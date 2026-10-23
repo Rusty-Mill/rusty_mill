@@ -58,7 +58,7 @@ pub use color::ensure_contrast;
 pub use grid::BidiRow;
 #[cfg(any(test, feature = "gui"))]
 pub use grid::BlockMark;
-pub use grid::{CursorShape, DirtyFrame, Grid, LineAttr, SCROLLBACK_MAX};
+pub use grid::{CursorShape, DirtyFrame, Grid, LineAttr, SCROLLBACK_MAX, SnapshotError};
 #[cfg(feature = "gui")]
 pub use grid::{MouseModes, Selection};
 pub use parser::AnsiParser;

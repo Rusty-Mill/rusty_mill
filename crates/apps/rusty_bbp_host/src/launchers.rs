@@ -189,8 +189,8 @@ fn check(provider: Provider, facts: &Facts) -> Result<(), String> {
 /// How the provider's `bbp mcp` reaches its turn.
 #[derive(Clone, Debug)]
 enum Channel {
-    /// Through the task directory, as the binding.
-    Direct(Binding),
+    /// Through the task directory, as the binding, for its one turn.
+    Direct(Binding, TurnId),
     /// Confined: through the moderator's relay pipes in `pipes`.
     Relay {
         task: TaskId,
@@ -203,7 +203,11 @@ impl Channel {
     /// The moderator's per-turn environment: relayed when it names pipes.
     fn from_env() -> Result<Channel, String> {
         let Some(pipes) = std::env::var_os(broker::RELAY_ENV).map(PathBuf::from) else {
-            return Binding::from_env().map(Channel::Direct);
+            let binding = Binding::from_env()?;
+            let turn = binding
+                .turn
+                .ok_or("a provider launcher serves one turn: set $BBP_TURN")?;
+            return Ok(Channel::Direct(binding, turn));
         };
         let var = |k: &str| std::env::var(k).map_err(|_| format!("missing ${k}"));
         Ok(Channel::Relay {
@@ -219,14 +223,14 @@ impl Channel {
 
     fn task(&self) -> &TaskId {
         match self {
-            Self::Direct(b) => &b.task,
+            Self::Direct(b, _) => &b.task,
             Self::Relay { task, .. } => task,
         }
     }
 
     fn turn(&self) -> TurnId {
         match self {
-            Self::Direct(b) => b.turn,
+            Self::Direct(_, turn) => *turn,
             Self::Relay { turn, .. } => *turn,
         }
     }
@@ -234,11 +238,11 @@ impl Channel {
     /// The environment of the provider's `bbp mcp`.
     fn env(&self) -> BTreeMap<&'static str, String> {
         match self {
-            Self::Direct(b) => BTreeMap::from([
+            Self::Direct(b, turn) => BTreeMap::from([
                 ("BBP_DIR", b.dir.to_string_lossy().into_owned()),
                 ("BBP_TASK", b.task.0.clone()),
                 ("BBP_PRINCIPAL", b.principal.0.clone()),
-                ("BBP_TURN", b.turn.0.to_string()),
+                ("BBP_TURN", turn.0.to_string()),
             ]),
             Self::Relay { pipes, .. } => {
                 BTreeMap::from([(broker::RELAY_ENV, pipes.to_string_lossy().into_owned())])
@@ -273,8 +277,8 @@ struct McpServer {
 fn validate_config(path: &Path, channel: &Channel, bbp: &Path) -> Result<(), String> {
     // A relayed configuration is the moderator's, beside the workspace; only
     // its content can be checked.
-    if let Channel::Direct(b) = channel {
-        let expected_path = moderator::mcp_config_path(&b.dir, &b.task, b.turn);
+    if let Channel::Direct(b, turn) = channel {
+        let expected_path = moderator::mcp_config_path(&b.dir, &b.task, *turn);
         if path.canonicalize().map_err(|e| e.to_string())?
             != expected_path.canonicalize().map_err(|e| e.to_string())?
         {
@@ -480,14 +484,14 @@ pub fn run(provider: Provider) -> Result<(), String> {
         .ok_or("missing per-turn MCP configuration")?;
     // Keep the moderator's spelling in MCP env (including symlink aliases),
     // while validate_config compares file identity through canonical paths.
-    if matches!(&channel, Channel::Direct(b) if !b.dir.is_absolute()) {
+    if matches!(&channel, Channel::Direct(b, _) if !b.dir.is_absolute()) {
         return Err("BBP_DIR must be absolute".into());
     }
     validate_config(&mcp, &channel, &bbp)?;
     let (facts, parent) = match &channel {
-        Channel::Direct(binding) => {
+        Channel::Direct(binding, turn) => {
             let driver = open_driver(&binding.dir, &binding.task)?;
-            let facts = Facts::of(&driver.state, &binding.principal, binding.turn);
+            let facts = Facts::of(&driver.state, &binding.principal, *turn);
             let parent = binding
                 .dir
                 .join("harness")

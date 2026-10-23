@@ -4,7 +4,7 @@ use rusty_bbp::{PrincipalId, Stage, TaskId, TurnId};
 use rusty_serde::json::Value;
 
 fn direct() -> Channel {
-    Channel::Direct(binding())
+    Channel::Direct(binding(), TurnId(42))
 }
 
 fn binding() -> Binding {
@@ -12,7 +12,7 @@ fn binding() -> Binding {
         dir: "/tmp/store with spaces".into(),
         task: TaskId("task\"x".into()),
         principal: PrincipalId("agent".into()),
-        turn: TurnId(42),
+        turn: Some(TurnId(42)),
     }
 }
 

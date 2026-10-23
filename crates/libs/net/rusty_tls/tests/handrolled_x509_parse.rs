@@ -21,7 +21,13 @@
 //! The parser does not decide that and neither does this file — see the
 //! module docs on `handrolled::x509`.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rcgen::{
     date_time_ymd, BasicConstraints, CertificateParams, CustomExtension, DistinguishedName, DnType,

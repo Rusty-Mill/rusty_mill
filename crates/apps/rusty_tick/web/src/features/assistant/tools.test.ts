@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import type { List, Task } from '@/api/types'
+import type { List, Tag, Task } from '@/api/types'
 import { addDays, startOfDay } from '@/lib/date'
 import { nextOccurrence } from '@/lib/recurrence'
-import { moveTo, overdue, pickTask, readDay, readRemind, readRepeat, readWhen, remindTrigger, taskTools, type ToolContext } from './tools'
+import { moveTo, overdue, pickTask, readDay, readRemind, readRepeat, readSnooze, readTags, readWhen, remindTrigger, snoozeTo, taskTools, type ToolContext } from './tools'
 
 const NOW = new Date(2026, 9, 22, 12).getTime()
 const task = (id: string, title: string, over: Partial<Task> = {}): Task =>
@@ -141,7 +141,7 @@ describe('update_task', () => {
     const { c, done } = context(tasks)
     expect(await run(c, 'update_task', { query: 'milk', due: 'soonish' })).toEqual({ error: expect.stringContaining("can't read “soonish”") })
     expect(await run(c, 'update_task', { query: 'milk', title: '  ' })).toEqual({ error: 'Say the new title.' })
-    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title, a day, a priority, a list, a repeat or a reminder.' })
+    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title, a day, a priority, a list, a repeat, a reminder, a snooze or tags.' })
     expect(await run(c, 'update_task', { query: 'buy', due: 'today' })).toEqual({ matches: ['Buy milk', 'Buy oats'] })
     expect(await run(c, 'update_task', { query: ' ', due: 'today' })).toEqual({ error: 'Say which task.' })
     expect(done).toEqual([])
@@ -344,5 +344,138 @@ describe('update_task with a reminder', () => {
     expect(await run(c, 'update_task', { query: 'bins', remind: '1 hour before' })).toEqual({ error: expect.stringContaining('all day') })
     expect(await run(c, 'update_task', { query: 'someday', remind: '1 hour before' })).toEqual({ error: expect.stringContaining('no date') })
     expect(done).toEqual([])
+  })
+})
+
+describe('snooze', () => {
+  it('adds minutes and hours to the instant, across a DST fall-back', () => {
+    // 01:45 EDT on 2026-11-01 in New York; 30 minutes later is 01:15 EST, a repeated hour.
+    const now = Date.UTC(2026, 10, 1, 5, 45)
+    const t = task('t', 'Call', { dueMs: now, isAllDay: false, startMs: now - 3_600_000 })
+    expect(snoozeTo(t, { minutes: 30 }, now)).toEqual({ dueMs: now + 30 * 60_000, isAllDay: false })
+    expect(snoozeTo(t, { minutes: 120 }, now + 20_000)).toEqual({ dueMs: now + 121 * 60_000, isAllDay: false })
+    // A start after the new due time is dropped, as for any move.
+    expect(snoozeTo({ ...t, startMs: now + 3_600_000 }, { minutes: 30 }, now)).toEqual({ dueMs: now + 30 * 60_000, isAllDay: false, startMs: null })
+  })
+
+  const at = (d: number, h = 0, m = 0): number => new Date(2026, 9, d, h, m).getTime()
+  const timed = task('t', 'Dentist', { dueMs: at(22, 15), isAllDay: false, startMs: null })
+  const allDay = task('a', 'Bins', { dueMs: at(25), isAllDay: true, startMs: null })
+  const overdue = task('o', 'Taxes', { dueMs: at(19, 9), isAllDay: false, startMs: null })
+
+  it('reads how long people say to snooze', () => {
+    expect(readSnooze('2 hours', NOW)).toEqual({ minutes: 120 })
+    expect(readSnooze('for 30 mins', NOW)).toEqual({ minutes: 30 })
+    expect(readSnooze('A day', NOW)).toEqual({ days: 1 })
+    expect(readSnooze('2 weeks', NOW)).toEqual({ days: 14 })
+    expect(readSnooze('until friday at 9', NOW)).toEqual({ until: { day: at(23), time: { h: 9, m: 0 } } })
+    for (const text of ['ages', '0 hours', '73 hours', '53 weeks', '2 months', 'until whenever', 'until none', '']) expect(readSnooze(text, NOW), text).toBeUndefined()
+  })
+
+  it('counts minutes and hours from now, and days from the due day or today', () => {
+    expect(snoozeTo(timed, { minutes: 90 }, NOW + 20_000)).toEqual({ dueMs: at(22, 13, 31), isAllDay: false })
+    expect(snoozeTo(timed, { days: 1 }, NOW)).toEqual({ dueMs: at(23, 15), isAllDay: false })
+    expect(snoozeTo(allDay, { days: 2 }, NOW)).toEqual({ dueMs: at(27), isAllDay: true })
+    expect(snoozeTo(overdue, { days: 1 }, NOW)).toEqual({ dueMs: at(23, 9), isAllDay: false })
+    expect(snoozeTo(task('u', 'Someday', { startMs: null }), { days: 7 }, NOW)).toEqual({ dueMs: at(29), isAllDay: true })
+    expect(snoozeTo(allDay, { until: { day: at(30) } }, NOW)).toEqual({ dueMs: at(30), isAllDay: true })
+  })
+
+  it('snoozes the one task named, and changes nothing for a snooze it cannot read', async () => {
+    const { c, done } = context([timed, allDay])
+    expect(await run(c, 'update_task', { query: 'dentist', snooze: '2 hours' })).toEqual({ title: 'Dentist', snooze: expect.any(String) })
+    expect(done).toEqual([`update t ${JSON.stringify({ dueMs: at(22, 14), isAllDay: false })}`])
+    expect(await run(c, 'update_task', { query: 'bins', snooze: 'a fortnight' })).toEqual({ error: expect.stringContaining("can't read") })
+    expect(done).toHaveLength(1)
+  })
+})
+
+describe('tags', () => {
+  it('reads the tags people name', () => {
+    expect(readTags('work')).toEqual(['work'])
+    expect(readTags('#Work, home and  errands')).toEqual(['Work', 'home', 'errands'])
+    for (const text of ['', ' , ', '#', 'x'.repeat(65)]) expect(readTags(text), text).toBeUndefined()
+  })
+
+  it('adds new tags as said and known ones by name, and removes them', async () => {
+    const dentist = task('d', 'Dentist', { tags: ['health'] })
+    const { c, done } = context([dentist])
+    c.entities.tags = [{ name: 'work' } as (typeof c.entities.tags)[number]]
+    expect(await run(c, 'update_task', { query: 'dentist', tag: 'Work and #Errands, health' })).toEqual({ title: 'Dentist', tagged: '#work, #errands, #health' })
+    expect(await run(c, 'update_task', { query: 'dentist', untag: '#HEALTH, nope' })).toEqual({ title: 'Dentist', untagged: '#health' })
+    expect(done).toEqual(['update d {"tags":["health","work","Errands"]}', 'update d {"tags":[]}'])
+  })
+
+  it('changes nothing for tags it cannot read or a tag the task lacks', async () => {
+    const { c, done } = context([task('d', 'Dentist', { tags: ['health'] })])
+    expect(await run(c, 'update_task', { query: 'dentist', tag: ' # ' })).toEqual({ error: expect.stringContaining("can't read") })
+    expect(await run(c, 'update_task', { query: 'dentist', untag: 'work' })).toEqual({ error: '“Dentist” has no tag #work.' })
+    const full = task('f', 'Full', { tags: Array.from({ length: 20 }, (_, i) => `t${i}`) })
+    const many = context([full])
+    expect(await run(many.c, 'update_task', { query: 'full', tag: 'one more' })).toEqual({ error: 'A task holds at most 20 tags.' })
+    expect(await run(many.c, 'update_task', { query: 'full', tag: 't3' })).toEqual({ title: 'Full', tagged: '#t3' })
+    expect(done).toEqual([])
+  })
+})
+
+describe('filter_tasks', () => {
+  const day = (d: number): number => new Date(2026, 9, d, 9).getTime()
+  const tasks = [
+    task('a', 'Pay rent', { priority: 5, dueMs: day(22), tags: ['home'] }),
+    task('b', 'Call bank', { priority: 5, dueMs: day(20), tags: ['work'] }),
+    task('c', 'Plan trip', { priority: 5, dueMs: day(26) }),
+    task('d', 'Someday', { priority: 5, tags: ['deep work'] }),
+    task('e', 'Read', { priority: 0, dueMs: day(22), tags: ['work'] }),
+    task('f', 'Done high', { priority: 5, status: 'done', tags: ['work'] }),
+    task('g', 'Trashed high', { priority: 5, deletedMs: 1, tags: ['work'] }),
+  ]
+  const known = ['home', 'work', 'deep work', 'unused'].map((name) => ({ name }) as Tag)
+
+  it('lists the open tasks of a priority and/or a tag in each view', async () => {
+    const { c } = context(tasks)
+    c.entities.tags = known
+    const titles = async (args: Record<string, string>) => ((await run(c, 'filter_tasks', args)) as { tasks: string[] }).tasks.map((l) => l.split(' (')[0])
+    expect(await titles({ priority: 'high' })).toEqual(['Pay rent', 'Call bank', 'Plan trip', 'Someday'])
+    expect(await titles({ priority: 'high', view: 'today' })).toEqual(['Pay rent', 'Call bank'])
+    expect(await titles({ priority: 'high', view: 'next7' })).toEqual(['Pay rent', 'Plan trip'])
+    expect(await titles({ priority: 'high', view: 'overdue' })).toEqual(['Call bank'])
+    expect(await titles({ priority: 'none', view: 'today' })).toEqual(['Read'])
+    expect(await titles({ tag: '#Work' })).toEqual(['Call bank', 'Read'])
+    expect(await titles({ tag: 'deep work' })).toEqual(['Someday'])
+    expect(await titles({ tag: 'work', priority: 'high', view: 'today' })).toEqual(['Call bank'])
+    expect(await titles({ tag: 'unused' })).toEqual([])
+  })
+
+  it('filters by status, with views by due date and the Trash left out', async () => {
+    const extra = [
+      task('h', 'Old done', { priority: 5, status: 'done', dueMs: day(19), tags: ['work'] }),
+      task('i', 'Skipped', { status: 'wontdo', dueMs: day(23) }),
+    ]
+    const { c } = context([...tasks, ...extra])
+    c.entities.tags = known
+    const titles = async (args: Record<string, string>) => ((await run(c, 'filter_tasks', args)) as { tasks: string[] }).tasks.map((l) => l.split(' (')[0])
+    expect(await titles({ status: 'done' })).toEqual(['Done high', 'Old done'])
+    expect(await titles({ status: 'done', view: 'overdue' })).toEqual(['Old done'])
+    expect(await titles({ status: 'done', tag: 'work', priority: 'high' })).toEqual(['Done high', 'Old done'])
+    expect(await titles({ status: 'wontdo', view: 'next7' })).toEqual(['Skipped'])
+    expect(await titles({ status: 'open', view: 'overdue' })).toEqual(['Call bank'])
+  })
+
+  it('filters by list, answering with the list’s own name', async () => {
+    const { c } = context([...tasks, task('w', 'Report', { priority: 5, dueMs: day(22), listId: 'w' }), task('x', 'Draft', { listId: 'w' })])
+    c.entities.tags = known
+    expect(await run(c, 'filter_tasks', { list: 'work' })).toEqual({ tasks: [expect.stringMatching(/^Report/), 'Draft'], list: 'Work' })
+    expect(await run(c, 'filter_tasks', { list: 'WORK', priority: 'high', view: 'today' })).toEqual({ tasks: [expect.stringMatching(/^Report/)], list: 'Work' })
+    expect(await run(c, 'filter_tasks', { list: 'inbox', tag: 'work' })).toEqual({ tasks: [expect.stringMatching(/^Call bank/), expect.stringMatching(/^Read/)], list: 'Inbox' })
+  })
+
+  it('names what it cannot filter by', async () => {
+    const { c } = context(tasks)
+    c.entities.tags = known
+    expect(await run(c, 'filter_tasks', { priority: 'urgent' })).toEqual({ error: 'Priority is high, medium, low or none.' })
+    expect(await run(c, 'filter_tasks', { tag: 'gym' })).toEqual({ error: 'You have no tag #gym.' })
+    expect(await run(c, 'filter_tasks', { view: 'today' })).toEqual({ error: 'Say a status, a priority, a tag or a list to filter by.' })
+    expect(await run(c, 'filter_tasks', { status: 'stuck' })).toEqual({ error: 'Status is open, done or wontdo.' })
+    expect(await run(c, 'filter_tasks', { list: 'old' })).toEqual({ error: 'No list matches “old”.' })
   })
 })

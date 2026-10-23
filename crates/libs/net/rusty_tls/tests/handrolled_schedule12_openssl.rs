@@ -23,7 +23,13 @@
 //! mistakes on purpose and require this oracle to notice, so the suite cannot be
 //! green because it never exercised the derivation.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rusty_tls::handrolled::record::{Aead, RecordError};
 use rusty_tls::handrolled::record12::Opener;

@@ -26,6 +26,8 @@ web-bridge = []
 [dependencies]
 rusty_base64 = { workspace = true }
 rusty_hex = { workspace = true }
+# Bounds-checked reads for decoding snapshots (in-repo foundation crate).
+rusty_wire = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 rusty_regx = { workspace = true, optional = true }

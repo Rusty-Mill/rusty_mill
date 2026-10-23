@@ -29,7 +29,13 @@
 //! this parser cannot even read, is a straightforward defect. That is the
 //! direction worth failing on.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use platform::security::TrustAnchors;
 use rustls::pki_types::CertificateDer;
