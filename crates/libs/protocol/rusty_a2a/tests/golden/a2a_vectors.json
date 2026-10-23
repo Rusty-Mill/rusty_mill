@@ -1,5 +1,5 @@
 {
-"generator": "tests/golden/gen_vectors.py",
+"generator": "rusty_prost/tools/gen_vectors.py --proto spec/a2a.proto -I spec/googleapis --compile-all spec/googleapis --extra tests/golden/extra_vectors.py",
 "protobuf": "7.36.2",
 "vectors": [
 {
