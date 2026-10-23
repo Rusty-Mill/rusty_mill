@@ -127,6 +127,16 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 }
 
 impl<T> Sender<T> {
+    /// Blocking form of [`send`](Self::send), for synchronous code -- a
+    /// plain OS thread bridging blocking I/O into async tasks. Parks the
+    /// calling thread until it completes; no runtime is needed.
+    ///
+    /// Never call this from an async task: it parks the worker thread
+    /// running it, stalling every other task queued there.
+    pub fn blocking_send(&self, value: T) -> Result<(), SendError<T>> {
+        crate::runtime::block_on_inner(self.send(value))
+    }
+
     pub async fn send(&self, value: T) -> Result<(), SendError<T>> {
         let mut value = Some(value);
         let sent = std::future::poll_fn(|cx| {
@@ -584,6 +594,16 @@ impl<T> fmt::Display for SendTimeoutError<T> {
 impl<T> std::error::Error for SendTimeoutError<T> {}
 
 impl<T> Receiver<T> {
+    /// Blocking form of [`recv`](Self::recv), for synchronous code -- a
+    /// plain OS thread bridging blocking I/O into async tasks. Parks the
+    /// calling thread until it completes; no runtime is needed.
+    ///
+    /// Never call this from an async task: it parks the worker thread
+    /// running it, stalling every other task queued there.
+    pub fn blocking_recv(&mut self) -> Option<T> {
+        crate::runtime::block_on_inner(self.recv())
+    }
+
     pub async fn recv(&mut self) -> Option<T> {
         std::future::poll_fn(|cx| {
             if crate::coop::poll_proceed(cx).is_pending() {
@@ -762,6 +782,16 @@ impl<T> fmt::Debug for WeakUnboundedSender<T> {
 }
 
 impl<T> UnboundedReceiver<T> {
+    /// Blocking form of [`recv`](Self::recv), for synchronous code -- a
+    /// plain OS thread bridging blocking I/O into async tasks. Parks the
+    /// calling thread until it completes; no runtime is needed.
+    ///
+    /// Never call this from an async task: it parks the worker thread
+    /// running it, stalling every other task queued there.
+    pub fn blocking_recv(&mut self) -> Option<T> {
+        crate::runtime::block_on_inner(self.recv())
+    }
+
     pub async fn recv(&mut self) -> Option<T> {
         std::future::poll_fn(|cx| {
             if crate::coop::poll_proceed(cx).is_pending() {

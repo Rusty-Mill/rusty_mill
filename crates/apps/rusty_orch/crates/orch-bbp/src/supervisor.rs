@@ -51,17 +51,8 @@ impl Supervisor for StdSupervisor {
         }
         let key = rusty_bbp::Sha256::of(task.as_bytes()).hex();
         let dir = config.dir.join("mod");
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(dir.join(format!("{key}.lock")))
-            .map_err(|e| e.to_string())?;
-        match lock.try_lock() {
-            Err(std::fs::TryLockError::WouldBlock) => return Ok(Supervised::Running),
-            Err(std::fs::TryLockError::Error(e)) => return Err(e.to_string()),
-            Ok(()) => drop(lock),
+        if locked(&dir, &key)? {
+            return Ok(Supervised::Running);
         }
         let log = OpenOptions::new()
             .create(true)
@@ -92,6 +83,9 @@ impl Supervisor for StdSupervisor {
                 .args(["--agent-slots", &slots.agents.to_string()])
                 .args(["--validator-slots", &slots.validators.to_string()]);
         }
+        if let Some(secs) = config.end_grace_secs {
+            command.args(["--end-grace-secs", &secs.to_string()]);
+        }
         command.stdin(Stdio::null()).stdout(log).stderr(err);
         orch_cli::scrub_env(&mut command, SCRUB);
         #[cfg(unix)]
@@ -104,14 +98,8 @@ impl Supervisor for StdSupervisor {
         // Observe BBP's lock, not merely a pid that could already have exited.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            let probe = OpenOptions::new()
-                .write(true)
-                .open(dir.join(format!("{key}.lock")))
-                .map_err(|e| e.to_string())?;
-            match probe.try_lock() {
-                Err(std::fs::TryLockError::WouldBlock) => break,
-                Err(std::fs::TryLockError::Error(e)) => return Err(e.to_string()),
-                Ok(()) => drop(probe),
+            if locked(&dir, &key)? {
+                break;
             }
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
                 return Err(format!("BBP moderator exited {status}; see its task log"));
@@ -130,6 +118,23 @@ impl Supervisor for StdSupervisor {
         rusty_atomic_file::write(&dir.join(format!("{key}.pid")), pid.to_string().as_bytes())
             .map_err(|e| e.to_string())?;
         Ok(Supervised::Started)
+    }
+}
+
+/// Whether some process holds `<dir>/<key>.lock`, creating the file (and
+/// `dir`) when missing, as BBP's moderator does.
+fn locked(dir: &Path, key: &str) -> Result<bool, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let probe = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(format!("{key}.lock")))
+        .map_err(|e| e.to_string())?;
+    match probe.try_lock() {
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.to_string()),
+        Ok(()) => Ok(false),
     }
 }
 

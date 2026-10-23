@@ -25,5 +25,10 @@ rb_rlbot_wire = { path = "../rb_rlbot_wire" }
 # `rotator_to_quat`, checked against a recorded quaternion: the one RLBot-rotator convention.
 rb_scenario = { path = "../rb_scenario" }
 
+[dev-dependencies]
+# `tests/chaser_bot.rs` plays the built `rb_chaser_bot` against the simulated core. A dev-only
+# cycle (core depends on this crate's library), which Cargo allows for integration tests.
+rb_rlbot_core = { path = "../rb_rlbot_core" }
+
 [package.metadata.rusty_mill]
 layer = "apps"

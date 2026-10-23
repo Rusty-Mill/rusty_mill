@@ -157,13 +157,15 @@ pub(crate) fn draw_grid(
     if cw == 0 || ch == 0 {
         return;
     }
+    // Resolve the fold-aware viewport once; per-cell lookups below reuse it.
+    let view = grid.view();
     let cursor = (focused && grid.cursor_visible && grid.view_offset == 0 && cursor_on)
         .then_some(grid.cursor);
     let shape = grid.cursor_shape;
     let block_cursor =
         |col: usize, row: usize| shape == CursorShape::Block && cursor == Some((col, row));
-    let inverted = |col: usize, row: usize| grid.is_selected(col, row);
-    let search_hl = |col: usize, row: usize| grid.search_highlight(col, row);
+    let inverted = |col: usize, row: usize| view.is_selected(col, row);
+    let search_hl = |col: usize, row: usize| view.search_highlight(col, row);
     let status = grid.status_row();
     let last_row = grid.rows.saturating_sub(1);
     // Bidi (implicit mode): per-row visual/logical permutations. `None` for
@@ -175,7 +177,7 @@ pub(crate) fn draw_grid(
             if status.is_some() && r == last_row {
                 None
             } else {
-                grid.bidi_row(r)
+                view.bidi_row(r)
             }
         })
         .collect();
@@ -193,7 +195,7 @@ pub(crate) fn draw_grid(
         let cell = if on_status {
             status.unwrap()[col]
         } else {
-            grid.viewport_cell(col, row)
+            view.cell(col, row)
         };
         let bg = if !on_status && block_cursor(col, row) {
             grid.cursor_color
@@ -227,7 +229,7 @@ pub(crate) fn draw_grid(
             if on_status {
                 status.unwrap()[col]
             } else {
-                grid.viewport_cell(col, row)
+                view.cell(col, row)
             }
         };
         let eligible = |col: usize, cell: &Cell| {
@@ -312,7 +314,7 @@ pub(crate) fn draw_grid(
         let cell = if on_status {
             status.unwrap()[col]
         } else {
-            grid.viewport_cell(col, row)
+            view.cell(col, row)
         };
         let (fg, under_bg) = if !on_status && block_cursor(col, row) {
             (cell.bg, grid.cursor_color)
@@ -343,7 +345,7 @@ pub(crate) fn draw_grid(
         let cell = if on_status {
             status.unwrap()[col]
         } else {
-            grid.viewport_cell(col, row)
+            view.cell(col, row)
         };
         if cell.flags & WIDE_TRAILER != 0 {
             continue;
@@ -529,7 +531,7 @@ pub(crate) fn draw_grid(
             if col + w > grid.cols {
                 break;
             }
-            let base = grid.viewport_cell(col, crow);
+            let base = view.cell(col, crow);
             let (fg, bg) = (base.bg, base.fg);
             let x0 = ox + (col0 + col) * cw;
             for y in y0..(y0 + ch).min(height) {

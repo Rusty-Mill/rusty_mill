@@ -15,7 +15,8 @@ use orch_core::goal::Goal;
 use orch_core::task::Plan;
 use orch_core::{EntryId, GoalId, TaskId, Text};
 use orch_dispatch::{
-    AgentRunner, DispatchError, Dispatcher, Fence, Ledger, Outcome, Routing, RoutingError, TaskHost,
+    AgentRunner, DispatchError, Dispatcher, Fence, Ledger, Outcome, Progress, Routing,
+    RoutingError, TaskHost,
 };
 use orch_store::{GoalState, Store, StoreError};
 
@@ -50,6 +51,8 @@ pub enum Ended {
     Failed(DispatchError),
     /// The goal's wall-clock budget ran out between runs.
     WallClock(Duration),
+    /// The goal's hosted tasks were cancelled and its assignment retired.
+    Cancelled,
 }
 
 impl fmt::Display for Ended {
@@ -60,6 +63,7 @@ impl fmt::Display for Ended {
             Self::Blocked(ids) => write!(f, "blocked on {} card(s)", ids.len()),
             Self::Failed(e) => write!(f, "failed: {e}"),
             Self::WallClock(d) => write!(f, "wall clock of {}s exceeded", d.as_secs()),
+            Self::Cancelled => f.write_str("cancelled"),
         }
     }
 }
@@ -190,6 +194,8 @@ pub const ATTEMPT: &str = "1";
 pub struct Hosting {
     pub host: Box<dyn TaskHost>,
     pub card: Option<CardHosting>,
+    /// Cancel the goal's hosted tasks for this reason instead of running.
+    pub cancel: Option<Text>,
 }
 
 /// The Millboard card a hosted goal works for.
@@ -312,6 +318,16 @@ pub fn execute_hosted<R: AgentRunner>(
     let routing = Routing::try_from(spec.routing).map_err(RunError::Routing)?;
     let goal = spec.goal;
     let host = match hosting {
+        Some(mut h) if h.cancel.is_some() => {
+            let ended = cancel(&mut resume, &goal, goal_id, &mut h, &board, &plan)?;
+            return Ok(Summary {
+                goal,
+                ended,
+                plan,
+                board,
+                ledger,
+            });
+        }
         Some(mut h) => {
             let fence = take_over(&mut resume, &goal, goal_id, h.card.as_mut())?;
             Some((h.host, fence))
@@ -358,6 +374,80 @@ pub fn execute_hosted<R: AgentRunner>(
         board,
         ledger,
     })
+}
+
+/// Cancel every hosted task of the goal, then retire its assignment.
+///
+/// The run first takes the assignment over, so every earlier holder is
+/// fenced out before anything is cancelled. Each Implement card's host
+/// execution is cancelled whether or not its handle reached the board, and
+/// each host returns only after the execution's processes are gone. Only then is the card's execution reconciled
+/// as cancelled and the assignment retired, durably, so no later run can
+/// resume the goal. Every step is idempotent: a cancel interrupted at any
+/// point is completed by running it again, and one that already finished
+/// does nothing.
+fn cancel(
+    resume: &mut Option<Resume<'_>>,
+    goal: &Goal,
+    goal_id: GoalId,
+    hosting: &mut Hosting,
+    board: &Board,
+    plan: &Plan,
+) -> Result<Ended, RunError> {
+    let lease = |e: FactoryError| RunError::Lease(format!("{e:?}"));
+    let reason = hosting
+        .cancel
+        .clone()
+        .ok_or_else(|| RunError::Lease("no cancel reason".into()))?;
+    let retired = match resume {
+        Some(r) => r
+            .store
+            .load_factory(goal_id)?
+            .assignment(GOAL_ORCHESTRATOR)
+            .is_some_and(|a| !a.active),
+        None => return Err(RunError::Lease("cancel needs durable --state".into())),
+    };
+    if retired {
+        return Ok(Ended::Cancelled);
+    }
+    let fence = take_over(resume, goal, goal_id, hosting.card.as_mut())?;
+    // Every card a host would serve, handle or not: an open can start work
+    // before its handle is checkpointed, and the host finds that work itself.
+    let hosted = plan
+        .tasks()
+        .iter()
+        .filter(|t| t.spec().role == orch_core::task::Role::Implement);
+    for task in hosted {
+        match hosting.host.cancel(task, board, &reason, &fence) {
+            Ok(Progress::Cancelled { .. } | Progress::Closed { .. }) => {}
+            Ok(_) => {
+                return Err(RunError::Lease(format!(
+                    "hosted task {} did not end",
+                    task.id()
+                )))
+            }
+            Err(e) => return Err(RunError::Lease(format!("cancel {}: {e:?}", task.id()))),
+        }
+    }
+    let Some(r) = resume else {
+        return Err(RunError::Lease("cancel needs durable --state".into()));
+    };
+    let mut factory = r.store.load_factory(goal_id)?;
+    if let Some(card) = &hosting.card {
+        factory
+            .reconcile(
+                &card.card,
+                GOAL_ORCHESTRATOR,
+                fence.generation,
+                ExecutionState::Cancelled,
+            )
+            .map_err(lease)?;
+    }
+    factory
+        .retire(GOAL_ORCHESTRATOR, fence.generation)
+        .map_err(lease)?;
+    r.store.save_factory(goal_id, &factory)?;
+    Ok(Ended::Cancelled)
 }
 
 /// Save when there is somewhere to save to.

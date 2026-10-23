@@ -22,9 +22,10 @@ use std::time::Duration;
 use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
 use agentgateway_mcp::{McpRequest, McpRequestResult, McpResponseResult, request_result};
-use prost::Message as _;
 use rmcp::{ServiceExt, model::CallToolRequestParams, transport::StreamableHttpClientTransport};
 use rusty_mcp::otel::OtelConfig;
+use rusty_prost::Message as _;
+use rusty_prost::wkt::Value;
 use tokio_util::sync::CancellationToken;
 
 /// Distinctive enough to find by scanning, and not a substring of anything
@@ -126,15 +127,18 @@ async fn processor() -> (String, CancellationToken) {
                 });
                 McpRequestResult {
                     result: Some(request_result::Result::Pass(Default::default())),
-                    metadata: match agentgateway_mcp::to_proto_value(bag).kind {
-                        Some(prost_types::value::Kind::StructValue(s)) => Some(s),
+                    metadata: match agentgateway_mcp::to_proto_value(bag) {
+                        Value::Struct(s) => Some(s),
                         _ => None,
                     },
                     ..Default::default()
                 }
                 .encode_to_vec()
+                .expect("should encode")
             } else {
-                McpResponseResult::default().encode_to_vec()
+                McpResponseResult::default()
+                    .encode_to_vec()
+                    .expect("should encode")
             };
 
             let mut framed = Vec::with_capacity(payload.len() + 5);

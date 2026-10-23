@@ -2,79 +2,10 @@
 //! `rusty_prost`, the server trait and service that routes the eleven RPCs, and the client.
 //! The shapes follow what `tonic-prost-build` generated, so callers read the same.
 
-use std::marker::PhantomData;
-
-use bytes::{Buf, BufMut};
-use rusty_prost::Message;
-use tonic::codec::{BufferSettings, Codec, DecodeBuf, Decoder, EncodeBuf, Encoder};
-use tonic::Status;
+use rusty_tonic::tonic_codec::WireCodec;
 
 /// The service's name in a request path.
 const SERVICE: &str = "lf.a2a.v1.A2AService";
-
-/// A `tonic` codec for `rusty_prost` messages: `T` is sent, `U` is received.
-#[derive(Debug, Clone)]
-pub(crate) struct WireCodec<T, U>(PhantomData<(T, U)>);
-
-impl<T, U> Default for WireCodec<T, U> {
-    fn default() -> Self {
-        WireCodec(PhantomData)
-    }
-}
-
-impl<T: Message + Send + 'static, U: Message + Send + 'static> Codec for WireCodec<T, U> {
-    type Encode = T;
-    type Decode = U;
-    type Encoder = WireEncoder<T>;
-    type Decoder = WireDecoder<U>;
-
-    fn encoder(&mut self) -> WireEncoder<T> {
-        WireEncoder(PhantomData)
-    }
-
-    fn decoder(&mut self) -> WireDecoder<U> {
-        WireDecoder(PhantomData)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct WireEncoder<T>(PhantomData<T>);
-
-impl<T: Message> Encoder for WireEncoder<T> {
-    type Item = T;
-    type Error = Status;
-
-    fn encode(&mut self, item: T, dst: &mut EncodeBuf<'_>) -> Result<(), Status> {
-        let bytes = item
-            .encode_to_vec()
-            .map_err(|e| Status::internal(format!("failed to encode a message: {e}")))?;
-        dst.put_slice(&bytes);
-        Ok(())
-    }
-
-    fn buffer_settings(&self) -> BufferSettings {
-        BufferSettings::default()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct WireDecoder<U>(PhantomData<U>);
-
-impl<U: Message> Decoder for WireDecoder<U> {
-    type Item = U;
-    type Error = Status;
-
-    fn decode(&mut self, src: &mut DecodeBuf<'_>) -> Result<Option<U>, Status> {
-        let bytes = src.copy_to_bytes(src.remaining());
-        U::decode(&bytes)
-            .map(Some)
-            .map_err(|e| Status::internal(format!("failed to decode a message: {e}")))
-    }
-
-    fn buffer_settings(&self) -> BufferSettings {
-        BufferSettings::default()
-    }
-}
 
 /// The server side: implement [`A2aService`](a2a_service_server::A2aService) and serve
 /// [`A2aServiceServer`](a2a_service_server::A2aServiceServer) with `tonic`.

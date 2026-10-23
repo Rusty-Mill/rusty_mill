@@ -390,8 +390,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonwebtoken 11.0.0",
- "prost",
- "prost-types",
  "rand 0.8.8",
  "rcgen",
  "reqwest 0.13.4",
@@ -402,6 +400,7 @@ dependencies = [
  "rusty_log",
  "rusty_mcp_axum",
  "rusty_mcp_server",
+ "rusty_prost",
  "serde_json",
  "tempfile",
  "tokio",
@@ -518,21 +517,20 @@ dependencies = [
  "cel",
  "http",
  "http-body-util",
- "prost",
- "prost-types",
  "regex",
  "rusty-mcp",
  "rusty_json",
  "rusty_log",
  "rusty_mcp_client_native",
  "rusty_mcp_server",
+ "rusty_prost",
  "rusty_serve",
+ "rusty_tonic",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tonic",
- "tonic-prost",
 ]
 
 [[package]]
@@ -3552,9 +3550,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.4"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
  "subtle",
@@ -10251,6 +10249,7 @@ dependencies = [
  "rb_domain",
  "rb_env",
  "rb_rlbot_client",
+ "rb_rlbot_core",
  "rb_rlbot_wire",
  "rb_scenario",
 ]
@@ -12118,7 +12117,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.8.9",
- "bytes",
  "chrono",
  "ed25519-dalek 3.0.0",
  "eventsource-stream",
@@ -12132,6 +12130,7 @@ dependencies = [
  "rusty_log",
  "rusty_prost",
  "rusty_retry",
+ "rusty_tonic",
  "rusty_uuid",
  "serde",
  "serde_json",
@@ -13119,8 +13118,10 @@ dependencies = [
 name = "rusty_tonic"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures-util",
  "http",
+ "http-body-util",
  "prost",
  "rcgen",
  "rustls",
