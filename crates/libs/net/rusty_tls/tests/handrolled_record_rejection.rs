@@ -10,7 +10,13 @@
 //! Each test names the specific rejection, so a regression points at what
 //! stopped being checked rather than just "a test failed".
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rusty_tls::handrolled::record::{
     Aead, ContentType, Opener, RecordError, Sealer, HEADER_LEN, MAX_ENCRYPTED_FRAGMENT_LEN,

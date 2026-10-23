@@ -11,7 +11,13 @@
 //! TLS 1.3 EncryptedExtensions path and the TLS 1.2 ServerHello path with one
 //! driver.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+// ring-only suite (ADR-0005): it needs the engine's server or a signing key,
+// and the native backend has neither.
+#![cfg(all(
+    feature = "handrolled-engine",
+    rusty_tls_handrolled,
+    not(rusty_tls_native_crypto)
+))]
 
 use std::sync::Arc;
 

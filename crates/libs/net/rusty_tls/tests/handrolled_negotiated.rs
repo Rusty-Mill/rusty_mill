@@ -9,7 +9,13 @@
 //! (an ECDSA P-256 key signs with `ecdsa_secp256r1_sha256`, a P-384 key with
 //! `ecdsa_secp384r1_sha384`, Ed25519 with `ed25519`).
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+// ring-only suite (ADR-0005): it needs the engine's server or a signing key,
+// and the native backend has neither.
+#![cfg(all(
+    feature = "handrolled-engine",
+    rusty_tls_handrolled,
+    not(rusty_tls_native_crypto)
+))]
 
 use std::sync::Arc;
 

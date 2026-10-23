@@ -97,6 +97,20 @@ consumer's tree switch this on for everyone else in that build; a `--cfg` flag
 comes from `RUSTFLAGS` and no dependency can reach it. See
 [ADR-0002](./docs/adr/0002-handrolled-engine-behind-a-permanently-non-default-seam.md).
 
+The engine can also run on first-party primitives instead of `ring`
+([ADR-0005](./docs/adr/0005-first-party-primitives-for-the-client-engine.md)):
+the `native-crypto` feature plus a second cfg. That build is a client only —
+no server role, no client certificates — and offers ChaCha20-Poly1305 first,
+because its AES-GCM is portable and slow. It has no direct `ring` dependency,
+so the compiler checks that the engine makes no `ring` call (`ring` is still
+in the build through `rustls`).
+
+```bash
+RUSTFLAGS='--cfg rusty_tls_handrolled --cfg rusty_tls_native_crypto' \
+RUSTDOCFLAGS='--cfg rusty_tls_handrolled --cfg rusty_tls_native_crypto' \
+    cargo test --features native-crypto
+```
+
 ## Development
 ```bash
 cargo build
