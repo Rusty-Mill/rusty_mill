@@ -16,11 +16,11 @@ layer = "libs"
 rusty_axum = { workspace = true }
 # To wrap a streamed body (`Stream`), as rusty_axum itself does.
 futures-core = { workspace = true }
-# The runtime being bridged to: only `Handle` and its `enter` guard, which
-# need no features. Consumers bring the runtime itself. This crate is the one
+# The runtime being bridged to: only `Handle` and its `enter` guard, behind
+# the `rt` feature. Consumers bring the runtime itself. This crate is the one
 # place in the rusty_axum stack that names tokio, so that rusty_axum never
 # does (#879).
-tokio = { version = "1", default-features = false }
+tokio = { version = "1", default-features = false, features = ["rt"] }
 
 [dev-dependencies]
 rusty_tokio = { workspace = true }
