@@ -49,6 +49,15 @@ pub struct Launcher {
     /// (Linux). See [`crate::confine`].
     #[rusty_serde(default)]
     pub sandbox: Option<HarnessSandbox>,
+    /// Keep one harness for the role across turns instead of one per turn.
+    /// Its `bbp mcp` is a session server: the harness calls `wait` for each
+    /// turn and acts with the ticket it returns. It is started at the role's
+    /// first grant and kept while its turns end by its own move; a turn ended
+    /// from outside (deadline, budget, abort, revocation) stops it, cancelling
+    /// any inference still in flight, and the next grant starts a new one.
+    /// Not yet with `sandbox` or a cost cap, and its args cannot use `{turn}`.
+    #[rusty_serde(default)]
+    pub session: bool,
 }
 
 /// One launcher per role id, keyed by the ids of the task's roster. A role
@@ -250,6 +259,38 @@ pub fn log_path(dir: &Path, task: &TaskId, turn: TurnId) -> PathBuf {
     task_dir(dir, "agents", task).join(format!("turn-{}.log", turn.0))
 }
 
+/// What a harness's `bbp mcp` speaks for: one turn, or the role's session.
+#[derive(Clone, Copy, Debug)]
+pub enum Bound<'a> {
+    Turn(TurnId),
+    Session(&'a RoleId),
+}
+
+impl Bound<'_> {
+    /// The file stem a harness's MCP config and output are named by.
+    fn stem(&self) -> String {
+        match self {
+            Bound::Turn(t) => format!("turn-{}", t.0),
+            Bound::Session(role) => {
+                format!("session-{}", &Sha256::of(role.0.as_bytes()).hex()[..16])
+            }
+        }
+    }
+
+    /// The `bbp mcp` binding variable and its value.
+    fn env(&self) -> (&'static str, String) {
+        match self {
+            Bound::Turn(t) => ("BBP_TURN", t.0.to_string()),
+            Bound::Session(_) => ("BBP_SESSION", "yes".into()),
+        }
+    }
+}
+
+/// Where a role's session harness writes its output.
+pub fn session_log_path(dir: &Path, task: &TaskId, role: &RoleId) -> PathBuf {
+    task_dir(dir, "agents", task).join(format!("{}.log", Bound::Session(role).stem()))
+}
+
 /// The file whose exclusive lock is the right to moderate `task`.
 pub fn lock_path(dir: &Path, task: &TaskId) -> PathBuf {
     task_dir(dir, "mod", task).with_extension("lock")
@@ -290,19 +331,20 @@ pub fn write_mcp_config(
     task: &TaskId,
     bbp: &Path,
     principal: &PrincipalId,
-    turn: TurnId,
+    bound: Bound,
 ) -> Result<PathBuf, String> {
-    let path = mcp_config_path(dir, task, turn);
+    let path = task_dir(dir, "mcp", task).join(format!("{}.json", bound.stem()));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    let (var, value) = bound.env();
     let text = format!(
-        "{{\"mcpServers\":{{\"bbp\":{{\"command\":{},\"args\":[\"mcp\"],\"env\":{{\"BBP_DIR\":{},\"BBP_TASK\":{},\"BBP_PRINCIPAL\":{},\"BBP_TURN\":\"{}\"}}}}}}}}\n",
+        "{{\"mcpServers\":{{\"bbp\":{{\"command\":{},\"args\":[\"mcp\"],\"env\":{{\"BBP_DIR\":{},\"BBP_TASK\":{},\"BBP_PRINCIPAL\":{},\"{var}\":{}}}}}}}}}\n",
         json_str(&bbp.to_string_lossy()),
         json_str(&dir.to_string_lossy()),
         json_str(&task.0),
         json_str(&principal.0),
-        turn.0
+        json_str(&value)
     );
     rusty_atomic_file::write(&path, text.as_bytes())
         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -310,7 +352,10 @@ pub fn write_mcp_config(
 }
 
 struct Harness {
+    /// The turn it serves; a session's latest.
     turn: TurnId,
+    /// A session harness's role: it outlives its turns.
+    session: Option<RoleId>,
     child: Child,
     /// A confined harness's MCP broker, in the harness's process group.
     broker: Option<Child>,
@@ -511,6 +556,7 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
 /// A run the cap or the wall limit stops is an `Ok` outcome carrying the stop,
 /// so the caller can still print what happened; [`run`] turns it into an error.
 pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
+    check_sessions(cfg).map_err(|e| format!("moderator: refusing to start: {e}"))?;
     // An evidence run (one with a cost cap and its prices) starts only if every
     // role pins a priced model.
     if let Some(cap) = &cfg.cost_cap {
@@ -676,6 +722,20 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                     forfeited = Some((h.turn, is_live));
                     break;
                 }
+                // A session keeps running past a turn it ended itself; it
+                // calls wait for the next one.
+                Ok(None) if !is_live && h.session.is_some() && ended_by_agent(&d.state, h.turn) => {
+                }
+                // A turn ended from outside stops its session at once: that
+                // cancels an inference still in flight and its queued calls.
+                Ok(None) if !is_live && h.session.is_some() => {
+                    eprintln!(
+                        "bbp mod: turn {} ended from outside; stopping its session",
+                        h.turn.0
+                    );
+                    forfeited = Some((h.turn, false));
+                    break;
+                }
                 Ok(None) if !is_live => {
                     let ended = *h.ended.get_or_insert_with(Instant::now);
                     if ended.elapsed() >= cfg.end_grace {
@@ -710,6 +770,17 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                 );
                 continue;
             };
+            // A running session takes the turn through its next wait.
+            if let Some(h) = sup
+                .harnesses
+                .iter_mut()
+                .find(|h| h.session.as_ref() == Some(&role))
+            {
+                eprintln!("bbp mod: turn {} goes to {role}'s session", turn.0);
+                launched.insert(turn);
+                h.turn = turn;
+                continue;
+            }
             // Without an agent slot the turn waits for a later poll, or its deadline.
             let Some((slot, stdin)) = admit(cfg, Class::Agent)? else {
                 if waiting.insert(turn) {
@@ -729,7 +800,11 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             let mut hold = slot.as_ref().map(|s| s.holder(&cfg.bbp)).transpose()?;
             let group = hold.as_ref().map(Child::id);
             let facts = crate::launchers::Facts::of(&d.state, &principal, turn);
-            let launched = match spawn(cfg, l, &role, &principal, turn, stdin, group, &facts) {
+            let bound = match l.session {
+                true => Bound::Session(&role),
+                false => Bound::Turn(turn),
+            };
+            let launched = match spawn(cfg, l, &role, &principal, bound, stdin, group, &facts) {
                 Ok(launched) => launched,
                 Err(e) => {
                     if let Some(Err(k)) = hold.as_mut().map(|h| kill_tree(h, h.id())) {
@@ -744,6 +819,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             }
             sup.harnesses.push(Harness {
                 turn,
+                session: l.session.then(|| role.clone()),
                 child: launched.child,
                 broker: launched.broker,
                 confined: launched.confined,
@@ -767,6 +843,46 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
         let timeout = next_wait(cfg.poll, now(), d.state.next_deadline(), wall, graces);
         waker.wait(&children, timeout)?;
     }
+}
+
+/// True when `turn` ended by its holder's own move (a pass, yield, verdict,
+/// candidate or request), not by a deadline, budget, abort or revocation.
+fn ended_by_agent(st: &TaskState, turn: TurnId) -> bool {
+    st.turn_end_cause.get(&turn).is_some_and(|c| {
+        matches!(
+            c,
+            TurnEnd::Pass
+                | TurnEnd::Yield
+                | TurnEnd::Verdict
+                | TurnEnd::Candidate
+                | TurnEnd::Request
+        )
+    })
+}
+
+/// Session launchers run unconfined and uncapped until both are supported:
+/// a session's cost is known only once it exits, so a live cap could not
+/// hold it, and confinement is prepared per turn. Its args name no turn.
+fn check_sessions(cfg: &Config) -> Result<(), String> {
+    for (role, l) in cfg.launchers.iter().filter(|(_, l)| l.session) {
+        if cfg.cost_cap.is_some() {
+            return Err(format!(
+                "{role}: a session launcher cannot run under a cost cap"
+            ));
+        }
+        if l.sandbox.is_some() {
+            return Err(format!("{role}: a session launcher cannot be confined yet"));
+        }
+        if std::iter::once(&l.program)
+            .chain(&l.args)
+            .any(|a| a.contains("{turn}"))
+        {
+            return Err(format!(
+                "{role}: a session launcher serves many turns; drop {{turn}}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// How long a pass may wait for an event: until the nearest turn or request
@@ -986,43 +1102,62 @@ fn spawn(
     l: &Launcher,
     role: &RoleId,
     principal: &PrincipalId,
-    turn: TurnId,
+    bound: Bound,
     stdin: Stdio,
     group: Option<u32>,
     facts: &crate::launchers::Facts,
 ) -> Result<Launched, String> {
     let bbp = &cfg.bbp;
-    let confined = l
-        .sandbox
-        .as_ref()
-        .map(|sandbox| Turn::prepare(cfg, sandbox, turn, facts))
-        .transpose()?;
+    let turn = match bound {
+        Bound::Turn(t) => Some(t),
+        Bound::Session(_) => None,
+    };
+    let confined = match (&l.sandbox, turn) {
+        (Some(sandbox), Some(turn)) => Some(Turn::prepare(cfg, sandbox, turn, facts)?),
+        (Some(_), None) => return Err(format!("{role}: a session harness cannot be confined yet")),
+        (None, _) => None,
+    };
     let mcp = match &confined {
         Some(t) => t.mcp_config.clone(),
-        None => write_mcp_config(&cfg.dir, &cfg.task, bbp, principal, turn)?,
+        None => write_mcp_config(&cfg.dir, &cfg.task, bbp, principal, bound)?,
     };
     let role_name = role.0.as_str();
     let fill = |a: &str| {
-        a.replace("{dir}", &cfg.dir.to_string_lossy())
+        let a = a
+            .replace("{dir}", &cfg.dir.to_string_lossy())
             .replace("{task}", &cfg.task.0)
             .replace("{principal}", &principal.0)
-            .replace("{turn}", &turn.0.to_string())
             .replace("{role}", role_name)
             .replace("{bbp}", &bbp.to_string_lossy())
-            .replace("{mcp_config}", &mcp.to_string_lossy())
+            .replace("{mcp_config}", &mcp.to_string_lossy());
+        match turn {
+            Some(t) => a.replace("{turn}", &t.0.to_string()),
+            None => a,
+        }
     };
-    let log_path = log_path(&cfg.dir, &cfg.task, turn);
+    let log_path = task_dir(&cfg.dir, "agents", &cfg.task).join(format!("{}.log", bound.stem()));
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let log = File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
+    // A session started again after a stop keeps its predecessors' output.
+    let log = File::options()
+        .create(true)
+        .write(true)
+        .append(turn.is_none())
+        .truncate(turn.is_some())
+        .open(&log_path)
+        .map_err(|e| format!("{}: {e}", log_path.display()))?;
     let err = log.try_clone().map_err(|e| e.to_string())?;
     let broker_log = log.try_clone().map_err(|e| e.to_string())?;
-    eprintln!("bbp mod: launching {role_name} for turn {}", turn.0);
+    let (var, value) = bound.env();
+    match turn {
+        Some(t) => eprintln!("bbp mod: launching {role_name} for turn {}", t.0),
+        None => eprintln!("bbp mod: launching {role_name}'s session"),
+    }
     let mut env: Vec<(String, String)> = vec![
         ("BBP_TASK".into(), cfg.task.0.clone()),
         ("BBP_PRINCIPAL".into(), principal.0.clone()),
-        ("BBP_TURN".into(), turn.0.to_string()),
+        (var.into(), value),
         ("BBP_ROLE".into(), role_name.into()),
         ("BBP_BIN".into(), bbp.to_string_lossy().into_owned()),
         ("BBP_MCP_CONFIG".into(), mcp.to_string_lossy().into_owned()),
@@ -1075,9 +1210,8 @@ fn spawn(
         .spawn()
         .map_err(|e| format!("spawn {}: {e}", l.program))?;
     let group = group.unwrap_or(child.id());
-    let broker = match &confined {
-        None => None,
-        Some(t) => match t.broker(
+    let broker = match (&confined, turn) {
+        (Some(t), Some(turn)) => match t.broker(
             cfg,
             principal,
             turn,
@@ -1091,6 +1225,7 @@ fn spawn(
                 return Err(e);
             }
         },
+        _ => None,
     };
     Ok(Launched {
         child,

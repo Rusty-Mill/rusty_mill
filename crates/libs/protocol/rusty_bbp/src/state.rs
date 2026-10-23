@@ -1,7 +1,7 @@
 //! `TaskState`: the indexed fold over events that rules consult. `Card` is its projection.
 
 use crate::command::Response;
-use crate::event::{EscalateReason, Event};
+use crate::event::{EscalateReason, Event, TurnEnd};
 use crate::ids::*;
 use crate::policy::SchedulingPolicy;
 use crate::record::*;
@@ -243,6 +243,8 @@ pub struct TaskState {
     // tell new events from old ones. Revs are the card revision after the event.
     /// Per role, the rev of the event that ended its latest turn.
     pub last_turn_end: HashMap<RoleId, Rev>,
+    /// Why each ended turn ended.
+    pub turn_end_cause: HashMap<TurnId, TurnEnd>,
     /// The rev at which each message was appended, parallel to `messages`.
     pub msg_rev: Vec<Rev>,
     /// The rev at which each artifact was stored.
@@ -304,6 +306,7 @@ impl TaskState {
             exhausted: HashSet::new(),
             opened: false,
             last_turn_end: HashMap::new(),
+            turn_end_cause: HashMap::new(),
             msg_rev: Vec::new(),
             art_rev: HashMap::new(),
             ready_rev: Rev(0),
@@ -682,10 +685,11 @@ impl TaskState {
                 self.spent.turns += 1;
                 self.seed_unseen(*turn);
             }
-            Event::TurnEnded { turn, cause: _ } => {
+            Event::TurnEnded { turn, cause } => {
                 if let Some(i) = self.turns.iter().position(|t| t.id == *turn) {
                     let t = self.turns.remove(i);
                     self.last_turn_end.insert(t.role, self.rev);
+                    self.turn_end_cause.insert(*turn, *cause);
                 }
             }
             Event::MessageAppended(m) => {

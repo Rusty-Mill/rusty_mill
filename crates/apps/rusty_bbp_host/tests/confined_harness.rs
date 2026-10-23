@@ -85,6 +85,7 @@ fn setup(
         program: path.to_string_lossy().into_owned(),
         args,
         builtin_tools: true,
+        session: false,
         sandbox,
     };
     Config {
@@ -509,6 +510,7 @@ fn a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone() {
             "{mcp_config}".into(),
         ],
         builtin_tools: true,
+        session: false,
         sandbox: Some(HarnessSandbox {
             read: vec![
                 bin.to_string_lossy().into_owned(),
