@@ -46,7 +46,6 @@ rusty_term_core = { path = "core", version = "0.1.1" }
 rusty_dirs = { workspace = true }
 rusty_atomic_file = { workspace = true }
 libc = { workspace = true }
-parking_lot = "0.12"
 # In-house async runtime (reactor, timers, signals, channels) in place of
 # tokio, per the dependency sovereignty policy (ADR-0002).
 rusty_tokio = { workspace = true }

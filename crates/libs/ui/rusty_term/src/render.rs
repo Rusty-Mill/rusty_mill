@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 
 use crate::backend::Backend;
 use crate::core::{

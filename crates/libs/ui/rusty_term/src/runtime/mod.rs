@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 
 use crate::backend::Backend;
 use crate::core::Grid;
