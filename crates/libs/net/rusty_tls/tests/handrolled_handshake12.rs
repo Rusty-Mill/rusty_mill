@@ -10,7 +10,13 @@
 //! (a truncated message is not a shorter message), and **every trailing octet**
 //! must be refused (a second message hiding behind the first).
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rusty_tls::handrolled::handshake::{Extension, HandshakeError};
 use rusty_tls::handrolled::handshake12::{

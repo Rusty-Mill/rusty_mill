@@ -19,9 +19,12 @@
 //! `RUSTY_TLS_LIVE_HOSTS` (comma-separated) replaces the default host list.
 
 #![cfg(all(
-    feature = "handrolled-engine",
     rusty_tls_handrolled,
-    target_os = "linux"
+    target_os = "linux",
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
 ))]
 
 use std::io::{Read, Write};
