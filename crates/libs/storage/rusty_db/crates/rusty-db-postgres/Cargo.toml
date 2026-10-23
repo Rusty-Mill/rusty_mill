@@ -2,6 +2,7 @@
 name = "rusty-db-postgres"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.94"
 license = "MIT"
 repository = "https://github.com/baileyrd/rusty_db"
 description = "PostgreSQL driver for rusty_db, built on sqlx"

@@ -2,6 +2,7 @@
 name = "rusty-meshed-trace"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 description = "Reverse-trace and domain-maturity model for rusty_meshed: outcome -> domains -> sources, with a fidelity verdict and a worst-first bottleneck list."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_mill"

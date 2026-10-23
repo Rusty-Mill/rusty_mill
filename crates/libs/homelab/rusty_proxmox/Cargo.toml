@@ -2,7 +2,7 @@
 name = "rusty_proxmox"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.87"
 license = "MIT OR Apache-2.0"
 description = "Async client for the Proxmox VE REST API: nodes, guest lifecycle, snapshots, cluster resources, storage, and backups."
 repository = "https://github.com/baileyrd/rusty_proxmox"

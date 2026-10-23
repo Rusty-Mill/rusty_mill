@@ -2,6 +2,7 @@
 name = "rusty-meshed-sdk"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 description = "The data-product producer/consumer SDK, transactional outbox, and topic lifecycle management, ported from meshed.sdk and meshed.infrastructure."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_mill"

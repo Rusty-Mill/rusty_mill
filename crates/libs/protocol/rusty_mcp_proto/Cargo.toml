@@ -2,6 +2,7 @@
 name = "rusty_mcp_proto"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.81"
 description = "Sovereign MCP wire types on rusty_json: JSON-RPC 2.0 envelope, error codes, protocol versions, content, tools and paginated lists, with a hand-written codec and no serde"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rusty-Mill/rusty_mill"

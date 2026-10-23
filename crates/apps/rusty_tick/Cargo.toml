@@ -2,6 +2,7 @@
 name = "rusty_tick"
 version = "0.0.1"
 edition = "2021"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/Rusty-Mill/rusty_mill"
 description = "Self-hosted task manager on rusty_multimodal_db_engine (spike)"

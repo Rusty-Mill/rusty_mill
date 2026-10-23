@@ -2,6 +2,7 @@
 name = "rsi-core"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 publish = false
 description = "Pure domain core of the rusty_rsi self-improvement harness: accept gate, noise margin, budget metering, search helpers and lineage types"

@@ -6,7 +6,8 @@ Read `cargo metadata` JSON from argv[1]. For every workspace member that declare
 independent default-feature normal/build closure across target-specific dependencies.
 Take the highest `rust-version` declared by any package in that closure (an
 edition-2024 package counts as 1.85) and report the member if its own declaration is
-lower. This compares declarations; it does not build at the old toolchain.
+lower. Also fail when a member declares no `rust-version` at all. This compares
+declarations; `msrv-compile` is what builds at the declared toolchain.
 """
 import json
 import re
@@ -130,9 +131,25 @@ def workspace_default_violations(metadata: dict, workspace_root: Path, cargo: st
     return sorted(violations)
 
 
+def undeclared_members(metadata: dict) -> list[str]:
+    """Return sorted names of workspace members that declare no `rust-version`."""
+    packages = {pkg["id"]: pkg for pkg in metadata["packages"]}
+    return sorted(
+        packages[member]["name"]
+        for member in metadata["workspace_members"]
+        if not packages[member].get("rust_version")
+    )
+
+
 def main() -> None:
     metadata = json.loads(Path(sys.argv[1]).read_text())
     workspace_root = Path(metadata["workspace_root"])
+    undeclared = undeclared_members(metadata)
+    if undeclared:
+        print("Every workspace member must declare a `rust-version`; missing on:", file=sys.stderr)
+        for name in undeclared:
+            print(f"  - {name}", file=sys.stderr)
+        sys.exit(1)
     violations = workspace_default_violations(metadata, workspace_root)
     if violations:
         print(
