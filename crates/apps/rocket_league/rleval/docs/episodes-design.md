@@ -1,6 +1,6 @@
-# Episodes — design proposal (assessment rec. #6)
+# Episodes — design proposal
 
-Status: **A (Recovery), B (Challenge) and C (Loss) shipped; D measured and dropped.** Source: `docs/competitor/spire/ASSESSMENT.md` §5 #6.
+Status: **A (Recovery), B (Challenge) and C (Loss) shipped; D measured and dropped.**
 
 ## Problem
 We score recovery, possession loss and challenge only as **per-player aggregates**
@@ -13,7 +13,7 @@ becomes a reducer over its episodes, so **the list and the score cannot drift**.
 Serve the rows and let a click seek the 3D viewer to the moment.
 
 ## Future growth
-Not in v1 — each needs a definition we can't validate yet (assessment §2.2, §6.2) —
+Not in v1 — each needs a definition we can't validate yet —
 but the design leaves room: a new kind is one enum variant plus one emitter; a new
 field on a kind is additive.
 
@@ -93,8 +93,8 @@ frames+roles ─► emitters ─► Vec<Episode> ─┬─► metrics (reducers)
 5. Headless-browser smoke (existing GL-smoke pattern): row click moves the viewer timeline.
 
 ## Validation against Spire
-Assessment §6.2 items 2–4 once its raw rows are available: align by timestamp (±0.5 s),
-report count and per-player agreement. **Differences are expected** (§2.2): ours is
+Once Spire's per-event rows are available: align by timestamp (±0.5 s),
+report count and per-player agreement. **Differences are expected**: ours is
 touch-based and needs facing to call a recovery done. The list makes them inspectable.
 
 ## Staging — four small PRs, ≈ 8 dev-days
@@ -114,7 +114,7 @@ A proves the plumbing end to end; B and C are then pure additions.
 
 ## Risks and decisions
 - **Loss ignores dead-ball / goal-ended possessions** (needs a next touch). Recommend
-  keeping it: it matches the existing metric; revisit with Spire's rows (§6.2 #2).
+  keeping it: it matches the existing metric; revisit with Spire's rows.
 - **"Challenge" is a 1st-man 50/50, not a last-man decision.** Naming it honestly beats
   implying parity; last-man logic is a separate, later change.
 - **Refactor risk** is confined by the bit-equal drift test.
