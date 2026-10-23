@@ -26,6 +26,7 @@ mod request;
 pub mod response;
 pub mod routing;
 pub mod serve;
+mod stop;
 
 pub use body::{Body, BoxError};
 pub use extract::{FromRequest, Json, Path, Query, Rejection, State};
