@@ -20,5 +20,8 @@ let response = app.call(rusty_axum::Request::new(rusty_axum::Method::Get, "/heal
   Response bodies may stream (`Body::from_stream`, `Sse`).
 - `Method`, `StatusCode` and `HeaderMap` come from `rusty_http`.
 
-Status: core only. The HTTP/1.1 server on `rusty_tokio`/`rusty_tls`, middleware
-and CORS come next; no consumer has moved yet.
+- `serve(listener, tls, options, router)` runs HTTP/1.1 on `rusty_tokio`, plain
+  or over `rusty_tls`: keep-alive, `Expect: 100-continue`, bounded head, body,
+  idle time and connections, and graceful shutdown that ends SSE streams cleanly.
+
+Status: middleware and CORS come next; no consumer has moved yet.

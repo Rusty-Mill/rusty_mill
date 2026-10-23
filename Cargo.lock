@@ -12190,8 +12190,11 @@ name = "rusty_axum"
 version = "0.1.0"
 dependencies = [
  "futures-core",
+ "rcgen",
+ "rustls",
  "rusty_http",
  "rusty_percent",
+ "rusty_tls",
  "rusty_tokio",
  "serde",
  "serde_json",
