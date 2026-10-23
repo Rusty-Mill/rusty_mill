@@ -356,7 +356,9 @@ async fn run_async(
             // Keep the read dup alive for the task; `master` deregisters before
             // it (declared after, dropped first) so the fd is still open then.
             let _read_handle = read_handle;
-            let master = match AsyncFd::new(FdRef(read_fd)) {
+            // SAFETY: `read_fd` is `_read_handle`'s open dup, which never
+            // changes and outlives `master` (declared before it, dropped after).
+            let master = match unsafe { AsyncFd::register(FdRef(read_fd)) } {
                 Ok(m) => m,
                 Err(_) => return,
             };
@@ -403,11 +405,17 @@ async fn run_async(
                 frame: Arc::clone(&frame),
             };
             let _write_handle = write_handle;
-            let tty = match open_tty_nonblocking().and_then(AsyncFd::new) {
+            let tty = match open_tty_nonblocking().and_then(|fd| {
+                // SAFETY: the `OwnedFd` is moved into the `AsyncFd`, so it stays
+                // open and unchanged until the `AsyncFd` drops it.
+                unsafe { AsyncFd::register(fd) }.map_err(std::io::Error::from)
+            }) {
                 Ok(t) => t,
                 Err(_) => return,
             };
-            let writer = match AsyncFd::new(FdRef(write_fd)) {
+            // SAFETY: `write_fd` is `_write_handle`'s open dup, which never
+            // changes and outlives `writer` (declared before it, dropped after).
+            let writer = match unsafe { AsyncFd::register(FdRef(write_fd)) } {
                 Ok(w) => w,
                 Err(_) => return,
             };
