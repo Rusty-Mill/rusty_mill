@@ -136,9 +136,14 @@ fn two_envs_fed_the_same_tape_give_bit_identical_frames() {
         assert_same(tick as u32, a, b);
     }
     // The tape is not a car sitting still: the run went somewhere worth comparing.
-    let last = a.last().unwrap();
-    assert!(last.cars.iter().all(|c| c.position.length() > 0.0));
-    assert!(last.ball.velocity.length() > 0.0 || last.ball.position != start().ball.position);
+    let (first, last) = (&a[0], a.last().unwrap());
+    for (from, to) in first.cars.iter().zip(&last.cars) {
+        assert!(
+            (to.position - from.position).length() > 100.0,
+            "car {}",
+            from.player_id
+        );
+    }
 }
 
 #[test]
