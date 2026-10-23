@@ -1,0 +1,12 @@
+# Used by BuildKit for this Dockerfile in place of the root .dockerignore: the
+# build context is the monorepo root (see the Dockerfile).
+.git
+target
+**/target
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/node_modules
+crates/apps/rocket_league/rleval/service/*.db
+crates/apps/rocket_league/rleval/service/blobs/
+crates/apps/rocket_league/rleval/data/

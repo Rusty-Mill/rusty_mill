@@ -25,6 +25,10 @@ PATH_JOB_PREFIXES = {
     "agui": "crates/libs/protocol/rusty_agui/",
     # The viewer's smoke test renders this fixture; Cargo impact alone would miss a change to it.
     "rleval_viewer": "crates/apps/rocket_league/rleval/assets/replays/",
+    # The rleval Python service (FastAPI + SQLModel) has no Cargo package to follow.
+    "rleval_service": "crates/apps/rocket_league/rleval/service/",
+    # The service image (and its Dockerfile.dockerignore): a release build, so only when it changes.
+    "rleval_image": "crates/apps/rocket_league/rleval/Dockerfile",
 }
 
 PACKAGE_JOB_PREFIXES = {

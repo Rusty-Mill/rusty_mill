@@ -40,6 +40,8 @@ PLAN_KEYS = {
     "tls_engine",
     "rleval_viewer",
     "rleval_app",
+    "rleval_service",
+    "rleval_image",
     "crypto_ct",
     "rand_platforms",
     "shards",
@@ -318,7 +320,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_rleval_jobs_follow_cargo_impact_and_the_viewer_fixture(self) -> None:
@@ -342,8 +344,28 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertFalse(flags["rleval_viewer"])
         self.assertFalse(flags["rleval_app"])
 
+    def test_rleval_service_jobs_follow_their_paths_only(self) -> None:
+        flags = specialized_job_flags(
+            ["crates/apps/rocket_league/rleval/service/app/models.py"], []
+        )
+        self.assertTrue(flags["rleval_service"])
+        self.assertFalse(flags["rleval_image"])
+        for path in (
+            "crates/apps/rocket_league/rleval/Dockerfile",
+            "crates/apps/rocket_league/rleval/Dockerfile.dockerignore",
+        ):
+            flags = specialized_job_flags([path], [])
+            self.assertTrue(flags["rleval_image"], path)
+            self.assertFalse(flags["rleval_service"], path)
+        # Docs and the Rust crates beside it select neither.
+        flags = specialized_job_flags(
+            ["crates/apps/rocket_league/rleval/docs/episodes-design.md"], ["rleval-app"]
+        )
+        self.assertFalse(flags["rleval_service"])
+        self.assertFalse(flags["rleval_image"])
+
     def test_rleval_jobs_are_planned_and_gated(self) -> None:
-        for key in ("rleval_viewer", "rleval_app"):
+        for key in ("rleval_viewer", "rleval_app", "rleval_service", "rleval_image"):
             self.assertIn(f"{key}: ${{{{ steps.plan.outputs.{key} }}}}", self.workflow)
             self.assertIn(f"if: needs.plan.outputs.{key} == 'true'", self.workflow)
 
@@ -422,11 +444,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_agui_package_change_selects_tick_web_too(self) -> None:
