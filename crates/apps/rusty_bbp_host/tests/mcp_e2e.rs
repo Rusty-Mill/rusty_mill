@@ -29,7 +29,6 @@ impl Mcp {
     }
 
     /// A session server, which acts only in turns `wait` has shown.
-    #[cfg(target_os = "linux")] // sessions need Linux
     fn session(dir: &Path, task: &str, principal: &str) -> Mcp {
         Mcp::spawn_as(dir, task, principal, ("BBP_SESSION", "yes"))
     }
@@ -110,7 +109,6 @@ impl Mcp {
 
     /// Write several tool calls in one write, as a pipelining client would;
     /// returns their ids.
-    #[cfg(target_os = "linux")] // sessions need Linux
     fn send_calls(&mut self, calls: &[(&str, &str)]) -> Vec<u64> {
         let mut lines = String::new();
         let ids = calls
@@ -126,6 +124,13 @@ impl Mcp {
         stdin.write_all(lines.as_bytes()).expect("write");
         stdin.flush().expect("flush");
         ids
+    }
+
+    /// Write raw bytes, such as half a request.
+    fn write_raw(&mut self, bytes: &str) {
+        let stdin = self.child.stdin.as_mut().expect("stdin");
+        stdin.write_all(bytes.as_bytes()).expect("write");
+        stdin.flush().expect("flush");
     }
 
     fn recv_call(&mut self, id: u64) -> (Value, bool) {
@@ -593,7 +598,6 @@ fn master_initialisation_has_one_winner() {
 }
 
 /// End the live turn from outside, as the moderator does at a deadline.
-#[cfg(target_os = "linux")] // sessions need Linux
 fn abort_turn(dir: &Path, task: &TaskId) {
     open_driver(dir, task)
         .expect("driver")
@@ -601,7 +605,6 @@ fn abort_turn(dir: &Path, task: &TaskId) {
         .expect("abort");
 }
 
-#[cfg(target_os = "linux")] // sessions need Linux
 fn woke(reply: &Value) -> (&str, Option<u64>) {
     (
         reply["woke"].as_str().unwrap_or_else(|| panic!("{reply}")),
@@ -609,22 +612,39 @@ fn woke(reply: &Value) -> (&str, Option<u64>) {
     )
 }
 
+fn ticket(reply: &Value) -> String {
+    reply["ticket"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{reply}"))
+        .to_owned()
+}
+
+fn post(op: &str, ticket: &str) -> String {
+    format!(r#"{{"op":"{op}","kind":"ask","to":["coder"],"body":"{op}","ticket":"{ticket}"}}"#)
+}
+
+fn refusal(reply: &(Value, bool)) -> &str {
+    assert!(reply.1, "expected a refusal: {}", reply.0);
+    reply.0.as_str().unwrap_or("")
+}
+
 #[test]
-#[cfg(target_os = "linux")] // sessions need Linux
 fn a_session_acts_only_in_turns_wait_has_shown() {
     let dir = tempdir("session");
     let task = setup(&dir);
     let first = turn_of(&dir, &task);
     let mut planner = Mcp::session(&dir, "T1", "planner");
     let tools = planner.request("tools/list", "{}");
-    let names: Vec<&str> = match &tools["result"]["tools"] {
-        Value::Seq(t) => t.iter().filter_map(|x| x["name"].as_str()).collect(),
-        _ => vec![],
+    let Value::Seq(tools) = &tools["result"]["tools"] else {
+        panic!("{tools}")
     };
-    assert_eq!(names.last(), Some(&"wait"));
+    assert_eq!(tools.last().and_then(|t| t["name"].as_str()), Some("wait"));
+    let post_tool = tools.iter().find(|t| t["name"].as_str() == Some("post"));
+    let required = &post_tool.expect("post")["inputSchema"]["required"];
+    assert!(required.to_string().contains("ticket"), "{required}");
 
-    // Pipelined behind the wait that shows the grant, a post issued before it
-    // keeps the binding it was sent under: none.
+    // Pipelined with the wait that shows the grant, a call issued before it
+    // holds no ticket and cannot act, whatever the timing.
     let ids = planner.send_calls(&[
         ("wait", r#"{"timeout_s":5}"#),
         (
@@ -634,73 +654,51 @@ fn a_session_acts_only_in_turns_wait_has_shown() {
     ]);
     let (w, _) = planner.recv_call(ids[0]);
     assert_eq!(woke(&w), ("turn", Some(first)));
-    let (queued, err) = planner.recv_call(ids[1]);
-    assert!(err, "a pre-grant call must not get the new token: {queued}");
-    assert!(
-        queued.as_str().unwrap_or("").contains("no turn yet"),
-        "{queued}"
-    );
-    drop(planner);
-    let mut planner = Mcp::session(&dir, "T1", "planner");
-
-    // Granted already, but not yet shown: no action until wait.
-    let (early, err) = planner.call(
-        "post",
-        r#"{"op":"p0","kind":"ask","to":["coder"],"body":"?"}"#,
-    );
-    assert!(err);
-    assert!(
-        early.as_str().unwrap_or("").contains("call wait"),
-        "{early}"
-    );
+    let t1 = ticket(&w);
+    assert!(refusal(&planner.recv_call(ids[1])).contains("ticket"));
+    let forged = format!("{first}.{}", "0".repeat(32));
+    assert!(refusal(&planner.call("post", &post("f", &forged))).contains("unknown ticket"));
     let (_, err) = planner.call("task_card", "{}");
     assert!(!err, "the card stays free");
-    let (w, err) = planner.call("wait", r#"{"timeout_s":5}"#);
-    assert!(!err, "{w}");
-    assert_eq!(woke(&w), ("turn", Some(first)));
     let (w, _) = planner.call("wait", "{}");
     assert_eq!(
         woke(&w),
         ("held", Some(first)),
         "a held turn returns at once"
     );
-    let (ok, err) = planner.call(
-        "post",
-        r#"{"op":"p1","kind":"ask","to":["coder"],"body":"Async?"}"#,
-    );
-    assert!(!err, "{ok}");
+    assert_eq!(ticket(&w), t1);
+    let accepted = planner.call("post", &post("p1", &t1));
+    assert!(!accepted.1, "{}", accepted.0);
 
-    // The turn ends; the shown turn is stale and the coder holds the next.
+    // The turn ends: its ticket acts no more, but an accepted op replays.
     abort_turn(&dir, &task);
-    let (late, err) = planner.call(
-        "post",
-        r#"{"op":"p2","kind":"ask","to":["coder"],"body":"late"}"#,
-    );
-    assert!(err);
-    assert!(
-        late.as_str()
-            .unwrap_or("")
-            .contains("call wait for your next turn"),
-        "{late}"
+    assert!(refusal(&planner.call("post", &post("p2", &t1)))
+        .contains(&format!("turn {first} has ended; call wait")));
+    assert_eq!(
+        planner.call("post", &post("p1", &t1)),
+        accepted,
+        "R15 replay"
     );
     let started = std::time::Instant::now();
     let (w, _) = planner.call("wait", r#"{"timeout_s":1}"#);
     assert_eq!(woke(&w), ("timeout", None));
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 
-    // A blocked wait wakes when the coder's question grants the planner a turn.
+    // Calls from the old inference queued behind a blocked wait keep their
+    // binding when the coder's question grants the planner a new turn.
     let mut coder = Mcp::session(&dir, "T1", "coder");
     let (w, _) = coder.call("wait", "{}");
     assert_eq!(woke(&w).0, "turn");
+    let tc = ticket(&w);
     let pending = planner.send_call("wait", r#"{"timeout_s":60}"#);
-    let stale = planner.send_call(
+    let stale = planner.send_call("post", &post("p-old", &t1));
+    let bare = planner.send_call(
         "post",
-        r#"{"op":"p-old","kind":"ask","to":["coder"],"body":"from the old inference"}"#,
+        r#"{"op":"p-bare","kind":"ask","to":["coder"],"body":"?"}"#,
     );
-    let (ok, err) = coder.call(
-        "post",
-        r#"{"op":"c1","kind":"ask","to":["planner"],"body":"Sync."}"#,
-    );
+    let asked =
+        format!(r#"{{"op":"c1","kind":"ask","to":["planner"],"body":"Sync.","ticket":"{tc}"}}"#);
+    let (ok, err) = coder.call("post", &asked);
     assert!(!err, "{ok}");
     let started = std::time::Instant::now();
     abort_turn(&dir, &task);
@@ -708,18 +706,12 @@ fn a_session_acts_only_in_turns_wait_has_shown() {
     let (w, _) = planner.recv_call(pending);
     assert_eq!(woke(&w), ("turn", Some(next)));
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
-    let (old, err) = planner.recv_call(stale);
-    assert!(err, "a call queued behind wait keeps its old turn: {old}");
-    assert!(
-        old.as_str()
-            .unwrap_or("")
-            .contains(&format!("turn {first} has ended")),
-        "{old}"
-    );
-    let (ok, err) = planner.call(
-        "post",
-        r#"{"op":"p3","kind":"ask","to":["coder"],"body":"next"}"#,
-    );
+    let t2 = ticket(&w);
+    assert_ne!(t1, t2);
+    assert!(refusal(&planner.recv_call(stale)).contains(&format!("turn {first} has ended")));
+    assert!(refusal(&planner.recv_call(bare)).contains("ticket"));
+    assert!(refusal(&planner.call("post", &post("p-coder", &tc))).contains("unknown ticket"));
+    let (ok, err) = planner.call("post", &post("p3", &t2));
     assert!(!err, "{ok}");
 
     // A finished task ends every wait.
@@ -727,6 +719,20 @@ fn a_session_acts_only_in_turns_wait_has_shown() {
     human::perform(&dir, &task, "cancel", &["done"], Some(rev)).expect("cancel");
     let (w, _) = coder.call("wait", "{}");
     assert_eq!(woke(&w), ("ended", None));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_partial_request_never_holds_back_a_wait_reply() {
+    let dir = tempdir("partial");
+    let task = setup(&dir);
+    let mut planner = Mcp::session(&dir, "T1", "planner");
+    let id = planner.send_call("wait", r#"{"timeout_s":5}"#);
+    planner.write_raw(r#"{"jsonrpc":"2.0","id":99,"method":"#);
+    let (w, _) = planner.recv_call(id);
+    assert_eq!(woke(&w), ("turn", Some(turn_of(&dir, &task))));
+    planner.write_raw("\"ping\"}\n");
+    assert!(planner.recv(99).get("result").is_some());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

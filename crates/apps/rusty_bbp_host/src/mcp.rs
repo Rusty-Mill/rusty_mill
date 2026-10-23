@@ -9,20 +9,19 @@
 //! model sends can change which turn this process speaks for.
 //!
 //! A session server (`BBP_SESSION=yes`, no `BBP_TURN`) lives for the whole
-//! task and speaks for each turn of its principal's role in order, but only
-//! once `wait` has shown that turn to the model: a call from an inference that
-//! began before the turn was granted cannot act in it. Each request is bound
-//! to the turn shown when it arrived, and when `wait` shows a new turn every
-//! request already sent is drained first and keeps the earlier binding, so a
-//! call queued behind `wait` is refused rather than relabelled with the new
-//! grant (the v0.5 invocation-bound token). Sessions need Linux, for `poll`.
+//! task and speaks for each turn of its principal's role, but never for the
+//! process as a whole: `wait` shows a turn with a ticket, an unguessable value
+//! derived from that turn's token, and every call that acts names the ticket
+//! of the turn it acts in. The ticket is the invocation context. An inference
+//! can carry only a ticket it has seen, so a call produced before a grant
+//! (pipelined with `wait`, or queued behind it) holds no ticket or an earlier
+//! one, and is refused with that earlier turn's token, never relabelled with
+//! the new grant, however the requests are timed on the stream.
 
 use crate::{fresh_op, now, open_driver, response_json};
 use rusty_bbp::*;
 use rusty_serde::Value;
-use std::collections::VecDeque;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -56,8 +55,7 @@ impl Binding {
                 t.parse()
                     .map_err(|_| "BBP_TURN must be a number".to_owned())?,
             )),
-            (None, Some(s)) if s == "yes" && cfg!(target_os = "linux") => None,
-            (None, Some(s)) if s == "yes" => return Err("a session server needs Linux".into()),
+            (None, Some(s)) if s == "yes" => None,
             _ => return Err("set exactly one of $BBP_TURN or $BBP_SESSION=yes".into()),
         };
         Ok(Binding {
@@ -72,7 +70,7 @@ impl Binding {
 pub struct Server {
     binding: Binding,
     driver: Driver<FsStore>,
-    /// A session's turn as `wait` last showed it to the model.
+    /// The turn `wait` last showed, to tell a new grant from a held one.
     shown: Option<TurnId>,
     /// A session's watch on the task log, made on its first `wait`.
     waker: Option<crate::waker::Waker>,
@@ -124,12 +122,25 @@ pub fn tools(session: bool) -> Value {
             ("inputSchema", input),
         ])
     };
+    // A session's acting tools name the turn they act in by its ticket.
+    let schema = |mut props: Vec<(&str, &str, &str)>, required: &[&str]| {
+        let mut required = required.to_vec();
+        if session {
+            props.push((
+                "ticket",
+                "string",
+                "The ticket wait returned for the turn you act in",
+            ));
+            required.push("ticket");
+        }
+        schema(props, &required)
+    };
     Value::Seq(
         vec![
         tool(
             "task_card",
             "The task's current state, turn, candidate, run and budgets. Free; needs no turn.",
-            schema(vec![], &[]),
+            self::schema(vec![], &[]),
         ),
         tool(
             "read",
@@ -180,8 +191,8 @@ pub fn tools(session: bool) -> Value {
     .chain(session.then(|| {
         tool(
             "wait",
-            "Block until your role is granted a turn, the task ends, or timeout_s passes, then say which (woke: turn, held, ended or timeout). Free. Every other tool except task_card needs a turn that wait has shown you; call wait again whenever you have nothing to do.",
-            schema(
+            "Block until your role is granted a turn, the task ends, or timeout_s passes, then say which (woke: turn, held, ended or timeout). Free. A turn comes with a ticket: pass it as `ticket` to every other tool except task_card while you act in that turn, and call wait again whenever you have nothing to do.",
+            self::schema(
                 vec![("timeout_s", "integer", "Longest wait in seconds; default 60, at most 600")],
                 &[],
             ),
@@ -450,25 +461,51 @@ impl Server {
         self.driver.state.turn_of(&role).map(|t| t.id)
     }
 
+    /// The ticket for `turn`: its number and a digest of its token, which
+    /// names the turn without revealing the token.
+    fn ticket(&self, turn: TurnId) -> String {
+        let mut bytes = self.token(turn).0 .0.to_vec();
+        bytes.extend_from_slice(b"|ticket");
+        format!("{}.{}", turn.0, &Sha256::of(&bytes).hex()[..32])
+    }
+
+    /// The turn a session call acts in, from its `ticket` argument.
+    fn ticketed(&self, args: &Value) -> Result<TurnId, String> {
+        let ticket = args
+            .get("ticket")
+            .and_then(Value::as_str)
+            .ok_or("a session acts only with the ticket wait returned; call wait")?;
+        ticket
+            .split_once('.')
+            .and_then(|(n, _)| n.parse().ok())
+            .map(TurnId)
+            .filter(|&t| self.ticket(t) == ticket)
+            .ok_or_else(|| "unknown ticket; call wait for yours".to_owned())
+    }
+
     /// Why a session's `wait` should return now, if it should.
     fn woke(&mut self) -> Option<Value> {
-        let state = self.driver.state.state;
-        let reply = |woke: &str, turn: Option<TurnId>| {
-            obj(vec![
-                ("woke", woke.into()),
-                ("turn", turn.map_or(Value::Null, |t| Value::from(t.0))),
-                ("state", format!("{state:?}").into()),
-            ])
+        let (woke, turn) = if self.driver.state.state.terminal() {
+            ("ended", None)
+        } else {
+            let held = self.held()?;
+            let seen = self.shown.replace(held) == Some(held);
+            (if seen { "held" } else { "turn" }, Some(held))
         };
-        if state.terminal() {
-            return Some(reply("ended", None));
-        }
-        let held = self.held()?;
-        if self.shown == Some(held) {
-            return Some(reply("held", Some(held)));
-        }
-        self.shown = Some(held);
-        Some(reply("turn", Some(held)))
+        Some(self.wake_reply(woke, turn))
+    }
+
+    /// A `wait` answer: why it returned, and the turn and ticket it shows.
+    fn wake_reply(&self, woke: &str, turn: Option<TurnId>) -> Value {
+        obj(vec![
+            ("woke", woke.into()),
+            ("turn", turn.map_or(Value::Null, |t| Value::from(t.0))),
+            (
+                "ticket",
+                turn.map_or(Value::Null, |t| self.ticket(t).into()),
+            ),
+            ("state", format!("{:?}", self.driver.state.state).into()),
+        ])
     }
 
     /// `wait`: block until [`Server::woke`] has a reason or the timeout passes.
@@ -489,12 +526,7 @@ impl Server {
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                let state = format!("{:?}", self.driver.state.state);
-                return Ok(obj(vec![
-                    ("woke", "timeout".into()),
-                    ("turn", Value::Null),
-                    ("state", state.into()),
-                ]));
+                return Ok(self.wake_reply("timeout", None));
             }
             let log = log_path_for(&self.binding.dir, &self.binding.task);
             self.waker
@@ -553,14 +585,8 @@ impl Server {
         }
     }
 
-    /// Run one tool call end to end, as of `shown`: the turn `wait` had shown
-    /// when the request arrived.
-    fn call(
-        &mut self,
-        name: &str,
-        args: &Value,
-        shown: Option<TurnId>,
-    ) -> Result<Response, String> {
+    /// Run one tool call end to end.
+    pub fn call(&mut self, name: &str, args: &Value) -> Result<Response, String> {
         self.driver.sync().map_err(|e| format!("{e:?}"))?;
         let Translated {
             op,
@@ -568,7 +594,11 @@ impl Server {
             bytes,
         } = action(name, args)?;
         let free = matches!(act, AgentAction::TaskCard);
-        let turn = self.binding.turn.or(shown);
+        let turn = match self.binding.turn {
+            Some(t) => Some(t),
+            None if free => None,
+            None => Some(self.ticketed(args)?),
+        };
         let live = turn.is_some_and(|t| self.live(t));
         if !free && !live && !self.accepted(&op) {
             return Err(match (self.binding.turn, turn) {
@@ -577,7 +607,7 @@ impl Server {
                     t.0
                 ),
                 (None, Some(t)) => format!("turn {} has ended; call wait for your next turn", t.0),
-                (None, None) => "you hold no turn yet; call wait".to_owned(),
+                (None, None) => "you hold no turn; call wait".to_owned(),
             });
         }
         if let Some((payload, body)) = bytes {
@@ -600,9 +630,8 @@ impl Server {
             .map_err(|e| format!("{e:?}"))
     }
 
-    /// Handle one JSON-RPC request, which arrived while `shown` was the shown
-    /// turn; `None` for notifications.
-    fn handle(&mut self, req: &Value, shown: Option<TurnId>) -> Option<Value> {
+    /// Handle one JSON-RPC request; `None` for notifications.
+    pub fn handle(&mut self, req: &Value) -> Option<Value> {
         let id = req.get("id").cloned();
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         if id.is_none() || id.as_ref().map(Value::is_null).unwrap_or(true) {
@@ -641,7 +670,7 @@ impl Server {
                         Ok(reply) => text_result(reply.to_string(), false),
                         Err(e) => text_result(e, true),
                     },
-                    _ => match self.call(name, &args, shown) {
+                    _ => match self.call(name, &args) {
                         Ok(resp) => self.render(&resp),
                         Err(e) => text_result(e, true),
                     },
@@ -668,104 +697,40 @@ impl Server {
 
     /// Serve stdin to stdout until EOF.
     pub fn serve(&mut self) -> io::Result<()> {
-        self.serve_on(BufReader::new(stdin_file()?), io::stdout().lock())
+        self.serve_on(io::stdin().lock(), io::stdout().lock())
     }
 
     /// Serve newline-delimited requests from `input` to `output` until EOF.
-    pub fn serve_on(
-        &mut self,
-        mut input: BufReader<File>,
-        mut output: impl Write,
-    ) -> io::Result<()> {
-        let mut queued: VecDeque<(String, Option<TurnId>)> = VecDeque::new();
-        loop {
-            let (line, shown) = match queued.pop_front() {
-                Some(q) => q,
-                None => {
-                    let mut line = String::new();
-                    if input.read_line(&mut line)? == 0 {
-                        return Ok(());
-                    }
-                    (line, self.shown)
+    pub fn serve_on(&mut self, input: impl BufRead, mut stdout: impl Write) -> io::Result<()> {
+        for line in input.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let req: Value = match rusty_serde::json::from_str(&line) {
+                Ok(v) => v,
+                Err(e) => {
+                    let err = obj(vec![
+                        ("jsonrpc", "2.0".into()),
+                        ("id", Value::Null),
+                        (
+                            "error",
+                            obj(vec![
+                                ("code", Value::Int(-32700)),
+                                ("message", format!("parse error: {e}").into()),
+                            ]),
+                        ),
+                    ]);
+                    writeln!(stdout, "{err}")?;
+                    stdout.flush()?;
+                    continue;
                 }
             };
-            let before = self.shown;
-            let reply = self.respond(&line, shown);
-            if self.shown != before {
-                // Whatever was sent before this reply was issued without seeing
-                // the new turn: it keeps the turn shown before.
-                for line in drain(&mut input)? {
-                    queued.push_back((line, before));
-                }
-            }
-            if let Some(reply) = reply {
-                writeln!(output, "{reply}")?;
-                output.flush()?;
+            if let Some(resp) = self.handle(&req) {
+                writeln!(stdout, "{resp}")?;
+                stdout.flush()?;
             }
         }
+        Ok(())
     }
-
-    /// The reply to one request line, if it needs one.
-    fn respond(&mut self, line: &str, shown: Option<TurnId>) -> Option<Value> {
-        if line.trim().is_empty() {
-            return None;
-        }
-        match rusty_serde::json::from_str(line) {
-            Ok(req) => self.handle(&req, shown),
-            Err(e) => Some(obj(vec![
-                ("jsonrpc", "2.0".into()),
-                ("id", Value::Null),
-                (
-                    "error",
-                    obj(vec![
-                        ("code", Value::Int(-32700)),
-                        ("message", format!("parse error: {e}").into()),
-                    ]),
-                ),
-            ])),
-        }
-    }
-}
-
-/// Every request line already sent on `input`, without waiting for more. A
-/// line whose start has arrived is read to its end.
-fn drain(input: &mut BufReader<File>) -> io::Result<Vec<String>> {
-    let mut lines = Vec::new();
-    while !input.buffer().is_empty() || ready(input.get_ref())? {
-        let mut line = String::new();
-        if input.read_line(&mut line)? == 0 {
-            break;
-        }
-        lines.push(line);
-    }
-    Ok(lines)
-}
-
-/// True when reading `file` would not block: input waits, or the writer left.
-#[cfg(target_os = "linux")]
-fn ready(file: &File) -> io::Result<bool> {
-    use rusty_libc::fd::{poll, PollFd, POLLIN};
-    use std::os::fd::AsRawFd;
-    let mut fds = [PollFd::new(file.as_raw_fd(), POLLIN)];
-    poll(&mut fds, 0).map_err(|e| io::Error::other(format!("poll: {e:?}")))?;
-    Ok(fds[0].revents != 0)
-}
-
-/// Sessions are refused off Linux, so nothing is ever shown to drain for.
-#[cfg(not(target_os = "linux"))]
-fn ready(_: &File) -> io::Result<bool> {
-    Ok(false)
-}
-
-/// Stdin as an unbuffered file, so [`ready`] sees every byte not yet read.
-#[cfg(unix)]
-fn stdin_file() -> io::Result<File> {
-    use std::os::fd::AsFd;
-    Ok(File::from(io::stdin().as_fd().try_clone_to_owned()?))
-}
-
-#[cfg(windows)]
-fn stdin_file() -> io::Result<File> {
-    use std::os::windows::io::AsHandle;
-    Ok(File::from(io::stdin().as_handle().try_clone_to_owned()?))
 }

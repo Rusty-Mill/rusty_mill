@@ -4,6 +4,6 @@ changelog: `bbp mcp` can serve a whole task as a session (`BBP_SESSION=yes`) wit
 ---
 ## 2026-10-23 - BBP session servers and the `wait` tool
 
-- **Added:** `bbp mcp` with `BBP_SESSION=yes` (instead of `BBP_TURN`) serves its principal for the whole task. Its sixth tool, `wait`, blocks until the role holds a turn (`turn`, or `held` when already shown), the task is closed or cancelled (`ended`), or `timeout_s` passes (default 60, at most 600). It acts only in the turn `wait` last showed, with that turn's token; a request already sent when `wait` shows a new turn keeps the earlier binding and is refused, never relabelled with the new grant. Sessions need Linux. Step 3a of `docs/bbp-event-based-plan.md`.
+- **Added:** `bbp mcp` with `BBP_SESSION=yes` (instead of `BBP_TURN`) serves its principal for the whole task. Its sixth tool, `wait`, blocks until the role holds a turn (`turn`, or `held` when already shown), the task is closed or cancelled (`ended`), or `timeout_s` passes (default 60, at most 600). Each acting call passes the ticket `wait` returned for its turn and acts with that turn's token, so a call produced before a grant (no ticket, or an earlier one) is refused, never relabelled with the new grant. Step 3a of `docs/bbp-event-based-plan.md`.
 - **Unchanged:** per-turn servers, their tool list and refusals; provider launchers still require `BBP_TURN`.
 - **Known limitations:** nothing launches sessions yet (3b), and they are not yet confined or cost-accounted (3c). Validated with scripted MCP clients; no live-model run.
