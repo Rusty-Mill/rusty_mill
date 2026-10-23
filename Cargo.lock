@@ -12200,6 +12200,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_axum_tokio"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "rusty_axum",
+ "rusty_tokio",
+ "tokio",
+]
+
+[[package]]
 name = "rusty_base64"
 version = "0.1.0"
 

@@ -23,7 +23,7 @@ use rusty_tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use rusty_tokio::task::JoinHandle;
 use rusty_tokio::time::{sleep, timeout, timeout_at};
 
-use crate::body::{ChunkStream, Inner};
+use crate::body::{BodyStream, Inner};
 use crate::request::Request;
 use crate::response::Response;
 use crate::routing::Router;
@@ -392,7 +392,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Conn<T> {
     /// the server stops (`true`), or it fails or a write fails (`false`).
     async fn stream(
         &mut self,
-        mut stream: ChunkStream,
+        mut stream: BodyStream,
         stop: &Arc<Stop>,
         frame: fn(&[u8]) -> Vec<u8>,
     ) -> bool {
