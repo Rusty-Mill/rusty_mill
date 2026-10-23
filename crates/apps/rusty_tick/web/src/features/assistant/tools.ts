@@ -213,14 +213,18 @@ export function readSnooze(text: string, now: number): Snooze | undefined {
 
 /**
  * Where snoozing `t` moves it. Minutes and hours count from now, to the
- * minute; days and weeks from its due day (today if it is overdue or undated),
- * keeping its time; "until" moves it as "move … to …" does.
+ * minute, as an instant; days and weeks from its due day (today if it is
+ * overdue or undated), keeping its time; "until" moves it as "move … to …" does.
  */
 export function snoozeTo(t: Task, snooze: Snooze, now: number): TaskPatch {
   if ('until' in snooze) return moveTo(t, snooze.until.day ?? startOfDay(t.dueMs ?? now), snooze.until.time)
   if ('days' in snooze) return moveTo(t, addDays(Math.max(startOfDay(t.dueMs ?? now), startOfDay(now)), snooze.days))
-  const at = new Date(Math.ceil((now + snooze.minutes * MINUTE) / MINUTE) * MINUTE)
-  return moveTo(t, startOfDay(at.getTime()), { h: at.getHours(), m: at.getMinutes() })
+  // The instant itself, not a local day and clock time: in a DST fall-back hour
+  // the same 01:15 happens twice, and only the instant says which one.
+  const dueMs = Math.ceil((now + snooze.minutes * MINUTE) / MINUTE) * MINUTE
+  const patch: TaskPatch = { dueMs, isAllDay: false }
+  if (t.startMs !== null && t.startMs > dueMs) patch.startMs = null
+  return patch
 }
 
 const dayLabel = (ms: number): string => new Date(ms).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })

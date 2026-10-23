@@ -348,6 +348,16 @@ describe('update_task with a reminder', () => {
 })
 
 describe('snooze', () => {
+  it('adds minutes and hours to the instant, across a DST fall-back', () => {
+    // 01:45 EDT on 2026-11-01 in New York; 30 minutes later is 01:15 EST, a repeated hour.
+    const now = Date.UTC(2026, 10, 1, 5, 45)
+    const t = task('t', 'Call', { dueMs: now, isAllDay: false, startMs: now - 3_600_000 })
+    expect(snoozeTo(t, { minutes: 30 }, now)).toEqual({ dueMs: now + 30 * 60_000, isAllDay: false })
+    expect(snoozeTo(t, { minutes: 120 }, now + 20_000)).toEqual({ dueMs: now + 121 * 60_000, isAllDay: false })
+    // A start after the new due time is dropped, as for any move.
+    expect(snoozeTo({ ...t, startMs: now + 3_600_000 }, { minutes: 30 }, now)).toEqual({ dueMs: now + 30 * 60_000, isAllDay: false, startMs: null })
+  })
+
   const at = (d: number, h = 0, m = 0): number => new Date(2026, 9, d, h, m).getTime()
   const timed = task('t', 'Dentist', { dueMs: at(22, 15), isAllDay: false, startMs: null })
   const allDay = task('a', 'Bins', { dueMs: at(25), isAllDay: true, startMs: null })

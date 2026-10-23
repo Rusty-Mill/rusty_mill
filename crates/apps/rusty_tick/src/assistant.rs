@@ -820,10 +820,10 @@ fn snooze_phrase(text: &str, lower: &str) -> Option<Reply> {
         return Some(Reply::Text(SNOOZE_HELP.into()));
     };
     let snooze = rest[name.len()..].trim();
-    let name = match name.len().checked_sub(" for".len()) {
-        Some(at) if name[at..].eq_ignore_ascii_case(" for") => &name[..at],
-        _ if name.eq_ignore_ascii_case("for") => "",
-        _ => name,
+    let name = match strip_suffix_ci(name, " for") {
+        Some(name) => name,
+        None if name.eq_ignore_ascii_case("for") => "",
+        None => name,
     };
     Some(snooze_call(unquote(name), snooze))
 }
@@ -1774,6 +1774,15 @@ mod tests {
     #[test]
     fn turns_snooze_phrases_into_update_task() {
         let snooze = |q: &str, d: &str| call(UPDATE_TASK, json!({"query": q, "snooze": d}));
+        // A name ending in a multi-byte character is never sliced inside it.
+        for (said, name, how_long) in [
+            ("snooze 😀x 2 hours", "😀x", "2 hours"),
+            ("snooze 😀x for 2 hours", "😀x", "2 hours"),
+            ("snooze café 1 day", "café", "1 day"),
+            ("snooze é for a day", "é", "a day"),
+        ] {
+            assert_eq!(decide(&input(said)), snooze(name, how_long), "{said}");
+        }
         assert_eq!(
             decide(&input("snooze dentist for 2 hours")),
             snooze("dentist", "2 hours")
