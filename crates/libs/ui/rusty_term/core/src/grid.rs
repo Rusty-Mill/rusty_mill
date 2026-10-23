@@ -1404,6 +1404,12 @@ impl Grid {
         self.screen.get(y).map_or(&[], |line| &line.cells)
     }
 
+    /// Whether live screen row `y` soft-wraps into the next one.
+    #[cfg(test)]
+    pub(crate) fn row_wrapped(&self, y: usize) -> bool {
+        self.screen.get(y).is_some_and(|line| line.wrapped)
+    }
+
     /// Mutable access to the cells of live screen row `y`; empty past the
     /// last row. Writes bypass [`Grid::set_cell`]'s wide-glyph repair and do
     /// not mark the row dirty.
