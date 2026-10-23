@@ -340,10 +340,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Conn<T> {
         let bodiless = status.is_informational() || code == 204 || code == 304;
         match body.0 {
             Inner::Full(bytes) => {
-                if let Some(length) = &head_length {
-                    set(&mut headers, "content-length", length);
+                // 1xx and 204 may not carry a length (RFC 9110 §8.6). A HEAD
+                // answer carries the GET body's length only when the router
+                // knew it, never the length of the body it stripped.
+                let length = if status.is_informational() || code == 204 {
+                    None
+                } else if head_only {
+                    head_length
                 } else if !bodiless {
-                    set(&mut headers, "content-length", &bytes.len().to_string());
+                    Some(bytes.len().to_string())
+                } else {
+                    None
+                };
+                if let Some(length) = &length {
+                    set(&mut headers, "content-length", length);
                 }
                 let send_body = !(head_only || bodiless);
                 let mut out = head_bytes(status, &headers);
