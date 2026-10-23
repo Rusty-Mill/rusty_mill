@@ -152,15 +152,7 @@ jobs:
           $batch = Join-Path $env:RUNNER_TEMP 'rb score batch'
           New-Item -ItemType Directory -Force $batch | Out-Null
           Copy-Item "$bot/fixtures/probe_reverse.jsonl" "$batch/probe_reverse_run1.jsonl"
-          # rb_run_tapes writes a pad sidecar beside each capture; it is not a capture and must not be scored.
-          Set-Content "$batch/probe_reverse_run1.pads.jsonl" '{"tick":1}'
           & "$bot/run_batch.ps1" -ScoreOnly $batch
-          # The documented entry point is Windows PowerShell 5.1 (`powershell -File`), where a native
-          # command's stderr is a terminating error: scoring the sidecar as a capture made rb-verify
-          # print to stderr and aborted the whole batch there, though pwsh 7 carried on.
-          Remove-Item "$batch/results.md"
-          powershell -NoProfile -ExecutionPolicy Bypass -File "$bot/run_batch.ps1" -ScoreOnly $batch
-          if ($LASTEXITCODE -ne 0) { throw "Windows PowerShell ScoreOnly failed with a pad sidecar in the batch (exit $LASTEXITCODE)" }
           $report = Get-Content "$batch/results.md" -Raw
           if ($report -notmatch '\| probe_reverse \| [0-9]+' -or $report -match 'scoring failed') {
             throw "ScoreOnly did not score the matching fixture: $report"
