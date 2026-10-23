@@ -1,0 +1,374 @@
+//! The router: paths to method routers to handlers.
+//!
+//! A path is static segments and `{name}` parameters (`/tasks/{id}`). When
+//! several routes match, the one whose earliest segments are static wins,
+//! so `/tasks/new` beats `/tasks/{id}`. A matched path with no handler for
+//! the method answers 405 with `Allow`; `HEAD` falls back to `GET`.
+
+use std::sync::Arc;
+
+use rusty_http::{Method, StatusCode};
+
+use crate::handler::{erase, BoxHandler, Handler};
+use crate::request::Request;
+use crate::response::{IntoResponse, Response};
+use crate::BoxFuture;
+
+/// Routes requests to handlers. `S` is the state its handlers extract with
+/// [`State`](crate::State), supplied by [`Router::with_state`]; a router
+/// with every state supplied is a `Router<()>`, which [`Router::call`]s.
+pub struct Router<S = ()> {
+    routes: Vec<Route<S>>,
+}
+
+struct Route<S> {
+    path: String,
+    pattern: Vec<Segment>,
+    methods: MethodRouter<S>,
+}
+
+/// Captured path parameters, name and decoded value, in route order.
+type Params = Vec<(String, String)>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Segment {
+    Static(String),
+    Param(String),
+}
+
+impl<S> Default for Router<S> {
+    fn default() -> Self {
+        Router { routes: Vec::new() }
+    }
+}
+
+impl<S: Send + Sync + 'static> Router<S> {
+    /// An empty router: every request is 404.
+    pub fn new() -> Self {
+        Router::default()
+    }
+
+    /// Routes `path` to `methods`. A path given twice merges its methods.
+    ///
+    /// # Panics
+    ///
+    /// When `path` does not start with `/`, has an unsupported segment
+    /// (`:name`, `{*rest}`, an unclosed brace), repeats a parameter name,
+    /// overlaps a route of the same shape under other parameter names, or
+    /// gives a method a second handler. These are mistakes in the program,
+    /// found the first time it builds its router.
+    pub fn route(mut self, path: &str, methods: MethodRouter<S>) -> Self {
+        let pattern = parse(path);
+        if let Some(route) = self
+            .routes
+            .iter_mut()
+            .find(|r| same_shape(&r.pattern, &pattern))
+        {
+            assert!(
+                route.path == path,
+                "route {path:?} overlaps {:?}",
+                route.path
+            );
+            route.methods.merge(methods, path);
+            return self;
+        }
+        self.routes.push(Route {
+            path: path.to_string(),
+            pattern,
+            methods,
+        });
+        self
+    }
+
+    /// Adds every route of `other`.
+    ///
+    /// # Panics
+    ///
+    /// As [`Router::route`], when the two routers overlap.
+    pub fn merge(self, other: Router<S>) -> Self {
+        other.routes.into_iter().fold(self, |router, route| {
+            router.route(&route.path, route.methods)
+        })
+    }
+
+    /// Supplies the state every handler extracts, giving a router that
+    /// needs `S2` instead (usually `()`).
+    pub fn with_state<S2>(self, state: S) -> Router<S2>
+    where
+        S: Clone,
+    {
+        Router {
+            routes: self
+                .routes
+                .into_iter()
+                .map(|route| Route {
+                    path: route.path,
+                    pattern: route.pattern,
+                    methods: route.methods.with_state(state.clone()),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl Router<()> {
+    /// Answers `req` in process: routing, extraction and the handler, no
+    /// socket. The server calls this; so do tests.
+    pub fn call(&self, mut req: Request) -> BoxFuture<'static, Response> {
+        let Some(segments) = decode_segments(req.path()) else {
+            return ready((StatusCode::BAD_REQUEST, "path is not valid UTF-8"));
+        };
+        let Some((route, params)) = self.best_match(&segments) else {
+            return ready(StatusCode::NOT_FOUND);
+        };
+        let Some(handler) = route.methods.find(req.method()) else {
+            return ready(route.methods.not_allowed());
+        };
+        req.set_params(params);
+        handler(req, &())
+    }
+
+    fn best_match(&self, segments: &[String]) -> Option<(&Route<()>, Params)> {
+        self.routes
+            .iter()
+            .filter_map(|route| capture(&route.pattern, segments).map(|params| (route, params)))
+            .max_by_key(|(route, _)| specificity(&route.pattern))
+    }
+}
+
+fn ready(response: impl IntoResponse) -> BoxFuture<'static, Response> {
+    let response = response.into_response();
+    Box::pin(async move { response })
+}
+
+fn parse(path: &str) -> Vec<Segment> {
+    assert!(path.starts_with('/'), "route {path:?} must start with '/'");
+    let pattern: Vec<Segment> = path[1..]
+        .split('/')
+        .map(
+            |segment| match segment.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+                Some(name) => {
+                    assert!(
+                        !name.is_empty() && !name.contains(['{', '}', '*']),
+                        "route {path:?}: unsupported parameter {segment:?}"
+                    );
+                    Segment::Param(name.to_string())
+                }
+                None => {
+                    assert!(
+                        !segment.contains(['{', '}']) && !segment.starts_with(':'),
+                        "route {path:?}: unsupported segment {segment:?} (parameters are {{name}})"
+                    );
+                    Segment::Static(segment.to_string())
+                }
+            },
+        )
+        .collect();
+    let mut names: Vec<&str> = pattern
+        .iter()
+        .filter_map(|s| match s {
+            Segment::Param(name) => Some(name.as_str()),
+            Segment::Static(_) => None,
+        })
+        .collect();
+    let count = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert!(
+        names.len() == count,
+        "route {path:?} repeats a parameter name"
+    );
+    pattern
+}
+
+fn same_shape(a: &[Segment], b: &[Segment]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|pair| match pair {
+            (Segment::Static(x), Segment::Static(y)) => x == y,
+            (Segment::Param(_), Segment::Param(_)) => true,
+            _ => false,
+        })
+}
+
+/// The request path's segments, percent-decoded; `None` when one is not
+/// UTF-8.
+fn decode_segments(path: &str) -> Option<Vec<String>> {
+    path.strip_prefix('/')
+        .unwrap_or(path)
+        .split('/')
+        .map(rusty_percent::decode_utf8)
+        .collect()
+}
+
+fn capture(pattern: &[Segment], segments: &[String]) -> Option<Params> {
+    if pattern.len() != segments.len() {
+        return None;
+    }
+    let mut params = Vec::new();
+    for (expected, actual) in pattern.iter().zip(segments) {
+        match expected {
+            Segment::Static(s) if s == actual => {}
+            Segment::Static(_) => return None,
+            Segment::Param(name) => params.push((name.clone(), actual.clone())),
+        }
+    }
+    Some(params)
+}
+
+/// Static segments outrank parameters, earliest segment first.
+fn specificity(pattern: &[Segment]) -> Vec<bool> {
+    pattern
+        .iter()
+        .map(|s| matches!(s, Segment::Static(_)))
+        .collect()
+}
+
+/// Handlers for one path, by method. Built with [`get`], [`post`] and the
+/// others, chained: `get(list).post(create)`.
+pub struct MethodRouter<S = ()> {
+    handlers: Vec<(Method, BoxHandler<S>)>,
+}
+
+impl<S: Send + Sync + 'static> MethodRouter<S> {
+    fn on<H, T>(mut self, method: Method, handler: H) -> Self
+    where
+        H: Handler<T, S>,
+        T: 'static,
+    {
+        assert!(
+            self.handlers.iter().all(|(m, _)| *m != method),
+            "{} has two handlers",
+            method.as_str()
+        );
+        self.handlers.push((method, erase(handler)));
+        self
+    }
+
+    fn merge(&mut self, other: MethodRouter<S>, path: &str) {
+        for (method, handler) in other.handlers {
+            assert!(
+                self.handlers.iter().all(|(m, _)| *m != method),
+                "route {path:?}: {} has two handlers",
+                method.as_str()
+            );
+            self.handlers.push((method, handler));
+        }
+    }
+
+    fn with_state<S2>(self, state: S) -> MethodRouter<S2>
+    where
+        S: Clone,
+    {
+        let handlers = self
+            .handlers
+            .into_iter()
+            .map(|(method, handler)| {
+                let state = state.clone();
+                let bound: BoxHandler<S2> = Arc::new(move |req, _: &S2| handler(req, &state));
+                (method, bound)
+            })
+            .collect();
+        MethodRouter { handlers }
+    }
+}
+
+impl MethodRouter<()> {
+    fn find(&self, method: &Method) -> Option<&BoxHandler<()>> {
+        let exact = self.handlers.iter().find(|(m, _)| m == method);
+        let head_as_get = || {
+            (*method == Method::Head)
+                .then(|| self.handlers.iter().find(|(m, _)| *m == Method::Get))
+                .flatten()
+        };
+        exact.or_else(head_as_get).map(|(_, handler)| handler)
+    }
+
+    fn not_allowed(&self) -> Response {
+        let mut allow: Vec<&str> = self.handlers.iter().map(|(m, _)| m.as_str()).collect();
+        if allow.contains(&"GET") && !allow.contains(&"HEAD") {
+            allow.push("HEAD");
+        }
+        Response::new(StatusCode::METHOD_NOT_ALLOWED, crate::Body::empty())
+            .with_header("allow", &allow.join(", "))
+    }
+}
+
+macro_rules! method_fns {
+    ($($name:ident => $method:ident),*) => {
+        $(
+            #[doc = concat!("Routes `", stringify!($method), "` to `handler`.")]
+            pub fn $name<H, T, S>(handler: H) -> MethodRouter<S>
+            where
+                H: Handler<T, S>,
+                T: 'static,
+                S: Send + Sync + 'static,
+            {
+                MethodRouter { handlers: Vec::new() }.on(Method::$method, handler)
+            }
+        )*
+        impl<S: Send + Sync + 'static> MethodRouter<S> {
+            $(
+                #[doc = concat!("Also routes `", stringify!($method), "` to `handler`.")]
+                pub fn $name<H, T>(self, handler: H) -> Self
+                where
+                    H: Handler<T, S>,
+                    T: 'static,
+                {
+                    self.on(Method::$method, handler)
+                }
+            )*
+        }
+    };
+}
+
+method_fns!(get => Get, post => Post, put => Put, patch => Patch, delete => Delete);
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn static_beats_parameter() {
+        let a = parse("/tasks/{id}");
+        let b = parse("/tasks/new");
+        let segs = vec!["tasks".to_string(), "new".to_string()];
+        assert!(capture(&a, &segs).is_some() && capture(&b, &segs).is_some());
+        assert!(specificity(&b) > specificity(&a));
+    }
+
+    #[test]
+    fn root_is_one_empty_segment() {
+        assert_eq!(parse("/"), vec![Segment::Static(String::new())]);
+        assert_eq!(decode_segments("/"), Some(vec![String::new()]));
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported segment")]
+    fn colon_syntax_is_refused() {
+        parse("/tasks/:id");
+    }
+
+    #[test]
+    #[should_panic(expected = "repeats a parameter")]
+    fn repeated_parameter_is_refused() {
+        parse("/{a}/{a}");
+    }
+
+    #[test]
+    #[should_panic(expected = "overlaps")]
+    fn same_shape_other_names_is_refused() {
+        let _ = Router::<()>::new()
+            .route("/t/{a}", get(|| async {}))
+            .route("/t/{b}", post(|| async {}));
+    }
+
+    #[test]
+    #[should_panic(expected = "two handlers")]
+    fn second_handler_for_a_method_is_refused() {
+        let _ = Router::<()>::new()
+            .route("/t", get(|| async {}))
+            .route("/t", get(|| async {}));
+    }
+}
