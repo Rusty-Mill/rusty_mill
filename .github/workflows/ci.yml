@@ -1344,8 +1344,8 @@ jobs:
   # the engine makes no `ring` call. It is client-only coverage, not a second
   # copy of the job above: the native backend has no server role or signing,
   # so the suites that need them are `ring`-only (their inner `cfg` says so)
-  # and stay covered there. BoGo is not run here yet: its shim drives the
-  # engine's server and does not build on this backend.
+  # and stay covered there. BoGo runs here client-side only: on this backend
+  # the shim reports server and client-certificate scenarios as unimplemented.
   rusty-tls-engine-native:
     concurrency:
       group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-tls-engine-native
@@ -1445,6 +1445,23 @@ jobs:
           echo "doctests: $d"
           if [ "$d" -lt 2 ]; then
             echo "::error::the handrolled doctests did not run -- is RUSTDOCFLAGS set?"
+            exit 1
+          fi
+      # BoGo against the client role on the first-party backend (ADR-0005
+      # decision 4). The engine has no server or signing here, so the shim
+      # reports those scenarios as unimplemented (exit 89). The floor is set
+      # from the first full run (445 passed at the pinned commit). A shim that
+      # skipped everything would also exit 0, which is what the floor catches.
+      # The ring job's BoGo run keeps covering the server role.
+      - name: BoGo, client role (BoringSSL protocol suite)
+        shell: bash
+        run: |
+          set -euo pipefail
+          go version
+          NATIVE=1 crates/libs/net/rusty_tls/bogo/run.sh | tee bogo-native.out
+          passed=$(sed -nE 's/^BoGo: ([0-9]+) passed.*/\1/p' bogo-native.out)
+          if [ "${passed:-0}" -lt 430 ]; then
+            echo "::error::native BoGo passed only ${passed:-0} tests (expected 430+) -- is the shim skipping everything?"
             exit 1
           fi
       - name: x509-limbo certificate differential

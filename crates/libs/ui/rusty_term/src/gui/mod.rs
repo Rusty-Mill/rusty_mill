@@ -17,6 +17,8 @@
 //! - [`window`] — the `winit` event loop + window tying it together.
 
 mod access;
+#[doc(hidden)]
+pub mod bench;
 mod boxdraw;
 pub mod control;
 mod cpu;

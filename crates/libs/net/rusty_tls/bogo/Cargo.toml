@@ -6,6 +6,11 @@
 # See README.md for how to run it.
 #
 #   RUSTFLAGS='--cfg rusty_tls_handrolled' cargo build --release
+#
+# On the native backend (ADR-0005), client role only:
+#
+#   RUSTFLAGS='--cfg rusty_tls_handrolled --cfg rusty_tls_native_crypto' \
+#     cargo build --release --no-default-features --features native
 
 [package]
 name = "rusty_tls-bogo"
@@ -15,7 +20,16 @@ edition = "2021"
 
 [dependencies.rusty_tls]
 path = ".."
-features = ["handrolled-engine"]
+
+[features]
+default = ["ring"]
+# The engine's `ring` backend: both roles.
+ring = ["rusty_tls/handrolled-engine"]
+# The first-party backend: client role only. Needs `--cfg rusty_tls_native_crypto`.
+native = ["rusty_tls/native-crypto"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(rusty_tls_native_crypto)'] }
 
 [[bin]]
 name = "bogo_shim"
