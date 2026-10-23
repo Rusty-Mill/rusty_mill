@@ -12219,6 +12219,7 @@ dependencies = [
  "rusty_rand",
  "rusty_sandbox",
  "rusty_serde",
+ "rusty_worktree",
 ]
 
 [[package]]
@@ -12672,6 +12673,7 @@ dependencies = [
  "rusty_mill_board",
  "rusty_sandbox",
  "rusty_serve",
+ "rusty_worktree",
  "serde",
  "serde_json",
  "uuid",
@@ -13150,6 +13152,10 @@ version = "0.1.0"
 
 [[package]]
 name = "rusty_wiremock"
+version = "0.1.0"
+
+[[package]]
+name = "rusty_worktree"
 version = "0.1.0"
 
 [[package]]

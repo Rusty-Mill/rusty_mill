@@ -10,13 +10,18 @@
 //! occurrences merge, a repeated field's occurrences append, a oneof's last member wins. Unknown
 //! fields are skipped. [`field`] has the helpers sub-messages and maps need.
 //!
+//! A schema can also be declared as a table with [`message!`], [`oneof!`] and [`open_enum!`]
+//! (see [`declare`]) instead of writing `encode` and `merge_field` by hand.
+//!
 //! The well-known types live in [`wkt`] and `google.rpc.Status`/`ErrorInfo` in [`rpc`].
 
 mod message;
 
+pub mod declare;
 pub mod field;
 pub mod rpc;
 pub mod wkt;
 
+pub use declare::{Oneof, UnknownEnumValue};
 pub use message::{Message, Name, Result};
 pub use rusty_protobuf::{Error, Field, Reader, Writer, DEFAULT_DEPTH_LIMIT};

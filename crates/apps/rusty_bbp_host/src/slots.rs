@@ -10,10 +10,13 @@
 //! reservation table exists, so none can be left behind by a crash, and a
 //! restarted moderator reclaims a slot exactly when its holder is gone.
 //!
-//! A harness is a launcher's program, free to replace its stdin. So the
-//! moderator also hands the lock to a `bbp slot-hold` process of its own
-//! ([`Slot::hold_for`]), which keeps it until the harness's process group
-//! has no member left, whether or not the moderator lives that long.
+//! A harness is a launcher's program, free to replace its stdin. So before
+//! it launches a harness, the moderator hands the lock to a `bbp slot-hold`
+//! process ([`Slot::holder`]) that leads a new process group, and starts the
+//! harness in that group. The holder keeps the lock until the moderator
+//! closes its stdin (or dies) and no other member of the group is left, so
+//! no moment exists at which a running harness's slot depends on the
+//! moderator alone.
 //!
 //! The capacity is recorded once, in `<dir>/capacity`, by the first
 //! moderator to open the directory. A moderator configured with a different
@@ -21,6 +24,7 @@
 //! and together exceed either.
 
 use std::fs::{File, OpenOptions, TryLockError};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -152,19 +156,22 @@ impl Slot {
             .map_err(|e| format!("slot: {e}"))
     }
 
-    /// Hold this slot in a `bbp slot-hold` process, in a process group of
-    /// its own, for as long as process group `group` has a member: however
-    /// that group's processes treat their stdio, and whether or not the
-    /// caller outlives them.
+    /// Hold this slot in a `bbp slot-hold` process that leads a new process
+    /// group, whose id is the holder's pid. Start the slot's user in that
+    /// group, then drop the holder's stdin. The holder keeps the slot until
+    /// its stdin is closed and it is the group's last member: however the
+    /// group's processes treat their stdio, and whether or not the caller
+    /// outlives them. Should the caller die before starting anyone, the
+    /// slot is freed.
     ///
     /// # Errors
     /// When the holder cannot be started.
-    pub fn hold_for(&self, bbp: &Path, group: u32) -> Result<Child, String> {
+    pub fn holder(&self, bbp: &Path) -> Result<Child, String> {
         let mut command = Command::new(bbp);
         command
-            .args(["slot-hold", "--group", &group.to_string()])
-            .stdin(self.stdio()?)
-            .stdout(Stdio::null())
+            .arg("slot-hold")
+            .stdin(Stdio::piped())
+            .stdout(self.stdio()?)
             .stderr(Stdio::inherit());
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -177,24 +184,54 @@ impl Slot {
     }
 }
 
-/// `bbp slot-hold`: return once process group `group` has no member left.
-/// The slot lock, the caller's stdin, stays open until then.
-pub fn hold_while_alive(group: i32) {
-    while group_alive(group) {
+/// `bbp slot-hold`: return once stdin is closed and this process is the
+/// last member of the process group it leads. The slot lock, its stdout,
+/// stays open until then. The group's id is this process's pid, which is
+/// not reused while the process or its group lives.
+pub fn hold_while_alive() {
+    // Nothing is written; end of file means the caller is done starting the
+    // group's members, or is gone.
+    let _ = std::io::stdin().lock().read_to_end(&mut Vec::new());
+    // Two empty looks in a row: a scan can miss a member that forked as its
+    // parent exited.
+    let mut empty = 0;
+    while empty < 2 {
+        empty = if others_in_group() { 0 } else { empty + 1 };
         std::thread::sleep(Duration::from_millis(100));
     }
 }
 
-/// A group whose id was freed and reused within one poll keeps the slot
-/// longer than needed: late admission, never oversubscription.
+/// Whether a process other than this one is in the group this one leads.
+/// A `/proc` that cannot be listed counts as yes: late admission, never
+/// oversubscription.
 #[cfg(target_os = "linux")]
-fn group_alive(group: i32) -> bool {
-    group > 0 && rusty_libc::process::killpg(group, 0) != Err(rusty_libc::Errno::ESRCH)
+fn others_in_group() -> bool {
+    let me = std::process::id();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    entries.flatten().any(|entry| {
+        let pid = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok());
+        pid.is_some_and(|pid| pid != me)
+            && std::fs::read_to_string(entry.path().join("stat"))
+                .is_ok_and(|stat| stat_pgrp(&stat) == Some(me))
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
-fn group_alive(_: i32) -> bool {
+fn others_in_group() -> bool {
     false
+}
+
+/// The process group in a `/proc/PID/stat` line: the third field after the
+/// parenthesised command name, which may itself hold spaces or parentheses.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn stat_pgrp(stat: &str) -> Option<u32> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().nth(2)?.parse().ok()
 }
 
 /// Write `bytes` to `path` unless it already exists, without ever exposing a
@@ -224,6 +261,21 @@ mod tests {
         dir
     }
 
+    /// The next free slot of `class`, awaited briefly: another test's fork
+    /// may hold a copy of a just-released lock until it execs.
+    fn reacquire(slots: &Slots, class: Class) -> Result<Slot, String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(slot) = slots.try_acquire(class)? {
+                return Ok(slot);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("slot never freed".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     const TWO_AND_ONE: Capacity = Capacity {
         agents: 2,
         validators: 1,
@@ -239,12 +291,9 @@ mod tests {
         let v = slots.try_acquire(Class::Validator)?.ok_or("validator")?;
         assert!(slots.try_acquire(Class::Validator)?.is_none());
         drop(a);
-        assert_eq!(
-            slots.try_acquire(Class::Agent)?.map(|s| s.name()),
-            Some("agent-0".into())
-        );
+        assert_eq!(reacquire(&slots, Class::Agent)?.name(), "agent-0");
         drop(v);
-        assert!(slots.try_acquire(Class::Validator)?.is_some());
+        reacquire(&slots, Class::Validator)?;
         Ok(())
     }
 
@@ -274,6 +323,14 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn the_group_is_read_past_any_command_name() {
+        assert_eq!(stat_pgrp("42 (sh) S 1 77 77 0 -1"), Some(77));
+        assert_eq!(stat_pgrp("42 (a) b) (c) R 1 9 9 0"), Some(9));
+        assert_eq!(stat_pgrp("42 (sh"), None);
+        assert_eq!(stat_pgrp("42 (sh) S 1"), None);
+    }
+
     // Inheriting a lock with a duplicated descriptor is Unix semantics; the
     // crash guarantees are proven on Linux.
     #[test]
@@ -298,13 +355,7 @@ mod tests {
         assert!(slots.try_acquire(Class::Agent)?.is_none());
         child.kill().map_err(|e| e.to_string())?;
         child.wait().map_err(|e| e.to_string())?;
-        // Another test's fork may hold a copy of the descriptor until it
-        // execs, so the release is awaited, briefly.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while slots.try_acquire(Class::Agent)?.is_none() {
-            assert!(std::time::Instant::now() < deadline, "slot never freed");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        reacquire(&slots, Class::Agent)?;
         Ok(())
     }
 }

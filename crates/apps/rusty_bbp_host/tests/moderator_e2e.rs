@@ -109,6 +109,14 @@ fn card(dir: &Path, task: &TaskId) -> Card {
 
 /// Drive one task from open to closed; the run directory is left for the caller.
 fn happy_run(tag: &str) -> (PathBuf, TaskId, moderator::Outcome, Vec<State>) {
+    happy_run_polling(tag, Duration::from_millis(50))
+}
+
+/// [`happy_run`] with the moderator's longest wait between passes set to `poll`.
+fn happy_run_polling(
+    tag: &str,
+    poll: Duration,
+) -> (PathBuf, TaskId, moderator::Outcome, Vec<State>) {
     let dir = tempdir(tag);
     let (repo, base) = repo(&dir);
     let task = TaskId("T1".into());
@@ -177,7 +185,7 @@ fn happy_run(tag: &str) -> (PathBuf, TaskId, moderator::Outcome, Vec<State>) {
         work: dir.join("work"),
         launchers,
         confinement: Confinement::Unconfined,
-        poll: Duration::from_millis(50),
+        poll,
         max_wall: Duration::from_secs(90),
         end_grace: Duration::ZERO,
         cost_cap: None,
@@ -291,6 +299,25 @@ fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
         count(moderator::mcp_config_path(&dir, &task, TurnId(1))),
         4,
         "one MCP config per launched turn"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The poll is only the longest wait: log appends (agents' calls, the human's
+/// gate commands) and harness and runner exits wake the moderator. With a
+/// one-minute poll the whole task, eight states, still closes in seconds.
+/// Linux only: elsewhere the waker sleeps out the poll, which the other tests
+/// here cover at a short poll.
+#[test]
+#[cfg(target_os = "linux")]
+fn events_drive_the_moderator_and_the_poll_is_only_a_fallback() {
+    let started = Instant::now();
+    let (dir, _, out, _) = happy_run_polling("events", Duration::from_secs(60));
+    assert_eq!(out.state, State::Closed);
+    assert!(
+        started.elapsed() < Duration::from_secs(45),
+        "took {:?}: the loop waited on its poll instead of events",
+        started.elapsed()
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2215,12 +2242,13 @@ fn a_run_that_closes_over_the_cap_is_a_cap_stop_not_a_wall_stop() {
     assert!(out.state.terminal(), "the run did reach its end");
 }
 
-#[test]
+/// A task whose turns expire after 1 s, with a planner harness that stays
+/// alive and silent: nothing but its deadline ends a turn.
 #[cfg(target_os = "linux")]
-fn no_progress_deadlines_pause_live_harnesses_and_survive_restart() {
-    let dir = tempdir("deadline-guard");
+fn quiet_planner_task(tag: &str, poll: Duration) -> (PathBuf, TaskId, Config) {
+    let dir = tempdir(tag);
     let (repo, _) = repo(&dir);
-    let task = TaskId("deadline-guard".into());
+    let task = TaskId(tag.into());
     // Open through the real driver with short immutable turn deadlines. No
     // synthetic TurnEnded events or edited log: moderator ticks expire them.
     let master = rusty_bbp_host::master::ensure(&dir).unwrap();
@@ -2281,7 +2309,14 @@ fn no_progress_deadlines_pause_live_harnesses_and_survive_restart() {
         Launchers::default().with("planner", launcher),
         10,
     );
-    cfg.poll = Duration::from_millis(10);
+    cfg.poll = poll;
+    (dir, task, cfg)
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn no_progress_deadlines_pause_live_harnesses_and_survive_restart() {
+    let (dir, task, cfg) = quiet_planner_task("deadline-guard", Duration::from_millis(10));
     assert!(moderator::run(&cfg)
         .unwrap_err()
         .contains("moderator paused"));
@@ -2315,5 +2350,73 @@ fn no_progress_deadlines_pause_live_harnesses_and_survive_restart() {
         .unwrap_err()
         .contains("moderator paused"));
     assert_eq!(open_driver(&dir, &task).unwrap().state.rev, rev);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A silent harness writes nothing and does not exit, so no event wakes the
+/// loop: its 1 s turn deadlines must still fire on time under a one-minute poll.
+#[test]
+#[cfg(target_os = "linux")]
+fn quiet_turn_deadlines_fire_on_time_under_a_long_poll() {
+    let (dir, task, cfg) = quiet_planner_task("deadline-quiet", Duration::from_secs(60));
+    let started = Instant::now();
+    assert!(moderator::run(&cfg)
+        .unwrap_err()
+        .contains("moderator paused"));
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "took {:?}: deadlines waited on the poll",
+        started.elapsed()
+    );
+    let events = open_driver(&dir, &task)
+        .unwrap()
+        .store
+        .events(&task, 0)
+        .unwrap();
+    let deadlines = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                Event::TurnEnded {
+                    cause: TurnEnd::Deadline,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(deadlines, 3);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The same silence under a 2 s wall limit: the wall stop comes on time too.
+#[test]
+fn a_quiet_run_stops_at_its_wall_limit_under_a_long_poll() {
+    let dir = tempdir("wall-quiet");
+    let (repo, _) = repo(&dir);
+    let task = TaskId("T1".into());
+    open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
+    let launcher = Launcher {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), "exec sleep 30".into()],
+        builtin_tools: false,
+        sandbox: None,
+    };
+    let mut cfg = config(
+        &dir,
+        &task,
+        repo,
+        Launchers::default().with("planner", launcher),
+        2,
+    );
+    cfg.poll = Duration::from_secs(60);
+    let started = Instant::now();
+    let out = moderator::run_to_stop(&cfg).expect("an outcome");
+    assert_eq!(out.stop.expect("stopped").kind, moderator::StopKind::Wall);
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "took {:?}: the wall limit waited on the poll",
+        started.elapsed()
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }

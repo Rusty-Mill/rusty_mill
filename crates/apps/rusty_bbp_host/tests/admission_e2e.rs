@@ -390,3 +390,52 @@ fn crash(tag: &str, prelude: &str) {
     second.wait().expect("reap");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A slot holder is up before its harness: a caller that dies before
+/// starting anyone frees the slot, and one that dies just after starting a
+/// harness that drops its stdin leaves the slot held until the harness is
+/// gone. Closing the holder's stdin is what the caller's death does.
+#[test]
+fn a_slot_holder_covers_its_harness_from_the_start() {
+    use rusty_bbp_host::slots::{Capacity, Class, Slots};
+    use std::os::unix::process::CommandExt;
+    let root = tempdir("holder");
+    let one = Capacity {
+        agents: 1,
+        validators: 1,
+    };
+    let slots = Slots::open(&root.join("slots"), one).expect("slots");
+    let bbp = Path::new(env!("CARGO_BIN_EXE_bbp"));
+    let free = || slots.try_acquire(Class::Agent).expect("acquire").is_some();
+
+    let slot = slots
+        .try_acquire(Class::Agent)
+        .expect("acquire")
+        .expect("free");
+    let mut hold = slot.holder(bbp).expect("holder");
+    drop(slot);
+    drop(hold.stdin.take());
+    hold.wait().expect("holder exits");
+    wait_until("the unused slot", Duration::from_secs(5), free);
+
+    let slot = slots
+        .try_acquire(Class::Agent)
+        .expect("acquire")
+        .expect("free");
+    let mut hold = slot.holder(bbp).expect("holder");
+    let mut harness = Proc::new("sh")
+        .args(["-c", "exec </dev/null; exec sleep 30"])
+        .stdin(slot.stdio().expect("stdio"))
+        .process_group(i32::try_from(hold.id()).expect("pid"))
+        .spawn()
+        .expect("harness");
+    drop(slot);
+    drop(hold.stdin.take());
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(!free(), "the harness ran without its slot");
+    harness.kill().expect("kill");
+    harness.wait().expect("reap");
+    hold.wait().expect("holder exits");
+    wait_until("the released slot", Duration::from_secs(5), free);
+    let _ = std::fs::remove_dir_all(&root);
+}

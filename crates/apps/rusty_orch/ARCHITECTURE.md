@@ -101,7 +101,8 @@ hosted task has one of. With `slots` in the BBP configuration, each moderator
 takes an agent slot before launching a harness and a validator slot before
 starting a runner, from a slot directory shared across goals. Slots are kernel
 file locks handed to the child as a stdio descriptor, and, for a harness, to
-a `bbp slot-hold` process that watches its process group. So a slot is held
+a `bbp slot-hold` process, started first, that leads the harness's process
+group and watches it. So a slot is held
 until the child's whole process tree is gone, whatever the harness does with
 its stdin, and is never released early by a
 moderator crash; no reservation record exists to recover. They are not kept in
@@ -112,4 +113,6 @@ A pool member with a `sandbox` runs confined: BBP launches its harness under
 `rusty_sandbox` with a fresh turn workspace and only the declared paths and
 variables, never the BBP directory, so it cannot read the master secret or
 act as the human. Its MCP calls reach the turn's server through a relay over
-named pipes to a broker outside the sandbox.
+named pipes to a broker outside the sandbox. With `checkout`, its workspace is a
+`rusty_worktree` worktree of the repository: tasks share one object store,
+read-only, and each harness writes only its own worktree.

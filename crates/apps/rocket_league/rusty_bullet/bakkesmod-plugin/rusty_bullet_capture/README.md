@@ -113,7 +113,10 @@ game starts, add `plugin load rusty_bullet_capture` to
 
 ## If Rocket League crashes
 
-1. **Rebuild after every Rocket League or BakkesMod update.** A DLL built
+1. **Rebuild after every Rocket League or BakkesMod update.**
+   `tools/rb_tape_bot/preflight.ps1` does this for you (`run_batch.ps1` runs it
+   first): it rebuilds and reinstalls when BakkesMod's version, its
+   `pluginsdk.lib` or this source changed, and `-Check` only reports. By hand: a DLL built
    against an older BakkesMod SDK can crash once the game updates, even
    with unchanged source. Delete `build/` and rerun both `cmake` commands
    against the current `%appdata%\bakkesmod\bakkesmod\bakkesmodsdk`, then

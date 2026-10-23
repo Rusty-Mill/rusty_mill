@@ -162,6 +162,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_vulkan | rusty_vulkan | A #![no_std] + alloc sovereign raw Vulkan / Metal hardware command buffer and GPU surface layer | 1 |
 | libs | rusty_whisper | rusty-whisper | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) | 1 |
 | libs | rusty_wiremock | rusty_wiremock | A blocking std::net HTTP mock server that answers canned responses, for Rusty Mill test suites | 4 |
+| libs | rusty_worktree | rusty_worktree | Git worktrees that share one repository's object store, driven through the git CLI with hooks off and the git directory always named explicitly | 2 |
 | apps | coreutils | coreutils | Modular pure-Rust implementation of core GNU/POSIX utilities | 0 |
 | apps | coreutils-async | coreutils-async | Reference consumer for platform-async: arun, an async port of rustils' rrun. | 0 |
 | apps | mill-term | mill-term | Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement) | 0 |

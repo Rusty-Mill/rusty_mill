@@ -1715,10 +1715,8 @@ fn fire_deadlines(w: &mut Work, now: Time) {
     for id in expired {
         end_turn(w, id, TurnEnd::Deadline, now);
     }
-    if let Some(d) = w.st.pending_request.as_ref().and_then(|p| p.deadline) {
-        if d <= now && !w.st.state.terminal() && w.st.state != State::Escalated {
-            escalate(w, EscalateReason::RequestDeadline, now);
-        }
+    if w.st.request_deadline().is_some_and(|d| d <= now) {
+        escalate(w, EscalateReason::RequestDeadline, now);
     }
 }
 
@@ -1750,6 +1748,40 @@ mod tests {
         st.roster = roster();
         st.state = state;
         st
+    }
+
+    fn grant(st: &mut TaskState, role: &str, turn: u64, deadline: u64) {
+        st.apply(&Event::TurnGranted {
+            role: RoleId::from(role),
+            turn: TurnId(turn),
+            kind: TurnKind::Default,
+            deadline: Time(deadline),
+            return_to: None,
+            slice: None,
+        });
+    }
+
+    /// The deadline a waiting driver must wake for is the one `fire_deadlines`
+    /// would act on, and nothing else: waking for a request that can no longer
+    /// escalate would spin.
+    #[test]
+    fn next_deadline_is_the_earliest_deadline_a_tick_would_fire() {
+        let mut st = at(State::Build);
+        assert_eq!(st.next_deadline(), None);
+        grant(&mut st, "coder", 1, 900);
+        grant(&mut st, "tester", 2, 700);
+        assert_eq!(st.next_deadline(), Some(Time(700)));
+        st.pending_request = Some(PendingRequest {
+            msg: MsgId(1),
+            requester: RoleId::from("planner"),
+            gate: false,
+            deadline: Some(Time(500)),
+        });
+        assert_eq!(st.next_deadline(), Some(Time(500)));
+        st.state = State::Escalated;
+        assert_eq!(st.next_deadline(), Some(Time(700)));
+        st.turns.clear();
+        assert_eq!(st.next_deadline(), None);
     }
 
     #[test]
