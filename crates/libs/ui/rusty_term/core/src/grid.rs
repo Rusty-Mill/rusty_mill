@@ -1276,10 +1276,17 @@ impl StatusLine {
 impl Grid {
     /// Create a `cols`×`rows` grid filled with blank cells.
     pub fn new(cols: usize, rows: usize) -> Self {
+        Self::with_screen(cols, rows, blank_screen(cols, rows, Cell::blank()))
+    }
+
+    /// A `cols`×`rows` grid in its initial state around an already-built
+    /// `screen` (`rows` lines of `cols` cells), so a decoder can build the
+    /// rows first and allocate no blank screen to throw away.
+    pub(crate) fn with_screen(cols: usize, rows: usize, screen: Vec<Line>) -> Self {
         Self {
             cols,
             rows,
-            screen: blank_screen(cols, rows, Cell::blank()),
+            screen,
             dirty: vec![false; rows],
             cursor: (0, 0),
             saved_cursor: (0, 0),

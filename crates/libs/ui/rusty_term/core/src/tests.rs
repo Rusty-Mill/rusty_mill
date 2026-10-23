@@ -6718,3 +6718,51 @@ fn snapshot_decode_caps_total_cells() {
         Some(SnapshotError::Invalid("too many cells"))
     );
 }
+
+#[test]
+fn snapshot_decode_rejects_an_overflowing_varint_inside_a_valid_snapshot() {
+    // The column count (byte 5, value 2) replaced by a ten-byte varint that
+    // used to wrap to 2: the rest of the snapshot stays valid.
+    let good = Grid::new(2, 1).encode_snapshot();
+    assert!(Grid::decode_snapshot(&good).is_ok());
+    assert_eq!(good[5], 2);
+    let mut bad = good[..5].to_vec();
+    bad.extend([0x82, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02]);
+    bad.extend(&good[6..]);
+    assert_eq!(
+        Grid::decode_snapshot(&bad).err(),
+        Some(SnapshotError::Invalid("varint overflow"))
+    );
+}
+
+/// A snapshot header for a `cols`x1 grid with default state, an empty title
+/// and tables, and `history` declared lines; the caller appends the lines.
+fn snapshot_header(cols: u8, history: &[u8]) -> Vec<u8> {
+    let mut w = b"RTSN\x01".to_vec();
+    w.extend([cols, 1]); // cols, rows
+    w.extend([0, 0, 0, 0, 0, 0]); // cursor, saved cursor, scroll region
+    w.extend([0, 0, 0, 0, 0]); // flags, shape, title, clusters, links
+    w.extend(history);
+    w
+}
+
+#[test]
+fn snapshot_decode_charges_empty_history_lines() {
+    // 2^20 + 1 declared lines are refused before any is read.
+    let w = snapshot_header(4, &[0x81, 0x80, 0x40]);
+    assert_eq!(
+        Grid::decode_snapshot(&w).err(),
+        Some(SnapshotError::Invalid("too many lines"))
+    );
+    // 2^20 empty lines (`00 00` each: zero cells, no meta) fill the line
+    // budget, so the screen row that follows is over it.
+    let mut w = snapshot_header(4, &[0x80, 0x80, 0x40]);
+    for _ in 0..1 << 20 {
+        w.extend([0x00, 0x00]);
+    }
+    w.extend([0x04, 0x00, 0x0a, 0x00, 0, 0, 0, 0, 0, b' ', 0x00]);
+    assert_eq!(
+        Grid::decode_snapshot(&w).err(),
+        Some(SnapshotError::Invalid("too many lines"))
+    );
+}

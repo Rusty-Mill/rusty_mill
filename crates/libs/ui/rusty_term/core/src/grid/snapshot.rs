@@ -51,6 +51,9 @@ const MAX_DIM: usize = 4096;
 /// Most cells a snapshot may decode to (history and screens together), so a
 /// small hostile input cannot claim gigabytes through repeat runs.
 const MAX_CELLS: usize = 1 << 25;
+/// Most lines a snapshot may decode to (history and screens together). Each
+/// line costs a header even when empty, so lines have a budget of their own.
+const MAX_LINES: usize = 1 << 20;
 /// Identical cells in a row from which a repeat run beats a literal one.
 const MIN_REPEAT: usize = 4;
 
@@ -189,6 +192,7 @@ impl Grid {
             r: Reader::new(bytes),
             styles: Vec::new(),
             cells_left: MAX_CELLS,
+            lines_left: MAX_LINES,
             clusters: 0,
             links: 0,
         };
@@ -201,34 +205,30 @@ impl Grid {
         }
         let cols = d.dim()?;
         let rows = d.dim()?;
-        let mut g = Grid::new(cols, rows);
-        g.cursor = d.point(cols, rows)?;
-        g.saved_cursor = d.point(cols, rows)?;
+        // Everything is read and validated before the grid is built, so a
+        // truncated or hostile header allocates no screen.
+        let cursor = d.point(cols, rows)?;
+        let saved_cursor = d.point(cols, rows)?;
         let (top, bottom) = (d.usize()?, d.usize()?);
         if top > bottom || bottom >= rows {
             return Err(SnapshotError::Invalid("scroll region"));
         }
-        (g.scroll_top, g.scroll_bottom) = (top, bottom);
         let flags = d.r.read_u8()?;
-        g.cursor_visible = flags & FLAG_CURSOR_VISIBLE != 0;
-        g.cursor_blink = flags & FLAG_CURSOR_BLINK != 0;
-        g.autowrap = flags & FLAG_AUTOWRAP != 0;
-        g.cursor_shape = shape_from(d.r.read_u8()?)?;
-        g.title = d.string()?;
-        g.clusters = d.table()?;
-        g.links = d.table()?;
-        g.clusters_arc = Arc::from(g.clusters.clone());
-        g.links_arc = Arc::from(g.links.clone());
-        (d.clusters, d.links) = (g.clusters.len(), g.links.len());
+        let cursor_shape = shape_from(d.r.read_u8()?)?;
+        let title = d.string()?;
+        let clusters = d.table()?;
+        let links = d.table()?;
+        (d.clusters, d.links) = (clusters.len(), links.len());
         let history = d.usize()?;
+        if history > MAX_LINES {
+            return Err(SnapshotError::Invalid("too many lines"));
+        }
         let mut scrollback = VecDeque::new();
         for _ in 0..history {
             scrollback.push_back(d.line(cols, false)?);
         }
-        g.scrollback_max = g.scrollback_max.max(history);
-        g.scrollback = scrollback;
-        g.screen = d.screen(cols, rows)?;
-        g.primary = match d.r.read_u8()? {
+        let screen = d.screen(cols, rows)?;
+        let primary = match d.r.read_u8()? {
             0 => None,
             1 => {
                 let cursor = d.point(cols, rows)?;
@@ -247,6 +247,20 @@ impl Grid {
         if !d.r.is_empty() {
             return Err(SnapshotError::Invalid("trailing bytes"));
         }
+        let mut g = Grid::with_screen(cols, rows, screen);
+        (g.cursor, g.saved_cursor) = (cursor, saved_cursor);
+        (g.scroll_top, g.scroll_bottom) = (top, bottom);
+        g.cursor_visible = flags & FLAG_CURSOR_VISIBLE != 0;
+        g.cursor_blink = flags & FLAG_CURSOR_BLINK != 0;
+        g.autowrap = flags & FLAG_AUTOWRAP != 0;
+        g.cursor_shape = cursor_shape;
+        g.title = title;
+        g.clusters_arc = Arc::from(clusters.clone());
+        g.links_arc = Arc::from(links.clone());
+        (g.clusters, g.links) = (clusters, links);
+        g.scrollback_max = g.scrollback_max.max(history);
+        g.scrollback = scrollback;
+        g.primary = primary;
         g.dirty = vec![true; rows];
         Ok(g)
     }
@@ -362,6 +376,7 @@ struct Decoder<'a> {
     r: Reader<'a>,
     styles: Vec<Style>,
     cells_left: usize,
+    lines_left: usize,
     clusters: usize,
     links: usize,
 }
@@ -371,12 +386,17 @@ impl Decoder<'_> {
         let mut v = 0u64;
         for shift in (0..64).step_by(7) {
             let b = self.r.read_u8()?;
+            // The tenth byte holds bit 63 only: a larger payload, or a
+            // further byte, would overflow `u64`.
+            if shift == 63 && b > 1 {
+                return Err(SnapshotError::Invalid("varint overflow"));
+            }
             v |= u64::from(b & 0x7f) << shift;
             if b & 0x80 == 0 {
                 return Ok(v);
             }
         }
-        Err(SnapshotError::Invalid("varint too long"))
+        Err(SnapshotError::Invalid("varint overflow"))
     }
 
     fn usize(&mut self) -> Result<usize> {
@@ -436,6 +456,10 @@ impl Decoder<'_> {
             .cells_left
             .checked_sub(n)
             .ok_or(SnapshotError::Invalid("too many cells"))?;
+        self.lines_left = self
+            .lines_left
+            .checked_sub(1)
+            .ok_or(SnapshotError::Invalid("too many lines"))?;
         let meta = self.r.read_u8()?;
         if meta >> 3 != 0 {
             return Err(SnapshotError::Invalid("line meta"));
@@ -564,5 +588,44 @@ fn mode_from(code: u8) -> Result<AltMode> {
         1 => Ok(AltMode::Dec1047),
         2 => Ok(AltMode::Dec1049),
         _ => Err(SnapshotError::Invalid("alternate screen mode")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn varint(bytes: &[u8]) -> Result<u64> {
+        let mut d = Decoder {
+            r: Reader::new(bytes),
+            styles: Vec::new(),
+            cells_left: MAX_CELLS,
+            lines_left: MAX_LINES,
+            clusters: 0,
+            links: 0,
+        };
+        d.varint()
+    }
+
+    #[test]
+    fn varint_accepts_the_full_u64_range_and_rejects_overflow() {
+        let max = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+        assert_eq!(varint(&max), Ok(u64::MAX));
+        let top_bit = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01];
+        assert_eq!(varint(&top_bit), Ok(1 << 63));
+        assert_eq!(varint(&[0x00]), Ok(0));
+        assert_eq!(varint(&[0x7f]), Ok(127));
+        assert_eq!(varint(&[0x80, 0x01]), Ok(128));
+        // A tenth byte with payload 2 or 127, or one that continues, would
+        // overflow (81 80 .. 80 02 used to wrap to 1).
+        let overflow = Err(SnapshotError::Invalid("varint overflow"));
+        let nine = [0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80];
+        for tenth in [0x02, 0x7f, 0x81, 0x80] {
+            let mut v = nine.to_vec();
+            v.push(tenth);
+            v.push(0x00); // a continuing tenth byte must not reach this
+            assert_eq!(varint(&v), overflow, "tenth byte {tenth:#04x}");
+        }
+        assert_eq!(varint(&nine), Err(SnapshotError::Truncated));
     }
 }
