@@ -19,16 +19,17 @@ use rk_app::contract::TurnResult;
 use rk_app::Session;
 use rk_config::Config;
 use rk_constrain::{
-    ApprovalGate, ApprovalRequest, ApprovalResponse, ApprovalTrigger, PlanDecision,
+    approval_channel, ApprovalGate, ApprovalResponder, ApprovalResponse, ApprovalTrigger,
+    PlanDecision,
 };
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::error::{classify, BoundaryErrorPayload};
 
 /// The receiver end of the approval channel — drained by the bridge's setup task,
 /// which emits `rk://approval_request` and parks the responder for `approval_respond`.
-pub type ApprovalRx = mpsc::Receiver<ApprovalRequest>;
+pub use rk_constrain::ApprovalRx;
 
 /// A model-agnostic façade over [`Session`]. Every method returns frontend-ready
 /// JSON (or a [`BoundaryErrorPayload`]); nothing here names the concrete model.
@@ -274,7 +275,7 @@ pub struct AppState {
     pub workspace: PathBuf,
     /// The in-flight approval responder, parked by the setup task until
     /// `approval_respond` answers it. One approval pends at a time per turn.
-    pub pending_approval: Arc<Mutex<Option<oneshot::Sender<ApprovalResponse>>>>,
+    pub pending_approval: Arc<Mutex<Option<ApprovalResponder>>>,
     /// Session config overrides recorded by `config_set` (restart-only keys
     /// are flagged, not applied live, in v1).
     pub overrides: Mutex<serde_json::Map<String, Value>>,
@@ -282,7 +283,7 @@ pub struct AppState {
 
 impl AppState {
     /// Park an approval responder; called by the setup task per `rk://approval_request`.
-    pub fn park_approval(&self, responder: oneshot::Sender<ApprovalResponse>) {
+    pub fn park_approval(&self, responder: ApprovalResponder) {
         *self
             .pending_approval
             .lock()
@@ -320,7 +321,7 @@ pub fn build_production_state() -> anyhow::Result<(AppState, ApprovalRx)> {
         .api_key(api_key.clone())
         .build()?;
 
-    let (tx, rx) = mpsc::channel::<ApprovalRequest>(8);
+    let (tx, rx) = approval_channel(8);
     let gate = ApprovalGate::new(
         vec![ApprovalTrigger::NewFilePath, ApprovalTrigger::BashFirstUse],
         tx,

@@ -93,6 +93,18 @@ pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
 }
 
+impl<T> fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sender").finish_non_exhaustive()
+    }
+}
+
+impl<T> fmt::Debug for Receiver<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Receiver").finish_non_exhaustive()
+    }
+}
+
 pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "mpsc channel capacity must be positive");
     let shared = Arc::new(Shared {
@@ -601,7 +613,12 @@ impl<T> Drop for Receiver<T> {
         let mut guard = self.shared.inner.lock().unwrap();
         guard.receiver_alive = false;
         let waiters = std::mem::take(&mut guard.send_waiters);
+        // Undelivered values are dropped with the receiver, as tokio does, so
+        // anything they own (a one-shot responder, say) closes too. Dropped
+        // after unlocking: a value's own `Drop` may touch this channel.
+        let undelivered = std::mem::take(&mut guard.queue);
         drop(guard);
+        drop(undelivered);
         for waker in waiters {
             waker.wake();
         }
@@ -625,6 +642,18 @@ pub struct UnboundedSender<T> {
 
 pub struct UnboundedReceiver<T> {
     shared: Arc<UnboundedShared<T>>,
+}
+
+impl<T> fmt::Debug for UnboundedSender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnboundedSender").finish_non_exhaustive()
+    }
+}
+
+impl<T> fmt::Debug for UnboundedReceiver<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnboundedReceiver").finish_non_exhaustive()
+    }
 }
 
 pub fn unbounded_channel<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
@@ -758,7 +787,13 @@ impl<T> Drop for UnboundedReceiver<T> {
         // Drop -- an unbounded Sender never waits to send, so there's
         // never anyone parked on this channel besides (at most) the
         // receiver itself, which is what's dropping right now.
-        self.shared.inner.lock().unwrap().receiver_alive = false;
+        let mut guard = self.shared.inner.lock().unwrap();
+        guard.receiver_alive = false;
+        // As the bounded Receiver's Drop: undelivered values go with it,
+        // dropped after unlocking.
+        let undelivered = std::mem::take(&mut guard.queue);
+        drop(guard);
+        drop(undelivered);
     }
 }
 

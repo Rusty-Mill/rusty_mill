@@ -22,7 +22,8 @@ use aisdk::core::capabilities::{TextInputSupport, ToolCallSupport};
 use aisdk::core::language_model::LanguageModel;
 use rk_config::Config;
 use rk_constrain::{
-    AcpPolicy, ApprovalGate, ApprovalRequest, ApprovalResponse, ApprovalTrigger, PolicyChain,
+    approval_channel, AcpPolicy, ApprovalGate, ApprovalResponder, ApprovalResponse,
+    ApprovalTrigger, PolicyChain,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -70,10 +71,10 @@ where
     // Per-connection state.
     let mut session: Option<Arc<Session<M>>> = None;
     let mut client_caps = ClientCaps::default();
-    let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalRequest>(8);
+    let (approval_tx, mut approval_rx) = approval_channel(8);
     // Shims (fs/terminal) call back to the editor over this channel.
     let (client_tx, mut client_rx) = mpsc::channel::<ClientCall>(8);
-    let mut pending_perms: HashMap<u64, oneshot::Sender<ApprovalResponse>> = HashMap::new();
+    let mut pending_perms: HashMap<u64, ApprovalResponder> = HashMap::new();
     let mut pending_client: HashMap<u64, oneshot::Sender<Result<Value, String>>> = HashMap::new();
     // Server→client request ids (shared across permission + capability requests).
     let mut next_req_id: u64 = 1;
