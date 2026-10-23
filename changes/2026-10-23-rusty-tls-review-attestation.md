@@ -19,4 +19,4 @@ changelog: "Crypto plan: record the owner's 2026-10-23 attestation that the nati
   - **Labels:** the automated reviews stay labelled automated.
   - **Unrecorded:** the reviewed commits, the method and any findings.
   - **Not a certification:** this is not a timing or production-security certification.
-  - **D5 export gating:** whether `rusty_aead`'s AES types stay exported unconditionally is still open.
+- **Decided:** D5's export question. `rusty_aead`'s AES types stay exported unconditionally, because their only user is `rusty_tls`'s doubly gated native backend. A default-off feature would change the public API without protecting anything new. D5 is closed.
