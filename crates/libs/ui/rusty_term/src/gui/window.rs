@@ -3844,10 +3844,12 @@ impl WindowState<'_> {
         let mut g = Grid::new(cols, rows);
         let (fg, bg) = (self.theme.fg, self.theme.bg);
         let dim = mix(self.theme.fg, self.theme.bg, 110);
-        for cell in &mut g.cells {
-            *cell = Cell::blank();
-            cell.fg = fg;
-            cell.bg = bg;
+        for y in 0..rows {
+            for cell in g.row_mut(y) {
+                *cell = Cell::blank();
+                cell.fg = fg;
+                cell.bg = bg;
+            }
         }
         let bar = cols.min(56);
         let footer = rows.saturating_sub(2);

@@ -12,15 +12,19 @@ fn parse(input: &[u8], cols: usize, rows: usize) -> Grid {
     g
 }
 
+/// The live screen flattened row-major, so a test can index cell `y * cols + x`.
+fn cells(g: &Grid) -> Vec<Cell> {
+    (0..g.rows).flat_map(|y| g.row(y).to_vec()).collect()
+}
+
 fn row_text(g: &Grid, y: usize) -> String {
-    let base = y * g.cols;
-    g.cells[base..base + g.cols].iter().map(|c| c.ch).collect()
+    g.row(y).iter().map(|c| c.ch).collect()
 }
 
 /// The full glyph text at `(x, y)`: base scalar plus any interned grapheme
 /// continuation. Mirrors the renderer's reconstruction.
 fn glyph(g: &Grid, x: usize, y: usize) -> String {
-    let cell = g.cells[y * g.cols + x];
+    let cell = g.row(y)[x];
     let mut s = String::new();
     s.push(cell.ch);
     if cell.cluster != 0 {
@@ -41,8 +45,8 @@ fn spix(img: &SixelImage, x: usize, y: usize) -> Option<u32> {
 #[test]
 fn writes_plain_text() {
     let g = parse(b"hi", 80, 24);
-    assert_eq!(g.cells[0].ch, 'h');
-    assert_eq!(g.cells[1].ch, 'i');
+    assert_eq!(cells(&g)[0].ch, 'h');
+    assert_eq!(cells(&g)[1].ch, 'i');
     assert_eq!(g.cursor, (2, 0));
     assert!(g.dirty[0]);
 }
@@ -50,7 +54,7 @@ fn writes_plain_text() {
 #[test]
 fn newline_and_carriage_return() {
     let g = parse(b"ab\r\nc", 80, 24);
-    assert_eq!(g.cells[0].ch, 'a');
+    assert_eq!(cells(&g)[0].ch, 'a');
     assert_eq!(row_text(&g, 1).trim_end(), "c");
     assert_eq!(g.cursor, (1, 1));
 }
@@ -59,7 +63,7 @@ fn newline_and_carriage_return() {
 fn put_char_wraps_at_right_margin() {
     let g = parse(b"abc", 2, 24);
     assert_eq!(row_text(&g, 0), "ab");
-    assert_eq!(g.cells[2].ch, 'c'); // wrapped to row 1, col 0 -> index y*cols+x = 1*2+0
+    assert_eq!(cells(&g)[2].ch, 'c'); // wrapped to row 1, col 0 -> index y*cols+x = 1*2+0
     assert_eq!(g.cursor, (1, 1));
 }
 
@@ -67,7 +71,7 @@ fn put_char_wraps_at_right_margin() {
 fn tab_stops_at_eight_and_clamps_at_margin() {
     let g = parse(b"a\tb", 80, 24);
     assert_eq!(g.cursor.0, 9); // 'a' at 0, tab to 8, 'b' at 8 -> cursor 9
-    assert_eq!(g.cells[8].ch, 'b');
+    assert_eq!(cells(&g)[8].ch, 'b');
 
     // A tab on a narrow grid must not wrap/scroll.
     let g2 = parse(b"\t", 4, 4);
@@ -78,29 +82,29 @@ fn tab_stops_at_eight_and_clamps_at_margin() {
 #[test]
 fn sgr_sets_basic_colors() {
     let g = parse(b"\x1b[31mX", 80, 24);
-    assert_eq!(g.cells[0].fg, PALETTE_16[1]); // SGR 31 = dim red 0x800000
+    assert_eq!(cells(&g)[0].fg, PALETTE_16[1]); // SGR 31 = dim red 0x800000
 }
 
 #[test]
 fn sgr_reset_restores_defaults() {
     let g = parse(b"\x1b[31mA\x1b[0mB", 80, 24);
-    assert_eq!(g.cells[0].fg, PALETTE_16[1]);
-    assert_eq!(g.cells[1].fg, DEFAULT_FG);
+    assert_eq!(cells(&g)[0].fg, PALETTE_16[1]);
+    assert_eq!(cells(&g)[1].fg, DEFAULT_FG);
 }
 
 #[test]
 fn sgr_empty_param_is_reset() {
     let g = parse(b"\x1b[31mA\x1b[mB", 80, 24);
-    assert_eq!(g.cells[1].fg, DEFAULT_FG);
+    assert_eq!(cells(&g)[1].fg, DEFAULT_FG);
 }
 
 #[test]
 fn sgr_truecolor_and_256() {
     let g = parse(b"\x1b[38;2;10;20;30mX", 80, 24);
-    assert_eq!(g.cells[0].fg, 0x0A141E);
+    assert_eq!(cells(&g)[0].fg, 0x0A141E);
 
     let g2 = parse(b"\x1b[48;5;15mY", 80, 24);
-    assert_eq!(g2.cells[0].bg, 0xFFFFFF); // palette index 15
+    assert_eq!(cells(&g2)[0].bg, 0xFFFFFF); // palette index 15
 }
 
 #[test]
@@ -108,20 +112,20 @@ fn sgr_colon_subparameters() {
     // ISO 8613-6 colon forms (libvte et al.): both must set the color and not
     // leak the tail onto the screen as the old `;`-only parser did.
     let g = parse(b"\x1b[38:2:10:20:30mX", 80, 24);
-    assert_eq!(g.cells[0].fg, 0x0A141E);
-    assert_eq!(g.cells[1].ch, ' ', "no leaked tail");
+    assert_eq!(cells(&g)[0].fg, 0x0A141E);
+    assert_eq!(cells(&g)[1].ch, ' ', "no leaked tail");
 
     let g = parse(b"\x1b[48:5:15mY", 80, 24);
-    assert_eq!(g.cells[0].bg, 0xFFFFFF);
+    assert_eq!(cells(&g)[0].bg, 0xFFFFFF);
 
     // T.416 form with a colorspace field between `2` and the RGB triple.
     let g = parse(b"\x1b[38:2:0:10:20:30mZ", 80, 24);
-    assert_eq!(g.cells[0].fg, 0x0A141E);
+    assert_eq!(cells(&g)[0].fg, 0x0A141E);
 
     // A colon group mixed with ordinary parameters: bold + colon-fg.
     let g = parse(b"\x1b[1;38:5:1mW", 80, 24);
-    assert_eq!(g.cells[0].fg, PALETTE_16[1]);
-    assert_ne!(g.cells[0].flags & ATTR_BOLD, 0);
+    assert_eq!(cells(&g)[0].fg, PALETTE_16[1]);
+    assert_ne!(cells(&g)[0].flags & ATTR_BOLD, 0);
 }
 
 #[test]
@@ -135,7 +139,7 @@ fn csi_param_buffer_is_bounded() {
     let flood = vec![b'1'; 1_000_000];
     p.advance(&mut g, &flood);
     p.advance(&mut g, b"mX"); // SGR final byte then a printable
-    assert_eq!(g.cells[0].ch, 'X');
+    assert_eq!(cells(&g)[0].ch, 'X');
 }
 
 #[test]
@@ -147,7 +151,7 @@ fn cursor_position_is_clamped() {
 #[test]
 fn cursor_position_default_is_home() {
     let g = parse(b"X\x1b[HY", 80, 24);
-    assert_eq!(g.cells[0].ch, 'Y'); // overwrote 'X' at home
+    assert_eq!(cells(&g)[0].ch, 'Y'); // overwrote 'X' at home
     assert_eq!(g.cursor, (1, 0));
 }
 
@@ -174,7 +178,7 @@ fn erase_display_full() {
     let mut g = parse(b"hello", 80, 24);
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b[2J");
-    assert_eq!(g.cells[0].ch, ' ');
+    assert_eq!(cells(&g)[0].ch, ' ');
     assert_eq!(g.cursor, (0, 0));
 }
 
@@ -214,7 +218,7 @@ fn alt_screen_saves_and_restores_primary() {
 
     // Enter alt screen (DEC private 1049): cleared, cursor home.
     p.advance(&mut g, b"\x1b[?1049h");
-    assert_eq!(g.cells[0].ch, ' ');
+    assert_eq!(cells(&g)[0].ch, ' ');
     assert_eq!(g.cursor, (0, 0));
     p.advance(&mut g, b"ALT");
     assert_eq!(&row_text(&g, 0)[..3], "ALT");
@@ -266,7 +270,7 @@ fn resize_keeps_short_line_and_repaints() {
     // Growing back keeps the surviving content and blanks the new area.
     g.resize(80, 24);
     assert_eq!(&row_text(&g, 0)[..5], "hello");
-    assert_eq!(g.cells[79].ch, ' ');
+    assert_eq!(cells(&g)[79].ch, ' ');
 }
 
 #[test]
@@ -336,12 +340,12 @@ fn resize_does_not_split_a_wide_glyph() {
     let mut p = AnsiParser::new();
     p.advance(&mut g, "a世界你".as_bytes());
     g.resize(4, 3);
-    assert_eq!(g.cells[0].ch, 'a');
-    assert_eq!(g.cells[1].ch, '世');
-    assert_eq!(g.cells[2].flags & WIDE_TRAILER, WIDE_TRAILER);
-    assert_eq!(g.cells[3].ch, ' '); // 界 didn't fit in col 3 -> pushed down, no split
-    assert_eq!(g.cells[4].ch, '界'); // row 1, col 0
-    assert_eq!(g.cells[6].ch, '你'); // row 1, col 2
+    assert_eq!(cells(&g)[0].ch, 'a');
+    assert_eq!(cells(&g)[1].ch, '世');
+    assert_eq!(cells(&g)[2].flags & WIDE_TRAILER, WIDE_TRAILER);
+    assert_eq!(cells(&g)[3].ch, ' '); // 界 didn't fit in col 3 -> pushed down, no split
+    assert_eq!(cells(&g)[4].ch, '界'); // row 1, col 0
+    assert_eq!(cells(&g)[6].ch, '你'); // row 1, col 2
 }
 
 #[test]
@@ -454,7 +458,7 @@ fn c0_control_inside_csi_executes_and_continues() {
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b[5\r;10H");
     assert_eq!(g.cursor, (9, 4)); // CUP row 5, col 10 applied
-    assert_eq!(g.cells[0].ch, ' '); // ";10H" not printed
+    assert_eq!(cells(&g)[0].ch, ' '); // ";10H" not printed
 }
 
 #[test]
@@ -555,7 +559,7 @@ fn save_and_restore_cursor() {
 fn osc_title_is_consumed_not_printed() {
     // OSC 2 (set window title) terminated by BEL, then real text.
     let g = parse(b"\x1b]2;my title\x07X", 80, 24);
-    assert_eq!(g.cells[0].ch, 'X');
+    assert_eq!(cells(&g)[0].ch, 'X');
     assert_eq!(g.cursor, (1, 0));
 }
 
@@ -563,15 +567,15 @@ fn osc_title_is_consumed_not_printed() {
 fn osc_terminated_by_st_is_consumed() {
     // OSC 7 (cwd) terminated by ST (ESC \).
     let g = parse(b"\x1b]7;file://host/path\x1b\\Y", 80, 24);
-    assert_eq!(g.cells[0].ch, 'Y');
+    assert_eq!(cells(&g)[0].ch, 'Y');
 }
 
 #[test]
 fn csi_private_mode_is_consumed_not_printed() {
     // Bracketed-paste enable/disable must not leak "2004h"/"2004l".
     let g = parse(b"\x1b[?2004hA\x1b[?2004lB", 80, 24);
-    assert_eq!(g.cells[0].ch, 'A');
-    assert_eq!(g.cells[1].ch, 'B');
+    assert_eq!(cells(&g)[0].ch, 'A');
+    assert_eq!(cells(&g)[1].ch, 'B');
     assert_eq!(g.cursor, (2, 0));
 }
 
@@ -579,7 +583,7 @@ fn csi_private_mode_is_consumed_not_printed() {
 fn charset_designation_is_consumed() {
     // ESC ( B (designate ASCII) must not leak the 'B'.
     let g = parse(b"\x1b(BZ", 80, 24);
-    assert_eq!(g.cells[0].ch, 'Z');
+    assert_eq!(cells(&g)[0].ch, 'Z');
     assert_eq!(g.cursor, (1, 0));
 }
 #[test]
@@ -587,10 +591,10 @@ fn dec_line_drawing_g0_translates_letters_to_box_glyphs() {
     // ESC ( 0 designates DEC Special Graphics into G0 (active by default), so
     // `lqk` becomes the top of a box: ┌─┐. ESC ( B restores ASCII.
     let g = parse(b"\x1b(0lqk\x1b(Bx", 80, 24);
-    assert_eq!(g.cells[0].ch, '┌');
-    assert_eq!(g.cells[1].ch, '─');
-    assert_eq!(g.cells[2].ch, '┐');
-    assert_eq!(g.cells[3].ch, 'x'); // back to ASCII — not translated
+    assert_eq!(cells(&g)[0].ch, '┌');
+    assert_eq!(cells(&g)[1].ch, '─');
+    assert_eq!(cells(&g)[2].ch, '┐');
+    assert_eq!(cells(&g)[3].ch, 'x'); // back to ASCII — not translated
 }
 
 #[test]
@@ -598,28 +602,28 @@ fn so_si_toggle_g1_line_drawing() {
     // The ncurses pattern: designate G1 = line-drawing (ESC ) 0), then SO/SI
     // (^N/^O) shift GL between G1 and G0 around a run of glyphs.
     let g = parse(b"\x1b)0a\x0eqx\x0fb", 80, 24);
-    assert_eq!(g.cells[0].ch, 'a'); // GL still G0 (ASCII)
-    assert_eq!(g.cells[1].ch, '─'); // SO -> G1, 'q' -> horizontal line
-    assert_eq!(g.cells[2].ch, '│'); // 'x' -> vertical line
-    assert_eq!(g.cells[3].ch, 'b'); // SI -> back to G0 (ASCII)
+    assert_eq!(cells(&g)[0].ch, 'a'); // GL still G0 (ASCII)
+    assert_eq!(cells(&g)[1].ch, '─'); // SO -> G1, 'q' -> horizontal line
+    assert_eq!(cells(&g)[2].ch, '│'); // 'x' -> vertical line
+    assert_eq!(cells(&g)[3].ch, 'b'); // SI -> back to G0 (ASCII)
 }
 
 #[test]
 fn dec_graphics_passes_digits_and_space_through() {
     // Only 0x60..=0x7e differ; digits, space, and punctuation are unchanged.
     let g = parse(b"\x1b(0 1!", 80, 24);
-    assert_eq!(g.cells[0].ch, ' ');
-    assert_eq!(g.cells[1].ch, '1');
-    assert_eq!(g.cells[2].ch, '!');
+    assert_eq!(cells(&g)[0].ch, ' ');
+    assert_eq!(cells(&g)[1].ch, '1');
+    assert_eq!(cells(&g)[2].ch, '!');
 }
 
 #[test]
 fn dec_graphics_rep_repeats_translated_glyph() {
     // REP after a line-drawing glyph repeats the translated glyph, not the byte.
     let g = parse(b"\x1b(0q\x1b[2b", 80, 24); // '─' then repeat x2 -> "───"
-    assert_eq!(g.cells[0].ch, '─');
-    assert_eq!(g.cells[1].ch, '─');
-    assert_eq!(g.cells[2].ch, '─');
+    assert_eq!(cells(&g)[0].ch, '─');
+    assert_eq!(cells(&g)[1].ch, '─');
+    assert_eq!(cells(&g)[2].ch, '─');
     assert_eq!(g.cursor, (3, 0));
 }
 
@@ -631,7 +635,7 @@ fn ris_resets_charset_to_ascii() {
     p.advance(&mut g, b"\x1b(0"); // G0 = line-drawing
     p.advance(&mut g, b"\x1bc"); // RIS
     p.advance(&mut g, b"q"); // would be '─' if charset persisted
-    assert_eq!(g.cells[0].ch, 'q');
+    assert_eq!(cells(&g)[0].ch, 'q');
 }
 
 #[test]
@@ -641,7 +645,7 @@ fn decstr_resets_charset_to_ascii() {
     p.advance(&mut g, b"\x1b(0"); // G0 = line-drawing
     p.advance(&mut g, b"\x1b[!p"); // DECSTR soft reset
     p.advance(&mut g, b"q");
-    assert_eq!(g.cells[0].ch, 'q');
+    assert_eq!(cells(&g)[0].ch, 'q');
 }
 
 #[test]
@@ -677,10 +681,10 @@ fn char_width_covers_cases_the_old_table_missed() {
 #[test]
 fn wide_char_occupies_two_cells() {
     let g = parse("世x".as_bytes(), 80, 24);
-    assert_eq!(g.cells[0].ch, '世');
-    assert_eq!(g.cells[0].flags & WIDE_TRAILER, 0);
-    assert_ne!(g.cells[1].flags & WIDE_TRAILER, 0); // trailer flagged
-    assert_eq!(g.cells[2].ch, 'x'); // next glyph after the wide pair
+    assert_eq!(cells(&g)[0].ch, '世');
+    assert_eq!(cells(&g)[0].flags & WIDE_TRAILER, 0);
+    assert_ne!(cells(&g)[1].flags & WIDE_TRAILER, 0); // trailer flagged
+    assert_eq!(cells(&g)[2].ch, 'x'); // next glyph after the wide pair
     assert_eq!(g.cursor, (3, 0));
 }
 
@@ -690,9 +694,9 @@ fn overwriting_wide_head_clears_orphan_trailer() {
     g.put_char('世', Pen::default()); // head col 0, trailer col 1
     g.cursor = (0, 0);
     g.put_char('a', Pen::default()); // overwrite the head
-    assert_eq!(g.cells[0].ch, 'a');
-    assert_eq!(g.cells[1].ch, ' '); // orphaned trailer blanked
-    assert_eq!(g.cells[1].flags & WIDE_TRAILER, 0);
+    assert_eq!(cells(&g)[0].ch, 'a');
+    assert_eq!(cells(&g)[1].ch, ' '); // orphaned trailer blanked
+    assert_eq!(cells(&g)[1].flags & WIDE_TRAILER, 0);
 }
 
 #[test]
@@ -701,29 +705,29 @@ fn overwriting_wide_trailer_clears_orphan_head() {
     g.put_char('世', Pen::default()); // head col 0, trailer col 1
     g.cursor = (1, 0);
     g.put_char('b', Pen::default()); // overwrite the trailer
-    assert_eq!(g.cells[1].ch, 'b');
-    assert_eq!(g.cells[0].ch, ' '); // orphaned head blanked
+    assert_eq!(cells(&g)[1].ch, 'b');
+    assert_eq!(cells(&g)[0].ch, ' '); // orphaned head blanked
 }
 
 #[test]
 fn wide_char_wraps_when_it_would_not_fit() {
     // Width-3 grid: 'a' at col 0, wide '世' needs cols 1-2 -> fits at 1..3.
     let g = parse("a世".as_bytes(), 3, 24);
-    assert_eq!(g.cells[0].ch, 'a');
-    assert_eq!(g.cells[1].ch, '世');
+    assert_eq!(cells(&g)[0].ch, 'a');
+    assert_eq!(cells(&g)[1].ch, '世');
     // Now only 1 column free; a second wide char must wrap to the next row.
     let g2 = parse("ab世".as_bytes(), 3, 24);
     assert_eq!(row_text(&g2, 0), "ab ");
-    assert_eq!(g2.cells[3].ch, '世'); // wrapped to row 1, col 0
+    assert_eq!(cells(&g2)[3].ch, '世'); // wrapped to row 1, col 0
 }
 
 #[test]
 fn combining_mark_attaches_to_preceding_glyph() {
     // 'a' + U+0301 (combining acute) + 'b'.
     let g = parse("a\u{0301}b".as_bytes(), 80, 24);
-    assert_eq!(g.cells[0].ch, 'a');
+    assert_eq!(cells(&g)[0].ch, 'a');
     assert_eq!(glyph(&g, 0, 0), "a\u{0301}"); // mark composed onto 'a'
-    assert_eq!(g.cells[1].ch, 'b'); // mark consumed no cell
+    assert_eq!(cells(&g)[1].ch, 'b'); // mark consumed no cell
     assert_eq!(g.cursor, (2, 0));
 }
 
@@ -744,16 +748,16 @@ fn multiple_combining_marks_are_all_kept() {
 fn combining_mark_at_line_start_is_dropped() {
     // No preceding glyph -> nothing to attach to.
     let g = parse("\u{0301}x".as_bytes(), 80, 24);
-    assert_eq!(g.cells[0].ch, 'x');
+    assert_eq!(cells(&g)[0].ch, 'x');
     assert_eq!(g.cursor, (1, 0));
 }
 
 #[test]
 fn combining_mark_attaches_to_wide_glyph_head() {
     let g = parse("世\u{0301}".as_bytes(), 80, 24);
-    assert_eq!(g.cells[0].ch, '世');
+    assert_eq!(cells(&g)[0].ch, '世');
     assert_eq!(glyph(&g, 0, 0), "世\u{0301}"); // on the head, not the trailer
-    assert_ne!(g.cells[1].flags & WIDE_TRAILER, 0);
+    assert_ne!(cells(&g)[1].flags & WIDE_TRAILER, 0);
 }
 
 #[test]
@@ -763,7 +767,7 @@ fn zwj_emoji_sequence_collapses_to_one_glyph() {
     // separate emoji spanning six.
     let g = parse("\x1b[?2027h👨\u{200d}💻".as_bytes(), 80, 24);
     assert_eq!(glyph(&g, 0, 0), "👨\u{200d}💻");
-    assert_ne!(g.cells[1].flags & WIDE_TRAILER, 0);
+    assert_ne!(cells(&g)[1].flags & WIDE_TRAILER, 0);
     assert_eq!(g.cursor, (2, 0));
 }
 
@@ -780,8 +784,8 @@ fn emoji_skin_tone_modifier_joins_base_glyph() {
 fn distinct_wide_glyphs_stay_separate() {
     // Boundary detection must not over-merge: 世 and 界 are separate graphemes.
     let g = parse("世界".as_bytes(), 80, 24);
-    assert_eq!(g.cells[0].ch, '世');
-    assert_eq!(g.cells[2].ch, '界');
+    assert_eq!(cells(&g)[0].ch, '世');
+    assert_eq!(cells(&g)[2].ch, '界');
     assert_eq!(g.cursor, (4, 0));
 }
 
@@ -789,7 +793,7 @@ fn distinct_wide_glyphs_stay_separate() {
 fn utf8_two_byte_decodes() {
     // U+00E9 'é' = C3 A9
     let g = parse(b"\xc3\xa9", 80, 24);
-    assert_eq!(g.cells[0].ch, 'é');
+    assert_eq!(cells(&g)[0].ch, 'é');
     assert_eq!(g.cursor, (1, 0));
 }
 
@@ -797,14 +801,14 @@ fn utf8_two_byte_decodes() {
 fn utf8_three_byte_decodes() {
     // U+2794 '➔'-family arrow = E2 9E 94; the prompt arrow '➜' is E2 9E 9C.
     let g = parse("➜".as_bytes(), 80, 24);
-    assert_eq!(g.cells[0].ch, '➜');
+    assert_eq!(cells(&g)[0].ch, '➜');
 }
 
 #[test]
 fn utf8_four_byte_emoji_decodes() {
     // U+1F600 😀 = F0 9F 98 80
     let g = parse("😀".as_bytes(), 80, 24);
-    assert_eq!(g.cells[0].ch, '😀');
+    assert_eq!(cells(&g)[0].ch, '😀');
 }
 
 #[test]
@@ -813,17 +817,17 @@ fn utf8_split_across_chunks() {
     let mut p = AnsiParser::new();
     let bytes = "é".as_bytes(); // C3 A9
     p.advance(&mut g, &bytes[..1]); // lead byte only
-    assert_eq!(g.cells[0].ch, ' '); // nothing emitted yet
+    assert_eq!(cells(&g)[0].ch, ' '); // nothing emitted yet
     p.advance(&mut g, &bytes[1..]); // continuation
-    assert_eq!(g.cells[0].ch, 'é');
+    assert_eq!(cells(&g)[0].ch, 'é');
 }
 
 #[test]
 fn utf8_invalid_yields_replacement() {
     // Stray continuation byte.
     let g = parse(b"\x80X", 80, 24);
-    assert_eq!(g.cells[0].ch, '\u{FFFD}');
-    assert_eq!(g.cells[1].ch, 'X');
+    assert_eq!(cells(&g)[0].ch, '\u{FFFD}');
+    assert_eq!(cells(&g)[1].ch, 'X');
 }
 
 #[test]
@@ -831,8 +835,8 @@ fn utf8_truncated_then_ascii_recovers() {
     // Lead byte expecting a continuation, interrupted by an ASCII byte:
     // emit replacement for the truncated char, then render the ASCII byte.
     let g = parse(b"\xc3A", 80, 24);
-    assert_eq!(g.cells[0].ch, '\u{FFFD}');
-    assert_eq!(g.cells[1].ch, 'A');
+    assert_eq!(cells(&g)[0].ch, '\u{FFFD}');
+    assert_eq!(cells(&g)[1].ch, 'A');
 }
 
 #[test]
@@ -841,19 +845,19 @@ fn utf8_overlong_yields_replacement() {
     // raw control scalar in a cell — an escape-injection vector once the
     // renderer replays cell text to the host terminal.
     let g = parse(b"\xe0\x80\x9bX", 80, 24);
-    assert_eq!(g.cells[0].ch, '\u{FFFD}');
-    assert_eq!(g.cells[1].ch, 'X');
+    assert_eq!(cells(&g)[0].ch, '\u{FFFD}');
+    assert_eq!(cells(&g)[1].ch, 'X');
     // The largest overlong values each length admits (C0/C1 leads are already
     // rejected, so 2-byte overlongs can't begin; test 3- and 4-byte forms).
     let g = parse(b"\xe0\x9f\xbfX", 80, 24); // U+07FF in three bytes
-    assert_eq!(g.cells[0].ch, '\u{FFFD}');
+    assert_eq!(cells(&g)[0].ch, '\u{FFFD}');
     let g = parse(b"\xf0\x8f\xbf\xbfX", 80, 24); // U+FFFF in four bytes
-    assert_eq!(g.cells[0].ch, '\u{FFFD}');
-    assert_eq!(g.cells[1].ch, 'X');
+    assert_eq!(cells(&g)[0].ch, '\u{FFFD}');
+    assert_eq!(cells(&g)[1].ch, 'X');
     // The boundary values themselves still decode.
     let g = parse("\u{800}\u{10000}".as_bytes(), 80, 24);
-    assert_eq!(g.cells[0].ch, '\u{800}');
-    assert_eq!(g.cells[1].ch, '\u{10000}');
+    assert_eq!(cells(&g)[0].ch, '\u{800}');
+    assert_eq!(cells(&g)[1].ch, '\u{10000}');
 }
 
 #[test]
@@ -870,7 +874,7 @@ fn escape_sequence_split_across_chunks() {
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b[3");
     p.advance(&mut g, b"1mX");
-    assert_eq!(g.cells[0].fg, PALETTE_16[1]); // SGR 31
+    assert_eq!(cells(&g)[0].fg, PALETTE_16[1]); // SGR 31
 }
 
 #[test]
@@ -878,7 +882,7 @@ fn dcs_string_is_consumed_not_printed() {
     // DCS (ESC P) … ST (ESC \) — e.g. a DECRQSS status reply. The body must
     // not leak onto the screen.
     let g = parse(b"\x1bP1$r0m\x1b\\X", 80, 24);
-    assert_eq!(g.cells[0].ch, 'X');
+    assert_eq!(cells(&g)[0].ch, 'X');
     assert_eq!(g.cursor, (1, 0));
 }
 
@@ -886,7 +890,7 @@ fn dcs_string_is_consumed_not_printed() {
 fn apc_string_is_consumed_not_printed() {
     // APC (ESC _) … ST — e.g. the Kitty graphics protocol introducer.
     let g = parse(b"\x1b_Gf=100,a=T;base64data\x1b\\X", 80, 24);
-    assert_eq!(g.cells[0].ch, 'X');
+    assert_eq!(cells(&g)[0].ch, 'X');
     assert_eq!(g.cursor, (1, 0));
 }
 
@@ -894,7 +898,7 @@ fn apc_string_is_consumed_not_printed() {
 fn pm_string_is_consumed_not_printed() {
     // PM (ESC ^) … ST.
     let g = parse(b"\x1b^private message\x1b\\X", 80, 24);
-    assert_eq!(g.cells[0].ch, 'X');
+    assert_eq!(cells(&g)[0].ch, 'X');
     assert_eq!(g.cursor, (1, 0));
 }
 
@@ -902,7 +906,7 @@ fn pm_string_is_consumed_not_printed() {
 fn sos_string_is_consumed_not_printed() {
     // SOS (ESC X) … ST.
     let g = parse(b"\x1bXstart of string\x1b\\Y", 80, 24);
-    assert_eq!(g.cells[0].ch, 'Y');
+    assert_eq!(cells(&g)[0].ch, 'Y');
     assert_eq!(g.cursor, (1, 0));
 }
 
@@ -914,7 +918,7 @@ fn dcs_string_split_across_chunks_is_consumed() {
     p.advance(&mut g, b"\x1bP1$r");
     p.advance(&mut g, b"sixel-ish body");
     p.advance(&mut g, b"\x1b\\Z");
-    assert_eq!(g.cells[0].ch, 'Z');
+    assert_eq!(cells(&g)[0].ch, 'Z');
     assert_eq!(g.cursor, (1, 0));
 }
 
@@ -922,7 +926,7 @@ fn dcs_string_split_across_chunks_is_consumed() {
 fn dcs_string_aborted_by_can() {
     // CAN (0x18) cancels the string; subsequent bytes render normally.
     let g = parse(b"\x1bPbody\x18X", 80, 24);
-    assert_eq!(g.cells[0].ch, 'X');
+    assert_eq!(cells(&g)[0].ch, 'X');
     assert_eq!(g.cursor, (1, 0));
 }
 
@@ -938,7 +942,7 @@ fn da1_query_is_answered_and_not_printed() {
     p.advance(&mut g, b"\x1b[0c");
     assert_eq!(p.take_responses(), b"\x1b[?1;2;4c");
     // Nothing leaked onto the grid.
-    assert_eq!(g.cells[0].ch, ' ');
+    assert_eq!(cells(&g)[0].ch, ' ');
     assert_eq!(g.cursor, (0, 0));
 }
 
@@ -950,7 +954,7 @@ fn da2_query_is_answered() {
     assert_eq!(p.take_responses(), b"\x1b[>0;1;0c");
     // The `>` marker must not be confused with a DEC private mode and must
     // not disturb the alt screen.
-    assert!(g.cells[0].ch == ' ');
+    assert!(cells(&g)[0].ch == ' ');
 }
 
 #[test]
@@ -960,7 +964,7 @@ fn xtversion_query_reports_name_and_version() {
     p.advance(&mut g, b"\x1b[>q");
     let expected = concat!("\x1bP>|rusty_term(", env!("CARGO_PKG_VERSION"), ")\x1b\\").as_bytes();
     assert_eq!(p.take_responses(), expected);
-    assert_eq!(g.cells[0].ch, ' '); // nothing leaked to the screen
+    assert_eq!(cells(&g)[0].ch, ' '); // nothing leaked to the screen
 }
 #[test]
 fn xtgettcap_answers_known_caps_and_truecolor() {
@@ -973,7 +977,7 @@ fn xtgettcap_answers_known_caps_and_truecolor() {
         p.take_responses(),
         b"\x1bP1+r436f=323536\x1b\\\x1bP1+r5463\x1b\\"
     );
-    assert_eq!(g.cells[0].ch, ' '); // nothing leaked to the screen
+    assert_eq!(cells(&g)[0].ch, ' '); // nothing leaked to the screen
 }
 
 #[test]
@@ -1025,7 +1029,7 @@ fn decscusr_is_relayed_to_host_not_printed() {
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b[4 q");
     assert_eq!(g.take_host_out(), b"\x1b[4 q");
-    assert_eq!(g.cells[0].ch, ' '); // nothing leaked to the screen
+    assert_eq!(cells(&g)[0].ch, ' '); // nothing leaked to the screen
 }
 
 #[test]
@@ -1238,28 +1242,28 @@ fn sgr4_colon_style_sets_undercurl_and_other_styles() {
         24,
     );
     assert_eq!(
-        UnderlineStyle::from_attrs(g.cells[0].flags),
+        UnderlineStyle::from_attrs(cells(&g)[0].flags),
         UnderlineStyle::Curly
     );
-    assert_ne!(g.cells[0].flags & ATTR_UNDERLINE, 0);
+    assert_ne!(cells(&g)[0].flags & ATTR_UNDERLINE, 0);
     assert_eq!(
-        UnderlineStyle::from_attrs(g.cells[1].flags),
+        UnderlineStyle::from_attrs(cells(&g)[1].flags),
         UnderlineStyle::Dotted
     );
     assert_eq!(
-        UnderlineStyle::from_attrs(g.cells[2].flags),
+        UnderlineStyle::from_attrs(cells(&g)[2].flags),
         UnderlineStyle::Dashed
     );
     assert_eq!(
-        UnderlineStyle::from_attrs(g.cells[3].flags),
+        UnderlineStyle::from_attrs(cells(&g)[3].flags),
         UnderlineStyle::Double
     );
     assert_eq!(
-        UnderlineStyle::from_attrs(g.cells[4].flags),
+        UnderlineStyle::from_attrs(cells(&g)[4].flags),
         UnderlineStyle::Straight
     );
     // `4:0` turns the underline off outright rather than just resetting style.
-    assert_eq!(g.cells[5].flags & ATTR_UNDERLINE, 0);
+    assert_eq!(cells(&g)[5].flags & ATTR_UNDERLINE, 0);
 }
 
 #[test]
@@ -1267,10 +1271,10 @@ fn sgr4_semicolon_form_is_unambiguous_from_colon_sub_param() {
     // `4;3` is two independent codes (underline, then italic) — never the
     // curly-style sub-parameter `4:3` means.
     let g = parse(b"\x1b[4;3mx", 80, 24);
-    assert_ne!(g.cells[0].flags & ATTR_UNDERLINE, 0);
-    assert_ne!(g.cells[0].flags & ATTR_ITALIC, 0);
+    assert_ne!(cells(&g)[0].flags & ATTR_UNDERLINE, 0);
+    assert_ne!(cells(&g)[0].flags & ATTR_ITALIC, 0);
     assert_eq!(
-        UnderlineStyle::from_attrs(g.cells[0].flags),
+        UnderlineStyle::from_attrs(cells(&g)[0].flags),
         UnderlineStyle::Straight
     );
 }
@@ -1279,10 +1283,10 @@ fn sgr4_semicolon_form_is_unambiguous_from_colon_sub_param() {
 fn sgr4_bare_forces_straight_even_over_a_leftover_colon_style() {
     let g = parse(b"\x1b[4:3m\x1b[4mx", 80, 24);
     assert_eq!(
-        UnderlineStyle::from_attrs(g.cells[0].flags),
+        UnderlineStyle::from_attrs(cells(&g)[0].flags),
         UnderlineStyle::Straight
     );
-    assert_ne!(g.cells[0].flags & ATTR_UNDERLINE, 0);
+    assert_ne!(cells(&g)[0].flags & ATTR_UNDERLINE, 0);
 }
 
 #[test]
@@ -1292,26 +1296,26 @@ fn sgr58_sets_underline_color_independent_of_fg_and_59_resets() {
         80,
         24,
     );
-    assert_ne!(g.cells[0].flags & ATTR_UNDERLINE_COLOR, 0);
-    assert_eq!(g.cells[0].underline_color, 0xFF0000);
-    assert_eq!(g.cells[0].fg, 0x0A141E); // fg untouched by SGR 58
+    assert_ne!(cells(&g)[0].flags & ATTR_UNDERLINE_COLOR, 0);
+    assert_eq!(cells(&g)[0].underline_color, 0xFF0000);
+    assert_eq!(cells(&g)[0].fg, 0x0A141E); // fg untouched by SGR 58
     // 59 turns the custom-color flag back off; the rendering fallback (fg) is
     // the renderer's job, not the model's — the flag alone is what matters.
-    assert_eq!(g.cells[1].flags & ATTR_UNDERLINE_COLOR, 0);
+    assert_eq!(cells(&g)[1].flags & ATTR_UNDERLINE_COLOR, 0);
 }
 
 #[test]
 fn sgr58_colon_form_matches_semicolon_form() {
     let g = parse(b"\x1b[4m\x1b[58:2:0:255:0mA", 80, 24);
-    assert_ne!(g.cells[0].flags & ATTR_UNDERLINE_COLOR, 0);
-    assert_eq!(g.cells[0].underline_color, 0x00FF00);
+    assert_ne!(cells(&g)[0].flags & ATTR_UNDERLINE_COLOR, 0);
+    assert_eq!(cells(&g)[0].underline_color, 0x00FF00);
 }
 
 #[test]
 fn sgr_reset_clears_underline_style_and_color() {
     let g = parse(b"\x1b[4:3m\x1b[58;2;1;2;3m\x1b[0mx", 80, 24);
-    assert_eq!(g.cells[0].flags & ATTR_UNDERLINE, 0);
-    assert_eq!(g.cells[0].flags & ATTR_UNDERLINE_COLOR, 0);
+    assert_eq!(cells(&g)[0].flags & ATTR_UNDERLINE, 0);
+    assert_eq!(cells(&g)[0].flags & ATTR_UNDERLINE_COLOR, 0);
 }
 
 #[test]
@@ -1379,7 +1383,7 @@ fn osc_title_decodes_utf8_and_does_not_print() {
     // Multi-byte payload must round-trip, and the trailing 'X' still renders.
     let g = parse("\x1b]2;café 世\x07X".as_bytes(), 80, 24);
     assert_eq!(g.title, "café 世");
-    assert_eq!(g.cells[0].ch, 'X');
+    assert_eq!(cells(&g)[0].ch, 'X');
     assert_eq!(g.cursor, (1, 0));
 }
 
@@ -1398,7 +1402,7 @@ fn osc_without_separator_is_ignored() {
     let g = parse(b"\x1b]999\x07Z", 80, 24);
     assert_eq!(g.title, "");
     assert_eq!(g.cwd, "");
-    assert_eq!(g.cells[0].ch, 'Z');
+    assert_eq!(cells(&g)[0].ch, 'Z');
 }
 
 #[test]
@@ -1406,7 +1410,7 @@ fn osc_unknown_code_is_ignored_but_consumed() {
     // OSC 52 (clipboard) isn't acted on yet, but must not leak or set title.
     let g = parse(b"\x1b]52;c;SGVsbG8=\x07W", 80, 24);
     assert_eq!(g.title, "");
-    assert_eq!(g.cells[0].ch, 'W');
+    assert_eq!(cells(&g)[0].ch, 'W');
 }
 
 #[test]
@@ -1423,6 +1427,157 @@ fn full_screen_scroll_captures_into_scrollback() {
     // Live grid now shows BBBB / CCCC.
     assert_eq!(row_text(&g, 0), "BBBB");
     assert_eq!(row_text(&g, 1), "CCCC");
+}
+
+/// Text of scrollback line `i`.
+fn hist_text(g: &Grid, i: usize) -> String {
+    g.scrollback[i].cells.iter().map(|c| c.ch).collect()
+}
+
+/// Every live row holds exactly `cols` cells (rows rotate and are recycled,
+/// so a wrong-width row would only show up later as an out-of-bounds write).
+fn assert_rows_sized(g: &Grid) {
+    for y in 0..g.rows {
+        assert_eq!(g.row(y).len(), g.cols, "row {y}");
+    }
+}
+
+#[test]
+fn evicted_scrollback_line_is_recycled_blank_and_unwrapped() {
+    // Cap 2: from the third captured line on, each scroll recycles the evicted
+    // line as the new bottom row. "XXXXYY" wraps, so the recycled line was
+    // soft-wrapped; the bottom row it becomes must be blank and unwrapped.
+    let mut g = Grid::new(4, 2);
+    g.set_scrollback_max(2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"XXXXYY\r\nA\r\nB\r\nC\r\n");
+    assert_eq!(g.scrollback.len(), 2);
+    assert_eq!(hist_text(&g, 0), "A   ");
+    assert_eq!(hist_text(&g, 1), "B   ");
+    assert_eq!(row_text(&g, 0), "C   ");
+    assert_eq!(row_text(&g, 1), "    ");
+    assert!(g.scrollback.iter().all(|l| !l.wrapped));
+    assert_rows_sized(&g);
+}
+
+#[test]
+fn zero_scrollback_cap_keeps_no_history_and_scrolls() {
+    let mut g = Grid::new(3, 2);
+    g.set_scrollback_max(0);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"a\r\nb\r\nc\r\nd");
+    assert_eq!(g.scrollback.len(), 0);
+    assert_eq!(row_text(&g, 0), "c  ");
+    assert_eq!(row_text(&g, 1), "d  ");
+    assert_rows_sized(&g);
+}
+
+#[test]
+fn scrolled_off_line_keeps_its_wrap_and_drops_its_size_attr() {
+    // A double-width, soft-wrapped row leaves the screen whole: the wrap bit
+    // travels into history (the reflow needs it), the size attribute does not.
+    let mut g = Grid::new(4, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b#6abcdef\r\nx");
+    assert_eq!(g.scrollback.len(), 1);
+    assert!(g.scrollback[0].wrapped);
+    assert_eq!(g.scrollback[0].attr, LineAttr::Single);
+    assert_eq!(hist_text(&g, 0), "abcd");
+    assert_eq!(row_text(&g, 0), "ef  ");
+}
+
+#[test]
+fn wide_glyph_wrapped_at_row_edge_rejoins_from_scrollback_on_resize() {
+    // "abc世" on 4 columns: 世 does not fit in the last column, so it wraps
+    // and the row is marked soft-wrapped. After the row scrolls into history,
+    // widening rejoins it with its continuation, dropping the filler cell.
+    let mut g = Grid::new(4, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, "abc世\r\nz".as_bytes());
+    assert_eq!(g.scrollback.len(), 1);
+    assert!(g.scrollback[0].wrapped);
+    assert_eq!(row_text(&g, 0), "世   "); // head, trailer, two blanks
+    assert_ne!(g.row(0)[1].flags & WIDE_TRAILER, 0);
+    g.resize(8, 2);
+    assert_eq!(g.scrollback.len(), 0);
+    assert_eq!(glyph(&g, 3, 0), "世");
+    assert_eq!(row_text(&g, 1), "z       ");
+    assert_rows_sized(&g);
+}
+
+#[test]
+fn rows_stay_sized_through_resize_and_recycling() {
+    // Recycled lines can come from history of another width; every live row
+    // must still hold exactly `cols` cells after narrowing and widening.
+    let mut g = Grid::new(6, 3);
+    g.set_scrollback_max(3);
+    let mut p = AnsiParser::new();
+    for i in 0..10 {
+        p.advance(&mut g, format!("line{i}\r\n").as_bytes());
+    }
+    g.resize(4, 3);
+    p.advance(&mut g, b"p\r\nq\r\nr\r\ns\r\n");
+    assert_rows_sized(&g);
+    g.resize(9, 2);
+    p.advance(&mut g, b"t\r\nu\r\nv\r\n");
+    assert_rows_sized(&g);
+    assert!(g.scrollback.len() <= 3);
+    assert_eq!(row_text(&g, 0), "v        ");
+}
+
+#[test]
+fn region_scrolls_rotate_rows_with_their_metadata() {
+    // Rows 1..=3 of 5 form the region. SU, SD, IL and DL move whole rows,
+    // size attribute and wrap bit included, and never touch rows 0 and 4.
+    let mut g = Grid::new(4, 5);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"T\r\nA\r\n\x1b#6B\r\nC\r\nZ");
+    p.advance(&mut g, b"\x1b[2;4r"); // region rows 1..=3, cursor homed
+    p.advance(&mut g, b"\x1b[S"); // SU: A leaves, B and C move up
+    assert_eq!(
+        (0..5).map(|y| row_text(&g, y)).collect::<Vec<_>>(),
+        ["T   ", "B   ", "C   ", "    ", "Z   "]
+    );
+    assert_eq!(g.snapshot_dirty().line_attrs[1], LineAttr::DoubleWidth);
+    p.advance(&mut g, b"\x1b[T"); // SD: back down, blank row at the top
+    assert_eq!(row_text(&g, 1), "    ");
+    assert_eq!(row_text(&g, 2), "B   ");
+    assert_eq!(g.snapshot_dirty().line_attrs[2], LineAttr::DoubleWidth);
+    assert_eq!(g.snapshot_dirty().line_attrs[1], LineAttr::Single);
+    p.advance(&mut g, b"\x1b[3;1H\x1b[M"); // DL at B: C moves up
+    assert_eq!(row_text(&g, 2), "C   ");
+    assert_eq!(g.snapshot_dirty().line_attrs[2], LineAttr::Single);
+    p.advance(&mut g, b"\x1b[2;1H\x1b[L"); // IL at row 1: C pushed to row 3
+    assert_eq!(row_text(&g, 3), "C   ");
+    assert_eq!(row_text(&g, 0), "T   ");
+    assert_eq!(row_text(&g, 4), "Z   ");
+    assert_eq!(g.scrollback.len(), 0);
+    assert_rows_sized(&g);
+}
+
+#[test]
+fn alternate_screen_rows_are_reused_blank() {
+    // Leaving the alternate screen keeps its rows for the next entry; they
+    // must come back blank, at the current size, with no attrs or wraps.
+    let mut g = Grid::new(4, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"main\x1b[?1049h\x1b#6altscreen\x1b[?1049l");
+    assert_eq!(row_text(&g, 0), "main");
+    g.resize(6, 3);
+    p.advance(&mut g, b"\x1b[?1049h");
+    assert_eq!(
+        (0..3).map(|y| row_text(&g, y)).collect::<String>(),
+        " ".repeat(18)
+    );
+    assert!(
+        g.snapshot_dirty()
+            .line_attrs
+            .iter()
+            .all(|a| *a == LineAttr::Single)
+    );
+    assert_rows_sized(&g);
+    p.advance(&mut g, b"\x1b[?1049l");
+    assert_eq!(row_text(&g, 0), "main  ");
 }
 
 #[test]
@@ -1508,7 +1663,7 @@ fn osc_52_set_is_forwarded_to_host_and_not_printed() {
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b]52;c;SGVsbG8=\x07X");
     assert_eq!(g.take_host_out(), b"\x1b]52;c;SGVsbG8=\x07");
-    assert_eq!(g.cells[0].ch, 'X'); // payload didn't leak onto the screen
+    assert_eq!(cells(&g)[0].ch, 'X'); // payload didn't leak onto the screen
     // Drained: a second take returns nothing.
     assert!(g.take_host_out().is_empty());
 }
@@ -1550,7 +1705,7 @@ fn osc_52_query_flags_window_backend() {
     assert!(!g.clipboard_query);
     p.advance(&mut g, b"\x1b]52;c;?\x07");
     assert!(g.clipboard_query);
-    assert_eq!(g.cells[0].ch, ' '); // nothing leaked to the screen
+    assert_eq!(cells(&g)[0].ch, ' '); // nothing leaked to the screen
 }
 
 #[test]
@@ -1563,7 +1718,7 @@ fn osc_9_records_notification_and_relays() {
         vec![(String::new(), "Build complete".to_string())]
     );
     assert_eq!(g.take_host_out(), b"\x1b]9;Build complete\x07"); // relayed for TUI
-    assert_eq!(g.cells[0].ch, ' '); // not printed
+    assert_eq!(cells(&g)[0].ch, ' '); // not printed
 }
 
 #[test]
@@ -1604,13 +1759,13 @@ fn osc_777_non_notify_is_ignored() {
 #[test]
 fn osc_8_stamps_link_on_covered_cells() {
     let g = parse(b"\x1b]8;;http://example.com\x1b\\AB\x1b]8;;\x1b\\C", 80, 24);
-    assert_ne!(g.cells[0].link, 0);
-    assert_eq!(g.cells[0].link, g.cells[1].link); // A and B share the link
+    assert_ne!(cells(&g)[0].link, 0);
+    assert_eq!(cells(&g)[0].link, cells(&g)[1].link); // A and B share the link
     assert_eq!(
-        g.links[(g.cells[0].link - 1) as usize],
+        g.links[(cells(&g)[0].link - 1) as usize],
         "http://example.com"
     );
-    assert_eq!(g.cells[2].link, 0); // C is after the close
+    assert_eq!(cells(&g)[2].link, 0); // C is after the close
 }
 
 #[test]
@@ -1730,8 +1885,8 @@ fn search_jump_cycles_and_clear_resets() {
 fn osc_8_with_id_param_links_uri() {
     // The params field (here `id=foo`) is skipped; the URI still links.
     let g = parse(b"\x1b]8;id=foo;http://e.com\x1b\\Z", 80, 24);
-    assert_ne!(g.cells[0].link, 0);
-    assert_eq!(g.links[(g.cells[0].link - 1) as usize], "http://e.com");
+    assert_ne!(cells(&g)[0].link, 0);
+    assert_eq!(g.links[(cells(&g)[0].link - 1) as usize], "http://e.com");
 }
 
 #[test]
@@ -1741,7 +1896,7 @@ fn osc_8_interns_duplicate_uri_once() {
         80,
         24,
     );
-    assert_eq!(g.cells[0].link, g.cells[2].link); // same interned id
+    assert_eq!(cells(&g)[0].link, cells(&g)[2].link); // same interned id
     assert_eq!(g.links.len(), 1); // URI stored once
 }
 
@@ -1750,7 +1905,7 @@ fn osc_4_sets_palette_index_recoloring_later_text() {
     // Redefine palette index 1 (normally dim red) to pure blue, then print with
     // SGR 31 (which resolves through index 1).
     let g = parse(b"\x1b]4;1;rgb:00/00/ff\x1b\\\x1b[31mX", 80, 24);
-    assert_eq!(g.cells[0].fg, 0x0000FF);
+    assert_eq!(cells(&g)[0].fg, 0x0000FF);
 }
 
 #[test]
@@ -1768,7 +1923,7 @@ fn osc_104_resets_palette() {
     p.advance(&mut g, b"\x1b]4;1;rgb:00/00/ff\x1b\\"); // change index 1
     p.advance(&mut g, b"\x1b]104;1\x1b\\"); // reset index 1
     p.advance(&mut g, b"\x1b[31mX");
-    assert_eq!(g.cells[0].fg, 0x800000); // back to the default dim red
+    assert_eq!(cells(&g)[0].fg, 0x800000); // back to the default dim red
 }
 
 #[test]
@@ -1779,10 +1934,10 @@ fn osc_11_sets_default_bg_and_colors_erases() {
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b]11;rgb:00/00/ff\x1b\\");
     p.advance(&mut g, b"\x1b[2J"); // ED 2 — clear all
-    assert_eq!(g.cells[0].bg, 0x0000FF);
+    assert_eq!(cells(&g)[0].bg, 0x0000FF);
     // And SGR 49 (default bg) now resolves to blue for new text too.
     p.advance(&mut g, b"\x1b[49mX");
-    assert_eq!(g.cells[0].bg, 0x0000FF);
+    assert_eq!(cells(&g)[0].bg, 0x0000FF);
 }
 
 #[test]
@@ -1791,7 +1946,7 @@ fn osc_10_sets_default_fg_for_reset_pen() {
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b]10;rgb:0a/0b/0c\x1b\\");
     p.advance(&mut g, b"X"); // default pen -> default fg
-    assert_eq!(g.cells[0].fg, 0x0A0B0C);
+    assert_eq!(cells(&g)[0].fg, 0x0A0B0C);
 }
 
 #[test]
@@ -1804,7 +1959,7 @@ fn osc_11_query_replies_and_110_resets() {
     // OSC 111 resets the default background to black.
     p.advance(&mut g, b"\x1b]111\x1b\\");
     p.advance(&mut g, b"\x1b[2J");
-    assert_eq!(g.cells[0].bg, 0x000000);
+    assert_eq!(cells(&g)[0].bg, 0x000000);
 }
 
 #[test]
@@ -1815,7 +1970,7 @@ fn osc_color_resets_on_ris() {
     p.advance(&mut g, b"\x1b]11;rgb:00/00/ff\x1b\\");
     p.advance(&mut g, b"\x1bc"); // RIS
     p.advance(&mut g, b"\x1b[2J");
-    assert_eq!(g.cells[0].bg, 0x000000);
+    assert_eq!(cells(&g)[0].bg, 0x000000);
 }
 
 #[test]
@@ -1823,7 +1978,7 @@ fn osc_1_icon_name_is_forwarded_to_host_not_printed() {
     let mut g = Grid::new(80, 24);
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b]1;myicon\x07X");
-    assert_eq!(g.cells[0].ch, 'X'); // not leaked to the screen
+    assert_eq!(cells(&g)[0].ch, 'X'); // not leaked to the screen
     assert_eq!(g.title, ""); // icon name is not the window title
     assert_eq!(g.take_host_out(), b"\x1b]1;myicon\x07"); // forwarded verbatim
 }
@@ -2093,53 +2248,53 @@ fn osc_633_command_lifecycle_and_unknown_subcommands_are_harmless() {
     // but otherwise a no-op, same as their 133 counterparts.
     p.advance(&mut g, b"\x1b]633;B\x07\x1b]633;E;ls -la\x07");
     p.advance(&mut g, b"echo hi");
-    assert_eq!(g.cells[0].ch, 'e'); // the OSC didn't leak into the grid
+    assert_eq!(cells(&g)[0].ch, 'e'); // the OSC didn't leak into the grid
 }
 
 #[test]
 fn sgr_sets_text_attribute_bits() {
     let g = parse(b"\x1b[1mA\x1b[4mB", 80, 24);
-    assert_ne!(g.cells[0].flags & ATTR_BOLD, 0); // A is bold
+    assert_ne!(cells(&g)[0].flags & ATTR_BOLD, 0); // A is bold
     // B is bold + underline (attributes accumulate until reset).
-    assert_ne!(g.cells[1].flags & ATTR_BOLD, 0);
-    assert_ne!(g.cells[1].flags & ATTR_UNDERLINE, 0);
+    assert_ne!(cells(&g)[1].flags & ATTR_BOLD, 0);
+    assert_ne!(cells(&g)[1].flags & ATTR_UNDERLINE, 0);
 }
 
 #[test]
 fn sgr_combined_attributes_in_one_sequence() {
     // Bold + italic + reverse set together, with a color, in one CSI m.
     let g = parse(b"\x1b[1;3;7;31mX", 80, 24);
-    let f = g.cells[0].flags;
+    let f = cells(&g)[0].flags;
     assert_ne!(f & ATTR_BOLD, 0);
     assert_ne!(f & ATTR_ITALIC, 0);
     assert_ne!(f & ATTR_REVERSE, 0);
-    assert_eq!(g.cells[0].fg, PALETTE_16[1]); // 31 still applied
+    assert_eq!(cells(&g)[0].fg, PALETTE_16[1]); // 31 still applied
 }
 
 #[test]
 fn sgr_reset_clears_all_attributes() {
     let g = parse(b"\x1b[1;4;7mA\x1b[0mB", 80, 24);
-    assert_ne!(g.cells[0].flags & ATTR_MASK, 0); // A styled
-    assert_eq!(g.cells[1].flags & ATTR_MASK, 0); // B fully reset
+    assert_ne!(cells(&g)[0].flags & ATTR_MASK, 0); // A styled
+    assert_eq!(cells(&g)[1].flags & ATTR_MASK, 0); // B fully reset
 }
 
 #[test]
 fn sgr_selective_attribute_resets() {
     // 22 clears bold (and dim), leaving underline; 24 then clears underline.
     let g = parse(b"\x1b[1;4mA\x1b[22mB\x1b[24mC", 80, 24);
-    assert_ne!(g.cells[0].flags & ATTR_BOLD, 0);
-    assert_ne!(g.cells[0].flags & ATTR_UNDERLINE, 0);
-    assert_eq!(g.cells[1].flags & ATTR_BOLD, 0); // bold cleared
-    assert_ne!(g.cells[1].flags & ATTR_UNDERLINE, 0); // underline kept
-    assert_eq!(g.cells[2].flags & ATTR_UNDERLINE, 0); // underline cleared
+    assert_ne!(cells(&g)[0].flags & ATTR_BOLD, 0);
+    assert_ne!(cells(&g)[0].flags & ATTR_UNDERLINE, 0);
+    assert_eq!(cells(&g)[1].flags & ATTR_BOLD, 0); // bold cleared
+    assert_ne!(cells(&g)[1].flags & ATTR_UNDERLINE, 0); // underline kept
+    assert_eq!(cells(&g)[2].flags & ATTR_UNDERLINE, 0); // underline cleared
 }
 
 #[test]
 fn sgr_22_clears_both_bold_and_dim() {
     let g = parse(b"\x1b[1;2mA\x1b[22mB", 80, 24);
-    assert_ne!(g.cells[0].flags & ATTR_BOLD, 0);
-    assert_ne!(g.cells[0].flags & ATTR_DIM, 0);
-    assert_eq!(g.cells[1].flags & (ATTR_BOLD | ATTR_DIM), 0);
+    assert_ne!(cells(&g)[0].flags & ATTR_BOLD, 0);
+    assert_ne!(cells(&g)[0].flags & ATTR_DIM, 0);
+    assert_eq!(cells(&g)[1].flags & (ATTR_BOLD | ATTR_DIM), 0);
 }
 
 #[test]
@@ -2147,8 +2302,8 @@ fn wide_trailer_carries_only_layout_bit_under_attributes() {
     // A bold wide glyph: the head carries the bold bit; the trailer carries
     // only WIDE_TRAILER, never a rendition attribute.
     let g = parse("\x1b[1m世".as_bytes(), 80, 24);
-    assert_ne!(g.cells[0].flags & ATTR_BOLD, 0); // head is bold
-    assert_eq!(g.cells[1].flags, WIDE_TRAILER); // trailer: layout bit only
+    assert_ne!(cells(&g)[0].flags & ATTR_BOLD, 0); // head is bold
+    assert_eq!(cells(&g)[1].flags, WIDE_TRAILER); // trailer: layout bit only
 }
 
 #[test]
@@ -2388,9 +2543,9 @@ fn rep_default_count_is_one() {
 #[test]
 fn rep_repeats_multibyte_char() {
     let g = parse("é\x1b[2b".as_bytes(), 80, 24); // 'é' then x2 -> "ééé"
-    assert_eq!(g.cells[0].ch, 'é');
-    assert_eq!(g.cells[1].ch, 'é');
-    assert_eq!(g.cells[2].ch, 'é');
+    assert_eq!(cells(&g)[0].ch, 'é');
+    assert_eq!(cells(&g)[1].ch, 'é');
+    assert_eq!(cells(&g)[2].ch, 'é');
     assert_eq!(g.cursor, (3, 0));
 }
 
@@ -2407,7 +2562,7 @@ fn rep_after_tab_is_noop() {
     // A tab also clears the memory (it is a cursor move, not a "last char").
     let g = parse(b"A\t\x1b[2b", 80, 24);
     // 'A' at col 0, tab to col 8, REP repeats nothing.
-    assert_eq!(g.cells[0].ch, 'A');
+    assert_eq!(cells(&g)[0].ch, 'A');
     assert_eq!(g.cursor, (8, 0));
 }
 
@@ -2494,7 +2649,7 @@ fn mouse_mode_set_is_relayed_to_host_not_printed() {
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b[?1000h");
     assert_eq!(g.take_host_out(), b"\x1b[?1000h"); // relayed verbatim
-    assert_eq!(g.cells[0].ch, ' '); // not printed onto the grid
+    assert_eq!(cells(&g)[0].ch, ' '); // not printed onto the grid
     assert_eq!(g.cursor, (0, 0));
 }
 
@@ -2602,8 +2757,8 @@ fn decfra_fills_a_rectangle_with_the_given_character() {
 #[test]
 fn decfra_uses_the_current_pen_colors() {
     let g = parse(b"\x1b[31m\x1b[120;1;1;1;1$x", 4, 3);
-    assert_eq!(g.cells[0].ch, 'x');
-    assert_ne!(g.cells[0].fg, DEFAULT_FG); // took the red pen, not the default
+    assert_eq!(cells(&g)[0].ch, 'x');
+    assert_ne!(cells(&g)[0].fg, DEFAULT_FG); // took the red pen, not the default
 }
 
 #[test]
@@ -2681,7 +2836,7 @@ fn kitty_keyboard_protocol_is_relayed_to_host() {
     // Push flags (`CSI > flags u`).
     p.advance(&mut g, b"\x1b[>1u");
     assert_eq!(g.take_host_out(), b"\x1b[>1u");
-    assert_eq!(g.cells[0].ch, ' '); // not printed
+    assert_eq!(cells(&g)[0].ch, ' '); // not printed
     assert!(p.take_responses().is_empty()); // host answers, not us
     // Set (`= flags ; mode u`), pop (`< n u`), and query (`? u`).
     p.advance(&mut g, b"\x1b[=5;1u");
@@ -2759,7 +2914,7 @@ fn ris_resets_screen_cursor_and_region() {
     p.advance(&mut g, b"\x1b[2;10r"); // scroll region (homes cursor)
     p.advance(&mut g, b"\x1b[?25l"); // hide cursor
     p.advance(&mut g, b"\x1bc"); // RIS
-    assert_eq!(g.cells[0].ch, ' '); // screen cleared
+    assert_eq!(cells(&g)[0].ch, ' '); // screen cleared
     assert_eq!(g.cursor, (0, 0)); // home
     assert_eq!((g.scroll_top, g.scroll_bottom), (0, 23)); // region reset
     assert!(g.cursor_visible); // cursor visible again
@@ -2772,7 +2927,7 @@ fn ris_resets_pen() {
     p.advance(&mut g, b"\x1b[31m"); // red pen
     p.advance(&mut g, b"\x1bc"); // RIS resets the pen
     p.advance(&mut g, b"X");
-    assert_eq!(g.cells[0].fg, DEFAULT_FG); // back to default color
+    assert_eq!(cells(&g)[0].fg, DEFAULT_FG); // back to default color
 }
 
 #[test]
@@ -2823,7 +2978,7 @@ fn decawm_off_overwrites_last_column() {
 #[test]
 fn decaln_fills_screen_with_e() {
     let g = parse(b"\x1b#8", 4, 2); // DECALN
-    assert!(g.cells.iter().all(|c| c.ch == 'E'));
+    assert!(cells(&g).iter().all(|c| c.ch == 'E'));
     assert_eq!(g.cursor, (0, 0));
 }
 
@@ -2832,7 +2987,7 @@ fn esc_hash_non_8_is_consumed_not_printed() {
     // ESC # 3 (DECDHL top half) sets the line size but must not leak the '#'/'3';
     // the following 'X' still renders.
     let g = parse(b"\x1b#3X", 4, 2);
-    assert_eq!(g.cells[0].ch, 'X');
+    assert_eq!(cells(&g)[0].ch, 'X');
     assert_eq!(g.cursor, (1, 0));
 }
 
@@ -3122,9 +3277,9 @@ fn render_sixel_writes_halfblock_cells() {
     };
     let mut g = Grid::new(80, 24);
     g.render_sixel(&img);
-    assert_eq!(g.cells[0].ch, '\u{2580}'); // ▀
-    assert_eq!(g.cells[0].fg, 0xFF0000);
-    assert_eq!(g.cells[0].bg, 0x00FF00);
+    assert_eq!(cells(&g)[0].ch, '\u{2580}'); // ▀
+    assert_eq!(cells(&g)[0].fg, 0xFF0000);
+    assert_eq!(cells(&g)[0].bg, 0x00FF00);
     assert_eq!(g.cursor, (0, 1)); // sixel scrolling: column 0 of the row below
 }
 
@@ -3142,7 +3297,7 @@ fn render_image_stores_pixel_image_for_overlay() {
     assert_eq!((im.pw, im.ph), (4, 4)); // full source resolution retained
     assert_eq!(im.pixels.len(), 16);
     // ...alongside the half-block cells the TUI/GPU fall back to.
-    assert_eq!(g.cells[0].ch, '\u{2580}');
+    assert_eq!(cells(&g)[0].ch, '\u{2580}');
     // Clearing the screen drops placed images.
     g.clear_all();
     assert!(g.images().is_empty());
@@ -3158,9 +3313,9 @@ fn render_sixel_transparent_lower_half_uses_default_bg() {
     };
     let mut g = Grid::new(80, 24);
     g.render_sixel(&img);
-    assert_eq!(g.cells[0].ch, '\u{2580}');
-    assert_eq!(g.cells[0].fg, 0xFF0000);
-    assert_eq!(g.cells[0].bg, DEFAULT_BG);
+    assert_eq!(cells(&g)[0].ch, '\u{2580}');
+    assert_eq!(cells(&g)[0].fg, 0xFF0000);
+    assert_eq!(cells(&g)[0].bg, DEFAULT_BG);
 }
 
 #[test]
@@ -3182,9 +3337,9 @@ fn render_sixel_shrinks_to_fit_width() {
     };
     let mut g = Grid::new(2, 24);
     g.render_sixel(&img);
-    assert_eq!(g.cells[0].fg, 0xFF0000); // sampled source col 0
-    assert_eq!(g.cells[1].fg, 0x00FF00); // sampled source col 2
-    assert_eq!(g.cells[0].ch, '\u{2580}');
+    assert_eq!(cells(&g)[0].fg, 0xFF0000); // sampled source col 0
+    assert_eq!(cells(&g)[1].fg, 0x00FF00); // sampled source col 2
+    assert_eq!(cells(&g)[0].ch, '\u{2580}');
 }
 
 #[test]
@@ -3198,8 +3353,8 @@ fn render_sixel_taller_than_screen_scrolls() {
     };
     let mut g = Grid::new(2, 2);
     g.render_sixel(&img);
-    assert_eq!(g.cells[0].ch, '\u{2580}');
-    assert_eq!(g.cells[0].fg, 0xFF0000);
+    assert_eq!(cells(&g)[0].ch, '\u{2580}');
+    assert_eq!(cells(&g)[0].fg, 0xFF0000);
     assert!(!g.scrollback.is_empty()); // rows scrolled into history
     assert_eq!(g.cursor, (0, 1));
 }
@@ -3209,9 +3364,9 @@ fn dcs_sixel_renders_into_grid() {
     // DCS `q` + define-red + all-bits column + ST. The image (1×6 red) renders
     // as upper-half blocks; the sixel data never leaks as text.
     let g = parse(b"\x1bPq#0;2;100;0;0~\x1b\\", 80, 24);
-    assert_eq!(g.cells[0].ch, '\u{2580}');
-    assert_eq!(g.cells[0].fg, 0xFF0000);
-    assert_eq!(g.cells[0].bg, 0xFF0000); // 6 rows -> top and bottom both red
+    assert_eq!(cells(&g)[0].ch, '\u{2580}');
+    assert_eq!(cells(&g)[0].fg, 0xFF0000);
+    assert_eq!(cells(&g)[0].bg, 0xFF0000); // 6 rows -> top and bottom both red
     assert_eq!(g.cursor, (0, 3)); // 6px = 3 cell rows, cursor below
 }
 
@@ -3219,8 +3374,8 @@ fn dcs_sixel_renders_into_grid() {
 fn dcs_sixel_skips_leading_params() {
     // `DCS 0;1;0 q <data>`: the `q` final byte follows the numeric params.
     let g = parse(b"\x1bP0;1;0q#1~\x1b\\", 80, 24);
-    assert_eq!(g.cells[0].ch, '\u{2580}');
-    assert_eq!(g.cells[0].fg, 0x3333CC); // default palette register 1
+    assert_eq!(cells(&g)[0].ch, '\u{2580}');
+    assert_eq!(cells(&g)[0].fg, 0x3333CC); // default palette register 1
 }
 
 #[test]
@@ -3228,8 +3383,8 @@ fn dcs_non_sixel_is_ignored_not_leaked() {
     // A DECRQSS-style DCS (`$q…`) is not a Sixel: it's consumed and discarded,
     // and the following `X` prints normally at the origin.
     let g = parse(b"\x1bP$qm\x1b\\X", 80, 24);
-    assert_eq!(g.cells[0].ch, 'X');
-    assert!(g.cells.iter().all(|c| c.ch != '\u{2580}')); // nothing rendered
+    assert_eq!(cells(&g)[0].ch, 'X');
+    assert!(cells(&g).iter().all(|c| c.ch != '\u{2580}')); // nothing rendered
 }
 
 #[test]
@@ -3239,8 +3394,8 @@ fn dcs_sixel_split_across_chunks() {
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1bPq#0;2;0;100;0"); // introducer + partial data
     p.advance(&mut g, b"~\x1b\\"); // rest of data + ST
-    assert_eq!(g.cells[0].ch, '\u{2580}');
-    assert_eq!(g.cells[0].fg, 0x00FF00);
+    assert_eq!(cells(&g)[0].ch, '\u{2580}');
+    assert_eq!(cells(&g)[0].fg, 0x00FF00);
 }
 
 #[test]
@@ -3453,11 +3608,11 @@ fn iterm2_inline_jpeg_renders_image() {
     input.extend_from_slice(GRAY8_B64.as_bytes());
     input.push(0x07);
     let g = parse(&input, 20, 10);
-    assert_eq!(g.cells[0].ch, '\u{2580}'); // a half-block image cell
+    assert_eq!(cells(&g)[0].ch, '\u{2580}'); // a half-block image cell
     let (r, gn, b) = (
-        (g.cells[0].fg >> 16) & 0xff,
-        (g.cells[0].fg >> 8) & 0xff,
-        g.cells[0].fg & 0xff,
+        (cells(&g)[0].fg >> 16) & 0xff,
+        (cells(&g)[0].fg >> 8) & 0xff,
+        cells(&g)[0].fg & 0xff,
     );
     assert!(
         (118..=138).contains(&r) && r == gn && gn == b,
@@ -3473,13 +3628,13 @@ fn iterm2_non_inline_transfer_is_ignored() {
     input.extend_from_slice(GRAY8_B64.as_bytes());
     input.push(0x07);
     let g = parse(&input, 20, 10);
-    assert_eq!(g.cells[0].ch, ' ');
+    assert_eq!(cells(&g)[0].ch, ' ');
 }
 
 #[test]
 fn iterm2_non_file_subcommand_is_ignored() {
     let g = parse(b"\x1b]1337;SetUserVar=foo=YmFy\x07", 20, 10);
-    assert_eq!(g.cells[0].ch, ' ');
+    assert_eq!(cells(&g)[0].ch, ' ');
 }
 
 #[test]
@@ -3506,9 +3661,9 @@ fn iterm2_large_image_payload_is_not_truncated() {
 
     // 34px tall -> 17 cell rows; row 16 (the bottom) depends on late entropy.
     let bottom = 16 * 40;
-    assert_ne!(g.cells[bottom].ch, ' '); // an image actually rendered there
-    assert_eq!(g.cells[bottom].fg, gref.cells[bottom].fg);
-    assert_eq!(g.cells[0].fg, gref.cells[0].fg);
+    assert_ne!(cells(&g)[bottom].ch, ' '); // an image actually rendered there
+    assert_eq!(cells(&g)[bottom].fg, cells(&gref)[bottom].fg);
+    assert_eq!(cells(&g)[0].fg, cells(&gref)[0].fg);
 }
 
 #[test]
@@ -3537,7 +3692,7 @@ fn iterm2_width_hint_shrinks_the_image_footprint() {
         20,
         10,
     );
-    assert_ne!(g.cells[7].ch, ' ');
+    assert_ne!(cells(&g)[7].ch, ' ');
 
     // width=4 shrinks the footprint to 4 columns; nothing past it is touched.
     let g = parse(
@@ -3550,8 +3705,8 @@ fn iterm2_width_hint_shrinks_the_image_footprint() {
         20,
         10,
     );
-    assert_ne!(g.cells[3].ch, ' ');
-    assert_eq!(g.cells[4].ch, ' ');
+    assert_ne!(cells(&g)[3].ch, ' ');
+    assert_eq!(cells(&g)[4].ch, ' ');
 }
 
 #[test]
@@ -3567,7 +3722,7 @@ fn iterm2_height_hint_shrinks_the_row_footprint() {
         20,
         10,
     );
-    assert_ne!(g.cells[3 * 20].ch, ' ');
+    assert_ne!(cells(&g)[3 * 20].ch, ' ');
 
     // height=2 shrinks it to 2 cell rows; row 2 onward is never touched.
     let g = parse(
@@ -3580,8 +3735,8 @@ fn iterm2_height_hint_shrinks_the_row_footprint() {
         20,
         10,
     );
-    assert_ne!(g.cells[20].ch, ' '); // row 1 painted
-    assert_eq!(g.cells[2 * 20].ch, ' '); // row 2 untouched
+    assert_ne!(cells(&g)[20].ch, ' '); // row 1 painted
+    assert_eq!(cells(&g)[2 * 20].ch, ' '); // row 2 untouched
 }
 
 #[test]
@@ -3598,10 +3753,10 @@ fn iterm2_preserve_aspect_ratio_zero_stretches_to_both_axes() {
         20,
         10,
     );
-    assert_ne!(g.cells[4].ch, ' '); // col 4 (5th column) painted
-    assert_eq!(g.cells[5].ch, ' '); // col 5 not
-    assert_ne!(g.cells[2 * 20].ch, ' '); // row 2 (3rd row) painted
-    assert_eq!(g.cells[3 * 20].ch, ' '); // row 3 not
+    assert_ne!(cells(&g)[4].ch, ' '); // col 4 (5th column) painted
+    assert_eq!(cells(&g)[5].ch, ' '); // col 5 not
+    assert_ne!(cells(&g)[2 * 20].ch, ' '); // row 2 (3rd row) painted
+    assert_eq!(cells(&g)[3 * 20].ch, ' '); // row 3 not
 }
 
 #[test]
@@ -3612,8 +3767,8 @@ fn render_image_sized_contain_fits_within_both_axes_preserving_aspect() {
     // unused rather than stretching the image to fill it.
     let mut g = Grid::new(20, 10);
     g.render_image_sized(4, 2, &[Some(0xFF0000); 8], Some(4), Some(8), true);
-    assert_ne!(g.cells[3].ch, ' '); // all 4 requested columns painted
-    assert_eq!(g.cells[20].ch, ' '); // only 1 cell row used, not 8
+    assert_ne!(cells(&g)[3].ch, ' '); // all 4 requested columns painted
+    assert_eq!(cells(&g)[20].ch, ' '); // only 1 cell row used, not 8
 }
 
 #[test]
@@ -3632,8 +3787,8 @@ fn render_image_sized_clamps_absurd_height_hint() {
 fn kitty_raw_rgba_renders() {
     // f=32 (RGBA), 1×1 red, transmit+display. `/wAA/w==` = [ff,00,00,ff].
     let g = parse(b"\x1b_Gf=32,s=1,v=1,a=T;/wAA/w==\x1b\\", 80, 24);
-    assert_eq!(g.cells[0].ch, '\u{2580}');
-    assert_eq!(g.cells[0].fg, 0xFF0000);
+    assert_eq!(cells(&g)[0].ch, '\u{2580}');
+    assert_eq!(cells(&g)[0].fg, 0xFF0000);
     assert_eq!(g.cursor, (0, 1));
 }
 
@@ -3643,7 +3798,7 @@ fn kitty_query_is_answered_ok() {
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b_Gi=99,a=q;\x1b\\");
     assert_eq!(p.take_responses(), b"\x1b_Gi=99;OK\x1b\\");
-    assert_eq!(g.cells[0].ch, ' '); // a query renders nothing
+    assert_eq!(cells(&g)[0].ch, ' '); // a query renders nothing
 }
 
 #[test]
@@ -3651,10 +3806,10 @@ fn kitty_png_renders() {
     let cmd = b"\x1b_Gf=100,a=T;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR42mP4z8DwHwyBNAgwAABIyQj4xTT9BQAAAABJRU5ErkJggg==\x1b\\";
     let g = parse(cmd, 80, 24);
     // 2×2: row0 red,green; row1 blue,transparent -> one half-block cell row.
-    assert_eq!(g.cells[0].ch, '\u{2580}');
-    assert_eq!(g.cells[0].fg, 0xFF0000); // top-left red
-    assert_eq!(g.cells[0].bg, 0x0000FF); // bottom-left blue
-    assert_eq!(g.cells[1].fg, 0x00FF00); // top-right green
+    assert_eq!(cells(&g)[0].ch, '\u{2580}');
+    assert_eq!(cells(&g)[0].fg, 0xFF0000); // top-left red
+    assert_eq!(cells(&g)[0].bg, 0x0000FF); // bottom-left blue
+    assert_eq!(cells(&g)[1].fg, 0x00FF00); // top-right green
 }
 
 #[test]
@@ -3664,8 +3819,8 @@ fn kitty_chunked_transmission_accumulates() {
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b_Gf=32,s=1,v=1,a=T,m=1;/wAA\x1b\\");
     p.advance(&mut g, b"\x1b_Gm=0;/w==\x1b\\");
-    assert_eq!(g.cells[0].ch, '\u{2580}');
-    assert_eq!(g.cells[0].fg, 0xFF0000);
+    assert_eq!(cells(&g)[0].ch, '\u{2580}');
+    assert_eq!(cells(&g)[0].fg, 0xFF0000);
 }
 
 #[test]
@@ -3688,7 +3843,8 @@ fn kitty_oversized_chunk_reports_failure_not_truncated_render() {
     }
     p.advance(&mut g, b"\x1b_Gm=0;\x1b\\"); // final chunk
     assert_eq!(
-        g.cells[0].ch, ' ',
+        cells(&g)[0].ch,
+        ' ',
         "no image rendered from truncated payload"
     );
     assert_eq!(p.take_responses(), b"\x1b_Gi=7;EBADF\x1b\\");
@@ -3698,7 +3854,7 @@ fn kitty_oversized_chunk_reports_failure_not_truncated_render() {
 fn kitty_non_graphics_apc_ignored() {
     // An APC not starting with `G` is consumed, not decoded; `X` then prints.
     let g = parse(b"\x1b_Zhello\x1b\\X", 80, 24);
-    assert_eq!(g.cells[0].ch, 'X');
+    assert_eq!(cells(&g)[0].ch, 'X');
 }
 
 #[cfg(feature = "l13")]
@@ -4520,10 +4676,10 @@ fn themed_parser_writes_text_in_theme_colors() {
     g.apply_theme(&test_theme());
     let mut p = AnsiParser::with_theme(test_theme());
     p.advance(&mut g, b"hi\x1b[31mr");
-    let c = g.cells[0];
+    let c = cells(&g)[0];
     assert_eq!(c.fg, 0xd8d8d8, "plain text uses the themed default fg");
     assert_eq!(c.bg, 0x1d1f21, "plain text uses the themed default bg");
-    let r = g.cells[2];
+    let r = cells(&g)[2];
     assert_eq!(r.fg, 0xcc6666, "SGR 31 resolves through the themed palette");
 }
 
@@ -4532,11 +4688,11 @@ fn themed_grid_erases_in_theme_background() {
     let mut g = Grid::new(4, 2);
     g.apply_theme(&test_theme());
     // Untouched (startup) cells already carry the themed colors...
-    assert_eq!(g.cells[0].bg, 0x1d1f21);
+    assert_eq!(cells(&g)[0].bg, 0x1d1f21);
     // ...and so do cells cleared after output (ED 2).
     let mut p = AnsiParser::with_theme(test_theme());
     p.advance(&mut g, b"xx\x1b[2J");
-    assert_eq!(g.cells[0].bg, 0x1d1f21, "ED fills with the themed bg");
+    assert_eq!(cells(&g)[0].bg, 0x1d1f21, "ED fills with the themed bg");
 }
 
 #[test]
@@ -4546,7 +4702,7 @@ fn ris_restores_theme_not_builtin() {
     let mut p = AnsiParser::with_theme(test_theme());
     // The child sets its own colors (OSC 10/11), then fully resets.
     p.advance(&mut g, b"\x1b]10;#ffffff\x07\x1b]11;#000000\x07\x1b\x63x");
-    let c = g.cells[0];
+    let c = cells(&g)[0];
     assert_eq!(
         c.fg, 0xd8d8d8,
         "RIS returns to the configured fg, not white"
@@ -4563,7 +4719,7 @@ fn osc_110_111_reset_to_theme() {
     g.apply_theme(&test_theme());
     let mut p = AnsiParser::with_theme(test_theme());
     p.advance(&mut g, b"\x1b]10;#123456\x07\x1b]110\x07\x1b]111\x07x");
-    let c = g.cells[0];
+    let c = cells(&g)[0];
     assert_eq!(c.fg, 0xd8d8d8, "OSC 110 restores the themed fg");
     assert_eq!(c.bg, 0x1d1f21, "OSC 111 restores the themed bg");
 }
@@ -4576,7 +4732,8 @@ fn osc_104_resets_palette_to_theme() {
     // the *themed* red, not the stock xterm 0x800000.
     p.advance(&mut g, b"\x1b]4;1;#0000ff\x07\x1b]104;1\x07\x1b[31mx");
     assert_eq!(
-        g.cells[0].fg, 0xcc6666,
+        cells(&g)[0].fg,
+        0xcc6666,
         "OSC 104 restores the themed index 1"
     );
 }
@@ -4617,12 +4774,12 @@ fn retheme_recolors_existing_content() {
     let old = p.retheme(new);
     assert_eq!(old, test_theme(), "retheme returns the previous seed");
     g.retheme(&old, &new);
-    assert_eq!(g.cells[0].fg, 0x111111, "plain text recolored to new fg");
-    assert_eq!(g.cells[0].bg, 0x222222, "bg recolored");
-    assert_eq!(g.cells[2].fg, 0x333333, "ANSI red remapped to new red");
+    assert_eq!(cells(&g)[0].fg, 0x111111, "plain text recolored to new fg");
+    assert_eq!(cells(&g)[0].bg, 0x222222, "bg recolored");
+    assert_eq!(cells(&g)[2].fg, 0x333333, "ANSI red remapped to new red");
     // New output uses the new theme immediately.
     p.advance(&mut g, b"\x1b[0mx");
-    assert_eq!(g.cells[3].fg, 0x111111);
+    assert_eq!(cells(&g)[3].fg, 0x111111);
 }
 
 #[test]
@@ -4636,13 +4793,17 @@ fn retheme_preserves_truecolor_and_child_overrides() {
     new.palette16[2] = 0x444444;
     let old = p.retheme(new);
     g.retheme(&old, &new);
-    assert_eq!(g.cells[0].fg, 0x010203, "truecolor passes through retheme");
+    assert_eq!(
+        cells(&g)[0].fg,
+        0x010203,
+        "truecolor passes through retheme"
+    );
     // The child's own OSC 4 green is kept (not stomped to the new theme's).
     p.advance(&mut g, b"\x1b[32mG");
-    assert_eq!(g.cells[2].fg, 0xabcdef, "child palette override survives");
+    assert_eq!(cells(&g)[2].fg, 0xabcdef, "child palette override survives");
     // And a reset returns to the *new* theme, not the old one.
     p.advance(&mut g, b"\x1b]104;2\x07\x1b[32mz");
-    assert_eq!(g.cells[3].fg, 0x444444, "reset lands on the new theme");
+    assert_eq!(cells(&g)[3].fg, 0x444444, "reset lands on the new theme");
 }
 
 #[test]
@@ -4775,8 +4936,8 @@ fn bel_flags_bell_and_relays_to_host() {
     assert!(g.bell);
     assert_eq!(g.take_host_out(), b"\x07");
     // Text around the BEL still prints normally.
-    assert_eq!(g.cells[0].ch, 'b');
-    assert_eq!(g.cells[6].ch, 'a');
+    assert_eq!(cells(&g)[0].ch, 'b');
+    assert_eq!(cells(&g)[6].ch, 'a');
     // RIS clears the pending ring.
     p.advance(&mut g, b"\x1bc");
     assert!(!g.bell);
@@ -5231,7 +5392,7 @@ fn parser_survives_deterministic_byte_soup() {
         let _ = g.take_host_out();
     }
     // The grid must still be internally consistent enough to render.
-    assert_eq!(g.cells.len(), g.cols * g.rows);
+    assert_eq!(cells(&g).len(), g.cols * g.rows);
     let _ = g.snapshot_viewport();
 }
 
@@ -5321,15 +5482,15 @@ fn decsca_protects_cells_from_selective_erase() {
     p.advance(&mut g, b"\x1b[1\"qkeep\x1b[0\"qdrop");
     // DECSEL 2 (whole line, selective): only "drop" goes.
     p.advance(&mut g, b"\x1b[?2K");
-    let row: String = (0..8).map(|x| g.cells[x].ch).collect();
+    let row: String = (0..8).map(|x| cells(&g)[x].ch).collect();
     assert_eq!(row, "keep    ");
     // SGR 0 must NOT clear protection (it's not a rendition attribute).
     p.advance(&mut g, b"\x1b[H\x1b[1\"q\x1b[0mSAFE\x1b[?2K");
-    let row: String = (0..4).map(|x| g.cells[x].ch).collect();
+    let row: String = (0..4).map(|x| cells(&g)[x].ch).collect();
     assert_eq!(row, "SAFE");
     // Plain EL still erases everything, protected or not.
     p.advance(&mut g, b"\x1b[2K");
-    assert_eq!(g.cells[0].ch, ' ');
+    assert_eq!(cells(&g)[0].ch, ' ');
 }
 
 #[test]
@@ -5338,14 +5499,14 @@ fn decsed_erases_display_selectively() {
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b[1\"qAA\x1b[0\"qbb\r\ncc\r\ndd");
     p.advance(&mut g, b"\x1b[H\x1b[?2J"); // selective erase all
-    assert_eq!(g.cells[0].ch, 'A');
-    assert_eq!(g.cells[1].ch, 'A');
-    assert_eq!(g.cells[2].ch, ' '); // "bb" gone
-    assert_eq!(g.cells[g.cols].ch, ' '); // "cc" gone
+    assert_eq!(cells(&g)[0].ch, 'A');
+    assert_eq!(cells(&g)[1].ch, 'A');
+    assert_eq!(cells(&g)[2].ch, ' '); // "bb" gone
+    assert_eq!(cells(&g)[g.cols].ch, ' '); // "cc" gone
     // DECSTR resets the protection state for subsequent writes.
     p.advance(&mut g, b"\x1b[!p");
     p.advance(&mut g, b"xx\x1b[?2K");
-    assert_eq!(g.cells[0].ch, ' ');
+    assert_eq!(cells(&g)[0].ch, ' ');
 }
 
 #[test]
@@ -5379,9 +5540,9 @@ fn side_margins_confine_wrap_cr_and_scrolling() {
     // (abcdef / ghijkl / mnopqr) and the 's' wraps at the band bottom,
     // scrolling the band once — "abcdef" leaves, sentinels never move.
     p.advance(&mut g, b"\x1b[1;3Habcdefghijklmnopqrs");
-    assert_eq!(g.cells[0].ch, 'L');
-    assert_eq!(g.cells[9].ch, 'R');
-    let band = |row: usize| -> String { (2..8).map(|x| g.cells[row * g.cols + x].ch).collect() };
+    assert_eq!(cells(&g)[0].ch, 'L');
+    assert_eq!(cells(&g)[9].ch, 'R');
+    let band = |row: usize| -> String { (2..8).map(|x| cells(&g)[row * g.cols + x].ch).collect() };
     assert_eq!(band(0), "ghijkl");
     assert_eq!(band(1), "mnopqr");
     assert_eq!(band(2), "s     ");
@@ -5403,16 +5564,16 @@ fn side_margins_limit_il_dl_to_the_band() {
     p.advance(&mut g, b"\x1b[?69h\x1b[3;8s\x1b[2;3H"); // margins 2..=7, cursor row 1 in band
     p.advance(&mut g, b"\x1b[1L"); // IL: shift band rows 1.. down
     // Outside the margins row 1 keeps its 'b's; inside it blanked.
-    assert_eq!(g.cells[g.cols].ch, 'b');
-    assert_eq!(g.cells[g.cols + 2].ch, ' ');
+    assert_eq!(cells(&g)[g.cols].ch, 'b');
+    assert_eq!(cells(&g)[g.cols + 2].ch, ' ');
     // The old band content of row 1 moved to row 2.
-    assert_eq!(g.cells[2 * g.cols + 2].ch, 'b');
+    assert_eq!(cells(&g)[2 * g.cols + 2].ch, 'b');
     // DL undoes it.
     p.advance(&mut g, b"\x1b[1M");
-    assert_eq!(g.cells[g.cols + 2].ch, 'b');
+    assert_eq!(cells(&g)[g.cols + 2].ch, 'b');
     // IL with the cursor outside the side margins is a no-op.
     p.advance(&mut g, b"\x1b[2;1H\x1b[1L");
-    assert_eq!(g.cells[g.cols + 2].ch, 'b');
+    assert_eq!(cells(&g)[g.cols + 2].ch, 'b');
 }
 
 #[test]
@@ -5431,8 +5592,8 @@ fn delete_lines_with_side_margins_and_cursor_at_top_does_not_panic() {
     p.advance(&mut g, b"\x1b[?69h\x1b[3;8s\x1b[1;3H"); // margins cols 2..=7 (0-based), cursor row 0 in band
     p.advance(&mut g, b"\x1b[9999M"); // DL count far exceeding the region height
     // The whole band is blanked; outside the margins is untouched.
-    assert_eq!(g.cells[2].ch, ' ');
-    assert_eq!(g.cells[0].ch, 'a'); // col 0, outside the left margin, unaffected
+    assert_eq!(cells(&g)[2].ch, ' ');
+    assert_eq!(cells(&g)[0].ch, 'a'); // col 0, outside the left margin, unaffected
 }
 
 #[test]
@@ -5456,10 +5617,10 @@ fn kitty_store_and_put_render_by_id() {
     // a=t stores without rendering; a=p places by id.
     p.advance(&mut g, b"\x1b_Gf=32,s=1,v=1,a=t,i=7;/wAA/w==\x1b\\");
     assert_eq!(p.take_responses(), b"\x1b_Gi=7;OK\x1b\\");
-    assert_eq!(g.cells[0].ch, ' ', "transmit-only draws nothing");
+    assert_eq!(cells(&g)[0].ch, ' ', "transmit-only draws nothing");
     p.advance(&mut g, b"\x1b_Ga=p,i=7;\x1b\\");
-    assert_eq!(g.cells[0].ch, '\u{2580}');
-    assert_eq!(g.cells[0].fg, 0xFF0000);
+    assert_eq!(cells(&g)[0].ch, '\u{2580}');
+    assert_eq!(cells(&g)[0].fg, 0xFF0000);
     // Placing an unknown id is an error.
     p.advance(&mut g, b"\x1b_Ga=p,i=8;\x1b\\");
     let _ = p.take_responses();
@@ -5478,7 +5639,7 @@ fn kitty_virtual_placement_and_placeholder_decode() {
         &mut g,
         b"\x1b_Gf=32,s=1,v=1,a=T,U=1,i=42,c=2,r=2;/wAA/w==\x1b\\",
     );
-    assert_eq!(g.cells[0].ch, ' ', "a virtual placement draws no cells");
+    assert_eq!(cells(&g)[0].ch, ' ', "a virtual placement draws no cells");
     assert_eq!(g.kitty_virtual_geometry(42), Some((2, 2)));
     // The app prints placeholders: fg encodes the id, diacritics row/col.
     // DIACRITICS[0]=U+0305 (0), DIACRITICS[1]=U+030D (1).
@@ -5703,7 +5864,7 @@ fn iterm2_inline_webp_renders_cells() {
     input.push(0x07);
     p.advance(&mut g, &input);
     // 16x16 -> 16 cols x 8 half-block rows of image cells from the origin.
-    assert_eq!(g.cells[0].ch, '\u{2580}', "half-block cell painted");
+    assert_eq!(cells(&g)[0].ch, '\u{2580}', "half-block cell painted");
 }
 
 /// 64x48 photo-like lossless WebP (sine/cosine gradients + quadratic blue):
@@ -6072,7 +6233,7 @@ const BCE_BG: u32 = 0x008000;
 /// Assert every cell of row `y` in `xs` is a blank BCE cell.
 fn assert_bce(g: &Grid, y: usize, xs: std::ops::Range<usize>, what: &str) {
     for x in xs {
-        let c = g.cells[y * g.cols + x];
+        let c = g.row(y)[x];
         assert_eq!(
             (c.ch, c.bg, c.fg, c.flags),
             (' ', BCE_BG, DEFAULT_FG, 0),
@@ -6150,7 +6311,7 @@ fn bce_follows_sgr_reset_and_default_background() {
         input.extend_from_slice(b"\x1b[2J");
         let g = parse(&input, 4, 1);
         assert!(
-            g.cells.iter().all(|c| c.bg == DEFAULT_BG),
+            cells(&g).iter().all(|c| c.bg == DEFAULT_BG),
             "after {reset:?}"
         );
     }
@@ -6161,7 +6322,7 @@ fn bce_follows_sgr_reset_and_default_background() {
         input.extend_from_slice(b"\x1b[2J");
         let g = parse(&input, 4, 1);
         assert!(
-            g.cells.iter().all(|c| c.bg == DEFAULT_BG),
+            cells(&g).iter().all(|c| c.bg == DEFAULT_BG),
             "after {reset:?}"
         );
     }
@@ -6173,7 +6334,7 @@ fn bce_keeps_attributes_and_foreground_out_of_erased_cells() {
     assert_bce(&parse(b"\x1b[1;7;31;42m\x1b[2K", 6, 1), 0, 0..6, "attrs");
     // Truecolor and 256-color backgrounds erase with that exact color.
     let g = parse(b"\x1b[48;2;1;2;3m\x1b[K", 4, 1);
-    assert!(g.cells.iter().all(|c| c.bg == 0x010203));
+    assert!(cells(&g).iter().all(|c| c.bg == 0x010203));
 }
 
 #[test]
@@ -6181,7 +6342,7 @@ fn bce_does_not_apply_to_resize_fill() {
     // Growing the grid is not an erase: new cells use the default background.
     let mut g = parse(b"\x1b[42m", 4, 1);
     g.resize(6, 2);
-    assert!(g.cells[4..].iter().all(|c| c.bg == DEFAULT_BG));
+    assert!(cells(&g)[4..].iter().all(|c| c.bg == DEFAULT_BG));
 }
 
 // ---- Legacy (wcwidth) widths by default; DEC mode 2027 opt-in, #855 ----
@@ -6196,15 +6357,15 @@ fn default_widths_follow_wcwidth_per_code_point() {
     // 👍 (2) + skin tone (2) + b: the modifier takes its own two columns.
     let g = parse("a👍\u{1f3fd}b".as_bytes(), 20, 1);
     assert_eq!(g.cursor, (6, 0));
-    assert_eq!(g.cells[1].ch, '👍');
-    assert_eq!(g.cells[3].ch, '\u{1f3fd}');
-    assert_eq!(g.cells[5].ch, 'b');
+    assert_eq!(cells(&g)[1].ch, '👍');
+    assert_eq!(cells(&g)[3].ch, '\u{1f3fd}');
+    assert_eq!(cells(&g)[5].ch, 'b');
     // A flag is two regional indicators of two columns each (vim and
     // Ghostty; glibc's wcwidth says 1).
     let g = parse("a🇯🇵b".as_bytes(), 20, 1);
     assert_eq!(g.cursor, (6, 0));
     assert_eq!(
-        (g.cells[1].ch, g.cells[3].ch, g.cells[5].ch),
+        (cells(&g)[1].ch, cells(&g)[3].ch, cells(&g)[5].ch),
         ('🇯', '🇵', 'b')
     );
 }
@@ -6219,7 +6380,7 @@ fn default_zero_width_scalars_attach_to_the_left_glyph() {
     // (2 + 0 + 2 = 4 columns, as wcwidth counts).
     let g = parse("👨\u{200d}💻".as_bytes(), 20, 1);
     assert_eq!(glyph(&g, 0, 0), "👨\u{200d}");
-    assert_eq!(g.cells[2].ch, '💻');
+    assert_eq!(cells(&g)[2].ch, '💻');
     assert_eq!(g.cursor, (4, 0));
 }
 
@@ -6250,7 +6411,7 @@ fn ris_resets_mode_2027_and_decstr_keeps_it() {
 fn mode_2027_flag_is_one_two_column_glyph() {
     let g = parse("\x1b[?2027ha🇯🇵b".as_bytes(), 20, 1);
     assert_eq!(glyph(&g, 1, 0), "🇯🇵");
-    assert_ne!(g.cells[2].flags & WIDE_TRAILER, 0);
+    assert_ne!(cells(&g)[2].flags & WIDE_TRAILER, 0);
     assert_eq!(g.cursor, (4, 0));
 }
 

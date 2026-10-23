@@ -13,9 +13,12 @@
 # unicode 528.0.
 # wcwidth widths (grapheme segmentation only under mode 2027): unicode_heavy
 # measured 255.9.
+# Ring-buffer scroll (rows rotate, scrollback lines recycled), measured:
+# alt 848.2, ascii 193.2, cursor 127.3, scroll 258.6, sgr 207.8, unicode
+# 166.8. alt and cursor keep their ceilings.
 alt_screen_flicker   920
-ascii_throughput     415
+ascii_throughput     213
 cursor_thrash        137
-scroll_heavy        1100
-sgr_churn            472
-unicode_heavy        282
+scroll_heavy         285
+sgr_churn            229
+unicode_heavy        184
