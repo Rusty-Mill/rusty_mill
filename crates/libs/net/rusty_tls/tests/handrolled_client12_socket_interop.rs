@@ -175,7 +175,7 @@ struct Server {
     port: u16,
     _files: Files,
     /// Held open so `s_server` never meets a closed pipe when it logs.
-    _stdout: std::io::BufReader<std::process::ChildStdout>,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
 }
 
 impl Drop for Server {
@@ -193,16 +193,31 @@ fn free_port() -> u16 {
         .port()
 }
 
+#[derive(Clone, Copy, Debug)]
+enum TlsVersion {
+    Tls12,
+    Tls13,
+}
+
+impl TlsVersion {
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Tls12 => "-tls1_2",
+            Self::Tls13 => "-tls1_3",
+        }
+    }
+}
+
 /// Start `openssl s_server -www` with extra arguments, and wait until it
 /// accepts connections.
-fn serve(pki: &Pki, extra: &[&str]) -> Server {
+fn serve(pki: &Pki, version: TlsVersion, extra: &[&str]) -> Server {
     // A free port is found by binding and letting go of it, which another test
     // in this process (or another suite) can take before `s_server` binds it.
     // That is a property of the harness, not of the engine, so a failed start
     // is retried on a fresh port before it is reported.
     let mut last = String::new();
     for _ in 0..5 {
-        match try_serve(pki, extra) {
+        match try_serve(pki, version, extra) {
             Ok(server) => return server,
             Err(why) => last = why,
         }
@@ -210,7 +225,7 @@ fn serve(pki: &Pki, extra: &[&str]) -> Server {
     panic!("{last}");
 }
 
-fn try_serve(pki: &Pki, extra: &[&str]) -> Result<Server, String> {
+fn try_serve(pki: &Pki, version: TlsVersion, extra: &[&str]) -> Result<Server, String> {
     let files = Files::new(pki);
     let port = free_port();
     let child = Command::new("openssl")
@@ -218,7 +233,7 @@ fn try_serve(pki: &Pki, extra: &[&str]) -> Result<Server, String> {
         .args(["-cert", &files.path("leaf.pem")])
         .args(["-cert_chain", &files.path("root.pem")])
         .args(["-key", &files.path("key.pem")])
-        .args(["-tls1_2", "-no_ticket", "-www"])
+        .args([version.flag(), "-no_ticket", "-www"])
         .args(extra)
         .stdout(Stdio::piped())
         .stderr(Stdio::from(
@@ -228,7 +243,15 @@ fn try_serve(pki: &Pki, extra: &[&str]) -> Result<Server, String> {
         .expect("openssl s_server starts");
 
     let mut child = child;
-    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+    let stdout = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+    // Own the child before reading readiness, so every startup error also
+    // kills/reaps it and removes its files before a fresh-port retry.
+    let mut server = Server {
+        child,
+        port,
+        _files: files,
+        stdout,
+    };
     // Without `-quiet`, `s_server` prints `ACCEPT` once it is listening. That
     // is the readiness signal: probing with a connection is a handshake that
     // never completes, which `s_server` does not always survive, and it showed
@@ -236,24 +259,21 @@ fn try_serve(pki: &Pki, extra: &[&str]) -> Result<Server, String> {
     let mut line = String::new();
     loop {
         line.clear();
-        let n = std::io::BufRead::read_line(&mut stdout, &mut line)
-            .map_err(|e| format!("s_server output: {e}"))?;
-        if n == 0 {
-            let why = std::fs::read_to_string(files.0.join("stderr.txt")).unwrap_or_default();
-            return Err(format!(
-                "openssl s_server exited before listening on port {port}: {extra:?}\n{why}"
-            ));
-        }
-        if line.starts_with("ACCEPT") {
-            break;
-        }
+        let result = std::io::BufRead::read_line(&mut server.stdout, &mut line);
+        let why = match result {
+            Ok(0) => "exited before listening".to_string(),
+            Ok(_) if line.starts_with("ACCEPT") => return Ok(server),
+            Ok(_) => continue,
+            Err(e) => format!("reading readiness: {e}"),
+        };
+        let status = server.child.try_wait();
+        let stderr = std::fs::read_to_string(server._files.0.join("stderr.txt"))
+            .unwrap_or_else(|e| format!("could not read stderr: {e}"));
+        return Err(format!(
+            "openssl s_server {why} on port {port}: {} {extra:?}; status: {status:?}\nstderr:\n{stderr}",
+            version.flag(),
+        ));
     }
-    Ok(Server {
-        child,
-        port,
-        _files: files,
-        _stdout: stdout,
-    })
 }
 
 fn read_record(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
@@ -337,7 +357,7 @@ fn run(
     suites: &[CipherSuite12],
     groups: &[NamedGroup],
 ) -> Result<Reply, Talk> {
-    let server = serve(pki, extra);
+    let server = serve(pki, TlsVersion::Tls12, extra);
     let anchors = anchors(pki);
     let config = ClientConfig12 {
         server_name: ServerName::Dns(SERVER),
@@ -551,6 +571,7 @@ fn ed25519_is_verified_against_openssl() {
     let (pki, now) = ed25519_via_openssl();
     let server = serve(
         &pki,
+        TlsVersion::Tls12,
         &[
             "-cipher",
             "ECDHE-ECDSA-AES128-GCM-SHA256",
@@ -659,6 +680,7 @@ fn a_required_client_certificate_is_presented_and_accepted() {
         std::fs::write(&client_root, &client_pki.root_pem).expect("client CA");
         let server = serve(
             &server_pki,
+            TlsVersion::Tls12,
             &["-Verify", "1", "-CAfile", &client_root.to_string_lossy()],
         );
 
@@ -686,30 +708,11 @@ fn a_required_client_certificate_is_presented_and_accepted() {
 #[test]
 #[ignore = "needs the openssl binary; CI runs it with --ignored"]
 fn a_tls13_only_openssl_refuses_with_a_protocol_version_alert() {
-    // `serve` passes -tls1_2 first; the later flag wins for the version range.
     let outcome = {
         let pki = pki(Leaf::P256, SERVER);
-        let files = Files::new(&pki);
-        let port = free_port();
-        let mut child = Command::new("openssl")
-            .args(["s_server", "-accept", &port.to_string()])
-            .args([
-                "-cert",
-                &files.path("leaf.pem"),
-                "-key",
-                &files.path("key.pem"),
-            ])
-            .args(["-tls1_3", "-www", "-quiet"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("openssl");
-        for _ in 0..100 {
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        // Use ACCEPT readiness: a throwaway TCP probe can terminate s_server
+        // before the real TLS 1.2 client reaches its TLS 1.3-only listener.
+        let server = serve(&pki, TlsVersion::Tls13, &[]);
         let anchors = anchors(&pki);
         let config = ClientConfig12 {
             server_name: ServerName::Dns(SERVER),
@@ -720,10 +723,7 @@ fn a_tls13_only_openssl_refuses_with_a_protocol_version_alert() {
             identity: None,
             alpn: &[],
         };
-        let outcome = talk(port, &config);
-        let _ = child.kill();
-        let _ = child.wait();
-        outcome
+        talk(server.port, &config)
     };
     match outcome {
         Err(Talk::Refused(ClientError::PeerAlert(alert))) => {
@@ -736,6 +736,26 @@ fn a_tls13_only_openssl_refuses_with_a_protocol_version_alert() {
             "expected the peer's alert, got {:?}",
             other.map(|r| r.response)
         ),
+    }
+}
+
+/// A failed start must surface the command context and OpenSSL's stderr,
+/// rather than returning a port whose first connection will be refused.
+#[test]
+#[ignore = "needs the openssl binary; CI runs it with --ignored"]
+fn openssl_startup_failure_reports_diagnostics() {
+    let pki = pki(Leaf::P256, SERVER);
+    for version in [TlsVersion::Tls12, TlsVersion::Tls13] {
+        let extra = ["-cipher", "rusty_tls_invalid_cipher"];
+        let why = match try_serve(&pki, version, &extra) {
+            Ok(_) => panic!("an invalid cipher must prevent startup"),
+            Err(why) => why,
+        };
+        assert!(why.contains("exited before listening on port"), "{why}");
+        assert!(why.contains(version.flag()), "{why}");
+        assert!(why.contains("rusty_tls_invalid_cipher"), "{why}");
+        assert!(why.contains("status:"), "{why}");
+        assert!(why.contains("no cipher match"), "{why}");
     }
 }
 
