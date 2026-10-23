@@ -1,0 +1,219 @@
+//! `rusty-mux <socket> [block]`: attach this terminal to a rusty_mux block.
+//! Without a block id it creates a session, window and block first. Ctrl-]
+//! detaches; the block keeps running and its id is printed for reattaching.
+
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.is_empty() || args.len() > 2 {
+        eprintln!("usage: rusty-mux <socket> [block]");
+        return ExitCode::from(2);
+    }
+    match client::run(&args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("rusty-mux: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod client {
+    pub fn run(_args: &[std::ffi::OsString]) -> Result<(), String> {
+        Err("the Phase 1 client runs on Linux only".into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod client {
+    use std::ffi::OsString;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    use platform::term::Terminal;
+    use platform_linux::LinuxTerminal;
+    use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
+    use rusty_mux_proto::{Features, Message};
+    use rusty_mux_tui::{Conn, paint};
+    use rusty_term_core::Grid;
+    use rusty_uuid::Uuid;
+
+    /// Ctrl-]: detach.
+    const DETACH: u8 = 0x1d;
+
+    pub fn run(args: &[OsString]) -> Result<(), String> {
+        let stream = UnixStream::connect(&args[0]).map_err(|e| format!("connecting: {e}"))?;
+        let mut conn = Conn::new(stream.try_clone().map_err(|e| e.to_string())?);
+        let mut term = LinuxTerminal::new();
+        let win = term
+            .window_size()
+            .map_err(|e| format!("terminal size: {e:?}"))?;
+        // A pty nobody sized reports 0x0; fall back to the classic 80x24.
+        let size = Size::new(win.cols, win.rows)
+            .or_else(|_| Size::new(80, 24))
+            .map_err(|e| e.to_string())?;
+
+        conn.send(&Message::Hello {
+            features: Features::NONE,
+        })
+        .map_err(|e| e.to_string())?;
+        let mut req = Requests {
+            conn: &mut conn,
+            next: 1,
+            held: Vec::new(),
+        };
+        req.welcome()?;
+        let block = match args.get(1) {
+            Some(id) => BlockId::from_uuid(parse_uuid(id)?),
+            None => req.create(size)?,
+        };
+        req.call(|req| Message::Attach { req, block })?;
+        let writer = req.call(|req| Message::AcquireLease { req, block }).is_ok();
+        if writer && let Err(err) = req.call(|req| Message::Resize { req, block, size }) {
+            eprintln!("rusty-mux: keeping the block's size: {err}");
+        }
+
+        let held = std::mem::take(&mut req.held);
+        term.enter_raw().map_err(|e| format!("raw mode: {e:?}"))?;
+        let output = std::thread::spawn(move || show(conn, held, block));
+        let result = forward(&term, stream, block, writer);
+        if let Err(err) = term.leave_raw() {
+            eprintln!("rusty-mux: restoring the terminal: {err:?}");
+        }
+        // Not joined: the output thread may sit in a read; exiting ends it.
+        drop(output);
+        println!("\r\nrusty-mux: detached from block {block}");
+        result
+    }
+
+    struct Requests<'a> {
+        conn: &'a mut Conn<UnixStream>,
+        next: u64,
+        /// Messages that arrived while waiting for a reply, such as the
+        /// snapshot that follows an attach, kept for [`show`].
+        held: Vec<Message>,
+    }
+
+    impl Requests<'_> {
+        fn welcome(&mut self) -> Result<(), String> {
+            match self.conn.recv().map_err(|e| e.to_string())? {
+                Message::Welcome { .. } => Ok(()),
+                other => Err(format!("expected Welcome, got {other:?}")),
+            }
+        }
+
+        /// Sends a request and waits for its reply, skipping everything else.
+        fn call(&mut self, make: impl FnOnce(u64) -> Message) -> Result<Option<Uuid>, String> {
+            let req = self.next;
+            self.next += 1;
+            self.conn.send(&make(req)).map_err(|e| e.to_string())?;
+            loop {
+                match self.conn.recv().map_err(|e| e.to_string())? {
+                    Message::Done { req: r, created } if r == req => return Ok(created),
+                    Message::Failed { req: r, reason } if r == req => return Err(reason),
+                    other => self.held.push(other),
+                }
+            }
+        }
+
+        fn create(&mut self, size: Size) -> Result<BlockId, String> {
+            let missing = || "the server did not return an id".to_string();
+            let session = SessionId::from_uuid(
+                self.call(|req| Message::CreateSession {
+                    req,
+                    name: "main".into(),
+                })?
+                .ok_or_else(missing)?,
+            );
+            let window = WindowId::from_uuid(
+                self.call(|req| Message::CreateWindow {
+                    req,
+                    session,
+                    name: "main".into(),
+                })?
+                .ok_or_else(missing)?,
+            );
+            let block = self
+                .call(|req| Message::CreateBlock { req, window, size })?
+                .ok_or_else(missing)?;
+            Ok(BlockId::from_uuid(block))
+        }
+    }
+
+    /// Server to screen: paint the snapshot, then pass raw output through.
+    fn show(mut conn: Conn<UnixStream>, held: Vec<Message>, block: BlockId) {
+        // Locked per write: the main thread prints the detach line when it is done.
+        let mut stdout = std::io::stdout();
+        let mut held = held.into_iter();
+        while let Some(message) = held.next().or_else(|| conn.recv().ok()) {
+            let bytes = match message {
+                Message::Snapshot { block: b, data } if b == block => {
+                    match Grid::decode_snapshot(&data) {
+                        Ok(grid) => paint(&grid),
+                        Err(err) => {
+                            format!("\r\nrusty-mux: bad snapshot: {err:?}\r\n").into_bytes()
+                        }
+                    }
+                }
+                Message::Output { block: b, data } if b == block => data,
+                Message::Event(rusty_mux_core::Event::BlockClosed { block: b }) if b == block => {
+                    return;
+                }
+                _ => continue,
+            };
+            if stdout
+                .write_all(&bytes)
+                .and_then(|()| stdout.flush())
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+
+    /// Keyboard to server, until Ctrl-] or the connection ends.
+    fn forward(
+        term: &LinuxTerminal,
+        stream: UnixStream,
+        block: BlockId,
+        writer: bool,
+    ) -> Result<(), String> {
+        let mut conn = Conn::new(stream);
+        let mut buf = [0u8; 4096];
+        let mut req = 1_000_000;
+        loop {
+            let n = term
+                .read_chunk(&mut buf)
+                .map_err(|e| format!("reading the keyboard: {e:?}"))?;
+            if n == 0 {
+                return Ok(());
+            }
+            let keys = &buf[..n];
+            let (keys, detach) = match keys.iter().position(|&b| b == DETACH) {
+                Some(at) => (&keys[..at], true),
+                None => (keys, false),
+            };
+            if writer && !keys.is_empty() {
+                req += 1;
+                let input = Message::Input {
+                    req,
+                    block,
+                    data: keys.to_vec(),
+                };
+                if conn.send(&input).is_err() {
+                    return Ok(());
+                }
+            }
+            if detach {
+                return Ok(());
+            }
+        }
+    }
+
+    fn parse_uuid(text: &OsString) -> Result<Uuid, String> {
+        let text = text.to_str().ok_or("block id is not UTF-8")?;
+        text.parse().map_err(|e| format!("block id: {e}"))
+    }
+}

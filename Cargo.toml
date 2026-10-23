@@ -105,6 +105,7 @@ members = [
     "crates/apps/rusty_mux/crates/core",
     "crates/apps/rusty_mux/crates/proto",
     "crates/apps/rusty_mux/crates/server",
+    "crates/apps/rusty_mux/crates/tui",
     "crates/apps/rusty_remind_me/crates/remind_me_core",
     "crates/apps/rusty_remind_me/crates/remind_me_mcp",
     "crates/apps/rusty_remind_me/crates/remind_me_api",

@@ -52,7 +52,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_sync | rusty_sync | A #![no_std] + alloc sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate | 3 |
 | foundation | rusty_time | rusty_time | A #![no_std] + alloc sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate | 7 |
 | foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 4 |
-| foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 17 |
+| foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 18 |
 | foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 10 |
 | foundation | rusty_wire | rusty_wire | A minimal, zero-dependency endian-explicit byte cursor Reader/Writer for Rust | 11 |
 | platform | portable-runtime | compat |  | 4 |
@@ -61,9 +61,9 @@ Families are the current directories immediately below `crates/`.
 | platform | portable-runtime | proc-runner |  | 0 |
 | platform | portable-runtime | pty-shell |  | 0 |
 | platform | portable-runtime | stat-tool |  | 0 |
-| platform | rustils | platform | Portable trait surface and types for rustils — the api layer. No I/O, no unsafe. | 20 |
+| platform | rustils | platform | Portable trait surface and types for rustils — the api layer. No I/O, no unsafe. | 21 |
 | platform | rustils | platform-bsd | BSD backend (net-only slice, rustils#48/#86): platform::net over libc for macOS, FreeBSD, OpenBSD, NetBSD and DragonFly, mirroring platform-linux's layering. | 2 |
-| platform | rustils | platform-linux | Linux backend: libc floor now (RFC v2 §2 D-2); raw-syscall Track P later, feature-gated. | 11 |
+| platform | rustils | platform-linux | Linux backend: libc floor now (RFC v2 §2 D-2); raw-syscall Track P later, feature-gated. | 12 |
 | platform | rustils | platform-mock | In-memory backend implementing every platform trait — the injectable test double (RFC v2 §4.1). | 6 |
 | platform | rustils | platform-parity | Shared behavior-spec assertion sets for the PAL parity suites. Test-support only; never a dependency of a shipped crate. | 4 |
 | platform | rustils | platform-windows | Windows backend: windows-sys floor (RFC v2 §2 D-1); typed handles and safe wrappers above it. | 4 |
@@ -156,7 +156,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_stream | rusty_stream | The workspace's async Stream trait, its combinators and the stream!/try_stream! macros -- the in-house replacement for futures, futures-util, futures-core and async-stream. | 0 |
 | libs | rusty_stream | rusty_stream-macros | The stream!/try_stream! proc macros for rusty_stream -- not meant to be depended on directly, use rusty_stream's re-exports. | 1 |
 | libs | rusty_term | rusty_term | A terminal emulator written from scratch in Rust, with a deliberately small dependency surface. | 2 |
-| libs | rusty_term | rusty_term_core | rusty_term's headless VT engine: parser, grid, scrollback and OSC handling, with no async runtime, PTY or renderer. | 2 |
+| libs | rusty_term | rusty_term_core | rusty_term's headless VT engine: parser, grid, scrollback and OSC handling, with no async runtime, PTY or renderer. | 3 |
 | libs | rusty_term | rusty_term_l13 | rusty_term's L13 structured side-channel: a private-OSC JSON-RPC transport hosting MCP + LSP/ACP negotiation, addressed against a narrow TerminalState trait rather than rusty_term's own Grid type. | 1 |
 | libs | rusty_tls | rusty_tls | A TLS library implementation in Rust | 10 |
 | libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 29 |
@@ -240,9 +240,10 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_mill_board | rusty_mill_board | Mill Board: a capability-gated kanban board for humans and agents, served over MCP and a live web UI. | 1 |
 | apps | rusty_mill_board | rusty_mill_runner | Optional runner for Mill Board: works cards through stages by running a configured agent command per column, sandboxed in a git worktree. | 0 |
 | apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends | 0 |
-| apps | rusty_mux | rusty_mux_core | rusty_mux's pure domain model: sessions, windows, blocks, clients, input leases and events. No I/O. | 2 |
-| apps | rusty_mux | rusty_mux_proto | rusty_mux's wire protocol: length-prefixed frames of tagged varint fields, with feature bits. No I/O. | 1 |
+| apps | rusty_mux | rusty_mux_core | rusty_mux's pure domain model: sessions, windows, blocks, clients, input leases and events. No I/O. | 3 |
+| apps | rusty_mux | rusty_mux_proto | rusty_mux's wire protocol: length-prefixed frames of tagged varint fields, with feature bits. No I/O. | 2 |
 | apps | rusty_mux | rusty_mux_server | rusty_mux's server: owns the PTYs, keeps one terminal per block, and tees raw output to attached clients over a Unix socket. | 0 |
+| apps | rusty_mux | rusty_mux_tui | Throwaway Phase 1 terminal client for rusty_mux: attaches the local terminal to one block over a Unix socket. | 0 |
 | apps | rusty_orch | orch-bbp | TaskHost adapter over the existing BBP CLI and moderator | 1 |
 | apps | rusty_orch | orch-claude | Orchestrator adapter: Agent::Claude over the Claude Code CLI, read-only tools, prompt on stdin, one schema-constrained JSON object out. | 1 |
 | apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 5 |
