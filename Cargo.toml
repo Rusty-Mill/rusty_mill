@@ -104,6 +104,7 @@ members = [
     "crates/libs/storage/rusty_multimodal_db_engine",
     "crates/apps/rusty_mux/crates/core",
     "crates/apps/rusty_mux/crates/proto",
+    "crates/apps/rusty_mux/crates/server",
     "crates/apps/rusty_remind_me/crates/remind_me_core",
     "crates/apps/rusty_remind_me/crates/remind_me_mcp",
     "crates/apps/rusty_remind_me/crates/remind_me_api",
@@ -946,6 +947,9 @@ remind_me_hub = { path = "crates/apps/rusty_remind_me/crates/remind_me_hub" }
 
 # rusty_mux family (docs/projects/mux/).
 rusty_mux_core = { path = "crates/apps/rusty_mux/crates/core" }
+rusty_mux_proto = { path = "crates/apps/rusty_mux/crates/proto" }
+# rusty_term's headless engine, for consumers that must not link its tokio front end.
+rusty_term_core = { path = "crates/libs/ui/rusty_term/core" }
 tracing-appender = "0.2"
 # Markdown parsing
 comrak = { version = "0.52", default-features = false, features = [] }
