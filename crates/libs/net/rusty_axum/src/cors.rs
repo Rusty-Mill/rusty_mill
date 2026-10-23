@@ -116,14 +116,35 @@ fn decorate(mut response: Response, allowed_origin: Option<String>) -> Response 
     if let Some(allowed) = allowed_origin {
         response = response.with_header("access-control-allow-origin", &allowed);
     }
-    if response.headers.get("vary").is_none() {
-        response = response.with_header("vary", VARY);
-    }
-    response
+    let vary = merge_vary(response.headers.get_all("vary"));
+    response.with_header("vary", &vary)
 }
 
 /// What a CORS answer depends on, so caches keep one per origin.
-const VARY: &str = "origin, access-control-request-method, access-control-request-headers";
+const VARY: [&str; 3] = [
+    "origin",
+    "access-control-request-method",
+    "access-control-request-headers",
+];
+
+/// The `Vary` value with the CORS fields added to what the response
+/// already varies on. `*` already covers everything and stays alone.
+fn merge_vary<'a>(existing: impl Iterator<Item = &'a str>) -> String {
+    let mut tokens: Vec<&str> = existing
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect();
+    if tokens.contains(&"*") {
+        return "*".to_string();
+    }
+    for field in VARY {
+        if !tokens.iter().any(|t| t.eq_ignore_ascii_case(field)) {
+            tokens.push(field);
+        }
+    }
+    tokens.join(", ")
+}
 
 fn join<'a>(items: impl Iterator<Item = &'a str>) -> String {
     items.collect::<Vec<_>>().join(",")
@@ -178,6 +199,36 @@ mod tests {
         );
     }
 
+    fn with_vary(vary: &str, origin: Option<&str>) -> Option<String> {
+        let response = Response::new(StatusCode::OK, "x").with_header("vary", vary);
+        let allowed = exact().allowed_origin(origin);
+        decorate(response, allowed)
+            .headers
+            .get("vary")
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn existing_vary_is_merged_not_skipped() {
+        let all = "accept-encoding, origin, access-control-request-method, access-control-request-headers";
+        for origin in [
+            Some("https://app.example"),
+            Some("https://evil.example"),
+            None,
+        ] {
+            assert_eq!(with_vary("accept-encoding", origin).as_deref(), Some(all));
+        }
+        assert_eq!(
+            with_vary("Origin, accept-encoding", None).as_deref(),
+            Some("Origin, accept-encoding, access-control-request-method, access-control-request-headers")
+        );
+        assert_eq!(
+            with_vary("*", Some("https://app.example")).as_deref(),
+            Some("*")
+        );
+        assert_eq!(with_vary("accept, *", None).as_deref(), Some("*"));
+    }
+
     #[test]
     fn preflight_lists_methods_and_headers() {
         let req = Request::new(Method::Options, "/chat")
@@ -197,6 +248,6 @@ mod tests {
             r.headers.get("access-control-allow-origin"),
             Some("https://app.example")
         );
-        assert_eq!(r.headers.get("vary"), Some(VARY));
+        assert_eq!(r.headers.get("vary"), Some(VARY.join(", ").as_str()));
     }
 }
