@@ -11,6 +11,7 @@ pub mod docs;
 pub mod dto;
 pub mod fetch;
 pub mod lists;
+pub mod mcp;
 pub mod pool;
 pub mod server;
 pub mod service;
