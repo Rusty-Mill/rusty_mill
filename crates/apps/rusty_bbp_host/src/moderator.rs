@@ -259,10 +259,13 @@ pub fn log_path(dir: &Path, task: &TaskId, turn: TurnId) -> PathBuf {
     task_dir(dir, "agents", task).join(format!("turn-{}.log", turn.0))
 }
 
-/// The provider session id every turn of `role` shares: a UUID derived from
-/// the task and role, stable across moderator restarts.
-pub fn session_id(task: &TaskId, role: &RoleId) -> String {
-    let mut b = Sha256::of(format!("bbp-session|{}|{}", task.0, role.0).as_bytes()).0;
+/// The provider session id every turn of `role` shares: a UUID keyed by the
+/// store's master (see [`crate::master`]) and derived from task and role, so it
+/// is stable across moderator restarts of one store and distinct between
+/// stores that reuse the same task and role names.
+pub fn session_id(master: &[u8; 32], task: &TaskId, role: &RoleId) -> String {
+    let label = format!("|bbp-session|{}|{}", task.0, role.0);
+    let mut b = Sha256::of(&[master.as_slice(), label.as_bytes()].concat()).0;
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let h = Sha256(b).hex();
@@ -276,9 +279,9 @@ pub fn session_id(task: &TaskId, role: &RoleId) -> String {
     )
 }
 
-/// Present once a turn of `role` was launched with its session id.
-fn session_marker(dir: &Path, task: &TaskId, role: &RoleId) -> PathBuf {
-    task_dir(dir, "agents", task).join(format!("session-{}.started", session_id(task, role)))
+/// Present once a turn was launched with session id `id`.
+fn session_marker(dir: &Path, task: &TaskId, id: &str) -> PathBuf {
+    task_dir(dir, "agents", task).join(format!("session-{id}.started"))
 }
 
 /// The file whose exclusive lock is the right to moderate `task`.
@@ -1079,8 +1082,13 @@ fn spawn(
         None => write_mcp_config(&cfg.dir, &cfg.task, bbp, principal, turn)?,
     };
     let role_name = role.0.as_str();
-    let session = l.session.then(|| session_id(&cfg.task, role));
-    let marker = session_marker(&cfg.dir, &cfg.task, role);
+    let session = match l.session {
+        true => Some(session_id(&crate::master::load(&cfg.dir)?, &cfg.task, role)),
+        false => None,
+    };
+    let marker = session
+        .as_deref()
+        .map(|id| session_marker(&cfg.dir, &cfg.task, id));
     let fill = |a: &str| {
         a.replace("{dir}", &cfg.dir.to_string_lossy())
             .replace("{task}", &cfg.task.0)
@@ -1107,7 +1115,7 @@ fn spawn(
         ("BBP_BIN".into(), bbp.to_string_lossy().into_owned()),
         ("BBP_MCP_CONFIG".into(), mcp.to_string_lossy().into_owned()),
     ];
-    if let Some(id) = &session {
+    if let (Some(id), Some(marker)) = (&session, &marker) {
         let resume = if marker.exists() { "yes" } else { "no" };
         env.push(("BBP_SESSION_ID".into(), id.clone()));
         env.push(("BBP_SESSION_RESUME".into(), resume.into()));
@@ -1161,8 +1169,8 @@ fn spawn(
         .map_err(|e| format!("spawn {}: {e}", l.program))?;
     let group = group.unwrap_or(child.id());
     // Later turns of the session resume what this one starts.
-    if session.is_some() {
-        if let Err(e) = File::create(&marker) {
+    if let Some(marker) = &marker {
+        if let Err(e) = File::create(marker) {
             kill_tree(&mut child, group)?;
             return Err(format!("{}: {e}", marker.display()));
         }

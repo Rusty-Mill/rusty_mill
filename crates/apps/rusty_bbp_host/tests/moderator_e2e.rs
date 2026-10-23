@@ -2492,7 +2492,8 @@ fn a_session_launchers_turns_share_one_session_one_process_at_a_time() {
     assert_eq!(out.state, State::Cancelled);
     assert_eq!(out.turns_launched, 4);
 
-    let id = moderator::session_id(&task, &Who::Planner.id());
+    let master = rusty_bbp_host::master::load(&dir).expect("master");
+    let id = moderator::session_id(&master, &task, &Who::Planner.id());
     let shape: Vec<usize> = id.split('-').map(str::len).collect();
     assert_eq!(shape, vec![8, 4, 4, 4, 12], "{id}");
     let log = std::fs::read_to_string(dir.join("session-log")).expect("log");
@@ -2508,6 +2509,25 @@ fn a_session_launchers_turns_share_one_session_one_process_at_a_time() {
         "one process at a time"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The session id is the store's: stable across reopening one store,
+/// distinct between stores that reuse the same task and role names.
+#[test]
+fn session_ids_are_namespaced_by_store() {
+    let (a, b) = (tempdir("session-store-a"), tempdir("session-store-b"));
+    let task = TaskId("T1".into());
+    let role = Who::Planner.id();
+    let id = |dir: &Path| {
+        let master = rusty_bbp_host::master::ensure(dir).expect("master");
+        moderator::session_id(&master, &task, &role)
+    };
+    let first = id(&a);
+    assert_eq!(id(&a), first, "a restart keeps the session");
+    assert_ne!(id(&b), first, "another store gets its own session");
+    for dir in [a, b] {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[test]
