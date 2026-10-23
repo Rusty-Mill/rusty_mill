@@ -22,7 +22,13 @@
 //! `keyUsage` omits `keyCertSign`, which RFC 5280 §6.1.4(n) forbids. Demanding
 //! agreement on any of them would be demanding this crate be less careful.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rcgen::{
     date_time_ymd, BasicConstraints, Certificate as RcgenCertificate, CertificateParams,

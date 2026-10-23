@@ -15,7 +15,13 @@
 //!    sentinel and must carry on.
 //! 4. **`TLS_FALLBACK_SCSV`** and the other refusals the choice makes.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+// ring-only suite (ADR-0005): it needs the engine's server or a signing key,
+// and the native backend has neither.
+#![cfg(all(
+    feature = "handrolled-engine",
+    rusty_tls_handrolled,
+    not(rusty_tls_native_crypto)
+))]
 
 use std::sync::Arc;
 
