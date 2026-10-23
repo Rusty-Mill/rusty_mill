@@ -19,14 +19,15 @@ use rusty_http::head::{RequestHead, ResponseHead};
 use rusty_http::{HeaderMap, Method, StatusCode, TransportError, Version};
 use rusty_tls::{AsyncTlsServerStream, TlsAcceptor};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, TcpListener, TcpStream};
-use rusty_tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
+use rusty_tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use rusty_tokio::task::JoinHandle;
 use rusty_tokio::time::{sleep, timeout, timeout_at};
 
-use crate::body::Inner;
+use crate::body::{BodyStream, Inner};
 use crate::request::Request;
 use crate::response::Response;
 use crate::routing::Router;
+use crate::stop::Stop;
 
 /// How [`serve`] runs.
 #[derive(Debug, Clone)]
@@ -63,8 +64,14 @@ impl Default for ServeOptions {
 /// [`Server::shutdown`] without waiting for it.
 pub struct Server {
     local_addr: SocketAddr,
-    stop: watch::Sender<bool>,
-    task: JoinHandle<()>,
+    stop: Arc<Stop>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stop.stop();
+    }
 }
 
 impl Server {
@@ -75,11 +82,13 @@ impl Server {
 
     /// Stops accepting, closes idle connections, ends streamed bodies, and
     /// waits until requests in flight have been answered.
-    pub async fn shutdown(self) {
-        // A send fails only when every connection and the accept loop are
-        // already gone, which is what is being asked for.
-        let _ = self.stop.send(true);
-        let _ = self.task.await;
+    pub async fn shutdown(mut self) {
+        self.stop.stop();
+        if let Some(task) = self.task.take() {
+            // A failed join means the accept loop panicked; it is gone
+            // either way, which is what shutting down asks for.
+            let _ = task.await;
+        }
     }
 
     /// Serves until `signal` completes, then shuts down as
@@ -104,7 +113,7 @@ pub fn serve(
     router: Router,
 ) -> io::Result<Server> {
     let local_addr = listener.local_addr()?;
-    let (stop, stopped) = watch::channel(false);
+    let stop = Arc::new(Stop::default());
     let max = options.max_connections.clamp(1, u32::MAX as usize);
     let shared = Arc::new(Shared {
         router,
@@ -113,8 +122,13 @@ pub fn serve(
     });
     Ok(Server {
         local_addr,
+        task: Some(rusty_tokio::spawn(accept_loop(
+            listener,
+            shared,
+            stop.clone(),
+            max,
+        ))),
         stop,
-        task: rusty_tokio::spawn(accept_loop(listener, shared, stopped, max)),
     })
 }
 
@@ -126,31 +140,21 @@ struct Shared {
 
 /// Waits for `work`, or for the stop signal: `None` once stopped. The stop
 /// signal is polled first so that always-ready work cannot starve it.
-async fn until_stopped<F: Future>(
-    work: F,
-    stopped: &mut watch::Receiver<bool>,
-) -> Option<F::Output> {
-    // Level-triggered as well: a receiver cloned after the signal was sent
-    // has already "seen" it and would otherwise never be told.
-    if *stopped.borrow() {
+async fn until_stopped<F: Future>(work: F, stop: &Arc<Stop>) -> Option<F::Output> {
+    if stop.is_stopped() {
         return None;
     }
     rusty_tokio::select! {
-        _ = stopped.changed() => None,
+        _ = stop.wait() => None,
         w = work => Some(w),
     }
 }
 
 /// Accepts connections until told to stop, then waits for them all to end.
-async fn accept_loop(
-    listener: TcpListener,
-    shared: Arc<Shared>,
-    mut stopped: watch::Receiver<bool>,
-    max: usize,
-) {
+async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<Stop>, max: usize) {
     let permits = Arc::new(Semaphore::new(max));
     loop {
-        let Some(accepted) = until_stopped(listener.accept(), &mut stopped).await else {
+        let Some(accepted) = until_stopped(listener.accept(), &stop).await else {
             break;
         };
         let Ok((tcp, _)) = accepted else {
@@ -162,7 +166,7 @@ async fn accept_loop(
         let Ok(permit) = permits.clone().try_acquire_owned() else {
             continue;
         };
-        rusty_tokio::spawn(connection(tcp, shared.clone(), stopped.clone(), permit));
+        rusty_tokio::spawn(connection(tcp, shared.clone(), stop.clone(), permit));
     }
     drop(listener);
     // Every connection holds a permit until it ends.
@@ -173,16 +177,16 @@ async fn accept_loop(
 async fn connection(
     tcp: TcpStream,
     shared: Arc<Shared>,
-    stopped: watch::Receiver<bool>,
+    stop: Arc<Stop>,
     _permit: OwnedSemaphorePermit,
 ) {
     let _ = tcp.set_nodelay(true);
     let Some(acceptor) = shared.tls.clone() else {
-        return run(tcp, &shared, stopped).await;
+        return run(tcp, &shared, &stop).await;
     };
     let deadline = Instant::now() + shared.options.handshake_timeout;
     if let Ok(Ok(io)) = timeout_at(deadline, handshake(acceptor, tcp)).await {
-        run(io, &shared, stopped).await;
+        run(io, &shared, &stop).await;
     }
 }
 
@@ -197,7 +201,7 @@ async fn handshake(
 
 /// Serves requests on `io` in order until the client is done, a limit is
 /// hit, or the server stops.
-async fn run<T>(io: T, shared: &Shared, mut stopped: watch::Receiver<bool>)
+async fn run<T>(io: T, shared: &Shared, stop: &Arc<Stop>)
 where
     T: AsyncRead + AsyncWrite + Unpin + Send,
 {
@@ -208,22 +212,23 @@ where
     };
     loop {
         let next = conn.io.read_request_head(options.max_head_bytes);
-        let head = match until_stopped(timeout(options.idle_timeout, next), &mut stopped).await {
+        let head = match until_stopped(timeout(options.idle_timeout, next), stop).await {
             Some(Ok(Ok(head))) => head,
             Some(Ok(Err(e))) => return conn.refuse(&e).await,
             // Stopped between requests, or idle too long.
             None | Some(Err(_)) => return,
         };
-        let keep_alive = wants_keep_alive(&head);
-        let head_only = head.method == Method::Head;
+        let reply = Reply {
+            head_only: head.method == Method::Head,
+            keep_alive: wants_keep_alive(&head),
+            chunked: head.version == Version::Http11,
+        };
         let req = match conn.read_request(head, options).await {
             Ok(req) => req,
             Err(e) => return conn.refuse(&e).await,
         };
         let response = shared.router.call(req).await;
-        let reusable = conn
-            .respond(response, head_only, keep_alive, &mut stopped)
-            .await;
+        let reusable = conn.respond(response, reply, stop).await;
         if !reusable {
             return;
         }
@@ -245,6 +250,21 @@ fn expects_continue(head: &RequestHead) -> bool {
             .headers
             .get("expect")
             .is_some_and(|v| v.trim().eq_ignore_ascii_case("100-continue"))
+}
+
+/// How to answer the request just read.
+#[derive(Debug, Clone, Copy)]
+struct Reply {
+    head_only: bool,
+    keep_alive: bool,
+    /// HTTP/1.1: a stream may be sent chunked.
+    chunked: bool,
+}
+
+fn chunk_frame(chunk: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(chunk.len() + 16);
+    rusty_http::body::write_chunk(&mut out, chunk);
+    out
 }
 
 struct Conn<T> {
@@ -294,13 +314,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Conn<T> {
     }
 
     /// Writes `response`; whether the connection can serve another request.
-    async fn respond(
-        &mut self,
-        response: Response,
-        head_only: bool,
-        keep_alive: bool,
-        stopped: &mut watch::Receiver<bool>,
-    ) -> bool {
+    async fn respond(&mut self, response: Response, reply: Reply, stop: &Arc<Stop>) -> bool {
+        let Reply {
+            head_only,
+            keep_alive,
+            chunked,
+        } = reply;
         let Response {
             status,
             mut headers,
@@ -337,36 +356,49 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Conn<T> {
                 let out = head_bytes(status, &headers);
                 self.write(&out).await.is_ok() && keep_alive
             }
-            Inner::Stream(mut stream) => {
+            Inner::Stream(stream) if chunked => {
                 set(&mut headers, "transfer-encoding", "chunked");
-                let out = head_bytes(status, &headers);
-                if self.write(&out).await.is_err() {
+                if self.write(&head_bytes(status, &headers)).await.is_err() {
                     return false;
                 }
-                loop {
-                    let next = poll_fn(|cx| stream.as_mut().poll_next(cx));
-                    let chunk = match until_stopped(next, stopped).await {
-                        // Ended by the stream, or by shutdown: close the
-                        // body properly either way.
-                        None | Some(None) => {
-                            let ended = self.write(b"0\r\n\r\n").await.is_ok();
-                            return ended && keep_alive && !*stopped.borrow();
-                        }
-                        // A failed stream: no terminator, so the client sees
-                        // the body truncated, and the connection closes.
-                        Some(Some(Err(_))) => return false,
-                        Some(Some(Ok(chunk))) => chunk,
-                    };
-                    // An empty chunk would read as the end of the body.
-                    if chunk.is_empty() {
-                        continue;
-                    }
-                    let mut out = Vec::with_capacity(chunk.len() + 16);
-                    rusty_http::body::write_chunk(&mut out, &chunk);
-                    if self.write(&out).await.is_err() {
-                        return false;
-                    }
+                let ended = self.stream(stream, stop, chunk_frame).await;
+                // Ended by the stream or by shutdown: close the body
+                // properly either way. A failed stream gets no terminator,
+                // so the client sees the body truncated.
+                ended && self.write(b"0\r\n\r\n").await.is_ok() && keep_alive && !stop.is_stopped()
+            }
+            // HTTP/1.0 has no chunked coding (RFC 9112 §6.1): the bytes go
+            // as they are and closing the connection ends the body.
+            Inner::Stream(stream) => {
+                if self.write(&head_bytes(status, &headers)).await.is_ok() {
+                    self.stream(stream, stop, <[u8]>::to_vec).await;
                 }
+                false
+            }
+        }
+    }
+
+    /// Writes each chunk of `stream`, framed by `frame`, until it ends or
+    /// the server stops (`true`), or it fails or a write fails (`false`).
+    async fn stream(
+        &mut self,
+        mut stream: BodyStream,
+        stop: &Arc<Stop>,
+        frame: fn(&[u8]) -> Vec<u8>,
+    ) -> bool {
+        loop {
+            let next = poll_fn(|cx| stream.as_mut().poll_next(cx));
+            let chunk = match until_stopped(next, stop).await {
+                None | Some(None) => return true,
+                Some(Some(Err(_))) => return false,
+                Some(Some(Ok(chunk))) => chunk,
+            };
+            // An empty chunk would read as the end of a chunked body.
+            if chunk.is_empty() {
+                continue;
+            }
+            if self.write(&frame(&chunk)).await.is_err() {
+                return false;
             }
         }
     }
@@ -405,4 +437,88 @@ fn head_bytes(status: StatusCode, headers: &HeaderMap) -> Vec<u8> {
     let mut out = Vec::new();
     head.write(&mut out);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::convert::Infallible;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use futures_core::Stream;
+    use rusty_http::body::response_framing;
+    use rusty_http::head::RequestHead;
+    use rusty_http::HeaderMap;
+
+    use super::*;
+    use crate::response::sse::{Event, Sse};
+    use crate::routing::get;
+
+    /// `n` events, each ready at once.
+    struct Burst(u32);
+
+    impl Stream for Burst {
+        type Item = Result<Event, Infallible>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.0 == 0 {
+                return Poll::Ready(None);
+            }
+            self.0 -= 1;
+            Poll::Ready(Some(Ok(Event::default().data("x"))))
+        }
+    }
+
+    async fn request(conn: &mut AsyncTransport<TcpStream>, target: &str) -> Vec<u8> {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost").unwrap();
+        let head = RequestHead {
+            method: Method::Get,
+            target: target.to_string(),
+            version: Version::Http11,
+            headers,
+        };
+        conn.write_request_head(&head).await.unwrap();
+        let head = conn.read_response_head(1024).await.unwrap();
+        let framing = response_framing(&head.headers, &Method::Get, head.status).unwrap();
+        conn.read_body(framing).await.unwrap()
+    }
+
+    /// Accepts, keep-alive requests and streamed chunks each wait on the
+    /// stop signal; none of those waits may outlive itself.
+    #[rusty_tokio::test]
+    async fn waiting_for_stop_does_not_accumulate() {
+        let router = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .route("/burst", get(|| async { Sse::new(Burst(500)) }));
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let server = serve(listener, None, ServeOptions::default(), router).unwrap();
+        let connect = || TcpStream::connect_addr(server.local_addr());
+
+        for _ in 0..50 {
+            let mut conn = AsyncTransport::new(connect().await.unwrap());
+            assert_eq!(request(&mut conn, "/").await, b"ok");
+        }
+        let mut kept = AsyncTransport::new(connect().await.unwrap());
+        for _ in 0..200 {
+            assert_eq!(request(&mut kept, "/").await, b"ok");
+        }
+        for _ in 0..5 {
+            assert_eq!(request(&mut kept, "/burst").await.len(), 500 * 9);
+        }
+
+        // Left waiting: the accept loop and the one open connection.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while server.stop.waiters() > 2 && Instant::now() < deadline {
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            server.stop.waiters() <= 2,
+            "{} waiters",
+            server.stop.waiters()
+        );
+        server.shutdown().await;
+    }
 }
