@@ -977,6 +977,16 @@ impl AnsiParser {
                 // Terminal-WG bidi: paragraph-direction autodetection
                 // (default on; off = the SCP-fixed direction applies).
                 g.bidi_autodetect = set;
+            } else if param == 40 {
+                // Allow DECCOLM. Default off; nothing to undo when it is
+                // reset, since DECCOLM never resizes the grid.
+                g.allow_deccolm = set;
+            } else if param == 3 {
+                // DECCOLM: ignored unless mode 40 allows it, and then only
+                // its side effects run (see Grid::deccolm).
+                if g.allow_deccolm {
+                    g.deccolm(set);
+                }
             } else if param == 2027 {
                 // Grapheme clustering: off = wcwidth widths per code point
                 // (what apps assume), on = one cell per UAX #29 grapheme.
@@ -1040,6 +1050,8 @@ impl AnsiParser {
             2004 => g.bracketed_paste,
             2026 => g.sync_output_active(),
             2027 => g.grapheme_clustering,
+            3 => g.column_mode_132,
+            40 => g.allow_deccolm,
             _ => {
                 self.responses
                     .extend_from_slice(format!("\x1b[?{mode};0$y").as_bytes());
