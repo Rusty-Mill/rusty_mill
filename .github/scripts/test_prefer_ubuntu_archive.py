@@ -118,7 +118,13 @@ class SetupWiringTests(unittest.TestCase):
         self.assertIn("if: runner.os == 'Linux' && runner.environment == 'github-hosted'", step)
         self.assertIn('sudo python3 "${{ github.action_path }}/prefer_ubuntu_archive.py"', step)
         self.assertNotIn("continue-on-error", step)
-        self.assertLess(action.index("prefer_ubuntu_archive.py"), action.index("sudo apt-get update"))
+        # The cache helper owns APT update/install now. Check both the first
+        # helper invocation and the privileged install call, not an inline
+        # command that no longer exists in the composite action.
+        install = 'sudo /usr/bin/python3 "${{ github.action_path }}/apt_download_cache.py" install'
+        self.assertIn(install, action)
+        self.assertLess(action.index("prefer_ubuntu_archive.py"), action.index("apt_download_cache.py"))
+        self.assertLess(action.index("prefer_ubuntu_archive.py"), action.index(install))
 
 
 if __name__ == "__main__":
