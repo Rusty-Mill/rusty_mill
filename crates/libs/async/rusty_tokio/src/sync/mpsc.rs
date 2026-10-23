@@ -19,11 +19,19 @@
 //! recheck-after-register dance. `unbounded_channel`'s own `Inner`
 //! reuses this same one-lock shape for the queue/`recv_waker` pair, just
 //! without a `send_waiters` list at all -- nothing ever waits to send.
+//!
+//! Each waiting `send`/`reserve` holds a [`SendWait`]: one keyed entry in
+//! `send_waiters`, refreshed rather than duplicated on re-poll, and removed
+//! when the future is dropped. A future dropped after its wake was already
+//! delivered hands that wake to the next waiter, since the capacity it was
+//! woken for is still free. Without this, a cancelled sender's stale entry
+//! could absorb the one wake a freed slot sends, leaving a live sender
+//! parked while the channel has room.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::task::{Poll, Waker};
 
 struct Inner<T> {
@@ -37,14 +45,84 @@ struct Inner<T> {
     /// < capacity`), without needing a placeholder value in `queue`
     /// itself.
     reserved: usize,
-    send_waiters: VecDeque<Waker>,
+    /// Waiting senders, oldest first, keyed by their [`SendWait`].
+    send_waiters: VecDeque<(u64, Waker)>,
+    next_waiter: u64,
     recv_waker: Option<Waker>,
     senders_alive: usize,
     receiver_alive: bool,
 }
 
+impl<T> Inner<T> {
+    /// Wake the oldest waiting sender, if any. Returns the waker so the
+    /// caller can wake it after unlocking.
+    fn pop_send_waiter(&mut self) -> Option<Waker> {
+        self.send_waiters.pop_front().map(|(_, waker)| waker)
+    }
+
+    /// Queue `wait` with `waker`, or refresh its waker if still queued.
+    fn wait_to_send(&mut self, wait: &mut Option<u64>, waker: &Waker) {
+        if let Some(key) = *wait {
+            if let Some((_, queued)) = self.send_waiters.iter_mut().find(|(k, _)| *k == key) {
+                queued.clone_from(waker);
+                return;
+            }
+        }
+        let key = self.next_waiter;
+        self.next_waiter = self.next_waiter.wrapping_add(1);
+        self.send_waiters.push_back((key, waker.clone()));
+        *wait = Some(key);
+    }
+
+    /// `wait` finished (capacity taken, or the channel closed): leave the
+    /// queue without consuming anyone else's wake.
+    fn stop_waiting(&mut self, wait: &mut Option<u64>) {
+        if let Some(key) = wait.take() {
+            self.send_waiters.retain(|(k, _)| *k != key);
+        }
+    }
+}
+
 struct Shared<T> {
     inner: Mutex<Inner<T>>,
+}
+
+/// One `send`/`reserve` call's place in `send_waiters` (see the module
+/// docs). `key` is `None` until it first waits and again once it finishes.
+struct SendWait<'a, T> {
+    shared: &'a Shared<T>,
+    key: Option<u64>,
+}
+
+impl<'a, T> SendWait<'a, T> {
+    fn new(shared: &'a Shared<T>) -> Self {
+        SendWait { shared, key: None }
+    }
+}
+
+impl<T> Drop for SendWait<'_, T> {
+    fn drop(&mut self) {
+        let Some(key) = self.key.take() else {
+            return;
+        };
+        // Never panic in drop: a poisoned lock still guards a consistent
+        // waiter list (every critical section here leaves it whole).
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(i) = guard.send_waiters.iter().position(|(k, _)| *k == key) {
+            guard.send_waiters.remove(i);
+            return;
+        }
+        // Woken but cancelled before using the wake: pass it on.
+        let next = guard.pop_send_waiter();
+        drop(guard);
+        if let Some(waker) = next {
+            waker.wake();
+        }
+    }
 }
 
 impl<T> Shared<T> {
@@ -58,7 +136,7 @@ impl<T> Shared<T> {
         guard.reserved -= n;
         let mut woken = Vec::new();
         for _ in 0..n {
-            match guard.send_waiters.pop_front() {
+            match guard.pop_send_waiter() {
                 Some(waker) => woken.push(waker),
                 None => break,
             }
@@ -113,6 +191,7 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
             capacity,
             reserved: 0,
             send_waiters: VecDeque::new(),
+            next_waiter: 0,
             recv_waker: None,
             senders_alive: 1,
             receiver_alive: true,
@@ -129,12 +208,15 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 impl<T> Sender<T> {
     pub async fn send(&self, value: T) -> Result<(), SendError<T>> {
         let mut value = Some(value);
+        let mut wait = SendWait::new(&self.shared);
         let sent = std::future::poll_fn(|cx| {
             let mut guard = self.shared.inner.lock().unwrap();
             if !guard.receiver_alive {
+                wait.key = None;
                 return Poll::Ready(false);
             }
             if guard.queue.len() + guard.reserved < guard.capacity {
+                guard.stop_waiting(&mut wait.key);
                 guard
                     .queue
                     .push_back(value.take().expect("polled after completion"));
@@ -145,7 +227,7 @@ impl<T> Sender<T> {
                 }
                 return Poll::Ready(true);
             }
-            guard.send_waiters.push_back(cx.waker().clone());
+            guard.wait_to_send(&mut wait.key, cx.waker());
             Poll::Pending
         })
         .await;
@@ -209,7 +291,8 @@ impl<T> Sender<T> {
     /// Fill it (synchronously, since the slot's already reserved) via
     /// [`Permit::send`].
     pub async fn reserve(&self) -> Result<Permit<'_, T>, SendError<()>> {
-        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, 1)).await;
+        let mut wait = SendWait::new(&self.shared);
+        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, 1, &mut wait)).await;
         if reserved {
             Ok(Permit {
                 sender: self,
@@ -223,7 +306,8 @@ impl<T> Sender<T> {
     /// Like [`reserve`](Self::reserve), but reserves `n` slots at once,
     /// handed back one at a time via the returned [`PermitIterator`].
     pub async fn reserve_many(&self, n: usize) -> Result<PermitIterator<'_, T>, SendError<()>> {
-        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, n)).await;
+        let mut wait = SendWait::new(&self.shared);
+        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, n, &mut wait)).await;
         if reserved {
             Ok(PermitIterator {
                 sender: self,
@@ -239,7 +323,9 @@ impl<T> Sender<T> {
     /// this particular `Sender`'s own lifetime (e.g. moved into a
     /// spawned task), at the cost of consuming this one to make it.
     pub async fn reserve_owned(self) -> Result<OwnedPermit<T>, SendError<()>> {
-        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, 1)).await;
+        let mut wait = SendWait::new(&self.shared);
+        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, 1, &mut wait)).await;
+        drop(wait);
         if reserved {
             Ok(OwnedPermit { sender: Some(self) })
         } else {
@@ -289,16 +375,23 @@ impl<T> Sender<T> {
     /// -- `Ready(true)` once `n` slots are reserved, `Ready(false)` if
     /// the receiver's gone (no reservation made), `Pending` (queued
     /// behind any other waiting sender) otherwise.
-    fn poll_reserve(&self, cx: &mut std::task::Context<'_>, n: usize) -> Poll<bool> {
+    fn poll_reserve(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        n: usize,
+        wait: &mut SendWait<'_, T>,
+    ) -> Poll<bool> {
         let mut guard = self.shared.inner.lock().unwrap();
         if !guard.receiver_alive {
+            wait.key = None;
             return Poll::Ready(false);
         }
         if guard.queue.len() + guard.reserved + n <= guard.capacity {
+            guard.stop_waiting(&mut wait.key);
             guard.reserved += n;
             return Poll::Ready(true);
         }
-        guard.send_waiters.push_back(cx.waker().clone());
+        guard.wait_to_send(&mut wait.key, cx.waker());
         Poll::Pending
     }
 }
@@ -591,7 +684,7 @@ impl<T> Receiver<T> {
             }
             let mut guard = self.shared.inner.lock().unwrap();
             if let Some(v) = guard.queue.pop_front() {
-                let waker = guard.send_waiters.pop_front();
+                let waker = guard.pop_send_waiter();
                 drop(guard);
                 if let Some(waker) = waker {
                     waker.wake();
@@ -619,7 +712,7 @@ impl<T> Drop for Receiver<T> {
         let undelivered = std::mem::take(&mut guard.queue);
         drop(guard);
         drop(undelivered);
-        for waker in waiters {
+        for (_, waker) in waiters {
             waker.wake();
         }
     }
