@@ -150,9 +150,17 @@ impl<S: Send + Sync + 'static> Router<S> {
 
 impl Router<()> {
     /// Answers `req` in process: layers, routing, extraction and the
-    /// handler, no socket. The server calls this; so do tests.
+    /// handler, no socket. The server calls this; so do tests. A `HEAD`
+    /// answer keeps the status and headers of the `GET` answer but no body:
+    /// a whole body becomes its `Content-Length`, and a stream is dropped
+    /// unpolled. That happens outside every layer, so layers see the body.
     pub fn call(&self, req: Request) -> BoxFuture<'static, Response> {
-        Next::new(self.clone(), self.layers.len()).run(req)
+        let head = *req.method() == Method::Head;
+        let response = Next::new(self.clone(), self.layers.len()).run(req);
+        if !head {
+            return response;
+        }
+        Box::pin(async move { without_body(response.await) })
     }
 
     /// The `i`th layer, counted from the first added.
@@ -181,6 +189,19 @@ impl Router<()> {
             .filter_map(|route| capture(&route.pattern, segments).map(|params| (route, params)))
             .max_by_key(|(route, _)| specificity(&route.pattern))
     }
+}
+
+/// A `HEAD` answer: the body goes, its length stays when it is known.
+fn without_body(response: Response) -> Response {
+    let length = response.body.as_bytes().map(<[u8]>::len);
+    let mut response = Response {
+        body: crate::Body::empty(),
+        ..response
+    };
+    if let Some(length) = length {
+        response = response.with_header("content-length", &length.to_string());
+    }
+    response
 }
 
 fn ready(response: impl IntoResponse) -> BoxFuture<'static, Response> {
