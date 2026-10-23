@@ -75,7 +75,7 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
    - Instructions per byte fell a lot: ascii 376 → 48, scroll 1001 → 137.
    - About half the remaining wall-clock time is the kernel faulting in fresh scrollback, because `bench_vt_throughput` builds a new grid per iteration.
    - With glibc keeping freed memory, ascii runs at over 100 MB/s and scroll at about 40 MB/s.
-   - `bench_frame_time`, which keeps one grid alive, reports 49-160 MB/s parser-only.
+   - `bench_frame_time`, which keeps one grid alive, reports 49-160 MB/s parser-only on the scrolling, ASCII, cursor, SGR and Unicode workloads (alt_screen_flicker: 7.5 MB/s).
    - Whether the floors should be judged on a long-lived grid is **for the owner to decide**.
 2. **Snapshot encode is not reliably faster than libghostty:** 11.5-14.3 ms against 9.3-11.0 ms on the later host, 9.3 against 9.6 ms on the first. It is 3.7x smaller (2.09 MB against 7.81 MB). Whether encode time is a hard target is unconfirmed.
 3. **Unicode is the slowest workload:** about 24 MB/s against libghostty's 44.5. The fast path covers ASCII only.
@@ -96,8 +96,10 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
 - **Every change goes through a PR on its own branch. Never push to `main`.**
   - Merge through the merge queue ("Merge when ready"), with a **merge commit**.
   - Never force-push or rebase shared history. To update a branch, merge `main` into it.
-- **The owner queues; the agent does not.** After green CI, record the review and a self-review in the PR body, then tell the owner it is ready.
-  - A queued branch cannot be pushed (GH006). Ask the owner to dequeue first.
+- **Queueing.** A PR is ready once the reviewer has cleared its exact head and CI is green on it. Record the review and a self-review in the PR body, then queue it ("Merge when ready"). The merge queue's own validation (`required-gate` on the queued entry) still applies.
+  - Basis: the owner's latest instruction, as reported by the reviewer on #950: "Whenever a pr is ready and not queued, you should queue it." If in doubt, confirm with the owner.
+  - *Historical:* in the 2026-10-21 to 2026-10-23 session the owner queued every PR, and the agent only reported readiness. That is not a rule for successors.
+  - A queued branch cannot be pushed (GH006). Dequeue it, or have it dequeued, first.
 - **Code:**
   - No `unwrap`/`expect` in production code.
   - Tests for non-trivial logic, including boundary cases: scroll regions, resize, wide glyphs at row edges, scrollback eviction.
