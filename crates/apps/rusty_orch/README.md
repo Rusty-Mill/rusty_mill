@@ -57,6 +57,15 @@ command, and stops if the card already carries a later one. The credential and
 identity come from `RUSTY_ORCH_BOARD_TOKEN`, `RUSTY_ORCH_BOARD_ACTOR` and
 `RUSTY_ORCH_BOARD_ROLE` (a role with Build); plain `http://` only.
 
+Add `--cancel <reason>` to stop a hosted goal. The run takes the goal's
+assignment over, so earlier holders are fenced out, cancels each hosted BBP task,
+and returns only when every process the task started has been reaped and its
+slot is free. It then marks the card's execution cancelled and retires the
+assignment, so a later `run` on that state is refused. Running the cancel again
+finishes an interrupted one and does nothing after a complete one. Set the BBP
+configuration's `end_grace_secs` to bound how long a harness may run after its
+turn ends (BBP's default is 60 s).
+
 Proposed-change impact: `rusty_orch inspect --repo <checkout> --impact <request.json>`
 joins Cargo consumers to Millboard ownership and complete RemindMe requirements.
 See [Stage 1 usage and snapshot contract](docs/change-impact.md).

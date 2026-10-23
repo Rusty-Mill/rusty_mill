@@ -188,6 +188,12 @@ impl Supervisor for ScriptSupervisor {
         ));
         Ok(Supervised::Started)
     }
+    fn running(&self, _: &Config, _: &str) -> Result<bool, String> {
+        match self.0.borrow_mut().as_mut() {
+            Some(m) => Ok(m.0.try_wait().map_err(|e| e.to_string())?.is_none()),
+            None => Ok(false),
+        }
+    }
 }
 fn wait_gate<S: Supervisor>(
     host: &mut BbpHost<StdCommand, S>,
@@ -536,9 +542,8 @@ fn orch_binary_reopens_its_durable_goal_without_opening_or_charging_twice() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// Cancel the one task a report's hosted entry points at, so its harness
-/// stops before the test directory goes; returns how often it was opened.
-fn cancel_hosted(c: &Config, report: &rusty_serde::json::Value) -> usize {
+/// The task a report's hosted entry points at.
+fn report_handle(report: &rusty_serde::json::Value) -> Handle {
     let entry = report["entries"]
         .as_seq()
         .unwrap()
@@ -550,7 +555,13 @@ fn cancel_hosted(c: &Config, report: &rusty_serde::json::Value) -> usize {
         .unwrap()
         .strip_prefix("url:bbp:")
         .unwrap();
-    let h: Handle = rusty_serde::json::from_str(pointer).unwrap();
+    rusty_serde::json::from_str(pointer).unwrap()
+}
+
+/// Cancel the one task a report's hosted entry points at, so its harness
+/// stops before the test directory goes; returns how often it was opened.
+fn cancel_hosted(c: &Config, report: &rusty_serde::json::Value) -> usize {
+    let h = report_handle(report);
     let log = events(&h);
     let opened = log
         .iter()
@@ -730,6 +741,113 @@ echo end $(date +%s%N) >> {record}
     }
     std::fs::remove_dir_all(dir).unwrap();
     println!("BBP_ACCEPTANCE PASS slot-admission");
+}
+
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; Linux moderator"]
+fn orch_binary_cancel_reaps_a_live_turn_frees_its_slot_and_retires_the_goal() {
+    let (dir, mut c) = setup();
+    let slots = dir.join("slots");
+    c.slots = Some(Slots {
+        dir: slots.clone(),
+        agents: 1,
+        validators: 1,
+    });
+    c.end_grace_secs = Some(1);
+    // The writer never ends its turn: it records its pid, then writes a tick
+    // every 100 ms until something kills it.
+    let (pid, ticks) = (dir.join("writer.pid"), dir.join("ticks"));
+    let script = dir.join("tick.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "echo $$ > {}\nwhile :; do echo t >> {}; sleep 0.1; done\n",
+            pid.display(),
+            ticks.display()
+        ),
+    )
+    .unwrap();
+    c.pool.get_mut("writer").unwrap().program = "/bin/sh".into();
+    c.pool.get_mut("writer").unwrap().args = vec![script.to_string_lossy().into()];
+    let cfg = dir.join("bbp.json");
+    std::fs::write(&cfg, rusty_serde::json::to_string(&c).unwrap()).unwrap();
+    let goal = dir.join("goal.json");
+    std::fs::write(&goal, r#"{"goal":"Implement flag","done_when":["tested"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":1,"stop":"checkpoint","tasks":[{"role":"implement","instruction":"Implement flag","acceptance":["tested"],"max_calls":1}]}"#).unwrap();
+    let orch = std::env::var_os("ORCH_TEST_BIN").expect("set ORCH_TEST_BIN");
+    let run = |extra: &[&str]| {
+        Command::new(&orch)
+            .arg("run")
+            .arg(&goal)
+            .arg("--bbp")
+            .arg(&cfg)
+            .arg("--state")
+            .arg(dir.join("state"))
+            .arg("--json")
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let report = |out: &std::process::Output| -> rusty_serde::json::Value {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        rusty_serde::json::from_str(&String::from_utf8(out.stdout.clone()).unwrap()).unwrap()
+    };
+    let first = report(&run(&[]));
+    assert_eq!(first["ended"]["kind"].as_str(), Some("waiting"));
+    let h = report_handle(&first);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !(ticks.exists() && pid.exists()) {
+        assert!(Instant::now() < deadline, "the writer never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let writer = std::fs::read_to_string(&pid).unwrap().trim().to_owned();
+
+    let started = Instant::now();
+    let cancelled = report(&run(&["--cancel", "owner withdrew the card"]));
+    assert_eq!(cancelled["ended"]["kind"].as_str(), Some("cancelled"));
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "cancel took {:?}",
+        started.elapsed()
+    );
+    // The cancel returned only after the writer was reaped, so it writes no
+    // more, and its slot is free for other work at once.
+    assert!(
+        !std::path::Path::new(&format!("/proc/{writer}")).exists(),
+        "writer {writer} still exists"
+    );
+    let count = || std::fs::read_to_string(&ticks).unwrap().lines().count();
+    let before = count();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(count(), before, "nothing writes after the cancel");
+    let slot = std::fs::OpenOptions::new()
+        .write(true)
+        .open(slots.join("agent-0.lock"))
+        .unwrap();
+    assert!(slot.try_lock().is_ok(), "the agent slot is free");
+    drop(slot);
+    let view = TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &events(&h));
+    assert_eq!(view.card.state, rusty_bbp::State::Cancelled);
+    assert_eq!(view.cancelled.as_deref(), Some("owner withdrew the card"));
+
+    // The goal's assignment is retired: a later run is refused before it
+    // hosts anything, and cancelling again changes nothing.
+    let resumed = run(&[]);
+    assert!(!resumed.status.success());
+    assert!(
+        String::from_utf8_lossy(&resumed.stderr).contains("Retired"),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let logged = events(&h).len();
+    let again = report(&run(&["--cancel", "owner withdrew the card"]));
+    assert_eq!(again["ended"]["kind"].as_str(), Some("cancelled"));
+    assert_eq!(events(&h).len(), logged, "a second cancel records nothing");
+    std::fs::remove_dir_all(dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS orch-cancel");
 }
 
 #[test]

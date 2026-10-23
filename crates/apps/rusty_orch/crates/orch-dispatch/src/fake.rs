@@ -77,6 +77,10 @@ pub struct HostScript {
     pub relays: std::collections::VecDeque<Result<crate::Relayed, crate::ClassifiedError>>,
     /// The fence of every command, in order.
     pub fences: Vec<crate::Fence>,
+    /// The reason of every cancel that succeeded, in order.
+    pub cancels: Vec<orch_core::Text>,
+    /// Errors the next cancels fail with, after admitting their fence.
+    pub fail_cancel: std::collections::VecDeque<crate::ClassifiedError>,
 }
 impl HostScript {
     /// Record `fence`, refusing it like a real host when a later generation,
@@ -140,5 +144,21 @@ impl crate::TaskHost for FakeHost {
             .relays
             .pop_front()
             .unwrap_or(Ok(crate::Relayed::Applied))
+    }
+    fn cancel(
+        &mut self,
+        _handle: &crate::HostHandle,
+        reason: &orch_core::Text,
+        fence: &crate::Fence,
+    ) -> Result<crate::Progress, crate::ClassifiedError> {
+        let mut state = self.0.borrow_mut();
+        state.admit(fence)?;
+        if let Some(e) = state.fail_cancel.pop_front() {
+            return Err(e);
+        }
+        state.cancels.push(reason.clone());
+        Ok(crate::Progress::Cancelled {
+            reason: reason.clone(),
+        })
     }
 }

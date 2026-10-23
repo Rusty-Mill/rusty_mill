@@ -65,6 +65,15 @@ pub trait TaskHost: std::fmt::Debug {
         answer: &Text,
         fence: &Fence,
     ) -> Result<Relayed, ClassifiedError>;
+    /// Cancel the hosted task and return only once nothing it started still
+    /// runs, so its capacity is free. Idempotent: a task that already ended
+    /// returns its terminal progress unchanged, which may be `Closed`.
+    fn cancel(
+        &mut self,
+        handle: &HostHandle,
+        reason: &Text,
+        fence: &Fence,
+    ) -> Result<Progress, ClassifiedError>;
 }
 /// Find the host pointer saved by the dispatcher, without adapter memory.
 pub fn hosted_handle(board: &Board, task: TaskId) -> Option<HostHandle> {

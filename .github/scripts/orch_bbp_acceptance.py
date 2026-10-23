@@ -36,6 +36,8 @@ CASES = (
          "tests_e2e::orch_binary_records_each_generation_with_its_millboard_card"),
     Case("slot-admission", "orch-bbp", ("--lib",),
          "tests_e2e::orch_binary_admits_two_goals_through_one_agent_slot"),
+    Case("orch-cancel", "orch-bbp", ("--lib",),
+         "tests_e2e::orch_binary_cancel_reaps_a_live_turn_frees_its_slot_and_retires_the_goal"),
     Case("harness-confined", "orch-bbp", ("--lib",),
          "tests_e2e::orch_binary_confines_a_sandboxed_pool_member_away_from_the_bbp_directory"),
     Case("bbp-confined", "rusty_bbp_host", ("--test", "confined_harness"),

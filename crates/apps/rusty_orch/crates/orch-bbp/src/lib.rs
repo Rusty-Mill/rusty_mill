@@ -36,6 +36,15 @@ pub const SCRUB: &[&str] = &[
     "BBP_PRINCIPAL",
     "BBP_TURN",
 ];
+/// How often a cancel re-reads the task when another writer moved its
+/// revision in between.
+const CANCEL_ATTEMPTS: usize = 5;
+/// BBP's end grace when the configuration leaves it unset.
+const BBP_END_GRACE_SECS: u64 = 60;
+/// How long a cancel waits, beyond the end grace BBP gives a harness to
+/// print its result, for the moderator to reap what it started.
+const CANCEL_MARGIN: Duration = Duration::from_secs(30);
+
 fn transient(e: impl std::fmt::Display) -> ClassifiedError {
     ClassifiedError::Transient(AgentError(e.to_string()))
 }
@@ -349,6 +358,58 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
             .map_err(transient)?;
         Ok(())
     }
+    /// Record the cancel in BBP, retrying when the revision moved under it.
+    /// The op is derived from the revision, so a retry after a lost reply
+    /// replays rather than cancels twice.
+    fn request_cancel(
+        &self,
+        h: &Handle,
+        config: &Config,
+        reason: &Text,
+    ) -> Result<(), ClassifiedError> {
+        let words: Vec<_> = reason.as_str().split_whitespace().collect();
+        if words.iter().any(|s| s.starts_with("--")) {
+            return Err(permanent("a cancel reason may not contain flags"));
+        }
+        for _ in 0..CANCEL_ATTEMPTS {
+            let view = self
+                .show(config, h)?
+                .ok_or_else(|| transient("hosted task missing"))?;
+            if view.card.state.terminal() {
+                return Ok(());
+            }
+            let rev = view.card.rev.0.to_string();
+            let op = Sha256::of(format!("{}:cancel:{rev}:{reason}", h.task).as_bytes()).hex();
+            let mut args = vec![
+                "--fence".into(),
+                rev.clone(),
+                "--rev".into(),
+                rev,
+                "--op".into(),
+                format!("orch-{op}"),
+                "cancel".into(),
+            ];
+            args.extend(words.iter().map(|w| (*w).to_owned()));
+            match self.response(config, h, "human", args)? {
+                Response::Rejected(r) if matches!(r.code, Code::StaleRev | Code::Terminal) => {}
+                response => return Self::accepted(response),
+            }
+        }
+        Err(transient("the task kept changing; cancel not recorded"))
+    }
+    /// Wait until the moderator has released its lock, which it does only
+    /// after reaping every process it started.
+    fn await_reaped(&self, config: &Config, task: &str) -> Result<(), ClassifiedError> {
+        let grace = config.end_grace_secs.unwrap_or(BBP_END_GRACE_SECS);
+        let deadline = std::time::Instant::now() + Duration::from_secs(grace) + CANCEL_MARGIN;
+        while self.supervisor.running(config, task).map_err(transient)? {
+            if std::time::Instant::now() >= deadline {
+                return Err(transient("moderator still running after cancel"));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
+    }
     fn rejected_answer(
         &self,
         h: &Handle,
@@ -654,6 +715,22 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
                 Ok(Relayed::Applied)
             }
         }
+    }
+    fn cancel(
+        &mut self,
+        handle: &HostHandle,
+        reason: &Text,
+        fence: &Fence,
+    ) -> Result<Progress, ClassifiedError> {
+        let h = self.handle(handle)?;
+        Self::admit(&h, fence)?;
+        let frozen = Self::load(&h)?;
+        self.request_cancel(&h, &frozen.config, reason)?;
+        self.await_reaped(&frozen.config, &h.task)?;
+        let view = self
+            .show(&frozen.config, &h)?
+            .ok_or_else(|| transient("hosted task missing"))?;
+        Self::progress(view)
     }
 }
 
