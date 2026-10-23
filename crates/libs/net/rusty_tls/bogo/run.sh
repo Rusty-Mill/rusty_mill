@@ -3,11 +3,16 @@
 #
 #   BORINGSSL=/path/to/boringssl ./run.sh            # all tests
 #   BORINGSSL=... ./run.sh -test 'Trailing*'         # extra runner flags
+#   NATIVE=1 ./run.sh                                # the native backend (ADR-0005)
 #
 # BORINGSSL is a checkout of the commit in PINNED_COMMIT (see below); without it
 # one is cloned into target/boringssl. Needs a Go toolchain and network on
 # first use. Exits non-zero if any test FAILS; tests the shim does not
 # implement (exit 89) and tests listed in config.json are reported, not hidden.
+#
+# NATIVE=1 builds the shim on the first-party backend (client role only), into
+# its own target directory, and writes its results under $OUT/native. Server and
+# client-certificate scenarios are then unimplemented, not failed.
 set -euo pipefail
 
 # The BoringSSL commit the suite is pinned to. Bumping it will add and rename
@@ -34,6 +39,17 @@ fetch_pinned() {
 here="$(cd "$(dirname "$0")" && pwd)"
 out="${OUT:-$here/target}"
 mkdir -p "$out"
+cfg="--cfg rusty_tls_handrolled"
+features=()
+shim_target="$here/target"
+results="$out"
+if [ -n "${NATIVE:-}" ]; then
+  cfg="$cfg --cfg rusty_tls_native_crypto"
+  features=(--no-default-features --features native)
+  shim_target="$here/target/native"
+  results="$out/native"
+  mkdir -p "$results"
+fi
 
 if [ -z "${BORINGSSL:-}" ]; then
   BORINGSSL="$out/boringssl"
@@ -47,19 +63,20 @@ if [ -z "${BORINGSSL:-}" ]; then
   fi
 fi
 
-(cd "$here" && RUSTFLAGS="--cfg rusty_tls_handrolled ${RUSTFLAGS:-}" cargo build -q --release)
+(cd "$here" && RUSTFLAGS="$cfg ${RUSTFLAGS:-}" CARGO_TARGET_DIR="$shim_target" \
+  cargo build -q --release "${features[@]}")
 (cd "$BORINGSSL/ssl/test/runner" && go test -c -o "$out/runner.test" .)
 
 cd "$BORINGSSL/ssl/test/runner"
 set +e
 "$out/runner.test" -test.timeout 60m \
-  -shim-path "$here/target/release/bogo_shim" \
+  -shim-path "$shim_target/release/bogo_shim" \
   -shim-config "$here/config.json" \
   -allow-unimplemented -loose-errors -pipe \
-  -json-output "$out/results.json" \
-  -num-workers "${WORKERS:-8}" "$@" > "$out/run.log" 2>&1
+  -json-output "$results/results.json" \
+  -num-workers "${WORKERS:-8}" "$@" > "$results/run.log" 2>&1
 status=$?
 set -e
 
-python3 "$here/summary.py" "$out/results.json" "$out/run.log" "$here/config.json"
+python3 "$here/summary.py" "$results/results.json" "$results/run.log" "$here/config.json"
 exit $status
