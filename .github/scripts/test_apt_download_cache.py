@@ -162,6 +162,10 @@ class InstallationTests(unittest.TestCase):
             self.assertNotIn("--print-uris", calls[-1])
             self.assertIn("APT::Keep-Downloaded-Packages=true", calls[-1])
             self.assertIn("Binary::apt-get::APT::Keep-Downloaded-Packages=true", calls[-1])
+            for command in calls:
+                self.assertNotIn("--allow-unauthenticated", command)
+                self.assertFalse(any("AllowInsecure" in option or "AllowUnauthenticated" in option
+                                     or "trusted=yes" in option for option in command))
             self.assertIn(f"verified-reused={int(warm)}", log)
             self.assertIn(f"planned-downloads={int(not warm)}", log)
             self.assertIn("retained=true", output)
@@ -178,6 +182,15 @@ class InstallationTests(unittest.TestCase):
 
     def test_dependency_install_failure_is_not_masked(self) -> None:
         self.simulate(fail=True)
+
+    def test_failed_authenticated_update_stops_before_cache_verification_or_install(self) -> None:
+        with patch.object(MODULE.subprocess, "run", side_effect=subprocess.CalledProcessError(100, ["apt-get", "update"])) as run, \
+             patch.object(MODULE, "trusted_index") as verify, patch.object(MODULE, "copy_verified") as copy:
+            with self.assertRaises(subprocess.CalledProcessError):
+                MODULE.install(["example"], Path("unused-restored-cache"), Path("unused-output"))
+            run.assert_called_once_with(["apt-get", "update"], check=True)
+            verify.assert_not_called()
+            copy.assert_not_called()
 
     def test_missing_verifier_falls_back_to_normal_downloads(self) -> None:
         calls, log, _ = self.simulate(warm=True, unavailable=True)
