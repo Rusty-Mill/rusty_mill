@@ -634,10 +634,8 @@ fn per_turn_files_are_task_scoped() {
     let bbp = PathBuf::from(env!("CARGO_BIN_EXE_bbp"));
     let (a, b) = (TaskId("T1".into()), TaskId("T2".into()));
     let p = PrincipalId("planner".into());
-    let ca = moderator::write_mcp_config(&dir, &a, &bbp, &p, moderator::Bound::Turn(TurnId(1)))
-        .expect("write");
-    let cb = moderator::write_mcp_config(&dir, &b, &bbp, &p, moderator::Bound::Turn(TurnId(1)))
-        .expect("write");
+    let ca = moderator::write_mcp_config(&dir, &a, &bbp, &p, TurnId(1)).expect("write");
+    let cb = moderator::write_mcp_config(&dir, &b, &bbp, &p, TurnId(1)).expect("write");
     assert_ne!(ca, cb);
     assert_ne!(
         moderator::log_path(&dir, &a, TurnId(1)),
@@ -647,14 +645,8 @@ fn per_turn_files_are_task_scoped() {
     assert!(text(&ca).contains(r#""BBP_TASK":"T1""#), "{}", text(&ca));
     assert!(text(&cb).contains(r#""BBP_TASK":"T2""#), "{}", text(&cb));
     // Rewriting one leaves the other untouched.
-    moderator::write_mcp_config(
-        &dir,
-        &a,
-        &bbp,
-        &PrincipalId("coder".into()),
-        moderator::Bound::Turn(TurnId(1)),
-    )
-    .expect("write");
+    moderator::write_mcp_config(&dir, &a, &bbp, &PrincipalId("coder".into()), TurnId(1))
+        .expect("write");
     assert!(text(&cb).contains(r#""BBP_PRINCIPAL":"planner""#));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2435,168 +2427,86 @@ fn a_quiet_run_stops_at_its_wall_limit_under_a_long_poll() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// A session harness: a shell agent that keeps one session `bbp mcp` open
-/// through two pipes, records each start in `starts-<role>`, and runs `body`
-/// with `call TOOL ARGS` (the reply in `$reply`), `woke` and `ticket`.
-fn session_agent(dir: &Path, name: &str, body: &str) -> Launcher {
+/// A session launcher: each turn is its own `sh` harness that records
+/// `start TURN SESSION_ID RESUME ARG` and `end TURN` in `session-log`, passes
+/// its first three turns (lingering a second after each, within the grace)
+/// and asks for the plan gate on the fourth.
+fn session_launcher(dir: &Path) -> Launcher {
     let bin = dir.join("agents-bin");
     std::fs::create_dir_all(&bin).expect("mkdir");
-    let path = bin.join(format!("{name}.sh"));
-    let script = format!(
-        r#"#!/bin/sh
+    let path = bin.join("session.sh");
+    let script = r##"#!/bin/sh
 set -e
-echo $$ >> "$BBP_DIR/starts-$BBP_ROLE"
-pipes=$(mktemp -d)
-mkfifo "$pipes/in" "$pipes/out"
-"$BBP_BIN" mcp <"$pipes/in" >"$pipes/out" &
-exec 3>"$pipes/in" 4<"$pipes/out"
-n=0
-rpc() {{ n=$((n+1)); printf '{{"jsonrpc":"2.0","id":%s,"method":"%s","params":%s}}\n' "$n" "$1" "$2" >&3; read -r reply <&4; echo "$reply" >&2; }}
-call() {{ rpc tools/call "{{\"name\":\"$1\",\"arguments\":$2}}"; }}
-field() {{ printf '%s' "$reply" | sed -n "s/.*\\\\\"$1\\\\\":\\\\\"\([^\\\\]*\)\\\\\".*/\1/p"; }}
-woke() {{ field woke; }}
-ticket() {{ field ticket; }}
-rpc initialize '{{"protocolVersion":"2025-06-18","capabilities":{{}},"clientInfo":{{"name":"sh","version":"0"}}}}'
-{body}
-"#
-    );
+log="$BBP_DIR/session-log"
+echo "start $BBP_TURN $BBP_SESSION_ID $BBP_SESSION_RESUME $1" >> "$log"
+init='{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"sh","version":"0"}}}'
+call() { printf '{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":%s}\n' "$1" "$2"; }
+if [ "$(grep -c '^start' "$log")" -le 3 ]; then
+  { echo "$init"; call 1 '{"name":"post","arguments":{"op":"pass-'"$BBP_TURN"'","kind":"pass"}}'; } | "$BBP_BIN" mcp
+  sleep 1
+else
+  { echo "$init"
+    call 1 '{"name":"put_artifact","arguments":{"op":"s","kind":"spec","brief":1,"body":"# Spec"}}'
+    call 2 '{"name":"post","arguments":{"op":"g","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve?","gate":true}}'
+  } | "$BBP_BIN" mcp
+fi
+echo "end $BBP_TURN" >> "$log"
+"##;
     std::fs::write(&path, script).expect("write script");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     Launcher {
         program: path.to_string_lossy().into_owned(),
-        args: vec!["{role}".into()],
+        args: vec!["{session}".into()],
         builtin_tools: false,
         session: true,
         sandbox: None,
     }
 }
 
-fn starts(dir: &Path, role: &str) -> Vec<String> {
-    std::fs::read_to_string(dir.join(format!("starts-{role}")))
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_owned)
-        .collect()
-}
-
-/// One planner session serves turn after turn: it passes three times, then
-/// asks for the plan gate, each in the turn `wait` showed it, and is started
-/// once. Cancelling the task ends its wait and it exits.
+/// Every turn of a session launcher is its own process, killed or exited
+/// before the next starts, and all of them share the role's session id;
+/// all but the first are told to resume it.
 #[test]
-#[cfg(target_os = "linux")]
-fn a_session_harness_serves_its_roles_turns_and_is_started_once() {
-    let dir = tempdir("session-serves");
+fn a_session_launchers_turns_share_one_session_one_process_at_a_time() {
+    let dir = tempdir("session-turns");
     let (repo, _) = repo(&dir);
     let task = TaskId("T1".into());
     open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
-    let planner = session_agent(
-        &dir,
-        "planner",
-        r##"i=0
-while :; do
-  call wait '{"timeout_s":30}'
-  case $(woke) in ended) exit 0;; turn) ;; *) continue;; esac
-  t=$(ticket); i=$((i+1))
-  if [ $i -le 3 ]; then
-    call post "{\"op\":\"pass$i\",\"kind\":\"pass\",\"ticket\":\"$t\"}"
-  else
-    call put_artifact "{\"op\":\"s\",\"kind\":\"spec\",\"brief\":1,\"body\":\"# Spec\",\"ticket\":\"$t\"}"
-    call post "{\"op\":\"g\",\"kind\":\"request_decision\",\"to\":[\"human\"],\"refs\":[\"art:2\"],\"body\":\"Approve?\",\"gate\":true,\"ticket\":\"$t\"}"
-  fi
-done"##,
-    );
-    let cfg = config(
+    let mut cfg = config(
         &dir,
         &task,
         repo,
-        Launchers::default().with("planner", planner),
+        Launchers::default().with("planner", session_launcher(&dir)),
         60,
     );
+    cfg.end_grace = Duration::from_secs(5);
     let moderator = std::thread::spawn(move || moderator::run(&cfg));
     let deadline = Instant::now() + Duration::from_secs(60);
     while card(&dir, &task).state != State::PlanGate {
-        assert!(
-            Instant::now() < deadline,
-            "no plan gate: {:?}",
-            card(&dir, &task).state
-        );
+        assert!(Instant::now() < deadline, "no plan gate");
         std::thread::sleep(Duration::from_millis(50));
     }
     let rev = card(&dir, &task).rev;
     human::perform(&dir, &task, "cancel", &["done"], Some(rev)).expect("cancel");
     let out = moderator.join().expect("join").expect("moderator");
     assert_eq!(out.state, State::Cancelled);
-    assert_eq!(
-        starts(&dir, "planner").len(),
-        1,
-        "one session for every turn"
-    );
-    let events = open_driver(&dir, &task)
-        .unwrap()
-        .store
-        .events(&task, 0)
-        .unwrap();
-    let causes: Vec<TurnEnd> = events
-        .iter()
-        .filter_map(|e| match e {
-            Event::TurnEnded { cause, .. } => Some(*cause),
-            _ => None,
+    assert_eq!(out.turns_launched, 4);
+
+    let id = moderator::session_id(&task, &Who::Planner.id());
+    let shape: Vec<usize> = id.split('-').map(str::len).collect();
+    assert_eq!(shape, vec![8, 4, 4, 4, 12], "{id}");
+    let log = std::fs::read_to_string(dir.join("session-log")).expect("log");
+    let expected: Vec<String> = (1..=4)
+        .flat_map(|t| {
+            let resume = if t == 1 { "no" } else { "yes" };
+            [format!("start {t} {id} {resume} {id}"), format!("end {t}")]
         })
         .collect();
     assert_eq!(
-        causes,
-        vec![
-            TurnEnd::Pass,
-            TurnEnd::Pass,
-            TurnEnd::Pass,
-            TurnEnd::Request
-        ],
-        "each turn ended by the session's own move"
+        log.lines().collect::<Vec<_>>(),
+        expected,
+        "one process at a time"
     );
-    assert_eq!(out.turns_launched, 4);
-    assert!(moderator::session_log_path(&dir, &task, &Who::Planner.id()).exists());
-    assert!(
-        !moderator::log_path(&dir, &task, TurnId(1)).exists(),
-        "no per-turn harness"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// A turn that ends from outside (here its deadline) stops the session that
-/// held it, so nothing it was still generating can act; the next grant
-/// starts a fresh one.
-#[test]
-#[cfg(target_os = "linux")]
-fn a_turn_ended_from_outside_stops_its_session() {
-    let (dir, task, mut cfg) = quiet_planner_task("session-deadline", Duration::from_millis(10));
-    let quiet = session_agent(
-        &dir,
-        "quiet",
-        r#"call wait '{"timeout_s":30}'
-sleep 30"#,
-    );
-    cfg.launchers = Launchers::default().with("planner", quiet);
-    assert!(moderator::run(&cfg)
-        .unwrap_err()
-        .contains("moderator paused"));
-    let pids = starts(&dir, "planner");
-    assert_eq!(
-        pids.len(),
-        3,
-        "one session per externally ended turn: {pids:?}"
-    );
-    for pid in pids {
-        assert!(!alive(&pid), "session {pid} survived its turn");
-    }
-    let events = open_driver(&dir, &task)
-        .unwrap()
-        .store
-        .events(&task, 0)
-        .unwrap();
-    assert!(events.iter().all(|e| !matches!(
-        e,
-        Event::TurnEnded { cause, .. } if *cause != TurnEnd::Deadline
-    )));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2606,7 +2516,7 @@ fn session_launchers_are_refused_capped_confined_or_naming_a_turn() {
     let (repo, _) = repo(&dir);
     let task = TaskId("T1".into());
     open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
-    let session = session_agent(&dir, "planner", "exit 0");
+    let session = session_launcher(&dir);
     let base = config(&dir, &task, repo, Launchers::default(), 5);
     let refused = |cfg: Config| moderator::run(&cfg).unwrap_err();
 

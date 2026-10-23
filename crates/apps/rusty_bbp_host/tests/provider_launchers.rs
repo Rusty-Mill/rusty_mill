@@ -142,7 +142,7 @@ impl Fixture {
             &task,
             &PathBuf::from(env!("CARGO_BIN_EXE_bbp")),
             &principal,
-            moderator::Bound::Turn(turn),
+            turn,
         )
         .unwrap();
         Self {
