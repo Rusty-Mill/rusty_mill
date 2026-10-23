@@ -29,7 +29,7 @@ pub mod response;
 pub mod routing;
 pub mod serve;
 
-pub use body::{Body, BoxError};
+pub use body::{Body, BodyStream, BoxError};
 pub use extract::{FromRequest, Json, Path, Query, Rejection, State};
 pub use handler::Handler;
 pub use request::Request;

@@ -1,0 +1,34 @@
+[package]
+name = "rusty_axum_tokio"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "Migration bridge: lets rusty_axum handlers that still call tokio libraries run on rusty_tokio, by entering a tokio runtime on every poll. Deleted when the last consumer leaves tokio."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+# The framework this layer plugs into.
+rusty_axum = { workspace = true }
+# To wrap a streamed body (`Stream`), as rusty_axum itself does.
+futures-core = { workspace = true }
+# The runtime being bridged to: only `Handle` and its `enter` guard, which
+# need no features. Consumers bring the runtime itself. This crate is the one
+# place in the rusty_axum stack that names tokio, so that rusty_axum never
+# does (#879).
+tokio = { version = "1", default-features = false }
+
+[dev-dependencies]
+rusty_tokio = { workspace = true }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "sync", "net", "io-util"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"
