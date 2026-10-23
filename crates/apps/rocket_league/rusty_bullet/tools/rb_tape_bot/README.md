@@ -97,9 +97,9 @@ From the repository root, with **BakkesMod running** (nothing else needed;
 no RLBot GUI, no launcher, no clicking in the game):
 
 ```
-powershell -File tools\rb_tape_bot\run_batch.ps1            # every scenario, twice
-powershell -File tools\rb_tape_bot\run_batch.ps1 -Repeat 1 -Scenarios pogo,half_flip
-powershell -File tools\rb_tape_bot\run_batch.ps1 -ScoreOnly replays\batch_<stamp>
+pwsh -NoProfile -File tools\rb_tape_bot\run_batch.ps1            # every scenario, twice
+pwsh -NoProfile -File tools\rb_tape_bot\run_batch.ps1 -Repeat 1 -Scenarios pogo,half_flip
+pwsh -NoProfile -File tools\rb_tape_bot\run_batch.ps1 -ScoreOnly replays\batch_<stamp>
 ```
 
 It builds the bot, runs `rb_run_tapes`, then scores each capture with
@@ -327,9 +327,7 @@ changes, with the car's position and boost at that physics frame.
 with the port. To measure the game's spread (about 50 minutes unattended):
 
 ```powershell
-powershell -File tools
-b_tape_bot
-un_batch.ps1 -Repeat 5 -Scenarios (501..524 | % { "fuzz_$_" } | Join-String -Separator ",")
+pwsh -NoProfile -File tools\rb_tape_bot\run_batch.ps1 -Repeat 5 -Scenarios (501..524 | % { "fuzz_$_" } | Join-String -Separator ",")
 python -I tools/rb_tape_bot/spread_report.py replays/batch_<stamp>
 ```
 
@@ -473,7 +471,7 @@ In the monorepo, `run_batch.ps1` checks the verifier build result before using
 It stops on build failure, invalid metadata, or a missing executable.
 
 The batch script scores directly; it does not invoke the Python report tools.
-`powershell -File` runs in a child process and cannot set the caller's environment.
+`pwsh -File` runs in a child process and cannot set the caller's environment.
 For direct Python use, set `RB_VERIFY` explicitly in the same shell (from the
 monorepo root; adjust the binary path if `CARGO_TARGET_DIR` is overridden):
 
