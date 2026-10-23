@@ -12511,6 +12511,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_journal"
+version = "0.1.0"
+dependencies = [
+ "rusty_tokio",
+ "rusty_wire",
+]
+
+[[package]]
 name = "rusty_json"
 version = "0.1.0"
 dependencies = [
@@ -12950,14 +12958,6 @@ version = "0.1.0"
 dependencies = [
  "rusty_libc",
  "rusty_win32",
-]
-
-[[package]]
-name = "rusty_stream"
-version = "0.1.0"
-dependencies = [
- "rusty_tokio",
- "rusty_wire",
 ]
 
 [[package]]

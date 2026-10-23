@@ -1,4 +1,7 @@
-# rusty_stream
+# rusty_journal
+
+Renamed from `rusty_stream` (#895); that name now belongs to the async
+`Stream` crate (#896). The wire protocol and on-disk format are unchanged.
 
 Single-node durable log for RustyMill, built on `rusty_wire`. Append-only segment
 storage with a sparse offset index, in the spirit of Kafka's `.log`/`.index` model —
@@ -20,7 +23,7 @@ just documentation review).
 
 Every gap this document previously tracked as "still open" (segment manifest
 persistence, the frame-size cap, graceful shutdown) is now closed, and — as
-of `baileyrd/rusty_tokio#256` landing — `rusty_stream` has a real standalone
+of `baileyrd/rusty_tokio#256` landing — `rusty_journal` has a real standalone
 server binary (`src/main.rs`), not just an in-process API for tests. See
 [RELEASE_NOTES.md](./RELEASE_NOTES.md) for the full history and each
 change's own stated known limitations (smaller, ongoing ones like
@@ -28,14 +31,11 @@ change's own stated known limitations (smaller, ongoing ones like
 
 ## Getting started
 ```bash
-git clone https://github.com/baileyrd/rusty_stream
-cd rusty_stream
-cargo build
-cargo test
+cargo build -p rusty_journal
+cargo test -p rusty_journal
 ```
-`rusty_tokio` is pulled as a pinned `git` dependency (see `Cargo.toml`'s comment
-for why it's a `rev`, not a branch) — no local sibling checkout needed as of
-`baileyrd/rusty_tokio#254`.
+`rusty_tokio` and `rusty_wire` are workspace path dependencies. Linux only
+(io_uring).
 
 ### Running the server
 ```bash

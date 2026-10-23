@@ -1,6 +1,6 @@
 # Multi-stage build: compile in a full Rust image, ship just the binary in
 # a minimal runtime image. Requires network access at build time to fetch
-# rusty_stream's pinned git dependencies (rusty_tokio, rusty_wire, and
+# rusty_journal's pinned git dependencies (rusty_tokio, rusty_wire, and
 # their own transitive git deps) -- see Cargo.toml's comments for why
 # those are pinned revs, not crates.io releases.
 #
@@ -12,7 +12,7 @@ FROM rust:1-slim-bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release --bin rusty_stream
+RUN cargo build --release --bin rusty_journal
 
 FROM debian:bookworm-slim
 # io_uring is a host-kernel feature, not something this image provides --
@@ -24,11 +24,11 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /build/target/release/rusty_stream /usr/local/bin/rusty_stream
+COPY --from=builder /build/target/release/rusty_journal /usr/local/bin/rusty_journal
 
 ENV RUSTY_STREAM_ADDR=0.0.0.0:7420
 ENV RUSTY_STREAM_DATA_DIR=/data
 VOLUME ["/data"]
 EXPOSE 7420
 
-ENTRYPOINT ["/usr/local/bin/rusty_stream"]
+ENTRYPOINT ["/usr/local/bin/rusty_journal"]
