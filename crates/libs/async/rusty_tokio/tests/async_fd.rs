@@ -91,6 +91,7 @@ fn async_fd_get_ref_get_mut_into_inner_reach_the_wrapped_value() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
         let mut async_fd = AsyncFd::new(reader).unwrap();
+        assert_eq!(async_fd.as_raw_fd(), raw_fd);
         assert_eq!(async_fd.get_ref().as_raw_fd(), raw_fd);
         assert_eq!(async_fd.get_mut().as_raw_fd(), raw_fd);
         assert_eq!(async_fd.interest(), Interest::READABLE | Interest::WRITABLE);
