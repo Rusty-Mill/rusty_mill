@@ -95,8 +95,9 @@ it is "source clearance of the bounded corrections, not acceptance of a passing 
 production adoption". It also names what stays open: no full evidence record exists for that head, CI does not run
 the statistical timing series, the AES exports remain unconditional with gating unresolved, and best-effort wiping
 cannot establish erasure of every temporary. The two doc items it named are corrected in `73dd7629`. The AES source
-is otherwise unchanged since `70139bb3`. D5 itself, whether this counts as gap 3's review for wiring, is still the
-owner's decision. No human review of AES-GCM is recorded. Section 11b sets this beside the records for the other primitives.
+is otherwise unchanged since `70139bb3`. On 2026-10-23 the owner attested that the AES integration review was complete (section 11b),
+which settles D5's review question. D5's other question, whether `rusty_aead`'s AES types stay exported
+unconditionally, is still open. No human review of AES-GCM is recorded. Section 11b sets this beside the records for the other primitives.
 
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
@@ -682,7 +683,7 @@ the honest current position.
 
 | Requirement | State |
 | --- | --- |
-| Arithmetic review of the shared Montgomery core: carry bounds, reduction invariants, limb conversions, adversarial boundaries. Sharing the code concentrates the impact of a defect. | Boundary tests added (`mont::tests::adversarial_boundaries_match_biguint`, moduli of 1 to 128 limbs built from all-ones, near-2^(64k), sparse and top-bit patterns; operands 0, 1, n-1, n-2, R; mul, add, sub, enter/leave against an independent bignum): no defect found. `add`/`sub` assume inputs below `n` and `mul` assumes `a*b < n*R`; documented in code, enforced by callers. **A human review of the invariants has not happened.** |
+| Arithmetic review of the shared Montgomery core: carry bounds, reduction invariants, limb conversions, adversarial boundaries. Sharing the code concentrates the impact of a defect. | Boundary tests added (`mont::tests::adversarial_boundaries_match_biguint`, moduli of 1 to 128 limbs built from all-ones, near-2^(64k), sparse and top-bit patterns; operands 0, 1, n-1, n-2, R; mul, add, sub, enter/leave against an independent bignum): no defect found. `add`/`sub` assume inputs below `n` and `mul` assumes `a*b < n*R`; documented in code, enforced by callers. **A human review of the invariants has not happened.** *(2026-10-23: the owner attests that this review is complete. The commit, method and findings are not recorded; see section 11b.)* |
 | AEAD failure tests: corrupted tag, AAD and ciphertext; no unauthenticated plaintext exposed; full-length tag comparison; counter limit; explicit nonce contract. | Corrupted tag/AAD/ciphertext/nonce: tested (differential and unit). Failed open leaves the buffer undecrypted: tested. Wrong-length and empty tags rejected: tested. Counter limit: `MAX_LEN` is now `u32::MAX * 64` (274,877,906,880 bytes, RFC 8439 section 2.8; it was one block short, found by Codex round 1) and its value and boundary arithmetic are pinned by a unit test, but a message of that size is never actually sealed. Nonce contract: stated in the type's docs (never reuse under one key), not enforced by the API, and the caller owns uniqueness. |
 | X25519 boundary tests: decoding, clamping, low-order inputs, all-zero shared-secret rejection (RFC 8446 requires it). | Top-bit masking, non-canonical `u`, clamping mutants, 31 all-zero Wycheproof cases rejected by `agree`, matches `ring` on all 518 public keys. Key generation needs a CSPRNG and is not part of this crate. |
 | Pinned evidence: implementation commit, vector versions, executed and skipped case counts, reproducible commands, review findings. | `docs/research/crypto-evidence/collect.sh` and `EVIDENCE-2026-10-09.txt`. **Review findings: none exist yet.** |
@@ -790,13 +791,25 @@ re-review.
 | `rusty_crypto_key::{constant_time_eq, wipe}` | `wipe` was in the scope of #540's automated reviews. `constant_time_eq` (the native HMAC tag check) has no review record. | **No.** |
 | The seam itself (`handrolled/crypto/{mod,ring,native}.rs`, call sites, the gates) | Author self-review (#865, #871). Independent **automated** source reviews of #871: `d7e74eb1` (comment 6339638133; found the X25519 unwind-wipe gap, fixed in `7192f26a`) and `7192f26a` (comment 6339760776; no new blocking finding), and a check that `99a08e51` is byte-identical in crypto code and tests to `d86de0a1` (comment 6354987869). Their stated limits: source passes, no local tests, no comprehensive audit or forensic-erasure claim, and they do not discharge D5 or the primitive review requirements. #871 also has the seam differential, the client-only CI variant and OpenSSL interop. | **No.** |
 
-**Still unreviewed, precisely:**
+**Without a human review on record before 2026-10-23** (resolved by the owner's attestation below):
 - **#540's secret-handling code at `e3266f2e`:** the HMAC key paths, ChaCha20-Poly1305, X25519 and the Montgomery-core invariants. The owner accepted their own review on 2026-10-10, but that statement gave no scope, so it does not close these rows. If the owner states on GitHub that their review covered these components, at that commit, the rows close.
 - **The helpers** `rusty_crypto_key::constant_time_eq` and `wipe`.
 - **The #871 seam code.** It has automated reviews only (above).
 - **AES-GCM.** It has an automated, bounded source review only. Also missing: a full constant-time record for the corrected head, the export gating, and the D5 decision itself.
 
 Further automated review can add evidence here, but it cannot stand in for the human review these rows require.
+
+**Owner attestation (2026-10-23; #871 comment 6355620568, confirmed by the owner directly on 2026-10-23).** The owner was asked whether the remaining review of #540's crypto
+primitives and the AES integration review were complete, and answered: "all reviews were completed". This covers
+every item in the list above, the scope #871 comment 6354987869 names: HMAC/HKDF, ChaCha20-Poly1305, X25519, the
+Montgomery invariants, the comparison and wiping helpers, the seam, and AES-GCM. It resolves the review-completion
+hold for the native client backend, which merged as #871. It is recorded as the owner's attestation:
+
+- The reviewed commits, the method and any findings are not recorded.
+- It does not turn the automated reviews above into a human audit.
+- It is not a timing or production-security certification.
+
+The "No" cells above describe the records that existed before the attestation.
 
 ## 12. What I did not verify
 

@@ -1,10 +1,10 @@
 # AES-GCM for `rusty_aead`: design note (draft, no code)
 
 Date: 2026-10-10 (updated 2026-10-13). Status: **the design below was written before any code; a spike and its
-constant-time evidence now exist in `rusty_aead` (sections 8 to 10), used by nothing, preliminary. Automated, bounded source review on #651: the re-review of `70139bb3` (comment 6150642627) cleared the
+constant-time evidence now exist in `rusty_aead` (sections 8 to 10), used only by `rusty_tls`'s opt-in native backend (#871), preliminary. Automated, bounded source review on #651: the re-review of `70139bb3` (comment 6150642627) cleared the
 reported source defects. It does not accept a constant-time evidence record or production adoption, and no human
-review is recorded
-(section 10; plan section 0, "AES-GCM review record").** Plan context:
+review is recorded beyond the owner's 2026-10-23 attestation that the AES integration review was complete
+(section 10; plan sections 0, "AES-GCM review record", and 11b).** Plan context:
 `CRYPTO-REPLACEMENT-PLAN.md` section 13.1 gap 3, decisions D1 and D2. The freeze was reopened for this gap only
 (plan section 0, "Owner decisions (2026-10-10)"). Signing stays closed; the `rusty_tls` seam was reopened for the client role on 2026-10-22 (plan section 0). Numbers marked
 *estimate* are not measurements; the first step below produces the measurement.
