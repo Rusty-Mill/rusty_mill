@@ -12186,6 +12186,21 @@ name = "rusty_audio"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_axum"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "rcgen",
+ "rustls",
+ "rusty_http",
+ "rusty_percent",
+ "rusty_tls",
+ "rusty_tokio",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rusty_base64"
 version = "0.1.0"
 
@@ -12990,6 +13005,7 @@ dependencies = [
  "rusty_hex",
  "rusty_regx",
  "rusty_term_l13",
+ "rusty_wire",
  "unicode-segmentation",
  "unicode-width 0.2.2",
 ]

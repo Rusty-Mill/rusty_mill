@@ -15,6 +15,9 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::sixel::SixelImage;
 
+mod snapshot;
+pub use snapshot::SnapshotError;
+
 /// Default maximum number of lines retained in the scrollback history. Older
 /// lines are dropped as new ones arrive. Overridable per-grid via
 /// [`Grid::set_scrollback_max`] (the `scrollback` config key).
@@ -818,7 +821,7 @@ struct SavedScreen {
 /// One row of cells, on the live screen or in scrollback. The same value moves
 /// from the screen into history when it scrolls off the top, and an evicted
 /// history line is recycled as the new bottom row, so a scroll moves no cells.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Line {
     /// The row's cells: exactly `cols` on the live screen; a history line keeps
     /// the width it had when it left the screen until the next reflow.
@@ -1273,10 +1276,17 @@ impl StatusLine {
 impl Grid {
     /// Create a `cols`×`rows` grid filled with blank cells.
     pub fn new(cols: usize, rows: usize) -> Self {
+        Self::with_screen(cols, rows, blank_screen(cols, rows, Cell::blank()))
+    }
+
+    /// A `cols`×`rows` grid in its initial state around an already-built
+    /// `screen` (`rows` lines of `cols` cells), so a decoder can build the
+    /// rows first and allocate no blank screen to throw away.
+    pub(crate) fn with_screen(cols: usize, rows: usize, screen: Vec<Line>) -> Self {
         Self {
             cols,
             rows,
-            screen: blank_screen(cols, rows, Cell::blank()),
+            screen,
             dirty: vec![false; rows],
             cursor: (0, 0),
             saved_cursor: (0, 0),
@@ -1402,6 +1412,12 @@ impl Grid {
     /// last row.
     pub fn row(&self, y: usize) -> &[Cell] {
         self.screen.get(y).map_or(&[], |line| &line.cells)
+    }
+
+    /// Whether live screen row `y` soft-wraps into the next one.
+    #[cfg(test)]
+    pub(crate) fn row_wrapped(&self, y: usize) -> bool {
+        self.screen.get(y).is_some_and(|line| line.wrapped)
     }
 
     /// Mutable access to the cells of live screen row `y`; empty past the
@@ -2107,6 +2123,57 @@ impl Grid {
         // glyph wider than the grid itself (w=2, cols=1) must not push past it,
         // or later column arithmetic indexes outside the row.
         self.cursor.0 = (self.cursor.0 + w).min(self.cols);
+    }
+
+    /// Write a run of printable ASCII at the cursor, as [`Grid::put_char`]
+    /// would one byte at a time. The part that fits before the right edge is
+    /// filled straight into the row; wrapping, insert mode and DECSLRM margins
+    /// fall back to [`Grid::put_char`] for one byte.
+    pub(crate) fn put_ascii(&mut self, run: &[u8], pen: Pen) {
+        let mut rest = run;
+        while let Some((&first, tail)) = rest.split_first() {
+            let (x, y) = self.cursor;
+            let room = self.cols.saturating_sub(x);
+            if room == 0 || self.insert_mode || self.side_margins_active() {
+                self.put_char(char::from(first), pen);
+                rest = tail;
+                continue;
+            }
+            let n = room.min(rest.len());
+            self.fill_ascii(x, y, &rest[..n], pen);
+            self.cursor.0 = x + n;
+            rest = &rest[n..];
+        }
+    }
+
+    /// Overwrite `bytes.len()` cells of row `y` from column `x` (the caller
+    /// keeps them on the row) with ASCII glyphs. A wide glyph cut by either
+    /// end of the run loses its other half, as [`Grid::set_cell`] does.
+    fn fill_ascii(&mut self, x: usize, y: usize, bytes: &[u8], pen: Pen) {
+        let link = self.current_link;
+        let Some(line) = self.screen.get_mut(y) else {
+            return;
+        };
+        let row = &mut line.cells;
+        let end = x + bytes.len();
+        if x >= 1 && row[x].flags & WIDE_TRAILER != 0 {
+            row[x - 1] = Cell::blank();
+        }
+        if end < row.len() && row[end].flags & WIDE_TRAILER != 0 {
+            row[end] = Cell::blank();
+        }
+        for (cell, &b) in row[x..end].iter_mut().zip(bytes) {
+            *cell = Cell {
+                ch: char::from(b),
+                cluster: 0,
+                fg: pen.fg,
+                bg: pen.bg,
+                flags: pen.attrs,
+                link,
+                underline_color: pen.underline_color,
+            };
+        }
+        self.dirty[y] = true;
     }
 
     /// The base cell of the grapheme immediately left of the cursor, stepping

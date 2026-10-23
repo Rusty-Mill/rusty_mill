@@ -16,9 +16,11 @@
 # Ring-buffer scroll (rows rotate, scrollback lines recycled), measured:
 # alt 848.2, ascii 193.2, cursor 127.3, scroll 258.6, sgr 207.8, unicode
 # 166.8. alt and cursor keep their ceilings.
-alt_screen_flicker   920
-ascii_throughput     213
-cursor_thrash        137
-scroll_heavy         285
-sgr_churn            229
+# Printable-ASCII fast path, measured: alt 735.0, ascii 47.9, cursor 84.7,
+# scroll 136.7, sgr 116.7, unicode 167.8 (unicode keeps its ceiling).
+alt_screen_flicker   809
+ascii_throughput      53
+cursor_thrash         93
+scroll_heavy         150
+sgr_churn            128
 unicode_heavy        184
