@@ -27,9 +27,17 @@ rusty_http = { workspace = true, optional = true }
 rusty_tokio = { workspace = true, optional = true }
 # The server (module `server`) takes an optional `TlsAcceptor`.
 rusty_tls = { workspace = true, optional = true, features = ["rusty-tokio"] }
+# The `tonic-codec` feature: a codec for `rusty_prost` messages on tonic's transport.
+tonic = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 
 [features]
 rusty-tokio = ["dep:rusty_hyper", "dep:rusty_h2", "dep:rusty_http", "dep:rusty_tokio", "dep:rusty_tls"]
+tonic-codec = ["dep:tonic", "dep:bytes"]
+
+[[test]]
+name = "tonic_codec"
+required-features = ["tonic-codec"]
 
 [[test]]
 name = "client_calls"
@@ -69,6 +77,7 @@ tonic-prost = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }
 http = { workspace = true }
+http-body-util = { workspace = true }
 tower = { workspace = true }
 futures-util = { workspace = true }
 # Throwaway certificates for the TLS tests; `CertificateDer` names the pinned anchors.

@@ -49,6 +49,15 @@ pub struct Launcher {
     /// (Linux). See [`crate::confine`].
     #[rusty_serde(default)]
     pub sandbox: Option<HarnessSandbox>,
+    /// Keep one provider conversation for the role across its turns. Each
+    /// turn is still its own harness process with its own `bbp mcp`, killed
+    /// when the turn ends; every one gets the role's session id (`{session}`,
+    /// `BBP_SESSION_ID`) and `BBP_SESSION_RESUME` (`yes` once a turn of the
+    /// role was launched with it), so it can resume the conversation. The
+    /// next turn's harness starts only after the last one has exited. Not
+    /// yet with `sandbox` or a cost cap, and its args cannot use `{turn}`.
+    #[rusty_serde(default)]
+    pub session: bool,
 }
 
 /// One launcher per role id, keyed by the ids of the task's roster. A role
@@ -250,6 +259,31 @@ pub fn log_path(dir: &Path, task: &TaskId, turn: TurnId) -> PathBuf {
     task_dir(dir, "agents", task).join(format!("turn-{}.log", turn.0))
 }
 
+/// The provider session id every turn of `role` shares: a UUID keyed by the
+/// store's master (see [`crate::master`]) and derived from task and role, so it
+/// is stable across moderator restarts of one store and distinct between
+/// stores that reuse the same task and role names.
+pub fn session_id(master: &[u8; 32], task: &TaskId, role: &RoleId) -> String {
+    let label = format!("|bbp-session|{}|{}", task.0, role.0);
+    let mut b = Sha256::of(&[master.as_slice(), label.as_bytes()].concat()).0;
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h = Sha256(b).hex();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
+}
+
+/// Present once a turn was launched with session id `id`.
+fn session_marker(dir: &Path, task: &TaskId, id: &str) -> PathBuf {
+    task_dir(dir, "agents", task).join(format!("session-{id}.started"))
+}
+
 /// The file whose exclusive lock is the right to moderate `task`.
 pub fn lock_path(dir: &Path, task: &TaskId) -> PathBuf {
     task_dir(dir, "mod", task).with_extension("lock")
@@ -311,6 +345,8 @@ pub fn write_mcp_config(
 
 struct Harness {
     turn: TurnId,
+    /// The role whose provider session this harness resumes, if it does.
+    session: Option<RoleId>,
     child: Child,
     /// A confined harness's MCP broker, in the harness's process group.
     broker: Option<Child>,
@@ -511,6 +547,7 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
 /// A run the cap or the wall limit stops is an `Ok` outcome carrying the stop,
 /// so the caller can still print what happened; [`run`] turns it into an error.
 pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
+    check_sessions(cfg).map_err(|e| format!("moderator: refusing to start: {e}"))?;
     // An evidence run (one with a cost cap and its prices) starts only if every
     // role pins a priced model.
     if let Some(cap) = &cfg.cost_cap {
@@ -710,6 +747,22 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                 );
                 continue;
             };
+            // One process per session at a time: the next turn waits until
+            // the last one's harness has exited or been stopped.
+            if l.session
+                && sup
+                    .harnesses
+                    .iter()
+                    .any(|h| h.session.as_ref() == Some(&role))
+            {
+                if waiting.insert(turn) {
+                    eprintln!(
+                        "bbp mod: turn {} waits for {role}'s last harness to end",
+                        turn.0
+                    );
+                }
+                continue;
+            }
             // Without an agent slot the turn waits for a later poll, or its deadline.
             let Some((slot, stdin)) = admit(cfg, Class::Agent)? else {
                 if waiting.insert(turn) {
@@ -744,6 +797,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             }
             sup.harnesses.push(Harness {
                 turn,
+                session: l.session.then(|| role.clone()),
                 child: launched.child,
                 broker: launched.broker,
                 confined: launched.confined,
@@ -767,6 +821,32 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
         let timeout = next_wait(cfg.poll, now(), d.state.next_deadline(), wall, graces);
         waker.wait(&children, timeout)?;
     }
+}
+
+/// Session launchers run unconfined and uncapped until both are supported: a
+/// confined turn's home is its own workspace, where no earlier conversation
+/// is, and resumed turns are not yet priced. Their args name the session, not
+/// the turn.
+fn check_sessions(cfg: &Config) -> Result<(), String> {
+    for (role, l) in cfg.launchers.iter().filter(|(_, l)| l.session) {
+        if cfg.cost_cap.is_some() {
+            return Err(format!(
+                "{role}: a session launcher cannot run under a cost cap"
+            ));
+        }
+        if l.sandbox.is_some() {
+            return Err(format!("{role}: a session launcher cannot be confined yet"));
+        }
+        if std::iter::once(&l.program)
+            .chain(&l.args)
+            .any(|a| a.contains("{turn}"))
+        {
+            return Err(format!(
+                "{role}: a session launcher names its session; drop {{turn}}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// How long a pass may wait for an event: until the nearest turn or request
@@ -1002,6 +1082,13 @@ fn spawn(
         None => write_mcp_config(&cfg.dir, &cfg.task, bbp, principal, turn)?,
     };
     let role_name = role.0.as_str();
+    let session = match l.session {
+        true => Some(session_id(&crate::master::load(&cfg.dir)?, &cfg.task, role)),
+        false => None,
+    };
+    let marker = session
+        .as_deref()
+        .map(|id| session_marker(&cfg.dir, &cfg.task, id));
     let fill = |a: &str| {
         a.replace("{dir}", &cfg.dir.to_string_lossy())
             .replace("{task}", &cfg.task.0)
@@ -1010,6 +1097,7 @@ fn spawn(
             .replace("{role}", role_name)
             .replace("{bbp}", &bbp.to_string_lossy())
             .replace("{mcp_config}", &mcp.to_string_lossy())
+            .replace("{session}", session.as_deref().unwrap_or("{session}"))
     };
     let log_path = log_path(&cfg.dir, &cfg.task, turn);
     if let Some(parent) = log_path.parent() {
@@ -1027,6 +1115,11 @@ fn spawn(
         ("BBP_BIN".into(), bbp.to_string_lossy().into_owned()),
         ("BBP_MCP_CONFIG".into(), mcp.to_string_lossy().into_owned()),
     ];
+    if let (Some(id), Some(marker)) = (&session, &marker) {
+        let resume = if marker.exists() { "yes" } else { "no" };
+        env.push(("BBP_SESSION_ID".into(), id.clone()));
+        env.push(("BBP_SESSION_RESUME".into(), resume.into()));
+    }
     // An evidence run pins the cache lifetime for the main agent and for
     // subagents: they default to different lifetimes, and the price file
     // prices cache writes at the 1-hour rate.
@@ -1075,6 +1168,13 @@ fn spawn(
         .spawn()
         .map_err(|e| format!("spawn {}: {e}", l.program))?;
     let group = group.unwrap_or(child.id());
+    // Later turns of the session resume what this one starts.
+    if let Some(marker) = &marker {
+        if let Err(e) = File::create(marker) {
+            kill_tree(&mut child, group)?;
+            return Err(format!("{}: {e}", marker.display()));
+        }
+    }
     let broker = match &confined {
         None => None,
         Some(t) => match t.broker(

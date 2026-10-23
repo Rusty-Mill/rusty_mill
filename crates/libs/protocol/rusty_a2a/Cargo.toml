@@ -47,7 +47,8 @@ signature = { version = "3", optional = true }
 # grpc feature: the messages are `rusty_prost` (see `src/pb`); `tonic` is only the transport.
 tonic = { version = "0.14", optional = true }
 rusty_prost = { workspace = true, optional = true }
-bytes = { workspace = true, optional = true }
+# The codec between `rusty_prost` messages and `tonic`.
+rusty_tonic = { workspace = true, optional = true, features = ["tonic-codec"] }
 
 [features]
 default = []
@@ -76,7 +77,7 @@ signing = ["dep:p256", "dep:ed25519-dalek", "dep:getrandom", "dep:signature"]
 grpc = [
   "dep:tonic",
   "dep:rusty_prost",
-  "dep:bytes",
+  "dep:rusty_tonic",
   "dep:tokio",
   "dep:futures-core",
   "dep:futures-util",

@@ -558,6 +558,7 @@ rusty_bbp = { path = "crates/libs/protocol/rusty_bbp" }
 rusty_flatbuffers = { path = "crates/libs/protocol/rusty_flatbuffers" }
 rusty_protobuf = { path = "crates/libs/protocol/rusty_protobuf" }
 rusty_prost = { path = "crates/libs/protocol/rusty_prost" }
+rusty_tonic = { path = "crates/libs/protocol/rusty_tonic" }
 rusty_sandbox = { path = "crates/libs/rusty_sandbox" }
 rusty_worktree = { path = "crates/libs/rusty_worktree" }
 rusty_bot = { path = "crates/libs/rusty_bot" }

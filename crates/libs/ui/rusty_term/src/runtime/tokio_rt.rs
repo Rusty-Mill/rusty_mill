@@ -57,17 +57,29 @@ impl Drop for ShutdownOnDrop {
     }
 }
 
-/// A PTY master descriptor registered with the reactor that does **not** close
-/// the fd on drop — ownership stays with the `BackendHandle` that produced it,
-/// which closes it. `AsyncFd<FdRef>` only deregisters from the reactor on drop.
+/// Duplicate `fd` into a descriptor this runtime owns outright, so
+/// registering it with the reactor never depends on how a (safe, possibly
+/// external) `BackendHandle` manages the fd it reports. The dup shares the open
+/// file description, so reads, writes and `O_NONBLOCK` are unchanged. A
+/// closed `fd` fails here with `EBADF` rather than later inside the reactor.
 #[cfg(unix)]
-struct FdRef(RawFd);
-
-#[cfg(unix)]
-impl AsRawFd for FdRef {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0
+fn dup_owned(fd: RawFd) -> std::io::Result<OwnedFd> {
+    // SAFETY: `F_DUPFD_CLOEXEC` accepts any integer and has no memory operands;
+    // an invalid `fd` returns -1/EBADF.
+    let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        return Err(std::io::Error::last_os_error());
     }
+    // SAFETY: `dup` is a freshly allocated descriptor nothing else refers to.
+    Ok(unsafe { OwnedFd::from_raw_fd(dup) })
+}
+
+/// Register an owned descriptor with the reactor.
+#[cfg(unix)]
+fn register_owned(fd: OwnedFd) -> std::io::Result<AsyncFd<OwnedFd>> {
+    // SAFETY: the `OwnedFd` is moved into the `AsyncFd`, so it stays open and
+    // returns the same fd until the `AsyncFd` drops (and closes) it.
+    unsafe { AsyncFd::register(fd) }.map_err(std::io::Error::from)
 }
 
 /// Put `fd`'s open file description into non-blocking mode, as `AsyncFd`
@@ -158,7 +170,7 @@ fn write_some(fd: RawFd, data: &[u8]) -> std::io::Result<usize> {
 /// short writes. The slave's input queue is finite, so partial writes are
 /// normal.
 #[cfg(unix)]
-async fn write_all(afd: &AsyncFd<FdRef>, data: &[u8]) -> std::io::Result<()> {
+async fn write_all(afd: &AsyncFd<OwnedFd>, data: &[u8]) -> std::io::Result<()> {
     let mut written = 0;
     while written < data.len() {
         let mut guard = afd.writable().await?;
@@ -270,16 +282,15 @@ async fn run_async(
     // `reader` (the shell, spawned before the runtime started) owns the master
     // fd + child and reaps it on drop; keeping it in this top-level future
     // means the child is reaped on every exit path. Independent dups feed the
-    // read, write, and resize paths.
-    let read_handle = reader.try_clone()?;
-    let write_handle = reader.try_clone()?;
+    // read, write, and resize paths; the read/write dups are owned here, so
+    // their reactor registrations cannot be invalidated by the backend.
+    let read_fd = dup_owned(reader.pty_fd())?;
+    let write_fd = dup_owned(reader.pty_fd())?;
     let mut resizer = reader.try_clone()?;
 
     // One O_NONBLOCK on the shared open file description covers every dup; the
     // resize dup only issues ioctls, so it is unaffected.
     set_nonblocking(reader.pty_fd())?;
-    let read_fd = read_handle.pty_fd();
-    let write_fd = write_handle.pty_fd();
 
     let running = Arc::new(AtomicBool::new(true));
     let frame = Arc::new(Notify::new());
@@ -353,10 +364,7 @@ async fn run_async(
                 running: Arc::clone(&running),
                 frame: Arc::clone(&frame),
             };
-            // Keep the read dup alive for the task; `master` deregisters before
-            // it (declared after, dropped first) so the fd is still open then.
-            let _read_handle = read_handle;
-            let master = match AsyncFd::new(FdRef(read_fd)) {
+            let master = match register_owned(read_fd) {
                 Ok(m) => m,
                 Err(_) => return,
             };
@@ -402,12 +410,11 @@ async fn run_async(
                 running: Arc::clone(&running),
                 frame: Arc::clone(&frame),
             };
-            let _write_handle = write_handle;
-            let tty = match open_tty_nonblocking().and_then(AsyncFd::new) {
+            let tty = match open_tty_nonblocking().and_then(register_owned) {
                 Ok(t) => t,
                 Err(_) => return,
             };
-            let writer = match AsyncFd::new(FdRef(write_fd)) {
+            let writer = match register_owned(write_fd) {
                 Ok(w) => w,
                 Err(_) => return,
             };
@@ -765,4 +772,66 @@ async fn run_async(
     // process has certainly signaled, so this returns promptly.
     let code = reader.reap_exit_status().unwrap_or(0);
     Ok(code)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn pipe() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0; 2];
+        // SAFETY: `pipe` writes two fds into a two-element array.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: both fds are freshly opened and owned only here.
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+    }
+
+    fn is_open(fd: RawFd) -> bool {
+        // SAFETY: `F_GETFD` on any integer; no memory operands.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        flags >= 0
+    }
+
+    #[test]
+    fn dup_owned_rejects_an_invalid_fd() {
+        // -1 is never a valid descriptor; a closed fd's number could be
+        // reused concurrently by a parallel test.
+        let err = dup_owned(-1).expect_err("invalid fd must not be duplicated");
+        assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+    }
+
+    #[tokio::test]
+    async fn registration_survives_the_source_fd_closing() {
+        let (r, w) = pipe();
+        set_nonblocking(r.as_raw_fd()).unwrap();
+        let afd = register_owned(dup_owned(r.as_raw_fd()).unwrap()).unwrap();
+        // The backend closes its handle; the registered dup is unaffected.
+        drop(r);
+        write_some(w.as_raw_fd(), b"hi").unwrap();
+        let mut guard = afd.readable().await.unwrap();
+        let data = guard
+            .try_io(|inner| read_nonblocking(inner.as_raw_fd()))
+            .expect("readable")
+            .unwrap();
+        assert_eq!(data, b"hi");
+    }
+
+    #[tokio::test]
+    async fn dropping_or_cancelling_the_registration_leaves_the_source_open() {
+        let (r, _w) = pipe();
+        set_nonblocking(r.as_raw_fd()).unwrap();
+        let src = r.as_raw_fd();
+
+        let afd = register_owned(dup_owned(src).unwrap()).unwrap();
+        drop(afd);
+        assert!(is_open(src));
+
+        let afd = register_owned(dup_owned(src).unwrap()).unwrap();
+        let task = tokio::spawn(async move {
+            let _ = afd.readable().await;
+        });
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(is_open(src));
+    }
 }

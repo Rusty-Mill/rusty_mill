@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
-"""Regenerates `a2a_vectors.json`: wire-format vectors for every message in spec/a2a.proto,
-produced by Google's Python protobuf runtime (an implementation independent of this crate).
+"""Wire-format vectors for every message in a .proto, produced by Google's Python protobuf
+runtime (an implementation independent of `rusty_prost`), for a consumer's golden test.
 
     python3 -m venv venv && venv/bin/pip install grpcio-tools protobuf
-    venv/bin/python tests/golden/gen_vectors.py
+    venv/bin/python rusty_prost/tools/gen_vectors.py --proto PATH/x.proto -I DIR [-I DIR ...] \\
+        [--compile-all DIR] [--extra extra_vectors.py] --out x_vectors.json --label "<command>"
 
 Each vector is {type, name, input, canonical} (hex). `input` is what a peer might send (possibly
 not canonical: unknown fields, repeated occurrences, fields out of order); `canonical` is what
 the reference parses it to and serializes back, with unknown fields discarded and map keys
-sorted, which is what this crate must re-encode. The random vectors are seeded, so a rerun with
-the same runtime reproduces the file.
+sorted, which is what the consumer must re-encode. The random vectors are seeded, so a rerun
+with the same runtime reproduces the file.
+
+`--extra FILE` adds the consumer's hand-built edge cases: FILE is run with `add(type, name, raw)`
+and the wire helpers `varint`, `tag`, `ld` (length-delimited field) and `vi` (varint field) in
+scope. `--compile-all DIR` also compiles every .proto under DIR (for imports the proto needs).
 """
+import argparse
 import json
 import os
 import random
@@ -21,19 +27,35 @@ from google.protobuf import json_format, message_factory
 from google.protobuf.descriptor import FieldDescriptor as FD
 from grpc_tools import protoc
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SPEC = os.path.join(HERE, "..", "..", "spec")
-OUT = os.path.join(HERE, "a2a_vectors.json")
+ap = argparse.ArgumentParser()
+ap.add_argument("--proto", required=True)
+ap.add_argument("-I", dest="includes", action="append", default=[])
+ap.add_argument("--compile-all", action="append", default=[])
+ap.add_argument("--extra")
+ap.add_argument("--out", required=True)
+ap.add_argument("--label", required=True, help="recorded in the file as `generator`")
+ap.add_argument("--seed", type=int, default=20261021)
+args = ap.parse_args()
 
 tmp = tempfile.mkdtemp()
 inc = os.path.join(os.path.dirname(__import__("grpc_tools").__file__), "_proto")
-api = sorted(os.path.relpath(os.path.join(r, f), SPEC + "/googleapis") for r, _, fs in os.walk(SPEC + "/googleapis") for f in fs if f.endswith(".proto"))
-rc = protoc.main(["protoc", f"-I{SPEC}", f"-I{SPEC}/googleapis", f"-I{inc}", f"--python_out={tmp}", "a2a.proto", *api])
+api = sorted(
+    os.path.relpath(os.path.join(r, f), root)
+    for root in args.compile_all
+    for r, _, fs in os.walk(root)
+    for f in fs
+    if f.endswith(".proto")
+)
+proto = os.path.abspath(args.proto)
+rc = protoc.main(
+    ["protoc", f"-I{os.path.dirname(proto)}", *[f"-I{i}" for i in args.includes], f"-I{inc}",
+     f"--python_out={tmp}", os.path.basename(proto), *api]
+)
 assert rc == 0, "protoc failed"
 sys.path.insert(0, tmp)
-import a2a_pb2  # noqa: E402
+pb2 = __import__(os.path.basename(proto)[: -len(".proto")] + "_pb2")
 
-rng = random.Random(20261021)
+rng = random.Random(args.seed)
 STRINGS = ["", "a", "hello", "ünïcödé ✓", "x" * 300, "task-1", "https://example.org/a?b=c", "\u0000nul", "日本語"]
 INTS = [0, 1, -1, 7, 255, 65536, 2**31 - 1, -(2**31)]
 JSONS = [None, True, False, 0, 1.5, -2, "s", [], [1, "a", None], {}, {"k": 1, "n": {"a": [True, 2.5]}}]
@@ -125,7 +147,7 @@ def ser(m):
 
 def messages():
     out = []
-    for name, d in a2a_pb2.DESCRIPTOR.message_types_by_name.items():
+    for name, d in pb2.DESCRIPTOR.message_types_by_name.items():
         out.append(d)
     return out
 
@@ -157,7 +179,7 @@ def vi(number, n):
 
 
 def canon(typ, raw):
-    c = cls(a2a_pb2.DESCRIPTOR.message_types_by_name[typ])()
+    c = cls(pb2.DESCRIPTOR.message_types_by_name[typ])()
     c.ParseFromString(raw)
     c.DiscardUnknownFields()
     return ser(c)
@@ -179,31 +201,9 @@ for d in messages():
         b = ser(m)
         add(d.name, f"random-{i}", b, b)
 
-# Hand-built: what a peer may send that is not the canonical encoding.
-sub = ld(1, b"a") + ld(2, b"b")
-add("Task", "unknown fields are dropped", ld(1, b"t1") + vi(99, 5) + ld(98, b"zz") + ld(2, b"c1"))
-add("Task", "last occurrence of a scalar wins", ld(1, b"first") + ld(1, b"second"))
-add("Task", "fields out of order", ld(2, b"ctx") + ld(1, b"id"))
-add("Task", "sub-message occurrences merge", ld(3, vi(1, 2)) + ld(3, ld(2, ld(1, b"m1"))))
-add("Task", "present but empty sub-message", ld(3, b""))
-add("TaskStatus", "an enum value the schema does not know", vi(1, 99))
-add("Part", "oneof: the last member wins", ld(1, b"text") + ld(3, b"http://u"))
-add("Part", "oneof: a member set to its default is still set", ld(1, b""))
-add("Part", "bytes member", ld(2, b"\x00\xff\x10"))
-add("GetTaskRequest", "optional int32 present as zero", ld(2, b"t") + vi(3, 0))
-add("GetTaskRequest", "optional int32 negative", vi(3, -5))
-add("AgentCard", "map entries: a repeated key is replaced",
-    ld(8, ld(1, b"k") + ld(2, ld(5, ld(1, b"d1")))) + ld(8, ld(1, b"k") + ld(2, ld(5, ld(1, b"d2")))))
-add("AgentCard", "map entry with no value", ld(8, ld(1, b"only-key")))
-add("AgentCard", "map entry with no key", ld(8, ld(2, ld(5, ld(1, b"d")))))
-add("AgentCard", "map entries are sorted on re-encode", ld(8, ld(1, b"z") + ld(2, b"")) + ld(8, ld(1, b"a") + ld(2, b"")))
-add("SecurityRequirement", "map of string lists", ld(1, ld(1, b"oauth") + ld(2, ld(1, b"read") + ld(1, b"write"))))
-add("AuthorizationCodeOAuthFlow", "map of strings", ld(4, ld(1, b"s1") + ld(2, b"d1")) + ld(4, ld(1, b"s2") + ld(2, b"")))
-add("OAuthFlows", "deprecated member", ld(3, ld(1, b"https://a")))
-add("StreamResponse", "payload: the last member wins", ld(1, ld(1, b"t")) + ld(2, ld(1, b"m")))
-add("StreamResponse", "payload: the same member twice merges", ld(1, ld(1, b"t")) + ld(1, ld(2, b"ctx")))
-add("ListTaskPushNotificationConfigsRequest", "tenant has the highest field number", ld(4, b"acme") + ld(1, b"t") + vi(2, 7))
-add("Message", "repeated strings keep their order", ld(7, b"e2") + ld(7, b"e1") + ld(8, b"r"))
 
-json.dump({"generator": "tests/golden/gen_vectors.py", "protobuf": __import__("google.protobuf").protobuf.__version__, "vectors": vectors}, open(OUT, "w"), indent=0)
-print(f"wrote {len(vectors)} vectors for {len(messages())} messages to {OUT}")
+if args.extra:
+    exec(compile(open(args.extra).read(), args.extra, "exec"), {"add": add, "varint": varint, "tag": tag, "ld": ld, "vi": vi})
+
+json.dump({"generator": args.label, "protobuf": __import__("google.protobuf").protobuf.__version__, "vectors": vectors}, open(args.out, "w"), indent=0)
+print(f"wrote {len(vectors)} vectors for {len(messages())} messages to {args.out}")
