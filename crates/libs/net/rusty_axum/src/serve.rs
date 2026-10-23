@@ -306,6 +306,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Conn<T> {
             mut headers,
             body,
         } = response;
+        // The router answers HEAD bodiless, with the GET body's length as
+        // `Content-Length` when it is known: that header is the answer.
+        let head_length = head_only
+            .then(|| headers.get("content-length").map(str::to_string))
+            .flatten();
         for name in ["content-length", "transfer-encoding", "connection"] {
             headers.remove(name);
         }
@@ -316,7 +321,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Conn<T> {
         let bodiless = status.is_informational() || code == 204 || code == 304;
         match body.0 {
             Inner::Full(bytes) => {
-                if !bodiless {
+                if let Some(length) = &head_length {
+                    set(&mut headers, "content-length", length);
+                } else if !bodiless {
                     set(&mut headers, "content-length", &bytes.len().to_string());
                 }
                 let send_body = !(head_only || bodiless);
