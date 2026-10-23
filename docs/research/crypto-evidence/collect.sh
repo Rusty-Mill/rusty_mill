@@ -82,8 +82,8 @@ PY
 for f in crates/foundation/rusty_pk/tests/vectors/ecdsa_p256_sha384.txt crates/foundation/rusty_pk/tests/vectors/rsa_forgeries.txt; do echo "generated: $f lines=$(wc -l < $f)"; done
 
 section "tests (executed / failed / ignored per binary)"
-cargo test --release -p rusty_ct_check -p rusty_sha2 -p rusty_pk -p rusty_aead -p rusty_crypto_key >/dev/null 2>&1 || fail "cargo test"
-cargo test --release -p rusty_ct_check -p rusty_sha2 -p rusty_pk -p rusty_aead -p rusty_crypto_key 2>&1 \
+cargo test --release -p rusty_ct_check -p rusty_sha2 -p rusty_pk -p rusty_aead -p rusty_crypto_key --features rusty_aead/aes-gcm >/dev/null 2>&1 || fail "cargo test"
+cargo test --release -p rusty_ct_check -p rusty_sha2 -p rusty_pk -p rusty_aead -p rusty_crypto_key --features rusty_aead/aes-gcm 2>&1 \
   | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^\s+Running|^   Doc-tests|^test result' | paste -sd' ' | sed 's/ Running /\nRunning /g; s/ Doc-tests /\nDoc-tests /g'
 echo
 echo "ignored tests (run below): $(grep -rn '#\[ignore' crates/foundation/rusty_ct_check crates/foundation/rusty_sha2 crates/foundation/rusty_pk crates/foundation/rusty_aead --include=*.rs | wc -l)"
@@ -96,7 +96,9 @@ cargo fmt --all --check >/dev/null 2>&1 && echo "fmt: clean" || { echo "fmt: DIF
 CI_TC_LINT=$(sed -n 's/^  RUST_TOOLCHAIN: "\(.*\)"/\1/p' .github/workflows/ci.yml | head -1)
 for tc in "$CI_TC_LINT" stable; do
   for c in rusty_ct_check rusty_sha2 rusty_pk rusty_aead rusty_crypto_key; do
-    RUSTUP_TOOLCHAIN=$tc cargo clippy -p $c --all-targets -- -D warnings >/dev/null 2>&1 && echo "clippy $c ($tc): clean" || { echo "clippy $c ($tc): FAILED"; fail "clippy $c on $tc"; }
+    aead_features=
+    [ "$c" != rusty_aead ] || aead_features="--features aes-gcm"
+    RUSTUP_TOOLCHAIN=$tc cargo clippy -p $c --all-targets $aead_features -- -D warnings >/dev/null 2>&1 && echo "clippy $c ($tc): clean" || { echo "clippy $c ($tc): FAILED"; fail "clippy $c on $tc"; }
   done
 done
 
@@ -170,7 +172,7 @@ python3 -I crates/foundation/rusty_pk/scripts/test_verdict_sites.py >/dev/null 2
 
 section "speed, one run each (not benchmarks)"
 cargo test --release -p rusty_pk --test perf -- --ignored --nocapture 2>&1 | grep -E 'ours'
-cargo test --release -p rusty_aead --test perf -- --ignored --nocapture 2>&1 | grep -E 'MB/s'
+cargo test --release -p rusty_aead --features aes-gcm --test perf -- --ignored --nocapture 2>&1 | grep -E 'MB/s'
 echo
 if [ $FAIL -eq 0 ]; then echo "RESULT: all checks passed (this is evidence, not proof)"; else echo "RESULT: FAILED, see the !! lines above"; fi
 echo "end of record"
