@@ -539,9 +539,10 @@ impl MagicUdp {
     fn bind(addr: SocketAddr) -> io::Result<Self> {
         let sock = LinuxUdpSocket::bind(addr).map_err(from_platform_err)?;
         sock.set_nonblocking(true).map_err(from_platform_err)?;
-        Ok(Self {
-            fd: AsyncFd::new(sock)?,
-        })
+        // SAFETY: `sock` owns its `OwnedFd` and always returns it from
+        // `as_raw_fd`; moving it in keeps it open for the `AsyncFd`'s lifetime.
+        let fd = unsafe { AsyncFd::register(sock) }?;
+        Ok(Self { fd })
     }
 
     /// The address this socket is bound to.
