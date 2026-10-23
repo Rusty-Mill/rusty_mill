@@ -2,6 +2,7 @@
 name = "rusty_json_patch"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.81"
 description = "Sovereign JSON Pointer (RFC 6901), JSON Patch (RFC 6902) and JSON Merge Patch (RFC 7386) over rusty_json::Value: parse, apply atomically, and diff"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rusty-Mill/rusty_mill"

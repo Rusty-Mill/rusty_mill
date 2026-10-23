@@ -14,7 +14,13 @@
 //! the clear, unlike TLS 1.3) and that nothing is accepted merely because it
 //! parsed.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rusty_tls::handrolled::record::{Aead, ContentType, RecordError, HEADER_LEN};
 use rusty_tls::handrolled::record12::{fixed_iv_len, overhead, Opener, Sealer, MAX_CIPHERTEXT_LEN};

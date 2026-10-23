@@ -2,6 +2,7 @@
 name = "rusty_a2a"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 description = "A reusable Rust implementation of the Agent2Agent (A2A) protocol (https://a2a-protocol.org)"
 license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_a2a"

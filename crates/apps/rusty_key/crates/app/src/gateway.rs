@@ -123,7 +123,7 @@ where
         // which blocks first-bash-use / new-file-write actions exactly like
         // ACP/desktop gate them behind a human, instead of leaving the
         // gateway tool-approval-free (round-4 finding 1d).
-        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let (tx, _rx) = rk_constrain::approval_channel(8);
         let gate = ApprovalGate::new(
             vec![ApprovalTrigger::NewFilePath, ApprovalTrigger::BashFirstUse],
             tx,

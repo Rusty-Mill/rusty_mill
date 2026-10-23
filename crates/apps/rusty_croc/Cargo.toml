@@ -2,6 +2,7 @@
 name = "rusty-croc"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 description = "Rust port of croc (https://github.com/schollz/croc) — secure peer-to-peer file transfer"
 license = "MIT"
 

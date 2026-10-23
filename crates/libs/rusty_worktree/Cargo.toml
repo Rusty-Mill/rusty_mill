@@ -2,6 +2,7 @@
 name = "rusty_worktree"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
 description = "Git worktrees that share one repository's object store, driven through the git CLI with hooks off and the git directory always named explicitly"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rusty-Mill/rusty_mill"

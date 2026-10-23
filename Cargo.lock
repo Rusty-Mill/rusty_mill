@@ -10883,9 +10883,9 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "rk-observe",
+ "rusty_tokio",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -12184,6 +12184,21 @@ name = "rusty_audio"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_axum"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "rcgen",
+ "rustls",
+ "rusty_http",
+ "rusty_percent",
+ "rusty_tls",
+ "rusty_tokio",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rusty_base64"
 version = "0.1.0"
 
@@ -12988,6 +13003,7 @@ dependencies = [
  "rusty_hex",
  "rusty_regx",
  "rusty_term_l13",
+ "rusty_wire",
  "unicode-segmentation",
  "unicode-width 0.2.2",
 ]
@@ -13018,6 +13034,7 @@ dependencies = [
  "rusty_crypto_key",
  "rusty_http",
  "rusty_json",
+ "rusty_mcp_server",
  "rusty_multimodal_db_engine",
  "rusty_oauth",
  "rusty_rand",
@@ -13037,7 +13054,7 @@ version = "0.1.0"
 
 [[package]]
 name = "rusty_tls"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "platform",
  "platform-bsd",
@@ -13046,7 +13063,12 @@ dependencies = [
  "rcgen",
  "ring",
  "rustls",
+ "rusty_aead",
+ "rusty_crypto_key",
  "rusty_json",
+ "rusty_pk",
+ "rusty_rand",
+ "rusty_sha2",
  "rusty_tokio",
  "time",
 ]

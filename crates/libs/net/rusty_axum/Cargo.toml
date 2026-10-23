@@ -1,0 +1,44 @@
+[package]
+name = "rusty_axum"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "An in-house web framework replacing axum: a router, extractors, responses and SSE over rusty_http's types, runtime-free at its core"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+# Every dependency is justified (the ecosystem's dependency-justification
+# convention, see rusty_tls's Cargo.toml).
+[dependencies]
+# The message types (`Method`, `StatusCode`, `HeaderMap`): one HTTP model in
+# the workspace, not a second one from the `http` crate.
+rusty_http = { workspace = true, features = ["rusty-tokio"] }
+# The server's runtime (accept loop, connection tasks, timers) and TLS. The
+# owner's decision (#879): rusty_tokio, never tokio.
+rusty_tokio = { workspace = true }
+rusty_tls = { workspace = true, features = ["rusty-tokio"] }
+# Query-string decoding (`+` as space, `%XX`).
+rusty_percent = { workspace = true }
+# `Query`, `Path` and `Json` deserialize into the handler's own types, which
+# every consumer already derives with serde.
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The `Stream` trait for streamed bodies and SSE: the interop trait every
+# consumer's streams already implement. The trait only, not `futures`.
+futures-core = { workspace = true }
+
+[dev-dependencies]
+# Test certificates and the client's trust anchor, as rusty_hyper's tests.
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"

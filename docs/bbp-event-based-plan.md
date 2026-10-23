@@ -1,6 +1,6 @@
 # BBP: from loop-based to event-based
 
-Status: proposal for the owner, 2026-10-22. Docs only; nothing here is built.
+Status: accepted by the owner, 2026-10-22. Step 1 merged (#880); step 2 approved.
 Goal (owner): BBP reacts to events instead of running a loop. `rusty_crdt` is a means, not the goal.
 Builds on `docs/bbp-event-driven-design.md` (accepted Phase 1) and `docs/bbp-concurrency-design.md` (2a/2b).
 
@@ -22,7 +22,7 @@ coarse to time an 11 s spec (c3 was unmeasurable). Both point at the same fix: s
 | The moderator sleeps `cfg.poll` (default 500 ms), then ticks the engine and checks every harness | `rusty_bbp_host/src/moderator.rs:710` | Block until the task log or a harness changes |
 | The store cannot tell anyone it changed: `refresh` re-reads, there is no subscribe | `rusty_bbp/src/store.rs` (`Store`) | A change signal per task |
 | Each turn is a fresh one-shot harness; an agent sees the board only when granted | `agents*.json`, `moderator.rs` launch | Long-lived agents that wait for a wake |
-| Who acts next walks `turn_order` | `TurnBased` in `pick_next` | `EventDriven` (`wake_set` + `pick_from`): built, opt-in via `bbp open --policy event-driven`, limited to one live turn (`engine.rs:298`) |
+| Who acts next walks `turn_order` | `TurnBased` in `pick_next` | `EventDriven` (`wake_set` + `pick_from`): the default for one-live-turn tasks since step 2; `--policy turn-based` opts out, and tasks with several live turns stay turn-based (`engine.rs:298`) |
 
 ## Steps (one PR each, no stacking, each behind its own owner approval)
 
@@ -50,9 +50,11 @@ coarse to time an 11 s spec (c3 was unmeasurable). Both point at the same fix: s
 
 ### 3. Long-lived agents woken by events (host and launcher change)
 
-- A new bbp MCP tool, `wait`: blocks until something the role may read is appended after its cursor, or the
-  role is granted a turn, then returns what changed. The agent decides whether to act; acting still needs a
-  granted turn, so R14 and token binding are unchanged.
+- A new bbp MCP tool, `wait`: blocks until the role is granted a turn or the task ends, then says which.
+  Acting still needs a granted turn, so R14 and token binding are unchanged. **Status:** 3a (the tool and
+  session-bound `bbp mcp`) is implemented; it wakes on grants only, since reading also needs a turn and a
+  message addressed to the role is what makes `wake_set` grant one. 3b (the moderator keeps one harness
+  per role) and 3c (confined sessions, per-session cost accounting) follow.
 - Launchers start one agent session per role for the whole task instead of one per turn. Cost accounting
   (`bbp tokens`, the cap) moves from per-turn logs to per-session logs with turn markers.
 - No CRDT: still one live turn at a time, but agents now react to events instead of being polled into
@@ -96,8 +98,8 @@ editors and their edit rate, so a two-agent probe cannot rule a CRDT out (owner,
 ## What this needs from the owner
 
 1. Approve this plan's order (1, 2, 3, then 4).
-2. For step 4: the agent counts that matter (how many concurrent editors the factory is expected to run),
-   so the load harness tests the right range.
+2. For step 4: the agent counts that matter. Answered 2026-10-23: 4 concurrent editors on the same
+   artifact.
 3. Whether the 2b record stays as is (a loop-mode run) with a short note that it did not test this question.
 
 ## Out of scope

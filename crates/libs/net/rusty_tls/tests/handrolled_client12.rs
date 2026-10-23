@@ -18,7 +18,13 @@
 //! server (built from this crate's own primitives, used only to make the client
 //! *refuse*) and requires each way a flight can be wrong to be refused.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use std::sync::Arc;
 
@@ -32,6 +38,98 @@ use rusty_tls::handrolled::client12::{
 };
 use rusty_tls::handrolled::kx::NamedGroup;
 use rusty_tls::handrolled::name::ServerName;
+
+#[cfg(rusty_tls_native_crypto)]
+use ring_signer::SigningKey;
+/// The scripted server's signing key. On the `ring` backend that is the
+/// engine's own [`rusty_tls::handrolled::sign::SigningKey`]; the native backend
+/// has no signing (ADR-0005), so there the server signs with `ring` directly,
+/// through [`ring_signer`], and the client's refusals are still exercised.
+#[cfg(not(rusty_tls_native_crypto))]
+use rusty_tls::handrolled::sign::SigningKey;
+
+/// A test-only stand-in for the engine's `SigningKey`, with the same
+/// constructors, schemes and `sign` contract (`src/handrolled/sign.rs`), built
+/// on `ring` (a dev-dependency). It exists so the scripted server can sign a
+/// ServerKeyExchange in a build where the engine cannot.
+#[cfg(rusty_tls_native_crypto)]
+mod ring_signer {
+    use ring::rand::SystemRandom;
+    use ring::signature::{self, EcdsaKeyPair, Ed25519KeyPair, RsaKeyPair};
+    use rusty_tls::handrolled::verify::SignatureScheme;
+
+    pub enum SigningKey {
+        Ecdsa(EcdsaKeyPair, SignatureScheme),
+        Ed25519(Ed25519KeyPair),
+        Rsa(RsaKeyPair),
+    }
+
+    impl SigningKey {
+        pub fn ecdsa_p256(pkcs8: &[u8]) -> Result<Self, ()> {
+            let rng = SystemRandom::new();
+            EcdsaKeyPair::from_pkcs8(&signature::ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8, &rng)
+                .map(|pair| Self::Ecdsa(pair, SignatureScheme::ECDSA_SECP256R1_SHA256))
+                .map_err(|_| ())
+        }
+
+        pub fn ecdsa_p384(pkcs8: &[u8]) -> Result<Self, ()> {
+            let rng = SystemRandom::new();
+            EcdsaKeyPair::from_pkcs8(&signature::ECDSA_P384_SHA384_ASN1_SIGNING, pkcs8, &rng)
+                .map(|pair| Self::Ecdsa(pair, SignatureScheme::ECDSA_SECP384R1_SHA384))
+                .map_err(|_| ())
+        }
+
+        pub fn ed25519(pkcs8: &[u8]) -> Result<Self, ()> {
+            Ed25519KeyPair::from_pkcs8_maybe_unchecked(pkcs8)
+                .map(Self::Ed25519)
+                .map_err(|_| ())
+        }
+
+        pub fn rsa(pkcs8: &[u8]) -> Result<Self, ()> {
+            RsaKeyPair::from_pkcs8(pkcs8).map(Self::Rsa).map_err(|_| ())
+        }
+
+        fn schemes(&self) -> &'static [SignatureScheme] {
+            match self {
+                Self::Ecdsa(_, scheme) if *scheme == SignatureScheme::ECDSA_SECP384R1_SHA384 => {
+                    &[SignatureScheme::ECDSA_SECP384R1_SHA384]
+                }
+                Self::Ecdsa(..) => &[SignatureScheme::ECDSA_SECP256R1_SHA256],
+                Self::Ed25519(_) => &[SignatureScheme::ED25519],
+                Self::Rsa(_) => &[
+                    SignatureScheme::RSA_PSS_RSAE_SHA256,
+                    SignatureScheme::RSA_PSS_RSAE_SHA384,
+                    SignatureScheme::RSA_PSS_RSAE_SHA512,
+                ],
+            }
+        }
+
+        pub fn sign(&self, scheme: SignatureScheme, message: &[u8]) -> Result<Vec<u8>, ()> {
+            if !self.schemes().contains(&scheme) {
+                return Err(());
+            }
+            let rng = SystemRandom::new();
+            match self {
+                Self::Ecdsa(pair, _) => pair
+                    .sign(&rng, message)
+                    .map(|sig| sig.as_ref().to_vec())
+                    .map_err(|_| ()),
+                Self::Ed25519(pair) => Ok(pair.sign(message).as_ref().to_vec()),
+                Self::Rsa(pair) => {
+                    let padding: &dyn signature::RsaEncoding = match scheme {
+                        SignatureScheme::RSA_PSS_RSAE_SHA384 => &signature::RSA_PSS_SHA384,
+                        SignatureScheme::RSA_PSS_RSAE_SHA512 => &signature::RSA_PSS_SHA512,
+                        _ => &signature::RSA_PSS_SHA256,
+                    };
+                    let mut out = vec![0u8; pair.public().modulus_len()];
+                    pair.sign(padding, &rng, message, &mut out)
+                        .map_err(|_| ())?;
+                    Ok(out)
+                }
+            }
+        }
+    }
+}
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
 use rusty_tls::handrolled::x509::Certificate;
 
@@ -583,6 +681,7 @@ fn the_standalone_client_negotiates_alpn_with_rustls() {
     assert_eq!(run(&[]), None);
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 /// A client identity is presented and proven: rustls, requiring a client
 /// certificate, accepts the chain and the `CertificateVerify` made over the
 /// 1.2 transcript, for each key type this client can sign with.
@@ -647,6 +746,7 @@ fn a_client_identity_is_presented_and_proven_to_rustls() {
     }
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 /// A client chain too long for one record: Certificate and ClientKeyExchange
 /// are one handshake flight that exceeds 2^14 bytes, so it must be split into
 /// several records (RFC 5246 6.2.1). rustls refuses an oversized record, so
@@ -857,6 +957,7 @@ mod hello {
 /// control test proves the uncorrupted flight completes, so no refusal test can
 /// pass because the scripted server was simply broken.
 mod fake {
+    use super::SigningKey;
     use super::*;
     use rusty_tls::handrolled::handshake::{
         messages, ClientHello, Extension, HandshakeType, Message,
@@ -872,7 +973,6 @@ mod fake {
     use rusty_tls::handrolled::schedule12::{
         extended_master_secret, finished_verify_data, key_block, MasterSecret, Side,
     };
-    use rusty_tls::handrolled::sign::SigningKey;
     use rusty_tls::handrolled::wire::Writer;
 
     pub const TLS12: u16 = 0x0303;
@@ -1474,6 +1574,7 @@ impl<'a> Script<'a> {
         self.alpn = alpn;
         self
     }
+    #[cfg(not(rusty_tls_native_crypto))]
     fn identity(mut self, i: &'a rusty_tls::handrolled::client::ClientIdentity<'a>) -> Self {
         self.identity = Some(i);
         self
@@ -1578,6 +1679,7 @@ fn refused(pki: &Pki, script: Script<'_>) -> ClientError {
     }
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 /// A separate CA and client leaf of this key type.
 fn pki_with_key(leaf: Leaf) -> Pki {
     pki(leaf, "client.example")
@@ -1643,6 +1745,7 @@ fn a_flight_is_reassembled_however_it_is_framed() {
 // ---------------------------------------------------------------- refusals
 
 mod refusals {
+    use super::SigningKey;
     use super::*;
     use rusty_tls::handrolled::client::{Alert, AlertDescription, AlertLevel};
     use rusty_tls::handrolled::handshake::{HandshakeError, HandshakeType};
@@ -1651,7 +1754,6 @@ mod refusals {
     use rusty_tls::handrolled::name::NameError;
     use rusty_tls::handrolled::path::PathError;
     use rusty_tls::handrolled::record::{ContentType, RecordError};
-    use rusty_tls::handrolled::sign::SigningKey;
     use rusty_tls::handrolled::verify::{SignatureScheme, VerifyError};
 
     /// Re-sign the ServerKeyExchange after a test changed what it covers.
@@ -2380,6 +2482,7 @@ mod refusals {
         assert_eq!(fake.client_types, vec![HandshakeType::ClientKeyExchange]);
     }
 
+    #[cfg(not(rusty_tls_native_crypto))]
     fn identity_for<'a>(
         leaf: Leaf,
         chain: &'a [Vec<u8>],
@@ -2392,6 +2495,7 @@ mod refusals {
         }
     }
 
+    #[cfg(not(rusty_tls_native_crypto))]
     /// With an identity the server's request can be answered, the flight is
     /// Certificate, ClientKeyExchange, CertificateVerify, in that order, and
     /// the signature verifies over the transcript before it. The Finished that
@@ -2427,6 +2531,7 @@ mod refusals {
         assert_eq!(fake.client_finished_ok, Some(true));
     }
 
+    #[cfg(not(rusty_tls_native_crypto))]
     /// A key that can sign none of the schemes the request named (the fake asks
     /// for ECDSA P-256 and RSA-PSS; this is Ed25519) is answered with an empty
     /// Certificate, not an abort and not a signature in a scheme nobody asked for.
@@ -2459,6 +2564,7 @@ mod refusals {
         assert_eq!(fake.client_types, vec![HandshakeType::ClientKeyExchange]);
     }
 
+    #[cfg(not(rusty_tls_native_crypto))]
     /// RFC 5246 7.4.4: the request names key types as well as signature
     /// algorithms. A server asking for `ecdsa_sign` may list RSA-PSS because
     /// its own chain uses it; that does not ask for an RSA client key, and the

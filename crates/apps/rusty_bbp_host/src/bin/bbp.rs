@@ -1,7 +1,7 @@
 //! `bbp`: host commands for the Blackboard Protocol.
 //!
 //! ```text
-//! bbp mcp                                   per-turn MCP server; env BBP_DIR, BBP_TASK, BBP_PRINCIPAL, BBP_TURN (with BBP_MCP_RELAY: relay to the broker)
+//! bbp mcp                                   per-turn MCP server; env BBP_DIR, BBP_TASK, BBP_PRINCIPAL, BBP_TURN or BBP_SESSION=yes (with BBP_MCP_RELAY: relay to the broker)
 //! bbp mcp-broker --pipes DIR --harness PID  serves a confined harness's relay; env as bbp mcp
 //! bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N] [--policy turn-based|event-driven]
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
@@ -153,7 +153,7 @@ fn run() -> Result<String, String> {
             };
             let policy = match a.flags.get("policy") {
                 Some(v) => admin::parse_policy(v)?,
-                None => SchedulingPolicy::default(),
+                None => admin::default_policy(live),
             };
             admin::open_task_live(
                 &dir,

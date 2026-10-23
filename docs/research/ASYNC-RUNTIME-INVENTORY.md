@@ -13,11 +13,13 @@ follow-up tickets come after it.
   G2 and G3). 24 of the 94 resolve only under a different module (G1). 37
   crates can move now (tier A). 22 more need gaps closed first (tier B). 27 cannot move while
   a third-party dependency they use runs on tokio (tier C, G9).
-- **`futures` / `futures-util` / `async-stream`: no-go until G7 is decided.**
+- **`futures` / `futures-util` / `async-stream`: no-go until G7 is built.**
   The ticket names `rusty_stream` as their replacement, but it is not one.
   `rusty_stream` is a durable log server ("Single-node durable log for
   RustyMill"): it has no `Stream` trait, no combinators and no `stream!`
-  macro. Nothing in the workspace provides that API.
+  macro. Nothing in the workspace provides that API. Owner decision
+  (2026-10-22): rename the log server to `rusty_journal` (#895) and build a
+  new `rusty_stream` from scratch for this API (#896).
 
 ## 1. Totals
 
@@ -76,45 +78,53 @@ come from the Gaps column of section 4.
 | G4 | `#[rusty_tokio::main/test]` rejects `flavor = "multi_thread"` and `"current_thread"` (185 attributes); it accepts only `worker_threads` and `flavor = "thread_per_core"`. Both runtimes exist (`Builder::new_multi_thread`, `new_current_thread`) | `rusty_tokio-macros/src/args.rs:30-49` | 16 | yes: map each flavor to its `Builder` |
 | G5 | `start_paused = true` rejected (20 attributes). `time::pause` exists. The macro docs still say "no pausable clock (issue #56)", which is out of date | `rusty_tokio-macros/src/lib.rs:34-38`; `src/time/mod.rs:300` | 1 | yes |
 | G6 | `select!` supports 2-5 arms, irrefutable patterns only, no `else`, no `, if` guard, no `biased;`. 9 of 25 sites exceed it: refutable pattern 6, `biased` 4, guard 2, `else` 1, more than 5 arms 1 | `src/macros.rs:8-29` | 8 | yes: rewrite as a proc macro in `rusty_tokio-macros`, which already depends on `syn`, so the module's "new dependency" reason no longer applies |
-| G7 | No in-house `Stream` trait, combinators (`StreamExt::next/map/filter/then/boxed/buffered`, `TryStreamExt`), `BoxStream`/`BoxFuture`, `stream::iter/once/unfold/select_all`, `future::join_all/ready`, `channel::mpsc::unbounded` or `stream!`/`try_stream!` | `rusty_stream/Cargo.toml:5`, `src/lib.rs:18-36` | 24 | partly: yes for combinators, boxed aliases, `join_all` and the two macros; **no for the `Stream` trait itself**. Keep `futures-core` as the trait for crossing crate boundaries, the way `rusty_tokio` keeps `futures-io` and `bytes` (`rusty_tokio/Cargo.toml:30-48`). axum SSE, reqwest `bytes_stream` and tonic all speak `futures_core::Stream` |
+| G7 | No in-house `Stream` trait, combinators (`StreamExt::next/map/filter/then/boxed/buffered`, `TryStreamExt`), `BoxStream`/`BoxFuture`, `stream::iter/once/unfold/select_all`, `future::join_all/ready`, `channel::mpsc::unbounded` or `stream!`/`try_stream!` | `rusty_stream/Cargo.toml:5`, `src/lib.rs:18-36` | 24 | yes: a new `rusty_stream` with its own `Stream` trait, combinators and macros (#896). An optional `futures-core` interop feature adapts in both directions, the way `rusty_tokio` keeps `futures-io` and `bytes` (`rusty_tokio/Cargo.toml:30-48`), because axum SSE, reqwest `bytes_stream` and tonic all speak `futures_core::Stream` |
 | G8 | `tokio_util::sync::CancellationToken` (20 uses) | per-crate table | 4 | yes: small, on `sync::Notify` |
 | G9 | Third-party dependencies that need a tokio runtime: `reqwest` 10, `axum` 9, `aisdk` 4, `sqlx` 4, `hyper` 3, `tower`/`tower-http`/`hyper-util`/`tonic` 2 each, `tokio-postgres`, `h2`, `redis`, `aws-sdk-s3`, `meilisearch-sdk` | `Cargo.lock`, direct normal dependencies only | 27 | no: these crates keep `tokio` until the framework is replaced (#687), following the precedent of D4 in `RUSTY-MCP-SOVEREIGNTY.md`. Two of them are softer, see below |
 | G10 | `tokio_test::block_on` appears only in doctests (7 `rusty_adk` crates) | `adk-*/src/lib.rs` doc comments | 7 | yes: `rusty_tokio::Runtime::new()?.block_on` |
 | G11 | Public API exposes `tokio` or `futures` types, so dependents migrate together: `rusty_lsp`, `rusty_request`, `rusty-db-core`, `rusty_term`, `rusty_homelab_mcp`, `rk-app` | single-line `pub` signatures | 6 | no gap: ordering only, see section 3. `rusty_http`, `rusty_request`, `rusty_tls` and `rusty_h2` already ship a `rusty-tokio` feature beside `tokio` |
+| G13 | Channel endpoints (`mpsc`, `oneshot`, `broadcast`, `watch` senders and receivers) lacked `Debug`, which tokio implements; a struct deriving `Debug` over one failed to build. Found by the pilot | `rk-constrain` `ApprovalRequest` | 1 | yes: closed in the pilot PR |
 | G12 | Method-level surface (builder methods, `*Ext` methods, `select!` arm bodies) is not probed | method | — | checked crate by crate by compiling; the pilot is the first check |
 
 The two softer G9 cases are `sha256`, which reaches tokio only through its
 async helper (`remind_me_core`, `remind_me_remote`), and `winit`/
 `accesskit_winit`, which reach it through the platform accessibility bus
 (`rusty_term`). Tokio runs inside those crates and no tokio type crosses into
-workspace code. Replacing `sha256` with the in-house hash (#688) would move
-the two `remind_me` crates to tier B.
+workspace code. Replacing `sha256` with the in-house hash (#688) removes one
+edge but does not by itself move either `remind_me` crate out of tier C:
+`remind_me_remote` still depends on axum, and `remind_me_core` on the AWS SDK
+(optional `cloud-backup`, `rt-tokio`).
 
 ## 3. Order
 
-1. **Pilot `rk-constrain`** (tier A, issue #686 deliverable 3). It has no
-   workspace async dependencies and no G1 paths. It uses `spawn`,
-   `sync::mpsc`, `sync::oneshot`, `JoinHandle` and 8 `#[tokio::test]`, so it
-   exercises the scheduler, the channels and the test macro, which most of
-   tier A needs. Other candidates are `rusty-search-memory` (smaller: `RwLock`
-   only) and `rusty_http` (already has a `rusty-tokio` feature, but `rusty_request`,
-   the `rusty-search-*` crates and the homelab crates depend on it).
-2. G1, G2-G5, G8 and G10 are small and independent, and can run in parallel
-   with the pilot. G1 first: 39 crates need it, and it turns the rest of
-   tier A into a crate rename.
-3. Tier A, providers first: `rusty_http` → `rusty_request` → the
-   `rusty-search-*`, homelab and `rusty-mcp*` crates; then the leaves.
-4. G6, then tier B crates that need only G4/G6.
-5. G7: owner decision on whether `futures-core` stays as the interop trait.
-   Then the in-house combinators, then the `rusty_adk` family, `rp-core`,
-   `rusty-db-core` and `rusty_tonic`.
-6. Tier C waits on #687 (HTTP stack), the database drivers and the SDKs
-   listed in G9.
+1. **Pilot `rk-constrain`** (tier A, #686 deliverable 3; done). It has no
+   workspace async dependencies and no G1 paths, and its `spawn`,
+   `sync::mpsc`, `sync::oneshot`, `JoinHandle` and 21 tests exercise the
+   scheduler, the channels and the test macro. Its public API exposed tokio
+   channel types to `rk-agui`, `rk-app` and the desktop shell. It now exports
+   `approval_channel()` and the `ApprovalTx`/`ApprovalRx`/`ApprovalResponder`
+   aliases, so callers never name a runtime crate. `rusty_tokio`'s channels
+   need no `rusty_tokio` runtime, and those dependents still drain them from
+   tokio. The pilot surfaced G13.
+2. Gap tickets, independent of each other and of the pilot: #897 (G1, first:
+   39 crates need it, and it turns the rest of tier A into a crate rename),
+   #898 (G2, G3), #899 (G4, G5), #900 (G6), #901 (G8). #895 renames the log
+   server to `rusty_journal`, then #896 builds `rusty_stream` (G7).
+3. Providers: #903 moves `rusty_http`, `rusty_request`, `rusty_h2` and
+   `rusty_hyper`.
+4. Families, each blocked as its ticket says:
 
-Proposed follow-up tickets (not filed yet): G1, G2+G3, G4+G5, G6, G7
-(decision), G7 (build), G8, G10, and one migration ticket per family: rusty_key,
-rusty_provider, rusty_tailscale, rusty_search, homelab, rusty_mcp, rusty_adk,
-rusty_db, net libs, misc apps.
+| Ticket | Family | Crates | After |
+|---|---|---|---|
+| #904 | rusty_search | 10 | #903 |
+| #905 | homelab | 4 | #903, #897, #899 |
+| #906 | rusty_mcp | 5 | #903, #897, #899 |
+| #907 | rusty_tailscale | 9 | #903, #897, #899, #900 |
+| #908 | rusty_adk (includes G10) | 12 | #896, #897, #900 |
+| #909 | rusty_db | 2 | #896 |
+| #910 | rusty_provider | 2 | #896, #897, #899 |
+| #911 | small crates (rusty_key, skillopt, lsp, tonic, misc) | 10 | #903, #897, #899, #896 |
+| #912 | tier C tracking | 27 | #687, #688 |
 
 ## 4. Per-crate table
 

@@ -25,6 +25,16 @@ pub fn parse_policy(name: &str) -> Result<SchedulingPolicy, String> {
     }
 }
 
+/// The policy a task opens under when none is named: event-driven, which
+/// allows one live turn, and turn-based for a task that allows several.
+pub fn default_policy(max_live_turns: u32) -> SchedulingPolicy {
+    if max_live_turns > 1 {
+        SchedulingPolicy::TurnBased
+    } else {
+        SchedulingPolicy::EventDriven
+    }
+}
+
 /// Open `task` in the store at `dir` with `brief` as its brief. The profile
 /// set is frozen first; its digest is the task's `profile_digest`. A task
 /// that is already open keeps its frozen file: the core's `AlreadyOpen`
@@ -48,7 +58,7 @@ pub fn open_task(
         set,
         roster,
         1,
-        SchedulingPolicy::default(),
+        default_policy(1),
     )
 }
 
@@ -174,5 +184,13 @@ mod tests {
         );
         assert!(matches!(parse_policy("EventDriven"), Err(e) if e.contains("--policy")));
         assert!(parse_policy("").is_err());
+    }
+
+    #[test]
+    fn new_tasks_default_to_event_driven_unless_several_turns_are_live() {
+        assert_eq!(default_policy(1), SchedulingPolicy::EventDriven);
+        assert_eq!(default_policy(2), SchedulingPolicy::TurnBased);
+        // Replay of a log without the field stays turn-based.
+        assert_eq!(SchedulingPolicy::default(), SchedulingPolicy::TurnBased);
     }
 }

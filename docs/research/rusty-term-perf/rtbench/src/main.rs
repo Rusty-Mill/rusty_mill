@@ -32,7 +32,7 @@ fn main() {
         let mut p = AnsiParser::new();
         for c in data.chunks(4096) { p.advance(&mut g, c); }
         for r in 0..40 {
-            let row: String = g.cells[r * 120..(r + 1) * 120].iter().filter(|c| c.flags & rusty_term::core::WIDE_TRAILER == 0).map(|c| c.ch).collect();
+            let row: String = g.row(r).iter().filter(|c| c.flags & rusty_term::core::WIDE_TRAILER == 0).map(|c| c.ch).collect();
             println!("{}", row.trim_end());
         }
         return;
@@ -53,6 +53,18 @@ fn main() {
         g.resize(c, r);
         println!("resize -> {c}x{r}: {:.2} ms", t.elapsed().as_secs_f64()*1e3);
     }
+    // Full snapshot of 200x50 + 10k lines, compared with libghostty's
+    // encode_snapshot (ghbench). Re-fill so the resizes above don't shape it.
+    let (g2, _p2) = filled(cols, rows, lines);
+    let t = Instant::now();
+    let snap = g2.encode_snapshot();
+    let enc = t.elapsed();
+    let t = Instant::now();
+    let back = rusty_term::core::Grid::decode_snapshot(&snap).expect("decode");
+    println!("encode_snapshot ({cols}x{rows} + {} lines): {:.2} ms, {} bytes ({:.2} B/cell); decode {:.2} ms",
+        g2.scrollback_len(), enc.as_secs_f64()*1e3, snap.len(),
+        snap.len() as f64 / ((g2.scrollback_len() + rows) * cols) as f64, t.elapsed().as_secs_f64()*1e3);
+    std::hint::black_box(back);
     // Snapshot proxy: no serializer exists; time the closest existing
     // full-state read (viewport snapshot) and a full re-encode of the
     // visible screen via the TUI renderer's frame data.

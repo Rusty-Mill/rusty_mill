@@ -25,6 +25,8 @@ interface HabitsState {
   update(id: string, input: HabitInput): void
   remove(id: string): void
   toggle(habitId: string, day: string): void
+  /** Set a day's check-ins to `count` (0 clears the day). */
+  setCount(habitId: string, day: string, count: number): void
 }
 
 let api: ApiClient | null = null
@@ -147,10 +149,13 @@ export const useHabits = create<HabitsState>()((set, get) => {
     },
 
     toggle(habitId, day) {
-      const id = checkinId(habitId, day)
       const goal = parseGoal(get().habits.find((h) => h.id === habitId)?.goal ?? '').count
-      const count = get().checkins[id]?.count ?? 0
-      const next = count >= goal ? 0 : count + 1 // each click adds one until the goal is met; one more clears the day
+      const count = get().checkins[checkinId(habitId, day)]?.count ?? 0
+      get().setCount(habitId, day, count >= goal ? 0 : count + 1) // each click adds one until the goal is met; one more clears the day
+    },
+
+    setCount(habitId, day, next) {
+      const id = checkinId(habitId, day)
       const checkins = { ...get().checkins }
       if (next === 0) {
         delete checkins[id]

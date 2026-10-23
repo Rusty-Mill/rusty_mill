@@ -12,7 +12,13 @@
 //! 4. each refuses what it cannot derive from (empty pre-master secret, a hash
 //!    of the wrong length, a wrong-length `Finished`).
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rustls::crypto::ring::cipher_suite::{
     TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,

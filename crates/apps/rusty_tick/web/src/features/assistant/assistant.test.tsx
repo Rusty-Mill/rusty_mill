@@ -30,7 +30,7 @@ function scriptedAgent(): { fetch: typeof fetch; inputs: RunAgentInput[] } {
     } else {
       inner = [
         ...say('a1', 'Adding “Buy milk”…'),
-        { type: 'TOOL_CALL_START', toolCallId: 'c1', toolCallName: 'create_task', parentMessageId: 'a1' },
+        { type: 'TOOL_CALL_START', toolCallId: 'c1', toolCallName: 'add_task', parentMessageId: 'a1' },
         { type: 'TOOL_CALL_ARGS', toolCallId: 'c1', delta: JSON.stringify({ title: 'Buy milk' }) },
         { type: 'TOOL_CALL_END', toolCallId: 'c1' },
       ]
@@ -47,7 +47,7 @@ afterEach(() => {
 })
 
 describe('the assistant panel', () => {
-  it('opens from the rail, adds a task through the create_task tool, and confirms', async () => {
+  it('opens from the rail, adds a task through the add_task tool, and confirms', async () => {
     const agent = scriptedAgent()
     vi.stubGlobal('fetch', agent.fetch)
     const user = userEvent.setup()
@@ -61,10 +61,22 @@ describe('the assistant panel', () => {
     const tasks = (await api.snapshot()).tasks
     expect(tasks.map((t) => t.title)).toEqual(['Buy milk'])
 
-    // The first run offered the tool and the open view; the second carried the tool's answer.
+    // The first run offered the tools (the task ones named as the MCP server's); the second carried the tool's answer.
     expect(agent.inputs).toHaveLength(2)
-    expect(agent.inputs[0]?.tools?.map((t) => t.name)).toEqual(['create_task'])
-    expect(agent.inputs[0]?.context?.map((c) => c.description)).toEqual(['view', 'tasks in view'])
+    expect(agent.inputs[0]?.tools?.map((t) => t.name).sort()).toEqual([
+      'add_habit',
+      'add_task',
+      'check_in_habit',
+      'complete_task',
+      'delete_task',
+      'due_tasks',
+      'filter_tasks',
+      'list_habits',
+      'list_lists',
+      'reopen_task',
+      'search_tasks',
+      'update_task',
+    ])
     expect(agent.inputs[1]?.messages?.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'c1' })
     expect(JSON.parse(String(agent.inputs[1]?.messages?.at(-1)?.content))).toMatchObject({ title: 'Buy milk' })
 

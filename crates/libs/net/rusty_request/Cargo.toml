@@ -2,6 +2,7 @@
 name = "rusty_request"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
 description = "An async HTTP client -- a Rust take on Python's requests, built on rusty_tokio and rusty_http."
 license = "MIT"
 

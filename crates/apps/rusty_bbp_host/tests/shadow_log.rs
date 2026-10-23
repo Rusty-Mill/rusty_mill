@@ -16,10 +16,11 @@ fn tempdir(tag: &str) -> PathBuf {
     dir
 }
 
-/// A task with the four roles assigned and the first turn granted.
+/// A turn-based task (shadow records exist only there) with the four roles
+/// assigned and the first turn granted.
 fn setup(dir: &Path) -> TaskId {
     let task = TaskId("T1".into());
-    admin::open_task(
+    admin::open_task_live(
         dir,
         &task,
         "github.com/example/repo",
@@ -27,6 +28,8 @@ fn setup(dir: &Path) -> TaskId {
         &PrincipalId("human".into()),
         &rusty_bbp_host::profiles::ProfileSet::shell("test", "true"),
         common::roster(),
+        1,
+        SchedulingPolicy::TurnBased,
     )
     .expect("open");
     for w in Who::ALL {

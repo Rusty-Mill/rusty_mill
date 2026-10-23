@@ -59,18 +59,18 @@ class SiteTests(unittest.TestCase):
         self.assertIn("not a conditional jump", self.check(rows, 0x15))
         self.assertIn("no instruction", self.check(rows, 0x99))
         rows = [(0x10, F, "call", ENSURE), (0x15, F, "jne", "x")]
-        self.assertIn("report says", self.check(rows, 0x15, name="taint::main"))
+        self.assertIn("report says", self.check(rows, 0x15, name="rusty_pk_taint::main"))
 
 
 class ReportTests(unittest.TestCase):
     def test_only_the_top_frame_of_each_diagnostic_is_taken(self):
         text = (
             "==1== Conditional jump or move depends on uninitialised value(s)\n"
-            "==1==    at 0x120491: <rusty_pk::ecdh::PrivateKey>::public_key (in /x/taint)\n"
-            "==1==    by 0x11D726: taint::main (in /x/taint)\n"
+            "==1==    at 0x120491: <rusty_pk::ecdh::PrivateKey>::public_key (in /x/rusty_pk_taint)\n"
+            "==1==    by 0x11D726: rusty_pk_taint::main (in /x/rusty_pk_taint)\n"
             "==1== \n"
             "==1== Use of uninitialised value of size 8\n"
-            "==1==    at 0x120C4E: <rusty_pk::ecdh::PrivateKey>::agree (in /x/taint)\n"
+            "==1==    at 0x120C4E: <rusty_pk::ecdh::PrivateKey>::agree (in /x/rusty_pk_taint)\n"
         )
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
             f.write(text)

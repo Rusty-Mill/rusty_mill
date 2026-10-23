@@ -6,7 +6,13 @@
 //! and one that does not is a server that showed the wrong one. Both versions
 //! run through the combined server with the peer pinned to one version.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+// ring-only suite (ADR-0005): it needs the engine's server or a signing key,
+// and the native backend has neither.
+#![cfg(all(
+    feature = "handrolled-engine",
+    rusty_tls_handrolled,
+    not(rusty_tls_native_crypto)
+))]
 
 use std::sync::Arc;
 
