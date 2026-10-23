@@ -53,8 +53,12 @@ coarse to time an 11 s spec (c3 was unmeasurable). Both point at the same fix: s
 - A new bbp MCP tool, `wait`: blocks until the role is granted a turn or the task ends, then says which.
   Acting still needs a granted turn, so R14 and token binding are unchanged. **Status:** 3a (the tool and
   session-bound `bbp mcp`) is implemented; it wakes on grants only, since reading also needs a turn and a
-  message addressed to the role is what makes `wake_set` grant one. 3b (the moderator keeps one harness
-  per role) and 3c (confined sessions, per-session cost accounting) follow.
+  message addressed to the role is what makes `wake_set` grant one. 3b keeps the agent's context, not its
+  process: an opt-in `"session": true` launcher gives every turn of a role one provider session id to
+  resume, while each turn stays its own process, the only inference boundary the host can enforce (spec
+  v0.5 §110). A long-lived process would need a bbp-owned adapter that drives the model API itself; the
+  session `bbp mcp` and `wait` are kept for that. Refused under a cost cap or a sandbox. 3c (confined
+  sessions, resumed-turn pricing) follows.
 - Launchers start one agent session per role for the whole task instead of one per turn. Cost accounting
   (`bbp tokens`, the cap) moves from per-turn logs to per-session logs with turn markers.
 - No CRDT: still one live turn at a time, but agents now react to events instead of being polled into
