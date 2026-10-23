@@ -42,10 +42,7 @@ impl Waker {
         {
             let inotify = linux::Inotify::watch(log)
                 .map_err(|e| {
-                    eprintln!(
-                        "bbp mod: cannot watch {} ({e}); polling instead",
-                        log.display()
-                    )
+                    eprintln!("bbp: cannot watch {} ({e}); polling instead", log.display())
                 })
                 .ok();
             Waker {

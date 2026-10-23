@@ -54,7 +54,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 4 |
 | foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 14 |
 | foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 10 |
-| foundation | rusty_wire | rusty_wire | A minimal, zero-dependency endian-explicit byte cursor Reader/Writer for Rust | 9 |
+| foundation | rusty_wire | rusty_wire | A minimal, zero-dependency endian-explicit byte cursor Reader/Writer for Rust | 10 |
 | platform | portable-runtime | compat |  | 4 |
 | platform | portable-runtime | conformance |  | 0 |
 | platform | portable-runtime | contract |  | 5 |

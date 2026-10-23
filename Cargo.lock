@@ -13015,6 +13015,7 @@ dependencies = [
  "rusty_hex",
  "rusty_regx",
  "rusty_term_l13",
+ "rusty_wire",
  "unicode-segmentation",
  "unicode-width 0.2.2",
 ]

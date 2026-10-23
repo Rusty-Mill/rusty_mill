@@ -50,9 +50,11 @@ coarse to time an 11 s spec (c3 was unmeasurable). Both point at the same fix: s
 
 ### 3. Long-lived agents woken by events (host and launcher change)
 
-- A new bbp MCP tool, `wait`: blocks until something the role may read is appended after its cursor, or the
-  role is granted a turn, then returns what changed. The agent decides whether to act; acting still needs a
-  granted turn, so R14 and token binding are unchanged.
+- A new bbp MCP tool, `wait`: blocks until the role is granted a turn or the task ends, then says which.
+  Acting still needs a granted turn, so R14 and token binding are unchanged. **Status:** 3a (the tool and
+  session-bound `bbp mcp`) is implemented; it wakes on grants only, since reading also needs a turn and a
+  message addressed to the role is what makes `wake_set` grant one. 3b (the moderator keeps one harness
+  per role) and 3c (confined sessions, per-session cost accounting) follow.
 - Launchers start one agent session per role for the whole task instead of one per turn. Cost accounting
   (`bbp tokens`, the cap) moves from per-turn logs to per-session logs with turn markers.
 - No CRDT: still one live turn at a time, but agents now react to events instead of being polled into
@@ -96,8 +98,8 @@ editors and their edit rate, so a two-agent probe cannot rule a CRDT out (owner,
 ## What this needs from the owner
 
 1. Approve this plan's order (1, 2, 3, then 4).
-2. For step 4: the agent counts that matter (how many concurrent editors the factory is expected to run),
-   so the load harness tests the right range.
+2. For step 4: the agent counts that matter. Answered 2026-10-23: 4 concurrent editors on the same
+   artifact.
 3. Whether the 2b record stays as is (a loop-mode run) with a short note that it did not test this question.
 
 ## Out of scope
