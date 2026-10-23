@@ -96,8 +96,8 @@ production adoption". It also names what stays open: no full evidence record exi
 the statistical timing series, the AES exports remain unconditional with gating unresolved, and best-effort wiping
 cannot establish erasure of every temporary. The two doc items it named are corrected in `73dd7629`. The AES source
 is otherwise unchanged since `70139bb3`. On 2026-10-23 the owner attested that the AES integration review was complete (section 11b),
-which settles D5's review question. D5's other question was decided by the owner the same day: `rusty_aead`'s AES types stay exported
-unconditionally, because their only user is `rusty_tls`'s doubly gated native backend. D5 is closed. Beyond that
+which settles D5's review question. D5's other question was decided the same day, in the owner's answer in the working session on 2026-10-23 ("Go with your recommendation"), the implementer's transcription, not yet restated from the owner's GitHub account: `rusty_aead`'s AES types stay exported
+unconditionally. The TLS gates (`native-crypto` plus `--cfg rusty_tls_native_crypto`) cover only `rusty_tls`'s use. The AES types themselves stay public, so any crate that depends on `rusty_aead` can call them directly. A default-off feature would make that use opt-in. The owner chose not to add one. Beyond that
 attestation, no human review of AES-GCM is recorded. Section 11b sets this beside the records for the other primitives.
 
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
