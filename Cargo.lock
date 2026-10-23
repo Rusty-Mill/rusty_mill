@@ -3552,9 +3552,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
 dependencies = [
  "cmov",
  "subtle",
@@ -12186,6 +12186,21 @@ name = "rusty_audio"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_axum"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "rcgen",
+ "rustls",
+ "rusty_http",
+ "rusty_percent",
+ "rusty_tls",
+ "rusty_tokio",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rusty_base64"
 version = "0.1.0"
 
@@ -12990,6 +13005,7 @@ dependencies = [
  "rusty_hex",
  "rusty_regx",
  "rusty_term_l13",
+ "rusty_wire",
  "unicode-segmentation",
  "unicode-width 0.2.2",
 ]

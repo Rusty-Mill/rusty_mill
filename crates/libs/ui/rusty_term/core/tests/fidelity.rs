@@ -139,9 +139,8 @@ fn dump(grid: &Grid) -> String {
     out
 }
 
-#[test]
-fn corpus_matches_goldens() {
-    let update = std::env::var_os("UPDATE_GOLDEN").is_some();
+/// The corpus recordings (`*.vt`), sorted.
+fn recordings() -> Vec<PathBuf> {
     let mut entries: Vec<PathBuf> = fs::read_dir(corpus_dir())
         .expect("corpus directory")
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -153,6 +152,13 @@ fn corpus_matches_goldens() {
         "no recordings in {}",
         corpus_dir().display()
     );
+    entries
+}
+
+#[test]
+fn corpus_matches_goldens() {
+    let update = std::env::var_os("UPDATE_GOLDEN").is_some();
+    let entries = recordings();
 
     let mut failures = Vec::new();
     for vt in &entries {
@@ -189,6 +195,16 @@ fn corpus_matches_goldens() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// Every recorded screen survives a snapshot round trip unchanged.
+#[test]
+fn corpus_round_trips_through_a_snapshot() {
+    for vt in recordings() {
+        let grid = replay(&fs::read(&vt).expect("read recording"), CHUNK);
+        let back = Grid::decode_snapshot(&grid.encode_snapshot()).expect("decode snapshot");
+        assert_eq!(dump(&back), dump(&grid), "{}", vt.display());
+    }
 }
 
 /// The first few differing lines, enough to see what moved.
