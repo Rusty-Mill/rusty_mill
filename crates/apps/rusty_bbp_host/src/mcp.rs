@@ -11,12 +11,18 @@
 //! A session server (`BBP_SESSION=yes`, no `BBP_TURN`) lives for the whole
 //! task and speaks for each turn of its principal's role in order, but only
 //! once `wait` has shown that turn to the model: a call from an inference that
-//! began before the turn was granted cannot act in it.
+//! began before the turn was granted cannot act in it. Each request is bound
+//! to the turn shown when it arrived, and when `wait` shows a new turn every
+//! request already sent is drained first and keeps the earlier binding, so a
+//! call queued behind `wait` is refused rather than relabelled with the new
+//! grant (the v0.5 invocation-bound token). Sessions need Linux, for `poll`.
 
 use crate::{fresh_op, now, open_driver, response_json};
 use rusty_bbp::*;
 use rusty_serde::Value;
-use std::io::{self, BufRead, Write};
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -50,7 +56,8 @@ impl Binding {
                 t.parse()
                     .map_err(|_| "BBP_TURN must be a number".to_owned())?,
             )),
-            (None, Some(s)) if s == "yes" => None,
+            (None, Some(s)) if s == "yes" && cfg!(target_os = "linux") => None,
+            (None, Some(s)) if s == "yes" => return Err("a session server needs Linux".into()),
             _ => return Err("set exactly one of $BBP_TURN or $BBP_SESSION=yes".into()),
         };
         Ok(Binding {
@@ -428,11 +435,6 @@ impl Server {
         })
     }
 
-    /// The turn this process acts in: its bound turn, or the one `wait` showed.
-    fn turn(&self) -> Option<TurnId> {
-        self.binding.turn.or(self.shown)
-    }
-
     fn token(&self, turn: TurnId) -> Token {
         self.driver.state.token_for(&self.binding.principal, turn)
     }
@@ -551,8 +553,14 @@ impl Server {
         }
     }
 
-    /// Run one tool call end to end.
-    pub fn call(&mut self, name: &str, args: &Value) -> Result<Response, String> {
+    /// Run one tool call end to end, as of `shown`: the turn `wait` had shown
+    /// when the request arrived.
+    fn call(
+        &mut self,
+        name: &str,
+        args: &Value,
+        shown: Option<TurnId>,
+    ) -> Result<Response, String> {
         self.driver.sync().map_err(|e| format!("{e:?}"))?;
         let Translated {
             op,
@@ -560,7 +568,7 @@ impl Server {
             bytes,
         } = action(name, args)?;
         let free = matches!(act, AgentAction::TaskCard);
-        let turn = self.turn();
+        let turn = self.binding.turn.or(shown);
         let live = turn.is_some_and(|t| self.live(t));
         if !free && !live && !self.accepted(&op) {
             return Err(match (self.binding.turn, turn) {
@@ -592,8 +600,9 @@ impl Server {
             .map_err(|e| format!("{e:?}"))
     }
 
-    /// Handle one JSON-RPC request; `None` for notifications.
-    pub fn handle(&mut self, req: &Value) -> Option<Value> {
+    /// Handle one JSON-RPC request, which arrived while `shown` was the shown
+    /// turn; `None` for notifications.
+    fn handle(&mut self, req: &Value, shown: Option<TurnId>) -> Option<Value> {
         let id = req.get("id").cloned();
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         if id.is_none() || id.as_ref().map(Value::is_null).unwrap_or(true) {
@@ -632,7 +641,7 @@ impl Server {
                         Ok(reply) => text_result(reply.to_string(), false),
                         Err(e) => text_result(e, true),
                     },
-                    _ => match self.call(name, &args) {
+                    _ => match self.call(name, &args, shown) {
                         Ok(resp) => self.render(&resp),
                         Err(e) => text_result(e, true),
                     },
@@ -659,40 +668,104 @@ impl Server {
 
     /// Serve stdin to stdout until EOF.
     pub fn serve(&mut self) -> io::Result<()> {
-        self.serve_on(io::stdin().lock(), io::stdout().lock())
+        self.serve_on(BufReader::new(stdin_file()?), io::stdout().lock())
     }
 
     /// Serve newline-delimited requests from `input` to `output` until EOF.
-    pub fn serve_on(&mut self, input: impl BufRead, mut stdout: impl Write) -> io::Result<()> {
-        for line in input.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let req: Value = match rusty_serde::json::from_str(&line) {
-                Ok(v) => v,
-                Err(e) => {
-                    let err = obj(vec![
-                        ("jsonrpc", "2.0".into()),
-                        ("id", Value::Null),
-                        (
-                            "error",
-                            obj(vec![
-                                ("code", Value::Int(-32700)),
-                                ("message", format!("parse error: {e}").into()),
-                            ]),
-                        ),
-                    ]);
-                    writeln!(stdout, "{err}")?;
-                    stdout.flush()?;
-                    continue;
+    pub fn serve_on(
+        &mut self,
+        mut input: BufReader<File>,
+        mut output: impl Write,
+    ) -> io::Result<()> {
+        let mut queued: VecDeque<(String, Option<TurnId>)> = VecDeque::new();
+        loop {
+            let (line, shown) = match queued.pop_front() {
+                Some(q) => q,
+                None => {
+                    let mut line = String::new();
+                    if input.read_line(&mut line)? == 0 {
+                        return Ok(());
+                    }
+                    (line, self.shown)
                 }
             };
-            if let Some(resp) = self.handle(&req) {
-                writeln!(stdout, "{resp}")?;
-                stdout.flush()?;
+            let before = self.shown;
+            let reply = self.respond(&line, shown);
+            if self.shown != before {
+                // Whatever was sent before this reply was issued without seeing
+                // the new turn: it keeps the turn shown before.
+                for line in drain(&mut input)? {
+                    queued.push_back((line, before));
+                }
+            }
+            if let Some(reply) = reply {
+                writeln!(output, "{reply}")?;
+                output.flush()?;
             }
         }
-        Ok(())
     }
+
+    /// The reply to one request line, if it needs one.
+    fn respond(&mut self, line: &str, shown: Option<TurnId>) -> Option<Value> {
+        if line.trim().is_empty() {
+            return None;
+        }
+        match rusty_serde::json::from_str(line) {
+            Ok(req) => self.handle(&req, shown),
+            Err(e) => Some(obj(vec![
+                ("jsonrpc", "2.0".into()),
+                ("id", Value::Null),
+                (
+                    "error",
+                    obj(vec![
+                        ("code", Value::Int(-32700)),
+                        ("message", format!("parse error: {e}").into()),
+                    ]),
+                ),
+            ])),
+        }
+    }
+}
+
+/// Every request line already sent on `input`, without waiting for more. A
+/// line whose start has arrived is read to its end.
+fn drain(input: &mut BufReader<File>) -> io::Result<Vec<String>> {
+    let mut lines = Vec::new();
+    while !input.buffer().is_empty() || ready(input.get_ref())? {
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            break;
+        }
+        lines.push(line);
+    }
+    Ok(lines)
+}
+
+/// True when reading `file` would not block: input waits, or the writer left.
+#[cfg(target_os = "linux")]
+fn ready(file: &File) -> io::Result<bool> {
+    use rusty_libc::fd::{poll, PollFd, POLLIN};
+    use std::os::fd::AsRawFd;
+    let mut fds = [PollFd::new(file.as_raw_fd(), POLLIN)];
+    poll(&mut fds, 0).map_err(|e| io::Error::other(format!("poll: {e:?}")))?;
+    Ok(fds[0].revents != 0)
+}
+
+/// Sessions are refused off Linux, so nothing is ever shown to drain for.
+#[cfg(not(target_os = "linux"))]
+fn ready(_: &File) -> io::Result<bool> {
+    Ok(false)
+}
+
+/// Stdin as an unbuffered file, so [`ready`] sees every byte not yet read.
+#[cfg(unix)]
+fn stdin_file() -> io::Result<File> {
+    use std::os::fd::AsFd;
+    Ok(File::from(io::stdin().as_fd().try_clone_to_owned()?))
+}
+
+#[cfg(windows)]
+fn stdin_file() -> io::Result<File> {
+    use std::os::windows::io::AsHandle;
+    Ok(File::from(io::stdin().as_handle().try_clone_to_owned()?))
 }

@@ -29,6 +29,7 @@ impl Mcp {
     }
 
     /// A session server, which acts only in turns `wait` has shown.
+    #[cfg(target_os = "linux")] // sessions need Linux
     fn session(dir: &Path, task: &str, principal: &str) -> Mcp {
         Mcp::spawn_as(dir, task, principal, ("BBP_SESSION", "yes"))
     }
@@ -105,6 +106,26 @@ impl Mcp {
             "tools/call",
             &format!("{{\"name\":\"{name}\",\"arguments\":{args}}}"),
         )
+    }
+
+    /// Write several tool calls in one write, as a pipelining client would;
+    /// returns their ids.
+    #[cfg(target_os = "linux")] // sessions need Linux
+    fn send_calls(&mut self, calls: &[(&str, &str)]) -> Vec<u64> {
+        let mut lines = String::new();
+        let ids = calls
+            .iter()
+            .map(|(name, args)| {
+                let id = self.next_id;
+                self.next_id += 1;
+                lines += &format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"{name}\",\"arguments\":{args}}}}}\n");
+                id
+            })
+            .collect();
+        let stdin = self.child.stdin.as_mut().expect("stdin");
+        stdin.write_all(lines.as_bytes()).expect("write");
+        stdin.flush().expect("flush");
+        ids
     }
 
     fn recv_call(&mut self, id: u64) -> (Value, bool) {
@@ -572,6 +593,7 @@ fn master_initialisation_has_one_winner() {
 }
 
 /// End the live turn from outside, as the moderator does at a deadline.
+#[cfg(target_os = "linux")] // sessions need Linux
 fn abort_turn(dir: &Path, task: &TaskId) {
     open_driver(dir, task)
         .expect("driver")
@@ -579,6 +601,7 @@ fn abort_turn(dir: &Path, task: &TaskId) {
         .expect("abort");
 }
 
+#[cfg(target_os = "linux")] // sessions need Linux
 fn woke(reply: &Value) -> (&str, Option<u64>) {
     (
         reply["woke"].as_str().unwrap_or_else(|| panic!("{reply}")),
@@ -587,6 +610,7 @@ fn woke(reply: &Value) -> (&str, Option<u64>) {
 }
 
 #[test]
+#[cfg(target_os = "linux")] // sessions need Linux
 fn a_session_acts_only_in_turns_wait_has_shown() {
     let dir = tempdir("session");
     let task = setup(&dir);
@@ -598,6 +622,26 @@ fn a_session_acts_only_in_turns_wait_has_shown() {
         _ => vec![],
     };
     assert_eq!(names.last(), Some(&"wait"));
+
+    // Pipelined behind the wait that shows the grant, a post issued before it
+    // keeps the binding it was sent under: none.
+    let ids = planner.send_calls(&[
+        ("wait", r#"{"timeout_s":5}"#),
+        (
+            "post",
+            r#"{"op":"q0","kind":"ask","to":["coder"],"body":"queued"}"#,
+        ),
+    ]);
+    let (w, _) = planner.recv_call(ids[0]);
+    assert_eq!(woke(&w), ("turn", Some(first)));
+    let (queued, err) = planner.recv_call(ids[1]);
+    assert!(err, "a pre-grant call must not get the new token: {queued}");
+    assert!(
+        queued.as_str().unwrap_or("").contains("no turn yet"),
+        "{queued}"
+    );
+    drop(planner);
+    let mut planner = Mcp::session(&dir, "T1", "planner");
 
     // Granted already, but not yet shown: no action until wait.
     let (early, err) = planner.call(
@@ -649,6 +693,10 @@ fn a_session_acts_only_in_turns_wait_has_shown() {
     let (w, _) = coder.call("wait", "{}");
     assert_eq!(woke(&w).0, "turn");
     let pending = planner.send_call("wait", r#"{"timeout_s":60}"#);
+    let stale = planner.send_call(
+        "post",
+        r#"{"op":"p-old","kind":"ask","to":["coder"],"body":"from the old inference"}"#,
+    );
     let (ok, err) = coder.call(
         "post",
         r#"{"op":"c1","kind":"ask","to":["planner"],"body":"Sync."}"#,
@@ -660,6 +708,14 @@ fn a_session_acts_only_in_turns_wait_has_shown() {
     let (w, _) = planner.recv_call(pending);
     assert_eq!(woke(&w), ("turn", Some(next)));
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    let (old, err) = planner.recv_call(stale);
+    assert!(err, "a call queued behind wait keeps its old turn: {old}");
+    assert!(
+        old.as_str()
+            .unwrap_or("")
+            .contains(&format!("turn {first} has ended")),
+        "{old}"
+    );
     let (ok, err) = planner.call(
         "post",
         r#"{"op":"p3","kind":"ask","to":["coder"],"body":"next"}"#,
