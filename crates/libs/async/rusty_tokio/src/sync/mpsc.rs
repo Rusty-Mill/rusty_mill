@@ -61,25 +61,31 @@ impl<T> Inner<T> {
     }
 
     /// Queue `wait` with `waker`, or refresh its waker if still queued.
-    fn wait_to_send(&mut self, wait: &mut Option<u64>, waker: &Waker) {
+    /// Returns the waker it replaced, for the caller to drop after
+    /// unlocking (see [`Self::stop_waiting`]).
+    #[must_use = "drop the replaced waker after unlocking"]
+    fn wait_to_send(&mut self, wait: &mut Option<u64>, waker: &Waker) -> Option<Waker> {
         if let Some(key) = *wait {
             if let Some((_, queued)) = self.send_waiters.iter_mut().find(|(k, _)| *k == key) {
-                queued.clone_from(waker);
-                return;
+                return Some(std::mem::replace(queued, waker.clone()));
             }
         }
         let key = self.next_waiter;
         self.next_waiter = self.next_waiter.wrapping_add(1);
         self.send_waiters.push_back((key, waker.clone()));
         *wait = Some(key);
+        None
     }
 
     /// `wait` finished (capacity taken, or the channel closed): leave the
-    /// queue without consuming anyone else's wake.
-    fn stop_waiting(&mut self, wait: &mut Option<u64>) {
-        if let Some(key) = wait.take() {
-            self.send_waiters.retain(|(k, _)| *k != key);
-        }
+    /// queue without consuming anyone else's wake. Returns the removed
+    /// waker for the caller to drop after unlocking: a waker may own a
+    /// `Sender` of this very channel, whose `Drop` takes this lock.
+    #[must_use = "drop the removed waker after unlocking"]
+    fn stop_waiting(&mut self, wait: &mut Option<u64>) -> Option<Waker> {
+        let key = wait.take()?;
+        let i = self.send_waiters.iter().position(|(k, _)| *k == key)?;
+        self.send_waiters.remove(i).map(|(_, waker)| waker)
     }
 }
 
@@ -113,7 +119,9 @@ impl<T> Drop for SendWait<'_, T> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if let Some(i) = guard.send_waiters.iter().position(|(k, _)| *k == key) {
-            guard.send_waiters.remove(i);
+            let removed = guard.send_waiters.remove(i);
+            drop(guard); // before `removed`: its waker may own a `Sender`
+            drop(removed);
             return;
         }
         // Woken but cancelled before using the wake: pass it on.
@@ -216,18 +224,21 @@ impl<T> Sender<T> {
                 return Poll::Ready(false);
             }
             if guard.queue.len() + guard.reserved < guard.capacity {
-                guard.stop_waiting(&mut wait.key);
+                let stale = guard.stop_waiting(&mut wait.key);
                 guard
                     .queue
                     .push_back(value.take().expect("polled after completion"));
                 let waker = guard.recv_waker.take();
                 drop(guard);
+                drop(stale);
                 if let Some(waker) = waker {
                     waker.wake();
                 }
                 return Poll::Ready(true);
             }
-            guard.wait_to_send(&mut wait.key, cx.waker());
+            let stale = guard.wait_to_send(&mut wait.key, cx.waker());
+            drop(guard);
+            drop(stale);
             Poll::Pending
         })
         .await;
@@ -386,13 +397,20 @@ impl<T> Sender<T> {
             wait.key = None;
             return Poll::Ready(false);
         }
-        if guard.queue.len() + guard.reserved + n <= guard.capacity {
-            guard.stop_waiting(&mut wait.key);
+        let ready = guard.queue.len() + guard.reserved + n <= guard.capacity;
+        let stale = if ready {
             guard.reserved += n;
-            return Poll::Ready(true);
+            guard.stop_waiting(&mut wait.key)
+        } else {
+            guard.wait_to_send(&mut wait.key, cx.waker())
+        };
+        drop(guard);
+        drop(stale);
+        if ready {
+            Poll::Ready(true)
+        } else {
+            Poll::Pending
         }
-        guard.wait_to_send(&mut wait.key, cx.waker());
-        Poll::Pending
     }
 }
 
@@ -694,7 +712,9 @@ impl<T> Receiver<T> {
             if guard.senders_alive == 0 {
                 return Poll::Ready(None);
             }
-            guard.recv_waker = Some(cx.waker().clone());
+            let stale = guard.recv_waker.replace(cx.waker().clone());
+            drop(guard);
+            drop(stale); // after unlocking: a waker may own a `Sender`
             Poll::Pending
         })
         .await
@@ -867,7 +887,9 @@ impl<T> UnboundedReceiver<T> {
             if guard.senders_alive == 0 {
                 return Poll::Ready(None);
             }
-            guard.recv_waker = Some(cx.waker().clone());
+            let stale = guard.recv_waker.replace(cx.waker().clone());
+            drop(guard);
+            drop(stale); // after unlocking: a waker may own a `Sender`
             Poll::Pending
         })
         .await
