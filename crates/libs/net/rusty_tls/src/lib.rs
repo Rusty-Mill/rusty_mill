@@ -54,13 +54,35 @@ mod provider;
 mod server;
 mod trust;
 
-#[cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+// The engine compiles with `--cfg rusty_tls_handrolled` and the feature for
+// its backend: `handrolled-engine` (`ring`) normally, `native-crypto`
+// (first-party primitives, ADR-0005) under `--cfg rusty_tls_native_crypto`.
+// The native backend does not need `handrolled-engine`, so a native build can
+// have no direct `ring` dependency at all, which makes "the engine calls no
+// `ring`" something the compiler checks rather than something a reader trusts.
+#[cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 pub mod handrolled;
+
+// The native backend's cfg is meaningless without the crates it selects. Unlike
+// a feature without its cfg (ADR-0002 §2), this cannot arise from
+// `--all-features`: only the person running the build sets a cfg, so an error
+// here reaches exactly the person who can fix it.
+#[cfg(all(rusty_tls_native_crypto, not(feature = "native-crypto")))]
+compile_error!("--cfg rusty_tls_native_crypto needs the `native-crypto` feature (ADR-0005)");
 
 /// The hand-rolled engine is *not* compiled into this build.
 ///
-/// You are seeing this stub because the `handrolled-engine` cargo feature is
-/// enabled but `--cfg rusty_tls_handrolled` is not set. Both are required,
+/// You are seeing this stub because the `handrolled-engine` (or
+/// `native-crypto`) cargo feature is enabled but `--cfg rusty_tls_handrolled`
+/// is not set, or because only `native-crypto` is enabled without
+/// `--cfg rusty_tls_native_crypto` (the `ring` backend then has no `ring` to
+/// use). A feature and its cfg are both required,
 /// and the cfg is the one that carries the guarantee: cargo features are
 /// unified across a dependency graph, so a feature alone would let any crate
 /// in a consumer's tree enable a hand-rolled TLS implementation for every
@@ -77,7 +99,16 @@ pub mod handrolled;
 /// Before you do: this is an opt-in experiment, permanently non-default, and
 /// `rustls` remains the engine behind every type this crate exports. See
 /// `docs/adr/0002-handrolled-engine-behind-a-permanently-non-default-seam.md`.
-#[cfg(all(feature = "handrolled-engine", not(rusty_tls_handrolled)))]
+#[cfg(all(
+    any(feature = "handrolled-engine", feature = "native-crypto"),
+    not(all(
+        rusty_tls_handrolled,
+        any(
+            all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+            all(feature = "native-crypto", rusty_tls_native_crypto)
+        )
+    ))
+))]
 pub mod handrolled {}
 
 #[cfg(feature = "rusty-tokio")]

@@ -22,8 +22,10 @@
 //!
 //! - `crypto` (private) — the one place the client path calls its
 //!   cryptographic backend: hashes, HMAC, AEAD, key exchange, signature
-//!   checks and randomness. The backend is `ring`; signing and the server's
-//!   ticket cipher call `ring` directly.
+//!   checks and randomness. The backend is `ring` by default, or the
+//!   first-party crates with `native-crypto` and
+//!   `--cfg rusty_tls_native_crypto` (ADR-0005). Signing and the server's
+//!   ticket cipher call `ring` directly, and the native build has neither.
 //! - [`record`] — the TLS 1.3 record layer (stage 1): AEAD protection and
 //!   framing for an already-established connection.
 //! - [`record12`] — the TLS 1.2 record layer (stage 4b-i): the same AEADs as
@@ -38,7 +40,7 @@
 //! - [`client12`] — the TLS 1.2 client handshake (stage 4b-iii): ECDHE with an
 //!   AEAD, extended master secret required, no resumption, no client
 //!   certificate. The first TLS 1.2 code here that talks to a peer.
-//! - [`server12`] — the TLS 1.2 server handshake (stage 4b-iv): the same
+//! - `server12` — the TLS 1.2 server handshake (stage 4b-iv): the same
 //!   refusals as the client, an optional client certificate that must prove
 //!   its key, and a shared [`client12::Connection12`] once established.
 //! - [`negotiate`] — one endpoint that speaks both (stage 4b-v): chooses the
@@ -87,22 +89,29 @@
 //!
 //! - [`sign`] — producing handshake signatures (stage 5), and the first thing
 //!   here that holds a private key rather than only checking one.
-//! - [`server`] — the TLS 1.3 server handshake (stage 5). The mirror of
+//! - `server` — the TLS 1.3 server handshake (stage 5). The mirror of
 //!   [`client`], and exposed differently: every byte it parses is unsolicited.
-//! - [`ticket`] — sealing and opening resumption tickets (stage 5,
+//! - `ticket` — sealing and opening resumption tickets (stage 5,
 //!   `rusty_tls#43`), and the key that does it. That key is as sensitive as
 //!   the certificate's private key and needs rotating; the module says why and
-//!   [`ticket::TicketKeys`] is the shape that makes rotating possible.
+//!   `ticket::TicketKeys` is the shape that makes rotating possible.
 //!
 //! TLS 1.2 (4b) was built in stages 4b-i to 4b-vi;
 //! `docs/research/TLS12-DESIGN.md` records them.
 //!
+//! The server modules (`server`, `server12`, `ticket`) and signing do not
+//! exist on the native backend (ADR-0005), which is why they are named here in
+//! plain text rather than linked.
+//!
 //! # What is deliberately *not* here
 //!
 //! Cryptographic primitives. AES-GCM, ChaCha20-Poly1305, X25519, SHA-2, and
-//! P-256 come from `ring`. Hand-rolling those is a different project with a
-//! correctness property — constant-time execution — that none of this
-//! module's testing strategy can see.
+//! P-256 come from `ring`, or on the native backend from the first-party
+//! crates in `crates/foundation` (ADR-0005). Either way they are not written
+//! here: hand-rolling primitives is a different project with a correctness
+//! property — constant-time execution — that none of this module's testing
+//! strategy can see, and the first-party crates carry their own evidence for
+//! it.
 
 pub mod client;
 pub mod client12;
@@ -120,10 +129,13 @@ pub mod record;
 pub mod record12;
 pub mod schedule;
 pub mod schedule12;
+#[cfg(not(rusty_tls_native_crypto))]
 pub mod server;
+#[cfg(not(rusty_tls_native_crypto))]
 pub mod server12;
 pub mod sign;
 pub mod stream;
+#[cfg(not(rusty_tls_native_crypto))]
 pub mod ticket;
 pub mod verify;
 pub mod wire;

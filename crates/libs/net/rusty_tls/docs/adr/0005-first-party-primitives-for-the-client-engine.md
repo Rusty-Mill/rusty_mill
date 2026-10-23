@@ -11,7 +11,8 @@ recommendations for decisions D2, D3 and D4 in `docs/research/TLS-NATIVE-CRYPTO-
 with "Approved". Later the same day the owner chose the §1 exception in decision 1 ("(a)")
 over keeping `handrolled-engine` as a requirement, and agreed to defer BoGo on the native
 backend (decision 4). Each of these is the implementer's transcription of the owner's
-answer, not a statement from the owner's GitHub account.
+answer, not a statement from the owner's GitHub account. *(2026-10-23: the owner has since confirmed
+D2 to D4, the §1 exception and the BoGo deferral directly, recorded on #868 in comment 6343682194.)*
 
 ## Context
 

@@ -6,14 +6,22 @@
 //! refusal, but it tells the peer the wrong thing, and tells an observer which
 //! of two faults it was when RFC 8446 §6 asks implementations not to.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rusty_tls::handrolled::client::{Alert, AlertDescription, AlertLevel, ClientError};
 use rusty_tls::handrolled::handshake::{HandshakeError, HandshakeType};
+#[cfg(not(rusty_tls_native_crypto))]
 use rusty_tls::handrolled::kx::KxError;
 use rusty_tls::handrolled::limits::Flood;
 use rusty_tls::handrolled::path::PathError;
 use rusty_tls::handrolled::record::{ContentType, RecordError};
+#[cfg(not(rusty_tls_native_crypto))]
 use rusty_tls::handrolled::server::ServerError;
 use rusty_tls::handrolled::verify::VerifyError;
 
@@ -160,6 +168,7 @@ fn what_a_client_tells_a_server() {
     }
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 #[test]
 fn what_a_server_tells_a_client() {
     use AlertDescription as A;
