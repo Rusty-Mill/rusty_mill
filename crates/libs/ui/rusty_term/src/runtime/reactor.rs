@@ -1,23 +1,24 @@
-//! Tokio runtime: a single async reactor drives the terminal on every platform.
+//! Async runtime: a single [`rusty_tokio`] reactor drives the terminal on every
+//! platform.
 //!
 //! On **Unix** the PTY master and a fresh `/dev/tty` open are registered with
-//! the reactor via [`AsyncFd`]; `SIGWINCH` arrives as a [`tokio::signal`] stream.
-//! On **Windows** ConPTY's pipes are synchronous (no pollable fd), so blocking
-//! reader / writer / stdin threads bridge into tokio channels and a timer polls
+//! the reactor via [`AsyncFd`]; `SIGWINCH` arrives as a [`rusty_tokio::signal`]
+//! stream. On **Windows** ConPTY's pipes are synchronous (no pollable fd), so
+//! blocking reader / writer / stdin threads bridge into async channels and a timer polls
 //! the console size for resizes. Both paths share [`run`] and the
 //! [`Notify`]-driven render loop.
 //!
 //! Locking note: the grid uses a `parking_lot::Mutex` (sync), and a guard is
 //! **never** held across an `.await` — every critical section locks, mutates or
 //! snapshots, and drops the guard before any await. So a sync mutex is correct
-//! here, not `tokio::sync::Mutex`.
+//! here, not `rusty_tokio::sync::Mutex`.
 
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
-use tokio::sync::Notify;
+use rusty_tokio::sync::Notify;
 
 use crate::backend::Backend;
 use crate::core::{AnsiParser, Grid};
@@ -25,11 +26,11 @@ use crate::input::{Scroll, split_input};
 use crate::render::{FRAME_BUDGET, RawModeGuard, RenderState, render_once, restore_host_modes};
 
 #[cfg(unix)]
+use rusty_tokio::io::AsyncFd;
+#[cfg(unix)]
+use rusty_tokio::signal::{SignalKind, signal};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-#[cfg(unix)]
-use tokio::io::unix::AsyncFd;
-#[cfg(unix)]
-use tokio::signal::unix::{SignalKind, signal};
 
 #[cfg(windows)]
 use std::io::Read;
@@ -55,6 +56,15 @@ impl Drop for ShutdownOnDrop {
         self.running.store(false, Ordering::Relaxed);
         self.frame.notify_one();
     }
+}
+
+/// What woke the render loop: a repaint request, a size change, or (Windows,
+/// where output arrives over a channel) a chunk of PTY output or its EOF.
+enum Wake {
+    Frame,
+    Resize,
+    #[cfg(windows)]
+    Output(Option<Vec<u8>>),
 }
 
 /// A PTY master descriptor registered with the reactor that does **not** close
@@ -172,7 +182,7 @@ async fn write_all(afd: &AsyncFd<FdRef>, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Build a small multi-threaded tokio runtime and drive the terminal on it.
+/// Build a small multi-threaded runtime and drive the terminal on it.
 /// Runs the TUI to completion and returns the child shell's exit status as a
 /// `std::process::exit`-compatible value (the caller is expected to exit the
 /// process with it) — its own exit code on a normal exit, 128+signal on a
@@ -201,9 +211,8 @@ pub fn run(
         config.cwd.as_deref(),
     )?;
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    let rt = rusty_tokio::Builder::new_multi_thread()
         .worker_threads(2)
-        .enable_all()
         .build()?;
     rt.block_on(run_async(backend, reader, grid, config))
 }
@@ -313,7 +322,7 @@ async fn run_async(
         let frame = Arc::clone(&frame);
         let exit_status = Arc::clone(&exit_status);
         let pid = reader.child_pid();
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             let Some(pid) = pid else { return };
             let Ok(mut sigchld) = signal(SignalKind::child()) else {
                 return;
@@ -346,7 +355,7 @@ async fn run_async(
         let running = Arc::clone(&running);
         let frame = Arc::clone(&frame);
         let parser = Arc::clone(&parser);
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             // Wakes the render loop on every exit from this task — including a
             // panic in `parser.advance` on hostile child bytes.
             let _shutdown = ShutdownOnDrop {
@@ -397,7 +406,7 @@ async fn run_async(
         let grid = Arc::clone(&grid);
         let running = Arc::clone(&running);
         let frame = Arc::clone(&frame);
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             let _shutdown = ShutdownOnDrop {
                 running: Arc::clone(&running),
                 frame: Arc::clone(&frame),
@@ -466,12 +475,17 @@ async fn run_async(
     // A pinned `Notified` future re-armed in place: no await sits between its
     // completion and the next arm, so a `notify_one` in that gap is not lost,
     // and the `sigwinch` branch never drops a pending notification.
-    let notified = frame.notified();
-    tokio::pin!(notified);
+    let mut notified = std::pin::pin!(frame.notified());
 
     loop {
-        tokio::select! {
-            _ = &mut notified => {
+        // `select!` arms are plain expressions (no `.await` or `break`), so
+        // pick the event here and act on it below.
+        let woke = rusty_tokio::select! {
+            _ = &mut notified => Wake::Frame,
+            _ = sigwinch.recv() => Wake::Resize,
+        };
+        match woke {
+            Wake::Frame => {
                 notified.set(frame.notified());
                 if !running.load(Ordering::Relaxed) {
                     break;
@@ -480,11 +494,11 @@ async fn run_async(
                 // last paint has elapsed, so a flood repaints at ~60 Hz.
                 let since = render_state.last_frame.elapsed();
                 if since < FRAME_BUDGET {
-                    tokio::time::sleep(FRAME_BUDGET - since).await;
+                    rusty_tokio::time::sleep(FRAME_BUDGET - since).await;
                 }
                 render_once(&grid, &mut render_state);
             }
-            _ = sigwinch.recv() => {
+            Wake::Resize => {
                 // Reflow the grid, tell the child its new size, and clear the
                 // screen for a clean full repaint. Only act on a real change so a
                 // spurious SIGWINCH doesn't blank the screen.
@@ -539,7 +553,7 @@ async fn run_async(
 
 /// Windows ConPTY driver: the pipes are synchronous (no readiness-pollable fd),
 /// so dedicated blocking threads bridge PTY output, PTY input, and host stdin
-/// into tokio channels, while the async render loop coalesces repaints and polls
+/// into async channels, while the async render loop coalesces repaints and polls
 /// the console size for resizes (there is no `SIGWINCH`).
 #[cfg(windows)]
 async fn run_async(
@@ -590,7 +604,7 @@ async fn run_async(
     // 64 * 4096-byte reads is 256 KiB of slack, comfortably more than one
     // frame's worth of output at any reasonable render cadence.
     const OUTPUT_CHANNEL_CAPACITY: usize = 64;
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(OUTPUT_CHANNEL_CAPACITY);
+    let (out_tx, mut out_rx) = rusty_tokio::sync::mpsc::channel::<Vec<u8>>(OUTPUT_CHANNEL_CAPACITY);
     {
         let running = Arc::clone(&running);
         std::thread::spawn(move || {
@@ -612,7 +626,7 @@ async fn run_async(
 
     // PTY input: the async side queues bytes; a blocking `WriteFile` thread
     // drains them so reply/keystroke writes never block the reactor.
-    let (in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let (in_tx, in_rx) = rusty_tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     {
         let mut in_rx = in_rx;
         std::thread::spawn(move || {
@@ -686,13 +700,19 @@ async fn run_async(
     let parser = Arc::new(Mutex::new(AnsiParser::with_theme(config.theme)));
     watch_config(Arc::clone(&parser), Arc::clone(&grid), Arc::clone(&frame));
     let mut render_state = RenderState::new();
-    let mut resize_poll = tokio::time::interval(Duration::from_millis(150));
-    let notified = frame.notified();
-    tokio::pin!(notified);
+    let mut resize_poll = rusty_tokio::time::interval(Duration::from_millis(150));
+    let mut notified = std::pin::pin!(frame.notified());
 
     loop {
-        tokio::select! {
-            data = out_rx.recv() => {
+        // `select!` arms are plain expressions (no `.await` or `break`), so
+        // pick the event here and act on it below.
+        let woke = rusty_tokio::select! {
+            data = out_rx.recv() => Wake::Output(data),
+            _ = &mut notified => Wake::Frame,
+            _ = resize_poll.tick() => Wake::Resize,
+        };
+        match woke {
+            Wake::Output(data) => {
                 match data {
                     Some(data) => {
                         let (responses, should_notify) = {
@@ -712,18 +732,18 @@ async fn run_async(
                     None => break, // PTY EOF: the shell exited
                 }
             }
-            _ = &mut notified => {
+            Wake::Frame => {
                 notified.set(frame.notified());
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }
                 let since = render_state.last_frame.elapsed();
                 if since < FRAME_BUDGET {
-                    tokio::time::sleep(FRAME_BUDGET - since).await;
+                    rusty_tokio::time::sleep(FRAME_BUDGET - since).await;
                 }
                 render_once(&grid, &mut render_state);
             }
-            _ = resize_poll.tick() => {
+            Wake::Resize => {
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }

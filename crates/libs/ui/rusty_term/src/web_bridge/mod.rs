@@ -6,7 +6,7 @@
 //! the rest of the tree it adds no dependencies: the RFC 6455 handshake and
 //! framing are hand-rolled in [`ws`] (SHA-1 included), the HTTP part is the
 //! two lines a websocket upgrade actually needs, and the async runtime is
-//! the tokio the terminal already links.
+//! the [`rusty_tokio`] the terminal already links.
 //!
 //! ## Wire protocol (also documented in `web/README.md`)
 //!
@@ -43,10 +43,8 @@ mod ws;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::OwnedWriteHalf;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt, OwnedWriteHalf, TcpListener, TcpStream};
+use rusty_tokio::sync::mpsc;
 
 use crate::backend::{Backend, BackendHandle};
 
@@ -91,11 +89,9 @@ impl Default for BridgeConfig {
 /// Run the bridge until the process is killed: bind, accept, one independent
 /// PTY session per websocket connection.
 pub fn run(cfg: BridgeConfig) -> Result<(), Error> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    let rt = rusty_tokio::Builder::new_multi_thread().build()?;
     rt.block_on(async move {
-        let listener = TcpListener::bind(&cfg.listen).await?;
+        let listener = TcpListener::bind_addrs(cfg.listen.as_str()).await?;
         eprintln!(
             "rusty_term web bridge: listening on ws://{} (shell: {})",
             listener.local_addr()?,
@@ -104,13 +100,20 @@ pub fn run(cfg: BridgeConfig) -> Result<(), Error> {
         loop {
             let (stream, peer) = listener.accept().await?;
             let cfg = cfg.clone();
-            tokio::spawn(async move {
+            rusty_tokio::spawn(async move {
                 if let Err(e) = session(stream, cfg).await {
                     eprintln!("rusty_term web bridge: session {peer}: {e}");
                 }
             });
         }
     })
+}
+
+/// What woke a session task: socket bytes, a PTY event, or the stats tick.
+enum Wake {
+    Socket(std::io::Result<usize>),
+    Pty(Option<PtyEvent>),
+    Stats,
 }
 
 /// What the PTY reader thread hands the session task.
@@ -126,7 +129,8 @@ enum PtyEvent {
 async fn session(mut stream: TcpStream, cfg: BridgeConfig) -> Result<(), Error> {
     // --- HTTP upgrade. Read the header block (bounded in size and time),
     // validate, 101. ---
-    let head = match tokio::time::timeout(HANDSHAKE_TIMEOUT, read_handshake_head(&mut stream)).await
+    let head = match rusty_tokio::time::timeout(HANDSHAKE_TIMEOUT, read_handshake_head(&mut stream))
+        .await
     {
         Ok(Ok(Some(head))) => head,
         Ok(Ok(None)) => return refuse(&mut stream, "431 Request Header Fields Too Large").await,
@@ -160,8 +164,8 @@ async fn session(mut stream: TcpStream, cfg: BridgeConfig) -> Result<(), Error> 
     // the per-session git cache behind it.
     let mut cwd: Option<PathBuf> = None;
     let mut git_cache = stats::GitCache::new();
-    let mut stats_tick = tokio::time::interval(STATS_INTERVAL);
-    stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut stats_tick = rusty_tokio::time::interval(STATS_INTERVAL);
+    stats_tick.set_missed_tick_behavior(rusty_tokio::time::MissedTickBehavior::Skip);
 
     loop {
         // Drain complete frames before reading more from the socket.
@@ -202,7 +206,7 @@ async fn session(mut stream: TcpStream, cfg: BridgeConfig) -> Result<(), Error> 
                     // Handed off to spawn_writer's dedicated thread rather
                     // than written here: frames run up to MAX_FRAME (1 MB —
                     // a large paste, not just a keystroke), and writing that
-                    // directly would block whichever tokio worker thread
+                    // directly would block whichever runtime worker thread
                     // services this session, stalling any other session
                     // sharing it. A write failure surfaces independently
                     // through the reader thread's EOF once the PTY is gone.
@@ -229,23 +233,31 @@ async fn session(mut stream: TcpStream, cfg: BridgeConfig) -> Result<(), Error> 
         }
 
         let mut chunk = [0u8; 4096];
-        tokio::select! {
-            read = rd.read(&mut chunk) => {
+        // `select!` arms are plain expressions (no `.await` or `return`), so
+        // pick the event here and act on it below.
+        let woke = rusty_tokio::select! {
+            read = rd.read(&mut chunk) => Wake::Socket(read),
+            event = rx.recv() => Wake::Pty(event),
+            _ = stats_tick.tick() => Wake::Stats,
+        };
+        match woke {
+            Wake::Socket(read) => {
                 let n = read?;
                 if n == 0 {
                     return Ok(()); // client went away; drop hangs up the PTY
                 }
                 buf.extend_from_slice(&chunk[..n]);
             }
-            event = rx.recv() => match event {
+            Wake::Pty(event) => match event {
                 Some(PtyEvent::Data(data)) => {
-                    wr.write_all(&ws::encode_frame(ws::Opcode::Binary, &data)).await?;
+                    wr.write_all(&ws::encode_frame(ws::Opcode::Binary, &data))
+                        .await?;
                 }
                 Some(PtyEvent::Eof) | None => {
                     return finish(&mut wr, handle.as_mut()).await;
                 }
             },
-            _ = stats_tick.tick() => {
+            Wake::Stats => {
                 let git = match &cwd {
                     Some(dir) => git_cache.info(dir),
                     None => stats::GitInfo::default(),
@@ -257,7 +269,8 @@ async fn session(mut stream: TcpStream, cfg: BridgeConfig) -> Result<(), Error> 
                     &git,
                 );
                 let msg = format!("stats {json}");
-                wr.write_all(&ws::encode_frame(ws::Opcode::Text, msg.as_bytes())).await?;
+                wr.write_all(&ws::encode_frame(ws::Opcode::Text, msg.as_bytes()))
+                    .await?;
             }
         }
     }
@@ -347,7 +360,7 @@ fn spawn_reader(mut clone: Box<dyn BackendHandle>, tx: mpsc::UnboundedSender<Pty
 /// session task (mirrors [`spawn_reader`]'s split). A single frame can carry
 /// up to `MAX_FRAME` (1 MB — a large paste, not just a keystroke), and
 /// writing that inline in the session task's `select!` would block whichever
-/// tokio worker thread services it for the duration, stalling any other
+/// runtime worker thread services it for the duration, stalling any other
 /// session sharing that thread. Ends quietly once the channel closes (the
 /// session task is done with this connection) or a write fails (the PTY
 /// went away — the reader thread's EOF already tells the session task that
@@ -447,9 +460,9 @@ mod tests {
 
     /// Routing writes through spawn_writer's channel must decouple the
     /// caller from a slow underlying write — the exact property this fix
-    /// exists for (a large paste's write no longer blocks the tokio worker
+    /// exists for (a large paste's write no longer blocks the runtime worker
     /// thread the async session task runs on).
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn writer_thread_decouples_slow_writes_from_the_caller() {
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let handle: Box<dyn BackendHandle> = Box::new(MockHandle {
@@ -471,7 +484,7 @@ mod tests {
 
         // Give the background thread time to drain both writes, then check
         // they arrived, and in order.
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        rusty_tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         assert_eq!(
             *log.lock().unwrap(),
             vec![b"hello".to_vec(), b"world".to_vec()]
@@ -484,21 +497,21 @@ mod tests {
     /// to bound a loopback-only slowloris variant. Uses a short test-local
     /// timeout rather than the production constant so the test itself stays
     /// fast.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn handshake_read_times_out_on_a_stalled_peer() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let client = tokio::spawn(async move {
-            let mut sock = TcpStream::connect(addr).await.unwrap();
+        let client = rusty_tokio::spawn(async move {
+            let sock = TcpStream::connect(addr).await.unwrap();
             // Send part of a request line, then stall — never the blank
             // line that would end the header block.
             sock.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            rusty_tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         });
 
         let (mut server_stream, _) = listener.accept().await.unwrap();
-        let result = tokio::time::timeout(
+        let result = rusty_tokio::time::timeout(
             std::time::Duration::from_millis(200),
             read_handshake_head(&mut server_stream),
         )
