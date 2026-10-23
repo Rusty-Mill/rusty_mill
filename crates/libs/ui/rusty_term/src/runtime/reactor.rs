@@ -14,12 +14,14 @@
 //! here, not `rusty_tokio::sync::Mutex`.
 
 use std::io::Write;
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 use rusty_tokio::sync::Notify;
 
+use super::fair::fair_select;
 use crate::backend::Backend;
 use crate::core::{AnsiParser, Grid};
 use crate::input::{Scroll, split_input};
@@ -40,7 +42,7 @@ use std::time::Duration;
 /// Signals the render loop to stop when a task ends — on its own, the task's
 /// `running.store(false)` + `frame.notify_one()` only run after the loop body,
 /// so a panic anywhere inside (e.g. in the untrusted-byte parser) would skip
-/// them and leave the main `select!` waiting forever with the host terminal
+/// them and leave the render loop waiting forever with the host terminal
 /// stuck in raw mode. As a `Drop` guard this fires on every exit, panic
 /// included. (Unix only — the Windows path bridges through blocking threads
 /// and channels rather than these reactor-driven tasks.)
@@ -479,14 +481,22 @@ async fn run_async(
     // A pinned `Notified` future re-armed in place: no await sits between its
     // completion and the next arm, so a `notify_one` in that gap is not lost,
     // and the `sigwinch` branch never drops a pending notification.
-    let mut notified = std::pin::pin!(frame.notified());
+    let mut notified = pin!(frame.notified());
+    let mut turn = 0;
 
     loop {
-        // `select!` arms are plain expressions (no `.await` or `break`), so
-        // pick the event here and act on it below.
-        let woke = rusty_tokio::select! {
-            _ = &mut notified => Wake::Frame,
-            _ = sigwinch.recv() => Wake::Resize,
+        // Round-robin, not `select!`'s fixed order: sustained output keeps
+        // the frame `Notify` ready, and must not starve resizes.
+        let woke = {
+            let frame_arm = pin!(async {
+                (&mut notified).await;
+                Wake::Frame
+            });
+            let resize_arm = pin!(async {
+                sigwinch.recv().await;
+                Wake::Resize
+            });
+            fair_select(&mut turn, &mut [frame_arm, resize_arm]).await
         };
         match woke {
             Wake::Frame => {
@@ -705,15 +715,23 @@ async fn run_async(
     watch_config(Arc::clone(&parser), Arc::clone(&grid), Arc::clone(&frame));
     let mut render_state = RenderState::new();
     let mut resize_poll = rusty_tokio::time::interval(Duration::from_millis(150));
-    let mut notified = std::pin::pin!(frame.notified());
+    let mut notified = pin!(frame.notified());
+    let mut turn = 0;
 
     loop {
-        // `select!` arms are plain expressions (no `.await` or `break`), so
-        // pick the event here and act on it below.
-        let woke = rusty_tokio::select! {
-            data = out_rx.recv() => Wake::Output(data),
-            _ = &mut notified => Wake::Frame,
-            _ = resize_poll.tick() => Wake::Resize,
+        // Round-robin, not `select!`'s fixed order: a never-empty output
+        // channel must not starve repaints, shutdown checks or resizes.
+        let woke = {
+            let output_arm = pin!(async { Wake::Output(out_rx.recv().await) });
+            let frame_arm = pin!(async {
+                (&mut notified).await;
+                Wake::Frame
+            });
+            let resize_arm = pin!(async {
+                resize_poll.tick().await;
+                Wake::Resize
+            });
+            fair_select(&mut turn, &mut [output_arm, frame_arm, resize_arm]).await
         };
         match woke {
             Wake::Output(data) => {
