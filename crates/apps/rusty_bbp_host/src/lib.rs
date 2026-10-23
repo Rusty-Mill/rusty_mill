@@ -5,6 +5,8 @@
 //! - [`human`]: the human channel as CLI actions.
 //! - [`moderator`]: the loop that launches one agent harness per granted
 //!   turn and the runner per selected run, until the task closes.
+//! - [`waker`]: what the moderator waits on between passes: log appends and
+//!   child exits, with the poll as the longest wait.
 //! - [`runner`]: the test supervisor. Applies a candidate in a fresh checkout,
 //!   runs the frozen profile set under a sandbox, stores log and report.
 //! - [`profiles`]: the profile set a task freezes at open.
@@ -38,6 +40,7 @@ pub mod runner;
 pub mod shadow;
 pub mod slots;
 pub mod tokens;
+pub mod waker;
 pub mod why;
 
 use rusty_bbp::*;

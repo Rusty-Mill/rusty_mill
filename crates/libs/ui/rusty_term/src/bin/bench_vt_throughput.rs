@@ -19,6 +19,12 @@
 //!   cargo run --release --bin bench_vt_throughput               # all workloads, 20 iterations each
 //!   cargo run --release --bin bench_vt_throughput -- 100         # 100 iterations each
 //!   cargo run --release --bin bench_vt_throughput -- 50 bench/workloads/sgr_churn.vt
+//!   cargo run --release --bin bench_vt_throughput -- --once bench/workloads/scroll_heavy.vt
+//!
+//! `--once` feeds each file through the parser exactly once, with no warmup,
+//! timing or latency pass, and prints nothing. It exists to be run under an
+//! instruction counter (`bench/ir_gate.py` runs it under cachegrind), where
+//! the deterministic count, not wall-clock time, is the CI regression gate.
 
 use std::env;
 use std::fs;
@@ -142,7 +148,20 @@ fn discover_workloads(dir: &str) -> Vec<String> {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    if let Some(i) = args.iter().position(|a| a == "--once") {
+        args.remove(i);
+        for path in &args {
+            match fs::read(path) {
+                Ok(data) => feed(&data, 1),
+                Err(e) => {
+                    eprintln!("{path}: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        return;
+    }
 
     let (iterations, rest): (u32, &[String]) =
         match args.first().and_then(|s| s.parse::<u32>().ok()) {

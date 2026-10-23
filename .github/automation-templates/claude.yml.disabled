@@ -1,0 +1,47 @@
+name: Claude interactive worker (disabled)
+on:
+  issue_comment: {types: [created]}
+  pull_request_review_comment: {types: [created]}
+permissions: {contents: read}
+concurrency:
+  group: claude-worker-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  work:
+    # Activation requires a separately reviewed code change. Variables cannot enable this.
+    if: ${{ false && github.event.comment.user.type == 'User' && contains(github.event.comment.body, '@claude') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Future interactive writing scope, NOT review-only. No OIDC/App token exchange.
+    permissions: {contents: write, pull-requests: write, issues: write}
+    steps:
+      - name: Resolve current same-repository PR head
+        id: target
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            const number = context.payload.issue?.number || context.payload.pull_request?.number;
+            const isPR = !!(context.payload.issue?.pull_request || context.payload.pull_request);
+            let sha = context.sha;
+            if (isPR) {
+              const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: number});
+              if (pr.state !== 'open' || pr.head.repo?.full_name !== `${context.repo.owner}/${context.repo.repo}` || !pr.head.ref.startsWith('claude/')) {
+                core.notice('Unsupported PR target: requires open same-repository claude/* head.');
+                return;
+              }
+              sha = pr.head.sha;
+            }
+            core.setOutput('sha', sha);
+      - if: steps.target.outputs.sha != ''
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+          persist-credentials: false
+      - if: steps.target.outputs.sha != ''
+        uses: anthropics/claude-code-action@e4b9cb6aa9618b5977f9faab7ef0b1d5688c449b
+        with:
+          github_token: ${{ github.token }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: --max-turns 20

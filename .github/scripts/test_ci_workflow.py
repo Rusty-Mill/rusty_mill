@@ -36,6 +36,7 @@ PLAN_KEYS = {
     "win32",
     "multimodal_db",
     "rusty_config_no_std",
+    "term_bench",
     "tls_engine",
     "rleval_viewer",
     "rleval_app",
@@ -50,6 +51,18 @@ SPECIALIZED_KEYS = PLAN_KEYS - {"full", "packages", "ci_only", "shards", "compon
 class CiWorkflowSchedulingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    def test_build_environment_setup_has_a_blocking_step_timeout(self) -> None:
+        steps = re.findall(
+            r"(?m)^      - uses: \./\.github/actions/setup-build-env\n"
+            r"(?:(?!      - |  \S)[^\n]*\n)*",
+            self.workflow,
+        )
+        self.assertEqual(len(steps), 4)
+        for step in steps:
+            with self.subTest(step=step):
+                self.assertIn("\n        timeout-minutes: 15\n", step)
+                self.assertNotIn("continue-on-error", step)
 
     def test_push_pr_and_manual_full_sweep_events_are_declared(self) -> None:
         # No post-merge push run: the merge queue tested the tree that lands.
@@ -305,7 +318,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_rleval_jobs_follow_cargo_impact_and_the_viewer_fixture(self) -> None:
@@ -409,17 +422,22 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_agui_package_change_selects_tick_web_too(self) -> None:
         flags = specialized_job_flags(["crates/libs/protocol/rusty_agui/packages/agui-react/src/hooks.tsx"], [])
         self.assertTrue(flags["agui"])
         self.assertTrue(flags["tick"])
+
+    def test_term_bench_follows_the_engine_and_its_driver(self) -> None:
+        for package in ("rusty_term_core", "rusty_term"):
+            self.assertTrue(specialized_job_flags([], [package])["term_bench"], package)
+        self.assertFalse(specialized_job_flags([], ["rusty_tick"])["term_bench"])
 
     def test_shared_and_specialized_package_rules(self) -> None:
         flags = specialized_job_flags(
