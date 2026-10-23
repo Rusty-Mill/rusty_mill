@@ -8,13 +8,13 @@ size 80x24 cursor 4,8 visible=true alt=true
 |  7 007 plain ascii line with some words to wrap and scroll
 |  8 008 plain ascii line with some words to wrap and scroll
 |  9 wide: 日本語テキスト 漢字 한국어
-| 10 emoji: 😀 👍🏽ci 🇯l🇵n
+| 10 emoji: 😀 👍🏽 🇯🇵
 | 11 inserted 日本 line
 |sample.txt [+]
 |  7 007 plain ascii line with some words to wrap and scroll
 |  8 008 plain ascii line with some words to wrap and scroll
 |  9 wide: 日本語テキスト 漢字 한국어
-| 10 emoji: 😀 👍🏽.. 🇯.🇵.
+| 10 emoji: 😀 👍🏽 🇯🇵
 | 11 inserted 日本 line
 | 12 combining: é ü ñ
 | 13 rtl: שלום עולם
@@ -49,8 +49,8 @@ styles:
 22:0-79 fg=- bg=- reverse
 trailers:
 8:11,13,15,17,19,21,23,26,28,31,33,35
-9:12,15
+9:12,15,17,20,22
 10:14,16
 14:11,13,15,17,19,21,23,26,28,31,33,35
-15:12,15
+15:12,15,17,20,22
 16:14,16

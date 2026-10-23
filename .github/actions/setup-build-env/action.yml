@@ -21,6 +21,13 @@ runs:
         toolchain: ${{ env.RUST_TOOLCHAIN }}
         components: ${{ inputs.components }}
 
+    # The hosted image already lists the official archive as a fallback.
+    # APT uses numeric priorities, so reordering lines cannot prefer it.
+    - name: Prefer official Ubuntu archive (GitHub-hosted Linux)
+      if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+      shell: bash
+      run: sudo python3 "${{ github.action_path }}/prefer_ubuntu_archive.py"
+
     # rusty_term's gui/gui-gpu features and rusty_gui's Linux X11 backend
     # link against X11/wayland directly; rusty_a2a's grpc feature runs a
     # build.rs that needs `protoc`; platform-linux's secret_service
