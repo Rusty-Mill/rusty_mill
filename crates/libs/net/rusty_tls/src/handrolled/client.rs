@@ -141,7 +141,8 @@ pub enum AlertLevel {
 
 impl AlertLevel {
     /// Decode a wire value. Shared with [`super::server`], which reads alerts
-    /// from the other direction.
+    /// from the other direction (and which the native backend does not have).
+    #[cfg_attr(rusty_tls_native_crypto, allow(dead_code))]
     pub(crate) const fn from_wire(value: u8) -> Self {
         Self::from_u8(value)
     }
@@ -761,10 +762,25 @@ impl CipherSuite {
     pub const TLS_CHACHA20_POLY1305_SHA256: Self = Self(0x1303);
 
     /// The suites this client offers, strongest-preference first.
+    #[cfg(not(rusty_tls_native_crypto))]
     pub const SUPPORTED: &'static [Self] = &[
         Self::TLS_AES_256_GCM_SHA384,
         Self::TLS_AES_128_GCM_SHA256,
         Self::TLS_CHACHA20_POLY1305_SHA256,
+    ];
+
+    /// The suites this client offers, most preferred first.
+    ///
+    /// On the native backend ChaCha20-Poly1305 leads (ADR-0005, D4): its AES-GCM
+    /// is portable code, about 60 to 150 times slower than `ring`'s, so
+    /// preferring it would be preferring the slow cipher for no stated reason.
+    /// The AES suites are still offered. This order is also the ClientHello's
+    /// fingerprint, which therefore differs from the `ring` build's.
+    #[cfg(rusty_tls_native_crypto)]
+    pub const SUPPORTED: &'static [Self] = &[
+        Self::TLS_CHACHA20_POLY1305_SHA256,
+        Self::TLS_AES_256_GCM_SHA384,
+        Self::TLS_AES_128_GCM_SHA256,
     ];
 
     /// The AEAD and hash this suite names, or `None` if it names neither.
@@ -2445,6 +2461,9 @@ pub enum Incoming {
     Closed,
 }
 
+// Server-side constructors and builders: unused on the native backend, which
+// has no server role (ADR-0005).
+#[cfg_attr(rusty_tls_native_crypto, allow(dead_code))]
 impl Connection {
     /// Assemble a connection from an already-completed handshake.
     ///

@@ -5,10 +5,10 @@
  * agent turns into a reply; a task named ambiguously is not guessed at.
  */
 import type { ActionDefinition } from '@rusty-mill/agui-core'
-import type { List, NewTask, Priority, Task, TaskPatch } from '@/api/types'
+import type { List, NewTask, Priority, Status, Task, TaskPatch } from '@/api/types'
 import { searchTasks } from '@/features/search/search'
 import { tasksForView, type Entities } from '@/features/tasks/organize'
-import { addDays, startOfDay } from '@/lib/date'
+import { addDays, MINUTE, startOfDay } from '@/lib/date'
 import { describeRule, formatRule, parseRule, type Freq, type Rule } from '@/lib/recurrence'
 
 /** Most tasks one answer lists. */
@@ -184,6 +184,49 @@ export function moveTo(t: Task, day: number | null, time?: Clock): TaskPatch {
   return patch
 }
 
+/** A snooze as said: for a span of minutes or days, or until a day and/or time. */
+export type Snooze = { minutes: number } | { days: number } | { until: When }
+/** Each unit as minutes or days, and the most of it a snooze takes. */
+const SNOOZE_UNIT: Record<string, { per: 'minutes' | 'days'; size: number; max: number }> = {
+  minute: { per: 'minutes', size: 1, max: 1440 },
+  min: { per: 'minutes', size: 1, max: 1440 },
+  hour: { per: 'minutes', size: 60, max: 72 },
+  day: { per: 'days', size: 1, max: 365 },
+  week: { per: 'days', size: 7, max: 52 },
+}
+
+/** How long `text` says to snooze: "2 hours", "a day", "1 week", or "until friday at 9". */
+export function readSnooze(text: string, now: number): Snooze | undefined {
+  const t = norm(text)
+  const until = /^until (.+)$/.exec(t)
+  if (until) {
+    const when = readWhen(until[1]!, now)
+    return when ? { until: when } : undefined
+  }
+  const m = /^(?:for )?(\d{1,4}|a|an|one) (minute|min|hour|day|week)s?$/.exec(t)
+  const unit = m ? SNOOZE_UNIT[m[2]!] : undefined
+  if (!m || !unit) return undefined
+  const n = /^\d/.test(m[1]!) ? Number(m[1]) : 1
+  if (n < 1 || n > unit.max) return undefined
+  return unit.per === 'minutes' ? { minutes: n * unit.size } : { days: n * unit.size }
+}
+
+/**
+ * Where snoozing `t` moves it. Minutes and hours count from now, to the
+ * minute, as an instant; days and weeks from its due day (today if it is
+ * overdue or undated), keeping its time; "until" moves it as "move … to …" does.
+ */
+export function snoozeTo(t: Task, snooze: Snooze, now: number): TaskPatch {
+  if ('until' in snooze) return moveTo(t, snooze.until.day ?? startOfDay(t.dueMs ?? now), snooze.until.time)
+  if ('days' in snooze) return moveTo(t, addDays(Math.max(startOfDay(t.dueMs ?? now), startOfDay(now)), snooze.days))
+  // The instant itself, not a local day and clock time: in a DST fall-back hour
+  // the same 01:15 happens twice, and only the instant says which one.
+  const dueMs = Math.ceil((now + snooze.minutes * MINUTE) / MINUTE) * MINUTE
+  const patch: TaskPatch = { dueMs, isAllDay: false }
+  if (t.startMs !== null && t.startMs > dueMs) patch.startMs = null
+  return patch
+}
+
 const dayLabel = (ms: number): string => new Date(ms).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
 const whenLabel = (patch: TaskPatch): string =>
   patch.dueMs == null ? 'no date' : patch.isAllDay ? dayLabel(patch.dueMs) : `${dayLabel(patch.dueMs)} at ${new Date(patch.dueMs).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`
@@ -252,18 +295,55 @@ function remindPatch(task: Task, r: Remind): { patch: TaskPatch; said: string } 
   return { patch: { reminders: [trigger] }, said: remindLabel(r, task.isAllDay) }
 }
 
+/** The server's tag limits (`src/service.rs`): tags per task, characters per tag. */
+const MAX_TAGS = 20
+const MAX_TAG_CHARS = 64
+
+/** The tags `text` names: "work", "#work, home and errands"; `undefined` if none or one is too long. */
+export function readTags(text: string): string[] | undefined {
+  const tags = text
+    .split(/\s*(?:,|\band\b)\s*/i)
+    .map((t) => t.trim().replace(/^#/, '').trim())
+    .filter(Boolean)
+  return tags.length > 0 && tags.every((t) => [...t].length <= MAX_TAG_CHARS) ? tags : undefined
+}
+
+const hashed = (names: readonly string[]): string => names.map((n) => `#${n}`).join(', ')
+
+/**
+ * The tags of `t` with `said` added, or with them removed (`remove`). An added
+ * tag that exists is referred to by its name; a new one goes as said, and the
+ * server creates it, as the tag picker's "create" does.
+ */
+function tagPatch(t: Task, said: string[], remove: boolean, known: readonly { name: string }[]): { patch: TaskPatch; changed: string[] } | { error: string } {
+  const names = [...new Set(said.map((s) => s.toLowerCase()))]
+  if (remove) {
+    const gone = names.filter((n) => t.tags.includes(n))
+    if (gone.length === 0) return { error: `“${t.title}” has no tag ${hashed(names)}.` }
+    return { patch: { tags: t.tags.filter((n) => !gone.includes(n)) }, changed: gone }
+  }
+  const fresh = names.filter((n) => !t.tags.includes(n))
+  if (t.tags.length + fresh.length > MAX_TAGS) return { error: `A task holds at most ${MAX_TAGS} tags.` }
+  const added = fresh.map((n) => (known.some((k) => k.name === n) ? n : said.find((s) => s.toLowerCase() === n)!))
+  return { patch: { tags: [...t.tags, ...added] }, changed: names }
+}
+
+const STATUSES: readonly Status[] = ['open', 'done', 'wontdo']
+
 /** Priority words, as the agent sends them, and the priority each sets. */
 const PRIORITY: Record<string, Priority> = { high: 5, medium: 3, med: 3, low: 1, none: 0, no: 0 }
 const PRIORITY_NAME: Record<Priority, string> = { 5: 'high', 3: 'medium', 1: 'low', 0: 'none' }
 
 /**
  * Rename the task `query` names, move it to the day `due` names or the
- * `list` named, or set its `priority`, `repeat` or `remind`; every argument is checked
+ * `list` named, `snooze` it, `tag` or `untag` it, or set its `priority`, `repeat` or `remind`; every argument is checked
  * before the task is picked, so a bad one changes nothing.
  */
 async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: string]: string }): Promise<Answer> {
-  const { query = '', title, due, priority, list, repeat, remind } = args
-  if ([title, due, priority, list, repeat, remind].every((v) => v === undefined)) return { error: 'Say what to change: a new title, a day, a priority, a list, a repeat or a reminder.' }
+  const { query = '', title, due, priority, list, repeat, remind, snooze, tag, untag } = args
+  if ([title, due, priority, list, repeat, remind, snooze, tag, untag].every((v) => v === undefined)) {
+    return { error: 'Say what to change: a new title, a day, a priority, a list, a repeat, a reminder, a snooze or tags.' }
+  }
   if (title !== undefined && title.trim() === '') return { error: 'Say the new title.' }
   const when = due === undefined ? undefined : readWhen(due, c.now)
   if (due !== undefined && when === undefined) {
@@ -281,6 +361,13 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
   if (remind !== undefined && reminder === undefined) {
     return { error: `I can't read “${remind.trim()}” as a reminder; try at the time, 5 minutes before, 1 hour before, a day before or none.` }
   }
+  const span = snooze === undefined ? undefined : readSnooze(snooze, c.now)
+  if (snooze !== undefined && span === undefined) {
+    return { error: `I can't read “${snooze.trim()}” as a snooze; try 30 minutes, 2 hours, a day, 1 week or until friday at 9.` }
+  }
+  const tagText = tag ?? untag
+  const tags = tagText === undefined ? undefined : readTags(tagText)
+  if (tagText !== undefined && tags === undefined) return { error: `I can't read “${tagText.trim()}” as tags; try work, or #work and home (each up to ${MAX_TAG_CHARS} characters).` }
   const target = list === undefined ? undefined : pickList(c.entities.lists, list)
   if (target !== undefined && 'error' in target) return target
   const pick = pickTask(tasks, query, 'task')
@@ -289,6 +376,17 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
   if (title !== undefined) {
     await c.update(task.id, { title: title.trim() })
     return { title: title.trim() }
+  }
+  if (tags !== undefined) {
+    const made = tagPatch(task, tags, untag !== undefined, c.entities.tags)
+    if ('error' in made) return made
+    await c.update(task.id, made.patch)
+    return untag !== undefined ? { title: task.title, untagged: hashed(made.changed) } : { title: task.title, tagged: hashed(made.changed) }
+  }
+  if (span !== undefined) {
+    const patch = snoozeTo(task, span, c.now)
+    await c.update(task.id, patch)
+    return { title: task.title, snooze: whenLabel(patch) }
   }
   if (reminder !== undefined) {
     const made = remindPatch(task, reminder)
@@ -360,6 +458,41 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
       },
     },
     {
+      name: 'filter_tasks',
+      description:
+        'Tasks of a status (open unless named), priority, tag and/or list: all of them, or those due today (overdue included), in the next 7 days, or overdue.',
+      parameters: {
+        type: 'object',
+        properties: {
+          status: { type: 'string', enum: ['open', 'done', 'wontdo'] },
+          priority: { type: 'string', enum: ['high', 'medium', 'low', 'none'] },
+          tag: { type: 'string', description: 'A tag’s name, with or without #' },
+          list: { type: 'string', description: 'A list’s name, or enough of it' },
+          view: { type: 'string', enum: ['all', 'today', 'next7', 'overdue'] },
+        },
+      },
+      handler: ({ status, priority, tag, list, view = 'all' }) => {
+        if (status !== undefined && !STATUSES.includes(status as Status)) return { error: 'Status is open, done or wontdo.' }
+        const level = priority === undefined ? undefined : PRIORITY[norm(priority)]
+        if (priority !== undefined && level === undefined) return { error: 'Priority is high, medium, low or none.' }
+        const name = tag === undefined ? undefined : norm(tag).replace(/^#/, '')
+        if (name !== undefined && !c.entities.tags.some((t) => t.name === name)) return { error: `You have no tag #${name}.` }
+        const target = list === undefined ? undefined : pickList(c.entities.lists, list)
+        if (target !== undefined && 'error' in target) return target
+        const listId = target?.list.id
+        if ([status, level, name, listId].every((v) => v === undefined)) return { error: 'Say a status, a priority, a tag or a list to filter by.' }
+        // Views go by due date whatever the status; done tasks are included, then kept by status.
+        const kind = view === 'next7' ? 'week' : view === 'today' ? 'today' : 'all'
+        const viewed = tasksForView({ kind }, c.entities, c.now, true)
+        const tasks = view === 'overdue' ? viewed.filter((t) => t.dueMs !== null && t.dueMs < startOfDay(c.now)) : viewed
+        const wanted = status ?? 'open'
+        const found = lines(
+          tasks.filter((t) => t.status === wanted && (level === undefined || t.priority === level) && (name === undefined || t.tags.includes(name)) && (listId === undefined || t.listId === listId)),
+        )
+        return target === undefined ? found : { ...found, list: target.list.name }
+      },
+    },
+    {
       name: 'complete_task',
       description: 'Complete the one open task this names.',
       parameters: titled,
@@ -373,7 +506,7 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
     },
     {
       name: 'update_task',
-      description: 'Rename the one task this names, move it to another day or time (today, tomorrow, friday at 3pm, in 3 days, 2026-11-05 9:30, 3pm, all day, or none), set its priority, repeat or reminder, or move it to another list.',
+      description: 'Rename the one task this names, move it to another day or time (today, tomorrow, friday at 3pm, in 3 days, 2026-11-05 9:30, 3pm, all day, or none), set its priority, repeat or reminder, snooze it, tag or untag it, or move it to another list.',
       parameters: {
         type: 'object',
         properties: {
@@ -384,6 +517,9 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
           list: { type: 'string', description: 'The list to move it to, by name' },
           repeat: { type: 'string', description: 'How often it repeats, as said (daily, every 2 weeks, on weekdays, never)' },
           remind: { type: 'string', description: 'When to remind, as said (at the time, 1 hour before, a day before, none)' },
+          snooze: { type: 'string', description: 'How long to snooze it, as said (30 minutes, 2 hours, a day, 1 week, until friday at 9)' },
+          tag: { type: 'string', description: 'Tags to add, as said (work, or #work and home)' },
+          untag: { type: 'string', description: 'Tags to remove, as said' },
         },
         required: ['query'],
       },

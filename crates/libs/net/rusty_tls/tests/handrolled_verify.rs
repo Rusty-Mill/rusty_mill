@@ -23,7 +23,13 @@
 //! That is coverage no generated certificate can provide, because `rcgen`
 //! (via `ring`) cannot even produce an RSA key.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use platform::security::TrustAnchors;
 use rcgen::{

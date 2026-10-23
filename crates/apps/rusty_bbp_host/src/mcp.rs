@@ -1,17 +1,36 @@
-//! A per-turn MCP server over stdio: newline-delimited JSON-RPC 2.0, the
-//! `initialize`, `ping`, `tools/list` and `tools/call` methods, five tools.
+//! An MCP server over stdio: newline-delimited JSON-RPC 2.0, the
+//! `initialize`, `ping`, `tools/list` and `tools/call` methods, five tools
+//! (six for a session).
 //!
-//! The process is the invocation. It learns its task, principal and turn id
-//! from the environment, derives the execution token for that turn, and once
-//! the turn has ended every tool call is refused, except the free card and
-//! the exact replay of an operation the turn already accepted. Nothing the
+//! A per-turn server is the invocation. It learns its task, principal and turn
+//! id from the environment, derives the execution token for that turn, and
+//! once the turn has ended every tool call is refused, except the free card
+//! and the exact replay of an operation the turn already accepted. Nothing the
 //! model sends can change which turn this process speaks for.
+//!
+//! A session server (`BBP_SESSION=yes`, no `BBP_TURN`) lives for the whole
+//! task and speaks for each turn of its principal's role, but never for the
+//! process as a whole: `wait` shows a turn with a ticket, an unguessable value
+//! derived from that turn's token, and every call that acts names the ticket
+//! of the turn it acts in. The ticket is the invocation context. An inference
+//! can carry only a ticket it has seen, so a call produced before a grant
+//! (pipelined with `wait`, or queued behind it) holds no ticket or an earlier
+//! one, and is refused with that earlier turn's token, never relabelled with
+//! the new grant, however the requests are timed on the stream.
 
 use crate::{fresh_op, now, open_driver, response_json};
 use rusty_bbp::*;
 use rusty_serde::Value;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// How long `wait` blocks when the model names no timeout, and at most.
+const WAIT_DEFAULT: Duration = Duration::from_secs(60);
+const WAIT_MAX: Duration = Duration::from_secs(600);
+/// The longest a `wait` sleeps between log checks: the log watch wakes it
+/// sooner, so this only bounds a platform or setup without one.
+const WAIT_RECHECK: Duration = Duration::from_secs(1);
 
 /// What one `bbp mcp` process is bound to.
 #[derive(Clone, Debug)]
@@ -19,22 +38,31 @@ pub struct Binding {
     pub dir: PathBuf,
     pub task: TaskId,
     pub principal: PrincipalId,
-    pub turn: TurnId,
+    /// The one turn a per-turn server speaks for; `None` for a session.
+    pub turn: Option<TurnId>,
 }
 
 impl Binding {
-    /// Read `BBP_DIR`, `BBP_TASK`, `BBP_PRINCIPAL`, `BBP_TURN`.
+    /// Read `BBP_DIR`, `BBP_TASK`, `BBP_PRINCIPAL`, and either `BBP_TURN` or
+    /// `BBP_SESSION=yes`.
     pub fn from_env() -> Result<Binding, String> {
         let var = |k: &str| std::env::var(k).map_err(|_| format!("missing ${k}"));
+        let turn = match (
+            std::env::var("BBP_TURN").ok(),
+            std::env::var("BBP_SESSION").ok(),
+        ) {
+            (Some(t), None) => Some(TurnId(
+                t.parse()
+                    .map_err(|_| "BBP_TURN must be a number".to_owned())?,
+            )),
+            (None, Some(s)) if s == "yes" => None,
+            _ => return Err("set exactly one of $BBP_TURN or $BBP_SESSION=yes".into()),
+        };
         Ok(Binding {
             dir: PathBuf::from(var("BBP_DIR")?),
             task: TaskId(var("BBP_TASK")?),
             principal: PrincipalId(var("BBP_PRINCIPAL")?),
-            turn: TurnId(
-                var("BBP_TURN")?
-                    .parse()
-                    .map_err(|_| "BBP_TURN must be a number".to_owned())?,
-            ),
+            turn,
         })
     }
 }
@@ -42,6 +70,10 @@ impl Binding {
 pub struct Server {
     binding: Binding,
     driver: Driver<FsStore>,
+    /// The turn `wait` last showed, to tell a new grant from a held one.
+    shown: Option<TurnId>,
+    /// A session's watch on the task log, made on its first `wait`.
+    waker: Option<crate::waker::Waker>,
 }
 
 fn obj(pairs: Vec<(&str, Value)>) -> Value {
@@ -81,8 +113,8 @@ fn schema(props: Vec<(&str, &str, &str)>, required: &[&str]) -> Value {
     ])
 }
 
-/// The tool catalogue, fixed by the protocol.
-pub fn tools() -> Value {
+/// The tool catalogue, fixed by the protocol; a session adds `wait`.
+pub fn tools(session: bool) -> Value {
     let tool = |name: &str, desc: &str, input: Value| {
         obj(vec![
             ("name", name.into()),
@@ -90,11 +122,25 @@ pub fn tools() -> Value {
             ("inputSchema", input),
         ])
     };
-    Value::Seq(vec![
+    // A session's acting tools name the turn they act in by its ticket.
+    let schema = |mut props: Vec<(&str, &str, &str)>, required: &[&str]| {
+        let mut required = required.to_vec();
+        if session {
+            props.push((
+                "ticket",
+                "string",
+                "The ticket wait returned for the turn you act in",
+            ));
+            required.push("ticket");
+        }
+        schema(props, &required)
+    };
+    Value::Seq(
+        vec![
         tool(
             "task_card",
             "The task's current state, turn, candidate, run and budgets. Free; needs no turn.",
-            schema(vec![], &[]),
+            self::schema(vec![], &[]),
         ),
         tool(
             "read",
@@ -140,7 +186,19 @@ pub fn tools() -> Value {
                 &["op", "kind"],
             ),
         ),
-    ])
+    ]
+    .into_iter()
+    .chain(session.then(|| {
+        tool(
+            "wait",
+            "Block until your role is granted a turn, the task ends, or timeout_s passes, then say which (woke: turn, held, ended or timeout). Free. A turn comes with a ticket: pass it as `ticket` to every other tool except task_card while you act in that turn, and call wait again whenever you have nothing to do.",
+            self::schema(
+                vec![("timeout_s", "integer", "Longest wait in seconds; default 60, at most 600")],
+                &[],
+            ),
+        )
+    }))
+    .collect())
 }
 
 fn parse_ref(s: &str) -> Result<Ref, String> {
@@ -380,22 +438,101 @@ pub fn action(name: &str, a: &Value) -> Result<Translated, String> {
 impl Server {
     pub fn new(binding: Binding) -> Result<Server, String> {
         let driver = open_driver(&binding.dir, &binding.task)?;
-        Ok(Server { binding, driver })
+        Ok(Server {
+            binding,
+            driver,
+            shown: None,
+            waker: None,
+        })
     }
 
-    fn token(&self) -> Token {
-        self.driver
-            .state
-            .token_for(&self.binding.principal, self.binding.turn)
+    fn token(&self, turn: TurnId) -> Token {
+        self.driver.state.token_for(&self.binding.principal, turn)
     }
 
-    /// True while this process's turn is live.
-    fn turn_live(&self) -> bool {
-        self.driver
-            .state
-            .turns
-            .iter()
-            .any(|t| t.id == self.binding.turn)
+    /// True while `turn` is live.
+    fn live(&self, turn: TurnId) -> bool {
+        self.driver.state.turns.iter().any(|t| t.id == turn)
+    }
+
+    /// The live turn of this principal's role, if it holds one.
+    fn held(&self) -> Option<TurnId> {
+        let role = self.driver.state.role_of(&self.binding.principal)?;
+        self.driver.state.turn_of(&role).map(|t| t.id)
+    }
+
+    /// The ticket for `turn`: its number and a digest of its token, which
+    /// names the turn without revealing the token.
+    fn ticket(&self, turn: TurnId) -> String {
+        let mut bytes = self.token(turn).0 .0.to_vec();
+        bytes.extend_from_slice(b"|ticket");
+        format!("{}.{}", turn.0, &Sha256::of(&bytes).hex()[..32])
+    }
+
+    /// The turn a session call acts in, from its `ticket` argument.
+    fn ticketed(&self, args: &Value) -> Result<TurnId, String> {
+        let ticket = args
+            .get("ticket")
+            .and_then(Value::as_str)
+            .ok_or("a session acts only with the ticket wait returned; call wait")?;
+        ticket
+            .split_once('.')
+            .and_then(|(n, _)| n.parse().ok())
+            .map(TurnId)
+            .filter(|&t| self.ticket(t) == ticket)
+            .ok_or_else(|| "unknown ticket; call wait for yours".to_owned())
+    }
+
+    /// Why a session's `wait` should return now, if it should.
+    fn woke(&mut self) -> Option<Value> {
+        let (woke, turn) = if self.driver.state.state.terminal() {
+            ("ended", None)
+        } else {
+            let held = self.held()?;
+            let seen = self.shown.replace(held) == Some(held);
+            (if seen { "held" } else { "turn" }, Some(held))
+        };
+        Some(self.wake_reply(woke, turn))
+    }
+
+    /// A `wait` answer: why it returned, and the turn and ticket it shows.
+    fn wake_reply(&self, woke: &str, turn: Option<TurnId>) -> Value {
+        obj(vec![
+            ("woke", woke.into()),
+            ("turn", turn.map_or(Value::Null, |t| Value::from(t.0))),
+            (
+                "ticket",
+                turn.map_or(Value::Null, |t| self.ticket(t).into()),
+            ),
+            ("state", format!("{:?}", self.driver.state.state).into()),
+        ])
+    }
+
+    /// `wait`: block until [`Server::woke`] has a reason or the timeout passes.
+    fn wait(&mut self, args: &Value) -> Result<Value, String> {
+        if self.binding.turn.is_some() {
+            return Err("wait is for a session; this server speaks for one turn".into());
+        }
+        let timeout = args
+            .get("timeout_s")
+            .and_then(Value::as_u64)
+            .map_or(WAIT_DEFAULT, Duration::from_secs)
+            .min(WAIT_MAX);
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.driver.sync().map_err(|e| format!("{e:?}"))?;
+            if let Some(reply) = self.woke() {
+                return Ok(reply);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(self.wake_reply("timeout", None));
+            }
+            let log = log_path_for(&self.binding.dir, &self.binding.task);
+            self.waker
+                .get_or_insert_with(|| crate::waker::Waker::new(&log))
+                .wait(&[], left.min(WAIT_RECHECK))?;
+        }
     }
 
     /// True when this principal already had `op` accepted. Its exact replay
@@ -457,18 +594,31 @@ impl Server {
             bytes,
         } = action(name, args)?;
         let free = matches!(act, AgentAction::TaskCard);
-        if !free && !self.turn_live() && !self.accepted(&op) {
-            return Err(format!(
-                "turn {} has ended; this server speaks for no later turn",
-                self.binding.turn.0
-            ));
+        let turn = match self.binding.turn {
+            Some(t) => Some(t),
+            None if free => None,
+            None => Some(self.ticketed(args)?),
+        };
+        let live = turn.is_some_and(|t| self.live(t));
+        if !free && !live && !self.accepted(&op) {
+            return Err(match (self.binding.turn, turn) {
+                (Some(t), _) => format!(
+                    "turn {} has ended; this server speaks for no later turn",
+                    t.0
+                ),
+                (None, Some(t)) => format!("turn {} has ended; call wait for your next turn", t.0),
+                (None, None) => "you hold no turn; call wait".to_owned(),
+            });
         }
         if let Some((payload, body)) = bytes {
             let encoded = encode_artifact(&payload, &body).map_err(|e| e.to_string())?;
             let blob = self.driver.store.blob_put(&encoded);
             act = AgentAction::PutArtifact { blob, payload };
         }
-        let token = (!matches!(act, AgentAction::TaskCard)).then(|| self.token());
+        // A replay after the turn ended still names the turn it was made in.
+        let token = turn
+            .filter(|_| !matches!(act, AgentAction::TaskCard))
+            .map(|t| self.token(t));
         let cmd = Command::Agent {
             principal: self.binding.principal.clone(),
             token,
@@ -508,16 +658,22 @@ impl Server {
                 ),
             ])),
             "ping" => Ok(obj(vec![])),
-            "tools/list" => Ok(obj(vec![("tools", tools())])),
+            "tools/list" => Ok(obj(vec![("tools", tools(self.binding.turn.is_none()))])),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params
                     .get("arguments")
                     .cloned()
                     .unwrap_or_else(|| Value::Map(vec![]));
-                Ok(match self.call(name, &args) {
-                    Ok(resp) => self.render(&resp),
-                    Err(e) => text_result(e, true),
+                Ok(match name {
+                    "wait" => match self.wait(&args) {
+                        Ok(reply) => text_result(reply.to_string(), false),
+                        Err(e) => text_result(e, true),
+                    },
+                    _ => match self.call(name, &args) {
+                        Ok(resp) => self.render(&resp),
+                        Err(e) => text_result(e, true),
+                    },
                 })
             }
             _ => Err((-32601, format!("method not found: {method}"))),

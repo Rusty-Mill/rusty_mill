@@ -2,7 +2,9 @@
 
 Phases from the design brief §9. Each exit criterion is a test or a measured number. Phase N+1 starts only after the owner accepts phase N's go/no-go.
 
-## Phase 0: engine prerequisites (in flight)
+## Phase 0: engine prerequisites (done 2026-10-23, two targets open)
+
+Status: items 1, 2 and 4 landed (#872, #894, #939); item 3 landed as #930 plus #936. Open: the MB/s floors (#889) and reliable ≤ 11.2 ms encode (#939). See CAPABILITIES.
 
 1. #872 lands: instruction-count gate in `required-gate`.
 2. #855 lands: per-code-point widths by default, mode 2027 opt-in; `vim_edit` matches the oracle.

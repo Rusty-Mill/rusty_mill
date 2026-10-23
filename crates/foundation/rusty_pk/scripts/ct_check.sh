@@ -5,8 +5,8 @@
 set -eu
 cd "$(dirname "$0")/.."
 TARGET=$(cargo metadata --format-version=1 --no-deps | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')
-cargo build --release --example taint -q
-BIN="$TARGET/release/examples/taint"
+cargo build --release --example rusty_pk_taint -q
+BIN="$TARGET/release/examples/rusty_pk_taint"
 fail=0
 . ../rusty_ct_check/scripts/taint_lib.sh
 for m in x25519 agree control ecdh256 ecdh384 ecdh-import256 ecdh-import384 ecdh-generate256 ecdh-generate384 ecdh-control; do run_mode $m; done
@@ -24,7 +24,7 @@ for m in ecdh256 ecdh384 ecdh-import256 ecdh-import384 ecdh-generate256 ecdh-gen
   python3 -I scripts/verdict_sites.py "$BIN" "$OUT/$m" $want || fail=1
 done
 n=$(count ecdh-control); echo "taint(ecdh-control): $n error(s), want >=3 (verdicts plus the planted branch)"; [ "$n" -ge 3 ] || fail=1
-report ecdh-control | grep -q 'at 0x[0-9A-F]*: taint::main' || { echo "taint(ecdh-control): the planted branch was not reported in main"; fail=1; }
+report ecdh-control | grep -q 'at 0x[0-9A-F]*: rusty_pk_taint::main' || { echo "taint(ecdh-control): the planted branch was not reported in main"; fail=1; }
 if python3 -I scripts/verdict_sites.py "$BIN" "$OUT/ecdh-control" >/dev/null; then echo "taint(ecdh-control): verdict_sites accepted the planted branch"; fail=1; fi
 python3 -I ../rusty_ct_check/scripts/disasm_audit.py "$BIN" scripts/disasm_limits.txt || fail=1
 exit $fail

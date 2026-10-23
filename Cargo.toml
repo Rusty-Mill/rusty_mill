@@ -162,6 +162,7 @@ members = [
     "crates/foundation/rusty_codec",
     "crates/libs/net/rusty_h2",
     "crates/libs/net/rusty_hyper",
+    "crates/libs/net/rusty_axum",
     "crates/libs/ui/rusty_audio",
     "crates/foundation/rusty_crypto_key",
     "crates/libs/storage/rusty_db/crates/rusty-db-core",

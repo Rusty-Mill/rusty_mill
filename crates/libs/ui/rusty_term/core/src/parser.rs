@@ -128,6 +128,32 @@ pub struct AnsiParser {
     palette: Palette,
 }
 
+/// Length of the leading run of printable ASCII (`0x20..=0x7e`) in `bytes`,
+/// scanned eight bytes at a time.
+///
+/// Per byte of a little-endian word, the high bit of `mask` is set when the
+/// byte is below 0x20 (subtracting 0x20 borrows), at or above 0x7f (adding 1
+/// reaches 0x80), or already has its high bit set. A carry or borrow only
+/// leaves a byte that is itself flagged and only moves to higher bytes, so
+/// the lowest flagged byte is exact.
+pub(crate) fn printable_ascii_len(bytes: &[u8]) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let (words, tail) = bytes.as_chunks::<8>();
+    for (i, word) in words.iter().enumerate() {
+        let w = u64::from_le_bytes(*word);
+        let mask = ((w.wrapping_sub(0x20 * ONES) & !w) | w.wrapping_add(ONES) | w) & HIGH;
+        if mask != 0 {
+            return i * 8 + (mask.trailing_zeros() / 8) as usize;
+        }
+    }
+    words.len() * 8
+        + tail
+            .iter()
+            .take_while(|b| (0x20..=0x7e).contains(*b))
+            .count()
+}
+
 /// Upper bound on the bytes buffered for a single OSC string. Real titles and
 /// cwd URIs are far shorter; past this we keep consuming the string but stop
 /// storing it.
@@ -228,7 +254,22 @@ impl AnsiParser {
     /// Feed a chunk of bytes, applying their effects to `g`. Parser state
     /// persists across calls, so escape sequences may straddle chunk boundaries.
     pub fn advance(&mut self, g: &mut Grid, bytes: &[u8]) {
-        for &b in bytes {
+        let mut i = 0;
+        while i < bytes.len() {
+            // Fast path: a run of printable ASCII in the ground state, with
+            // ASCII in GL, goes to the grid in one call.
+            if self.state == ParserState::Ground
+                && (0x20..=0x7e).contains(&bytes[i])
+                && self.charsets[self.gl] == Charset::Ascii
+            {
+                let run = printable_ascii_len(&bytes[i..]);
+                g.put_ascii(&bytes[i..i + run], self.write_pen());
+                self.last_char = Some(char::from(bytes[i + run - 1]));
+                i += run;
+                continue;
+            }
+            let b = bytes[i];
+            i += 1;
             match self.state {
                 ParserState::Ground => self.ground_byte(b, g),
                 ParserState::Utf8 => {

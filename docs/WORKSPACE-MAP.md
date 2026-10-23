@@ -15,7 +15,7 @@ Families are the current directories immediately below `crates/`.
 | Layer | Family | Crate name | Description | Dependents count |
 | --- | --- | --- | --- | ---: |
 | foundation | rpath | rpath | Path translation and normalization engine for MSYS2/Git Bash/POSIX to Windows interop | 5 |
-| foundation | rusty_aead | rusty_aead | Dependency-free ChaCha20-Poly1305 (RFC 8439) AEAD. Portable, no unsafe, no allocation. Stage 3 of the native ring replacement plan. | 0 |
+| foundation | rusty_aead | rusty_aead | Dependency-free ChaCha20-Poly1305 (RFC 8439) AEAD. Portable, no unsafe, no allocation. Stage 3 of the native ring replacement plan. | 1 |
 | foundation | rusty_ansder | rusty_ansder | ASN.1 BER/DER TLV encoder and decoder for Rusty Mill, built on rusty_wire | 0 |
 | foundation | rusty_atomic_file | rusty_atomic_file | Replace a file crash-atomically: sibling temp file, fsync, rename, directory fsync. The one std-path helper the workspace's whole-file writers share. | 11 |
 | foundation | rusty_base64 | rusty_base64 | Hand-rolled, dependency-free Base64 (RFC 4648) -- standard and URL-safe alphabets, encode and decode -- extracted from rusty_oauth's own encoding module so rusty_acp, rusty-mcp, and rusty_a2a can depend on it instead of the external base64 crate. | 21 |
@@ -23,7 +23,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_compress | rusty_compress | A sans-IO stream compression and decompression abstraction crate for DEFLATE, Gzip, Zlib, and LZMA | 2 |
 | foundation | rusty_config | rusty_config | A zero-dependency, no_std INI and Key-Value configuration file parser for Rust | 0 |
 | foundation | rusty_confined_fs | rusty_confined_fs | Create directories and open files for writing beneath a root without following a symlink: openat/O_NOFOLLOW walk on Linux, checked fallback elsewhere. | 2 |
-| foundation | rusty_crypto_key | rusty_crypto_key | A zeroize-on-drop key storage and file persistence micro-crate (0600 permissions on Unix) | 13 |
+| foundation | rusty_crypto_key | rusty_crypto_key | A zeroize-on-drop key storage and file persistence micro-crate (0600 permissions on Unix) | 14 |
 | foundation | rusty_ct_check | rusty_ct_check | Test-support harness for constant-time evidence: valgrind secret tainting, a dudect-style timing t-test and a disassembly audit script. Detects planted leaks; proves nothing about their absence. Not for production dependencies. | 3 |
 | foundation | rusty_diff | rusty_diff | Pure Rust implementation of Myers and Patience diff algorithms, unified diff formatting, and patch application | 2 |
 | foundation | rusty_dirs | rusty_dirs | Dependency-free per-user config directory lookup: %APPDATA% on Windows, $XDG_CONFIG_HOME or ~/.config elsewhere. | 2 |
@@ -36,9 +36,9 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_json_patch | rusty_json_patch | Sovereign JSON Pointer (RFC 6901), JSON Patch (RFC 6902) and JSON Merge Patch (RFC 7386) over rusty_json::Value: parse, apply atomically, and diff | 1 |
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 12 |
-| foundation | rusty_percent | rusty_percent | Hand-rolled, dependency-free percent-encoding for URL components and query strings: RFC 3986 unreserved encode, lenient decode, form decode ('+' is a space). | 11 |
-| foundation | rusty_pk | rusty_pk | Dependency-free public-key primitives for the native TLS engine: RSA and ECDSA (P-256, P-384) and Ed25519 signature verification, X25519, ECDH on P-256 and P-384. Portable, no unsafe. Stages 2 and 4 and gap 2 of the native ring replacement plan. | 0 |
-| foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 11 |
+| foundation | rusty_percent | rusty_percent | Hand-rolled, dependency-free percent-encoding for URL components and query strings: RFC 3986 unreserved encode, lenient decode, form decode ('+' is a space). | 12 |
+| foundation | rusty_pk | rusty_pk | Dependency-free public-key primitives for the native TLS engine: RSA and ECDSA (P-256, P-384) and Ed25519 signature verification, X25519, ECDH on P-256 and P-384. Portable, no unsafe. Stages 2 and 4 and gap 2 of the native ring replacement plan. | 1 |
+| foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 12 |
 | foundation | rusty_regx | rusty_regx | A minimal, linear-time POSIX-ERE regex engine with no dependencies | 6 |
 | foundation | rusty_retry | rusty_retry | Exponential backoff with jitter, and Retry-After delta-seconds parsing -- the retry mechanism shared by rusty_request and rusty-acp. Deciding what's retryable stays with each caller. | 8 |
 | foundation | rusty_rsa | rusty_rsa | Hand-rolled, dependency-free BigUint (RSA/ECC arithmetic) and SHA-256 -- the primitives rusty_oauth and rusty_rdp each independently reimplemented for their own RSA public-key verification/encryption. Named for the primary use case; BigUint is general-purpose (rusty_oauth's own ECC/ES256 code also builds on it) and SHA-256 is a general hash, not RSA-specific -- see lib.rs. | 6 |
@@ -46,7 +46,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_serde | rusty_serde_derive | Hand-written #[derive(Serialize, Deserialize)] proc-macro for rusty_serde, built directly on proc_macro (no syn/quote). | 1 |
 | foundation | rusty_serde | rusty_serde_erased | A minimal, isolated unsafe primitive for erasing a serializer/deserializer's associated Ok type across an object-safe (dyn-compatible) boundary - internal to rusty_serde, not a public API. | 1 |
 | foundation | rusty_sha1 | rusty_sha1 | A zero-dependency SHA-1 (FIPS 180-1) implementation, shared by rusty_git's object hashing and rusty_term's WebSocket handshake | 3 |
-| foundation | rusty_sha2 | rusty_sha2 | Dependency-free SHA-256, SHA-384, SHA-512, HMAC and HKDF (RFC 5869) with zeroized state. Portable, no allocation, no unsafe. Stage 1 of the native ring replacement plan. | 1 |
+| foundation | rusty_sha2 | rusty_sha2 | Dependency-free SHA-256, SHA-384, SHA-512, HMAC and HKDF (RFC 5869) with zeroized state. Portable, no allocation, no unsafe. Stage 1 of the native ring replacement plan. | 2 |
 | foundation | rusty_simd | rusty_simd | A zero-dependency SIMD (AVX2/NEON/FMA) accelerated block dequantization kernel library for LLM and Whisper inference | 3 |
 | foundation | rusty_std | rusty_std | A #![no_std] + alloc sovereign standard library built on top of rusty_libc and rusty_win32 | 2 |
 | foundation | rusty_sync | rusty_sync | A #![no_std] + alloc sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate | 3 |
@@ -54,7 +54,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 4 |
 | foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 14 |
 | foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 10 |
-| foundation | rusty_wire | rusty_wire | A minimal, zero-dependency endian-explicit byte cursor Reader/Writer for Rust | 9 |
+| foundation | rusty_wire | rusty_wire | A minimal, zero-dependency endian-explicit byte cursor Reader/Writer for Rust | 10 |
 | platform | portable-runtime | compat |  | 4 |
 | platform | portable-runtime | conformance |  | 0 |
 | platform | portable-runtime | contract |  | 5 |
@@ -94,6 +94,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_agui | rusty_agui | Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint | 7 |
 | libs | rusty_ansi | rusty_ansi | A zero-allocation, no_std VT/CSI/OSC ANSI escape sequence parser core for Rust | 2 |
 | libs | rusty_audio | rusty_audio | A #![no_std] + alloc sovereign PCM audio capture and playback device driver library | 2 |
+| libs | rusty_axum | rusty_axum | An in-house web framework replacing axum: a router, extractors, responses and SSE over rusty_http's types, runtime-free at its core | 0 |
 | libs | rusty_bbp | rusty_bbp | Blackboard Protocol core: records, rules, lifecycle for multi-vendor agents collaborating on one software task. Pure, no I/O. | 3 |
 | libs | rusty_bot | rusty_bot | Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary | 0 |
 | libs | rusty_channel | rusty_channel | Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack, Microsoft Teams and SMS (Twilio) adapters | 1 |
@@ -111,7 +112,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 3 |
 | libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 4 |
 | libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 2 |
-| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 29 |
+| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 30 |
 | libs | rusty_hyper | rusty_hyper | HTTP/2-only client and server packaging over rusty_h2: connect(url) for plain h2c or TLS with ALPN h2, serve(listener, tls, handler), timeouts, keepalive and graceful shutdown. No HTTP/1.1. | 1 |
 | libs | rusty_journal | rusty_journal | Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio. | 0 |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
@@ -154,8 +155,8 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_term | rusty_term | A terminal emulator written from scratch in Rust, with a deliberately small dependency surface. | 2 |
 | libs | rusty_term | rusty_term_core | rusty_term's headless VT engine: parser, grid, scrollback and OSC handling, with no async runtime, PTY or renderer. | 1 |
 | libs | rusty_term | rusty_term_l13 | rusty_term's L13 structured side-channel: a private-OSC JSON-RPC transport hosting MCP + LSP/ACP negotiation, addressed against a narrow TerminalState trait rather than rusty_term's own Grid type. | 1 |
-| libs | rusty_tls | rusty_tls | A TLS library implementation in Rust | 9 |
-| libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 23 |
+| libs | rusty_tls | rusty_tls | A TLS library implementation in Rust | 10 |
+| libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 24 |
 | libs | rusty_tokio | rusty_tokio-macros | Proc-macro attributes (#[main], #[test]) for rusty_tokio -- not meant to be depended on directly, use rusty_tokio's re-exports. | 1 |
 | libs | rusty_tonic | rusty_tonic | Dependency-free gRPC protocol core: status codes and error details, validated metadata, message framing with a receive limit, grpc-timeout, and request/response header lists. Sans-IO; no async, no HTTP/2, no code generation. | 0 |
 | libs | rusty_ttf_parser | rusty-ttf-parser | A #![no_std], allocation-free, zero-dependency TrueType/OpenType reader: cmap, GSUB lookups and PNG colour bitmaps | 1 |

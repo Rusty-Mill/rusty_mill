@@ -1338,6 +1338,139 @@ jobs:
       - name: cargo check -p rusty_config --no-default-features
         run: cargo check -p rusty_config --no-default-features --all-targets
 
+  # The same engine on its first-party backend (ADR-0005): `native-crypto`
+  # with `--cfg rusty_tls_native_crypto`, no `handrolled-engine`. That build
+  # has no direct `ring` dependency, so compiling it is itself the check that
+  # the engine makes no `ring` call. It is client-only coverage, not a second
+  # copy of the job above: the native backend has no server role or signing,
+  # so the suites that need them are `ring`-only (their inner `cfg` says so)
+  # and stay covered there. BoGo runs here client-side only: on this backend
+  # the shim reports server and client-certificate scenarios as unimplemented.
+  rusty-tls-engine-native:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-tls-engine-native
+      queue: max
+      cancel-in-progress: false
+    name: rusty_tls native engine (first-party crypto)
+    needs: plan
+    if: needs.plan.outputs.tls_engine == 'true' && needs.plan.outputs.linux == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg rusty_tls_handrolled --cfg rusty_tls_native_crypto
+      RUSTDOCFLAGS: --cfg rusty_tls_handrolled --cfg rusty_tls_native_crypto
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.event_name != 'merge_group' }}
+          shared-key: rusty-tls-engine-native
+      # `ring` must not be a direct dependency of this build. If a later change
+      # makes `native-crypto` imply `handrolled-engine` (or adds `ring` some
+      # other way), the compile-time proof above silently stops being one.
+      - name: no direct ring dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          deps=$(cargo tree -p rusty_tls --features native-crypto -e normal --depth 1 --prefix none)
+          echo "$deps"
+          if echo "$deps" | grep -qE '^ring v'; then
+            echo "::error::rusty_tls with native-crypto depends on ring directly"
+            exit 1
+          fi
+      - name: cargo clippy -p rusty_tls --features native-crypto
+        run: cargo clippy -p rusty_tls --all-targets --features native-crypto -- -D warnings
+      # With the native cfg the server modules do not exist, so a doc link to
+      # one breaks only here; the job above cannot see it.
+      - name: cargo doc -p rusty_tls --all-features (native cfg)
+        env:
+          RUSTDOCFLAGS: --cfg rusty_tls_handrolled --cfg rusty_tls_native_crypto -D warnings
+        run: cargo doc -p rusty_tls --all-features --no-deps
+      # Includes the seam differential (`handrolled::crypto::native::tests`):
+      # the same inputs through both backends, byte-identical outputs.
+      - name: cargo test -p rusty_tls --features native-crypto
+        run: cargo test -p rusty_tls --features native-crypto
+      - name: socket interop against OpenSSL (client direction)
+        shell: bash
+        run: |
+          set -euo pipefail
+          openssl version
+          out=$(cargo test -p rusty_tls --features native-crypto \
+            --test handrolled_client12_socket_interop -- --ignored --nocapture --color never)
+          echo "$out"
+          echo "$out" | grep -qE 'test result: ok\. [1-9][0-9]* passed' || {
+            echo "::error::the OpenSSL client interop suite ran no tests"
+            exit 1
+          }
+      # The zero-tests trap again, with an explicit split: a suite marked
+      # `// ring-only suite (ADR-0005)` (its inner cfg excludes the native
+      # backend) must compile to zero tests here, and
+      # every other handrolled suite must run at least one. A suite that drops
+      # to zero without saying so fails, and so does one that claims to be
+      # ring-only but still runs.
+      - name: prove the native suites ran, and only those
+        shell: bash
+        run: |
+          set -euo pipefail
+          native=0
+          ring_only=0
+          for f in crates/libs/net/rusty_tls/tests/handrolled_*.rs; do
+            t=$(basename "$f" .rs)
+            n=$(cargo test -p rusty_tls --features native-crypto --test "$t" -- --list | grep -c ': test$' || true)
+            if grep -q '^// ring-only suite (ADR-0005)' "$f"; then
+              echo "$t: ring-only, $n tests"
+              if [ "$n" -ne 0 ]; then
+                echo "::error::$t is marked ring-only but ran $n tests on the native backend"
+                exit 1
+              fi
+              ring_only=$((ring_only + 1))
+            else
+              echo "$t: $n tests"
+              if [ "$n" -eq 0 ]; then
+                echo "::error::$t compiled to zero tests on the native backend -- mark it ring-only or fix its cfg"
+                exit 1
+              fi
+              native=$((native + 1))
+            fi
+          done
+          echo "native suites: $native, ring-only suites: $ring_only"
+          if [ "$native" -lt 25 ]; then
+            echo "::error::only $native handrolled suites ran on the native backend; expected 25 or more"
+            exit 1
+          fi
+          d=$(cargo test -p rusty_tls --features native-crypto --doc -- --list | grep -c ': test$' || true)
+          echo "doctests: $d"
+          if [ "$d" -lt 2 ]; then
+            echo "::error::the handrolled doctests did not run -- is RUSTDOCFLAGS set?"
+            exit 1
+          fi
+      # BoGo against the client role on the first-party backend (ADR-0005
+      # decision 4). The engine has no server or signing here, so the shim
+      # reports those scenarios as unimplemented (exit 89). The floor is set
+      # from the first full run (445 passed at the pinned commit). A shim that
+      # skipped everything would also exit 0, which is what the floor catches.
+      # The ring job's BoGo run keeps covering the server role.
+      - name: BoGo, client role (BoringSSL protocol suite)
+        shell: bash
+        run: |
+          set -euo pipefail
+          go version
+          NATIVE=1 crates/libs/net/rusty_tls/bogo/run.sh | tee bogo-native.out
+          passed=$(sed -nE 's/^BoGo: ([0-9]+) passed.*/\1/p' bogo-native.out)
+          if [ "${passed:-0}" -lt 430 ]; then
+            echo "::error::native BoGo passed only ${passed:-0} tests (expected 430+) -- is the shim skipping everything?"
+            exit 1
+          fi
+      - name: x509-limbo certificate differential
+        shell: bash
+        run: >
+          bash .github/scripts/limbo_differential.sh
+          cargo test -p rusty_tls --features native-crypto
+          --test handrolled_limbo -- --ignored --nocapture --color never
+
   # The hand-rolled TLS engine (rusty_tls#25) compiles only with the cargo
   # feature `handrolled-engine` AND `--cfg rusty_tls_handrolled`
   # (crates/libs/net/rusty_tls/docs/adr/0002-*.md). Neither the generic clippy
@@ -2011,6 +2144,7 @@ jobs:
       - msrv-compile
       - rusty-config-no-std-check
       - rusty-tls-engine
+      - rusty-tls-engine-native
       - rusty-tls-fuzz
       - crypto-constant-time
       - rusty-rand-platforms

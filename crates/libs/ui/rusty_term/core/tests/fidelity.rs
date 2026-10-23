@@ -75,7 +75,7 @@ fn attrs(flags: u16) -> String {
 /// per run of identically styled non-default cells, then the column of every
 /// wide-glyph trailer, which pins each glyph to its column.
 fn dump(grid: &Grid) -> String {
-    let blank = Grid::new(1, 1).cells[0];
+    let blank = Grid::new(1, 1).row(0)[0];
     let (default_fg, default_bg) = (blank.fg, blank.bg);
     let mut out = format!(
         "size {}x{} cursor {},{} visible={} alt={}\n",
@@ -88,7 +88,8 @@ fn dump(grid: &Grid) -> String {
     );
     let mut styles = String::new();
     let mut trailers = String::new();
-    for (y, row) in grid.cells.chunks(grid.cols).enumerate() {
+    for y in 0..grid.rows {
+        let row = grid.row(y);
         let cols: Vec<String> = (0..row.len())
             .filter(|&x| row[x].flags & WIDE_TRAILER != 0)
             .map(|x| x.to_string())
@@ -138,9 +139,8 @@ fn dump(grid: &Grid) -> String {
     out
 }
 
-#[test]
-fn corpus_matches_goldens() {
-    let update = std::env::var_os("UPDATE_GOLDEN").is_some();
+/// The corpus recordings (`*.vt`), sorted.
+fn recordings() -> Vec<PathBuf> {
     let mut entries: Vec<PathBuf> = fs::read_dir(corpus_dir())
         .expect("corpus directory")
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -152,6 +152,13 @@ fn corpus_matches_goldens() {
         "no recordings in {}",
         corpus_dir().display()
     );
+    entries
+}
+
+#[test]
+fn corpus_matches_goldens() {
+    let update = std::env::var_os("UPDATE_GOLDEN").is_some();
+    let entries = recordings();
 
     let mut failures = Vec::new();
     for vt in &entries {
@@ -190,6 +197,16 @@ fn corpus_matches_goldens() {
     );
 }
 
+/// Every recorded screen survives a snapshot round trip unchanged.
+#[test]
+fn corpus_round_trips_through_a_snapshot() {
+    for vt in recordings() {
+        let grid = replay(&fs::read(&vt).expect("read recording"), CHUNK);
+        let back = Grid::decode_snapshot(&grid.encode_snapshot()).expect("decode snapshot");
+        assert_eq!(dump(&back), dump(&grid), "{}", vt.display());
+    }
+}
+
 /// The first few differing lines, enough to see what moved.
 fn line_diff(expected: &str, actual: &str) -> String {
     let (e, a): (Vec<&str>, Vec<&str>) = (expected.lines().collect(), actual.lines().collect());
@@ -217,9 +234,9 @@ fn dump_pins_wide_trailer_columns() {
     let mut moved = Grid::new(4, 1);
     parser.advance(&mut moved, "日A".as_bytes());
     // [日, trailer, A, ·] -> [日, A, trailer, ·]
-    moved.cells.swap(1, 2);
+    moved.row_mut(0).swap(1, 2);
     assert_ne!(
-        good.cells[1].flags & WIDE_TRAILER,
+        good.row(0)[1].flags & WIDE_TRAILER,
         0,
         "fixture: cell 1 is the trailer"
     );

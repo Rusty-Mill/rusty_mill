@@ -33,7 +33,13 @@
 //! every one of those vectors happens to use. ADR-0002 records this gap
 //! rather than leaving it to be discovered.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rustls::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, Iv, OutboundChunks, OutboundPlainMessage,
