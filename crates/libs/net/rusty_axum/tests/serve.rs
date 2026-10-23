@@ -28,16 +28,25 @@ type Events = UnboundedReceiver<Result<Event, Infallible>>;
 
 /// Hands the next `/events` request the receiving end of a channel.
 static EVENTS: Mutex<Option<Events>> = Mutex::new(None);
+/// The same for `/events10`, the HTTP/1.0 test's own, so the two tests
+/// cannot race for one channel.
+static EVENTS_10: Mutex<Option<Events>> = Mutex::new(None);
 
 fn app() -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/echo", post(|body: String| async move { body }))
         .route("/events", get(events))
+        .route("/events10", get(events_10))
 }
 
 async fn events() -> impl IntoResponse {
     let rx = EVENTS.lock().unwrap().take().unwrap();
+    Sse::new(Recv(Some(Box::pin(next(rx)))))
+}
+
+async fn events_10() -> impl IntoResponse {
+    let rx = EVENTS_10.lock().unwrap().take().unwrap();
     Sse::new(Recv(Some(Box::pin(next(rx)))))
 }
 
@@ -249,6 +258,46 @@ async fn sse_streams_and_shutdown_ends_it() {
         None,
         "the body ends with its terminating chunk"
     );
+    drop(tx);
+}
+
+/// HTTP/1.0 has no chunked coding: the stream goes raw and the closed
+/// connection ends it, also when shutdown ends the stream.
+#[rusty_tokio::test]
+async fn http_1_0_streams_are_close_delimited() {
+    let (tx, rx) = unbounded_channel();
+    *EVENTS_10.lock().unwrap() = Some(rx);
+    let server = start(ServeOptions::default(), None);
+    let tcp = TcpStream::connect_addr(server.local_addr()).await.unwrap();
+    tcp.write_all(b"GET /events10 HTTP/1.0\r\n\r\n")
+        .await
+        .unwrap();
+    let mut conn = AsyncTransport::new(tcp);
+    let head = conn.read_response_head(1024).await.unwrap();
+    assert_eq!(head.headers.get("transfer-encoding"), None);
+    assert_eq!(head.headers.get("content-length"), None);
+    assert_eq!(head.headers.get("connection"), Some("close"));
+    let framing = response_framing(&head.headers, &Method::Get, head.status).unwrap();
+    assert_eq!(framing, Framing::Close);
+    let mut reader = conn.into_body_reader(framing);
+
+    tx.send(Ok(Event::default().data("a"))).unwrap();
+    let first = timeout(Duration::from_secs(5), reader.next_chunk())
+        .await
+        .unwrap();
+    assert_eq!(
+        first.unwrap().unwrap(),
+        b"data: a\n\n",
+        "raw bytes, no chunk framing"
+    );
+
+    timeout(Duration::from_secs(5), server.shutdown())
+        .await
+        .unwrap();
+    let end = timeout(Duration::from_secs(5), reader.next_chunk())
+        .await
+        .unwrap();
+    assert_eq!(end.unwrap(), None, "the close ends the body");
     drop(tx);
 }
 

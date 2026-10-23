@@ -10,7 +10,7 @@ use futures_core::Stream;
 /// The error type a body stream may end with.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-type ChunkStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, BoxError>> + Send>>;
+pub(crate) type ChunkStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, BoxError>> + Send>>;
 
 /// A response body. A whole body is sent with `Content-Length`; a stream is
 /// sent chunked, each item as it is produced (SSE, streamed replies).
