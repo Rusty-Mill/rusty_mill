@@ -35,12 +35,12 @@ serde_json = { workspace = true }
 regex = { workspace = true }
 cel = { workspace = true }
 http = { workspace = true }
-# The `mcpGuardrails` wire protocol. The messages are written by hand rather
-# than generated, so no `protoc` is needed to build this crate.
+# The `mcpGuardrails` wire protocol. The messages are written as tables on
+# `rusty_prost` rather than generated, so no `protoc` is needed to build this
+# crate; `tonic` is only the transport.
 tonic = { workspace = true }
-tonic-prost = { workspace = true }
-prost = { workspace = true }
-prost-types = { workspace = true }
+rusty_prost = { workspace = true }
+rusty_tonic = { workspace = true, features = ["tonic-codec"] }
 # Spans for MCP requests, and the attributes a guardrail writes on them.
 rusty-mcp = { workspace = true, default-features = false, features = ["otel"] }
 thiserror = "2"
