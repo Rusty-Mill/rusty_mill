@@ -36,16 +36,22 @@ fn dir_of(dir: &Path, task: &TaskId) -> PathBuf {
 }
 
 /// Whether a moderator ever started a harness for `task`: each one gets a
-/// turn log, under every `bbp` version.
+/// turn log, under every `bbp` version. An entry that cannot be read is an
+/// error, never "no harness ran".
 fn launched_any(dir: &Path, task: &TaskId) -> Result<bool, String> {
     let agents = task_dir(dir, "agents", task);
-    match std::fs::read_dir(&agents) {
-        Ok(entries) => Ok(entries
-            .flatten()
-            .any(|e| e.file_name().to_string_lossy().starts_with("turn-"))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(format!("{}: {e}", agents.display())),
+    let entries = match std::fs::read_dir(&agents) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("{}: {e}", agents.display())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", agents.display()))?;
+        if entry.file_name().to_string_lossy().starts_with("turn-") {
+            return Ok(true);
+        }
     }
+    Ok(false)
 }
 
 /// Make `task`'s groups recordable, once, under the moderator lock. `false`
@@ -230,51 +236,92 @@ impl Owned {
 fn inspect(id: u32, start: u64) -> Result<Seen, String> {
     let holder = Pidfd::open(id)?.filter(|_| crate::slots::process_start(id) == Some(start));
     let Some(holder) = holder else {
-        // Two looks, as the holder takes: a scan can miss a member that
-        // forked as its parent exited.
-        let gone = empty(id) && {
-            std::thread::sleep(Duration::from_millis(100));
-            empty(id)
-        };
-        return Ok(if gone { Seen::Empty } else { Seen::Unowned });
+        return unowned(Path::new(PROC), id);
     };
     let mut members = Vec::new();
-    for pid in members_of(id) {
-        if let Some(member) = Pidfd::open(pid)?.filter(|_| in_group(pid, id)) {
+    for pid in members_of(Path::new(PROC), id)? {
+        let Some(member) = Pidfd::open(pid)? else {
+            continue;
+        };
+        if in_group(Path::new(PROC), pid, id)? {
             members.push(member);
         }
     }
     Ok(Seen::Owned(Owned { holder, members }))
 }
 
-/// Whether no live process but the leader has group id `id`.
+#[cfg(target_os = "linux")]
+const PROC: &str = "/proc";
+
+/// What is left of group `id` once its holder is gone, as `proc` lists it:
+/// [`Seen::Empty`] only after two looks find no member (a scan can miss a
+/// member that forked as its parent exited, as the holder's own does).
+#[cfg(target_os = "linux")]
+fn unowned(proc: &Path, id: u32) -> Result<Seen, String> {
+    if !members_of(proc, id)?.is_empty() {
+        return Ok(Seen::Unowned);
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    Ok(if members_of(proc, id)?.is_empty() {
+        Seen::Empty
+    } else {
+        Seen::Unowned
+    })
+}
+
+/// Whether no live process but the leader has group id `id`; a scan that
+/// fails counts as no.
 #[cfg(target_os = "linux")]
 fn empty(id: u32) -> bool {
-    members_of(id).is_empty()
+    members_of(Path::new(PROC), id).is_ok_and(|m| m.is_empty())
 }
 
-/// The live processes in group `id` other than its leader. A `/proc` that
-/// cannot be listed counts as one member: never quiet on a guess.
+/// The live processes in group `id` other than its leader, as `proc` lists
+/// them. Any process that cannot be read, short of having exited, is an
+/// error: never absent on a guess.
 #[cfg(target_os = "linux")]
-fn members_of(id: u32) -> Vec<u32> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return vec![0];
+fn members_of(proc: &Path, id: u32) -> Result<Vec<u32>, String> {
+    let entries = std::fs::read_dir(proc).map_err(|e| format!("{}: {e}", proc.display()))?;
+    let mut members = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", proc.display()))?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid != id && in_group(proc, pid, id)? {
+            members.push(pid);
+        }
+    }
+    Ok(members)
+}
+
+/// Whether `pid` is a live (not zombie) process in group `id`. A process
+/// that exited while being read is not; any other failure to read or parse
+/// its stat is an error.
+#[cfg(target_os = "linux")]
+fn in_group(proc: &Path, pid: u32, id: u32) -> Result<bool, String> {
+    let path = proc.join(pid.to_string()).join("stat");
+    let stat = match std::fs::read_to_string(&path) {
+        Ok(stat) => stat,
+        Err(e) if exited(&e) => return Ok(false),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    entries
-        .flatten()
-        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|&pid| pid != id && in_group(pid, id))
-        .collect()
+    let malformed = || format!("{}: malformed stat", path.display());
+    let (_, rest) = stat.rsplit_once(") ").ok_or_else(malformed)?;
+    let state = rest.chars().next().ok_or_else(malformed)?;
+    let group = crate::slots::stat_pgrp(&stat).ok_or_else(malformed)?;
+    Ok(state != 'Z' && group == id)
 }
 
-/// Whether `pid` is a live (not zombie) process in group `id`.
+/// Whether a `/proc` read failed because the process is gone: its
+/// directory went (`ENOENT`) or it exited mid-read (`ESRCH`).
 #[cfg(target_os = "linux")]
-fn in_group(pid: u32, id: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(") ")
-            .is_some_and(|(_, rest)| !rest.starts_with('Z'))
-            && crate::slots::stat_pgrp(&stat) == Some(id)
-    })
+fn exited(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(3)
 }
 
 /// A pidfd: one process, never a later one with its pid.
@@ -428,5 +475,84 @@ mod tests {
             inspect(holder.id(), 0).expect("inspect"),
             Seen::Empty
         ));
+    }
+
+    /// A fake `/proc` with one entry per `(name, stat)`; `None` makes the
+    /// entry's `stat` a directory, which no read can get through.
+    fn fake_proc(tag: &str, entries: &[(&str, Option<&str>)]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("bbp_groups_{}_{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (name, stat) in entries {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            match stat {
+                Some(text) => std::fs::write(dir.join("stat"), text).expect("stat"),
+                None => std::fs::create_dir(dir.join("stat")).expect("unreadable stat"),
+            }
+        }
+        root
+    }
+
+    #[test]
+    fn an_unreadable_surviving_member_is_an_error_never_an_empty_group() {
+        let proc = fake_proc(
+            "unreadable",
+            &[("1", Some("1 (init) S 0 1 1")), ("42", None)],
+        );
+        let seen = unowned(&proc, 7);
+        assert!(seen.is_err_and(|e| e.contains("42")));
+        let _ = std::fs::remove_dir_all(&proc);
+    }
+
+    #[test]
+    fn a_malformed_stat_is_an_error_never_a_nonmember() {
+        let proc = fake_proc("malformed", &[("42", Some("42 (sh"))]);
+        assert!(unowned(&proc, 7).is_err_and(|e| e.contains("malformed")));
+        let _ = std::fs::remove_dir_all(&proc);
+    }
+
+    /// Exited while being listed: its directory is gone by the time its
+    /// stat is read. That alone is absence.
+    #[test]
+    fn only_a_process_that_exited_is_absent() {
+        let proc = fake_proc(
+            "races",
+            &[
+                ("41", Some("41 (a b) S 1 7 7")),
+                ("42", Some("42 (sh) Z 1 7 7")),
+            ],
+        );
+        assert!(
+            matches!(unowned(&proc, 7), Ok(Seen::Unowned)),
+            "a live member"
+        );
+        std::fs::remove_dir_all(proc.join("41")).expect("exit");
+        assert!(
+            matches!(unowned(&proc, 7), Ok(Seen::Empty)),
+            "a zombie and a gone one"
+        );
+        let _ = std::fs::remove_dir_all(&proc);
+    }
+
+    #[test]
+    fn an_unlistable_proc_is_an_error() {
+        let missing = std::env::temp_dir().join(format!("bbp_groups_{}_none", std::process::id()));
+        assert!(unowned(&missing, 7).is_err());
+    }
+
+    /// Whether legacy work ran cannot be decided from a turn-log directory
+    /// that cannot be listed: the task is refused, not called recorded-free.
+    #[test]
+    fn an_unlistable_turn_log_directory_refuses_the_task() {
+        let dir = std::env::temp_dir().join(format!("bbp_groups_{}_legacy", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let task = TaskId("T".into());
+        let agents = task_dir(&dir, "agents", &task);
+        std::fs::create_dir_all(agents.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&agents, "").expect("a file where the directory should be");
+        assert!(records(&dir, &task).is_err());
+        assert!(enable(&dir, &task).is_err());
+        assert!(!dir_of(&dir, &task).exists(), "no capability is granted");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
