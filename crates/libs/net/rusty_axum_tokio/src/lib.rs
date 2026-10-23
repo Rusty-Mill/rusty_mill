@@ -2,11 +2,14 @@
 //! `tokio` libraries (`reqwest`, `sqlx`, `tonic`, `tokio::time`).
 //!
 //! `rusty_axum` serves on `rusty_tokio`. A tokio resource used there panics
-//! ("no reactor") unless a tokio runtime is entered while it is polled.
-//! [`TokioBridge`] enters one on **every poll**, of the handler's future and
-//! of a streamed response body (SSE), which is polled after the handler has
-//! returned. The tokio runtime must be multi-threaded and kept running by
-//! the consumer: its threads drive tokio's I/O and timers.
+//! ("no reactor") unless a tokio runtime is entered while it is polled, and
+//! some need one when dropped too (a pooled connection's `Drop` spawns its
+//! cleanup). [`TokioBridge`] enters one on **every poll and on drop**, of
+//! the handler's future and of a streamed response body (SSE), which is
+//! polled after the handler has returned. Drop covers cancellation: a
+//! client that disconnects, a HEAD request's suppressed body, shutdown. The
+//! tokio runtime must be multi-threaded and kept running by the consumer:
+//! its threads drive tokio's I/O and timers.
 //!
 //! Add it as the router's last layer, so that it is outermost and every
 //! other layer runs inside it:
@@ -54,8 +57,11 @@ impl Middleware for TokioBridge {
             let _entered = handle.enter();
             next.run(req)
         };
+        // Wrapped before it is returned, so a request cancelled before its
+        // first poll still drops `inner` inside the runtime.
+        let inner = Entered::new(handle.clone(), inner);
         Box::pin(async move {
-            let mut response = Entered::new(handle.clone(), inner).await;
+            let mut response = inner.await;
             response.body = response
                 .body
                 .map_stream(|stream| Box::pin(Entered::new(handle, stream)) as BodyStream);
@@ -64,15 +70,27 @@ impl Middleware for TokioBridge {
     }
 }
 
-/// A future or stream polled with `handle` entered.
+/// A future or stream polled and dropped with `handle` entered.
 struct Entered<T> {
     handle: Handle,
-    inner: T,
+    /// `None` only inside `drop`, which takes it to drop it while entered:
+    /// fields drop after `Drop::drop` returns, by when the guard is gone.
+    inner: Option<T>,
 }
 
 impl<T> Entered<T> {
     fn new(handle: Handle, inner: T) -> Self {
-        Entered { handle, inner }
+        Entered {
+            handle,
+            inner: Some(inner),
+        }
+    }
+}
+
+impl<T> Drop for Entered<T> {
+    fn drop(&mut self) {
+        let _entered = self.handle.enter();
+        drop(self.inner.take());
     }
 }
 
@@ -82,7 +100,10 @@ impl Future for Entered<BoxFuture<'static, Response>> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Response> {
         let this = &mut *self;
         let _entered = this.handle.enter();
-        this.inner.as_mut().poll(cx)
+        match this.inner.as_mut() {
+            Some(inner) => inner.as_mut().poll(cx),
+            None => Poll::Pending,
+        }
     }
 }
 
@@ -92,6 +113,9 @@ impl Stream for Entered<BodyStream> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
         let _entered = this.handle.enter();
-        this.inner.as_mut().poll_next(cx)
+        match this.inner.as_mut() {
+            Some(inner) => inner.as_mut().poll_next(cx),
+            None => Poll::Ready(None),
+        }
     }
 }
