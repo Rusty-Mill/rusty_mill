@@ -1,0 +1,14 @@
+name: Claude interactive worker (activation held)
+on:
+  issue_comment: {types: [created]}
+  pull_request_review_comment: {types: [created]}
+permissions: {contents: read}
+jobs:
+  activation-hold:
+    # Provider actions are not permitted by current repository policy.
+    # Reviewed designs live outside the workflow discovery directory.
+    if: ${{ false && github.event_name != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "Activation held; see docs/agents/claude-worker.md"
