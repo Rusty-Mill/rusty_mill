@@ -25,7 +25,7 @@ Also merged:
 | #925 | DECCOLM | #856 |
 | #943 | ctutils 0.4.4 (RUSTSEC-2026-0385) | |
 
-#944 is closed as a duplicate. Its branch `claude/ctutils-rustsec-2026-0385` is still on the remote: this session cannot delete it, so delete it in the GitHub UI.
+#944 is closed as a duplicate, and its branch has been deleted.
 
 **#940 merged at `5c24bf8c`.** No PR from this work is open apart from #950 (these docs).
 

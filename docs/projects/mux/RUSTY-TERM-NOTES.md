@@ -119,7 +119,6 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 | PTY read batching (row 10) | `rusty_term` backends; relevant to `rusty_mux_server` | Not started (P2) |
 | Issue #850: `l13` pulls in tokio through `rusty_lsp` | `rusty_term_core`, `rusty_lsp` | Open, low priority (D14) |
 | ConPTY spike 1 | the mux PTY layer on Windows | Owner pending |
-| Stale branch `claude/ctutils-rustsec-2026-0385` (from the closed #944) | repo hygiene | Still on the remote; delete if wanted |
 
 ## 5. References
 
