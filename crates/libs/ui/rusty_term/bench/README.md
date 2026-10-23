@@ -93,6 +93,29 @@ Ceilings are the measured count plus 10% for toolchain codegen drift.
 +10% of the new value in the same PR. The baseline and the libghostty-vt
 reference throughput are in `docs/research/RUSTY-TERM-PERF-BACKLOG.md` §2.1.
 
+## `bench_frame_time` (Rust, windowed front-end's CPU frame path)
+
+Paints the window's real CPU frame path (`gui::render::composite`) into an offscreen buffer, without a window or present. It has two modes.
+
+- **Streaming.** A parser thread feeds a workload into a shared `Mutex<Grid>` in 4 KiB chunks, locking per chunk like the PTY reader. It loops the file for at least `--secs` (default 2). A render thread paints at `--hz` (default 60) and holds the grid lock for the whole frame, as the window does today. Reported per workload:
+  - frame ms;
+  - lock hold ms, during which the parser is blocked;
+  - the render thread's wait for the lock;
+  - parser MB/s with rendering, against parsing alone.
+- **Static folds.** Frame ms for the same text with 0 and with 1,024 OSC 133 command fold blocks, at the live view and scrolled back half a screen into history.
+
+Percentiles are nearest rank. A run that cannot measure (no font, a renderer that fails to start or panics, no samples) exits non-zero.
+
+```
+python3 bench/gen_workloads.py --size quick
+cargo run --release --features gui --bin bench_frame_time
+cargo run --release --features gui --bin bench_frame_time -- --hz 120 --secs 3 bench/workloads/scroll_heavy.vt
+```
+
+It needs a monospace font: `$RUSTY_TERM_FONT`, or the system fonts the window looks for. It is a local tool and not run in CI, because wall-clock frame times are not stable on shared runners.
+
+Parser MB/s here is for one grid that lives for the whole run, so scrollback fills and its lines are recycled, as in a real session. `bench_vt_throughput` builds a fresh grid per iteration and so also pays to fault in new scrollback memory.
+
 ## `run_bench.py` (cross-terminal)
 
 Drives rusty_term and any other terminal emulators listed in

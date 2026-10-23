@@ -132,70 +132,92 @@ impl Renderer for CpuRenderer {
         let Ok(mut buffer) = self.surface.buffer_mut() else {
             return;
         };
-        buffer.fill(bg); // the padding band (and any slack) is background
-        let (w, h) = (width as usize, height as usize);
-        let (cw, ch) = font.cell_size();
-        // The chrome bar sits `inset` px below the window's top edge (the
-        // strip band shows above it); the grid shifts down by the same
-        // amount so the pad-sized gap between bar and content survives —
-        // the bottom pad absorbs the difference.
-        let inset = if chrome.is_empty() {
-            0
-        } else {
-            bar_inset(pad, ch)
-        };
-        let oy = pad + inset;
-        // Gaps between panes show the divider: fill the panes' bounding box
-        // with it, then let the grids overpaint everything but the gaps.
-        if let (Some(x1), Some(y1)) = (
-            panes.iter().map(|p| p.col0 + p.grid.cols).max(),
-            panes.iter().map(|p| p.row0 + p.grid.rows).max(),
-        ) {
-            let y0 = panes.iter().map(|p| p.row0).min().unwrap_or(0) * ch + oy;
-            for y in y0..(y1 * ch + oy).min(h) {
-                let base = y * w;
-                for x in pad..(x1 * cw + pad).min(w) {
-                    buffer[base + x] = divider;
-                }
+        composite(
+            &mut buffer,
+            panes,
+            chrome,
+            status,
+            font,
+            width as usize,
+            height as usize,
+            divider,
+            bg,
+            bar_bg,
+            pad,
+        );
+        let _ = buffer.present();
+    }
+}
+
+/// Paint one frame into `buffer` (`width × height` pixels): everything
+/// [`Renderer::render`] does except presenting. Pure, so the frame-time
+/// bench drives the real frame path without a window.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn composite(
+    buffer: &mut [u32],
+    panes: &[PaneFrame],
+    chrome: &[Cell],
+    status: &[Cell],
+    font: &mut FontCache,
+    w: usize,
+    h: usize,
+    divider: u32,
+    bg: u32,
+    bar_bg: u32,
+    pad: usize,
+) {
+    buffer.fill(bg); // the padding band (and any slack) is background
+    let (cw, ch) = font.cell_size();
+    // The chrome bar sits `inset` px below the window's top edge (the
+    // strip band shows above it); the grid shifts down by the same
+    // amount so the pad-sized gap between bar and content survives —
+    // the bottom pad absorbs the difference.
+    let inset = if chrome.is_empty() {
+        0
+    } else {
+        bar_inset(pad, ch)
+    };
+    let oy = pad + inset;
+    // Gaps between panes show the divider: fill the panes' bounding box
+    // with it, then let the grids overpaint everything but the gaps.
+    if let (Some(x1), Some(y1)) = (
+        panes.iter().map(|p| p.col0 + p.grid.cols).max(),
+        panes.iter().map(|p| p.row0 + p.grid.rows).max(),
+    ) {
+        let y0 = panes.iter().map(|p| p.row0).min().unwrap_or(0) * ch + oy;
+        for y in y0..(y1 * ch + oy).min(h) {
+            let base = y * w;
+            for x in pad..(x1 * cw + pad).min(w) {
+                buffer[base + x] = divider;
             }
         }
-        if !chrome.is_empty() {
-            cpu::draw_chrome(&mut buffer, w, h, chrome, font, cw, ch, inset, bar_bg);
-        }
-        // The status ribbon sits flush with the window's bottom edge; the
-        // grid was sized one row shorter, so it never paints under it.
-        if !status.is_empty() && h >= ch {
-            cpu::draw_bar(&mut buffer, w, h, status, font, cw, ch, h - ch);
-        }
-        for p in panes {
-            cpu::draw_grid(
-                &mut buffer,
-                w,
-                h,
-                p.grid,
-                p.col0,
-                p.row0,
-                pad,
-                oy,
-                p.focused,
-                p.cursor_on,
-                p.hover_link,
-                font,
-            );
-            cpu::draw_trail(
-                &mut buffer,
-                w,
-                h,
-                p.grid,
-                p.col0,
-                p.row0,
-                pad,
-                oy,
-                &p.trail,
-                font,
-            );
-            cpu::draw_marks(&mut buffer, w, h, p.col0, p.row0, pad, oy, &p.marks, font);
-        }
-        let _ = buffer.present();
+    }
+    if !chrome.is_empty() {
+        cpu::draw_chrome(buffer, w, h, chrome, font, cw, ch, inset, bar_bg);
+    }
+    // The status ribbon sits flush with the window's bottom edge; the
+    // grid was sized one row shorter, so it never paints under it.
+    if !status.is_empty() && h >= ch {
+        cpu::draw_bar(buffer, w, h, status, font, cw, ch, h - ch);
+    }
+    for p in panes {
+        cpu::draw_grid(
+            buffer,
+            w,
+            h,
+            p.grid,
+            p.col0,
+            p.row0,
+            pad,
+            oy,
+            p.focused,
+            p.cursor_on,
+            p.hover_link,
+            font,
+        );
+        cpu::draw_trail(
+            buffer, w, h, p.grid, p.col0, p.row0, pad, oy, &p.trail, font,
+        );
+        cpu::draw_marks(buffer, w, h, p.col0, p.row0, pad, oy, &p.marks, font);
     }
 }

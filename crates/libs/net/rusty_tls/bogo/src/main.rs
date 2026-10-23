@@ -18,28 +18,41 @@
 //! The engine has no insecure mode, so there is no way to turn off name or
 //! chain verification. A client scenario that needs one is skipped, not
 //! faked.
+//!
+//! # Both backends
+//!
+//! The shim builds against either crypto backend. On the native one
+//! (`--features native`, `--cfg rusty_tls_native_crypto`; ADR-0005) the
+//! engine has no server role and no signing, so a server scenario or a client
+//! certificate exits 89 and is counted as unimplemented. Every client
+//! scenario runs as it does on `ring`.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::exit;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(not(rusty_tls_native_crypto))]
+use rusty_tls::handrolled::client::ClientIdentity;
 use rusty_tls::handrolled::client::{
-    CipherSuite, ClientConfig, ClientError, ClientHandshake, ClientIdentity, Incoming, Resumption,
-    Session,
+    CipherSuite, ClientConfig, ClientError, ClientHandshake, Incoming, Resumption, Session,
 };
 use rusty_tls::handrolled::client12::{
     CipherSuite12, ClientConfig12, ClientHandshake12, Incoming12,
 };
 use rusty_tls::handrolled::kx::NamedGroup;
 use rusty_tls::handrolled::name::ServerName;
-use rusty_tls::handrolled::negotiate::{
-    ClientConfigBoth, ClientHandshakeBoth, Established, ServerConfigBoth, ServerHandshakeBoth,
-};
+use rusty_tls::handrolled::negotiate::{ClientConfigBoth, ClientHandshakeBoth, Established};
+#[cfg(not(rusty_tls_native_crypto))]
+use rusty_tls::handrolled::negotiate::{ServerConfigBoth, ServerHandshakeBoth};
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
+#[cfg(not(rusty_tls_native_crypto))]
 use rusty_tls::handrolled::server::{ClientAuth, ServerConfig, ServerHandshake, Tickets};
+#[cfg(not(rusty_tls_native_crypto))]
 use rusty_tls::handrolled::server12::{ServerConfig12, ServerHandshake12};
+#[cfg(not(rusty_tls_native_crypto))]
 use rusty_tls::handrolled::sign::SigningKey;
+#[cfg(not(rusty_tls_native_crypto))]
 use rusty_tls::handrolled::ticket::{TicketKey, TicketKeys};
 use rusty_tls::handrolled::x509::Certificate;
 
@@ -304,11 +317,13 @@ fn pem_blocks(path: &str) -> Vec<(String, Vec<u8>)> {
     out
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// A signing key from a PKCS#8 file, with the algorithm read from its OID.
+#[cfg(not(rusty_tls_native_crypto))]
 fn signing_key(path: &str) -> SigningKey {
     let Some((_, der)) = pem_blocks(path).into_iter().next() else {
         fail("no key in the key file")
@@ -436,16 +451,19 @@ macro_rules! machine {
     };
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 machine!(ServerSide, ServerHandshakeBoth, |m| m
     .into_connection()
     .map_err(|e| e.to_string()));
 machine!(ClientSide, ClientHandshakeBoth, |m| m
     .into_connection()
     .map_err(|e| e.to_string()));
+#[cfg(not(rusty_tls_native_crypto))]
 machine!(Server13, ServerHandshake, |m| m
     .into_connection()
     .map(Established::Tls13)
     .map_err(|e| e.to_string()));
+#[cfg(not(rusty_tls_native_crypto))]
 machine!(Server12, ServerHandshake12, |m| m
     .into_connection()
     .map(Established::Tls12)
@@ -588,6 +606,7 @@ fn main() {
     // the same shim opening a second connection and offering what the first
     // one was given, so what it was given has to outlive a connection.
     let resume_count = parse_args(0).resume_count;
+    #[cfg(not(rusty_tls_native_crypto))]
     let ticket_key = TicketKey::generate().unwrap_or_else(|e| fail(e));
     let mut sessions = Vec::new();
     for index in 0..=resume_count {
@@ -597,7 +616,10 @@ fn main() {
             unimplemented("a scenario that allows neither TLS 1.2 nor 1.3");
         }
         if config.server {
+            #[cfg(not(rusty_tls_native_crypto))]
             serve(&config, tls12, tls13, &ticket_key);
+            #[cfg(rusty_tls_native_crypto)]
+            unimplemented("the server role (not built on the native backend, ADR-0005)");
         } else {
             connect_client(&config, tls12, tls13, &mut sessions);
         }
@@ -656,6 +678,7 @@ fn expect_version(config: &Config, connection: &Established) {
     }
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 fn serve(config: &Config, tls12: bool, tls13: bool, ticket_key: &TicketKey) {
     let cert = config
         .cert_file
@@ -756,11 +779,16 @@ fn connect_client(
     sessions: &mut Vec<(Session, Instant)>,
 ) {
     // Both halves or neither: a chain without its key cannot sign.
+    #[cfg(not(rusty_tls_native_crypto))]
     let identity_material = match (&config.cert_file, &config.key_file) {
         (Some(cert), Some(key)) => Some((certificates(cert), signing_key(key))),
         (None, None) => None,
         _ => unimplemented("a client certificate without its key (or the reverse)"),
     };
+    #[cfg(rusty_tls_native_crypto)]
+    if config.cert_file.is_some() || config.key_file.is_some() {
+        unimplemented("a client certificate (not built on the native backend, ADR-0005)");
+    }
     let trust = config
         .trust_cert
         .as_deref()
@@ -771,9 +799,12 @@ fn connect_client(
         .map(|der| Certificate::parse(der).unwrap_or_else(|e| fail(format!("trust anchor: {e}"))))
         .collect();
     let anchors: Vec<TrustAnchor<'_>> = parsed.iter().map(TrustAnchor::from_certificate).collect();
+    #[cfg(not(rusty_tls_native_crypto))]
     let identity = identity_material
         .as_ref()
         .map(|(certificates, key)| ClientIdentity { certificates, key });
+    #[cfg(rusty_tls_native_crypto)]
+    let identity = None;
     let name = config.host_name.as_deref().unwrap_or("test");
 
     // A ticket is single-use (RFC 8446 section 4.6.1): take the oldest, so the
