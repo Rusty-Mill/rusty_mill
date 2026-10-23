@@ -59,6 +59,7 @@ export interface DataActions {
   /** Save marks once per card at a time; release its lock on success or failure. */
   updateMarks(id: string, patch: Pick<CardPatch, 'points' | 'frequency'>, base: string): Promise<void>
   createCard(input: NewCard): Promise<Card>
+  /** Wait for this tab's outstanding card updates before choosing the split version; failures abort the split. */
   split(id: string, input: SplitInput): Promise<SplitResult>
   reset(id: string): Promise<Card>
   deleteCard(id: string): Promise<void>
@@ -103,6 +104,9 @@ export function createDataStore({ api }: DataOptions): DataStore {
 
     /** A card's version as this store shows it; absent for a card it does not know. */
     const etagOf = (id: string): string | undefined => get().index.byId.get(id)?.etag
+    // A rapid deal → split must use the acknowledged owner version, even after leaving
+    // and reopening the pane. Keep this in the store; never retry an external conflict.
+    const pendingCardUpdates = new Map<string, Set<Promise<Card>>>()
     const treeEtagOf = (id: string): string | undefined => get().index.byId.get(id)?.treeEtag
 
     /** Bumped when a write starts and when it ends; see the header. */
@@ -200,15 +204,25 @@ export function createDataStore({ api }: DataOptions): DataStore {
           set({ people: get().people.filter((p) => p.id !== id) })
         }),
 
-      updateCard: (id, patch, base) =>
-        write(
+      async updateCard(id, patch, base) {
+        const pending = write(
           async () => {
             const card = await api.updateCard(id, patch, base)
             mergeCards(card)
             return card
           },
           hasParent(id) || patch.parentCardId != null,
-        ),
+        )
+        const updates = pendingCardUpdates.get(id) ?? new Set<Promise<Card>>()
+        updates.add(pending)
+        pendingCardUpdates.set(id, updates)
+        try {
+          return await pending
+        } finally {
+          updates.delete(pending)
+          if (updates.size === 0) pendingCardUpdates.delete(id)
+        }
+      },
       async updateMarks(id, patch, base) {
         if (get().pendingMarks.includes(id)) return
         set((s) => ({ pendingMarks: [...s.pendingMarks, id] }))
@@ -227,12 +241,16 @@ export function createDataStore({ api }: DataOptions): DataStore {
           },
           input.parentCardId != null,
         ),
-      split: (id, input) =>
-        write(async () => {
+      async split(id, input) {
+        const updates = pendingCardUpdates.get(id)
+        // Rejections were already toasted by updateCard; do not send a dependent split.
+        if (updates) await Promise.all(updates)
+        return write(async () => {
           const result = await api.split(id, input, etagOf(id))
           mergeCards(result.parent, ...result.children)
           return result
-        }, hasParent(id)),
+        }, hasParent(id))
+      },
       reset: (id) =>
         write(async () => {
           const card = await api.reset(id, etagOf(id))

@@ -850,4 +850,33 @@ mod tests {
             }
         });
     }
+
+    /// Dropping a registration, or cancelling the task that waits on it,
+    /// closes only the runtime's dup, never the backend's fd.
+    #[rusty_tokio::test]
+    async fn dropping_or_cancelling_the_registration_leaves_the_source_open() {
+        let is_open = |fd: RawFd| {
+            // SAFETY: F_GETFD takes no memory operands; a closed fd is EBADF.
+            unsafe { libc::fcntl(fd, libc::F_GETFD) >= 0 }
+        };
+        let (backend_fd, _tx) = pipe();
+        set_nonblocking(backend_fd.as_raw_fd()).unwrap();
+        let src = backend_fd.as_raw_fd();
+
+        drop(AsyncFd::new(dup_owned(src).unwrap()).unwrap());
+        assert!(is_open(src));
+
+        let afd = AsyncFd::new(dup_owned(src).unwrap()).unwrap();
+        let task = rusty_tokio::spawn(async move {
+            // Registration starts optimistically ready; `try_io` clears
+            // that on `WouldBlock`, so this parks until aborted.
+            loop {
+                let mut guard = afd.readable().await.unwrap();
+                let _ = guard.try_io(|inner| read_nonblocking(inner.as_raw_fd()));
+            }
+        });
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(is_open(src));
+    }
 }

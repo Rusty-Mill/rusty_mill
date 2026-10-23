@@ -7,6 +7,7 @@ mistakes TLS stacks actually make.
 ```sh
 ./run.sh                    # all tests (needs Go; clones BoringSSL on first use)
 ./run.sh -test 'KeyUpdate*' # extra args go to the runner
+NATIVE=1 ./run.sh           # the native backend (ADR-0005), client role only
 ```
 
 The BoringSSL commit is pinned in `run.sh`; bumping it adds and renames tests,
@@ -28,6 +29,14 @@ pass. Every entry is a finding or a documented difference, not a convenience.
 Differences worth knowing: each `KeyUpdate` request is answered (BoringSSL
 coalesces); a renegotiation request gets a `no_renegotiation` warning and the
 connection carries on; 0-RTT is refused; RSA signing is PSS-only; a server that accepts only PKCS#1 v1.5 or SHA-1 client signatures gets an empty Certificate; TLS 1.3 resumption runs (the shim keeps tickets across connections) but TLS 1.2 resumption does not exist.
+
+## The native backend
+
+`NATIVE=1` builds the shim with `--no-default-features --features native` and
+`--cfg rusty_tls_native_crypto`. That engine has no server role and no signing,
+so server scenarios and client certificates exit 89 and are counted as
+unimplemented. At the pinned commit: 445 pass, 0 fail. CI's native job holds
+it to a floor of 430. Results land in `target/native/` (or `$OUT/native`).
 
 A failing test is an engine bug until shown otherwise. Do not add it to
 `config.json` to get green.

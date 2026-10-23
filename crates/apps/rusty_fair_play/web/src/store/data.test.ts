@@ -18,6 +18,88 @@ async function seeded() {
 }
 
 describe('data store', () => {
+  it('waits for the owner acknowledgement before splitting, without blocking other cards', async () => {
+    const { store, api, ada } = await seeded()
+    const [card, other] = store.getState().cards as [Card, Card]
+    const real = api.updateCard.bind(api)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    let committed!: () => void
+    const ownerCommitted = new Promise<void>((resolve) => (committed = resolve))
+    vi.spyOn(api, 'updateCard').mockImplementationOnce(async (id, patch, etag) => {
+      const saved = await real(id, patch, etag)
+      committed()
+      await gate
+      return saved
+    })
+    const split = vi.spyOn(api, 'split')
+    const owner = store.getState().updateCard(card.id, { ownerId: ada.id }, card.etag)
+    await ownerCommitted
+    const input = { children: [{ name: 'First' }, { name: 'Second' }] }
+    const pending = store.getState().split(card.id, input)
+    await store.getState().split(other.id, input)
+    expect(split).toHaveBeenCalledTimes(1)
+    expect(split.mock.calls[0]![0]).toBe(other.id)
+    release()
+    const saved = await owner
+    expect((await pending).parent.ownerId).toBe(ada.id)
+    expect(split).toHaveBeenLastCalledWith(card.id, input, saved.etag)
+    expect(store.getState().toasts).toHaveLength(0)
+  })
+
+  it.each(['failure', 'stale'] as const)('aborts a dependent split on owner %s and permits retry', async (outcome) => {
+    const { store, api, ada } = await seeded()
+    const card = store.getState().cards[0]!
+    const current = await api.updateCard(card.id, { notes: 'another tab' }, card.etag)
+    const error = outcome === 'stale' ? new StaleError(current) : new Error('Owner save failed')
+    let reject!: (error: Error) => void
+    vi.spyOn(api, 'updateCard').mockImplementationOnce(() => new Promise((_, fail) => (reject = fail)))
+    const split = vi.spyOn(api, 'split')
+    const owner = store.getState().updateCard(card.id, { ownerId: ada.id }, card.etag)
+    const ownerRejected = expect(owner).rejects.toBe(error)
+    const input = { children: [{ name: 'First' }] }
+    const pending = store.getState().split(card.id, input)
+    const splitRejected = expect(pending).rejects.toBe(error)
+    reject(error)
+    await Promise.all([ownerRejected, splitRejected])
+    expect(split).not.toHaveBeenCalled()
+    expect(store.getState().toasts).toHaveLength(1)
+    expect(store.getState().toasts[0]!.message).toBe(outcome === 'stale' ? STALE_MESSAGE : 'Owner save failed')
+    await store.getState().refresh()
+    await store.getState().updateCard(card.id, { ownerId: ada.id }, current.etag)
+    expect((await store.getState().split(card.id, input)).parent.ownerId).toBe(ada.id)
+  })
+
+  it('preserves a real external conflict after the pending owner update', async () => {
+    const { store, api, ada } = await seeded()
+    const card = store.getState().cards[0]!
+    const real = api.updateCard.bind(api)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    let committed!: () => void
+    const ownerCommitted = new Promise<void>((resolve) => (committed = resolve))
+    vi.spyOn(api, 'updateCard').mockImplementationOnce(async (id, patch, etag) => {
+      const saved = await real(id, patch, etag)
+      committed()
+      await gate
+      return saved
+    })
+    const split = vi.spyOn(api, 'split')
+    const owner = store.getState().updateCard(card.id, { ownerId: ada.id }, card.etag)
+    await ownerCommitted
+    const pending = store.getState().split(card.id, { children: [{ name: 'First' }] })
+    const rejected = expect(pending).rejects.toBeInstanceOf(StaleError)
+    await real(card.id, { notes: 'another tab' }, (await api.getCard(card.id)).etag)
+    release()
+    const saved = await owner
+    await rejected
+    expect(split).toHaveBeenCalledTimes(1)
+    expect(split.mock.calls[0]![2]).toBe(saved.etag)
+    expect(store.getState().toasts.at(-1)?.message).toBe(STALE_MESSAGE)
+    expect(store.getState().index.byId.get(card.id)?.notes).toBe('another tab')
+    expect(store.getState().index.children.get(card.id) ?? []).toHaveLength(0)
+  })
+
   it('keeps the later selection tag when an earlier bulk request is delayed', async () => {
     const { store, api, ada } = await seeded()
     const [a, b, c] = store.getState().cards as [Card, Card, Card]

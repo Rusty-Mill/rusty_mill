@@ -45,8 +45,11 @@ impl Tun {
     pub fn create(name: &str, ipv4: Ipv4Addr, prefix_len: u8, mtu: u32) -> io::Result<Self> {
         let dev = LinuxTunDevice::create(name, ipv4, prefix_len, mtu).map_err(from_platform_err)?;
         dev.set_nonblocking(true).map_err(from_platform_err)?;
+        // SAFETY: `dev` owns its `OwnedFd` and always returns it from
+        // `as_raw_fd`; moving it in keeps it open for the `AsyncFd`'s lifetime.
+        let fd = unsafe { AsyncFd::register(dev) }?;
         Ok(Self {
-            fd: Arc::new(AsyncFd::new(dev)?),
+            fd: Arc::new(fd),
             name: name.to_string(),
             ipv4,
         })

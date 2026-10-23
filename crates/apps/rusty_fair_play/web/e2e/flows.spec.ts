@@ -50,6 +50,7 @@ test('split a card into two with different owners', async ({ page }) => {
   await page.goto('/#/deck')
   await tile(page, /^Cleaning/).click()
   await pane(page).getByLabel('Deal to').selectOption({ label: 'Ada' })
+  await expect(tile(page, /^Cleaning/).getByTestId('owner')).toContainText('Ada')
   await pane(page).getByRole('button', { name: 'Split…' }).click()
   const dialog = page.getByRole('dialog', { name: /Split/ })
   await dialog.getByLabel('Child 1 name').fill('Floors')
