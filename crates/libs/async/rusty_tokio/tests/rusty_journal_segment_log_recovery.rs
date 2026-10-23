@@ -4,7 +4,7 @@
 // another OS still tries to compile this file against items `src/io/mod.rs`
 // only re-exports under `cfg(target_os = "linux")`. This file-level cfg is what
 // actually keeps it Linux-only.
-//! A `rusty_stream`-shaped demonstration of the `OpDriver`/`SimDriver`
+//! A `rusty_journal`-shaped demonstration of the `OpDriver`/`SimDriver`
 //! seam (handoff item 4): [`SegmentLog`] below is real, working
 //! recovery code -- length-prefixed, CRC-checked records, replayed from
 //! offset 0 and truncated at the first sign of trouble on open, exactly
@@ -16,14 +16,14 @@
 //! code actually does, not on the fault injection machinery itself.
 //!
 //! Record format on disk (deliberately simple -- this is a
-//! demonstration, not `rusty_stream`'s actual wire format):
+//! demonstration, not `rusty_journal`'s actual wire format):
 //! `[len: u32 LE][crc32(payload): u32 LE][payload; len bytes]`.
 
 use rusty_tokio::io::{OpDriver, SimDriver, UringFile};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------
-// SegmentLog: the "rusty_stream"-shaped piece under test
+// SegmentLog: the "rusty_journal"-shaped piece under test
 // ---------------------------------------------------------------------
 
 /// A single append-only segment file, backed by whatever [`OpDriver`]
@@ -185,7 +185,7 @@ fn torn_write_is_caught_by_recovery_and_the_log_stays_usable() {
 
         let post_crash_driver = sim.crash_and_reopen();
 
-        // The real recovery path -- exactly what a `rusty_stream`
+        // The real recovery path -- exactly what a `rusty_journal`
         // segment would run on startup after an unclean shutdown.
         let mut recovered = SegmentLog::recover(post_crash_driver, "/virtual/segment-0.log")
             .await

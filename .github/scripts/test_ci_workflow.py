@@ -40,6 +40,8 @@ PLAN_KEYS = {
     "tls_engine",
     "rleval_viewer",
     "rleval_app",
+    "rleval_service",
+    "rleval_image",
     "crypto_ct",
     "rand_platforms",
     "shards",
@@ -318,7 +320,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_rleval_jobs_follow_cargo_impact_and_the_viewer_fixture(self) -> None:
@@ -342,8 +344,41 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertFalse(flags["rleval_viewer"])
         self.assertFalse(flags["rleval_app"])
 
+    def test_rleval_service_jobs_follow_their_paths_only(self) -> None:
+        # A test-only change runs pytest but cannot change the image.
+        flags = specialized_job_flags(
+            ["crates/apps/rocket_league/rleval/service/tests/test_api.py"], []
+        )
+        self.assertTrue(flags["rleval_service"])
+        self.assertFalse(flags["rleval_image"])
+        # What the image installs runs both: pytest on the runner's Python with the dev extra
+        # is not the image's Python with the production extras.
+        for path in (
+            "crates/apps/rocket_league/rleval/service/app/models.py",
+            "crates/apps/rocket_league/rleval/service/migrations/env.py",
+            "crates/apps/rocket_league/rleval/service/pyproject.toml",
+            "crates/apps/rocket_league/rleval/service/alembic.ini",
+        ):
+            flags = specialized_job_flags([path], [])
+            self.assertTrue(flags["rleval_service"], path)
+            self.assertTrue(flags["rleval_image"], path)
+        for path in (
+            "crates/apps/rocket_league/rleval/Dockerfile",
+            "crates/apps/rocket_league/rleval/Dockerfile.dockerignore",
+            "crates/apps/rocket_league/rleval/docker-compose.yml",
+        ):
+            flags = specialized_job_flags([path], [])
+            self.assertTrue(flags["rleval_image"], path)
+            self.assertFalse(flags["rleval_service"], path)
+        # Docs and the Rust crates beside it select neither.
+        flags = specialized_job_flags(
+            ["crates/apps/rocket_league/rleval/docs/episodes-design.md"], ["rleval-app"]
+        )
+        self.assertFalse(flags["rleval_service"])
+        self.assertFalse(flags["rleval_image"])
+
     def test_rleval_jobs_are_planned_and_gated(self) -> None:
-        for key in ("rleval_viewer", "rleval_app"):
+        for key in ("rleval_viewer", "rleval_app", "rleval_service", "rleval_image"):
             self.assertIn(f"{key}: ${{{{ steps.plan.outputs.{key} }}}}", self.workflow)
             self.assertIn(f"if: needs.plan.outputs.{key} == 'true'", self.workflow)
 
@@ -422,11 +457,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_agui_package_change_selects_tick_web_too(self) -> None:
@@ -829,6 +864,21 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self._planner_map("--packages", "", input=f"{path}\n")["tls_engine"], "false")
 
+    def test_rleval_service_jobs_run_when_their_own_ci_changes(self) -> None:
+        for path in (".github/workflows/ci.yml", ".github/scripts/ci_plan.py"):
+            with self.subTest(path=path):
+                outputs = self._planner_map("--packages", "", input=f"{path}\n")
+                self.assertEqual(outputs["rleval_service"], "true")
+                self.assertEqual(outputs["rleval_image"], "true")
+                smoke = self._planner_map("--emit-ci-smoke", input=f"{path}\n")
+                self.assertEqual(smoke["rleval_service"], "true")
+                self.assertEqual(smoke["rleval_image"], "true")
+        for path in (".github/scripts/test_ci_workflow.py", "docs/README.md", ".github/workflows/unrelated.yml"):
+            with self.subTest(path=path):
+                outputs = self._planner_map("--packages", "", input=f"{path}\n")
+                self.assertEqual(outputs["rleval_service"], "false")
+                self.assertEqual(outputs["rleval_image"], "false")
+
     def test_rand_platforms_survive_ci_only_shortcut(self) -> None:
         for path in (
             ".github/workflows/ci.yml",
@@ -845,11 +895,16 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 self.assertEqual(outputs["ci_only"], "true")
                 self.assertEqual(outputs["full"], "false")
                 self.assertEqual(outputs["rand_platforms"], "false" if "unrelated" in path else "true")
-                # ci.yml and ci_plan.py also select the native TLS engine jobs.
-                tls = path in {".github/workflows/ci.yml", ".github/scripts/ci_plan.py"}
-                self.assertEqual(outputs["tls_engine"], "true" if tls else "false")
+                # ci.yml and ci_plan.py also select the native TLS engine and rleval service jobs.
+                own = path in {".github/workflows/ci.yml", ".github/scripts/ci_plan.py"}
+                for key in ("tls_engine", "rleval_service", "rleval_image"):
+                    self.assertEqual(outputs[key], "true" if own else "false", key)
                 self.assertTrue(
-                    all(outputs[key] == "false" for key in SPECIALIZED_KEYS - {"rand_platforms", "tls_engine"})
+                    all(
+                        outputs[key] == "false"
+                        for key in SPECIALIZED_KEYS
+                        - {"rand_platforms", "tls_engine", "rleval_service", "rleval_image"}
+                    )
                 )
         self.assertIn(
             "printf '%s\\n' \"$changed\" | python3 .github/scripts/ci_plan.py --emit-ci-smoke >> \"$GITHUB_OUTPUT\"",

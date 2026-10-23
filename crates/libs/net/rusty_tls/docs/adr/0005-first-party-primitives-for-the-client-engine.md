@@ -76,7 +76,10 @@ lockfile. Replacing it under the hand-rolled engine does not remove it from the 
    supported tests and zero-tests guard. A native BoGo floor needs a client-only BoGo shim,
    because the current shim drives the engine's server. Until one exists, BoGo covers the
    `ring` backend only. The owner agreed to this deferral on 2026-10-22. It is a deferral,
-   not equivalent coverage, and a client-only shim is the follow-up. A seam differential runs the same keys and inputs through both backends. The `crypto-constant-time` job and the plan's §11
+   not equivalent coverage, and a client-only shim is the follow-up. *(2026-10-23: the
+   deferral is closed. The shim now builds on the native backend, where it reports
+   server and client-certificate scenarios as unimplemented, and the native CI job runs
+   BoGo with its own floor (430; 445 passed, 0 failed at the pinned commit).)* A seam differential runs the same keys and inputs through both backends. The `crypto-constant-time` job and the plan's §11
    table apply. The `ring` job keeps full coverage. The secret-handling primitives listed
    under Context (HMAC/HKDF, the AEADs, X25519, ECDH) each keep their crate's constant-time
    evidence and review requirement. Constant-time claims stay "no leak found by these

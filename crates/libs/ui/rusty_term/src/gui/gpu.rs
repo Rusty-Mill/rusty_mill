@@ -856,6 +856,8 @@ impl GpuCore {
         hover_link: Option<(usize, usize, usize)>,
         font: &mut FontCache,
     ) {
+        // Resolve the fold-aware viewport once; per-cell lookups below reuse it.
+        let view = grid.view();
         let cursor = (focused && grid.cursor_visible && grid.view_offset == 0 && cursor_on)
             .then_some(grid.cursor);
         let status = grid.status_row();
@@ -886,7 +888,7 @@ impl GpuCore {
             // `None` (identity) for pure-LTR/status rows — mirrors the CPU
             // renderer. Cell state stays logical; only the emitted instance
             // X position (and glyph mirroring) go through the map.
-            let bidi = if on_status { None } else { grid.bidi_row(row) };
+            let bidi = if on_status { None } else { view.bidi_row(row) };
             let vis = |col: usize| -> usize {
                 bidi.as_ref()
                     .and_then(|b| b.log2vis.get(col))
@@ -897,7 +899,7 @@ impl GpuCore {
                 let cell = if on_status {
                     status.unwrap()[col]
                 } else {
-                    grid.viewport_cell(col, row)
+                    view.cell(col, row)
                 };
                 if cell.flags & WIDE_TRAILER != 0 {
                     cols.push(Resolved {
@@ -920,7 +922,7 @@ impl GpuCore {
                         CursorShape::Bar => (cell.fg, cell.bg, 3u32, grid.cursor_color),
                     };
                     (fg, bg, curs, ccol, false)
-                } else if !on_status && let Some(cur) = grid.search_highlight(col, row) {
+                } else if !on_status && let Some(cur) = view.search_highlight(col, row) {
                     (
                         SEARCH_FG,
                         if cur { SEARCH_CUR_BG } else { SEARCH_BG },
@@ -928,7 +930,7 @@ impl GpuCore {
                         0,
                         false,
                     )
-                } else if !on_status && grid.is_selected(col, row) {
+                } else if !on_status && view.is_selected(col, row) {
                     (cell.bg, cell.fg, 0, 0, false)
                 } else {
                     (cell.fg, cell.bg, 0, 0, true)
@@ -1186,7 +1188,7 @@ impl GpuCore {
                 if col + w > grid.cols {
                     break;
                 }
-                let base = grid.viewport_cell(col, crow);
+                let base = view.cell(col, crow);
                 let (rect, is_color) = self.tile_for_char(pch, Style::Regular, font);
                 let fg = if is_color { 0xFFFFFF } else { base.bg };
                 frame.base.push(Self::base_inst(

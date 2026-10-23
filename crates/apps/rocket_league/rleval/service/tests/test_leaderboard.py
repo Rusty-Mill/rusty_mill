@@ -160,11 +160,11 @@ def test_recent_feed_is_newest_first(client, session, make_account):
     b = make_account(email="rb@example.com")
     _lock(session, b, "B")
     ra = _report(session, "r_a", a.id, "A", 60.0)
-    ra.created_at = datetime(2026, 1, 1, 12, 0)  # older personal best
+    ra.created_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)  # older personal best
     session.add(ra); session.commit()
     leaderboard.materialize(session, a, "r_a")
     rb = _report(session, "r_b", b.id, "B", 50.0)
-    rb.created_at = datetime(2026, 1, 2, 12, 0)  # newer, lower composite
+    rb.created_at = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)  # newer, lower composite
     session.add(rb); session.commit()
     leaderboard.materialize(session, b, "r_b")
     session.commit()

@@ -175,6 +175,15 @@ impl<T: AsRawFd> AsyncFd<T> {
     }
 }
 
+/// The wrapped value's fd, as tokio's `AsyncFd` exposes it, so a
+/// [`try_io`](AsyncFdReadyGuard::try_io) closure can syscall on its argument
+/// directly.
+impl<T: AsRawFd> AsRawFd for AsyncFd<T> {
+    fn as_raw_fd(&self) -> RawFd {
+        self.get_ref().as_raw_fd()
+    }
+}
+
 impl<T: AsRawFd> Drop for AsyncFd<T> {
     fn drop(&mut self) {
         self.reactor.deregister(self.fd);

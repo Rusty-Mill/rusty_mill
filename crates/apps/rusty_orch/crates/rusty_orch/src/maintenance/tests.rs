@@ -235,6 +235,15 @@ impl TaskHost for Host {
     ) -> std::result::Result<Relayed, ClassifiedError> {
         panic!("maintenance must never relay approval")
     }
+    fn cancel(
+        &mut self,
+        _: &Task,
+        _: &Board,
+        _: &Text,
+        _: &Fence,
+    ) -> std::result::Result<Progress, ClassifiedError> {
+        panic!("maintenance must never cancel")
+    }
 }
 #[test]
 fn crash_recovery_keeps_identity_and_does_not_reopen_known_handle() {

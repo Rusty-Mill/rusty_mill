@@ -1315,7 +1315,7 @@ impl std::task::Wake for BlockOnWaker {
     }
 }
 
-fn block_on_inner<F: Future>(future: F) -> F::Output {
+pub(crate) fn block_on_inner<F: Future>(future: F) -> F::Output {
     let mut future = std::pin::pin!(future);
     let parker = Arc::new(BlockOnWaker::new());
     let waker = std::task::Waker::from(parker.clone());

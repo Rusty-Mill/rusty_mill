@@ -26,6 +26,9 @@ options:
                           from it on the next run      [env RUSTY_ORCH_STATE]
   --bbp <config.json>     enable BBP task hosting (requires --state) [env ORCH_BBP]
   --card <id>             host the goal for this Millboard card (requires BBP hosting)
+  --cancel <reason>       cancel the goal's hosted tasks, wait until their
+                          processes are reaped, and retire the goal's
+                          assignment so no later run resumes it
   --board <url>           Millboard's http:// address for --card [env RUSTY_ORCH_BOARD]
                           credential and identity: env RUSTY_ORCH_BOARD_TOKEN,
                           RUSTY_ORCH_BOARD_ACTOR, RUSTY_ORCH_BOARD_ROLE
@@ -51,6 +54,8 @@ pub struct Args {
     pub state: Option<PathBuf>,
     /// The Millboard card the hosted goal works for.
     pub card: Option<CardArgs>,
+    /// Cancel the hosted goal for this reason instead of running it.
+    pub cancel: Option<orch_core::Text>,
 }
 
 /// `--card` and how to reach its board.
@@ -96,6 +101,7 @@ pub fn parse(
     let mut state = env("RUSTY_ORCH_STATE").map(PathBuf::from);
     let mut card = None;
     let mut board = env("RUSTY_ORCH_BOARD");
+    let mut cancel = None;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--ollama-model" => ollama_model = Some(value(&arg, argv.next())?),
@@ -108,6 +114,13 @@ pub fn parse(
             "--state" => state = Some(PathBuf::from(value(&arg, argv.next())?)),
             "--card" => card = Some(value(&arg, argv.next())?),
             "--board" => board = Some(value(&arg, argv.next())?),
+            "--cancel" => {
+                let reason = value(&arg, argv.next())?;
+                cancel = Some(
+                    orch_core::Text::new(&reason)
+                        .ok_or_else(|| usage("--cancel needs a reason".to_owned()))?,
+                );
+            }
             "-h" | "--help" => return Err(ArgsError::Help),
             flag if flag.starts_with('-') => return Err(usage(format!("unknown option {flag:?}"))),
             _ if goal.is_none() => goal = Some(PathBuf::from(arg)),
@@ -129,6 +142,7 @@ pub fn parse(
     };
     Ok(Args {
         card,
+        cancel,
         bbp,
         goal: goal.ok_or_else(|| usage("missing <goal.json>".to_owned()))?,
         ollama_model: ollama_model.unwrap_or_else(|| "llama3.2".to_owned()),
@@ -204,6 +218,34 @@ mod tests {
         .expect("ok");
         assert_eq!(a.card.map(|c| c.board.url), Some("http://flag".into()));
         assert!(!format!("{expected:?}").contains("secret"));
+    }
+
+    #[test]
+    fn cancel_takes_a_nonblank_reason() {
+        let a = parse(
+            argv("run --cancel withdrawn g.json"),
+            no_env,
+            PathBuf::from("/w"),
+        )
+        .expect("ok");
+        assert_eq!(
+            a.cancel.map(|r| r.as_str().to_owned()),
+            Some("withdrawn".into())
+        );
+        let e = parse(argv("run g.json --cancel"), no_env, PathBuf::from("/w"));
+        assert_eq!(
+            e,
+            Err(ArgsError::Usage("--cancel needs a value".to_owned()))
+        );
+        let blank = parse(
+            ["run", "--cancel", " ", "g.json"].map(str::to_owned),
+            no_env,
+            PathBuf::from("/w"),
+        );
+        assert_eq!(
+            blank,
+            Err(ArgsError::Usage("--cancel needs a reason".to_owned()))
+        );
     }
 
     #[test]

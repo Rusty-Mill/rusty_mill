@@ -29,6 +29,7 @@ fn args(interactive: bool, json: bool) -> Args {
         json,
         state: None,
         card: None,
+        cancel: None,
     }
 }
 

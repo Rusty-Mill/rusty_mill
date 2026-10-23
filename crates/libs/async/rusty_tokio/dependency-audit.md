@@ -34,7 +34,7 @@ already sovereign.
 Live namespace enumerated rather than trusting the skill's cached
 `platform-directory.md`, which is well out of date (it lists 30 repos; the
 account has 80+, and `rusty_sync`, `rusty_wire`, `rusty_codec`, `rusty_async`,
-`rusty_stream` are all missing from it).
+`rusty_journal` are all missing from it).
 
 | Repo | Read | Result |
 | --- | --- | --- |

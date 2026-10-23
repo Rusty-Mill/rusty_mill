@@ -170,7 +170,7 @@ uvicorn app.main:app                # the API (now enqueues)
 Or the whole stack (Redis + API + worker, worker image bundles the Rust binary):
 
 ```bash
-docker compose up --build           # repo root
+docker compose up --build           # from crates/apps/rocket_league/rleval
 ```
 
 The job payload is just the `replay_id`, so workers reload the replay from the DB

@@ -5,6 +5,11 @@
 # RLS_DB_AUTO_CREATE=0, so it relies on migrations). Blobs still share a volume
 # here; for full multi-node set RLS_BLOB_BACKEND=s3 and add a MinIO service.
 
+# The image builds from the monorepo root (see the Dockerfile).
+x-build: &build
+  context: ../../../..
+  dockerfile: crates/apps/rocket_league/rleval/Dockerfile
+
 x-db-env: &db-env
   RLS_DATABASE_URL: postgresql+psycopg2://rls:rls@postgres:5432/rls
 
@@ -32,7 +37,7 @@ services:
       retries: 10
 
   migrate:
-    build: .
+    build: *build
     command: ["alembic", "upgrade", "head"]
     environment: *db-env
     restart: "no"
@@ -41,7 +46,7 @@ services:
         condition: service_healthy
 
   api:
-    build: .
+    build: *build
     environment:
       <<: *db-env
       RLS_DB_AUTO_CREATE: "0"
@@ -59,7 +64,7 @@ services:
         condition: service_completed_successfully
 
   worker:
-    build: .
+    build: *build
     command:
       ["celery", "-A", "app.celery_app:celery_app", "worker",
        "-Q", "scoring", "--concurrency=2", "--loglevel=info"]

@@ -7,6 +7,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 ### Added
 - `server::serve_with_drain_timeout` and `DEFAULT_DRAIN_TIMEOUT` (30 s).
 ### Changed
+- Renamed from `rusty_stream` to `rusty_journal` (package, binary, crate path). Wire protocol, on-disk format and the `RUSTY_STREAM_*` environment variables are unchanged.
 ### Fixed
 - `serve` drops finished connection tasks while accepting, instead of holding every task until shutdown. Its graceful drain aborts connections still open after the drain deadline; an idle peer used to hold it open forever (design review 3.7).
 - `Segment::open_on` recovery now reads a full record's declared length

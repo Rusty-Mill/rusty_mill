@@ -1899,3 +1899,62 @@ fn dropping_a_receiver_drops_undelivered_values() {
         "unbounded: value outlived its receiver"
     );
 }
+
+/// A plain OS thread feeds a bounded channel with `blocking_send`; the async
+/// side drains it. Capacity 1 forces the sender to park on a full channel.
+#[test]
+fn mpsc_blocking_send_from_os_thread_waits_for_capacity() {
+    let rt = Runtime::builder().worker_threads(2).build().unwrap();
+    let (tx, mut rx) = mpsc::channel::<u32>(1);
+    let producer = std::thread::spawn(move || {
+        for i in 0..100 {
+            tx.blocking_send(i).unwrap();
+        }
+    });
+    let got = rt.block_on(async move {
+        let mut got = Vec::new();
+        while let Some(v) = rx.recv().await {
+            got.push(v);
+        }
+        got
+    });
+    producer.join().unwrap();
+    assert_eq!(got, (0..100).collect::<Vec<_>>());
+}
+
+#[test]
+fn mpsc_blocking_send_fails_once_receiver_is_dropped() {
+    let (tx, rx) = mpsc::channel::<u32>(1);
+    drop(rx);
+    assert_eq!(tx.blocking_send(7).unwrap_err().0, 7);
+}
+
+/// The async side sends; a plain OS thread drains with `blocking_recv`,
+/// which returns `None` once every sender is gone.
+#[test]
+fn mpsc_blocking_recv_on_os_thread_drains_then_ends() {
+    let rt = Runtime::builder().worker_threads(2).build().unwrap();
+    let (tx, mut rx) = mpsc::channel::<u32>(2);
+    let (utx, mut urx) = mpsc::unbounded_channel::<u32>();
+    let consumer = std::thread::spawn(move || {
+        let mut bounded = Vec::new();
+        while let Some(v) = rx.blocking_recv() {
+            bounded.push(v);
+        }
+        let mut unbounded = Vec::new();
+        while let Some(v) = urx.blocking_recv() {
+            unbounded.push(v);
+        }
+        (bounded, unbounded)
+    });
+    rt.block_on(async move {
+        for i in 0..50 {
+            tx.send(i).await.unwrap();
+            utx.send(i).unwrap();
+            rusty_tokio::time::sleep(Duration::from_micros(50)).await;
+        }
+    });
+    let (bounded, unbounded) = consumer.join().unwrap();
+    assert_eq!(bounded, (0..50).collect::<Vec<_>>());
+    assert_eq!(unbounded, (0..50).collect::<Vec<_>>());
+}
