@@ -23,7 +23,13 @@ fn main() {
 AES = "use rusty_aead::{" + ", ".join(AES_API) + "};\n" + COMMON
 
 
-def check(directory, dependency, source, features=(), missing=()):
+def check(
+    directory: Path,
+    dependency: str,
+    source: str,
+    features: tuple[str, ...] = (),
+    missing: tuple[str, ...] = (),
+) -> None:
     """Require a clean compile or the specific missing public API diagnostics."""
     (directory / "Cargo.toml").write_text(f'''[package]
 name = "aead-feature-consumer"
@@ -42,7 +48,7 @@ optional = true
     command = ["cargo", "check", "--manifest-path", str(directory / "Cargo.toml")]
     if features:
         command += ["--features", ",".join(features)]
-    done = subprocess.run(command, text=True, capture_output=True)
+    done = subprocess.run(command, cwd=directory, text=True, capture_output=True)
     if missing:
         assert done.returncode != 0, "AES API unexpectedly available without opt-in"
         for name in missing:
