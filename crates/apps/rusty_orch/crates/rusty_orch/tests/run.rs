@@ -669,3 +669,21 @@ fn a_cancel_the_host_could_not_finish_leaves_the_goal_to_cancel_again() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_cancel_reaches_a_card_whose_handle_never_reached_the_board() {
+    let dir = scratch("cancel_unrecorded");
+    let card = Card::default();
+    let host = orch_dispatch::fake::FakeHost::default();
+    let mut store = Store::open(&dir).expect("open");
+    // No hosted run checkpointed a handle, yet an open may have started work.
+    let s = cancelled(&mut store, &card, &host).expect("cancel");
+    assert_eq!(s.ended, Ended::Cancelled);
+    assert_eq!(
+        host.0.borrow().cancels.len(),
+        1,
+        "the Implement card was cancelled"
+    );
+    assert_eq!(host.0.borrow().opens, 0, "nothing was opened to do it");
+    let _ = std::fs::remove_dir_all(&dir);
+}

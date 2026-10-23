@@ -379,8 +379,9 @@ pub fn execute_hosted<R: AgentRunner>(
 /// Cancel every hosted task of the goal, then retire its assignment.
 ///
 /// The run first takes the assignment over, so every earlier holder is
-/// fenced out before anything is cancelled. Each host returns only after the
-/// task's processes are reaped. Only then is the card's execution reconciled
+/// fenced out before anything is cancelled. Each Implement card's host
+/// execution is cancelled whether or not its handle reached the board, and
+/// each host returns only after the execution's processes are gone. Only then is the card's execution reconciled
 /// as cancelled and the assignment retired, durably, so no later run can
 /// resume the goal. Every step is idempotent: a cancel interrupted at any
 /// point is completed by running it again, and one that already finished
@@ -410,11 +411,14 @@ fn cancel(
         return Ok(Ended::Cancelled);
     }
     let fence = take_over(resume, goal, goal_id, hosting.card.as_mut())?;
-    for task in plan.tasks() {
-        let Some(handle) = orch_dispatch::hosted_handle(board, task.id()) else {
-            continue;
-        };
-        match hosting.host.cancel(&handle, &reason, &fence) {
+    // Every card a host would serve, handle or not: an open can start work
+    // before its handle is checkpointed, and the host finds that work itself.
+    let hosted = plan
+        .tasks()
+        .iter()
+        .filter(|t| t.spec().role == orch_core::task::Role::Implement);
+    for task in hosted {
+        match hosting.host.cancel(task, board, &reason, &fence) {
             Ok(Progress::Cancelled { .. } | Progress::Closed { .. }) => {}
             Ok(_) => {
                 return Err(RunError::Lease(format!(

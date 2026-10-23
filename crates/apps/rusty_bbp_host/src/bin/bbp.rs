@@ -11,6 +11,7 @@
 //!                                          reject, rerun, resume and cancel need --rev, the card revision you saw
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp mod-health --dir D --task T [--check yes | --reset yes --rev N]  replayed launch-loop health
+//! bbp quiesce --dir D --task T             for an ended task: `true` once no moderator, runner or harness group of it runs; kills groups a dead moderator left
 //! bbp profiles rust-lld --sysroot PATH     pre-task, bounded Rust/LLD test profile
 //! bbp metrics --dir D --task T                             concurrency metrics of the task's log, as JSON
 //! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
@@ -119,6 +120,9 @@ fn run() -> Result<String, String> {
         ("why", Some(t)) => TaskId(t.clone()),
         _ => TaskId(a.flag_or_env("task", "BBP_TASK")?),
     };
+    if sub == "quiesce" {
+        return moderator::quiesce(&dir, &task).map(|quiet| quiet.to_string());
+    }
     if sub == "mod-health" {
         if a.flags.get("reset").is_some_and(|value| value == "yes") {
             let rev = a

@@ -22,7 +22,7 @@
 
 use crate::confine::{HarnessSandbox, Turn};
 use crate::runner::Confinement;
-use crate::slots::{Class, Slot};
+use crate::slots::{self, Class, Slot};
 use crate::{now, open_driver};
 use rusty_bbp::*;
 use rusty_serde::{Deserialize, Serialize};
@@ -255,6 +255,107 @@ pub fn lock_path(dir: &Path, task: &TaskId) -> PathBuf {
     task_dir(dir, "mod", task).with_extension("lock")
 }
 
+/// Where the moderator records each harness group it starts: one file per
+/// group, named by its holder's pid and holding the holder's start time.
+fn groups_dir(dir: &Path, task: &TaskId) -> PathBuf {
+    task_dir(dir, "mod", task).with_extension("groups")
+}
+
+/// Record the group `holder` leads before anyone joins it, so a group
+/// outlives its record only if this moderator dies: never unrecorded.
+/// Only Linux can tell a holder from a later process with its pid, so only
+/// there are groups recorded (and [`quiesce`] supported).
+fn record_group(dir: &Path, task: &TaskId, holder: u32) -> Result<Option<PathBuf>, String> {
+    if !cfg!(target_os = "linux") {
+        return Ok(None);
+    }
+    let start = slots::process_start(holder).ok_or("slot holder exited at start")?;
+    let groups = groups_dir(dir, task);
+    std::fs::create_dir_all(&groups).map_err(|e| e.to_string())?;
+    let path = groups.join(holder.to_string());
+    rusty_atomic_file::write(&path, start.to_string().as_bytes())
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Some(path))
+}
+
+/// Whether nothing `task`'s moderators started still runs: no moderator,
+/// no runner, and no recorded harness group whose holder lives. A holder
+/// lives exactly while its group has members, and its pid names only that
+/// group while it does, so the groups of a moderator that died are killed
+/// here. Only an ended task is quiesced: a live one is its moderator's to
+/// resume.
+///
+/// # Errors
+/// When the task is not closed or cancelled, or its state cannot be read.
+pub fn quiesce(dir: &Path, task: &TaskId) -> Result<bool, String> {
+    if !cfg!(target_os = "linux") {
+        return Err("quiesce is supported on Linux only".into());
+    }
+    if !open_driver(dir, task)?.state.state.terminal() {
+        return Err(format!("task {} has not ended", task.0));
+    }
+    // Held, so no moderator starts a group while the records are read.
+    let Some(_lock) = try_lock(&lock_path(dir, task))? else {
+        return Ok(false);
+    };
+    let mut quiet = try_lock(&crate::runner::lock_path(dir, task))?.is_some();
+    let groups = groups_dir(dir, task);
+    let entries = match std::fs::read_dir(&groups) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(quiet),
+        Err(e) => return Err(format!("{}: {e}", groups.display())),
+    };
+    for entry in entries {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        let pid: u32 = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| format!("unexpected group record {}", path.display()))?;
+        let recorded = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        if slots::process_start(pid).map(|s| s.to_string()) != Some(recorded) {
+            std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            continue;
+        }
+        quiet = false;
+        kill_group(pid)?;
+    }
+    Ok(quiet)
+}
+
+/// `SIGKILL` the group a live holder leads, the holder included.
+#[cfg(target_os = "linux")]
+fn kill_group(holder: u32) -> Result<(), String> {
+    let group = i32::try_from(holder).map_err(|_| "pid out of range".to_owned())?;
+    match rusty_libc::process::killpg(group, rusty_libc::signal::SIGKILL) {
+        Ok(()) | Err(rusty_libc::Errno::ESRCH) => Ok(()),
+        Err(e) => Err(format!("killpg({group}): {e:?}")),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_group(_holder: u32) -> Result<(), String> {
+    Err("harness groups are only cleaned up on Linux".into())
+}
+
+/// The exclusive lock on `path` if no one else holds it, `None` if someone does.
+fn try_lock(path: &Path) -> Result<Option<File>, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
 /// Take the moderator lock, or say who else would have to let go.
 fn lock(dir: &Path, task: &TaskId) -> Result<File, String> {
     let path = lock_path(dir, task);
@@ -325,6 +426,8 @@ struct Harness {
     /// and keeps the slot while the group has another member, should this
     /// moderator die first.
     hold: Option<Child>,
+    /// The group's record, removed once the group is reaped.
+    record: Option<PathBuf>,
 }
 
 /// Every process the loop started. Dropping it kills the harness and its
@@ -366,6 +469,12 @@ impl Harness {
         // the next turn of the same number, so failing to remove it is not fatal.
         if let Some(Err(e)) = self.confined.as_ref().map(Turn::finish) {
             eprintln!("bbp mod: turn {} worktree not removed: {e}", self.turn.0);
+        }
+        // A record left behind names a dead holder, which quiesce discards.
+        if let (Ok(()), Some(record)) = (&hold, self.record.take()) {
+            if let Err(e) = std::fs::remove_file(&record) {
+                eprintln!("bbp mod: group record {} kept: {e}", record.display());
+            }
         }
         harness.and(broker).and(hold)
     }
@@ -724,10 +833,25 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                 .get(&role)
                 .cloned()
                 .ok_or_else(|| format!("{role} has no principal"))?;
-            // The holder is up before the harness, so the slot never rests on
-            // this moderator alone.
-            let mut hold = slot.as_ref().map(|s| s.holder(&cfg.bbp)).transpose()?;
+            // The holder is up, and its group recorded, before the harness, so
+            // neither the slot nor the group's cleanup ever rests on this
+            // moderator alone.
+            // On Linux every harness has a holder, so its group is recorded
+            // with or without admission.
+            let mut hold = (slot.is_some() || cfg!(target_os = "linux"))
+                .then(|| slots::holder(&cfg.bbp, slot.as_ref()))
+                .transpose()?;
             let group = hold.as_ref().map(Child::id);
+            let record = match group.map(|g| record_group(&cfg.dir, &cfg.task, g)) {
+                Some(Err(e)) => {
+                    if let Some(Err(k)) = hold.as_mut().map(|h| kill_tree(h, h.id())) {
+                        eprintln!("bbp mod: slot holder for turn {} not stopped: {k}", turn.0);
+                    }
+                    return Err(e);
+                }
+                Some(Ok(record)) => record,
+                None => None,
+            };
             let facts = crate::launchers::Facts::of(&d.state, &principal, turn);
             let launched = match spawn(cfg, l, &role, &principal, turn, stdin, group, &facts) {
                 Ok(launched) => launched,
@@ -750,6 +874,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                 ended: None,
                 _slot: slot,
                 hold,
+                record,
             });
         }
         let children: Vec<u32> = sup

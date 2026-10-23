@@ -439,3 +439,83 @@ fn a_slot_holder_covers_its_harness_from_the_start() {
     wait_until("the released slot", Duration::from_secs(5), free);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// What `bbp quiesce` says for `t`: `Ok(true)` once nothing of it runs.
+fn quiesce(t: &Task) -> Result<bool, String> {
+    let out = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .arg("quiesce")
+        .arg("--dir")
+        .arg(&t.dir)
+        .args(["--task", &t.task.0])
+        .output()
+        .expect("bbp quiesce");
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    Ok(text == "true")
+}
+
+/// A moderator that dies leaves its harness running, holding its slot. Once
+/// the task has ended, `bbp quiesce` kills that orphan's whole group, so its
+/// answer `true` means the harness is gone and the slot is free, with no
+/// moderator left to say so.
+#[test]
+fn quiesce_kills_the_groups_a_dead_moderator_left_and_only_then_says_true() {
+    use rusty_bbp_host::slots::{Capacity, Class, Slots};
+    let root = tempdir("quiesce");
+    let (probe, slots, go) = (root.join("probe"), root.join("slots"), root.join("go"));
+    std::fs::create_dir_all(&probe).expect("mkdir");
+    let t = task(
+        &root,
+        "T1",
+        &probe,
+        Some(&go),
+        "echo $$ > \"$BBP_DIR/harness.pid\"\n",
+    );
+    let _release = Release(go.clone());
+    let mut first = moderator(&t, &slots, 1);
+    let pid = t.dir.join("harness.pid");
+    wait_until("the harness", Duration::from_secs(20), || pid.exists());
+    first.kill().expect("kill");
+    first.wait().expect("reap");
+    let harness = std::fs::read_to_string(&pid)
+        .expect("pid")
+        .trim()
+        .to_owned();
+    // A zombie has exited; it waits only for whoever adopted it to reap it.
+    let alive = || {
+        std::fs::read_to_string(format!("/proc/{harness}/stat")).is_ok_and(|stat| {
+            !stat
+                .rsplit_once(") ")
+                .is_some_and(|(_, r)| r.starts_with('Z'))
+        })
+    };
+    assert!(alive(), "the orphan outlives its moderator");
+
+    assert!(quiesce(&t).unwrap_err().contains("has not ended"));
+    let rev = admin::card(&t.dir, &t.task).expect("card").rev;
+    human::perform(&t.dir, &t.task, "cancel", &["withdrawn"], Some(rev)).expect("cancel");
+    assert_eq!(quiesce(&t), Ok(false), "the orphan is still running");
+    wait_until("quiesced", Duration::from_secs(10), || {
+        quiesce(&t) == Ok(true)
+    });
+    assert!(!alive(), "the orphan was killed");
+    let one = Capacity {
+        agents: 1,
+        validators: 1,
+    };
+    let held = Slots::open(&slots, one).expect("slots");
+    assert!(
+        held.try_acquire(Class::Agent).expect("acquire").is_some(),
+        "the slot is free"
+    );
+    let records = std::fs::read_dir(t.dir.join("mod"))
+        .expect("mod dir")
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "groups"))
+        .flat_map(|e| std::fs::read_dir(e.path()).expect("groups").flatten())
+        .count();
+    assert_eq!(records, 0, "no record outlives its group");
+    let _ = std::fs::remove_dir_all(&root);
+}

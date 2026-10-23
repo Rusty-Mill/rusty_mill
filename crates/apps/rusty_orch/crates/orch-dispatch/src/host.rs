@@ -65,12 +65,16 @@ pub trait TaskHost: std::fmt::Debug {
         answer: &Text,
         fence: &Fence,
     ) -> Result<Relayed, ClassifiedError>;
-    /// Cancel the hosted task and return only once nothing it started still
-    /// runs, so its capacity is free. Idempotent: a task that already ended
-    /// returns its terminal progress unchanged, which may be `Closed`.
+    /// Cancel the hosted execution of `task`, and return only once nothing
+    /// it started still runs, so its capacity is free. The host finds the
+    /// execution itself, without a recorded [`HostHandle`]: an open may have
+    /// started work before its handle reached the board. An execution never
+    /// opened is left unable to start. Idempotent: an execution that already
+    /// ended returns its terminal progress unchanged, which may be `Closed`.
     fn cancel(
         &mut self,
-        handle: &HostHandle,
+        task: &Task,
+        board: &Board,
         reason: &Text,
         fence: &Fence,
     ) -> Result<Progress, ClassifiedError>;

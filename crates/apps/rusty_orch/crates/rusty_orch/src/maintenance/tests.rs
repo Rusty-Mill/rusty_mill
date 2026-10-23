@@ -237,7 +237,8 @@ impl TaskHost for Host {
     }
     fn cancel(
         &mut self,
-        _: &HostHandle,
+        _: &Task,
+        _: &Board,
         _: &Text,
         _: &Fence,
     ) -> std::result::Result<Progress, ClassifiedError> {

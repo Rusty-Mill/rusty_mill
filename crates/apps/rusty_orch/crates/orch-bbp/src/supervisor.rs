@@ -13,9 +13,6 @@ pub enum Supervised {
 /// Long-lived process seam, separate from finite CommandRunner invocations.
 pub trait Supervisor: std::fmt::Debug {
     fn ensure(&mut self, config: &Config, task: &str, agents: &Path) -> Result<Supervised, String>;
-    /// Whether the task's moderator still holds its lock. BBP releases it
-    /// only after it has reaped every harness and runner it started.
-    fn running(&self, config: &Config, task: &str) -> Result<bool, String>;
 }
 /// Supervisor for supported Linux sandboxed workloads. Never falls back to none.
 #[derive(Debug, Default)]
@@ -121,11 +118,6 @@ impl Supervisor for StdSupervisor {
         rusty_atomic_file::write(&dir.join(format!("{key}.pid")), pid.to_string().as_bytes())
             .map_err(|e| e.to_string())?;
         Ok(Supervised::Started)
-    }
-
-    fn running(&self, config: &Config, task: &str) -> Result<bool, String> {
-        let key = rusty_bbp::Sha256::of(task.as_bytes()).hex();
-        locked(&config.dir.join("mod"), &key)
     }
 }
 

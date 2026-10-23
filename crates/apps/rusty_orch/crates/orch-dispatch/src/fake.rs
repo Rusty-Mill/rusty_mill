@@ -147,7 +147,8 @@ impl crate::TaskHost for FakeHost {
     }
     fn cancel(
         &mut self,
-        _handle: &crate::HostHandle,
+        _task: &orch_core::task::Task,
+        _board: &orch_core::board::Board,
         reason: &orch_core::Text,
         fence: &crate::Fence,
     ) -> Result<crate::Progress, crate::ClassifiedError> {

@@ -58,9 +58,12 @@ identity come from `RUSTY_ORCH_BOARD_TOKEN`, `RUSTY_ORCH_BOARD_ACTOR` and
 `RUSTY_ORCH_BOARD_ROLE` (a role with Build); plain `http://` only.
 
 Add `--cancel <reason>` to stop a hosted goal. The run takes the goal's
-assignment over, so earlier holders are fenced out, cancels each hosted BBP task,
-and returns only when every process the task started has been reaped and its
-slot is free. It then marks the card's execution cancelled and retires the
+assignment over, so earlier holders are fenced out, and cancels the BBP task of
+every Implement card, found from its id whether or not its handle was
+checkpointed (one never opened is opened already cancelled, so it can never
+start). It returns only when `bbp quiesce` finds none of the task's moderator,
+runner or harness groups running, even if the moderator died, and its slot is
+free. It then marks the card's execution cancelled and retires the
 assignment, so a later `run` on that state is refused. Running the cancel again
 finishes an interrupted one and does nothing after a complete one. Set the BBP
 configuration's `end_grace_secs` to bound how long a harness may run after its
