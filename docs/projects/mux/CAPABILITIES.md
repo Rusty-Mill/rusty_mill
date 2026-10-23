@@ -10,13 +10,14 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 |---|---|---|
 | VT parser + grid (`rusty_term_core`) | done | `crates/libs/ui/rusty_term/core/src/` |
 | Headless core, no tokio | done | #851 |
-| Fidelity gate (18-case corpus) | done | #857; `core/tests/fidelity.rs`; 13/18 match the libghostty oracle (`docs/research/rusty-term-perf/FIDELITY.md`) |
+| Fidelity gate (18-case corpus) | done | #857; `core/tests/fidelity.rs`; 15/18 match the libghostty oracle, the other 3 are the deliberate DECCOLM divergence (`docs/research/rusty-term-perf/FIDELITY.md`) |
 | BCE erase | done | #862 |
-| Instruction-count benchmark gate | in-progress | #872 (open) |
-| Per-code-point widths, mode 2027 | not-started | #855 |
-| DECCOLM side effects | not-started | #856 |
-| Ring-buffer screen + recycled scrollback rows | not-started | backlog top-5 #2 |
-| Snapshot serializer | not-started | backlog top-5 #5 |
+| Instruction-count benchmark gate | done | #872 |
+| Per-code-point widths, mode 2027 | done | #894 (closes #855) |
+| DECCOLM side effects, never a resize | done | #856 |
+| Ring-buffer screen + recycled scrollback rows | in-progress | #930 merged (memmove 4.6%); MB/s floors not met, #889 stays open (DECISIONS) |
+| Printable-ASCII fast path | done | #936 (backlog #4) |
+| Snapshot serializer | done | #939: 2.09 MB for 200x50 + 10k lines (target ≤ 7.8 MB); encode 9.3-14.3 ms (target ≤ 11.2 ms, not met reliably) |
 
 ## Capability matrix
 
