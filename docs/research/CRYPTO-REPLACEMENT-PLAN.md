@@ -12,10 +12,10 @@ key exchange, signing, or randomness (section 0, "Scope limits"). **Consumer sta
 consumer, `rusty_tls` file, gate or default was changed; nothing here is used by anything.
 Work was frozen at stage 4 by owner decision; the freeze has since been reopened for gaps 1 and 2 (done) and,
 on 2026-10-10, for AES-GCM (gap 3); on 2026-10-22 the `rusty_tls` seam (gap 4) was reopened for the client role only, by
-the implementer's transcription of the owner's instruction, not yet restated from the owner's GitHub account; signing
+the implementer's transcription of the owner's instruction; signing
 (gap 5) stays closed (section 0). Everything marked "decision" is the owner's. Section 10's draft
-was accepted on 2026-10-22 as ADR-0005, for the client role only (section 0; the implementer's
-transcription, pending the owner's restatement on GitHub). Vocabulary used below: "implemented" means code and tests
+was accepted on 2026-10-22 as ADR-0005, for the client role only (section 0; confirmed by the
+owner on GitHub, #868 comment 6343682194). Vocabulary used below: "implemented" means code and tests
 exist; it never means reviewed or approved for TLS use.
 
 ## 0. Progress and owner decisions (updated as stages land)
@@ -65,17 +65,18 @@ next steps; the implementer's transcription, **not yet restated from the owner's
   removed. This chose the layout; it did not answer whether about 65 to 80 MB/s bulk is worth finishing, so that stays open.
 
 **Owner decision (2026-10-22): gap 4 reopened, client role only.** Given directly in the implementing session, in answer
-to `TLS-NATIVE-CRYPTO-SEAM.md` decision D1: "reopen gap 4, client role only". This is the implementer's transcription, not yet
-restated from the owner's GitHub account. It reopens the `rusty_tls` backend seam (section 13.1, gap 4) for the **client
+to `TLS-NATIVE-CRYPTO-SEAM.md` decision D1: "reopen gap 4, client role only". This is the implementer's transcription. No separate
+GitHub restatement of D1 is recorded; the owner's GitHub confirmation of D2 to D4 (below) builds on it. It reopens the `rusty_tls` backend seam (section 13.1, gap 4) for the **client
 role** as scoped in `TLS-NATIVE-CRYPTO-SEAM.md`. It does **not** reopen signing (gap 5), the server role or client
 certificates, and it changes no default: the engine keeps `ring` unless the new cfg is set. Still open, and each the
 owner's: the ADR that ADR-0002 section 6 requires before the engine's primitives change (seam note D2, the section 10
 draft); signing under the native cfg (D3); the suite order with portable AES (D4); and AES-GCM's review status (D5).
+D2 to D4 were decided later the same day (below); D5 is still open.
 
 **Owner decisions (2026-10-22): ADR-0005 accepted; signing compiled out; ChaCha20 first.** Given directly
 in the implementing session as "Approved", in answer to the recommendations for D2, D3 and D4 in
-`TLS-NATIVE-CRYPTO-SEAM.md`. This is the implementer's transcription, not yet restated from the owner's
-GitHub account. Section 10's draft is accepted as ADR-0005 for the client role only. Under the native
+`TLS-NATIVE-CRYPTO-SEAM.md`. First recorded as the implementer's transcription; **confirmed directly by the owner** in reply to an
+explicit list, recorded on #868 (comment 6343682194, 2026-10-22). Section 10's draft is accepted as ADR-0005 for the client role only. Under the native
 backend, signing, the servers, tickets and client certificates are compiled out, and ChaCha20-Poly1305
 is offered first. D5 (AES-GCM's review status) is still open and must be settled before the native
 backend merges.
@@ -83,8 +84,19 @@ backend merges.
 **Owner decisions (2026-10-22, later): ADR-0002 §1 exception; BoGo deferral.** Asked whether the native
 path should keep requiring `handrolled-engine` (which puts `ring` back as a direct dependency) or take a
 narrow exception to ADR-0002 §1, the owner chose the exception ("(a)"). The owner also agreed to defer BoGo
-on the native backend until a client-only shim exists. Both are recorded in ADR-0005 and are the
-implementer's transcription, not yet restated from the owner's GitHub account.
+on the native backend until a client-only shim exists. Both are recorded in ADR-0005. **Confirmed directly by
+the owner** with D2 to D4 (#868 comment 6343682194), and restated on #871 on 2026-10-23 (comment 6354851710).
+
+**AES-GCM review record, for D5 (2026-10-23).** AES-GCM has an **automated** source review with a defined
+scope (#871 comments 6354851710 and 6354987869 classify it). It is not a human audit by the owner. On #651 it
+reviewed `0341df4c` (comment 6150120879), then re-reviewed `70139bb3` (comment 6150642627), which cleared
+the reported source defects and found no new blocking defect. That re-review states its limits:
+it is "source clearance of the bounded corrections, not acceptance of a passing constant-time evidence record or
+production adoption". It also names what stays open: no full evidence record exists for that head, CI does not run
+the statistical timing series, the AES exports remain unconditional with gating unresolved, and best-effort wiping
+cannot establish erasure of every temporary. The two doc items it named are corrected in `73dd7629`. The AES source
+is otherwise unchanged since `70139bb3`. D5 itself, whether this counts as gap 3's review for wiring, is still the
+owner's decision. No human review of AES-GCM is recorded. Section 11b sets this beside the records for the other primitives.
 
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
@@ -675,7 +687,7 @@ the honest current position.
 | X25519 boundary tests: decoding, clamping, low-order inputs, all-zero shared-secret rejection (RFC 8446 requires it). | Top-bit masking, non-canonical `u`, clamping mutants, 31 all-zero Wycheproof cases rejected by `agree`, matches `ring` on all 518 public keys. Key generation needs a CSPRNG and is not part of this crate. |
 | Pinned evidence: implementation commit, vector versions, executed and skipped case counts, reproducible commands, review findings. | `docs/research/crypto-evidence/collect.sh` and `EVIDENCE-2026-10-09.txt`. **Review findings: none exist yet.** |
 | `ring` usage inventory including randomness and helper APIs. | Section 2.3. |
-| Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Verified by the owner (baileyrd), 2026-10-09 (23:44 to 23:46 UTC; PR #576 comment 6091204395, relayed by the reviewer and confirmed accurate by the owner in the implementing session): the independent review is verified and covers both #572 and #576, including ECDH and `rusty_rand`.** The reviewer was the owner, who saw both Ed25519 behaviours (small-order keys rejected, then accepted as `ring` does) and decided to accept. **Still not recorded here:** the reviewed commit, the method and any findings (the implementer did not see them), and whether the review covers the #540 components listed in this row (Montgomery-core invariants in the row above, the AEAD, the HMAC/HKDF paths), so this row is **not** evidence for those and the stage rows keep "review pending". One reviewer, who also owns the project. Plan decision D4 (a second reviewer for ECDH and AES) is the owner's call and unchanged. |
+| Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Verified by the owner (baileyrd), 2026-10-09 (23:44 to 23:46 UTC; PR #576 comment 6091204395, relayed by the reviewer and confirmed accurate by the owner in the implementing session): the independent review is verified and covers both #572 and #576, including ECDH and `rusty_rand`.** The reviewer was the owner, who saw both Ed25519 behaviours (small-order keys rejected, then accepted as `ring` does) and decided to accept. **Still not recorded here:** the reviewed commit, the method and any findings (the implementer did not see them), and whether the review covers the #540 components listed in this row (Montgomery-core invariants in the row above, the AEAD, the HMAC/HKDF paths), so this row is **not** evidence for those and the stage rows keep "review pending". One reviewer, who also owns the project. Plan decision D4 (a second reviewer for ECDH and AES) is the owner's call and unchanged. Section 11b re-checks this row, component by component, for the native client backend (2026-10-23). |
 
 ## 11a. Independent review, round 1 (Codex, PR #540, reviewed commit `25fcc18`)
 
@@ -745,10 +757,53 @@ self-tests, and so covers the final collector. Later commits are merges of `main
 none of `crates/foundation`, `docs/research` or the CI scripts, plus the record itself.
 It is still evidence, not proof: one container VM, x86-64, 40 repetitions per series.
 
+## 11b. Integration re-check for the native client backend (gap 4, #871, 2026-10-23)
+
+This re-checks the section 11 table for the primitives that `rusty_tls`'s native backend
+(`src/handrolled/crypto/native.rs`) actually calls, as the seam note's section 4 requires. It is a
+re-check against the existing records, not a new review. "Human review" here means a review whose
+reviewer, scope and conclusion are on record. Review comments posted from the owner's account count as automated
+unless a record says a person performed them, as the owner directed for #651 and #871 (#871 comment 6354987869).
+Automated reviews add evidence but are never relabelled as the human review the plan requires.
+
+**What the backend uses.** `rusty_sha2` (SHA-256/384, `HmacSha256`/`HmacSha384`; HKDF and the TLS 1.2
+PRF stay in `rusty_tls`, built on HMAC), `rusty_aead` (`ChaCha20Poly1305`, `Aes128Gcm`, `Aes256Gcm`),
+`rusty_pk` (`x25519`, `ecdh` P-256/P-384, and `rsa`/`ecdsa`/`ed25519` verification), `rusty_rand::fill`,
+and `rusty_crypto_key::{constant_time_eq, wipe}`.
+
+**Source changes since each record.** `rusty_sha2`, the ChaCha20-Poly1305 code, `x25519.rs` and
+`field.rs` are unchanged since #540's last reviewed head `e3266f2e`. `mont.rs` changed once, in
+`e41f267c` (#576): `Modulus::add` became `inline(never)`, with no arithmetic change. `weierstrass.rs`
+changed only field visibility (`da929dfa`, #576). The AES-GCM source
+is unchanged since `70139bb3`, except for `73dd7629`, which corrects two doc comments named in the
+re-review.
+
+| Component | Records | Human review on record? |
+| --- | --- | --- |
+| SHA-2, HMAC (HKDF key paths) | #540: three Codex rounds (section 11a) and source follow-ups at `112a53cb` to `d9baf8b3`. The post-merge comment on #540 (6083596442) says: "Independent human crypto review is still not recorded". | **No.** |
+| ChaCha20-Poly1305 | #540, as above. | **No.** |
+| X25519 | #540, as above. | **No.** |
+| Shared Montgomery core (`mont.rs`, `field.rs`) | #540, as above, plus the boundary tests in section 11. ECDH (#576) runs on this core, and the review of #576 below covers ECDH, but no record says it covers the core's invariants. | **No.** Section 11 still holds: "A human review of the invariants has not happened." |
+| ECDH P-256/P-384, `rusty_rand` | Owner-verified independent review of #572 and #576 (2026-10-09; #576 comment 6091204395). The reviewed commit, method and findings are not recorded. | **Yes**, with that scope. |
+| Signature verification (`rsa`, `ecdsa`, `ed25519`) | #540, as above. The Ed25519 small-order policy was decided by the owner (#572). | **No**, beyond the Ed25519 policy decision. This code handles public data only. |
+| AES-128/256-GCM | #651: source review of `0341df4c` (comment 6150120879), then a re-review of `70139bb3` (comment 6150642627) that cleared the reported source defects and found no new blocking defect. That re-review states its own limits: it is "source clearance of the bounded corrections, not acceptance of a passing constant-time evidence record or production adoption". No full evidence record exists for that head. CI does not run the statistical timing series. The AES types are still exported unconditionally. Wiping is best-effort. | **No.** The record is an automated, bounded source review: it clears the corrections' source defects only, and is not full timing evidence or production certification (#871 comment 6354987869). D5 still asks whether this counts as gap 3's review. |
+| `rusty_crypto_key::{constant_time_eq, wipe}` | `wipe` was in the scope of #540's automated reviews. `constant_time_eq` (the native HMAC tag check) has no review record. | **No.** |
+| The seam itself (`handrolled/crypto/{mod,ring,native}.rs`, call sites, the gates) | Author self-review (#865, #871). Independent **automated** source reviews of #871: `d7e74eb1` (comment 6339638133; found the X25519 unwind-wipe gap, fixed in `7192f26a`) and `7192f26a` (comment 6339760776; no new blocking finding), and a check that `99a08e51` is byte-identical in crypto code and tests to `d86de0a1` (comment 6354987869). Their stated limits: source passes, no local tests, no comprehensive audit or forensic-erasure claim, and they do not discharge D5 or the primitive review requirements. #871 also has the seam differential, the client-only CI variant and OpenSSL interop. | **No.** |
+
+**Still unreviewed, precisely:**
+- **#540's secret-handling code at `e3266f2e`:** the HMAC key paths, ChaCha20-Poly1305, X25519 and the Montgomery-core invariants. The owner accepted their own review on 2026-10-10, but that statement gave no scope, so it does not close these rows. If the owner states on GitHub that their review covered these components, at that commit, the rows close.
+- **The helpers** `rusty_crypto_key::constant_time_eq` and `wipe`.
+- **The #871 seam code.** It has automated reviews only (above).
+- **AES-GCM.** It has an automated, bounded source review only. Also missing: a full constant-time record for the corrected head, the export gating, and the D5 decision itself.
+
+Further automated review can add evidence here, but it cannot stand in for the human review these rows require.
+
 ## 12. What I did not verify
 
 Added after review (current as of the evidence record):
-- No human has reviewed any of the new code; every statement above is the implementer's.
+- No human has reviewed any of the new code; every statement above is the implementer's. *(Superseded in
+  part: an owner-verified review covers ECDH and `rusty_rand` (#572, #576). AES-GCM has an automated, bounded source
+  review only. Section 11b lists what still has no human review on record.)*
 - `ring` parity was established against 0.17.14 only, on the recorded corpus.
 - Constant-time results are single-machine, x86-64, rustc 1.99.0, in a container VM with unknown neighbours, and preliminary; aarch64 was
   never run, and the taint tool is a no-op there (`rusty_ct_check::taint::SUPPORTED`).
@@ -804,7 +859,7 @@ re-derived.
   AES-GCM (2026-10-10, "Unfreeze"); gap 4, client role only (2026-10-22); gap 5 stays closed.
 - **D3 Client-only or also server role** (gap 5). *Decided 2026-10-22:* client role only. Under
   the native backend, signing, the servers and client certificates are compiled out (ADR-0005;
-  the implementer's transcription, pending the owner's restatement on GitHub).
+  confirmed by the owner on GitHub, #868 comment 6343682194).
 - **D4 Review process per stage:** this plan assumes each of gaps 2, 3 and 5 gets the same
   evidence package and an independent review before it is wired; the previous review was by
   the owner alone. A second reviewer for the AES and ECDH secret-handling code is cheap

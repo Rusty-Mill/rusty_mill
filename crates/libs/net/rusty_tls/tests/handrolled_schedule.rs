@@ -23,7 +23,13 @@
 //! for. `the_schedule_is_bound_to_the_transcript` is the test for that, and it
 //! is the one that would survive if everything else here were deleted.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rusty_tls::handrolled::schedule::{
     binder_key, derive_secret, expand_label, finished_key, finished_verify_data, psk_binder,

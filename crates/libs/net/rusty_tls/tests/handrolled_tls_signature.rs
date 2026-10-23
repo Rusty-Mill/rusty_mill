@@ -24,7 +24,13 @@
 //! generate RSA keys, so one 2048-bit key is embedded below. It exists solely
 //! to sign test messages in this file and has never protected anything.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use ring::rand::SystemRandom;
 use ring::signature;
@@ -704,6 +710,7 @@ fn a_key_with_malformed_parameters_is_refused() {
 // Signing — stage 5
 // ---------------------------------------------------------------------------
 
+#[cfg(not(rusty_tls_native_crypto))]
 /// An RSA signing key uses the padding the scheme names, not always the first
 /// one.
 ///
@@ -755,6 +762,7 @@ fn an_rsa_signing_key_uses_the_padding_its_scheme_names() {
     }
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 /// A key signs the bytes it was given and nothing else.
 #[test]
 fn a_signing_key_signs_exactly_what_it_was_handed() {

@@ -17,7 +17,13 @@
 //! ones a round trip cannot reach and an interop test never produces, because a
 //! well-behaved peer never sends them.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+// ring-only suite (ADR-0005): it needs the engine's server or a signing key,
+// and the native backend has neither.
+#![cfg(all(
+    feature = "handrolled-engine",
+    rusty_tls_handrolled,
+    not(rusty_tls_native_crypto)
+))]
 
 use rusty_tls::handrolled::client::CipherSuite;
 use rusty_tls::handrolled::ticket::{TicketContents, TicketError, TicketKey, TicketKeys};

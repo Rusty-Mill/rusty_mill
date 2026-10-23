@@ -17,7 +17,13 @@
 //!   would be easier and much less precise — it is hard to be sure which rule
 //!   a mutated byte actually broke.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rusty_tls::handrolled::der::{DerError, Reader, Tag};
 use rusty_tls::handrolled::x509::{Certificate, Version, X509Error};
