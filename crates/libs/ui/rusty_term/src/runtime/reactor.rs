@@ -67,17 +67,27 @@ enum Wake {
     Output(Option<Vec<u8>>),
 }
 
-/// A PTY master descriptor registered with the reactor that does **not** close
-/// the fd on drop — ownership stays with the `BackendHandle` that produced it,
-/// which closes it. `AsyncFd<FdRef>` only deregisters from the reactor on drop.
+/// Duplicate `fd` into a descriptor this runtime owns (close-on-exec), for
+/// registering with the reactor.
+///
+/// `fd` comes from the safe [`BackendHandle::pty_fd`](crate::backend::BackendHandle::pty_fd),
+/// so nothing guarantees it stays open: a third-party backend may close or
+/// reuse it at any time. Registering the raw number would then poll, read and
+/// write whatever file later took that number. `F_DUPFD_CLOEXEC` is checked
+/// by the kernel (`EBADF` for a closed fd), and the copy it returns is ours
+/// alone, so the `AsyncFd` that owns it stays valid however the backend
+/// handles its own descriptor. The copy shares the open file description, so
+/// `O_NONBLOCK` set on the master applies to it too.
 #[cfg(unix)]
-struct FdRef(RawFd);
-
-#[cfg(unix)]
-impl AsRawFd for FdRef {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0
+fn dup_owned(fd: RawFd) -> std::io::Result<OwnedFd> {
+    // SAFETY: fcntl takes no memory operands; an invalid `fd` is an `EBADF`
+    // error, not undefined behaviour.
+    let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        return Err(std::io::Error::last_os_error());
     }
+    // SAFETY: `dup` is a fresh descriptor that nothing else refers to.
+    Ok(unsafe { OwnedFd::from_raw_fd(dup) })
 }
 
 /// Put `fd`'s open file description into non-blocking mode, as `AsyncFd`
@@ -168,7 +178,7 @@ fn write_some(fd: RawFd, data: &[u8]) -> std::io::Result<usize> {
 /// short writes. The slave's input queue is finite, so partial writes are
 /// normal.
 #[cfg(unix)]
-async fn write_all(afd: &AsyncFd<FdRef>, data: &[u8]) -> std::io::Result<()> {
+async fn write_all(afd: &AsyncFd<OwnedFd>, data: &[u8]) -> std::io::Result<()> {
     let mut written = 0;
     while written < data.len() {
         let mut guard = afd.writable().await?;
@@ -278,17 +288,15 @@ async fn run_async(
 
     // `reader` (the shell, spawned before the runtime started) owns the master
     // fd + child and reaps it on drop; keeping it in this top-level future
-    // means the child is reaped on every exit path. Independent dups feed the
-    // read, write, and resize paths.
-    let read_handle = reader.try_clone()?;
-    let write_handle = reader.try_clone()?;
+    // means the child is reaped on every exit path. Independent owned dups
+    // feed the read and write paths, and a handle clone the resize path.
+    let read_fd = dup_owned(reader.pty_fd())?;
+    let write_fd = dup_owned(reader.pty_fd())?;
     let mut resizer = reader.try_clone()?;
 
     // One O_NONBLOCK on the shared open file description covers every dup; the
     // resize dup only issues ioctls, so it is unaffected.
     set_nonblocking(reader.pty_fd())?;
-    let read_fd = read_handle.pty_fd();
-    let write_fd = write_handle.pty_fd();
 
     let running = Arc::new(AtomicBool::new(true));
     let frame = Arc::new(Notify::new());
@@ -362,10 +370,7 @@ async fn run_async(
                 running: Arc::clone(&running),
                 frame: Arc::clone(&frame),
             };
-            // Keep the read dup alive for the task; `master` deregisters before
-            // it (declared after, dropped first) so the fd is still open then.
-            let _read_handle = read_handle;
-            let master = match AsyncFd::new(FdRef(read_fd)) {
+            let master = match AsyncFd::new(read_fd) {
                 Ok(m) => m,
                 Err(_) => return,
             };
@@ -411,12 +416,11 @@ async fn run_async(
                 running: Arc::clone(&running),
                 frame: Arc::clone(&frame),
             };
-            let _write_handle = write_handle;
             let tty = match open_tty_nonblocking().and_then(AsyncFd::new) {
                 Ok(t) => t,
                 Err(_) => return,
             };
-            let writer = match AsyncFd::new(FdRef(write_fd)) {
+            let writer = match AsyncFd::new(write_fd) {
                 Ok(w) => w,
                 Err(_) => return,
             };
@@ -785,4 +789,65 @@ async fn run_async(
     // process has certainly signaled, so this returns promptly.
     let code = reader.reap_exit_status().unwrap_or(0);
     Ok(code)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A pipe as two owned fds: (read end, write end).
+    fn pipe() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0; 2];
+        // SAFETY: `fds` is a valid two-element out-array.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: both are fresh descriptors we exclusively own.
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+    }
+
+    #[test]
+    fn dup_owned_survives_the_backend_closing_its_fd() {
+        let (backend_fd, tx) = pipe();
+        let dup = dup_owned(backend_fd.as_raw_fd()).unwrap();
+        assert_ne!(dup.as_raw_fd(), backend_fd.as_raw_fd());
+        // SAFETY: `dup` is a valid fd; F_GETFD only reads its flags.
+        let flags = unsafe { libc::fcntl(dup.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0, "dup must be close-on-exec");
+
+        // The backend closes (and the number may be reused); ours still reads.
+        drop(backend_fd);
+        let _reuse = pipe();
+        assert_eq!(write_some(tx.as_raw_fd(), b"ok").unwrap(), 2);
+        assert_eq!(read_nonblocking(dup.as_raw_fd()).unwrap(), b"ok");
+    }
+
+    #[test]
+    fn dup_owned_rejects_an_invalid_fd() {
+        // EBADF, never a silently registered stranger.
+        assert_eq!(dup_owned(-1).unwrap_err().raw_os_error(), Some(libc::EBADF));
+    }
+
+    /// Registered in the reactor, the owned dup keeps delivering readiness
+    /// and data after the backend's own fd is closed.
+    #[test]
+    fn registered_dup_reads_after_backend_close() {
+        let rt = rusty_tokio::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let (backend_fd, tx) = pipe();
+        set_nonblocking(backend_fd.as_raw_fd()).unwrap();
+        let dup = dup_owned(backend_fd.as_raw_fd()).unwrap();
+        drop(backend_fd);
+        rt.block_on(async move {
+            let afd = AsyncFd::new(dup).unwrap();
+            write_some(tx.as_raw_fd(), b"hi").unwrap();
+            loop {
+                let mut guard = afd.readable().await.unwrap();
+                if let Ok(data) = guard.try_io(|inner| read_nonblocking(inner.as_raw_fd())) {
+                    assert_eq!(data.unwrap(), b"hi");
+                    break;
+                }
+            }
+        });
+    }
 }

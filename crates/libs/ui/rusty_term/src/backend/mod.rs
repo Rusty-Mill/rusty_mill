@@ -63,7 +63,8 @@ pub trait BackendHandle: Send {
 
     /// The PTY master descriptor backing this handle, for the Unix runtime to
     /// drive through a readiness reactor (`rusty_tokio::io::AsyncFd`). The fd stays owned
-    /// by the handle — the caller registers it without closing it. Unix-only; the
+    /// by the handle: the runtime registers its own duplicate, never this number, so
+    /// the handle may close it at any time. Unix-only; the
     /// Windows ConPTY handle has no equivalent pollable fd (its runtime bridges
     /// the blocking [`read`](Self::read)/[`write`](Self::write) instead).
     #[cfg(unix)]
