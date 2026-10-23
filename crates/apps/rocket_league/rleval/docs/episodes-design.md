@@ -23,8 +23,8 @@ field on a kind is additive.
 | Challenge outcomes (won / delayed / lost) | `Challenge` | a per-contest outcome rule; `miss` bits stay |
 | Last-man decisions, necessity | new `Decision` kind | a last-man definition (roles are 1st/2nd man today) |
 | Approach events (controlled / rushed / hesitated) | new `Approach` kind | thresholds validated on the corpus |
-| xG | `Shot` (shipped in assessment #3: strike time, speed, goal-plane `aim`, outcome) | a labelled dataset — the shot log now supplies it |
-| ~~Possession chains~~ | shipped (assessment #8): `Chain`, unit = one team's touches ≤3 s apart (`scoring/src/chains.rs`) | — |
+| xG | `Shot` (shipped: strike time, speed, goal-plane `aim`, outcome) | a labelled dataset — the shot log now supplies it |
+| ~~Possession chains~~ | shipped: `Chain`, unit = one team's touches ≤3 s apart (`scoring/src/chains.rs`) | — |
 | Any tunable threshold | `ScoreConfig` + a version bump | evidence the default is wrong |
 
 ## Design
