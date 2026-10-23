@@ -153,7 +153,7 @@ fn run() -> Result<String, String> {
             };
             let policy = match a.flags.get("policy") {
                 Some(v) => admin::parse_policy(v)?,
-                None => SchedulingPolicy::default(),
+                None => admin::default_policy(live),
             };
             admin::open_task_live(
                 &dir,

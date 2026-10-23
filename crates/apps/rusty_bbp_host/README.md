@@ -24,7 +24,7 @@ An MCP client configuration for Claude Code, one per role, looks like:
 ```text
 bbp mcp                                   serve one turn over stdio
 bbp metrics --dir D --task T              concurrency metrics of a task's log, as JSON (`bbp mod` prints `elapsed_ms`)
-bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE]
+bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N] [--policy turn-based|event-driven]
 bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 bbp card    --dir D --task T              the core card plus the task's scheduling `policy`, as JSON
 bbp why     --dir D (--task T | T) [--turn N]   why each turn was granted, replayed from the log, as JSON
@@ -101,6 +101,8 @@ The harness therefore cannot read `master` or the log, or run `bbp human`. Its M
 With `"checkout": true` the workspace is a git worktree of `--repo-path`, detached at its `HEAD`, made with `rusty_worktree`: every turn of every task shares the repository's object store, which the harness may read (`.git` is a read root) but not write, and each harness may write only its own worktree. It submits its work as diffs through MCP, as before; the worktree is removed when the harness stops. `HOME` and `TMPDIR` are a scratch directory beside the workspace, so a checkout's diff shows only the harness's edits.
 
 The opinionated provider launchers (`codex-bbp-harness`, `claude-bbp-harness`) run confined too. A confined launcher cannot read the task directory, so the moderator writes the turn's launch facts (role capabilities, vendors, live turn, review state, repository path) to `turn-N.facts.json` beside the workspace, which the harness may read but not write. The launcher runs the same checks on them as it does unconfined, and points its provider's `bbp mcp` at the relay. See [provider launchers](docs/provider-launchers.md#confined).
+
+`bbp open` schedules a task with one live turn `event-driven` (the next turn goes to the role an event woke) unless `--policy turn-based` says otherwise; a task with `--live-turns` above 1 is turn-based, the only policy that allows several live turns. The policy is recorded when the task opens and never changes, and logs written before the field existed replay as turn-based. An event-driven log is schema 4, which a build older than the policy field refuses to replay.
 
 `--roster FILE` (on `bbp open`) is a JSON array of roles: id, `turn_order` and the capability fields of the spec's Role table. The roles are the orchestrator's to define; the host passes them on and the core validates and records them. `docs/proving/roster.json` is the four-role example of spec Appendix C.1. An invalid roster is refused with `BadRoster` and no task exists; a roster cannot change afterwards.
 

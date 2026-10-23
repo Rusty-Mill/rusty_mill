@@ -201,12 +201,14 @@ fn one_process_serves_one_turn_and_refuses_the_next() {
     // The card is still free to read.
     let (_, err) = mcp.call("task_card", "{}");
     assert!(!err);
-    // A new process for the new turn works.
-    let new_turn = d.state.turn().expect("turn").id;
-    let mut mcp2 = Mcp::spawn(&dir, "T1", "planner", new_turn.0);
+    // A new process for the new turn works. Event-driven scheduling gives it
+    // to the coder, whom the planner's question woke.
+    let next = d.state.turn().expect("turn");
+    assert_eq!(next.role, Who::Coder.id());
+    let mut mcp2 = Mcp::spawn(&dir, "T1", "coder", next.id.0);
     let (ok, err) = mcp2.call(
         "post",
-        r#"{"op":"p3","kind":"ask","to":["coder"],"body":"fresh turn"}"#,
+        r#"{"op":"p3","kind":"ask","to":["planner"],"body":"fresh turn"}"#,
     );
     assert!(!err, "{ok}");
     let _ = std::fs::remove_dir_all(&dir);
