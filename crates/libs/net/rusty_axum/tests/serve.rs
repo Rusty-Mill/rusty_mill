@@ -38,6 +38,17 @@ fn app() -> Router {
         .route("/echo", post(|body: String| async move { body }))
         .route("/events", get(events))
         .route("/events10", get(events_10))
+        .route("/finite", get(finite))
+}
+
+/// A short stream that ends on its own.
+async fn finite() -> impl IntoResponse {
+    let (tx, rx) = unbounded_channel();
+    for word in ["one", "two"] {
+        tx.send(Ok(Event::default().data(word))).unwrap();
+    }
+    drop(tx);
+    Sse::new(Recv(Some(Box::pin(next(rx)))))
 }
 
 async fn events() -> impl IntoResponse {
@@ -130,6 +141,25 @@ async fn head_gets_headers_without_a_body() {
     // Still usable: the next response starts where expected.
     send(&mut conn, Method::Get, "/health", &[], b"").await;
     assert_eq!(read(&mut conn, &Method::Get).await.1, "ok");
+}
+
+/// HEAD of a streamed GET: no body and no length, since none is known,
+/// and the connection still serves the next request correctly.
+#[rusty_tokio::test]
+async fn head_of_a_stream_has_no_length() {
+    let server = start(ServeOptions::default(), None);
+    let mut conn = connect(&server).await;
+    send(&mut conn, Method::Head, "/finite", &[], b"").await;
+    let (head, body) = read(&mut conn, &Method::Head).await;
+    assert_eq!(head.status.as_u16(), 200);
+    assert_eq!(head.headers.get("content-type"), Some("text/event-stream"));
+    assert_eq!(head.headers.get("content-length"), None);
+    assert_eq!(head.headers.get("transfer-encoding"), None);
+    assert!(body.is_empty());
+    send(&mut conn, Method::Get, "/finite", &[], b"").await;
+    let (head, body) = read(&mut conn, &Method::Get).await;
+    assert_eq!(head.headers.get("transfer-encoding"), Some("chunked"));
+    assert_eq!(body, "data: one\n\ndata: two\n\n");
 }
 
 #[rusty_tokio::test]
