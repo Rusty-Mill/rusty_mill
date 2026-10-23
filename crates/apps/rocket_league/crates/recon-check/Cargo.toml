@@ -2,6 +2,7 @@
 name = "recon-check"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 publish = false
 description = "Phase 2 cross-check: our boxcars reconstruction vs subtr-actor's independent reconstruction of the same replay"

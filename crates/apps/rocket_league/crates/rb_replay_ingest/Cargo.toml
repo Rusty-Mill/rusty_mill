@@ -3,6 +3,7 @@ name = "rb_replay_ingest"
 description = "Replay-file ingestion adapter (RB-VERIFY-001): implements PhysicsStateSource by parsing .replay files via boxcars + subtr-actor."
 version.workspace = true
 edition.workspace = true
+rust-version = "1.88"
 license.workspace = true
 repository = "https://github.com/Rusty-Mill/rusty_mill"
 publish.workspace = true

@@ -81,11 +81,41 @@ and stay in their parent's list (moving a parent moves them). `repeatFlag` is an
 `RRULE` and `reminders` are `TRIGGER:` strings; the server stores both, and the web UI expands
 recurrence and raises reminders as browser notifications.
 
+## MCP
+
+The server also speaks MCP (Streamable HTTP) at `/mcp`, under the same bearer
+tokens as the API, so an agent can read and change your tasks. Tools:
+`list_lists`, `list_tasks`, `due_tasks`, `search_tasks`, `get_task`,
+`add_task` (to the Inbox unless `listId` is given), `update_task`,
+`complete_task`, `reopen_task` and `delete_task` (to the Trash). Each runs
+the matching API route in-process, with its validation and errors. Browsers
+are refused (no `Origin` is accepted). For Claude Code:
+
+```
+claude mcp add --transport http tick http://127.0.0.1:8787/mcp --header "Authorization: Bearer $RUSTY_TICK_TOKEN"
+```
+
+The web UI's assistant (`/api/agent`) offers the same tools, by the same
+names, run in the browser. It is rule-based, not a model: “add buy milk”,
+“find milk”, “what's due today?”, “what's overdue?”, “due this week”,
+“complete buy milk”, “reopen buy milk”, “delete buy milk”, “rename buy milk to
+buy oat milk”, “move buy milk to friday” (also tomorrow, in 3 days, next week,
+2026-11-05, none, with a time: “friday at 3pm”, “tomorrow 9:30”; or a time alone:
+“3pm”, “at 9”, “all day”), “make buy milk high priority” (or medium, low, no), “move buy
+milk to list Work” (or “to the Work list”, “to inbox”), “repeat water plants
+every 2 weeks” (or daily, weekly, monthly, yearly, on weekdays, every monday and
+friday; “make … repeat …”; “stop repeating …”), “remind me about dentist 1 hour
+before” (or 5 minutes, a day before, at the time, on the day; “stop reminding me about
+…”; an all-day task is reminded at 09:00) and “lists”. A task is named by its title; when several
+match, it asks which. Quote a name that contains “to” (“rename "a to b" to c”). An
+unreadable day changes nothing.
+
 ## Layout
 
 `api` (pure router) and `dto` (wire shapes) sit over `service` (rules), which
 sits over `store`/`lists` (the engine). `server` binds `Backend` to
-`rusty_serve`, the shared blocking HTTP server that also serves `web/dist`.
+`rusty_serve`, the shared blocking HTTP server that also serves `web/dist`;
+`mcp` routes `/mcp` beside it and turns tool calls into API requests.
 
 ```
 cargo test -p rusty_tick

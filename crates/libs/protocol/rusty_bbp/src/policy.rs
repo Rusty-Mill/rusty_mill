@@ -7,11 +7,13 @@ use rusty_serde::{Deserialize, Serialize};
 pub enum SchedulingPolicy {
     /// The roles that serve the current state take turns in `turn_order`, the
     /// default holder first (v0.5 behaviour).
-    /// Also what a log written before this field existed replays as.
+    /// Also what a log written before this field existed replays as, which is
+    /// why it stays this enum's `Default`; hosts open new one-turn tasks
+    /// `EventDriven`.
     #[default]
     TurnBased,
     /// The next turn goes to the first role `wake_set` makes selectable, and to
     /// the `TurnBased` choice when none is. Still exactly one live turn, so the
-    /// task must open with `max_live_turns == 1`. Opt-in, per task.
+    /// task must open with `max_live_turns == 1`. Chosen per task at open.
     EventDriven,
 }

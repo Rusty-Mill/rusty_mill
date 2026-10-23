@@ -3,6 +3,7 @@ name = "rb_capture_ingest"
 description = "BakkesMod offline-capture ingestion adapter (RB-VERIFY-002): implements PhysicsStateSource by parsing the JSON-Lines capture format (ADR-0005). BakkesMod-side plugin that writes it not yet built."
 version.workspace = true
 edition.workspace = true
+rust-version = "1.75"
 license.workspace = true
 repository = "https://github.com/Rusty-Mill/rusty_mill"
 publish.workspace = true

@@ -2,6 +2,7 @@
 name = "rusty-meshed-domains"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 description = "The manpower domain: event schemas, domain data products (personnel lifecycle, position management, readiness reporting), scenario builder, and demo generators, ported from meshed.domains."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_mill"

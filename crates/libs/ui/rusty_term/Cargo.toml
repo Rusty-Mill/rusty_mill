@@ -2,6 +2,7 @@
 name = "rusty_term"
 version = "0.1.1"
 edition = "2024"
+rust-version = "1.88"
 default-run = "rusty_term"
 license = "MIT"
 description = "A terminal emulator written from scratch in Rust, with a deliberately small dependency surface."

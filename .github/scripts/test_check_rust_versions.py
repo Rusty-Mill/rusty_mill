@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from check_rust_versions import rust_version_violations, workspace_default_violations
+from check_rust_versions import rust_version_violations, undeclared_members, workspace_default_violations
 
 
 SCRIPT = Path(__file__).with_name("check_rust_versions.py")
@@ -36,6 +36,15 @@ def metadata(members: list[dict], others: list[dict], deps: dict[str, list[dict]
         "packages": packages,
         "resolve": {"nodes": [{"id": p["id"], "deps": deps.get(p["id"], [])} for p in packages]},
     }
+
+
+class UndeclaredMembersTests(unittest.TestCase):
+    def test_lists_only_members_without_a_declaration_sorted(self) -> None:
+        md = metadata([pkg("z"), pkg("a"), pkg("ok", "1.75")], [pkg("dep")], {})
+        self.assertEqual(undeclared_members(md), ["a", "z"])
+
+    def test_all_declared_is_clean(self) -> None:
+        self.assertEqual(undeclared_members(metadata([pkg("a", "1.75")], [], {})), [])
 
 
 class RustVersionViolationsTests(unittest.TestCase):

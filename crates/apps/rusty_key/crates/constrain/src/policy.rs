@@ -350,7 +350,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn blocks_escape_allows_inside() {
         let p = WorkspacePolicy::new("/ws");
         assert!(p
@@ -371,7 +371,7 @@ mod tests {
             .is_err());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn acp_policy_confines_fs_and_terminal_to_workspace() {
         let p = AcpPolicy::new("/ws");
         // In-workspace fs paths pass.
@@ -409,7 +409,7 @@ mod tests {
             .is_ok());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn bashguard_blocks_destructive_allows_safe() {
         let g = BashGuard::new();
         assert!(g
@@ -470,7 +470,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn chain_first_block_wins() {
         let chain = PolicyChain::new().with(Arc::new(WorkspacePolicy::new("/ws")));
         assert!(chain

@@ -2,6 +2,7 @@
 name = "mill-term"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement)"
 

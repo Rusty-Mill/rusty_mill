@@ -2,6 +2,7 @@
 name = "rusty_bbp"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 description = "Blackboard Protocol core: records, rules, lifecycle for multi-vendor agents collaborating on one software task. Pure, no I/O."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rusty-Mill/rusty_mill"

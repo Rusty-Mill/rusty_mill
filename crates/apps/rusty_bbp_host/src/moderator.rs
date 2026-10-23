@@ -728,7 +728,8 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             // this moderator alone.
             let mut hold = slot.as_ref().map(|s| s.holder(&cfg.bbp)).transpose()?;
             let group = hold.as_ref().map(Child::id);
-            let launched = match spawn(cfg, l, &role, &principal, turn, stdin, group) {
+            let facts = crate::launchers::Facts::of(&d.state, &principal, turn);
+            let launched = match spawn(cfg, l, &role, &principal, turn, stdin, group, &facts) {
                 Ok(launched) => launched,
                 Err(e) => {
                     if let Some(Err(k)) = hold.as_mut().map(|h| kill_tree(h, h.id())) {
@@ -979,6 +980,7 @@ struct Launched {
     confined: Option<Turn>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn(
     cfg: &Config,
     l: &Launcher,
@@ -987,12 +989,13 @@ fn spawn(
     turn: TurnId,
     stdin: Stdio,
     group: Option<u32>,
+    facts: &crate::launchers::Facts,
 ) -> Result<Launched, String> {
     let bbp = &cfg.bbp;
     let confined = l
         .sandbox
         .as_ref()
-        .map(|sandbox| Turn::prepare(cfg, sandbox, turn))
+        .map(|sandbox| Turn::prepare(cfg, sandbox, turn, facts))
         .transpose()?;
     let mcp = match &confined {
         Some(t) => t.mcp_config.clone(),
@@ -1045,6 +1048,10 @@ fn spawn(
             env.push((
                 crate::broker::RELAY_ENV.into(),
                 t.pipes.to_string_lossy().into_owned(),
+            ));
+            env.push((
+                crate::launchers::FACTS_ENV.into(),
+                t.facts.to_string_lossy().into_owned(),
             ));
             t.command(cfg, sandbox, program, args, env)?
         }

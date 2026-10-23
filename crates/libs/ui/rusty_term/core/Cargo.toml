@@ -4,6 +4,7 @@ name = "rusty_term_core"
 # `rusty_term(<CARGO_PKG_VERSION>)`, which now reads this crate's version.
 version = "0.1.1"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
 description = "rusty_term's headless VT engine: parser, grid, scrollback and OSC handling, with no async runtime, PTY or renderer."
 repository = "https://github.com/baileyrd/rusty_term"

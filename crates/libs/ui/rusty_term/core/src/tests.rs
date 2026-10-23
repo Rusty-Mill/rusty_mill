@@ -758,9 +758,10 @@ fn combining_mark_attaches_to_wide_glyph_head() {
 
 #[test]
 fn zwj_emoji_sequence_collapses_to_one_glyph() {
-    // 👨 + ZWJ + 💻 (man technologist) is one grapheme occupying two columns,
-    // not three separate emoji spanning six.
-    let g = parse("👨\u{200d}💻".as_bytes(), 80, 24);
+    // With grapheme clustering (DEC mode 2027), 👨 + ZWJ + 💻 (man
+    // technologist) is one grapheme occupying two columns, not three
+    // separate emoji spanning six.
+    let g = parse("\x1b[?2027h👨\u{200d}💻".as_bytes(), 80, 24);
     assert_eq!(glyph(&g, 0, 0), "👨\u{200d}💻");
     assert_ne!(g.cells[1].flags & WIDE_TRAILER, 0);
     assert_eq!(g.cursor, (2, 0));
@@ -768,8 +769,9 @@ fn zwj_emoji_sequence_collapses_to_one_glyph() {
 
 #[test]
 fn emoji_skin_tone_modifier_joins_base_glyph() {
-    // 👍 + medium skin tone is one grapheme; the modifier doesn't get its own cell.
-    let g = parse("👍\u{1f3fd}".as_bytes(), 80, 24);
+    // With mode 2027, 👍 + medium skin tone is one grapheme; the modifier
+    // doesn't get its own cell.
+    let g = parse("\x1b[?2027h👍\u{1f3fd}".as_bytes(), 80, 24);
     assert_eq!(glyph(&g, 0, 0), "👍\u{1f3fd}");
     assert_eq!(g.cursor, (2, 0));
 }
@@ -6180,4 +6182,152 @@ fn bce_does_not_apply_to_resize_fill() {
     let mut g = parse(b"\x1b[42m", 4, 1);
     g.resize(6, 2);
     assert!(g.cells[4..].iter().all(|c| c.bg == DEFAULT_BG));
+}
+
+// ---- Legacy (wcwidth) widths by default; DEC mode 2027 opt-in, #855 ----
+//
+// Programs lay out with libc wcwidth, one code point at a time. Unless an app
+// opts into grapheme clustering with DEC private mode 2027, every non-zero-width
+// scalar takes its own columns and zero-width scalars attach to the glyph on
+// their left, so the app's cursor model and ours agree.
+
+#[test]
+fn default_widths_follow_wcwidth_per_code_point() {
+    // 👍 (2) + skin tone (2) + b: the modifier takes its own two columns.
+    let g = parse("a👍\u{1f3fd}b".as_bytes(), 20, 1);
+    assert_eq!(g.cursor, (6, 0));
+    assert_eq!(g.cells[1].ch, '👍');
+    assert_eq!(g.cells[3].ch, '\u{1f3fd}');
+    assert_eq!(g.cells[5].ch, 'b');
+    // A flag is two regional indicators of two columns each (vim and
+    // Ghostty; glibc's wcwidth says 1).
+    let g = parse("a🇯🇵b".as_bytes(), 20, 1);
+    assert_eq!(g.cursor, (6, 0));
+    assert_eq!(
+        (g.cells[1].ch, g.cells[3].ch, g.cells[5].ch),
+        ('🇯', '🇵', 'b')
+    );
+}
+
+#[test]
+fn default_zero_width_scalars_attach_to_the_left_glyph() {
+    // Combining marks still join their base.
+    let g = parse("e\u{0301}x".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "e\u{0301}");
+    assert_eq!(g.cursor, (2, 0));
+    // ZWJ joins the glyph on its left; the next emoji takes its own cells
+    // (2 + 0 + 2 = 4 columns, as wcwidth counts).
+    let g = parse("👨\u{200d}💻".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "👨\u{200d}");
+    assert_eq!(g.cells[2].ch, '💻');
+    assert_eq!(g.cursor, (4, 0));
+}
+
+#[test]
+fn mode_2027_toggles_clustering_and_reports_through_decrqm() {
+    let mut g = Grid::new(20, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[?2027$p");
+    assert_eq!(p.take_responses(), b"\x1b[?2027;2$y", "reset by default");
+    p.advance(&mut g, b"\x1b[?2027h\x1b[?2027$p");
+    assert_eq!(p.take_responses(), b"\x1b[?2027;1$y");
+    p.advance(&mut g, "👍\u{1f3fd}".as_bytes());
+    assert_eq!(g.cursor, (2, 0), "clustered while set");
+    p.advance(&mut g, "\x1b[?2027l👍\u{1f3fd}".as_bytes());
+    assert_eq!(g.cursor, (6, 0), "per code point again after reset");
+}
+
+#[test]
+fn ris_resets_mode_2027_and_decstr_keeps_it() {
+    // As Ghostty: a full reset clears every mode; DECSTR's list excludes 2027.
+    let g = parse("\x1b[?2027h\x1bc👍\u{1f3fd}".as_bytes(), 20, 1);
+    assert_eq!(g.cursor, (4, 0));
+    let g = parse("\x1b[?2027h\x1b[!p👍\u{1f3fd}".as_bytes(), 20, 1);
+    assert_eq!(g.cursor, (2, 0));
+}
+
+#[test]
+fn mode_2027_flag_is_one_two_column_glyph() {
+    let g = parse("\x1b[?2027ha🇯🇵b".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 1, 0), "🇯🇵");
+    assert_ne!(g.cells[2].flags & WIDE_TRAILER, 0);
+    assert_eq!(g.cursor, (4, 0));
+}
+
+#[test]
+fn regional_indicators_are_two_columns_wide() {
+    for ch in ['\u{1f1e6}', '\u{1f1ef}', '\u{1f1ff}'] {
+        assert_eq!(char_width(ch), 2, "{ch:?}");
+    }
+    assert_eq!(char_width('\u{1f1e5}'), 1, "just below the block");
+}
+
+// ---- DECCOLM (CSI ? 3 h/l) gated by mode 40, #856 ----
+//
+// Owner decision: never resize. A mux server owns the PTY size and each
+// client its own viewport, so a program must not force 132 columns. With
+// mode 40 (allow 80/132 switching, default off) set, DECCOLM runs its side
+// effects only: clear the screen, reset all margins, home the cursor. With
+// mode 40 reset it is ignored. (Ghostty also resizes the grid; we don't.)
+
+fn deccolm_setup() -> Vec<u8> {
+    // Text on every row, top/bottom margins 2-4, left/right margins 3-8,
+    // cursor parked mid-screen.
+    b"line0\r\nline1\r\nline2\r\nline3\r\nline4\x1b[2;4r\x1b[?69h\x1b[3;8s\x1b[4;5H".to_vec()
+}
+
+#[test]
+fn deccolm_is_ignored_without_mode_40() {
+    for seq in [&b"\x1b[?3h"[..], b"\x1b[?3l"] {
+        let mut input = deccolm_setup();
+        input.extend_from_slice(seq);
+        let g = parse(&input, 10, 5);
+        assert_eq!(
+            row_text(&g, 0).trim_end(),
+            "line0",
+            "{seq:?} must not clear"
+        );
+        assert_eq!((g.scroll_top, g.scroll_bottom), (1, 3), "margins kept");
+        assert_eq!(g.cols, 10);
+    }
+}
+
+#[test]
+fn deccolm_with_mode_40_clears_resets_margins_and_homes_without_resizing() {
+    for seq in [&b"\x1b[?40h\x1b[?3h"[..], b"\x1b[?40h\x1b[?3l"] {
+        let mut input = deccolm_setup();
+        input.extend_from_slice(seq);
+        let g = parse(&input, 10, 5);
+        for y in 0..5 {
+            assert_eq!(row_text(&g, y).trim_end(), "", "{seq:?} row {y} cleared");
+        }
+        assert_eq!(
+            (g.scroll_top, g.scroll_bottom),
+            (0, 4),
+            "top/bottom margins reset"
+        );
+        assert_eq!(
+            (g.left_margin, g.right_margin),
+            (0, 9),
+            "left/right margins reset"
+        );
+        assert_eq!(g.cursor, (0, 0), "cursor homed");
+        assert_eq!((g.cols, g.rows), (10, 5), "size unchanged");
+    }
+}
+
+#[test]
+fn decrqm_reports_modes_3_and_40() {
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[?40$p\x1b[?3$p");
+    assert_eq!(p.take_responses(), b"\x1b[?40;2$y\x1b[?3;2$y");
+    // Without mode 40 a DECCOLM set is ignored, so mode 3 stays reset.
+    p.advance(&mut g, b"\x1b[?3h\x1b[?3$p");
+    assert_eq!(p.take_responses(), b"\x1b[?3;2$y");
+    p.advance(&mut g, b"\x1b[?40h\x1b[?3h\x1b[?40$p\x1b[?3$p");
+    assert_eq!(p.take_responses(), b"\x1b[?40;1$y\x1b[?3;1$y");
+    // RIS resets both.
+    p.advance(&mut g, b"\x1bc\x1b[?40$p\x1b[?3$p");
+    assert_eq!(p.take_responses(), b"\x1b[?40;2$y\x1b[?3;2$y");
 }

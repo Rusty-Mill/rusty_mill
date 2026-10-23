@@ -2,6 +2,7 @@
 name = "rusty_routine"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 description = "Routines for AG-UI agents: a cron schedule that posts a RunAgentInput on time, disabled after too many consecutive failures"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rusty-Mill/rusty_mill"

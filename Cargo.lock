@@ -10885,9 +10885,9 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "rk-observe",
+ "rusty_tokio",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -13033,6 +13033,7 @@ dependencies = [
  "rusty_crypto_key",
  "rusty_http",
  "rusty_json",
+ "rusty_mcp_server",
  "rusty_multimodal_db_engine",
  "rusty_oauth",
  "rusty_rand",

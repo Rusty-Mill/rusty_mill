@@ -38,13 +38,13 @@ No recording contains host process lists, absolute paths or host names: htop run
 
 ## Oracle results (2026-10-21)
 
-12 of 18 cases matched libghostty-vt cell for cell at first, attributes included, and all six differences were explained. After the BCE fix (Rusty-Mill/rusty_mill#854), 13 of 18 match; the table keeps the original findings.
+12 of 18 cases matched libghostty-vt cell for cell at first, attributes included, and all six differences were explained. After the BCE fix (Rusty-Mill/rusty_mill#854), 13 of 18 matched; after the width fix (Rusty-Mill/rusty_mill#855), 15 of 18 match. The remaining three are the deliberate DECCOLM divergence below. The table keeps the original findings.
 
 | Case(s) | Difference | Cause | Verdict |
 |---|---|---|---|
 | `htop_self` | rows 9, 10, 23: the cells after the text keep the default background in rusty_term; libghostty fills them with the SGR background (green, cyan) | **BCE missing.** `EL`, `ECH` and `ED` fill with the *default* colours (`Grid::erase_cell`, `core/src/grid.rs:2826`) instead of the current SGR background. rusty_term's terminfo inherits `xterm-256color`, which advertises `bce`, so ncurses apps rely on it. Reproduced in isolation: `ESC[42m ESC[K`, `ESC[42m ESC[5X` and `ESC[42m ESC[2J` all leave black cells. | **Fixed** (Rusty-Mill/rusty_mill#854): erases now fill with the SGR background; `htop_self` matches the oracle |
-| `vim_edit` | stray characters after `👍🏽` and inside `🇯🇵` (two rows) | **Width disagreement with `wcwidth`.** rusty_term folds an emoji modifier or a regional-indicator pair into one cluster: `👍🏽` is 2 columns and `🇯🇵` is 1. vim and glibc `wcwidth` count each code point: 4 and 2. vim's cursor positioning then lands on the wrong cells. libghostty agrees with vim by default. | **rusty_term bug**: legacy per-code-point width should be the default, with grapheme clustering opt-in (DEC mode 2027, as Ghostty, WezTerm, foot and contour do). Rusty-Mill/rusty_mill#855 |
-| `vttest_1_2`, `vttest_1_3`, `vttest_2_3` | different screens from the first 132-column step on | **DECCOLM** (`CSI ? 3 h/l`, enabled by vttest's `CSI ? 40 h`): libghostty resizes to 132 columns. rusty_term's parser has no mode-3 handling at all, so it neither resizes nor runs the side effects. Alacritty (`alacritty_terminal/src/term/mod.rs` `deccolm`) and kitty (`kitty/screen.c`, `DECCOLM`) do not resize either, but they do erase the screen and reset the scroll region, and kitty homes the cursor. The oracle reads only 80 columns, so it cannot show libghostty's columns 80-131. | **Partly a bug.** Resizing to 132 columns is an owner decision; xterm only does it with `allowColumnMode`. Running the side effects (erase, reset margins, home) is cheap, and every reference does it. Rusty-Mill/rusty_mill#856 |
+| `vim_edit` | stray characters after `👍🏽` and inside `🇯🇵` (two rows) | **Width disagreement with `wcwidth`.** rusty_term folded an emoji modifier or a regional-indicator pair into one cluster: `👍🏽` was 2 columns and `🇯🇵` 1. vim counts each code point: 4 and 4. It gives each regional indicator 2 columns, as libghostty does; glibc's `wcwidth` says 1 and `unicode-width` agrees with glibc. vim's cursor positioning then landed on the wrong cells. | **Fixed** (Rusty-Mill/rusty_mill#855): per-code-point widths by default, grapheme clustering opt-in with DEC mode 2027 (as Ghostty, WezTerm, foot and contour do), and regional indicators 2 columns. `vim_edit` and `wide_combining` now match the oracle. |
+| `vttest_1_2`, `vttest_1_3`, `vttest_2_3` | different screens from the first 132-column step on | **DECCOLM** (`CSI ? 3 h/l`, enabled by vttest's `CSI ? 40 h`). libghostty resizes its grid to 132 columns; rusty_term never resizes. | **Deliberate divergence (owner decision, Rusty-Mill/rusty_mill#856). Do not "fix".** In a mux the server owns the PTY size and each client its own viewport, so a program must not force 132 columns. With mode 40 set, DECCOLM clears the screen, resets every margin and homes the cursor, at the current size; with mode 40 reset it is ignored. vttest then draws for 132 columns on an 80-column grid and its lines wrap, so these three cases will keep differing from the oracle. |
 
 ## Limits
 
@@ -53,3 +53,11 @@ No recording contains host process lists, absolute paths or host names: htop run
 - **Not covered:** scrollback contents, hyperlinks (OSC 8), images (sixel, kitty), titles, mouse modes and line attributes (DECDWL/DECDHL).
 - **Recorded on Linux only.** A Windows ConPTY corpus is still owed (spike 1 of `MUX-ADOPT-DECISIONS.md`).
 - **The oracle is the fork's libghostty-vt.** Upstream was not built here.
+
+## Deliberate divergences from the oracle
+
+These are intended. A change that makes them match libghostty is a regression, not a fix.
+
+| Cases | rusty_term | libghostty | Why |
+|---|---|---|---|
+| `vttest_1_2`, `vttest_1_3`, `vttest_2_3` | DECCOLM (mode 3) never resizes the grid. With mode 40 it only clears the screen, resets the margins and homes the cursor. | resizes the grid to 80/132 columns | Rusty-Mill/rusty_mill#856: in a mux the server owns the PTY size and each client its own viewport. |

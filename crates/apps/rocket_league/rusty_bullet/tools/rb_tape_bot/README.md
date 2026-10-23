@@ -97,9 +97,9 @@ From the repository root, with **BakkesMod running** (nothing else needed;
 no RLBot GUI, no launcher, no clicking in the game):
 
 ```
-powershell -File tools\rb_tape_bot\run_batch.ps1            # every scenario, twice
-powershell -File tools\rb_tape_bot\run_batch.ps1 -Repeat 1 -Scenarios pogo,half_flip
-powershell -File tools\rb_tape_bot\run_batch.ps1 -ScoreOnly replays\batch_<stamp>
+pwsh -NoProfile -File tools\rb_tape_bot\run_batch.ps1            # every scenario, twice
+pwsh -NoProfile -File tools\rb_tape_bot\run_batch.ps1 -Repeat 1 -Scenarios pogo,half_flip
+pwsh -NoProfile -File tools\rb_tape_bot\run_batch.ps1 -ScoreOnly replays\batch_<stamp>
 ```
 
 It builds the bot, runs `rb_run_tapes`, then scores each capture with
@@ -108,6 +108,16 @@ scenario: lag, position error mean/max per run, first tick over 10/100 uu,
 frames, largest gap, start-frame error, repeatable). Captures are
 `<scenario>_run<k>.jsonl` next to it; core's log is `core.log` there if the
 runner had to start core. About five minutes for all eleven twice.
+
+Before the game launches, `preflight.ps1` checks that the installed capture
+plugin was built for the installed BakkesMod (version, `pluginsdk.lib` hash and
+plugin source hash, stamped beside the DLL) and rebuilds and reinstalls it when
+not, keeping the old DLL as `.bm<version>.dll.bak`. `-NoPreflight` skips it;
+`preflight.ps1 -Check` reports without changing anything. A running game holds the
+DLL, so a hand run refuses until you close it or pass `-CloseGame`; `run_batch.ps1`
+passes it, since core relaunches the game anyway. It also warns when
+Rocket League was updated after RLBot core or BakkesMod. BakkesMod's own update
+prompt still needs a click; accept it and rerun.
 
 What `rb_run_tapes` does for each scenario: starts `RLBotServer.exe` if core
 is not listening; if the capture plugin's heartbeat is missing, starts a
@@ -317,9 +327,7 @@ changes, with the car's position and boost at that physics frame.
 with the port. To measure the game's spread (about 50 minutes unattended):
 
 ```powershell
-powershell -File tools
-b_tape_bot
-un_batch.ps1 -Repeat 5 -Scenarios (501..524 | % { "fuzz_$_" } | Join-String -Separator ",")
+pwsh -NoProfile -File tools\rb_tape_bot\run_batch.ps1 -Repeat 5 -Scenarios (501..524 | % { "fuzz_$_" } | Join-String -Separator ",")
 python -I tools/rb_tape_bot/spread_report.py replays/batch_<stamp>
 ```
 
@@ -463,7 +471,7 @@ In the monorepo, `run_batch.ps1` checks the verifier build result before using
 It stops on build failure, invalid metadata, or a missing executable.
 
 The batch script scores directly; it does not invoke the Python report tools.
-`powershell -File` runs in a child process and cannot set the caller's environment.
+`pwsh -File` runs in a child process and cannot set the caller's environment.
 For direct Python use, set `RB_VERIFY` explicitly in the same shell (from the
 monorepo root; adjust the binary path if `CARGO_TARGET_DIR` is overridden):
 

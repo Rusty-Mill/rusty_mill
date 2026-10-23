@@ -21,6 +21,13 @@ runs:
         toolchain: ${{ env.RUST_TOOLCHAIN }}
         components: ${{ inputs.components }}
 
+    # The hosted image already lists the official archive as a fallback.
+    # APT uses numeric priorities, so reordering lines cannot prefer it.
+    - name: Prefer official Ubuntu archive (GitHub-hosted Linux)
+      if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+      shell: bash
+      run: sudo python3 "${{ github.action_path }}/prefer_ubuntu_archive.py"
+
     # rusty_term's gui/gui-gpu features and rusty_gui's Linux X11 backend
     # link against X11/wayland directly; rusty_a2a's grpc feature runs a
     # build.rs that needs `protoc`; platform-linux's secret_service
@@ -31,17 +38,36 @@ runs:
     # libdbus. None of this ships on the ubuntu-latest image by default.
     # One combined apt-get install (instead of six separate ones) to cut
     # round-trips.
+    - name: Prepare APT download cache key (hosted Linux)
+      id: apt-key
+      if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+      continue-on-error: true
+      shell: bash
+      run: /usr/bin/python3 "${{ github.action_path }}/apt_download_cache.py" key
+
+    # Cache scope alone is not an authenticity guarantee: verify all restored
+    # bytes against signed APT indexes before copying them to root's archives.
+    - name: Restore downloaded Ubuntu packages
+      id: apt-restore
+      if: steps.apt-key.outputs.enabled == 'true'
+      continue-on-error: true
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+      env:
+        SEGMENT_DOWNLOAD_TIMEOUT_MINS: '1'
+      with:
+        path: ${{ steps.apt-key.outputs.path }}/*.deb
+        key: ${{ steps.apt-key.outputs.key }}
+        restore-keys: ${{ steps.apt-key.outputs.prefix }}
+
     - name: Install native build dependencies (Linux)
+      id: native-install
       if: runner.os == 'Linux'
       shell: bash
+      env:
+        APT_STAGING: ${{ steps.apt-key.outputs.path }}
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev \
-          libxi-dev libxcursor-dev libxinerama-dev libgl1-mesa-dev \
-          protobuf-compiler dbus dbus-x11 gnome-keyring libasound2-dev \
-          libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
-          librsvg2-dev libdbus-1-dev
+        sudo /usr/bin/python3 "${{ github.action_path }}/apt_download_cache.py" install \
+          --staging "$APT_STAGING" --output "$GITHUB_OUTPUT"
         # gnome-keyring-daemon ships with capabilities (cap_ipc_lock) set via
         # `setcap` that the Actions runner's container doesn't actually grant
         # use of, which otherwise surfaces as an opaque "Operation not
@@ -49,6 +75,32 @@ runs:
         # (actions/runner-images#6683). Stripping them falls back to a mode
         # that needs no special privileges.
         sudo setcap -r /usr/bin/gnome-keyring-daemon || true
+
+    - name: Export authenticated retained Ubuntu archives
+      id: apt-export
+      if: steps.native-install.outputs.retained == 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        APT_ARCHIVES: ${{ steps.native-install.outputs.archives }}
+        APT_STAGING: ${{ steps.apt-key.outputs.path }}
+      run: |
+        /usr/bin/python3 "${{ github.action_path }}/apt_download_cache.py" export \
+          --archives "$APT_ARCHIVES" --staging "$APT_STAGING"
+
+    # Save immediately after successful native installation, before unrelated
+    # Rust tests. Existing main sweeps warm it; PRs/queue entries never publish.
+    - name: Save downloaded Ubuntu packages (trusted main only)
+      if: >-
+        success() && steps.apt-export.outputs.cacheable == 'true' &&
+        steps.apt-restore.outputs.cache-hit != 'true' &&
+        github.repository == 'Rusty-Mill/rusty_mill' && github.ref == 'refs/heads/main' &&
+        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      continue-on-error: true
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ${{ steps.apt-key.outputs.path }}/*.deb
+        key: ${{ steps.apt-key.outputs.key }}
 
     # platform-linux's own Secret Service integration tests spawn a private
     # dbus-daemon + gnome-keyring-daemon per test (see that crate's own

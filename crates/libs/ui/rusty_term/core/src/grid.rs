@@ -624,6 +624,17 @@ pub struct Grid {
     /// printed at the right margin overwrites the last column instead of
     /// wrapping to the next line.
     pub(crate) autowrap: bool,
+    /// DEC private mode 2027 (grapheme clustering). Off by default: widths
+    /// follow wcwidth one code point at a time, as the programs laying out the
+    /// screen assume. When on, a whole UAX #29 grapheme shares one cell.
+    pub(crate) grapheme_clustering: bool,
+    /// DEC private mode 40: allow DECCOLM (80/132 column switching). Off by
+    /// default; while off, DECCOLM is ignored.
+    pub(crate) allow_deccolm: bool,
+    /// DEC private mode 3 (DECCOLM), as last set while mode 40 allowed it.
+    /// Reported by DECRQM only: the grid is never resized for it (see
+    /// [`Grid::deccolm`]).
+    pub(crate) column_mode_132: bool,
     /// Whether origin mode (DECOM `?6`, default off) is enabled. When on,
     /// absolute cursor positioning (`CUP`/`HVP`/`VPA`) is relative to the scroll
     /// region top and the cursor is confined to the region.
@@ -1326,6 +1337,9 @@ impl Grid {
             cell_px: None,
             cursor_icon: None,
             autowrap: true,
+            grapheme_clustering: false,
+            allow_deccolm: false,
+            column_mode_132: false,
             origin_mode: false,
             lr_margin_mode: false,
             left_margin: 0,
@@ -1978,17 +1992,28 @@ impl Grid {
     /// line if it would not fit, then advancing the cursor by the glyph's
     /// display width. A double-width glyph also writes a flagged trailing cell.
     pub fn put_char(&mut self, ch: char, pen: Pen) {
-        // A non-ASCII scalar may continue the grapheme in the cell to the left
-        // (combining mark, ZWJ join, skin tone, variation selector). ASCII is
-        // always its own grapheme, so the common path skips the check entirely.
+        // A non-ASCII scalar may belong to the glyph on its left. ASCII is
+        // always its own glyph, so the common path skips the check entirely.
         if !ch.is_ascii() {
-            if let Some((bx, by)) = self.left_base()
-                && self.continues_grapheme(bx, by, ch)
+            if self.grapheme_clustering {
+                // Mode 2027: join anything that continues the UAX #29
+                // grapheme (combining mark, ZWJ join, skin tone, flag pair).
+                if let Some((bx, by)) = self.left_base()
+                    && self.continues_grapheme(bx, by, ch)
+                {
+                    self.append_to_glyph(bx, by, ch);
+                    return;
+                }
+            } else if char_width(ch) == 0
+                && let Some((bx, by)) = self.left_base()
             {
+                // Default (wcwidth) widths: only a zero-width scalar (combining
+                // mark, ZWJ, variation selector) joins the glyph on its left;
+                // every other scalar takes its own columns below.
                 self.append_to_glyph(bx, by, ch);
                 return;
             }
-            // Not a continuation: a zero-width scalar has no cell of its own.
+            // Not joined: a zero-width scalar has no cell of its own.
             if char_width(ch) == 0 {
                 return;
             }
@@ -2803,6 +2828,19 @@ impl Grid {
         }
     }
 
+    /// DECCOLM (`CSI ? 3 h/l`) while mode 40 allows it: the side effects
+    /// only. The screen is cleared, every margin reset and the cursor homed,
+    /// but the grid keeps its size. In a mux the server owns the PTY size and
+    /// each client its own viewport, so a program must not force 80 or 132
+    /// columns (Ghostty resizes the grid here; this deliberately does not).
+    pub(crate) fn deccolm(&mut self, wide: bool) {
+        self.column_mode_132 = wide;
+        self.reset_scroll_region();
+        self.left_margin = 0;
+        self.right_margin = self.cols.saturating_sub(1);
+        self.clear_all(); // also homes the cursor
+    }
+
     /// Blank every cell and home the cursor (used by `CSI 2 J`).
     pub(crate) fn clear_all(&mut self) {
         let blank = self.erase_cell();
@@ -3491,6 +3529,9 @@ impl Grid {
         self.notif99_pending.clear();
         self.primary = None; // leave the alternate screen if active
         self.erase_bg = None; // RIS resets the SGR pen too
+        self.grapheme_clustering = false; // and every mode (DECSTR keeps 2027)
+        self.allow_deccolm = false;
+        self.column_mode_132 = false;
         self.cells = vec![self.default_cell(); self.cols * self.rows];
         #[cfg(any(test, feature = "gui"))]
         self.images.clear();
