@@ -5,7 +5,7 @@
  * run here against the same store the rest of the UI uses.
  */
 import { Sparkles, X } from 'lucide-react'
-import { useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { AgentProvider, useAction, useAgent } from '@rusty-mill/agui-react'
 import { contentText, type Message } from '@rusty-mill/agui-core'
 import { getToken } from '@/app/env'
@@ -14,7 +14,9 @@ import { useView } from '@/app/useView'
 import { assigneeMap } from '@/features/assignees/logic'
 import { useAssignees } from '@/features/assignees/store'
 import { useFilters } from '@/features/filters/store'
+import { useHabits } from '@/features/habits/store'
 import { useUi } from '@/store/ui'
+import { habitTools } from './habitTools'
 import { taskTools } from './tools'
 
 export const AGENT_URL = '/api/agent'
@@ -45,6 +47,7 @@ function Panel() {
   const { messages, running, error, send } = useAgent()
   const [draft, setDraft] = useState('')
   useTaskTools()
+  useHabitTools()
 
   const submit = (e: FormEvent): void => {
     e.preventDefault()
@@ -110,7 +113,7 @@ function useTaskTools(): void {
   const filters = useFilters((s) => s.items)
   const assigneeItems = useAssignees((s) => s.items)
   const actions = useActions()
-  const [add, search, due, complete, reopen, update, remove, listLists] = taskTools({
+  const [add, search, due, filter, complete, reopen, update, remove, listLists] = taskTools({
     entities: { tasks: Object.values(tasks), lists: Object.values(lists), tags: Object.values(tags), inboxId, filters, assignees: assigneeMap(assigneeItems) },
     listId: spec?.kind === 'list' ? spec.id : inboxId,
     now: Date.now(),
@@ -124,9 +127,25 @@ function useTaskTools(): void {
   useAction(add!)
   useAction(search!)
   useAction(due!)
+  useAction(filter!)
   useAction(complete!)
   useAction(reopen!)
   useAction(update!)
   useAction(remove!)
   useAction(listLists!)
+}
+
+/** The habit tools (`habitTools.ts`), bound to the habits store, loaded as the habits page loads it. */
+function useHabitTools(): void {
+  const { api } = useServices()
+  const { notify } = useActions()
+  const habits = useHabits((s) => s.habits)
+  const checkins = useHabits((s) => s.checkins)
+  useEffect(() => {
+    void useHabits.getState().load(api, notify)
+  }, [api, notify])
+  const [list, checkIn, add] = habitTools({ habits, checkins, now: Date.now(), add: useHabits.getState().add, setCount: useHabits.getState().setCount })
+  useAction(list!)
+  useAction(checkIn!)
+  useAction(add!)
 }
