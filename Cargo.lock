@@ -10251,6 +10251,7 @@ dependencies = [
  "rb_domain",
  "rb_env",
  "rb_rlbot_client",
+ "rb_rlbot_core",
  "rb_rlbot_wire",
  "rb_scenario",
 ]
