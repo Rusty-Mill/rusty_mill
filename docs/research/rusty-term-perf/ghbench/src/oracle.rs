@@ -53,8 +53,10 @@ pub fn dump(path: &str) -> String {
         t.active_screen().expect("screen") == Screen::Alternate,
     );
     let mut styles = String::new();
+    let mut trailers = String::new();
     let mut buf = ['\0'; 32];
     for y in 0..ROWS {
+        let mut tails = Vec::new();
         let mut text = String::new();
         let mut run: Option<(u16, u16, String)> = None;
         for x in 0..COLS {
@@ -63,6 +65,7 @@ pub fn dump(path: &str) -> String {
                 .expect("grid ref");
             let cell = at.cell().expect("cell");
             if cell.wide().expect("wide") == CellWide::SpacerTail {
+                tails.push(x.to_string());
                 continue;
             }
             let n = at.graphemes(&mut buf).unwrap_or(0);
@@ -115,8 +118,13 @@ pub fn dump(path: &str) -> String {
             let _ = writeln!(styles, "{y}:{start}-{end} {}", current.trim_end());
         }
         let _ = writeln!(out, "|{}", text.trim_end());
+        if !tails.is_empty() {
+            let _ = writeln!(trailers, "{y}:{}", tails.join(","));
+        }
     }
     out.push_str("styles:\n");
     out.push_str(&styles);
+    out.push_str("trailers:\n");
+    out.push_str(&trailers);
     out
 }

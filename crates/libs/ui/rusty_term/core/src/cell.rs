@@ -145,9 +145,17 @@ impl Default for Pen {
 /// East Asian Width (UAX #11) and emoji-presentation property tables. Control
 /// characters (for which the crate reports no width) collapse to `0`; the
 /// parser handles C0/C1 controls before they ever reach this function.
+/// Regional indicators are overridden to `2` (see the body).
 ///
 /// [`unicode-width`]: https://docs.rs/unicode-width
 pub fn char_width(ch: char) -> usize {
+    // Regional indicators (the halves of a flag) are East Asian Width
+    // Neutral, so the crate says 1, but vim and Ghostty draw each in two
+    // columns. Matching them keeps vim's cursor and ours in step (glibc's
+    // wcwidth says 1; the apps that draw flags disagree with it).
+    if ('\u{1f1e6}'..='\u{1f1ff}').contains(&ch) {
+        return 2;
+    }
     UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 

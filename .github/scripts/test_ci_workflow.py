@@ -52,6 +52,18 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = WORKFLOW.read_text(encoding="utf-8")
 
+    def test_build_environment_setup_has_a_blocking_step_timeout(self) -> None:
+        steps = re.findall(
+            r"(?m)^      - uses: \./\.github/actions/setup-build-env\n"
+            r"(?:(?!      - |  \S)[^\n]*\n)*",
+            self.workflow,
+        )
+        self.assertEqual(len(steps), 4)
+        for step in steps:
+            with self.subTest(step=step):
+                self.assertIn("\n        timeout-minutes: 15\n", step)
+                self.assertNotIn("continue-on-error", step)
+
     def test_push_pr_and_manual_full_sweep_events_are_declared(self) -> None:
         # No post-merge push run: the merge queue tested the tree that lands.
         self.assertNotIn("  push:\n    branches: [main]", self.workflow)

@@ -11,9 +11,11 @@
 # Baseline 2026-10-22, rustc 1.98.1, before the ring-buffer scroll work.
 # Measured: alt 837.0, ascii 375.8, cursor 124.8, scroll 1000.6, sgr 429.1,
 # unicode 528.0.
+# wcwidth widths (grapheme segmentation only under mode 2027): unicode_heavy
+# measured 255.9.
 alt_screen_flicker   920
 ascii_throughput     415
 cursor_thrash        137
 scroll_heavy        1100
 sgr_churn            472
-unicode_heavy        580
+unicode_heavy        282
