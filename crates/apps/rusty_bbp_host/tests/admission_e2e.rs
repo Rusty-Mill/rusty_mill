@@ -456,14 +456,44 @@ fn quiesce(t: &Task) -> Result<bool, String> {
     Ok(text == "true")
 }
 
-/// A moderator that dies leaves its harness running, holding its slot. Once
-/// the task has ended, `bbp quiesce` kills that orphan's whole group, so its
-/// answer `true` means the harness is gone and the slot is free, with no
-/// moderator left to say so.
-#[test]
-fn quiesce_kills_the_groups_a_dead_moderator_left_and_only_then_says_true() {
-    use rusty_bbp_host::slots::{Capacity, Class, Slots};
-    let root = tempdir("quiesce");
+/// Whether `pid` runs: a zombie has exited, and waits only for whoever
+/// adopted it to reap it.
+fn alive(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        !stat
+            .rsplit_once(") ")
+            .is_some_and(|(_, r)| r.starts_with('Z'))
+    })
+}
+
+fn kill9(pid: &str) {
+    let status = Proc::new("kill").args(["-9", pid]).status().expect("kill");
+    assert!(status.success(), "kill -9 {pid}");
+}
+
+/// The group records of `t`'s moderators.
+fn records(t: &Task) -> Vec<PathBuf> {
+    std::fs::read_dir(t.dir.join("mod"))
+        .expect("mod dir")
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "groups"))
+        .flat_map(|e| std::fs::read_dir(e.path()).expect("groups").flatten())
+        .map(|e| e.path())
+        .collect()
+}
+
+/// A task whose moderator was killed while its harness runs (held at the
+/// gate until the release drops), with the harness's pid.
+struct Orphan {
+    root: PathBuf,
+    slots: PathBuf,
+    t: Task,
+    harness: String,
+    _release: Release,
+}
+
+fn orphan(tag: &str) -> Orphan {
+    let root = tempdir(tag);
     let (probe, slots, go) = (root.join("probe"), root.join("slots"), root.join("go"));
     std::fs::create_dir_all(&probe).expect("mkdir");
     let t = task(
@@ -473,7 +503,7 @@ fn quiesce_kills_the_groups_a_dead_moderator_left_and_only_then_says_true() {
         Some(&go),
         "echo $$ > \"$BBP_DIR/harness.pid\"\n",
     );
-    let _release = Release(go.clone());
+    let release = Release(go);
     let mut first = moderator(&t, &slots, 1);
     let pid = t.dir.join("harness.pid");
     wait_until("the harness", Duration::from_secs(20), || pid.exists());
@@ -483,39 +513,98 @@ fn quiesce_kills_the_groups_a_dead_moderator_left_and_only_then_says_true() {
         .expect("pid")
         .trim()
         .to_owned();
-    // A zombie has exited; it waits only for whoever adopted it to reap it.
-    let alive = || {
-        std::fs::read_to_string(format!("/proc/{harness}/stat")).is_ok_and(|stat| {
-            !stat
-                .rsplit_once(") ")
-                .is_some_and(|(_, r)| r.starts_with('Z'))
-        })
-    };
-    assert!(alive(), "the orphan outlives its moderator");
+    assert!(alive(&harness), "the orphan outlives its moderator");
+    Orphan {
+        root,
+        slots,
+        t,
+        harness,
+        _release: release,
+    }
+}
 
-    assert!(quiesce(&t).unwrap_err().contains("has not ended"));
+fn cancel(t: &Task) {
     let rev = admin::card(&t.dir, &t.task).expect("card").rev;
     human::perform(&t.dir, &t.task, "cancel", &["withdrawn"], Some(rev)).expect("cancel");
-    assert_eq!(quiesce(&t), Ok(false), "the orphan is still running");
+}
+
+/// A moderator that dies leaves its harness running, holding its slot. Once
+/// the task has ended, `bbp quiesce` kills that orphan, so its answer `true`
+/// means the harness is gone and the slot is free, with no moderator left
+/// to say so.
+#[test]
+fn quiesce_kills_the_groups_a_dead_moderator_left_and_only_then_says_true() {
+    use rusty_bbp_host::slots::{Capacity, Class, Slots};
+    let o = orphan("quiesce");
+    assert!(quiesce(&o.t).unwrap_err().contains("has not ended"));
+    cancel(&o.t);
+    assert_eq!(quiesce(&o.t), Ok(false), "the orphan is still running");
     wait_until("quiesced", Duration::from_secs(10), || {
-        quiesce(&t) == Ok(true)
+        quiesce(&o.t) == Ok(true)
     });
-    assert!(!alive(), "the orphan was killed");
+    assert!(!alive(&o.harness), "the orphan was killed");
     let one = Capacity {
         agents: 1,
         validators: 1,
     };
-    let held = Slots::open(&slots, one).expect("slots");
+    let held = Slots::open(&o.slots, one).expect("slots");
     assert!(
         held.try_acquire(Class::Agent).expect("acquire").is_some(),
         "the slot is free"
     );
-    let records = std::fs::read_dir(t.dir.join("mod"))
-        .expect("mod dir")
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "groups"))
-        .flat_map(|e| std::fs::read_dir(e.path()).expect("groups").flatten())
-        .count();
-    assert_eq!(records, 0, "no record outlives its group");
-    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(records(&o.t).len(), 0, "no record outlives its group");
+    let _ = std::fs::remove_dir_all(&o.root);
+}
+
+/// With its holder dead too, a group's members can no longer be told from a
+/// later group with the same id: quiesce signals none of them and keeps the
+/// record, answering `false` until the last member has exited by itself.
+#[test]
+fn a_group_whose_holder_died_is_not_quiet_until_its_last_member_exits() {
+    let o = orphan("holder_lost");
+    let [record] = records(&o.t).try_into().expect("one group");
+    let holder = record
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("holder")
+        .to_owned();
+    kill9(&holder);
+    wait_until("the holder's death", Duration::from_secs(5), || {
+        !alive(&holder)
+    });
+    cancel(&o.t);
+    for _ in 0..3 {
+        assert_eq!(quiesce(&o.t), Ok(false), "a member still runs");
+    }
+    assert!(alive(&o.harness), "no unowned member is signalled");
+    assert!(record.exists(), "the record outlives no member");
+    // The member exits late, and what it forked a little later still.
+    kill9(&o.harness);
+    wait_until("quiesced", Duration::from_secs(10), || {
+        quiesce(&o.t) == Ok(true)
+    });
+    assert!(!record.exists(), "the record goes once the group is empty");
+    let _ = std::fs::remove_dir_all(&o.root);
+}
+
+/// A task whose harnesses ran under a `bbp` that recorded no groups has no
+/// record to prove them gone: quiesce refuses it instead of saying `true`.
+#[test]
+fn a_task_whose_harnesses_ran_unrecorded_is_never_called_quiet() {
+    let o = orphan("legacy");
+    let groups = records(&o.t)
+        .first()
+        .and_then(|r| r.parent())
+        .expect("groups dir")
+        .to_owned();
+    std::fs::remove_dir_all(&groups).expect("as an older bbp left it");
+    cancel(&o.t);
+    let refused = quiesce(&o.t).unwrap_err();
+    assert!(
+        refused.contains("before their groups were recorded"),
+        "{refused}"
+    );
+    assert!(alive(&o.harness), "nothing unrecorded is signalled");
+    kill9(&o.harness);
+    let _ = std::fs::remove_dir_all(&o.root);
 }

@@ -63,7 +63,9 @@ every Implement card, found from its id whether or not its handle was
 checkpointed (one never opened is opened already cancelled, so it can never
 start). It returns only when `bbp quiesce` finds none of the task's moderator,
 runner or harness groups running, even if the moderator died, and its slot is
-free. It then marks the card's execution cancelled and retires the
+free. If that cannot be established (a harness group whose holder was
+killed while members remain, or a task whose harnesses ran under a `bbp` that
+recorded no groups) the cancel fails and nothing is retired. It then marks the card's execution cancelled and retires the
 assignment, so a later `run` on that state is refused. Running the cancel again
 finishes an interrupted one and does nothing after a complete one. Set the BBP
 configuration's `end_grace_secs` to bound how long a harness may run after its

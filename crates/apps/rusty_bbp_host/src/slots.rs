@@ -263,7 +263,7 @@ fn others_in_group() -> bool {
 /// The process group in a `/proc/PID/stat` line: the third field after the
 /// parenthesised command name, which may itself hold spaces or parentheses.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn stat_pgrp(stat: &str) -> Option<u32> {
+pub(crate) fn stat_pgrp(stat: &str) -> Option<u32> {
     let (_, rest) = stat.rsplit_once(')')?;
     rest.split_whitespace().nth(2)?.parse().ok()
 }
