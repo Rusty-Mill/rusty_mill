@@ -42,11 +42,13 @@ mod ws;
 
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
+use std::pin::pin;
 
 use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt, OwnedWriteHalf, TcpListener, TcpStream};
 use rusty_tokio::sync::mpsc;
 
 use crate::backend::{Backend, BackendHandle};
+use crate::runtime::fair_select;
 
 #[cfg(unix)]
 use crate::backend::UnixBackend as PlatformBackend;
@@ -166,6 +168,7 @@ async fn session(mut stream: TcpStream, cfg: BridgeConfig) -> Result<(), Error> 
     let mut git_cache = stats::GitCache::new();
     let mut stats_tick = rusty_tokio::time::interval(STATS_INTERVAL);
     stats_tick.set_missed_tick_behavior(rusty_tokio::time::MissedTickBehavior::Skip);
+    let mut turn = 0;
 
     loop {
         // Drain complete frames before reading more from the socket.
@@ -233,12 +236,16 @@ async fn session(mut stream: TcpStream, cfg: BridgeConfig) -> Result<(), Error> 
         }
 
         let mut chunk = [0u8; 4096];
-        // `select!` arms are plain expressions (no `.await` or `return`), so
-        // pick the event here and act on it below.
-        let woke = rusty_tokio::select! {
-            read = rd.read(&mut chunk) => Wake::Socket(read),
-            event = rx.recv() => Wake::Pty(event),
-            _ = stats_tick.tick() => Wake::Stats,
+        // Round-robin, not `select!`'s fixed order: a client flooding input
+        // must not starve PTY output or stats, nor PTY output the client.
+        let woke = {
+            let socket_arm = pin!(async { Wake::Socket(rd.read(&mut chunk).await) });
+            let pty_arm = pin!(async { Wake::Pty(rx.recv().await) });
+            let stats_arm = pin!(async {
+                stats_tick.tick().await;
+                Wake::Stats
+            });
+            fair_select(&mut turn, &mut [socket_arm, pty_arm, stats_arm]).await
         };
         match woke {
             Wake::Socket(read) => {

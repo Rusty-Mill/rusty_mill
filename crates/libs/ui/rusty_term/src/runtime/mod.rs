@@ -14,6 +14,9 @@ use crate::sync::Mutex;
 use crate::backend::Backend;
 use crate::core::Grid;
 
+mod fair;
+#[cfg(feature = "web-bridge")]
+pub(crate) use fair::fair_select;
 mod reactor;
 pub use reactor::run;
 
