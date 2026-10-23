@@ -10,3 +10,8 @@ target
 crates/apps/rocket_league/rleval/service/*.db
 crates/apps/rocket_league/rleval/service/blobs/
 crates/apps/rocket_league/rleval/data/
+# Local environment, credentials and state never belong in an image.
+**/.env
+**/.env.*
+**/.venv
+**/venv
