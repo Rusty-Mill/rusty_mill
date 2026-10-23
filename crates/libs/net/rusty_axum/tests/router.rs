@@ -205,3 +205,44 @@ async fn merge_combines_routers() {
         "b"
     );
 }
+
+/// Panics if polled: proves a HEAD answer never reads its stream.
+struct Untouchable;
+
+impl Stream for Untouchable {
+    type Item = Result<Event, Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        panic!("a HEAD response body was polled");
+    }
+}
+
+#[rusty_tokio::test]
+async fn head_keeps_status_and_headers_but_no_body() {
+    let app = Router::<()>::new()
+        .route("/text", get(|| async { "twelve bytes" }))
+        .route("/events", get(|| async { Sse::new(Untouchable) }))
+        .route("/json", get(|Json(v): Json<Value>| async move { Json(v) }));
+
+    let r = app.call(Request::new(Method::Head, "/text")).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(
+        r.headers.get("content-type"),
+        Some("text/plain; charset=utf-8")
+    );
+    assert_eq!(r.headers.get("content-length"), Some("12"));
+    assert_eq!(r.body.as_bytes(), Some(&b""[..]));
+
+    let r = app.call(Request::new(Method::Head, "/events")).await;
+    assert_eq!(r.headers.get("content-type"), Some("text/event-stream"));
+    assert_eq!(r.headers.get("content-length"), None);
+    assert_eq!(r.body.collect().await.unwrap(), b"");
+
+    let r = app.call(Request::new(Method::Head, "/json")).await;
+    assert_eq!(r.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert!(r.headers.get("content-length").is_some());
+    assert_eq!(r.body.as_bytes(), Some(&b""[..]));
+
+    let r = app.call(Request::new(Method::Get, "/text")).await;
+    assert_eq!(r.body.as_bytes(), Some(&b"twelve bytes"[..]));
+}

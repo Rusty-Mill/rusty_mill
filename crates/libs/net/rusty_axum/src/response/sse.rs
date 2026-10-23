@@ -71,16 +71,34 @@ impl Event {
             out.push_str(&format!("id: {id}\n"));
         }
         if let Some(data) = &self.data {
-            for line in data.split('\n') {
-                out.push_str(&format!(
-                    "data: {}\n",
-                    line.strip_suffix('\r').unwrap_or(line)
-                ));
+            for line in data_lines(data) {
+                out.push_str(&format!("data: {line}\n"));
             }
         }
         out.push('\n');
         out.into_bytes()
     }
+}
+
+/// The data's logical lines. SSE ends a line at CRLF, a lone CR or a lone
+/// LF, so all three must start a new `data:` line: an unprefixed CR would
+/// let data text such as `event: x` become a field of its own.
+fn data_lines(data: &str) -> impl Iterator<Item = &str> {
+    let mut rest = Some(data);
+    std::iter::from_fn(move || {
+        let text = rest?;
+        match text.find(['\r', '\n']) {
+            None => {
+                rest = None;
+                Some(text)
+            }
+            Some(i) => {
+                let skip = if text[i..].starts_with("\r\n") { 2 } else { 1 };
+                rest = Some(&text[i + skip..]);
+                Some(&text[..i])
+            }
+        }
+    })
 }
 
 fn one_line(text: &str) -> String {
@@ -138,6 +156,23 @@ mod tests {
     fn encodes_name_id_and_multiline_data() {
         let e = Event::default().event("token").id("7").data("a\nb");
         assert_eq!(e.to_bytes(), b"event: token\nid: 7\ndata: a\ndata: b\n\n");
+    }
+
+    #[test]
+    fn every_line_break_starts_a_data_line() {
+        let e = Event::default().data("a\r\nb\rc\nd");
+        assert_eq!(e.to_bytes(), b"data: a\ndata: b\ndata: c\ndata: d\n\n");
+        let e = Event::default().data("x\r\r");
+        assert_eq!(e.to_bytes(), b"data: x\ndata: \ndata: \n\n");
+    }
+
+    #[test]
+    fn field_text_in_data_stays_data() {
+        let e = Event::default().data("safe\revent: forged\rid: 9\rretry: 1\r\rdata: injected");
+        assert_eq!(
+            e.to_bytes(),
+            b"data: safe\ndata: event: forged\ndata: id: 9\ndata: retry: 1\ndata: \ndata: data: injected\n\n"
+        );
     }
 
     #[test]
