@@ -6572,3 +6572,197 @@ fn ascii_fast_path_matches_put_char_one_byte_at_a_time() {
         }
     }
 }
+
+/// A grid exercising every part of a snapshot: styles, wide glyphs, a
+/// grapheme cluster, a hyperlink, a soft wrap, a double-width line, history,
+/// a title, a moved cursor and, when `alt`, the alternate screen.
+fn snapshot_fixture(alt: bool) -> Grid {
+    let mut g = Grid::new(10, 4);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b]2;title\x07\x1b[2027h");
+    p.advance(
+        &mut g,
+        "\x1b[1;31;48;2;1;2;3mred\x1b[0m 日本 e\u{301}\r\n".as_bytes(),
+    );
+    p.advance(&mut g, b"\x1b]8;;https://x.test\x07link\x1b]8;;\x07\r\n");
+    p.advance(&mut g, b"0123456789wrapped\r\n\x1b#6wide\r\nmore\r\nlast");
+    p.advance(
+        &mut g,
+        b"\x1b[4:3m\x1b[58;2;9;9;9mul\x1b[0m\x1b[?25l\x1b[5 q\x1b7\x1b[2;3H",
+    );
+    if alt {
+        p.advance(&mut g, b"\x1b[?1049h\x1b[44malt\x1b[K\x1b[1;2r");
+    }
+    g
+}
+
+fn assert_same_snapshot_state(a: &Grid, b: &Grid) {
+    assert_eq!(
+        (a.cols, a.rows, a.cursor, a.saved_cursor),
+        (b.cols, b.rows, b.cursor, b.saved_cursor)
+    );
+    assert_eq!(
+        (a.scroll_top, a.scroll_bottom),
+        (b.scroll_top, b.scroll_bottom)
+    );
+    assert_eq!(
+        (a.cursor_visible, a.cursor_blink, a.cursor_shape),
+        (b.cursor_visible, b.cursor_blink, b.cursor_shape)
+    );
+    assert_eq!(
+        (&a.title, &a.clusters, &a.links),
+        (&b.title, &b.clusters, &b.links)
+    );
+    assert_eq!(a.scrollback, b.scrollback);
+    assert_eq!(a.in_alt_screen(), b.in_alt_screen());
+    for y in 0..a.rows {
+        assert_eq!(a.row(y), b.row(y), "row {y}");
+    }
+    assert_eq!(a.snapshot_dirty().line_attrs, b.snapshot_dirty().line_attrs);
+}
+
+#[test]
+fn snapshot_round_trips_the_drawable_state() {
+    for alt in [false, true] {
+        let g = snapshot_fixture(alt);
+        assert!(!g.scrollback.is_empty() && !g.clusters.is_empty() && !g.links.is_empty());
+        let bytes = g.encode_snapshot();
+        let back = Grid::decode_snapshot(&bytes).expect("decode");
+        assert_same_snapshot_state(&g, &back);
+        // The stashed primary screen survives too: leaving the alternate
+        // screen on both shows the same primary.
+        let (mut g, mut back) = (g, back);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, b"\x1b[?1049l");
+        p.advance(&mut back, b"\x1b[?1049l");
+        assert_same_snapshot_state(&g, &back);
+        // Re-encoding the decoded grid is byte-identical.
+        assert_eq!(back.encode_snapshot(), g.encode_snapshot());
+    }
+}
+
+#[test]
+fn snapshot_collapses_blank_runs() {
+    // An empty 200x50 screen: one repeat run per line, under 10 bytes each
+    // (24 bytes per cell in memory).
+    let bytes = Grid::new(200, 50).encode_snapshot();
+    assert!(bytes.len() < 50 * 10, "{} bytes", bytes.len());
+}
+
+#[test]
+fn snapshot_decode_rejects_bad_headers() {
+    let good = snapshot_fixture(true).encode_snapshot();
+    assert_eq!(
+        Grid::decode_snapshot(b"").err(),
+        Some(SnapshotError::BadMagic)
+    );
+    assert_eq!(
+        Grid::decode_snapshot(b"XXXX\x01").err(),
+        Some(SnapshotError::BadMagic)
+    );
+    let mut v2 = good.clone();
+    v2[4] = 2;
+    assert_eq!(
+        Grid::decode_snapshot(&v2).err(),
+        Some(SnapshotError::UnsupportedVersion(2))
+    );
+    let mut trailing = good.clone();
+    trailing.push(0);
+    assert_eq!(
+        Grid::decode_snapshot(&trailing).err(),
+        Some(SnapshotError::Invalid("trailing bytes"))
+    );
+    // 5000 columns: past the dimension cap.
+    assert_eq!(
+        Grid::decode_snapshot(b"RTSN\x01\x88\x27\x01").err(),
+        Some(SnapshotError::Invalid("dimension"))
+    );
+}
+
+#[test]
+fn snapshot_decode_never_panics_on_truncated_or_corrupt_input() {
+    let good = snapshot_fixture(true).encode_snapshot();
+    for len in 0..good.len() {
+        assert!(Grid::decode_snapshot(&good[..len]).is_err(), "prefix {len}");
+    }
+    for i in 0..good.len() {
+        for flip in [0x01u8, 0x80, 0xff] {
+            let mut bad = good.clone();
+            bad[i] ^= flip;
+            // Either outcome is fine; a panic or a huge allocation is not.
+            let _ = Grid::decode_snapshot(&bad);
+        }
+    }
+}
+
+#[test]
+fn snapshot_decode_caps_total_cells() {
+    // A tiny input claiming 2^20 history lines of 4096 repeated cells each
+    // must stop at the cell cap, not allocate gigabytes.
+    let mut w = b"RTSN\x01".to_vec();
+    w.extend([0x80, 0x20, 0x01]); // cols 4096, rows 1
+    w.extend([0, 0, 0, 0, 0, 0]); // cursor, saved cursor, scroll region
+    w.extend([0, 0, 0, 0, 0]); // flags, shape, title, clusters, links
+    w.extend([0x80, 0x80, 0x40]); // 2^20 history lines
+    // Each line: 4096 cells, meta, one plain repeat run of 4096 (head
+    // 4096 << 2 | 2) in style 0, a space. The first line defines style 0
+    // (five zero fields); the rest reuse it.
+    w.extend([
+        0x80, 0x20, 0x00, 0x82, 0x80, 0x01, 0x00, 0, 0, 0, 0, 0, b' ',
+    ]);
+    for _ in 1..9000 {
+        w.extend([0x80, 0x20, 0x00, 0x82, 0x80, 0x01, 0x00, b' ']);
+    }
+    assert_eq!(
+        Grid::decode_snapshot(&w).err(),
+        Some(SnapshotError::Invalid("too many cells"))
+    );
+}
+
+#[test]
+fn snapshot_decode_rejects_an_overflowing_varint_inside_a_valid_snapshot() {
+    // The column count (byte 5, value 2) replaced by a ten-byte varint that
+    // used to wrap to 2: the rest of the snapshot stays valid.
+    let good = Grid::new(2, 1).encode_snapshot();
+    assert!(Grid::decode_snapshot(&good).is_ok());
+    assert_eq!(good[5], 2);
+    let mut bad = good[..5].to_vec();
+    bad.extend([0x82, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02]);
+    bad.extend(&good[6..]);
+    assert_eq!(
+        Grid::decode_snapshot(&bad).err(),
+        Some(SnapshotError::Invalid("varint overflow"))
+    );
+}
+
+/// A snapshot header for a `cols`x1 grid with default state, an empty title
+/// and tables, and `history` declared lines; the caller appends the lines.
+fn snapshot_header(cols: u8, history: &[u8]) -> Vec<u8> {
+    let mut w = b"RTSN\x01".to_vec();
+    w.extend([cols, 1]); // cols, rows
+    w.extend([0, 0, 0, 0, 0, 0]); // cursor, saved cursor, scroll region
+    w.extend([0, 0, 0, 0, 0]); // flags, shape, title, clusters, links
+    w.extend(history);
+    w
+}
+
+#[test]
+fn snapshot_decode_charges_empty_history_lines() {
+    // 2^20 + 1 declared lines are refused before any is read.
+    let w = snapshot_header(4, &[0x81, 0x80, 0x40]);
+    assert_eq!(
+        Grid::decode_snapshot(&w).err(),
+        Some(SnapshotError::Invalid("too many lines"))
+    );
+    // 2^20 empty lines (`00 00` each: zero cells, no meta) fill the line
+    // budget, so the screen row that follows is over it.
+    let mut w = snapshot_header(4, &[0x80, 0x80, 0x40]);
+    for _ in 0..1 << 20 {
+        w.extend([0x00, 0x00]);
+    }
+    w.extend([0x04, 0x00, 0x0a, 0x00, 0, 0, 0, 0, 0, b' ', 0x00]);
+    assert_eq!(
+        Grid::decode_snapshot(&w).err(),
+        Some(SnapshotError::Invalid("too many lines"))
+    );
+}
