@@ -11,7 +11,10 @@ mod plan;
 mod policy;
 mod security;
 
-pub use approval::{ApprovalGate, ApprovalRequest, ApprovalResponse, ApprovalTrigger};
+pub use approval::{
+    approval_channel, ApprovalGate, ApprovalRequest, ApprovalResponder, ApprovalResponse,
+    ApprovalRx, ApprovalTrigger, ApprovalTx,
+};
 pub use inspect::{DefaultInspector, Inspection, ReturnInspector};
 pub use plan::{PlanController, PlanDecision};
 pub use policy::{

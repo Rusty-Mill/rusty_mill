@@ -2,6 +2,7 @@
 name = "rusty-meshed-core"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 description = "Shared platform config for rusty_meshed: env-prefixed settings loaded once, injected into every other rusty_meshed crate."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_mill"

@@ -2,6 +2,7 @@
 name = "rusty_channel"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 description = "Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack, Microsoft Teams and SMS (Twilio) adapters"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rusty-Mill/rusty_mill"

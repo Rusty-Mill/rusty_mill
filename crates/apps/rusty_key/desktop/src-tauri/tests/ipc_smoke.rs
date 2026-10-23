@@ -14,14 +14,13 @@ use std::sync::{Arc, Mutex};
 use rk_app::contract::{command, event};
 use rk_app::Session;
 use rk_config::Config;
-use rk_constrain::{ApprovalGate, ApprovalTrigger};
+use rk_constrain::{approval_channel, ApprovalGate, ApprovalTrigger};
 use rk_kernel::fake::{FakeLanguageModel, Scripted};
 use rusty_keys_desktop_lib::state::{AppState, ApprovalRx};
 use rusty_keys_desktop_lib::{configure, COMMANDS, EVENTS};
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime, INVOKE_KEY};
 use tauri::webview::InvokeRequest;
 use tauri::{WebviewUrl, WebviewWindow, WebviewWindowBuilder};
-use tokio::sync::mpsc;
 
 /// A scripted-model session + approval receiver, wired exactly like production.
 fn fake_state() -> (AppState, ApprovalRx) {
@@ -38,7 +37,7 @@ fn fake_state() -> (AppState, ApprovalRx) {
     })
     .unwrap();
     let model = FakeLanguageModel::new(vec![vec![Scripted::Text("done.".into())]]);
-    let (tx, rx) = mpsc::channel(8);
+    let (tx, rx) = approval_channel(8);
     let gate = ApprovalGate::new(vec![ApprovalTrigger::NewFilePath], tx);
     let session = Session::new_with_policy(&config, model, Arc::new(gate)).unwrap();
     let state = AppState {

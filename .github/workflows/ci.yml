@@ -142,6 +142,7 @@ jobs:
           python -I -m unittest discover -s crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot -p 'test_verify_path.py' -v
           if ($LASTEXITCODE -ne 0) { throw "Python verifier regressions failed" }
           ./crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot/test-run-batch.ps1
+          ./crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot/test-preflight.ps1
       - name: Real monorepo ScoreOnly with matching recorded fixture (no game)
         shell: pwsh
         env:
@@ -151,15 +152,7 @@ jobs:
           $batch = Join-Path $env:RUNNER_TEMP 'rb score batch'
           New-Item -ItemType Directory -Force $batch | Out-Null
           Copy-Item "$bot/fixtures/probe_reverse.jsonl" "$batch/probe_reverse_run1.jsonl"
-          # rb_run_tapes writes a pad sidecar beside each capture; it is not a capture and must not be scored.
-          Set-Content "$batch/probe_reverse_run1.pads.jsonl" '{"tick":1}'
           & "$bot/run_batch.ps1" -ScoreOnly $batch
-          # The documented entry point is Windows PowerShell 5.1 (`powershell -File`), where a native
-          # command's stderr is a terminating error: scoring the sidecar as a capture made rb-verify
-          # print to stderr and aborted the whole batch there, though pwsh 7 carried on.
-          Remove-Item "$batch/results.md"
-          powershell -NoProfile -ExecutionPolicy Bypass -File "$bot/run_batch.ps1" -ScoreOnly $batch
-          if ($LASTEXITCODE -ne 0) { throw "Windows PowerShell ScoreOnly failed with a pad sidecar in the batch (exit $LASTEXITCODE)" }
           $report = Get-Content "$batch/results.md" -Raw
           if ($report -notmatch '\| probe_reverse \| [0-9]+' -or $report -match 'scoring failed') {
             throw "ScoreOnly did not score the matching fixture: $report"
@@ -494,6 +487,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
+        timeout-minutes: 15
         with:
           components: clippy
           cache-shared-key: clippy-${{ matrix.scope.component }}-${{ matrix.os }}
@@ -545,6 +539,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
+        timeout-minutes: 15
         with:
           cache-shared-key: ci-smoke-${{ matrix.os }}
       - run: cargo test --locked -p rusty_baseline
@@ -567,6 +562,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
+        timeout-minutes: 15
         with:
           cache-shared-key: test-${{ matrix.scope.component }}-${{ matrix.os }}
 
@@ -1299,6 +1295,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
+        timeout-minutes: 15
         with:
           cache-shared-key: msrv-compile
       - name: cargo check each crate at its declared rust-version

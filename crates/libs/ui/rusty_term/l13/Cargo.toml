@@ -2,6 +2,7 @@
 name = "rusty_term_l13"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "rusty_term's L13 structured side-channel: a private-OSC JSON-RPC transport hosting MCP + LSP/ACP negotiation, addressed against a narrow TerminalState trait rather than rusty_term's own Grid type."
 license = "MIT"
 

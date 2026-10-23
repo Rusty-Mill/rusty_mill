@@ -3,6 +3,7 @@ name = "rb_rlbot_core"
 description = "A simulated RLBot v5 core: speaks the RLBot socket protocol to bots and scripts, but plays the match on rb_env's physics instead of Rocket League, so a bot can be run against rusty_bullet repeatably with no game installed. The rusty_bullet counterpart of what RLBot core plus Bridge.dll do with the real game."
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.82"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rusty-Mill/rusty_mill"
 publish = false

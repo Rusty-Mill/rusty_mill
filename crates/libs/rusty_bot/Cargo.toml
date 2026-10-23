@@ -2,6 +2,7 @@
 name = "rusty_bot"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 description = "Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rusty-Mill/rusty_mill"

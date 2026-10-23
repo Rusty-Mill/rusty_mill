@@ -69,7 +69,8 @@ use rk_app::contract::TurnResult;
 use rk_app::{Session, TurnOutcome};
 use rk_config::Config;
 use rk_constrain::{
-    ApprovalGate, ApprovalRequest, ApprovalResponse, ApprovalTrigger, PlanDecision,
+    approval_channel, ApprovalGate, ApprovalResponder, ApprovalResponse, ApprovalRx,
+    ApprovalTrigger, PlanDecision,
 };
 use rk_observe::{ToolEvent, ToolStatus};
 use rusty_agui::serve::{Agent, Emitter};
@@ -77,7 +78,7 @@ use rusty_agui::{Error, Message, RunAgentInput};
 use rusty_json::Value;
 use serde_json::json;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 /// The frontend tool an approval request is reported as.
@@ -97,7 +98,7 @@ pub struct KeyAgent<M> {
 /// One thread's session and what it is waiting on.
 struct Thread<M> {
     session: Arc<Session<M>>,
-    approvals: mpsc::Receiver<ApprovalRequest>,
+    approvals: ApprovalRx,
     /// Frontend tool calls issued so far, for ids.
     calls: u32,
     /// A turn stopped in the approval gate.
@@ -111,7 +112,7 @@ struct Parked {
     call_id: String,
     turn: JoinHandle<anyhow::Result<TurnOutcome>>,
     tokens: mpsc::UnboundedReceiver<String>,
-    respond: oneshot::Sender<ApprovalResponse>,
+    respond: ApprovalResponder,
 }
 
 impl<M> KeyAgent<M>
@@ -139,7 +140,7 @@ where
     /// The thread's session, built on first contact.
     fn thread(&mut self, thread_id: &str) -> Result<&mut Thread<M>, Error> {
         if !self.threads.contains_key(thread_id) {
-            let (tx, approvals) = mpsc::channel(8);
+            let (tx, approvals) = approval_channel(8);
             let gate = ApprovalGate::new(self.triggers.clone(), tx);
             let session =
                 Session::new_with_policy(&self.config, self.model.clone(), Arc::new(gate))

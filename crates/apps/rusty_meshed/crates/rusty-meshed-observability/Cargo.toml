@@ -2,6 +2,7 @@
 name = "rusty-meshed-observability"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 description = "Lineage tracking, metrics collection, SLO monitoring, and the CI contract gate, ported from meshed.observability."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_mill"

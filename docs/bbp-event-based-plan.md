@@ -1,6 +1,6 @@
 # BBP: from loop-based to event-based
 
-Status: proposal for the owner, 2026-10-22. Docs only; nothing here is built.
+Status: accepted by the owner, 2026-10-22. Step 1 merged (#880); step 2 approved.
 Goal (owner): BBP reacts to events instead of running a loop. `rusty_crdt` is a means, not the goal.
 Builds on `docs/bbp-event-driven-design.md` (accepted Phase 1) and `docs/bbp-concurrency-design.md` (2a/2b).
 
@@ -22,7 +22,7 @@ coarse to time an 11 s spec (c3 was unmeasurable). Both point at the same fix: s
 | The moderator sleeps `cfg.poll` (default 500 ms), then ticks the engine and checks every harness | `rusty_bbp_host/src/moderator.rs:710` | Block until the task log or a harness changes |
 | The store cannot tell anyone it changed: `refresh` re-reads, there is no subscribe | `rusty_bbp/src/store.rs` (`Store`) | A change signal per task |
 | Each turn is a fresh one-shot harness; an agent sees the board only when granted | `agents*.json`, `moderator.rs` launch | Long-lived agents that wait for a wake |
-| Who acts next walks `turn_order` | `TurnBased` in `pick_next` | `EventDriven` (`wake_set` + `pick_from`): built, opt-in via `bbp open --policy event-driven`, limited to one live turn (`engine.rs:298`) |
+| Who acts next walks `turn_order` | `TurnBased` in `pick_next` | `EventDriven` (`wake_set` + `pick_from`): the default for one-live-turn tasks since step 2; `--policy turn-based` opts out, and tasks with several live turns stay turn-based (`engine.rs:298`) |
 
 ## Steps (one PR each, no stacking, each behind its own owner approval)
 

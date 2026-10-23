@@ -56,6 +56,18 @@ pub struct Receiver<T> {
     next_to_read: u64,
 }
 
+impl<T> fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sender").finish_non_exhaustive()
+    }
+}
+
+impl<T> fmt::Debug for Receiver<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Receiver").finish_non_exhaustive()
+    }
+}
+
 /// Creates a broadcast channel with room for `capacity` unread messages
 /// before a lagging receiver starts missing them.
 ///
