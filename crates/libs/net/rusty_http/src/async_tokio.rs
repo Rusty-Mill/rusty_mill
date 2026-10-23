@@ -50,6 +50,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncTransport<T> {
         &self.io
     }
 
+    /// Mutably borrows the underlying transport: to flush it after a
+    /// write, which a buffering transport (TLS) needs before the peer sees
+    /// the bytes. Reading from it directly would skip buffered data.
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.io
+    }
+
     /// Consumes `self`, returning the underlying transport. See
     /// [`crate::sync::SyncTransport::into_inner`]'s docs -- the same
     /// caution about unconsumed buffered bytes applies; prefer

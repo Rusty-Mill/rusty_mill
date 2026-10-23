@@ -10,6 +10,8 @@
 //! - **Buffered request bodies.** The server reads a body whole (bounded)
 //!   before routing, so extraction is synchronous: a [`FromRequest`] reads
 //!   or takes what it needs from `&mut Request`. Response bodies may stream.
+//! - **One server.** [`serve`] runs HTTP/1.1 on `rusty_tokio`, plain or
+//!   over `rusty_tls`. There is no `tokio` dependency.
 //! - **`rusty_http`'s types.** [`Method`], [`StatusCode`] and [`HeaderMap`]
 //!   are re-exported from it; there is no `http` crate.
 //!
@@ -23,6 +25,7 @@ mod handler;
 mod request;
 pub mod response;
 pub mod routing;
+pub mod serve;
 
 pub use body::{Body, BoxError};
 pub use extract::{FromRequest, Json, Path, Query, Rejection, State};
@@ -31,6 +34,7 @@ pub use request::Request;
 pub use response::{IntoResponse, Response};
 pub use routing::Router;
 pub use rusty_http::{HeaderMap, Method, StatusCode};
+pub use serve::{serve, ServeOptions, Server};
 
 use std::future::Future;
 use std::pin::Pin;

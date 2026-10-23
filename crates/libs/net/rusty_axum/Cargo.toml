@@ -2,7 +2,7 @@
 name = "rusty_axum"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.87"
 description = "An in-house web framework replacing axum: a router, extractors, responses and SSE over rusty_http's types, runtime-free at its core"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rusty-Mill/rusty_mill"
@@ -16,7 +16,11 @@ layer = "libs"
 [dependencies]
 # The message types (`Method`, `StatusCode`, `HeaderMap`): one HTTP model in
 # the workspace, not a second one from the `http` crate.
-rusty_http = { workspace = true }
+rusty_http = { workspace = true, features = ["rusty-tokio"] }
+# The server's runtime (accept loop, connection tasks, timers) and TLS. The
+# owner's decision (#879): rusty_tokio, never tokio.
+rusty_tokio = { workspace = true }
+rusty_tls = { workspace = true, features = ["rusty-tokio"] }
 # Query-string decoding (`+` as space, `%XX`).
 rusty_percent = { workspace = true }
 # `Query`, `Path` and `Json` deserialize into the handler's own types, which
@@ -28,7 +32,9 @@ serde_json = { workspace = true }
 futures-core = { workspace = true }
 
 [dev-dependencies]
-rusty_tokio = { workspace = true }
+# Test certificates and the client's trust anchor, as rusty_hyper's tests.
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 
 [lints.rust]
 unsafe_code = "forbid"
