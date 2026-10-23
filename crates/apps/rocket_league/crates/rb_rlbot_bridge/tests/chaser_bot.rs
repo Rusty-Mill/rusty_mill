@@ -6,14 +6,14 @@
 //! and the same match every time.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rb_rlbot_bridge::{chaser, controller_state, observation};
 use rb_rlbot_client::Connection;
@@ -26,9 +26,23 @@ use rb_rlbot_wire::{
 };
 
 const BOT: &str = env!("CARGO_BIN_EXE_rb_chaser_bot");
+/// How long any one wait in these tests may take: a socket read, an accept, a process or the
+/// core thread ending. Past it the test fails instead of hanging.
 const WAIT: Duration = Duration::from_secs(30);
 
-/// A spawned bot, killed if the test fails before it exits.
+/// Polls `done` until it holds or [`WAIT`] has passed; returns whether it held.
+fn within_wait(mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + WAIT;
+    while !done() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+/// A spawned bot, killed and reaped if the test fails before it exits.
 struct Bot(Option<Child>);
 
 impl Bot {
@@ -45,8 +59,31 @@ impl Bot {
         Bot(Some(child))
     }
 
+    /// Waits up to [`WAIT`] for the bot to exit and returns what it printed. The child stays
+    /// owned (so killed on drop) until it has been reaped.
     fn wait(mut self) -> Output {
-        self.0.take().unwrap().wait_with_output().unwrap()
+        let child = self.0.as_mut().unwrap();
+        let drain = |mut pipe: Box<dyn Read + Send>| {
+            thread::spawn(move || {
+                let mut bytes = Vec::new();
+                pipe.read_to_end(&mut bytes).unwrap();
+                bytes
+            })
+        };
+        let stdout = drain(Box::new(child.stdout.take().unwrap()));
+        let stderr = drain(Box::new(child.stderr.take().unwrap()));
+        let mut status = None;
+        let exited = within_wait(|| {
+            status = child.try_wait().unwrap();
+            status.is_some()
+        });
+        assert!(exited, "the bot did not exit within {WAIT:?}");
+        self.0 = None;
+        Output {
+            status: status.unwrap(),
+            stdout: stdout.join().unwrap(),
+            stderr: stderr.join().unwrap(),
+        }
     }
 }
 
@@ -70,8 +107,21 @@ struct StandIn {
 }
 
 impl StandIn {
+    /// Accepts the bot's connection, waiting at most [`WAIT`] for it.
     fn accept(listener: &TcpListener) -> StandIn {
-        let (stream, _) = listener.accept().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut accepted = None;
+        let connected = within_wait(|| match listener.accept() {
+            Ok((stream, _)) => {
+                accepted = Some(stream);
+                true
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(e) => panic!("accept: {e}"),
+        });
+        assert!(connected, "the bot did not connect within {WAIT:?}");
+        let stream = accepted.unwrap();
+        stream.set_nonblocking(false).unwrap();
         stream.set_read_timeout(Some(WAIT)).unwrap();
         StandIn {
             stream,
@@ -231,11 +281,32 @@ fn the_bot_fails_when_nothing_is_listening() {
     assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
 }
 
-/// A lockstep simulated core for a blue and an orange chaser, on its own thread.
+/// A lockstep simulated core for a blue and an orange chaser, on its own thread. Dropping it
+/// (a failed assertion included) stops the core and joins its thread.
 struct SimCore {
     addr: SocketAddr,
     events: Arc<Mutex<Vec<Event>>>,
-    handle: JoinHandle<RunEnd>,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<RunEnd>>,
+}
+
+impl SimCore {
+    /// Waits up to [`WAIT`] for the run to end by itself and returns why it ended.
+    fn finish(&mut self) -> RunEnd {
+        let handle = self.handle.as_ref().unwrap();
+        let ended = within_wait(|| handle.is_finished());
+        assert!(ended, "the core did not end within {WAIT:?}");
+        self.handle.take().unwrap().join().unwrap()
+    }
+}
+
+impl Drop for SimCore {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 const BLUE: &str = "test/blue_chaser";
@@ -245,6 +316,8 @@ fn start_sim_core() -> SimCore {
     let (tx, rx) = mpsc::channel();
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&events);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_flag = Arc::clone(&stop);
     let handle = thread::spawn(move || {
         let players = [(BLUE.to_string(), 0), (ORANGE.to_string(), 1)];
         let sim = Simulation::new(bot_match(&players, MatchLengthMutator::FiveMinutes)).unwrap();
@@ -253,13 +326,14 @@ fn start_sim_core() -> SimCore {
         };
         let mut core = Core::bind("127.0.0.1:0", sim, pacing).unwrap();
         tx.send(core.local_addr().unwrap()).unwrap();
-        core.run(&AtomicBool::new(false), |e| sink.lock().unwrap().push(e))
+        core.run(&stop_flag, |e| sink.lock().unwrap().push(e))
             .unwrap()
     });
     SimCore {
-        addr: rx.recv().unwrap(),
+        addr: rx.recv_timeout(WAIT).unwrap(),
         events,
-        handle,
+        stop,
+        handle: Some(handle),
     }
 }
 
@@ -278,13 +352,12 @@ fn ball_moving(packet: &GamePacket) -> bool {
 
 /// Runs both chasers against the simulated core, watching as a match runner (empty agent id)
 /// until the ball is hit, then stops the match. Returns every packet up to the first one with
-/// the ball moving.
+/// the ball moving: the whole match from its first frame, one packet per frame.
 fn chaser_match() -> Vec<GamePacket> {
-    let core = start_sim_core();
-    let port = core.addr.port();
-    let blue = Bot::spawn(port, BLUE);
-    let orange = Bot::spawn(port, ORANGE);
+    let mut core = start_sim_core();
 
+    // The runner joins and has its opening messages before either bot exists, so it is
+    // registered when the match starts and sees every packet.
     let mut runner = Connection::connect(core.addr).unwrap();
     runner
         .send(ConnectionSettings {
@@ -294,7 +367,21 @@ fn chaser_match() -> Vec<GamePacket> {
             close_between_matches: true,
         })
         .unwrap();
-    let mut seen = Vec::new();
+    let (mut configuration, mut field) = (false, false);
+    while !(configuration && field) {
+        match runner.recv_timeout(WAIT).unwrap() {
+            Some(CoreMessage::MatchConfiguration(_)) => configuration = true,
+            Some(CoreMessage::FieldInfo(_)) => field = true,
+            Some(CoreMessage::GamePacket(_)) => panic!("a packet before any bot joined"),
+            Some(_) => {}
+            None => panic!("no opening messages within {WAIT:?}"),
+        }
+    }
+
+    let port = core.addr.port();
+    let blue = Bot::spawn(port, BLUE);
+    let orange = Bot::spawn(port, ORANGE);
+    let mut seen: Vec<GamePacket> = Vec::new();
     loop {
         let message = runner.recv_timeout(WAIT).unwrap();
         let Some(CoreMessage::GamePacket(packet)) = message else {
@@ -302,6 +389,11 @@ fn chaser_match() -> Vec<GamePacket> {
             continue;
         };
         let frame_num = packet.match_info.frame_num;
+        let expected = seen.last().map_or(0, |p| p.match_info.frame_num + 1);
+        assert_eq!(
+            frame_num, expected,
+            "packets are not one per frame from the first"
+        );
         assert!(frame_num <= TOUCH_BY_FRAME, "no touch by frame {frame_num}");
         let hit = ball_moving(&packet);
         seen.push(packet);
@@ -315,7 +407,7 @@ fn chaser_match() -> Vec<GamePacket> {
         })
         .unwrap();
 
-    let end = core.handle.join().unwrap();
+    let end = core.finish();
     assert_eq!(
         end,
         RunEnd::StopCommand {
