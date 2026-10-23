@@ -1,8 +1,8 @@
 # Native engine off `ring`: scope for gap 4 (the `rusty_tls` backend seam)
 
-Date: 2026-10-21. Status: **scope, no code. Gap 4 reopened by the owner on 2026-10-22, client role only** (D1;
-`CRYPTO-REPLACEMENT-PLAN.md` section 0). D2 to D5 are still open. Nothing here changes a gate, a default, a
-dependency or a consumer. Every decision in section 6 is the owner's.
+Date: 2026-10-21. Status: **scope, no code beyond step 1 (#865). Gap 4 reopened for the client role (D1) and D2 to D4
+decided on 2026-10-22: ADR-0005 accepted, signing compiled out, ChaCha20-Poly1305 first.** D5 is still
+open. Every decision in section 6 is the owner's.
 
 Context: `CRYPTO-REPLACEMENT-PLAN.md` section 13.1, gap 4 ("same signatures as the `ring` call sites,
 selected by an extra cfg beside `rusty_tls_handrolled`; default stays `ring`"). This note turns that row
@@ -11,13 +11,12 @@ into a concrete design, an evidence plan and the decisions that block it.
 ## 1. Answer first
 
 - Every primitive the hand-rolled engine takes from `ring` has a first-party replacement **except
-  signing** (gap 5, closed). So a truly ring-free engine is the **client role with no client
+  signing** (gap 5, closed). So an engine that calls no `ring` is the **client role with no client
   certificate**, which is where the plan recommends stopping (plan section 1).
 - The work is one internal module plus mechanical call-site changes: about **6 to 9 days** (the plan's 5
   to 8, plus about 1 for compiling signing out and the CI variant).
-- It is blocked by decisions, not code. Gap 4 is reopened (D1, 2026-10-22); still open are an ADR for
-  ADR-0002 section 6, what happens to signing, the cipher-suite order with portable AES, and AES-GCM's
-  review status (section 6).
+- It was blocked by decisions, not code. D1 to D4 were decided on 2026-10-22 (ADR-0005); AES-GCM's
+  review status (D5) is still open and must be settled before the native backend merges (section 6).
 - This removes `ring` from the *engine*. rustls, the default engine, keeps it, and so do `boringtun`,
   `quinn`, `jsonwebtoken` and the other lockfile users (plan decision D5).
 
@@ -47,8 +46,10 @@ at `6ba272c8`):
    arrays the native crates use.
 2. **Selection uses the ADR-0002 section 1 construction, a second time:** a cargo feature
    `native-crypto` that adds the native crates instead of `ring`, and a cfg
-   `--cfg rusty_tls_native_crypto` that a dependency cannot set. It only has effect inside the existing
-   `handrolled-engine` and `rusty_tls_handrolled` gates. Without it the engine uses `ring`, as today.
+   `--cfg rusty_tls_native_crypto` that a dependency cannot set, together with the existing
+   `--cfg rusty_tls_handrolled`. `native-crypto` does not require `handrolled-engine`, so a
+   native build has no direct `ring` dependency (the narrow ADR-0002 §1 exception in ADR-0005,
+   owner decision 2026-10-22). Without the native cfg the engine uses `ring`, as today.
    `rustls`'s own `ring` is untouched.
 3. **Under the native cfg, signing is compiled out:** `sign.rs`, `server.rs`, `server12.rs`, `ticket.rs`
    and `ClientIdentity`. Keeping them would keep `ring` in the graph (decision D3). A client asked for a
@@ -63,7 +64,7 @@ at `6ba272c8`):
 | Check | How |
 | --- | --- |
 | The client-side engine suite under the native backend | A second variant of the `rusty-tls-engine` CI job (`.github/workflows/ci.yml`) with the native cfg. Its client tests against a real `rustls` server then double as interop with a `ring`-backed peer. Server and mTLS suites cannot run there, because section 3 compiles them out, so the variant needs its own list of the tests it supports and its own zero-tests guard. It is **not** equivalent coverage: the existing `ring`-backend job stays unchanged and keeps running everything. |
-| OpenSSL interop and BoGo | Same job variant, client direction only. BoGo's server cases do not apply, so the variant needs its own floor, set from its first run with every newly disabled case given a reason; the existing floor (830) stays on the `ring` job. |
+| OpenSSL interop and BoGo | OpenSSL interop in the client direction (`handrolled_client12_socket_interop`) runs in the variant. **BoGo does not yet:** its shim drives the engine's server and does not build on the native backend, so a client-only shim is follow-up work; until then BoGo covers the `ring` backend only, at its existing floor (830). The owner agreed to this deferral on 2026-10-22 (ADR-0005 decision 4). It is a deferral, not equivalent coverage. |
 | Seam differential | Same keys and inputs through both backends: byte-identical records, secrets and Finished values. RFC 8448 known answers under both. |
 | Constant time | The existing `crypto-constant-time` job covers the primitives; the seam adds no secret-dependent branch or index, checked in review. |
 | Plan section 11 table | Re-checked at the integration commit. |
@@ -79,9 +80,9 @@ signing out under the cfg (about 1), the CI variant and seam differential (about
 | # | Decision | Options | Recommendation |
 | --- | --- | --- | --- |
 | D1 | Reopen gap 4 | Reopen for the client role, or keep it closed | **Decided 2026-10-22: reopened, client role only** |
-| D2 | ADR | ADR-0002 section 6 requires its own ADR to revisit `ring`. Accept the plan's section 10 draft (ADR-0005), scoped to the client role, or amend ADR-0002 section 6 | Accept ADR-0005, client role only |
-| D3 | Signing under the native cfg | Compile out the server and client certificates (ring-free), or keep `ring` for signing only (native primitives, not ring-free) | Compile out |
-| D4 | Cipher-suite order with portable AES (60 to 150 times slower than `ring`) | Put ChaCha20-Poly1305 first under the native cfg (a ClientHello fingerprint change), or confirm the AES intrinsics approval (plan D1, never reconfirmed) | ChaCha20-Poly1305 first |
+| D2 | ADR | ADR-0002 section 6 requires its own ADR to revisit `ring`. Accept the plan's section 10 draft (ADR-0005), scoped to the client role, or amend ADR-0002 section 6 | **Decided 2026-10-22: ADR-0005 accepted, client role only** |
+| D3 | Signing under the native cfg | Compile out the server and client certificates (ring-free), or keep `ring` for signing only (native primitives, not ring-free) | **Decided 2026-10-22: compile out** |
+| D4 | Cipher-suite order with portable AES (60 to 150 times slower than `ring`) | Put ChaCha20-Poly1305 first under the native cfg (a ClientHello fingerprint change), or confirm the AES intrinsics approval (plan D1, never reconfirmed) | **Decided 2026-10-22: ChaCha20-Poly1305 first** |
 | D5 | AES-GCM review | Whether the 2026-10-13 review of #651 is gap 3's review; and whether `rusty_aead`'s AES types stay exported unconditionally (`AES-GCM-DESIGN.md` section 10) | Owner's call |
 
 ## 7. Not in scope
