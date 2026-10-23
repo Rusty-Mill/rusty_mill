@@ -11,9 +11,13 @@
 //!   does today. Reported: frame ms, lock hold ms (the parser is blocked for
 //!   it), the render thread's wait for the lock, and parser MB/s with
 //!   rendering against parsing alone.
-//! - **Static folds.** Frame ms for a full grid with 0 and with 1,024 command
-//!   fold blocks (OSC 133 `C`..`D`), at the live view and scrolled back into
-//!   history. Every cell drawn maps its view row through the fold blocks.
+//! - **Static folds.** Frame ms for the same text with 0 and with 1,024
+//!   command fold blocks (OSC 133 `C`..`D` around each command's output), at
+//!   the live view and scrolled back half a screen into history. Every cell
+//!   drawn maps its view row through the fold blocks.
+//!
+//! A run that cannot measure (no font, a renderer that fails to start or
+//! panics, no samples) exits non-zero instead of printing zeros.
 //!
 //! Usage:
 //!   python3 bench/gen_workloads.py --size quick
@@ -28,6 +32,7 @@ use std::fs;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -49,17 +54,38 @@ struct Options {
     workloads: Vec<String>,
 }
 
+/// Something that paints one frame of a grid: the real CPU frame path, or a
+/// stand-in in tests.
+trait Painter {
+    fn paint(&mut self, grid: &Grid);
+}
+
+impl Painter for FrameBench {
+    fn paint(&mut self, grid: &Grid) {
+        self.draw(grid);
+    }
+}
+
+fn frame_bench() -> Option<FrameBench> {
+    FrameBench::new(COLS, ROWS, FONT_PX)
+}
+
 fn main() -> ExitCode {
-    let opts = match parse_args(env::args().skip(1).collect()) {
-        Ok(o) => o,
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("{e}\nusage: bench_frame_time [--hz N] [--secs N] [WORKLOAD.vt...]");
-            return ExitCode::from(2);
+            eprintln!("bench_frame_time: {e}");
+            ExitCode::from(2)
         }
-    };
-    if FrameBench::new(COLS, ROWS, FONT_PX).is_none() {
-        eprintln!("no usable monospace font: set RUSTY_TERM_FONT");
-        return ExitCode::from(2);
+    }
+}
+
+fn run() -> Result<(), String> {
+    let opts = parse_args(env::args().skip(1).collect()).map_err(|e| {
+        format!("{e}\nusage: bench_frame_time [--hz N] [--secs N] [WORKLOAD.vt...]")
+    })?;
+    if frame_bench().is_none() {
+        return Err("no usable monospace font: set RUSTY_TERM_FONT".to_owned());
     }
     println!(
         "## Streaming: {COLS}x{ROWS}, {CHUNK} B chunks, render at {} Hz, >= {} s per workload\n",
@@ -70,52 +96,47 @@ fn main() -> ExitCode {
     );
     println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     for path in &opts.workloads {
-        let data = match fs::read(path) {
-            Ok(d) if !d.is_empty() => d,
-            Ok(_) => {
-                eprintln!("{path}: empty");
-                return ExitCode::from(2);
-            }
-            Err(e) => {
-                eprintln!("{path}: {e}");
-                return ExitCode::from(2);
-            }
-        };
+        let data = fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        if data.is_empty() {
+            return Err(format!("{path}: empty"));
+        }
         let name = path
             .rsplit('/')
             .next()
             .unwrap_or(path)
             .trim_end_matches(".vt");
         let alone = parse_alone(&data, opts.secs);
-        let s = streaming(&data, &opts);
+        let s = streaming(&data, &opts, frame_bench).map_err(|e| format!("{name}: {e}"))?;
         println!(
             "| {name} | {} | {} | {} | {} | {} | {} | {} | {alone:.1} | {:.1} |",
             s.frame.len(),
-            ms(pct(&s.frame, 50.0)),
-            ms(pct(&s.frame, 99.0)),
-            ms(pct(&s.hold, 50.0)),
-            ms(pct(&s.hold, 99.0)),
-            ms(pct(&s.hold, 100.0)),
-            ms(pct(&s.wait, 99.0)),
+            pct_ms(&s.frame, 50.0)?,
+            pct_ms(&s.frame, 99.0)?,
+            pct_ms(&s.hold, 50.0)?,
+            pct_ms(&s.hold, 99.0)?,
+            pct_ms(&s.hold, 100.0)?,
+            pct_ms(&s.wait, 99.0)?,
             s.mb_per_s,
         );
     }
     println!("\n## Static folds: {COLS}x{ROWS}, {STATIC_FRAMES} frames each\n");
     println!("| fold blocks | view | frame p50 | frame p99 |");
     println!("|---:|---|---:|---:|");
-    for blocks in [0, FOLD_BLOCKS] {
+    for folds in [false, true] {
         for scrolled in [false, true] {
-            let (grid, made) = fold_grid(blocks, scrolled);
-            let frames = static_frames(&grid);
+            let grid = fold_grid(folds, scrolled)?;
+            let mut fb = frame_bench().ok_or("renderer failed to start")?;
+            let frames = static_frames(&mut fb, &grid);
             let view = if scrolled { "scrolled back" } else { "live" };
             println!(
-                "| {made} | {view} | {} | {} |",
-                ms(pct(&frames, 50.0)),
-                ms(pct(&frames, 99.0))
+                "| {} | {view} | {} | {} |",
+                grid.fold_blocks().len(),
+                pct_ms(&frames, 50.0)?,
+                pct_ms(&frames, 99.0)?
             );
         }
     }
-    ExitCode::SUCCESS
+    Ok(())
 }
 
 fn parse_args(args: Vec<String>) -> Result<Options, String> {
@@ -182,6 +203,7 @@ fn parse_alone(data: &[u8], secs: f64) -> f64 {
     feed(&Mutex::new(Grid::new(COLS, ROWS)), data, secs)
 }
 
+#[derive(Debug)]
 struct Streamed {
     frame: Vec<Duration>,
     hold: Vec<Duration>,
@@ -189,46 +211,81 @@ struct Streamed {
     mb_per_s: f64,
 }
 
-fn streaming(data: &[u8], opts: &Options) -> Streamed {
+/// Run the parser against a render thread built by `make`. The render
+/// thread reports readiness before the parser starts, so timing covers
+/// rendering from the first chunk. A renderer that fails to start, panics or
+/// records no frame is an error.
+fn streaming<P: Painter>(
+    data: &[u8],
+    opts: &Options,
+    make: impl FnOnce() -> Option<P> + Send + 'static,
+) -> Result<Streamed, String> {
     let grid = Arc::new(Mutex::new(Grid::new(COLS, ROWS)));
     let done = Arc::new(AtomicBool::new(false));
+    let (ready_tx, ready_rx) = mpsc::channel();
     let render = {
         let (grid, done) = (Arc::clone(&grid), Arc::clone(&done));
         let period = Duration::from_secs_f64(1.0 / opts.hz);
-        thread::spawn(move || render_loop(&grid, &done, period))
+        thread::spawn(move || {
+            let Some(mut painter) = make() else {
+                let _ = ready_tx.send(false);
+                return FrameTimes::default();
+            };
+            let _ = ready_tx.send(true);
+            render_loop(&mut painter, &grid, &done, period)
+        })
     };
-    let mb_per_s = feed(&grid, data, opts.secs);
+    // A renderer that panics before reporting drops the sender: also a failure.
+    let started = ready_rx.recv().unwrap_or(false);
+    let mb_per_s = if started {
+        feed(&grid, data, opts.secs)
+    } else {
+        0.0
+    };
     done.store(true, Ordering::Relaxed);
-    let (frame, hold, wait) = render.join().unwrap_or_default();
-    Streamed {
+    let (frame, hold, wait) = render
+        .join()
+        .map_err(|_| "render thread panicked".to_owned())?;
+    if !started {
+        return Err("renderer failed to start".to_owned());
+    }
+    if frame.is_empty() {
+        return Err("no frames recorded".to_owned());
+    }
+    Ok(Streamed {
         frame,
         hold,
         wait,
         mb_per_s,
-    }
+    })
 }
 
 type FrameTimes = (Vec<Duration>, Vec<Duration>, Vec<Duration>);
 
 /// Paint every `period` until `done`, as the window does today: take the
-/// grid lock, paint the whole frame, release. Returns per-frame (frame,
-/// lock hold, lock wait) times.
-fn render_loop(grid: &Mutex<Grid>, done: &AtomicBool, period: Duration) -> FrameTimes {
+/// grid lock, paint the whole frame, release. Always paints at least once.
+/// Returns per-frame (frame, lock hold, lock wait) times.
+fn render_loop(
+    painter: &mut impl Painter,
+    grid: &Mutex<Grid>,
+    done: &AtomicBool,
+    period: Duration,
+) -> FrameTimes {
     let mut times: FrameTimes = Default::default();
-    let Some(mut fb) = FrameBench::new(COLS, ROWS, FONT_PX) else {
-        return times;
-    };
     let mut next = Instant::now();
-    while !done.load(Ordering::Relaxed) {
+    loop {
         let t0 = Instant::now();
         let g = grid.lock();
         let t1 = Instant::now();
-        fb.draw(&g);
+        painter.paint(&g);
         drop(g);
         let t2 = Instant::now();
         times.0.push(t2 - t0);
         times.1.push(t2 - t1);
         times.2.push(t1 - t0);
+        if done.load(Ordering::Relaxed) {
+            return times;
+        }
         next += period;
         let now = Instant::now();
         if next > now {
@@ -237,59 +294,75 @@ fn render_loop(grid: &Mutex<Grid>, done: &AtomicBool, period: Duration) -> Frame
             next = now; // over budget: do not try to catch up
         }
     }
-    times
 }
 
-/// A full grid holding `blocks` finished command blocks (each a prompt
-/// line and one output line), optionally scrolled back half a screen into
-/// history. Returns the grid and the number of fold blocks it holds.
-fn fold_grid(blocks: usize, scrolled: bool) -> (Grid, usize) {
-    let mut g = Grid::new(COLS, ROWS);
-    let mut p = AnsiParser::new();
+/// A full grid with the same text either way: [`FOLD_BLOCKS`] commands, each
+/// a prompt line and an output line. With `folds`, OSC 133 marks each
+/// command's output, making it a fold block. With `scrolled`, the view is
+/// scrolled back half a screen. Errors if the grid does not end up so.
+fn fold_grid(folds: bool, scrolled: bool) -> Result<Grid, String> {
     let mut stream = Vec::new();
-    for i in 0..blocks.max(ROWS) {
-        if i < blocks {
-            stream.extend_from_slice(b"\x1b]133;A\x07$ make\r\n\x1b]133;C\x07");
-            stream.extend_from_slice(format!("output line {i}\r\n").as_bytes());
-            stream.extend_from_slice(b"\x1b]133;D;0\x07");
+    for i in 0..FOLD_BLOCKS {
+        let (a, c, d): (&[u8], &[u8], &[u8]) = if folds {
+            (b"\x1b]133;A\x07", b"\x1b]133;C\x07", b"\x1b]133;D;0\x07")
         } else {
-            stream.extend_from_slice(format!("plain line {i}\r\n").as_bytes());
-        }
+            (b"", b"", b"")
+        };
+        stream.extend_from_slice(a);
+        stream.extend_from_slice(b"$ make\r\n");
+        stream.extend_from_slice(c);
+        stream.extend_from_slice(format!("output line {i}\r\n").as_bytes());
+        stream.extend_from_slice(d);
     }
-    p.advance(&mut g, &stream);
+    let mut g = Grid::new(COLS, ROWS);
+    AnsiParser::new().advance(&mut g, &stream);
+    let want_blocks = if folds { FOLD_BLOCKS } else { 0 };
+    if g.fold_blocks().len() != want_blocks {
+        return Err(format!(
+            "fold fixture: {} blocks, expected {want_blocks}",
+            g.fold_blocks().len()
+        ));
+    }
     if scrolled {
         g.scroll_view_up(ROWS / 2);
+        if g.view_offset != ROWS / 2 {
+            return Err(format!(
+                "fold fixture: view offset {}, expected {}",
+                g.view_offset,
+                ROWS / 2
+            ));
+        }
     }
-    let made = g.fold_blocks().len();
-    (g, made)
+    Ok(g)
 }
 
-fn static_frames(grid: &Grid) -> Vec<Duration> {
-    let Some(mut fb) = FrameBench::new(COLS, ROWS, FONT_PX) else {
-        return Vec::new();
-    };
-    fb.draw(grid); // warm the glyph cache
+/// [`STATIC_FRAMES`] timed frames of `grid`, after one untimed frame that
+/// warms the glyph cache.
+fn static_frames(painter: &mut impl Painter, grid: &Grid) -> Vec<Duration> {
+    painter.paint(grid);
     (0..STATIC_FRAMES)
         .map(|_| {
             let t = Instant::now();
-            fb.draw(grid);
+            painter.paint(grid);
             t.elapsed()
         })
         .collect()
 }
 
-/// The `p`th percentile (nearest rank) of `v`; zero when empty.
-fn pct(v: &[Duration], p: f64) -> Duration {
+/// The `p`th percentile of `v` by nearest rank: the value at rank
+/// `ceil(p / 100 * n)`, clamped to `1..=n`. `None` when `v` is empty.
+fn pct(v: &[Duration], p: f64) -> Option<Duration> {
     let mut s = v.to_vec();
     s.sort_unstable();
-    let Some(last) = s.len().checked_sub(1) else {
-        return Duration::ZERO;
-    };
-    s[((p / 100.0 * last as f64).round() as usize).min(last)]
+    let n = s.len();
+    let rank = ((p / 100.0 * n as f64).ceil() as usize).clamp(1, n.max(1));
+    s.get(rank - 1).copied()
 }
 
-fn ms(d: Duration) -> String {
-    format!("{:.2} ms", d.as_secs_f64() * 1e3)
+/// [`pct`] formatted in milliseconds; an error when there are no samples.
+fn pct_ms(v: &[Duration], p: f64) -> Result<String, String> {
+    let d = pct(v, p).ok_or("no samples")?;
+    Ok(format!("{:.2} ms", d.as_secs_f64() * 1e3))
 }
 
 #[cfg(test)]
@@ -301,14 +374,19 @@ mod tests {
     }
 
     #[test]
-    fn pct_is_nearest_rank_and_zero_when_empty() {
-        let v: Vec<Duration> = (1..=100).rev().map(d).collect();
-        assert_eq!(pct(&v, 0.0), d(1));
-        assert_eq!(pct(&v, 50.0), d(51));
-        assert_eq!(pct(&v, 99.0), d(99));
-        assert_eq!(pct(&v, 100.0), d(100));
-        assert_eq!(pct(&[d(7)], 99.0), d(7));
-        assert_eq!(pct(&[], 50.0), Duration::ZERO);
+    fn pct_is_nearest_rank_with_defined_endpoints() {
+        let hundred: Vec<Duration> = (1..=100).rev().map(d).collect();
+        assert_eq!(pct(&hundred, 0.0), Some(d(1)));
+        assert_eq!(pct(&hundred, 50.0), Some(d(50)));
+        assert_eq!(pct(&hundred, 99.0), Some(d(99)));
+        assert_eq!(pct(&hundred, 100.0), Some(d(100)));
+        // 60 frames: p99 is rank ceil(59.4) = 60, the worst frame.
+        let sixty: Vec<Duration> = (1..=60).map(d).collect();
+        assert_eq!(pct(&sixty, 99.0), Some(d(60)));
+        assert_eq!(pct(&sixty, 50.0), Some(d(30)));
+        assert_eq!(pct(&[d(7)], 99.0), Some(d(7)));
+        assert_eq!(pct(&[], 50.0), None);
+        assert!(pct_ms(&[], 50.0).is_err());
     }
 
     #[test]
@@ -327,5 +405,56 @@ mod tests {
             let args = bad.into_iter().map(String::from).collect();
             assert!(parse_args(args).is_err());
         }
+    }
+
+    #[test]
+    fn fold_fixtures_match_except_for_fold_blocks() {
+        for scrolled in [false, true] {
+            let plain = fold_grid(false, scrolled).expect("plain fixture");
+            let folded = fold_grid(true, scrolled).expect("folded fixture");
+            assert_eq!(plain.fold_blocks().len(), 0);
+            assert_eq!(folded.fold_blocks().len(), FOLD_BLOCKS);
+            assert_eq!(plain.scrollback_len(), folded.scrollback_len());
+            assert_eq!(plain.view_offset, folded.view_offset);
+            assert_eq!(plain.view_offset, if scrolled { ROWS / 2 } else { 0 });
+            for y in 0..ROWS {
+                assert_eq!(plain.row(y), folded.row(y), "row {y}");
+            }
+        }
+    }
+
+    struct Counting(usize);
+    impl Painter for Counting {
+        fn paint(&mut self, _: &Grid) {
+            self.0 += 1;
+        }
+    }
+
+    struct Panicking;
+    impl Painter for Panicking {
+        fn paint(&mut self, _: &Grid) {
+            panic!("paint failed");
+        }
+    }
+
+    fn short() -> Options {
+        Options {
+            hz: 1000.0,
+            secs: 0.01,
+            workloads: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn streaming_reports_failures_instead_of_empty_samples() {
+        let data = b"hello\r\n".repeat(64);
+        let none = streaming(&data, &short(), || None::<Counting>);
+        assert_eq!(none.err().as_deref(), Some("renderer failed to start"));
+        let panics = streaming(&data, &short(), || Some(Panicking));
+        assert_eq!(panics.err().as_deref(), Some("render thread panicked"));
+        let ok = streaming(&data, &short(), || Some(Counting(0))).expect("measures");
+        assert!(!ok.frame.is_empty());
+        assert_eq!(ok.frame.len(), ok.hold.len());
+        assert_eq!(ok.frame.len(), ok.wait.len());
     }
 }

@@ -102,7 +102,9 @@ Paints the window's real CPU frame path (`gui::render::composite`) into an offsc
   - lock hold ms, during which the parser is blocked;
   - the render thread's wait for the lock;
   - parser MB/s with rendering, against parsing alone.
-- **Static folds.** Frame ms for a full grid with 0 and with 1,024 OSC 133 command fold blocks, at the live view and scrolled back into history.
+- **Static folds.** Frame ms for the same text with 0 and with 1,024 OSC 133 command fold blocks, at the live view and scrolled back half a screen into history.
+
+Percentiles are nearest rank. A run that cannot measure (no font, a renderer that fails to start or panics, no samples) exits non-zero.
 
 ```
 python3 bench/gen_workloads.py --size quick
