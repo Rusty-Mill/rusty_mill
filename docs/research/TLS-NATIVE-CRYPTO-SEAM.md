@@ -32,7 +32,7 @@ at `6ba272c8`):
 | `digest` SHA-256 / SHA-384 | `schedule.rs` | `rusty_sha2` | Implemented |
 | `hmac` (key schedules, Finished; HKDF is hand-written over it) | `schedule.rs`, `schedule12.rs` | `rusty_sha2::Hmac` (or its HKDF) | Implemented |
 | `aead` ChaCha20-Poly1305, records | `record.rs`, `record12.rs` | `rusty_aead::ChaCha20Poly1305` | Implemented |
-| `aead` AES-128-GCM / AES-256-GCM, records | `record.rs`, `record12.rs` | `rusty_aead::{Aes128Gcm, Aes256Gcm}` | Implemented, portable only; source-reviewed within #651's bounds (plan section 11b); whether that is enough is decision D5 |
+| `aead` AES-128-GCM / AES-256-GCM, records | `record.rs`, `record12.rs` | `rusty_aead::{Aes128Gcm, Aes256Gcm}` | Implemented, portable only. Automated, bounded source review on #651, no human review (plan section 11b). Decision D5 |
 | `agreement` X25519, P-256, P-384 | `kx.rs` | `rusty_pk::x25519`, `rusty_pk::ecdh` | Implemented |
 | `signature` verification (the 11 verifiers listed in plan section 0) | `verify.rs` | `rusty_pk::{rsa, ecdsa, ed25519}` | Implemented, exactly that subset |
 | `rand::SystemRandom` | `client.rs`, `kx.rs`, `server.rs`, `ticket.rs` | `rusty_rand::fill` | Implemented |
@@ -69,7 +69,7 @@ at `6ba272c8`):
 | OpenSSL interop and BoGo | OpenSSL interop in the client direction (`handrolled_client12_socket_interop`) runs in the variant. **BoGo does not yet:** its shim drives the engine's server and does not build on the native backend, so a client-only shim is follow-up work; until then BoGo covers the `ring` backend only, at its existing floor (830). The owner agreed to this deferral on 2026-10-22 (ADR-0005 decision 4). It is a deferral, not equivalent coverage. |
 | Seam differential | Same keys and inputs through both backends: byte-identical records, secrets and Finished values. RFC 8448 known answers under both. |
 | Constant time | The existing `crypto-constant-time` job covers the primitives; the seam adds no secret-dependent branch or index, checked in review. |
-| Plan section 11 table | Re-checked for #871 in plan section 11b (2026-10-23). The re-check lists the review records for each primitive the backend calls. Still without a recorded human review: the #540 secret-handling code at `e3266f2e` (HMAC key paths, ChaCha20-Poly1305, X25519, the Montgomery-core invariants), the seam code in #871, and AES-GCM's items outside #651's bounded clearance. To be repeated at the integration commit. |
+| Plan section 11 table | Re-checked for #871 in plan section 11b (2026-10-23). The re-check lists the review records for each primitive the backend calls. Still without a recorded human review: the #540 secret-handling code at `e3266f2e` (HMAC key paths, ChaCha20-Poly1305, X25519, the Montgomery-core invariants), the `constant_time_eq` and `wipe` helpers, the seam code in #871 (automated reviews only), and AES-GCM (an automated, bounded source review only). To be repeated at the integration commit. |
 
 ## 5. Effort
 
@@ -85,7 +85,7 @@ signing out under the cfg (about 1), the CI variant and seam differential (about
 | D2 | ADR | ADR-0002 section 6 requires its own ADR to revisit `ring`. Accept the plan's section 10 draft (ADR-0005), scoped to the client role, or amend ADR-0002 section 6 | **Decided 2026-10-22: ADR-0005 accepted, client role only** |
 | D3 | Signing under the native cfg | Compile out the server and client certificates (ring-free), or keep `ring` for signing only (native primitives, not ring-free) | **Decided 2026-10-22: compile out** |
 | D4 | Cipher-suite order with portable AES (60 to 150 times slower than `ring`) | Put ChaCha20-Poly1305 first under the native cfg (a ClientHello fingerprint change), or confirm the AES intrinsics approval (plan D1, never reconfirmed) | **Decided 2026-10-22: ChaCha20-Poly1305 first** |
-| D5 | AES-GCM review | Whether the 2026-10-13 review of #651 is gap 3's review; and whether `rusty_aead`'s AES types stay exported unconditionally (`AES-GCM-DESIGN.md` section 10). The review exists. Its re-review of `70139bb3` (comment 6150642627) cleared the source corrections but explicitly did not accept a constant-time evidence record or production adoption (plan section 0, "AES-GCM review record") | Owner's call |
+| D5 | AES-GCM review | Whether the 2026-10-13 review of #651 is gap 3's review; and whether `rusty_aead`'s AES types stay exported unconditionally (`AES-GCM-DESIGN.md` section 10). An automated, bounded source review exists. Its re-review of `70139bb3` (comment 6150642627) cleared the source corrections. It explicitly did not accept a constant-time evidence record or production adoption, and no human review is recorded (plan section 0, "AES-GCM review record") | Owner's call |
 
 ## 7. Not in scope
 

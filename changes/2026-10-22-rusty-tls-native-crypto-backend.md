@@ -25,5 +25,5 @@ changelog: "`rusty_tls`: the `native-crypto` feature: with `--cfg rusty_tls_nati
   - BoGo does not run on the native backend yet, because its shim needs the server role. ADR-0005 asks for a native BoGo floor; the owner agreed on 2026-10-22 to defer it until a client-only shim exists. It is a deferral, not equivalent coverage.
   - The native build cannot present a client certificate or act as a server.
   - AES-GCM is portable and slow.
-  - D5 (AES-GCM's review status) must be settled before this merges (ADR-0005). The AES-GCM source review (#651, bounded) is now recorded. Plan section 11b re-checks the plan's section 11 table for this backend, primitive by primitive, and names what has no human review on record.
+  - D5 (AES-GCM's review status) must be settled before this merges (ADR-0005). The automated, bounded AES-GCM source review on #651 is now recorded, with no human review. Plan section 11b re-checks the plan's section 11 table for this backend, primitive by primitive, and names what has no human review on record.
 - **Version:** `rusty_tls` 0.12.1 -> 0.13.0 (a new feature; `docs/versioning.md` §2).

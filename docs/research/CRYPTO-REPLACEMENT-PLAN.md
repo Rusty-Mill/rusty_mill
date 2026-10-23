@@ -87,16 +87,16 @@ narrow exception to ADR-0002 §1, the owner chose the exception ("(a)"). The own
 on the native backend until a client-only shim exists. Both are recorded in ADR-0005. **Confirmed directly by
 the owner** with D2 to D4 (#868 comment 6343682194), and restated on #871 on 2026-10-23 (comment 6354851710).
 
-**AES-GCM review record, for D5 (2026-10-23).** A review of AES-GCM exists, and it has a defined scope. The owner
-cites it as AES-GCM's source review (#871 comment 6354851710). On #651 it reviewed `0341df4c` (comment 6150120879), then
-re-reviewed `70139bb3` (comment 6150642627), which cleared
+**AES-GCM review record, for D5 (2026-10-23).** AES-GCM has an **automated** source review with a defined
+scope (#871 comments 6354851710 and 6354987869 classify it). It is not a human audit by the owner. On #651 it
+reviewed `0341df4c` (comment 6150120879), then re-reviewed `70139bb3` (comment 6150642627), which cleared
 the reported source defects and found no new blocking defect. That re-review states its limits:
 it is "source clearance of the bounded corrections, not acceptance of a passing constant-time evidence record or
 production adoption". It also names what stays open: no full evidence record exists for that head, CI does not run
 the statistical timing series, the AES exports remain unconditional with gating unresolved, and best-effort wiping
 cannot establish erasure of every temporary. The two doc items it named are corrected in `73dd7629`. The AES source
 is otherwise unchanged since `70139bb3`. D5 itself, whether this counts as gap 3's review for wiring, is still the
-owner's decision. Section 11b sets this beside the records for the other primitives.
+owner's decision. No human review of AES-GCM is recorded. Section 11b sets this beside the records for the other primitives.
 
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
@@ -762,8 +762,9 @@ It is still evidence, not proof: one container VM, x86-64, 40 repetitions per se
 This re-checks the section 11 table for the primitives that `rusty_tls`'s native backend
 (`src/handrolled/crypto/native.rs`) actually calls, as the seam note's section 4 requires. It is a
 re-check against the existing records, not a new review. "Human review" here means a review whose
-reviewer, scope and conclusion are on record. A review comment that names an automated pass as its source
-counts as automated, even when it was posted from the owner's account.
+reviewer, scope and conclusion are on record. Review comments posted from the owner's account count as automated
+unless a record says a person performed them, as the owner directed for #651 and #871 (#871 comment 6354987869).
+Automated reviews add evidence but are never relabelled as the human review the plan requires.
 
 **What the backend uses.** `rusty_sha2` (SHA-256/384, `HmacSha256`/`HmacSha384`; HKDF and the TLS 1.2
 PRF stay in `rusty_tls`, built on HMAC), `rusty_aead` (`ChaCha20Poly1305`, `Aes128Gcm`, `Aes256Gcm`),
@@ -785,21 +786,24 @@ re-review.
 | Shared Montgomery core (`mont.rs`, `field.rs`) | #540, as above, plus the boundary tests in section 11. ECDH (#576) runs on this core, and the review of #576 below covers ECDH, but no record says it covers the core's invariants. | **No.** Section 11 still holds: "A human review of the invariants has not happened." |
 | ECDH P-256/P-384, `rusty_rand` | Owner-verified independent review of #572 and #576 (2026-10-09; #576 comment 6091204395). The reviewed commit, method and findings are not recorded. | **Yes**, with that scope. |
 | Signature verification (`rsa`, `ecdsa`, `ed25519`) | #540, as above. The Ed25519 small-order policy was decided by the owner (#572). | **No**, beyond the Ed25519 policy decision. This code handles public data only. |
-| AES-128/256-GCM | #651: source review of `0341df4c` (comment 6150120879), then a re-review of `70139bb3` (comment 6150642627) that cleared the reported source defects and found no new blocking defect. That re-review states its own limits: it is "source clearance of the bounded corrections, not acceptance of a passing constant-time evidence record or production adoption". No full evidence record exists for that head. CI does not run the statistical timing series. The AES types are still exported unconditionally. Wiping is best-effort. | **Yes, for source correctness of the corrections, within those limits.** The owner cites it as the source review (#871 comment 6354851710). D5 still asks whether this counts as gap 3's review. |
-| `rusty_crypto_key::{constant_time_eq, wipe}` | `wipe` was in #540's review scope. Neither function has a separate record. | **No.** |
-| The seam itself (`handrolled/crypto/{mod,ring,native}.rs`, call sites, the gates) | #865 and #871 author self-review only. #871 has the seam differential, the client-only CI variant and OpenSSL interop. | **No.** An independent review of #871 is outstanding. |
+| AES-128/256-GCM | #651: source review of `0341df4c` (comment 6150120879), then a re-review of `70139bb3` (comment 6150642627) that cleared the reported source defects and found no new blocking defect. That re-review states its own limits: it is "source clearance of the bounded corrections, not acceptance of a passing constant-time evidence record or production adoption". No full evidence record exists for that head. CI does not run the statistical timing series. The AES types are still exported unconditionally. Wiping is best-effort. | **No.** The record is an automated, bounded source review: it clears the corrections' source defects only, and is not full timing evidence or production certification (#871 comment 6354987869). D5 still asks whether this counts as gap 3's review. |
+| `rusty_crypto_key::{constant_time_eq, wipe}` | `wipe` was in the scope of #540's automated reviews. `constant_time_eq` (the native HMAC tag check) has no review record. | **No.** |
+| The seam itself (`handrolled/crypto/{mod,ring,native}.rs`, call sites, the gates) | Author self-review (#865, #871). Independent **automated** source reviews of #871: `d7e74eb1` (comment 6339638133; found the X25519 unwind-wipe gap, fixed in `7192f26a`) and `7192f26a` (comment 6339760776; no new blocking finding), and a check that `99a08e51` is byte-identical in crypto code and tests to `d86de0a1` (comment 6354987869). Their stated limits: source passes, no local tests, no comprehensive audit or forensic-erasure claim, and they do not discharge D5 or the primitive review requirements. #871 also has the seam differential, the client-only CI variant and OpenSSL interop. | **No.** |
 
 **Still unreviewed, precisely:**
 - **#540's secret-handling code at `e3266f2e`:** the HMAC key paths, ChaCha20-Poly1305, X25519 and the Montgomery-core invariants. The owner accepted their own review on 2026-10-10, but that statement gave no scope, so it does not close these rows. If the owner states on GitHub that their review covered these components, at that commit, the rows close.
-- **The #871 seam code** and its use of `constant_time_eq`.
-- **AES-GCM items outside #651's bounded clearance:** a full constant-time record for the corrected head, the export gating, and the D5 decision itself.
+- **The helpers** `rusty_crypto_key::constant_time_eq` and `wipe`.
+- **The #871 seam code.** It has automated reviews only (above).
+- **AES-GCM.** It has an automated, bounded source review only. Also missing: a full constant-time record for the corrected head, the export gating, and the D5 decision itself.
+
+Further automated review can add evidence here, but it cannot stand in for the human review these rows require.
 
 ## 12. What I did not verify
 
 Added after review (current as of the evidence record):
 - No human has reviewed any of the new code; every statement above is the implementer's. *(Superseded in
-  part: the owner later reviewed ECDH and `rusty_rand` (#572, #576) and AES-GCM within #651's bounds. Section 11b
-  lists what still has no human review on record.)*
+  part: an owner-verified review covers ECDH and `rusty_rand` (#572, #576). AES-GCM has an automated, bounded source
+  review only. Section 11b lists what still has no human review on record.)*
 - `ring` parity was established against 0.17.14 only, on the recorded corpus.
 - Constant-time results are single-machine, x86-64, rustc 1.99.0, in a container VM with unknown neighbours, and preliminary; aarch64 was
   never run, and the taint tool is a no-op there (`rusty_ct_check::taint::SUPPORTED`).
