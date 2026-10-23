@@ -494,6 +494,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
+        timeout-minutes: 15
         with:
           components: clippy
           cache-shared-key: clippy-${{ matrix.scope.component }}-${{ matrix.os }}
@@ -545,6 +546,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
+        timeout-minutes: 15
         with:
           cache-shared-key: ci-smoke-${{ matrix.os }}
       - run: cargo test --locked -p rusty_baseline
@@ -567,6 +569,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
+        timeout-minutes: 15
         with:
           cache-shared-key: test-${{ matrix.scope.component }}-${{ matrix.os }}
 
@@ -1299,6 +1302,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
+        timeout-minutes: 15
         with:
           cache-shared-key: msrv-compile
       - name: cargo check each crate at its declared rust-version
