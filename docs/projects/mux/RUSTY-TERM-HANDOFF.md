@@ -27,7 +27,7 @@ Also merged:
 
 #944 is closed as a duplicate. Its branch `claude/ctutils-rustsec-2026-0385` is still on the remote: this session cannot delete it, so delete it in the GitHub UI.
 
-**#940 is in the merge queue at `528be634`.** If it has not merged when you start, check it first. If it was dequeued or failed, fix it before anything else.
+**#940 merged at `5c24bf8c`.** No PR from this work is open apart from #950 (these docs).
 
 ## 2. Roadmap (recommended order)
 

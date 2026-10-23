@@ -26,7 +26,7 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 | D14 | #850 (the `l13` feature pulls tokio in through `rusty_lsp`) is low priority. Leave it alone. | The mux does not need `l13` in phase 1 | Yes |
 | D15 | Fix RUSTSEC-2026-0385 with a separate lockfile PR, never a suppression. #943 (`ctutils` 0.4.4) landed. My duplicate #944 (0.4.5) was closed. | cargo-deny was blocking every PR | Yes ("a", "Close 944") |
 | D16 | `rusty_tokio` is the async runtime for every `rusty_mux_*` crate; no tokio in any mux binary. | Sovereignty | Yes (DECISIONS 2026-10-22, recorded before this handoff) |
-| D17 | The frame-time benchmark is a local tool, not a CI gate. | Wall-clock is unstable on shared runners | Unconfirmed (not objected to; #940 was queued by the owner) |
+| D17 | The frame-time benchmark is a local tool, not a CI gate. | Wall-clock is unstable on shared runners | Unconfirmed (not objected to; #940 merged as such) |
 
 ## 2. Design context
 
@@ -112,7 +112,7 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 
 | Item | Touches | Status |
 |---|---|---|
-| PR #940: frame-time benchmark (`bench_frame_time`, `render::composite`) | `rusty_term` (gui) | In the merge queue at `528be634`; CI green; reviewer cleared |
+| PR #940: frame-time benchmark (`bench_frame_time`, `render::composite`) | `rusty_term` (gui) | Merged (`5c24bf8c`) |
 | Backlog #3 = rows 8 + 9 + 7 (short lock, row map once per frame, dirty rows) | `rusty_term` gui, `rusty_term_core` | Not started; needs the owner's go-ahead |
 | Incremental snapshot: per-row seqno plus stable row index | `rusty_term_core`, future `rusty_mux_proto` | Not started; belongs to the mux protocol work |
 | Compact cell (row 5) and contiguous scrollback (row 6) | `rusty_term_core`, snapshot version | Deferred (D10) |
@@ -136,7 +136,7 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 | #930 | Ring scroll |
 | #936 | ASCII fast path |
 | #939 | Snapshot |
-| #940 | Frame bench (queued, not yet merged) |
+| #940 | Frame bench |
 | #943 | ctutils 0.4.4 (not from this session) |
 | #944 | ctutils 0.4.5 duplicate, closed |
 
