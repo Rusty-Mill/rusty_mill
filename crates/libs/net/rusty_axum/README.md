@@ -24,4 +24,7 @@ let response = app.call(rusty_axum::Request::new(rusty_axum::Method::Get, "/heal
   or over `rusty_tls`: keep-alive, `Expect: 100-continue`, bounded head, body,
   idle time and connections, and graceful shutdown that ends SSE streams cleanly.
 
-Status: middleware and CORS come next; no consumer has moved yet.
+- `Router::layer` wraps every request: `middleware::from_fn(|req, next| ..)` or
+  `cors::Cors` (tower-http's `CorsLayer` behaviour).
+
+Status: no consumer has moved yet; `rk-app` is the pilot.

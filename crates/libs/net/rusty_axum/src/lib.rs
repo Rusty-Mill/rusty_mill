@@ -19,9 +19,11 @@
 //! multipart, cookies, typed headers, HTTP/2 for an app.
 
 mod body;
+pub mod cors;
 mod de;
 pub mod extract;
 mod handler;
+pub mod middleware;
 mod request;
 pub mod response;
 pub mod routing;

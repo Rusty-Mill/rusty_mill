@@ -10,6 +10,7 @@ use std::sync::Arc;
 use rusty_http::{Method, StatusCode};
 
 use crate::handler::{erase, BoxHandler, Handler};
+use crate::middleware::{Middleware, Next};
 use crate::request::Request;
 use crate::response::{IntoResponse, Response};
 use crate::BoxFuture;
@@ -17,8 +18,19 @@ use crate::BoxFuture;
 /// Routes requests to handlers. `S` is the state its handlers extract with
 /// [`State`](crate::State), supplied by [`Router::with_state`]; a router
 /// with every state supplied is a `Router<()>`, which [`Router::call`]s.
+/// Cloning is cheap: routes and layers are shared.
 pub struct Router<S = ()> {
-    routes: Vec<Route<S>>,
+    routes: Arc<Vec<Route<S>>>,
+    layers: Arc<Vec<Arc<dyn Middleware>>>,
+}
+
+impl<S> Clone for Router<S> {
+    fn clone(&self) -> Self {
+        Router {
+            routes: self.routes.clone(),
+            layers: self.layers.clone(),
+        }
+    }
 }
 
 struct Route<S> {
@@ -36,9 +48,22 @@ enum Segment {
     Param(String),
 }
 
+impl<S> Clone for Route<S> {
+    fn clone(&self) -> Self {
+        Route {
+            path: self.path.clone(),
+            pattern: self.pattern.clone(),
+            methods: self.methods.clone(),
+        }
+    }
+}
+
 impl<S> Default for Router<S> {
     fn default() -> Self {
-        Router { routes: Vec::new() }
+        Router {
+            routes: Arc::new(Vec::new()),
+            layers: Arc::new(Vec::new()),
+        }
     }
 }
 
@@ -59,11 +84,8 @@ impl<S: Send + Sync + 'static> Router<S> {
     /// found the first time it builds its router.
     pub fn route(mut self, path: &str, methods: MethodRouter<S>) -> Self {
         let pattern = parse(path);
-        if let Some(route) = self
-            .routes
-            .iter_mut()
-            .find(|r| same_shape(&r.pattern, &pattern))
-        {
+        let routes = Arc::make_mut(&mut self.routes);
+        if let Some(route) = routes.iter_mut().find(|r| same_shape(&r.pattern, &pattern)) {
             assert!(
                 route.path == path,
                 "route {path:?} overlaps {:?}",
@@ -72,7 +94,7 @@ impl<S: Send + Sync + 'static> Router<S> {
             route.methods.merge(methods, path);
             return self;
         }
-        self.routes.push(Route {
+        routes.push(Route {
             path: path.to_string(),
             pattern,
             methods,
@@ -84,11 +106,24 @@ impl<S: Send + Sync + 'static> Router<S> {
     ///
     /// # Panics
     ///
-    /// As [`Router::route`], when the two routers overlap.
+    /// As [`Router::route`], when the two routers overlap; and when `other`
+    /// has layers, which would silently apply to every route after the
+    /// merge. Merge first, then add layers.
     pub fn merge(self, other: Router<S>) -> Self {
-        other.routes.into_iter().fold(self, |router, route| {
-            router.route(&route.path, route.methods)
+        assert!(
+            other.layers.is_empty(),
+            "merge a router before adding its layers"
+        );
+        other.routes.iter().fold(self, |router, route| {
+            router.route(&route.path, route.methods.clone())
         })
+    }
+
+    /// Wraps every request, including those answered 404 or 405, in
+    /// `middleware`. The last layer added runs first, as in axum.
+    pub fn layer(mut self, middleware: impl Middleware) -> Self {
+        Arc::make_mut(&mut self.layers).push(Arc::new(middleware));
+        self
     }
 
     /// Supplies the state every handler extracts, giving a router that
@@ -97,35 +132,44 @@ impl<S: Send + Sync + 'static> Router<S> {
     where
         S: Clone,
     {
+        let routes = self
+            .routes
+            .iter()
+            .map(|route| Route {
+                path: route.path.clone(),
+                pattern: route.pattern.clone(),
+                methods: route.methods.clone().with_state(state.clone()),
+            })
+            .collect();
         Router {
-            routes: self
-                .routes
-                .into_iter()
-                .map(|route| Route {
-                    path: route.path,
-                    pattern: route.pattern,
-                    methods: route.methods.with_state(state.clone()),
-                })
-                .collect(),
+            routes: Arc::new(routes),
+            layers: self.layers,
         }
     }
 }
 
 impl Router<()> {
-    /// Answers `req` in process: routing, extraction and the handler, no
-    /// socket. The server calls this; so do tests. A `HEAD` answer keeps
-    /// the status and headers of the `GET` answer but no body: a whole body
-    /// becomes its `Content-Length`, and a stream is dropped unpolled.
+    /// Answers `req` in process: layers, routing, extraction and the
+    /// handler, no socket. The server calls this; so do tests. A `HEAD`
+    /// answer keeps the status and headers of the `GET` answer but no body:
+    /// a whole body becomes its `Content-Length`, and a stream is dropped
+    /// unpolled. That happens outside every layer, so layers see the body.
     pub fn call(&self, req: Request) -> BoxFuture<'static, Response> {
         let head = *req.method() == Method::Head;
-        let response = self.dispatch(req);
+        let response = Next::new(self.clone(), self.layers.len()).run(req);
         if !head {
             return response;
         }
         Box::pin(async move { without_body(response.await) })
     }
 
-    fn dispatch(&self, mut req: Request) -> BoxFuture<'static, Response> {
+    /// The `i`th layer, counted from the first added.
+    pub(crate) fn layer_at(&self, i: usize) -> Option<&Arc<dyn Middleware>> {
+        self.layers.get(i)
+    }
+
+    /// Routing and the handler, after every layer.
+    pub(crate) fn dispatch(&self, mut req: Request) -> BoxFuture<'static, Response> {
         let Some(segments) = decode_segments(req.path()) else {
             return ready((StatusCode::BAD_REQUEST, "path is not valid UTF-8"));
         };
@@ -251,6 +295,14 @@ fn specificity(pattern: &[Segment]) -> Vec<bool> {
 /// others, chained: `get(list).post(create)`.
 pub struct MethodRouter<S = ()> {
     handlers: Vec<(Method, BoxHandler<S>)>,
+}
+
+impl<S> Clone for MethodRouter<S> {
+    fn clone(&self) -> Self {
+        MethodRouter {
+            handlers: self.handlers.clone(),
+        }
+    }
 }
 
 impl<S: Send + Sync + 'static> MethodRouter<S> {
