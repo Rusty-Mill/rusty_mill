@@ -23,12 +23,19 @@ pub(crate) async fn run(state: Shared, stream: UnixStream) {
         Ok(None) => return,
         Err(err) => return eprintln!("rusty-mux-server: handshake: {err}"),
     };
-    let (out, inbox) = outbox();
+    let (out, inbox, cancel) = outbox();
     let client = state.borrow_mut().connect(out, features);
-    rusty_tokio::task::spawn_local(write_frames(inbox, wr));
-
-    if let Err(err) = serve(&state, client, &mut rd, &mut frames).await {
-        eprintln!("rusty-mux-server: client {client}: {err}");
+    // One owning future races both halves and eviction. Dropping the losing
+    // futures closes both socket halves and discards the receiver/backlog,
+    // including a writer currently blocked inside write_all.
+    rusty_tokio::select! {
+        _ = cancel.notified() => {},
+        result = serve(&state, client, &mut rd, &mut frames) => {
+            if let Err(err) = result {
+                eprintln!("rusty-mux-server: client {client}: {err}");
+            }
+        },
+        _ = write_frames(inbox, wr) => {},
     }
     state.borrow_mut().disconnect(client);
 }
@@ -104,4 +111,72 @@ impl Frames {
             self.buf.extend_from_slice(&self.chunk[..n]);
         }
     }
+}
+
+#[cfg(test)]
+mod regression {
+    use super::*;
+    use crate::Config;
+    use rusty_mux_proto::{Features, encode};
+    use rusty_tokio::{Builder, LocalOptions};
+    use std::time::Duration;
+
+    #[test]
+    fn eviction_releases_blocked_writer_reader_socket_and_backlog() {
+        let rt = Builder::new_current_thread()
+            .build_local(&LocalOptions::default())
+            .unwrap();
+        rt.block_on(async {
+            let state = State::shared(Config {
+                program: "/bin/sh".into(),
+                args: vec![],
+                cwd: "/".into(),
+            });
+            let (peer, server) = UnixStream::pair().unwrap();
+            peer.write_all(
+                &encode(&Message::Hello {
+                    features: Features::REPLAY_SNAPSHOT,
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            let task = rusty_tokio::task::spawn_local(run(state.clone(), server));
+            rusty_tokio::task::yield_now().await;
+            let client = state.borrow().test_client();
+            // The peer stops reading. Force the writer into a pending write_all,
+            // then overfill its queue while the reader waits for another request.
+            state.borrow_mut().test_send(client, vec![0; 4 << 20]);
+            rusty_tokio::task::yield_now().await;
+            let queued = state.borrow().test_queue(client);
+            assert_eq!(queued.get(), 0, "writer must have dequeued the large frame");
+            assert!(
+                !task.is_finished(),
+                "non-reading peer must keep connection pending"
+            );
+            let weak = Rc::downgrade(&queued);
+            for _ in 0..10 {
+                state.borrow_mut().test_send(client, vec![0; 1 << 20]);
+            }
+            drop(queued);
+            rusty_tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!state.borrow().has_client(client));
+            assert!(
+                weak.upgrade().is_none(),
+                "receiver and queued backlog retained"
+            );
+            // Drain bytes already in the kernel, then observe the socket close.
+            let mut buf = [0; 8192];
+            rusty_tokio::time::timeout(Duration::from_secs(2), async {
+                while peer.read(&mut buf).await.unwrap() != 0 {}
+            })
+            .await
+            .unwrap();
+        });
+    }
+
+    use std::rc::Rc;
 }

@@ -7,12 +7,15 @@ use crate::Error;
 use crate::field::{In, Out};
 
 /// Optional protocol capabilities. Each peer sends its own; the session uses
-/// the intersection. Phase 1 defines no bits yet.
+/// the intersection. Replay checkpoints require explicit opt-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Features(u64);
 
 impl Features {
     pub const NONE: Self = Self(0);
+
+    /// Snapshot payload is the versioned RMRP replay checkpoint (see mux docs).
+    pub const REPLAY_SNAPSHOT: Self = Self(1);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)

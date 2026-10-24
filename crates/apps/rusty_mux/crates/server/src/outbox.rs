@@ -3,6 +3,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use rusty_tokio::sync::Notify;
 use rusty_tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Frames queued but not yet written beyond this many bytes mean the client
@@ -13,6 +14,7 @@ pub(crate) const BUDGET: usize = 8 << 20;
 /// The sending side, held by the server state.
 pub(crate) struct Outbox {
     tx: UnboundedSender<Vec<u8>>,
+    cancel: Rc<Notify>,
     queued: Rc<Cell<usize>>,
 }
 
@@ -22,15 +24,18 @@ pub(crate) struct Inbox {
     queued: Rc<Cell<usize>>,
 }
 
-pub(crate) fn outbox() -> (Outbox, Inbox) {
+pub(crate) fn outbox() -> (Outbox, Inbox, Rc<Notify>) {
+    let cancel = Rc::new(Notify::new());
     let (tx, rx) = unbounded_channel();
     let queued = Rc::new(Cell::new(0));
     (
         Outbox {
             tx,
+            cancel: cancel.clone(),
             queued: queued.clone(),
         },
         Inbox { rx, queued },
+        cancel,
     )
 }
 
@@ -54,5 +59,18 @@ impl Inbox {
         self.queued
             .set(self.queued.get().saturating_sub(frame.len()));
         Some(frame)
+    }
+}
+
+impl Drop for Outbox {
+    fn drop(&mut self) {
+        self.cancel.notify_one();
+    }
+}
+
+#[cfg(test)]
+impl Outbox {
+    pub(crate) fn test_queue(&self) -> Rc<Cell<usize>> {
+        self.queued.clone()
     }
 }

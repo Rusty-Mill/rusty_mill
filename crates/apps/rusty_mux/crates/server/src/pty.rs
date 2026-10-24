@@ -56,7 +56,7 @@ impl Process {
     /// `SIGHUP` is still reaped. Runs as its own task so the server keeps
     /// serving meanwhile.
     pub(crate) async fn reap(mut self) {
-        let Some(mut child) = self.child.take() else {
+        let Some(child) = self.child.as_mut() else {
             return;
         };
         let deadline = Instant::now() + GRACE;
@@ -64,21 +64,21 @@ impl Process {
         // An unreaped leader keeps its pgid, so signalling the group before
         // `try_wait` reports the exit cannot reach an unrelated group.
         if matches!(child.try_wait(), Ok(None)) {
-            signal(&child, Signal::Hup);
+            signal(child, Signal::Hup);
         }
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => return,
                 Ok(None) => {}
                 Err(err) => {
-                    // Put back so the drop fallback still kills and reaps it.
+                    // The child stays in self across awaits and errors, so
+                    // cancellation also runs the kill-and-wait fallback.
                     eprintln!("rusty-mux-server: polling pid {}: {err:?}", child.id());
-                    self.child = Some(child);
                     return;
                 }
             }
             if !killed && Instant::now() >= deadline {
-                signal(&child, Signal::Kill);
+                signal(child, Signal::Kill);
                 killed = true;
             }
             rusty_tokio::time::sleep(POLL).await;
@@ -157,4 +157,38 @@ fn to_io(err: PlatformError) -> io::Error {
         _ => io::ErrorKind::Other,
     };
     io::Error::new(kind, format!("{}: {:?}", err.op, err.os))
+}
+
+#[cfg(test)]
+mod regression {
+    use super::*;
+    use rusty_tokio::{Builder, LocalOptions};
+
+    #[test]
+    fn cancelled_reaper_keeps_child_ownership() {
+        let rt = Builder::new_current_thread()
+            .build_local(&LocalOptions::default())
+            .unwrap();
+        rt.block_on(async {
+            let cmd = Command::new("/bin/sh", "/")
+                .arg("-c")
+                .arg("trap '' HUP; printf ready; while :; do :; done");
+            let (master, child) = LinuxPty
+                .spawn_concrete(&cmd, win_size(Size::new(80, 24).unwrap()))
+                .unwrap();
+            let pid = child.id();
+            let mut buf = [0; 64];
+            assert!(master.read(&mut buf).unwrap() > 0);
+            let process = Process { child: Some(child) };
+            let task = rusty_tokio::task::spawn_local(process.reap());
+            rusty_tokio::task::yield_now().await;
+            task.abort();
+            let _ = task.await;
+            drop(master);
+            assert!(
+                !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                "cancelled reaper lost child {pid}"
+            );
+        });
+    }
 }

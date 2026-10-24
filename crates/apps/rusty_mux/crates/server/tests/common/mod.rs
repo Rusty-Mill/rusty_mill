@@ -79,7 +79,7 @@ impl Client {
             parse: true,
         };
         client.send(&Message::Hello {
-            features: Features::NONE,
+            features: Features::REPLAY_SNAPSHOT,
         });
         match client.recv() {
             Message::Welcome { client: id, .. } => client.id = id,
@@ -112,10 +112,16 @@ impl Client {
     fn apply(&mut self, message: &Message) {
         match message {
             Message::Snapshot { block, data } => {
-                let grid = Grid::decode_snapshot(data).expect("snapshot decodes");
-                self.terms.insert(*block, (grid, AnsiParser::new()));
+                let terminal =
+                    rusty_mux_server::checkpoint::restore(data).expect("checkpoint decodes");
+                self.terms.insert(*block, terminal);
                 self.output.insert(*block, Vec::new());
                 self.ready.insert(*block, false);
+            }
+            Message::Event(rusty_mux_core::Event::BlockResized { block, size }) => {
+                if let Some((grid, _)) = self.terms.get_mut(block) {
+                    grid.resize(size.cols().into(), size.rows().into());
+                }
             }
             Message::Ready { block } => {
                 self.ready.insert(*block, true);

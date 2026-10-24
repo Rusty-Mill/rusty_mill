@@ -2,7 +2,7 @@
 //!
 //! The server owns one PTY per block and feeds its output to a server-side
 //! `rusty_term_core` grid, so a client that attaches gets a snapshot of the
-//! grid, then a ready frame, then the raw PTY bytes. Every attached client
+//! terminal (negotiated replay checkpoint), then a ready frame, then the raw PTY bytes. Every attached client
 //! parses those bytes itself; the server never re-renders. Input reaches a
 //! PTY only from the client holding that block's lease ([`rusty_mux_core`]).
 //!
@@ -12,6 +12,7 @@
 //!
 //! Phase 1 is Linux-only; [`serve`] reports `Unsupported` elsewhere.
 
+pub mod checkpoint;
 #[cfg(target_os = "linux")]
 mod conn;
 #[cfg(target_os = "linux")]
