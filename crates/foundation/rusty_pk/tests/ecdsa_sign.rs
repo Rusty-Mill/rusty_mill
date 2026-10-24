@@ -1,7 +1,6 @@
 //! ECDSA signing against `ring`: each side verifies the other's signatures and agrees on
 //! public keys. ECDSA nonces are random in `ring` and hedged here, so signatures cannot be
-//! compared byte for byte. Fixed-noise known answers are below; the plain RFC 6979 known
-//! answers are unit tests in `src/ecdsa.rs`.
+//! compared byte for byte; the RFC 6979 known answers are unit tests in `src/ecdsa.rs`.
 
 use std::collections::HashSet;
 
@@ -10,7 +9,7 @@ use ring::signature::{
     EcdsaKeyPair, KeyPair, UnparsedPublicKey, ECDSA_P256_SHA256_ASN1,
     ECDSA_P256_SHA256_ASN1_SIGNING, ECDSA_P384_SHA384_ASN1, ECDSA_P384_SHA384_ASN1_SIGNING,
 };
-use rusty_pk::ecdsa::{noise_len, verify, CurveId, Digest, SignError, SigningKey};
+use rusty_pk::ecdsa::{hedge_len, verify, CurveId, Digest, SignError, SigningKey};
 
 struct Lcg(u64);
 
@@ -102,11 +101,29 @@ fn assert_r_never_repeats(count: usize, mut fill: impl FnMut(&mut [u8])) {
     }
 }
 
-/// `r` never repeats over 2,000 signatures of one message per curve.
+/// This bounded smoke test observes no repeated `r` for one key and message (2,000
+/// signatures per curve), and a source that returns all zeros still yields a valid
+/// (deterministic) signature.
 #[test]
-fn hedged_nonces_do_not_repeat() {
+fn bounded_nonce_smoke_test_and_fixed_zero_noise() {
     let mut lcg = Lcg(7);
     assert_r_never_repeats(2_000, |h| lcg.fill(h));
+    for curve in [CurveId::P256, CurveId::P384] {
+        let (len, digest) = params(curve);
+        let key = SigningKey::from_bytes(curve, &vec![0x42; len]).unwrap();
+        let public = key.public_key().unwrap();
+        let zero = |h: &mut [u8]| {
+            h.fill(0);
+            Ok::<(), ()>(())
+        };
+        let a = key.sign(b"m", zero).unwrap();
+        assert_eq!(
+            a,
+            key.sign(b"m", zero).unwrap(),
+            "a zero hedge is deterministic"
+        );
+        assert!(verify(curve, digest, public.as_bytes(), b"m", &a).is_ok());
+    }
 }
 
 /// The plan's bar: `r` never repeats over 100,000 signatures of one message per curve, with
@@ -120,82 +137,19 @@ fn hedged_nonces_do_not_repeat_over_100k_signatures() {
     assert_r_never_repeats(100_000, |h| rng.fill(h).unwrap());
 }
 
-/// Fixed noise through the public `sign` gives the expected signature (RFC 6979 key and
-/// message "sample", draft-irtf-cfrg-det-sigs-with-noise-05 section 4). The expected values
-/// come from an independent Python implementation of that construction (`hashlib`, `hmac`
-/// and affine curve arithmetic), which also reproduces RFC 6979 A.2.5 and A.2.6.
-#[test]
-fn fixed_noise_known_answers() {
-    const X256: &str = "C9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721";
-    const X384: &str = "6B9D3DAD2E1B8C1C05B19875B6659F4DE23C3B667BF297BA9AA47740787137D896D5724E4C70A825F872C9EA60D2EDF5";
-    let cases = [
-        (CurveId::P256, X256, 0x00, "51C74722DB8FA584212E37CB39FA873FD7301602D3388B811DA72C9E9C404AC7", "D133481EE6027B10D1E35ABB95A735F0681A3EF65D893AA678AD3B47EC14D1C1"),
-        (CurveId::P256, X256, 0xff, "CB51D5492E7CE49F6C2540A9CFDC2D052D4252990F30B34CC26214E7322383FC", "48115ABCF892AE0AFA33E01DAB584026D1A078B29FFF7E83C3D0223F046EBC59"),
-        (CurveId::P256, X256, 0x01, "8F921763C1BAA901677FCE6DF8F6459A7E4D16D80EBD445EF9777C2F1E0517A4", "81D38968695B0309DFE50026D2456411D823E07E22E536D67236D5D5D08444DD"),
-        (CurveId::P384, X384, 0x00, "D00D17F46D516AF375808F8F704B042E4BF30800B8914B08EC42AE9ACC2EA2B79C34D50CAF838C4045EC0E053E5CD307", "9E52326F5729276617E4D13C0845378957951C8E0BB0BFF3DA03BE2F7BC2FC66C9445238D2224C055D2B8DFACB8C7705"),
-        (CurveId::P384, X384, 0xff, "A0C35F5ED18A6781817B3D3C5FDD32D0C087A4D097A91FE736CA3422968FBE9D7B25D559603068B2DCC188368A1809C9", "BF501EBA9C06205A3DF1464F27A9E3600CC5DA0BCB61F1C255265E2FCF247328BE40EB1CAFF41957DD73934EC9E3ABFD"),
-        (CurveId::P384, X384, 0x01, "5BA4031E9F055551E5A3857B61F2D425F9A0D5356EF2C5FDC01C0D77A0E2DAED5A96988DD6EE3C94187E59C7C4A16B86", "B756A0B1E1B1C6C38818FAFB24B1F276B55CB0AC8CA9379A08BCBC00389DBCDF075F2340889A176DC5C96DF01B2E7E98"),
-    ];
-    for (curve, x, noise, want_r, want_s) in cases {
-        let (len, digest) = params(curve);
-        let key = SigningKey::from_bytes(curve, &hex(x)).unwrap();
-        // 0x01 stands for the ramp 1, 2, ..., len; 0x00 and 0xff fill every byte.
-        let fill = |h: &mut [u8]| {
-            assert_eq!(h.len(), noise_len(curve));
-            for (i, b) in h.iter_mut().enumerate() {
-                *b = if noise == 0x01 { i as u8 + 1 } else { noise };
-            }
-            Ok::<(), ()>(())
-        };
-        let sig = key.sign(b"sample", fill).unwrap();
-        assert_eq!(
-            sig,
-            der(&hex(want_r), &hex(want_s), len),
-            "{curve:?} {noise:#x}"
-        );
-        assert_eq!(
-            sig,
-            key.sign(b"sample", fill).unwrap(),
-            "fixed noise repeats"
-        );
-        let public = key.public_key().unwrap();
-        assert!(verify(curve, digest, public.as_bytes(), b"sample", &sig).is_ok());
-    }
-}
-
-fn hex(s: &str) -> Vec<u8> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-        .collect()
-}
-
-/// The minimal DER `SEQUENCE { r, s }` for fixed-width `r` and `s`.
-fn der(r: &[u8], s: &[u8], len: usize) -> Vec<u8> {
-    let int = |v: &[u8]| {
-        let v = &v[v.iter().position(|&b| b != 0).unwrap_or(len - 1)..];
-        let pad = v[0] & 0x80 != 0;
-        let mut out = vec![0x02, (v.len() + usize::from(pad)) as u8];
-        if pad {
-            out.push(0);
-        }
-        out.extend_from_slice(v);
-        out
-    };
-    let body = [int(r), int(s)].concat();
-    [vec![0x30, body.len() as u8], body].concat()
-}
-
 #[test]
 fn a_failed_random_source_signs_nothing() {
-    let key = SigningKey::from_bytes(CurveId::P256, &[1; 32]).unwrap();
-    let mut asked = 0;
-    let result = key.sign(b"m", |h: &mut [u8]| {
-        asked = h.len();
-        Err("no entropy")
-    });
-    assert_eq!(result, Err(SignError::Random));
-    assert_eq!(asked, noise_len(CurveId::P256));
+    for curve in [CurveId::P256, CurveId::P384] {
+        let key = SigningKey::from_bytes(curve, &vec![1; hedge_len(curve)]).unwrap();
+        let mut asked = 0;
+        let result = key.sign(b"m", |h: &mut [u8]| {
+            asked = h.len();
+            h.fill(0x42); // Even a source that partially writes then fails signs nothing.
+            Err("no entropy")
+        });
+        assert_eq!(result, Err(SignError::Random));
+        assert_eq!(asked, hedge_len(curve));
+    }
 }
 
 #[test]
@@ -217,4 +171,57 @@ fn invalid_private_keys_are_refused() {
 fn debug_does_not_print_the_key() {
     let key = SigningKey::from_bytes(CurveId::P384, &[3; 48]).unwrap();
     assert_eq!(format!("{key:?}"), "ecdsa::SigningKey(..)");
+}
+
+/// Exercise the production build (which has no plain RFC 6979 path) against the
+/// independent fixed-noise answers, and have ring verify each resulting signature.
+#[test]
+fn draft_05_fixed_noise_public_signing_path() {
+    let decode = |s: &str| -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    };
+    for line in include_str!("vectors/hedged_ecdsa.txt").lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let curve = if fields[0] == "256" {
+            CurveId::P256
+        } else {
+            CurveId::P384
+        };
+        let len = hedge_len(curve);
+        let key = SigningKey::from_bytes(curve, &vec![0x11; len]).unwrap();
+        let message = vec![b'a'; fields[1].parse().unwrap()];
+        let noise: u8 = fields[2].parse().unwrap();
+        let signature = key
+            .sign(&message, |out: &mut [u8]| {
+                assert_eq!(out.len(), len);
+                out.fill(noise);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        let mut body = Vec::new();
+        for component in &fields[6..8] {
+            let bytes = decode(component);
+            let first = bytes.iter().position(|&b| b != 0).unwrap();
+            let bytes = &bytes[first..];
+            let pad = usize::from(bytes[0] & 0x80 != 0);
+            body.extend_from_slice(&[2, (bytes.len() + pad) as u8]);
+            body.extend(std::iter::repeat_n(0, pad));
+            body.extend_from_slice(bytes);
+        }
+        let mut expected = vec![0x30, body.len() as u8];
+        expected.extend_from_slice(&body);
+        assert_eq!(signature, expected, "{line}");
+        let verifying = if curve == CurveId::P256 {
+            &ECDSA_P256_SHA256_ASN1
+        } else {
+            &ECDSA_P384_SHA384_ASN1
+        };
+        let public = key.public_key().unwrap();
+        UnparsedPublicKey::new(verifying, public.as_bytes())
+            .verify(&message, &signature)
+            .unwrap();
+    }
 }

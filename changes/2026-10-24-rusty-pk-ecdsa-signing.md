@@ -1,26 +1,18 @@
 ---
 category: Added
-changelog: "`rusty_pk`: ECDSA signing on P-256 (SHA-256) and P-384 (SHA-384) with hedged RFC 6979 nonces (draft-irtf-cfrg-det-sigs-with-noise-05 section 4), constant-time."
+changelog: "`rusty_pk`: ECDSA signing on P-256/SHA-256 and P-384/SHA-384 with pinned draft-05 hedged nonces."
 ---
 ## 2026-10-24 - rusty_pk: ECDSA signing (gap 5, ADR-0006)
 
-- **Added:** `ecdsa::SigningKey`, with `from_bytes`, `curve`, `public_key` and `sign(message, fill)`, plus `ecdsa::noise_len`. It signs P-256 with SHA-256 and P-384 with SHA-384, as TLS pairs them, and returns DER.
-  - **Nonce:** hedged RFC 6979, pinned to `draft-irtf-cfrg-det-sigs-with-noise-05` section 4 (the construction #989 sets). RFC 6979 section 3.2's HMAC-DRBG, with steps (d) and (f) replaced by `K = HMAC_K(V || tag || Z || pad1 || int2octets(x) || pad2 || bits2octets(h1))`. `Z` is `noise_len` fresh secret bytes (32 on P-256, 48 on P-384), the same in both steps, and the zero pads end each part on a hash-block boundary.
-  - **Random-source errors fail closed:** a `fill` that reports an error makes `sign` return `SignError::Random` and sign nothing. There is no deterministic fallback.
-  - **Claims, bounded by the draft's section 5:** noise that is weak or repeated without being detected still leaves the nonce a deterministic function of key, message and noise. That avoids the key recovery that weak randomness causes in random-nonce ECDSA, but the output is not plain RFC 6979. Hedging mitigates some side-channel and fault attacks on determinism. It does not guarantee nonce uniqueness, prevent replay, or necessarily stop instruction-skipping faults. Plain RFC 6979 and fixed-noise paths are test-only.
-  - **Constant-time arithmetic:** `k*G` reuses ECDH's constant-time multiplication, through the new crate-internal `ecdh::generator_x`. `k^-1` and `s = k^-1(z + r d)` use the order field's branch-free arithmetic. Every secret-derived check goes through `ecdh::ensure`: key range, nonce range, not at infinity, and r and s non-zero.
-  - **Public outputs:** DER encoding of the published `r` and `s` happens only in `ecdsa::output`.
-- **Evidence:**
-  - **Known answers:**
-    - RFC 6979 appendix A.2.5 and A.2.6 ("sample" and "test" on both curves) match exactly through the test-only plain path.
-    - Fixed-noise answers (all-zero, all-0xff and a 1..n ramp `Z`, both curves) match through the public `sign`. The expected values come from an independent Python implementation of the draft-05 construction, which also reproduces A.2.5 and A.2.6.
-  - **Cross-check with `ring`:** for 200 keys per curve, each side verifies the other's signatures, and `ring` accepts our public key.
-  - **Nonces:**
-    - No repeated `r` over 2,000 signatures of one message per curve (every run). There is also an ignored test for the plan's bar of 100,000 per curve with OS noise; it was run once locally in release (see the PR).
-    - A top-bit bias smoke test: over 20,000 nonces per curve, each of the top 8 bits of `k` is within 5 sigma of uniform. This is statistical only.
-    - Fixed noise repeats, different noise changes the nonce, and zero noise does not equal plain RFC 6979.
-    - A failed source returns `SignError::Random`, and invalid keys are refused.
-  - **Taint:** valgrind modes `ecdsa-sign256` and `ecdsa-sign384` mark the key and the noise secret. Exactly 4 reports are verdict branches; every other report's stack passes through `ecdsa::output`. `verdict_sites.py --output`, with new self-tests, enforces this. The planted control `ecdsa-control` is caught and refused.
-  - **Jump counts:** exact counts are pinned for `sign_seeded`, `Rfc6979::mac` and `generator_x`.
-  - **Timing:** new P-256 and P-384 sparse-vs-dense key tests, each with an A/A baseline, are in the collector. Each pair is chosen so that both classes' `r` and `s` have the same encoded lengths, which the test asserts; an early pair with unequal DER lengths showed a harmless public-length gap.
-- **Not changed:** verification, `rusty_tls`, any consumer. `TLS-NATIVE-SIGNING.md` is left to #989.
+- **Added:** `ecdsa::SigningKey::{from_bytes, curve, public_key, sign}`, returning DER. No TLS wiring or RSA signing.
+- **Nonce:** pinned `draft-irtf-cfrg-det-sigs-with-noise-05` section 4, reconciled with design correction #989 at `263832fa92552fe6f0a7d99f168bba5a9344054c`. Noise precedes the secret key; P-256 uses 32 bytes and zero padding 63/32, P-384 uses 48 bytes and padding 31/80. Both d/f use the same noise, with V updated between them; other RFC 6979 steps and rejection sampling remain unchanged. `hedge_len(curve)` replaces the unreleased fixed `HEDGE_LEN` constant.
+- **RNG/fault behavior:** detected RNG failure returns `SignError::Random` without a signature or fallback, including partial writes. Undetected repeated/zero noise gives a deterministic instance of the padded construction, not plain RFC 6979 output. Repeated noise retains deterministic-style resistance to algebraic recovery caused by weak randomness in randomized ECDSA. Hedging mitigates some attacks exploiting determinism; it guarantees neither uniqueness nor replay protection and need not stop instruction-skipping faults. Other side-channel defenses remain necessary.
+- **Known answers:** separate test-only original RFC 6979 appendix A.2.5/A.2.6 vectors; 20 fixed-noise draft-05 fixtures from stdlib Python HMAC/hashlib and separate affine big-integer curve arithmetic. K/V, nonce and r/s are pinned for both curves, zero/nonzero noise and SHA padding boundaries. The production signing path matches these fixtures and ring verifies them. The reference is independently implemented, not independently human-reviewed; draft -05 has no completed vectors.
+- **Bounded validation:** both-curve cross-verification with ring (200 keys per curve), 2,000 repeated-message signatures per curve with deterministic test noise, fixed-zero reproducibility, both-curve fail-closed RNG errors and invalid-key/DER tests. A second, separately written Python reference agrees with all 20 fixtures.
+- **Evidence on this construction:** constant-time claims remain "no leak found by the methods run", not proof.
+  - No repeated `r` over 100,000 signatures of one message per curve with OS CSPRNG noise. This is an ignored test, run once in release locally; see the PR.
+  - A nonce top-bit smoke test: over 20,000 DRBG nonces per curve, each of the top 8 bits is within 5 sigma of uniform. Statistical only.
+  - Valgrind taint (`ecdsa-sign256`/`384`: 4 verdict sites, the rest through `ecdsa::output`; control refused) and the exact jump-count pins re-run on the draft-05 code.
+  - P-256 and P-384 timing with A/A baselines in the collector. Each key pair gives both classes equal `r` and `s` encoded lengths, which the test asserts. Local figures are in the PR.
+- **Outstanding before TLS wiring:** independent review with reviewer, scope and exact commit. The full evidence plan (engine suites, native BoGo with server scenarios, PKCS#8) remains incomplete.
+- **Design documents:** adopt #989's exact nonce/RNG/fault corrections in the note, ADR and replacement plan, retaining direct owner scope and independent review before TLS wiring.
