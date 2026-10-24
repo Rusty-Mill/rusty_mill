@@ -12,7 +12,7 @@ This picks up from `docs/research/RUSTY-TERM-PERF-BACKLOG.md` (row numbers below
 | 2. Ring-buffer screen + recycled rows | 1, 2 | Done, but the speed floors are **not** met (§3.1) | #930 |
 | 4. Printable fast path | 3, 4 (ASCII only) | Done for ASCII. Non-ASCII runs and batched `put_str` for other text are not done. | #936 |
 | 5. Snapshot serializer | 16 (full only) | Full snapshot done. Incremental is not done. | #939 |
-| 3. GUI frame path | 8, 9, 7 | Frame benchmark built. **The work itself has not started.** | #940 (bench) |
+| 3. GUI frame path | 8, 9, 7 | Benchmark built. Rows 9 (view map) and 8 (short lock) done. **Row 7 not started.** | #940 (bench), #952 (row 9), #974 (row 8) |
 
 Also merged:
 
@@ -24,26 +24,27 @@ Also merged:
 | #894 | wcwidth widths and mode 2027 | #855 |
 | #925 | DECCOLM | #856 |
 | #943 | ctutils 0.4.4 (RUSTSEC-2026-0385) | |
+| #952 | View-row map once per frame (backlog row 9) | |
+| #955 | `rusty_term` runs on `rusty_tokio`; tokio dropped | |
 
 #944 is closed as a duplicate, and its branch has been deleted.
 
-**#940 merged at `5c24bf8c`.** These docs landed in #950. No PR from this work is open.
+**#940 merged at `5c24bf8c`.** These docs landed in #950. #956 (open, by another session) replaces `parking_lot` in `rusty_term` with a std-backed mutex.
 
 ## 2. Roadmap (recommended order)
 
 Each step needs the owner's sign-off before it starts, because the owner gates every top-5 item. Each one ships as its own PR scoped to the rusty_term crates.
 
-1. **GUI frame path, row 9 first: compute the view-row map once per frame.**
-   - Today `abs_of_view_row` → `display_history_len` walks up to 1,024 `fold_blocks` for every cell access, about 4 accesses per cell in the CPU path. Code: `core/src/grid.rs` (`abs_of_view_row`, `display_history_len`) and `src/gui/cpu.rs`.
-   - Proof: in `bench_frame_time`, 1,024-block frames match 0-block frames. The baseline is 8.79 ms live and 13.47 ms scrolled back, against 1.02 ms with no blocks.
-   - Low risk; the smallest change of the three.
-2. **Row 8: short lock, then render without it.**
-   - Copy what the frame needs under the lock, release it, then composite and present.
-   - The GUI holds every visible pane's grid lock across render **and** present/vsync (`src/gui/window.rs`, `gpu.rs` `get_current_texture`).
-   - Proof: lock hold under 1 ms per frame (baseline p50 1.43-2.54 ms, p99 up to 7.28 ms), and parser MB/s while rendering close to MB/s alone.
-   - Consider fair handoff so parsing cannot starve frames (Alacritty's `FairMutex`, Ghostty's lock demand), described in the backlog.
+1. **Row 9: view-row map once per frame. Done in #952.**
+   - `Grid::view` (`core/src/grid/view.rs`) resolves every viewport row in one walk over the fold blocks, and the CPU and GPU renderers read from it. #974's `FrameView` builds on the same walk.
+   - #952's local numbers (120x40, 2026-10-23): with 1,024 fold blocks a frame takes 1.00-1.05 ms p50, against 0.99-1.36 ms with none.
+   - *Historical:* #940's baseline before the fix was 8.79 ms live and 13.47 ms scrolled back, against 1.02 ms with no blocks. These are not remaining work.
+2. **Row 8: short lock. Done in #974.**
+   - `Grid::frame_view` copies what a frame draws into an owned `FrameView` under each pane's lock. The window then composites and presents without holding it.
+   - #974's local numbers (120x40, 120 Hz, 2026-10-24): lock hold is 0.08-0.09 ms p50 and 0.14-0.40 ms p99, so p50 and p99 are under the 1 ms target. The worst single hold, 2.45 ms, is not. Parser MB/s while rendering now matches parsing alone.
+   - Left open: the lock is a plain mutex with no fair handoff, and no starvation was measured. #974 defers a lock-type change to the tokio-removal work.
 3. **Row 7: the GUI consumes dirty rows.**
-   - The core already tracks `Grid::dirty`, and the TUI uses it. The CPU path does a full `buffer.fill`, and the GPU path rebuilds all instances.
+   - The core already tracks `Grid::dirty`, and the TUI uses it. Since #974, `frame_view` still copies every row each frame, so dirty rows can also shrink that copy. The CPU path does a full `buffer.fill`, and the GPU path rebuilds all instances.
    - Design the per-row change seqno here, because the same mechanism serves incremental snapshots (step 5). Agree its shape with the mux protocol owner first.
 4. **Close the throughput floors (§3.1).** Measure first; there are possibly two separate problems:
    - a benchmark artifact (a fresh grid per iteration, page-faulting new scrollback);
@@ -113,7 +114,7 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
 - **Never read `.env`; never commit or log secrets.**
 - **rusty_mux crates use `rusty_tokio`, not tokio.**
   - The mux links `rusty_term_core`. Its `l13` feature is tokio-free since #949.
-  - Do not link the `rusty_term` front-end crate, which depends on tokio and `parking_lot`.
+  - Do not link the `rusty_term` front-end crate: it is the windowed and TUI app, not the engine. It no longer depends on tokio (#955) but still depends on `parking_lot` until #956 lands.
 
 ## 5. How to validate
 
@@ -186,6 +187,6 @@ The ratchet rule: a PR that lowers a count lowers that ceiling to about measured
   - `docs/projects/mux/{CHARTER,DECISIONS,RISKS,SPIKES}.md`
   - `crates/libs/ui/rusty_term/bench/README.md`
   - `docs/projects/mux/RUSTY-TERM-NOTES.md`
-- **Pull requests:** #851, #857, #862, #872, #894, #925, #930, #936, #939, #940, #943, #944 (closed).
+- **Pull requests:** #851, #857, #862, #872, #894, #925, #930, #936, #939, #940, #943, #944 (closed), #952, #955, #974 (by other sessions).
 - **Issues:** #850 (closed by #949), #854, #855, #856 (closed).
 - **Branch used:** `claude/new-session-s68lms`. Start new work from `origin/main` on a fresh branch.
