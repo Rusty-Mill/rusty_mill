@@ -12,12 +12,15 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   Rocket Science! The Physics and Networking of Rocket League."
   [Video](https://www.youtube.com/watch?v=ueEmiDM94IE),
   [slides](https://media.gdcvault.com/gdc2018/presentations/Cone_Jared_It_Is_Rocket.pdf).
-- **Finding**: Client and server both run the same physics simulation
-  (Bullet). Server is authoritative; each client also predicts locally so
-  input feels instant. Network traffic is periodic authoritative-snapshot
-  corrections, not continuous full state. Visible lag/rubber-banding is
-  almost certainly reconciliation-smoothing behavior, not raw network
-  latency.
+- **Finding** (on the slides): Client and server both run the same physics
+  simulation (Bullet). Server is authoritative; each client also predicts
+  locally so input feels instant, and re-simulates from the server's
+  frame-stamped physics state when they disagree.
+- **Not settled** (third-party summary of the video only, not on the
+  slides): that traffic is periodic snapshot corrections rather than
+  continuous full state, and that visible lag/rubber-banding is
+  reconciliation smoothing rather than raw latency. Treat both as
+  hypotheses (ADR-0001 H1, H2) until the spoken talk is checked.
 - **Used by**: ADR-0001, RB-NET-001. This is the single best public
   technical source and anchors all physics/netcode research.
 
