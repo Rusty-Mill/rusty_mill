@@ -120,8 +120,8 @@ plugin's absence if that were represented in this crate, but the plugin is
 a separate deliverable outside it (see Architecture).
 
 Known defects in real captures (unlimited boost in the September freeplay
-sessions, single-tick `angular_velocity` spikes and input drops, dead analog
-axes in two clips, a dodge with no recorded `jump` press) are listed in
+sessions, single-tick `angular_velocity` spikes and input drops, steer, pitch,
+yaw and roll recorded as zero in two clips, a dodge with no recorded `jump` press) are listed in
 `docs/research/SERVER-CLONE-BRANCH-FINDINGS.md`. The parser accepts them; a
 scorer has to allow for them.
 
