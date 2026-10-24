@@ -18,6 +18,7 @@
 use super::worker;
 use super::Shared;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -29,12 +30,17 @@ pub(super) fn block_on<F: Future>(shared: &Arc<Shared>, future: F) -> F::Output 
     let _worker_guard = worker::enter_as_worker(0);
 
     let mut future = std::pin::pin!(future);
-    let waker = Waker::from(Arc::new(ParkingWaker {
+    let parking = Arc::new(ParkingWaker {
         shared: shared.clone(),
-    }));
+        woken: AtomicBool::new(false),
+    });
+    let waker = Waker::from(parking.clone());
     let mut cx = Context::from_waker(&waker);
 
     loop {
+        // Cleared before the poll, so a wake during it (e.g.
+        // `yield_now`) is still seen by the auto-advance check below.
+        parking.woken.store(false, Ordering::Release);
         if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
             return value;
         }
@@ -55,6 +61,21 @@ pub(super) fn block_on<F: Future>(shared: &Arc<Shared>, future: F) -> F::Output 
             continue;
         }
 
+        // A paused clock never moves on its own, so with nothing
+        // runnable a paused runtime waiting on a timer would wait
+        // forever. Jump to the next deadline instead -- tokio's
+        // auto-advance, which is what makes `start_paused = true` (and
+        // `time::pause()` without manual `advance` calls) usable. Held
+        // off while `future` itself was woken (it will make progress on
+        // the next poll, e.g. mid-`advance`'s `yield_now`) or blocking
+        // work is still running in real time.
+        if !parking.woken.load(Ordering::Acquire)
+            && !shared.blocking_pool.has_in_flight()
+            && shared.timer.auto_advance()
+        {
+            continue;
+        }
+
         // Nothing runnable right now -- park until `future`'s own waker
         // fires or a task gets scheduled (from a spawned task's own
         // wake, or the reactor/timer background threads), whichever
@@ -68,6 +89,9 @@ pub(super) fn block_on<F: Future>(shared: &Arc<Shared>, future: F) -> F::Output 
 
 struct ParkingWaker {
     shared: Arc<Shared>,
+    /// Set by any wake of `block_on`'s own future -- see auto-advance
+    /// above.
+    woken: AtomicBool,
 }
 
 impl Wake for ParkingWaker {
@@ -76,6 +100,7 @@ impl Wake for ParkingWaker {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.store(true, Ordering::Release);
         self.shared.wake_all_parked();
     }
 }

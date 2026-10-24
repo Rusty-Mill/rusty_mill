@@ -11,7 +11,7 @@ use std::future::{poll_fn, Future};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rusty_http::async_tokio::AsyncTransport;
 use rusty_http::body::{request_framing, Framing};
@@ -21,7 +21,7 @@ use rusty_tls::{AsyncTlsServerStream, TlsAcceptor};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, TcpListener, TcpStream};
 use rusty_tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use rusty_tokio::task::JoinHandle;
-use rusty_tokio::time::{sleep, timeout, timeout_at};
+use rusty_tokio::time::{sleep, timeout, timeout_at, Instant};
 
 use crate::body::{BodyStream, Inner};
 use crate::request::Request;

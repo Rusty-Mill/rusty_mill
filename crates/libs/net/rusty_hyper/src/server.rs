@@ -4,7 +4,7 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rusty_h2::driver::{self, Request, Respond};
 use rusty_h2::server::builder::Builder;
@@ -12,7 +12,7 @@ use rusty_tls::{AsyncTlsServerStream, TlsAcceptor};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpListener, TcpStream};
 use rusty_tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use rusty_tokio::task::JoinHandle;
-use rusty_tokio::time::{sleep, timeout_at};
+use rusty_tokio::time::{sleep, timeout_at, Instant};
 
 use crate::Error;
 

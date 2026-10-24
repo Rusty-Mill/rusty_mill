@@ -17,6 +17,9 @@ struct Inner {
     condvar: Condvar,
     shutdown: AtomicBool,
     live_threads: AtomicUsize,
+    /// Jobs queued or running, not yet returned -- read by the paused
+    /// clock's auto-advance (see [`BlockingPool::has_in_flight`]).
+    in_flight: AtomicUsize,
     max_threads: usize,
     idle_timeout: Duration,
     thread_config: super::ThreadConfig,
@@ -39,6 +42,7 @@ impl BlockingPool {
                 condvar: Condvar::new(),
                 shutdown: AtomicBool::new(false),
                 live_threads: AtomicUsize::new(0),
+                in_flight: AtomicUsize::new(0),
                 max_threads,
                 idle_timeout,
                 thread_config,
@@ -47,6 +51,9 @@ impl BlockingPool {
     }
 
     pub(crate) fn spawn(&self, job: Job) {
+        // Counted before it's visible to a worker, so there's no window
+        // where the job exists but `has_in_flight` reads false.
+        self.inner.in_flight.fetch_add(1, Ordering::AcqRel);
         self.inner.queue.lock().unwrap().push_back(job);
         self.inner.condvar.notify_one();
         self.grow_if_needed();
@@ -56,6 +63,15 @@ impl BlockingPool {
     /// [`super::RuntimeMetrics::num_blocking_threads`].
     pub(crate) fn live_threads(&self) -> usize {
         self.inner.live_threads.load(Ordering::Acquire)
+    }
+
+    /// Whether any `spawn_blocking` job is queued or still running.
+    /// Auto-advance of a paused clock holds off while this is true, as
+    /// tokio's does: blocking work runs in real time, so jumping virtual
+    /// time past a timeout while it's still running would fire that
+    /// timeout for work that was never actually late.
+    pub(crate) fn has_in_flight(&self) -> bool {
+        self.inner.in_flight.load(Ordering::Acquire) > 0
     }
 
     /// Adds one more worker thread if the pool is under its cap. Called
@@ -107,7 +123,15 @@ impl BlockingPool {
                 }
             };
             match job {
-                Some(job) => job(),
+                Some(job) => {
+                    // Decremented only after `job` returns -- by then it
+                    // has already woken whatever awaits its result, so
+                    // a scheduler that sees zero here also sees that
+                    // task queued. The guard keeps the count right even
+                    // if `job` unwinds.
+                    let _done = InFlightGuard(&inner.in_flight);
+                    job();
+                }
                 None => {
                     inner.live_threads.fetch_sub(1, Ordering::AcqRel);
                     // Wake anyone in `shutdown()` waiting for the count
@@ -158,5 +182,14 @@ impl BlockingPool {
     pub(crate) fn shutdown(&self) {
         self.signal_shutdown();
         self.wait_for_drain(None);
+    }
+}
+
+/// Decrements [`Inner::in_flight`] on drop -- see `worker_loop`.
+struct InFlightGuard<'a>(&'a AtomicUsize);
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }

@@ -24,7 +24,7 @@ use crate::{
 pub(crate) async fn until<F: Future>(deadline: Option<Instant>, f: F) -> Option<F::Output> {
     match deadline {
         None => Some(f.await),
-        Some(at) => timeout_at(at, f).await.ok(),
+        Some(at) => timeout_at(at.into(), f).await.ok(),
     }
 }
 
