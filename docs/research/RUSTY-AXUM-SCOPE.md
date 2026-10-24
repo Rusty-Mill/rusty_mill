@@ -237,6 +237,12 @@ impact. Worth its own issue.
    used tokio sockets, timers, `spawn` and a oneshot channel this way.
    The cost is two runtimes in one process while a consumer is
    mid-migration. This replaces the recommendation in 6.3.1.
+   *Decided by the owner, 2026-10-23:* one shared bridge crate,
+   `rusty_axum_tokio`, rather than a copy in each consumer. Its
+   `TokioBridge` layer enters the handle on every poll of the handler
+   future and of a streamed body (SSE is polled after the handler
+   returns). It is the only crate in the stack that names `tokio`, and it
+   is deleted with its last consumer.
 2. **Yes, dev-dependencies count**, and `rmcp`, the wire-format oracle,
    is to be replaced too, so the suggestion in question 2 is withdrawn.
    ADR-0002 Amendment 1 records the change.

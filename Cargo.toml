@@ -165,6 +165,7 @@ members = [
     "crates/libs/net/rusty_h2",
     "crates/libs/net/rusty_hyper",
     "crates/libs/net/rusty_axum",
+    "crates/libs/net/rusty_axum_tokio",
     "crates/libs/ui/rusty_audio",
     "crates/foundation/rusty_crypto_key",
     "crates/libs/storage/rusty_db/crates/rusty-db-core",
@@ -741,6 +742,7 @@ ts-localapi = { path = "crates/apps/rusty_tailscale/crates/ts-localapi" }
 ts-net = { path = "crates/apps/rusty_tailscale/crates/ts-net" }
 rusty_http = { path = "crates/libs/net/rusty_http" }
 rusty_serve = { path = "crates/libs/net/rusty_serve" }
+rusty_axum = { path = "crates/libs/net/rusty_axum" }
 rusty_crypto_key = { path = "crates/foundation/rusty_crypto_key" }
 rusty_ansi = { path = "crates/libs/ui/rusty_ansi" }
 hyper = { version = "1", default-features = false }
