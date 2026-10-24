@@ -463,6 +463,87 @@ async fn closed_is_ready_at_once_for_a_stream_that_is_already_gone() {
         .expect("a stream that was already gone");
 }
 
+/// Leave the completed response's headers, DATA and trailers unread. A PING
+/// acknowledgement is a wire-order barrier: the client has processed them all.
+async fn retained_response_closed_on_driver_death(register_before: bool) {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
+
+    #[derive(Default)]
+    struct Woken(AtomicBool);
+    impl Wake for Woken {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let (h, mut acceptor, client) = idle_pair().await;
+    let (send, response) = h
+        .send_request(request("/svc/Retained"), true)
+        .await
+        .unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    let mut reply = respond.send_response(ok_response(), false).await.unwrap();
+    reply.send_data(b"buffered".to_vec(), false).await.unwrap();
+    reply
+        .send_trailers(vec![hf("grpc-status", "0")])
+        .await
+        .unwrap();
+    promptly("the completed response was not received", h.ping())
+        .await
+        .unwrap();
+
+    let mut waiters = [send.closed(), send.closed()];
+    let probes = [Arc::new(Woken::default()), Arc::new(Woken::default())];
+    let wakers = probes.each_ref().map(|p| Waker::from(p.clone()));
+    if register_before {
+        for (waiter, waker) in waiters.iter_mut().zip(&wakers) {
+            assert!(Pin::new(waiter)
+                .poll(&mut Context::from_waker(waker))
+                .is_pending());
+        }
+    }
+    client.abort();
+    assert!(client.await.unwrap_err().is_cancelled());
+    if register_before {
+        // Assert the actual wakes before polling again: a timeout could mask a lost wake.
+        for probe in &probes {
+            assert!(
+                probe.0.load(Ordering::SeqCst),
+                "retained stream waiter was not woken"
+            );
+        }
+    } else {
+        waiters = [send.closed(), send.closed()];
+    }
+    for (waiter, waker) in waiters.iter_mut().zip(&wakers) {
+        assert!(Pin::new(waiter)
+            .poll(&mut Context::from_waker(waker))
+            .is_ready());
+    }
+
+    let mut response = response
+        .await
+        .expect("buffered headers survive driver death");
+    assert_eq!(response.headers, ok_response());
+    let (data, trailers) = drain(&mut response.body).await.unwrap();
+    assert_eq!(data, b"buffered");
+    assert_eq!(trailers, Some(vec![hf("grpc-status", "0")]));
+}
+
+#[rusty_tokio::test]
+async fn retained_response_closed_waiters_registered_before_driver_death_are_woken() {
+    retained_response_closed_on_driver_death(true).await;
+}
+
+#[rusty_tokio::test]
+async fn retained_response_closed_waiters_registered_after_driver_death_are_ready() {
+    retained_response_closed_on_driver_death(false).await;
+}
+
 // ---- a raw, hostile peer ---------------------------------------------------
 
 fn wire(frame: &Frame) -> Vec<u8> {

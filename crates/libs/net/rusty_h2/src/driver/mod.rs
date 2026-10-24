@@ -438,8 +438,9 @@ pub struct Request {
     pub body: RecvStream,
 }
 
-/// Resolves once a stream is gone: the peer reset it, the connection failed, or it was finished
+/// Resolves once a stream is gone: the peer reset it, the connection ended, or it was finished
 /// and forgotten. Made by [`Respond::closed`] and [`SendStream::closed`].
+/// Buffered response headers and body remain readable after the connection ends.
 ///
 /// A handler that waits on something else (a computation, a lock) learns here that nobody is
 /// listening any more, which a write would only tell it later, or never, once the request has
@@ -455,6 +456,9 @@ impl Future for Closed {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut sh = lock(&self.shared);
+        if sh.closed {
+            return Poll::Ready(());
+        }
         match sh.streams.get_mut(&self.id) {
             Some(s) if s.abort.is_none() => {
                 register(&mut s.closed_wakers, cx.waker());

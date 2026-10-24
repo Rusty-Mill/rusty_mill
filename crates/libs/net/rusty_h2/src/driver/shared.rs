@@ -388,6 +388,12 @@ impl Shared {
         for id in ids {
             self.fail_stream(id, Fail::Closed);
         }
+        // Completed streams may remain for unread headers or body. `fail_stream`
+        // preserves those reads, but their Closed waiters must also learn the
+        // connection ended, even though the stream itself did not fail.
+        for s in self.streams.values_mut() {
+            self.wakes.append(&mut s.closed_wakers);
+        }
         for p in self.pings.values_mut() {
             if let Some(w) = p.waker.take() {
                 self.wakes.push(w);
