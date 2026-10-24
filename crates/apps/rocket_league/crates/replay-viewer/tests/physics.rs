@@ -32,7 +32,7 @@ fn scene_matches_golden() {
 }
 
 #[test]
-fn candidate_cars_are_ghosts_in_their_own_pri_range() {
+fn candidate_cars_are_ghosts_with_negative_pris() {
     let frames = example();
     let scene = build_physics_scene("example", &frames, Some(&frames)).expect("scene");
     let ghosts: Vec<_> = scene.players.iter().filter(|p| p.ghost).collect();

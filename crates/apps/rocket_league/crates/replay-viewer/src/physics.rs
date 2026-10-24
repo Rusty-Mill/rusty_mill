@@ -172,7 +172,9 @@ fn roster(recorded: &[PhysicsFrame], sim: &[PhysicsFrame]) -> Result<Vec<ScenePl
     Ok(players)
 }
 
-fn pri(player_id: u32, ghost: bool) -> Result<i32, String> {
+/// Recorded IDs are nonnegative; candidate IDs use `-1 - player_id`.
+/// Rejects IDs above `i32::MAX` before arithmetic.
+pub fn pri(player_id: u32, ghost: bool) -> Result<i32, String> {
     let id = i32::try_from(player_id)
         .map_err(|_| format!("player id {player_id} is too large for the viewer"))?;
     // Recorded IDs are nonnegative; simulated IDs occupy the negative half,
@@ -202,6 +204,38 @@ mod tests {
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    fn frame_at(t: f32) -> PhysicsFrame {
+        PhysicsFrame {
+            timestamp_secs: t,
+            ball: rb_domain::BallState {
+                position: rb_domain::Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                velocity: rb_domain::Vec3::ZERO,
+                angular_velocity: rb_domain::Vec3::ZERO,
+            },
+            cars: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn nearest_picks_the_closest_frame_in_the_window() {
+        let sim = [frame_at(0.96), frame_at(1.01)];
+        let mut cursor = 0;
+        let hit = nearest(&sim, &mut cursor, 1.0, 0.05).map(|f| f.timestamp_secs);
+        assert_eq!(hit, Some(1.01));
+        assert_eq!(nearest(&sim, &mut cursor, 2.0, 0.05), None);
+    }
+
+    #[test]
+    fn recorded_and_candidate_pris_never_meet() {
+        assert_eq!(pri(0, false), Ok(0));
+        assert_eq!(pri(0, true), Ok(-1));
+        assert_eq!(pri(1_000_000, false), Ok(1_000_000));
+        assert_ne!(pri(1_000_000, false), pri(0, true));
+        assert_eq!(pri(i32::MAX as u32, true), Ok(i32::MIN));
+        assert!(pri(u32::MAX, false).is_err());
     }
 
     #[test]

@@ -693,6 +693,19 @@ pub fn boost_is_unlimited(frames: &[PhysicsFrame]) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    #[test]
+    fn a_failed_publish_leaves_the_existing_file_and_no_temporary() {
+        let dir = std::env::temp_dir().join("rb_verify_cli_publish_failure");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.jsonl");
+        std::fs::write(&path, b"kept").unwrap();
+        let result = super::publish_candidate(&path, b"candidate");
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"kept");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
 
     #[test]
