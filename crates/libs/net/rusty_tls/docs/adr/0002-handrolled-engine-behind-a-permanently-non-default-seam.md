@@ -751,3 +751,51 @@ question is not decided by a pull request that merely wires it.
   would carry the engine's risk for its sign-in traffic. The bar exists to make that
   acceptable, and the one-line way back to rustls is the control if it is not.
 - If the bar is not met, nothing changes: the engine stays unwired.
+
+## Amendment 2 (2026-10-24): the named consumer may use the native backend
+
+Status: **the consumer is the owner's choice; the added conditions are proposed.** On
+2026-10-24, in the working session, asked which consumer should be the first to use the
+first-party backend, the owner chose "rleval-app OIDC (Recommended)". This is the
+implementer's transcription, not yet restated from the owner's GitHub account. The three
+added conditions below are the implementer's proposal and take effect when the owner
+accepts this amendment. Condition 2 widens the approved review scope, which is the owner's
+decision. It wires nothing.
+
+**What changes.** Amendment 1 named `rleval-app`'s OIDC transport (client side only,
+TLS 1.3 only, named hosts) and kept its primitives on `ring`. ADR-0005 then put the client
+engine on first-party primitives behind `native-crypto` plus `--cfg rusty_tls_native_crypto`.
+It left this consumer on `ring` "unless separately approved". This amendment is that
+approval: the same consumer, in the same scope, may reach the engine through the native
+backend instead of the `ring` one.
+
+**Conditions.** Every condition of Amendment 1 still holds, unchanged:
+- the Tier 1 bar;
+- off by default, with a one-line way back to rustls;
+- no root export changes;
+- the named scope, with `NativeTlsStream::tls13_only()` set;
+- no library default moves;
+- webpki divergences resolved or accepted.
+
+In addition, before wiring (proposed):
+
+1. **The live evidence (Tier 1 item 1) is on the native backend.** The live-internet step runs
+   in the native CI job against the consumer's hosts, with the differential against rustls,
+   and the 10 consecutive scheduled runs are counted there.
+2. **The review (Tier 1 item 4) covers the native seam.** `handrolled/crypto/native.rs` is
+   reviewed in addition to `TLS-REVIEW-SCOPE.md`. The first-party primitives under it rest on
+   their own records (plan section 11b, the AES-GCM attestation, ADR-0005's evidence bar).
+3. **The consumer's feature enables the native backend explicitly**: `native-crypto` and the
+   second cfg. The way back is still one line, to rustls, not to the `ring` backend.
+
+**What this does not do.**
+- It names no other consumer and no server use. The server role and signing (ADR-0006) stay
+  unused by any consumer.
+- It moves no default, and it changes nothing for the `ring` backend's own Tier 1 path.
+- It does not lower the bar. Tier 1 items 1, 3 and 4 are still unmet, so nothing is wired.
+
+**Consequences.** If the consumer is ever wired, its sign-in traffic carries the first-party
+primitives as well as the engine, which is one more exposure than Amendment 1 described.
+The native backend's own evidence is the control: the seam differential, the native BoGo
+floor, the constant-time evidence and the primitive reviews. So are the rustls fallback and
+the narrow scope.
