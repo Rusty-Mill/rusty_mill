@@ -470,6 +470,36 @@ mod tests {
     use crate::routing::get;
 
     #[test]
+    fn stop_wins_when_both_become_ready_after_the_precheck() {
+        use std::cell::Cell;
+        use std::task::{Context, Poll, Waker};
+
+        for _ in 0..128 {
+            let stop = Arc::new(Stop::default());
+            let ready = Cell::new(false);
+            let work_polls = Cell::new(0);
+            let work = std::future::poll_fn(|_| {
+                work_polls.set(work_polls.get() + 1);
+                if ready.get() {
+                    Poll::Ready(7)
+                } else {
+                    Poll::Pending
+                }
+            });
+            let mut waiting = std::pin::pin!(until_stopped(work, &stop));
+            let mut cx = Context::from_waker(Waker::noop());
+            // Cross the initial level check with neither branch ready.
+            assert!(waiting.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(work_polls.get(), 1);
+            // Both branches are ready on the next poll of the selector.
+            ready.set(true);
+            stop.stop();
+            assert_eq!(waiting.as_mut().poll(&mut cx), Poll::Ready(None));
+            assert_eq!(work_polls.get(), 1, "shutdown must be polled before work");
+        }
+    }
+
+    #[test]
     fn a_stop_that_becomes_ready_with_the_work_wins() {
         // Past the precheck, both branches park; then the stop and the work
         // become ready together. A current-thread runtime keeps the racing
