@@ -8,7 +8,7 @@
 //! the console size for resizes. Both paths share [`run`] and the
 //! [`Notify`]-driven render loop.
 //!
-//! Locking note: the grid uses a `parking_lot::Mutex` (sync), and a guard is
+//! Locking note: the grid uses a sync [`crate::sync::Mutex`], and a guard is
 //! **never** held across an `.await` — every critical section locks, mutates or
 //! snapshots, and drops the guard before any await. So a sync mutex is correct
 //! here, not `rusty_tokio::sync::Mutex`.
@@ -18,7 +18,7 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 use rusty_tokio::sync::Notify;
 
 use super::fair::fair_select;

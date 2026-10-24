@@ -1,7 +1,7 @@
 //! Unix PTY backend: forks `/bin/bash` onto a freshly allocated pseudo-terminal
 //! and exposes the master side as a [`BackendHandle`].
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 use std::os::unix::io::RawFd;
 
 /// The host terminal's `termios` captured when raw mode was enabled, so it can

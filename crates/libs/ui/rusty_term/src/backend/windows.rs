@@ -14,7 +14,7 @@
 //! on a timer and calls [`BackendHandle::set_winsize`] on change.
 
 use crate::backend::{Backend, BackendHandle};
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE, HANDLE,

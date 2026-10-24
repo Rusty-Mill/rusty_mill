@@ -7287,7 +7287,6 @@ dependencies = [
 name = "mill-term"
 version = "0.1.0"
 dependencies = [
- "parking_lot",
  "rpath",
  "rusty_git",
  "rusty_term",
@@ -12840,7 +12839,6 @@ dependencies = [
  "arboard",
  "bytemuck",
  "libc 0.2.189",
- "parking_lot",
  "pollster 0.3.0",
  "rusty-ttf-parser",
  "rusty_atomic_file",

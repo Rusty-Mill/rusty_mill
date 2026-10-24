@@ -413,7 +413,7 @@ docs/
 
 ## Design notes
 
-- **Small dependency surface.** The core depends only on `libc`, `parking_lot`,
+- **Small dependency surface.** The core depends only on `libc`,
   `unicode-width`, and `unicode-segmentation`; Sixel, the Kitty graphics stack
   (base64 → zlib/DEFLATE → PNG), the baseline JPEG decoder (iTerm2 images), and
   the GSUB ligature shaper are all hand-rolled — no image or text-shaping crates.
