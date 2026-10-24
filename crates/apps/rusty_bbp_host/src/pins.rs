@@ -730,6 +730,7 @@ mod tests {
             program: program.into(),
             args: args.iter().map(|a| (*a).into()).collect(),
             builtin_tools: false,
+            session: false,
             sandbox: None,
         }
     }

@@ -1,10 +1,10 @@
 # AES-GCM for `rusty_aead`: design note (draft, no code)
 
 Date: 2026-10-10 (updated 2026-10-13). Status: **the design below was written before any code; a spike and its
-constant-time evidence now exist in `rusty_aead` (sections 8 to 10), used by nothing, preliminary. Automated, bounded source review on #651: the re-review of `70139bb3` (comment 6150642627) cleared the
+constant-time evidence now exist in `rusty_aead` (sections 8 to 10), used only by `rusty_tls`'s opt-in native backend (#871), preliminary. Automated, bounded source review on #651: the re-review of `70139bb3` (comment 6150642627) cleared the
 reported source defects. It does not accept a constant-time evidence record or production adoption, and no human
-review is recorded
-(section 10; plan section 0, "AES-GCM review record").** Plan context:
+review is recorded beyond the owner's 2026-10-23 attestation that the AES integration review was complete
+(section 10; plan sections 0, "AES-GCM review record", and 11b).** Plan context:
 `CRYPTO-REPLACEMENT-PLAN.md` section 13.1 gap 3, decisions D1 and D2. The freeze was reopened for this gap only
 (plan section 0, "Owner decisions (2026-10-10)"). Signing stays closed; the `rusty_tls` seam was reopened for the client role on 2026-10-22 (plan section 0). Numbers marked
 *estimate* are not measurements; the first step below produces the measurement.
@@ -314,6 +314,8 @@ Open, for the owner:
 - **The AES types are exported unconditionally** from `rusty_aead`. Nothing in the repository uses them, but that is not a
   gate: a downstream user could. A default-off cargo feature (for example `experimental-aes-gcm`) would make the status
   explicit; it is a public-API change, so it has not been made.
+  **Decided 2026-10-23** (the owner's answer in the working session on 2026-10-23 ("Go with your recommendation"), the implementer's transcription, not yet restated from the owner's GitHub account): the AES types stay exported unconditionally. Inside the repository their
+  only user is `rusty_tls`'s native backend. The TLS gates (`native-crypto` plus `--cfg rusty_tls_native_crypto`) cover only `rusty_tls`'s use. The AES types themselves stay public, so any crate that depends on `rusty_aead` can call them directly. A default-off feature would make that use opt-in. The owner chose not to add one.
 - The ChaCha20-Poly1305 timing baselines have the same workload mismatch (erratum, item 3).
 - Everything under "Not done" in section 9.
 

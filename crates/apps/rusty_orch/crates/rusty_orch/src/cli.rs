@@ -85,7 +85,7 @@ pub fn run_with<R: AgentRunner>(
         write!(streams.stdout, "{}", report::text(&summary))?;
     }
     Ok(match summary.ended {
-        Ended::Finished | Ended::Waiting(_) => EXIT_FINISHED,
+        Ended::Finished | Ended::Waiting(_) | Ended::Cancelled => EXIT_FINISHED,
         Ended::Blocked(_) => EXIT_BLOCKED,
         Ended::Failed(_) | Ended::WallClock(_) => EXIT_FAILED,
     })
@@ -132,6 +132,9 @@ fn task_host(args: &Args, goal_json: &str) -> Result<Option<Hosting>, Box<dyn st
             .transpose()?,
     };
     let Some(config) = config else {
+        if args.cancel.is_some() {
+            return Err("--cancel requires BBP task hosting (--bbp or the goal's bbp)".into());
+        }
         if args.card.is_some() {
             return Err("--card requires BBP task hosting (--bbp or the goal's bbp)".into());
         }
@@ -166,5 +169,6 @@ fn task_host(args: &Args, goal_json: &str) -> Result<Option<Hosting>, Box<dyn st
     Ok(Some(Hosting {
         host: Box::new(host),
         card,
+        cancel: args.cancel.clone(),
     }))
 }

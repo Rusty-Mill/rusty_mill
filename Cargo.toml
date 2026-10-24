@@ -69,7 +69,7 @@ members = [
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo",
-    "crates/libs/async/rusty_stream",
+    "crates/libs/async/rusty_journal",
     "crates/foundation/rusty_url",
     "crates/libs/net/rusty_http",
     "crates/libs/net/rusty_serve",
@@ -163,6 +163,7 @@ members = [
     "crates/libs/net/rusty_h2",
     "crates/libs/net/rusty_hyper",
     "crates/libs/net/rusty_axum",
+    "crates/libs/net/rusty_axum_tokio",
     "crates/libs/ui/rusty_audio",
     "crates/foundation/rusty_crypto_key",
     "crates/libs/storage/rusty_db/crates/rusty-db-core",
@@ -469,7 +470,9 @@ rusty_jinja = { path = "crates/foundation/rusty_jinja" }
 rusty_kafka = { path = "crates/libs/net/rusty_kafka" }
 rusty_libc = { path = "crates/foundation/rusty_libc", version = "0.0.1" }
 rusty_lines = { path = "crates/libs/ui/rusty_lines" }
-rusty_lsp = { path = "crates/libs/protocol/rusty_lsp" }
+# Default features off: the runtime (tokio) is opt-in per consumer via
+# `features = ["runtime"]`; rusty_term_l13 needs only the data types (#850).
+rusty_lsp = { path = "crates/libs/protocol/rusty_lsp", default-features = false }
 rusty_opnsense = { path = "crates/libs/homelab/rusty_opnsense" }
 rusty_proxmox = { path = "crates/libs/homelab/rusty_proxmox" }
 rusty_rand = { path = "crates/foundation/rusty_rand" }
@@ -557,6 +560,7 @@ rusty_bbp = { path = "crates/libs/protocol/rusty_bbp" }
 rusty_flatbuffers = { path = "crates/libs/protocol/rusty_flatbuffers" }
 rusty_protobuf = { path = "crates/libs/protocol/rusty_protobuf" }
 rusty_prost = { path = "crates/libs/protocol/rusty_prost" }
+rusty_tonic = { path = "crates/libs/protocol/rusty_tonic" }
 rusty_sandbox = { path = "crates/libs/rusty_sandbox" }
 rusty_worktree = { path = "crates/libs/rusty_worktree" }
 rusty_bot = { path = "crates/libs/rusty_bot" }
@@ -736,6 +740,7 @@ ts-localapi = { path = "crates/apps/rusty_tailscale/crates/ts-localapi" }
 ts-net = { path = "crates/apps/rusty_tailscale/crates/ts-net" }
 rusty_http = { path = "crates/libs/net/rusty_http" }
 rusty_serve = { path = "crates/libs/net/rusty_serve" }
+rusty_axum = { path = "crates/libs/net/rusty_axum" }
 rusty_crypto_key = { path = "crates/foundation/rusty_crypto_key" }
 rusty_ansi = { path = "crates/libs/ui/rusty_ansi" }
 hyper = { version = "1", default-features = false }

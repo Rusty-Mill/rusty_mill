@@ -24,21 +24,43 @@ default-features = false
 [[bench]]
 name = "core"
 harness = false
+required-features = ["runtime"]
+
+[[test]]
+name = "integration"
+required-features = ["runtime"]
+
+[[test]]
+name = "property"
+required-features = ["runtime"]
+
+[[test]]
+name = "test_client"
+required-features = ["runtime"]
+
+[[example]]
+name = "text_server"
+required-features = ["runtime"]
 
 [features]
-default = []
+default = ["runtime"]
+# The async server/client runtime (`server`, `client`, `service`,
+# `transport`, `documents`, `cancel`, `testing`) and its tokio dependency.
+# Without it the crate is just the protocol data types (`error`, `jsonrpc`,
+# `lsp`, `text`), so a consumer that only parses JSON-RPC links no runtime.
+runtime = ["dep:tokio"]
 # `Server::from_tcp`: serve an accepted tokio TCP connection.
-tcp = ["tokio/net"]
+tcp = ["runtime", "tokio/net"]
 # Wire-level instrumentation via the `tracing` crate.
-tracing = ["dep:rusty_log"]
+tracing = ["runtime", "dep:rusty_log"]
 # Sovereign async runtime adapter support via `rusty_tokio`.
-rusty-tokio = ["dep:rusty_tokio"]
+rusty-tokio = ["runtime", "dep:rusty_tokio"]
 # Sovereign JSON support via `rusty_json`.
 rusty-json = ["dep:rusty_json"]
 
 [dependencies]
 rusty_percent = { workspace = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time"] }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time"] }
 serde = { workspace = true }
 serde_json = "1"
 rusty_log = { workspace = true, optional = true }

@@ -1,5 +1,5 @@
 [package]
-name = "rusty_stream"
+name = "rusty_journal"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
@@ -19,7 +19,7 @@ rusty_tokio = { path = "../rusty_tokio", features = [
     "thread-per-core",
     "io-uring-fs",
 ] }
-# ADR-0002 D1: rusty_stream's own protocol, built on rusty_wire's Reader/
+# ADR-0002 D1: rusty_journal's own protocol, built on rusty_wire's Reader/
 # Writer byte-cursor primitives rather than a redundant hand-rolled one.
 # Now a path dependency on the sibling crate merged into this same
 # workspace.

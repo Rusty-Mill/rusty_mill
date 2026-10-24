@@ -25,7 +25,23 @@ PATH_JOB_PREFIXES = {
     "agui": "crates/libs/protocol/rusty_agui/",
     # The viewer's smoke test renders this fixture; Cargo impact alone would miss a change to it.
     "rleval_viewer": "crates/apps/rocket_league/rleval/assets/replays/",
+    # The rleval Python service (FastAPI + SQLModel) has no Cargo package to follow.
+    "rleval_service": "crates/apps/rocket_league/rleval/service/",
+    # The service image (and its Dockerfile.dockerignore): a release build, so only when it changes.
+    "rleval_image": "crates/apps/rocket_league/rleval/Dockerfile",
 }
+
+# What the rleval image copies in besides the Dockerfile (PATH_JOB_PREFIXES["rleval_image"]).
+RLEVAL_IMAGE_INPUTS = tuple(
+    "crates/apps/rocket_league/rleval/" + path
+    for path in (
+        "docker-compose.yml",
+        "service/app/",
+        "service/migrations/",
+        "service/pyproject.toml",
+        "service/alembic.ini",
+    )
+)
 
 PACKAGE_JOB_PREFIXES = {
     "dashboard": ("rusty-meshed-",),
@@ -286,6 +302,13 @@ def specialized_job_flags(
         }
         for path in paths
     )
+    # The rleval service jobs run a pip install and a docker build that no Cargo edge reaches, so
+    # an edit to the workflow or the planner runs them too (a skipped job reports success). The
+    # image also installs the service's app, migrations and package metadata (with the
+    # production extras, on its own Python), so those inputs and compose rebuild it as well.
+    rleval_ci = any(path in {".github/workflows/ci.yml", ".github/scripts/ci_plan.py"} for path in paths)
+    flags["rleval_service"] |= rleval_ci
+    flags["rleval_image"] |= rleval_ci or any(path.startswith(RLEVAL_IMAGE_INPUTS) for path in paths)
     for job, prefixes in PACKAGE_JOB_PREFIXES.items():
         flags[job] = flags.get(job, False) or any(
             package.startswith(prefix) for package in package_set for prefix in prefixes

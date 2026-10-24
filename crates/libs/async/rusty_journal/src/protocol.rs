@@ -1,4 +1,4 @@
-//! `rusty_stream`'s own wire protocol (ADR-0002 D1) — built on `rusty_wire`'s
+//! `rusty_journal`'s own wire protocol (ADR-0002 D1) — built on `rusty_wire`'s
 //! `Reader`/`Writer` byte-cursor primitives rather than a redundant
 //! hand-rolled one, and, per that same decision, not Kafka wire-protocol
 //! compatible.

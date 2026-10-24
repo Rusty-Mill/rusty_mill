@@ -7,7 +7,7 @@
 # enforcing it against this workspace's real, shared Cargo.lock surfaces a
 # large pre-existing backlog (unmaintained/yanked transitive crates, two
 # real wasmtime CVEs, an rmcp DNS-rebinding CVE, license-metadata gaps in
-# `rusty_rusqlite`/`rusty_stream`, and dozens of the workspace's own
+# `rusty_rusqlite`/`rusty_journal`, and dozens of the workspace's own
 # deliberate duplicate-version splits tripping `[bans]`) that is a separate
 # triage project, not a CI-gate change. Run locally with `cargo deny check`.
 

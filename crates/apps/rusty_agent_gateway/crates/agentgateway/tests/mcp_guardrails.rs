@@ -17,13 +17,14 @@ use agentgateway_mcp::{
     AuthorizationError, McpRequest, McpRequestResult, McpResponse, McpResponseResult,
     authorization_error, request_result, response_result,
 };
-use prost::Message as _;
 use rmcp::{
     ServiceExt,
     model::{CallToolRequestParams, GetPromptRequestParams, ReadResourceRequestParams},
     service::RunningService,
     transport::StreamableHttpClientTransport,
 };
+use rusty_prost::Message as _;
+use rusty_prost::wkt::{Struct, Value};
 use tokio_util::sync::CancellationToken;
 
 /// How the scripted processor should answer.
@@ -51,12 +52,12 @@ struct Seen {
 }
 
 /// A `metadata_context` struct as plain key/value strings.
-fn flatten(context: Option<prost_types::Struct>) -> Vec<(String, String)> {
+fn flatten(context: Option<Struct>) -> Vec<(String, String)> {
     context
         .into_iter()
         .flat_map(|s| s.fields)
-        .filter_map(|(k, v)| match v.kind {
-            Some(prost_types::value::Kind::StringValue(text)) => Some((k, text)),
+        .filter_map(|(k, v)| match v {
+            Value::String(text) => Some((k, text)),
             _ => None,
         })
         .collect()
@@ -156,16 +157,15 @@ async fn processor(script: Script) -> (String, Arc<Seen>, CancellationToken) {
                             .then(|| {
                                 match agentgateway_mcp::to_proto_value(serde_json::json!({
                                     "classification": "phishing",
-                                }))
-                                .kind
-                                {
-                                    Some(prost_types::value::Kind::StructValue(s)) => Some(s),
+                                })) {
+                                    Value::Struct(s) => Some(s),
                                     _ => None,
                                 }
                             })
                             .flatten(),
                     }
                     .encode_to_vec()
+                    .expect("should encode")
                 } else {
                     let decoded = McpResponse::decode(message).expect("should decode");
                     if let Ok(mut seen) = recorder.metadata.lock() {
@@ -195,6 +195,7 @@ async fn processor(script: Script) -> (String, Arc<Seen>, CancellationToken) {
                         }),
                     }
                     .encode_to_vec()
+                    .expect("should encode")
                 };
 
                 let mut framed = Vec::with_capacity(payload.len() + 5);
