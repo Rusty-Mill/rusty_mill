@@ -203,8 +203,8 @@ fn feed(grid: &Mutex<Grid>, data: &[u8], opts: &Options) -> Result<Fed, String> 
     let mut parser = AnsiParser::new();
     let mut hold = Vec::new();
     let mut step = |chunk: &[u8]| {
-        let t = Instant::now();
         let mut g = grid.lock_bulk();
+        let t = Instant::now(); // the hold, not the wait to acquire
         parser.advance(&mut g, chunk);
         let _ = g.take_host_out();
         drop(g);
@@ -231,9 +231,14 @@ fn feed(grid: &Mutex<Grid>, data: &[u8], opts: &Options) -> Result<Fed, String> 
 /// Write `data` (looped, at least once) into a pipe from a writer thread for
 /// `secs`, and hand each read of up to [`CHUNK`] bytes to `step`. Returns the
 /// bytes read.
+///
+/// The read end is owned by the scope's closure, so an early return or a
+/// panic in `step` closes it before the scope joins the writer: the writer's
+/// `write_all` then fails instead of blocking on a full pipe forever.
 fn feed_pipe(data: &[u8], secs: f64, step: &mut impl FnMut(&[u8])) -> Result<usize, String> {
-    let (mut rx, mut tx) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
+    let (rx, mut tx) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
     thread::scope(|s| {
+        let mut rx = rx;
         let writer = s.spawn(move || -> std::io::Result<()> {
             let start = Instant::now();
             loop {
@@ -246,10 +251,12 @@ fn feed_pipe(data: &[u8], secs: f64, step: &mut impl FnMut(&[u8])) -> Result<usi
         let mut buf = vec![0u8; CHUNK];
         let mut bytes = 0usize;
         loop {
-            let n = rx.read(&mut buf).map_err(|e| format!("pipe read: {e}"))?;
-            if n == 0 {
-                break;
-            }
+            let n = match rx.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(format!("pipe read: {e}")),
+            };
             step(&buf[..n]);
             bytes += n;
         }
@@ -559,6 +566,22 @@ mod tests {
         assert_eq!(ok.frame.len(), ok.hold.len());
         assert_eq!(ok.frame.len(), ok.wait.len());
         assert!(!ok.reader_hold.is_empty());
+    }
+
+    /// A consumer that fails on its first chunk must not leave the writer
+    /// blocked on a full pipe: the read end closes before the writer is
+    /// joined, so `write_all` fails and the feed returns.
+    #[test]
+    fn pipe_feed_returns_when_the_consumer_fails_early() {
+        let data = vec![b'x'; 1 << 20]; // far more than a pipe buffer
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                feed_pipe(&data, 60.0, &mut |_| panic!("consumer fails"))
+            }));
+            let _ = tx.send(r.is_err());
+        });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(true));
     }
 
     #[test]

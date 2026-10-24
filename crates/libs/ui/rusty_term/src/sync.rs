@@ -21,7 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Longest [`Mutex::lock_bulk`] defers to waiters before contending anyway,
-/// so a caller that locks in a loop cannot starve the bulk writer either.
+/// so a caller that locks in a loop does not stall the bulk writer either.
 const BULK_DEFER_MAX: Duration = Duration::from_millis(1);
 
 /// [`std::sync::Mutex`] whose [`lock`](Self::lock) never fails: a lock
@@ -61,7 +61,9 @@ impl<T: ?Sized> Mutex<T> {
 
     /// [`lock`](Self::lock) for loops that re-lock back to back (a PTY
     /// reader taking the grid per chunk): first yields while a `lock` caller
-    /// is waiting, for at most [`BULK_DEFER_MAX`], so that caller gets in.
+    /// is waiting, for at most [`BULK_DEFER_MAX`], so that caller usually
+    /// gets in. Best effort, bounded: a waiter the scheduler has not run
+    /// within that bound still loses, so this is not a fairness guarantee.
     pub fn lock_bulk(&self) -> MutexGuard<'_, T> {
         let start = Instant::now();
         while self.waiting.load(Ordering::Relaxed) > 0 && start.elapsed() < BULK_DEFER_MAX {
