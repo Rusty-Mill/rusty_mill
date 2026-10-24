@@ -786,8 +786,11 @@ In addition, before wiring:
 2. **The review (Tier 1 item 4) covers the native seam.** `handrolled/crypto/native.rs` is
    reviewed in addition to `TLS-REVIEW-SCOPE.md`. The first-party primitives under it rest on
    their own records (plan section 11b, the AES-GCM attestation, ADR-0005's evidence bar).
-3. **The consumer's feature enables the native backend explicitly**: `native-crypto` and the
-   second cfg. The way back is still one line, to rustls, not to the `ring` backend.
+3. **The consumer opts into the native backend explicitly.** Its off-by-default feature enables
+   `native-crypto`. The backend is selected only when the person building it also passes
+   `--cfg rusty_tls_native_crypto` (with `--cfg rusty_tls_handrolled`). A Cargo feature cannot set
+   a cfg, and no dependency can (section 1). The way back is still one line, to rustls, not to the
+   `ring` backend.
 
 **What this does not do.**
 - It names no other consumer and no server use. The server role and signing (ADR-0006) stay
