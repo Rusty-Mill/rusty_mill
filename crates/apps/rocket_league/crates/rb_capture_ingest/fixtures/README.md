@@ -59,8 +59,9 @@ every one; the numbers below are main's on 2026-10-24.
 | `clean-dodge` | `clean_dodge04` 6.28–8.60 s | a pure-left side dodge (`yaw = -1`) on open floor | 1.75 / 4.76 | untouched |
 | `dodge-free-landing` | `onewheellanding06` 38.75–40.89 s | a hop and one-wheel landing with no dodge | 1.10 / 3.14 | untouched |
 
-Two known capture defects, from the source branch: the analog axes are
-recorded as zero throughout `hittickjump01` and `01b`, and `walldrive04`
+Two known capture defects, from the source branch: steer, pitch, yaw and
+roll are recorded as zero throughout `hittickjump01` and `01b` (throttle is
+recorded), and `walldrive04`
 has a dodge at 30.175 s with no `jump` press recorded. The files hold
 poses and inputs only, no names or account ids.
 

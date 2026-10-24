@@ -16,9 +16,9 @@ one-step error (`rb-verify --self-onestep`) is the useful number there.
 | `walldrive04.jsonl` | 4626 | steered driving, a boost run at the cap into the `+X` wall curve, a reverse descent, a second wall climb, a wall jump and a backflip (recorded with no `jump` press) |
 | `curverun05.jsonl` | 5677 | a lap riding the side-wall fillets and all four corner arches with boost and handbrake taps |
 | `onewheellanding06.jsonl` | 5350 | many short hops with air roll, diagonal dodges, one-wheel landings |
-| `hittickjump01.jsonl` | 5038 | boost, jump at the cap, an airborne hit, a second press with an all-zero stick; analog axes zero throughout |
+| `hittickjump01.jsonl` | 5038 | boost, jump at the cap, an airborne hit, a second press with an all-zero stick; steer, pitch, yaw and roll zero throughout (throttle recorded) |
 | `hittickjump01_v2.jsonl` | 10114 | the third session's re-recording of the drill with the rebuilt plugin: three wheels-down hit-tick jumps, the cleanest cut as `hit-tick-jump` |
-| `hittickjump01b.jsonl` | 3131 | boost, jump at the cap, the airborne hit `airborne-hit` is cut from, the ball's goal entry; analog axes zero throughout |
+| `hittickjump01b.jsonl` | 3131 | boost, jump at the cap, the airborne hit `airborne-hit` is cut from, the ball's goal entry; steer, pitch, yaw and roll zero throughout (throttle recorded) |
 | `wall_curve02.jsonl` | 6825 | five wall-climb events (full-boost and throttle-only, both side walls); the first is `wall-climb-crest` |
 | `goal_shot03.jsonl` | 9356 | a ground shot into the `+Y` net (`goal-shot-net-entry`) and a slow rolling shot the length of the field into the `-Y` goal |
 | `clean_dodge04.jsonl` | 3925 | nine ground jump-dodges on open floor, including a pure-left and a mirrored pure-right one |
