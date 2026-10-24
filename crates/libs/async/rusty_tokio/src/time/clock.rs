@@ -16,7 +16,7 @@
 //! comparing an `Instant` against another `Instant` works the same
 //! either way.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 pub(crate) struct Clock {
@@ -63,6 +63,20 @@ impl Clock {
         let mut guard = self.paused.lock().unwrap();
         assert!(guard.is_some(), "time is not paused");
         *guard = None;
+    }
+
+    /// Moves a paused clock forward to `instant` and returns the
+    /// resulting "now"; `None` (and no change) if the clock isn't
+    /// paused. Never moves it backwards. Unlike [`set`](Self::set) this
+    /// doesn't panic, because auto-advance runs from the scheduler loop,
+    /// which must not take the runtime down over a `resume()` that raced
+    /// it.
+    pub(crate) fn advance_to(&self, instant: Instant) -> Option<Instant> {
+        let mut guard = self.paused.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = (*guard)?;
+        let next = now.max(instant);
+        *guard = Some(next);
+        Some(next)
     }
 
     /// Moves the frozen virtual clock directly to `instant`.

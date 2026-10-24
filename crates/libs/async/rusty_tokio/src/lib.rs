@@ -322,6 +322,62 @@ pub mod time;
 mod coop;
 mod macros;
 
+/// Compile-fail checks for [`macro@main`]/[`macro@test`]'s arguments
+/// (#899). They live here, not in `rusty_tokio-macros`, because the
+/// expansion only means anything with this crate in scope. Each
+/// `compile_fail` block has a passing twin first, so a block can't pass
+/// just by failing for some unrelated reason.
+///
+/// Every accepted flavor builds:
+///
+/// ```
+/// #[rusty_tokio::main(flavor = "current_thread", start_paused = true)]
+/// async fn main() {
+///     rusty_tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+/// }
+/// ```
+///
+/// ```
+/// #[rusty_tokio::main(flavor = "multi_thread", worker_threads = 2)]
+/// async fn main() {}
+/// ```
+///
+/// An unknown flavor is an error:
+///
+/// ```compile_fail
+/// #[rusty_tokio::main(flavor = "single_thread")]
+/// async fn main() {}
+/// ```
+///
+/// `worker_threads` on `current_thread` is an error, as in tokio:
+///
+/// ```compile_fail
+/// #[rusty_tokio::main(flavor = "current_thread", worker_threads = 2)]
+/// async fn main() {}
+/// ```
+///
+/// `start_paused = true` needs `current_thread`, as in tokio:
+///
+/// ```compile_fail
+/// #[rusty_tokio::main(flavor = "multi_thread", start_paused = true)]
+/// async fn main() {}
+/// ```
+///
+/// ```compile_fail
+/// // `main`'s default flavor is multi_thread.
+/// #[rusty_tokio::main(start_paused = true)]
+/// async fn main() {}
+/// ```
+///
+/// An unknown argument is an error:
+///
+/// ```compile_fail
+/// #[rusty_tokio::main(unhandled_panic = "shutdown_runtime")]
+/// async fn main() {}
+/// ```
+#[cfg(doctest)]
+pub struct MacroArgsCompileFail;
+
 pub use runtime::{
     Builder, EnterGuard, Handle, Id, LocalOptions, LocalRuntime, Runtime, RuntimeFlavor,
     RuntimeMetrics, TryCurrentError,
