@@ -15,6 +15,12 @@
 //!   command fold blocks (OSC 133 `C`..`D` around each command's output), at
 //!   the live view and scrolled back half a screen into history. Every cell
 //!   drawn maps its view row through the fold blocks.
+//! - **Typing.** Frame ms when each frame adds one character at the prompt
+//!   of a full screen.
+//!
+//! The renderer repaints only the rows that changed since the last frame, as
+//! the window does on a backend that keeps its buffer; the `full repaint`
+//! figures repaint every row, as before damage tracking.
 //!
 //! A run that cannot measure (no font, a renderer that fails to start or
 //! panics, no samples) exits non-zero instead of printing zeros.
@@ -120,21 +126,40 @@ fn run() -> Result<(), String> {
         );
     }
     println!("\n## Static folds: {COLS}x{ROWS}, {STATIC_FRAMES} frames each\n");
-    println!("| fold blocks | view | frame p50 | frame p99 |");
-    println!("|---:|---|---:|---:|");
+    println!("| fold blocks | view | frame p50 | frame p99 | full repaint p50 |");
+    println!("|---:|---|---:|---:|---:|");
     for folds in [false, true] {
         for scrolled in [false, true] {
             let grid = fold_grid(folds, scrolled)?;
             let mut fb = frame_bench().ok_or("renderer failed to start")?;
             let frames = static_frames(&mut fb, &grid);
+            let mut fb = frame_bench()
+                .ok_or("renderer failed to start")?
+                .full_repaint();
+            let full = static_frames(&mut fb, &grid);
             let view = if scrolled { "scrolled back" } else { "live" };
             println!(
-                "| {} | {view} | {} | {} |",
+                "| {} | {view} | {} | {} | {} |",
                 grid.fold_blocks().len(),
                 pct_ms(&frames, 50.0)?,
-                pct_ms(&frames, 99.0)?
+                pct_ms(&frames, 99.0)?,
+                pct_ms(&full, 50.0)?
             );
         }
+    }
+    println!("\n## Typing: {COLS}x{ROWS}, one character per frame, {STATIC_FRAMES} frames\n");
+    println!("| repaint | frame p50 | frame p99 |");
+    println!("|---|---:|---:|");
+    for full in [false, true] {
+        let fb = frame_bench().ok_or("renderer failed to start")?;
+        let mut fb = if full { fb.full_repaint() } else { fb };
+        let frames = typing_frames(&mut fb, &mut fold_grid(false, false)?);
+        let repaint = if full { "full" } else { "changed rows" };
+        println!(
+            "| {repaint} | {} | {} |",
+            pct_ms(&frames, 50.0)?,
+            pct_ms(&frames, 99.0)?
+        );
     }
     Ok(())
 }
@@ -343,6 +368,21 @@ fn static_frames(painter: &mut impl Painter, grid: &Grid) -> Vec<Duration> {
     painter.paint(&grid.frame_view());
     (0..STATIC_FRAMES)
         .map(|_| {
+            let t = Instant::now();
+            painter.paint(&grid.frame_view());
+            t.elapsed()
+        })
+        .collect()
+}
+
+/// [`STATIC_FRAMES`] timed frames that each type one character at the
+/// prompt of `grid` first, after one untimed frame.
+fn typing_frames(painter: &mut impl Painter, grid: &mut Grid) -> Vec<Duration> {
+    let mut parser = AnsiParser::new();
+    painter.paint(&grid.frame_view());
+    (0..STATIC_FRAMES)
+        .map(|_| {
+            parser.advance(grid, b"x");
             let t = Instant::now();
             painter.paint(&grid.frame_view());
             t.elapsed()
