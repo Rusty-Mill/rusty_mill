@@ -12,7 +12,7 @@
 //! registered with it differ, in `epoll.rs`/`kqueue.rs`/`io_uring.rs`.
 //! All three expose the identical `Reactor::{new, start, register,
 //! deregister, shutdown}` surface this module re-exports, so nothing
-//! above this module (or in `tcp.rs`/`udp.rs`/`unix.rs`) needs its own
+//! above this module (or in `tcp.rs`/`udp.rs`/`unix_socket.rs`) needs its own
 //! `#[cfg]` for which backend is live.
 //!
 //! A fourth combination exists on Linux: the `io-uring-reactor` feature

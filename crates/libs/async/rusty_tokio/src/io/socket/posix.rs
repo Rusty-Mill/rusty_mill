@@ -28,7 +28,7 @@
 //!   that API intact instead of hiding a mutex behind it.
 //!
 //! The same non-blocking-`connect` gap applies to `AF_UNIX` streams too
-//! (`unix.rs`), so `new_unix_socket`/`unix_connect`/`sun_path_offset`/
+//! (`unix_socket.rs`), so `new_unix_socket`/`unix_connect`/`sun_path_offset`/
 //! `to_sockaddr_un` below mirror `new_tcp_socket`/`connect`/`to_sockaddr`
 //! exactly, just packing a `sockaddr_un` from a `Path` instead of a
 //! `sockaddr_{in,in6}` from a `SocketAddr` -- rustils' own

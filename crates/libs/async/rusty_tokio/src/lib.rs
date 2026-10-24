@@ -263,7 +263,7 @@
 //!   developed and tested on Linux -- treat the macOS and Windows
 //!   reactor paths as reviewed-but-unverified until someone runs *this*
 //!   crate's test suite on the real OS, not just rustils' or mio's own.
-//!   `AF_UNIX` (`unix.rs`/`unix_datagram.rs`) and `process`/`signal`
+//!   `AF_UNIX` (`unix_socket.rs`/`unix_datagram.rs`) and `process`/`signal`
 //!   are Unix-only and simply absent from the crate on Windows (no
 //!   `#[cfg]`-gated stub methods that would panic at runtime) -- there's
 //!   no portable equivalent to fall back to, matching how tokio itself
@@ -309,8 +309,10 @@
 
 pub mod fs;
 pub mod io;
+pub mod net;
 #[cfg(any(unix, windows))]
 pub mod process;
+pub mod runtime;
 #[cfg(any(unix, windows))]
 pub mod signal;
 pub mod sync;
@@ -319,7 +321,6 @@ pub mod time;
 
 mod coop;
 mod macros;
-mod runtime;
 
 pub use runtime::{
     Builder, EnterGuard, Handle, Id, LocalOptions, LocalRuntime, Runtime, RuntimeFlavor,
