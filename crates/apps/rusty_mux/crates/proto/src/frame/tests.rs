@@ -348,3 +348,74 @@ fn features_intersect() {
     assert!(!ours.contains(theirs));
     assert!(ours.contains(Features::NONE));
 }
+
+#[test]
+fn near_limit_unknown_and_duplicate_fields_decode_last_value() {
+    for key in [0x1e, 0x14] {
+        // The review's legal 16,777,215-byte Hello payload, for both unknown
+        // fields and duplicate features. Retained state is checked in field tests.
+        let mut frame = Vec::with_capacity(MAX_FRAME as usize + 4);
+        frame.extend_from_slice(&[0x00, 0xff, 0xff, 0xff, 0x01]);
+        for _ in 0..8_388_606 {
+            frame.extend_from_slice(&[key, 0]);
+        }
+        frame.extend_from_slice(&[0x14, 42]);
+        assert_eq!(
+            decode(&frame),
+            Ok(Some((
+                Message::Hello {
+                    features: Features::from_bits(42)
+                },
+                frame.len()
+            )))
+        );
+        // A malformed final recognized field must still override valid fields.
+        let end = frame.len() - 2;
+        frame[end..].copy_from_slice(&[0x15, 0]);
+        assert_eq!(
+            decode(&frame),
+            Err(Error::InvalidField {
+                message: 1,
+                field: 10
+            })
+        );
+    }
+}
+
+#[test]
+fn malformed_unknown_field_lengths_varints_and_ids_are_rejected() {
+    let mut oversized_id = Writer::new();
+    crate::varint::write(&mut oversized_id, (u64::from(u32::MAX) + 1) << 1);
+    let cases = [
+        (vec![0x1e, 0x80], Error::Truncated),
+        ([vec![0x1e], vec![0x80; 10]].concat(), Error::VarintOverflow),
+        (vec![0x1f, 0x80], Error::Truncated),
+        ([vec![0x1f], vec![0xff; 10]].concat(), Error::VarintOverflow),
+        (vec![0x1f, 2, 0], Error::Truncated),
+        (
+            oversized_id.into_vec(),
+            Error::FieldIdTooLarge((u64::from(u32::MAX) + 1) << 1),
+        ),
+    ];
+    for (tail, expected) in cases {
+        let mut frame = raw_frame(1, |o| {
+            o.varint(10, 0);
+        });
+        frame.extend(tail);
+        let len = (frame.len() - 4) as u32;
+        frame[..4].copy_from_slice(&len.to_be_bytes());
+        assert_eq!(decode(&frame), Err(expected));
+    }
+}
+
+#[test]
+fn maximum_size_snapshot_still_round_trips() {
+    // Type (1), UUID key/length/value (18), data key/length (5).
+    let message = Message::Snapshot {
+        block: BlockId::from_uuid(Uuid::nil()),
+        data: vec![0; MAX_FRAME as usize - 24],
+    };
+    let frame = encode(&message).unwrap();
+    assert_eq!(frame.len(), MAX_FRAME as usize + 4);
+    assert_eq!(decode(&frame), Ok(Some((message, frame.len()))));
+}

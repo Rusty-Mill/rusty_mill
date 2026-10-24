@@ -132,8 +132,8 @@ const CREATED: u32 = 11;
 const REASON: u32 = 12;
 const KIND: u32 = 13;
 const HOLDER: u32 = 14;
-// HOLDER is the highest id; every id must have a decode slot.
-const _: () = assert!((HOLDER as usize) < crate::field::SLOTS);
+// IDs 1..=HOLDER are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = HOLDER as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;

@@ -36,21 +36,17 @@ enum Value<'a> {
     Bytes(&'a [u8]),
 }
 
-/// Field ids below this are kept for lookup; every message's ids must fit.
-/// Higher ids are parsed and validated, then dropped, so decode state stays
-/// fixed however many fields a frame repeats.
-pub(crate) const SLOTS: usize = 16;
-
-/// A message body's fields, looked up by id. The last occurrence of an id wins.
+/// A message body's recognized fields, looked up by id. The last occurrence wins.
+/// Unknown fields are validated but not retained; repeated fields replace a slot.
 pub(crate) struct In<'a> {
     message: u8,
-    slots: [Option<Value<'a>>; SLOTS],
+    fields: [Option<Value<'a>>; crate::message::FIELD_COUNT],
 }
 
 impl<'a> In<'a> {
     pub(crate) fn parse(message: u8, body: &'a [u8]) -> Result<Self, Error> {
         let mut r = Reader::new(body);
-        let mut slots = [None; SLOTS];
+        let mut fields = [None; crate::message::FIELD_COUNT];
         while !r.is_empty() {
             let key = varint::read(&mut r)?;
             let id = u32::try_from(key >> 1).map_err(|_| Error::FieldIdTooLarge(key))?;
@@ -62,24 +58,25 @@ impl<'a> In<'a> {
                     Value::Bytes(r.read_bytes(len)?)
                 }
             };
-            if let Some(slot) = usize::try_from(id).ok().and_then(|i| slots.get_mut(i)) {
+            if let Some(slot) = id.checked_sub(1).and_then(|i| fields.get_mut(i as usize)) {
                 *slot = Some(value);
             }
         }
-        Ok(Self { message, slots })
-    }
-
-    fn get(&self, id: u32) -> Option<Value<'a>> {
-        usize::try_from(id)
-            .ok()
-            .and_then(|i| self.slots.get(i).copied().flatten())
+        Ok(Self { message, fields })
     }
 
     fn find(&self, id: u32) -> Result<Value<'a>, Error> {
-        self.get(id).ok_or(Error::MissingField {
+        self.slot(id).ok_or(Error::MissingField {
             message: self.message,
             field: id,
         })
+    }
+
+    fn slot(&self, id: u32) -> Option<Value<'a>> {
+        id.checked_sub(1)
+            .and_then(|i| self.fields.get(i as usize))
+            .copied()
+            .flatten()
     }
 
     pub(crate) fn invalid(&self, id: u32) -> Error {
@@ -123,9 +120,51 @@ impl<'a> In<'a> {
         id: u32,
         get: impl FnOnce(&Self, u32) -> Result<T, Error>,
     ) -> Result<Option<T>, Error> {
-        if self.get(id).is_none() {
+        if self.slot(id).is_none() {
             return Ok(None);
         }
         get(self, id).map(Some)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn high_count_unknown_fields_retain_no_state() {
+        let mut out = Out(Writer::new());
+        for id in 15..100_015 {
+            out.varint(id, 0).bytes(id, b"unknown");
+        }
+        out.varint(0, 0).bytes(u32::MAX, b"also unknown");
+        let body = out.0.into_vec();
+        let fields = In::parse(1, &body).unwrap();
+        assert_eq!(fields.fields.len(), 14);
+        assert!(fields.fields.iter().all(Option::is_none));
+        assert_eq!(fields.opt(10, In::varint), Ok(None));
+    }
+
+    #[test]
+    fn high_count_duplicates_replace_slots_including_invalid_final_values() {
+        let mut out = Out(Writer::new());
+        for _ in 0..100_000 {
+            out.varint(10, 1).bytes(14, &[0; 16]);
+        }
+        out.varint(10, 42).bytes(14, b"short uuid");
+        let mut body = out.0.into_vec();
+        let fields = In::parse(1, &body).unwrap();
+        assert_eq!(fields.fields.len(), 14);
+        assert_eq!(fields.fields.iter().flatten().count(), 2);
+        assert_eq!(fields.varint(10), Ok(42));
+        assert_eq!(fields.opt(14, In::uuid), Err(fields.invalid(14)));
+
+        // A wrong-kind final value must replace a valid one, not be ignored.
+        body.extend_from_slice(&[21, 0]);
+        let fields = In::parse(1, &body).unwrap();
+        assert_eq!(fields.varint(10), Err(fields.invalid(10)));
+        // Conversely, a later valid value replaces an earlier invalid one.
+        body.extend_from_slice(&[20, 7]);
+        assert_eq!(In::parse(1, &body).unwrap().varint(10), Ok(7));
     }
 }
