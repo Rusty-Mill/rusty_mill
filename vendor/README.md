@@ -28,7 +28,9 @@ fixture and the required context-space lines in unified patches.
 
 Run `python3 vendor/verify.py` to download the archives, verify checksums, apply
 the patches in a temporary directory, and compare every vendored file. It never
-writes to the working copies. Review the small source/manifest hunks separately
+writes to the working copies. It also checks that maintained and normalized
+manifests agree on the patched global dependency scopes and RustCrypto feature
+wiring; a WASM-only signature-v3 alias is rejected. Review the small source/manifest hunks separately
 from lockfile churn and the unchanged imported source.
 
 ## Compatibility boundary
@@ -89,3 +91,41 @@ and require review of that exact head before removal. Croc can remain on the
 published curve releases. Do not remove or relabel RUSTSEC-2026-0387; the old
 0.5 dependency must remain absent. Existing unrelated advisory exceptions in
 `deny.toml` retain their separate maintenance obligations.
+
+## Review correction: source scope and lockfile boundaries
+
+`jsonwebtoken/Cargo.toml.orig` and normalized `Cargo.toml` both declare
+`signature-v3` in **global** dependencies, enabled by `rust_crypto`. To exercise
+future maintenance from the source manifest itself, copy the vendored directory
+to a temporary directory, replace its `Cargo.toml` with `Cargo.toml.orig`, and
+run its locked RustCrypto+PEM test suite. This runs on native Linux, so an alias
+accidentally placed under the WASM target header cannot pass unnoticed.
+
+Three semver-legal but unrelated resolver reselections were reverted to main's
+original edges. These ranges were read from the published crate archives after
+verifying each archive against its unchanged root-lock checksum, rather than
+inferred from regenerated output:
+
+| Unchanged package | Published dependency requirement | Preserved root-lock edge |
+| --- | --- | --- |
+| hyper-util 0.1.20 | socket2 `>=0.5.9, <0.7` | socket2 0.5.10 |
+| quinn 0.11.11 | socket2 `>=0.5, <0.7` on non-browser-WASM targets | socket2 0.5.10 |
+| malloc_buf 0.0.6 | libc `>=0.1, <0.3` | libc 0.1.12 |
+
+All three package versions and checksums remain unchanged. Locked all-features
+metadata confirms those exact edges and only crypto-bigint 0.7.6. The native
+consumer build covers hyper-util; malloc_buf is a macOS dependency and is
+validated here by its authenticated requirement and all-target metadata, not a
+claim that it ran on macOS.
+
+The restored Quinn edge is also exercised through a real workspace consumer:
+
+```sh
+RUSTFLAGS='--cfg reqwest_unstable' cargo check --locked -p agentgateway-auth --features reqwest/http3
+```
+
+The cfg is reqwest's documented opt-in for its HTTP/3 feature, used only by this
+additional compile check; no committed feature or provider configuration changes.
+A direct `cargo check -p hyper-util -p quinn` invocation hit Cargo 1.98.1's
+feature-resolver panic when selecting the non-workspace optional dependency.
+The normal consumer check above succeeds and compiles the actual HTTP/3 closure.

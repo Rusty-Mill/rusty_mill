@@ -27,6 +27,7 @@ base64 = "0.22"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 signature = { version = "2.2.0", features = ["std"] }
+signature-v3 = { package = "signature", version = "3", optional = true }
 
 # For PEM decoding
 pem = { version = "3", optional = true }
@@ -50,8 +51,6 @@ zeroize = { version = "1.8.2", features = ["derive"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 getrandom = "0.2"
-
-signature-v3 = { package = "signature", version = "3", optional = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.1"

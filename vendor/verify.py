@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent
@@ -24,6 +25,35 @@ def files(root: Path) -> dict[str, bytes]:
         for p in root.rglob("*")
         if p.is_file() and "target" not in p.relative_to(root).parts
     }
+
+
+def verify_manifest_alignment(root: Path) -> None:
+    """Keep maintained crypto dependency scopes aligned with Cargo's manifest."""
+    original = tomllib.loads((root / "Cargo.toml.orig").read_text())
+    normalized = tomllib.loads((root / "Cargo.toml").read_text())
+    name = normalized["package"]["name"]
+    dependencies = (
+        ["p256", "crypto-bigint"]
+        if name == "aws-sigv4"
+        else ["p256", "p384", "signature-v3"]
+    )
+    for dependency in dependencies:
+        source = original.get("dependencies", {}).get(dependency)
+        resolved = normalized.get("dependencies", {}).get(dependency)
+        if source is None or source != resolved:
+            raise SystemExit(f"{name}: {dependency} must match in global dependencies of both manifests")
+        if any(
+            dependency in target.get("dependencies", {})
+            for target in original.get("target", {}).values()
+        ):
+            raise SystemExit(f"{name}: patched dependency {dependency} unexpectedly target-scoped")
+    if name == "jsonwebtoken":
+        features = original.get("features", {}).get("rust_crypto")
+        if (
+            features != normalized.get("features", {}).get("rust_crypto")
+            or "dep:signature-v3" not in (features or [])
+        ):
+            raise SystemExit("jsonwebtoken: rust_crypto must enable the same global signature-v3 alias")
 
 
 def main() -> None:
@@ -45,7 +75,8 @@ def main() -> None:
             changed = sorted(k for k in expected.keys() | actual.keys() if expected.get(k) != actual.get(k))
             if changed:
                 raise SystemExit(f"{name}: unreproducible files: {changed}")
-            print(f"{name} {source['version']}: verified archive + patch, {len(actual)} files")
+            verify_manifest_alignment(ROOT / name)
+            print(f"{name} {source['version']}: verified archive + patch + manifest alignment, {len(actual)} files")
 
 
 if __name__ == "__main__":

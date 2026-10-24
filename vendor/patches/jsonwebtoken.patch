@@ -740,7 +740,15 @@
 +optional = true
 --- a/jsonwebtoken/Cargo.toml.orig
 +++ b/jsonwebtoken/Cargo.toml.orig
-@@ -38,8 +38,8 @@
+@@ -27,6 +27,7 @@
+ serde = { version = "1.0.228", features = ["derive"] }
+ serde_json = "1.0"
+ signature = { version = "2.2.0", features = ["std"] }
++signature-v3 = { package = "signature", version = "3", optional = true }
+ 
+ # For PEM decoding
+ pem = { version = "3", optional = true }
+@@ -38,8 +39,8 @@
  # "rust_crypto" feature
  ed25519-dalek = { version = "2.1.1", optional = true, features = ["pkcs8"] }
  hmac = { version = "0.12.1", optional = true, features = ["reset"] }
@@ -751,16 +759,7 @@
  rand = { version = "0.8.5", optional = true, features = [
      "std",
  ], default-features = false }
-@@ -50,6 +50,8 @@
- [target.'cfg(target_arch = "wasm32")'.dependencies]
- js-sys = "0.3"
- getrandom = "0.2"
-+
-+signature-v3 = { package = "signature", version = "3", optional = true }
- 
- [dev-dependencies]
- wasm-bindgen-test = "0.3.1"
-@@ -77,6 +79,7 @@
+@@ -77,6 +78,7 @@
      "dep:rand",
      "dep:rsa",
      "dep:sha2",

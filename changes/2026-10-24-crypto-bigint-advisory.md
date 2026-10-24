@@ -26,6 +26,10 @@ changelog: Resolve RUSTSEC-2026-0387 across AWS SigV4a, JWT RustCrypto and Croc 
   validation, ownership and removal conditions. Source-patched package
   versions remain truthful. No crypto-bigint source/version metadata is
   forged and no crypto backend is switched.
+- **Review corrections:** keep the JWT signature-3 alias global in both
+  maintained and normalized manifests, verify dependency/feature scope during
+  provenance checks, and retain main's unrelated hyper-util/quinn socket2 and
+  malloc_buf libc lock edges.
 - **Known limitations:** temporary vendored patches must be maintained until
   compatible upstream releases remove the old graph. This PR still needs
   exact-head CI and independent security review. The workspace's unrelated
