@@ -56,7 +56,7 @@ fn a_malformed_host_string_is_an_error_not_a_panic() {
 fn a_resolved_address_can_actually_be_connected_to() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
         let mut addrs = lookup_host(format!("127.0.0.1:{port}")).await.unwrap();

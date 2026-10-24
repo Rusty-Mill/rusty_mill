@@ -503,7 +503,7 @@ mod tests {
         let router = Router::new()
             .route("/", get(|| async { "ok" }))
             .route("/burst", get(|| async { Sse::new(Burst(500)) }));
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server = serve(listener, None, ServeOptions::default(), router).unwrap();
         let connect = || TcpStream::connect_addr(server.local_addr());
 

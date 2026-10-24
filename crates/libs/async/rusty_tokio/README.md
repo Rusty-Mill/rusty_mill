@@ -769,7 +769,7 @@ use rusty_tokio::io::TcpListener;
 fn main() -> std::io::Result<()> {
     let rt = Runtime::new()?;
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:7878".parse().unwrap())?;
+        let listener = TcpListener::bind("127.0.0.1:7878").await?;
         loop {
             let (stream, _peer) = listener.accept().await?;
             rusty_tokio::spawn(async move {

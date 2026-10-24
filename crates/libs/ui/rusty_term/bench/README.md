@@ -95,14 +95,15 @@ reference throughput are in `docs/research/RUSTY-TERM-PERF-BACKLOG.md` §2.1.
 
 ## `bench_frame_time` (Rust, windowed front-end's CPU frame path)
 
-Paints the window's real CPU frame path (`gui::render::composite`) into an offscreen buffer, without a window or present. It has two modes.
+Paints the window's real CPU frame path (`gui::render::composite`) into an offscreen buffer, without a window or present. Like the window on a backend that keeps its buffer, it repaints only the rows that changed since the last frame; the `full repaint` figures repaint every row. It has three modes.
 
 - **Streaming.** A parser thread feeds a workload into a shared `Mutex<Grid>` in 4 KiB chunks, locking per chunk like the PTY reader. It loops the file for at least `--secs` (default 2). A render thread paints at `--hz` (default 60) as the window does: it locks the grid, copies the frame (`Grid::frame_view`), unlocks, then paints from the copy. Reported per workload:
   - frame ms;
   - lock hold ms (the copy), during which the parser is blocked;
   - the render thread's wait for the lock;
   - parser MB/s with rendering, against parsing alone.
-- **Static folds.** Frame ms for the same text with 0 and with 1,024 OSC 133 command fold blocks, at the live view and scrolled back half a screen into history.
+- **Static folds.** Frame ms for the same text with 0 and with 1,024 OSC 133 command fold blocks, at the live view and scrolled back half a screen into history, against a full repaint.
+- **Typing.** Frame ms when each frame adds one character at the prompt of a full screen, with changed rows only and with a full repaint.
 
 Percentiles are nearest rank. A run that cannot measure (no font, a renderer that fails to start or panics, no samples) exits non-zero.
 

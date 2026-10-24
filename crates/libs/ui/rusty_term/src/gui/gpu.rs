@@ -20,6 +20,10 @@
 //! old fixed 32×32 one-cell slot grid (and its 1024-glyph cap).
 //! [`GpuCore`] is target-agnostic (renders to any texture view), so the
 //! windowed [`GpuRenderer`] and the headless render-to-texture test share it.
+//!
+//! Each pane row's base and overlay instances are cached with the row's
+//! [`RowState`]; a frame rebuilds only the rows whose state changed and
+//! replays the rest.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -32,11 +36,12 @@ use winit::window::Window;
 use crate::core::Grid;
 use crate::core::{
     ATTR_BOLD, ATTR_ITALIC, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell, CursorShape,
-    FrameView, UnderlineStyle, WIDE_TRAILER, char_width,
+    UnderlineStyle, WIDE_TRAILER, char_width,
 };
 
+use super::damage::{self, RowState};
 use super::font::{FontCache, Glyph, GlyphSource, Style};
-use super::render::{Renderer, SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG};
+use super::render::{PaneFrame, Renderer, SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG};
 
 /// Atlas texture edge (clamped to the device limit at creation).
 const ATLAS_MAX: u32 = 2048;
@@ -225,7 +230,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 struct Instance {
     col: u32,
     row: u32,
@@ -289,6 +294,32 @@ enum TileKey {
     Shaped(usize),
 }
 
+/// One pane row's instances as last built, and what they were built from.
+struct CachedRow {
+    state: RowState,
+    /// [`GpuCore::atlas_epoch`] when built: a recycled atlas moves tiles.
+    epoch: u64,
+    base: Vec<Instance>,
+    overlay: Vec<Instance>,
+}
+
+/// The inputs every row of a pane shares; any change rebuilds them all.
+#[derive(PartialEq)]
+struct RowContext {
+    origin: (usize, usize),
+    font: u64,
+    cursor_color: u32,
+    min_contrast: u32,
+    status: Option<Vec<Cell>>,
+}
+
+/// One pane's cached rows.
+#[derive(Default)]
+struct PaneRows {
+    context: Option<RowContext>,
+    rows: Vec<Option<CachedRow>>,
+}
+
 /// Target-agnostic GPU compositor: device, pipelines, and glyph atlas.
 pub(crate) struct GpuCore {
     device: wgpu::Device,
@@ -304,6 +335,10 @@ pub(crate) struct GpuCore {
     shelf_x: u32,
     shelf_y: u32,
     tiles: HashMap<TileKey, (u32, u32, u32, u32)>,
+    /// Bumped each time the atlas is recycled.
+    atlas_epoch: u64,
+    /// Per pane, in paint order.
+    row_cache: Vec<PaneRows>,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     img_bind_layout: wgpu::BindGroupLayout,
@@ -574,6 +609,8 @@ impl GpuCore {
             shelf_x: 0,
             shelf_y: 0,
             tiles: HashMap::new(),
+            atlas_epoch: 0,
+            row_cache: Vec::new(),
             uniform_buf,
             bind_group,
             img_bind_layout,
@@ -628,6 +665,7 @@ impl GpuCore {
                 // frames still sample the old texels; the visual glitch lasts one
                 // frame, versus permanently blank glyphs.
                 self.tiles.clear();
+                self.atlas_epoch += 1;
                 self.shelf_x = 0;
                 self.shelf_y = 0;
                 match self.alloc_shelf(w) {
@@ -786,16 +824,18 @@ impl GpuCore {
         let row_off = if chrome.is_empty() { 0 } else { 1 };
         let mut frame = FrameLists::default();
         self.append_chrome(&mut frame, chrome, font);
-        self.append_grid(
-            &mut frame,
-            &grid.frame_view(),
-            0,
-            row_off,
-            true,
+        let view_grid = grid.frame_view();
+        let pane = PaneFrame {
+            grid: &view_grid,
+            col0: 0,
+            row0: row_off,
+            focused: true,
             cursor_on,
-            None,
-            font,
-        );
+            trail: Vec::new(),
+            hover_link: None,
+            marks: Vec::new(),
+        };
+        self.append_grid(&mut frame, &pane, &mut PaneRows::default(), font);
         self.draw_frame(view, &frame, 0x000000);
     }
 
@@ -852,21 +892,31 @@ impl GpuCore {
         }
     }
 
-    /// Append `grid`'s cell, ligature-run, image, and IME-preedit draws at
-    /// cell offset `(col0, row0)`. The cursor and preedit show only when
-    /// `focused`; selection and search highlights come from the grid's state.
-    #[allow(clippy::too_many_arguments)]
+    /// Append pane `p`'s cell, ligature-run, image, and IME-preedit draws at
+    /// its cell offset. The cursor and preedit show only when focused;
+    /// selection and search highlights come from the grid's state. Rows
+    /// whose state matches `cache` replay their cached instances.
     fn append_grid(
         &mut self,
         frame: &mut FrameLists,
-        grid: &FrameView,
-        col0: usize,
-        row0: usize,
-        focused: bool,
-        cursor_on: bool,
-        hover_link: Option<(usize, usize, usize)>,
+        p: &PaneFrame,
+        cache: &mut PaneRows,
         font: &mut FontCache,
     ) {
+        let (grid, col0, row0) = (p.grid, p.col0, p.row0);
+        let (focused, cursor_on, hover_link) = (p.focused, p.cursor_on, p.hover_link);
+        let context = RowContext {
+            origin: (col0, row0),
+            font: font.id(),
+            cursor_color: grid.cursor_color,
+            min_contrast: grid.min_contrast.to_bits(),
+            status: grid.status_row().map(<[Cell]>::to_vec),
+        };
+        if cache.context.as_ref() != Some(&context) {
+            cache.rows.clear();
+            cache.context = Some(context);
+        }
+        cache.rows.resize_with(grid.rows, || None);
         let cursor = (focused && grid.cursor_visible && grid.view_offset == 0 && cursor_on)
             .then_some(grid.cursor);
         let status = grid.status_row();
@@ -892,6 +942,17 @@ impl GpuCore {
         }
 
         for row in 0..grid.rows {
+            let state = damage::row_state(p, row);
+            if let Some(c) = &cache.rows[row]
+                && c.epoch == self.atlas_epoch
+                && state.same(&c.state)
+            {
+                frame.base.extend_from_slice(&c.base);
+                frame.overlay.extend_from_slice(&c.overlay);
+                continue;
+            }
+            let (epoch, base0, overlay0) =
+                (self.atlas_epoch, frame.base.len(), frame.overlay.len());
             let on_status = status.is_some() && row == last_row;
             // Bidi (implicit mode): the row's visual/logical permutation, or
             // `None` (identity) for pure-LTR/status rows — mirrors the CPU
@@ -1085,6 +1146,12 @@ impl GpuCore {
                     pos += span;
                 }
             }
+            cache.rows[row] = Some(CachedRow {
+                state,
+                epoch,
+                base: frame.base[base0..].to_vec(),
+                overlay: frame.overlay[overlay0..].to_vec(),
+            });
         }
 
         // Scrollbar overlay: cell-resolution thumb in the rightmost column.
@@ -1293,6 +1360,22 @@ impl GpuCore {
         pad: usize,
     ) {
         self.write_uniforms(width, height, pad, !chrome.is_empty());
+        let frame = self.frame_lists(width, panes, chrome, status, font, divider, bar_bg);
+        self.draw_frame(view, &frame, bg);
+    }
+
+    /// Every instance of one frame, as [`Self::render_panes`] draws it.
+    #[allow(clippy::too_many_arguments)]
+    fn frame_lists(
+        &mut self,
+        width: u32,
+        panes: &[PaneFrame],
+        chrome: &[Cell],
+        status: &[Cell],
+        font: &mut FontCache,
+        divider: u32,
+        bar_bg: u32,
+    ) -> FrameLists {
         let mut frame = FrameLists::default();
         // The strip-colored band above the chrome (see `render::bar_inset`):
         // a full-width quad at the window's top edge, exempt from the
@@ -1323,17 +1406,10 @@ impl GpuCore {
                 ));
             }
         }
-        for p in panes {
-            self.append_grid(
-                &mut frame,
-                p.grid,
-                p.col0,
-                p.row0,
-                p.focused,
-                p.cursor_on,
-                p.hover_link,
-                font,
-            );
+        let mut cache = std::mem::take(&mut self.row_cache);
+        cache.resize_with(panes.len(), PaneRows::default);
+        for (p, rows) in panes.iter().zip(&mut cache) {
+            self.append_grid(&mut frame, p, rows, font);
             // Cursor-trail ghosts (G36): solid cursor-colored fills on the
             // blended overlay layer, mirroring the CPU renderer's draw_trail.
             for &(col, row, alpha) in &p.trail {
@@ -1378,7 +1454,9 @@ impl GpuCore {
                 });
             }
         }
-        self.draw_frame(view, &frame, bg);
+        cache.truncate(panes.len());
+        self.row_cache = cache;
+        frame
     }
 
     /// Submit the frame: base cells (opaque), overlay glyphs (blended), then
@@ -1822,5 +1900,81 @@ mod tests {
         core.device.poll(wgpu::Maintain::Wait);
         let data = readback.slice(..).get_mapped_range();
         assert_eq!([data[0], data[1], data[2]], [0, 0, 255]);
+    }
+
+    /// A generated session (writes, cursor and view moves, selections, hover,
+    /// trail, focus) over two panes: every frame built from the row cache
+    /// equals one built from scratch.
+    #[test]
+    fn cached_rows_replay_what_a_rebuild_makes() {
+        use super::super::damage::tests::{Extras, Rng, panes, step};
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+        let mut grids = vec![
+            (Grid::new(14, 6), AnsiParser::new()),
+            (Grid::new(9, 5), AnsiParser::new()),
+        ];
+        let mut x = Extras {
+            cursor_on: true,
+            focused: true,
+            hover: None,
+            trail: None,
+        };
+        for n in 0..600 {
+            step(&mut rng, &mut grids, &mut x);
+            let views: Vec<_> = grids.iter().map(|(g, _)| g.frame_view()).collect();
+            let panes = panes(&views, x);
+            let cached = core.frame_lists(400, &panes, &[], &[], &mut font, 1, 2);
+            let kept = std::mem::take(&mut core.row_cache);
+            let fresh = core.frame_lists(400, &panes, &[], &[], &mut font, 1, 2);
+            core.row_cache = kept;
+            assert_eq!(cached.base, fresh.base, "frame {n}: base instances");
+            assert_eq!(
+                cached.overlay, fresh.overlay,
+                "frame {n}: overlay instances"
+            );
+        }
+    }
+
+    /// Unchanged rows replay their cached instances; a written row rebuilds.
+    #[test]
+    fn only_changed_rows_rebuild() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let mut g = Grid::new(10, 3);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, b"a\r\nb\r\nc\x1b[H");
+        let pane = |v| PaneFrame {
+            grid: v,
+            col0: 0,
+            row0: 0,
+            focused: true,
+            cursor_on: true,
+            trail: Vec::new(),
+            hover_link: None,
+            marks: Vec::new(),
+        };
+        let v = g.frame_view();
+        core.frame_lists(400, &[pane(&v)], &[], &[], &mut font, 1, 2);
+        // Mark every cached instance, so a replay is visible.
+        for row in core.row_cache[0].rows.iter_mut().flatten() {
+            row.base.iter_mut().for_each(|i| i.dcol = 0xABCDEF);
+        }
+        // Row 2 changes; the cursor stays on row 0.
+        p.advance(&mut g, b"\x1b[3;1Hz\x1b[H");
+        let v = g.frame_view();
+        let frame = core.frame_lists(400, &[pane(&v)], &[], &[], &mut font, 1, 2);
+        // The divider fill under the panes is never cached.
+        let marked = |row: u32| {
+            frame
+                .base
+                .iter()
+                .any(|i| i.row == row && i.dcol == 0xABCDEF)
+        };
+        assert!(marked(0) && marked(1), "unchanged rows replay");
+        assert!(!marked(2), "the written row rebuilds");
     }
 }

@@ -62,7 +62,8 @@ async fn events_10() -> impl IntoResponse {
 }
 
 fn start(options: ServeOptions, tls: Option<TlsAcceptor>) -> Server {
-    let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = TcpListener::from_std(std_listener).unwrap();
     serve(listener, tls, options, app()).unwrap()
 }
 

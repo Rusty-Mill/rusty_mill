@@ -211,7 +211,7 @@ mod tests {
             consumer_offsets: Arc::new(rusty_tokio::sync::Mutex::new(consumer_offsets)),
         };
 
-        let listener = rusty_tokio::io::TcpListener::bind_addrs("127.0.0.1:0")
+        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
@@ -306,7 +306,7 @@ mod tests {
     /// instead of returning promptly with an error.
     #[rusty_tokio::test]
     async fn a_response_frame_claiming_more_than_the_cap_is_rejected() {
-        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let mock_server = rusty_tokio::spawn(async move {

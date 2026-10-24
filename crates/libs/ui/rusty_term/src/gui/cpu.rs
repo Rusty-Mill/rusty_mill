@@ -57,6 +57,7 @@ pub(crate) fn render(
         cursor_on,
         None,
         font,
+        None,
     );
 }
 
@@ -141,7 +142,16 @@ pub(crate) fn draw_bar(
         }
         let pen_x = (col * cw) as i32 + glyph.left;
         let pen_y = baseline + glyph.top + y0 as i32;
-        blit(buf, width, height, &glyph, pen_x, pen_y, cell.fg);
+        blit(
+            buf,
+            width,
+            (0, width),
+            |py| py < height,
+            &glyph,
+            pen_x,
+            pen_y,
+            cell.fg,
+        );
     }
 }
 
@@ -150,6 +160,11 @@ pub(crate) fn draw_bar(
 /// `grid.cols × grid.rows`. The cursor (block / bar / underline) and IME
 /// preedit show only when `focused`; selection and search highlights come from
 /// the grid's own state. Cells past the buffer edge are clipped.
+///
+/// `repaint` limits the paint to the marked viewport rows (`None` paints
+/// all): every pixel outside their bands is left as it is. A glyph draws
+/// only inside its pane and its own row band or a neighbor's, so a row's
+/// pixels depend on it and its two neighbors alone (see `super::damage`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_grid(
     buf: &mut [u32],
@@ -164,12 +179,27 @@ pub(crate) fn draw_grid(
     cursor_on: bool,
     hover_link: Option<(usize, usize, usize)>,
     font: &mut dyn GlyphSource,
+    repaint: Option<&[bool]>,
 ) {
     let (cw, ch) = font.cell_size();
     let baseline = font.baseline();
     if cw == 0 || ch == 0 {
         return;
     }
+    let on = |row: usize| repaint.is_none_or(|m| m[row]);
+    // Rows whose glyphs can reach a repainted band.
+    let near = |row: usize| {
+        repaint.is_none_or(|m| m[row.saturating_sub(1)..(row + 2).min(m.len())].contains(&true))
+    };
+    let pane_top = oy + row0 * ch;
+    let pane_x = (ox + col0 * cw, (ox + (col0 + grid.cols) * cw).min(width));
+    // Pixel row `py` is in a repainted band of the pane.
+    let band_on =
+        |py: usize| py >= pane_top && (py - pane_top) / ch < grid.rows && on((py - pane_top) / ch);
+    // The bands a glyph of `row` may draw into: its own and its neighbors'.
+    let glyph_y = |row: usize| {
+        move |py: usize| py < height && band_on(py) && ((py - pane_top) / ch).abs_diff(row) <= 1
+    };
     let cursor = (focused && grid.cursor_visible && grid.view_offset == 0 && cursor_on)
         .then_some(grid.cursor);
     let shape = grid.cursor_shape;
@@ -192,6 +222,9 @@ pub(crate) fn draw_grid(
     // Pass 1: backgrounds (every cell, incl. wide trailers, before glyphs).
     for i in 0..grid.cols * grid.rows {
         let (col, row) = (i % grid.cols, i / grid.cols);
+        if !on(row) {
+            continue;
+        }
         let on_status = status.is_some() && row == last_row;
         let cell = if on_status {
             status.unwrap()[col]
@@ -225,6 +258,9 @@ pub(crate) fn draw_grid(
     let mut plan: Vec<Option<Rc<Glyph>>> = vec![None; grid.cols * grid.rows];
     let mut run: Vec<char> = Vec::new();
     for row in 0..grid.rows {
+        if !near(row) {
+            continue;
+        }
         let on_status = status.is_some() && row == last_row;
         let cell_at = |col: usize| {
             if on_status {
@@ -331,7 +367,7 @@ pub(crate) fn draw_grid(
         let fg = crate::core::ensure_contrast(fg, under_bg, grid.min_contrast);
         let pen_x = (ox + (col0 + vis(col, row)) * cw) as i32 + glyph.left;
         let pen_y = (oy + (row0 + row) * ch) as i32 + baseline + glyph.top;
-        blit(buf, width, height, glyph, pen_x, pen_y, fg);
+        blit(buf, width, pane_x, glyph_y(row), glyph, pen_x, pen_y, fg);
     }
 
     // Pass 2.5: underline / strikethrough decorations (SGR 4/9). Neither is a
@@ -348,7 +384,7 @@ pub(crate) fn draw_grid(
         } else {
             grid.cell(col, row)
         };
-        if cell.flags & WIDE_TRAILER != 0 {
+        if cell.flags & WIDE_TRAILER != 0 || !on(row) {
             continue;
         }
         // Ctrl-hovered hyperlink (G22): forces a plain underline over its
@@ -398,14 +434,14 @@ pub(crate) fn draw_grid(
         }
         let x0 = ox as isize + ((col0 + im.col) * cw) as isize;
         let y0 = oy as isize + (row0 as isize + im.top) * ch as isize;
-        let pane_top = (oy + row0 * ch) as isize;
+        let pane_top = pane_top as isize;
         let pane_bottom = ((oy + (row0 + grid.rows) * ch).min(height)) as isize;
         let pane_right = ((ox + (col0 + grid.cols) * cw).min(width)) as isize;
         // An animated image (inline GIF) arrives as its current frame.
         let pixels: &[Option<u32>] = &im.pixels;
         for dy in 0..dst_h {
             let py = y0 + dy;
-            if py < pane_top || py >= pane_bottom {
+            if py < pane_top || py >= pane_bottom || !band_on(py as usize) {
                 continue;
             }
             let sy = dy as usize * im.ph / dst_h as usize;
@@ -426,7 +462,11 @@ pub(crate) fn draw_grid(
     if let Some((ccol, crow)) = cursor
         && shape != CursorShape::Block
         && !(status.is_some() && crow == last_row)
+        && on(crow)
     {
+        // A pending wrap leaves the cursor one past the last column; draw
+        // it on that column, never outside the pane.
+        let ccol = ccol.min(grid.cols.saturating_sub(1));
         let (x0, y0) = (ox + (col0 + vis(ccol, crow)) * cw, oy + (row0 + crow) * ch);
         let color = grid.cursor_color;
         match shape {
@@ -472,6 +512,9 @@ pub(crate) fn draw_grid(
                 continue; // an index past the placement grid shows nothing
             }
             let (col, row) = (i % grid.cols, i / grid.cols);
+            if !on(row) {
+                continue;
+            }
             let (sx0, sx1) = (
                 pcol * iw / pcols,
                 ((pcol + 1) * iw / pcols).max(pcol * iw / pcols + 1),
@@ -509,15 +552,17 @@ pub(crate) fn draw_grid(
         let x0 = x1.saturating_sub(bar_w);
         let y0 = oy + (row0 + first) * ch;
         let y1 = (oy + (row0 + first + len) * ch).min(height);
-        for y in y0..y1 {
+        for y in (y0..y1).filter(|&y| band_on(y)) {
             for x in x0..x1 {
                 buf[y * width + x] = color;
             }
         }
     }
 
-    // IME preedit (composition): reverse-video glyphs at the cursor.
-    if focused && !grid.ime_preedit.is_empty() && grid.view_offset == 0 {
+    // IME preedit (composition): reverse-video glyphs at the cursor. Its
+    // glyphs may overhang a repainted neighbor, so they draw whenever one
+    // is; the background only when the cursor's own row is repainted.
+    if focused && !grid.ime_preedit.is_empty() && grid.view_offset == 0 && near(grid.cursor.1) {
         let crow = grid.cursor.1;
         let mut col = grid.cursor.0;
         let y0 = oy + (row0 + crow) * ch;
@@ -529,7 +574,7 @@ pub(crate) fn draw_grid(
             let base = grid.cell(col, crow);
             let (fg, bg) = (base.bg, base.fg);
             let x0 = ox + (col0 + col) * cw;
-            for y in y0..(y0 + ch).min(height) {
+            for y in (y0..(y0 + ch).min(height)).filter(|_| on(crow)) {
                 let b = y * width;
                 for x in x0..(x0 + w * cw).min(width) {
                     buf[b + x] = bg;
@@ -539,7 +584,7 @@ pub(crate) fn draw_grid(
             if glyph.width != 0 {
                 let pen_x = x0 as i32 + glyph.left;
                 let pen_y = y0 as i32 + baseline + glyph.top;
-                blit(buf, width, height, &glyph, pen_x, pen_y, fg);
+                blit(buf, width, pane_x, glyph_y(crow), &glyph, pen_x, pen_y, fg);
             }
             col += w;
         }
@@ -660,11 +705,14 @@ fn draw_strike(
     hline(buf, width, height, x0, cw, y, thick, color);
 }
 
-/// Alpha-blend a glyph's coverage in `fg` over whatever is already in `buf`.
+/// Alpha-blend a glyph's coverage in `fg` over whatever is already in `buf`,
+/// inside the columns `clip_x` (`start..end`) of the pixel rows `rows` keeps.
+#[allow(clippy::too_many_arguments)]
 fn blit(
     buf: &mut [u32],
     width: usize,
-    height: usize,
+    clip_x: (usize, usize),
+    rows: impl Fn(usize) -> bool,
     glyph: &Glyph,
     pen_x: i32,
     pen_y: i32,
@@ -672,13 +720,13 @@ fn blit(
 ) {
     for gy in 0..glyph.height {
         let py = pen_y + gy as i32;
-        if py < 0 || py as usize >= height {
+        if py < 0 || !rows(py as usize) {
             continue;
         }
         let row = py as usize * width;
         for gx in 0..glyph.width {
             let px = pen_x + gx as i32;
-            if px < 0 || px as usize >= width {
+            if px < 0 || px as usize >= clip_x.1.min(width) || (px as usize) < clip_x.0 {
                 continue;
             }
             let gi = gy * glyph.width + gx;
@@ -771,6 +819,7 @@ pub(crate) fn draw_trail(
     oy: usize,
     trail: &[(usize, usize, f32)],
     font: &mut dyn GlyphSource,
+    repaint: Option<&[bool]>,
 ) {
     if trail.is_empty() {
         return;
@@ -778,7 +827,7 @@ pub(crate) fn draw_trail(
     let (cw, ch) = font.cell_size();
     let color = grid.cursor_color;
     for &(col, row, alpha) in trail {
-        if col >= grid.cols || row >= grid.rows {
+        if col >= grid.cols || row >= grid.rows || repaint.is_some_and(|m| !m[row]) {
             continue;
         }
         let a = alpha.clamp(0.0, 1.0);
@@ -881,6 +930,7 @@ mod tests {
             0,
             &[(1, 0, 0.5)],
             &mut font,
+            None,
         );
         let inside = buf[(ch / 2) * w + cw + cw / 2];
         assert!((inside >> 16) & 0xFF > 0x40, "red blended in: {inside:06x}");
@@ -897,6 +947,7 @@ mod tests {
             0,
             &[(99, 99, 1.0)],
             &mut font,
+            None,
         );
     }
 
@@ -1048,6 +1099,7 @@ mod tests {
             false,
             Some((0, 0, 1)),
             &mut MockFont,
+            None,
         );
         assert_eq!(
             buf[6 * w],
@@ -1081,6 +1133,7 @@ mod tests {
             false,
             Some((0, 0, 0)),
             &mut MockFont,
+            None,
         );
         assert_eq!(buf[6 * w], 0xFF0000);
     }
@@ -1326,6 +1379,7 @@ mod tests {
             false,
             None,
             &mut MockFont,
+            None,
         );
         assert_eq!(
             buf[ch * w + cw],
@@ -1355,6 +1409,7 @@ mod tests {
             false,
             None,
             &mut MockFont,
+            None,
         );
         // The image composites as real pixels over its reserved half-block cell.
         assert_eq!(buf[0], 0xFF0000, "image pixel composited at the origin");
@@ -1396,6 +1451,7 @@ mod tests {
             false,
             None,
             &mut MockFont,
+            None,
         );
         assert_eq!(buf[0], 0xFF0000, "cell (0,0) shows the red half");
         assert_eq!(buf[cw], 0x00FF00, "cell (1,0) shows the green half");
@@ -1416,6 +1472,7 @@ mod tests {
             false,
             None,
             &mut MockFont,
+            None,
         );
         assert_eq!(buf2[2 * cw], 0, "index past the placement grid stays empty");
     }
@@ -1528,6 +1585,7 @@ mod tests {
                 false,
                 None,
                 &mut fc,
+                None,
             );
             (buf, cw, chh)
         };
@@ -1575,7 +1633,14 @@ mod tests {
             color: Some(vec![0xFFFF0000, 0x00000000, 0xFF00FF00, 0x800000FF]),
         };
         blit(
-            &mut buf, 4, 4, &glyph, 0, 0, 0x123456, /* fg must be ignored */
+            &mut buf,
+            4,
+            (0, 4),
+            |py| py < 4,
+            &glyph,
+            0,
+            0,
+            0x123456, /* fg must be ignored */
         );
         assert_eq!(buf[0], 0xFF0000, "opaque red pixel");
         assert_eq!(buf[1], 0x000000, "transparent pixel leaves bg");
