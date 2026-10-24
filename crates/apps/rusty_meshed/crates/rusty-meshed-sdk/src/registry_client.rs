@@ -277,7 +277,8 @@ mod tests {
     fn start_fake_server<S: Into<String> + Send + 'static>(
         responses: Vec<(u16, S)>,
     ) -> (String, rusty_tokio::JoinHandle<Vec<CapturedRequest>>) {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).expect("failed to bind");
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind");
+        let listener = TcpListener::from_std(std_listener).expect("failed to register");
         let addr = listener.local_addr().expect("failed to read local_addr");
         let url = format!("http://{addr}");
 
