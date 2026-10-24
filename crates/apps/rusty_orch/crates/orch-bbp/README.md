@@ -32,6 +32,13 @@ The configuration contains:
 - `slots` (optional): `{dir, agents, validators}`, machine-wide admission
   passed to `bbp mod --slots`. Every moderator naming the same `dir`, across
   goals, runs at most `agents` harnesses and `validators` runners at once.
+- `lease` (optional): `{read, write, ttl_secs}`, the permission lease Orch
+  grants the goal's assignment ([ADR-0017](../../docs/adr/0017-permission-leases.md)).
+  Every assigned pool member must then be sandboxed; its sandbox paths are met
+  with the lease's, both resolved through symlinks, when the task is first
+  frozen. A later run under a lease that reaches other paths is refused, so
+  widening access needs a new task. Each run renews the end; a moderator's
+  `max_wall_secs` is cut to what is left of it, so harnesses stop when it ends.
 
 See the [two-role configuration](../../docs/examples/bbp.json) and BBP's
 [proving configuration](../../../rusty_bbp_host/docs/proving/agents.json).

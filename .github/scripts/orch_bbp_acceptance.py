@@ -46,6 +46,8 @@ CASES = (
          "tests_e2e::orch_binary_cancel_finds_work_started_before_its_handle_was_checkpointed"),
     Case("harness-confined", "orch-bbp", ("--lib",),
          "tests_e2e::orch_binary_confines_a_sandboxed_pool_member_away_from_the_bbp_directory"),
+    Case("lease-confined", "orch-bbp", ("--lib",),
+         "tests_e2e::orch_binary_confines_a_pool_member_to_the_goals_lease"),
     Case("bbp-confined", "rusty_bbp_host", ("--test", "confined_harness"),
          "a_confined_harness_cannot_reach_the_task_directory_yet_plans_through_its_relay"),
     Case("shared-worktrees", "rusty_bbp_host", ("--test", "confined_harness"),

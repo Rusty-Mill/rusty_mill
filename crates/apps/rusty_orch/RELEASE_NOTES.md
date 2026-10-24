@@ -4,6 +4,19 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Permission leases
+**2026-10-24**
+
+- A grant can carry a lease of read and write paths and an end. A child's
+  lease must fit inside its parent's, on delegation, re-grant and restore.
+- `lease: {read, write, ttl_secs}` in the hosting configuration confines a
+  hosted goal: every assigned pool member must be sandboxed, and its sandbox
+  keeps only what the lease also reaches. A run under a different lease is
+  refused; one whose lease ended stops driving the task, and the moderator
+  is stopped at the end by BBP itself.
+
+---
+
 ## Factory execution-link hardening
 **2026-10-21**
 

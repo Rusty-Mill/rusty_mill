@@ -25,6 +25,70 @@ pub struct Grant {
     pub delegation_budget: u32,
     /// Maximum calls attributable to this assignment.
     pub call_budget: u32,
+    /// Filesystem reach and lifetime of the assignment's workers. `None`
+    /// leaves them bounded by the hosting configuration alone; a leased
+    /// parent delegates only leases it covers, never `None`.
+    pub lease: Option<Lease>,
+}
+
+/// A permission lease: the paths an assignment's workers may reach and when
+/// that authority ends. A host confines workers to it; it never widens what
+/// the host's own configuration allows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lease {
+    /// Absolute, normalized paths workers may read.
+    pub read: Vec<String>,
+    /// Absolute, normalized paths workers may read and write.
+    pub write: Vec<String>,
+    /// Unix seconds at which the lease ends; `None` never ends.
+    pub expires: Option<u64>,
+}
+
+impl Lease {
+    /// Whether every path is absolute and normalized: no empty, `.` or `..`
+    /// component and no trailing slash, so containment is a prefix test.
+    pub fn valid(&self) -> bool {
+        self.read.iter().chain(&self.write).all(|p| normalized(p))
+    }
+
+    /// Whether `child` asks for nothing beyond this lease: each write path
+    /// inside one of ours, each read path inside one we read or write, and
+    /// an end no later than ours.
+    pub fn covers(&self, child: &Lease) -> bool {
+        let reach = |paths: &[String], p: &String| paths.iter().any(|root| contains(root, p));
+        child.write.iter().all(|p| reach(&self.write, p))
+            && child
+                .read
+                .iter()
+                .all(|p| reach(&self.read, p) || reach(&self.write, p))
+            && match (self.expires, child.expires) {
+                (None, _) => true,
+                (Some(ours), Some(theirs)) => theirs <= ours,
+                (Some(_), None) => false,
+            }
+    }
+
+    /// Whether the lease still holds at unix second `now`.
+    pub fn live(&self, now: u64) -> bool {
+        !matches!(self.expires, Some(end) if now >= end)
+    }
+}
+
+/// Whether normalized absolute `path` is `root` or lies beneath it.
+pub fn contains(root: &str, path: &str) -> bool {
+    root == "/"
+        || path
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Whether `path` is absolute with no empty, `.` or `..` component.
+pub fn normalized(path: &str) -> bool {
+    path == "/"
+        || path.strip_prefix('/').is_some_and(|rest| {
+            rest.split('/')
+                .all(|c| !c.is_empty() && c != "." && c != "..")
+        })
 }
 
 /// A configured project, task, or worker orchestrator assignment.
@@ -144,6 +208,7 @@ impl Factory {
         if self.assignments.contains_key(&assignment.id) {
             return Err(FactoryError::Invalid("assignment id already exists"));
         }
+        valid_lease(&assignment.grant)?;
         self.assignments.insert(assignment.id.clone(), assignment);
         Ok(())
     }
@@ -160,6 +225,7 @@ impl Factory {
         if assignment.parent != previous.parent {
             return Err(FactoryError::Invalid("replacement changes parent"));
         }
+        valid_lease(&assignment.grant)?;
         if let Some(parent) = assignment.parent.as_deref() {
             self.validate_child_grant(parent, &assignment, Some(&assignment.id))?;
         }
@@ -377,7 +443,8 @@ impl Factory {
     /// invariants the mutating operations maintain instead of trusting them:
     /// unique ids, known acyclic parents, parent generations no later than
     /// the parent's own, delegation and call budgets that cover every child,
-    /// project scopes of currently bound children inside their parent's, and
+    /// project scopes and leases of currently bound children inside their
+    /// parent's, valid lease paths, and
     /// links naming a known assignment at a generation it has reached.
     pub fn restore(
         delegations: Vec<Delegation>,
@@ -397,6 +464,7 @@ impl Factory {
                     "assignment id, identity id, and generation are required",
                 ));
             }
+            valid_lease(&assignment.grant)?;
             if assignment.parent.is_some() != parent_generation.is_some() {
                 return Err(FactoryError::Invalid(
                     "a parent generation must accompany exactly the delegated assignments",
@@ -448,11 +516,7 @@ impl Factory {
                 ));
             }
             if bound == Some(parent_assignment.generation)
-                && current
-                    .grant
-                    .projects
-                    .iter()
-                    .any(|project| !parent_assignment.grant.projects.contains(project))
+                && !within_grant(&parent_assignment.grant, &current.grant)
             {
                 return Err(FactoryError::DelegationOutsideGrant);
             }
@@ -558,14 +622,11 @@ impl Factory {
         }) {
             totals = Self::reserve(totals, &existing.grant)?;
         }
+        valid_lease(&child.grant)?;
         let (descendants, calls) = Self::reserve(totals, &child.grant)?;
         if descendants > parent_assignment.grant.delegation_budget
             || calls > parent_assignment.grant.call_budget
-            || child
-                .grant
-                .projects
-                .iter()
-                .any(|project| !parent_assignment.grant.projects.contains(project))
+            || !within_grant(&parent_assignment.grant, &child.grant)
         {
             return Err(FactoryError::DelegationOutsideGrant);
         }
@@ -588,6 +649,30 @@ impl Factory {
         }
         Ok(())
     }
+}
+
+/// Whether `child`'s project scope and lease fit inside `parent`'s. An
+/// unleased parent bounds no lease; a leased one admits only leases it covers.
+fn within_grant(parent: &Grant, child: &Grant) -> bool {
+    let lease = match (&parent.lease, &child.lease) {
+        (None, _) => true,
+        (Some(ours), Some(theirs)) => ours.covers(theirs),
+        (Some(_), None) => false,
+    };
+    lease
+        && child
+            .projects
+            .iter()
+            .all(|project| parent.projects.contains(project))
+}
+
+fn valid_lease(grant: &Grant) -> Result<(), FactoryError> {
+    if grant.lease.as_ref().is_some_and(|lease| !lease.valid()) {
+        return Err(FactoryError::Invalid(
+            "lease paths must be absolute and normalized",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -613,6 +698,7 @@ mod tests {
                 projects: projects.iter().map(|s| (*s).into()).collect(),
                 delegation_budget: delegates,
                 call_budget: calls,
+                lease: None,
             },
             active: true,
         }
@@ -917,6 +1003,144 @@ mod tests {
         );
         assert_eq!(f.authorize("worker", 3), Err(FactoryError::StaleGeneration));
     }
+    fn lease(read: &[&str], write: &[&str], expires: Option<u64>) -> Option<Lease> {
+        let paths = |ps: &[&str]| ps.iter().map(|p| (*p).to_owned()).collect();
+        Some(Lease {
+            read: paths(read),
+            write: paths(write),
+            expires,
+        })
+    }
+    fn leased(id: &str, parent: Option<&str>, lease: Option<Lease>) -> Assignment {
+        let mut a = assignment(id, parent, 1, &["orch"], u32::from(parent.is_none()), 1);
+        a.grant.lease = lease;
+        a
+    }
+    #[test]
+    fn lease_paths_are_normalized_and_contained_by_whole_components() {
+        assert!(contains("/srv", "/srv"));
+        assert!(contains("/srv", "/srv/a/b"));
+        assert!(contains("/", "/srv"));
+        assert!(!contains("/srv", "/srvx"));
+        assert!(!contains("/srv/a", "/srv"));
+        for bad in [
+            "",
+            "srv",
+            "/srv/",
+            "/srv//a",
+            "/srv/./a",
+            "/srv/../etc",
+            "/..",
+        ] {
+            assert!(!normalized(bad), "{bad:?}");
+        }
+        assert!(normalized("/") && normalized("/srv/a.b/..c"));
+        assert!(lease(&["/a"], &["/b"], None).is_some_and(|l| l.valid()));
+        assert!(!lease(&["/a/../etc"], &[], None).is_some_and(|l| l.valid()));
+    }
+    #[test]
+    fn a_lease_covers_only_narrower_reach_and_an_earlier_end() {
+        let parent = lease(&["/r"], &["/w"], Some(100)).unwrap();
+        let covers = |child: Option<Lease>| parent.covers(&child.unwrap());
+        assert!(covers(lease(&["/r/x", "/w/y"], &["/w/z"], Some(100))));
+        assert!(
+            !covers(lease(&[], &["/r/x"], Some(50))),
+            "write under a read root"
+        );
+        assert!(!covers(lease(&["/elsewhere"], &[], Some(50))));
+        assert!(!covers(lease(&[], &[], Some(101))));
+        assert!(
+            !covers(lease(&[], &[], None)),
+            "an endless lease outlives ours"
+        );
+        assert!(lease(&[], &["/"], None).unwrap().covers(&parent));
+        assert!(parent.live(99) && !parent.live(100));
+        assert!(lease(&[], &[], None).unwrap().live(u64::MAX));
+    }
+    #[test]
+    fn delegation_never_widens_a_lease() {
+        let mut f = Factory::default();
+        f.assign(leased(
+            "root",
+            None,
+            lease(&["/src"], &["/src/a"], Some(100)),
+        ))
+        .unwrap();
+        for wider in [
+            None,
+            lease(&["/etc"], &[], Some(100)),
+            lease(&[], &["/src"], Some(100)),
+            lease(&[], &["/src/a"], Some(101)),
+        ] {
+            assert_eq!(
+                f.delegate("root", 1, leased("child", Some("root"), wider)),
+                Err(FactoryError::DelegationOutsideGrant)
+            );
+        }
+        assert_eq!(
+            f.delegate(
+                "root",
+                1,
+                leased("child", Some("root"), lease(&["/src/../etc"], &[], Some(1)))
+            ),
+            Err(FactoryError::Invalid(
+                "lease paths must be absolute and normalized"
+            ))
+        );
+        f.delegate(
+            "root",
+            1,
+            leased(
+                "child",
+                Some("root"),
+                lease(&["/src/b"], &["/src/a/x"], Some(90)),
+            ),
+        )
+        .unwrap();
+        // Re-granting cannot widen it either.
+        let mut root = leased("root", None, lease(&["/src"], &["/src/a"], Some(100)));
+        root.generation = 2;
+        f.replace(root).unwrap();
+        let mut wider = leased("child", Some("root"), lease(&["/"], &[], Some(90)));
+        wider.generation = 2;
+        assert_eq!(
+            f.regrant("root", 2, wider),
+            Err(FactoryError::DelegationOutsideGrant)
+        );
+        // An unleased root delegates any valid lease.
+        let mut g = Factory::default();
+        g.assign(leased("root", None, None)).unwrap();
+        g.delegate(
+            "root",
+            1,
+            leased("child", Some("root"), lease(&["/"], &["/"], None)),
+        )
+        .unwrap();
+        assert_eq!(
+            g.assign(leased("bad", None, lease(&["relative"], &[], None))),
+            Err(FactoryError::Invalid(
+                "lease paths must be absolute and normalized"
+            ))
+        );
+    }
+    #[test]
+    fn restore_refuses_a_bound_child_outside_its_parents_lease() {
+        let root = Delegation {
+            assignment: leased("root", None, lease(&["/src"], &[], Some(100))),
+            parent_generation: None,
+        };
+        let child = |bound| Delegation {
+            assignment: leased("child", Some("root"), lease(&["/etc"], &[], Some(100))),
+            parent_generation: Some(bound),
+        };
+        let mut stale = root.clone();
+        stale.assignment.generation = 2;
+        assert_eq!(
+            Factory::restore(vec![root, child(1)], vec![]),
+            Err(FactoryError::DelegationOutsideGrant)
+        );
+        assert!(Factory::restore(vec![stale, child(1)], vec![]).is_ok());
+    }
     fn restored(f: &Factory) -> Result<Factory, FactoryError> {
         Factory::restore(f.delegations(), f.links().cloned().collect())
     }
@@ -1029,6 +1253,7 @@ mod tests {
             projects: vec![],
             delegation_budget: 0,
             call_budget: 3,
+            lease: None,
         };
         assert_eq!(f.take_over("goal", identity(), grant()), Ok(1));
         assert_eq!(f.take_over("goal", identity(), grant()), Ok(2));

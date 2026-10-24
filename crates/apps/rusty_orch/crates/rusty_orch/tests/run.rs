@@ -467,6 +467,16 @@ fn hosted_with(
     host: &orch_dispatch::fake::FakeHost,
     cancel: Option<Text>,
 ) -> Result<Summary, RunError> {
+    hosted_leased(store, card, host, cancel, None)
+}
+
+fn hosted_leased(
+    store: &mut Store,
+    card: Option<&Card>,
+    host: &orch_dispatch::fake::FakeHost,
+    cancel: Option<Text>,
+    lease: Option<rusty_orch::run::LeaseSpec>,
+) -> Result<Summary, RunError> {
     execute_hosted(
         spec(5, IMPLEMENT),
         FakeAgent::new([]),
@@ -484,6 +494,7 @@ fn hosted_with(
                 board: Box::new(card.clone()),
             }),
             cancel,
+            lease,
         }),
     )
 }
@@ -686,4 +697,53 @@ fn a_cancel_reaches_a_card_whose_handle_never_reached_the_board() {
     );
     assert_eq!(host.0.borrow().opens, 0, "nothing was opened to do it");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn each_run_grants_and_persists_a_fresh_lease_at_its_generation() {
+    let dir = scratch("lease");
+    let host = orch_dispatch::fake::FakeHost::default();
+    let spec = |write: &str| rusty_orch::run::LeaseSpec {
+        read: vec!["/srv/src".into()],
+        write: vec![write.into()],
+        ttl_secs: Some(600),
+    };
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs()
+    };
+    let before = now();
+    for _ in 0..2 {
+        let mut store = Store::open(&dir).expect("open");
+        let s =
+            hosted_leased(&mut store, None, &host, None, Some(spec("/srv/src/a"))).expect("run");
+        assert!(matches!(s.ended, Ended::Waiting(_)), "{}", s.ended);
+    }
+    let fences = host.0.borrow().fences.clone();
+    let last = fences.last().expect("hosted");
+    let lease = last.lease.clone().expect("leased fence");
+    assert_eq!(
+        (last.generation, lease.write.clone()),
+        (2, vec!["/srv/src/a".to_owned()])
+    );
+    let end = lease.expires.expect("an end");
+    assert!((before + 600..=now() + 600).contains(&end), "{end}");
+    let store = Store::open(&dir).expect("reopen");
+    let saved = store
+        .load_factory(orch_core::GoalId::from_raw(1))
+        .expect("load");
+    let grant = &saved
+        .assignment(rusty_orch::run::GOAL_ORCHESTRATOR)
+        .expect("assignment")
+        .grant;
+    assert_eq!(grant.lease.as_ref(), Some(&lease), "durable before hosting");
+    drop(store);
+    // A malformed lease is refused before any hosted command.
+    let mut store = Store::open(&dir).expect("open");
+    let refused = hosted_leased(&mut store, None, &host, None, Some(spec("/srv/../etc")));
+    assert!(matches!(refused, Err(RunError::Lease(_))));
+    assert_eq!(host.0.borrow().fences.len(), fences.len());
+    let _ = std::fs::remove_dir_all(dir);
 }

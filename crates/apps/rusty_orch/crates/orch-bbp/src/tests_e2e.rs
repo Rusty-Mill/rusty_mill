@@ -1095,6 +1095,100 @@ RPC
     println!("BBP_ACCEPTANCE PASS harness-confined");
 }
 
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; enforced Linux sandbox"]
+fn orch_binary_confines_a_pool_member_to_the_goals_lease() {
+    let (dir, mut c) = setup();
+    // The pool member may read `secret`; the goal's lease reaches only `bin`.
+    let (bin, secret) = (dir.join("bin"), dir.join("secret"));
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&secret).unwrap();
+    std::fs::write(secret.join("token"), "s3cret").unwrap();
+    let script = bin.join("plan.sh");
+    std::fs::write(&script, r##"if cat "$1/token" >/dev/null 2>&1; then echo "secret: read"; else echo "secret: denied"; fi
+"$BBP_BIN" mcp <<'RPC'
+{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"script","version":"0"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"p1","kind":"spec","brief":1,"body":"# Spec\nAC1."}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"post","arguments":{"op":"p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve?","gate":true}}}
+RPC
+"##).unwrap();
+    let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
+    for agent in c.pool.values_mut() {
+        agent.sandbox = Some(Sandbox {
+            read: vec![path(&bin), path(&secret)],
+            ..Sandbox::default()
+        });
+    }
+    let writer = c.pool.get_mut("writer").unwrap();
+    writer.program = "/bin/sh".into();
+    writer.args = vec![path(&script), path(&secret)];
+    let mut hosting = rusty_serde::json::to_value(&c).unwrap();
+    let lease = format!(r#"{{"read":[{:?}],"ttl_secs":600}}"#, path(&bin));
+    let lease: rusty_serde::json::Value = rusty_serde::json::from_str(&lease).unwrap();
+    hosting.insert("lease", lease);
+    let cfg = dir.join("bbp.json");
+    std::fs::write(&cfg, rusty_serde::json::to_string(&hosting).unwrap()).unwrap();
+    let goal = dir.join("goal.json");
+    std::fs::write(&goal, r#"{"goal":"Implement flag","done_when":["tested"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":1,"stop":"checkpoint","tasks":[{"role":"implement","instruction":"Implement flag","acceptance":["tested"],"max_calls":1}]}"#).unwrap();
+    let orch = std::env::var_os("ORCH_TEST_BIN").expect("set ORCH_TEST_BIN");
+    let out = Command::new(&orch)
+        .arg("run")
+        .arg(&goal)
+        .arg("--bbp")
+        .arg(&cfg)
+        .arg("--state")
+        .arg(dir.join("orch-state"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        matches!(out.status.code(), Some(0 | 3)),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: rusty_serde::json::Value =
+        rusty_serde::json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let h = report_handle(&report);
+    let log = h
+        .dir
+        .join("agents")
+        .join(rusty_bbp::Sha256::of(h.task.as_bytes()).hex())
+        .join("turn-1.log");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let view = TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &events(&h));
+        if view.card.state == rusty_bbp::State::PlanGate {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no plan gate; writer said:\n{}",
+            std::fs::read_to_string(&log).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let said = std::fs::read_to_string(&log).unwrap();
+    println!("{said}");
+    assert!(said.contains("secret: denied"), "{said}");
+    // The pool member could read `secret`; what the moderator launched could not.
+    let agents: rusty_serde::json::Value = rusty_serde::json::from_str(
+        &std::fs::read_to_string(
+            BbpHost::<StdCommand, StdSupervisor>::manifest(&h).join("agents.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let read = agents["maker"]["sandbox"]["read"].as_seq().unwrap();
+    assert_eq!(read.len(), 1, "{read:?}");
+    assert_eq!(
+        read[0].as_str(),
+        Some(path(&bin.canonicalize().unwrap()).as_str())
+    );
+    assert_eq!(cancel_hosted(&c, &report), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS lease-confined");
+}
+
 /// A real in-memory Millboard on a loopback port with a shared token and the
 /// default roles, stopped on drop.
 struct Millboard {
