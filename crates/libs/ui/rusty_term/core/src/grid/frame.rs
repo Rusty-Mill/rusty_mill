@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use super::view::View;
+use super::view::{View, ViewLine};
 use super::{BidiRow, BlockMark, Cell, CursorShape, Grid};
 
 /// Per-cell highlight bits.
@@ -18,6 +18,15 @@ const HL_CURRENT: u8 = 4;
 
 /// A resolved placeholder cell: `(image id, placement row, placement col)`.
 type Placeholder = (u32, u32, u32);
+
+/// What a viewport row shows and as of which change: two frames' keys for a
+/// row are equal only if the row's cells did not change between them (see
+/// [`Grid::row_stamp`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowKey {
+    line: ViewLine,
+    stamp: (u64, u64),
+}
 
 /// A placed pixel image, resolved for one frame.
 pub struct FrameImage {
@@ -62,6 +71,7 @@ pub struct FrameView {
     pub ime_preedit: String,
     cells: Vec<Cell>,
     highlight: Vec<u8>,
+    keys: Vec<Option<RowKey>>,
     bidi: Vec<Option<BidiRow>>,
     status: Option<Vec<Cell>>,
     scrollbar: Option<(usize, usize, u32)>,
@@ -75,6 +85,23 @@ impl FrameView {
     /// The cell at viewport `(col, row)`, as [`Grid::viewport_cell`].
     pub fn cell(&self, col: usize, row: usize) -> Cell {
         self.cells[row * self.cols + col]
+    }
+
+    /// The cells of viewport `row`.
+    pub fn row_cells(&self, row: usize) -> &[Cell] {
+        &self.cells[row * self.cols..(row + 1) * self.cols]
+    }
+
+    /// The highlight bits of viewport `row`, one byte per cell; equal across
+    /// frames when its selection and search highlights are.
+    pub fn row_highlight(&self, row: usize) -> &[u8] {
+        &self.highlight[row * self.cols..(row + 1) * self.cols]
+    }
+
+    /// The change key of viewport `row`. `None` when the row has no stable
+    /// key (a fold summary): treat it as changed.
+    pub fn row_key(&self, row: usize) -> Option<RowKey> {
+        self.keys[row]
     }
 
     /// Whether `(col, row)` is selected, as [`Grid::is_selected`].
@@ -179,6 +206,7 @@ impl Grid {
                 }
             })
             .collect();
+        let keys = view.lines().iter().map(|&l| self.row_key_of(l)).collect();
         let placeholders = self.placeholders_of(&view);
         let kitty = self.frame_kitty(placeholders.as_deref().unwrap_or(&[]));
         FrameView {
@@ -193,6 +221,7 @@ impl Grid {
             ime_preedit: self.ime_preedit.clone(),
             cells,
             highlight,
+            keys,
             bidi,
             status,
             scrollbar: self.scrollbar(),
@@ -201,6 +230,16 @@ impl Grid {
             images: self.frame_images(),
             kitty,
         }
+    }
+
+    /// The change key of a resolved row.
+    fn row_key_of(&self, line: ViewLine) -> Option<RowKey> {
+        let stamp = match line {
+            ViewLine::Live(r) => self.row_stamp(r),
+            ViewLine::Hist(_) => self.hist_stamp(),
+            ViewLine::Summary(_) => return None,
+        };
+        Some(RowKey { line, stamp })
     }
 
     /// Placed images with their top row and drawable pixels resolved: an

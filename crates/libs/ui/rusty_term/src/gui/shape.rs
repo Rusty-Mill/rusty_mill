@@ -50,13 +50,11 @@ pub(crate) struct Shaper {
     data: Vec<u8>,
     lookups: Vec<u16>,
     /// Memoizes `shape()` by input glyph-id run. Both renderers re-shape
-    /// every eligible run of every visible row on every frame (no per-row
-    /// dirty tracking yet), and each miss here both re-parses the font and
-    /// re-walks GSUB from scratch — measurable CPU on a full, ligature-heavy
-    /// screen at 60fps. Real terminal content is dominated by
-    /// repeated/unchanged runs (blank padding, prompts, a static buffer
-    /// between keystrokes), so this alone removes most of the redundant work
-    /// even before dirty-row tracking lands.
+    /// every eligible run of every row they rebuild, and each miss here both
+    /// re-parses the font and re-walks GSUB from scratch — measurable CPU
+    /// when a ligature-heavy screen changes wholesale (a scroll, a clear).
+    /// Real terminal content is dominated by repeated runs (blank padding,
+    /// prompts), so this removes most of the redundant work there.
     cache: ShapeCache,
 }
 
