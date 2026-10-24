@@ -26,12 +26,18 @@ pub fn pri(player_id: u32, ghost: bool) -> Result<i32, String> {
 /// The team colour used for every car: a capture has no teams.
 const CAPTURE_TEAM: i32 = 0;
 
+/// Pairing window for a one-frame recording, which has no tick to halve: half
+/// a tick at the 120 Hz capture rate.
+const SINGLE_FRAME_TOLERANCE_SECS: f32 = 0.5 / 120.0;
+
 /// Build the scene for a recorded run and an optional candidate run.
 ///
-/// Candidate frames are matched to recorded frames by nearest timestamp
-/// within half a recorded tick; a recorded frame with no match shows only the
-/// recorded cars. Fails on an empty recording or a player id too large for a
-/// `pri`.
+/// Each recorded frame shows the candidate frame nearest it in time, within
+/// half a recorded tick (the earlier one on a tie); a recorded frame with no
+/// match shows only the recorded cars. Fails on an empty recording, on
+/// timestamps that are not finite and strictly increasing in either run (the
+/// pairing and the page's time search rely on it), or on a player id too large
+/// for a `pri`.
 pub fn build_physics_scene(
     id: &str,
     recorded: &[PhysicsFrame],
@@ -41,14 +47,20 @@ pub fn build_physics_scene(
         (Some(first), Some(last)) => (first.timestamp_secs, last.timestamp_secs),
         _ => return Err("the recording has no frames".into()),
     };
+    let sim = sim.unwrap_or(&[]);
+    check_increasing("recording", recorded)?;
+    check_increasing("candidate", sim)?;
     let duration = last - first;
     let hz = if duration > 0.0 {
         (recorded.len() - 1) as f32 / duration
     } else {
         0.0
     };
-    let tolerance = if hz > 0.0 { 0.5 / hz } else { f32::INFINITY };
-    let sim = sim.unwrap_or(&[]);
+    let tolerance = if hz > 0.0 {
+        0.5 / hz
+    } else {
+        SINGLE_FRAME_TOLERANCE_SECS
+    };
 
     let mut frames = Vec::with_capacity(recorded.len());
     let mut cursor = 0;
@@ -98,8 +110,8 @@ pub fn quat_to_euler(q: Quat) -> [f32; 3] {
     [pitch, yaw, roll]
 }
 
-/// The candidate frame closest to `t`, if one lies within `tolerance`.
-/// Advances `*cursor` past frames too early for `t`, so a forward scan over
+/// The candidate frame closest to `t`, if one lies within `tolerance`; on a
+/// tie, the earlier one (`min_by` keeps the first minimum). Advances `*cursor` past frames too early for `t`, so a forward scan over
 /// time-sorted frames stays linear.
 fn nearest<'a>(
     sim: &'a [PhysicsFrame],
@@ -118,6 +130,26 @@ fn nearest<'a>(
                 .abs()
                 .total_cmp(&(b.timestamp_secs - t).abs())
         })
+}
+
+/// Fails unless every timestamp is finite and greater than the one before.
+fn check_increasing(run: &str, frames: &[PhysicsFrame]) -> Result<(), String> {
+    if let Some(bad) = frames.iter().find(|f| !f.timestamp_secs.is_finite()) {
+        return Err(format!(
+            "the {run} has a non-finite timestamp ({})",
+            bad.timestamp_secs
+        ));
+    }
+    match frames
+        .windows(2)
+        .find(|w| w[1].timestamp_secs <= w[0].timestamp_secs)
+    {
+        Some(w) => Err(format!(
+            "the {run}'s timestamps are not strictly increasing ({} then {})",
+            w[0].timestamp_secs, w[1].timestamp_secs
+        )),
+        None => Ok(()),
+    }
 }
 
 fn cars_of(frame: &PhysicsFrame, ghost: bool) -> Result<Vec<SceneCar>, String> {
@@ -177,6 +209,7 @@ fn pos(p: rb_domain::Vec3) -> [f32; 3] {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::f32::consts::FRAC_PI_2;
@@ -205,6 +238,70 @@ mod tests {
         let hit = nearest(&sim, &mut cursor, 1.0, 0.05).map(|f| f.timestamp_secs);
         assert_eq!(hit, Some(1.01));
         assert_eq!(nearest(&sim, &mut cursor, 2.0, 0.05), None);
+    }
+
+    /// The reviewer's case: recorded 0, .02, .04 against candidates .011, .020.
+    #[test]
+    fn each_recorded_frame_takes_its_nearest_candidate() {
+        let recorded = [frame_at(0.0), frame_at(0.02), frame_at(0.04)];
+        let sim = [frame_at(0.011), frame_at(0.020)];
+        let mut cursor = 0;
+        let picks: Vec<Option<f32>> = recorded
+            .iter()
+            .map(|r| nearest(&sim, &mut cursor, r.timestamp_secs, 0.01).map(|f| f.timestamp_secs))
+            .collect();
+        assert_eq!(picks, [None, Some(0.020), None]);
+    }
+
+    #[test]
+    fn a_tie_takes_the_earlier_frame() {
+        let sim = [frame_at(0.5), frame_at(1.5)];
+        let hit = nearest(&sim, &mut 0, 1.0, 0.5).map(|f| f.timestamp_secs);
+        assert_eq!(hit, Some(0.5));
+    }
+
+    fn with_car(mut frame: PhysicsFrame) -> PhysicsFrame {
+        frame.cars.push(rb_domain::CarState {
+            player_id: 0,
+            position: rb_domain::Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            velocity: rb_domain::Vec3::ZERO,
+            angular_velocity: rb_domain::Vec3::ZERO,
+            boost_amount: 0.0,
+            input: None,
+        });
+        frame
+    }
+
+    #[test]
+    fn a_one_frame_recording_pairs_only_a_close_candidate() {
+        let recorded = [with_car(frame_at(1.0))];
+        let cars = |sim: &[PhysicsFrame]| {
+            build_physics_scene("one", &recorded, Some(sim))
+                .unwrap()
+                .frames[0]
+                .cars
+                .len()
+        };
+        assert_eq!(
+            cars(&[with_car(frame_at(5.0))]),
+            1,
+            "a distant candidate paired"
+        );
+        assert_eq!(cars(&[with_car(frame_at(1.001))]), 2);
+    }
+
+    #[test]
+    fn out_of_order_or_non_finite_timestamps_are_refused() {
+        let ok = [frame_at(0.0), frame_at(0.1)];
+        let backwards = [frame_at(0.1), frame_at(0.0)];
+        let repeated = [frame_at(0.1), frame_at(0.1)];
+        let nan = [frame_at(0.0), frame_at(f32::NAN)];
+        for bad in [&backwards[..], &repeated[..], &nan[..]] {
+            assert!(build_physics_scene("x", bad, None).is_err());
+            assert!(build_physics_scene("x", &ok, Some(bad)).is_err());
+        }
+        assert!(build_physics_scene("x", &ok, Some(&ok)).is_ok());
     }
 
     #[test]

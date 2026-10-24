@@ -60,8 +60,9 @@ candidate cars with `pri = -1 - id` (never equal to a recorded id) and
 `ghost: true`, drawn pale and translucent over the recorded car. Frames stay at
 the capture rate (120 Hz), time is rebased so the first recorded frame is
 `t = 0` (the title gives the capture time it maps to), each recorded frame
-shows the candidate frame nearest it in time, and one with no candidate frame
-within half a tick shows the recording alone. The ball is the recorded one.
+shows the candidate frame nearest it in time (the earlier on a tie), and one
+with no candidate frame within half a tick shows the recording alone. Both runs
+must have finite, strictly increasing timestamps; anything else is refused. The ball is the recorded one.
 Replay-only overlays (events, roles, stats, win probability) stay empty. The viewer reads
 capture files through `rb_capture_ingest`, so it never links the physics.
 
