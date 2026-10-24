@@ -23,7 +23,7 @@ mod reader;
 
 pub use crc::crc;
 pub use error::Error;
-pub use header::{Header, Properties, Property, MIN_VERSION};
+pub use header::{Header, Properties, Property, MAX_PROPERTY_DEPTH, MIN_VERSION};
 
 use reader::Reader;
 
@@ -47,7 +47,9 @@ pub struct Replay<'a> {
 /// Parse a replay file's container and header.
 ///
 /// Both CRCs are always checked, so a corrupt file is reported as such rather
-/// than as a confusing decode error further in.
+/// than as a confusing decode error further in. Array and struct nesting share
+/// a limit of [`MAX_PROPERTY_DEPTH`] levels; deeper headers return
+/// [`Error::NestingLimit`].
 pub fn parse(data: &[u8]) -> Result<Replay<'_>, Error> {
     let mut r = Reader::new(data, 0);
     let (header_size, header_crc, header_offset, header_data) = section(&mut r, "header")?;

@@ -48,6 +48,13 @@ pub enum Error {
         /// The kind as written.
         kind: String,
     },
+    /// A nested array or struct would exceed [`crate::MAX_PROPERTY_DEPTH`].
+    NestingLimit {
+        /// Absolute offset of the rejected property's kind string length.
+        offset: usize,
+        /// Maximum number of array/struct levels allowed on one path.
+        limit: usize,
+    },
     /// The replay predates the versions this parser supports
     /// ([`crate::MIN_VERSION`]).
     UnsupportedVersion {
@@ -93,6 +100,12 @@ impl fmt::Display for Error {
             Error::InvalidUtf8 { offset } => write!(f, "invalid UTF-8 string at byte {offset}"),
             Error::UnknownProperty { offset, kind } => {
                 write!(f, "unknown header property kind {kind:?} at byte {offset}")
+            }
+            Error::NestingLimit { offset, limit } => {
+                write!(
+                    f,
+                    "header property nesting exceeds {limit} levels at byte {offset}"
+                )
             }
             Error::UnsupportedVersion {
                 engine,

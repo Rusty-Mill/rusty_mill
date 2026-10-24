@@ -9,6 +9,12 @@ use crate::reader::Reader;
 /// gates below it. Older replays fail rather than decode by guesswork.
 pub const MIN_VERSION: (i32, i32, i32) = (868, 23, 8);
 
+/// Maximum number of nested array/struct properties on any header path.
+///
+/// Both kinds consume the same budget; the root property map has depth zero.
+/// This bounds parser recursion and the depth of the returned property tree.
+pub const MAX_PROPERTY_DEPTH: usize = 64;
+
 /// Most entries an array property may hold (as boxcars).
 const MAX_ARRAY_LEN: usize = 25_000;
 
@@ -102,7 +108,7 @@ pub(crate) fn parse(r: &mut Reader<'_>) -> Result<Header, Error> {
         });
     }
     let game_type = r.text("game type")?;
-    let properties = properties(r)?;
+    let properties = properties(r, 0)?;
     if r.remaining() > 0 {
         return Err(Error::TrailingHeaderData {
             bytes: r.remaining(),
@@ -118,14 +124,14 @@ pub(crate) fn parse(r: &mut Reader<'_>) -> Result<Header, Error> {
 }
 
 /// A property map, up to and including its `None` key.
-fn properties(r: &mut Reader<'_>) -> Result<Properties, Error> {
+fn properties(r: &mut Reader<'_>, depth: usize) -> Result<Properties, Error> {
     let mut out = Vec::new();
     loop {
         let key = r.name("property key")?;
         if key == "None" {
             return Ok(out);
         }
-        if let Some(value) = property(r)? {
+        if let Some(value) = property(r, depth)? {
             out.push((key, value));
         }
     }
@@ -134,12 +140,18 @@ fn properties(r: &mut Reader<'_>) -> Result<Properties, Error> {
 /// One value after its key. `None` for a `ByteProperty` whose enum type is
 /// `None`: it carries one padding byte and no value, and is dropped (as
 /// boxcars does).
-fn property(r: &mut Reader<'_>) -> Result<Option<Property>, Error> {
+fn property(r: &mut Reader<'_>, depth: usize) -> Result<Option<Property>, Error> {
     let kind_offset = r.offset();
     let kind = r.name("property kind")?;
     // The value's byte size. Not trusted (boxcars ignores it too): every kind
     // below has a self-delimiting encoding.
     r.u64("property size")?;
+    if matches!(kind.as_str(), "ArrayProperty" | "StructProperty") && depth >= MAX_PROPERTY_DEPTH {
+        return Err(Error::NestingLimit {
+            offset: kind_offset,
+            limit: MAX_PROPERTY_DEPTH,
+        });
+    }
     let value = match kind.as_str() {
         "ArrayProperty" => {
             let offset = r.offset();
@@ -151,7 +163,11 @@ fn property(r: &mut Reader<'_>) -> Result<Option<Property>, Error> {
                     value: n as i64,
                 });
             }
-            Property::Array((0..n).map(|_| properties(r)).collect::<Result<_, _>>()?)
+            Property::Array(
+                (0..n)
+                    .map(|_| properties(r, depth + 1))
+                    .collect::<Result<_, _>>()?,
+            )
         }
         "BoolProperty" => Property::Bool(r.u8("bool value")? == 1),
         "ByteProperty" => {
@@ -170,7 +186,7 @@ fn property(r: &mut Reader<'_>) -> Result<Option<Property>, Error> {
         "StrProperty" => Property::Str(r.text("str value")?),
         "StructProperty" => {
             let name = r.name("struct name")?;
-            let fields = properties(r)?;
+            let fields = properties(r, depth + 1)?;
             Property::Struct { name, fields }
         }
         _ => {
