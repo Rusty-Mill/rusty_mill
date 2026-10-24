@@ -94,14 +94,16 @@ one accuracy metric (see `RB-VERIFY-003`).
 
 ## Runtime topology (forward-looking, Phase 3)
 
-Per the GDC talk: client and server both run the same physics simulation.
+Per the GDC slides: client and server both run the same physics simulation.
 Clients predict locally from player input for responsiveness; the server
-runs the authoritative simulation and periodically sends correction
-snapshots, not continuous full state. Visible rubber-banding/lag in the
-real game is understood to be reconciliation-smoothing behavior, not raw
-network latency — this project's Phase 3 netcode is built to reproduce that
-model so it can be inspected directly, rather than reverse-engineered
-behaviorally from the outside.
+runs the authoritative simulation and sends frame-stamped physics state the
+clients reconcile against. Two further points are unverified hypotheses
+(ADR-0001 H1, H2): that this is periodic snapshots rather than continuous
+full state, and that visible rubber-banding/lag in the real game is
+reconciliation smoothing rather than raw network latency. This project's
+Phase 3 netcode is built to reproduce the model so it can be inspected
+directly, and H2 tested, rather than reverse-engineered behaviorally from
+the outside.
 
 ## Legal and IP boundary
 
