@@ -13,6 +13,7 @@
 use std::error::Error;
 use std::path::PathBuf;
 
+use rb_domain::divergence::DivergenceScore;
 use rb_verify_cli::{score_capture_against_candidate, SeedFrame, DEFAULT_MAX_TIMESTAMP_DELTA_SECS};
 
 /// One recording and the most error the port may show on it (mean, max; uu).
@@ -84,11 +85,35 @@ fn check(case: &Case) -> Result<Vec<String>, Box<dyn Error>> {
         SeedFrame::default(),
         DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
     )?;
+    Ok(check_score(case, &score))
+}
+
+/// Reject invalid or empty comparisons before applying the measured bounds.
+fn check_score(case: &Case, score: &DivergenceScore) -> Vec<String> {
+    let mut failures = Vec::new();
+    if score.frames_compared == 0 || score.cars.pairs_compared == 0 {
+        failures.push(format!(
+            "{}: no meaningful comparison ({} frames, {} car pairs)",
+            case.fixture, score.frames_compared, score.cars.pairs_compared
+        ));
+    }
+    let metrics = [
+        score.cars.mean_position_distance,
+        score.cars.max_position_distance,
+        score.cars.mean_rotation_distance,
+        score.cars.max_rotation_distance,
+        score.cars.mean_velocity_distance,
+        score.cars.max_velocity_distance,
+        score.mean_ball_distance,
+        score.max_ball_distance,
+    ];
+    if metrics.iter().any(|metric| !metric.is_finite()) {
+        failures.push(format!("{}: nonfinite divergence metric", case.fixture));
+    }
     let (mean, max) = (
         score.cars.mean_position_distance,
         score.cars.max_position_distance,
     );
-    let mut failures = Vec::new();
     if mean > case.car.0 || max > case.car.1 {
         failures.push(format!(
             "{}: car mean {mean:.2} / max {max:.2} uu over the bound {:?}",
@@ -104,7 +129,7 @@ fn check(case: &Case) -> Result<Vec<String>, Box<dyn Error>> {
             ));
         }
     }
-    Ok(failures)
+    failures
 }
 
 #[test]
@@ -130,4 +155,76 @@ fn every_human_fixture_has_a_case() -> Result<(), Box<dyn Error>> {
     listed.sort();
     assert_eq!(on_disk, listed);
     Ok(())
+}
+
+fn valid_score() -> DivergenceScore {
+    use rb_domain::divergence::CarDivergence;
+
+    DivergenceScore {
+        frames_compared: 1,
+        mean_ball_distance: 0.0,
+        max_ball_distance: 0.0,
+        cars: CarDivergence {
+            pairs_compared: 1,
+            mean_position_distance: 0.0,
+            max_position_distance: 0.0,
+            mean_rotation_distance: 0.0,
+            max_rotation_distance: 0.0,
+            mean_velocity_distance: 0.0,
+            max_velocity_distance: 0.0,
+        },
+    }
+}
+
+#[test]
+fn gate_rejects_nonfinite_metrics() {
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        for metric_index in 0..8 {
+            let mut score = valid_score();
+            let metrics = [
+                &mut score.cars.mean_position_distance,
+                &mut score.cars.max_position_distance,
+                &mut score.cars.mean_rotation_distance,
+                &mut score.cars.max_rotation_distance,
+                &mut score.cars.mean_velocity_distance,
+                &mut score.cars.max_velocity_distance,
+                &mut score.mean_ball_distance,
+                &mut score.max_ball_distance,
+            ];
+            *metrics[metric_index] = value;
+            // Validate scores even when this case does not bound the ball.
+            for case in [&CASES[0], &CASES[1]] {
+                assert!(
+                    !check_score(case, &score).is_empty(),
+                    "accepted nonfinite metric {metric_index}: {value}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn gate_rejects_zero_matched_frames_or_cars() {
+    for (frames, cars) in [(0, 0), (0, 1), (1, 0)] {
+        let mut score = valid_score();
+        score.frames_compared = frames;
+        score.cars.pairs_compared = cars;
+        assert!(!check_score(&CASES[0], &score).is_empty());
+    }
+}
+
+#[test]
+fn gate_accepts_finite_matches_and_rejects_exceeded_bounds() {
+    assert!(check_score(&CASES[0], &valid_score()).is_empty());
+    for metric_index in 0..4 {
+        let mut score = valid_score();
+        let metrics = [
+            &mut score.cars.mean_position_distance,
+            &mut score.cars.max_position_distance,
+            &mut score.mean_ball_distance,
+            &mut score.max_ball_distance,
+        ];
+        *metrics[metric_index] = 100.0;
+        assert!(!check_score(&CASES[0], &score).is_empty());
+    }
 }

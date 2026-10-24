@@ -45,7 +45,10 @@ input the game recorded on every tick. They come from the unmerged
 `baileyrd/rusty_bullet` (head `bcf8f69`), byte for byte. Each starts at
 or just before a grounded, neutral frame so `rb-verify --self` seeds on
 it. `rb_verify_cli/tests/human_captures.rs` bounds the port's error on
-every one; the numbers below are main's on 2026-10-24.
+every one; the numbers below are main's on 2026-10-24. Seven of nine car
+means are under 2 uu; the exceptions are `dodge-derailment` (6.96 uu) and
+`wall-climb-crest` (16.95 uu). The `hit-tick-jump` ball error remains
+unresolved (188.57 uu mean / 1023.82 max).
 
 | Fixture | Cut from (`raw/`) | Holds | Car mean / max (uu) | Ball mean / max (uu) |
 |---|---|---|---|---|
@@ -61,7 +64,7 @@ every one; the numbers below are main's on 2026-10-24.
 
 Two known capture defects, from the source branch: steer, pitch, yaw and
 roll are recorded as zero throughout `hittickjump01` and `01b` (throttle is
-recorded), and `walldrive04`
+nonzero in 442 and 445 frames, respectively), and `walldrive04`
 has a dodge at 30.175 s with no `jump` press recorded. The files hold
 poses and inputs only, no names or account ids.
 
