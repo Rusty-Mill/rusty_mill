@@ -633,3 +633,60 @@ fn a_turn_with_messages_and_no_result_says_no_result_not_after_the_last_result()
         .unwrap()
         .contains("after the last result"));
 }
+
+// ---- 3c: a resumed session turn's result carries the earlier turns
+
+/// Turn 1 starts a session, turn 2 resumes it: turn 2's `modelUsage` and
+/// `total_cost_usd` are running totals over both, and only its
+/// `model_usage_since_last_result` is its own. The run costs each turn once.
+#[test]
+fn a_resumed_session_turn_is_charged_once_not_with_the_session_so_far() {
+    let own = r#"{"inputTokens":10,"outputTokens":100,"cacheReadInputTokens":10000,"cacheCreationInputTokens":1000,"webSearchRequests":0,"costUSD":0.00602}"#;
+    let both = r#"{"inputTokens":20,"outputTokens":200,"cacheReadInputTokens":20000,"cacheCreationInputTokens":2000,"webSearchRequests":0,"costUSD":0.01204}"#;
+    let result = |total: f64, usage: &str, since: Option<&str>| {
+        let since = since.map_or(String::new(), |s| {
+            format!(
+                r#","result_index":0,"model_usage_since_last_result":{{"claude-sonnet-5-5":{s}}}"#
+            )
+        });
+        format!(
+            "{{\"type\":\"result\",\"is_error\":false,\"terminal_reason\":\"completed\",\"total_cost_usd\":{total},\"modelUsage\":{{\"claude-sonnet-5-5\":{usage}}}{since}}}\n"
+        )
+    };
+    let dir = scratch("resumed-session");
+    let task = TaskId("T".into());
+    let logs = [result(0.00602, own, None), result(0.01204, both, Some(own))];
+    let mut events = Vec::new();
+    for (i, text) in logs.iter().enumerate() {
+        let turn = TurnId(i as u64 + 1);
+        let p = log_path(&dir, &task, turn);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&p, text).expect("write log");
+        events.push(Event::TurnGranted {
+            role: RoleId("planner".into()),
+            turn,
+            kind: TurnKind::Default,
+            deadline: Time(0),
+            return_to: None,
+            slice: None,
+        });
+    }
+    let c = criteria("resumed-session-c", SONNET_ONLY);
+    let read = || tokens::of(&dir, &task, &events, Some(&c)).expect("priced");
+    // Unrecorded, turn 2 would be read as a fresh process: both turns again.
+    assert!(near(read().usd.expect("known"), 0.00602 + 0.01204));
+    let marker = rusty_bbp_host::moderator::resumed_path(&dir, &task, TurnId(2));
+    std::fs::write(&marker, b"").expect("marker");
+    let t = read();
+    assert!(near(t.usd.expect("known"), 2.0 * 0.00602), "{t:?}");
+    assert_eq!(t.sum.output_tokens, 200);
+    // Without its own account, the resumed turn's cost is unknown, not zero.
+    std::fs::write(
+        log_path(&dir, &task, TurnId(2)),
+        result(0.01204, both, None),
+    )
+    .expect("write");
+    let t = read();
+    assert_eq!((t.usd, t.unknown_turns), (None, 1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
