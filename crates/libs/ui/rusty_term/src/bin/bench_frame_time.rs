@@ -438,11 +438,19 @@ mod tests {
         }
     }
 
-    /// Records whether the grid lock was free while it painted.
+    /// Records whether another thread could take the grid lock while it
+    /// painted. Uses only `lock`, so it holds for any mutex type.
     struct LockProbe(Arc<Mutex<Grid>>, Vec<bool>);
     impl Painter for LockProbe {
         fn paint(&mut self, _: &FrameView) {
-            self.1.push(self.0.try_lock().is_some());
+            let (tx, rx) = mpsc::channel();
+            let grid = Arc::clone(&self.0);
+            // Left blocked if the lock is held; released once paint returns.
+            thread::spawn(move || {
+                let _g = grid.lock();
+                let _ = tx.send(());
+            });
+            self.1.push(rx.recv_timeout(Duration::from_secs(5)).is_ok());
         }
     }
 
