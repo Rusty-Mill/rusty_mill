@@ -153,3 +153,16 @@ for ang in (10, 20, 30, 45, 60):
             car((x0, -3000, 17), (vx, vy, 0), rot=[-0.0096, yaw, 0], boost=0), [st(420, throttle=1)], settle=0)
         names5.append(n)
 print(len(names5), "round-5 scenarios")
+
+
+# ---- round 6: ball speed cap and rest (board b19; the captures so far reach 3,541 uu/s and never stop)
+names6 = []
+for v in (4500, 6500):
+    n = f"probe_ball_fast_{v}"
+    add(n, f"ball launched along the floor at {v} uu/s toward the side wall (6000 cap)", ball_car, [st(180)],
+        ball={"location": [-3000, 0, 93.15], "velocity": [v, 0, 0]})
+    names6.append(n)
+add("probe_ball_rest", "ball rolling on the floor at 600 uu/s until it stops (rolling and sleep thresholds)", ball_car, [st(1200)],
+    ball={"location": [0, -2000, 93.15], "velocity": [0, 600, 0]})
+names6.append("probe_ball_rest")
+print(len(names6), "round-6 scenarios")
