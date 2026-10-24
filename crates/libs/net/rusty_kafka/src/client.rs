@@ -1034,7 +1034,9 @@ mod tests {
 
     #[rusty_tokio::test]
     async fn connect_with_timeout_succeeds_over_loopback() {
-        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         let accept = rusty_tokio::spawn(async move { listener.accept().await.unwrap() });
 
