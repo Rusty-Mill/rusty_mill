@@ -14,7 +14,7 @@
 //!   ([`Grid::frame_view`]), unlock, paint. Reported: frame ms, the reader's
 //!   hold per chunk, the render thread's snapshot hold (the parser is blocked
 //!   for it) and its wait for the lock, and parser MB/s with rendering
-//!   against parsing alone.
+//!   against parsing alone. Reader hold excludes lock acquisition and deferral.
 //! - **Static folds.** Frame ms for the same text with 0 and with 1,024
 //!   command fold blocks (OSC 133 `C`..`D` around each command's output), at
 //!   the live view and scrolled back half a screen into history. Every cell
@@ -236,8 +236,21 @@ fn feed(grid: &Mutex<Grid>, data: &[u8], opts: &Options) -> Result<Fed, String> 
 /// panic in `step` closes it before the scope joins the writer: the writer's
 /// `write_all` then fails instead of blocking on a full pipe forever.
 fn feed_pipe(data: &[u8], secs: f64, step: &mut impl FnMut(&[u8])) -> Result<usize, String> {
-    let (rx, mut tx) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
+    let (rx, tx) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
+    feed_pipe_with_reader(data, secs, rx, tx, step)
+}
+
+// Keep the real pipe writer, but allow tests to inject read failures.
+fn feed_pipe_with_reader(
+    data: &[u8],
+    secs: f64,
+    rx: impl Read,
+    mut tx: std::io::PipeWriter,
+    step: &mut impl FnMut(&[u8]),
+) -> Result<usize, String> {
     thread::scope(|s| {
+        // Own the reader inside the scope body: errors and unwinding must
+        // close it before scope implicitly joins a possibly blocked writer.
         let mut rx = rx;
         let writer = s.spawn(move || -> std::io::Result<()> {
             let start = Instant::now();
@@ -260,6 +273,7 @@ fn feed_pipe(data: &[u8], secs: f64, step: &mut impl FnMut(&[u8])) -> Result<usi
             step(&buf[..n]);
             bytes += n;
         }
+        drop(rx);
         writer
             .join()
             .map_err(|_| "pipe writer panicked".to_owned())?
@@ -596,5 +610,107 @@ mod tests {
         assert!(fed.hold.len() >= data.len().div_ceil(CHUNK));
         let ok = streaming(&data, &opts, || Some(Counting(0))).expect("measures");
         assert!(!ok.reader_hold.is_empty());
+    }
+
+    struct InterruptedOnce(std::io::PipeReader, bool);
+
+    impl Read for InterruptedOnce {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.1 {
+                self.1 = true;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            self.0.read(buf)
+        }
+    }
+
+    #[test]
+    fn pipe_feed_retries_interrupted_reads_without_losing_bytes() {
+        let data = b"hello\r\n".repeat(2048);
+        let (rx, tx) = std::io::pipe().expect("pipe");
+        let mut received = Vec::new();
+        let bytes = feed_pipe_with_reader(
+            &data,
+            0.0, // exactly one complete write
+            InterruptedOnce(rx, false),
+            tx,
+            &mut |chunk| received.extend_from_slice(chunk),
+        )
+        .expect("interrupted read retried");
+        assert_eq!(bytes, data.len());
+        assert_eq!(received, data);
+    }
+
+    struct FailingReader(std::io::PipeReader, bool);
+
+    impl Read for FailingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.1 {
+                return Err(std::io::Error::other("injected read failure"));
+            }
+            self.1 = true;
+            self.0.read(buf)
+        }
+    }
+
+    #[test]
+    fn pipe_feed_closes_reader_before_join_on_consumer_failure() {
+        const CASE: &str = "RUSTY_TERM_PIPE_FAILURE_CASE";
+        if let Ok(case) = env::var(CASE) {
+            // Larger than the pipe buffer: the first write cannot complete
+            // while the consumer stops after at most one CHUNK-sized read.
+            let data = vec![b'x'; 16 * 1024 * 1024];
+            match case.as_str() {
+                "read-error" => {
+                    let (rx, tx) = std::io::pipe().expect("pipe");
+                    let err = feed_pipe_with_reader(
+                        &data,
+                        0.0,
+                        FailingReader(rx, false),
+                        tx,
+                        &mut |_| {},
+                    )
+                    .expect_err("injected failure");
+                    assert_eq!(err, "pipe read: injected read failure");
+                }
+                "step-panic" => {
+                    let result = std::panic::catch_unwind(|| {
+                        let _ = feed_pipe(&data, 0.0, &mut |_| panic!("consumer failed"));
+                    });
+                    assert!(result.is_err(), "consumer panic must propagate");
+                }
+                _ => panic!("unknown case: {case}"),
+            }
+            return;
+        }
+
+        for case in ["step-panic", "read-error"] {
+            // A subprocess makes a join deadlock a bounded test failure.
+            let mut child =
+                std::process::Command::new(env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::pipe_feed_closes_reader_before_join_on_consumer_failure",
+                        "--nocapture",
+                    ])
+                    .env(CASE, case)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .expect("failure subprocess");
+            let start = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().expect("subprocess status") {
+                    assert!(status.success(), "{case}: {status}");
+                    break;
+                }
+                if start.elapsed() > Duration::from_secs(10) {
+                    child.kill().expect("kill deadlocked subprocess");
+                    child.wait().expect("reap subprocess");
+                    panic!("{case}: pipe writer join hung after consumer failure");
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
 }

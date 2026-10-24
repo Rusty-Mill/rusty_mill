@@ -14,6 +14,7 @@
 //! thread then waits hundreds of milliseconds for a 0.1 ms snapshot. So
 //! [`Mutex::lock`] counts its waiters, and loops that re-lock back to back
 //! take [`Mutex::lock_bulk`] instead, which yields while anyone is waiting.
+//! This bounded, best-effort deferral does not guarantee starvation freedom.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{MutexGuard, PoisonError, TryLockError};
@@ -21,7 +22,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Longest [`Mutex::lock_bulk`] defers to waiters before contending anyway,
-/// so a caller that locks in a loop does not stall the bulk writer either.
+/// to bound voluntary deferral even when a caller locks in a loop.
 const BULK_DEFER_MAX: Duration = Duration::from_millis(1);
 
 /// [`std::sync::Mutex`] whose [`lock`](Self::lock) never fails: a lock
