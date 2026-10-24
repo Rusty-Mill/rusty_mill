@@ -56,11 +56,17 @@ cargo run -p replay-viewer -- capture.jsonl --sim candidate.jsonl --offline
 ```
 
 `physics.rs` maps both runs to the same `Scene`: one roster entry per car,
-candidate cars in their own `pri` range with `ghost: true`, drawn pale and
+candidate cars in a negative `pri` range (`-1 - player_id`), disjoint from
+recorded nonnegative IDs, with `ghost: true`, drawn pale and
 translucent over the recorded car. Frames stay at the capture rate (120 Hz),
 time is rebased so the first recorded frame is `t = 0` (the title gives the
 capture time it maps to), and a recorded frame with no candidate frame within
-half a tick shows the recording alone. The ball is the recorded one. Replay-only
+half an average recorded tick shows the recording alone. The closest timestamp
+wins; equal deltas choose the earlier sample. A singleton recording requires
+an exact match. Both timelines must have finite, strictly increasing timestamps.
+Player IDs above `i32::MAX` are rejected. Candidate export refuses every existing
+destination (including aliases of the recording), validates arguments before
+writing, and publishes a completely serialized file without overwriting data. The ball is the recorded one. Replay-only
 overlays (events, roles, stats, win probability) stay empty. The viewer reads
 capture files through `rb_capture_ingest`, so it never links the physics.
 

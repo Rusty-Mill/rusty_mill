@@ -4,7 +4,7 @@
 //! Both arrive as [`rb_domain::PhysicsFrame`] lists (ADR-0005 capture files,
 //! read by `rb_capture_ingest`), so the viewer never links the physics. Each
 //! car becomes a [`SceneCar`]; candidate cars get their own `pri` range
-//! ([`SIM_PRI_OFFSET`]) and a roster entry with [`ScenePlayer::ghost`] set,
+//! (negative IDs) and a roster entry with [`ScenePlayer::ghost`] set,
 //! which the page draws translucent over the recorded car. Frames stay at the
 //! capture rate, and time is rebased so the first recorded frame is `t = 0`.
 
@@ -14,10 +14,6 @@ use rb_domain::{PhysicsFrame, Quat};
 
 use crate::scene::{Field, Scene, SceneCar, SceneFrame, ScenePlayer};
 
-/// Added to a candidate car's player id to form its `pri`, keeping it apart
-/// from the recorded car with the same id.
-pub const SIM_PRI_OFFSET: i32 = 1_000_000;
-
 /// The team colour used for every car: a capture has no teams.
 const CAPTURE_TEAM: i32 = 0;
 
@@ -26,31 +22,38 @@ const CAPTURE_TEAM: i32 = 0;
 /// Candidate frames are matched to recorded frames by nearest timestamp
 /// within half a recorded tick; a recorded frame with no match shows only the
 /// recorded cars. Fails on an empty recording or a player id too large for a
-/// `pri`.
+/// `pri`, nonfinite timestamps, or timestamps that are not strictly increasing.
+/// A singleton recording matches only an identical timestamp. Ties select the
+/// earlier candidate timestamp.
 pub fn build_physics_scene(
     id: &str,
     recorded: &[PhysicsFrame],
     sim: Option<&[PhysicsFrame]>,
 ) -> Result<Scene, String> {
+    validate_timestamps(recorded)?;
+    validate_timestamps(sim.unwrap_or(&[]))?;
     let (first, last) = match (recorded.first(), recorded.last()) {
         (Some(first), Some(last)) => (first.timestamp_secs, last.timestamp_secs),
         _ => return Err("the recording has no frames".into()),
     };
     let duration = last - first;
+    if !duration.is_finite() {
+        return Err("capture timestamp span is too large".into());
+    }
     let hz = if duration > 0.0 {
         (recorded.len() - 1) as f32 / duration
     } else {
         0.0
     };
-    let tolerance = if hz > 0.0 { 0.5 / hz } else { f32::INFINITY };
+    let tolerance = if hz > 0.0 { 0.5 / hz } else { 0.0 };
     let sim = sim.unwrap_or(&[]);
 
     let mut frames = Vec::with_capacity(recorded.len());
     let mut cursor = 0;
     for frame in recorded {
-        let mut cars = cars_of(frame, 0)?;
+        let mut cars = cars_of(frame, false)?;
         if let Some(matched) = nearest(sim, &mut cursor, frame.timestamp_secs, tolerance) {
-            cars.extend(cars_of(matched, SIM_PRI_OFFSET)?);
+            cars.extend(cars_of(matched, true)?);
         }
         frames.push(SceneFrame {
             t: round(frame.timestamp_secs - first, 3),
@@ -93,28 +96,42 @@ pub fn quat_to_euler(q: Quat) -> [f32; 3] {
     [pitch, yaw, roll]
 }
 
-/// The first candidate frame at or after `*cursor` within `tolerance` of `t`;
-/// advances `*cursor` so a forward scan over sorted frames stays linear.
+/// Validate the ordering assumed by the cursor and the browser's searches.
+fn validate_timestamps(frames: &[PhysicsFrame]) -> Result<(), String> {
+    if frames.iter().any(|f| !f.timestamp_secs.is_finite())
+        || frames
+            .windows(2)
+            .any(|w| w[0].timestamp_secs >= w[1].timestamp_secs)
+    {
+        return Err("capture timestamps must be finite and strictly increasing".into());
+    }
+    Ok(())
+}
+
+/// The closest timestamp, preferring the earlier sample on equal deltas.
+/// Sorted queries let the cursor advance monotonically in linear total time.
 fn nearest<'a>(
     sim: &'a [PhysicsFrame],
     cursor: &mut usize,
     t: f32,
     tolerance: f32,
 ) -> Option<&'a PhysicsFrame> {
-    while *cursor < sim.len() && sim[*cursor].timestamp_secs < t - tolerance {
+    while *cursor + 1 < sim.len()
+        && (sim[*cursor + 1].timestamp_secs - t).abs() < (sim[*cursor].timestamp_secs - t).abs()
+    {
         *cursor += 1;
     }
     sim.get(*cursor)
-        .filter(|f| (f.timestamp_secs - t).abs() <= tolerance)
+        .filter(|f| (f64::from(f.timestamp_secs) - f64::from(t)).abs() <= f64::from(tolerance))
 }
 
-fn cars_of(frame: &PhysicsFrame, offset: i32) -> Result<Vec<SceneCar>, String> {
+fn cars_of(frame: &PhysicsFrame, ghost: bool) -> Result<Vec<SceneCar>, String> {
     frame
         .cars
         .iter()
         .map(|car| {
             Ok(SceneCar {
-                pri: pri(car.player_id, offset)?,
+                pri: pri(car.player_id, ghost)?,
                 p: pos(car.position),
                 rot: quat_to_euler(car.rotation).map(|a| round(a, 3)),
                 boost: car.boost_amount.clamp(0.0, 100.0).round() as u8,
@@ -133,7 +150,7 @@ fn roster(recorded: &[PhysicsFrame], sim: &[PhysicsFrame]) -> Result<Vec<ScenePl
             .collect()
     };
     let mut players = Vec::new();
-    for (frames, offset, ghost) in [(recorded, 0, false), (sim, SIM_PRI_OFFSET, true)] {
+    for (frames, ghost) in [(recorded, false), (sim, true)] {
         for player_id in ids(frames) {
             let name = if ghost {
                 format!("car {player_id} (sim)")
@@ -141,7 +158,7 @@ fn roster(recorded: &[PhysicsFrame], sim: &[PhysicsFrame]) -> Result<Vec<ScenePl
                 format!("car {player_id}")
             };
             players.push(ScenePlayer {
-                pri: pri(player_id, offset)?,
+                pri: pri(player_id, ghost)?,
                 name,
                 team: Some(CAPTURE_TEAM),
                 goals: 0,
@@ -155,11 +172,18 @@ fn roster(recorded: &[PhysicsFrame], sim: &[PhysicsFrame]) -> Result<Vec<ScenePl
     Ok(players)
 }
 
-fn pri(player_id: u32, offset: i32) -> Result<i32, String> {
-    i32::try_from(player_id)
-        .ok()
-        .and_then(|id| id.checked_add(offset))
-        .ok_or_else(|| format!("player id {player_id} is too large for the viewer"))
+fn pri(player_id: u32, ghost: bool) -> Result<i32, String> {
+    let id = i32::try_from(player_id)
+        .map_err(|_| format!("player id {player_id} is too large for the viewer"))?;
+    // Recorded IDs are nonnegative; simulated IDs occupy the negative half,
+    // including i32::MIN for player i32::MAX, without unchecked arithmetic.
+    if ghost {
+        (-1i32)
+            .checked_sub(id)
+            .ok_or_else(|| format!("player id {player_id} is too large for the viewer"))
+    } else {
+        Ok(id)
+    }
 }
 
 fn round(x: f32, places: i32) -> f32 {

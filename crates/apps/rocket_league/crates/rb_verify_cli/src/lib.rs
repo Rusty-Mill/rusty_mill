@@ -156,16 +156,95 @@ pub fn score_capture_against_candidate(
 /// Runs the same candidate simulation as [`score_capture_against_candidate`]
 /// and writes it to `out_path` in the capture format (ADR-0005), so a viewer
 /// can draw it beside the recording (ADR-0085). Returns the frames written.
+/// Refuses every existing destination, including aliases of the input.
 pub fn write_candidate(
     capture_path: impl AsRef<Path>,
     seed_frame: SeedFrame,
     out_path: impl AsRef<Path>,
 ) -> Result<usize, IngestError> {
-    let (_, candidate) = seed_and_simulate(capture_path, seed_frame)?;
-    let file = std::fs::File::create(out_path.as_ref())
-        .map_err(|e| IngestError::Io(format!("{}: {e}", out_path.as_ref().display())))?;
-    write_frames(&candidate, std::io::BufWriter::new(file))?;
-    Ok(candidate.len())
+    score_and_write_candidate(
+        capture_path,
+        seed_frame,
+        DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+        out_path,
+    )
+    .map(|(_, count)| count)
+}
+
+/// Simulate once, score that run, and publish it without replacing any existing
+/// destination. Existing files (including symlink/hard-link aliases of the
+/// recording) are rejected. Validation, simulation and serialization complete
+/// before publication; failures leave the input and existing output untouched.
+pub fn score_and_write_candidate(
+    capture_path: impl AsRef<Path>,
+    seed_frame: SeedFrame,
+    max_timestamp_delta_secs: f32,
+    out_path: impl AsRef<Path>,
+) -> Result<(DivergenceScore, usize), IngestError> {
+    if !max_timestamp_delta_secs.is_finite() || max_timestamp_delta_secs < 0.0 {
+        return Err(IngestError::Malformed(
+            "timestamp tolerance must be finite and nonnegative".into(),
+        ));
+    }
+    let out = out_path.as_ref();
+    match std::fs::symlink_metadata(out) {
+        Ok(_) => {
+            return Err(IngestError::Io(format!(
+                "{}: destination already exists",
+                out.display()
+            )))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(IngestError::Io(format!("{}: {e}", out.display()))),
+    }
+    let (recorded, candidate) = seed_and_simulate(capture_path, seed_frame)?;
+    let score = rb_domain::divergence::score(&recorded, &candidate, max_timestamp_delta_secs);
+    let mut bytes = Vec::new();
+    write_frames(&candidate, &mut bytes)?;
+    publish_candidate(out, &bytes)
+        .map_err(|e| IngestError::Io(format!("{}: {e}", out.display())))?;
+    Ok((score, candidate.len()))
+}
+
+/// A sibling temporary file and an atomic, no-clobber link publication ensure
+/// even a destination created concurrently is preserved. No rename-overwrite.
+fn publish_candidate(out: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let parent = out
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let (temp, mut file) = loop {
+        let temp = parent.join(format!(
+            ".rb-candidate-{}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => break (temp, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    };
+    let result = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| std::fs::hard_link(&temp, out));
+    drop(file);
+    // Publication has already succeeded or failed; cleanup cannot change it.
+    if let Err(e) = std::fs::remove_file(&temp) {
+        eprintln!(
+            "could not remove candidate temporary file {}: {e}",
+            temp.display()
+        );
+    }
+    result
 }
 
 /// Default window width (seconds) `rb-verify --self-growth` uses when the
@@ -615,6 +694,27 @@ pub fn boost_is_unlimited(frames: &[PhysicsFrame]) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_publication_never_clobbers_and_cleans_up_on_failure() {
+        let dir = std::env::temp_dir().join(format!("rb-publication-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let out = dir.join("candidate.jsonl");
+        std::fs::write(&out, b"concurrent writer").unwrap();
+        let error = publish_candidate(&out, b"simulation").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&out).unwrap(), b"concurrent writer");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_file(&out).unwrap();
+        // Link publication onto a directory fails after the temp is written.
+        assert!(publish_candidate(&dir, b"simulation").is_err());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        publish_candidate(&out, b"simulation").unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"simulation");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     use rb_scenario::Scenario;
 
     fn replay_fixture() -> &'static str {

@@ -61,9 +61,9 @@ use rb_scenario::Scenario;
 use rb_verify_cli::{
     car_frame_spin, compare_scenario, compare_scenario_recorded, default_grid, k_step_capture,
     k_step_score, one_step_capture, rotation_rate, scenario_from_capture,
-    score_capture_against_candidate, score_capture_growth, score_replay_against_capture,
-    simulate_scenario, sweep, trace_capture, wheel_kstep_capture, wheel_trace_capture,
-    write_candidate, Candidate, SeedFrame, TraceRow, WheelKStepRow, WheelTraceRow, Window,
+    score_and_write_candidate, score_capture_against_candidate, score_capture_growth,
+    score_replay_against_capture, simulate_scenario, sweep, trace_capture, wheel_kstep_capture,
+    wheel_trace_capture, Candidate, SeedFrame, TraceRow, WheelKStepRow, WheelTraceRow, Window,
     DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
 use std::env;
@@ -571,6 +571,9 @@ fn take_write_candidate(args: Vec<String>) -> Result<(Vec<String>, Option<String
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         if arg == "--write-candidate" {
+            if out.is_some() {
+                return Err("duplicate --write-candidate".into());
+            }
             out = Some(it.next().ok_or("--write-candidate needs a path")?);
         } else {
             rest.push(arg);
@@ -881,14 +884,9 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        if let Some(out) = candidate_out {
-            match write_candidate(&capture_path, seed_frame, &out) {
-                Ok(n) => eprintln!("wrote {n} candidate frames -> {out}"),
-                Err(e) => {
-                    eprintln!("writing candidate failed: {e}");
-                    return ExitCode::FAILURE;
-                }
-            }
+        if rest.len() > 1 {
+            eprintln!("unexpected --self arguments");
+            return ExitCode::FAILURE;
         }
         let mut args = rest.into_iter();
         let max_timestamp_delta_secs = match parse_max_timestamp_delta_secs(args.next()) {
@@ -898,7 +896,22 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        score_capture_against_candidate(capture_path, seed_frame, max_timestamp_delta_secs)
+        if !max_timestamp_delta_secs.is_finite() || max_timestamp_delta_secs < 0.0 {
+            eprintln!("timestamp tolerance must be finite and nonnegative");
+            return ExitCode::FAILURE;
+        }
+        match candidate_out {
+            Some(out) => {
+                score_and_write_candidate(&capture_path, seed_frame, max_timestamp_delta_secs, &out)
+                    .map(|(score, n)| {
+                        eprintln!("wrote {n} candidate frames -> {out}");
+                        score
+                    })
+            }
+            None => {
+                score_capture_against_candidate(capture_path, seed_frame, max_timestamp_delta_secs)
+            }
+        }
     } else {
         let Some(capture_path) = args.next() else {
             eprintln!("{}", usage());
