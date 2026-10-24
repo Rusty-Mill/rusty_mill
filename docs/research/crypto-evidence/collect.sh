@@ -166,6 +166,8 @@ rusty_pk|ed25519_sign_null_calibration_identical_classes|A/A  Ed25519 sign (base
 rusty_pk|ed25519_sign_key_classes_not_distinguishable|ed25519 sign: zero-seed vs ones-seed key
 rusty_pk|ecdsa_p256_sign_null_calibration_identical_classes|A/A  ECDSA P-256 sign (baseline)
 rusty_pk|ecdsa_p256_sign_sparse_vs_dense_key|ecdsa p256 sign: sparse vs dense key
+rusty_pk|ecdsa_p384_sign_null_calibration_identical_classes|A/A  ECDSA P-384 sign (baseline)
+rusty_pk|ecdsa_p384_sign_sparse_vs_dense_key|ecdsa p384 sign: sparse vs dense key
 SPECS
 for tf in test_timing_series.py test_check_manifests.py test_planted_leak.py; do
   python3 -I docs/research/crypto-evidence/$tf >/dev/null 2>&1 && echo "collector self-test $tf: passed" || { echo "collector self-test $tf: FAILED"; fail "$tf"; }

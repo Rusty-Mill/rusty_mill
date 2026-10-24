@@ -31,7 +31,7 @@ if python3 -I scripts/verdict_sites.py "$BIN" "$OUT/ecdh-control" >/dev/null; th
 n=$(count ed25519-sign); echo "taint(ed25519-sign): $n error(s), want 0"; [ "$n" -eq 0 ] || fail=1
 n=$(count ed25519-control); echo "taint(ed25519-control): $n error(s), want >=1 (the planted branch)"; [ "$n" -ge 1 ] || fail=1
 report ed25519-control | grep -q 'rusty_pk_taint::main' || { echo "taint(ed25519-control): the planted branch was not reported in main"; fail=1; }
-# ECDSA signing: the key and the hedge are secret. Allowed: the four ensure verdicts (key range, nonce
+# ECDSA signing: the key and the noise Z are secret. Allowed: the four ensure verdicts (key range, nonce
 # candidate range, result not at infinity, r and s non-zero) and reports whose stack passes through
 # ecdsa::output, which encodes the published r and s. Nothing else.
 for m in ecdsa-sign256 ecdsa-sign384; do

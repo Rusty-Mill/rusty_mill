@@ -17,7 +17,7 @@
 //!   `S = r + k*s` must report 0 errors.
 //! - `ed25519-control`: a deliberate branch on the (secret-derived) signature; must be caught.
 //! - `ecdsa-sign256`, `ecdsa-sign384`: an ECDSA private key marked secret before import, and
-//!   a hedge marked secret, then `sign`. Every report must be either the branch on an
+//!   noise Z marked secret, then `sign`. Every report must be either the branch on an
 //!   `ecdh::ensure` verdict (scalar valid, nonce candidate valid, result not at infinity) or
 //!   inside `ecdsa::output`, which handles only the published `r` and `s`.
 //! - `ecdsa-control`: a deliberate branch on a byte of the ECDSA private key, after signing;
@@ -169,10 +169,10 @@ fn ecdsa_sign(curve: CurveId, len: usize) {
     let key = ecdsa::SigningKey::from_bytes(curve, &bytes).unwrap();
     let sig = key.sign(
         black_box(b"a public message"),
-        |hedge: &mut [u8]| -> Result<(), ()> {
-            hedge.fill(0x5a);
-            let hedge = black_box(hedge);
-            mark_secret(hedge);
+        |noise: &mut [u8]| -> Result<(), ()> {
+            noise.fill(0x5a);
+            let noise = black_box(noise);
+            mark_secret(noise);
             Ok(())
         },
     );

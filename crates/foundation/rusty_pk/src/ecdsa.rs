@@ -4,15 +4,28 @@
 //! # Signing handles a secret
 //!
 //! [`SigningKey`] signs P-256 with SHA-256 and P-384 with SHA-384, as TLS pairs them. The
-//! nonce is **hedged RFC 6979**: RFC 6979 section 3.2's HMAC-DRBG over the private key and
-//! the message hash, with 32 fresh random bytes as the "additional data" of section 3.6. A
-//! failed or repeating random source therefore degrades to deterministic RFC 6979, which
-//! is still safe; a good one also defeats fault attacks that rely on determinism. `k * G`
+//! nonce is **hedged RFC 6979**, pinned to `draft-irtf-cfrg-det-sigs-with-noise-05` section 4
+//! (`docs/research/TLS-NATIVE-SIGNING.md` section 3): RFC 6979 section 3.2's HMAC-DRBG,
+//! with steps (d) and (f) replaced by
+//! `K = HMAC_K(V || tag || Z || pad1 || int2octets(x) || pad2 || bits2octets(h1))`, where `Z`
+//! is fresh secret noise of `ceil(qlen / 8)` bytes (32 on P-256, 48 on P-384) and the pads
+//! are the shortest zero strings that end each part on a hash-block boundary.
+//!
+//! The draft's section 5 bounds what this buys. A random source that **reports** an error
+//! fails closed: [`SigningKey::sign`] returns [`SignError::Random`] and signs nothing; there is
+//! no deterministic fallback. Per the draft, noise that is weak or repeated without being
+//! detected still leaves the nonce a deterministic function of key, message and noise, so it
+//! does not open the algebraic key recovery that weak randomness causes in fully random
+//! ECDSA. It does not reproduce plain RFC 6979 output, because the padded inputs differ.
+//! Hedging mitigates some side-channel and fault attacks that exploit determinism; it does not
+//! guarantee nonce uniqueness, prevent replay, or necessarily stop instruction-skipping
+//! faults. Plain RFC 6979 and fixed-noise paths exist for tests only. `k * G`
 //! uses the constant-time scalar multiplication behind [`crate::ecdh`], `k^-1` is Fermat
 //! inversion (public exponent, base not branched on), and `s = k^-1 (z + r d)` uses the
 //! order field's branch-free arithmetic. The only branches on secret-derived values are on
 //! verdicts: a nonce candidate outside `[1, n-1]` (rejected and redrawn, as RFC 6979
-//! specifies) and a result at infinity (impossible for a valid nonce).
+//! specifies), a result at infinity (impossible for a valid nonce), and a zero `r` or `s`
+//! (redrawn, RFC 6979 section 3.4).
 //!
 //! # Verification
 //!
@@ -138,8 +151,24 @@ impl core::fmt::Display for SignError {
 /// headers, and a sequence header with a long-form length.
 const MAX_DER: usize = 2 * (2 + 49) + 3;
 
-/// Length of the fresh randomness mixed into each nonce.
-pub const HEDGE_LEN: usize = 32;
+/// Length of the secret noise `Z` for one nonce on `curve`: `ceil(qlen / 8)`, 32 bytes on
+/// P-256 and 48 on P-384 (draft-irtf-cfrg-det-sigs-with-noise-05 section 4).
+pub const fn noise_len(curve: CurveId) -> usize {
+    match curve {
+        CurveId::P256 => 32,
+        CurveId::P384 => 48,
+    }
+}
+
+/// What seeds the RFC 6979 DRBG.
+#[derive(Clone, Copy)]
+enum Seed<'a> {
+    /// The pinned hedged construction with noise `Z` (production; fixed `Z` in tests).
+    Hedged(&'a [u8]),
+    /// Unmodified RFC 6979 section 3.2, only to reproduce its appendix A vectors.
+    #[cfg(test)]
+    Plain,
+}
 
 /// RFC 6979 candidates tried before giving up. The chance that one is rejected is about
 /// 2^-32 on P-256 and 2^-190 on P-384.
@@ -185,26 +214,27 @@ impl SigningKey {
     }
 
     /// The DER `SEQUENCE { r, s }` signature over `message` (hashed with SHA-256 on P-256,
-    /// SHA-384 on P-384). `fill` supplies [`HEDGE_LEN`] fresh random bytes for the nonce; if
-    /// it fails, nothing is signed.
+    /// SHA-384 on P-384). `fill` supplies [`noise_len`] fresh secret random bytes for the
+    /// nonce (production: `rusty_rand::fill`). If it reports an error, nothing is signed and
+    /// [`SignError::Random`] is returned; there is no fallback.
     pub fn sign<F>(
         &self,
         message: &[u8],
         fill: impl FnOnce(&mut [u8]) -> Result<(), F>,
     ) -> Result<Vec<u8>, SignError> {
-        let mut hedge = [0u8; HEDGE_LEN];
-        let filled = fill(&mut hedge);
+        let mut noise = [0u8; 48];
+        let len = noise_len(self.id);
+        let filled = fill(&mut noise[..len]);
         let signature = match filled {
-            Ok(()) => self.sign_with_extra(message, &hedge),
+            Ok(()) => self.sign_seeded(message, Seed::Hedged(&noise[..len])),
             Err(_) => Err(SignError::Random),
         };
-        wipe(&mut hedge);
+        wipe(&mut noise);
         signature
     }
 
-    /// RFC 6979 signing with `extra` as section 3.6's additional data (empty for the
-    /// deterministic variant of section 3.2, which the known-answer tests use).
-    fn sign_with_extra(&self, message: &[u8], extra: &[u8]) -> Result<Vec<u8>, SignError> {
+    /// RFC 6979 signing with the DRBG seeded by `seed`.
+    fn sign_seeded(&self, message: &[u8], seed: Seed<'_>) -> Result<Vec<u8>, SignError> {
         let curve = match self.id {
             CurveId::P256 => Curve::p256(),
             CurveId::P384 => Curve::p384(),
@@ -221,7 +251,7 @@ impl SigningKey {
         n.to_be_bytes(&z, &mut h1[..len])
             .ok_or(SignError::Internal)?;
 
-        let mut drbg = Rfc6979::new(self.id, self.key.scalar(), &h1[..len], extra);
+        let mut drbg = Rfc6979::new(self.id, self.key.scalar(), &h1[..len], seed);
         let mut d = limbs_from_be(self.key.scalar());
         let result = (|| {
             for _ in 0..NONCE_ATTEMPTS {
@@ -360,8 +390,18 @@ impl Rfc6979 {
         }
     }
 
-    /// Steps a to f of RFC 6979 section 3.2, with `extra` appended to the seed (section 3.6).
-    fn new(id: CurveId, x: &[u8], h1: &[u8], extra: &[u8]) -> Self {
+    /// The hash's block length: 64 bytes for SHA-256, 128 for SHA-384.
+    fn block(&self) -> usize {
+        match self.id {
+            CurveId::P256 => 64,
+            CurveId::P384 => 128,
+        }
+    }
+
+    /// Steps a to f of RFC 6979 section 3.2. For [`Seed::Hedged`], steps (d) and (f) use
+    /// `V || tag || Z || pad1 || int2octets(x) || pad2 || bits2octets(h1)` (draft -05 section 4),
+    /// with the same `Z` in both.
+    fn new(id: CurveId, x: &[u8], h1: &[u8], seed: Seed<'_>) -> Self {
         let mut drbg = Self {
             id,
             k: [0; 48],
@@ -370,9 +410,30 @@ impl Rfc6979 {
         };
         let len = drbg.len();
         drbg.v[..len].fill(0x01);
+        let block = drbg.block();
+        let zeros = [0u8; 128];
         for tag in [0x00u8, 0x01] {
             let mut next = [0u8; 48];
-            drbg.mac(&[&drbg.v[..len], &[tag], x, h1, extra], &mut next);
+            match seed {
+                Seed::Hedged(noise) => {
+                    let pad1 = (block - (len + 1 + noise.len()) % block) % block;
+                    let pad2 = (block - x.len() % block) % block;
+                    drbg.mac(
+                        &[
+                            &drbg.v[..len],
+                            &[tag],
+                            noise,
+                            &zeros[..pad1],
+                            x,
+                            &zeros[..pad2],
+                            h1,
+                        ],
+                        &mut next,
+                    );
+                }
+                #[cfg(test)]
+                Seed::Plain => drbg.mac(&[&drbg.v[..len], &[tag], x, h1], &mut next),
+            }
             drbg.k = next;
             drbg.mac(&[&drbg.v[..len]], &mut next);
             drbg.v = next;
@@ -445,7 +506,7 @@ mod tests {
     }
 
     /// RFC 6979 appendix A.2.5 (P-256, SHA-256) and A.2.6 (P-384, SHA-384), messages
-    /// "sample" and "test", through the deterministic path (no additional data).
+    /// "sample" and "test", through the unmodified RFC 6979 path (test-only).
     #[test]
     fn rfc_6979_appendix_a_vectors() {
         let cases = [
@@ -480,7 +541,7 @@ mod tests {
         ];
         for (curve, x, msg, want_r, want_s) in cases {
             let key = SigningKey::from_bytes(curve, &hex(x)).unwrap();
-            let sig = key.sign_with_extra(msg.as_bytes(), &[]).unwrap();
+            let sig = key.sign_seeded(msg.as_bytes(), Seed::Plain).unwrap();
             let len = if curve == CurveId::P256 { 32 } else { 48 };
             assert_eq!(
                 r_s(&sig, len),
@@ -497,16 +558,46 @@ mod tests {
         }
     }
 
-    /// The deterministic path repeats; the hedge changes the nonce.
+    /// Fixed noise repeats; different noise changes the nonce, and the hedged path never
+    /// coincides with plain RFC 6979.
     #[test]
-    fn the_hedge_changes_the_nonce_and_nothing_else() {
+    fn the_noise_changes_the_nonce() {
         let key = SigningKey::from_bytes(CurveId::P256, &[0x11; 32]).unwrap();
-        let a = key.sign_with_extra(b"m", &[]).unwrap();
-        assert_eq!(a, key.sign_with_extra(b"m", &[]).unwrap());
-        let b = key.sign_with_extra(b"m", &[1; HEDGE_LEN]).unwrap();
-        let c = key.sign_with_extra(b"m", &[2; HEDGE_LEN]).unwrap();
+        let plain = key.sign_seeded(b"m", Seed::Plain).unwrap();
+        let a = key.sign_seeded(b"m", Seed::Hedged(&[1; 32])).unwrap();
+        assert_eq!(a, key.sign_seeded(b"m", Seed::Hedged(&[1; 32])).unwrap());
+        let b = key.sign_seeded(b"m", Seed::Hedged(&[2; 32])).unwrap();
+        let zero = key.sign_seeded(b"m", Seed::Hedged(&[0; 32])).unwrap();
         assert_ne!(r_s(&a, 32).0, r_s(&b, 32).0);
-        assert_ne!(r_s(&b, 32).0, r_s(&c, 32).0);
+        assert_ne!(r_s(&plain, 32).0, r_s(&zero, 32).0);
+    }
+
+    /// A statistical smoke test, not a proof: over 20,000 nonces from distinct noise, each
+    /// of the top 8 bits of `k` is set at a rate within 5 standard deviations of what a
+    /// uniform `k` in `[1, n)` gives (one half, except the top bit on P-256, slightly less).
+    #[test]
+    fn nonce_top_bits_show_no_bias() {
+        const N: u32 = 20_000;
+        for id in [CurveId::P256, CurveId::P384] {
+            let len = noise_len(id);
+            let x = vec![0x42u8; len];
+            let h1 = vec![0x17u8; len];
+            let mut counts = [0u32; 8];
+            for i in 0..N {
+                let mut noise = vec![0u8; len];
+                noise[..4].copy_from_slice(&i.to_be_bytes());
+                let mut k = [0u8; 48];
+                Rfc6979::new(id, &x, &h1, Seed::Hedged(&noise)).next(&mut k[..len]);
+                for (bit, count) in counts.iter_mut().enumerate() {
+                    *count += u32::from(k[0] >> (7 - bit) & 1);
+                }
+            }
+            // sigma = sqrt(N / 4) ~ 70.7, so 5 sigma ~ 354.
+            for (bit, &count) in counts.iter().enumerate() {
+                let diff = (i64::from(count) - i64::from(N / 2)).abs();
+                assert!(diff < 354, "{id:?} bit {bit}: {count} of {N}");
+            }
+        }
     }
 
     #[test]

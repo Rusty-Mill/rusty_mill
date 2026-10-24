@@ -28,11 +28,11 @@ ed25519::Edwards>::encode 2
 rusty_pk::ed25519::reduce_digest 2
 ed25519::SigningKey>::sign 11
 ed25519::SigningKey>::from_seed 4
-# ECDSA signing (gap 5, ADR-0006). sign_with_extra inlines the RFC 6979 DRBG set-up and steps, the bounded
+# ECDSA signing (gap 5, ADR-0006). sign_seeded inlines the RFC 6979 DRBG set-up and steps, the bounded
 # nonce loop, the inversion and s = k^-1(z + r d); its jumps are public bounds checks, loop back-edges and the
 # ensure verdicts (taint modes ecdsa-sign256/384 allow only those, plus ecdsa::output on the published r, s).
 # generator_x is the constant-time k*G plus the verdict that it is not at infinity. Rfc6979::mac dispatches on
 # the (public) curve.
-ecdsa::SigningKey>::sign_with_extra 41
+ecdsa::SigningKey>::sign_seeded 41
 ecdsa::Rfc6979>::mac 5
 rusty_pk::ecdh::generator_x 9

@@ -83,7 +83,7 @@ class ReportTests(unittest.TestCase):
 
 class OutputTests(unittest.TestCase):
     STACK = ["memmove", "rusty_pk::ecdsa::der_signature::{closure#0}", "rusty_pk::ecdsa::output",
-             "<rusty_pk::ecdsa::SigningKey>::sign_with_extra"]
+             "<rusty_pk::ecdsa::SigningKey>::sign_seeded"]
 
     def test_a_stack_through_an_output_function_is_accepted(self):
         self.assertEqual(vs.through_output(self.STACK, ["ecdsa::output"]), "ecdsa::output")
