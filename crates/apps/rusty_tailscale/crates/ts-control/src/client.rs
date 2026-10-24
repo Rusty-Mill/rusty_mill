@@ -481,4 +481,84 @@ mod tests {
             Ok(body) => panic!("expected rejection, got {} byte body", body.len()),
         }
     }
+
+    /// Builds `interop/h2c-server-go` (Go's own `net/http` HTTP/2 server) if
+    /// a Go toolchain is available; `None` skips the test, as `go_interop`.
+    async fn go_h2c_server() -> Option<std::path::PathBuf> {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../interop/h2c-server-go");
+        let bin = dir.join("h2c-server-go");
+        if bin.exists() {
+            return Some(bin);
+        }
+        let go = ["/usr/local/go/bin/go", "go"].into_iter().find(|g| {
+            std::process::Command::new(g)
+                .arg("version")
+                .output()
+                .is_ok()
+        })?;
+        let status = rusty_tokio::process::Command::new(go)
+            .args(["build", "-o", "h2c-server-go", "."])
+            .current_dir(&dir)
+            .status()
+            .await
+            .ok()?;
+        status.success().then_some(bin)
+    }
+
+    /// The session against Go's HTTP/2, the implementation real control
+    /// servers run: a unary request, a streamed length-prefixed body, and a
+    /// non-success status.
+    #[rusty_tokio::test]
+    async fn session_speaks_http2_with_gos_net_http() {
+        use rusty_tokio::io::AsyncBufReadExt;
+
+        let Some(bin) = go_h2c_server().await else {
+            eprintln!("SKIPPED: no Go toolchain and no prebuilt h2c-server-go binary");
+            return;
+        };
+        let mut child = rusty_tokio::process::Command::new(&bin)
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn go h2c server");
+        let stdout = child.stdout.take().unwrap();
+        let line = rusty_tokio::io::BufReader::new(stdout)
+            .lines()
+            .next_line()
+            .await
+            .unwrap()
+            .expect("listen line");
+        let addr = line.strip_prefix("LISTENING ").expect("LISTENING prefix");
+
+        let tcp = rusty_tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut session = h2_handshake(tcp, addr.to_string(), Duration::from_secs(10))
+            .await
+            .unwrap();
+
+        let body = session
+            .request("/machine/register", b"hello".to_vec())
+            .await
+            .unwrap();
+        let echo: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(echo["proto"], "HTTP/2.0");
+        assert_eq!(echo["host"], addr);
+        assert_eq!(echo["len"], 5);
+
+        let mut frames = session
+            .request_stream("/machine/map", b"{}".to_vec())
+            .await
+            .unwrap();
+        for i in 0..3 {
+            let frame = frames.next_frame().await.unwrap().expect("frame");
+            let frame: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+            assert_eq!(frame["frame"], i);
+        }
+        assert!(frames.next_frame().await.unwrap().is_none());
+
+        match session.request("/missing", Vec::new()).await {
+            Err(ClientError::HttpStatus(404, path)) => assert_eq!(path, "/missing"),
+            other => panic!("expected HTTP 404, got {other:?}"),
+        }
+    }
 }

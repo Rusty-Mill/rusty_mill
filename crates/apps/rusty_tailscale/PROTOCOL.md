@@ -125,7 +125,7 @@ be preserved. Headscale 0.26 does not send an early payload.
 ## HTTP/2 over Noise
 
 The client runs an HTTP/2 **client connection directly over the Noise
-stream** (Go: `http2.Transport.NewClientConn`; ours: `h2::client`).
+stream** (Go: `http2.Transport.NewClientConn`; ours: `rusty_h2::driver::client`).
 Requests use normal `https://<host>/...` URLs but the connection is the
 Noise channel — no TLS, no ALPN; the server routes by `:path`.
 
@@ -438,7 +438,8 @@ entry points are exactly what a `cargo-fuzz`/libfuzzer target would drive.
   shrinks to ~100 lines of handshake we'd still have to frame ourselves
   (via an escape-hatch raw split). Byte-exact interop is verified against
   the real Go `controlbase` package (see `interop/noise-server-go/`).
-- HTTP/2 over the Noise conn via the `h2` crate (the hyper project's h2
-  implementation, same role as Go's `x/net/http2`).
+- HTTP/2 over the Noise conn via `rusty_h2`, this workspace's HTTP/2
+  implementation (same role as Go's `x/net/http2`). Interop with Go's
+  `net/http` HTTP/2 server is tested against `interop/h2c-server-go/`.
 - Base64 for the handshake header is encode-only and hand-rolled (20
   lines, tested), consistent with the no-dep-for-two-functions policy.

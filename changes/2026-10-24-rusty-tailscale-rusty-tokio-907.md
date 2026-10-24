@@ -20,6 +20,7 @@ changelog: The rusty_tailscale crates run on `rusty_tokio` instead of tokio; `ru
   - `mpsc::Receiver::try_recv`/`poll_recv` (bounded and unbounded), `mpsc::error::TryRecvError`, and tokio's `mpsc::error` path for the channel errors.
 - **Changed (`rusty_tokio`):** `lookup_host` takes this crate's `ToSocketAddrs`, as tokio's does, so a borrowed `&str` resolves; before, it needed a `'static` `std::net::ToSocketAddrs`. Every form workspace code passes still works.
 - **Added (`rusty_http`):** `async_tokio::Replay`, the `rusty_tokio` twin of `tokio_native::Replay`, for bytes of the next protocol that arrived bundled with an upgrade response.
+- **Added (test):** `ts-control`'s HTTP/2 session is tested against Go's own `net/http` HTTP/2 server (`interop/h2c-server-go`, h2c, standard library only), the implementation real control servers run. The test covers a unary request, a streamed length-prefixed body, and a 404 mapped to `ClientError::HttpStatus`. Like `go_interop`, it skips when no Go toolchain is available. `PROTOCOL.md` now names `rusty_h2` where it said `h2`.
 - **Verified:**
   - The family's tests pass: 70, the same count as on tokio, including the Go `controlbase` interop tests.
   - A one-off check against Go's `net/http` HTTP/2 server passed again on `rusty_tokio`.
