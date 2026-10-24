@@ -36,6 +36,15 @@ pub const SCRUB: &[&str] = &[
     "BBP_PRINCIPAL",
     "BBP_TURN",
 ];
+/// How often a cancel re-reads the task when another writer moved its
+/// revision in between.
+const CANCEL_ATTEMPTS: usize = 5;
+/// BBP's end grace when the configuration leaves it unset.
+const BBP_END_GRACE_SECS: u64 = 60;
+/// How long a cancel waits, beyond the end grace BBP gives a harness to
+/// print its result, for everything the task started to be gone.
+const CANCEL_MARGIN: Duration = Duration::from_secs(30);
+
 fn transient(e: impl std::fmt::Display) -> ClassifiedError {
     ClassifiedError::Transient(AgentError(e.to_string()))
 }
@@ -349,6 +358,99 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
             .map_err(transient)?;
         Ok(())
     }
+    /// Record the cancel in BBP, retrying when the revision moved under it.
+    /// The op is derived from the revision, so a retry after a lost reply
+    /// replays rather than cancels twice.
+    fn request_cancel(
+        &self,
+        h: &Handle,
+        config: &Config,
+        words: &[&str],
+        reason: &Text,
+    ) -> Result<(), ClassifiedError> {
+        for _ in 0..CANCEL_ATTEMPTS {
+            let view = self
+                .show(config, h)?
+                .ok_or_else(|| transient("hosted task missing"))?;
+            if view.card.state.terminal() {
+                return Ok(());
+            }
+            let rev = view.card.rev.0.to_string();
+            let op = Sha256::of(format!("{}:cancel:{rev}:{reason}", h.task).as_bytes()).hex();
+            let mut args = vec![
+                "--fence".into(),
+                rev.clone(),
+                "--rev".into(),
+                rev,
+                "--op".into(),
+                format!("orch-{op}"),
+                "cancel".into(),
+            ];
+            args.extend(words.iter().map(|w| (*w).to_owned()));
+            match self.response(config, h, "human", args)? {
+                Response::Rejected(r) if matches!(r.code, Code::StaleRev | Code::Terminal) => {}
+                response => return Self::accepted(response),
+            }
+        }
+        Err(transient("the task kept changing; cancel not recorded"))
+    }
+    /// Wait until `bbp quiesce` finds nothing of the ended task running: no
+    /// moderator, no runner, no harness group. It kills the groups of a
+    /// moderator that died, so this holds without one.
+    fn await_quiesced(&self, config: &Config, h: &Handle) -> Result<(), ClassifiedError> {
+        let grace = config.end_grace_secs.unwrap_or(BBP_END_GRACE_SECS);
+        let deadline = std::time::Instant::now() + Duration::from_secs(grace) + CANCEL_MARGIN;
+        loop {
+            match self.invoke(config, h, "quiesce", vec![])?.trim() {
+                "true" => return Ok(()),
+                "false" => {}
+                other => return Err(permanent(format!("bbp quiesce answered {other:?}"))),
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(transient("the task's processes still run after cancel"));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    /// Where `task`'s BBP task lives: derived from the goal's bytes, the
+    /// board's goal and the task id, so it is found again without a handle.
+    fn located(&self, task: &Task, board: &Board) -> Handle {
+        let id =
+            Sha256::of(format!("{}:{}:{}", self.namespace, board.goal(), task.id()).as_bytes())
+                .hex();
+        Handle {
+            dir: self.config.dir.clone(),
+            task: format!("orch-{id}"),
+        }
+    }
+    /// `bbp open` the frozen task unless it exists. Starts nothing.
+    fn open_once(&self, config: &Config, h: &Handle) -> Result<(), ClassifiedError> {
+        if self.show(config, h)?.is_some() {
+            return Ok(());
+        }
+        let dir = Self::manifest(h);
+        let response = self.response(
+            config,
+            h,
+            "open",
+            vec![
+                "--repo".into(),
+                config.repo.to_string_lossy().into_owned(),
+                "--brief".into(),
+                dir.join("brief.md").to_string_lossy().into_owned(),
+                "--roster".into(),
+                dir.join("roster.json").to_string_lossy().into_owned(),
+                "--profiles".into(),
+                dir.join("profiles.json").to_string_lossy().into_owned(),
+                "--live-turns".into(),
+                config.live_turns.to_string(),
+            ],
+        )?;
+        match response {
+            Response::Rejected(r) if r.code == Code::AlreadyOpen => Ok(()),
+            r => Self::accepted(r),
+        }
+    }
     fn rejected_answer(
         &self,
         h: &Handle,
@@ -467,41 +569,12 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
         board: &Board,
         fence: &Fence,
     ) -> Result<HostHandle, ClassifiedError> {
-        let id =
-            Sha256::of(format!("{}:{}:{}", self.namespace, board.goal(), task.id()).as_bytes())
-                .hex();
-        let h = Handle {
-            dir: self.config.dir.clone(),
-            task: format!("orch-{id}"),
-        };
+        let h = self.located(task, board);
         Self::admit(&h, fence)?;
         let frozen = self.freeze(&h, task, board)?;
         let config = &frozen.config;
         let agents = Self::materialize(&h, &frozen)?;
-        let dir = Self::manifest(&h);
-        if self.show(config, &h)?.is_none() {
-            let response = self.response(
-                config,
-                &h,
-                "open",
-                vec![
-                    "--repo".into(),
-                    config.repo.to_string_lossy().into_owned(),
-                    "--brief".into(),
-                    dir.join("brief.md").to_string_lossy().into_owned(),
-                    "--roster".into(),
-                    dir.join("roster.json").to_string_lossy().into_owned(),
-                    "--profiles".into(),
-                    dir.join("profiles.json").to_string_lossy().into_owned(),
-                    "--live-turns".into(),
-                    config.live_turns.to_string(),
-                ],
-            )?;
-            match response {
-                Response::Rejected(r) if r.code == Code::AlreadyOpen => {}
-                r => Self::accepted(r)?,
-            }
-        }
+        self.open_once(config, &h)?;
         let view = self
             .show(config, &h)?
             .ok_or_else(|| transient("opened task is missing"))?;
@@ -654,6 +727,37 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
                 Ok(Relayed::Applied)
             }
         }
+    }
+    /// Cancel the task's BBP task, found from its handle or derived as
+    /// `open` derives it. One never opened is opened now and cancelled at
+    /// once, with no principal assigned and no moderator started, so a
+    /// superseded holder's late `open` finds it ended and starts nothing.
+    fn cancel(
+        &mut self,
+        task: &Task,
+        board: &Board,
+        reason: &Text,
+        fence: &Fence,
+    ) -> Result<Progress, ClassifiedError> {
+        // No flags may enter BBP's flag parser from a reason.
+        let words: Vec<_> = reason.as_str().split_whitespace().collect();
+        if words.iter().any(|s| s.starts_with("--")) {
+            return Err(permanent("a cancel reason may not contain flags"));
+        }
+        let h = match orch_dispatch::hosted_handle(board, task.id()) {
+            Some(handle) => self.handle(&handle)?,
+            None => self.located(task, board),
+        };
+        Self::admit(&h, fence)?;
+        let frozen = self.freeze(&h, task, board)?;
+        Self::materialize(&h, &frozen)?;
+        self.open_once(&frozen.config, &h)?;
+        self.request_cancel(&h, &frozen.config, &words, reason)?;
+        self.await_quiesced(&frozen.config, &h)?;
+        let view = self
+            .show(&frozen.config, &h)?
+            .ok_or_else(|| transient("hosted task missing"))?;
+        Self::progress(view)
     }
 }
 

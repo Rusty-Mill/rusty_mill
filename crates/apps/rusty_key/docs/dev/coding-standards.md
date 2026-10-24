@@ -75,7 +75,7 @@ Mirrors [ARCHITECTURE.md §9](../ARCHITECTURE.md#9-deployment--runtime-topologie
 | Feature | Default | Gates | Heavy deps |
 |---|---|---|---|
 | `duckdb` | off | DuckDB long-term backend (Phase 5) | `duckdb-rs` |
-| `gateway` | off | axum HTTP gateway | `axum`, `tower` |
+| `gateway` | off | HTTP/SSE gateway | `rusty_axum`, `rusty_axum_tokio`, `rusty_tokio` |
 | `mcp` | on | MCP client + server | jsonrpc, `reqwest` (SSE) |
 | `web-tools` | on | `web_fetch` / `web_search` (still runtime-gated by `RUSTYKEYS_ALLOW_WEB`) | `reqwest`, HTML strip |
 | `frontend` | off | builds the Tauri desktop app | tauri toolchain (node/vite) |

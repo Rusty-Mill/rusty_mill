@@ -117,7 +117,7 @@ fn dropping_the_set_aborts_tasks_still_in_it() {
 }
 
 /// `try_join_next` hands back only tasks that have already finished, without
-/// waiting (design review 3.7: `rusty_stream`'s accept loop reaps with it).
+/// waiting (design review 3.7: `rusty_journal`'s accept loop reaps with it).
 #[test]
 fn try_join_next_returns_only_finished_tasks() {
     let rt = Runtime::builder().worker_threads(2).build().unwrap();

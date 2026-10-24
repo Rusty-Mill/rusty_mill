@@ -1,9 +1,12 @@
 # Native engine off `ring`: scope for gap 4 (the `rusty_tls` backend seam)
 
-Date: 2026-10-21. Status: **step 1 merged (#865); step 2, the native backend, is draft #871. Gap 4 reopened for the
+Date: 2026-10-21. Status: **step 1 merged (#865); step 2, the native backend, merged as #871 (2026-10-23). Gap 4 reopened for the
 client role (D1) and D2 to D4 decided on 2026-10-22: ADR-0005 accepted, signing compiled out, ChaCha20-Poly1305
-first; the owner confirmed D2 to D4 on GitHub (#868 comment 6343682194).** D5 is still open; its evidence is
-recorded (plan section 0, "AES-GCM review record"). The section 4 re-check of the plan's section 11 table is plan
+first; the owner confirmed D2 to D4 on GitHub (#868 comment 6343682194).** D5's review question was settled on
+2026-10-23 by the owner's attestation that all reviews were complete (plan section 11b). Its export question
+was superseded later that day by the owner's working-session concurrence ("Concur", 23:12:54 UTC):
+AES types require the default-off `rusty_aead/aes-gcm` feature. `native-crypto` explicitly enables it;
+Cargo feature unification makes this API opt-in, not a security boundary. The section 4 re-check of the plan's section 11 table is plan
 section 11b. Every decision in section 6 is the owner's.
 
 Context: `CRYPTO-REPLACEMENT-PLAN.md` section 13.1, gap 4 ("same signatures as the `ring` call sites,
@@ -69,7 +72,7 @@ at `6ba272c8`):
 | OpenSSL interop and BoGo | OpenSSL interop in the client direction (`handrolled_client12_socket_interop`) runs in the variant. **BoGo runs there too, client role only (2026-10-23).** The shim builds on the native backend (`NATIVE=1 bogo/run.sh`), where it reports server and client-certificate scenarios as unimplemented. Its own floor is 430: 445 passed, 0 failed at the pinned commit. The `ring` job's BoGo run, floor 830, keeps covering the server role. This closes the deferral the owner agreed on 2026-10-22 (ADR-0005 decision 4). |
 | Seam differential | Same keys and inputs through both backends: byte-identical records, secrets and Finished values. RFC 8448 known answers under both. |
 | Constant time | The existing `crypto-constant-time` job covers the primitives; the seam adds no secret-dependent branch or index, checked in review. |
-| Plan section 11 table | Re-checked for #871 in plan section 11b (2026-10-23). The re-check lists the review records for each primitive the backend calls. Still without a recorded human review: the #540 secret-handling code at `e3266f2e` (HMAC key paths, ChaCha20-Poly1305, X25519, the Montgomery-core invariants), the `constant_time_eq` and `wipe` helpers, the seam code in #871 (automated reviews only), and AES-GCM (an automated, bounded source review only). To be repeated at the integration commit. |
+| Plan section 11 table | Re-checked for #871 in plan section 11b (2026-10-23). The re-check lists the review records for each primitive the backend calls. Still without a recorded human review: the #540 secret-handling code at `e3266f2e` (HMAC key paths, ChaCha20-Poly1305, X25519, the Montgomery-core invariants), the `constant_time_eq` and `wipe` helpers, the seam code in #871 (automated reviews only), and AES-GCM (an automated, bounded source review only). On 2026-10-23 the owner attested that all these reviews were complete (plan section 11b). The commit, method and findings are not recorded. |
 
 ## 5. Effort
 
@@ -85,7 +88,7 @@ signing out under the cfg (about 1), the CI variant and seam differential (about
 | D2 | ADR | ADR-0002 section 6 requires its own ADR to revisit `ring`. Accept the plan's section 10 draft (ADR-0005), scoped to the client role, or amend ADR-0002 section 6 | **Decided 2026-10-22: ADR-0005 accepted, client role only** |
 | D3 | Signing under the native cfg | Compile out the server and client certificates (ring-free), or keep `ring` for signing only (native primitives, not ring-free) | **Decided 2026-10-22: compile out** |
 | D4 | Cipher-suite order with portable AES (60 to 150 times slower than `ring`) | Put ChaCha20-Poly1305 first under the native cfg (a ClientHello fingerprint change), or confirm the AES intrinsics approval (plan D1, never reconfirmed) | **Decided 2026-10-22: ChaCha20-Poly1305 first** |
-| D5 | AES-GCM review | Whether the 2026-10-13 review of #651 is gap 3's review; and whether `rusty_aead`'s AES types stay exported unconditionally (`AES-GCM-DESIGN.md` section 10). An automated, bounded source review exists. Its re-review of `70139bb3` (comment 6150642627) cleared the source corrections. It explicitly did not accept a constant-time evidence record or production adoption, and no human review is recorded (plan section 0, "AES-GCM review record") | Owner's call |
+| D5 | AES-GCM review | Whether the 2026-10-13 review of #651 is gap 3's review; and whether `rusty_aead`'s AES types stay exported unconditionally (`AES-GCM-DESIGN.md` section 10). An automated, bounded source review exists. Its re-review of `70139bb3` (comment 6150642627) cleared the source corrections. It explicitly did not accept a constant-time evidence record or production adoption, and no human review is recorded (plan section 0, "AES-GCM review record") | **Review question settled 2026-10-23** by the owner's attestation (plan section 11b). **Exports revised 2026-10-23** by the owner's later concurrence ("Concur", 23:12:54 UTC): default-off `rusty_aead/aes-gcm`. `native-crypto` explicitly enables it. Features unify across consumers; this is API opt-in, not a security boundary. AES implementation and review remain complete. |
 
 ## 7. Not in scope
 

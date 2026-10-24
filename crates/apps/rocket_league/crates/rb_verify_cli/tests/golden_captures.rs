@@ -119,7 +119,7 @@ const CASES: &[Case] = &[
         scenario: "scenarios/late_dodge.json",
         fixture: "late_dodge.jsonl",
         car: (1.8, 3.7),
-        ball: None,
+        ball: Some((0.2, 3.1)),
         other: None,
     },
     Case {

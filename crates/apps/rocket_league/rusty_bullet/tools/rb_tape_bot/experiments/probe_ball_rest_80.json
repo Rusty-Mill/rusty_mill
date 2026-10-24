@@ -1,0 +1,49 @@
+{
+  "name": "probe_ball_rest_80: ball rolling at 80 uu/s with matching spin, held 5 s (does it freeze?)",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      -3500,
+      -4000,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      0,
+      -2000,
+      93.15
+    ],
+    "velocity": [
+      0,
+      80,
+      0
+    ],
+    "angular_velocity": [
+      -0.8767123287671232,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 600
+    }
+  ]
+}

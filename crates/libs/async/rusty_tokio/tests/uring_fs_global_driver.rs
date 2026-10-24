@@ -27,7 +27,7 @@ fn global_driver_returns_the_same_singleton_instance_every_call() {
 
 /// The returned `Arc<dyn OpDriver>` is usable directly by
 /// `OpDriver`-generic code, without going through [`UringFile`] at all --
-/// the exact shape `rusty_stream`'s `Segment::create_on`/`open_on` need.
+/// the exact shape `rusty_journal`'s `Segment::create_on`/`open_on` need.
 #[test]
 fn global_driver_is_usable_directly_as_an_op_driver() {
     let rt = rusty_tokio::Runtime::new().unwrap();

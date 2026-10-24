@@ -124,6 +124,14 @@ where
     H: Fn(&Request) -> Response + Send + Sync + 'static,
 {
     let listener = TcpListener::bind((host, port))?;
+    serve_listener(listener, handler)
+}
+
+/// Serve on an already bound listener, retaining ownership of its address. Blocking.
+pub fn serve_listener<H>(listener: TcpListener, handler: H) -> io::Result<()>
+where
+    H: Fn(&Request) -> Response + Send + Sync + 'static,
+{
     let handler = Arc::new(handler);
     for stream in listener.incoming() {
         let stream = match stream {

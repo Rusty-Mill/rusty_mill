@@ -96,6 +96,7 @@ pub(super) fn config(dir: &std::path::Path) -> Config {
         ]),
         live_turns: 1,
         max_wall_secs: 60,
+        end_grace_secs: None,
         slots: None,
     }
 }
@@ -473,4 +474,122 @@ fn the_fence_admits_later_generations_and_refuses_superseded_holders() {
     admit(fence_at(4, "third")).unwrap();
     assert!(unavailable(admit(fence_at(3, "second"))));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn cancel_retries_a_moved_revision_waits_until_quiesced_and_skips_an_ended_task() {
+    let dir = temp();
+    let c = config(&dir);
+    let (task, board) = task();
+    let command = Contract::default();
+    command.replies.borrow_mut().extend([
+        "null".into(),
+        json(&Response::Ok),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Ok),
+        json(&Response::Ok),
+    ]);
+    let sup = FakeSupervisor::default();
+    let mut host = BbpHost::with_seams(
+        c.clone(),
+        "goal".into(),
+        "contract".into(),
+        command.clone(),
+        sup,
+    )
+    .unwrap();
+    host.open(&task, &board, &fence()).unwrap();
+    command.calls.borrow_mut().clear();
+    let mut ended = view(&c, State::Cancelled);
+    ended.cancelled = Some("owner withdrew".into());
+    // The board never got the handle: the host finds the task anyway.
+    command.replies.borrow_mut().extend([
+        json(&Some(view(&c, State::Planning))),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Rejected(Rejection::new(Code::StaleRev, "moved"))),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Ok),
+        "false".into(),
+        "true".into(),
+        json(&Some(ended.clone())),
+    ]);
+    let reason = txt("owner withdrew");
+    let progress = host.cancel(&task, &board, &reason, &fence()).unwrap();
+    assert_eq!(
+        progress,
+        Progress::Cancelled {
+            reason: reason.clone()
+        }
+    );
+    let calls = command.calls.borrow().clone();
+    assert_eq!(
+        calls.iter().map(|a| a[1].as_str()).collect::<Vec<_>>(),
+        ["show", "show", "human", "show", "human", "quiesce", "quiesce", "show"]
+    );
+    assert!(calls[2].windows(2).any(|a| a == ["--rev", "12"]));
+    assert!(calls[4].ends_with(&["cancel".into(), "owner".into(), "withdrew".into()]));
+
+    // An ended task is reported as it stands; nothing is sent.
+    command.calls.borrow_mut().clear();
+    command.replies.borrow_mut().extend([
+        json(&Some(ended.clone())),
+        json(&Some(ended.clone())),
+        "true".into(),
+        json(&Some(ended)),
+    ]);
+    assert_eq!(
+        host.cancel(&task, &board, &reason, &fence()).unwrap(),
+        Progress::Cancelled { reason }
+    );
+    assert!(command.calls.borrow().iter().all(|a| a[1] != "human"));
+    // A reason cannot smuggle a flag into BBP's parser.
+    command.calls.borrow_mut().clear();
+    assert!(host
+        .cancel(&task, &board, &txt("x --rev 1"), &fence())
+        .is_err());
+    assert!(command.calls.borrow().is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn cancel_opens_a_never_opened_task_straight_into_cancelled_and_starts_nothing() {
+    let dir = temp();
+    let c = config(&dir);
+    let (task, board) = task();
+    let command = Contract::default();
+    let mut ended = view(&c, State::Cancelled);
+    ended.cancelled = Some("withdrawn".into());
+    command.replies.borrow_mut().extend([
+        "null".into(),
+        json(&Response::Ok),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Ok),
+        "true".into(),
+        json(&Some(ended)),
+    ]);
+    let sup = FakeSupervisor::default();
+    let mut host = BbpHost::with_seams(
+        c,
+        "goal".into(),
+        "contract".into(),
+        command.clone(),
+        sup.clone(),
+    )
+    .unwrap();
+    let progress = host
+        .cancel(&task, &board, &txt("withdrawn"), &fence())
+        .unwrap();
+    assert!(matches!(progress, Progress::Cancelled { .. }));
+    assert_eq!(
+        command
+            .calls
+            .borrow()
+            .iter()
+            .map(|a| a[1].as_str())
+            .collect::<Vec<_>>(),
+        ["show", "open", "show", "human", "quiesce", "show"],
+        "no principal is assigned"
+    );
+    assert_eq!(sup.0.get(), 0, "no moderator is started");
+    std::fs::remove_dir_all(dir).unwrap();
 }

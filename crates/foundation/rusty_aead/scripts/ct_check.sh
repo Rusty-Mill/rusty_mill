@@ -17,7 +17,7 @@ n=$(count control); echo "taint(control): $n error(s), want >=1"; [ "$n" -ge 1 ]
 # AES-GCM (key and plaintext secret; the key schedule runs under the secret key too). `open` has exactly one report:
 # the public tag verdict in Gcm::open. `control-table` is a secret-indexed table lookup, the leak table-based AES
 # has, and must be reported or a clean result above would mean nothing.
-cargo build --release --example taint_aes -q
+cargo build --release --features aes-gcm --example taint_aes -q
 BIN_AES="$TARGET/release/examples/taint_aes"
 BIN_CHACHA="$BIN"
 BIN="$BIN_AES"

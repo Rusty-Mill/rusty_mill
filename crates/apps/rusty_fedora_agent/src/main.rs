@@ -10,7 +10,7 @@
 //! Linux-only, like the `systemctl`/`journalctl`/`dnf` it shells out to --
 //! excluded from `windows-latest` CI in `.github/workflows/ci.yml`
 //! (`windows-exclude: rusty_fedora_agent`) rather than cfg-gated into a
-//! portable shim, the same treatment `rusty_stream` (built on `io_uring`)
+//! portable shim, the same treatment `rusty_journal` (built on `io_uring`)
 //! already gets there.
 
 mod allowlist;
