@@ -79,7 +79,7 @@ impl<T: rusty_tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for TokioIo<T
 /// A loopback listener for the oracle's server, bound on `rt`.
 fn oracle_listener(rt: &rusty_tokio::Runtime) -> rusty_tokio::io::TcpListener {
     rt.block_on(async {
-        rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap()
+        rusty_tokio::io::TcpListener::bind("127.0.0.1:0").await.unwrap()
     })
 }
 
