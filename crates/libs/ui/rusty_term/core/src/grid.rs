@@ -16,13 +16,15 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::sixel::SixelImage;
 
 mod snapshot;
+#[cfg(test)]
+mod stamp_tests;
 pub use snapshot::SnapshotError;
 #[cfg(any(test, feature = "gui"))]
 mod frame;
 #[cfg(any(test, feature = "gui"))]
 mod view;
 #[cfg(any(test, feature = "gui"))]
-pub use frame::{FrameImage, FrameView};
+pub use frame::{FrameImage, FrameView, RowKey};
 #[cfg(any(test, feature = "gui"))]
 pub use view::View;
 
@@ -390,8 +392,20 @@ pub struct Grid {
     /// a line leaving the top moves whole into [`Grid::scrollback`]. Read it
     /// through [`Grid::row`].
     screen: Vec<Line>,
-    /// Per-row damage flags; `len() == rows`.
+    /// Per-row damage flags; `len() == rows`. One consumer clears them
+    /// ([`Grid::clear_dirty`]); [`Grid::row_stamp`] serves any number.
     pub dirty: Vec<bool>,
+    /// Per-row change stamps (`len() == rows`): the [`Grid::stamp`] taken
+    /// when the row last changed. Never cleared, so any number of observers
+    /// can each ask "changed since I looked". Set wherever `dirty` is.
+    row_stamp: Vec<u64>,
+    /// Stamp of the last scrollback change (push, eviction, clear, reflow,
+    /// retheme).
+    hist_stamp: u64,
+    /// The latest change stamp; strictly increases.
+    stamp: u64,
+    /// Process-unique id, so stamps from different grids never compare equal.
+    id: u64,
     /// Cursor position as `(col, row)`, both zero-based.
     pub cursor: (usize, usize),
     /// Cursor position stashed by a save (`DECSC` / `CSI s`) and restored by
@@ -875,6 +889,12 @@ impl Line {
 }
 
 /// A `rows`-high screen of [`Line::blank`] rows.
+/// A process-unique [`Grid`] id.
+fn next_grid_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn blank_screen(cols: usize, rows: usize, fill: Cell) -> Vec<Line> {
     (0..rows).map(|_| Line::blank(cols, fill)).collect()
 }
@@ -925,6 +945,7 @@ pub struct GridImage {
 /// and logical→visual cell permutations plus which logical cells sit in an
 /// RTL (odd-level) run — those draw their glyph's mirrored form (rule L4).
 #[cfg(any(test, feature = "gui"))]
+#[derive(Clone, PartialEq)]
 pub struct BidiRow {
     pub vis2log: Vec<u16>,
     pub log2vis: Vec<u16>,
@@ -1308,6 +1329,10 @@ impl Grid {
             rows,
             screen,
             dirty: vec![false; rows],
+            row_stamp: vec![0; rows],
+            hist_stamp: 0,
+            stamp: 0,
+            id: next_grid_id(),
             cursor: (0, 0),
             saved_cursor: (0, 0),
             scroll_top: 0,
@@ -1426,7 +1451,7 @@ impl Grid {
             row[x + 1] = Cell::blank();
         }
         row[x] = cell;
-        self.dirty[y] = true;
+        self.touch(y);
     }
 
     /// The cells of live screen row `y` (`cols` of them); empty past the
@@ -1642,9 +1667,7 @@ impl Grid {
             self.copy_band(y + 1, y, l, r);
         }
         self.screen[bottom].cells[l..=r].fill(blank);
-        for d in &mut self.dirty[top..=bottom] {
-            *d = true;
-        }
+        self.touch_rows(top..=bottom);
     }
 
     /// Copy columns `l..=r` of row `src` over the same columns of row `dst`.
@@ -1671,9 +1694,7 @@ impl Grid {
             self.copy_band(y, y + 1, l, r);
         }
         self.screen[top].cells[l..=r].fill(blank);
-        for d in &mut self.dirty[top..=bottom] {
-            *d = true;
-        }
+        self.touch_rows(top..=bottom);
     }
 
     pub fn carriage_return(&mut self) {
@@ -1996,6 +2017,7 @@ impl Grid {
             let mut line = std::mem::take(&mut self.screen[bottom]);
             line.attr = LineAttr::Single;
             self.scrollback.push_back(line);
+            self.touch_hist();
             if self.scrollback.len() > self.scrollback_max {
                 if let Some(evicted) = self.scrollback.pop_front() {
                     self.screen[bottom] = evicted;
@@ -2022,14 +2044,12 @@ impl Grid {
             // the incoming line so the viewed region stays put under new output.
             if self.view_offset > 0 {
                 self.view_offset = (self.view_offset + 1).min(self.display_history_len());
-                self.dirty.iter_mut().for_each(|d| *d = true);
+                self.touch_all();
             }
         }
         self.prime_blank_row(blank);
         self.screen[bottom].clear(&self.blank_row);
-        for d in &mut self.dirty[top..=bottom] {
-            *d = true;
-        }
+        self.touch_rows(top..=bottom);
     }
 
     /// Set the scrolling region to rows `top..=bottom` (0-based, inclusive) and
@@ -2094,8 +2114,12 @@ impl Grid {
             if self.autowrap {
                 // Mark this row as soft-wrapped before leaving it, so the reflow
                 // and scrollback know it and its successor are one logical line.
-                if let Some(line) = self.screen.get_mut(self.cursor.1) {
+                let y = self.cursor.1;
+                if let Some(line) = self.screen.get_mut(y)
+                    && !line.wrapped
+                {
                     line.wrapped = true;
+                    self.touch(y);
                 }
                 self.carriage_return();
                 self.newline();
@@ -2195,7 +2219,7 @@ impl Grid {
                 underline_color: pen.underline_color,
             };
         }
-        self.dirty[y] = true;
+        self.touch(y);
     }
 
     /// The base cell of the grapheme immediately left of the cursor, stepping
@@ -2401,7 +2425,7 @@ impl Grid {
         };
         self.fold_blocks[i].folded = false;
         self.view_offset = self.view_offset.min(self.display_history_len());
-        self.dirty.iter_mut().for_each(|d| *d = true);
+        self.touch_all();
         true
     }
 
@@ -2421,7 +2445,7 @@ impl Grid {
         };
         b.folded = !b.folded;
         self.view_offset = self.view_offset.min(self.display_history_len());
-        self.dirty.iter_mut().for_each(|d| *d = true);
+        self.touch_all();
         true
     }
 
@@ -2748,7 +2772,7 @@ impl Grid {
         suffix.push(ch);
         let id = self.intern_cluster(suffix);
         self.screen[y].cells[x].cluster = id;
-        self.dirty[y] = true;
+        self.touch(y);
     }
 
     /// Return the id for grapheme continuation `suffix`, interning it on first
@@ -2815,7 +2839,7 @@ impl Grid {
                     *cell = erase;
                 }
             }
-            self.dirty[y] = true;
+            self.touch(y);
         }
     }
 
@@ -2835,7 +2859,7 @@ impl Grid {
         if to >= self.cols {
             line.wrapped = false;
         }
-        self.dirty[y] = true;
+        self.touch(y);
     }
 
     /// DECERA — blank the rectangle `[top, bottom] × [left, right]` (0-based,
@@ -2852,7 +2876,7 @@ impl Grid {
         let blank = self.erase_cell();
         for y in top..=bottom {
             self.screen[y].cells[left..=right].fill(blank);
-            self.dirty[y] = true;
+            self.touch(y);
         }
     }
 
@@ -2884,7 +2908,7 @@ impl Grid {
         };
         for y in top..=bottom {
             self.screen[y].cells[left..=right].fill(cell);
-            self.dirty[y] = true;
+            self.touch(y);
         }
     }
 
@@ -2920,7 +2944,7 @@ impl Grid {
         }
         for (y, src) in buf.chunks(w).enumerate() {
             self.screen[dst_top + y].cells[dst_left..dst_left + w].copy_from_slice(src);
-            self.dirty[dst_top + y] = true;
+            self.touch(dst_top + y);
         }
     }
 
@@ -2946,7 +2970,7 @@ impl Grid {
         }
         #[cfg(any(test, feature = "gui"))]
         self.images.clear();
-        self.dirty.iter_mut().for_each(|d| *d = true);
+        self.touch_all();
         self.cursor = (0, 0);
     }
 
@@ -2956,9 +2980,10 @@ impl Grid {
     /// [`Grid::clear_all`].
     pub(crate) fn clear_scrollback(&mut self) {
         self.scrollback.clear();
+        self.touch_hist();
         self.prompt_marks.clear();
         self.view_offset = 0;
-        self.dirty.iter_mut().for_each(|d| *d = true);
+        self.touch_all();
     }
 
     /// The fill used by every erase / scroll-clear path: a blank in the
@@ -3008,8 +3033,8 @@ impl Grid {
             self.cursor_color = cursor;
             // Repaint the cursor cell's row so a pure OSC 12 change shows.
             let row = self.cursor.1;
-            if let Some(d) = self.dirty.get_mut(row) {
-                *d = true;
+            if row < self.rows {
+                self.touch(row);
             }
         }
     }
@@ -3019,8 +3044,8 @@ impl Grid {
     pub(crate) fn set_cursor_style(&mut self, shape: CursorShape, blink: bool) {
         self.cursor_shape = shape;
         self.cursor_blink = blink;
-        if let Some(d) = self.dirty.get_mut(self.cursor.1) {
-            *d = true;
+        if self.cursor.1 < self.rows {
+            self.touch(self.cursor.1);
         }
     }
 
@@ -3043,6 +3068,7 @@ impl Grid {
         self.scrollback_max = max;
         while self.scrollback.len() > max {
             self.scrollback.pop_front();
+            self.touch_hist();
             self.evict_prompt_mark();
             #[cfg(feature = "l13")]
             if let Some(s) = &mut self.command_start {
@@ -3066,7 +3092,7 @@ impl Grid {
     pub fn apply_theme(&mut self, theme: &super::Theme) {
         self.set_default_colors(theme.fg, theme.bg, theme.cursor);
         self.screen = blank_screen(self.cols, self.rows, self.default_cell());
-        self.dirty = vec![true; self.rows];
+        self.reset_damage();
     }
 
     /// Live theme switch (config reload): remap every color that resolves to
@@ -3094,7 +3120,8 @@ impl Grid {
             map(bg);
         }
         self.cursor_color = super::color::remap(self.cursor_color, old, new);
-        self.dirty = vec![true; self.rows];
+        self.reset_damage();
+        self.touch_hist();
         self.epoch += 1;
     }
 
@@ -3156,6 +3183,7 @@ impl Grid {
                 self.scrollback_max,
             );
             self.scrollback = r.scrollback;
+            self.touch_hist();
             self.prompt_marks = r.prompt_marks;
             #[cfg(feature = "l13")]
             {
@@ -3191,6 +3219,7 @@ impl Grid {
                 self.scrollback_max,
             );
             self.scrollback = r.scrollback;
+            self.touch_hist();
             self.screen = r.screen;
             self.cursor = r.cursor;
             self.prompt_marks = r.prompt_marks;
@@ -3208,7 +3237,7 @@ impl Grid {
 
         self.cols = cols;
         self.rows = rows;
-        self.dirty = vec![true; rows];
+        self.reset_damage();
         self.view_offset = 0;
         if let Some(s) = &mut self.status_line {
             s.relayout(cols);
@@ -3238,7 +3267,7 @@ impl Grid {
         // History isn't browsable under a full-screen app; snap to the live view.
         self.view_offset = 0;
         self.reset_scroll_region();
-        self.dirty.iter_mut().for_each(|d| *d = true);
+        self.touch_all();
     }
 
     /// The spare rows (see [`Grid::spare_screen`]) sized to the grid and filled
@@ -3271,7 +3300,7 @@ impl Grid {
                 );
             }
             self.reset_scroll_region();
-            self.dirty.iter_mut().for_each(|d| *d = true);
+            self.touch_all();
         }
     }
 
@@ -3304,7 +3333,7 @@ impl Grid {
         row[x..].rotate_left(n);
         let end = row.len();
         row[end - n..].fill(blank);
-        self.dirty[y] = true;
+        self.touch(y);
     }
 
     /// Insert `n` blank characters at the cursor, shifting the rest of the row
@@ -3319,7 +3348,7 @@ impl Grid {
         let row = &mut self.screen[y].cells;
         row[x..].rotate_right(n);
         row[x..x + n].fill(blank);
-        self.dirty[y] = true;
+        self.touch(y);
     }
 
     /// Blank `n` characters starting at the cursor without shifting (`ECH`).
@@ -3352,9 +3381,7 @@ impl Grid {
             for line in &mut self.screen[cy..(cy + n).min(self.scroll_bottom + 1)] {
                 line.cells[l..=r].fill(blank);
             }
-            for d in &mut self.dirty[cy..=self.scroll_bottom] {
-                *d = true;
-            }
+            self.touch_rows(cy..=self.scroll_bottom);
             return;
         }
         let n = n.min(self.scroll_bottom + 1 - cy);
@@ -3366,9 +3393,7 @@ impl Grid {
         for line in &mut self.screen[cy..cy + n] {
             line.clear(&self.blank_row);
         }
-        for d in &mut self.dirty[cy..=self.scroll_bottom] {
-            *d = true;
-        }
+        self.touch_rows(cy..=self.scroll_bottom);
     }
 
     /// Delete `n` lines at the cursor row, pulling the rows below it up within
@@ -3399,9 +3424,7 @@ impl Grid {
             for line in &mut self.screen[(self.scroll_bottom + 1 - n)..=self.scroll_bottom] {
                 line.cells[l..=r].fill(blank);
             }
-            for d in &mut self.dirty[cy..=self.scroll_bottom] {
-                *d = true;
-            }
+            self.touch_rows(cy..=self.scroll_bottom);
             return;
         }
         let n = n.min(self.scroll_bottom + 1 - cy);
@@ -3413,9 +3436,7 @@ impl Grid {
         for line in &mut self.screen[self.scroll_bottom + 1 - n..=self.scroll_bottom] {
             line.clear(&self.blank_row);
         }
-        for d in &mut self.dirty[cy..=self.scroll_bottom] {
-            *d = true;
-        }
+        self.touch_rows(cy..=self.scroll_bottom);
     }
 
     /// Scroll the current scrolling region up by `n` rows (`SU`). Reuses the
@@ -3461,9 +3482,7 @@ impl Grid {
         for line in &mut self.screen[top..top + n] {
             line.clear(&self.blank_row);
         }
-        for d in &mut self.dirty[top..=bottom] {
-            *d = true;
-        }
+        self.touch_rows(top..=bottom);
     }
 
     /// Move the cursor up one row, scrolling the region down when already at its
@@ -3485,7 +3504,7 @@ impl Grid {
         let y = self.cursor.1;
         if let Some(line) = self.screen.get_mut(y) {
             line.attr = attr;
-            self.dirty[y] = true;
+            self.touch(y);
         }
     }
 
@@ -3568,12 +3587,13 @@ impl Grid {
         self.screen = blank_screen(self.cols, self.rows, self.default_cell());
         #[cfg(any(test, feature = "gui"))]
         self.images.clear();
-        self.dirty = vec![true; self.rows];
+        self.reset_damage();
         self.cursor = (0, 0);
         self.saved_cursor = (0, 0);
         self.scroll_top = 0;
         self.scroll_bottom = self.rows.saturating_sub(1);
         self.scrollback.clear();
+        self.touch_hist();
         self.prompt_marks.clear();
         #[cfg(any(test, feature = "gui"))]
         {
@@ -3656,8 +3676,52 @@ impl Grid {
         for line in &mut self.screen {
             line.clear(&self.blank_row);
         }
-        self.dirty.iter_mut().for_each(|d| *d = true);
+        self.touch_all();
         self.cursor = (0, 0);
+    }
+
+    /// Mark row `y` changed: dirty, with a fresh stamp.
+    fn touch(&mut self, y: usize) {
+        self.stamp += 1;
+        self.dirty[y] = true;
+        self.row_stamp[y] = self.stamp;
+    }
+
+    /// Mark rows `r` changed under one fresh stamp.
+    fn touch_rows(&mut self, r: std::ops::RangeInclusive<usize>) {
+        self.stamp += 1;
+        self.dirty[r.clone()].fill(true);
+        self.row_stamp[r].fill(self.stamp);
+    }
+
+    /// Mark every row changed.
+    fn touch_all(&mut self) {
+        self.touch_rows(0..=self.rows.saturating_sub(1));
+    }
+
+    /// Mark every row changed, resizing the trackers to `rows`.
+    fn reset_damage(&mut self) {
+        self.stamp += 1;
+        self.dirty = vec![true; self.rows];
+        self.row_stamp = vec![self.stamp; self.rows];
+    }
+
+    /// Mark the scrollback changed.
+    fn touch_hist(&mut self) {
+        self.stamp += 1;
+        self.hist_stamp = self.stamp;
+    }
+
+    /// `(grid id, stamp)` of live row `y`'s last change: equal across two
+    /// looks only if the row did not change between them.
+    pub fn row_stamp(&self, y: usize) -> (u64, u64) {
+        (self.id, self.row_stamp[y])
+    }
+
+    /// `(grid id, stamp)` of the last scrollback change, as
+    /// [`Grid::row_stamp`] for history lines.
+    pub fn hist_stamp(&self) -> (u64, u64) {
+        (self.id, self.hist_stamp)
     }
 
     /// Clear all per-row dirty flags. Call after handing a frame to the renderer.
@@ -3673,7 +3737,7 @@ impl Grid {
     /// repainting on their own, so the next frame must be forced to redraw
     /// everything rather than skip rows it thinks are unchanged.
     pub fn force_full_repaint(&mut self) {
-        self.dirty = vec![true; self.rows];
+        self.reset_damage();
     }
 
     /// Overlay a status line at the bottom of the screen (L13 `render/set_status`),
@@ -3684,8 +3748,8 @@ impl Grid {
         let fg = fg.unwrap_or(self.default_fg);
         let bg = bg.unwrap_or(self.default_bg);
         self.status_line = Some(StatusLine::new(text, fg, bg, self.cols));
-        if let Some(d) = self.dirty.last_mut() {
-            *d = true;
+        if let Some(y) = self.rows.checked_sub(1) {
+            self.touch(y);
         }
     }
 
@@ -3694,9 +3758,9 @@ impl Grid {
     #[cfg(feature = "l13")]
     pub(crate) fn clear_status_line(&mut self) {
         if self.status_line.take().is_some()
-            && let Some(d) = self.dirty.last_mut()
+            && let Some(y) = self.rows.checked_sub(1)
         {
-            *d = true;
+            self.touch(y);
         }
     }
 
@@ -3975,7 +4039,7 @@ impl Grid {
             }
         }
         if changed {
-            self.dirty.iter_mut().for_each(|d| *d = true);
+            self.touch_all();
         }
         changed
     }
@@ -4425,7 +4489,7 @@ impl Grid {
                 Ok(re) => Some((re, folded.starts_with('^'))),
                 Err(_) => {
                     // Malformed pattern: finds nothing ("no matches" in the bar).
-                    self.dirty.iter_mut().for_each(|d| *d = true);
+                    self.touch_all();
                     return 0;
                 }
             }
@@ -4434,7 +4498,7 @@ impl Grid {
         };
         let q: Vec<char> = query.chars().map(fold).collect();
         if q.is_empty() {
-            self.dirty.iter_mut().for_each(|d| *d = true);
+            self.touch_all();
             return 0;
         }
         let total = self.scrollback.len() + self.rows;
@@ -4473,7 +4537,7 @@ impl Grid {
             self.search = Some(st);
             self.scroll_to_abs(anchor);
         }
-        self.dirty.iter_mut().for_each(|d| *d = true);
+        self.touch_all();
         n
     }
 
@@ -4496,7 +4560,7 @@ impl Grid {
             s.anchors[s.current].0
         };
         self.scroll_to_abs(abs);
-        self.dirty.iter_mut().for_each(|d| *d = true);
+        self.touch_all();
         true
     }
 
@@ -4530,7 +4594,7 @@ impl Grid {
     #[cfg(any(test, feature = "gui"))]
     pub fn clear_search(&mut self) {
         if self.search.take().is_some() {
-            self.dirty.iter_mut().for_each(|d| *d = true);
+            self.touch_all();
         }
     }
 
@@ -4541,7 +4605,7 @@ impl Grid {
             return false;
         }
         self.view_offset = offset;
-        self.dirty.iter_mut().for_each(|d| *d = true);
+        self.touch_all();
         true
     }
 
