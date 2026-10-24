@@ -79,7 +79,7 @@ for f in glob.glob("crates/foundation/rusty_pk/tests/vectors/rsa_pss_*.json"):
             native += (g["sha"] == g["mgfSha"] and g["sLen"] == H.get(g["sha"], -1))
 print(f"rsa_pss: {pss} cases across files; {native} use parameters in our profile (hash = mgf hash, salt = hash length); the rest are checked only for equality with ring and, if valid under other parameters, rejection")
 PY
-for f in crates/foundation/rusty_pk/tests/vectors/ecdsa_p256_sha384.txt crates/foundation/rusty_pk/tests/vectors/rsa_forgeries.txt; do echo "generated: $f lines=$(wc -l < $f)"; done
+for f in crates/foundation/rusty_pk/tests/vectors/ecdsa_p256_sha384.txt crates/foundation/rusty_pk/tests/vectors/rsa_forgeries.txt crates/foundation/rusty_pk/tests/vectors/hedged_ecdsa.txt; do echo "generated: $f lines=$(wc -l < $f)"; done
 
 section "tests (executed / failed / ignored per binary)"
 cargo test --release -p rusty_ct_check -p rusty_sha2 -p rusty_pk -p rusty_aead -p rusty_crypto_key --features rusty_aead/aes-gcm >/dev/null 2>&1 || fail "cargo test"
