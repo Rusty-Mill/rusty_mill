@@ -11,7 +11,7 @@ use rusty_tokio::task::JoinHandle;
 use rusty_uuid::Uuid;
 
 use crate::Config;
-use crate::checkpoint::{Replay, validate_size};
+use crate::checkpoint::validate_size;
 use crate::outbox::Outbox;
 use crate::pty::{self, Process, Pty};
 
@@ -29,7 +29,6 @@ struct BlockRt {
     grid: Grid,
     parser: AnsiParser,
     reader: JoinHandle<()>,
-    replay: Replay,
 }
 
 impl BlockRt {
@@ -71,7 +70,7 @@ impl State {
     pub(crate) fn connect(&mut self, outbox: Outbox, theirs: Features) -> ClientId {
         let client = self.mux.connect();
         self.clients.insert(client, outbox);
-        let features = theirs.intersection(Features::REPLAY_SNAPSHOT);
+        let features = theirs.intersection(Features::CHECKPOINT_V1);
         self.features.insert(client, features);
         self.send(client, &Message::Welcome { features, client });
         self.flush();
@@ -149,16 +148,12 @@ impl State {
                 if !self
                     .features
                     .get(&client)
-                    .is_some_and(|f| f.contains(Features::REPLAY_SNAPSHOT))
+                    .is_some_and(|f| f.contains(Features::CHECKPOINT_V1))
                 {
-                    return (req, Err("attach requires REPLAY_SNAPSHOT support".into()));
+                    return (req, Err("attach requires CHECKPOINT_V1 support".into()));
                 }
-                if !self
-                    .blocks
-                    .get(&block)
-                    .is_some_and(|rt| rt.replay.available())
-                {
-                    return (req, Err("exact replay checkpoint unavailable (block closed or replay budget exceeded)".into()));
+                if self.clients.get(&client).is_some_and(|out| out.attaching()) {
+                    return (req, Err("checkpoint transfer already in progress".into()));
                 }
                 let result = self.mux.attach(client, block);
                 (
@@ -205,7 +200,6 @@ impl State {
                 grid,
                 parser: AnsiParser::new(),
                 reader,
-                replay: Replay::new(size),
             },
         );
         Ok(Outcome::Done(Some(block.uuid())))
@@ -247,7 +241,6 @@ impl State {
             .get_mut(&block)
             .ok_or_else(|| format!("block {block} has no PTY"))?;
         rt.grid.resize(size.cols().into(), size.rows().into());
-        rt.replay.resize(size);
         Ok(Outcome::Done(None))
     }
 
@@ -257,7 +250,6 @@ impl State {
         let Some(rt) = self.blocks.get_mut(&block) else {
             return Vec::new();
         };
-        rt.replay.output(data);
         rt.parser.advance(&mut rt.grid, data);
         let replies = rt.parser.take_responses();
         let frame = encode(&Message::Output {
@@ -295,12 +287,21 @@ impl State {
         let Some(rt) = self.blocks.get(&block) else {
             return;
         };
-        let Some(data) = rt.replay.snapshot() else {
-            self.drop_client(client);
-            return;
+        let data = match rusty_term_core::checkpoint::encode(&rt.grid, &rt.parser) {
+            Ok(data) => data,
+            Err(err) => {
+                eprintln!("rusty-mux-server: encoding checkpoint: {err}");
+                self.drop_client(client);
+                return;
+            }
         };
-        self.send(client, &Message::Snapshot { block, data });
-        self.send(client, &Message::Ready { block });
+        if !self
+            .clients
+            .get(&client)
+            .is_some_and(|out| out.checkpoint(block, data))
+        {
+            self.drop_client(client);
+        }
     }
 
     fn send(&mut self, client: ClientId, message: &Message) {
@@ -391,6 +392,9 @@ impl State {
     pub(crate) fn test_client(&self) -> ClientId {
         *self.clients.keys().next().unwrap()
     }
+    pub(crate) fn test_checkpoint(&self, client: ClientId, data: Vec<u8>) {
+        assert!(self.clients[&client].checkpoint(BlockId::from_uuid(Uuid::nil()), data));
+    }
     pub(crate) fn test_send(&mut self, client: ClientId, data: Vec<u8>) {
         self.send_frame(client, data);
     }
@@ -402,7 +406,7 @@ impl State {
 #[cfg(test)]
 mod regression {
     use super::*;
-    use crate::checkpoint::{MAX_REPLAY, restore};
+    use crate::checkpoint::Receiver;
     use crate::outbox::{Inbox, outbox};
     use rusty_tokio::{Builder, LocalOptions};
 
@@ -420,7 +424,7 @@ mod regression {
         });
         let (out, inbox, _) = outbox();
         let mut state = shared.borrow_mut();
-        let client = state.connect(out, Features::REPLAY_SNAPSHOT);
+        let client = state.connect(out, Features::CHECKPOINT_V1);
         let session = state.mux.create_session("s");
         let window = state.mux.create_window(session, "w").unwrap();
         let Outcome::Done(Some(id)) = state
@@ -448,13 +452,21 @@ mod regression {
                 let (shared, client, block, mut inbox) = fixture();
                 shared.borrow_mut().output(block, prefix);
                 State::request(&shared, client, Message::Attach { req: 77, block });
+                let mut receiver = Receiver::default();
                 let (mut grid, mut parser) = loop {
-                    if let Some(Message::Snapshot { data, .. }) = inbox
-                        .next()
-                        .await
-                        .and_then(|f| rusty_mux_proto::decode(&f).unwrap().map(|v| v.0))
+                    match rusty_mux_proto::decode(&inbox.next().await.unwrap())
+                        .unwrap()
+                        .unwrap()
+                        .0
                     {
-                        break restore(&data).unwrap();
+                        Message::Checkpoint {
+                            offset,
+                            total,
+                            data,
+                            ..
+                        } => receiver.push(offset, total, &data).unwrap(),
+                        Message::Ready { .. } => break receiver.finish().unwrap(),
+                        _ => {}
                     }
                 };
                 shared.borrow_mut().output(block, suffix);
@@ -511,7 +523,94 @@ mod regression {
     }
 
     #[test]
-    fn dimensions_and_unavailable_checkpoints_fail_before_mutation() {
+    fn invalid_checkpoint_closes_without_chunks_or_ready() {
+        runtime().block_on(async {
+            let (shared, client, block, mut inbox) = fixture();
+            shared
+                .borrow_mut()
+                .blocks
+                .get_mut(&block)
+                .unwrap()
+                .grid
+                .cursor = (usize::MAX, 0);
+            State::request(&shared, client, Message::Attach { req: 12, block });
+            assert!(!shared.borrow().has_client(client));
+            while let Some(frame) = inbox.next().await {
+                assert!(!matches!(
+                    rusty_mux_proto::decode(&frame).unwrap().unwrap().0,
+                    Message::Checkpoint { .. } | Message::Ready { .. }
+                ));
+            }
+            shared.borrow_mut().mux.close_block(block).unwrap();
+            shared.borrow_mut().flush();
+        });
+    }
+
+    #[test]
+    fn sustained_output_and_repeated_attach_preserve_normal_history() {
+        runtime().block_on(async {
+            let (shared, client, block, mut inbox) = fixture();
+            // More than the rejected lifetime replay cap; only current Grid
+            // state is retained. Fill the normal 10,000-row history as well.
+            let bytes = vec![b'x'; 16 << 10];
+            for _ in 0..320 {
+                shared.borrow_mut().output(block, &bytes);
+            }
+            assert_eq!(shared.borrow().blocks[&block].grid.scrollback_len(), 10_000);
+            for req in 1..=3 {
+                State::request(&shared, client, Message::Attach { req, block });
+                // Continuation output arrives while the checkpoint is still
+                // queued: it must follow Ready and apply exactly once.
+                shared.borrow_mut().output(block, b"TAIL");
+                let mut receiver = Receiver::default();
+                let mut chunks = 0;
+                let mut declared = 0;
+                let (mut grid, mut parser) = loop {
+                    let frame = inbox.next().await.unwrap();
+                    assert!(frame.len() <= crate::checkpoint::CHUNK_BYTES + 128);
+                    match rusty_mux_proto::decode(&frame).unwrap().unwrap().0 {
+                        Message::Checkpoint {
+                            offset,
+                            total,
+                            data,
+                            ..
+                        } => {
+                            chunks += 1;
+                            declared = total;
+                            receiver.push(offset, total, &data).unwrap();
+                        }
+                        Message::Ready { .. } => break receiver.finish().unwrap(),
+                        Message::Output { .. } => panic!("output preceded Ready"),
+                        _ => {}
+                    }
+                };
+                assert!(declared > rusty_mux_proto::MAX_FRAME as u64);
+                assert!(chunks > 1);
+                loop {
+                    if let Message::Output { data, .. } =
+                        rusty_mux_proto::decode(&inbox.next().await.unwrap())
+                            .unwrap()
+                            .unwrap()
+                            .0
+                    {
+                        assert_eq!(data, b"TAIL");
+                        parser.advance(&mut grid, &data);
+                        break;
+                    }
+                }
+                assert_eq!(grid.scrollback_len(), 10_000);
+                assert_eq!(
+                    grid.encode_snapshot(),
+                    shared.borrow().blocks[&block].grid.encode_snapshot()
+                );
+                State::request(&shared, client, Message::Detach { req: req + 10 });
+            }
+            State::request(&shared, client, Message::CloseBlock { req: 99, block });
+        });
+    }
+
+    #[test]
+    fn dimensions_fail_before_mutation() {
         runtime().block_on(async {
             let (shared, client, block, _inbox) = fixture();
             let window = shared.borrow().mux.block(block).unwrap().window();
@@ -521,7 +620,7 @@ mod regression {
                 .mux
                 .acquire_lease(client, block)
                 .unwrap();
-            for (cols, rows) in [(4097, 1), (1, 4097), (65535, 65535), (257, 256)] {
+            for (cols, rows) in [(4097, 1), (1, 4097), (65535, 65535), (257, 256), (500, 100)] {
                 let size = Size::new(cols, rows).unwrap();
                 let mut state = shared.borrow_mut();
                 assert!(state.create_block(&shared, window, size).is_err());
@@ -534,19 +633,6 @@ mod regression {
                 );
             }
             shared.borrow_mut().mux.detach(client).unwrap();
-            shared
-                .borrow_mut()
-                .blocks
-                .get_mut(&block)
-                .unwrap()
-                .replay
-                .output(&vec![0; MAX_REPLAY]);
-            let (_, result) =
-                shared
-                    .borrow_mut()
-                    .apply(&shared, client, Message::Attach { req: 9, block });
-            assert!(result.is_err());
-            assert_eq!(shared.borrow().mux.client(client).unwrap().attached(), None);
             State::request(&shared, client, Message::CloseBlock { req: 99, block });
         });
     }

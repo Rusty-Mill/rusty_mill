@@ -135,7 +135,7 @@ mod regression {
             let (peer, server) = UnixStream::pair().unwrap();
             peer.write_all(
                 &encode(&Message::Hello {
-                    features: Features::REPLAY_SNAPSHOT,
+                    features: Features::CHECKPOINT_V1,
                 })
                 .unwrap(),
             )
@@ -146,10 +146,14 @@ mod regression {
             let client = state.borrow().test_client();
             // The peer stops reading. Force the writer into a pending write_all,
             // then overfill its queue while the reader waits for another request.
-            state.borrow_mut().test_send(client, vec![0; 4 << 20]);
+            state.borrow().test_checkpoint(client, vec![0; 17 << 20]);
             rusty_tokio::task::yield_now().await;
             let queued = state.borrow().test_queue(client);
-            assert_eq!(queued.get(), 0, "writer must have dequeued the large frame");
+            assert_eq!(
+                queued.get(),
+                0,
+                "writer must have dequeued the large checkpoint"
+            );
             assert!(
                 !task.is_finished(),
                 "non-reading peer must keep connection pending"

@@ -101,3 +101,30 @@ fn input_without_the_lease_is_refused() {
         }
     }
 }
+
+#[test]
+fn reattach_after_more_than_four_mib_of_real_pty_output() {
+    let path = start_server();
+    let mut a = Client::connect(&path);
+    a.parse = false;
+    let block = block_for(&mut a);
+    // A verbose command must not consume an attach lifetime budget. The test
+    // uses local /dev/zero only and waits for actual PTY output completion.
+    a.input(
+        block,
+        b"head -c 5242880 /dev/zero | tr '\\000' x; printf '\\nBIG_%s\\n' DONE\r",
+    );
+    a.wait_for(block, "BIG_DONE");
+    let mut b = Client::connect(&path);
+    let mut c = Client::connect(&path);
+    c.request(|req| Message::Attach { req, block });
+    for n in 100..103 {
+        b.request(|req| Message::Attach { req, block });
+        let marker = run_and_wait(&mut a, block, n);
+        b.wait_for(block, &marker);
+        c.wait_for(block, &marker);
+        assert_eq!(b.snapshot(block), c.snapshot(block));
+        b.request(|req| Message::Detach { req });
+    }
+    a.request(|req| Message::CloseBlock { req, block });
+}

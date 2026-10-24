@@ -7,15 +7,18 @@ use crate::Error;
 use crate::field::{In, Out};
 
 /// Optional protocol capabilities. Each peer sends its own; the session uses
-/// the intersection. Replay checkpoints require explicit opt-in.
+/// the intersection. Continuation checkpoints require explicit opt-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Features(u64);
 
 impl Features {
     pub const NONE: Self = Self(0);
 
-    /// Snapshot payload is the versioned RMRP replay checkpoint (see mux docs).
+    /// Reserved: rejected experimental RMRP replay capability.
     pub const REPLAY_SNAPSHOT: Self = Self(1);
+
+    /// RTCP v1 headless checkpoints transferred in ordered Checkpoint chunks.
+    pub const CHECKPOINT_V1: Self = Self(1 << 1);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -104,9 +107,18 @@ pub enum Message {
         reason: String,
     },
     Event(Event),
-    /// The block's terminal state, sent on attach before any output.
+    /// Legacy drawable snapshot; not a raw-output continuation checkpoint.
+    /// The Phase 1 server uses negotiated Checkpoint chunks for attach.
     Snapshot {
         block: BlockId,
+        data: Vec<u8>,
+    },
+    /// A chunk of RTCP v1, negotiated with CHECKPOINT_V1. Offsets must be
+    /// contiguous from zero and total is constant throughout one transfer.
+    Checkpoint {
+        block: BlockId,
+        offset: u64,
+        total: u64,
         data: Vec<u8>,
     },
     /// The snapshot is complete; raw output follows.
@@ -134,9 +146,11 @@ const FEATURES: u32 = 10;
 const CREATED: u32 = 11;
 const REASON: u32 = 12;
 const KIND: u32 = 13;
+const OFFSET: u32 = 15;
+const TOTAL: u32 = 16;
 const HOLDER: u32 = 14;
-// IDs 1..=HOLDER are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = HOLDER as usize;
+// IDs 1..=TOTAL are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = TOTAL as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -157,6 +171,7 @@ mod ty {
     pub const SNAPSHOT: u8 = 0x85;
     pub const READY: u8 = 0x86;
     pub const OUTPUT: u8 = 0x87;
+    pub const CHECKPOINT: u8 = 0x88;
 }
 
 impl Message {
@@ -222,6 +237,18 @@ impl Message {
             M::Snapshot { block, data } => {
                 out.uuid(BLOCK, block.uuid()).bytes(DATA, data);
                 ty::SNAPSHOT
+            }
+            M::Checkpoint {
+                block,
+                offset,
+                total,
+                data,
+            } => {
+                out.uuid(BLOCK, block.uuid())
+                    .varint(OFFSET, *offset)
+                    .varint(TOTAL, *total)
+                    .bytes(DATA, data);
+                ty::CHECKPOINT
             }
             M::Ready { block } => {
                 out.uuid(BLOCK, block.uuid());
@@ -299,6 +326,12 @@ impl Message {
             ty::EVENT => M::Event(get_event(&f)?),
             ty::SNAPSHOT => M::Snapshot {
                 block: block(&f, BLOCK)?,
+                data: f.bytes(DATA)?.to_vec(),
+            },
+            ty::CHECKPOINT => M::Checkpoint {
+                block: block(&f, BLOCK)?,
+                offset: f.varint(OFFSET)?,
+                total: f.varint(TOTAL)?,
                 data: f.bytes(DATA)?.to_vec(),
             },
             ty::READY => M::Ready {

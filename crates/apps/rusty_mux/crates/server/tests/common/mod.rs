@@ -56,6 +56,7 @@ pub struct Client {
     id: ClientId,
     next_req: u64,
     terms: HashMap<BlockId, (Grid, AnsiParser)>,
+    checkpoints: HashMap<BlockId, rusty_mux_server::checkpoint::Receiver>,
     /// Raw output received since attach, per block.
     output: HashMap<BlockId, Vec<u8>>,
     ready: HashMap<BlockId, bool>,
@@ -74,12 +75,13 @@ impl Client {
             id: ClientId::from_uuid(rusty_uuid::Uuid::nil()),
             next_req: 1,
             terms: HashMap::new(),
+            checkpoints: HashMap::new(),
             output: HashMap::new(),
             ready: HashMap::new(),
             parse: true,
         };
         client.send(&Message::Hello {
-            features: Features::REPLAY_SNAPSHOT,
+            features: Features::CHECKPOINT_V1,
         });
         match client.recv() {
             Message::Welcome { client: id, .. } => client.id = id,
@@ -111,10 +113,20 @@ impl Client {
 
     fn apply(&mut self, message: &Message) {
         match message {
-            Message::Snapshot { block, data } => {
-                let terminal =
-                    rusty_mux_server::checkpoint::restore(data).expect("checkpoint decodes");
-                self.terms.insert(*block, terminal);
+            Message::Checkpoint {
+                block,
+                offset,
+                total,
+                data,
+            } => {
+                if *offset == 0 {
+                    self.checkpoints.insert(*block, Default::default());
+                }
+                self.checkpoints
+                    .get_mut(block)
+                    .expect("checkpoint started")
+                    .push(*offset, *total, data)
+                    .expect("valid checkpoint chunk");
                 self.output.insert(*block, Vec::new());
                 self.ready.insert(*block, false);
             }
@@ -124,6 +136,13 @@ impl Client {
                 }
             }
             Message::Ready { block } => {
+                let terminal = self
+                    .checkpoints
+                    .remove(block)
+                    .expect("checkpoint")
+                    .finish()
+                    .expect("restore");
+                self.terms.insert(*block, terminal);
                 self.ready.insert(*block, true);
             }
             Message::Output { block, data } => {
@@ -174,7 +193,23 @@ impl Client {
     /// Reads until `block`'s output since attach contains `needle`.
     pub fn wait_for(&mut self, block: BlockId, needle: &str) {
         let deadline = Instant::now() + PATIENCE;
-        while !self.saw(block, needle) {
+        let mut checked = 0usize;
+        loop {
+            let out = self
+                .output
+                .get(&block)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let start = checked
+                .min(out.len())
+                .saturating_sub(needle.len().saturating_sub(1));
+            if out[start..]
+                .windows(needle.len())
+                .any(|w| w == needle.as_bytes())
+            {
+                return;
+            }
+            checked = out.len();
             assert!(
                 Instant::now() < deadline,
                 "timed out waiting for {needle:?}"
