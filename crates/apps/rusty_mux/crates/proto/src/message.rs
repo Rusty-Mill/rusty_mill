@@ -132,6 +132,8 @@ const CREATED: u32 = 11;
 const REASON: u32 = 12;
 const KIND: u32 = 13;
 const HOLDER: u32 = 14;
+// HOLDER is the highest id; every id must have a decode slot.
+const _: () = assert!((HOLDER as usize) < crate::field::SLOTS);
 
 mod ty {
     pub const HELLO: u8 = 0x01;

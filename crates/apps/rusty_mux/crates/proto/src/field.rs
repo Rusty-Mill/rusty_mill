@@ -36,16 +36,21 @@ enum Value<'a> {
     Bytes(&'a [u8]),
 }
 
+/// Field ids below this are kept for lookup; every message's ids must fit.
+/// Higher ids are parsed and validated, then dropped, so decode state stays
+/// fixed however many fields a frame repeats.
+pub(crate) const SLOTS: usize = 16;
+
 /// A message body's fields, looked up by id. The last occurrence of an id wins.
 pub(crate) struct In<'a> {
     message: u8,
-    fields: Vec<(u32, Value<'a>)>,
+    slots: [Option<Value<'a>>; SLOTS],
 }
 
 impl<'a> In<'a> {
     pub(crate) fn parse(message: u8, body: &'a [u8]) -> Result<Self, Error> {
         let mut r = Reader::new(body);
-        let mut fields = Vec::new();
+        let mut slots = [None; SLOTS];
         while !r.is_empty() {
             let key = varint::read(&mut r)?;
             let id = u32::try_from(key >> 1).map_err(|_| Error::FieldIdTooLarge(key))?;
@@ -57,21 +62,24 @@ impl<'a> In<'a> {
                     Value::Bytes(r.read_bytes(len)?)
                 }
             };
-            fields.push((id, value));
+            if let Some(slot) = usize::try_from(id).ok().and_then(|i| slots.get_mut(i)) {
+                *slot = Some(value);
+            }
         }
-        Ok(Self { message, fields })
+        Ok(Self { message, slots })
+    }
+
+    fn get(&self, id: u32) -> Option<Value<'a>> {
+        usize::try_from(id)
+            .ok()
+            .and_then(|i| self.slots.get(i).copied().flatten())
     }
 
     fn find(&self, id: u32) -> Result<Value<'a>, Error> {
-        self.fields
-            .iter()
-            .rev()
-            .find(|(f, _)| *f == id)
-            .map(|&(_, v)| v)
-            .ok_or(Error::MissingField {
-                message: self.message,
-                field: id,
-            })
+        self.get(id).ok_or(Error::MissingField {
+            message: self.message,
+            field: id,
+        })
     }
 
     pub(crate) fn invalid(&self, id: u32) -> Error {
@@ -115,7 +123,7 @@ impl<'a> In<'a> {
         id: u32,
         get: impl FnOnce(&Self, u32) -> Result<T, Error>,
     ) -> Result<Option<T>, Error> {
-        if !self.fields.iter().any(|(f, _)| *f == id) {
+        if self.get(id).is_none() {
             return Ok(None);
         }
         get(self, id).map(Some)

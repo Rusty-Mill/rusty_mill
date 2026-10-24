@@ -172,6 +172,71 @@ fn unknown_fields_are_skipped() {
     );
 }
 
+/// Fields repeated past any real use: one per id is kept, so decode state is
+/// fixed whatever the count.
+const REPEATS: u64 = 1 << 20;
+const FEATURES_ID: u32 = 10;
+
+#[test]
+fn decode_state_is_bounded_by_ids_not_by_field_count() {
+    // `In` owns nothing to free, so it cannot grow with the frame.
+    assert!(!std::mem::needs_drop::<crate::field::In<'static>>());
+    assert!(std::mem::size_of::<crate::field::In<'static>>() <= 512);
+    // Unknown ids, both below and above the kept range.
+    let unknown = raw_frame(0x01, |o| {
+        for i in 0..REPEATS {
+            o.varint(15, i).varint(99, i).bytes(1000, b"x");
+        }
+        o.varint(FEATURES_ID, 0);
+    });
+    assert_eq!(
+        decode(&unknown).unwrap().unwrap().0,
+        Message::Hello {
+            features: Features::NONE
+        }
+    );
+    // A known id repeated: the last occurrence wins.
+    let repeated = raw_frame(0x01, |o| {
+        for i in 0..=REPEATS {
+            o.varint(FEATURES_ID, i);
+        }
+    });
+    assert_eq!(
+        decode(&repeated).unwrap().unwrap().0,
+        Message::Hello {
+            features: Features::from_bits(REPEATS)
+        }
+    );
+}
+
+#[test]
+fn the_last_occurrence_of_a_field_is_the_one_validated() {
+    let frame = raw_frame(0x01, |o| {
+        o.varint(FEATURES_ID, 1).bytes(FEATURES_ID, b"x");
+    });
+    assert_eq!(
+        decode(&frame),
+        Err(Error::InvalidField {
+            message: 0x01,
+            field: FEATURES_ID
+        })
+    );
+}
+
+#[test]
+fn malformed_unknown_fields_are_still_rejected() {
+    // Unknown id 99 as a byte string whose length runs past the frame.
+    assert_eq!(
+        decode(&[0, 0, 0, 4, 0x06, 0xc7, 0x01, 0x05]),
+        Err(Error::Truncated)
+    );
+    // Unknown id 99 as a varint cut off mid-value.
+    assert_eq!(
+        decode(&[0, 0, 0, 4, 0x06, 0xc6, 0x01, 0x80]),
+        Err(Error::Truncated)
+    );
+}
+
 #[test]
 fn oversized_length_is_rejected_from_the_prefix_alone() {
     let prefix = (MAX_FRAME + 1).to_be_bytes();
