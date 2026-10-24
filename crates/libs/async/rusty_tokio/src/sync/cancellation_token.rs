@@ -25,10 +25,11 @@
 //!
 //! ## Locking
 //!
-//! Each node has its own lock, and no code path ever holds two: child
-//! creation locks only the parent, unlinking locks only the parent, and
-//! [`CancellationToken::cancel`] walks the subtree one node at a time. No
-//! waker is woken or dropped and no node is dropped while a lock is held
+//! Each node has its own state lock. Cancellation additionally takes a
+//! tree-wide propagation lock, serializing overlapping walks; each walk
+//! locks only one node state at a time. Child creation and unlinking take
+//! only the parent state lock. No
+//! waker is cloned, woken or dropped and no node is dropped while a lock is held
 //! (this crate has had review findings on exactly that): wakers are
 //! collected while marking and woken after the whole subtree is marked,
 //! which also means every task woken by a cancellation already sees every
@@ -45,10 +46,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Context, Poll, Waker};
 
 struct Node {
-    /// Mirrors `State::cancelled`, set while holding the lock, so
+    /// Publishes completed subtree cancellation while holding the lock, so
     /// `is_cancelled` and an already-cancelled poll never lock.
     cancelled: AtomicBool,
     state: Mutex<State>,
+    /// Serializes propagation, never held while invoking or dropping wakers.
+    propagation: Arc<Mutex<()>>,
     /// `None` for a root, and for a child created from an
     /// already-cancelled parent (it starts cancelled and has nothing to
     /// unlink from).
@@ -58,6 +61,7 @@ struct Node {
 }
 
 struct State {
+    /// Propagation has started; `Node::cancelled` publishes completion.
     cancelled: bool,
     children: HashMap<u64, Weak<Node>>,
     waiters: HashMap<u64, Waker>,
@@ -75,13 +79,17 @@ impl Node {
                 waiters: HashMap::new(),
                 next_key: 0,
             }),
+            propagation: parent.as_ref().map_or_else(
+                || Arc::new(Mutex::new(())),
+                |parent| parent.propagation.clone(),
+            ),
             parent,
             key,
         }
     }
 
     /// Nothing that can panic runs under these locks (no user code, only
-    /// map operations and waker clones), so a poisoned lock holds
+    /// map operations), so a poisoned lock holds
     /// consistent data; recover it rather than propagate a panic.
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
@@ -146,15 +154,22 @@ impl CancellationToken {
     /// Cancels this token and all its descendants, waking every task
     /// waiting on any of them. Idempotent.
     pub fn cancel(&self) {
+        let propagation = self
+            .node
+            .propagation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut wakers = Vec::new();
+        let mut marked = Vec::new();
         let mut pending = vec![self.node.clone()];
         while let Some(node) = pending.pop() {
             let mut state = node.lock();
             if state.cancelled {
+                drop(state);
+                marked.push(node);
                 continue;
             }
             state.cancelled = true;
-            node.cancelled.store(true, Ordering::Release);
             wakers.extend(std::mem::take(&mut state.waiters).into_values());
             // Upgraded under the lock, but the `Arc`s live in `pending`
             // and are dropped only after it's released (a child whose
@@ -164,7 +179,18 @@ impl CancellationToken {
             pending.extend(children.values().filter_map(Weak::upgrade));
             drop(state);
             drop(children);
+            marked.push(node);
         }
+        // Every descendant is marked before completion becomes observable.
+        // A concurrent cancel waits at the propagation lock, rather than
+        // confusing an in-progress node with a completed subtree.
+        for node in marked.iter().rev() {
+            let mut state = node.lock();
+            node.cancelled.store(true, Ordering::Release);
+            wakers.extend(std::mem::take(&mut state.waiters).into_values());
+        }
+        drop(propagation);
+        drop(marked);
         for waker in wakers {
             waker.wake();
         }
@@ -228,25 +254,23 @@ impl Waiter {
         if node.cancelled.load(Ordering::Acquire) {
             return Poll::Ready(());
         }
+        // RawWaker::clone is arbitrary user code (including cancel).
+        let candidate = cx.waker().clone();
         let mut state = node.lock();
-        if state.cancelled {
+        if node.cancelled.load(Ordering::Acquire) {
+            drop(state);
+            drop(candidate);
             return Poll::Ready(());
         }
-        let replaced = match self.key {
-            Some(key) => match state.waiters.get_mut(&key) {
-                Some(existing) if existing.will_wake(cx.waker()) => None,
-                Some(existing) => Some(std::mem::replace(existing, cx.waker().clone())),
-                None => state.waiters.insert(key, cx.waker().clone()),
-            },
-            None => {
-                let key = state.next_key;
-                state.next_key += 1;
-                self.key = Some(key);
-                state.waiters.insert(key, cx.waker().clone())
-            }
-        };
+        let key = *self.key.get_or_insert_with(|| {
+            let key = state.next_key;
+            state.next_key += 1;
+            key
+        });
+        // Even while propagation is in progress, register: its traversal
+        // will drain this node, or its completion will drain it below.
+        let replaced = state.waiters.insert(key, candidate);
         drop(state);
-        // A stale waker is dropped only now, with the lock released.
         drop(replaced);
         Poll::Pending
     }
@@ -345,6 +369,132 @@ impl Drop for DropGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_cancel_waits_for_stalled_descendant_and_wakes_after_completion() {
+        use std::task::Wake;
+        struct CheckSubtree(CancellationToken, CancellationToken);
+        impl Wake for CheckSubtree {
+            fn wake(self: Arc<Self>) {
+                assert!(self.1.is_cancelled());
+                // Wake callbacks may synchronously cancel an ancestor.
+                self.0.cancel();
+            }
+        }
+        let root = CancellationToken::new();
+        let child = root.child_token();
+        let grandchild = child.child_token();
+        let waker = Waker::from(Arc::new(CheckSubtree(root.clone(), grandchild.clone())));
+        let mut waiter = Box::pin(root.cancelled());
+        assert!(waiter
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        let stalled = child.node.lock();
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| root.cancel());
+            // Wait for propagation to reach the held descendant lock.
+            while !root.node.lock().cancelled {
+                std::thread::yield_now();
+            }
+            assert!(!root.is_cancelled());
+            let mut late = Box::pin(root.cancelled());
+            assert!(late
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending());
+            assert!(matches!(
+                root.node.propagation.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            let second = scope.spawn(|| {
+                root.cancel();
+                assert!(grandchild.is_cancelled());
+            });
+            drop(stalled);
+            first.join().unwrap();
+            second.join().unwrap();
+            assert!(late
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_ready());
+        });
+        assert!(root.is_cancelled());
+        assert!(grandchild.is_cancelled());
+    }
+
+    #[test]
+    fn raw_waker_clone_and_drop_can_reenter_token() {
+        use std::task::{RawWaker, RawWakerVTable};
+        struct Reentrant(CancellationToken, bool);
+        unsafe fn clone(data: *const ()) -> RawWaker {
+            // SAFETY: all data pointers come from Arc::into_raw below.
+            let value = unsafe { &*data.cast::<Reentrant>() };
+            if value.1 {
+                value.0.cancel();
+                assert!(value.0.child_token().is_cancelled());
+            }
+            // SAFETY: the borrowed waker keeps this Arc allocation alive.
+            unsafe { Arc::increment_strong_count(data.cast::<Reentrant>()) };
+            RawWaker::new(data, &VTABLE)
+        }
+        unsafe fn drop_raw(data: *const ()) {
+            // SAFETY: each owned raw waker owns exactly one Arc reference.
+            let value = unsafe { Arc::from_raw(data.cast::<Reentrant>()) };
+            value.0.cancel();
+            assert!(value.0.child_token().is_cancelled());
+        }
+        unsafe fn wake(data: *const ()) {
+            // SAFETY: wake consumes the same reference as drop.
+            unsafe { drop_raw(data) };
+        }
+        unsafe fn wake_by_ref(data: *const ()) {
+            // SAFETY: the caller holds a live raw waker reference.
+            unsafe { &*data.cast::<Reentrant>() }.0.cancel();
+        }
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop_raw);
+        let token = CancellationToken::new();
+        let raw = RawWaker::new(
+            Arc::into_raw(Arc::new(Reentrant(token.clone(), true))).cast(),
+            &VTABLE,
+        );
+        // SAFETY: the vtable maintains Arc ownership for every operation.
+        let waker = unsafe { Waker::from_raw(raw) };
+        let mut future = Box::pin(token.cancelled());
+        // Clone cancels before registration; poll must recheck completion.
+        assert!(future
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_ready());
+        assert_eq!(waiter_count(&token), 0);
+
+        // A registered waker's drop may also cancel, both when replaced
+        // and when the future unregisters without being polled again.
+        for replace in [false, true] {
+            let token = CancellationToken::new();
+            let raw = RawWaker::new(
+                Arc::into_raw(Arc::new(Reentrant(token.clone(), false))).cast(),
+                &VTABLE,
+            );
+            // SAFETY: same Arc ownership contract as above.
+            let waker = unsafe { Waker::from_raw(raw) };
+            let mut future = Box::pin(token.cancelled());
+            assert!(future
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending());
+            if replace {
+                assert!(future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending());
+                assert!(token.is_cancelled());
+            }
+            drop(future);
+            assert!(token.is_cancelled());
+            assert_eq!(waiter_count(&token), 0);
+        }
+    }
 
     fn child_count(token: &CancellationToken) -> usize {
         token.node.lock().children.len()

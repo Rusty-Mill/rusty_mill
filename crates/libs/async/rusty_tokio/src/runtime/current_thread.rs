@@ -69,10 +69,7 @@ pub(super) fn block_on<F: Future>(shared: &Arc<Shared>, future: F) -> F::Output 
         // off while `future` itself was woken (it will make progress on
         // the next poll, e.g. mid-`advance`'s `yield_now`) or blocking
         // work is still running in real time.
-        if !parking.woken.load(Ordering::Acquire)
-            && !shared.blocking_pool.has_in_flight()
-            && shared.timer.auto_advance()
-        {
+        if progress_before_auto_advance(shared, &parking) {
             continue;
         }
 
@@ -85,6 +82,22 @@ pub(super) fn block_on<F: Future>(shared: &Arc<Shared>, future: F) -> F::Output 
         // caught by that timeout, not lost outright.
         shared.park(0);
     }
+}
+
+/// Observe blocking completion *before* checking runnable work. The acquire
+/// load pairs with the pool's completion release: all continuations published
+/// before the count reached zero must be inspected before moving the clock.
+fn progress_before_auto_advance(shared: &Arc<Shared>, parking: &ParkingWaker) -> bool {
+    if shared.blocking_pool.has_in_flight() {
+        return false;
+    }
+    if let Some(task) = shared.next_task(0) {
+        let start = std::time::Instant::now();
+        task.run();
+        shared.add_busy_duration(0, start.elapsed());
+        return true;
+    }
+    !parking.woken.load(Ordering::Acquire) && shared.timer.auto_advance()
 }
 
 struct ParkingWaker {
@@ -102,5 +115,64 @@ impl Wake for ParkingWaker {
     fn wake_by_ref(self: &Arc<Self>) {
         self.woken.store(true, Ordering::Release);
         self.shared.wake_all_parked();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{time, Builder};
+    use std::time::Duration;
+
+    #[test]
+    fn completion_between_drain_and_idle_check_runs_continuation_before_timer() {
+        let rt = Builder::new_current_thread().build().unwrap();
+        let _entered = rt.enter();
+        time::pause();
+        let _worker = worker::enter_as_worker(0);
+        let shared = rt.primary_shared();
+        let parking = ParkingWaker {
+            shared: shared.clone(),
+            woken: AtomicBool::new(false),
+        };
+        let (release, blocked) = std::sync::mpsc::channel();
+        let job = crate::spawn_blocking(move || {
+            blocked.recv().unwrap();
+            7
+        });
+        let (tx, rx) = crate::sync::oneshot::channel();
+        rt.spawn(async move {
+            tx.send(job.await.unwrap()).unwrap();
+        });
+        // Poll both the blocking rendezvous and forwarding tasks.
+        while let Some(task) = shared.next_task(0) {
+            task.run();
+        }
+        let mut result = Box::pin(time::timeout(Duration::from_secs(1), rx));
+        let waker = Waker::from(Arc::new(ParkingWaker {
+            shared: shared.clone(),
+            woken: AtomicBool::new(false),
+        }));
+        assert!(result
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        assert!(shared.next_task(0).is_none());
+        let before = time::Instant::now();
+        // Force exactly the review's boundary: completion publishes runnable
+        // work and then zero in-flight jobs after the scheduler's first drain.
+        release.send(()).unwrap();
+        while shared.blocking_pool.has_in_flight() {
+            std::thread::yield_now();
+        }
+        assert!(progress_before_auto_advance(shared, &parking));
+        assert_eq!(time::Instant::now(), before);
+        // The rendezvous wakes the forwarding task; drain it next.
+        assert!(progress_before_auto_advance(shared, &parking));
+        assert_eq!(time::Instant::now(), before);
+        assert_eq!(
+            result.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Ready(Ok(Ok(7)))
+        );
     }
 }
