@@ -179,3 +179,16 @@ fn stamps_differ_across_grids_and_increase() {
         "clearing dirty flags leaves stamps alone"
     );
 }
+
+#[test]
+fn non_ascii_text_run_advances_its_row_stamp() {
+    // The text fast path (Grid::put_text) writes the row directly; it must
+    // stamp it like put_char does, or a renderer skips the new glyphs.
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[2;1H");
+    let before = (g.row_stamp(0), g.row_stamp(1));
+    p.advance(&mut g, "日本é".as_bytes());
+    assert!(g.row_stamp(1).1 > before.1.1, "the written row moves");
+    assert_eq!(g.row_stamp(0), before.0, "an untouched row keeps its stamp");
+}

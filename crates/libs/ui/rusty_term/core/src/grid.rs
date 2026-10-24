@@ -2260,7 +2260,7 @@ impl Grid {
         if x < cols && row[x].flags & WIDE_TRAILER != 0 {
             row[x] = Cell::blank();
         }
-        self.dirty[y] = true;
+        self.touch(y);
         self.cursor.0 = x;
         used
     }
