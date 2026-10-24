@@ -51,8 +51,10 @@ The decision below rests only on the slide-backed points.
 ## Considered options
 
 1. **Server-authoritative, client-predicted** (the disclosed Psyonix
-   model). Client runs local prediction for responsiveness; server is
-   ground truth; periodic correction snapshots reconcile the two.
+   model: authority, prediction and correction are on the slides). Client
+   runs local prediction for responsiveness; server is ground truth;
+   server corrections reconcile the two. Sending them as periodic
+   snapshots is this project's engineering choice, not disclosed (H1).
 2. **Client-authoritative / peer-to-peer**, each client trusts its own or a
    peer's simulation. Simpler to implement, no server process needed, but
    diverges from the actual system this project exists to understand, and
@@ -60,14 +62,16 @@ The decision below rests only on the slide-backed points.
 3. **Lockstep** (deterministic simulation, all clients simulate identically
    from synchronized input, no server correction). Requires very tight
    determinism guarantees and doesn't match the disclosed architecture
-   (which explicitly uses correction snapshots, implying clients aren't
+   (which explicitly uses server corrections, implying clients aren't
    expected to stay in perfect lockstep).
 
 ## Decision
 
 Adopt option 1: server-authoritative simulation with client-side
-prediction and periodic correction snapshots, matching Psyonix's disclosed
-design.
+prediction and server corrections, matching Psyonix's disclosed design.
+The corrections are sent as periodic snapshots; that is this project's
+engineering choice, consistent with but not confirmed by the disclosure
+(H1).
 
 ## Consequences
 
