@@ -269,7 +269,7 @@ mod tests {
 
     #[rusty_tokio::test]
     async fn connections_queued_before_a_stop_are_never_admitted() {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         // Three clients are already in the backlog, each having said hello.
         let mut clients = Vec::new();

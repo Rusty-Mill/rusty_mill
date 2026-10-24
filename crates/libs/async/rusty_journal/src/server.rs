@@ -234,7 +234,7 @@ mod tests {
         std::net::SocketAddr,
     ) {
         let state = test_state().await;
-        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         // Every test using this helper tears down via `server.abort()`,
@@ -550,7 +550,7 @@ mod tests {
     #[rusty_tokio::test]
     async fn shutdown_stops_accepting_and_drains_in_flight_connections() {
         let state = test_state().await;
-        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let server = rusty_tokio::spawn(serve(listener, state, shutdown_rx));
@@ -589,7 +589,7 @@ mod tests {
     #[rusty_tokio::test]
     async fn shutdown_drain_is_bounded_by_its_deadline() {
         let state = test_state().await;
-        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let server = rusty_tokio::spawn(serve_with_drain_timeout(

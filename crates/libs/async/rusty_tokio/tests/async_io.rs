@@ -13,7 +13,7 @@ fn asyncreadext_and_asyncwriteext_roundtrip_via_ufcs() {
     // means to exercise.
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -60,7 +60,7 @@ fn generic_function_over_asyncread_asyncwrite_dispatches_through_the_trait() {
 
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -90,7 +90,7 @@ fn shared_ref_impl_allows_concurrent_read_and_write_through_the_trait() {
     // only for owned `TcpStream`.
     let rt = Runtime::builder().worker_threads(2).build().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -126,7 +126,7 @@ fn shared_ref_impl_allows_concurrent_read_and_write_through_the_trait() {
 fn copy_streams_all_bytes_into_an_in_memory_sink() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let payload = vec![0xABu8; 200_000]; // several times the internal copy buffer size
@@ -154,7 +154,7 @@ fn copy_streams_all_bytes_into_an_in_memory_sink() {
 fn read_to_end_reads_until_eof() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -179,7 +179,7 @@ fn read_to_end_reads_until_eof() {
 fn read_to_string_reads_valid_utf8_until_eof() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -202,7 +202,7 @@ fn read_to_string_reads_valid_utf8_until_eof() {
 fn read_to_string_reports_invalid_utf8_without_modifying_the_buffer() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -230,7 +230,7 @@ fn write_vectored_writes_from_multiple_buffers() {
     // shape `write_all` already needs for a single buffer.
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
