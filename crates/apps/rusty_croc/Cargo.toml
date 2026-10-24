@@ -40,9 +40,9 @@ rusty_base64 = { workspace = true }
 rusty_confined_fs = { workspace = true }
 num-bigint = "0.4"
 num-traits = "0.2"
-p256 = { version = "0.13", features = ["arithmetic"] }
-p384 = { version = "0.13", features = ["arithmetic"] }
-p521 = { version = "0.13", features = ["arithmetic"] }
+p256 = { version = "0.14", features = ["arithmetic"] }
+p384 = { version = "0.14", features = ["arithmetic"] }
+p521 = { version = "0.14", features = ["arithmetic"] }
 crypto-bigint = { version = "0.7", features = ["subtle"] }
 subtle = "2"
 clap = { version = "4", features = ["derive"] }

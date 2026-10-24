@@ -297,6 +297,9 @@ members = [
 # comparing rusty_libc against the `libc` crate, deliberately outside the
 # library's own zero-dependency build.
 exclude = [
+    # Temporary, pinned upstream crypto patches; not first-party members.
+    "vendor/aws-sigv4",
+    "vendor/jsonwebtoken",
     "crates/libs/ui/rusty_term/fuzz",
     "crates/apps/rush/fuzz",
     "crates/libs/ui/rusty_lines/bench",
@@ -1027,3 +1030,8 @@ unsafe_code = "warn"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
+
+# RUSTSEC-2026-0387: pinned source patches, provenance/removal in vendor/README.md.
+[patch.crates-io]
+aws-sigv4 = { path = "vendor/aws-sigv4" }
+jsonwebtoken = { path = "vendor/jsonwebtoken" }

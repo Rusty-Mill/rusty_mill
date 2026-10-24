@@ -2,14 +2,14 @@
 //!
 //! The CPU implementation here presents via `softbuffer`; the GPU one
 //! ([`super::gpu`], behind `gui-gpu`) presents via `wgpu`. Both consume the same
-//! [`FontCache`] and the shared [`Grid`], so the window code is backend-agnostic.
+//! [`FontCache`] and each pane's [`FrameView`] snapshot, so the window code is backend-agnostic.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use winit::window::Window;
 
-use crate::core::{Cell, Grid};
+use crate::core::{Cell, FrameView};
 
 use super::cpu;
 use super::font::{FontCache, GlyphSource};
@@ -33,7 +33,7 @@ pub(super) const SEARCH_FG: u32 = 0x101010;
 /// sized to the grid's own `cols × rows`. `focused` gates the cursor/IME
 /// preedit (only the focused pane shows them); `cursor_on` is the blink phase.
 pub(crate) struct PaneFrame<'a> {
-    pub grid: &'a Grid,
+    pub grid: &'a FrameView,
     pub col0: usize,
     pub row0: usize,
     pub focused: bool,

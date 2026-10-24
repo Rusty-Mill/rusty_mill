@@ -1202,7 +1202,7 @@ impl WindowState<'_> {
         let status = self.status_row();
         let divider = mix(self.theme.bg, self.theme.fg, 60);
         if self.overlay.is_some() {
-            let page = self.build_overlay_grid();
+            let page = self.build_overlay_grid().frame_view();
             let (Some(renderer), Some(window)) = (self.renderer.as_mut(), self.window.as_ref())
             else {
                 return;
@@ -1245,7 +1245,7 @@ impl WindowState<'_> {
             let (grid, items) =
                 built.unwrap_or_else(|| (Grid::new(DOCK_CELLS, self.rows as usize), Vec::new()));
             self.dock_items = items;
-            Some(grid)
+            Some(grid.frame_view())
         } else {
             self.dock_items = Vec::new();
             None
@@ -1289,14 +1289,15 @@ impl WindowState<'_> {
                 access.sync(title, &g);
             }
         }
-        // Lock each pane's grid for the frame, then hand the renderer offset views
+        // Snapshot each pane's grid under a brief lock, then render from the
+        // snapshots, so the parser never waits out compositing or present
         // (the chrome bar occupies screen row 0, so panes start at row 1).
         let blink = self.cursor_blink_on;
         let focus = tab.focus;
-        let mut held = Vec::new();
+        let mut snaps = Vec::new();
         for (id, r) in tab.rects(area) {
             if let Some(p) = tab.pane(id) {
-                held.push((p.grid.lock(), r, id == focus));
+                snaps.push((p.grid.lock().frame_view(), r, id == focus));
             }
         }
         // Cursor trail (G36): when the focused pane's cursor jumped since the
@@ -1306,7 +1307,7 @@ impl WindowState<'_> {
         let mut ghosts: Vec<(usize, usize, f32)> = Vec::new();
         if self.config.cursor_trail.unwrap_or(false) {
             let now = Instant::now();
-            if let Some((g, _, _)) = held.iter().find(|(_, _, foc)| *foc) {
+            if let Some((g, _, _)) = snaps.iter().find(|(_, _, foc)| *foc) {
                 let cur = (g.cursor_visible && g.view_offset == 0).then_some(g.cursor);
                 match (self.cursor_prev, cur) {
                     (Some((pid, prev)), Some(cur)) if pid == focus && prev != cur => {
@@ -1338,7 +1339,7 @@ impl WindowState<'_> {
             crate::core::BlockMark::Error => self.theme.palette16[1],
             crate::core::BlockMark::Running => self.theme.cursor,
         };
-        let mut frames: Vec<PaneFrame> = held
+        let mut frames: Vec<PaneFrame> = snaps
             .iter()
             .map(|(g, r, foc)| PaneFrame {
                 grid: g,
@@ -1353,8 +1354,8 @@ impl WindowState<'_> {
                 },
                 hover_link: if *foc { self.hover_link } else { None },
                 marks: if marks_on {
-                    g.viewport_block_marks()
-                        .into_iter()
+                    g.block_marks()
+                        .iter()
                         .enumerate()
                         .filter_map(|(row, m)| m.map(|m| (row, mark_color(m))))
                         .collect()
@@ -3170,7 +3171,7 @@ impl WindowState<'_> {
     /// a `--profile` given at launch is reapplied via `profile_override`
     /// below — otherwise this window's profile-selected theme would silently
     /// revert to the file's top-level default on every save (mirrors
-    /// `runtime::tokio_rt::watch_config`'s fix for the TUI front-end).
+    /// `runtime::reactor::watch_config`'s fix for the TUI front-end).
     fn reload_config(&mut self) {
         let Some(path) = self.config_path.clone() else {
             return;

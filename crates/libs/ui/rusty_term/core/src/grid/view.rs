@@ -64,6 +64,11 @@ impl<'g> View<'g> {
     pub fn bidi_row(&self, row: usize) -> Option<BidiRow> {
         self.grid.bidi_row_of(row, |col| self.cell(col, row))
     }
+
+    /// The resolved rows, top to bottom.
+    pub(super) fn lines(&self) -> &[ViewLine] {
+        &self.lines
+    }
 }
 
 impl Grid {

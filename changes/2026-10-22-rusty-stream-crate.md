@@ -18,7 +18,7 @@ changelog: New `rusty_stream`: an in-house `Stream` trait, combinators, `stream!
   - The macros rewrite tokens with no `syn`. A `Yielder` passes each yielded value through a shared slot, with no thread-locals.
   - The `futures-core` feature adds `Compat<S>`, which converts in both directions for crates that speak `futures_core::Stream` (axum, reqwest, tonic).
 - **Verified:** 20 integration tests cover every adapter, the channel (including a send after the receiver drops), both macros (`?`, a bare `return;`, closures with and without return types, nested `fn` items and nested macros inside the body), a `select_all` removal that must not skip a ready stream, a receiver drop with a queued value that owns a sender (no deadlock) and the compat round trip. Also clippy `-D warnings` and fmt on both crates. `cargo tree` shows that the default build pulls nothing outside the workspace.
-- **Fixed (main integration):** regenerate the workspace map from locked all-features metadata so `rusty_tokio` counts the stream and `rusty_axum_tokio` dev dependents plus the landed `rk-app` dependency (27 total).
+- **Fixed (main integration):** regenerate the workspace map from locked all-features metadata so `rusty_tokio` counts the stream and `rusty_axum_tokio` dev dependents plus the landed `rk-app` and `rusty_term` dependencies (28 total).
 - **Known limitations:**
   - Adapters need `Unpin` streams (use `.boxed()` or `Box::pin`).
   - `select_all` merges round-robin, not in `FuturesUnordered` order.

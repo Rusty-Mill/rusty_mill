@@ -18,7 +18,11 @@ use super::sixel::SixelImage;
 mod snapshot;
 pub use snapshot::SnapshotError;
 #[cfg(any(test, feature = "gui"))]
+mod frame;
+#[cfg(any(test, feature = "gui"))]
 mod view;
+#[cfg(any(test, feature = "gui"))]
+pub use frame::{FrameImage, FrameView};
 #[cfg(any(test, feature = "gui"))]
 pub use view::View;
 
@@ -367,7 +371,8 @@ impl KittyImage {
 }
 
 pub struct KittyFrame {
-    pub pixels: Vec<Option<u32>>,
+    /// Shared so a frame snapshot can hold it without copying the pixels.
+    pub pixels: Arc<[Option<u32>]>,
     /// Display time in milliseconds (floored to 40 — the protocol allows 0,
     /// but a zero-gap loop would spin the repaint timer).
     pub gap_ms: u32,
@@ -898,7 +903,8 @@ pub struct GridImage {
     pub pw: usize,
     pub ph: usize,
     /// Source pixels, row-major `pw × ph`; `None` = transparent (skipped).
-    pub pixels: Vec<Option<u32>>,
+    /// Shared so a frame snapshot can hold them without copying.
+    pub pixels: Arc<[Option<u32>]>,
     /// For animated images (inline GIF): the backing [`KittyImage`] id whose
     /// *current frame* renderers draw instead of `pixels` (same `pw × ph`).
     /// `pixels` stays as the first frame, the fallback if the store evicts it.
@@ -1850,7 +1856,7 @@ impl Grid {
             rows,
             pw,
             ph,
-            pixels: pixels[..pw * ph].to_vec(),
+            pixels: pixels[..pw * ph].into(),
             anim: None,
         });
         if self.images.len() > MAX_IMAGES {
@@ -1926,7 +1932,7 @@ impl Grid {
             frames: frames
                 .into_iter()
                 .map(|(pixels, gap_ms)| KittyFrame {
-                    pixels,
+                    pixels: pixels.into(),
                     gap_ms: gap_ms.max(40),
                 })
                 .collect(),
@@ -3826,7 +3832,10 @@ impl Grid {
             id,
             w,
             h,
-            frames: vec![KittyFrame { pixels, gap_ms: 0 }],
+            frames: vec![KittyFrame {
+                pixels: pixels.into(),
+                gap_ms: 0,
+            }],
             current: 0,
             playing: false,
             last_advance: None,
@@ -3836,7 +3845,7 @@ impl Grid {
     /// A stored image's current frame, cloned for placement.
     pub(crate) fn kitty_get(&self, id: u32) -> Option<(usize, usize, Vec<Option<u32>>)> {
         let img = self.kitty_images.iter().find(|i| i.id == id)?;
-        Some((img.w, img.h, img.frames[img.current].pixels.clone()))
+        Some((img.w, img.h, img.frames[img.current].pixels.to_vec()))
     }
 
     /// Record a virtual placement (`U=1`): the image renders wherever
@@ -3886,7 +3895,7 @@ impl Grid {
             .last()
             .expect("images always have a root frame")
             .pixels
-            .clone();
+            .to_vec();
         for row in 0..h {
             let dy = y + row;
             if dy >= img.h {
@@ -3901,7 +3910,7 @@ impl Grid {
             }
         }
         img.frames.push(KittyFrame {
-            pixels: base,
+            pixels: base.into(),
             gap_ms: gap_ms.max(40),
         });
         true
@@ -3955,7 +3964,12 @@ impl Grid {
     /// renderers so inference can't drift between them.
     #[cfg(any(test, feature = "gui"))]
     pub fn placeholder_map(&self) -> Option<Vec<Option<(u32, u32, u32)>>> {
-        let view = self.view();
+        self.placeholders_of(&self.view())
+    }
+
+    /// [`Grid::placeholder_map`] over an already-resolved view.
+    #[cfg(any(test, feature = "gui"))]
+    fn placeholders_of(&self, view: &View<'_>) -> Option<Vec<Option<(u32, u32, u32)>>> {
         let mut ph: Vec<Option<(u32, u32, u32)>> = Vec::new();
         let mut any = false;
         for row in 0..self.rows {
@@ -4134,15 +4148,21 @@ impl Grid {
     /// affordance).
     #[cfg(any(test, feature = "gui"))]
     pub fn viewport_block_marks(&self) -> Vec<Option<BlockMark>> {
+        self.block_marks_of(&self.view_lines())
+    }
+
+    /// [`Grid::viewport_block_marks`] for already-resolved viewport rows.
+    #[cfg(any(test, feature = "gui"))]
+    fn block_marks_of(&self, lines: &[view::ViewLine]) -> Vec<Option<BlockMark>> {
         if self.in_alt_screen() {
             return vec![None; self.rows];
         }
         let running = self
             .fold_pending_start
             .map(|s| (s, self.scrollback.len() + self.cursor.1));
-        self.view_lines()
-            .into_iter()
-            .map(|line| {
+        lines
+            .iter()
+            .map(|&line| {
                 let abs = self.abs_of_line(line);
                 if let Some((s, e)) = running
                     && abs >= s

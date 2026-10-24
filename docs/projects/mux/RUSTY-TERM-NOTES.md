@@ -23,7 +23,7 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 | D11 | Work order after the ring buffer: #4 printable fast path, then #5 snapshot serializer, then #3 GUI frame path. | Only #4 could close the speed floors | Yes ("Concur") |
 | D12 | Snapshot format `RTSN` v1 on `rusty_wire`. Full snapshots only; incremental updates come with the mux protocol. (PR #939) | Mux attach prerequisite | Yes (approved "go ahead with #5") |
 | D13 | The fast path is a std-only SWAR scan; no `memchr`. | Avoid a new third-party dependency | Yes (owner's constraint) |
-| D14 | #850 (the `l13` feature pulls tokio in through `rusty_lsp`) is low priority. Leave it alone. | The mux does not need `l13` in phase 1 | Yes |
+| D14 | #850 (the `l13` feature pulled tokio in through `rusty_lsp`) was low priority. Fixed since by #949: `rusty_lsp` gained a default-on `runtime` feature, and `l13` uses it with default features off. | The mux does not need `l13` in phase 1 | Yes |
 | D15 | Fix RUSTSEC-2026-0385 with a separate lockfile PR, never a suppression. #943 (`ctutils` 0.4.4) landed. My duplicate #944 (0.4.5) was closed. | cargo-deny was blocking every PR | Yes ("a", "Close 944") |
 | D16 | `rusty_tokio` is the async runtime for every `rusty_mux_*` crate; no tokio in any mux binary. | Sovereignty | Yes (DECISIONS 2026-10-22, recorded before this handoff) |
 | D17 | The frame-time benchmark is a local tool, not a CI gate. | Wall-clock is unstable on shared runners | Unconfirmed (not objected to; #940 merged as such) |
@@ -36,8 +36,8 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
   - `crates/libs/ui/rusty_term` (`rusty_term`): the front-ends (TUI, winit GUI, PTY backends). It re-exports the core as `rusty_term::core`.
 - Core dependencies:
   - Without features: `rusty_base64`, `rusty_hex`, `rusty_wire`, `unicode-width`, `unicode-segmentation`.
-  - Feature `gui` adds `rusty_regx`. Feature `l13` adds `rusty_term_l13`, which pulls in tokio.
-- ⚠ The `rusty_term` front-end crate depends directly on `tokio = "1"` (rt-multi-thread, net, signal, time, sync) and `parking_lot`. A mux crate must link `rusty_term_core` without `l13`, not `rusty_term`, or it brings in tokio and conflicts with D16.
+  - Feature `gui` adds `rusty_regx`. Feature `l13` adds `rusty_term_l13`, which no longer pulls in tokio (#949; `cargo tree -p rusty_term_core --features l13` lists none).
+- ⚠ The `rusty_term` front-end crate depends directly on `tokio = "1"` (rt-multi-thread, net, signal, time, sync) and `parking_lot`. A mux crate must link `rusty_term_core`, not `rusty_term`, or it brings in tokio and conflicts with D16. `l13` is safe to enable on the core since #949.
 
 **Grid API**
 - Rows: `Grid::row(y)` and `Grid::row_mut(y)`. `Grid::cells` is no longer public.
@@ -117,7 +117,6 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 | Incremental snapshot: per-row seqno plus stable row index | `rusty_term_core`, future `rusty_mux_proto` | Not started; belongs to the mux protocol work |
 | Compact cell (row 5) and contiguous scrollback (row 6) | `rusty_term_core`, snapshot version | Deferred (D10) |
 | PTY read batching (row 10) | `rusty_term` backends; relevant to `rusty_mux_server` | Not started (P2) |
-| Issue #850: `l13` pulls in tokio through `rusty_lsp` | `rusty_term_core`, `rusty_lsp` | Open, low priority (D14) |
 | ConPTY spike 1 | the mux PTY layer on Windows | Owner pending |
 
 ## 5. References
@@ -139,7 +138,7 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 | #943 | ctutils 0.4.4 (not from this session) |
 | #944 | ctutils 0.4.5 duplicate, closed |
 
-**Issues:** #850 (tokio in `l13`, open), #854 (BCE, closed by #862), #855 (widths, closed by #894), #856 (DECCOLM, closed by #925).
+**Issues:** #850 (tokio in `l13`, closed by #949), #854 (BCE, closed by #862), #855 (widths, closed by #894), #856 (DECCOLM, closed by #925).
 
 **Branch:** `claude/new-session-s68lms`, reused for every PR in this session.
 
