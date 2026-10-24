@@ -12,6 +12,10 @@
 //! - `ecdh-import256`, `ecdh-import384`: `from_bytes` on tainted accepted scalars (1, 2^64,
 //!   2^128, a high-bit scalar, n-1) and rejected ones (0, n, all ones); same expectation.
 //! - `ecdh-generate256`, `ecdh-generate384`: `generate` with a source that marks its output secret.
+//! - `ed25519-sign`: an Ed25519 seed marked secret before `from_seed`, then `sign` on a
+//!   public message. Key expansion, the fixed-base multiplications, the reductions and
+//!   `S = r + k*s` must report 0 errors.
+//! - `ed25519-control`: a deliberate branch on the (secret-derived) signature; must be caught.
 //! - `control`: a deliberate branch on the secret; must be caught.
 //! - `ecdh-control`: a deliberate branch on the ECDH shared secret; must be caught.
 //!
@@ -19,6 +23,7 @@
 
 use rusty_ct_check::taint::mark_secret;
 use rusty_pk::ecdh::{Curve, PrivateKey};
+use rusty_pk::ed25519::SigningKey;
 use rusty_pk::x25519::{agree, public_key, x25519};
 use std::hint::black_box;
 
@@ -47,6 +52,16 @@ fn main() {
         "ecdh-import384" => import(Curve::P384, &N384),
         "ecdh-generate256" => generate(Curve::P256),
         "ecdh-generate384" => generate(Curve::P384),
+        "ed25519-sign" => {
+            let key = SigningKey::from_seed(&scalar).unwrap();
+            black_box(key.sign(black_box(b"a public message")).unwrap());
+        }
+        "ed25519-control" => {
+            let key = SigningKey::from_seed(&scalar).unwrap();
+            if key.sign(b"a public message").unwrap()[40] == black_box(0) {
+                black_box(1);
+            }
+        }
         "ecdh-control" => {
             let (key, peer) = ecdh_key(Curve::P256);
             if key.agree(&peer).unwrap().as_bytes()[0] == black_box(0) {
@@ -54,7 +69,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("modes: x25519 | agree | control | ecdh256 | ecdh384 | ecdh-import256 | ecdh-import384 | ecdh-generate256 | ecdh-generate384 | ecdh-control");
+            eprintln!("modes: x25519 | agree | control | ed25519-sign | ed25519-control | ecdh256 | ecdh384 | ecdh-import256 | ecdh-import384 | ecdh-generate256 | ecdh-generate384 | ecdh-control");
             std::process::exit(2);
         }
     }
