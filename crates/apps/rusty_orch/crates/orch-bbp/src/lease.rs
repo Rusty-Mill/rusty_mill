@@ -158,7 +158,8 @@ fn path(p: &Path) -> Result<String, String> {
         .ok_or_else(|| "non-UTF8 host path".to_owned())
 }
 
-#[cfg(test)]
+// Leases name POSIX paths, which only a Unix host resolves to themselves.
+#[cfg(all(test, unix))]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;

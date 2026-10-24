@@ -603,8 +603,10 @@ fn cancel_opens_a_never_opened_task_straight_into_cancelled_and_starts_nothing()
 }
 
 /// Records the moderator lifetime and deadline each `ensure` was asked for.
+#[cfg(unix)]
 #[derive(Debug, Clone, Default)]
 struct WallSupervisor(Rc<Cell<(u64, Option<u64>)>>);
+#[cfg(unix)]
 impl Supervisor for WallSupervisor {
     fn ensure(
         &mut self,
@@ -618,6 +620,7 @@ impl Supervisor for WallSupervisor {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
     let dir = temp().canonicalize().unwrap();

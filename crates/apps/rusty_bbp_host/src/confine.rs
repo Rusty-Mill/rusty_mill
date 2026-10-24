@@ -363,7 +363,8 @@ fn json(s: &str) -> Result<String, String> {
     rusty_serde::json::to_string(&s).map_err(|e| e.to_string())
 }
 
-#[cfg(test)]
+// The swap hazard is a Unix symlink one; harnesses are confined only there.
+#[cfg(all(test, unix))]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
