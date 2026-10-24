@@ -7,7 +7,7 @@ mistakes TLS stacks actually make.
 ```sh
 ./run.sh                    # all tests (needs Go; clones BoringSSL on first use)
 ./run.sh -test 'KeyUpdate*' # extra args go to the runner
-NATIVE=1 ./run.sh           # the native backend (ADR-0005), client role only
+NATIVE=1 ./run.sh           # the native backend (ADR-0005, ADR-0006), no RSA signing
 ```
 
 The BoringSSL commit is pinned in `run.sh`; bumping it adds and renames tests,
@@ -33,10 +33,12 @@ connection carries on; 0-RTT is refused; RSA signing is PSS-only; a server that 
 ## The native backend
 
 `NATIVE=1` builds the shim with `--no-default-features --features native` and
-`--cfg rusty_tls_native_crypto`. That engine has no server role and no signing,
-so server scenarios and client certificates exit 89 and are counted as
-unimplemented. At the pinned commit: 445 pass, 0 fail. CI's native job holds
-it to a floor of 430. Results land in `target/native/` (or `$OUT/native`).
+`--cfg rusty_tls_native_crypto`. That engine has both roles, tickets and client
+certificates, but no RSA signing (ADR-0006), so a scenario whose own key is RSA
+(BoGo's default server certificate) is refused at load, exits 89 and is counted
+as unimplemented. At the pinned commit: 494 pass, 0 fail; 390 shim runs refused
+an RSA key, which accounts for the gap to the `ring` build. CI's native job holds
+it to a floor of 480. Results land in `target/native/` (or `$OUT/native`).
 
 A failing test is an engine bug until shown otherwise. Do not add it to
 `config.json` to get green.

@@ -1009,8 +1009,7 @@ pub enum Incoming12 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Role {
     Client,
-    // Only the server constructs this; the native backend has none.
-    #[cfg_attr(rusty_tls_native_crypto, allow(dead_code))]
+    // Only the server constructs this.
     Server,
 }
 
@@ -1150,7 +1149,6 @@ impl Connection12 {
         self.server_name.as_deref()
     }
 
-    #[cfg_attr(rusty_tls_native_crypto, allow(dead_code))]
     pub(super) fn with_server_name(mut self, name: Option<String>) -> Self {
         self.server_name = name;
         self

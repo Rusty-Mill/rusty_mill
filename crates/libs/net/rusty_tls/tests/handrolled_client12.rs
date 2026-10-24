@@ -42,16 +42,17 @@ use rusty_tls::handrolled::name::ServerName;
 #[cfg(rusty_tls_native_crypto)]
 use ring_signer::SigningKey;
 /// The scripted server's signing key. On the `ring` backend that is the
-/// engine's own [`rusty_tls::handrolled::sign::SigningKey`]; the native backend
-/// has no signing (ADR-0005), so there the server signs with `ring` directly,
-/// through [`ring_signer`], and the client's refusals are still exercised.
+/// engine's own [`rusty_tls::handrolled::sign::SigningKey`]. The native
+/// backend's `SigningKey` has no RSA (ADR-0006), and this scripted server signs
+/// with RSA too, so there it signs with `ring` directly, through
+/// [`ring_signer`], and the client's refusals are still exercised.
 #[cfg(not(rusty_tls_native_crypto))]
 use rusty_tls::handrolled::sign::SigningKey;
 
 /// A test-only stand-in for the engine's `SigningKey`, with the same
 /// constructors, schemes and `sign` contract (`src/handrolled/sign.rs`), built
 /// on `ring` (a dev-dependency). It exists so the scripted server can sign a
-/// ServerKeyExchange in a build where the engine cannot.
+/// ServerKeyExchange, RSA included, in a build where the engine has no RSA signing.
 #[cfg(rusty_tls_native_crypto)]
 mod ring_signer {
     use ring::rand::SystemRandom;

@@ -3,16 +3,17 @@
 #
 #   BORINGSSL=/path/to/boringssl ./run.sh            # all tests
 #   BORINGSSL=... ./run.sh -test 'Trailing*'         # extra runner flags
-#   NATIVE=1 ./run.sh                                # the native backend (ADR-0005)
+#   NATIVE=1 ./run.sh                                # the native backend (ADR-0005, ADR-0006)
 #
 # BORINGSSL is a checkout of the commit in PINNED_COMMIT (see below); without it
 # one is cloned into target/boringssl. Needs a Go toolchain and network on
 # first use. Exits non-zero if any test FAILS; tests the shim does not
 # implement (exit 89) and tests listed in config.json are reported, not hidden.
 #
-# NATIVE=1 builds the shim on the first-party backend (client role only), into
-# its own target directory, and writes its results under $OUT/native. Server and
-# client-certificate scenarios are then unimplemented, not failed.
+# NATIVE=1 builds the shim on the first-party backend (both roles, no RSA
+# signing), into its own target directory, and writes its results under
+# $OUT/native. Scenarios that need this side to sign with RSA are then
+# unimplemented, not failed.
 set -euo pipefail
 
 # The BoringSSL commit the suite is pinned to. Bumping it will add and rename

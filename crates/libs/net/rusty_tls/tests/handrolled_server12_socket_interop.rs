@@ -21,12 +21,12 @@
 //!     -- --ignored --nocapture
 //! ```
 
-// ring-only suite (ADR-0005): it needs the engine's server or a signing key,
-// and the native backend has neither.
 #![cfg(all(
-    feature = "handrolled-engine",
     rusty_tls_handrolled,
-    not(rusty_tls_native_crypto)
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
 ))]
 
 use std::io::{Read, Write};
@@ -78,6 +78,15 @@ enum Leaf {
     P384,
     Rsa,
 }
+
+/// Whether this backend can serve an RSA certificate. The native backend has
+/// no RSA signing (ADR-0006 decision 2), so the RSA server cases here are
+/// skipped there, by name: the RSA suites in
+/// `every_suite_completes_with_openssl_and_is_the_one_negotiated`, the RSA leaf
+/// in `every_group_completes_with_openssl`, and all of
+/// `rsa_pss_signatures_are_accepted_and_pkcs1_only_clients_are_refused`.
+/// Verifying an RSA client certificate from OpenSSL still runs on both.
+const SERVES_RSA: bool = !cfg!(rusty_tls_native_crypto);
 
 struct Pki {
     root_der: Vec<u8>,
@@ -417,6 +426,9 @@ fn every_suite_completes_with_openssl_and_is_the_one_negotiated() {
         (Leaf::P384, &ecdsa),
         (Leaf::Rsa, &rsa),
     ] {
+        if leaf == Leaf::Rsa && !SERVES_RSA {
+            continue;
+        }
         let setup = Setup::rcgen(leaf);
         for (name, suite) in suites {
             let config = config(&setup, CipherSuite12::SUPPORTED, ALL_GROUPS, None);
@@ -442,6 +454,9 @@ fn every_group_completes_with_openssl() {
             (Leaf::P384, "P-384"),
             (Leaf::Rsa, "P-256"),
         ] {
+            if leaf == Leaf::Rsa && !SERVES_RSA {
+                continue;
+            }
             let setup = Setup::rcgen(leaf);
             let groups = [group];
             let config = config(&setup, CipherSuite12::SUPPORTED, &groups, None);
@@ -477,6 +492,8 @@ fn an_ecdsa_key_whose_curve_the_client_did_not_offer_is_refused() {
     assert!(!output.status.success());
 }
 
+// Needs an RSA signing key, which the native backend does not have (see `SERVES_RSA`).
+#[cfg(not(rusty_tls_native_crypto))]
 #[test]
 #[ignore = "needs the openssl binary; CI runs it with --ignored"]
 fn rsa_pss_signatures_are_accepted_and_pkcs1_only_clients_are_refused() {
