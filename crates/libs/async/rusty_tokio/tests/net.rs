@@ -585,3 +585,27 @@ fn udp_multicast_v4_round_trip_over_loopback() {
         receiver.leave_multicast_v4(multiaddr, interface).unwrap();
     });
 }
+
+/// tokio's `TcpStream::poll_shutdown` treats `NotConnected` as done, so
+/// shutting down a stream the peer already reset succeeds. `h2` relies on
+/// this: an error here makes its closed connection report the same error
+/// from every later `accept`.
+#[test]
+fn shutting_down_a_reset_stream_succeeds() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        // Already queued by the connect, so this blocking accept returns at once.
+        let (server, _) = listener.accept().unwrap();
+        let server = rusty_tokio::io::TcpSocket::from_std_stream(server).unwrap();
+        server.set_zero_linger().unwrap();
+        drop(server);
+        let mut buf = [0u8; 1];
+        // The reset arrives as an error or as EOF, depending on timing.
+        let _ = client.read(&mut buf).await;
+        client.shutdown().await.unwrap();
+    });
+}
