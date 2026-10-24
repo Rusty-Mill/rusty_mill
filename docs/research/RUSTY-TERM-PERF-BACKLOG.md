@@ -181,6 +181,7 @@ Each change comes with the benchmark that proves it. All core changes run `cargo
    - `bench_vt_throughput` scroll_heavy ≥ 16 MB/s and ascii_throughput ≥ 58 MB/s (libghostty-vt parity at 10k lines).
    - callgrind memmove share < 10%.
    - `rtbench` fill time < 30 ms.
+   - **Floors met (2026-10-24, main `0bd20ec4`).** The owner chose to judge them on the 4 MB workloads, which keep the 10k-line scrollback full for most of each run. `bench/floors.py` takes the slowest of 3 runs: ascii_throughput 61-110 MB/s and scroll_heavy 34-48 MB/s across sessions on a shared 4 vCPU host, against 14.8 and 4.6 before the ring buffer (`f5f220df`). Peak RSS is 35 MiB both before and after; cells are still 24 bytes, so memory waits on the compact cell (#5). The 200 KB `quick` workloads CI runs never fill the scrollback and are not judged.
 3. **GUI frame path (#8 + #9 + #7).** Snapshot under the lock, render without it; compute the view-row map once per frame; rebuild only dirty rows. Proof:
    - Frame-time bench: `bench_frame_time` (`crates/libs/ui/rusty_term/bench/README.md`) drives a `Grid` and the CPU frame path offscreen and reports p50/p99 frame ms and lock hold time while the workloads stream in. Baseline (2026-10-22/23, two hosts): lock hold 0.95-2.63 ms p50; 1,024 fold blocks make a frame 8.6x (live) to 13x (scrolled back) slower.
    - Target: lock hold < 1 ms per frame, steady frame time with 1,024 fold blocks.
