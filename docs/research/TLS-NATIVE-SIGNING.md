@@ -52,7 +52,8 @@ Everything else in `server.rs`, `server12.rs` and the server half of `negotiate.
      - `r = 0` and `s = 0` are retried with a fresh nonce, never returned.
      - Signatures are DER-encoded, as TLS needs.
    - **Nonce: hedged RFC 6979** (decision S2). The RFC 6979 HMAC-DRBG is seeded with the key, the message hash and
-     32 fresh bytes from `rusty_rand`, following `draft-irtf-cfrg-det-sigs-with-noise`. A broken random source then
+     32 fresh bytes from `rusty_rand`, passed as RFC 6979 section 3.6's "additional data" (`rusty_pk::ecdsa`). An
+     earlier version of this note named `draft-irtf-cfrg-det-sigs-with-noise`, a different construction. A broken random source then
      degrades to deterministic RFC 6979, which is still safe. A fault or replay cannot force a repeated nonce on a
      good one. A test-only entry point with no added randomness reproduces the RFC 6979 appendix A.2.5 and A.2.6
      vectors exactly.

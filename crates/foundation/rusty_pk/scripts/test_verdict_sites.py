@@ -75,7 +75,22 @@ class ReportTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
             f.write(text)
         self.addCleanup(os.unlink, f.name)
-        self.assertEqual([hex(a) for a, _ in vs.reports(f.name)], ["0x120491", "0x120c4e"])
+        found = vs.reports(f.name)
+        self.assertEqual([hex(a) for a, _, _ in found], ["0x120491", "0x120c4e"])
+        self.assertEqual(found[0][2], ["<rusty_pk::ecdh::PrivateKey>::public_key", "rusty_pk_taint::main"])
+        self.assertEqual(found[1][2], ["<rusty_pk::ecdh::PrivateKey>::agree"])
+
+
+class OutputTests(unittest.TestCase):
+    STACK = ["memmove", "rusty_pk::ecdsa::der_signature::{closure#0}", "rusty_pk::ecdsa::output",
+             "<rusty_pk::ecdsa::SigningKey>::sign_with_extra"]
+
+    def test_a_stack_through_an_output_function_is_accepted(self):
+        self.assertEqual(vs.through_output(self.STACK, ["ecdsa::output"]), "ecdsa::output")
+
+    def test_without_the_output_frame_or_the_option_it_is_not(self):
+        self.assertIsNone(vs.through_output(self.STACK[:2] + self.STACK[3:], ["ecdsa::output"]))
+        self.assertIsNone(vs.through_output(self.STACK, []))
 
 
 if __name__ == "__main__":
