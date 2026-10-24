@@ -172,8 +172,11 @@ fn serve(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         signer: Signer::new().ok(),
     });
 
+    // Keep this listener: releasing an ephemeral port before serving races other processes.
+    let listener = std::net::TcpListener::bind((host.as_str(), port))?;
+    let address = listener.local_addr()?;
     eprintln!(
-        "RLEval unified app serving on http://{host}:{port}  (sample dir: {})",
+        "RLEval unified app serving on http://{address}  (sample dir: {})",
         state.replays.display()
     );
     match (&state.store, state.authn.is_open()) {
@@ -185,7 +188,7 @@ fn serve(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     if state.allow_run {
         eprintln!("admin maintenance endpoint ENABLED (/api/admin/run) — localhost only.");
     }
-    server::serve(&host, port, move |req| route(req, &state))?;
+    server::serve_listener(listener, move |req| route(req, &state))?;
     Ok(())
 }
 
