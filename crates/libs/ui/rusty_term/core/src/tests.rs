@@ -6387,6 +6387,24 @@ fn bce_keeps_attributes_and_foreground_out_of_erased_cells() {
 }
 
 #[test]
+fn scrolled_in_rows_follow_erase_colour_and_width_changes() {
+    // Line::clear copies from a cached blank row; it must be rebuilt when the
+    // erase colour or the width changes, not keep handing out the old one.
+    let mut g = Grid::new(10, 3);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[3;1H\x1b[42m\n");
+    assert_bce(&g, 2, 0..10, "first BCE scroll");
+    p.advance(&mut g, b"\x1b[49m\n");
+    assert!(g.row(2).iter().all(|c| c.bg == DEFAULT_BG), "after SGR 49");
+    p.advance(&mut g, b"\x1b[42m\n");
+    assert_bce(&g, 2, 0..10, "BCE again");
+    g.resize(14, 3);
+    p.advance(&mut g, b"\x1b[3;1H\n");
+    assert_eq!(g.row(2).len(), 14, "row width after resize");
+    assert_bce(&g, 2, 0..14, "BCE after resize");
+}
+
+#[test]
 fn bce_does_not_apply_to_resize_fill() {
     // Growing the grid is not an erase: new cells use the default background.
     let mut g = parse(b"\x1b[42m", 4, 1);

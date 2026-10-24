@@ -18,9 +18,12 @@
 # 166.8. alt and cursor keep their ceilings.
 # Printable-ASCII fast path, measured: alt 735.0, ascii 47.9, cursor 84.7,
 # scroll 136.7, sgr 116.7, unicode 167.8 (unicode keeps its ceiling).
-alt_screen_flicker   809
-ascii_throughput      53
+# Cached blank row (Line::clear copies one prebuilt row), measured: alt
+# 522.7, ascii 39.6, cursor 84.7, scroll 104.7, sgr 106.9, unicode 163.8.
+# cursor and unicode keep their ceilings.
+alt_screen_flicker   575
+ascii_throughput      44
 cursor_thrash         93
-scroll_heavy         150
-sgr_churn            128
+scroll_heavy         115
+sgr_churn            118
 unicode_heavy        184

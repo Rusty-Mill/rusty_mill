@@ -408,6 +408,11 @@ pub struct Grid {
     /// reuse on the next entry, so an app that toggles the alternate screen
     /// does not allocate a row per switch. Empty until first use.
     spare_screen: Vec<Line>,
+    /// One row of blank cells that [`Line::clear`] copies from, so blanking a
+    /// row is a single `memcpy` instead of a per-cell store loop (the bulk of
+    /// a line feed's cost). Uniform by construction; refreshed by
+    /// [`Grid::prime_blank_row`] when the width or the fill cell changes.
+    blank_row: Vec<Cell>,
     /// Monotonic counter bumped on every parsed batch; lets the renderer
     /// reason about frame freshness.
     pub epoch: u64,
@@ -855,10 +860,15 @@ impl Line {
         }
     }
 
-    /// Reset to [`Line::blank`] in place, reusing the cell allocation.
-    fn clear(&mut self, cols: usize, fill: Cell) {
-        self.cells.clear();
-        self.cells.resize(cols, fill);
+    /// Reset in place to a copy of `blank` (a uniform row, see
+    /// [`Grid::blank_row`]), reusing the cell allocation.
+    fn clear(&mut self, blank: &[Cell]) {
+        if self.cells.len() == blank.len() {
+            self.cells.copy_from_slice(blank);
+        } else {
+            self.cells.clear();
+            self.cells.extend_from_slice(blank);
+        }
         self.wrapped = false;
         self.attr = LineAttr::Single;
     }
@@ -1304,6 +1314,7 @@ impl Grid {
             scroll_bottom: rows.saturating_sub(1),
             primary: None,
             spare_screen: Vec::new(),
+            blank_row: Vec::new(),
             epoch: 0,
             title: String::new(),
             title_stack: Vec::new(),
@@ -2014,7 +2025,8 @@ impl Grid {
                 self.dirty.iter_mut().for_each(|d| *d = true);
             }
         }
-        self.screen[bottom].clear(self.cols, blank);
+        self.prime_blank_row(blank);
+        self.screen[bottom].clear(&self.blank_row);
         for d in &mut self.dirty[top..=bottom] {
             *d = true;
         }
@@ -2959,6 +2971,18 @@ impl Grid {
         c
     }
 
+    /// Make [`Grid::blank_row`] `cols` copies of `fill`, rebuilding it only
+    /// when the width or the fill differs. The row is uniform, so its first
+    /// cell stands for all of them.
+    fn prime_blank_row(&mut self, fill: Cell) {
+        let stale =
+            self.blank_row.len() != self.cols || self.blank_row.first().is_some_and(|c| *c != fill);
+        if stale {
+            self.blank_row.clear();
+            self.blank_row.resize(self.cols, fill);
+        }
+    }
+
     /// A blank cell in the default colors, for fills that are not erases
     /// (resize, theme application, full reset).
     fn default_cell(&self) -> Cell {
@@ -3222,8 +3246,9 @@ impl Grid {
     fn take_spare_screen(&mut self, fill: Cell) -> Vec<Line> {
         let mut screen = std::mem::take(&mut self.spare_screen);
         screen.resize_with(self.rows, Line::default);
+        self.prime_blank_row(fill);
         for line in &mut screen {
-            line.clear(self.cols, fill);
+            line.clear(&self.blank_row);
         }
         screen
     }
@@ -3337,8 +3362,9 @@ impl Grid {
         // the region bottom come round to the cursor row and are blanked.
         let blank = self.erase_cell();
         self.screen[cy..=self.scroll_bottom].rotate_right(n);
+        self.prime_blank_row(blank);
         for line in &mut self.screen[cy..cy + n] {
-            line.clear(self.cols, blank);
+            line.clear(&self.blank_row);
         }
         for d in &mut self.dirty[cy..=self.scroll_bottom] {
             *d = true;
@@ -3383,8 +3409,9 @@ impl Grid {
         // round to the region bottom and are blanked.
         let blank = self.erase_cell();
         self.screen[cy..=self.scroll_bottom].rotate_left(n);
+        self.prime_blank_row(blank);
         for line in &mut self.screen[self.scroll_bottom + 1 - n..=self.scroll_bottom] {
-            line.clear(self.cols, blank);
+            line.clear(&self.blank_row);
         }
         for d in &mut self.dirty[cy..=self.scroll_bottom] {
             *d = true;
@@ -3430,8 +3457,9 @@ impl Grid {
         // Rotate the region down by n and blank the n rows freed at its top.
         let blank = self.erase_cell();
         self.screen[top..=bottom].rotate_right(n);
+        self.prime_blank_row(blank);
         for line in &mut self.screen[top..top + n] {
-            line.clear(self.cols, blank);
+            line.clear(&self.blank_row);
         }
         for d in &mut self.dirty[top..=bottom] {
             *d = true;
@@ -3624,8 +3652,9 @@ impl Grid {
     pub(crate) fn fill_alignment(&mut self) {
         let mut e = Cell::blank();
         e.ch = 'E';
+        self.prime_blank_row(e);
         for line in &mut self.screen {
-            line.clear(self.cols, e);
+            line.clear(&self.blank_row);
         }
         self.dirty.iter_mut().for_each(|d| *d = true);
         self.cursor = (0, 0);
