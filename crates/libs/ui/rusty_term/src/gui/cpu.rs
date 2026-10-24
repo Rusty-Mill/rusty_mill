@@ -6,9 +6,11 @@
 
 use std::rc::Rc;
 
+#[cfg(test)]
+use crate::core::Grid;
 use crate::core::{
     ATTR_BOLD, ATTR_ITALIC, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell, CursorShape,
-    Grid, UnderlineStyle, WIDE_TRAILER, char_width,
+    FrameView, UnderlineStyle, WIDE_TRAILER, char_width,
 };
 
 use super::font::{Glyph, GlyphSource, Style};
@@ -43,7 +45,18 @@ pub(crate) fn render(
     }
     let row0 = if chrome.is_empty() { 0 } else { 1 };
     draw_grid(
-        buf, width, height, grid, 0, row0, 0, 0, true, cursor_on, None, font,
+        buf,
+        width,
+        height,
+        &grid.frame_view(),
+        0,
+        row0,
+        0,
+        0,
+        true,
+        cursor_on,
+        None,
+        font,
     );
 }
 
@@ -142,7 +155,7 @@ pub(crate) fn draw_grid(
     buf: &mut [u32],
     width: usize,
     height: usize,
-    grid: &Grid,
+    grid: &FrameView,
     col0: usize,
     row0: usize,
     ox: usize,
@@ -157,33 +170,21 @@ pub(crate) fn draw_grid(
     if cw == 0 || ch == 0 {
         return;
     }
-    // Resolve the fold-aware viewport once; per-cell lookups below reuse it.
-    let view = grid.view();
     let cursor = (focused && grid.cursor_visible && grid.view_offset == 0 && cursor_on)
         .then_some(grid.cursor);
     let shape = grid.cursor_shape;
     let block_cursor =
         |col: usize, row: usize| shape == CursorShape::Block && cursor == Some((col, row));
-    let inverted = |col: usize, row: usize| view.is_selected(col, row);
-    let search_hl = |col: usize, row: usize| view.search_highlight(col, row);
+    let inverted = |col: usize, row: usize| grid.is_selected(col, row);
+    let search_hl = |col: usize, row: usize| grid.search_highlight(col, row);
     let status = grid.status_row();
     let last_row = grid.rows.saturating_sub(1);
     // Bidi (implicit mode): per-row visual/logical permutations. `None` for
     // pure-LTR rows, status rows, and when `bidi` is off — the common case,
     // costing one flag check. Cell *state* stays keyed by logical position;
     // only the draw X position (and glyph mirroring) go through the map.
-    let bidi: Vec<Option<crate::core::BidiRow>> = (0..grid.rows)
-        .map(|r| {
-            if status.is_some() && r == last_row {
-                None
-            } else {
-                view.bidi_row(r)
-            }
-        })
-        .collect();
     let vis = |col: usize, row: usize| -> usize {
-        bidi[row]
-            .as_ref()
+        grid.bidi_row(row)
             .and_then(|b| b.log2vis.get(col))
             .map_or(col, |&v| v as usize)
     };
@@ -195,7 +196,7 @@ pub(crate) fn draw_grid(
         let cell = if on_status {
             status.unwrap()[col]
         } else {
-            view.cell(col, row)
+            grid.cell(col, row)
         };
         let bg = if !on_status && block_cursor(col, row) {
             grid.cursor_color
@@ -229,7 +230,7 @@ pub(crate) fn draw_grid(
             if on_status {
                 status.unwrap()[col]
             } else {
-                view.cell(col, row)
+                grid.cell(col, row)
             }
         };
         let eligible = |col: usize, cell: &Cell| {
@@ -248,7 +249,7 @@ pub(crate) fn draw_grid(
                 && cell.ch != '\u{10EEEE}'
                 // A reordered (bidi) row draws cell-by-cell; shaping a run
                 // across visually non-adjacent cells would garble it.
-                && bidi[row].is_none()
+                && grid.bidi_row(row).is_none()
         };
         let mut col = 0;
         while col < grid.cols {
@@ -265,7 +266,7 @@ pub(crate) fn draw_grid(
                     // Arabic contextual form first (phase 3), then rule L4
                     // mirroring for RTL-run chars (Arabic never mirrors, so
                     // the order can't double-substitute).
-                    let ch = match &bidi[row] {
+                    let ch = match grid.bidi_row(row) {
                         Some(b) => {
                             let ch = b.shaped.as_ref().and_then(|s| s[col]).unwrap_or(cell.ch);
                             if b.rtl[col] {
@@ -314,7 +315,7 @@ pub(crate) fn draw_grid(
         let cell = if on_status {
             status.unwrap()[col]
         } else {
-            view.cell(col, row)
+            grid.cell(col, row)
         };
         let (fg, under_bg) = if !on_status && block_cursor(col, row) {
             (cell.bg, grid.cursor_color)
@@ -345,7 +346,7 @@ pub(crate) fn draw_grid(
         let cell = if on_status {
             status.unwrap()[col]
         } else {
-            view.cell(col, row)
+            grid.cell(col, row)
         };
         if cell.flags & WIDE_TRAILER != 0 {
             continue;
@@ -396,18 +397,12 @@ pub(crate) fn draw_grid(
             continue;
         }
         let x0 = ox as isize + ((col0 + im.col) * cw) as isize;
-        let y0 = oy as isize + (row0 as isize + grid.image_top_row(im)) * ch as isize;
+        let y0 = oy as isize + (row0 as isize + im.top) * ch as isize;
         let pane_top = (oy + row0 * ch) as isize;
         let pane_bottom = ((oy + (row0 + grid.rows) * ch).min(height)) as isize;
         let pane_right = ((ox + (col0 + grid.cols) * cw).min(width)) as isize;
-        // An animated image (inline GIF) draws its backing animation's current
-        // frame; the stored snapshot is the fallback if the store evicted it.
-        let pixels: &[Option<u32>] = im
-            .anim
-            .and_then(|id| grid.kitty_frame(id))
-            .filter(|&(w, h, _)| w == im.pw && h == im.ph)
-            .map(|(_, _, px)| px)
-            .unwrap_or(&im.pixels);
+        // An animated image (inline GIF) arrives as its current frame.
+        let pixels: &[Option<u32>] = &im.pixels;
         for dy in 0..dst_h {
             let py = y0 + dy;
             if py < pane_top || py >= pane_bottom {
@@ -531,7 +526,7 @@ pub(crate) fn draw_grid(
             if col + w > grid.cols {
                 break;
             }
-            let base = view.cell(col, crow);
+            let base = grid.cell(col, crow);
             let (fg, bg) = (base.bg, base.fg);
             let x0 = ox + (col0 + col) * cw;
             for y in y0..(y0 + ch).min(height) {
@@ -769,7 +764,7 @@ pub(crate) fn draw_trail(
     buf: &mut [u32],
     width: usize,
     height: usize,
-    grid: &crate::core::Grid,
+    grid: &FrameView,
     col0: usize,
     row0: usize,
     ox: usize,
@@ -875,7 +870,18 @@ mod tests {
         let (cw, ch) = font.cell_size();
         let (w, h) = (4 * cw, 2 * ch);
         let mut buf = vec![0u32; w * h];
-        draw_trail(&mut buf, w, h, &grid, 0, 0, 0, 0, &[(1, 0, 0.5)], &mut font);
+        draw_trail(
+            &mut buf,
+            w,
+            h,
+            &grid.frame_view(),
+            0,
+            0,
+            0,
+            0,
+            &[(1, 0, 0.5)],
+            &mut font,
+        );
         let inside = buf[(ch / 2) * w + cw + cw / 2];
         assert!((inside >> 16) & 0xFF > 0x40, "red blended in: {inside:06x}");
         assert_eq!(buf[0], 0, "cells outside the ghost untouched");
@@ -884,7 +890,7 @@ mod tests {
             &mut buf,
             w,
             h,
-            &grid,
+            &grid.frame_view(),
             0,
             0,
             0,
@@ -1033,7 +1039,7 @@ mod tests {
             &mut buf,
             w,
             h,
-            &g,
+            &g.frame_view(),
             0,
             0,
             0,
@@ -1066,7 +1072,7 @@ mod tests {
             &mut buf,
             w,
             h,
-            &g,
+            &g.frame_view(),
             0,
             0,
             0,
@@ -1311,7 +1317,7 @@ mod tests {
             &mut buf,
             w,
             h,
-            &g,
+            &g.frame_view(),
             1,
             1,
             0,
@@ -1340,7 +1346,7 @@ mod tests {
             &mut buf,
             w,
             h,
-            &g,
+            &g.frame_view(),
             0,
             0,
             0,
@@ -1381,7 +1387,7 @@ mod tests {
             &mut buf,
             w,
             h,
-            &g,
+            &g.frame_view(),
             0,
             0,
             0,
@@ -1401,7 +1407,7 @@ mod tests {
             &mut buf2,
             w,
             h,
-            &g,
+            &g.frame_view(),
             0,
             0,
             0,
@@ -1509,7 +1515,20 @@ mod tests {
             p.advance(&mut g, b"fi");
             let (w, h) = (cw * 2, chh);
             let mut buf = vec![0u32; w * h];
-            draw_grid(&mut buf, w, h, &g, 0, 0, 0, 0, false, false, None, &mut fc);
+            draw_grid(
+                &mut buf,
+                w,
+                h,
+                &g.frame_view(),
+                0,
+                0,
+                0,
+                0,
+                false,
+                false,
+                None,
+                &mut fc,
+            );
             (buf, cw, chh)
         };
         // Count glyph (non-background) pixels in cell column `c`.

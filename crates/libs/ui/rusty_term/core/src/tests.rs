@@ -5856,6 +5856,55 @@ fn iterm2_inline_animated_gif_plays_in_overlay() {
 }
 
 #[test]
+fn frame_view_shares_image_pixels_and_resolves_animation() {
+    let mut g = Grid::new(20, 8);
+    let mut p = AnsiParser::new();
+    let mut input = b"\x1b]1337;File=inline=1:".to_vec();
+    input.extend_from_slice(ANIM_GIF_B64.as_bytes());
+    input.push(0x07);
+    p.advance(&mut g, &input);
+    let t0 = std::time::Instant::now();
+    assert!(!g.advance_animations(t0));
+    assert!(g.advance_animations(t0 + std::time::Duration::from_millis(120)));
+    let im = g.images().last().expect("overlay image stored");
+    let id = im.anim.expect("animated");
+    let f = g.frame_view();
+    let fi = f.images().last().expect("image in the frame");
+    assert_eq!(fi.anim, Some((id, 1)), "the current animation frame");
+    assert_eq!(fi.pixels[0], Some(0x00FF00), "second frame green");
+    assert_eq!(fi.top, g.image_top_row(im));
+    // Dropping the animation falls back to the image's own pixels, shared;
+    // the earlier snapshot keeps the frame it captured.
+    g.kitty_delete(Some(id));
+    let later = g.frame_view();
+    assert_eq!(f.images().last().map(|i| i.pixels[0]), Some(Some(0x00FF00)));
+    let (fi, im) = (&later.images()[0], &g.images()[0]);
+    assert_eq!(fi.anim, None);
+    assert!(std::sync::Arc::ptr_eq(&fi.pixels, &im.pixels), "not copied");
+}
+
+#[test]
+fn frame_view_resolves_placeholder_images() {
+    let mut g = Grid::new(20, 6);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b_Gf=32,s=1,v=1,a=T,U=1,i=42,c=2,r=2;/wAA/w==\x1b\\",
+    );
+    p.advance(&mut g, b"\x1b[38;2;0;0;42m");
+    p.advance(
+        &mut g,
+        "\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\u{0305}\u{030D}".as_bytes(),
+    );
+    let f = g.frame_view();
+    assert_eq!(f.placeholder_map(), g.placeholder_map().as_deref());
+    assert_eq!(f.kitty_frame(42), g.kitty_frame(42));
+    assert_eq!(f.kitty_current(42), Some(0));
+    assert_eq!(f.placeholder_grid(42, 8, 16), g.placeholder_grid(42, 8, 16));
+    assert_eq!(f.kitty_frame(7), None, "unreferenced images stay out");
+}
+
+#[test]
 fn iterm2_inline_webp_renders_cells() {
     let mut g = Grid::new(20, 10);
     let mut p = AnsiParser::new();

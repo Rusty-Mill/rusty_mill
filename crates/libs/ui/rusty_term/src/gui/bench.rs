@@ -4,7 +4,7 @@
 //!
 //! [`render::composite`]: super::render::composite
 
-use crate::core::Grid;
+use crate::core::FrameView;
 
 use super::font::{self, FontCache, GlyphSource};
 use super::render::{self, PaneFrame};
@@ -34,12 +34,12 @@ impl FrameBench {
         })
     }
 
-    /// Paint one frame of `grid` as the focused pane, computing its
-    /// command-gutter marks the way the window does each frame.
-    pub fn draw(&mut self, grid: &Grid) {
+    /// Paint one frame snapshot as the focused pane, with its command-gutter
+    /// marks as the window builds them.
+    pub fn draw(&mut self, grid: &FrameView) {
         let marks = grid
-            .viewport_block_marks()
-            .into_iter()
+            .block_marks()
+            .iter()
             .enumerate()
             .filter_map(|(row, m)| m.map(|_| (row, 0x00ff00)))
             .collect();
