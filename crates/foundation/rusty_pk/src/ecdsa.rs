@@ -4,15 +4,18 @@
 //! # Signing handles a secret
 //!
 //! [`SigningKey`] signs P-256 with SHA-256 and P-384 with SHA-384, as TLS pairs them. The
-//! nonce is **hedged RFC 6979**: RFC 6979 section 3.2's HMAC-DRBG over the private key and
-//! the message hash, with 32 fresh random bytes as the "additional data" of section 3.6. A
-//! failed or repeating random source therefore degrades to deterministic RFC 6979, which
-//! is still safe; a good one also defeats fault attacks that rely on determinism. `k * G`
+//! nonce follows draft-irtf-cfrg-det-sigs-with-noise-05 section 4: 32 bytes of secret
+//! noise on P-256, 48 on P-384, before the private key in padded HMAC inputs. Detected
+//! RNG errors fail closed. Undetected repeated noise retains deterministic-style security
+//! against algebraic key recovery from weak randomness; it does not produce plain RFC 6979
+//! outputs. Identical key, message and noise repeat a signature. Hedging mitigates some
+//! attacks exploiting determinism, without guaranteeing uniqueness or preventing replay or
+//! instruction-skipping faults. Other side-channel defenses remain necessary. `k * G`
 //! uses the constant-time scalar multiplication behind [`crate::ecdh`], `k^-1` is Fermat
 //! inversion (public exponent, base not branched on), and `s = k^-1 (z + r d)` uses the
 //! order field's branch-free arithmetic. The only branches on secret-derived values are on
-//! verdicts: a nonce candidate outside `[1, n-1]` (rejected and redrawn, as RFC 6979
-//! specifies) and a result at infinity (impossible for a valid nonce).
+//! verdicts: key/nonce range checks, a result at infinity (impossible for a valid
+//! nonce), and zero r/s. Invalid candidates and zero r/s are retried as RFC 6979 specifies.
 //!
 //! # Verification
 //!
@@ -138,8 +141,13 @@ impl core::fmt::Display for SignError {
 /// headers, and a sequence header with a long-form length.
 const MAX_DER: usize = 2 * (2 + 49) + 3;
 
-/// Length of the fresh randomness mixed into each nonce.
-pub const HEDGE_LEN: usize = 32;
+/// Length of the secret fresh noise mixed into each nonce (draft -05 section 4).
+pub const fn hedge_len(curve: CurveId) -> usize {
+    match curve {
+        CurveId::P256 => 32,
+        CurveId::P384 => 48,
+    }
+}
 
 /// RFC 6979 candidates tried before giving up. The chance that one is rejected is about
 /// 2^-32 on P-256 and 2^-190 on P-384.
@@ -185,25 +193,26 @@ impl SigningKey {
     }
 
     /// The DER `SEQUENCE { r, s }` signature over `message` (hashed with SHA-256 on P-256,
-    /// SHA-384 on P-384). `fill` supplies [`HEDGE_LEN`] fresh random bytes for the nonce; if
+    /// SHA-384 on P-384). `fill` supplies [`hedge_len`] fresh secret random bytes for this curve; if
     /// it fails, nothing is signed.
     pub fn sign<F>(
         &self,
         message: &[u8],
         fill: impl FnOnce(&mut [u8]) -> Result<(), F>,
     ) -> Result<Vec<u8>, SignError> {
-        let mut hedge = [0u8; HEDGE_LEN];
-        let filled = fill(&mut hedge);
+        let mut hedge = [0u8; 48];
+        let len = hedge_len(self.id);
+        let filled = fill(&mut hedge[..len]);
         let signature = match filled {
-            Ok(()) => self.sign_with_extra(message, &hedge),
+            Ok(()) => self.sign_with_extra(message, &hedge[..len]),
             Err(_) => Err(SignError::Random),
         };
         wipe(&mut hedge);
         signature
     }
 
-    /// RFC 6979 signing with `extra` as section 3.6's additional data (empty for the
-    /// deterministic variant of section 3.2, which the known-answer tests use).
+    /// Draft -05 signing with curve-sized noise. Only unit-test builds accept empty
+    /// noise as a separate, unmodified RFC 6979 path for appendix A vectors.
     fn sign_with_extra(&self, message: &[u8], extra: &[u8]) -> Result<Vec<u8>, SignError> {
         let curve = match self.id {
             CurveId::P256 => Curve::p256(),
@@ -360,7 +369,9 @@ impl Rfc6979 {
         }
     }
 
-    /// Steps a to f of RFC 6979 section 3.2, with `extra` appended to the seed (section 3.6).
+    /// RFC 6979 a-f with d/f replaced by draft -05 section 4. Padding starts
+    /// the key in a new hash block after the noise, then h1 in another new block.
+    /// The same noise is reused in d/f; step e updates V between them.
     fn new(id: CurveId, x: &[u8], h1: &[u8], extra: &[u8]) -> Self {
         let mut drbg = Self {
             id,
@@ -372,7 +383,42 @@ impl Rfc6979 {
         drbg.v[..len].fill(0x01);
         for tag in [0x00u8, 0x01] {
             let mut next = [0u8; 48];
-            drbg.mac(&[&drbg.v[..len], &[tag], x, h1, extra], &mut next);
+            let zeros = [0u8; 80];
+            let (pad1, pad2) = match id {
+                CurveId::P256 => (63, 32), // (32 + 1 + 32 + 63) % 64 == 0
+                CurveId::P384 => (31, 80), // (48 + 1 + 48 + 31) % 128 == 0
+            };
+            #[cfg(test)]
+            if extra.is_empty() {
+                // Test-only original RFC 6979, never an RNG-error fallback.
+                drbg.mac(&[&drbg.v[..len], &[tag], x, h1], &mut next);
+            } else {
+                drbg.mac(
+                    &[
+                        &drbg.v[..len],
+                        &[tag],
+                        extra,
+                        &zeros[..pad1],
+                        x,
+                        &zeros[..pad2],
+                        h1,
+                    ],
+                    &mut next,
+                );
+            }
+            #[cfg(not(test))]
+            drbg.mac(
+                &[
+                    &drbg.v[..len],
+                    &[tag],
+                    extra,
+                    &zeros[..pad1],
+                    x,
+                    &zeros[..pad2],
+                    h1,
+                ],
+                &mut next,
+            );
             drbg.k = next;
             drbg.mac(&[&drbg.v[..len]], &mut next);
             drbg.v = next;
@@ -497,14 +543,75 @@ mod tests {
         }
     }
 
+    /// Independently generated by scripts/gen_hedged_ecdsa.py using Python
+    /// hashlib/HMAC and affine big-integer curve arithmetic. Pins both HMAC
+    /// block boundaries, initial K/V, the nonce and the final signature.
+    #[test]
+    fn draft_05_fixed_noise_known_answers() {
+        for line in include_str!("../tests/vectors/hedged_ecdsa.txt").lines() {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let id = if fields[0] == "256" {
+                CurveId::P256
+            } else {
+                CurveId::P384
+            };
+            let len = hedge_len(id);
+            let message_len: usize = fields[1].parse().unwrap();
+            let noise_byte: u8 = fields[2].parse().unwrap();
+            let message = vec![b'a'; message_len];
+            let noise = vec![noise_byte; len];
+            let scalar = vec![0x11; len];
+            let curve = if id == CurveId::P256 {
+                Curve::p256()
+            } else {
+                Curve::p384()
+            }
+            .unwrap();
+            let digest = if id == CurveId::P256 {
+                Digest::Sha256
+            } else {
+                Digest::Sha384
+            };
+            let z = hash_to_scalar(&curve, digest, &message).unwrap();
+            let mut h = vec![0; len];
+            curve.fnn.to_be_bytes(&z, &mut h).unwrap();
+            let mut drbg = Rfc6979::new(id, &scalar, &h, &noise);
+            assert_eq!(&drbg.k[..len], hex(fields[3]), "K: {line}");
+            assert_eq!(&drbg.v[..len], hex(fields[4]), "V: {line}");
+            let mut nonce = vec![0; len];
+            drbg.next(&mut nonce);
+            assert_eq!(nonce, hex(fields[5]), "nonce: {line}");
+            let key = SigningKey::from_bytes(id, &scalar).unwrap();
+            let signature = key
+                .sign(&message, |out: &mut [u8]| {
+                    assert_eq!(out.len(), len);
+                    out.copy_from_slice(&noise);
+                    Ok::<(), ()>(())
+                })
+                .unwrap();
+            assert_eq!(
+                r_s(&signature, len),
+                (fields[6].to_uppercase(), fields[7].to_uppercase())
+            );
+            assert_eq!(signature, key.sign_with_extra(&message, &noise).unwrap());
+            assert_ne!(
+                signature,
+                key.sign_with_extra(&message, &[]).unwrap(),
+                "fixed noise must not be confused with plain RFC 6979"
+            );
+            let public = key.public_key().unwrap();
+            assert!(verify(id, digest, public.as_bytes(), &message, &signature).is_ok());
+        }
+    }
+
     /// The deterministic path repeats; the hedge changes the nonce.
     #[test]
     fn the_hedge_changes_the_nonce_and_nothing_else() {
         let key = SigningKey::from_bytes(CurveId::P256, &[0x11; 32]).unwrap();
         let a = key.sign_with_extra(b"m", &[]).unwrap();
         assert_eq!(a, key.sign_with_extra(b"m", &[]).unwrap());
-        let b = key.sign_with_extra(b"m", &[1; HEDGE_LEN]).unwrap();
-        let c = key.sign_with_extra(b"m", &[2; HEDGE_LEN]).unwrap();
+        let b = key.sign_with_extra(b"m", &[1; 32]).unwrap();
+        let c = key.sign_with_extra(b"m", &[2; 32]).unwrap();
         assert_ne!(r_s(&a, 32).0, r_s(&b, 32).0);
         assert_ne!(r_s(&b, 32).0, r_s(&c, 32).0);
     }

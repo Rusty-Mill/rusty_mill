@@ -9,7 +9,7 @@ use ring::signature::{
     EcdsaKeyPair, KeyPair, UnparsedPublicKey, ECDSA_P256_SHA256_ASN1,
     ECDSA_P256_SHA256_ASN1_SIGNING, ECDSA_P384_SHA384_ASN1, ECDSA_P384_SHA384_ASN1_SIGNING,
 };
-use rusty_pk::ecdsa::{verify, CurveId, Digest, SignError, SigningKey, HEDGE_LEN};
+use rusty_pk::ecdsa::{hedge_len, verify, CurveId, Digest, SignError, SigningKey};
 
 struct Lcg(u64);
 
@@ -77,10 +77,10 @@ fn cross_verifies_with_ring_on_both_curves() {
     }
 }
 
-/// The hedge never repeats `r` for one key and message (2,000 signatures per curve), and a
+/// This bounded smoke test observes no repeated `r` for one key and message (2,000 signatures per curve), and a
 /// source that returns all zeros still yields a valid (deterministic) signature.
 #[test]
-fn hedged_nonces_do_not_repeat_and_a_dead_source_still_signs_safely() {
+fn bounded_nonce_smoke_test_and_fixed_zero_noise() {
     let mut lcg = Lcg(7);
     for curve in [CurveId::P256, CurveId::P384] {
         let (len, digest) = params(curve);
@@ -116,14 +116,17 @@ fn hedged_nonces_do_not_repeat_and_a_dead_source_still_signs_safely() {
 
 #[test]
 fn a_failed_random_source_signs_nothing() {
-    let key = SigningKey::from_bytes(CurveId::P256, &[1; 32]).unwrap();
-    let mut asked = 0;
-    let result = key.sign(b"m", |h: &mut [u8]| {
-        asked = h.len();
-        Err("no entropy")
-    });
-    assert_eq!(result, Err(SignError::Random));
-    assert_eq!(asked, HEDGE_LEN);
+    for curve in [CurveId::P256, CurveId::P384] {
+        let key = SigningKey::from_bytes(curve, &vec![1; hedge_len(curve)]).unwrap();
+        let mut asked = 0;
+        let result = key.sign(b"m", |h: &mut [u8]| {
+            asked = h.len();
+            h.fill(0x42); // Even a source that partially writes then fails signs nothing.
+            Err("no entropy")
+        });
+        assert_eq!(result, Err(SignError::Random));
+        assert_eq!(asked, hedge_len(curve));
+    }
 }
 
 #[test]
@@ -145,4 +148,57 @@ fn invalid_private_keys_are_refused() {
 fn debug_does_not_print_the_key() {
     let key = SigningKey::from_bytes(CurveId::P384, &[3; 48]).unwrap();
     assert_eq!(format!("{key:?}"), "ecdsa::SigningKey(..)");
+}
+
+/// Exercise the production build (which has no plain RFC 6979 path) against the
+/// independent fixed-noise answers, and have ring verify each resulting signature.
+#[test]
+fn draft_05_fixed_noise_public_signing_path() {
+    let decode = |s: &str| -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    };
+    for line in include_str!("vectors/hedged_ecdsa.txt").lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let curve = if fields[0] == "256" {
+            CurveId::P256
+        } else {
+            CurveId::P384
+        };
+        let len = hedge_len(curve);
+        let key = SigningKey::from_bytes(curve, &vec![0x11; len]).unwrap();
+        let message = vec![b'a'; fields[1].parse().unwrap()];
+        let noise: u8 = fields[2].parse().unwrap();
+        let signature = key
+            .sign(&message, |out: &mut [u8]| {
+                assert_eq!(out.len(), len);
+                out.fill(noise);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        let mut body = Vec::new();
+        for component in &fields[6..8] {
+            let bytes = decode(component);
+            let first = bytes.iter().position(|&b| b != 0).unwrap();
+            let bytes = &bytes[first..];
+            let pad = usize::from(bytes[0] & 0x80 != 0);
+            body.extend_from_slice(&[2, (bytes.len() + pad) as u8]);
+            body.extend(std::iter::repeat_n(0, pad));
+            body.extend_from_slice(bytes);
+        }
+        let mut expected = vec![0x30, body.len() as u8];
+        expected.extend_from_slice(&body);
+        assert_eq!(signature, expected, "{line}");
+        let verifying = if curve == CurveId::P256 {
+            &ECDSA_P256_SHA256_ASN1
+        } else {
+            &ECDSA_P384_SHA384_ASN1
+        };
+        let public = key.public_key().unwrap();
+        UnparsedPublicKey::new(verifying, public.as_bytes())
+            .verify(&message, &signature)
+            .unwrap();
+    }
 }

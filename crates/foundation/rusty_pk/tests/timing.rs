@@ -175,10 +175,9 @@ fn ed25519_sign_null_calibration_identical_classes() {
 /// (0x7f, then 0xff bytes, last byte 0x04).
 ///
 /// The timed region includes DER encoding, whose length depends on the published `r` and
-/// `s`. With a fixed hedge each class always gets the same nonce, so a pair whose
-/// signatures differ in DER length shows a real but harmless gap (the first pair tried,
-/// 0x01.. vs 0x7fff..ff, gave 72 vs 70 bytes and |t| up to 3.27). These two keys were chosen
-/// because both signatures are 72 bytes with 33-byte `r` and `s`, so only the secret differs.
+/// `s`. With fixed noise, different DER lengths can cause a public-output timing
+/// gap. These fixtures are required to give equal lengths; changing nonce derivation
+/// requires rechecking this assertion and rerunning the timing evidence.
 fn ecdsa_classes(curve: CurveId, a: &[u8], b: &[u8], seed: u64, samples: usize) -> Option<f64> {
     let slot = RefCell::new(ecdsa::SigningKey::from_bytes(curve, a).expect("valid scalar"));
     let sign = |key: &ecdsa::SigningKey| {

@@ -109,8 +109,13 @@ attestation, no human review of AES-GCM is recorded. Section 11b sets this besid
 server role (gap 5) to be taken up next, ahead of choosing a first native consumer. This is the implementer's
 transcription, not yet restated from the owner's GitHub account. The scope is `TLS-NATIVE-SIGNING.md`. Its
 decisions were then approved in the working session ("Approved", the implementer's transcription). The ECDSA nonce is
-hedged RFC 6979 (S2), and RSA signing stays out (S3). ADR-0006 is accepted (S4). An independent review of the
-signing code, recorded with reviewer, scope and commit, is required before the `rusty_tls` wiring merges (S5).
+hedged RFC 6979 (S2), pinned to `draft-irtf-cfrg-det-sigs-with-noise-05` §4 as specified in
+`TLS-NATIVE-SIGNING.md` §3: padded HMAC inputs, 32-byte P-256 noise and 48-byte P-384 noise, with production
+RNG errors failing closed and deterministic paths confined to tests. Repeated/zero noise has deterministic-style
+security, not plain RFC 6979 output; mitigation is bounded by draft §5's exclusions. RSA signing stays out (S3).
+ADR-0006 is accepted (S4). An independent review of the signing code, recorded with reviewer, scope and commit, is required before the `rusty_tls` wiring merges (S5).
+
+Direct owner confirmation on 2026-10-24 is recorded in [PR #981 comment 6385229428](https://github.com/Rusty-Mill/rusty_mill/pull/981#issuecomment-6385229428). The S1–S5 scope is settled; the correction below specifies its nonce construction and failure policy.
 
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
@@ -593,7 +598,7 @@ Effort is focused engineering days, plus or minus 50 percent, excluding review w
 | **4** X25519 | RFC 7748 | Wycheproof + RFC vectors + differential; all-zero output rejected as `ring` does; methods 1 to 4 clean; independent review. **Evaluate vendoring fiat-crypto generated field code** (formally verified, straight-line, MIT/Apache/BSD; COPYRIGHT file reachable, terms not re-checked) as the strongest correctness evidence on offer | 3 to 4 (+2 to evaluate fiat) | Ephemeral key exchange off `ring` for 25519 |
 | **5** AES-GCM | Fixsliced/bitsliced AES-128/256, constant-time GHASH (no tables) | Wycheproof + CAVP GCM + differential; no table lookup indexed by a secret (the disassembly script counts conditional jumps and divisions only and cannot show this; the check still has to be chosen, e.g. valgrind taint, which reports a secret-dependent address, plus review); methods 1 to 4 clean; review. **Throughput is 60 to 150x below `ring` unless intrinsics are approved.** | 8 to 12 (+5 to 8 for a reviewed intrinsics module, only if approved) | Needed before any ring-free client; useless alone |
 | **6a** ECDH P-256/P-384 | secret scalar multiplication, complete formulas, constant-time table selection, on-curve and infinity checks | Wycheproof ECDH (incl. invalid-curve and twist cases); differential; methods 1 to 4; review | 8 to 10 | **Client-only engine ring-free (with 1 to 5)** |
-| **6b** Signing | ECDSA P-256/P-384 (RFC 6979 and hedged nonce), Ed25519, PKCS#8 parsing | Wycheproof; differential both directions (their signatures verify under ours and vice versa); nonce bias test; methods 1 to 4; review | 6 to 8 | Server role and client certificates off `ring` except RSA |
+| **6b** Signing | ECDSA P-256/P-384 (pinned hedged nonce per `TLS-NATIVE-SIGNING.md` §3; plain RFC 6979 test-only), Ed25519, PKCS#8 parsing | Wycheproof; differential both directions (their signatures verify under ours and vice versa); nonce bias test; methods 1 to 4; review | 6 to 8 | Server role and client certificates off `ring` except RSA |
 | **7** RSA sign | constant-time modexp, CRT, blinding, fault check, PKCS#8 RSA parse | As 6b, plus blinding tested, plus verify-after-sign | 15 to 25 | **Recommend not doing.** |
 
 Totals: stages 0 to 3 about 31 to 40 days; through 5 about 40 to 56 (plus intrinsics);
@@ -867,7 +872,7 @@ engine off `ring`** (section 7.2: stages 1 to 5 plus 6a); signing is a separate 
 | 2 | **ECDH P-256 / P-384** (stage 6a) | RFC 8446 requires secp256r1 key exchange; the Montgomery core is reusable. | Secret scalar multiplication with complete formulas, constant-time table selection, on-curve and infinity checks, uncompressed SEC1 points. Today's scalar multiplication in `rusty_pk` is `_vartime` and **must not be reused for secrets**. | Wycheproof ECDH (invalid-curve and twist cases), differential vs `ring`, methods 1 to 4 of section 4.4 clean (valgrind taint, exact disassembly counts, timing with A/A baseline, planted-leak control), review. | 8 to 10 |
 | 3 | **AES-128/256-GCM** (stage 5) | Hardest and slowest; RFC 8446 mandates AES-128-GCM and the engine prefers AES-256-GCM, so most real handshakes need it. Also the ticket cipher. | Decision needed first (13.2 D1): portable fixsliced AES plus table-free GHASH, or AES-NI/PCLMUL in one reviewed `unsafe` module behind a runtime feature check. | Wycheproof GCM + CAVP + differential; no table lookup indexed by a secret (the disassembly script cannot show this; choose a check, e.g. valgrind taint plus review); methods 1 to 4; review. Portable throughput is 60 to 150x below `ring`; measure before wiring. | 8 to 12 (+5 to 8 with intrinsics) |
 | 4 | **`rusty_tls` backend seam** | Only after 1 to 3 exist; the TLS-engine session owns `rusty_tls`. | Same signatures as the `ring` call sites (section 2.3), selected by an extra cfg beside `rusty_tls_handrolled`; adapters for `Nonce`/`Aad`/`LessSafeKey`/`hmac::Context`; default stays `ring`. Scoped in `TLS-NATIVE-CRYPTO-SEAM.md`; **reopened 2026-10-22, client role only** (section 0). | Differential at the seam (same handshakes, both backends), interop with `ring`-backed peers, the whole section 11 table re-checked at the integration commit. | 5 to 8 |
-| 5 | **Signing** (stage 6b) | Only if a server role or client certificates must go native. | ECDSA P-256/P-384 (RFC 6979 or hedged nonce), Ed25519 sign, PKCS#8 parse. RSA-PSS signing (stage 7) stays "recommend not doing". Scoped in `TLS-NATIVE-SIGNING.md`; reopened on 2026-10-24 under ADR-0006 (section 0). | Wycheproof, differential both directions, nonce-bias test, methods 1 to 4, review. | 6 to 8 |
+| 5 | **Signing** (stage 6b) | Only if a server role or client certificates must go native. | ECDSA P-256/P-384 (pinned hedged nonce per `TLS-NATIVE-SIGNING.md` §3; production RNG errors fail closed), Ed25519 sign, PKCS#8 parse. RSA-PSS signing (stage 7) stays "recommend not doing". Scoped in `TLS-NATIVE-SIGNING.md`; reopened on 2026-10-24 under ADR-0006 (section 0). | Wycheproof, differential both directions, nonce-bias test, methods 1 to 4, review. | 6 to 8 |
 
 Sum for the client role (1 to 4): about 23 to 34 days plus intrinsics if chosen, before
 review wait. With signing: about 29 to 42. Estimates are reused from section 7.2, not
@@ -885,11 +890,15 @@ re-derived.
   AES-GCM (2026-10-10, "Unfreeze"); gap 4, client role only (2026-10-22); gap 5 reopened on 2026-10-24 (`TLS-NATIVE-SIGNING.md`; ADR-0006 accepted).
 - **D3 Client-only or also server role** (gap 5). *Decided 2026-10-22:* client role only. Under
   the native backend, signing, the servers and client certificates are compiled out (ADR-0005;
-  confirmed by the owner on GitHub, #868 comment 6343682194).
+  confirmed by the owner on GitHub, #868 comment 6343682194). *Extended 2026-10-24:* ADR-0006 authorizes
+  ECDSA/Ed25519 signing, server role, tickets and client certificates, subject to S5 review before wiring.
+  This is approved scope, not a claim that the native signing implementation has landed.
 - **D4 Review process per stage:** this plan assumes each of gaps 2, 3 and 5 gets the same
   evidence package and an independent review before it is wired; the previous review was by
   the owner alone. A second reviewer for the AES and ECDH secret-handling code is cheap
   relative to the risk; the owner decides. *Decided 2026-10-10: no second reviewer* (owner's decision).
+  *Gap 5 decision, 2026-10-24 (S5):* independent signing-code review recorded with reviewer, scope and exact
+  commit is required before TLS wiring merges; the earlier decision does not waive this requirement.
 - **D5 Where `ring` is allowed to remain:** it stays in the lockfile for `rustls`,
   `boringtun`, `jsonwebtoken`, `quinn` (section 2.2). Completion of this plan is "the native
   `rusty_tls` engine no longer needs `ring`", not "ring-free".
