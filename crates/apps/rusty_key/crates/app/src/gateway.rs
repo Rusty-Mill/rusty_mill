@@ -1,4 +1,4 @@
-//! Web gateway (PRD 06 / Phase 14): an `axum` HTTP+SSE surface over
+//! Web gateway (PRD 06 / Phase 14): a `rusty_axum` HTTP+SSE surface over
 //! `Session::send()`. The harness layer is not bypassed — `/chat` runs the same
 //! turn cycle, verification, and evidence journal as the CLI. Behind the
 //! `gateway` feature.
@@ -7,6 +7,11 @@
 //! `session_id` header to a per-tenant `Session` with idle-TTL + max-session
 //! eviction. A bearer secret (when set) gates every request and scopes which
 //! `session_id`s a caller may reach.
+//!
+//! The server runs on `rusty_tokio` (#879). `Session` is still tokio-based
+//! (aisdk/reqwest, `tokio::spawn`), so the router's outermost layer is
+//! `rusty_axum_tokio::TokioBridge`, entering the caller's tokio runtime on
+//! every poll of a handler and of the `/stream` body.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,13 +19,13 @@ use std::time::{Duration, Instant};
 
 use aisdk::core::capabilities::{TextInputSupport, ToolCallSupport};
 use aisdk::core::language_model::LanguageModel;
-use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::sse::{Event, Sse};
-use axum::response::IntoResponse;
-use axum::routing::{get, post};
-use axum::{Json, Router};
 use rk_config::Config;
+use rusty_axum::cors::{Allow, Cors};
+use rusty_axum::response::sse::{Event, Sse};
+use rusty_axum::routing::{get, post};
+use rusty_axum::serve::ServeOptions;
+use rusty_axum::{HeaderMap, IntoResponse, Json, Method, Query, Router, State, StatusCode};
+use rusty_axum_tokio::TokioBridge;
 use rusty_crypto_key::constant_time_eq;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
@@ -116,6 +121,12 @@ where
         self
     }
 
+    /// Override the allowed CORS origin (used in tests).
+    pub fn with_cors_origin(mut self, origin: &str) -> Self {
+        self.cors_origin = origin.to_string();
+        self
+    }
+
     fn build_session(&self) -> anyhow::Result<Arc<Session<M>>> {
         // No interactive adapter answers the gateway's approval prompts, so
         // the channel receiver is intentionally dropped: `ApprovalGate`
@@ -140,7 +151,6 @@ where
     fn authorize(&self, headers: &HeaderMap) -> Result<Option<String>, StatusCode> {
         let presented = headers
             .get("authorization")
-            .and_then(|v| v.to_str().ok())
             .and_then(rusty_oauth::bearer::token_from_authorization)
             .map(str::to_string);
         match &self.secret {
@@ -170,7 +180,6 @@ where
                 // session via the `x-session-id` header (rejected otherwise).
                 let sid = headers
                     .get("x-session-id")
-                    .and_then(|v| v.to_str().ok())
                     .map(str::to_string)
                     .ok_or(StatusCode::BAD_REQUEST)?;
                 let mut map = self.multi.lock().await;
@@ -199,27 +208,27 @@ where
         }
     }
 
-    /// The axum router over this gateway.
-    pub fn router(self: Arc<Self>) -> Router {
+    /// The router over this gateway. `tokio` is the runtime its handlers'
+    /// tokio work runs on (see the module docs).
+    pub fn router(self: Arc<Self>, tokio: tokio::runtime::Handle) -> Router {
         // Methods/headers are scoped to what the gateway's routes actually
         // use, not `Any` (round-4 finding 1). An empty/unconfigured
-        // `cors_origin` allows no origin at all (same-origin default).
-        let allow_origin = if self.cors_origin.is_empty() {
-            tower_http::cors::AllowOrigin::list(Vec::<axum::http::HeaderValue>::new())
-        } else {
-            self.cors_origin
-                .parse::<axum::http::HeaderValue>()
-                .map(tower_http::cors::AllowOrigin::exact)
-                .unwrap_or_else(|_| tower_http::cors::AllowOrigin::list(Vec::new()))
+        // `cors_origin` allows no origin at all (same-origin default); `*`
+        // allows any; anything else is compared exactly, so a malformed
+        // origin matches nothing.
+        let origins = match self.cors_origin.as_str() {
+            "" => Allow::List(Vec::new()),
+            "*" => Allow::Any,
+            origin => Allow::List(vec![origin.to_string()]),
         };
-        let cors = tower_http::cors::CorsLayer::new()
-            .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
-            .allow_headers([
-                axum::http::header::AUTHORIZATION,
-                axum::http::header::CONTENT_TYPE,
-                axum::http::HeaderName::from_static("x-session-id"),
-            ])
-            .allow_origin(allow_origin);
+        let cors = Cors::new()
+            .allow_methods(Allow::List(vec![Method::Get, Method::Post]))
+            .allow_headers(Allow::List(vec![
+                "authorization".into(),
+                "content-type".into(),
+                "x-session-id".into(),
+            ]))
+            .allow_origin(origins);
         Router::new()
             .route("/health", get(health::<M>))
             .route("/ready", get(ready::<M>))
@@ -231,6 +240,7 @@ where
             .route("/entropy", get(entropy::<M>))
             .route("/metrics", get(metrics::<M>))
             .layer(cors)
+            .layer(TokioBridge::new(tokio))
             .with_state(self)
     }
 }
@@ -490,25 +500,61 @@ fn now_tag() -> u128 {
         .unwrap_or(0)
 }
 
-/// Serve the gateway on `addr` until shutdown. Refuses to start unless a
-/// bearer secret is configured: a gateway is network-exposed by definition,
-/// so silently disabling auth when `RUSTYKEYS_GATEWAY_SECRET` is unset is not
-/// a safe default (round-4 finding 1b).
+/// Serve the gateway on `addr` until shutdown, with settings from the
+/// environment. See [`Gateway::serve`].
 pub async fn serve<M>(config: Config, model: M, addr: &str) -> anyhow::Result<()>
 where
     M: LanguageModel + TextInputSupport + ToolCallSupport + Clone + Send + Sync + 'static,
 {
-    let gw = Gateway::new(config, model);
-    if gw.secret.is_none() {
-        anyhow::bail!(
-            "refusing to start the gateway: RUSTYKEYS_GATEWAY_SECRET is not set. Set it to a \
-             bearer token callers must present, or the gateway would serve every request \
-             unauthenticated on the network."
-        );
+    Gateway::new(config, model).serve(addr).await
+}
+
+impl<M> Gateway<M>
+where
+    M: LanguageModel + TextInputSupport + ToolCallSupport + Clone + Send + Sync + 'static,
+{
+    /// Serve on `addr` until this future is dropped. Refuses to start unless
+    /// a bearer secret is configured: a gateway is network-exposed by
+    /// definition, so silently disabling auth when
+    /// `RUSTYKEYS_GATEWAY_SECRET` is unset is not a safe default (round-4
+    /// finding 1b).
+    pub async fn serve(self, addr: &str) -> anyhow::Result<()> {
+        if self.secret.is_none() {
+            anyhow::bail!(
+                "refusing to start the gateway: RUSTYKEYS_GATEWAY_SECRET is not set. Set it to \
+                 a bearer token callers must present, or the gateway would serve every \
+                 request unauthenticated on the network."
+            );
+        }
+        let app = Arc::new(self).router(tokio::runtime::Handle::current());
+        let addr = addr.to_string();
+        // Dropping this future drops `_stop`, which ends `stopped`: the
+        // server then shuts down and releases the listener, and the
+        // blocking-pool thread it occupies returns.
+        let (_stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        tokio::task::spawn_blocking(move || serve_on_rusty_tokio(app, &addr, stopped)).await?
     }
-    let gw = Arc::new(gw);
-    let app = gw.router();
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
+}
+
+/// Runs the server on a `rusty_tokio` runtime of its own until `stopped`
+/// completes.
+fn serve_on_rusty_tokio(
+    app: Router,
+    addr: &str,
+    stopped: tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<()> {
+    let runtime = rusty_tokio::Builder::new_multi_thread()
+        .thread_name("rk-gateway")
+        .build()?;
+    runtime.block_on(async {
+        let listener = rusty_tokio::io::TcpListener::bind_addrs(addr).await?;
+        let server = rusty_axum::serve(listener, None, ServeOptions::default(), app)?;
+        // A oneshot needs no reactor, so it can be awaited on rusty_tokio.
+        server
+            .shutdown_on(async {
+                let _ = stopped.await;
+            })
+            .await;
+        Ok(())
+    })
 }

@@ -7,7 +7,7 @@ name = "a2a-agent-server"
 version = "0.1.0"
 dependencies = [
  "adk-a2a",
- "axum 0.8.9",
+ "axum",
  "rusty-adk",
  "serde_json",
  "tokio",
@@ -159,7 +159,7 @@ dependencies = [
  "adk-tools",
  "async-stream",
  "async-trait",
- "axum 0.8.9",
+ "axum",
  "futures",
  "rusty_a2a",
  "rusty_base64",
@@ -254,7 +254,7 @@ dependencies = [
  "adk-sessions",
  "adk-tools",
  "async-trait",
- "axum 0.8.9",
+ "axum",
  "rusty-mcp-client",
  "rusty_log",
  "rusty_mcp_axum",
@@ -381,7 +381,7 @@ dependencies = [
  "agentgateway-proxy",
  "agentgateway-tls",
  "anyhow",
- "axum 0.8.9",
+ "axum",
  "bytes",
  "clap",
  "fs4 0.13.1",
@@ -513,7 +513,7 @@ version = "0.1.0"
 dependencies = [
  "agentgateway-config",
  "agentgateway-core",
- "axum 0.8.9",
+ "axum",
  "cel",
  "http",
  "http-body-util",
@@ -1800,45 +1800,11 @@ dependencies = [
 
 [[package]]
 name = "axum"
-version = "0.7.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
-dependencies = [
- "async-trait",
- "axum-core 0.4.5",
- "bytes",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "itoa",
- "matchit 0.7.3",
- "memchr",
- "mime",
- "percent-encoding",
- "pin-project-lite",
- "rustversion",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "serde_urlencoded",
- "sync_wrapper",
- "tokio",
- "tower",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
-name = "axum"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
- "axum-core 0.5.6",
+ "axum-core",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -1848,7 +1814,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "itoa",
- "matchit 0.8.4",
+ "matchit",
  "memchr",
  "mime",
  "percent-encoding",
@@ -1860,27 +1826,6 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tower",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
-name = "axum-core"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09f2bd6146b97ae3359fa0cc6d6b376d9539582c7b4220f041a33ec24c226199"
-dependencies = [
- "async-trait",
- "bytes",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "mime",
- "pin-project-lite",
- "rustversion",
- "sync_wrapper",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -7232,12 +7177,6 @@ dependencies = [
 
 [[package]]
 name = "matchit"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
-
-[[package]]
-name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
@@ -10578,7 +10517,7 @@ dependencies = [
 name = "remind_me_remote"
 version = "0.4.0"
 dependencies = [
- "axum 0.8.9",
+ "axum",
  "remind_me_core",
  "remind_me_mcp",
  "reqwest 0.13.4",
@@ -10837,7 +10776,6 @@ dependencies = [
  "aisdk",
  "anyhow",
  "async-trait",
- "axum 0.7.9",
  "futures",
  "rk-compose",
  "rk-config",
@@ -10846,14 +10784,15 @@ dependencies = [
  "rk-kernel",
  "rk-mcp",
  "rk-observe",
+ "rusty_axum",
+ "rusty_axum_tokio",
  "rusty_crypto_key",
  "rusty_mcp_server",
  "rusty_oauth",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "tokio",
- "tower",
- "tower-http",
 ]
 
 [[package]]
@@ -11097,7 +11036,7 @@ name = "rp-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum 0.8.9",
+ "axum",
  "futures-util",
  "jsonwebtoken 9.3.1",
  "reqwest 0.13.4",
@@ -11517,7 +11456,7 @@ name = "rusty-acp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "axum 0.8.9",
+ "axum",
  "chrono",
  "criterion 0.8.2",
  "eventsource-stream",
@@ -11746,7 +11685,7 @@ version = "0.1.0"
 name = "rusty-mcp"
 version = "0.11.0"
 dependencies = [
- "axum 0.8.9",
+ "axum",
  "http",
  "jsonwebtoken 11.0.0",
  "rand 0.8.8",
@@ -12116,7 +12055,7 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
- "axum 0.8.9",
+ "axum",
  "chrono",
  "ed25519-dalek 3.0.0",
  "eventsource-stream",
@@ -12618,7 +12557,7 @@ dependencies = [
 name = "rusty_mcp_axum"
 version = "0.1.0"
 dependencies = [
- "axum 0.8.9",
+ "axum",
  "futures",
  "rusty_http",
  "rusty_mcp_client_native",
@@ -12631,7 +12570,7 @@ dependencies = [
 name = "rusty_mcp_client_native"
 version = "0.1.0"
 dependencies = [
- "axum 0.8.9",
+ "axum",
  "rmcp",
  "rusty_base64",
  "rusty_json",
@@ -16034,7 +15973,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
 dependencies = [
  "async-trait",
- "axum 0.8.9",
+ "axum",
  "base64 0.22.1",
  "bytes",
  "h2",
