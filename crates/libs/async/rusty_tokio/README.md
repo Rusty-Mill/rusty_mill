@@ -808,7 +808,7 @@ With that in place, `io/tcp.rs` and `io/udp.rs` build directly on
 bind/listen/accept, addressing (`local_addr`/`peer_addr`), `set_nodelay`,
 and (for UDP) `send_to`/`recv_from` -- all of rustils' own sockaddr
 packing/unpacking, `SO_REUSEADDR`, and stale-socket handling, not
-reimplemented a second time here. `io/unix.rs` does the same for
+reimplemented a second time here. `io/unix_socket.rs` does the same for
 `platform_linux::{LinuxUnixListener, LinuxUnixStream}` -- including the
 mode-`0600` bind and stale-socket-file reclaim rustils' own
 `unix_listen` already does internally (a throwaway probe connect tells a
@@ -849,7 +849,7 @@ match `platform_linux` closely enough (same method names, same
 `platform::error::Result`, the rustils#41/#42 `AsFd`/`set_nonblocking`
 surface included from day one -- and, it turned out, `UnixStream`/
 `UnixListener` included from day one too, not just TCP/UDP) that
-`io/tcp.rs`/`io/udp.rs`/`io/unix.rs` need only a `#[cfg]`-gated type
+`io/tcp.rs`/`io/udp.rs`/`io/unix_socket.rs` need only a `#[cfg]`-gated type
 alias between `platform_linux`/`platform_bsd`, not their own branching.
 The same two hand-rolled exceptions above apply on macOS/BSD too, for the
 same reasons.
@@ -899,7 +899,7 @@ it *does* have the same raw-handle + non-blocking escape hatch
 (`AsRawSocket`, `set_nonblocking`, concrete non-boxed constructors)
 `platform_linux`/`platform_bsd` got via rustils#41/#42 -- forced by this
 very crate (`platform-windows/src/net.rs`'s own doc comment names this
-crate's issue #6 as the reason). `io/unix.rs`'s Windows arm
+crate's issue #6 as the reason). `io/unix_socket.rs`'s Windows arm
 (`UnixStream`/`UnixListener`) uses it directly, the same `#[cfg]`-gated
 type-alias pattern Linux/macOS/BSD already use -- see that module's own
 docs and `docs/decision-request-windows-process-signal-ipc.md` for the

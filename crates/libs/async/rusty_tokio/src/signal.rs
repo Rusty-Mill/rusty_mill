@@ -766,6 +766,13 @@ pub async fn ctrl_c() -> io::Result<()> {
     Ok(())
 }
 
+/// tokio's `signal::unix` path for [`signal`], [`Signal`] and
+/// [`SignalKind`] (#897).
+#[cfg(unix)]
+pub mod unix {
+    pub use super::{signal, Signal, SignalKind};
+}
+
 /// Windows-only console-control events with no POSIX equivalent --
 /// `SetConsoleCtrlHandler`'s four events besides Ctrl+C (which
 /// [`super::ctrl_c`] already covers, cross-platform). See the parent

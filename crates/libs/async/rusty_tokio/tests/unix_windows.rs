@@ -1,5 +1,5 @@
 #![cfg(windows)]
-// The Windows arm of `UnixListener`/`UnixStream` -- see `io/unix.rs`'s
+// The Windows arm of `UnixListener`/`UnixStream` -- see `io/unix_socket.rs`'s
 // own docs and `docs/decision-request-windows-process-signal-ipc.md` for
 // what's supported here versus the Unix arm (`tests/unix.rs`, which stays
 // `#![cfg(unix)]`-only): no `UnixStream::pair` (no anonymous `AF_UNIX`
