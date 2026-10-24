@@ -1,6 +1,6 @@
 # RB-VERIFY-002 — BakkesMod Offline Capture Ingestion
 
-- Version: 0.4.0
+- Version: 0.4.1
 - Status: In Progress (FR-001 — the BakkesMod-side plugin — built, loaded,
   and run against a real Rocket League + BakkesMod install; FR-002/NFR-001
   implemented and now also verified against that real capture, not just the
@@ -119,6 +119,12 @@ parsing (FR-002 is implemented) — it would still describe the BakkesMod
 plugin's absence if that were represented in this crate, but the plugin is
 a separate deliverable outside it (see Architecture).
 
+Known defects in real captures (unlimited boost in the September freeplay
+sessions, single-tick `angular_velocity` spikes and input drops, dead analog
+axes in two clips, a dodge with no recorded `jump` press) are listed in
+`docs/research/SERVER-CLONE-BRANCH-FINDINGS.md`. The parser accepts them; a
+scorer has to allow for them.
+
 ## Security, privacy, and compatibility
 
 Captures are the owner's own local play sessions; no third-party data
@@ -182,6 +188,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.4.1 (2026-10-24): points to the capture defects recorded from the
+  unimported server-clone branch (`SERVER-CLONE-BRANCH-FINDINGS.md`).
 - 0.4.0 (2026-09-02): FR-001's plugin built (MSVC/VS2022 Build Tools +
   CMake, against the owner's own installed `BakkesModSDK` copy), loaded
   into a real Rocket League + BakkesMod session, and run in freeplay — the
