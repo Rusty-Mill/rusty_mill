@@ -10784,6 +10784,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rl_replay"
+version = "0.1.0"
+dependencies = [
+ "boxcars",
+]
+
+[[package]]
 name = "rleval-app"
 version = "0.1.0"
 dependencies = [

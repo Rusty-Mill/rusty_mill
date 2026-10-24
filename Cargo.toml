@@ -12,6 +12,7 @@ members = [
     "crates/apps/rocket_league/crates/rleval-app",
     "crates/apps/rocket_league/crates/rb_capture_ingest",
     "crates/apps/rocket_league/crates/rb_domain",
+    "crates/apps/rocket_league/crates/rl_replay",
     "crates/apps/rocket_league/crates/rb_env",
     "crates/apps/rocket_league/crates/rb_physics_bullet",
     "crates/apps/rocket_league/crates/rb_replay_ingest",
