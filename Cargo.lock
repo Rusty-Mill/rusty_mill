@@ -11779,7 +11779,7 @@ dependencies = [
  "rusty-search-solr",
  "rusty-search-sqlite-fts5",
  "rusty-search-tantivy",
- "tokio",
+ "rusty_tokio",
 ]
 
 [[package]]
@@ -11791,9 +11791,9 @@ dependencies = [
  "rusty-search-core",
  "rusty_request",
  "rusty_serde",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11807,9 +11807,9 @@ dependencies = [
  "rusty_request",
  "rusty_serde",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11819,7 +11819,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rusty-search-core",
- "tokio",
+ "rusty_tokio",
 ]
 
 [[package]]
@@ -11841,9 +11841,9 @@ dependencies = [
  "rusty-search-core",
  "rusty_request",
  "rusty_serde",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11868,7 +11868,7 @@ dependencies = [
  "async-trait",
  "rusty-search-core",
  "rusty_serde",
- "tokio",
+ "rusty_tokio",
 ]
 
 [[package]]
@@ -11879,8 +11879,8 @@ dependencies = [
  "rusty-search-core",
  "rusty-search-elasticsearch",
  "rusty_request",
+ "rusty_tokio",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11894,9 +11894,9 @@ dependencies = [
  "rusty_request",
  "rusty_serde",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11909,9 +11909,9 @@ dependencies = [
  "rusty_serde",
  "rusty_sqlite",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
  "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -11922,11 +11922,11 @@ dependencies = [
  "rusty-search-core",
  "rusty_serde",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
  "tantivy",
  "tempfile",
- "tokio",
 ]
 
 [[package]]

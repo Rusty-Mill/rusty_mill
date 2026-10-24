@@ -1958,3 +1958,18 @@ fn mpsc_blocking_recv_on_os_thread_drains_then_ends() {
     assert_eq!(bounded, (0..50).collect::<Vec<_>>());
     assert_eq!(unbounded, (0..50).collect::<Vec<_>>());
 }
+
+#[test]
+fn rwlock_and_mutex_build_from_default_and_from_a_value() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let lock: RwLock<Vec<u8>> = RwLock::default();
+        assert!(lock.read().await.is_empty());
+        let lock = RwLock::from(7);
+        assert_eq!(*lock.read().await, 7);
+        let mutex: Mutex<String> = Mutex::default();
+        assert!(mutex.lock().await.is_empty());
+        let mutex = Mutex::from(9);
+        assert_eq!(*mutex.lock().await, 9);
+    });
+}

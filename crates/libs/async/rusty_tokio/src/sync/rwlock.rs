@@ -254,6 +254,20 @@ pub struct RwLockReadGuard<'a, T> {
     lock: &'a RwLock<T>,
 }
 
+/// As tokio's: a `RwLock` around `value`.
+impl<T> From<T> for RwLock<T> {
+    fn from(value: T) -> Self {
+        RwLock::new(value)
+    }
+}
+
+/// As tokio's: a `RwLock` around `T::default()`.
+impl<T: Default> Default for RwLock<T> {
+    fn default() -> Self {
+        RwLock::new(T::default())
+    }
+}
+
 impl<T> Deref for RwLockReadGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
