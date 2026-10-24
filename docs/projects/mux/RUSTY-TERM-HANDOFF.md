@@ -26,10 +26,11 @@ Also merged:
 | #943 | ctutils 0.4.4 (RUSTSEC-2026-0385) | |
 | #952 | View-row map once per frame (backlog row 9) | |
 | #955 | `rusty_term` runs on `rusty_tokio`; tokio dropped | |
+| #956 | `rusty_term::sync::Mutex` (std-backed) replaces `parking_lot` | |
 
 #944 is closed as a duplicate, and its branch has been deleted.
 
-**#940 merged at `5c24bf8c`.** These docs landed in #950. #956 (open, by another session) replaces `parking_lot` in `rusty_term` with a std-backed mutex.
+**#940 merged at `5c24bf8c`.** These docs landed in #950. No PR from this work is open.
 
 ## 2. Roadmap (recommended order)
 
@@ -42,7 +43,7 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
 2. **Row 8: short lock. Done in #974.**
    - `Grid::frame_view` copies what a frame draws into an owned `FrameView` under each pane's lock. The window then composites and presents without holding it.
    - #974's local numbers (120x40, 120 Hz, 2026-10-24): lock hold is 0.08-0.09 ms p50 and 0.14-0.40 ms p99, so p50 and p99 are under the 1 ms target. The worst single hold, 2.45 ms, is not. Parser MB/s while rendering now matches parsing alone.
-   - Left open: the lock is a plain mutex with no fair handoff, and no starvation was measured. #974 defers a lock-type change to the tokio-removal work.
+   - Left open: the lock is a plain mutex with no fair handoff, and no starvation was measured. #974 left the lock type to the tokio-removal work. That work (#956) swapped `parking_lot` for the std-backed `rusty_term::sync::Mutex`, which is still not fair.
 3. **Row 7: the GUI consumes dirty rows.**
    - The core already tracks `Grid::dirty`, and the TUI uses it. Since #974, `frame_view` still copies every row each frame, so dirty rows can also shrink that copy. The CPU path does a full `buffer.fill`, and the GPU path rebuilds all instances.
    - Design the per-row change seqno here, because the same mechanism serves incremental snapshots (step 5). Agree its shape with the mux protocol owner first.
@@ -114,7 +115,7 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
 - **Never read `.env`; never commit or log secrets.**
 - **rusty_mux crates use `rusty_tokio`, not tokio.**
   - The mux links `rusty_term_core`. Its `l13` feature is tokio-free since #949.
-  - Do not link the `rusty_term` front-end crate: it is the windowed and TUI app, not the engine. It no longer depends on tokio (#955) but still depends on `parking_lot` until #956 lands.
+  - Do not link the `rusty_term` front-end crate: it is the windowed and TUI app, not the engine. It no longer depends on tokio (#955) or directly on `parking_lot` (#956). Its `gui` and `gui-gpu` features still pull `parking_lot` in transitively through `arboard` and `wgpu`.
 
 ## 5. How to validate
 
@@ -187,6 +188,6 @@ The ratchet rule: a PR that lowers a count lowers that ceiling to about measured
   - `docs/projects/mux/{CHARTER,DECISIONS,RISKS,SPIKES}.md`
   - `crates/libs/ui/rusty_term/bench/README.md`
   - `docs/projects/mux/RUSTY-TERM-NOTES.md`
-- **Pull requests:** #851, #857, #862, #872, #894, #925, #930, #936, #939, #940, #943, #944 (closed), #952, #955, #974 (by other sessions).
+- **Pull requests:** #851, #857, #862, #872, #894, #925, #930, #936, #939, #940, #943, #944 (closed), #952, #955, #956, #974 (by other sessions).
 - **Issues:** #850 (closed by #949), #854, #855, #856 (closed).
 - **Branch used:** `claude/new-session-s68lms`. Start new work from `origin/main` on a fresh branch.
