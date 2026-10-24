@@ -27,7 +27,7 @@ Also merged:
 
 #944 is closed as a duplicate, and its branch has been deleted.
 
-**#940 merged at `5c24bf8c`.** No PR from this work is open apart from #950 (these docs).
+**#940 merged at `5c24bf8c`.** These docs landed in #950. No PR from this work is open.
 
 ## 2. Roadmap (recommended order)
 
@@ -87,7 +87,7 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
    - Nothing was measured on Windows.
    - ConPTY spike 1 (`spike1-conpty.ps1`) waits on the owner's Windows machine.
    - A Windows ConPTY fidelity corpus is still owed.
-6. **#850:** the core's `l13` feature pulls in tokio through `rusty_lsp`. Low priority by owner decision; leave it.
+6. **#850 is fixed** (#949): the core's `l13` feature no longer pulls in tokio. A new in-workspace consumer of `rusty_lsp`'s server or client must enable its `runtime` feature.
 7. **Mode 2027:** grapheme clustering is opt-in only, with no config key. Whether a key is wanted is unconfirmed.
 8. **Clean-room:** the backlog's technique rows were informed by reading Ghostty, Alacritty and WezTerm source, and kitty (described only). If the mux policy is strict clean-room, ask before reusing those designs (seqno and stable row index come from WezTerm).
 
@@ -112,7 +112,7 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
 - **Every PR needs a change fragment:** `changes/<date>-<slug>.md`, checked by `python3 .github/scripts/changes.py check`. Use the PR templates in `.github/PULL_REQUEST_TEMPLATE/`.
 - **Never read `.env`; never commit or log secrets.**
 - **rusty_mux crates use `rusty_tokio`, not tokio.**
-  - The mux links `rusty_term_core` without the `l13` feature.
+  - The mux links `rusty_term_core`. Its `l13` feature is tokio-free since #949.
   - Do not link the `rusty_term` front-end crate, which depends on tokio and `parking_lot`.
 
 ## 5. How to validate
@@ -187,5 +187,5 @@ The ratchet rule: a PR that lowers a count lowers that ceiling to about measured
   - `crates/libs/ui/rusty_term/bench/README.md`
   - `docs/projects/mux/RUSTY-TERM-NOTES.md`
 - **Pull requests:** #851, #857, #862, #872, #894, #925, #930, #936, #939, #940, #943, #944 (closed).
-- **Issues:** #850 (open), #854, #855, #856 (closed).
+- **Issues:** #850 (closed by #949), #854, #855, #856 (closed).
 - **Branch used:** `claude/new-session-s68lms`. Start new work from `origin/main` on a fresh branch.
