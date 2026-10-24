@@ -30,6 +30,8 @@ mod state;
 pub(crate) mod trace;
 mod yield_now;
 
+/// tokio's `task::spawn_blocking` path for [`crate::spawn_blocking`] (#897).
+pub use crate::spawn_blocking;
 pub use block_in_place::block_in_place;
 pub use builder::Builder;
 pub use id::{try_id, try_name, TaskId};
