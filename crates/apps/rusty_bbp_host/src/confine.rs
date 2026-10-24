@@ -365,6 +365,7 @@ fn json(s: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::moderator::{Launcher, Launchers};
 
