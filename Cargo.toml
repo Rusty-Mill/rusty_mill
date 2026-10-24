@@ -101,6 +101,7 @@ members = [
     "crates/libs/storage/rusty_fair_play_domain",
     "crates/libs/storage/rusty_multimodal_db_engine",
     "crates/apps/rusty_mux/crates/core",
+    "crates/apps/rusty_mux/crates/proto",
     "crates/apps/rusty_remind_me/crates/remind_me_core",
     "crates/apps/rusty_remind_me/crates/remind_me_mcp",
     "crates/apps/rusty_remind_me/crates/remind_me_api",
@@ -940,6 +941,9 @@ remind_me_mcp = { path = "crates/apps/rusty_remind_me/crates/remind_me_mcp" }
 remind_me_api = { path = "crates/apps/rusty_remind_me/crates/remind_me_api" }
 remind_me_remote = { path = "crates/apps/rusty_remind_me/crates/remind_me_remote" }
 remind_me_hub = { path = "crates/apps/rusty_remind_me/crates/remind_me_hub" }
+
+# rusty_mux family (docs/projects/mux/).
+rusty_mux_core = { path = "crates/apps/rusty_mux/crates/core" }
 tracing-appender = "0.2"
 # Markdown parsing
 comrak = { version = "0.52", default-features = false, features = [] }

@@ -1,0 +1,17 @@
+[package]
+name = "rusty_mux_proto"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "rusty_mux's wire protocol: length-prefixed frames of tagged varint fields, with feature bits. No I/O."
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+rusty_mux_core = { workspace = true }
+rusty_uuid = { workspace = true }
+rusty_wire = { workspace = true }
