@@ -65,8 +65,8 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 - The XTVERSION reply reads the core crate's version (0.1.1, kept in lockstep with `rusty_term`).
 
 **Rendering (measured by `bench_frame_time`, PR #940)**
-- **Lock hold:** at #940's baseline, the GUI held the grid lock for the whole frame, including present/vsync: 1.43-2.54 ms at p50, up to 7.28 ms at p99, with a 12.32 ms max. #974 (backlog row 8) now copies the frame under the lock and renders without it. Its local result is 0.08-0.09 ms p50, 0.14-0.40 ms p99 and a 2.45 ms worst case, under the 1 ms target. The lock is still a plain mutex with no fair handoff.
-- **Fold blocks:** 1,024 command fold blocks make a frame 8.6x slower at the live view and 13x slower scrolled back. The cause is the O(cells × fold_blocks) view mapping (backlog row 9).
+- **Lock hold:** at #940's baseline, the GUI held the grid lock for the whole frame, including present/vsync: 1.43-2.54 ms at p50, up to 7.28 ms at p99, with a 12.32 ms max. #974 (backlog row 8) now copies the frame under the lock and renders without it. Its local result is 0.08-0.09 ms p50 and 0.14-0.40 ms p99, both under the 1 ms target; the 2.45 ms worst case is not. The lock is still a plain mutex with no fair handoff.
+- **Fold blocks:** *historical:* at #940's baseline, 1,024 command fold blocks made a frame 8.6x slower live and 13x slower scrolled back, because of an O(cells × fold_blocks) view mapping. #952 (backlog row 9) fixed it with `Grid::view`, one walk per frame. Its local result is 1.00-1.05 ms p50 with 1,024 blocks, against 0.99-1.36 ms with none.
 - **Dirty rows:** the core tracks dirty rows (`Grid::dirty`), and the TUI uses them. The GUI ignores them (backlog row 7).
 
 **Performance status** (local, instructions per byte from the CI gate; ceilings: alt 809, ascii 53, cursor 93, scroll 150, sgr 128, unicode 184)
@@ -103,7 +103,7 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 2. Is snapshot encode speed against libghostty a hard target? It is not reliably met on the second host.
 3. Incremental snapshot design: per-row seqno, stable row index, and how parser state and modes travel on attach. Undecided.
 4. When does the compact cell (backlog row 5) land, and how does it bump the snapshot version? Deferred by D10.
-5. Starting #3 (GUI frame path; #9 first) needs the owner's go-ahead. Not given yet.
+5. The rest of #3 (GUI frame path) is row 7, dirty rows; it needs the owner's go-ahead. Rows 9 and 8 landed in #952 and #974.
 6. ConPTY spike 1 results and a Windows fidelity corpus: pending on the owner's side.
 7. A config key to make mode 2027 clustering the default: none exists. Is one wanted? Unconfirmed.
 8. Is the backlog's source reading compatible with the mux's clean-room rule? See the ⚠ above. Unconfirmed.
@@ -113,7 +113,7 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 | Item | Touches | Status |
 |---|---|---|
 | PR #940: frame-time benchmark (`bench_frame_time`, `render::composite`) | `rusty_term` (gui) | Merged (`5c24bf8c`) |
-| Backlog #3 = rows 8 + 9 + 7 (short lock, row map once per frame, dirty rows) | `rusty_term` gui, `rusty_term_core` | Row 8 done (#974); rows 9 and 7 not started, need the owner's go-ahead |
+| Backlog #3 = rows 8 + 9 + 7 (short lock, row map once per frame, dirty rows) | `rusty_term` gui, `rusty_term_core` | Rows 9 (#952) and 8 (#974) done; row 7 not started, needs the owner's go-ahead |
 | Incremental snapshot: per-row seqno plus stable row index | `rusty_term_core`, future `rusty_mux_proto` | Not started; belongs to the mux protocol work |
 | Compact cell (row 5) and contiguous scrollback (row 6) | `rusty_term_core`, snapshot version | Deferred (D10) |
 | PTY read batching (row 10) | `rusty_term` backends; relevant to `rusty_mux_server` | Not started (P2) |
@@ -135,6 +135,7 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 | #936 | ASCII fast path |
 | #939 | Snapshot |
 | #940 | Frame bench |
+| #952 | View-row map once per frame, row 9 (another session) |
 | #955 | `rusty_term` on `rusty_tokio` (another session) |
 | #974 | Short frame lock, row 8 (another session) |
 | #943 | ctutils 0.4.4 (not from this session) |
