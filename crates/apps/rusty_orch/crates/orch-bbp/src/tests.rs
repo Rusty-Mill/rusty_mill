@@ -118,7 +118,13 @@ pub(super) fn task() -> (Task, Board) {
 #[derive(Debug, Default, Clone)]
 pub(super) struct FakeSupervisor(Rc<Cell<usize>>);
 impl Supervisor for FakeSupervisor {
-    fn ensure(&mut self, _: &Config, _: &str, _: &std::path::Path) -> Result<Supervised, String> {
+    fn ensure(
+        &mut self,
+        _: &Config,
+        _: &str,
+        _: &std::path::Path,
+        _: Option<u64>,
+    ) -> Result<Supervised, String> {
         self.0.set(self.0.get() + 1);
         Ok(Supervised::Running)
     }
@@ -596,12 +602,18 @@ fn cancel_opens_a_never_opened_task_straight_into_cancelled_and_starts_nothing()
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// Records the moderator lifetime each `ensure` was asked for.
+/// Records the moderator lifetime and deadline each `ensure` was asked for.
 #[derive(Debug, Clone, Default)]
-struct WallSupervisor(Rc<Cell<u64>>);
+struct WallSupervisor(Rc<Cell<(u64, Option<u64>)>>);
 impl Supervisor for WallSupervisor {
-    fn ensure(&mut self, c: &Config, _: &str, _: &std::path::Path) -> Result<Supervised, String> {
-        self.0.set(c.max_wall_secs);
+    fn ensure(
+        &mut self,
+        c: &Config,
+        _: &str,
+        _: &std::path::Path,
+        deadline: Option<u64>,
+    ) -> Result<Supervised, String> {
+        self.0.set((c.max_wall_secs, deadline));
         Ok(Supervised::Running)
     }
 }
@@ -610,6 +622,9 @@ impl Supervisor for WallSupervisor {
 fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
     let dir = temp().canonicalize().unwrap();
     let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
+    for made in ["tools", "src/a"] {
+        std::fs::create_dir_all(dir.join(made)).unwrap();
+    }
     let mut c = config(&dir);
     for agent in c.pool.values_mut() {
         agent.sandbox = Some(Sandbox {
@@ -649,8 +664,8 @@ fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
     let handle = host
         .open(&task, &board, &leased("src/a", now + 30))
         .unwrap();
-    // The moderator dies with the lease, before its configured 60 s.
-    assert!((1..=30).contains(&wall.0.get()), "{}", wall.0.get());
+    // The moderator is told the lease's absolute end; its wall is unchanged.
+    assert_eq!(wall.0.get(), (60, Some(now + 30)));
     let h = host.handle(&handle).unwrap();
     let frozen = BbpHost::<Contract, WallSupervisor>::load(&h).unwrap();
     for agent in frozen.config.pool.values() {
@@ -679,7 +694,7 @@ fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
         host.poll(&handle, &leased("src/a", now.saturating_sub(1))),
         Err(ClassifiedError::Unavailable(_))
     ));
-    // A renewal at the same paths is admitted and extends the lifetime.
+    // A renewal at the same paths is admitted and moves the deadline.
     command
         .replies
         .borrow_mut()
@@ -688,7 +703,7 @@ fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
         host.poll(&handle, &leased("src/a", now + 3_600)).unwrap(),
         Progress::Working
     );
-    assert_eq!(wall.0.get(), 60);
+    assert_eq!(wall.0.get(), (60, Some(now + 3_600)));
     std::fs::remove_dir_all(dir).unwrap();
 }
 

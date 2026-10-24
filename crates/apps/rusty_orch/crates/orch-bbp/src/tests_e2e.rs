@@ -172,6 +172,7 @@ impl Supervisor for ScriptSupervisor {
         config: &Config,
         task: &str,
         _: &std::path::Path,
+        _: Option<u64>,
     ) -> Result<Supervised, String> {
         let mut child = self.0.borrow_mut();
         if let Some(m) = child.as_mut() {
@@ -398,7 +399,7 @@ RPC
     let first = std::fs::read_to_string(&pid_path).unwrap();
     assert_eq!(
         host.supervisor
-            .ensure(&frozen.config, &h.task, &agents)
+            .ensure(&frozen.config, &h.task, &agents, None)
             .unwrap(),
         Supervised::Running
     );
@@ -1099,6 +1100,7 @@ RPC
 #[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; enforced Linux sandbox"]
 fn orch_binary_confines_a_pool_member_to_the_goals_lease() {
     let (dir, mut c) = setup();
+    let dir = dir.canonicalize().unwrap();
     // The pool member may read `secret`; the goal's lease reaches only `bin`.
     let (bin, secret) = (dir.join("bin"), dir.join("secret"));
     std::fs::create_dir_all(&bin).unwrap();
@@ -1122,25 +1124,8 @@ RPC
     let writer = c.pool.get_mut("writer").unwrap();
     writer.program = "/bin/sh".into();
     writer.args = vec![path(&script), path(&secret)];
-    let mut hosting = rusty_serde::json::to_value(&c).unwrap();
     let lease = format!(r#"{{"read":[{:?}],"ttl_secs":600}}"#, path(&bin));
-    let lease: rusty_serde::json::Value = rusty_serde::json::from_str(&lease).unwrap();
-    hosting.insert("lease", lease);
-    let cfg = dir.join("bbp.json");
-    std::fs::write(&cfg, rusty_serde::json::to_string(&hosting).unwrap()).unwrap();
-    let goal = dir.join("goal.json");
-    std::fs::write(&goal, r#"{"goal":"Implement flag","done_when":["tested"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":1,"stop":"checkpoint","tasks":[{"role":"implement","instruction":"Implement flag","acceptance":["tested"],"max_calls":1}]}"#).unwrap();
-    let orch = std::env::var_os("ORCH_TEST_BIN").expect("set ORCH_TEST_BIN");
-    let out = Command::new(&orch)
-        .arg("run")
-        .arg(&goal)
-        .arg("--bbp")
-        .arg(&cfg)
-        .arg("--state")
-        .arg(dir.join("orch-state"))
-        .arg("--json")
-        .output()
-        .unwrap();
+    let out = run_leased(&dir, &c, &lease);
     assert!(
         matches!(out.status.code(), Some(0 | 3)),
         "{}",
@@ -1187,6 +1172,170 @@ RPC
     assert_eq!(cancel_hosted(&c, &report), 1);
     std::fs::remove_dir_all(dir).unwrap();
     println!("BBP_ACCEPTANCE PASS lease-confined");
+}
+
+/// `rusty_orch run` of a one-card goal hosted by `c` under `lease`, a JSON object.
+fn run_leased(dir: &std::path::Path, c: &Config, lease: &str) -> std::process::Output {
+    let mut hosting = rusty_serde::json::to_value(c).unwrap();
+    let lease: rusty_serde::json::Value = rusty_serde::json::from_str(lease).unwrap();
+    hosting.insert("lease", lease);
+    let cfg = dir.join("bbp.json");
+    std::fs::write(&cfg, rusty_serde::json::to_string(&hosting).unwrap()).unwrap();
+    let goal = dir.join("goal.json");
+    std::fs::write(&goal, r#"{"goal":"Implement flag","done_when":["tested"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":1,"stop":"checkpoint","tasks":[{"role":"implement","instruction":"Implement flag","acceptance":["tested"],"max_calls":1}]}"#).unwrap();
+    let orch = std::env::var_os("ORCH_TEST_BIN").expect("set ORCH_TEST_BIN");
+    Command::new(&orch)
+        .arg("run")
+        .arg(&goal)
+        .arg("--bbp")
+        .arg(&cfg)
+        .arg("--state")
+        .arg(dir.join("orch-state"))
+        .arg("--json")
+        .output()
+        .unwrap()
+}
+
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; enforced Linux sandbox"]
+fn a_member_that_could_swap_anothers_root_is_refused_by_orch_and_by_bbp() {
+    let (dir, mut c) = setup();
+    let dir = dir.canonicalize().unwrap();
+    // The writer may write `src`; the judge's rule names `src/sub`, which the
+    // writer could replace with a link to `secret` before the judge launches.
+    let (src, sub, secret) = (dir.join("src"), dir.join("src/sub"), dir.join("secret"));
+    for d in [&sub, &secret] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
+    c.pool.get_mut("writer").unwrap().sandbox = Some(Sandbox {
+        write: vec![path(&src)],
+        ..Sandbox::default()
+    });
+    c.pool.get_mut("judge").unwrap().sandbox = Some(Sandbox {
+        read: vec![path(&sub)],
+        ..Sandbox::default()
+    });
+    let out = run_leased(&dir, &c, &format!(r#"{{"write":[{:?}]}}"#, path(&src)));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("could swap")
+            || stderr.contains("could swap"),
+        "{stderr}"
+    );
+    // BBP refuses the same launchers when handed them directly.
+    let agents = dir.join("agents.json");
+    std::fs::write(
+        &agents,
+        format!(
+            r#"{{"maker":{{"program":"/bin/true","args":[],"sandbox":{{"write":[{:?}]}}}},"auditor":{{"program":"/bin/true","args":[],"sandbox":{{"read":[{:?}]}}}}}}"#,
+            path(&src),
+            path(&sub)
+        ),
+    )
+    .unwrap();
+    let bbp = Command::new(&c.binary)
+        .args(["mod", "--dir"])
+        .arg(dir.join("bbp-direct"))
+        .args(["--task", "swap", "--repo-path"])
+        .arg(&c.repo)
+        .arg("--work")
+        .arg(dir.join("direct-work"))
+        .arg("--agents")
+        .arg(&agents)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&bbp.stderr);
+    assert!(!bbp.status.success(), "{said}");
+    assert!(said.contains("beneath write root"), "{said}");
+    std::fs::remove_dir_all(dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS lease-unswappable");
+}
+
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; enforced Linux sandbox"]
+fn a_harness_stops_at_its_lease_end_even_after_its_moderator_dies() {
+    let (dir, mut c) = setup();
+    let dir = dir.canonicalize().unwrap();
+    let (bin, out) = (dir.join("bin"), dir.join("out"));
+    for d in [&bin, &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    // The writer never ends its turn: it writes a tick every 100 ms.
+    let script = bin.join("tick.sh");
+    std::fs::write(
+        &script,
+        "echo $$ > \"$1/pid\"; while :; do date +%s%N >> \"$1/ticks\"; sleep 0.1; done\n",
+    )
+    .unwrap();
+    let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
+    for agent in c.pool.values_mut() {
+        agent.sandbox = Some(Sandbox {
+            read: vec![path(&bin)],
+            write: vec![path(&out)],
+            ..Sandbox::default()
+        });
+    }
+    let writer = c.pool.get_mut("writer").unwrap();
+    writer.program = "/bin/sh".into();
+    writer.args = vec![path(&script), path(&out)];
+    let lease = format!(
+        r#"{{"read":[{:?}],"write":[{:?}],"ttl_secs":5}}"#,
+        path(&bin),
+        path(&out)
+    );
+    let started = std::time::SystemTime::now();
+    let run = run_leased(&dir, &c, &lease);
+    assert!(
+        matches!(run.status.code(), Some(0 | 3)),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let report: rusty_serde::json::Value =
+        rusty_serde::json::from_str(&String::from_utf8(run.stdout).unwrap()).unwrap();
+    let h = report_handle(&report);
+    let ticks = out.join("ticks");
+    let wait = Instant::now() + Duration::from_secs(4);
+    while !ticks.exists() {
+        assert!(Instant::now() < wait, "the writer never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Crash the moderator: nothing of Orch or BBP is left to stop the writer
+    // but its group's holder.
+    let key = rusty_bbp::Sha256::of(h.task.as_bytes()).hex();
+    let moderator = std::fs::read_to_string(c.dir.join("mod").join(format!("{key}.pid"))).unwrap();
+    assert!(Command::new("kill")
+        .args(["-KILL", moderator.trim()])
+        .status()
+        .unwrap()
+        .success());
+    let end = started + Duration::from_secs(7);
+    while std::time::SystemTime::now() < end {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let writer = std::fs::read_to_string(out.join("pid")).unwrap();
+    assert!(!running(writer.trim()), "the writer outlived its lease");
+    let last: u128 = std::fs::read_to_string(&ticks)
+        .unwrap()
+        .lines()
+        .last()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let lease_end = started.duration_since(std::time::UNIX_EPOCH).unwrap() + Duration::from_secs(6);
+    assert!(
+        last <= lease_end.as_nanos(),
+        "a tick landed after the lease ended"
+    );
+    let count = std::fs::read_to_string(&ticks).unwrap().lines().count();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        std::fs::read_to_string(&ticks).unwrap().lines().count(),
+        count
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS lease-deadline");
 }
 
 /// A real in-memory Millboard on a loopback port with a shared token and the

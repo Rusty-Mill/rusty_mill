@@ -366,21 +366,10 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
         }
         Ok(())
     }
-    /// `config` with the moderator's lifetime cut to what remains of the
-    /// fence's lease, so its harnesses are killed when the lease ends even
-    /// with no Orch process watching.
-    fn lifetime(config: &Config, fence: &Fence) -> Result<Config, ClassifiedError> {
-        let mut config = config.clone();
-        if let Some(end) = fence.lease.as_ref().and_then(|l| l.expires) {
-            let left = end
-                .checked_sub(unix_now()?)
-                .filter(|left| *left > 0)
-                .ok_or_else(|| {
-                    ClassifiedError::Unavailable(AgentError("the hosting lease has ended".into()))
-                })?;
-            config.max_wall_secs = config.max_wall_secs.min(left);
-        }
-        Ok(config)
+    /// The absolute end, in unix seconds, every process the fence starts
+    /// must be gone by: its lease's.
+    fn deadline(fence: &Fence) -> Option<u64> {
+        fence.lease.as_ref().and_then(|l| l.expires)
     }
     fn holder(path: &std::path::Path) -> Result<Holder, ClassifiedError> {
         let bytes = std::fs::read_to_string(path).map_err(transient)?;
@@ -434,7 +423,7 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
     ) -> Result<(), ClassifiedError> {
         let agents = Self::materialize(h, frozen)?;
         self.supervisor
-            .ensure(&Self::lifetime(&frozen.config, fence)?, &h.task, &agents)
+            .ensure(&frozen.config, &h.task, &agents, Self::deadline(fence))
             .map_err(transient)?;
         Ok(())
     }
@@ -698,7 +687,7 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
                 )?)?;
             }
             self.supervisor
-                .ensure(&Self::lifetime(config, fence)?, &h.task, &agents)
+                .ensure(config, &h.task, &agents, Self::deadline(fence))
                 .map_err(transient)?;
         }
         Ok(HostHandle(text(&format!(

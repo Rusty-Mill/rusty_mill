@@ -34,6 +34,10 @@ pub struct Grant {
 /// A permission lease: the paths an assignment's workers may reach and when
 /// that authority ends. A host confines workers to it; it never widens what
 /// the host's own configuration allows.
+///
+/// Containment here is by spelling. It is containment in fact only for
+/// canonical paths, with no symlink along them, which is why a host refuses
+/// any other lease path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lease {
     /// Absolute, normalized paths workers may read.

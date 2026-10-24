@@ -5,6 +5,13 @@
 //! both sides resolved through symlinks first. BBP still adds the system
 //! roots, the turn workspace and, with `checkout`, the repository's object
 //! store; a checkout therefore needs the repository inside the lease.
+//!
+//! Lease paths must already be canonical: `orch-core` compares a child's lease
+//! with its parent's by spelling, which is sound only when no component of a
+//! leased path is a symlink. No kept path of any member may lie beneath
+//! another kept write root, of the same member or another, since that
+//! harness could replace it with a symlink before its rule is made; BBP
+//! refuses the same, with its own roots, when the moderator starts.
 use crate::config::resolved;
 use crate::{Config, Sandbox};
 use orch_core::factory::{contains, Lease};
@@ -14,8 +21,8 @@ use std::path::Path;
 /// `lease`. An assigned member without a sandbox cannot be bounded, so it is
 /// refused rather than run as configured.
 pub(crate) fn confine(config: &Config, lease: &Lease) -> Result<Config, String> {
-    let read = canonical(&lease.read)?;
-    let write = canonical(&lease.write)?;
+    let read = exact(&lease.read)?;
+    let write = exact(&lease.write)?;
     let reach: Vec<String> = read.iter().chain(&write).cloned().collect();
     let repo = canonical(&[path(&config.repo)?])?;
     let mut confined = config.clone();
@@ -37,7 +44,45 @@ pub(crate) fn confine(config: &Config, lease: &Lease) -> Result<Config, String> 
         }
         *sandbox = bounded(sandbox, &read, &write)?;
     }
+    unswappable(&confined)?;
     Ok(confined)
+}
+
+/// Each lease path exactly as the kernel resolves it: existing, with no
+/// symlink anywhere along it.
+fn exact(paths: &[String]) -> Result<Vec<String>, String> {
+    for p in paths {
+        let real = std::fs::canonicalize(p).map_err(|e| format!("lease path {p}: {e}"))?;
+        if real != Path::new(p) {
+            return Err(format!(
+                "lease path {p} resolves to {}; leases name canonical paths",
+                real.display()
+            ));
+        }
+    }
+    Ok(paths.to_vec())
+}
+
+/// Refuse a confined pool in which some member's path lies strictly beneath
+/// a write root of any member.
+fn unswappable(config: &Config) -> Result<(), String> {
+    let sandboxes: Vec<&Sandbox> = config
+        .assignments
+        .values()
+        .filter_map(|a| config.pool.get(&a.agent)?.sandbox.as_ref())
+        .collect();
+    for write in sandboxes.iter().flat_map(|s| &s.write) {
+        let beneath = sandboxes
+            .iter()
+            .flat_map(|s| s.read.iter().chain(&s.write))
+            .find(|p| *p != write && contains(write, p));
+        if let Some(path) = beneath {
+            return Err(format!(
+                "{path} lies beneath write root {write}, which a harness could swap"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `sandbox` with its paths met with the lease's. Nothing is kept beneath a
@@ -129,6 +174,11 @@ mod tests {
             expires: None,
         }
     }
+    fn made(paths: &[&std::path::Path]) {
+        for p in paths {
+            std::fs::create_dir_all(p).unwrap();
+        }
+    }
     fn sandboxed(config: &mut Config, sandbox: Sandbox) {
         for agent in config.pool.values_mut() {
             agent.sandbox = Some(sandbox.clone());
@@ -144,6 +194,7 @@ mod tests {
             dir.join("tool"),
             dir.join("other"),
         );
+        made(&[&a, &tool]);
         let mut config = config(&dir);
         sandboxed(
             &mut config,
@@ -222,8 +273,53 @@ mod tests {
                 ..Sandbox::default()
             },
         );
+        made(&[&dir.join("elsewhere"), &dir.join("repo")]);
         let refused = confine(&checkout, &lease(&[&dir.join("elsewhere")], &[])).unwrap_err();
         assert!(refused.contains("repository"), "{refused}");
         assert!(confine(&checkout, &lease(&[&dir.join("repo")], &[])).is_ok());
+    }
+
+    #[test]
+    fn a_lease_path_through_a_symlink_is_refused() {
+        // A child leased `/src/escape` is lexically inside a parent's `/src`;
+        // were `escape` a link to `/secret`, it would reach outside it.
+        let dir = temp().canonicalize().unwrap();
+        let (src, secret) = (dir.join("src"), dir.join("secret"));
+        made(&[&src, &secret]);
+        std::os::unix::fs::symlink(&secret, src.join("escape")).unwrap();
+        let mut config = config(&dir);
+        sandboxed(
+            &mut config,
+            Sandbox {
+                read: strings(&[&secret, &src]),
+                ..Sandbox::default()
+            },
+        );
+        let refused = confine(&config, &lease(&[&src.join("escape")], &[])).unwrap_err();
+        assert!(refused.contains("canonical"), "{refused}");
+        let missing = confine(&config, &lease(&[&src.join("absent")], &[])).unwrap_err();
+        assert!(missing.contains("absent"), "{missing}");
+        assert!(confine(&config, &lease(&[&src], &[])).is_ok());
+    }
+
+    #[test]
+    fn one_members_write_root_may_not_hold_anothers_path() {
+        let dir = temp().canonicalize().unwrap();
+        let (src, sub) = (dir.join("src"), dir.join("src/sub"));
+        made(&[&sub]);
+        let mut config = config(&dir);
+        config.pool.get_mut("writer").unwrap().sandbox = Some(Sandbox {
+            write: strings(&[&src]),
+            ..Sandbox::default()
+        });
+        config.pool.get_mut("judge").unwrap().sandbox = Some(Sandbox {
+            read: strings(&[&sub]),
+            ..Sandbox::default()
+        });
+        let refused = confine(&config, &lease(&[], &[&src])).unwrap_err();
+        assert!(refused.contains("swap"), "{refused}");
+        // Narrowing the writer below the reader's path removes the hazard.
+        made(&[&src.join("out")]);
+        assert!(confine(&config, &lease(&[&sub], &[&src.join("out")])).is_ok());
     }
 }

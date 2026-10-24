@@ -11,9 +11,10 @@ One entry per merged PR against `main`, newest first. No version tags yet.
   lease must fit inside its parent's, on delegation, re-grant and restore.
 - `lease: {read, write, ttl_secs}` in the hosting configuration confines a
   hosted goal: every assigned pool member must be sandboxed, and its sandbox
-  keeps only what the lease also reaches. A run under a different lease is
-  refused; one whose lease ended stops driving the task, and the moderator
-  is stopped at the end by BBP itself.
+  keeps only what the lease also reaches. Lease paths must be canonical, and
+  no member's path may lie beneath any member's write root. A run under a
+  different lease is refused; one whose lease ended stops driving the task,
+  and every harness is killed at the end by BBP itself, moderator or not.
 
 ---
 
