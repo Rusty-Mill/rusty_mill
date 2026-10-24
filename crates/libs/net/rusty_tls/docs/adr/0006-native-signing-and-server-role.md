@@ -11,6 +11,8 @@ engine can sign. That is the implementer's transcription, not a statement from t
 owner then answered "Approved" in the working session on 2026-10-24 (the implementer's transcription, not yet restated from the owner's GitHub account) to the recommendations in `docs/research/TLS-NATIVE-SIGNING.md` §6
 (S2 to S5). That accepted this ADR and the choices below.
 
+Direct owner confirmation on 2026-10-24 is recorded in [PR #981 comment 6385229428](https://github.com/Rusty-Mill/rusty_mill/pull/981#issuecomment-6385229428). The S1–S5 scope is settled; the correction below specifies its nonce construction and failure policy.
+
 ## Context
 
 ADR-0005 put the hand-rolled engine's client path on first-party primitives (`rusty_sha2`, `rusty_pk`,
@@ -20,14 +22,20 @@ first-party signing existed (plan gap 5, closed).
 
 The server path needs only one thing the first-party crates lack: producing ECDSA and Ed25519 signatures from a
 PKCS#8 private key. Ticket sealing needs AES-256-GCM and randomness, which both exist. Signing is secret-handling
-code in the strictest sense. An ECDSA nonce that repeats, or leaks a few bits across signatures, gives away the
-long-term private key.
+code in the strictest sense. Reusing an ECDSA nonce across distinct messages, or leaking nonce bits across
+signatures, can expose the long-term private key.
 
 ## Decision
 
 1. **First-party signing in `rusty_pk`.**
-   - ECDSA on P-256 and P-384, with a **hedged RFC 6979 nonce**: RFC 6979's derivation, seeded also with fresh
-     `rusty_rand` output. A failed random source then degrades to plain RFC 6979.
+   - ECDSA on P-256/SHA-256 and P-384/SHA-384, with a **hedged RFC 6979 nonce** pinned to
+     [draft-irtf-cfrg-det-sigs-with-noise-05 §4](https://www.ietf.org/archive/id/draft-irtf-cfrg-det-sigs-with-noise-05.html#section-4).
+     Follow the exact padded HMAC inputs specified in `docs/research/TLS-NATIVE-SIGNING.md` §3, with secret
+     fresh `rusty_rand` noise of 32 bytes for P-256 and 48 bytes for P-384. Production RNG errors fail closed
+     with no signature and no deterministic fallback. Fixed-noise and plain RFC 6979 paths are test-only.
+     Repeated/zero noise retains deterministic-style security, not identical plain RFC 6979 output. Hedging
+     mitigates some attacks exploiting determinism; it guarantees neither nonce uniqueness nor replay or
+     fault resistance, and instruction-skipping faults are not necessarily stopped (draft §5).
    - Ed25519 per RFC 8032.
    - PKCS#8 parsing for those key types.
    - Constant-time scalar multiplication, inversion and reduction throughout. Key material is wiped on drop.
@@ -59,8 +67,8 @@ long-term private key.
 ## Alternatives
 
 - **Keep gap 5 closed:** the native engine stays client-only and server-side users stay on `ring`.
-- **Plain RFC 6979 nonces:** deterministic and fully testable, but exposed to fault attacks that hedging
-  mitigates.
+- **Plain RFC 6979 nonces:** deterministic and fully testable; hedging aims to mitigate some attacks
+  exploiting determinism, subject to the exclusions above.
 - **Random-only nonces, as `ring` does:** they depend entirely on the random source never failing.
 - **Build RSA-PSS signing too:** RSA private-key operations are the hardest to make constant-time, and the plan
   has recommended never doing it since stage 7.
