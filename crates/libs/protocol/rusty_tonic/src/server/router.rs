@@ -245,13 +245,25 @@ impl Router {
             }
         }
         let deadline = head.timeout.map(|t| Instant::now() + t);
+        // Taken before `respond` moves into the call: it tells us when the client is gone.
+        let closed = respond.closed();
         let shared = Shared::new(respond, self.max_send);
         let call = Call {
             head,
             incoming: RawIncoming::new(body, self.max_recv),
             shared: shared.clone(),
         };
-        let status = match until(deadline, route(call)).await {
+        // A handler that is only waiting (on a lock, on work elsewhere) would never notice the
+        // client leave: nothing it does reads or writes. So the call ends when the stream does,
+        // and the handler is dropped, as `tonic` drops it.
+        let ended = rusty_tokio::select! {
+            outcome = until(deadline, route(call)) => Some(outcome),
+            () = closed => None,
+        };
+        let Some(outcome) = ended else {
+            return;
+        };
+        let status = match outcome {
             None => Status::deadline_exceeded("the call's deadline passed"),
             Some(Ok(())) => Status::ok(),
             Some(Err(status)) => status,
