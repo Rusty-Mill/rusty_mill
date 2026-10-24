@@ -62,8 +62,7 @@ translucent over the recorded car. Frames stay at the capture rate (120 Hz),
 time is rebased so the first recorded frame is `t = 0` (the title gives the
 capture time it maps to), and a recorded frame with no candidate frame within
 half an average recorded tick shows the recording alone. The closest timestamp
-wins; equal deltas choose the earlier sample. A singleton recording requires
-an exact match. Both timelines must have finite, strictly increasing timestamps.
+wins; equal deltas choose the earlier sample. A singleton recording uses half a 120 Hz capture tick (about 4.17 ms). Both timelines must have finite, strictly increasing timestamps.
 Player IDs above `i32::MAX` are rejected. Candidate export refuses every existing
 destination (including aliases of the recording), validates arguments before
 writing, and publishes a completely serialized file without overwriting data. The ball is the recorded one. Replay-only

@@ -23,15 +23,15 @@ const CAPTURE_TEAM: i32 = 0;
 /// within half a recorded tick; a recorded frame with no match shows only the
 /// recorded cars. Fails on an empty recording or a player id too large for a
 /// `pri`, nonfinite timestamps, or timestamps that are not strictly increasing.
-/// A singleton recording matches only an identical timestamp. Ties select the
-/// earlier candidate timestamp.
+/// A singleton recording uses half a 120 Hz capture tick as its tolerance.
+/// Ties select the earlier candidate timestamp.
 pub fn build_physics_scene(
     id: &str,
     recorded: &[PhysicsFrame],
     sim: Option<&[PhysicsFrame]>,
 ) -> Result<Scene, String> {
-    validate_timestamps(recorded)?;
-    validate_timestamps(sim.unwrap_or(&[]))?;
+    check_increasing("recording", recorded)?;
+    check_increasing("candidate", sim.unwrap_or(&[]))?;
     let (first, last) = match (recorded.first(), recorded.last()) {
         (Some(first), Some(last)) => (first.timestamp_secs, last.timestamp_secs),
         _ => return Err("the recording has no frames".into()),
@@ -45,7 +45,7 @@ pub fn build_physics_scene(
     } else {
         0.0
     };
-    let tolerance = if hz > 0.0 { 0.5 / hz } else { 0.0 };
+    let tolerance = if hz > 0.0 { 0.5 / hz } else { 0.5 / 120.0 };
     let sim = sim.unwrap_or(&[]);
 
     let mut frames = Vec::with_capacity(recorded.len());
@@ -96,16 +96,24 @@ pub fn quat_to_euler(q: Quat) -> [f32; 3] {
     [pitch, yaw, roll]
 }
 
-/// Validate the ordering assumed by the cursor and the browser's searches.
-fn validate_timestamps(frames: &[PhysicsFrame]) -> Result<(), String> {
-    if frames.iter().any(|f| !f.timestamp_secs.is_finite())
-        || frames
-            .windows(2)
-            .any(|w| w[0].timestamp_secs >= w[1].timestamp_secs)
-    {
-        return Err("capture timestamps must be finite and strictly increasing".into());
+/// Fails unless every timestamp is finite and greater than the one before.
+fn check_increasing(run: &str, frames: &[PhysicsFrame]) -> Result<(), String> {
+    if let Some(bad) = frames.iter().find(|f| !f.timestamp_secs.is_finite()) {
+        return Err(format!(
+            "the {run} has a non-finite timestamp ({})",
+            bad.timestamp_secs
+        ));
     }
-    Ok(())
+    match frames
+        .windows(2)
+        .find(|w| w[1].timestamp_secs <= w[0].timestamp_secs)
+    {
+        Some(w) => Err(format!(
+            "the {run}'s timestamps are not strictly increasing ({} then {})",
+            w[0].timestamp_secs, w[1].timestamp_secs
+        )),
+        None => Ok(()),
+    }
 }
 
 /// The closest timestamp, preferring the earlier sample on equal deltas.
@@ -198,6 +206,7 @@ fn pos(p: rb_domain::Vec3) -> [f32; 3] {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::f32::consts::FRAC_PI_2;
@@ -226,6 +235,70 @@ mod tests {
         let hit = nearest(&sim, &mut cursor, 1.0, 0.05).map(|f| f.timestamp_secs);
         assert_eq!(hit, Some(1.01));
         assert_eq!(nearest(&sim, &mut cursor, 2.0, 0.05), None);
+    }
+
+    /// The reviewer's case: recorded 0, .02, .04 against candidates .011, .020.
+    #[test]
+    fn each_recorded_frame_takes_its_nearest_candidate() {
+        let recorded = [frame_at(0.0), frame_at(0.02), frame_at(0.04)];
+        let sim = [frame_at(0.011), frame_at(0.020)];
+        let mut cursor = 0;
+        let picks: Vec<Option<f32>> = recorded
+            .iter()
+            .map(|r| nearest(&sim, &mut cursor, r.timestamp_secs, 0.01).map(|f| f.timestamp_secs))
+            .collect();
+        assert_eq!(picks, [None, Some(0.020), None]);
+    }
+
+    #[test]
+    fn a_tie_takes_the_earlier_frame() {
+        let sim = [frame_at(0.5), frame_at(1.5)];
+        let hit = nearest(&sim, &mut 0, 1.0, 0.5).map(|f| f.timestamp_secs);
+        assert_eq!(hit, Some(0.5));
+    }
+
+    fn with_car(mut frame: PhysicsFrame) -> PhysicsFrame {
+        frame.cars.push(rb_domain::CarState {
+            player_id: 0,
+            position: rb_domain::Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            velocity: rb_domain::Vec3::ZERO,
+            angular_velocity: rb_domain::Vec3::ZERO,
+            boost_amount: 0.0,
+            input: None,
+        });
+        frame
+    }
+
+    #[test]
+    fn a_one_frame_recording_pairs_only_a_close_candidate() {
+        let recorded = [with_car(frame_at(1.0))];
+        let cars = |sim: &[PhysicsFrame]| {
+            build_physics_scene("one", &recorded, Some(sim))
+                .unwrap()
+                .frames[0]
+                .cars
+                .len()
+        };
+        assert_eq!(
+            cars(&[with_car(frame_at(5.0))]),
+            1,
+            "a distant candidate paired"
+        );
+        assert_eq!(cars(&[with_car(frame_at(1.001))]), 2);
+    }
+
+    #[test]
+    fn out_of_order_or_non_finite_timestamps_are_refused() {
+        let ok = [frame_at(0.0), frame_at(0.1)];
+        let backwards = [frame_at(0.1), frame_at(0.0)];
+        let repeated = [frame_at(0.1), frame_at(0.1)];
+        let nan = [frame_at(0.0), frame_at(f32::NAN)];
+        for bad in [&backwards[..], &repeated[..], &nan[..]] {
+            assert!(build_physics_scene("x", bad, None).is_err());
+            assert!(build_physics_scene("x", &ok, Some(bad)).is_err());
+        }
+        assert!(build_physics_scene("x", &ok, Some(&ok)).is_ok());
     }
 
     #[test]

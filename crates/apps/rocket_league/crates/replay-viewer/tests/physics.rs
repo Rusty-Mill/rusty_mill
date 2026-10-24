@@ -129,9 +129,9 @@ fn equal_distance_ties_choose_the_earlier_timestamp() {
 }
 
 #[test]
-fn singleton_requires_an_exact_match() {
+fn singleton_uses_half_a_capture_tick() {
     let recorded = samples(&[10.0]);
-    for (timestamp, count) in [(10.0, 2), (10.001, 1), (1000.0, 1)] {
+    for (timestamp, count) in [(10.0, 2), (10.001, 2), (10.005, 1), (1000.0, 1)] {
         let scene =
             build_physics_scene("one", &recorded, Some(&samples(&[timestamp]))).expect("scene");
         assert_eq!(scene.frames[0].cars.len(), count);
