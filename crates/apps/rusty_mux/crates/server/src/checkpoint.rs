@@ -23,6 +23,7 @@ pub fn validate_size(size: Size) -> Result<(), String> {
     }
     Ok(())
 }
+#[cfg(target_os = "linux")]
 pub(crate) fn grid(size: Size) -> Grid {
     Grid::new(size.cols().into(), size.rows().into())
 }
