@@ -12491,15 +12491,18 @@ name = "rusty_mcp_server"
 version = "0.1.0"
 dependencies = [
  "rmcp",
+ "rusty_axum",
  "rusty_base64",
  "rusty_crypto_key",
  "rusty_http",
  "rusty_json",
+ "rusty_mcp_client_native",
  "rusty_mcp_proto",
  "rusty_oauth",
  "rusty_rand",
  "rusty_serve",
  "rusty_time",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "tokio",
