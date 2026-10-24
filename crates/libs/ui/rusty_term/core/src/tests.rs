@@ -6674,8 +6674,11 @@ fn utf8_fast_path_matches_the_bytewise_decoder() {
     // Fed one byte per call, the parser never sees a whole sequence, so every
     // byte goes through the byte-wise decoder: the reference. Whole input and
     // every two-chunk split must match it, malformed sequences included.
-    let inputs: [&[u8]; 9] = [
+    // 31 two-byte scalars, then a three-byte one across the 64-byte window.
+    let window_edge = format!("{}日本", "é".repeat(31));
+    let inputs: [&[u8]; 10] = [
         "日本語 é😀 x".as_bytes(),
+        window_edge.as_bytes(),
         b"\xc3\xa9\x80\xc3\xa9",              // stray continuation mid-run
         b"\xe6\x97\xa5\xe6\x97A\xe6\x97\xa5", // truncated, then ASCII
         b"\xe0\x80\x9b\xc3\xa9",              // overlong ESC
@@ -6706,6 +6709,20 @@ fn utf8_fast_path_matches_the_bytewise_decoder() {
 }
 
 #[test]
+fn malformed_high_bytes_parse_in_linear_time() {
+    // Each byte below is rejected by the text fast path and taken by the
+    // byte-wise decoder. If finding that out scanned the rest of the input,
+    // one advance over 256 KiB would do ~10^10 steps and this test would hang.
+    for unit in [&[0xff][..], &[0xc3, 0xa9, 0x80]] {
+        let input = unit.repeat(256 * 1024 / unit.len());
+        let mut g = Grid::new(80, 24);
+        AnsiParser::new().advance(&mut g, &input);
+        let (x, y) = g.cursor;
+        assert_eq!(g.row(y)[x - 1].ch, '\u{FFFD}', "{unit:x?}");
+    }
+}
+
+#[test]
 fn utf8_run_stops_at_ascii_and_malformed_bytes() {
     assert_eq!(utf8_run("é世x".as_bytes()), Some("é世"));
     assert_eq!(utf8_run(b"\xc3\xa9\xc3"), Some("é")); // incomplete tail
@@ -6713,6 +6730,9 @@ fn utf8_run_stops_at_ascii_and_malformed_bytes() {
     assert_eq!(utf8_run(b"\xc3"), None);
     assert_eq!(utf8_run(b"\x80"), None);
     assert_eq!(utf8_run(b""), None);
+    // At most one window per call; a sequence the edge cuts starts the next.
+    let long = format!("{}日", "é".repeat(31));
+    assert_eq!(utf8_run(long.as_bytes()), Some("é".repeat(31).as_str()));
 }
 
 /// A grid exercising every part of a snapshot: styles, wide glyphs, a

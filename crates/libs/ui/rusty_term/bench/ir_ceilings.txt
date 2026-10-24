@@ -18,8 +18,8 @@
 # 166.8. alt and cursor keep their ceilings.
 # Printable-ASCII fast path, measured: alt 735.0, ascii 47.9, cursor 84.7,
 # scroll 136.7, sgr 116.7, unicode 167.8 (unicode keeps its ceiling).
-# Non-ASCII run writer (Grid::put_text), measured: alt 735.9, ascii 48.4,
-# cursor 86.2, scroll 138.0, sgr 118.0, unicode 116.5. Only unicode moves.
+# Non-ASCII run writer (Grid::put_text), measured: alt 735.9, ascii 48.0,
+# cursor 87.1, scroll 137.5, sgr 118.1, unicode 117.4. Only unicode moves.
 alt_screen_flicker   809
 ascii_throughput      53
 cursor_thrash         93
