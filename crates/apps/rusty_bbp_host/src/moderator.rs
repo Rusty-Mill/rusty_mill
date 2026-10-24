@@ -122,6 +122,10 @@ pub struct Config {
     /// turn's cost unknown, which fails an evidence run. Cap and wall stops
     /// kill at once.
     pub end_grace: Duration,
+    /// When every harness of the task must be gone: the end of the hosting
+    /// lease. No grace runs past it, and each harness's group holder kills
+    /// the group at it, so it holds even if this moderator dies first.
+    pub deadline: Option<std::time::SystemTime>,
     /// Stop the run when its harnesses have cost more than this.
     pub cost_cap: Option<CostCap>,
     /// Machine-wide admission. With slots, a granted turn's harness starts
@@ -614,6 +618,15 @@ fn kill_tree(child: &mut Child, group: u32) -> Result<(), String> {
     child.wait().map(|_| ()).map_err(|e| format!("wait: {e}"))
 }
 
+/// How long until `cfg.deadline`: zero once it has passed, unbounded without one.
+fn left(cfg: &Config) -> Duration {
+    cfg.deadline.map_or(Duration::MAX, |deadline| {
+        deadline
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or(Duration::ZERO)
+    })
+}
+
 /// [`run_to_stop`], with a stop as the error: the reason.
 pub fn run(cfg: &Config) -> Result<Outcome, String> {
     let out = run_to_stop(cfg)?;
@@ -634,6 +647,8 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
         crate::pins::check_run(&cfg.launchers, &cap.criteria)
             .map_err(|e| format!("moderator: refusing to start: {e}"))?;
     }
+    crate::confine::refuse_swappable(&cfg.launchers, &cfg.bbp, &cfg.work, &cfg.repo)
+        .map_err(|e| format!("moderator: refusing to start: {e}"))?;
     // The lock first: a startup refused for it must not leave a marker behind.
     let _lock = lock(&cfg.dir, &cfg.task)?;
     check_evidence_marker(cfg)?;
@@ -706,7 +721,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             started,
         };
         if matches!(state, State::Closed | State::Cancelled) {
-            sup.drain_harnesses(cfg.end_grace)?;
+            sup.drain_harnesses(cfg.end_grace.min(left(cfg)))?;
             sup.stop_runner()?;
             d.sync().map_err(|e| format!("{e:?}"))?;
             let stop = check_terminal(cfg, &d).err().map(|reason| Stop {
@@ -715,7 +730,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             });
             return outcome(cfg, &d, visits, seen, &tally(), stop);
         }
-        if started.elapsed() > cfg.max_wall {
+        if started.elapsed() > cfg.max_wall || left(cfg).is_zero() {
             sup.kill_harnesses()?;
             sup.stop_runner()?;
             d.sync().map_err(|e| format!("{e:?}"))?;
@@ -865,7 +880,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             // On Linux every harness has a holder, so its group is recorded
             // with or without admission.
             let mut hold = (slot.is_some() || cfg!(target_os = "linux"))
-                .then(|| slots::holder(&cfg.bbp, slot.as_ref()))
+                .then(|| slots::holder(&cfg.bbp, slot.as_ref(), cfg.deadline))
                 .transpose()?;
             let group = hold.as_ref().map(Child::id);
             let record = match group
@@ -918,7 +933,10 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             .iter()
             .filter_map(|h| h.ended)
             .map(|ended| cfg.end_grace.saturating_sub(ended.elapsed()));
-        let wall = cfg.max_wall.saturating_sub(started.elapsed());
+        let wall = cfg
+            .max_wall
+            .saturating_sub(started.elapsed())
+            .min(left(cfg));
         let timeout = next_wait(cfg.poll, now(), d.state.next_deadline(), wall, graces);
         waker.wait(&children, timeout)?;
     }

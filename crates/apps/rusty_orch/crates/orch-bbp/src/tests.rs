@@ -29,6 +29,7 @@ pub(super) fn fence_at(generation: u64, holder: &str) -> Fence {
         assignment: txt("goal-orchestrator"),
         generation,
         holder: txt(holder),
+        lease: None,
     }
 }
 pub(super) fn fence() -> Fence {
@@ -117,7 +118,13 @@ pub(super) fn task() -> (Task, Board) {
 #[derive(Debug, Default, Clone)]
 pub(super) struct FakeSupervisor(Rc<Cell<usize>>);
 impl Supervisor for FakeSupervisor {
-    fn ensure(&mut self, _: &Config, _: &str, _: &std::path::Path) -> Result<Supervised, String> {
+    fn ensure(
+        &mut self,
+        _: &Config,
+        _: &str,
+        _: &std::path::Path,
+        _: Option<u64>,
+    ) -> Result<Supervised, String> {
         self.0.set(self.0.get() + 1);
         Ok(Supervised::Running)
     }
@@ -341,7 +348,7 @@ fn relay_uses_saved_fence_and_stable_op_and_rejects_subject_or_flag_injection() 
         dir: c.dir.clone(),
         task: "task".into(),
     };
-    host.freeze(&h, &task, &board).unwrap();
+    host.freeze(&h, &task, &board, &fence()).unwrap();
     let handle = HostHandle(txt(&format!("bbp:{}", json(&h))));
     let gate = question(&mut board, &handle);
     cmd.replies.borrow_mut().extend([
@@ -443,6 +450,7 @@ fn hosted_brief_reuses_the_existing_renderer_to_resolve_board_context() {
             },
             plan.get(id).unwrap(),
             &board,
+            &fence(),
         )
         .unwrap();
     assert!(frozen.brief.contains("required research context"));
@@ -591,5 +599,145 @@ fn cancel_opens_a_never_opened_task_straight_into_cancelled_and_starts_nothing()
         "no principal is assigned"
     );
     assert_eq!(sup.0.get(), 0, "no moderator is started");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Records the moderator lifetime and deadline each `ensure` was asked for.
+#[derive(Debug, Clone, Default)]
+struct WallSupervisor(Rc<Cell<(u64, Option<u64>)>>);
+impl Supervisor for WallSupervisor {
+    fn ensure(
+        &mut self,
+        c: &Config,
+        _: &str,
+        _: &std::path::Path,
+        deadline: Option<u64>,
+    ) -> Result<Supervised, String> {
+        self.0.set((c.max_wall_secs, deadline));
+        Ok(Supervised::Running)
+    }
+}
+
+#[test]
+fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
+    let dir = temp().canonicalize().unwrap();
+    let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
+    for made in ["tools", "src/a"] {
+        std::fs::create_dir_all(dir.join(made)).unwrap();
+    }
+    let mut c = config(&dir);
+    for agent in c.pool.values_mut() {
+        agent.sandbox = Some(Sandbox {
+            read: vec![path("tools")],
+            write: vec![path("src")],
+            ..Sandbox::default()
+        });
+    }
+    let now = unix_now().unwrap();
+    let leased = |write: &str, expires: u64| {
+        let mut f = fence();
+        f.lease = Some(orch_core::factory::Lease {
+            read: vec![path("tools")],
+            write: vec![path(write)],
+            expires: Some(expires),
+        });
+        f
+    };
+    let (task, board) = task();
+    let command = Contract::default();
+    command.replies.borrow_mut().extend([
+        "null".into(),
+        json(&Response::Ok),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Ok),
+        json(&Response::Ok),
+    ]);
+    let wall = WallSupervisor::default();
+    let mut host = BbpHost::with_seams(
+        c.clone(),
+        "goal".into(),
+        "lease".into(),
+        command.clone(),
+        wall.clone(),
+    )
+    .unwrap();
+    let handle = host
+        .open(&task, &board, &leased("src/a", now + 30))
+        .unwrap();
+    // The moderator is told the lease's absolute end; its wall is unchanged.
+    assert_eq!(wall.0.get(), (60, Some(now + 30)));
+    let h = host.handle(&handle).unwrap();
+    let frozen = BbpHost::<Contract, WallSupervisor>::load(&h).unwrap();
+    for agent in frozen.config.pool.values() {
+        let sandbox = agent.sandbox.as_ref().unwrap();
+        assert_eq!(
+            (sandbox.read.clone(), sandbox.write.clone()),
+            (vec![path("tools")], vec![path("src/a")])
+        );
+    }
+    let agents = std::fs::read_to_string(
+        BbpHost::<Contract, WallSupervisor>::manifest(&h).join("agents.json"),
+    )
+    .unwrap();
+    assert!(!agents.contains(&format!("{}\"", path("src"))), "{agents}");
+
+    // Wider, absent, or ended leases are refused before BBP is asked.
+    assert!(matches!(
+        host.poll(&handle, &leased("src", now + 30)),
+        Err(ClassifiedError::Permanent(_))
+    ));
+    assert!(matches!(
+        host.poll(&handle, &fence()),
+        Err(ClassifiedError::Permanent(_))
+    ));
+    assert!(matches!(
+        host.poll(&handle, &leased("src/a", now.saturating_sub(1))),
+        Err(ClassifiedError::Unavailable(_))
+    ));
+    // A renewal at the same paths is admitted and moves the deadline.
+    command
+        .replies
+        .borrow_mut()
+        .push_back(json(&Some(view(&c, State::Planning))));
+    assert_eq!(
+        host.poll(&handle, &leased("src/a", now + 3_600)).unwrap(),
+        Progress::Working
+    );
+    assert_eq!(wall.0.get(), (60, Some(now + 3_600)));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn an_unleased_task_refuses_a_leased_holder() {
+    let dir = temp();
+    let c = config(&dir);
+    let (task, board) = task();
+    let command = Contract::default();
+    command.replies.borrow_mut().extend([
+        "null".into(),
+        json(&Response::Ok),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Ok),
+        json(&Response::Ok),
+    ]);
+    let mut host = BbpHost::with_seams(
+        c,
+        "goal".into(),
+        "unleased".into(),
+        command,
+        FakeSupervisor::default(),
+    )
+    .unwrap();
+    let handle = host.open(&task, &board, &fence()).unwrap();
+    let mut leased = fence();
+    leased.lease = Some(orch_core::factory::Lease {
+        read: vec!["/".into()],
+        write: vec!["/".into()],
+        expires: None,
+    });
+    assert!(matches!(
+        host.poll(&handle, &leased),
+        Err(ClassifiedError::Permanent(_))
+    ));
     std::fs::remove_dir_all(dir).unwrap();
 }

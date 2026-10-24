@@ -30,7 +30,7 @@ bbp card    --dir D --task T              the core card plus the task's scheduli
 bbp why     --dir D (--task T | T) [--turn N]   why each turn was granted, replayed from the log, as JSON
 bbp tick    --dir D --task T              fire deadlines and grant the first turn; `bbp mod` does this itself
 bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
-bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N]
+bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS]
 bbp human   --dir D --task T [--rev N] VERB ARGS...
   approve-plan ART | approve-merge ART RUN | reject STATE REASON... | decision MSG accept|reject NOTE...
   ask ROLE TEXT... | answer MSG TEXT... | rerun ART | receipt ART REVISION | resume STATE
@@ -73,7 +73,7 @@ The runner is Unix-shaped: profile sets take Unix absolute read roots and the de
 
 ## The moderator
 
-`bbp mod` is the loop that makes the core's decisions happen. Every poll it re-reads the store, fires deadlines (`Tick`), starts the runner once for a selected run with no report, launches one agent harness for a newly granted turn, and reaps a harness whose turn has ended. A harness whose turn ended gets `--end-grace-secs` (default 60) to exit on its own and print its final `result` line, which prices the turn; then it is killed. A cap or wall stop kills at once. Human gates are states with no turn, so the loop waits through them; `bbp human` from another shell moves the task on. It returns when the task is `closed` or `cancelled`, or fails after `--max-wall-secs`; at `escalated` it keeps polling until a human command moves the task on (`resume` or `cancel` are the usual choices; `reject` back to `planning` also leaves it).
+`bbp mod` is the loop that makes the core's decisions happen. Every poll it re-reads the store, fires deadlines (`Tick`), starts the runner once for a selected run with no report, launches one agent harness for a newly granted turn, and reaps a harness whose turn has ended. A harness whose turn ended gets `--end-grace-secs` (default 60) to exit on its own and print its final `result` line, which prices the turn; then it is killed. A cap or wall stop kills at once. `--deadline-unix` is an absolute end, a hosting lease's: no grace runs past it, the loop stops as at the wall when it comes, and each harness's `bbp slot-hold` holder kills its whole group at it, so it holds even if the moderator dies first. Human gates are states with no turn, so the loop waits through them; `bbp human` from another shell moves the task on. It returns when the task is `closed` or `cancelled`, or fails after `--max-wall-secs`; at `escalated` it keeps polling until a human command moves the task on (`resume` or `cancel` are the usual choices; `reject` back to `planning` also leaves it).
 
 One moderator per task: the loop holds an exclusive lock on `<dir>/mod/<task>.lock` for its lifetime and a second `bbp mod` on the same task is refused. A turn that is live before the loop's first tick belongs to an invocation this moderator cannot see or stop (a harness an earlier moderator launched), so it aborts that turn; the first turn of a freshly assigned task is granted by that tick and is the loop's own. On a stale turn it aborts: the old `bbp mcp` answers "turn has ended" to anything but the free card and an exact replay, and the replacement turn is launched here with a fresh token. Gates have no turn and keep waiting.
 
@@ -88,6 +88,8 @@ On Linux every harness gets a holder, with or without `--slots`, and the moderat
 An unconfined harness is trusted with the directory. It runs as the moderator's user, so a harness with shell or file tools can read `<dir>/master` or call `bbp human`; `bbp mcp` is the fence for the model's tool calls, not for the harness process.
 
 ### Confined harnesses
+
+`bbp mod` refuses to start when a launcher's sandbox root, a system root, the `bbp` directory or (with `checkout`) the repository's git directory lies strictly beneath any launcher's `write` path, or a `write` path lies in `--work`: Landlock follows a symlink at a rule's root, and such a root is one a harness could replace before its rule is made.
 
 A launcher with a `sandbox` object runs its harness under `rusty_sandbox` (Linux), through this binary's `__sandbox` helper:
 
