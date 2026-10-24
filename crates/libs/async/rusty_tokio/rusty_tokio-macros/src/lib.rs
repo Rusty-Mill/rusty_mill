@@ -1,5 +1,6 @@
-//! Proc-macro attributes for `rusty_tokio`: `#[rusty_tokio::main]` and
-//! `#[rusty_tokio::test]`. Each rewrites an `async fn` into the plain
+//! Proc macros for `rusty_tokio`: the `#[rusty_tokio::main]` and
+//! `#[rusty_tokio::test]` attributes, and the engine behind
+//! `rusty_tokio::select!` (see the `select` module). Each attribute rewrites an `async fn` into the plain
 //! `fn` that builds a `Runtime` and blocks on the original body --
 //! exactly the boilerplate every example and test in the main crate
 //! used to spell out by hand (`let rt = Runtime::new().unwrap();
@@ -42,6 +43,7 @@ use quote::quote;
 use syn::{parse_macro_input, ItemFn};
 
 mod args;
+mod select;
 
 use args::MacroArgs;
 
@@ -113,4 +115,15 @@ fn expand(args: TokenStream, item: TokenStream, is_test: bool) -> TokenStream {
     };
 
     expanded.into()
+}
+
+/// The engine behind `rusty_tokio::select!` -- not meant to be invoked
+/// directly. `rusty_tokio`'s own `macro_rules! select` forwards here as
+/// `$crate::__select_internal! { ($crate) <tokens> }`, handing over the
+/// crate path a proc macro has no other way to name. See the `select`
+/// module for the grammar, the expansion and why it is shaped that way.
+#[doc(hidden)]
+#[proc_macro]
+pub fn select_internal(input: TokenStream) -> TokenStream {
+    select::expand(input.into()).into()
 }
