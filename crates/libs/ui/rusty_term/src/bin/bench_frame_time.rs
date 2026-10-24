@@ -438,6 +438,24 @@ mod tests {
         }
     }
 
+    /// Records whether the grid lock was free while it painted.
+    struct LockProbe(Arc<Mutex<Grid>>, Vec<bool>);
+    impl Painter for LockProbe {
+        fn paint(&mut self, _: &FrameView) {
+            self.1.push(self.0.try_lock().is_some());
+        }
+    }
+
+    #[test]
+    fn render_loop_paints_without_the_grid_lock() {
+        let grid = Arc::new(Mutex::new(Grid::new(4, 2)));
+        let mut probe = LockProbe(Arc::clone(&grid), Vec::new());
+        let done = AtomicBool::new(true);
+        let times = render_loop(&mut probe, &grid, &done, Duration::ZERO);
+        assert_eq!(probe.1, [true], "one frame, painted unlocked");
+        assert_eq!(times.1.len(), 1);
+    }
+
     fn short() -> Options {
         Options {
             hz: 1000.0,

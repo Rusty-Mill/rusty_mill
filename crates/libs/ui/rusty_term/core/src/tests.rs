@@ -5873,10 +5873,12 @@ fn frame_view_shares_image_pixels_and_resolves_animation() {
     assert_eq!(fi.anim, Some((id, 1)), "the current animation frame");
     assert_eq!(fi.pixels[0], Some(0x00FF00), "second frame green");
     assert_eq!(fi.top, g.image_top_row(im));
-    // Dropping the animation falls back to the image's own pixels, shared.
+    // Dropping the animation falls back to the image's own pixels, shared;
+    // the earlier snapshot keeps the frame it captured.
     g.kitty_delete(Some(id));
-    let f = g.frame_view();
-    let (fi, im) = (&f.images()[0], &g.images()[0]);
+    let later = g.frame_view();
+    assert_eq!(f.images().last().map(|i| i.pixels[0]), Some(Some(0x00FF00)));
+    let (fi, im) = (&later.images()[0], &g.images()[0]);
     assert_eq!(fi.anim, None);
     assert!(std::sync::Arc::ptr_eq(&fi.pixels, &im.pixels), "not copied");
 }

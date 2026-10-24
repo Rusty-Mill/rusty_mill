@@ -302,6 +302,29 @@ mod tests {
     }
 
     #[test]
+    fn frame_view_is_unchanged_by_later_grid_writes() {
+        let mut g = busy_grid();
+        g.view_offset = 0;
+        let f = g.frame_view();
+        let before: Vec<Cell> = (0..g.rows)
+            .flat_map(|r| (0..g.cols).map(move |c| (c, r)))
+            .map(|(c, r)| f.cell(c, r))
+            .collect();
+        AnsiParser::new().advance(&mut g, b"\x1b[2J\x1b[Hoverwritten\r\n".repeat(8).as_slice());
+        g.selection = None;
+        let after: Vec<Cell> = (0..g.rows)
+            .flat_map(|r| (0..g.cols).map(move |c| (c, r)))
+            .map(|(c, r)| f.cell(c, r))
+            .collect();
+        assert_eq!(before, after);
+        let now: Vec<Cell> = (0..g.rows)
+            .flat_map(|r| (0..g.cols).map(move |c| (c, r)))
+            .map(|(c, r)| g.viewport_cell(c, r))
+            .collect();
+        assert_ne!(before, now, "the grid did change");
+    }
+
+    #[test]
     fn frame_view_matches_the_grid_at_every_offset() {
         let mut g = busy_grid();
         let (mut marks, mut selected, mut matched) = (false, false, false);
