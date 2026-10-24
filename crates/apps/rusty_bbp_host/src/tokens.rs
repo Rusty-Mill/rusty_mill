@@ -26,9 +26,14 @@
 //! and `total_cost_usd` carry the earlier turns too. Such a turn is priced
 //! from each result's `model_usage_since_last_result`, what its own process
 //! counted, summed over its results, with every write at the 1-hour rate and
-//! the per-model `costUSD` as the cross-check. A result without that field,
-//! or a gap in `result_index`, makes the turn's cost unknown: a running total
-//! is never taken for one turn's cost.
+//! the per-model `costUSD` as the cross-check. A result without that field
+//! or without a `result_index`, or a gap in the index, makes the turn's cost
+//! unknown: a running total is never taken for one turn's cost. Both fields
+//! are, per Claude Code's own result schema, set by a stream-json `claude -p`
+//! run on every result it writes and missing only from older versions,
+//! relayed results and hand-built error results; the index counts from 0,
+//! and a write that fails still uses its number, so a gap is a lost result
+//! whose usage nothing states.
 
 use crate::moderator::log_path;
 use rusty_bbp::*;
@@ -555,7 +560,8 @@ pub enum Cost {
 
 /// What a resumed turn's own process counted, per model, and the `costUSD`
 /// it states, summed over every result: `Err` says why there is no such
-/// account (a result without it, a gap in `result_index`, a missing cost).
+/// account (a result without it or without a `result_index`, a gap in the
+/// index, a missing cost). It does not judge whether the turn completed.
 pub fn own_usage(stream: &str) -> Result<(BTreeMap<String, Usage>, f64), String> {
     let mut models: BTreeMap<String, Usage> = BTreeMap::new();
     let mut usd = 0.0;
@@ -564,11 +570,14 @@ pub fn own_usage(stream: &str) -> Result<(BTreeMap<String, Usage>, f64), String>
         .filter_map(|l| rusty_serde::json::from_str::<Line>(l).ok())
         .filter(|l| l.kind == "result");
     for (n, l) in results.enumerate() {
-        if l.result_index.is_some_and(|i| i != n as u64) {
-            return Err(format!(
-                "result_index {:?} where {n} was due: a result is missing",
-                l.result_index
-            ));
+        match l.result_index {
+            Some(i) if i == n as u64 => {}
+            Some(i) => {
+                return Err(format!(
+                    "result_index {i} where {n} was due: a result is missing"
+                ))
+            }
+            None => return Err("a resumed turn's result is not numbered".into()),
         }
         let own = l
             .model_usage_since_last_result
@@ -866,10 +875,14 @@ fn read_tokens(
             None => {
                 // No prices given: the tokens only, from the result if there is
                 // one, else the printed messages.
-                let own = match resumed {
-                    true => own_usage(&text).ok().map(|(m, _)| m),
-                    false => last_result(&text).filter(|r| !r.is_error).map(|r| r.models),
-                };
+                // Either way only a turn whose last result is not an error
+                // is complete.
+                let own = last_result(&text)
+                    .filter(|r| !r.is_error)
+                    .and_then(|r| match resumed {
+                        true => own_usage(&text).ok().map(|(m, _)| m),
+                        false => Some(r.models),
+                    });
                 match own.filter(|m| !m.is_empty()) {
                     Some(m) => (true, None, None, m),
                     None => (
@@ -1144,6 +1157,11 @@ mod tests {
                 Ok(Cost::Unknown(_))
             ));
         }
+        let unnumbered = resumed_result(Some((0, OWN))).replace(r#""result_index":0,"#, "");
+        assert!(matches!(
+            price_resumed_turn(&unnumbered, &criteria()),
+            Ok(Cost::Unknown(_))
+        ));
         let uncosted = OWN.replace(r#","costUSD":0.00602"#, "");
         assert!(matches!(
             price_resumed_turn(&resumed_result(Some((0, &uncosted))), &criteria()),

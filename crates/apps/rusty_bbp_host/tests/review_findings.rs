@@ -690,3 +690,45 @@ fn a_resumed_session_turn_is_charged_once_not_with_the_session_so_far() {
     assert_eq!((t.usd, t.unknown_turns), (None, 1));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An error result is never a complete turn, fresh or resumed, priced or not,
+/// even when it states usage of its own.
+#[test]
+fn an_error_result_is_incomplete_fresh_or_resumed_priced_or_not() {
+    let own = r#"{"inputTokens":10,"outputTokens":100,"cacheReadInputTokens":10000,"cacheCreationInputTokens":1000,"webSearchRequests":0,"costUSD":0.00602}"#;
+    let error = format!(
+        "{{\"type\":\"result\",\"is_error\":true,\"terminal_reason\":\"error\",\"total_cost_usd\":0.00602,\"modelUsage\":{{\"claude-sonnet-5-5\":{own}}},\"result_index\":0,\"model_usage_since_last_result\":{{\"claude-sonnet-5-5\":{own}}}}}\n"
+    );
+    let c = criteria("error-result-c", SONNET_ONLY);
+    for resumed in [false, true] {
+        for priced in [None, Some(&c)] {
+            let dir = scratch(&format!("error-result-{resumed}-{}", priced.is_some()));
+            let task = TaskId("T".into());
+            let p = log_path(&dir, &task, TurnId(1));
+            std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&p, &error).expect("write log");
+            if resumed {
+                let marker = rusty_bbp_host::moderator::resumed_path(&dir, &task, TurnId(1));
+                std::fs::write(marker, b"").expect("marker");
+            }
+            let events = [Event::TurnGranted {
+                role: RoleId("planner".into()),
+                turn: TurnId(1),
+                kind: TurnKind::Default,
+                deadline: Time(0),
+                return_to: None,
+                slice: None,
+            }];
+            let t = tokens::of(&dir, &task, &events, priced).expect("read");
+            assert_eq!(
+                t.unknown_turns,
+                1,
+                "resumed {resumed}, priced {}",
+                priced.is_some()
+            );
+            assert!(!t.turns[0].complete);
+            assert_eq!(t.usd, None);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
