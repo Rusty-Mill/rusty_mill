@@ -2,7 +2,7 @@
 //! unit-testable without spawning a process — see `RB-VERIFY-003`'s
 //! Architecture and interfaces.
 
-use rb_capture_ingest::CaptureFileSource;
+use rb_capture_ingest::{write_frames, CaptureFileSource};
 use rb_domain::divergence::DivergenceScore;
 use rb_domain::{
     BallState, CarState, ControllerInput, IngestError, PhysicsFrame, PhysicsStateSource, Quat, Vec3,
@@ -151,6 +151,21 @@ pub fn score_capture_against_candidate(
         &candidate,
         max_timestamp_delta_secs,
     ))
+}
+
+/// Runs the same candidate simulation as [`score_capture_against_candidate`]
+/// and writes it to `out_path` in the capture format (ADR-0005), so a viewer
+/// can draw it beside the recording (ADR-0085). Returns the frames written.
+pub fn write_candidate(
+    capture_path: impl AsRef<Path>,
+    seed_frame: SeedFrame,
+    out_path: impl AsRef<Path>,
+) -> Result<usize, IngestError> {
+    let (_, candidate) = seed_and_simulate(capture_path, seed_frame)?;
+    let file = std::fs::File::create(out_path.as_ref())
+        .map_err(|e| IngestError::Io(format!("{}: {e}", out_path.as_ref().display())))?;
+    write_frames(&candidate, std::io::BufWriter::new(file))?;
+    Ok(candidate.len())
 }
 
 /// Default window width (seconds) `rb-verify --self-growth` uses when the

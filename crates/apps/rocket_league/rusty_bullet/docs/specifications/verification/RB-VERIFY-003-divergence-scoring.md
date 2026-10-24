@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.24.0
+- Version: 0.30.0
 - Status: Draft (all four functional requirements implemented and wired
   into `rb_verify_cli`; the first three run end-to-end against a real
   replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
@@ -411,6 +411,19 @@ them.
     row reproduces the earlier scratch sweep (`hitjump` 51.5 uu/s against
     51.0, same best tuning).
 
+- `RB-VERIFY-003-FR-019` (implemented): save the candidate run for viewing
+  (ADR-0085). `rb-verify --self <capture> --write-candidate <out.jsonl>` writes
+  the same simulation `--self` scores, in the ADR-0005 capture format
+  (`rb_capture_ingest::write_frames`), and still prints the score.
+  `replay-viewer <capture> --sim <out.jsonl>` draws it as ghost cars over the
+  recording. Every car carries its input; a frame with a car that has none is
+  refused rather than written with a guessed input.
+  - **Verification**: `rb_verify_cli` test
+    `saved_candidate_scores_like_the_in_memory_run` (the file reads back and
+    scores exactly as the in-memory run); `rb_capture_ingest` round-trip tests
+    (`written_frames_read_back_unchanged`, `to_line_round_trips_through_parse_line`,
+    `to_line_rejects_a_car_without_input`).
+
 
 ## Architecture and interfaces
 
@@ -629,6 +642,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.30.0 (2026-10-24): `RB-VERIFY-003-FR-019` implemented: `rb-verify --self
+  --write-candidate` saves the candidate run for `replay-viewer --sim`
+  (ADR-0085). The header version, left at 0.24.0, catches up.
 - 0.29.0 (2026-10-07): `RB-VERIFY-003-FR-018` implemented: scenarios with
   several cars (ADR-0067).
 - 0.28.0 (2026-10-07): the recorded-input replay finds the start lag; the

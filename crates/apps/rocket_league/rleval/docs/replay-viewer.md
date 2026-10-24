@@ -45,7 +45,25 @@ transitions, or click a player row to lock onto that car (`0` returns to free
 overview). Goal/demo/kickoff markers on the timeline are clickable, as is each
 ticker entry — both seek.
 
-## Look
+## Physics captures and sim runs
+
+The same page plays a BakkesMod or tape-bot capture (ADR-0005 JSON Lines) and,
+beside it, the port's simulation of that capture (ADR-0085):
+
+```sh
+rb-verify --self capture.jsonl --write-candidate candidate.jsonl
+cargo run -p replay-viewer -- capture.jsonl --sim candidate.jsonl --offline
+```
+
+`physics.rs` maps both runs to the same `Scene`: one roster entry per car,
+candidate cars in their own `pri` range with `ghost: true`, drawn pale and
+translucent over the recorded car. Frames stay at the capture rate (120 Hz),
+time is rebased so the first recorded frame is `t = 0` (the title gives the
+capture time it maps to), and a recorded frame with no candidate frame within
+half a tick shows the recording alone. The ball is the recorded one. Replay-only
+overlays (events, roles, stats, win probability) stay empty. The viewer reads
+capture files through `rb_capture_ingest`, so it never links the physics.
+
 
 Filmic (ACES) tone mapping, real soft shadow maps, a painted pitch (lines, centre
 circle, goal areas, mow stripes), goal nets, four-wheeled cars, a gradient sky,
@@ -119,7 +137,9 @@ refine against footage.
 
 The Rust scene projection, role attachment, downsample, and HTML/import-map
 substitution are unit- and golden-tested (`viewer/tests/scene.rs`,
-`golden.rs`). The JS/three.js rendering path is covered by a **headless-GL smoke
+`golden.rs`); the physics path has its own golden scene and pairing tests
+(`physics.rs`). CI smoke-tests both a replay page and a capture page with a sim
+run. The JS/three.js rendering path is covered by a **headless-GL smoke
 test** (`viewer/tests/gl_smoke.mjs`): it renders the `--offline` file under
 swiftshader and asserts the scene drew (`window.__rendered`) with no page errors.
 CI runs it (`.github/workflows/ci.yml`); locally, `npm i puppeteer` then

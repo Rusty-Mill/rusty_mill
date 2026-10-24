@@ -1720,6 +1720,15 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: Headless-GL smoke test
         run: node crates/apps/rocket_league/crates/replay-viewer/tests/gl_smoke.mjs "$RUNNER_TEMP/viewer.html"
+      # ADR-0085: the same page built from a capture, with the port's run as ghosts.
+      - name: Generate capture viewer with a sim run
+        env:
+          CAPTURE: crates/apps/rocket_league/crates/rb_capture_ingest/fixtures/human/clean-dodge.capture.jsonl
+        run: |
+          cargo run -q -p rb_verify_cli --bin rb-verify -- --self "$CAPTURE" --write-candidate "$RUNNER_TEMP/candidate.jsonl"
+          cargo run -q -p replay-viewer -- "$CAPTURE" --sim "$RUNNER_TEMP/candidate.jsonl" --offline --html "$RUNNER_TEMP/capture.html"
+      - name: Headless-GL smoke test (capture)
+        run: node crates/apps/rocket_league/crates/replay-viewer/tests/gl_smoke.mjs "$RUNNER_TEMP/capture.html"
 
   # Every other Rust job passes --all-features, which hides a broken default or
   # single-feature build of rleval-app: its default build is the token-only
