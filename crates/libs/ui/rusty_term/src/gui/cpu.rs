@@ -559,8 +559,10 @@ pub(crate) fn draw_grid(
         }
     }
 
-    // IME preedit (composition): reverse-video glyphs at the cursor.
-    if focused && !grid.ime_preedit.is_empty() && grid.view_offset == 0 && on(grid.cursor.1) {
+    // IME preedit (composition): reverse-video glyphs at the cursor. Its
+    // glyphs may overhang a repainted neighbor, so they draw whenever one
+    // is; the background only when the cursor's own row is repainted.
+    if focused && !grid.ime_preedit.is_empty() && grid.view_offset == 0 && near(grid.cursor.1) {
         let crow = grid.cursor.1;
         let mut col = grid.cursor.0;
         let y0 = oy + (row0 + crow) * ch;
@@ -572,7 +574,7 @@ pub(crate) fn draw_grid(
             let base = grid.cell(col, crow);
             let (fg, bg) = (base.bg, base.fg);
             let x0 = ox + (col0 + col) * cw;
-            for y in y0..(y0 + ch).min(height) {
+            for y in (y0..(y0 + ch).min(height)).filter(|_| on(crow)) {
                 let b = y * width;
                 for x in x0..(x0 + w * cw).min(width) {
                     buf[b + x] = bg;

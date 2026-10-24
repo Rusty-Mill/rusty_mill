@@ -119,7 +119,7 @@ pub(in crate::gui) struct Extras {
 pub(in crate::gui) fn step(rng: &mut Rng, grids: &mut [(Grid, AnsiParser)], x: &mut Extras) {
     let i = rng.below(grids.len());
     let (g, p) = &mut grids[i];
-    match rng.below(12) {
+    match rng.below(13) {
         0..=4 => {
             for _ in 0..1 + rng.below(4) {
                 p.advance(g, PIECES[rng.below(PIECES.len())].as_bytes());
@@ -145,6 +145,10 @@ pub(in crate::gui) fn step(rng: &mut Rng, grids: &mut [(Grid, AnsiParser)], x: &
             }
         }
         10 => g.select_word_at(rng.below(g.cols), rng.below(g.rows)),
+        11 => {
+            let on = g.ime_preedit.is_empty();
+            g.ime_preedit = if on { "ab".to_owned() } else { String::new() };
+        }
         _ => {} // a frame with nothing new
     }
 }
@@ -398,4 +402,65 @@ fn unknown_or_stale_buffers_repaint_fully() {
         Plan::Full,
         "forgotten"
     );
+}
+
+/// An IME preedit whose glyphs overhang into a neighbor row survives that
+/// neighbor's repaint while its own row is unchanged.
+#[test]
+fn ime_overhang_survives_a_neighbor_repaint() {
+    let mut g = Grid::new(10, 6);
+    let mut p = AnsiParser::new();
+    // A red background under the preedit, so its glyphs (drawn in that
+    // color) show where they overhang row 2.
+    p.advance(&mut g, b"\x1b[2;3H\x1b[41m  \x1b[0m\x1b[2;3H");
+    g.ime_preedit = "ab".to_owned();
+    let (w, h) = (10 * CELL.0, 6 * CELL.1);
+    let mut font = OverhangFont;
+    let paint =
+        |g: &Grid, buf: &mut [u32], damage: Option<&mut Damage>, font: &mut OverhangFont| {
+            let v = g.frame_view();
+            let pane = [PaneFrame {
+                grid: &v,
+                col0: 0,
+                row0: 0,
+                focused: true,
+                cursor_on: true,
+                trail: Vec::new(),
+                hover_link: None,
+                marks: Vec::new(),
+            }];
+            let frame = Frame::capture(&pane, &[], &[], 7, (w, h), COLORS, 0);
+            let plan = damage.as_ref().map_or(Plan::Full, |d| d.plan(&frame, 1));
+            composite(
+                buf,
+                &pane,
+                &[],
+                &[],
+                font,
+                w,
+                h,
+                COLORS[0],
+                COLORS[1],
+                COLORS[2],
+                0,
+                plan.rows(),
+            );
+            if let Some(d) = damage {
+                d.presented(frame);
+            }
+            plan
+        };
+    let mut damage = Damage::default();
+    let mut buf = vec![0u32; w * h];
+    paint(&g, &mut buf, Some(&mut damage), &mut font);
+    // Row 3 changes; the cursor and preedit stay on row 1.
+    p.advance(&mut g, b"\x1b[4;1Hzz\x1b[2;3H");
+    let plan = paint(&g, &mut buf, Some(&mut damage), &mut font);
+    let rows = |marked: &[usize]| (0..6).map(|r| marked.contains(&r)).collect::<Vec<_>>();
+    assert_eq!(plan, Plan::Rows(vec![rows(&[2, 3, 4])]));
+    let mut full = vec![0u32; w * h];
+    paint(&g, &mut full, None, &mut font);
+    if let Some(i) = buf.iter().zip(&full).position(|(a, b)| a != b) {
+        panic!("pixel ({}, {}) differs from a full repaint", i % w, i / w);
+    }
 }
