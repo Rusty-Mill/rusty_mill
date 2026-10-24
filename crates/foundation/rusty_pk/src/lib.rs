@@ -26,6 +26,7 @@ mod weierstrass;
 pub mod ecdh;
 pub mod ecdsa;
 pub mod ed25519;
+pub mod pkcs8;
 pub mod rsa;
 pub mod x25519;
 

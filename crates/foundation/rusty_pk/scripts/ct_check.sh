@@ -9,7 +9,7 @@ cargo build --release --example rusty_pk_taint -q
 BIN="$TARGET/release/examples/rusty_pk_taint"
 fail=0
 . ../rusty_ct_check/scripts/taint_lib.sh
-for m in x25519 agree control ecdh256 ecdh384 ecdh-import256 ecdh-import384 ecdh-generate256 ecdh-generate384 ecdh-control ed25519-sign ed25519-control ecdsa-sign256 ecdsa-sign384 ecdsa-control; do run_mode $m; done
+for m in x25519 agree control ecdh256 ecdh384 ecdh-import256 ecdh-import384 ecdh-generate256 ecdh-generate384 ecdh-control ed25519-sign ed25519-control ecdsa-sign256 ecdsa-sign384 ecdsa-control pkcs8-ecdsa256 pkcs8-ed25519; do run_mode $m; done
 n=$(count x25519);  echo "taint(x25519):  $n error(s), want 0";   [ "$n" -eq 0 ] || fail=1
 n=$(count agree);   echo "taint(agree):   $n error(s), want exactly 1 (peer small-order verdict)"; [ "$n" -eq 1 ] || fail=1
 report agree | grep -q 'x25519::agree' || { echo "taint(agree): the one report is not in agree"; fail=1; }
@@ -41,5 +41,13 @@ done
 n=$(count ecdsa-control); echo "taint(ecdsa-control): $n report(s), the planted branch must be caught and refused"
 report ecdsa-control | grep -q 'rusty_pk_taint::main' || { echo "taint(ecdsa-control): the planted branch was not reported in main"; fail=1; }
 if python3 -I scripts/verdict_sites.py "$BIN" "$OUT/ecdsa-control" --output ecdsa::output >/dev/null; then echo "taint(ecdsa-control): verdict_sites accepted the planted branch"; fail=1; fi
+# PKCS#8: only the private-key bytes inside the document are secret; structure is public. The only
+# allowed reports are ensure verdicts: ECDSA scalar valid, public key not at infinity, and derived
+# public key equal to the encoded one (3); Ed25519 the last only (1).
+for m in pkcs8-ecdsa256 pkcs8-ed25519; do
+  case $m in pkcs8-ecdsa256) want=3 ;; *) want=1 ;; esac
+  n=$(count $m); echo "taint($m): $n error(s), want exactly $want (verdict branches only)"; [ "$n" -eq $want ] || fail=1
+  python3 -I scripts/verdict_sites.py "$BIN" "$OUT/$m" $want || fail=1
+done
 python3 -I ../rusty_ct_check/scripts/disasm_audit.py "$BIN" scripts/disasm_limits.txt || fail=1
 exit $fail
