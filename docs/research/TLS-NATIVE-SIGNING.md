@@ -1,10 +1,10 @@
 # Native signing and the server role: scope for gap 5
 
-Date: 2026-10-24. Status: **scope, no code.** The owner asked on 2026-10-24 for gap 5 to be reopened so the
+Date: 2026-10-24. Status: **scope, no code; S1 to S5 decided and ADR-0006 accepted on 2026-10-24.** The owner asked on 2026-10-24 for gap 5 to be reopened so the
 native engine can sign. This is the implementer's transcription of a working-session instruction, not yet restated
-from the owner's GitHub account. The decisions in section 6 are the owner's. The governing record is the proposed
-ADR-0006 (`crates/libs/net/rusty_tls/docs/adr/0006-native-signing-and-server-role.md`). Until it is accepted,
-nothing here changes a gate, a default or a consumer.
+from the owner's GitHub account. The decisions in section 6 are the owner's: the owner answered "Approved" in the working session on 2026-10-24 (the implementer's transcription, not yet restated from the owner's GitHub account) to the recommendations. The governing record is
+ADR-0006 (`crates/libs/net/rusty_tls/docs/adr/0006-native-signing-and-server-role.md`), accepted. No gate,
+default or consumer changes until the implementation PRs land.
 
 Context: `CRYPTO-REPLACEMENT-PLAN.md` section 13.1 gap 5 ("ECDSA P-256/P-384 (RFC 6979 or hedged nonce), Ed25519
 sign, PKCS#8 parse. RSA-PSS signing (stage 7) stays 'recommend not doing'"). Gap 4 (`TLS-NATIVE-CRYPTO-SEAM.md`)
@@ -120,10 +120,10 @@ Rough, plus or minus 50 percent, like the plan's figures. Suggested order of PRs
 | # | Decision | Options | Recommendation |
 | --- | --- | --- | --- |
 | S1 | Reopen gap 5 | Reopen for native ECDSA and Ed25519 signing (server role, tickets, client certificates), or keep it closed | **Asked for by the owner on 2026-10-24** (working session; this note records it) |
-| S2 | ECDSA nonce | Plain RFC 6979 (deterministic); hedged RFC 6979 (RFC 6979 plus fresh randomness); or random only, as `ring` does | Hedged RFC 6979 |
-| S3 | RSA signing | Keep it out (native servers and client certificates use ECDSA or Ed25519 only), or build RSA-PSS signing (plan stage 7, "recommend never") | Keep it out |
-| S4 | ADR | Accept ADR-0006 (extends ADR-0005 to signing and the server role), or amend ADR-0005 | Accept ADR-0006 |
-| S5 | Review before wiring | Independent human review of the signing code before the `rusty_tls` wiring merges, or the owner alone (plan D4) | Independent review, recorded with reviewer, scope and commit |
+| S2 | ECDSA nonce | Plain RFC 6979 (deterministic); hedged RFC 6979 (RFC 6979 plus fresh randomness); or random only, as `ring` does | **Decided 2026-10-24: hedged RFC 6979** |
+| S3 | RSA signing | Keep it out (native servers and client certificates use ECDSA or Ed25519 only), or build RSA-PSS signing (plan stage 7, "recommend never") | **Decided 2026-10-24: kept out** |
+| S4 | ADR | Accept ADR-0006 (extends ADR-0005 to signing and the server role), or amend ADR-0005 | **Decided 2026-10-24: ADR-0006 accepted** |
+| S5 | Review before wiring | Independent human review of the signing code before the `rusty_tls` wiring merges, or the owner alone (plan D4) | **Decided 2026-10-24: independent review, recorded with reviewer, scope and commit** |
 
 ## 7. Not in scope
 

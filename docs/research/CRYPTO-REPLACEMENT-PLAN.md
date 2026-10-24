@@ -13,7 +13,7 @@ consumer, `rusty_tls` file, gate or default was changed; nothing here is used by
 Work was frozen at stage 4 by owner decision; the freeze has since been reopened for gaps 1 and 2 (done) and,
 on 2026-10-10, for AES-GCM (gap 3); on 2026-10-22 the `rusty_tls` seam (gap 4) was reopened for the client role only, by
 the implementer's transcription of the owner's instruction; signing
-(gap 5) was asked to be reopened on 2026-10-24, pending ADR-0006 (section 0). Everything marked "decision" is the owner's. Section 10's draft
+(gap 5) was reopened on 2026-10-24 under ADR-0006 (section 0). Everything marked "decision" is the owner's. Section 10's draft
 was accepted on 2026-10-22 as ADR-0005, for the client role only (section 0; confirmed by the
 owner on GitHub, #868 comment 6343682194). Vocabulary used below: "implemented" means code and tests
 exist; it never means reviewed or approved for TLS use.
@@ -108,8 +108,9 @@ attestation, no human review of AES-GCM is recorded. Section 11b sets this besid
 **Owner request (2026-10-24): reopen gap 5.** In the working session, the owner asked for native signing and the
 server role (gap 5) to be taken up next, ahead of choosing a first native consumer. This is the implementer's
 transcription, not yet restated from the owner's GitHub account. The scope is `TLS-NATIVE-SIGNING.md`. Its
-decisions S2 to S5 (the nonce scheme, RSA, the ADR and review before wiring) are open. ADR-0006 is proposed, not
-accepted, and nothing changes in code until it is accepted.
+decisions were then approved in the working session ("Approved", the implementer's transcription). The ECDSA nonce is
+hedged RFC 6979 (S2), and RSA signing stays out (S3). ADR-0006 is accepted (S4). An independent review of the
+signing code, recorded with reviewer, scope and commit, is required before the `rusty_tls` wiring merges (S5).
 
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
@@ -866,7 +867,7 @@ engine off `ring`** (section 7.2: stages 1 to 5 plus 6a); signing is a separate 
 | 2 | **ECDH P-256 / P-384** (stage 6a) | RFC 8446 requires secp256r1 key exchange; the Montgomery core is reusable. | Secret scalar multiplication with complete formulas, constant-time table selection, on-curve and infinity checks, uncompressed SEC1 points. Today's scalar multiplication in `rusty_pk` is `_vartime` and **must not be reused for secrets**. | Wycheproof ECDH (invalid-curve and twist cases), differential vs `ring`, methods 1 to 4 of section 4.4 clean (valgrind taint, exact disassembly counts, timing with A/A baseline, planted-leak control), review. | 8 to 10 |
 | 3 | **AES-128/256-GCM** (stage 5) | Hardest and slowest; RFC 8446 mandates AES-128-GCM and the engine prefers AES-256-GCM, so most real handshakes need it. Also the ticket cipher. | Decision needed first (13.2 D1): portable fixsliced AES plus table-free GHASH, or AES-NI/PCLMUL in one reviewed `unsafe` module behind a runtime feature check. | Wycheproof GCM + CAVP + differential; no table lookup indexed by a secret (the disassembly script cannot show this; choose a check, e.g. valgrind taint plus review); methods 1 to 4; review. Portable throughput is 60 to 150x below `ring`; measure before wiring. | 8 to 12 (+5 to 8 with intrinsics) |
 | 4 | **`rusty_tls` backend seam** | Only after 1 to 3 exist; the TLS-engine session owns `rusty_tls`. | Same signatures as the `ring` call sites (section 2.3), selected by an extra cfg beside `rusty_tls_handrolled`; adapters for `Nonce`/`Aad`/`LessSafeKey`/`hmac::Context`; default stays `ring`. Scoped in `TLS-NATIVE-CRYPTO-SEAM.md`; **reopened 2026-10-22, client role only** (section 0). | Differential at the seam (same handshakes, both backends), interop with `ring`-backed peers, the whole section 11 table re-checked at the integration commit. | 5 to 8 |
-| 5 | **Signing** (stage 6b) | Only if a server role or client certificates must go native. | ECDSA P-256/P-384 (RFC 6979 or hedged nonce), Ed25519 sign, PKCS#8 parse. RSA-PSS signing (stage 7) stays "recommend not doing". Scoped in `TLS-NATIVE-SIGNING.md`; asked to be reopened on 2026-10-24 (section 0). | Wycheproof, differential both directions, nonce-bias test, methods 1 to 4, review. | 6 to 8 |
+| 5 | **Signing** (stage 6b) | Only if a server role or client certificates must go native. | ECDSA P-256/P-384 (RFC 6979 or hedged nonce), Ed25519 sign, PKCS#8 parse. RSA-PSS signing (stage 7) stays "recommend not doing". Scoped in `TLS-NATIVE-SIGNING.md`; reopened on 2026-10-24 under ADR-0006 (section 0). | Wycheproof, differential both directions, nonce-bias test, methods 1 to 4, review. | 6 to 8 |
 
 Sum for the client role (1 to 4): about 23 to 34 days plus intrinsics if chosen, before
 review wait. With signing: about 29 to 42. Estimates are reused from section 7.2, not
@@ -881,7 +882,7 @@ re-derived.
   *Open (2026-10-10):* not reconfirmed; AES-GCM starts portable-only and uses no intrinsics until the owner confirms.
   Options, order of work, evidence bar and the open questions are in `AES-GCM-DESIGN.md` (draft, no code).
 - **D2 Reopen the freeze** for gaps 1 to 3 (and which of 4 and 5). *Decided:* gaps 1 and 2 (2026-10-09) and gap 3,
-  AES-GCM (2026-10-10, "Unfreeze"); gap 4, client role only (2026-10-22); gap 5 asked to be reopened on 2026-10-24 (`TLS-NATIVE-SIGNING.md`; ADR-0006 proposed).
+  AES-GCM (2026-10-10, "Unfreeze"); gap 4, client role only (2026-10-22); gap 5 reopened on 2026-10-24 (`TLS-NATIVE-SIGNING.md`; ADR-0006 accepted).
 - **D3 Client-only or also server role** (gap 5). *Decided 2026-10-22:* client role only. Under
   the native backend, signing, the servers and client certificates are compiled out (ADR-0005;
   confirmed by the owner on GitHub, #868 comment 6343682194).

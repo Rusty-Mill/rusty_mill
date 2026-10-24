@@ -1,14 +1,15 @@
 # ADR-0006: Native signing and the server role for the hand-rolled engine
 
-Status: **Proposed.** It would extend ADR-0005 from the client role to signing, the server role, session tickets
+Status: **Accepted** — 2026-10-24. It extends ADR-0005 from the client role to signing, the server role, session tickets
 and client certificates on the first-party backend. ADR-0005 forecloses exactly this ("using this ADR to justify
 native signing, a native server role ... needs its own decision"), and this is that decision.
 Date: 2026-10-24
+Accepted: 2026-10-24
 
 *Provenance.* The owner asked in the working session on 2026-10-24 for gap 5 to be reopened, so that the native
 engine can sign. That is the implementer's transcription, not a statement from the owner's GitHub account. The
-choices below are the recommendations in `docs/research/TLS-NATIVE-SIGNING.md` §6. None is accepted until the
-owner accepts this ADR.
+owner then answered "Approved" in the working session on 2026-10-24 (the implementer's transcription, not yet restated from the owner's GitHub account) to the recommendations in `docs/research/TLS-NATIVE-SIGNING.md` §6
+(S2 to S5). That accepted this ADR and the choices below.
 
 ## Context
 
@@ -22,7 +23,7 @@ PKCS#8 private key. Ticket sealing needs AES-256-GCM and randomness, which both 
 code in the strictest sense. An ECDSA nonce that repeats, or leaks a few bits across signatures, gives away the
 long-term private key.
 
-## Decision (proposed)
+## Decision
 
 1. **First-party signing in `rusty_pk`.**
    - ECDSA on P-256 and P-384, with a **hedged RFC 6979 nonce**: RFC 6979's derivation, seeded also with fresh
