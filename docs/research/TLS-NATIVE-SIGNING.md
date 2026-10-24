@@ -116,7 +116,7 @@ Everything else in `server.rs`, `server12.rs` and the server half of `negotiate.
 | Nonce | The test-only unmodified path matches RFC 6979 exactly. Fixed-noise fixtures check the pinned hedged construction, both curve-specific noise lengths and both padding boundaries against an independently checked derivation; draft -05 §6 has no completed vectors. Zero/repeated-noise test fixtures produce valid reproducible hedged signatures, without asserting equality to plain RFC 6979. Injected production RNG errors return an error and no signature, with no fallback. With fresh noise, check for repeated `r` over 100,000 signatures of one message under one key and check the top bits of `k` for bias; these are statistical smoke tests, not uniqueness or security proofs. |
 | Constant time | The `crypto-constant-time` job gains ECDSA signing (scalar multiplication, inversion, the `s` computation, nonce derivation) and Ed25519 signing (fixed-base multiplication, scalar reduction): valgrind taint with the private key and nonce marked secret, exact disassembly jump counts, and the timing series against an A/A baseline with a planted-leak control. The claim stays "no leak found by these methods". |
 | Engine | The 11 suites marked `ring-only suite (ADR-0005)` run on the native backend again, except the tests that need an RSA signing key, which are gated individually and named. The native BoGo floor is re-set from a run that includes server scenarios. OpenSSL interop runs in the server direction. |
-| Review | An independent review of the new signing code before it is wired (plan section 13.2 D4). Its reviewer, scope and conclusion are recorded in plan section 11b. Automated reviews are labelled automated. |
+| Review | The owner's review of the new signing code before it is wired (plan section 13.2 D4, owner alone; S5 as amended). Its reviewer, scope and conclusion are recorded in plan section 11b. Automated reviews are labelled automated. |
 
 ### ECDSA implementation checkpoint (PR #992 correction, 2026-10-24)
 
@@ -169,8 +169,8 @@ reviewer.
 - The 100,000-signature test is not in CI.
 
 **Still outstanding before TLS wiring:**
-- the independent signing-code review, recorded with reviewer, scope and exact commit
-  (S5);
+- the owner's signing-code review, recorded with reviewer, scope and exact commit
+  (S5 as amended; the reviewed code is on main at `698844212`);
 - PKCS#8 parsing;
 - the engine suites and native BoGo with server scenarios.
 
@@ -206,7 +206,7 @@ Rough, plus or minus 50 percent, like the plan's figures. Suggested order of PRs
 | S2 | ECDSA nonce | Plain RFC 6979 (deterministic); hedged RFC 6979 (the pinned §3 construction with fresh randomness); or random only, as `ring` does | **Decided 2026-10-24: hedged RFC 6979** |
 | S3 | RSA signing | Keep it out (native servers and client certificates use ECDSA or Ed25519 only), or build RSA-PSS signing (plan stage 7, "recommend never") | **Decided 2026-10-24: kept out** |
 | S4 | ADR | Accept ADR-0006 (extends ADR-0005 to signing and the server role), or amend ADR-0005 | **Decided 2026-10-24: ADR-0006 accepted** |
-| S5 | Review before wiring | Independent human review of the signing code before the `rusty_tls` wiring merges, or the owner alone (plan D4) | **Decided 2026-10-24: independent review, recorded with reviewer, scope and commit** |
+| S5 | Review before wiring | Independent human review of the signing code before the `rusty_tls` wiring merges, or the owner alone (plan D4) | **Decided 2026-10-24: independent review, recorded with reviewer, scope and commit. Amended 2026-10-24: owner review (plan D4), recorded the same way.** *Amended 2026-10-24:* the owner is the S5 reviewer ("S5 is me", working session; the implementer's transcription, not yet restated from the owner's GitHub account). That is plan D4's "owner alone" option, not an independent review: one reviewer, who owns the project and whose account authored commit `32db5c131` in #992. |
 
 ## 7. Not in scope
 
