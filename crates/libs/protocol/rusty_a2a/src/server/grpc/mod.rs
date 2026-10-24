@@ -266,7 +266,7 @@ impl GrpcService {
                     async move {
                         let events = on_app(&app, async move { svc.$method(request).await }).await?;
                         let mut replies = feed(&app, events);
-                        while let Some(reply) = replies.next().await {
+                        while let Some(reply) = replies.next().await? {
                             out.send(&reply?).await?;
                         }
                         Ok(())

@@ -214,3 +214,53 @@ async fn dropping_serve_grpc_closes_the_listener() {
         "the port was still held after serve_grpc was dropped"
     );
 }
+
+/// The application runtime stops while the transport stays up: a stream already begun must end
+/// in an error, never in a clean `OK` that would pass a truncated stream off as complete.
+#[test]
+fn a_stream_cut_short_by_the_application_stopping_ends_in_an_error() {
+    let app = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let transport = rusty_tokio::Runtime::new().unwrap();
+    let port = free_port();
+    let router = {
+        let _enter = app.enter();
+        AgentServer::new(card(port).with_streaming(true), Arc::new(Stalls))
+            .build()
+            .grpc_router(app.handle().clone())
+    };
+    let _server = {
+        let _enter = transport.enter();
+        rusty_tokio::io::TcpListener::bind(([127, 0, 0, 1], port).into())
+            .and_then(|listener| router.serve(listener, None, rusty_hyper::ServeOptions::default()))
+            .unwrap()
+    };
+    let client_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let ended = client_runtime.block_on(async {
+        let mut client = connect(format!("http://127.0.0.1:{port}")).await;
+        let mut stream = client
+            .send_streaming_message(versioned(send_request("stream")))
+            .await
+            .unwrap()
+            .into_inner();
+        // The agent accepts the task (a snapshot, then `Working`) and then stalls.
+        for _ in 0..2 {
+            let event = tokio::time::timeout(Duration::from_secs(5), stream.message())
+                .await
+                .expect("the opening events should arrive");
+            assert!(event.unwrap().is_some());
+        }
+        app.shutdown_background();
+        tokio::time::timeout(Duration::from_secs(5), stream.message())
+            .await
+            .expect("a stopped application must end the stream, not hang it")
+    });
+    let status = ended.expect_err("the stream was reported complete though it was cut short");
+    assert_eq!(status.code(), Code::Unavailable, "{status:?}");
+}

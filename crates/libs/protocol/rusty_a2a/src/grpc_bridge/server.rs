@@ -33,9 +33,16 @@ impl<T> Future for AppTask<T> {
     type Output = Result<T, Status>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.0)
-            .poll(cx)
-            .map(|joined| joined.map_err(|e| Status::internal(format!("the engine call failed: {e}"))))
+        Pin::new(&mut self.0).poll(cx).map(|joined| {
+            joined.map_err(|e| {
+                // A task cancelled by its runtime shutting down is not the caller's fault.
+                if e.is_cancelled() {
+                    Status::unavailable("the engine was shut down")
+                } else {
+                    Status::internal(format!("the engine call failed: {e}"))
+                }
+            })
+        })
     }
 }
 
@@ -52,13 +59,23 @@ where
 /// Dropping it stops the producer.
 pub(crate) struct Fed<T> {
     rx: tokio::sync::mpsc::Receiver<T>,
-    _task: AppTask<()>,
+    task: AppTask<()>,
+    ended: bool,
 }
 
 impl<T> Fed<T> {
-    /// The next item; `None` once the stream has ended.
-    pub(crate) async fn next(&mut self) -> Option<T> {
-        self.rx.recv().await
+    /// The next item, in order; `Ok(None)` once the stream has ended. A closed channel is an end
+    /// only if the producer finished: one that was cancelled (its runtime shut down) or
+    /// panicked is an error, so a truncated stream is never reported as complete.
+    pub(crate) async fn next(&mut self) -> Result<Option<T>, Status> {
+        if self.ended {
+            return Ok(None);
+        }
+        if let Some(item) = self.rx.recv().await {
+            return Ok(Some(item));
+        }
+        self.ended = true;
+        (&mut self.task).await.map(|()| None)
     }
 }
 
@@ -78,7 +95,11 @@ where
             }
         }
     }));
-    Fed { rx, _task: task }
+    Fed {
+        rx,
+        task,
+        ended: false,
+    }
 }
 
 /// How long a stopped server may wait for the calls in flight, and then its runtime for its tasks.
@@ -238,7 +259,7 @@ mod tests {
         let got = ours.block_on(async {
             let mut fed = feed(app.handle(), futures_util::stream::iter(items));
             let mut got = Vec::new();
-            while let Some(item) = fed.next().await {
+            while let Some(item) = fed.next().await.unwrap() {
                 got.push(item.unwrap());
             }
             got
@@ -253,7 +274,7 @@ mod tests {
         let got = ours.block_on(async {
             let mut fed = feed(app.handle(), futures_util::stream::iter(items));
             let mut got = Vec::new();
-            while let Some(item) = fed.next().await {
+            while let Some(item) = fed.next().await.unwrap() {
                 got.push(item.map_err(|s| s.code()));
             }
             got
@@ -274,9 +295,56 @@ mod tests {
         .boxed();
         ours.block_on(async {
             let mut fed = feed(app.handle(), producer);
-            assert!(fed.next().await.is_some());
+            assert!(fed.next().await.unwrap().is_some());
             drop(fed);
         });
         assert!(set_soon(&dropped), "the producer kept running");
+    }
+
+    /// One item, then a producer that never finishes.
+    fn one_then_pending() -> impl futures_util::Stream<Item = Result<u32, Status>> + Send {
+        futures_util::stream::iter([Ok(1u32)]).chain(futures_util::stream::pending())
+    }
+
+    #[test]
+    fn a_producer_cancelled_by_its_runtime_shutting_down_is_an_error_not_an_end() {
+        let (app, ours) = runtimes();
+        let mut fed = feed(app.handle(), one_then_pending());
+        let first = ours.block_on(fed.next()).unwrap();
+        assert_eq!(first.unwrap().unwrap(), 1);
+        // The application stops while the transport stays up.
+        drop(app);
+        let end = ours.block_on(async {
+            rusty_tokio::time::timeout(Duration::from_secs(5), fed.next())
+                .await
+                .expect("a stopped producer must end the stream, not hang it")
+        });
+        assert_eq!(end.unwrap_err().code(), Code::Unavailable);
+        // Asked again, it has ended.
+        assert!(ours.block_on(fed.next()).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_panicking_producer_is_an_internal_error_after_its_buffered_items() {
+        let (app, ours) = runtimes();
+        let producer = futures_util::stream::unfold(0u32, |n| async move {
+            if n == 2 {
+                panic!("boom");
+            }
+            Some((Ok::<u32, Status>(n), n + 1))
+        });
+        let (items, end) = ours.block_on(async {
+            let mut fed = feed(app.handle(), producer);
+            let mut items = Vec::new();
+            let end = loop {
+                match fed.next().await {
+                    Ok(Some(item)) => items.push(item.unwrap()),
+                    other => break other,
+                }
+            };
+            (items, end)
+        });
+        assert_eq!(items, vec![0, 1]);
+        assert_eq!(end.unwrap_err().code(), Code::Internal);
     }
 }
