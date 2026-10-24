@@ -153,11 +153,13 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_search | rusty-search-tantivy | Tantivy-backed SearchBackend implementation for rusty_search: embedded full-text search | 1 |
 | libs | rusty_serve | rusty_serve | A small blocking HTTP/1.1 server on rusty_http for a JSON API plus a built web UI: one thread per connection, bounded head, body, idle time and connection count, a sans-IO Handler, and a path-safe static file server | 19 |
 | libs | rusty_sqlite | rusty_sqlite | A thin, ergonomic wrapper over rusqlite: cross-platform bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management. | 10 |
+| libs | rusty_stream | rusty_stream | The workspace's async Stream trait, its combinators and the stream!/try_stream! macros -- the in-house replacement for futures, futures-util, futures-core and async-stream. | 0 |
+| libs | rusty_stream | rusty_stream-macros | The stream!/try_stream! proc macros for rusty_stream -- not meant to be depended on directly, use rusty_stream's re-exports. | 1 |
 | libs | rusty_term | rusty_term | A terminal emulator written from scratch in Rust, with a deliberately small dependency surface. | 2 |
 | libs | rusty_term | rusty_term_core | rusty_term's headless VT engine: parser, grid, scrollback and OSC handling, with no async runtime, PTY or renderer. | 1 |
 | libs | rusty_term | rusty_term_l13 | rusty_term's L13 structured side-channel: a private-OSC JSON-RPC transport hosting MCP + LSP/ACP negotiation, addressed against a narrow TerminalState trait rather than rusty_term's own Grid type. | 1 |
 | libs | rusty_tls | rusty_tls | A TLS library implementation in Rust | 10 |
-| libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 27 |
+| libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 28 |
 | libs | rusty_tokio | rusty_tokio-macros | Proc-macro attributes (#[main], #[test]) for rusty_tokio -- not meant to be depended on directly, use rusty_tokio's re-exports. | 1 |
 | libs | rusty_tonic | rusty_tonic | Dependency-free gRPC protocol core: status codes and error details, validated metadata, message framing with a receive limit, grpc-timeout, and request/response header lists. Sans-IO; no async, no HTTP/2, no code generation. | 2 |
 | libs | rusty_ttf_parser | rusty-ttf-parser | A #![no_std], allocation-free, zero-dependency TrueType/OpenType reader: cmap, GSUB lookups and PNG colour bitmaps | 1 |

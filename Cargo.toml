@@ -70,6 +70,8 @@ members = [
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo",
     "crates/libs/async/rusty_journal",
+    "crates/libs/async/rusty_stream",
+    "crates/libs/async/rusty_stream/rusty_stream-macros",
     "crates/foundation/rusty_url",
     "crates/libs/net/rusty_http",
     "crates/libs/net/rusty_serve",
