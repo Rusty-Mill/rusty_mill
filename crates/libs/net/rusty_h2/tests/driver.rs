@@ -321,6 +321,148 @@ async fn a_transport_that_dies_fails_pending_calls() {
         .is_err());
 }
 
+// ---- a stream that goes away while the application is idle -----------------
+
+/// Awaits `f`, which must finish promptly. A `timeout` polls its future once more when the
+/// deadline passes, so a lost wake-up would otherwise be rescued after the full wait and pass.
+async fn promptly<F: std::future::Future>(what: &str, f: F) -> F::Output {
+    let start = std::time::Instant::now();
+    let out = timeout(Duration::from_secs(5), f)
+        .await
+        .unwrap_or_else(|_| panic!("{what}"));
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{what}: finished only when the timeout polled again, so a wake-up was lost"
+    );
+    out
+}
+
+/// A connected client and server; the client's driver task is returned so a test can kill it.
+async fn idle_pair() -> (
+    ClientHandle,
+    driver::Acceptor,
+    rusty_tokio::task::JoinHandle<Result<(), Error>>,
+) {
+    let (a, b) = pair().await;
+    let (h, cdrv) = driver::client(a, ClientBuilder::new());
+    let (acceptor, sdrv) = driver::server(b, ServerBuilder::new());
+    let client_task = rusty_tokio::spawn(cdrv);
+    rusty_tokio::spawn(sdrv);
+    (h, acceptor, client_task)
+}
+
+#[rusty_tokio::test]
+async fn closed_stays_pending_while_the_stream_lives() {
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (_send, _resp) = h.send_request(request("/svc/Idle"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    assert!(timeout(Duration::from_millis(150), respond.closed())
+        .await
+        .is_err());
+}
+
+#[rusty_tokio::test]
+async fn closed_completes_when_the_client_resets_after_the_request_was_fully_read() {
+    // The server forgets such a stream outright, so a write only learns of it later.
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (mut send, _resp) = h.send_request(request("/svc/Cancel"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    let closed = respond.closed();
+    rusty_tokio::spawn(async move {
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+        send.reset(ErrorCode::Cancel);
+    });
+    promptly("the reset was never reported", closed).await;
+}
+
+#[rusty_tokio::test]
+async fn closed_completes_when_the_client_resets_a_request_still_being_sent() {
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (mut send, _resp) = h.send_request(request("/svc/Cancel"), false).await.unwrap();
+    send.send_data(b"part".to_vec(), false).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    let closed = respond.closed();
+    rusty_tokio::spawn(async move {
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+        send.reset(ErrorCode::Cancel);
+    });
+    promptly("the reset was never reported", closed).await;
+}
+
+#[rusty_tokio::test]
+async fn closed_completes_after_the_response_has_started() {
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (mut send, _resp) = h.send_request(request("/svc/Cancel"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    let reply = respond.send_response(ok_response(), false).await.unwrap();
+    let closed = reply.closed();
+    rusty_tokio::spawn(async move {
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+        send.reset(ErrorCode::Cancel);
+    });
+    promptly("the reset was never reported", closed).await;
+}
+
+#[rusty_tokio::test]
+async fn closed_completes_when_the_connection_dies() {
+    let (h, mut acceptor, client) = idle_pair().await;
+    let (_send, _resp) = h.send_request(request("/svc/Idle"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    let closed = respond.closed();
+    client.abort();
+    drop(h);
+    promptly("the dead connection was never reported", closed).await;
+}
+
+#[rusty_tokio::test]
+async fn every_waiting_closed_future_is_woken() {
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (mut send, _resp) = h.send_request(request("/svc/Cancel"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    let (first, second) = (respond.closed(), respond.closed());
+    rusty_tokio::spawn(async move {
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+        send.reset(ErrorCode::Cancel);
+    });
+    promptly("one of the waiters was never woken", async {
+        rusty_tokio::join!(first, second)
+    })
+    .await;
+}
+
+#[rusty_tokio::test]
+async fn closed_completes_when_the_stream_finishes_normally() {
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (_send, resp) = h.send_request(request("/svc/Done"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    // Already waiting when the stream ends, so only a wake-up can resolve it.
+    let waiting = rusty_tokio::spawn(respond.closed());
+    rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut reply = respond.send_response(ok_response(), false).await.unwrap();
+    reply
+        .send_trailers(vec![hf("grpc-status", "0")])
+        .await
+        .unwrap();
+    let mut resp = resp.await.unwrap();
+    drain(&mut resp.body).await.unwrap();
+    promptly("a finished stream was never reported", waiting)
+        .await
+        .unwrap();
+}
+
+#[rusty_tokio::test]
+async fn closed_is_ready_at_once_for_a_stream_that_is_already_gone() {
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (mut send, _resp) = h.send_request(request("/svc/Cancel"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    send.reset(ErrorCode::Cancel);
+    // Give the reset time to arrive, then ask afterwards.
+    rusty_tokio::time::sleep(Duration::from_millis(200)).await;
+    timeout(Duration::from_secs(1), respond.closed())
+        .await
+        .expect("a stream that was already gone");
+}
+
 // ---- a raw, hostile peer ---------------------------------------------------
 
 fn wire(frame: &Frame) -> Vec<u8> {

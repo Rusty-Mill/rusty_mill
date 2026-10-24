@@ -108,6 +108,8 @@ pub(super) struct Stream {
     pub(super) abort: Option<Fail>,
     pub(super) recv_dropped: bool,
     pub(super) headers_taken: bool,
+    /// Tasks waiting in [`Closed`](super::Closed) for the stream to go away.
+    pub(super) closed_wakers: Vec<Waker>,
     counted_done: bool,
 }
 
@@ -286,6 +288,8 @@ impl Shared {
         if let Some(mut s) = self.streams.remove(&id) {
             self.trash.extend(s.recv_waker.take());
             self.trash.extend(s.headers_waker.take());
+            // `Closed` treats a stream that is no longer tracked as gone.
+            self.wakes.append(&mut s.closed_wakers);
         }
     }
 
@@ -338,6 +342,7 @@ impl Shared {
             {
                 self.wakes.push(w);
             }
+            self.wakes.append(&mut s.closed_wakers);
         }
         self.settle(id);
         // A request that ended before the application accepted it is never

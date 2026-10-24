@@ -186,6 +186,14 @@ impl SendStream {
         Ok(())
     }
 
+    /// A future that resolves once this stream is gone (see [`Closed`]).
+    pub fn closed(&self) -> Closed {
+        Closed {
+            shared: self.shared.clone(),
+            id: self.id,
+        }
+    }
+
     /// Resets the stream with `code`.
     pub fn reset(&mut self, code: ErrorCode) {
         let mut sh = lock(&self.shared);
@@ -430,6 +438,33 @@ pub struct Request {
     pub body: RecvStream,
 }
 
+/// Resolves once a stream is gone: the peer reset it, the connection failed, or it was finished
+/// and forgotten. Made by [`Respond::closed`] and [`SendStream::closed`].
+///
+/// A handler that waits on something else (a computation, a lock) learns here that nobody is
+/// listening any more, which a write would only tell it later, or never, once the request has
+/// been read in full and the stream has been forgotten.
+#[must_use = "a Closed does nothing until it is polled"]
+pub struct Closed {
+    shared: Handle,
+    id: u32,
+}
+
+impl Future for Closed {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let mut sh = lock(&self.shared);
+        match sh.streams.get_mut(&self.id) {
+            Some(s) if s.abort.is_none() => {
+                register(&mut s.closed_wakers, cx.waker());
+                Poll::Pending
+            }
+            _ => Poll::Ready(()),
+        }
+    }
+}
+
 /// Answers one request.
 pub struct Respond {
     shared: Handle,
@@ -438,6 +473,15 @@ pub struct Respond {
 }
 
 impl Respond {
+    /// A future that resolves once this request's stream is gone (see [`Closed`]). It does not
+    /// borrow `self`, so it can be raced against a handler that owns the `Respond`.
+    pub fn closed(&self) -> Closed {
+        Closed {
+            shared: self.shared.clone(),
+            id: self.id,
+        }
+    }
+
     /// Sends the response headers.
     pub async fn send_response(
         mut self,
