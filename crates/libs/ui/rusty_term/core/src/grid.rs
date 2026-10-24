@@ -5061,7 +5061,7 @@ pub(crate) fn row_text(cells: &[Cell], clusters: &[String]) -> String {
     s.trim_end().to_string()
 }
 
-// RTCP v1 deliberately excludes view selection/search/folds, render caches,
+// RTCP v2 deliberately excludes view selection/search/folds, render caches,
 // recycled spare rows, pending host actions and L13 channel state.
 impl crate::checkpoint::Wire for Grid {
     fn write(&self, w: &mut crate::checkpoint::Writer) -> crate::checkpoint::Result<()> {
@@ -5081,6 +5081,7 @@ impl crate::checkpoint::Wire for Grid {
         crate::checkpoint::Wire::write(&self.scrollback_max, w)?;
         crate::checkpoint::Wire::write(&self.current_link, w)?;
         crate::checkpoint::Wire::write(&self.tab_stops, w)?;
+        crate::checkpoint::Wire::write(&self.cursor_visible, w)?;
         crate::checkpoint::Wire::write(&self.sync_output, w)?;
         crate::checkpoint::Wire::write(&self.sync_output_since, w)?;
         crate::checkpoint::Wire::write(&self.bracketed_paste, w)?;
@@ -5155,6 +5156,7 @@ impl crate::checkpoint::Wire for Grid {
         grid.scrollback_max = crate::checkpoint::Wire::read(r)?;
         grid.current_link = crate::checkpoint::Wire::read(r)?;
         grid.tab_stops = crate::checkpoint::Wire::read(r)?;
+        grid.cursor_visible = crate::checkpoint::Wire::read(r)?;
         grid.sync_output = crate::checkpoint::Wire::read(r)?;
         grid.sync_output_since = crate::checkpoint::Wire::read(r)?;
         grid.bracketed_paste = crate::checkpoint::Wire::read(r)?;

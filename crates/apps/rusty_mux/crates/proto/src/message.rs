@@ -17,8 +17,11 @@ impl Features {
     /// Reserved: rejected experimental RMRP replay capability.
     pub const REPLAY_SNAPSHOT: Self = Self(1);
 
-    /// RTCP v1 headless checkpoints transferred in ordered Checkpoint chunks.
+    /// Reserved: incomplete RTCP v1 checkpoint capability.
     pub const CHECKPOINT_V1: Self = Self(1 << 1);
+
+    /// RTCP v2 headless checkpoints transferred in ordered Checkpoint chunks.
+    pub const CHECKPOINT_V2: Self = Self(1 << 2);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -113,7 +116,7 @@ pub enum Message {
         block: BlockId,
         data: Vec<u8>,
     },
-    /// A chunk of RTCP v1, negotiated with CHECKPOINT_V1. Offsets must be
+    /// A chunk of RTCP v2, negotiated with CHECKPOINT_V2. Offsets must be
     /// contiguous from zero and total is constant throughout one transfer.
     Checkpoint {
         block: BlockId,

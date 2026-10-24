@@ -1,4 +1,4 @@
-# Phase 1 attach: RTCP v1 headless checkpoints
+# Phase 1 attach: RTCP v2 headless checkpoints
 
 The former experimental RMRP lifetime replay mechanism is removed. There is
 no cumulative output cutoff, no replay log, and no reduction of the engine's
@@ -8,9 +8,9 @@ output, subject to current-state memory limits.
 
 ## Negotiation and transfer
 
-`Features::CHECKPOINT_V1` is bit 1 (value 2). Bit 0 is reserved for the rejected
-experimental RMRP capability and does not enable attach. Hello/Welcome negotiate
-bit 1; Attach without it returns Failed. Existing frame layouts and the drawable
+`Features::CHECKPOINT_V2` is bit 2 (value 4). Bits 0 and 1 are reserved for
+rejected RMRP replay and incomplete RTCP v1 respectively; neither enables attach.
+Hello/Welcome negotiate bit 2; Attach without it returns Failed. Existing frame layouts and the drawable
 RTSN v1 API remain unchanged.
 
 A successful attach sends Done, then ordered `Checkpoint` messages (type `0x88`),
@@ -36,11 +36,11 @@ reader/writer futures and socket halves. It does not modify the block or its
 ability to produce a fresh checkpoint for another attach. A blocked non-reading
 peer cannot retain the transfer indefinitely after eviction.
 
-## RTCP v1 binary format
+## RTCP v2 binary format
 
 The codec is `rusty_term_core::checkpoint::{encode,decode}`. Magic `RTCP` is
-followed by version byte `1`, then Grid fields and AnsiParser fields in the
-explicit order in their `Wire` implementations. Field order is part of v1;
+followed by version byte `2`, then Grid fields and AnsiParser fields in the
+explicit order in their `Wire` implementations. Field order is part of v2;
 changing it or its meaning requires another version. This is an independent
 continuation format, not a reinterpretation of RTSN's drawable snapshot.
 
@@ -60,7 +60,7 @@ continuation format, not a reinterpretation of RTSN's drawable snapshot.
   exceeded budgets fail before returning a terminal for continued parsing.
 
 The headless profile includes live/primary screens, full retained history,
-wrapped/line attributes, tables and current hyperlink, cursor/saved cursor,
+wrapped/line attributes, tables and current hyperlink, cursor/saved cursor and DECTCEM visibility,
 tabs, vertical/horizontal margins, origin/insert/wrap/grapheme modes, input
 modes, title and keyboard stacks, palette/reset theme, erase colors, pending
 multipart notifications, stored Kitty images/frames/virtual placements and
@@ -72,7 +72,7 @@ Front-end selection/search/folds, render caches and spare allocations, pending
 host clipboard/notification/bell effects, and L13 application channel state are
 outside this *headless VT* profile. Pixel overlays present only in GUI builds
 are front-end state; headless Sixel/iTerm display cells and Kitty stored pixels
-are preserved. Enabling a library feature does not change RTCP v1's schema.
+are preserved. Enabling a library feature does not change RTCP v2's schema.
 The Phase 1 server does not enable GUI or L13. Clients must not treat RTCP as a
 GUI/L13 session checkpoint or replay host actions during restore.
 
@@ -95,3 +95,15 @@ not a claim that all terminal images/tables fit inside the cell budget.
 Linux Phase 1 and rusty_tokio remain unchanged. Child Process ownership survives
 reaper cancellation; normal close signals the process group with HUP, escalates
 to KILL after one second, and reaps it. Setup/teardown fallback kills and waits.
+
+## Durable-field audit
+
+The review correction adds cursor_visible symmetrically after tab_stops in the
+Grid schema and uses version 2/capability bit 2 so old v1 layouts fail closed.
+An independent inventory test covers all 87 Grid fields: 60 durable fields are
+encoded and decoded, and 27 excluded fields have explicit profile reasons.
+Exclusions are rebuildable caches/allocations, client view/render configuration,
+GUI-only overlays/folds/timers, pending host effects, or L13 channel/capture state.
+The inventory test fails if a new field lacks either encoding or an audited
+exclusion. A separate regression asserts restored cursor_visible and concrete
+DECRQM responses directly, rather than relying on RTCP re-encoding equality.

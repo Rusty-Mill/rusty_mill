@@ -1,4 +1,4 @@
-//! RTCP v1: a headless terminal continuation checkpoint, independent of RTSN.
+//! RTCP v2: a headless terminal continuation checkpoint, independent of RTSN.
 //! Durable parser/Grid state is included; front-end view state and pending
 //! host side effects are excluded. L13 channels are outside this profile.
 
@@ -29,7 +29,7 @@ pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
     grid.validate_checkpoint()?;
     parser.validate_checkpoint()?;
     let mut w = Writer {
-        bytes: b"RTCP\x01".to_vec(),
+        bytes: b"RTCP\x02".to_vec(),
         now: Instant::now(),
         budget: MAX_DECODED,
     };
@@ -38,11 +38,11 @@ pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
     Ok(w.bytes)
 }
 
-/// Decode untrusted RTCP v1, validating allocation budgets and internal indices
+/// Decode untrusted RTCP v2, validating allocation budgets and internal indices
 /// before returning objects that can safely continue parsing. No host actions
 /// or terminal responses are replayed while restoring.
 pub fn decode(data: &[u8]) -> Result<(Grid, AnsiParser)> {
-    if data.len() > MAX_ENCODED || !data.starts_with(b"RTCP\x01") {
+    if data.len() > MAX_ENCODED || !data.starts_with(b"RTCP\x02") {
         return Err(Error("checkpoint header/version/size"));
     }
     let mut r = Reader {
@@ -402,6 +402,117 @@ mod tests {
     }
 
     #[test]
+    fn hidden_cursor_restores_directly_and_answers_decrqm() {
+        for hidden in [true, false] {
+            let mut grid = Grid::new(20, 12);
+            let mut parser = AnsiParser::new();
+            parser.advance(&mut grid, if hidden { b"\x1b[?25l" } else { b"\x1b[?25h" });
+            assert_eq!(grid.cursor_visible, !hidden);
+            let (mut back, mut continuation) = same(&grid, &parser);
+            // Direct state and protocol assertions catch symmetric omissions
+            // that encode -> decode -> encode equality cannot reveal.
+            assert_eq!(back.cursor_visible, !hidden);
+            parser.advance(&mut grid, b"\x1b[?25$p");
+            continuation.advance(&mut back, b"\x1b[?25$p");
+            let expected = if hidden {
+                b"\x1b[?25;2$y"
+            } else {
+                b"\x1b[?25;1$y"
+            };
+            assert_eq!(parser.take_responses(), expected);
+            assert_eq!(continuation.take_responses(), expected);
+            continuation.advance(&mut back, b"X\x1b[?25h\x1b[?25$p");
+            assert!(back.cursor_visible);
+            assert_eq!(continuation.take_responses(), b"\x1b[?25;1$y");
+        }
+    }
+
+    #[test]
+    fn every_grid_field_is_encoded_or_explicitly_excluded() {
+        // Inventory is intentionally independent of the wire field list.
+        // New Grid fields must get a durable encoding or an audited reason
+        // to be outside the headless VT profile.
+        let excluded = [
+            ("dirty", "rebuilt row damage cache"),
+            ("spare_screen", "recycled blank allocation"),
+            ("epoch", "renderer freshness counter"),
+            ("view_offset", "client viewport"),
+            ("selection", "client selection"),
+            ("search", "GUI search"),
+            ("host_out", "pending host side effects"),
+            ("links_arc", "rebuilt hyperlink cache"),
+            ("clusters_arc", "rebuilt grapheme cache"),
+            ("bell", "pending host bell"),
+            ("min_contrast", "renderer configuration"),
+            ("bidi", "renderer configuration; VT bdsm state is encoded"),
+            ("command_began", "GUI command notification timer"),
+            ("finished_commands", "pending GUI notifications"),
+            ("clipboard_set", "pending host clipboard action"),
+            ("clipboard_set_primary", "pending host clipboard action"),
+            ("clipboard_query", "pending host clipboard query"),
+            ("clipboard_query_primary", "pending host clipboard query"),
+            ("notifications", "pending host notifications"),
+            ("ime_preedit", "GUI input composition"),
+            ("total_scrolled", "GUI overlay image anchor"),
+            (
+                "images",
+                "GUI-only pixel overlays; headless cells/store are encoded",
+            ),
+            ("fold_pending_start", "GUI fold state"),
+            ("fold_blocks", "GUI fold state"),
+            ("channel", "L13 application channel"),
+            ("command_start", "L13 command capture"),
+            ("last_command_output", "L13 command capture"),
+        ];
+        let source = include_str!("grid.rs");
+        let declaration = source
+            .split_once("pub struct Grid {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        let codec = source
+            .split_once("impl crate::checkpoint::Wire for Grid")
+            .unwrap()
+            .1;
+        let (write, read) = codec.split_once("    fn read(").unwrap();
+        let fields: Vec<_> = declaration
+            .lines()
+            .filter_map(|line| {
+                let line = line
+                    .trim()
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| line.trim().strip_prefix("pub "))
+                    .unwrap_or(line.trim());
+                let (name, _) = line.split_once(": ")?;
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    .then_some(name)
+            })
+            .collect();
+        for field in &fields {
+            if excluded.iter().any(|(name, _)| name == field) {
+                continue;
+            }
+            assert!(
+                write.contains(&format!("&self.{field},")),
+                "Grid::{field} missing from encoder"
+            );
+            assert!(
+                read.contains(&format!("grid.{field} = crate::checkpoint::Wire::read")),
+                "Grid::{field} missing from decoder"
+            );
+        }
+        for (field, reason) in excluded {
+            assert!(
+                fields.contains(&field),
+                "stale exclusion for {field}: {reason}"
+            );
+        }
+    }
+
+    #[test]
     fn normal_history_and_large_graphics_round_trip() {
         let mut grid = Grid::new(80, 24);
         let mut parser = AnsiParser::new();
@@ -464,7 +575,7 @@ mod tests {
             assert!(decode(&good[..len]).is_err(), "prefix {len}");
         }
         let mut bad = good.clone();
-        bad[4] = 2;
+        bad[4] = 1;
         assert!(decode(&bad).is_err());
         let mut bad = good.clone();
         bad.extend([0]);

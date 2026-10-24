@@ -70,7 +70,7 @@ impl State {
     pub(crate) fn connect(&mut self, outbox: Outbox, theirs: Features) -> ClientId {
         let client = self.mux.connect();
         self.clients.insert(client, outbox);
-        let features = theirs.intersection(Features::CHECKPOINT_V1);
+        let features = theirs.intersection(Features::CHECKPOINT_V2);
         self.features.insert(client, features);
         self.send(client, &Message::Welcome { features, client });
         self.flush();
@@ -148,9 +148,9 @@ impl State {
                 if !self
                     .features
                     .get(&client)
-                    .is_some_and(|f| f.contains(Features::CHECKPOINT_V1))
+                    .is_some_and(|f| f.contains(Features::CHECKPOINT_V2))
                 {
-                    return (req, Err("attach requires CHECKPOINT_V1 support".into()));
+                    return (req, Err("attach requires CHECKPOINT_V2 support".into()));
                 }
                 if self.clients.get(&client).is_some_and(|out| out.attaching()) {
                     return (req, Err("checkpoint transfer already in progress".into()));
@@ -424,7 +424,7 @@ mod regression {
         });
         let (out, inbox, _) = outbox();
         let mut state = shared.borrow_mut();
-        let client = state.connect(out, Features::CHECKPOINT_V1);
+        let client = state.connect(out, Features::CHECKPOINT_V2);
         let session = state.mux.create_session("s");
         let window = state.mux.create_window(session, "w").unwrap();
         let Outcome::Done(Some(id)) = state
@@ -442,6 +442,7 @@ mod regression {
         runtime().block_on(async {
             for (prefix, suffix) in [
                 (&b"\x1b[31m"[..], &b"X"[..]),
+                (&b"\x1b[?25l"[..], &b"X\x1b[?25$p"[..]),
                 (&b"\x1b["[..], &b"31mX"[..]),
                 (&b"\xe2\x82"[..], &b"\xac"[..]),
                 (&b"\x1b]2;part"[..], &b"ial\x07X"[..]),
@@ -469,8 +470,9 @@ mod regression {
                         _ => {}
                     }
                 };
-                shared.borrow_mut().output(block, suffix);
+                let replies = shared.borrow_mut().output(block, suffix);
                 parser.advance(&mut grid, suffix);
+                assert_eq!(parser.take_responses(), replies);
                 let state = shared.borrow();
                 let server = &state.blocks[&block].grid;
                 assert_eq!(
@@ -478,6 +480,7 @@ mod regression {
                     server.encode_snapshot(),
                     "prefix {prefix:?}"
                 );
+                assert_eq!(grid.cursor_visible, server.cursor_visible);
                 assert_eq!(grid.bracketed_paste, server.bracketed_paste);
                 assert_eq!(grid.app_cursor_keys, server.app_cursor_keys);
                 assert_eq!(grid.mouse_modes, server.mouse_modes);
@@ -491,8 +494,14 @@ mod regression {
     fn legacy_attach_and_encoding_failure_never_send_ready() {
         runtime().block_on(async {
             let (shared, client, block, mut inbox) = fixture();
-            shared.borrow_mut().features.insert(client, Features::NONE);
-            State::request(&shared, client, Message::Attach { req: 10, block });
+            for features in [
+                Features::NONE,
+                Features::REPLAY_SNAPSHOT,
+                Features::CHECKPOINT_V1,
+            ] {
+                shared.borrow_mut().features.insert(client, features);
+                State::request(&shared, client, Message::Attach { req: 10, block });
+            }
             assert_eq!(shared.borrow().mux.client(client).unwrap().attached(), None);
             // Force a frame encoding failure. Subsequent sends (including
             // Ready) must find no client rather than emit an incomplete attach.
