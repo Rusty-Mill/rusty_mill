@@ -2,8 +2,8 @@
 //!
 //! Linux-first (Phase 4). The device is created and configured through
 //! rustils' `platform_linux::LinuxTunDevice` (rustils#56, decision D14),
-//! then wrapped in tokio's `AsyncFd` for async packet I/O — the same
-//! "rustils-backed fd on tokio's reactor" shape `ts-magicsock` already
+//! then wrapped in `rusty_tokio`'s `AsyncFd` for async packet I/O — the same
+//! "rustils-backed fd on the runtime's reactor" shape `ts-magicsock` already
 //! established for `LinuxUdpSocket`. `ts-engine` bridges this to the
 //! WireGuard-over-DERP data plane.
 //!
@@ -21,7 +21,7 @@ use std::sync::Arc;
 use platform::error::{ErrorKind as PlatformErrorKind, PlatformError};
 use platform::tun::TunDevice as PlatformTunDevice;
 use platform_linux::LinuxTunDevice;
-use tokio::io::unix::AsyncFd;
+use rusty_tokio::io::unix::AsyncFd;
 
 /// Tailscale's standard tunnel MTU.
 pub const DEFAULT_MTU: u32 = 1280;

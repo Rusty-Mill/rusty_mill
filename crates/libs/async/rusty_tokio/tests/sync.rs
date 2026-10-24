@@ -1982,3 +1982,42 @@ fn mpsc_blocking_recv_on_os_thread_drains_then_ends() {
     assert_eq!(bounded, (0..50).collect::<Vec<_>>());
     assert_eq!(unbounded, (0..50).collect::<Vec<_>>());
 }
+
+#[test]
+fn mpsc_try_recv_reports_empty_then_disconnected_and_frees_capacity() {
+    use mpsc::error::{TryRecvError, TrySendError};
+    let (tx, mut rx) = mpsc::channel(1);
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    tx.try_send(1).unwrap();
+    assert!(matches!(tx.try_send(2), Err(TrySendError::Full(2))));
+    assert_eq!(rx.try_recv(), Ok(1));
+    // Taking a value frees its slot.
+    tx.try_send(3).unwrap();
+    drop(tx);
+    assert_eq!(rx.try_recv(), Ok(3));
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
+
+    let (utx, mut urx) = mpsc::unbounded_channel();
+    assert_eq!(urx.try_recv(), Err(TryRecvError::Empty));
+    utx.send(7).unwrap();
+    drop(utx);
+    assert_eq!(urx.try_recv(), Ok(7));
+    assert_eq!(urx.try_recv(), Err(TryRecvError::Disconnected));
+}
+
+#[test]
+fn mpsc_poll_recv_drives_a_hand_written_future() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::channel(2);
+        let (utx, mut urx) = mpsc::unbounded_channel();
+        rusty_tokio::spawn(async move {
+            tx.send(1).await.unwrap();
+            utx.send(2).unwrap();
+        });
+        let a = std::future::poll_fn(|cx| rx.poll_recv(cx)).await;
+        let b = std::future::poll_fn(|cx| urx.poll_recv(cx)).await;
+        assert_eq!((a, b), (Some(1), Some(2)));
+        assert_eq!(std::future::poll_fn(|cx| rx.poll_recv(cx)).await, None);
+    });
+}

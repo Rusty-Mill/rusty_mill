@@ -113,3 +113,22 @@ fn async_fd_writable_panics_if_write_interest_was_not_declared() {
         let _ = async_fd.writable().await;
     });
 }
+
+#[test]
+fn register_wraps_a_pipe_like_new() {
+    let (reader, writer) = std::io::pipe().unwrap();
+    set_nonblocking(reader.as_raw_fd());
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        // SAFETY: `reader` owns its fd and keeps it open while wrapped.
+        let async_fd = unsafe { AsyncFd::register(reader) }.unwrap();
+        raw_write(writer.as_raw_fd(), b"hi").unwrap();
+        let mut guard = async_fd.readable().await.unwrap();
+        let mut buf = [0u8; 2];
+        let n = guard
+            .try_io(|r| raw_read(r.get_ref().as_raw_fd(), &mut buf))
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf[..n], b"hi");
+    });
+}

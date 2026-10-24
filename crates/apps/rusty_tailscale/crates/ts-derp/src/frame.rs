@@ -4,7 +4,7 @@
 //! panic-free on arbitrary input and bounds every length against a caller
 //! supplied maximum.
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use rusty_tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// 8-byte DERP magic: `"DERP"` + the key emoji (U+1F511).
 pub const MAGIC: &[u8; 8] = b"DERP\xf0\x9f\x94\x91";
@@ -88,7 +88,7 @@ pub enum FrameError {
 
 /// Reads one frame header + payload, rejecting any frame longer than `max`.
 /// The returned payload is exactly `length` bytes.
-pub async fn read_frame<R: AsyncRead + Unpin>(
+pub async fn read_frame<R: AsyncRead + Unpin + Send>(
     r: &mut R,
     max: u32,
 ) -> Result<(FrameType, Vec<u8>), FrameError> {
@@ -103,7 +103,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
 }
 
 /// Writes one frame (header + payload) and flushes.
-pub async fn write_frame<W: AsyncWrite + Unpin>(
+pub async fn write_frame<W: AsyncWrite + Unpin + Send>(
     w: &mut W,
     frame_type: FrameType,
     payload: &[u8],
@@ -133,7 +133,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn write_then_read() {
         let mut buf = Vec::new();
         write_frame(&mut buf, FrameType::SendPacket, b"hello derp")
@@ -145,7 +145,7 @@ mod tests {
         assert_eq!(payload, b"hello derp");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn oversize_frame_rejected_without_allocating() {
         // Header claims 4 GiB; must error on the length check, not OOM.
         let mut bytes = vec![FrameType::RecvPacket.to_byte()];
@@ -155,7 +155,7 @@ mod tests {
         assert!(matches!(err, FrameError::TooLong { .. }));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn truncated_frame_is_error_not_panic() {
         // Length says 10 but only 3 bytes follow.
         let mut bytes = vec![FrameType::RecvPacket.to_byte()];
@@ -165,7 +165,7 @@ mod tests {
         assert!(read_frame(&mut cursor, MAX_FRAME_SIZE).await.is_err());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn empty_stream_is_eof_error() {
         let mut cursor = std::io::Cursor::new(Vec::new());
         assert!(read_frame(&mut cursor, MAX_FRAME_SIZE).await.is_err());

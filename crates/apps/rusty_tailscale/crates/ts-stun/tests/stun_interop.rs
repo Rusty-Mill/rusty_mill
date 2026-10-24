@@ -7,7 +7,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
+use rusty_tokio::net::UdpSocket;
 use ts_stun::{TxId, binding_request, parse_response};
 
 /// Encodes a STUN binding success response with the source in
@@ -38,13 +38,13 @@ fn success_response(tx: TxId, src: SocketAddr) -> Vec<u8> {
     b
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn binding_request_round_trip_over_udp() {
     let server = UdpSocket::bind("127.0.0.1:0").await.expect("bind server");
     let server_addr = server.local_addr().unwrap();
 
     // Responder: echo the client's public address per STUN.
-    tokio::spawn(async move {
+    rusty_tokio::spawn(async move {
         let mut buf = [0u8; 512];
         let (n, from) = server.recv_from(&mut buf).await.unwrap();
         // Transaction ID lives at bytes 8..20 of the request.
@@ -63,7 +63,7 @@ async fn binding_request_round_trip_over_udp() {
         .unwrap();
 
     let mut buf = [0u8; 512];
-    let n = tokio::time::timeout(Duration::from_secs(3), client.recv(&mut buf))
+    let n = rusty_tokio::time::timeout(Duration::from_secs(3), client.recv(&mut buf))
         .await
         .expect("response in time")
         .expect("recv");

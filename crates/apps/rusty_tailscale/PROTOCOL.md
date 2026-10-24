@@ -261,7 +261,7 @@ opaque** — DERP never sees inside the WireGuard payload.
   netmask** makes the kernel auto-install the connected route
   `100.64.0.0/10 dev ts0`, so no route command is needed. MTU 1280
   (Tailscale's default) avoids fragmentation over WireGuard+DERP. Async I/O
-  via tokio `AsyncFd` on the non-blocking fd; one packet per `read`.
+  via `rusty_tokio`'s `AsyncFd` on the non-blocking fd; one packet per `read`.
 - **Checksum offload**: packets the local kernel routes into a TUN can carry
   an incomplete transport checksum (`CHECKSUM_PARTIAL` — only the
   pseudo-header sum), expecting hardware to finish it. The engine recomputes
@@ -413,7 +413,7 @@ a userspace TCP/IP stack instead of the OS kernel.
   after WireGuard + DERP framing.
 - **Accept model.** A pool of smoltcp listen sockets (backlog) per bound port;
   when one leaves `LISTEN` (a SYN arrived) it is promoted to a connection and
-  replaced, so the port keeps accepting. Each connection is a tokio
+  replaced, so the port keeps accepting. Each connection is a `rusty_tokio`
   `AsyncRead + AsyncWrite` stream over bounded channels (TCP backpressure when
   the app reads slowly).
 

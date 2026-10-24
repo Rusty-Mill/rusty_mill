@@ -13,11 +13,10 @@ layer = "apps"
 [dependencies]
 ts-types.workspace = true
 ts-key.workspace = true
-tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "macros", "time"] }
+rusty_tokio.workspace = true
 crypto_box.workspace = true
-rusty_http = { workspace = true, features = ["tokio"] }
+rusty_http = { workspace = true, features = ["rusty-tokio"] }
 thiserror.workspace = true
 rusty_log = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

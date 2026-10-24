@@ -69,7 +69,7 @@ mod util;
 
 pub use addr::ToSocketAddrs;
 #[cfg(unix)]
-pub use async_fd::{AsyncFd, AsyncFdReadyGuard, TryIoError};
+pub use async_fd::{AsyncFd, AsyncFdReadyGuard, AsyncFdRegisterError, TryIoError};
 pub use async_io::{
     copy, copy_bidirectional, copy_bidirectional_with_sizes, copy_buf, AsyncBufRead,
     AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt,
@@ -118,5 +118,5 @@ pub use util::{empty, repeat, sink, Empty, Repeat, Sink};
 /// `tokio::io::unix::AsyncFd` migrates with only the crate renamed (#897).
 #[cfg(unix)]
 pub mod unix {
-    pub use super::{AsyncFd, AsyncFdReadyGuard, TryIoError};
+    pub use super::{AsyncFd, AsyncFdReadyGuard, AsyncFdRegisterError, TryIoError};
 }

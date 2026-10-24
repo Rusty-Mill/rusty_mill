@@ -12,11 +12,11 @@
 
 use std::path::PathBuf;
 
+use rusty_http::async_tokio::AsyncTransport;
 use rusty_http::head::RequestHead;
-use rusty_http::tokio_native::AsyncTransport;
 use rusty_http::{HeaderMap, Method, StatusCode, Version};
 #[cfg(unix)]
-use tokio::net::UnixStream;
+use rusty_tokio::net::UnixStream;
 
 /// Default tailscaled socket path on Linux.
 pub const DEFAULT_SOCKET: &str = "/var/run/tailscale/tailscaled.sock";

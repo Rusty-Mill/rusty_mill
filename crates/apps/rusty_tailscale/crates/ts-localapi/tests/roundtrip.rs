@@ -5,13 +5,15 @@
 //! the engine so the test is hermetic.
 
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Mutex;
+use std::task::{Context, Poll, ready};
 
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Method, Request, header};
-use hyper_util::rt::TokioIo;
-use tokio::net::UnixStream;
+use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use rusty_tokio::net::UnixStream;
 use ts_localapi::LocalBackend;
 use ts_types::{MaskedPrefs, PingResult, Prefs, Status};
 
@@ -54,13 +56,51 @@ impl LocalBackend for MockBackend {
     }
 }
 
+/// A `rusty_tokio` stream under hyper's own I/O traits, so the independent
+/// client runs on `rusty_tokio`. Reads go through a stack buffer to stay in
+/// safe code.
+struct HyperIo<T>(T);
+
+impl<T: AsyncRead + Unpin> hyper::rt::Read for HyperIo<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        mut buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let mut tmp = [0u8; 8192];
+        let len = buf.remaining().min(tmp.len());
+        let mut ours = ReadBuf::new(&mut tmp[..len]);
+        ready!(Pin::new(&mut self.0).poll_read(cx, &mut ours))?;
+        buf.put_slice(ours.filled());
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<T: AsyncWrite + Unpin> hyper::rt::Write for HyperIo<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
 /// One request/response over a fresh UDS connection (mirrors ts-cli's client).
 async fn request(socket: &PathBuf, method: Method, uri: &str, body: Bytes) -> (u16, Bytes) {
     let stream = UnixStream::connect(socket).await.unwrap();
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(HyperIo(stream))
         .await
         .unwrap();
-    let driver = tokio::spawn(conn);
+    let driver = rusty_tokio::spawn(conn);
     let req = Request::builder()
         .method(method)
         .uri(uri)
@@ -74,7 +114,7 @@ async fn request(socket: &PathBuf, method: Method, uri: &str, body: Bytes) -> (u
     (status, bytes)
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn status_prefs_ping_over_uds() {
     let dir = std::env::temp_dir().join(format!("ts-localapi-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -84,7 +124,7 @@ async fn status_prefs_ping_over_uds() {
         want_running: Mutex::new(true),
     };
     let serve_socket = socket.clone();
-    tokio::spawn(async move {
+    rusty_tokio::spawn(async move {
         ts_localapi::serve(&serve_socket, backend).await.unwrap();
     });
 
@@ -93,7 +133,7 @@ async fn status_prefs_ping_over_uds() {
         if socket.exists() {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        rusty_tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
     // GET status → Running.

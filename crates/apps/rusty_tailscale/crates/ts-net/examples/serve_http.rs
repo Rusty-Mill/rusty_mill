@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(target_os = "linux")]
 use ts_net::{Node, NodeConfig, TcpStream};
 
@@ -89,7 +89,7 @@ fn parse_args() -> Result<Args, String> {
 fn main() {}
 
 #[cfg(target_os = "linux")]
-#[tokio::main(flavor = "current_thread")]
+#[rusty_tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     tracing_subscriber_init();
     let args = match parse_args() {
@@ -139,7 +139,7 @@ async fn main() -> ExitCode {
     );
 
     while let Some(stream) = listener.accept().await {
-        tokio::spawn(handle(stream));
+        rusty_tokio::spawn(handle(stream));
     }
     ExitCode::SUCCESS
 }
