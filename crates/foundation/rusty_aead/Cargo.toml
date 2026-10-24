@@ -9,6 +9,23 @@ license = "MIT OR Apache-2.0"
 [package.metadata.rusty_mill]
 layer = "foundation"
 
+[features]
+default = []
+# Explicit API opt-in; Cargo unifies this feature across the dependency graph.
+aes-gcm = []
+
+[[test]]
+name = "aes_gcm_spike"
+required-features = ["aes-gcm"]
+
+[[test]]
+name = "aes_gcm_vectors"
+required-features = ["aes-gcm"]
+
+[[example]]
+name = "taint_aes"
+required-features = ["aes-gcm"]
+
 [dependencies]
 rusty_crypto_key = { workspace = true }
 

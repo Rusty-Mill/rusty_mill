@@ -5,6 +5,8 @@
 //! - [`human`]: the human channel as CLI actions.
 //! - [`moderator`]: the loop that launches one agent harness per granted
 //!   turn and the runner per selected run, until the task closes.
+//! - [`groups`]: the harness groups a task's moderators started, recorded so
+//!   `bbp quiesce` can establish their cleanup without them.
 //! - [`waker`]: what the moderator waits on between passes: log appends and
 //!   child exits, with the poll as the longest wait.
 //! - [`runner`]: the test supervisor. Applies a candidate in a fresh checkout,
@@ -26,6 +28,7 @@ pub mod args;
 pub mod broker;
 pub mod confine;
 pub mod grade;
+pub mod groups;
 pub mod human;
 pub mod launchers;
 pub mod mcp;

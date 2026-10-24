@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use orch_core::board::{Confidence, EntryKind};
 use orch_core::task::Status;
+use orch_core::Text;
 use orch_dispatch::fake::{FakeAgent, Reply};
 use orch_dispatch::{Ceiling, DispatchError};
 use orch_store::{fingerprint, Store};
@@ -444,6 +445,28 @@ fn hosted_for(
     card: Option<&Card>,
     host: &orch_dispatch::fake::FakeHost,
 ) -> Result<Summary, RunError> {
+    hosted_with(store, card, host, None)
+}
+
+fn cancelled(
+    store: &mut Store,
+    card: &Card,
+    host: &orch_dispatch::fake::FakeHost,
+) -> Result<Summary, RunError> {
+    hosted_with(
+        store,
+        Some(card),
+        host,
+        Text::new("owner withdrew the card"),
+    )
+}
+
+fn hosted_with(
+    store: &mut Store,
+    card: Option<&Card>,
+    host: &orch_dispatch::fake::FakeHost,
+    cancel: Option<Text>,
+) -> Result<Summary, RunError> {
     execute_hosted(
         spec(5, IMPLEMENT),
         FakeAgent::new([]),
@@ -460,6 +483,7 @@ fn hosted_for(
                 namespace: "namespace".into(),
                 board: Box::new(card.clone()),
             }),
+            cancel,
         }),
     )
 }
@@ -550,5 +574,116 @@ fn a_card_linked_state_resumed_without_its_card_is_refused_before_any_generation
         .expect("factory");
     let saved = factory.assignment("goal-orchestrator").expect("assignment");
     assert_eq!(saved.generation, 1, "no unpublished generation was saved");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_cancel_fences_earlier_holders_cancels_each_hosted_task_and_retires_the_goal() {
+    let dir = scratch("cancel");
+    let card = Card::default();
+    let host = orch_dispatch::fake::FakeHost::default();
+    let mut store = Store::open(&dir).expect("open");
+    hosted(&mut store, &card, &host).expect("hosted run");
+    drop(store);
+
+    let mut store = Store::open(&dir).expect("reopen");
+    let s = cancelled(&mut store, &card, &host).expect("cancel");
+    assert_eq!(s.ended, Ended::Cancelled);
+    let script = host.0.borrow();
+    assert_eq!(script.cancels.len(), 1, "the one hosted task was cancelled");
+    assert_eq!(
+        script.fences.last().map(|f| f.generation),
+        Some(2),
+        "the cancel ran under a generation newer than the run it stops"
+    );
+    drop(script);
+    assert_eq!(card.0.borrow().1, ["link 1", "recover 1->2"]);
+    let factory = store
+        .load_factory(orch_core::GoalId::from_raw(1))
+        .expect("factory");
+    let assignment = factory.assignment("goal-orchestrator").expect("assignment");
+    assert!(!assignment.active, "the goal's assignment is retired");
+    assert_eq!(
+        factory.link("card").map(|l| l.state),
+        Some(orch_core::factory::ExecutionState::Cancelled)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_cancelled_goal_is_never_resumed_and_a_second_cancel_does_nothing() {
+    let dir = scratch("cancel_twice");
+    let card = Card::default();
+    let host = orch_dispatch::fake::FakeHost::default();
+    let mut store = Store::open(&dir).expect("open");
+    hosted(&mut store, &card, &host).expect("hosted run");
+    cancelled(&mut store, &card, &host).expect("cancel");
+    let commands = host.0.borrow().fences.len();
+
+    let s = cancelled(&mut store, &card, &host).expect("cancel again");
+    assert_eq!(s.ended, Ended::Cancelled);
+    let error = hosted(&mut store, &card, &host).expect_err("resume refused");
+    assert!(
+        matches!(&error, RunError::Lease(why) if why.contains("Retired")),
+        "{error}"
+    );
+    assert_eq!(host.0.borrow().fences.len(), commands, "nothing was hosted");
+    assert_eq!(host.0.borrow().cancels.len(), 1);
+    assert_eq!(card.0.borrow().1, ["link 1", "recover 1->2"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_cancel_the_host_could_not_finish_leaves_the_goal_to_cancel_again() {
+    let dir = scratch("cancel_retry");
+    let card = Card::default();
+    let host = orch_dispatch::fake::FakeHost::default();
+    let mut store = Store::open(&dir).expect("open");
+    hosted(&mut store, &card, &host).expect("hosted run");
+    host.0
+        .borrow_mut()
+        .fail_cancel
+        .push_back(orch_dispatch::ClassifiedError::Transient(
+            orch_dispatch::AgentError("moderator still running after cancel".into()),
+        ));
+    let error = cancelled(&mut store, &card, &host).expect_err("not reaped yet");
+    assert!(
+        matches!(&error, RunError::Lease(why) if why.contains("still running")),
+        "{error}"
+    );
+    let factory = store
+        .load_factory(orch_core::GoalId::from_raw(1))
+        .expect("factory");
+    assert!(
+        factory
+            .assignment("goal-orchestrator")
+            .is_some_and(|a| a.active),
+        "nothing is retired before the host confirms its processes are gone"
+    );
+
+    let s = cancelled(&mut store, &card, &host).expect("cancel retried");
+    assert_eq!(s.ended, Ended::Cancelled);
+    assert_eq!(
+        card.0.borrow().1,
+        ["link 1", "recover 1->2", "recover 2->3"]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_cancel_reaches_a_card_whose_handle_never_reached_the_board() {
+    let dir = scratch("cancel_unrecorded");
+    let card = Card::default();
+    let host = orch_dispatch::fake::FakeHost::default();
+    let mut store = Store::open(&dir).expect("open");
+    // No hosted run checkpointed a handle, yet an open may have started work.
+    let s = cancelled(&mut store, &card, &host).expect("cancel");
+    assert_eq!(s.ended, Ended::Cancelled);
+    assert_eq!(
+        host.0.borrow().cancels.len(),
+        1,
+        "the Implement card was cancelled"
+    );
+    assert_eq!(host.0.borrow().opens, 0, "nothing was opened to do it");
     let _ = std::fs::remove_dir_all(&dir);
 }

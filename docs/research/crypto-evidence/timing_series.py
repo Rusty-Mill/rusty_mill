@@ -38,6 +38,8 @@ def resolve(package: str, cargo: str = "cargo") -> str:
     """Build `package`'s `timing` test target and return the executable Cargo reports."""
     cmd = [cargo, "test", "--release", "-p", package, "--test", "timing",
            "--no-run", "--message-format=json"]
+    if package == "rusty_aead":
+        cmd.extend(["--features", "aes-gcm"])
     done = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if done.returncode != 0:
         raise Failure(f"{package}: building the timing test failed (exit {done.returncode})")

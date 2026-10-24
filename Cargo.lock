@@ -7,7 +7,7 @@ name = "a2a-agent-server"
 version = "0.1.0"
 dependencies = [
  "adk-a2a",
- "axum 0.8.9",
+ "axum",
  "rusty-adk",
  "serde_json",
  "tokio",
@@ -159,7 +159,7 @@ dependencies = [
  "adk-tools",
  "async-stream",
  "async-trait",
- "axum 0.8.9",
+ "axum",
  "futures",
  "rusty_a2a",
  "rusty_base64",
@@ -254,7 +254,7 @@ dependencies = [
  "adk-sessions",
  "adk-tools",
  "async-trait",
- "axum 0.8.9",
+ "axum",
  "rusty-mcp-client",
  "rusty_log",
  "rusty_mcp_axum",
@@ -381,7 +381,7 @@ dependencies = [
  "agentgateway-proxy",
  "agentgateway-tls",
  "anyhow",
- "axum 0.8.9",
+ "axum",
  "bytes",
  "clap",
  "fs4 0.13.1",
@@ -390,8 +390,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonwebtoken 11.0.0",
- "prost",
- "prost-types",
  "rand 0.8.8",
  "rcgen",
  "reqwest 0.13.4",
@@ -402,6 +400,7 @@ dependencies = [
  "rusty_log",
  "rusty_mcp_axum",
  "rusty_mcp_server",
+ "rusty_prost",
  "serde_json",
  "tempfile",
  "tokio",
@@ -514,25 +513,24 @@ version = "0.1.0"
 dependencies = [
  "agentgateway-config",
  "agentgateway-core",
- "axum 0.8.9",
+ "axum",
  "cel",
  "http",
  "http-body-util",
- "prost",
- "prost-types",
  "regex",
  "rusty-mcp",
  "rusty_json",
  "rusty_log",
  "rusty_mcp_client_native",
  "rusty_mcp_server",
+ "rusty_prost",
  "rusty_serve",
+ "rusty_tonic",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tonic",
- "tonic-prost",
 ]
 
 [[package]]
@@ -1541,8 +1539,6 @@ dependencies = [
 [[package]]
 name = "aws-sigv4"
 version = "1.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2312577f088c9fbf4206dfdb884cf1de9407b43e1a923cbed5237775116fc24b"
 dependencies = [
  "aws-credential-types",
  "aws-smithy-eventstream",
@@ -1550,12 +1546,12 @@ dependencies = [
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "bytes",
- "crypto-bigint 0.5.5",
+ "crypto-bigint",
  "form_urlencoded",
  "hex",
  "hmac 0.13.0",
  "http",
- "p256 0.13.2",
+ "p256",
  "percent-encoding",
  "sha2 0.11.0",
  "subtle",
@@ -1802,45 +1798,11 @@ dependencies = [
 
 [[package]]
 name = "axum"
-version = "0.7.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
-dependencies = [
- "async-trait",
- "axum-core 0.4.5",
- "bytes",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "itoa",
- "matchit 0.7.3",
- "memchr",
- "mime",
- "percent-encoding",
- "pin-project-lite",
- "rustversion",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "serde_urlencoded",
- "sync_wrapper",
- "tokio",
- "tower",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
-name = "axum"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
- "axum-core 0.5.6",
+ "axum-core",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -1850,7 +1812,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "itoa",
- "matchit 0.8.4",
+ "matchit",
  "memchr",
  "mime",
  "percent-encoding",
@@ -1862,27 +1824,6 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tower",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
-name = "axum-core"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09f2bd6146b97ae3359fa0cc6d6b376d9539582c7b4220f041a33ec24c226199"
-dependencies = [
- "async-trait",
- "bytes",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "mime",
- "pin-project-lite",
- "rustversion",
- "sync_wrapper",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -1930,12 +1871,6 @@ dependencies = [
  "rustc-demangle",
  "windows-link 0.2.1",
 ]
-
-[[package]]
-name = "base16ct"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
 
 [[package]]
 name = "base16ct"
@@ -3361,21 +3296,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-bigint"
-version = "0.5.5"
+version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0dc92fb57ca44df6db8059111ab3af99a63d5d0f8375d9972e319a379c6bab76"
-dependencies = [
- "generic-array",
- "rand_core 0.6.4",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "crypto-bigint"
-version = "0.7.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+checksum = "6bb08299a6046833a879ace115697f12fd2bd6c8d3e93c909ffc9e0738e7cae0"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -3552,9 +3475,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.4"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
  "subtle",
@@ -4343,28 +4266,14 @@ dependencies = [
 
 [[package]]
 name = "ecdsa"
-version = "0.16.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee27f32b5c5292967d2d4a9d7f1e0b0aed2c15daded5a60300e4abb9d8020bca"
-dependencies = [
- "der 0.7.10",
- "digest 0.10.7",
- "elliptic-curve 0.13.8",
- "rfc6979 0.4.0",
- "signature 2.2.0",
- "spki 0.7.3",
-]
-
-[[package]]
-name = "ecdsa"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0681a4fc24c767085329728d8dfba959af91228aa4610cca4f8ce317ba46ae0"
 dependencies = [
  "der 0.8.1",
  "digest 0.11.3",
- "elliptic-curve 0.14.1",
- "rfc6979 0.6.0",
+ "elliptic-curve",
+ "rfc6979",
  "signature 3.0.0",
  "spki 0.8.0",
  "zeroize",
@@ -4439,42 +4348,21 @@ dependencies = [
 
 [[package]]
 name = "elliptic-curve"
-version = "0.13.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5e6043086bf7973472e0c7dff2142ea0b680d30e18d9cc40f267efbf222bd47"
-dependencies = [
- "base16ct 0.2.0",
- "crypto-bigint 0.5.5",
- "digest 0.10.7",
- "ff 0.13.1",
- "generic-array",
- "group 0.13.0",
- "hkdf 0.12.4",
- "pem-rfc7468 0.7.0",
- "pkcs8 0.10.2",
- "rand_core 0.6.4",
- "sec1 0.7.3",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "elliptic-curve"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d65aa39b3a5c1c9c1b745c9a019234bb7a21b77abcb4f4d266d706e2d577d65"
 dependencies = [
- "base16ct 1.0.0",
- "crypto-bigint 0.7.5",
+ "base16ct",
+ "crypto-bigint",
  "crypto-common 0.2.2",
  "digest 0.11.3",
- "ff 0.14.0",
- "group 0.14.0",
+ "ff",
+ "group",
  "hybrid-array",
  "pem-rfc7468 1.0.0",
  "pkcs8 0.11.0",
  "rand_core 0.10.1",
- "sec1 0.8.1",
+ "sec1",
  "subtle",
  "zeroize",
 ]
@@ -4747,16 +4635,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
-]
-
-[[package]]
-name = "ff"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0b50bfb653653f9ca9095b427bed08ab8d75a137839d9ad64eb11810d5b6393"
-dependencies = [
- "rand_core 0.6.4",
- "subtle",
 ]
 
 [[package]]
@@ -5558,22 +5436,11 @@ dependencies = [
 
 [[package]]
 name = "group"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0f9ef7462f7c099f518d754361858f86d8a07af53ba9af0fe635bbccb151a63"
-dependencies = [
- "ff 0.13.1",
- "rand_core 0.6.4",
- "subtle",
-]
-
-[[package]]
-name = "group"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fd1a1c7a5206c5b7a3f5a0d7ccd3ff85d0c8f5133d62a02680255b0004af5f4"
 dependencies = [
- "ff 0.14.0",
+ "ff",
  "rand_core 0.10.1",
  "subtle",
 ]
@@ -6689,15 +6556,13 @@ dependencies = [
 [[package]]
 name = "jsonwebtoken"
 version = "11.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "881733cbc631fc9e472e24447ce32a64bedf2da498d6d8570b08edc87de71f65"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
  "getrandom 0.2.17",
  "hmac 0.12.1",
  "js-sys",
- "p256 0.13.2",
+ "p256",
  "p384",
  "pem",
  "rand 0.8.8",
@@ -6706,6 +6571,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "signature 2.2.0",
+ "signature 3.0.0",
  "simple_asn1",
  "zeroize",
 ]
@@ -7231,12 +7097,6 @@ checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
 ]
-
-[[package]]
-name = "matchit"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "matchit"
@@ -8643,53 +8503,43 @@ dependencies = [
 
 [[package]]
 name = "p256"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9863ad85fa8f4460f9c48cb909d38a0d689dba1f6f6988a5e3e0d31071bcd4b"
-dependencies = [
- "ecdsa 0.16.9",
- "elliptic-curve 0.13.8",
- "primeorder 0.13.6",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "p256"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2c9239b2dbc807adbbe147e8cf72ea7450c3a0aabe62cb8e75ff4ec22e1f72a"
 dependencies = [
- "ecdsa 0.17.0",
- "elliptic-curve 0.14.1",
+ "ecdsa",
+ "elliptic-curve",
  "primefield",
- "primeorder 0.14.0",
+ "primeorder",
  "sha2 0.11.0",
 ]
 
 [[package]]
 name = "p384"
-version = "0.13.1"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe42f1670a52a47d448f14b6a5c61dd78fce51856e68edaa38f7ae3a46b8d6b6"
+checksum = "d17b851e6b3e378ab4ecb07fa2ed23f4d15f075735f8fec9fa1e7bdce5f8301f"
 dependencies = [
- "ecdsa 0.16.9",
- "elliptic-curve 0.13.8",
- "primeorder 0.13.6",
- "sha2 0.10.9",
+ "ecdsa",
+ "elliptic-curve",
+ "fiat-crypto 0.3.0",
+ "primefield",
+ "primeorder",
+ "sha2 0.11.0",
 ]
 
 [[package]]
 name = "p521"
-version = "0.13.3"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fc9e2161f1f215afdfce23677034ae137bbd45016a880c2eb3ba8eb95f085b2"
+checksum = "4ad64cc32c2dc466317c12ee5853e61f159f9eab1fe7efade0395dc2e7b43449"
 dependencies = [
- "base16ct 0.2.0",
- "ecdsa 0.16.9",
- "elliptic-curve 0.13.8",
- "primeorder 0.13.6",
- "rand_core 0.6.4",
- "sha2 0.10.9",
+ "base16ct",
+ "ecdsa",
+ "elliptic-curve",
+ "primefield",
+ "primeorder",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -9526,21 +9376,12 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c555a6e4eb7d4e158fcb028c835c3b8642206ddc279b5c6b202ef9a8bdb592f4"
 dependencies = [
- "crypto-bigint 0.7.5",
+ "crypto-bigint",
  "crypto-common 0.2.2",
- "ff 0.14.0",
+ "ff",
  "rand_core 0.10.1",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "primeorder"
-version = "0.13.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "353e1ca18966c16d9deb1c69278edbc5f194139612772bd9537af60ac231e1e6"
-dependencies = [
- "elliptic-curve 0.13.8",
 ]
 
 [[package]]
@@ -9549,7 +9390,7 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c9f42978c78a00e3d68f69fc03e57a234debae69da4020a4fb588fcdcd07b06"
 dependencies = [
- "elliptic-curve 0.14.1",
+ "elliptic-curve",
  "once_cell",
  "primefield",
  "serdect",
@@ -10250,6 +10091,7 @@ dependencies = [
  "rb_domain",
  "rb_env",
  "rb_rlbot_client",
+ "rb_rlbot_core",
  "rb_rlbot_wire",
  "rb_scenario",
 ]
@@ -10578,7 +10420,7 @@ dependencies = [
 name = "remind_me_remote"
 version = "0.4.0"
 dependencies = [
- "axum 0.8.9",
+ "axum",
  "remind_me_core",
  "remind_me_mcp",
  "reqwest 0.13.4",
@@ -10779,21 +10621,11 @@ dependencies = [
 
 [[package]]
 name = "rfc6979"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8dd2a808d456c4a54e300a23e9f5a67e122c3024119acbfd73e3bf664491cb2"
-dependencies = [
- "hmac 0.12.1",
- "subtle",
-]
-
-[[package]]
-name = "rfc6979"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4a459cddafb3fe76b31fd8f1108007566c40301feb64dc7b54656eb7388172b"
 dependencies = [
- "crypto-bigint 0.7.5",
+ "crypto-bigint",
  "hmac 0.13.0",
 ]
 
@@ -10837,7 +10669,6 @@ dependencies = [
  "aisdk",
  "anyhow",
  "async-trait",
- "axum 0.7.9",
  "futures",
  "rk-compose",
  "rk-config",
@@ -10846,14 +10677,15 @@ dependencies = [
  "rk-kernel",
  "rk-mcp",
  "rk-observe",
+ "rusty_axum",
+ "rusty_axum_tokio",
  "rusty_crypto_key",
  "rusty_mcp_server",
  "rusty_oauth",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "tokio",
- "tower",
- "tower-http",
 ]
 
 [[package]]
@@ -11097,7 +10929,7 @@ name = "rp-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum 0.8.9",
+ "axum",
  "futures-util",
  "jsonwebtoken 9.3.1",
  "reqwest 0.13.4",
@@ -11517,7 +11349,7 @@ name = "rusty-acp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "axum 0.8.9",
+ "axum",
  "chrono",
  "criterion 0.8.2",
  "eventsource-stream",
@@ -11568,7 +11400,7 @@ dependencies = [
  "argon2",
  "chacha20poly1305",
  "clap",
- "crypto-bigint 0.7.5",
+ "crypto-bigint",
  "env_logger",
  "flate2",
  "hex",
@@ -11580,7 +11412,7 @@ dependencies = [
  "murmur3 0.5.2",
  "num-bigint",
  "num-traits",
- "p256 0.13.2",
+ "p256",
  "p384",
  "p521",
  "pbkdf2",
@@ -11746,7 +11578,7 @@ version = "0.1.0"
 name = "rusty-mcp"
 version = "0.11.0"
 dependencies = [
- "axum 0.8.9",
+ "axum",
  "http",
  "jsonwebtoken 11.0.0",
  "rand 0.8.8",
@@ -12116,21 +11948,21 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
- "axum 0.8.9",
- "bytes",
+ "axum",
  "chrono",
  "ed25519-dalek 3.0.0",
  "eventsource-stream",
  "futures-core",
  "futures-util",
  "getrandom 0.4.3",
- "p256 0.14.0",
+ "p256",
  "reqwest 0.13.4",
  "rusty_base64",
  "rusty_ip",
  "rusty_log",
  "rusty_prost",
  "rusty_retry",
+ "rusty_tonic",
  "rusty_uuid",
  "serde",
  "serde_json",
@@ -12197,6 +12029,16 @@ dependencies = [
  "rusty_tokio",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "rusty_axum_tokio"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "rusty_axum",
+ "rusty_tokio",
+ "tokio",
 ]
 
 [[package]]
@@ -12512,6 +12354,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_journal"
+version = "0.1.0"
+dependencies = [
+ "rusty_tokio",
+ "rusty_wire",
+]
+
+[[package]]
 name = "rusty_json"
 version = "0.1.0"
 dependencies = [
@@ -12600,7 +12450,7 @@ dependencies = [
 name = "rusty_mcp_axum"
 version = "0.1.0"
 dependencies = [
- "axum 0.8.9",
+ "axum",
  "futures",
  "rusty_http",
  "rusty_mcp_client_native",
@@ -12613,7 +12463,7 @@ dependencies = [
 name = "rusty_mcp_client_native"
 version = "0.1.0"
 dependencies = [
- "axum 0.8.9",
+ "axum",
  "rmcp",
  "rusty_base64",
  "rusty_json",
@@ -12954,14 +12804,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusty_stream"
-version = "0.1.0"
-dependencies = [
- "rusty_tokio",
- "rusty_wire",
-]
-
-[[package]]
 name = "rusty_sync"
 version = "0.1.0"
 dependencies = [
@@ -13104,8 +12946,10 @@ dependencies = [
 name = "rusty_tonic"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures-util",
  "http",
+ "http-body-util",
  "prost",
  "rcgen",
  "rustls",
@@ -13335,25 +13179,11 @@ dependencies = [
 
 [[package]]
 name = "sec1"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3e97a565f76233a6003f9f5c54be1d9c5bdfa3eccfb189469f11ec4901c47dc"
-dependencies = [
- "base16ct 0.2.0",
- "der 0.7.10",
- "generic-array",
- "pkcs8 0.10.2",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "sec1"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d56d437c2f19203ce5f7122e507831de96f3d2d4d3be5af44a0b0a09d8a80e4d"
 dependencies = [
- "base16ct 1.0.0",
+ "base16ct",
  "ctutils",
  "der 0.8.1",
  "hybrid-array",
@@ -13658,7 +13488,7 @@ version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66cf8fedced2fcf12406bcb34223dffb92eaf34908ede12fed414c82b7f00b3e"
 dependencies = [
- "base16ct 1.0.0",
+ "base16ct",
  "serde",
 ]
 
@@ -16021,7 +15851,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
 dependencies = [
  "async-trait",
- "axum 0.8.9",
+ "axum",
  "base64 0.22.1",
  "bytes",
  "h2",
@@ -18462,8 +18292,8 @@ version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "795ca18b3fdb5e62bf982199278341ddcf7ebf7d32e25e212ad05d496e95f6fa"
 dependencies = [
- "ff 0.14.0",
- "group 0.14.0",
+ "ff",
+ "group",
  "hybrid-array",
  "primefield",
 ]

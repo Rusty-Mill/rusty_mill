@@ -18,6 +18,8 @@ mod metadata;
 pub mod server;
 mod status;
 mod timeout;
+#[cfg(feature = "tonic-codec")]
+pub mod tonic_codec;
 
 pub use code::Code;
 pub use frame::{

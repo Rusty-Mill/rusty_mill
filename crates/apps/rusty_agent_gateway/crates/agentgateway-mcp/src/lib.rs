@@ -24,8 +24,8 @@ pub use federation::{Federation, FederationError, TokenClaims};
 pub use gate::{Authorization, GateError, TargetFilter};
 pub use guardrails::{
     AuthorizationError, CallContext, Guardrails, GuardrailsError, HeaderMutation, McpHeader,
-    McpRequest, McpRequestResult, McpResponse, McpResponseResult, Outcome, authorization_error,
-    request_result, response_result, to_proto_value,
+    McpRequest, McpRequestResult, McpResponse, McpResponseResult, Outcome, Pass,
+    authorization_error, request_result, response_result, to_proto_value,
 };
 pub use header_override::HeaderOverride;
 pub use naming::{Resolution, ToolNamer};

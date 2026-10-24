@@ -1,5 +1,5 @@
 //! The hand-written `pb` messages against vectors produced by Google's Python protobuf runtime
-//! (`tests/golden/gen_vectors.py`): every message of `spec/a2a.proto` decodes and re-encodes to
+//! (made by `rusty_prost/tools/gen_vectors.py`): every message of `spec/a2a.proto` decodes and re-encodes to
 //! the reference's bytes, whatever order, repetition or unknown fields the input has.
 #![allow(clippy::unwrap_used)]
 

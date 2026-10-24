@@ -1,6 +1,6 @@
 //! dudect-style timing tests. Statistical and machine-dependent, so ignored
 //! by default; run in the scheduled job with
-//! `cargo test -p rusty_aead --release -- --ignored --nocapture`.
+//! `cargo test -p rusty_aead --features aes-gcm --release -- --ignored --nocapture`.
 //! A pass means "no leak detected here", nothing more.
 //!
 //! Method: class-dependent setup runs in `prepare` (untimed) into a buffer both
@@ -122,10 +122,13 @@ fn null_calibration_identical_classes() {
 // must come before these in a series, because the judging script reads each leak test against the
 // most recent A/A of its crate.
 
+#[cfg(feature = "aes-gcm")]
 use rusty_aead::{Aes128Gcm, Aes256Gcm};
 
+#[cfg(feature = "aes-gcm")]
 const AES_SAMPLES: usize = 50_000;
 
+#[cfg(feature = "aes-gcm")]
 fn other_key<const N: usize>() -> [u8; N] {
     let mut k = [0u8; N];
     for (i, b) in k.iter_mut().enumerate() {
@@ -137,6 +140,7 @@ fn other_key<const N: usize>() -> [u8; N] {
 /// A/A calibration for AES-GCM: identical work in both classes.
 #[test]
 #[ignore = "calibration; scheduled job only"]
+#[cfg(feature = "aes-gcm")]
 fn aes_null_calibration_identical_classes() {
     let cipher = Aes128Gcm::new(&[7u8; 16]);
     let buf = RefCell::new([0u8; 256]);
@@ -158,6 +162,7 @@ fn aes_null_calibration_identical_classes() {
 /// closure includes key expansion, so the key schedule and the hash-key derivation are covered.
 #[test]
 #[ignore = "timing-sensitive; scheduled job only"]
+#[cfg(feature = "aes-gcm")]
 fn aes128_key_classes_not_distinguishable() {
     let fixed = black_box([0u8; 16]);
     let other = black_box(other_key::<16>());
@@ -181,6 +186,7 @@ fn aes128_key_classes_not_distinguishable() {
 
 #[test]
 #[ignore = "timing-sensitive; scheduled job only"]
+#[cfg(feature = "aes-gcm")]
 fn aes256_key_classes_not_distinguishable() {
     let fixed = black_box([0u8; 32]);
     let other = black_box(other_key::<32>());
@@ -204,6 +210,7 @@ fn aes256_key_classes_not_distinguishable() {
 
 #[test]
 #[ignore = "timing-sensitive; scheduled job only"]
+#[cfg(feature = "aes-gcm")]
 fn aes_plaintext_classes_not_distinguishable() {
     let cipher = Aes128Gcm::new(&[7u8; 16]);
     let buf = RefCell::new([0u8; 256]);
@@ -222,6 +229,7 @@ fn aes_plaintext_classes_not_distinguishable() {
 
 #[test]
 #[ignore = "timing-sensitive; scheduled job only"]
+#[cfg(feature = "aes-gcm")]
 fn aes_tag_mismatch_position_not_distinguishable() {
     let cipher = Aes128Gcm::new(&[7u8; 16]);
     let mut sealed = [0x11u8; 256];
@@ -260,6 +268,7 @@ fn aes_tag_mismatch_position_not_distinguishable() {
 /// both classes.
 #[test]
 #[ignore = "calibration; scheduled job only"]
+#[cfg(feature = "aes-gcm")]
 fn aes128_ctor_null_calibration_identical_classes() {
     let key = RefCell::new([0u8; 16]);
     let t = leak_statistic_split(
@@ -280,6 +289,7 @@ fn aes128_ctor_null_calibration_identical_classes() {
 /// A/A for `aes256_key_classes_not_distinguishable`.
 #[test]
 #[ignore = "calibration; scheduled job only"]
+#[cfg(feature = "aes-gcm")]
 fn aes256_ctor_null_calibration_identical_classes() {
     let key = RefCell::new([0u8; 32]);
     let t = leak_statistic_split(
@@ -301,6 +311,7 @@ fn aes256_ctor_null_calibration_identical_classes() {
 /// byte at the same position in both classes.
 #[test]
 #[ignore = "calibration; scheduled job only"]
+#[cfg(feature = "aes-gcm")]
 fn aes_open_null_calibration_identical_classes() {
     let cipher = Aes128Gcm::new(&[7u8; 16]);
     let mut sealed = [0x11u8; 256];

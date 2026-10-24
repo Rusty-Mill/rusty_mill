@@ -61,6 +61,11 @@ pub struct Config {
     /// directory; without it each moderator launches as its turns allow.
     #[rusty_serde(default)]
     pub slots: Option<Slots>,
+    /// `bbp mod --end-grace-secs`: how long a harness whose turn ended, by
+    /// its own call, a revocation or a cancel, may run before it is killed.
+    /// Unset keeps BBP's default of 60 s.
+    #[rusty_serde(default)]
+    pub end_grace_secs: Option<u64>,
 }
 /// `bbp mod --slots`: how many harnesses (agents) and runners (validators)
 /// may run at once across every task using `dir`.

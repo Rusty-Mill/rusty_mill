@@ -123,7 +123,8 @@ handrolled-engine = ["dep:ring"]
 # It deliberately does not imply `handrolled-engine`: built without it, the
 # crate has no direct `ring` dependency, so the compiler itself checks that the
 # engine makes no `ring` call. `ring` stays in the graph through `rustls`.
-native-crypto = ["dep:rusty_sha2", "dep:rusty_pk", "dep:rusty_aead", "dep:rusty_rand", "dep:rusty_crypto_key"]
+# Explicitly opt into AES-GCM so native TLS retains its existing cipher suites.
+native-crypto = ["rusty_aead/aes-gcm", "dep:rusty_sha2", "dep:rusty_pk", "dep:rusty_aead", "dep:rusty_rand", "dep:rusty_crypto_key"]
 
 [dev-dependencies]
 # Generates throwaway certificates (wrong hostname, expired, untrusted

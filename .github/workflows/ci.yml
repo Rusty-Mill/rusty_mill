@@ -299,6 +299,8 @@ jobs:
       tls_engine: ${{ steps.plan.outputs.tls_engine }}
       rleval_viewer: ${{ steps.plan.outputs.rleval_viewer }}
       rleval_app: ${{ steps.plan.outputs.rleval_app }}
+      rleval_service: ${{ steps.plan.outputs.rleval_service }}
+      rleval_image: ${{ steps.plan.outputs.rleval_image }}
       crypto_ct: ${{ steps.plan.outputs.crypto_ct }}
       rand_platforms: ${{ steps.plan.outputs.rand_platforms }}
       shards: ${{ steps.plan.outputs.shards }}
@@ -492,7 +494,7 @@ jobs:
           components: clippy
           cache-shared-key: clippy-${{ matrix.scope.component }}-${{ matrix.os }}
 
-      # rusty_stream is built on io_uring, a Linux-only kernel interface --
+      # rusty_journal is built on io_uring, a Linux-only kernel interface --
       # excluded on windows-latest rather than making its internals
       # cfg-gated portable shims like rusty_win32 does the other way.
       # rusty_fedora_agent gets the same treatment: it shells out to
@@ -514,7 +516,7 @@ jobs:
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ matrix.scope.packages }}
-          windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
+          windows-exclude: rusty_journal rusty_fedora_agent rusty_multimodal_db
           exclude: ${{ env.REMIND_ME_PACKAGES }}
 
       - name: Clippy
@@ -571,7 +573,7 @@ jobs:
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ matrix.scope.packages }}
-          windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
+          windows-exclude: rusty_journal rusty_fedora_agent rusty_multimodal_db
           exclude: ${{ env.REMIND_ME_PACKAGES }}
 
       # mill-term's own tests locate sibling binaries (rush/rgit/rsed/rawk)
@@ -704,7 +706,7 @@ jobs:
       # from the plan job's raw list: only the former has the per-OS
       # exclusions applied. Re-deriving the scope here from
       # `needs.plan.outputs.packages` (or a bare `--doc --workspace`) is
-      # exactly how rusty_stream -- Linux-only, and correctly excluded on
+      # exactly how rusty_journal -- Linux-only, and correctly excluded on
       # windows-latest by every other step in this job -- was still getting
       # compiled by this one step and failing the whole job on Windows.
       # Runs once per OS, not once per shard -- doctests are cheap and
@@ -1751,6 +1753,46 @@ jobs:
       - name: cargo test -p rleval-app (default features)
         run: cargo test -p rleval-app
 
+  # The rleval Python service (crates/apps/rocket_league/rleval/service): its pytest suite with
+  # the dev extra, which pulls in the queue, S3 (moto), migration and crypto backends.
+  rleval-service:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rleval-service
+      queue: max
+      cancel-in-progress: false
+    name: rleval service (pytest)
+    needs: plan
+    if: needs.plan.outputs.rleval_service == 'true' && needs.plan.outputs.linux == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/apps/rocket_league/rleval/service
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install into a venv
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet -e ".[dev]"
+      - name: pytest
+        run: '"$RUNNER_TEMP/venv/bin/python" -m pytest -q'
+
+  # The rleval service image, built from the monorepo root as compose builds it.
+  rleval-image:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rleval-image
+      queue: max
+      cancel-in-progress: false
+    name: rleval service image (docker build)
+    needs: plan
+    if: needs.plan.outputs.rleval_image == 'true' && needs.plan.outputs.linux == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: docker build
+        run: docker build -f crates/apps/rocket_league/rleval/Dockerfile -t rleval-ci .
+      - name: The image bundles the scorer and imports the API
+        run: docker run --rm rleval-ci sh -c 'test -x "$RLS_WORKER_BIN" && python -c "import app.main"'
+
   # ---------------------------------------------------------------------------
   # rusty_remind_me (crates/apps/rusty_remind_me). Ported from that product's
   # own pre-merge CI (its crates/apps/rusty_remind_me/.github/workflows/ci.yml,
@@ -2150,6 +2192,8 @@ jobs:
       - rusty-rand-platforms
       - rleval-viewer-gl-smoke
       - rleval-app-feature-sets
+      - rleval-service
+      - rleval-image
       - remind-me
       - remind-me-features
       - remind-me-combined-features

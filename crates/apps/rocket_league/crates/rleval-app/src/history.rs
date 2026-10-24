@@ -3,8 +3,8 @@
 //! A [`SessionRecord`] is the slice of one [`Analysis`] worth keeping: for every
 //! player, the Pacifist headline, fault counts and per-dimension scores, plus
 //! whether their team won. [`habits`] then reads a player's records across
-//! matches and answers Spire's core question — *what shows up in my losses that
-//! doesn't in my wins?* — with one prioritized [`Focus`].
+//! matches and answers one question — *what shows up in my losses that doesn't
+//! in my wins?* — with one prioritized [`Focus`].
 //!
 //! Player identity is the replay's platform id (`steam:…`, `xbox:…`) when it has
 //! one — it survives renames — and the exact display name otherwise (bots, and

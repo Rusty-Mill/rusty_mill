@@ -50,6 +50,7 @@ fn seal_throughput() {
 
 #[test]
 #[ignore = "timing; run manually"]
+#[cfg(feature = "aes-gcm")]
 fn aes_gcm_seal_throughput() {
     for (name, alg, key_len) in [
         ("AES-128-GCM", &aead::AES_128_GCM, 16usize),

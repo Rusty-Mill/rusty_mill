@@ -7,10 +7,10 @@
 //! - **Streaming.** A parser thread feeds a `bench/workloads` file into a
 //!   shared `Mutex<Grid>` in 4 KiB chunks, locking per chunk as the PTY
 //!   reader does, looping the file for at least `--secs`. A render thread
-//!   paints at `--hz`, holding the grid lock for the whole frame as the window
-//!   does today. Reported: frame ms, lock hold ms (the parser is blocked for
-//!   it), the render thread's wait for the lock, and parser MB/s with
-//!   rendering against parsing alone.
+//!   paints at `--hz` as the window does: lock, snapshot the frame
+//!   ([`Grid::frame_view`]), unlock, paint. Reported: frame ms, lock hold ms
+//!   (the parser is blocked for it), the render thread's wait for the lock,
+//!   and parser MB/s with rendering against parsing alone.
 //! - **Static folds.** Frame ms for the same text with 0 and with 1,024
 //!   command fold blocks (OSC 133 `C`..`D` around each command's output), at
 //!   the live view and scrolled back half a screen into history. Every cell
@@ -36,7 +36,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rusty_term::core::{AnsiParser, Grid};
+use rusty_term::core::{AnsiParser, FrameView, Grid};
 use rusty_term::gui::bench::FrameBench;
 use rusty_term::sync::Mutex;
 
@@ -54,14 +54,14 @@ struct Options {
     workloads: Vec<String>,
 }
 
-/// Something that paints one frame of a grid: the real CPU frame path, or a
+/// Something that paints one frame snapshot: the real CPU frame path, or a
 /// stand-in in tests.
 trait Painter {
-    fn paint(&mut self, grid: &Grid);
+    fn paint(&mut self, frame: &FrameView);
 }
 
 impl Painter for FrameBench {
-    fn paint(&mut self, grid: &Grid) {
+    fn paint(&mut self, grid: &FrameView) {
         self.draw(grid);
     }
 }
@@ -262,8 +262,8 @@ fn streaming<P: Painter>(
 
 type FrameTimes = (Vec<Duration>, Vec<Duration>, Vec<Duration>);
 
-/// Paint every `period` until `done`, as the window does today: take the
-/// grid lock, paint the whole frame, release. Always paints at least once.
+/// Paint every `period` until `done`, as the window does: take the grid
+/// lock, snapshot the frame, release, paint. Always paints at least once.
 /// Returns per-frame (frame, lock hold, lock wait) times.
 fn render_loop(
     painter: &mut impl Painter,
@@ -277,10 +277,11 @@ fn render_loop(
         let t0 = Instant::now();
         let g = grid.lock();
         let t1 = Instant::now();
-        painter.paint(&g);
+        let frame = g.frame_view();
         drop(g);
         let t2 = Instant::now();
-        times.0.push(t2 - t0);
+        painter.paint(&frame);
+        times.0.push(t0.elapsed());
         times.1.push(t2 - t1);
         times.2.push(t1 - t0);
         if done.load(Ordering::Relaxed) {
@@ -336,14 +337,14 @@ fn fold_grid(folds: bool, scrolled: bool) -> Result<Grid, String> {
     Ok(g)
 }
 
-/// [`STATIC_FRAMES`] timed frames of `grid`, after one untimed frame that
-/// warms the glyph cache.
+/// [`STATIC_FRAMES`] timed frames of `grid` (snapshot and paint), after one
+/// untimed frame that warms the glyph cache.
 fn static_frames(painter: &mut impl Painter, grid: &Grid) -> Vec<Duration> {
-    painter.paint(grid);
+    painter.paint(&grid.frame_view());
     (0..STATIC_FRAMES)
         .map(|_| {
             let t = Instant::now();
-            painter.paint(grid);
+            painter.paint(&grid.frame_view());
             t.elapsed()
         })
         .collect()
@@ -425,16 +426,42 @@ mod tests {
 
     struct Counting(usize);
     impl Painter for Counting {
-        fn paint(&mut self, _: &Grid) {
+        fn paint(&mut self, _: &FrameView) {
             self.0 += 1;
         }
     }
 
     struct Panicking;
     impl Painter for Panicking {
-        fn paint(&mut self, _: &Grid) {
+        fn paint(&mut self, _: &FrameView) {
             panic!("paint failed");
         }
+    }
+
+    /// Records whether another thread could take the grid lock while it
+    /// painted. Uses only `lock`, so it holds for any mutex type.
+    struct LockProbe(Arc<Mutex<Grid>>, Vec<bool>);
+    impl Painter for LockProbe {
+        fn paint(&mut self, _: &FrameView) {
+            let (tx, rx) = mpsc::channel();
+            let grid = Arc::clone(&self.0);
+            // Left blocked if the lock is held; released once paint returns.
+            thread::spawn(move || {
+                let _g = grid.lock();
+                let _ = tx.send(());
+            });
+            self.1.push(rx.recv_timeout(Duration::from_secs(5)).is_ok());
+        }
+    }
+
+    #[test]
+    fn render_loop_paints_without_the_grid_lock() {
+        let grid = Arc::new(Mutex::new(Grid::new(4, 2)));
+        let mut probe = LockProbe(Arc::clone(&grid), Vec::new());
+        let done = AtomicBool::new(true);
+        let times = render_loop(&mut probe, &grid, &done, Duration::ZERO);
+        assert_eq!(probe.1, [true], "one frame, painted unlocked");
+        assert_eq!(times.1.len(), 1);
     }
 
     fn short() -> Options {

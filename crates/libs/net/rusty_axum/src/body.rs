@@ -10,7 +10,8 @@ use futures_core::Stream;
 /// The error type a body stream may end with.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-pub(crate) type ChunkStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, BoxError>> + Send>>;
+/// A streamed body's chunks, as [`Body::map_stream`] hands them over.
+pub type BodyStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, BoxError>> + Send>>;
 
 /// A response body. A whole body is sent with `Content-Length`; a stream is
 /// sent chunked, each item as it is produced (SSE, streamed replies).
@@ -18,7 +19,7 @@ pub struct Body(pub(crate) Inner);
 
 pub(crate) enum Inner {
     Full(Vec<u8>),
-    Stream(ChunkStream),
+    Stream(BodyStream),
 }
 
 impl Body {
@@ -35,6 +36,16 @@ impl Body {
         E: Into<BoxError>,
     {
         Body(Inner::Stream(Box::pin(ErrInto(Box::pin(stream)))))
+    }
+
+    /// Replaces a streamed body's stream with `f(stream)`; a whole body is
+    /// returned unchanged. For middleware that must run code around every
+    /// poll of the stream, such as a runtime bridge.
+    pub fn map_stream(self, f: impl FnOnce(BodyStream) -> BodyStream) -> Self {
+        match self.0 {
+            Inner::Stream(stream) => Body(Inner::Stream(f(stream))),
+            full => Body(full),
+        }
     }
 
     /// The whole body when it is not a stream.

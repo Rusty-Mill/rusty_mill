@@ -99,6 +99,7 @@ fn harness(dir: &Path, name: &str, lines: &[&str]) -> Launcher {
         program: path.to_string_lossy().into_owned(),
         args: vec!["{role}".into(), "{turn}".into()],
         builtin_tools: false,
+        session: false,
         sandbox: None,
     }
 }
@@ -670,6 +671,7 @@ fn the_harness_process_tree_dies_with_the_moderator() {
                 "{dir}/heartbeat".into(),
             ],
             builtin_tools: false,
+            session: false,
             sandbox: None,
         },
     );
@@ -757,6 +759,7 @@ fn launchers_are_keyed_by_any_role_id() {
             program: "true".into(),
             args: vec![],
             builtin_tools: true,
+            session: false,
             sandbox: None,
         },
     );
@@ -832,6 +835,7 @@ fn script(dir: &Path, name: &str, body: &str) -> Launcher {
         .map(String::from)
         .into(),
         builtin_tools: false,
+        session: false,
         sandbox: None,
     }
 }
@@ -2300,6 +2304,7 @@ fn quiet_planner_task(tag: &str, poll: Duration) -> (PathBuf, TaskId, Config) {
             r#"echo $$ > "$BBP_DIR/live-$BBP_TURN.pid"; exec sleep 30"#.into(),
         ],
         builtin_tools: false,
+        session: false,
         sandbox: None,
     };
     let mut cfg = config(
@@ -2400,6 +2405,7 @@ fn a_quiet_run_stops_at_its_wall_limit_under_a_long_poll() {
         program: "/bin/sh".into(),
         args: vec!["-c".into(), "exec sleep 30".into()],
         builtin_tools: false,
+        session: false,
         sandbox: None,
     };
     let mut cfg = config(
@@ -2419,4 +2425,137 @@ fn a_quiet_run_stops_at_its_wall_limit_under_a_long_poll() {
         started.elapsed()
     );
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A session launcher: each turn is its own `sh` harness that records
+/// `start TURN SESSION_ID RESUME ARG` and `end TURN` in `session-log`, passes
+/// its first three turns (lingering a second after each, within the grace)
+/// and asks for the plan gate on the fourth.
+fn session_launcher(dir: &Path) -> Launcher {
+    let bin = dir.join("agents-bin");
+    std::fs::create_dir_all(&bin).expect("mkdir");
+    let path = bin.join("session.sh");
+    let script = r##"#!/bin/sh
+set -e
+log="$BBP_DIR/session-log"
+echo "start $BBP_TURN $BBP_SESSION_ID $BBP_SESSION_RESUME $1" >> "$log"
+init='{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"sh","version":"0"}}}'
+call() { printf '{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":%s}\n' "$1" "$2"; }
+if [ "$(grep -c '^start' "$log")" -le 3 ]; then
+  { echo "$init"; call 1 '{"name":"post","arguments":{"op":"pass-'"$BBP_TURN"'","kind":"pass"}}'; } | "$BBP_BIN" mcp
+  sleep 1
+else
+  { echo "$init"
+    call 1 '{"name":"put_artifact","arguments":{"op":"s","kind":"spec","brief":1,"body":"# Spec"}}'
+    call 2 '{"name":"post","arguments":{"op":"g","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve?","gate":true}}'
+  } | "$BBP_BIN" mcp
+fi
+echo "end $BBP_TURN" >> "$log"
+"##;
+    std::fs::write(&path, script).expect("write script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    Launcher {
+        program: path.to_string_lossy().into_owned(),
+        args: vec!["{session}".into()],
+        builtin_tools: false,
+        session: true,
+        sandbox: None,
+    }
+}
+
+/// Every turn of a session launcher is its own process, killed or exited
+/// before the next starts, and all of them share the role's session id;
+/// all but the first are told to resume it.
+#[test]
+fn a_session_launchers_turns_share_one_session_one_process_at_a_time() {
+    let dir = tempdir("session-turns");
+    let (repo, _) = repo(&dir);
+    let task = TaskId("T1".into());
+    open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
+    let mut cfg = config(
+        &dir,
+        &task,
+        repo,
+        Launchers::default().with("planner", session_launcher(&dir)),
+        60,
+    );
+    cfg.end_grace = Duration::from_secs(5);
+    let moderator = std::thread::spawn(move || moderator::run(&cfg));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while card(&dir, &task).state != State::PlanGate {
+        assert!(Instant::now() < deadline, "no plan gate");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let rev = card(&dir, &task).rev;
+    human::perform(&dir, &task, "cancel", &["done"], Some(rev)).expect("cancel");
+    let out = moderator.join().expect("join").expect("moderator");
+    assert_eq!(out.state, State::Cancelled);
+    assert_eq!(out.turns_launched, 4);
+
+    let master = rusty_bbp_host::master::load(&dir).expect("master");
+    let id = moderator::session_id(&master, &task, &Who::Planner.id());
+    let shape: Vec<usize> = id.split('-').map(str::len).collect();
+    assert_eq!(shape, vec![8, 4, 4, 4, 12], "{id}");
+    let log = std::fs::read_to_string(dir.join("session-log")).expect("log");
+    let expected: Vec<String> = (1..=4)
+        .flat_map(|t| {
+            let resume = if t == 1 { "no" } else { "yes" };
+            [format!("start {t} {id} {resume} {id}"), format!("end {t}")]
+        })
+        .collect();
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        expected,
+        "one process at a time"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The session id is the store's: stable across reopening one store,
+/// distinct between stores that reuse the same task and role names.
+#[test]
+fn session_ids_are_namespaced_by_store() {
+    let (a, b) = (tempdir("session-store-a"), tempdir("session-store-b"));
+    let task = TaskId("T1".into());
+    let role = Who::Planner.id();
+    let id = |dir: &Path| {
+        let master = rusty_bbp_host::master::ensure(dir).expect("master");
+        moderator::session_id(&master, &task, &role)
+    };
+    let first = id(&a);
+    assert_eq!(id(&a), first, "a restart keeps the session");
+    assert_ne!(id(&b), first, "another store gets its own session");
+    for dir in [a, b] {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn session_launchers_are_refused_capped_confined_or_naming_a_turn() {
+    let dir = tempdir("session-refused");
+    let (repo, _) = repo(&dir);
+    let task = TaskId("T1".into());
+    open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
+    let session = session_launcher(&dir);
+    let base = config(&dir, &task, repo, Launchers::default(), 5);
+    let refused = |cfg: Config| moderator::run(&cfg).unwrap_err();
+
+    let mut capped = base.clone();
+    capped.launchers = Launchers::default().with("planner", session.clone());
+    capped.cost_cap = Some(cost_cap(1.0));
+    assert!(refused(capped).contains("cannot run under a cost cap"));
+
+    let mut turn = base.clone();
+    let mut l = session.clone();
+    l.args.push("{turn}".into());
+    turn.launchers = Launchers::default().with("planner", l);
+    assert!(refused(turn).contains("drop {turn}"));
+
+    let mut confined = base;
+    let mut l = session;
+    l.sandbox = Some(rusty_bbp_host::confine::HarnessSandbox::default());
+    confined.launchers = Launchers::default().with("planner", l);
+    assert!(refused(confined).contains("cannot be confined yet"));
+    assert_eq!(card(&dir, &task).state, State::Planning, "nothing ran");
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -156,32 +156,66 @@ impl Slot {
             .map_err(|e| format!("slot: {e}"))
     }
 
-    /// Hold this slot in a `bbp slot-hold` process that leads a new process
-    /// group, whose id is the holder's pid. Start the slot's user in that
-    /// group, then drop the holder's stdin. The holder keeps the slot until
-    /// its stdin is closed and it is the group's last member: however the
-    /// group's processes treat their stdio, and whether or not the caller
-    /// outlives them. Should the caller die before starting anyone, the
-    /// slot is freed.
+    /// Hold this slot in a `bbp slot-hold` process: [`holder`] with it.
     ///
     /// # Errors
     /// When the holder cannot be started.
     pub fn holder(&self, bbp: &Path) -> Result<Child, String> {
-        let mut command = Command::new(bbp);
-        command
-            .arg("slot-hold")
-            .stdin(Stdio::piped())
-            .stdout(self.stdio()?)
-            .stderr(Stdio::inherit());
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        command.spawn().map_err(|e| format!("slot holder: {e}"))
+        holder(bbp, Some(self))
     }
 
     /// `agent-0`, `validator-0`, ...
     pub fn name(&self) -> String {
         format!("{}-{}", self.class.name(), self.index)
     }
+}
+
+/// Start a `bbp slot-hold` process that leads a new process group, whose id
+/// is the holder's pid, holding `slot` if there is one. Start the group's
+/// members in it, then drop the holder's stdin. The holder keeps the slot,
+/// and stays alive, until its stdin is closed and it is the group's last
+/// member: however the group's processes treat their stdio, and whether or
+/// not the caller outlives them. So while the holder lives its pid names
+/// exactly this group, and once it is gone the group is empty. Should the
+/// caller die before starting anyone, the slot is freed.
+///
+/// # Errors
+/// When the holder cannot be started.
+pub fn holder(bbp: &Path, slot: Option<&Slot>) -> Result<Child, String> {
+    let stdout = match slot {
+        Some(slot) => slot.stdio()?,
+        None => Stdio::null(),
+    };
+    let mut command = Command::new(bbp);
+    command
+        .arg("slot-hold")
+        .stdin(Stdio::piped())
+        .stdout(stdout)
+        .stderr(Stdio::inherit());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    command.spawn().map_err(|e| format!("slot holder: {e}"))
+}
+
+/// When process `pid` started, in clock ticks since boot: with the pid, an
+/// identity no later process shares. `None` when it is gone or a zombie.
+#[cfg(target_os = "linux")]
+pub fn process_start(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    let mut fields = rest.split_whitespace();
+    if fields.next()? == "Z" {
+        return None;
+    }
+    // starttime is field 22 of stat(5); after the state (field 3) it is
+    // the 19th field on.
+    fields.nth(18)?.parse().ok()
+}
+
+/// Elsewhere a process cannot be told apart from its pid's later reuse.
+#[cfg(not(target_os = "linux"))]
+pub fn process_start(_pid: u32) -> Option<u64> {
+    None
 }
 
 /// `bbp slot-hold`: return once stdin is closed and this process is the
@@ -229,7 +263,7 @@ fn others_in_group() -> bool {
 /// The process group in a `/proc/PID/stat` line: the third field after the
 /// parenthesised command name, which may itself hold spaces or parentheses.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn stat_pgrp(stat: &str) -> Option<u32> {
+pub(crate) fn stat_pgrp(stat: &str) -> Option<u32> {
     let (_, rest) = stat.rsplit_once(')')?;
     rest.split_whitespace().nth(2)?.parse().ok()
 }

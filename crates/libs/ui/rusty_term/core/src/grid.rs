@@ -17,6 +17,14 @@ use super::sixel::SixelImage;
 
 mod snapshot;
 pub use snapshot::SnapshotError;
+#[cfg(any(test, feature = "gui"))]
+mod frame;
+#[cfg(any(test, feature = "gui"))]
+mod view;
+#[cfg(any(test, feature = "gui"))]
+pub use frame::{FrameImage, FrameView};
+#[cfg(any(test, feature = "gui"))]
+pub use view::View;
 
 /// Default maximum number of lines retained in the scrollback history. Older
 /// lines are dropped as new ones arrive. Overridable per-grid via
@@ -363,7 +371,8 @@ impl KittyImage {
 }
 
 pub struct KittyFrame {
-    pub pixels: Vec<Option<u32>>,
+    /// Shared so a frame snapshot can hold it without copying the pixels.
+    pub pixels: Arc<[Option<u32>]>,
     /// Display time in milliseconds (floored to 40 — the protocol allows 0,
     /// but a zero-gap loop would spin the repaint timer).
     pub gap_ms: u32,
@@ -894,7 +903,8 @@ pub struct GridImage {
     pub pw: usize,
     pub ph: usize,
     /// Source pixels, row-major `pw × ph`; `None` = transparent (skipped).
-    pub pixels: Vec<Option<u32>>,
+    /// Shared so a frame snapshot can hold them without copying.
+    pub pixels: Arc<[Option<u32>]>,
     /// For animated images (inline GIF): the backing [`KittyImage`] id whose
     /// *current frame* renderers draw instead of `pixels` (same `pw × ph`).
     /// `pixels` stays as the first frame, the fallback if the store evicts it.
@@ -1846,7 +1856,7 @@ impl Grid {
             rows,
             pw,
             ph,
-            pixels: pixels[..pw * ph].to_vec(),
+            pixels: pixels[..pw * ph].into(),
             anim: None,
         });
         if self.images.len() > MAX_IMAGES {
@@ -1922,7 +1932,7 @@ impl Grid {
             frames: frames
                 .into_iter()
                 .map(|(pixels, gap_ms)| KittyFrame {
-                    pixels,
+                    pixels: pixels.into(),
                     gap_ms: gap_ms.max(40),
                 })
                 .collect(),
@@ -2260,16 +2270,7 @@ impl Grid {
     /// selection/copy anchors land somewhere sensible.
     #[cfg(any(test, feature = "gui"))]
     pub fn abs_of_view_row(&self, vr: usize) -> usize {
-        let dhl = self.display_history_len();
-        let off = self.view_offset.min(dhl);
-        if vr < off {
-            match self.history_line(dhl - off + vr) {
-                HistLine::Abs(l) => l,
-                HistLine::Summary(i) => self.fold_blocks[i].start,
-            }
-        } else {
-            self.scrollback.len() + vr - off
-        }
+        self.abs_of_line(self.view_line(vr))
     }
 
     /// Folded command blocks that actually collapse in the view: fully
@@ -2373,14 +2374,9 @@ impl Grid {
     /// as an index into `fold_blocks`.
     #[cfg(any(test, feature = "gui"))]
     fn summary_block_at(&self, vr: usize) -> Option<usize> {
-        let dhl = self.display_history_len();
-        let off = self.view_offset.min(dhl);
-        if vr >= off {
-            return None;
-        }
-        match self.history_line(dhl - off + vr) {
-            HistLine::Summary(i) => Some(i),
-            HistLine::Abs(_) => None,
+        match self.view_line(vr) {
+            view::ViewLine::Summary(i) => Some(i),
+            _ => None,
         }
     }
 
@@ -2417,16 +2413,19 @@ impl Grid {
         true
     }
 
-    /// The synthesized cell at `(col)` of a fold block's summary line: a dim
-    /// italic "N lines hidden" notice on default colors.
+    /// A fold block's summary line: an "N lines hidden" notice.
     #[cfg(any(test, feature = "gui"))]
-    fn summary_cell(&self, block: usize, col: usize) -> Cell {
+    fn summary_text(&self, block: usize) -> String {
         let b = &self.fold_blocks[block];
-        let text = format!(
+        format!(
             "\u{25B7} {} lines hidden \u{2014} click to expand",
             b.end - b.start
-        );
-        let ch = text.chars().nth(col).unwrap_or(' ');
+        )
+    }
+
+    /// A summary-line cell showing `ch`: dim italic on default colors.
+    #[cfg(any(test, feature = "gui"))]
+    fn summary_cell(&self, ch: char) -> Cell {
         Cell {
             ch,
             cluster: 0,
@@ -3833,7 +3832,10 @@ impl Grid {
             id,
             w,
             h,
-            frames: vec![KittyFrame { pixels, gap_ms: 0 }],
+            frames: vec![KittyFrame {
+                pixels: pixels.into(),
+                gap_ms: 0,
+            }],
             current: 0,
             playing: false,
             last_advance: None,
@@ -3843,7 +3845,7 @@ impl Grid {
     /// A stored image's current frame, cloned for placement.
     pub(crate) fn kitty_get(&self, id: u32) -> Option<(usize, usize, Vec<Option<u32>>)> {
         let img = self.kitty_images.iter().find(|i| i.id == id)?;
-        Some((img.w, img.h, img.frames[img.current].pixels.clone()))
+        Some((img.w, img.h, img.frames[img.current].pixels.to_vec()))
     }
 
     /// Record a virtual placement (`U=1`): the image renders wherever
@@ -3893,7 +3895,7 @@ impl Grid {
             .last()
             .expect("images always have a root frame")
             .pixels
-            .clone();
+            .to_vec();
         for row in 0..h {
             let dy = y + row;
             if dy >= img.h {
@@ -3908,7 +3910,7 @@ impl Grid {
             }
         }
         img.frames.push(KittyFrame {
-            pixels: base,
+            pixels: base.into(),
             gap_ms: gap_ms.max(40),
         });
         true
@@ -3962,11 +3964,17 @@ impl Grid {
     /// renderers so inference can't drift between them.
     #[cfg(any(test, feature = "gui"))]
     pub fn placeholder_map(&self) -> Option<Vec<Option<(u32, u32, u32)>>> {
+        self.placeholders_of(&self.view())
+    }
+
+    /// [`Grid::placeholder_map`] over an already-resolved view.
+    #[cfg(any(test, feature = "gui"))]
+    fn placeholders_of(&self, view: &View<'_>) -> Option<Vec<Option<(u32, u32, u32)>>> {
         let mut ph: Vec<Option<(u32, u32, u32)>> = Vec::new();
         let mut any = false;
         for row in 0..self.rows {
             for col in 0..self.cols {
-                let entry = self.placeholder_at(col, row).map(|(id, r, c)| {
+                let entry = self.placeholder_of(view.cell(col, row)).map(|(id, r, c)| {
                     let left = (col > 0)
                         .then(|| ph.get(row * self.cols + col - 1).copied().flatten())
                         .flatten()
@@ -4034,7 +4042,12 @@ impl Grid {
         if col >= self.cols || row >= self.rows {
             return None;
         }
-        let cell = self.viewport_cell(col, row);
+        self.placeholder_of(self.viewport_cell(col, row))
+    }
+
+    /// [`Grid::placeholder_at`] for an already-resolved cell.
+    #[cfg(any(test, feature = "gui"))]
+    fn placeholder_of(&self, cell: Cell) -> Option<(u32, Option<u32>, Option<u32>)> {
         if cell.ch != '\u{10EEEE}' {
             return None;
         }
@@ -4135,15 +4148,22 @@ impl Grid {
     /// affordance).
     #[cfg(any(test, feature = "gui"))]
     pub fn viewport_block_marks(&self) -> Vec<Option<BlockMark>> {
+        self.block_marks_of(&self.view_lines())
+    }
+
+    /// [`Grid::viewport_block_marks`] for already-resolved viewport rows.
+    #[cfg(any(test, feature = "gui"))]
+    fn block_marks_of(&self, lines: &[view::ViewLine]) -> Vec<Option<BlockMark>> {
         if self.in_alt_screen() {
             return vec![None; self.rows];
         }
         let running = self
             .fold_pending_start
             .map(|s| (s, self.scrollback.len() + self.cursor.1));
-        (0..self.rows)
-            .map(|vr| {
-                let abs = self.abs_of_view_row(vr);
+        lines
+            .iter()
+            .map(|&line| {
+                let abs = self.abs_of_line(line);
                 if let Some((s, e)) = running
                     && abs >= s
                     && abs <= e
@@ -4455,8 +4475,13 @@ impl Grid {
     /// `Some(false)` (a match), `Some(true)` (the active match).
     #[cfg(any(test, feature = "gui"))]
     pub fn search_highlight(&self, col: usize, vr: usize) -> Option<bool> {
+        self.search_highlight_abs(col, self.abs_of_view_row(vr))
+    }
+
+    /// [`Grid::search_highlight`] for absolute row `abs`.
+    #[cfg(any(test, feature = "gui"))]
+    fn search_highlight_abs(&self, col: usize, abs: usize) -> Option<bool> {
         let s = self.search.as_ref()?;
-        let abs = self.abs_of_view_row(vr);
         for &(start, end, mi) in s.rows.get(&abs)? {
             if col >= start && col < end {
                 return Some(mi == s.current);
@@ -4582,20 +4607,7 @@ impl Grid {
     /// Used by the windowed renderers so a scrolled-up view paints history.
     #[cfg(any(test, feature = "gui"))]
     pub fn viewport_cell(&self, col: usize, row: usize) -> Cell {
-        let dhl = self.display_history_len();
-        let off = self.view_offset.min(dhl);
-        if row < off {
-            match self.history_line(dhl - off + row) {
-                HistLine::Abs(l) => self.scrollback[l]
-                    .cells
-                    .get(col)
-                    .copied()
-                    .unwrap_or_else(Cell::blank),
-                HistLine::Summary(i) => self.summary_cell(i, col),
-            }
-        } else {
-            self.screen[row - off].cells[col]
-        }
+        self.cell_of(self.view_line(row), col)
     }
 
     /// The bidi view of viewport row `row` (rule L2 applied to the row's
@@ -4605,10 +4617,25 @@ impl Grid {
     /// come out LTR and short-circuit to `None`, so the layers compose.
     #[cfg(any(test, feature = "gui"))]
     pub fn bidi_row(&self, row: usize) -> Option<BidiRow> {
-        // Config is the master switch; within it BDSM (mode 8) decides, and
-        // an app that never touches it gets implicit on the main screen /
-        // explicit on the alt screen (full-screen apps lay out themselves).
-        if !self.bidi || !self.bdsm.unwrap_or(!self.in_alt_screen()) || row >= self.rows {
+        if !self.bidi_active() || row >= self.rows {
+            return None;
+        }
+        let line = self.view_line(row);
+        self.bidi_row_of(row, |col| self.cell_of(line, col))
+    }
+
+    /// Config is the master switch; within it BDSM (mode 8) decides, and an
+    /// app that never touches it gets implicit on the main screen / explicit
+    /// on the alt screen (full-screen apps lay out themselves).
+    #[cfg(any(test, feature = "gui"))]
+    fn bidi_active(&self) -> bool {
+        self.bidi && self.bdsm.unwrap_or(!self.in_alt_screen())
+    }
+
+    /// [`Grid::bidi_row`] over the row's cells as `cell_at(col)` yields them.
+    #[cfg(any(test, feature = "gui"))]
+    fn bidi_row_of(&self, row: usize, cell_at: impl Fn(usize) -> Cell) -> Option<BidiRow> {
+        if !self.bidi_active() || row >= self.rows {
             return None;
         }
         // Unit per cell run: a wide lead absorbs its trailer.
@@ -4616,15 +4643,13 @@ impl Grid {
         let mut unit_cells: Vec<(u16, u16)> = Vec::new(); // (first col, ncells)
         let mut col = 0usize;
         while col < self.cols {
-            let cell = self.viewport_cell(col, row);
+            let cell = cell_at(col);
             let w = if cell.flags & WIDE_TRAILER != 0 {
                 // Orphan trailer (shouldn't happen mid-row): own unit.
                 1
             } else {
                 let mut n = 1;
-                while col + n < self.cols
-                    && self.viewport_cell(col + n, row).flags & WIDE_TRAILER != 0
-                {
+                while col + n < self.cols && cell_at(col + n).flags & WIDE_TRAILER != 0 {
                     n += 1;
                 }
                 n

@@ -12,7 +12,9 @@
 //!
 //! ## Quick start
 //!
-//! ```no_run
+// The example needs the `runtime` feature; without it, keep it as docs only.
+#![cfg_attr(feature = "runtime", doc = "```no_run")]
+#![cfg_attr(not(feature = "runtime"), doc = "```ignore")]
 //! use rusty_lsp::{Client, LanguageServer, Server};
 //! use rusty_lsp::error::Result;
 //! use rusty_lsp::lsp::{
@@ -64,6 +66,9 @@
 //!
 //! ## Cargo features
 //!
+//! - `runtime` (default) — the async server/client modules and their `tokio`
+//!   dependency. Disable default features for the protocol data types alone
+//!   (`error`, `jsonrpc`, `lsp`, `text`).
 //! - `tcp` — [`Server::from_tcp`], serving an accepted `tokio` TCP stream.
 //! - `tracing` — wire-level instrumentation via the `tracing` crate.
 //!
@@ -71,21 +76,33 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[cfg(feature = "runtime")]
 pub mod cancel;
+#[cfg(feature = "runtime")]
 pub mod client;
+#[cfg(feature = "runtime")]
 pub mod documents;
 pub mod error;
 pub mod jsonrpc;
 pub mod lsp;
+#[cfg(feature = "runtime")]
 pub mod server;
+#[cfg(feature = "runtime")]
 pub mod service;
+#[cfg(feature = "runtime")]
 pub mod testing;
 pub mod text;
+#[cfg(feature = "runtime")]
 pub mod transport;
 
+#[cfg(feature = "runtime")]
 pub use cancel::CancelToken;
+#[cfg(feature = "runtime")]
 pub use client::{Client, ProgressGuard};
+#[cfg(feature = "runtime")]
 pub use documents::{Document, Documents};
 pub use error::{Error, Result};
+#[cfg(feature = "runtime")]
 pub use server::Server;
+#[cfg(feature = "runtime")]
 pub use service::LanguageServer;

@@ -49,7 +49,7 @@ use crate::rules::Subject;
 
 pub use wire::{
     AuthorizationError, HeaderMutation, McpHeader, McpRequest, McpRequestResult, McpResponse,
-    McpResponseResult, authorization_error, request_result, response_result, to_proto_value,
+    McpResponseResult, Pass, authorization_error, request_result, response_result, to_proto_value,
 };
 
 /// Budget for one processor call when the config names none.
@@ -253,15 +253,9 @@ impl Annotations {
     /// Later processors win on a key collision, which is upstream's rule and
     /// the one that makes a chain read as a pipeline: the last thing to say
     /// something about a call is the most informed.
-    fn merge(&mut self, metadata: prost_types::Struct) {
+    fn merge(&mut self, metadata: rusty_prost::wkt::Struct) {
         for (key, value) in metadata.fields {
-            let Some(value) = wire::proto_to_json(value) else {
-                rusty_log::debug!(
-                    key,
-                    "a processor sent an annotation with no JSON form; skipping"
-                );
-                continue;
-            };
+            let value = wire::proto_to_json(value);
 
             let value = match &value {
                 serde_json::Value::String(text) if text.len() > MAX_ANNOTATION_BYTES => {
@@ -634,7 +628,7 @@ impl Compiled {
     /// guardrail offline. The processor sees the key absent and decides. That
     /// is also what makes `mcp.prompt.name` harmless on a `prompts/list`,
     /// which fans out and has no single subject.
-    fn metadata_context(&self, call: CallContext<'_>) -> Option<prost_types::Struct> {
+    fn metadata_context(&self, call: CallContext<'_>) -> Option<rusty_prost::wkt::Struct> {
         if self.metadata.is_empty() {
             return None;
         }
@@ -684,7 +678,7 @@ impl Compiled {
             })
             .collect();
 
-        Some(prost_types::Struct { fields })
+        Some(rusty_prost::wkt::Struct { fields })
     }
 
     async fn call_request(&self, request: McpRequest) -> Result<McpRequestResult, tonic::Status> {

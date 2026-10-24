@@ -3,37 +3,13 @@
 //! panel, and `?inline=1` keeps the legacy embedded shape.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::net::TcpStream;
+use std::process::{Command, Stdio};
 
-/// A running `rleval serve`, killed on drop.
-struct Server(Child, u16);
+mod support;
+use support::Server;
 
 impl Server {
-    fn start() -> Self {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let replays = format!("{}/../../rleval/assets/replays", env!("CARGO_MANIFEST_DIR"));
-        let child = Command::new(env!("CARGO_BIN_EXE_rleval"))
-            .args(["serve", "--port", &port.to_string(), "--replays", &replays])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn rleval");
-        let server = Self(child, port);
-        for _ in 0..100 {
-            if server.get("/healthz").0 == 200 {
-                return server;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        panic!("server did not come up");
-    }
-
     /// The raw `(head, body)` bytes of a GET sent with `extra` headers.
     fn get_raw(&self, path: &str, extra: &str) -> (String, Vec<u8>) {
         let mut s = TcpStream::connect(("127.0.0.1", self.1)).unwrap();
@@ -105,8 +81,8 @@ impl Server {
         let Ok(mut s) = TcpStream::connect(("127.0.0.1", self.1)) else {
             return (0, String::new());
         };
-        // A reset or short read while the child is still starting counts as "not up yet"
-        // (status 0), like a refused connect: `start` retries, real assertions still fail.
+        // A reset or short read counts as status 0, like a refused connect, so
+        // request assertions still fail on transport errors.
         let mut raw = Vec::new();
         let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         if s.write_all(req.as_bytes()).is_err() || s.read_to_end(&mut raw).is_err() {
@@ -120,13 +96,6 @@ impl Server {
             .and_then(|c| c.parse().ok())
             .unwrap_or(0);
         (status, body.to_string())
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
     }
 }
 
