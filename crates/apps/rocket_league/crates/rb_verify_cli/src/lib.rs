@@ -156,16 +156,71 @@ pub fn score_capture_against_candidate(
 /// Runs the same candidate simulation as [`score_capture_against_candidate`]
 /// and writes it to `out_path` in the capture format (ADR-0005), so a viewer
 /// can draw it beside the recording (ADR-0085). Returns the frames written.
+///
+/// Refuses an `out_path` that is the capture itself, by name or through a
+/// symlink or hard link, before simulating. The file is written beside
+/// `out_path` and renamed over it only once complete, so a failed write leaves
+/// any existing file there untouched.
 pub fn write_candidate(
     capture_path: impl AsRef<Path>,
     seed_frame: SeedFrame,
     out_path: impl AsRef<Path>,
 ) -> Result<usize, IngestError> {
+    let (capture_path, out_path) = (capture_path.as_ref(), out_path.as_ref());
+    if same_file(capture_path, out_path)? {
+        return Err(IngestError::Io(format!(
+            "refusing to write the candidate over its own capture {}",
+            out_path.display()
+        )));
+    }
     let (_, candidate) = seed_and_simulate(capture_path, seed_frame)?;
-    let file = std::fs::File::create(out_path.as_ref())
-        .map_err(|e| IngestError::Io(format!("{}: {e}", out_path.as_ref().display())))?;
-    write_frames(&candidate, std::io::BufWriter::new(file))?;
+    publish(out_path, |file| {
+        write_frames(&candidate, std::io::BufWriter::new(file))
+    })?;
     Ok(candidate.len())
+}
+
+/// Whether `out` names the same file as `existing`, following symlinks and,
+/// on Unix, hard links. A missing `out` is never the same file.
+fn same_file(existing: &Path, out: &Path) -> Result<bool, IngestError> {
+    let io = |path: &Path, e: std::io::Error| IngestError::Io(format!("{}: {e}", path.display()));
+    let Ok(out_meta) = std::fs::metadata(out) else {
+        return Ok(false);
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(existing).map_err(|e| io(existing, e))?;
+        Ok(meta.dev() == out_meta.dev() && meta.ino() == out_meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = out_meta;
+        let a = std::fs::canonicalize(existing).map_err(|e| io(existing, e))?;
+        let b = std::fs::canonicalize(out).map_err(|e| io(out, e))?;
+        Ok(a == b)
+    }
+}
+
+/// Writes `path` through a temporary file beside it, renamed into place only
+/// after `write` succeeds; on failure the temporary file is removed and `path`
+/// is left as it was.
+fn publish(
+    path: &Path,
+    write: impl FnOnce(std::fs::File) -> Result<(), IngestError>,
+) -> Result<(), IngestError> {
+    let io = |e: std::io::Error| IngestError::Io(format!("{}: {e}", path.display()));
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(format!(".tmp-{}", std::process::id()));
+    let tmp = path.with_file_name(tmp_name);
+    let result = std::fs::File::create(&tmp)
+        .map_err(io)
+        .and_then(write)
+        .and_then(|()| std::fs::rename(&tmp, path).map_err(io));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Default window width (seconds) `rb-verify --self-growth` uses when the
@@ -614,6 +669,19 @@ pub fn boost_is_unlimited(frames: &[PhysicsFrame]) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    #[test]
+    fn a_failed_publish_leaves_the_existing_file_and_no_temporary() {
+        let dir = std::env::temp_dir().join("rb_verify_cli_publish_failure");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.jsonl");
+        std::fs::write(&path, b"kept").unwrap();
+        let result = super::publish(&path, |_| Err(IngestError::Malformed("boom".into())));
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"kept");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
     use rb_scenario::Scenario;
 

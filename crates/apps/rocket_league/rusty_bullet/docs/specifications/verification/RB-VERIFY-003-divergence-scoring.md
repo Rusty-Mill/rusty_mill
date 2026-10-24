@@ -417,10 +417,15 @@ them.
   (`rb_capture_ingest::write_frames`), and still prints the score.
   `replay-viewer <capture> --sim <out.jsonl>` draws it as ghost cars over the
   recording. Every car carries its input; a frame with a car that has none is
-  refused rather than written with a guessed input.
+  refused rather than written with a guessed input. The output may not be the
+  capture itself (by name, symlink or hard link), every argument is validated
+  before anything is written, and the file is renamed into place only once
+  complete.
   - **Verification**: `rb_verify_cli` test
     `saved_candidate_scores_like_the_in_memory_run` (the file reads back and
-    scores exactly as the in-memory run); `rb_capture_ingest` round-trip tests
+    scores exactly as the in-memory run), the alias, bad-argument and
+    failed-publish tests (the capture's bytes stay unchanged, no file is left
+    behind); `rb_capture_ingest` round-trip tests
     (`written_frames_read_back_unchanged`, `to_line_round_trips_through_parse_line`,
     `to_line_rejects_a_car_without_input`).
 

@@ -7,7 +7,6 @@ use std::path::PathBuf;
 
 use rb_capture_ingest::CaptureFileSource;
 use rb_domain::{PhysicsFrame, PhysicsStateSource};
-use replay_viewer::physics::SIM_PRI_OFFSET;
 use replay_viewer::{build_physics_scene, html};
 
 fn example() -> Vec<PhysicsFrame> {
@@ -33,15 +32,15 @@ fn scene_matches_golden() {
 }
 
 #[test]
-fn candidate_cars_are_ghosts_in_their_own_pri_range() {
+fn candidate_cars_are_ghosts_with_negative_pris() {
     let frames = example();
     let scene = build_physics_scene("example", &frames, Some(&frames)).expect("scene");
     let ghosts: Vec<_> = scene.players.iter().filter(|p| p.ghost).collect();
     assert_eq!(ghosts.len(), 1);
-    assert_eq!(ghosts[0].pri, SIM_PRI_OFFSET);
+    assert_eq!(ghosts[0].pri, -1);
     for frame in &scene.frames {
         let pris: Vec<i32> = frame.cars.iter().map(|c| c.pri).collect();
-        assert_eq!(pris, [0, SIM_PRI_OFFSET]);
+        assert_eq!(pris, [0, -1]);
         assert_eq!(frame.cars[0].p, frame.cars[1].p);
     }
     assert_eq!(scene.frames[0].t, 0.0);

@@ -3,8 +3,8 @@
 //!
 //! Both arrive as [`rb_domain::PhysicsFrame`] lists (ADR-0005 capture files,
 //! read by `rb_capture_ingest`), so the viewer never links the physics. Each
-//! car becomes a [`SceneCar`]; candidate cars get their own `pri` range
-//! ([`SIM_PRI_OFFSET`]) and a roster entry with [`ScenePlayer::ghost`] set,
+//! car becomes a [`SceneCar`]; candidate cars get negative `pri`s ([`pri`])
+//! and a roster entry with [`ScenePlayer::ghost`] set,
 //! which the page draws translucent over the recorded car. Frames stay at the
 //! capture rate, and time is rebased so the first recorded frame is `t = 0`.
 
@@ -14,9 +14,14 @@ use rb_domain::{PhysicsFrame, Quat};
 
 use crate::scene::{Field, Scene, SceneCar, SceneFrame, ScenePlayer};
 
-/// Added to a candidate car's player id to form its `pri`, keeping it apart
-/// from the recorded car with the same id.
-pub const SIM_PRI_OFFSET: i32 = 1_000_000;
+/// A car's `pri`: its player id for a recorded car, `-1 - id` for a candidate
+/// car. The two ranges cannot meet, whatever the ids. Fails for an id above
+/// `i32::MAX`.
+pub fn pri(player_id: u32, ghost: bool) -> Result<i32, String> {
+    let id = i32::try_from(player_id)
+        .map_err(|_| format!("player id {player_id} is too large for the viewer"))?;
+    Ok(if ghost { -1 - id } else { id })
+}
 
 /// The team colour used for every car: a capture has no teams.
 const CAPTURE_TEAM: i32 = 0;
@@ -48,9 +53,9 @@ pub fn build_physics_scene(
     let mut frames = Vec::with_capacity(recorded.len());
     let mut cursor = 0;
     for frame in recorded {
-        let mut cars = cars_of(frame, 0)?;
+        let mut cars = cars_of(frame, false)?;
         if let Some(matched) = nearest(sim, &mut cursor, frame.timestamp_secs, tolerance) {
-            cars.extend(cars_of(matched, SIM_PRI_OFFSET)?);
+            cars.extend(cars_of(matched, true)?);
         }
         frames.push(SceneFrame {
             t: round(frame.timestamp_secs - first, 3),
@@ -93,8 +98,9 @@ pub fn quat_to_euler(q: Quat) -> [f32; 3] {
     [pitch, yaw, roll]
 }
 
-/// The first candidate frame at or after `*cursor` within `tolerance` of `t`;
-/// advances `*cursor` so a forward scan over sorted frames stays linear.
+/// The candidate frame closest to `t`, if one lies within `tolerance`.
+/// Advances `*cursor` past frames too early for `t`, so a forward scan over
+/// time-sorted frames stays linear.
 fn nearest<'a>(
     sim: &'a [PhysicsFrame],
     cursor: &mut usize,
@@ -104,17 +110,23 @@ fn nearest<'a>(
     while *cursor < sim.len() && sim[*cursor].timestamp_secs < t - tolerance {
         *cursor += 1;
     }
-    sim.get(*cursor)
-        .filter(|f| (f.timestamp_secs - t).abs() <= tolerance)
+    sim[*cursor..]
+        .iter()
+        .take_while(|f| f.timestamp_secs <= t + tolerance)
+        .min_by(|a, b| {
+            (a.timestamp_secs - t)
+                .abs()
+                .total_cmp(&(b.timestamp_secs - t).abs())
+        })
 }
 
-fn cars_of(frame: &PhysicsFrame, offset: i32) -> Result<Vec<SceneCar>, String> {
+fn cars_of(frame: &PhysicsFrame, ghost: bool) -> Result<Vec<SceneCar>, String> {
     frame
         .cars
         .iter()
         .map(|car| {
             Ok(SceneCar {
-                pri: pri(car.player_id, offset)?,
+                pri: pri(car.player_id, ghost)?,
                 p: pos(car.position),
                 rot: quat_to_euler(car.rotation).map(|a| round(a, 3)),
                 boost: car.boost_amount.clamp(0.0, 100.0).round() as u8,
@@ -133,7 +145,7 @@ fn roster(recorded: &[PhysicsFrame], sim: &[PhysicsFrame]) -> Result<Vec<ScenePl
             .collect()
     };
     let mut players = Vec::new();
-    for (frames, offset, ghost) in [(recorded, 0, false), (sim, SIM_PRI_OFFSET, true)] {
+    for (frames, ghost) in [(recorded, false), (sim, true)] {
         for player_id in ids(frames) {
             let name = if ghost {
                 format!("car {player_id} (sim)")
@@ -141,7 +153,7 @@ fn roster(recorded: &[PhysicsFrame], sim: &[PhysicsFrame]) -> Result<Vec<ScenePl
                 format!("car {player_id}")
             };
             players.push(ScenePlayer {
-                pri: pri(player_id, offset)?,
+                pri: pri(player_id, ghost)?,
                 name,
                 team: Some(CAPTURE_TEAM),
                 goals: 0,
@@ -153,13 +165,6 @@ fn roster(recorded: &[PhysicsFrame], sim: &[PhysicsFrame]) -> Result<Vec<ScenePl
         }
     }
     Ok(players)
-}
-
-fn pri(player_id: u32, offset: i32) -> Result<i32, String> {
-    i32::try_from(player_id)
-        .ok()
-        .and_then(|id| id.checked_add(offset))
-        .ok_or_else(|| format!("player id {player_id} is too large for the viewer"))
 }
 
 fn round(x: f32, places: i32) -> f32 {
@@ -178,6 +183,38 @@ mod tests {
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    fn frame_at(t: f32) -> PhysicsFrame {
+        PhysicsFrame {
+            timestamp_secs: t,
+            ball: rb_domain::BallState {
+                position: rb_domain::Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                velocity: rb_domain::Vec3::ZERO,
+                angular_velocity: rb_domain::Vec3::ZERO,
+            },
+            cars: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn nearest_picks_the_closest_frame_in_the_window() {
+        let sim = [frame_at(0.96), frame_at(1.01)];
+        let mut cursor = 0;
+        let hit = nearest(&sim, &mut cursor, 1.0, 0.05).map(|f| f.timestamp_secs);
+        assert_eq!(hit, Some(1.01));
+        assert_eq!(nearest(&sim, &mut cursor, 2.0, 0.05), None);
+    }
+
+    #[test]
+    fn recorded_and_candidate_pris_never_meet() {
+        assert_eq!(pri(0, false), Ok(0));
+        assert_eq!(pri(0, true), Ok(-1));
+        assert_eq!(pri(1_000_000, false), Ok(1_000_000));
+        assert_ne!(pri(1_000_000, false), pri(0, true));
+        assert_eq!(pri(i32::MAX as u32, true), Ok(i32::MIN));
+        assert!(pri(u32::MAX, false).is_err());
     }
 
     #[test]

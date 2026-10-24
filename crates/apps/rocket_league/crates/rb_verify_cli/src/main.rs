@@ -881,6 +881,15 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+        // Validate every argument before writing anything.
+        let max_timestamp_delta_secs = match parse_max_timestamp_delta_secs(rest.into_iter().next())
+        {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        };
         if let Some(out) = candidate_out {
             match write_candidate(&capture_path, seed_frame, &out) {
                 Ok(n) => eprintln!("wrote {n} candidate frames -> {out}"),
@@ -890,14 +899,6 @@ fn main() -> ExitCode {
                 }
             }
         }
-        let mut args = rest.into_iter();
-        let max_timestamp_delta_secs = match parse_max_timestamp_delta_secs(args.next()) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("{e}");
-                return ExitCode::FAILURE;
-            }
-        };
         score_capture_against_candidate(capture_path, seed_frame, max_timestamp_delta_secs)
     } else {
         let Some(capture_path) = args.next() else {
