@@ -3,11 +3,16 @@
 All notable changes to this project are recorded here. The format follows
 [Keep a Changelog][kac] and [Semantic Versioning][semver].
 
-Neither crate is published to crates.io — consume `rusty-mcp` by git tag:
+The crate is not published to crates.io and is no longer tagged: it is a
+member of the `rusty_mill` workspace. Workspace crates depend on it through the
+root `[workspace.dependencies]` entry and pick features themselves:
 
 ```toml
-rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.6.0" }
+rusty-mcp = { workspace = true, features = ["jwt"] }
 ```
+
+Tags and links to `baileyrd/rusty_mcp` below are history from the standalone
+repository.
 
 Being `0.x`, the API may still break in a minor release. Breaking changes will
 be called out here.
