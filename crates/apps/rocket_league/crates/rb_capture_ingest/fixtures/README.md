@@ -35,3 +35,36 @@ change history).
   correct against the format's own schema — it says nothing about whether
   that schema matches what a real BakkesMod plugin would actually produce,
   since none has been written yet.
+
+## `human/`
+
+Nine **real** excerpts of the owner's own BakkesMod capture sessions
+(2026-09-04 to 09-10, keyboard and mouse, plugin 1.0 to 1.1), with the
+input the game recorded on every tick. They come from the unmerged
+`claude/rocket-league-server-clone-u74q45` branch of the archived
+`baileyrd/rusty_bullet` (head `bcf8f69`), byte for byte. Each starts at
+or just before a grounded, neutral frame so `rb-verify --self` seeds on
+it. `rb_verify_cli/tests/human_captures.rs` bounds the port's error on
+every one; the numbers below are main's on 2026-10-24.
+
+| Fixture | Cut from (`raw/`) | Holds | Car mean / max (uu) | Ball mean / max (uu) |
+|---|---|---|---|---|
+| `throttle-jump` | `groundjumpthrottle03` 3.55–8.19 s | throttle from rest, a tapped jump, landing, a held jump | 1.94 / 5.55 | untouched |
+| `boost-wall-entry` | `walldrive04` 26.85–29.10 s | at the 2300 cap, boost on, straight into the `+X` wall curve | 0.91 / 9.46 | untouched |
+| `dodge-derailment` | session 1 (`test2`, not kept) 4.12–7.00 s | a ground jump and diagonal dodge | 6.96 / 24.14 | 18.55 / 83.85 |
+| `airborne-hit` | `hittickjump01b` 5.60–9.90 s | boost, a jump 7 ticks before an aerial hit, the ball's flight to the goal | 1.54 / 8.61 | 1.50 / 8.53 |
+| `hit-tick-jump` | `hittickjump01_v2` 43.81–47.90 s | a jump pressed 3 ticks before contact with all wheels down | 1.55 / 7.51 | 188.57 / 1023.82 |
+| `wall-climb-crest` | `wall_curve02` 13.14–20.00 s | full-boost wall curve, climb to the ceiling fillet, crest, fall | 16.95 / 90.98 | 12.09 / 28.03 |
+| `goal-shot-net-entry` | `goal_shot03` 8.82–13.40 s | a ground shot through the `+Y` goal mouth into the net | 1.52 / 2.00 | 6.01 / 20.91 |
+| `clean-dodge` | `clean_dodge04` 6.28–8.60 s | a pure-left side dodge (`yaw = -1`) on open floor | 1.75 / 4.76 | untouched |
+| `dodge-free-landing` | `onewheellanding06` 38.75–40.89 s | a hop and one-wheel landing with no dodge | 1.10 / 3.14 | untouched |
+
+Two known capture defects, from the source branch: the analog axes are
+recorded as zero throughout `hittickjump01` and `01b`, and `walldrive04`
+has a dodge at 30.175 s with no `jump` press recorded. The files hold
+poses and inputs only, no names or account ids.
+
+`human/raw/` keeps the ten whole clips the excerpts were cut from; see its
+README. No test reads them. The session-1 clip and `hit_tick_test` are not
+there: the first was never vendored, the second is already at
+`rusty_bullet/hit_tick_test.jsonl`.
