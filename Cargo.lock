@@ -16081,13 +16081,12 @@ name = "ts-control"
 version = "0.0.1"
 dependencies = [
  "blake2",
- "bytes",
  "chacha20poly1305",
- "h2",
  "hkdf 0.12.4",
- "http",
  "rusty_base64",
+ "rusty_h2",
  "rusty_http",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
