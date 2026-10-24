@@ -33,7 +33,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C08 | Command palette + directory browse | 4 | `rusty_mux` clients | not-started | |
 | C09 | Self-hosted, no account, no telemetry | 1 | all | not-started | |
 | C10 | Native scrollback and selection | 1 | `rusty_term_core`, `rusty_mux_tui` | in-progress | engine rows above |
-| C11 | Session model (session/window/block/client) | 1 | `rusty_mux_core` | not-started | |
+| C11 | Session model (session/window/block/client) | 1 | `rusty_mux_core` | in-progress | model, single-writer input lease and event queue in `crates/apps/rusty_mux/crates/core`; the server wires it to PTYs |
 | C12 | Tabs and splits, client-native | 4 | `rusty_mux` clients | not-started | |
 | C13 | Mosh-like feel (roaming, predictive echo) | 3 | `rusty_mux_transport` | not-started | spike 4 |
 | C14 | Live sharing | 3 | `rusty_mux_auth`, `rusty_mux_server` | not-started | |

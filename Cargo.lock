@@ -12586,6 +12586,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_mux_core"
+version = "0.1.0"
+dependencies = [
+ "rusty_uuid",
+]
+
+[[package]]
 name = "rusty_oauth"
 version = "0.1.0"
 dependencies = [
