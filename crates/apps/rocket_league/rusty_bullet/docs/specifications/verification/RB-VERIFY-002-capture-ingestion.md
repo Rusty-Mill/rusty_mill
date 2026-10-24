@@ -121,7 +121,9 @@ a separate deliverable outside it (see Architecture).
 
 Known defects in real captures (unlimited boost in the September freeplay
 sessions, single-tick `angular_velocity` spikes and input drops, steer, pitch,
-yaw and roll recorded as zero in two clips, a dodge with no recorded `jump` press) are listed in
+yaw and roll recorded as zero in `hittickjump01`/`01b` while throttle is
+nonzero in 442/445 frames respectively, a dodge with no recorded `jump`
+press) are listed in
 `docs/research/SERVER-CLONE-BRANCH-FINDINGS.md`. The parser accepts them; a
 scorer has to allow for them.
 

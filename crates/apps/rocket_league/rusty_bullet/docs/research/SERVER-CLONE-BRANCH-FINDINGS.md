@@ -9,7 +9,7 @@ to `FR-094` for different findings than `main` gave them.
 The owner chose (board card w3, 2026-10-24) to import its captures and record its
 findings, not its code or history. The captures are in
 `crates/rb_capture_ingest/fixtures/human/`, gated by `rb_verify_cli/tests/human_captures.rs`.
-Those paths arrive with PR #986, which must merge before this note.
+Those paths arrive with PR #986, whose corrected capture gate must merge before this note.
 This note maps each branch finding to where `main` now stands.
 
 **How to read it.** "Branch FR" is the branch's own number. Write it as `branch FR-0NN` if
@@ -37,12 +37,21 @@ position, uu, from `human_captures.rs`). For comparison, the branch's own code m
 | 090 | A pure side dodge splits its flip torque between two body axes (`FLIP_TORQUE_Y`) | FR-083, FR-085 | `clean-dodge` as above |
 | 093 | The wheels act one or two ticks past the jump | FR-092, FR-095 | closed on the branch too |
 | 094 | A 38° dodge-direction miss after held air control (four dodges) | FR-072 to FR-074, FR-103, FR-147 | `clean-dodge`, `dodge-derailment` as above |
-| 085 J | `onewheellanding06` from 4.0 s: a one-wheel bounce and backward dodge at 4.575 s, then the port landed inverted around 6.4 to 6.7 s and never righted, while the recording drove off upright | partly investigated, open | reseeded at 4.0 s, before the bounce (`rb-verify --scenario-from onewheellanding06.jsonl 4.0 9.0`, then `--scenario … --against`), main ends on its wheels like the recording, so the inverted outcome no longer reproduces; but the hop itself is not matched: heading differs and position error reaches 231 uu (93 mean), and the reseed's first-tick vertical velocity does not match the recording, so the seed alignment needs checking before this can be called closed |
+| 085 J | `onewheellanding06` from 4.0 s: a one-wheel bounce and backward dodge at 4.575 s, then the port landed inverted around 6.4 to 6.7084 s and never righted, while the recording drove off upright | partly investigated, open | reseeded at 4.0 s, before the bounce (`rb-verify --scenario-from onewheellanding06.jsonl 4.0 9.0`, then `--scenario … --against`), that run ends on its wheels like the recording, but does not establish that the original failure is fixed: heading differs and position error reaches 231 uu (93 mean), and the reseed's first-tick vertical velocity does not match the recording, so the seed alignment needs checking before this can be called closed |
 
-Apart from finding J (open) and the `hit-tick-jump` ball error after the hit (189 uu mean, 1024 max: open on main too), nothing in this table needs new code on main. If a later capture shows one of these
-mechanisms wrong again, start from the branch commit named in its row of the branch's
-`RB-PHYSICS-001` change history, not from its code: main's port has diverged too far for a
-patch to apply.
+These bounded captures and the mechanism map do not establish that every branch finding
+is closed or that no further code is needed. Finding J remains partly investigated/open:
+the 4.0 s run includes the 4.575 s causal event, but its seed alignment is unverified.
+The earlier 6.2 s reseed skipped that event and most divergence; it demonstrates only
+later-state recovery, not the original reproduction. Closing J requires a verified
+pre-event 4.0 s seed, the same bounce/dodge, and an outcome comparison through the
+original inverted-landing interval (6.4–6.7084 s).
+
+The `hit-tick-jump` ball error after the hit also remains unresolved (188.57 uu mean,
+1023.82 max). This import adds evidence, with no physics implementation or tuning.
+For a follow-up investigation, start from the branch commit named in the relevant row
+of its `RB-PHYSICS-001` change history; main's port has diverged too far for a branch
+patch to apply directly.
 
 ## Capture findings
 
