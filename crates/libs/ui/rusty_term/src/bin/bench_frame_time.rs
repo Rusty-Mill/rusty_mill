@@ -6,11 +6,15 @@
 //!
 //! - **Streaming.** A parser thread feeds a `bench/workloads` file into a
 //!   shared `Mutex<Grid>` in 4 KiB chunks, locking per chunk as the PTY
-//!   reader does, looping the file for at least `--secs`. A render thread
-//!   paints at `--hz` as the window does: lock, snapshot the frame
-//!   ([`Grid::frame_view`]), unlock, paint. Reported: frame ms, lock hold ms
-//!   (the parser is blocked for it), the render thread's wait for the lock,
-//!   and parser MB/s with rendering against parsing alone.
+//!   reader does (`lock_bulk`), looping the file for at least `--secs`. With
+//!   `--pipe` the chunks come from 4 KiB reads of an OS pipe that a writer
+//!   thread fills, as a PTY read would; without it the parser re-locks back
+//!   to back, the worst case for the render thread. A render thread paints at
+//!   `--hz` as the window does: lock, snapshot the frame
+//!   ([`Grid::frame_view`]), unlock, paint. Reported: frame ms, the reader's
+//!   hold per chunk, the render thread's snapshot hold (the parser is blocked
+//!   for it) and its wait for the lock, and parser MB/s with rendering
+//!   against parsing alone.
 //! - **Static folds.** Frame ms for the same text with 0 and with 1,024
 //!   command fold blocks (OSC 133 `C`..`D` around each command's output), at
 //!   the live view and scrolled back half a screen into history. Every cell
@@ -23,12 +27,14 @@
 //!   python3 bench/gen_workloads.py --size quick
 //!   cargo run --release --features gui --bin bench_frame_time
 //!   cargo run --release --features gui --bin bench_frame_time -- --hz 120 --secs 3 bench/workloads/scroll_heavy.vt
+//!   cargo run --release --features gui --bin bench_frame_time -- --pipe
 //!
 //! The font is the window's default (`$RUSTY_TERM_FONT` or a system
 //! monospace font).
 
 use std::env;
 use std::fs;
+use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +57,7 @@ const DEFAULT_WORKLOAD_DIR: &str = "bench/workloads";
 struct Options {
     hz: f64,
     secs: f64,
+    pipe: bool,
     workloads: Vec<String>,
 }
 
@@ -82,19 +89,20 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let opts = parse_args(env::args().skip(1).collect()).map_err(|e| {
-        format!("{e}\nusage: bench_frame_time [--hz N] [--secs N] [WORKLOAD.vt...]")
+        format!("{e}\nusage: bench_frame_time [--hz N] [--secs N] [--pipe] [WORKLOAD.vt...]")
     })?;
     if frame_bench().is_none() {
         return Err("no usable monospace font: set RUSTY_TERM_FONT".to_owned());
     }
+    let feed = if opts.pipe { "pipe" } else { "back to back" };
     println!(
-        "## Streaming: {COLS}x{ROWS}, {CHUNK} B chunks, render at {} Hz, >= {} s per workload\n",
+        "## Streaming: {COLS}x{ROWS}, {CHUNK} B chunks ({feed}), render at {} Hz, >= {} s per workload\n",
         opts.hz, opts.secs
     );
     println!(
-        "| workload | frames | frame p50 | frame p99 | lock hold p50 | lock hold p99 | lock hold max | render wait p99 | parse MB/s alone | parse MB/s rendering |"
+        "| workload | frames | frame p50 | frame p99 | reader hold p50 | reader hold p99 | snapshot hold p99 | render wait p99 | render wait max | parse MB/s alone | parse MB/s rendering |"
     );
-    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     for path in &opts.workloads {
         let data = fs::read(path).map_err(|e| format!("{path}: {e}"))?;
         if data.is_empty() {
@@ -105,17 +113,20 @@ fn run() -> Result<(), String> {
             .next()
             .unwrap_or(path)
             .trim_end_matches(".vt");
-        let alone = parse_alone(&data, opts.secs);
+        let alone = parse_alone(&data, &opts)
+            .map_err(|e| format!("{name}: {e}"))?
+            .mb_per_s;
         let s = streaming(&data, &opts, frame_bench).map_err(|e| format!("{name}: {e}"))?;
         println!(
-            "| {name} | {} | {} | {} | {} | {} | {} | {} | {alone:.1} | {:.1} |",
+            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {alone:.1} | {:.1} |",
             s.frame.len(),
             pct_ms(&s.frame, 50.0)?,
             pct_ms(&s.frame, 99.0)?,
-            pct_ms(&s.hold, 50.0)?,
+            pct_ms(&s.reader_hold, 50.0)?,
+            pct_ms(&s.reader_hold, 99.0)?,
             pct_ms(&s.hold, 99.0)?,
-            pct_ms(&s.hold, 100.0)?,
             pct_ms(&s.wait, 99.0)?,
+            pct_ms(&s.wait, 100.0)?,
             s.mb_per_s,
         );
     }
@@ -143,6 +154,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
     let mut opts = Options {
         hz: 60.0,
         secs: 2.0,
+        pipe: false,
         workloads: Vec::new(),
     };
     let mut it = args.into_iter();
@@ -160,6 +172,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
                     opts.secs = v;
                 }
             }
+            "--pipe" => opts.pipe = true,
             _ => opts.workloads.push(a),
         }
     }
@@ -176,38 +189,89 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
     Ok(opts)
 }
 
-/// Feed `data` (looped) through a parser into `grid` in [`CHUNK`]-byte
-/// pieces, locking per chunk like the PTY reader, until `secs` have passed
-/// and at least one whole pass is done. Returns MB/s.
-fn feed(grid: &Mutex<Grid>, data: &[u8], secs: f64) -> f64 {
-    let mut parser = AnsiParser::new();
-    let start = Instant::now();
-    let mut bytes = 0usize;
-    loop {
-        for chunk in data.chunks(CHUNK) {
-            let mut g = grid.lock();
-            parser.advance(&mut g, chunk);
-            let _ = g.take_host_out();
-            drop(g);
-            let _ = parser.take_responses();
-        }
-        bytes += data.len();
-        if start.elapsed().as_secs_f64() >= secs {
-            break;
-        }
-    }
-    bytes as f64 / 1e6 / start.elapsed().as_secs_f64()
+/// What [`feed`] measured: parser MB/s and its lock hold per chunk.
+struct Fed {
+    mb_per_s: f64,
+    hold: Vec<Duration>,
 }
 
-fn parse_alone(data: &[u8], secs: f64) -> f64 {
-    feed(&Mutex::new(Grid::new(COLS, ROWS)), data, secs)
+/// Feed `data` (looped) through a parser into `grid` in [`CHUNK`]-byte
+/// pieces, locking per chunk like the PTY reader, until `opts.secs` have
+/// passed and at least one whole pass is done. With `opts.pipe` the pieces
+/// are reads of a pipe that a writer thread fills.
+fn feed(grid: &Mutex<Grid>, data: &[u8], opts: &Options) -> Result<Fed, String> {
+    let mut parser = AnsiParser::new();
+    let mut hold = Vec::new();
+    let mut step = |chunk: &[u8]| {
+        let t = Instant::now();
+        let mut g = grid.lock_bulk();
+        parser.advance(&mut g, chunk);
+        let _ = g.take_host_out();
+        drop(g);
+        hold.push(t.elapsed());
+        let _ = parser.take_responses();
+    };
+    let start = Instant::now();
+    let bytes = if opts.pipe {
+        feed_pipe(data, opts.secs, &mut step)?
+    } else {
+        let mut bytes = 0usize;
+        loop {
+            data.chunks(CHUNK).for_each(&mut step);
+            bytes += data.len();
+            if start.elapsed().as_secs_f64() >= opts.secs {
+                break bytes;
+            }
+        }
+    };
+    let mb_per_s = bytes as f64 / 1e6 / start.elapsed().as_secs_f64();
+    Ok(Fed { mb_per_s, hold })
+}
+
+/// Write `data` (looped, at least once) into a pipe from a writer thread for
+/// `secs`, and hand each read of up to [`CHUNK`] bytes to `step`. Returns the
+/// bytes read.
+fn feed_pipe(data: &[u8], secs: f64, step: &mut impl FnMut(&[u8])) -> Result<usize, String> {
+    let (mut rx, mut tx) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
+    thread::scope(|s| {
+        let writer = s.spawn(move || -> std::io::Result<()> {
+            let start = Instant::now();
+            loop {
+                tx.write_all(data)?;
+                if start.elapsed().as_secs_f64() >= secs {
+                    return Ok(()); // dropping `tx` ends the reader
+                }
+            }
+        });
+        let mut buf = vec![0u8; CHUNK];
+        let mut bytes = 0usize;
+        loop {
+            let n = rx.read(&mut buf).map_err(|e| format!("pipe read: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            step(&buf[..n]);
+            bytes += n;
+        }
+        writer
+            .join()
+            .map_err(|_| "pipe writer panicked".to_owned())?
+            .map_err(|e| format!("pipe write: {e}"))?;
+        Ok(bytes)
+    })
+}
+
+fn parse_alone(data: &[u8], opts: &Options) -> Result<Fed, String> {
+    feed(&Mutex::new(Grid::new(COLS, ROWS)), data, opts)
 }
 
 #[derive(Debug)]
 struct Streamed {
     frame: Vec<Duration>,
+    /// The render thread's snapshot hold.
     hold: Vec<Duration>,
     wait: Vec<Duration>,
+    reader_hold: Vec<Duration>,
     mb_per_s: f64,
 }
 
@@ -237,10 +301,13 @@ fn streaming<P: Painter>(
     };
     // A renderer that panics before reporting drops the sender: also a failure.
     let started = ready_rx.recv().unwrap_or(false);
-    let mb_per_s = if started {
-        feed(&grid, data, opts.secs)
+    let fed = if started {
+        feed(&grid, data, opts)
     } else {
-        0.0
+        Ok(Fed {
+            mb_per_s: 0.0,
+            hold: Vec::new(),
+        })
     };
     done.store(true, Ordering::Relaxed);
     let (frame, hold, wait) = render
@@ -252,11 +319,13 @@ fn streaming<P: Painter>(
     if frame.is_empty() {
         return Err("no frames recorded".to_owned());
     }
+    let fed = fed?;
     Ok(Streamed {
         frame,
         hold,
         wait,
-        mb_per_s,
+        reader_hold: fed.hold,
+        mb_per_s: fed.mb_per_s,
     })
 }
 
@@ -394,8 +463,13 @@ mod tests {
     fn parse_args_reads_options_and_rejects_bad_numbers() {
         let o = parse_args(vec!["--hz".into(), "120".into(), "a.vt".into()]).expect("valid");
         assert_eq!(
-            (o.hz, o.secs, o.workloads),
-            (120.0, 2.0, vec!["a.vt".to_owned()])
+            (o.hz, o.secs, o.pipe, o.workloads),
+            (120.0, 2.0, false, vec!["a.vt".to_owned()])
+        );
+        assert!(
+            parse_args(vec!["--pipe".into(), "a.vt".into()])
+                .expect("valid")
+                .pipe
         );
         for bad in [
             vec!["--hz"],
@@ -468,6 +542,7 @@ mod tests {
         Options {
             hz: 1000.0,
             secs: 0.01,
+            pipe: false,
             workloads: Vec::new(),
         }
     }
@@ -483,5 +558,20 @@ mod tests {
         assert!(!ok.frame.is_empty());
         assert_eq!(ok.frame.len(), ok.hold.len());
         assert_eq!(ok.frame.len(), ok.wait.len());
+        assert!(!ok.reader_hold.is_empty());
+    }
+
+    #[test]
+    fn pipe_feed_parses_every_byte_at_least_once() {
+        let data = b"hello\r\n".repeat(2048); // several chunks
+        let opts = Options {
+            pipe: true,
+            ..short()
+        };
+        let fed = parse_alone(&data, &opts).expect("pipe feed");
+        assert!(fed.mb_per_s > 0.0);
+        assert!(fed.hold.len() >= data.len().div_ceil(CHUNK));
+        let ok = streaming(&data, &opts, || Some(Counting(0))).expect("measures");
+        assert!(!ok.reader_hold.is_empty());
     }
 }
