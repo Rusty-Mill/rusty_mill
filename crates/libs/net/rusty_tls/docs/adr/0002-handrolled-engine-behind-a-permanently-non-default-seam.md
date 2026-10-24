@@ -752,15 +752,16 @@ question is not decided by a pull request that merely wires it.
   acceptable, and the one-line way back to rustls is the control if it is not.
 - If the bar is not met, nothing changes: the engine stays unwired.
 
-## Amendment 2 (2026-10-24): the named consumer may use the native backend
+## Amendment 2 (accepted 2026-10-24): the named consumer may use the native backend
 
-Status: **the consumer is the owner's choice; the added conditions are proposed.** On
-2026-10-24, in the working session, asked which consumer should be the first to use the
-first-party backend, the owner chose "rleval-app OIDC (Recommended)". This is the
-implementer's transcription, not yet restated from the owner's GitHub account. The three
-added conditions below are the implementer's proposal and take effect when the owner
-accepts this amendment. Condition 2 widens the approved review scope, which is the owner's
-decision. It wires nothing.
+Status: **Accepted by the owner on 2026-10-24**, in the working session, in two steps:
+- Asked which consumer should be the first to use the first-party backend, the owner chose
+  "rleval-app OIDC (Recommended)".
+- The owner then accepted the three added conditions below ("Accept all three"),
+  including condition 2's widening of the approved review scope.
+
+This is the implementer's transcription, not yet restated from the owner's GitHub account.
+It wires nothing.
 
 **What changes.** Amendment 1 named `rleval-app`'s OIDC transport (client side only,
 TLS 1.3 only, named hosts) and kept its primitives on `ring`. ADR-0005 then put the client
@@ -777,7 +778,7 @@ backend instead of the `ring` one.
 - no library default moves;
 - webpki divergences resolved or accepted.
 
-In addition, before wiring (proposed):
+In addition, before wiring:
 
 1. **The live evidence (Tier 1 item 1) is on the native backend.** The live-internet step runs
    in the native CI job against the consumer's hosts, with the differential against rustls,
