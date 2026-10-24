@@ -1,86 +1,152 @@
-//! An alternative Linux reactor backend (issue #9), built on the
-//! `io-uring` crate rather than raw `epoll`. Scoped deliberately
-//! narrower than "route socket reads/writes through io_uring": this
-//! only replaces the *readiness* mechanism (`IORING_OP_POLL_ADD` in
-//! place of `epoll_wait`) behind the exact same [`super::ScheduledIo`]/
-//! [`super::poll_io`]/[`super::ready_io`] interface `epoll.rs` uses --
-//! the actual `read(2)`/`write(2)` syscalls in `socket/mod.rs` are
-//! unchanged, same as ever.
+//! Linux readiness reactor using one-shot io_uring `PollAdd` operations.
 //!
-//! That narrower scope is a real safety decision, not a shortcut.
-//! io_uring's other read/write opcodes hand the kernel a pointer into a
-//! caller-owned buffer for the *duration of an async operation* -- but
-//! this crate's `AsyncRead`/`AsyncWrite` traits pass `&mut [u8]`
-//! borrows, and a `Future` can be dropped (cancelled) at any `Pending`
-//! point per ordinary Rust semantics. Submit a real io_uring read into a
-//! borrowed stack buffer, then let that future get dropped (a timeout, a
-//! `select!`-style race, plain cancellation) before the kernel operation
-//! completes, and the kernel can still write into memory that's since
-//! been freed or reused -- a genuine use-after-free, not a hypothetical
-//! one. (This is exactly why `tokio-uring`/`monoio` use an
-//! owned-buffer-passed-by-value API shape instead of a borrowed one --
-//! a different trait design than this crate's `AsyncRead`/`AsyncWrite`,
-//! out of scope for issue #9's ask specifically, though not for a
-//! `TcpStream`-agnostic API not attempted here.) `IORING_OP_POLL_ADD`
-//! has no such hazard: it never references a user buffer at all, only a
-//! bare fd and a bitmask, so cancelling the future waiting on it is
-//! always safe -- deregistering just stops caring about a completion
-//! that, if it still arrives, finds nothing left in `registry` to wake.
+//! This replaces only readiness notification, not the socket read/write
+//! syscalls. Unlike io_uring reads into borrowed buffers, PollAdd never gives
+//! the kernel access to memory a cancelled future could free. It is therefore
+//! compatible with the existing borrowed-buffer AsyncRead/AsyncWrite API.
 //!
-//! ## Why the ring is only ever touched by one thread
+//! Polls reference no user buffers, but they DO retain kernel file references.
+//! Deregistration must reap the terminal poll and cancellation completions before
+//! the owner closes its fd, or an idle listener can keep its address bound.
 //!
-//! Unlike `epoll_ctl`/`epoll_wait` (independent syscalls the kernel
-//! synchronizes internally, so `register`/`deregister` and the event
-//! loop's wait can safely run on different threads with no
-//! synchronization of their own), an `io_uring` submission/completion
-//! queue is caller-owned `mmap`ed memory -- concurrent pushes from
-//! multiple threads need external synchronization this crate doesn't
-//! provide for you. Rather than wrap the ring in a `Mutex` locked on
-//! every `register`/`deregister` call (real contention: every socket
-//! creation would fight the reactor thread for the same lock), the ring
-//! is moved into the reactor thread's exclusive ownership in [`start`]
-//! and never touched by any other thread again. `register`/`deregister`
-//! instead queue a [`PendingOp`] and wake the reactor thread (the same
-//! `eventfd`-based wake `epoll.rs` uses), which drains that queue and
-//! submits the corresponding `PollAdd`/`PollRemove` itself.
+//! The ring is serialized by `driver`. The background thread waits with poll(2)
+//! OUTSIDE that lock, and invokes wakers outside it too. Deregistration can thus
+//! drive cancellation itself, even from a waker on the reactor thread. It never
+//! waits for the background thread, a task, or a callback to make progress.
 
 use super::{InitialReadiness, Interest, ScheduledIo};
-use io_uring::{opcode, types, IoUring};
+use io_uring::{opcode, squeue, types, IoUring};
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Reserved `user_data` for the wake `eventfd`'s own `PollAdd` --
-/// `RawFd` is always a small non-negative `i32`, so this (and
-/// [`REMOVE_USER_DATA`]) never collide with a real fd cast to `u64`.
-const WAKE_USER_DATA: u64 = u64::MAX;
-/// Reserved `user_data` for every `PollRemove` submission's own
-/// completion -- its result is never interesting (see `drain_pending`),
-/// only that it's recognized and skipped rather than mistaken for
-/// activity on some fd.
-const REMOVE_USER_DATA: u64 = u64::MAX - 1;
-
+const REMOVE_BIT: u64 = 1 << 63;
 const POLL_MASK: u32 = (libc::POLLIN as u32)
     | (libc::POLLOUT as u32)
     | (libc::POLLRDHUP as u32)
     | (libc::POLLHUP as u32)
     | (libc::POLLERR as u32);
 
-enum PendingOp {
-    Register(RawFd),
-    Deregister(RawFd),
+struct Registration {
+    fd: RawFd,
+    io: Arc<ScheduledIo>,
+}
+
+struct Driver {
+    ring: IoUring,
+    // Monotonic identities, rather than fd numbers: a delayed completion must
+    // never wake or re-arm a different socket that reused a closed fd.
+    next_id: u64,
+    ids: HashMap<RawFd, u64>,
+    registry: HashMap<u64, Registration>,
+    completions: VecDeque<(u64, i32)>,
+}
+
+impl Driver {
+    fn push(&mut self, entry: squeue::Entry) -> io::Result<()> {
+        loop {
+            // SAFETY: only PollAdd/PollRemove/Nop entries are used; none
+            // references user memory. The caller holds the driver mutex.
+            if unsafe { self.ring.submission().push(&entry) }.is_ok() {
+                return Ok(());
+            }
+            // Queue pressure is backpressure, never permission to discard an
+            // operation. Interrupted submissions preserve the queued entries.
+            self.submit(0)?;
+        }
+    }
+
+    fn submit(&mut self, want: usize) -> io::Result<()> {
+        loop {
+            match self.ring.submit_and_wait(want) {
+                Ok(_) => {
+                    // A successful enter may submit fewer than the queued
+                    // entries. Keep ownership of the remainder until flushed.
+                    if self.ring.submission().is_empty() {
+                        return Ok(());
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {
+                    // A full CQ can prevent the kernel flushing its overflow
+                    // list. Reap it rather than losing an SQ entry or spinning.
+                    self.reap();
+                    if want != 0 {
+                        return Ok(());
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    fn arm(&mut self, fd: RawFd, id: u64) -> io::Result<()> {
+        self.push(
+            opcode::PollAdd::new(types::Fd(fd), POLL_MASK)
+                .build()
+                .user_data(id),
+        )
+    }
+
+    fn reap(&mut self) {
+        self.completions.extend(
+            self.ring
+                .completion()
+                .map(|cqe| (cqe.user_data(), cqe.result())),
+        );
+    }
+
+    fn cancel(&mut self, id: u64) -> io::Result<()> {
+        let remove_id = id | REMOVE_BIT;
+        self.push(opcode::PollRemove::new(id).build().user_data(remove_id))?;
+        let mut poll_done = false;
+        let mut remove_done = false;
+        self.submit(0)?;
+        loop {
+            self.reap();
+            // Retain unrelated completions for normal readiness dispatch. In
+            // particular, never invoke a waker while holding the ring lock.
+            self.completions.retain(|&(token, result)| {
+                if token == id {
+                    poll_done = true;
+                    return false;
+                }
+                if token == remove_id {
+                    // ENOENT means the one-shot poll had already fired. Its
+                    // terminal CQE still has to be consumed before returning.
+                    // EALREADY likewise requires waiting for that terminal CQE
+                    // (liburing io_uring_prep_poll_remove(3)).
+                    assert!(
+                        result == 0 || result == -libc::ENOENT || result == -libc::EALREADY,
+                        "io_uring PollRemove failed: {result}"
+                    );
+                    remove_done = true;
+                    return false;
+                }
+                true
+            });
+            if poll_done && remove_done {
+                // A CQE can become visible on another submitter's task-work
+                // thread BEFORE io_free_batch_list drops the poll's file ref.
+                // Submit a fileless marker: processing a new SQE acquires the
+                // kernel's uring_lock, serializing with that cleanup. An empty
+                // enter (to_submit == 0) does not acquire that lock. Do not use
+                // IO_DRAIN, which would also wait for unrelated idle polls.
+                // The marker CQE has no registry entry and is simply ignored.
+                self.push(opcode::Nop::new().build().user_data(remove_id))?;
+                return self.submit(0);
+            }
+            self.submit(1)?;
+        }
+    }
 }
 
 pub(crate) struct Reactor {
-    /// `Some` until [`start`](Reactor::start) moves it into the reactor
-    /// thread; `None` forever after -- see this module's docs for why
-    /// nothing else ever touches it.
-    ring: Mutex<Option<IoUring>>,
+    driver: Mutex<Driver>,
     wake_fd: RawFd,
-    registry: Mutex<HashMap<RawFd, Arc<ScheduledIo>>>,
-    pending: Mutex<VecDeque<PendingOp>>,
+    ring_fd: RawFd,
     shutdown: AtomicBool,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -88,199 +154,107 @@ pub(crate) struct Reactor {
 impl Reactor {
     pub(crate) fn new() -> io::Result<Reactor> {
         let ring = IoUring::new(256)?;
-        // SAFETY: plain integer arguments, no memory referenced. Non-
-        // blocking so a drain-read from the reactor thread never itself
-        // blocks -- mirrors `epoll.rs`'s `wake_fd` exactly.
+        let ring_fd = ring.as_raw_fd();
+        // SAFETY: integer arguments, no user memory. Nonblocking so draining
+        // a wake never waits for another writer.
         let wake_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
         if wake_fd < 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(Reactor {
-            ring: Mutex::new(Some(ring)),
+            driver: Mutex::new(Driver {
+                ring,
+                next_id: 0,
+                ids: HashMap::new(),
+                registry: HashMap::new(),
+                completions: VecDeque::new(),
+            }),
             wake_fd,
-            registry: Mutex::new(HashMap::new()),
-            pending: Mutex::new(VecDeque::new()),
+            ring_fd,
             shutdown: AtomicBool::new(false),
             thread: Mutex::new(None),
         })
     }
 
-    /// Spawns the background reactor thread, moving the ring into it --
-    /// split from `new` for the same reason `epoll.rs`'s `start` is:
-    /// the thread closure needs an `Arc<Reactor>`, which doesn't exist
-    /// until after construction.
     pub(crate) fn start(self: &Arc<Self>) {
-        let ring = self
-            .ring
-            .lock()
-            .unwrap()
-            .take()
-            .expect("Reactor::start called more than once");
+        let mut thread = self.thread.lock().unwrap();
+        assert!(thread.is_none(), "Reactor::start called more than once");
         let reactor = self.clone();
-        let handle = std::thread::Builder::new()
-            .name("rusty_tokio-reactor".to_string())
-            .spawn(move || reactor.event_loop(ring))
-            .expect("failed to spawn rusty_tokio reactor thread");
-        *self.thread.lock().unwrap() = Some(handle);
+        *thread = Some(
+            std::thread::Builder::new()
+                .name("rusty_tokio-reactor".to_string())
+                .spawn(move || reactor.event_loop())
+                .expect("failed to spawn rusty_tokio reactor thread"),
+        );
     }
 
-    fn event_loop(&self, mut ring: IoUring) {
-        Self::arm(&mut ring, self.wake_fd, libc::POLLIN as u32, WAKE_USER_DATA);
-        loop {
-            if self.shutdown.load(Ordering::Acquire) {
+    fn event_loop(&self) {
+        while !self.shutdown.load(Ordering::Acquire) {
+            let notifications = {
+                let mut driver = self.driver.lock().unwrap();
+                driver.reap();
+                let completions = std::mem::take(&mut driver.completions);
+                let mut notifications = Vec::new();
+                for (id, result) in completions {
+                    let Some(registration) = driver.registry.get(&id) else {
+                        continue;
+                    };
+                    let fd = registration.fd;
+                    notifications.push((registration.io.clone(), result));
+                    driver.arm(fd, id).expect("io_uring poll re-arm failed");
+                }
+                driver.submit(0).expect("io_uring poll submission failed");
+                notifications
+            };
+            for (io, result) in notifications {
+                let events = result as u32;
+                if result < 0
+                    || events
+                        & (libc::POLLIN as u32
+                            | libc::POLLHUP as u32
+                            | libc::POLLERR as u32
+                            | libc::POLLRDHUP as u32)
+                        != 0
+                {
+                    io.mark_ready(Interest::Read);
+                }
+                if result < 0
+                    || events & (libc::POLLOUT as u32 | libc::POLLHUP as u32 | libc::POLLERR as u32)
+                        != 0
+                {
+                    io.mark_ready(Interest::Write);
+                }
+            }
+            let mut fds = [
+                libc::pollfd {
+                    fd: self.ring_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: self.wake_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            // SAFETY: `fds` is a valid array, both fds live until the reactor
+            // is dropped after joining this thread. No ring lock is held.
+            let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
+            if result < 0 {
+                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
                 return;
             }
-            self.drain_pending(&mut ring);
-
-            match ring.submit_and_wait(1) {
-                Ok(_) => {}
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                // Nothing sane to do with a fatal io_uring_enter error;
-                // exit the thread rather than spin, same as epoll.rs.
-                Err(_) => return,
+            if fds[1].revents != 0 {
+                self.drain_wake_fd();
             }
-
-            // Collected into a plain `Vec` first, deliberately: the
-            // `CompletionQueue` guard borrows `ring` and writes its
-            // consumed head back to the shared ring on drop (freeing
-            // those CQE slots for the kernel to reuse), so it needs to
-            // be dropped -- ending the loop below -- before this
-            // function goes on to call `Self::arm` on `ring` again for
-            // each fd found ready.
-            let mut completions = Vec::new();
-            {
-                let mut cq = ring.completion();
-                // Reloads the queue's cached tail from the shared,
-                // kernel-updated atomic -- without this, a freshly
-                // obtained `CompletionQueue` would only see whatever was
-                // already visible when the ring was constructed, not
-                // what `submit_and_wait` just added.
-                cq.sync();
-                for cqe in &mut cq {
-                    completions.push((cqe.user_data(), cqe.result()));
-                }
-            }
-
-            for (user_data, result) in completions {
-                match user_data {
-                    WAKE_USER_DATA => {
-                        self.drain_wake_fd();
-                        Self::arm(&mut ring, self.wake_fd, libc::POLLIN as u32, WAKE_USER_DATA);
-                    }
-                    REMOVE_USER_DATA => {
-                        // A `PollRemove`'s own completion -- nothing to
-                        // do with it either way (`0` if it found and
-                        // cancelled the poll, `-ENOENT` if the poll had
-                        // already fired or didn't exist).
-                    }
-                    fd_bits => {
-                        let fd = fd_bits as RawFd;
-                        let Some(io) = self.registry.lock().unwrap().get(&fd).cloned() else {
-                            // Deregistered (and possibly closed) since
-                            // this poll was armed -- exactly the stale-
-                            // completion case this module's docs
-                            // describe as safe to just ignore.
-                            continue;
-                        };
-                        if result < 0 {
-                            // A negative result (e.g. `-EBADF` if the fd
-                            // was closed without going through
-                            // `deregister` first) isn't itself readable
-                            // or writable -- but marking both ready lets
-                            // whichever `poll_io` retry loop is waiting
-                            // immediately re-attempt its real syscall
-                            // and surface the actual OS error from that,
-                            // rather than this reactor trying to
-                            // reinterpret a poll-level errno itself.
-                            io.mark_ready(Interest::Read);
-                            io.mark_ready(Interest::Write);
-                        } else {
-                            let events = result as u32;
-                            if events
-                                & (libc::POLLIN as u32
-                                    | libc::POLLHUP as u32
-                                    | libc::POLLERR as u32
-                                    | libc::POLLRDHUP as u32)
-                                != 0
-                            {
-                                io.mark_ready(Interest::Read);
-                            }
-                            if events
-                                & (libc::POLLOUT as u32
-                                    | libc::POLLHUP as u32
-                                    | libc::POLLERR as u32)
-                                != 0
-                            {
-                                io.mark_ready(Interest::Write);
-                            }
-                        }
-                        // `PollAdd` defaults to one-shot (see its own
-                        // doc comment in the `io-uring` crate): unlike
-                        // level-triggered `epoll_wait`, which keeps
-                        // reporting readiness on every call for as long
-                        // as it holds, a completed poll must be
-                        // resubmitted to keep watching this fd -- this
-                        // is what makes that resubmission automatic
-                        // rather than something a caller needs to
-                        // remember, matching epoll's own always-armed
-                        // behavior from the rest of this crate's point
-                        // of view.
-                        Self::arm(&mut ring, fd, POLL_MASK, fd as u64);
-                    }
-                }
-            }
-        }
-    }
-
-    fn drain_pending(&self, ring: &mut IoUring) {
-        let ops: Vec<PendingOp> = std::mem::take(&mut *self.pending.lock().unwrap()).into();
-        for op in ops {
-            match op {
-                PendingOp::Register(fd) => Self::arm(ring, fd, POLL_MASK, fd as u64),
-                PendingOp::Deregister(fd) => {
-                    let entry = opcode::PollRemove::new(fd as u64)
-                        .build()
-                        .user_data(REMOVE_USER_DATA);
-                    let mut sq = ring.submission();
-                    // SAFETY: `PollRemove` (like `PollAdd`) references
-                    // no user buffer -- only the `user_data` of the poll
-                    // it's cancelling -- so there's nothing that could
-                    // become invalid for the operation's duration.
-                    let _ = unsafe { sq.push(&entry) };
-                }
-            }
-        }
-    }
-
-    /// Submits a one-shot `PollAdd` for `fd` watching `mask`, tagged
-    /// with `user_data` -- shared by the wake `eventfd`'s own arming and
-    /// every real registered fd's (re-)arming.
-    fn arm(ring: &mut IoUring, fd: RawFd, mask: u32, user_data: u64) {
-        let entry = opcode::PollAdd::new(types::Fd(fd), mask)
-            .build()
-            .user_data(user_data);
-        let mut sq = ring.submission();
-        // SAFETY: see this module's top-level docs -- `PollAdd` never
-        // references a user buffer, so nothing can become invalid for
-        // the operation's duration regardless of what happens to `fd`
-        // afterward.
-        if unsafe { sq.push(&entry) }.is_err() {
-            // The submission queue is momentarily full -- flush what's
-            // already queued to free space and retry once. In practice
-            // this shouldn't happen at this ring size for any realistic
-            // number of concurrently-registered fds.
-            drop(sq);
-            let _ = ring.submit();
-            let mut sq = ring.submission();
-            let _ = unsafe { sq.push(&entry) };
         }
     }
 
     fn drain_wake_fd(&self) {
         let mut buf = [0u8; 8];
-        // SAFETY: `buf` is a valid 8-byte buffer; `wake_fd` is a valid,
-        // non-blocking eventfd, so this never blocks even with nothing
-        // to drain.
+        // SAFETY: valid 8-byte buffer and an owned nonblocking eventfd.
         unsafe {
             libc::read(self.wake_fd, buf.as_mut_ptr().cast(), buf.len());
         }
@@ -288,8 +262,7 @@ impl Reactor {
 
     fn wake(&self) {
         let one: u64 = 1;
-        // SAFETY: `&one` is a valid 8-byte buffer; `wake_fd` is a valid
-        // eventfd.
+        // SAFETY: valid 8-byte buffer and an owned eventfd.
         unsafe {
             libc::write(self.wake_fd, (&one as *const u64).cast(), 8);
         }
@@ -299,30 +272,46 @@ impl Reactor {
         self.register_with(fd, InitialReadiness::Optimistic)
     }
 
-    /// [`register`](Self::register) with an explicit starting
-    /// readiness -- see [`InitialReadiness`] for the one case (a
-    /// connect still in flight) where the optimistic default is wrong.
     pub(crate) fn register_with(
         &self,
         fd: RawFd,
         initial: InitialReadiness,
     ) -> io::Result<Arc<ScheduledIo>> {
         let io = Arc::new(ScheduledIo::with_initial(initial));
-        self.registry.lock().unwrap().insert(fd, io.clone());
-        self.pending
-            .lock()
-            .unwrap()
-            .push_back(PendingOp::Register(fd));
+        let mut driver = self.driver.lock().unwrap();
+        let id = driver.next_id;
+        assert!(
+            id < REMOVE_BIT,
+            "io_uring registration identities exhausted"
+        );
+        driver.next_id += 1;
+        driver.arm(fd, id)?;
+        driver.submit(0)?;
+        driver.ids.insert(fd, id);
+        driver
+            .registry
+            .insert(id, Registration { fd, io: io.clone() });
+        drop(driver);
         self.wake();
         Ok(io)
     }
 
     pub(crate) fn deregister(&self, fd: RawFd) {
-        self.registry.lock().unwrap().remove(&fd);
-        self.pending
-            .lock()
-            .unwrap()
-            .push_back(PendingOp::Deregister(fd));
+        let mut driver = self.driver.lock().unwrap();
+        let Some(id) = driver.ids.remove(&fd) else {
+            return;
+        };
+        let registration = driver.registry.remove(&id);
+        // A fatal submission error cannot be silently treated as successful
+        // teardown: the kernel may still own a reference to the listener.
+        driver
+            .cancel(id)
+            .expect("io_uring poll cancellation failed");
+        drop(driver);
+        // Dropping a stored waker can itself drop another registered fd.
+        drop(registration);
+        // Cancellation may have consumed other readiness CQEs. Dispatch them
+        // even if the ring itself has no completions left to make it readable.
         self.wake();
     }
 
@@ -337,15 +326,149 @@ impl Reactor {
 
 impl Drop for Reactor {
     fn drop(&mut self) {
-        // The ring itself (and its own internal fd) is dropped by
-        // `event_loop`'s local `ring: IoUring` parameter going out of
-        // scope when that function returns after `shutdown()` joins it
-        // -- only `wake_fd` is this struct's own to close.
-        //
-        // SAFETY: `wake_fd` is owned exclusively by this `Reactor` and
-        // still open at this point.
+        // SAFETY: this reactor owns the eventfd; its background thread has
+        // exited. The driver field owns and closes the ring itself.
         unsafe {
             libc::close(self.wake_fd);
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{TcpListener, TcpStream};
+    use std::os::fd::AsRawFd;
+    use std::sync::mpsc;
+    use std::task::{Context, Wake, Waker};
+    use std::time::Duration;
+
+    struct PauseWake {
+        entered: mpsc::Sender<()>,
+        resume: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl Wake for PauseWake {
+        fn wake(self: Arc<Self>) {
+            self.entered.send(()).unwrap();
+            self.resume
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+        }
+    }
+
+    // A different fd's waker stalls the background thread after it has
+    // armed the idle listener. Teardown must release that listener's
+    // kernel poll reference even when the background thread cannot run.
+    #[test]
+    fn deregister_releases_listener_while_reactor_is_in_a_waker() {
+        let reactor = Arc::new(Reactor::new().unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        reactor.register(listener.as_raw_fd()).unwrap();
+        let trigger = TcpListener::bind("127.0.0.1:0").unwrap();
+        let io = reactor.register(trigger.as_raw_fd()).unwrap();
+        io.clear_if_unchanged(Interest::Read, io.snapshot(Interest::Read));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let waker = Waker::from(Arc::new(PauseWake {
+            entered: entered_tx,
+            resume: Mutex::new(resume_rx),
+        }));
+        assert!(io
+            .poll_ready(&mut Context::from_waker(&waker), Interest::Read)
+            .is_pending());
+        reactor.start();
+        let connection = TcpStream::connect(trigger.local_addr().unwrap()).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        reactor.deregister(listener.as_raw_fd());
+        drop(listener);
+        let rebound = TcpListener::bind(addr);
+        resume_tx.send(()).unwrap();
+        reactor.shutdown();
+        drop(connection);
+        assert!(
+            rebound.is_ok(),
+            "listener address still retained: {rebound:?}"
+        );
+    }
+
+    #[test]
+    fn cancellation_survives_a_full_submission_queue_and_preserves_other_completions() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let trigger = TcpListener::bind("127.0.0.1:0").unwrap();
+        let connection = TcpStream::connect(trigger.local_addr().unwrap()).unwrap();
+        let mut driver = Driver {
+            ring: IoUring::new(2).unwrap(),
+            next_id: 2,
+            ids: HashMap::new(),
+            registry: HashMap::new(),
+            completions: VecDeque::new(),
+        };
+        driver.arm(listener.as_raw_fd(), 0).unwrap();
+        driver.arm(trigger.as_raw_fd(), 1).unwrap();
+        assert!(driver.ring.submission().is_full());
+        // PollRemove must make room, not be discarded. While waiting for its
+        // terminal CQEs it must also retain the unrelated readable listener.
+        driver.cancel(0).unwrap();
+        assert!(driver
+            .completions
+            .iter()
+            .any(|&(id, events)| id == 1 && events & libc::POLLIN as i32 != 0));
+        driver.cancel(1).unwrap();
+        assert!(driver
+            .completions
+            .iter()
+            .all(|&(id, _)| id & REMOVE_BIT != 0));
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let rebound = TcpListener::bind(addr).unwrap();
+        drop(rebound);
+        drop(connection);
+    }
+
+    struct DropFromWake {
+        reactor: Arc<Reactor>,
+        listener: Mutex<Option<TcpListener>>,
+        done: mpsc::Sender<std::io::Result<TcpListener>>,
+    }
+
+    impl Wake for DropFromWake {
+        fn wake(self: Arc<Self>) {
+            let listener = self.listener.lock().unwrap().take().unwrap();
+            let addr = listener.local_addr().unwrap();
+            self.reactor.deregister(listener.as_raw_fd());
+            drop(listener);
+            self.done.send(TcpListener::bind(addr)).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_waker_can_deregister_another_listener_on_the_reactor_thread() {
+        let reactor = Arc::new(Reactor::new().unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        reactor.register(listener.as_raw_fd()).unwrap();
+        let trigger = TcpListener::bind("127.0.0.1:0").unwrap();
+        let io = reactor.register(trigger.as_raw_fd()).unwrap();
+        io.clear_if_unchanged(Interest::Read, io.snapshot(Interest::Read));
+        let (done_tx, done_rx) = mpsc::channel();
+        let waker = Waker::from(Arc::new(DropFromWake {
+            reactor: reactor.clone(),
+            listener: Mutex::new(Some(listener)),
+            done: done_tx,
+        }));
+        assert!(io
+            .poll_ready(&mut Context::from_waker(&waker), Interest::Read)
+            .is_pending());
+        reactor.start();
+        let connection = TcpStream::connect(trigger.local_addr().unwrap()).unwrap();
+        let rebound = done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        reactor.shutdown();
+        drop(connection);
+        assert!(
+            rebound.is_ok(),
+            "listener address still retained: {rebound:?}"
+        );
     }
 }

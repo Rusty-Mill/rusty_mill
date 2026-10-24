@@ -102,9 +102,9 @@ mod ct {
                 use super::Point;
                 use num_bigint::BigUint;
                 use $krate::elliptic_curve::group::Group as _;
-                use $krate::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
+                use $krate::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
                 use $krate::elliptic_curve::PrimeField;
-                use $krate::{AffinePoint, EncodedPoint, FieldBytes, ProjectivePoint, Scalar};
+                use $krate::{AffinePoint, FieldBytes, ProjectivePoint, Scalar, Sec1Point};
 
                 fn order() -> BigUint {
                     BigUint::parse_bytes($order_hex, 16).unwrap()
@@ -131,12 +131,12 @@ mod ct {
                     match pt {
                         None => ProjectivePoint::IDENTITY,
                         Some((x, y)) => {
-                            let ep = EncodedPoint::from_affine_coordinates(
+                            let ep = Sec1Point::from_affine_coordinates(
                                 &pad(&x.to_bytes_be()),
                                 &pad(&y.to_bytes_be()),
                                 false,
                             );
-                            Option::<AffinePoint>::from(AffinePoint::from_encoded_point(&ep))
+                            Option::<AffinePoint>::from(AffinePoint::from_sec1_point(&ep))
                                 .map(ProjectivePoint::from)
                                 // Guarded upstream by is_on_curve; an off-curve
                                 // point here would already have been rejected.
@@ -146,7 +146,7 @@ mod ct {
                 }
 
                 fn from_proj(p: ProjectivePoint) -> Point {
-                    let ep = p.to_affine().to_encoded_point(false);
+                    let ep = p.to_affine().to_sec1_point(false);
                     match (ep.x(), ep.y()) {
                         (Some(x), Some(y)) => {
                             Some((BigUint::from_bytes_be(x), BigUint::from_bytes_be(y)))
