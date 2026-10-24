@@ -5,7 +5,7 @@ use rusty_term::{backend, config, core, runtime, shells, term};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use rusty_term::sync::Mutex;
 
 use backend::Backend;
 #[cfg(unix)]

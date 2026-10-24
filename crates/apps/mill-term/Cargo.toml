@@ -24,9 +24,6 @@ rusty_term = { workspace = true }
 # rusty_text build and prepending it to the child's PATH -- a build-artifact
 # lookup, not a Rust API dependency.
 rusty_git = { workspace = true }
-# Already a real (transitive) dependency of rusty_term's own Grid mutex;
-# declared directly since main.rs constructs that Mutex itself.
-parking_lot = "0.12"
 
 [[bin]]
 name = "mill-term"

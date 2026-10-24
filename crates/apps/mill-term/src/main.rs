@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use rusty_term::sync::Mutex;
 
 use rusty_term::backend::Backend;
 #[cfg(unix)]
