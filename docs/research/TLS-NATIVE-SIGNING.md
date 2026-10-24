@@ -130,18 +130,51 @@ independent human review. They cover both curves, zero and repeated nonzero
 noise, both HMAC padding boundaries, and SHA message-padding boundaries;
 the public production signing path matches them and `ring` verifies them.
 
-The ordinary suite checks only 2,000 signatures per curve with a deterministic
-test noise stream. **Still outstanding before TLS wiring:** the planned 100,000
-repeated-message signatures per curve with fresh CSPRNG noise, nonce top-bit
-bias evidence, P-384 signing timing with A/A and control coverage, and the
-independent signing-code review recorded with reviewer, scope and exact commit.
-P-256 timing and disassembly checks pass locally on rustc 1.98.1 x86-64.
-The corrected-head taint run is unverified here: Valgrind 3.24 stops at startup
-because the host libc loader lacks matching debug symbols; obtaining the matching
-symbols was unavailable in this environment. Rerun `scripts/ct_check.sh` on a
-suitable runner before treating that evidence as satisfied. These are bounded
-machine-specific checks, not constant-time certification. The full gap-5
-evidence plan is not complete.
+A second, separately written reference,
+`crates/foundation/rusty_pk/scripts/check_hedged_ecdsa.py`, reproduces RFC 6979
+A.2.5 and A.2.6 and recomputes `r` and `s` for all 20 fixtures. It shares no code
+with the generator, and agreement between two implementations by the same
+implementer is not a human review.
+
+**Evidence run at `c8cf39c55`.** The implementer (Claude Code, the working session)
+ran these locally on rustc 1.98.1, x86-64. The results are not reproduced by any
+reviewer.
+
+- **100,000 signatures:** no repeated `r` over 100,000 signatures of one message per
+  curve, with OS CSPRNG noise (`ring` `SystemRandom`). This is
+  `hedged_nonces_do_not_repeat_over_100k_signatures`, ignored in ordinary runs. It
+  passed once in release in 337 s. The ordinary suite checks 2,000 signatures per
+  curve with a deterministic test noise stream.
+- **Nonce top-bit bias:** over 20,000 DRBG nonces per curve, each of the top 8 bits of
+  `k` is within 5 sigma of uniform (`nonce_top_bits_show_no_bias`). This is a
+  statistical smoke test only.
+- **Valgrind taint:** `scripts/ct_check.sh` with Valgrind 3.22.0 exited 0. In
+  `ecdsa-sign256` and `ecdsa-sign384`, with the key and the noise secret, exactly 4
+  reports are verdict sites and every other report passes through `ecdsa::output`.
+  The `ecdsa-control` planted branch is caught and refused. An earlier attempt on
+  another host, with Valgrind 3.24, could not start because that host lacked libc
+  debug symbols.
+- **Disassembly pins:** all pass. `sign_seeded` has 41 jumps, `Rfc6979::mac` 5 and
+  `generator_x` 9, with no divisions. A count match is drift detection, not proof.
+- **Timing:** both curves have sparse-vs-dense key tests and A/A baselines, with key
+  pairs whose classes give equal `r` and `s` encoded lengths. Three runs gave |t| at
+  most 1.13 for the key classes and at most 1.64 for A/A, against a threshold of 4.5.
+  An earlier P-256 run on another host gave an A/A |t| of 3.60.
+
+**Limits.**
+- These are machine-specific runs on one toolchain, not constant-time certification.
+  The claim stays "no leak found by these methods".
+- There is no planted-leak timing control for ECDSA signing. The control is a
+  taint-mode control only.
+- The 100,000-signature test is not in CI.
+
+**Still outstanding before TLS wiring:**
+- the independent signing-code review, recorded with reviewer, scope and exact commit
+  (S5);
+- PKCS#8 parsing;
+- the engine suites and native BoGo with server scenarios.
+
+The full gap-5 evidence plan is not complete.
 
 ## 5. Effort
 
