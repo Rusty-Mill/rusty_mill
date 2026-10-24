@@ -1,5 +1,7 @@
 //! The request a handler sees.
 
+use std::net::SocketAddr;
+
 use rusty_http::{HeaderMap, Method};
 
 /// A request with its body read whole. The server builds one per request;
@@ -12,6 +14,7 @@ pub struct Request {
     headers: HeaderMap,
     body: Vec<u8>,
     params: Vec<(String, String)>,
+    peer_addr: Option<SocketAddr>,
 }
 
 impl Request {
@@ -24,6 +27,7 @@ impl Request {
             headers: HeaderMap::new(),
             body: Vec::new(),
             params: Vec::new(),
+            peer_addr: None,
         }
     }
 
@@ -47,6 +51,20 @@ impl Request {
     pub fn with_body(mut self, body: impl Into<Vec<u8>>) -> Self {
         self.body = body.into();
         self
+    }
+
+    /// Sets the address of the client that sent it. The server sets this;
+    /// a test sets it to exercise [`ConnectInfo`](crate::extract::ConnectInfo).
+    pub fn with_peer_addr(mut self, addr: SocketAddr) -> Self {
+        self.peer_addr = Some(addr);
+        self
+    }
+
+    /// The address of the client that sent it, when known: always for a
+    /// request the server read, never for one built in process unless
+    /// [`Request::with_peer_addr`] set it.
+    pub fn peer_addr(&self) -> Option<SocketAddr> {
+        self.peer_addr
     }
 
     /// The method.

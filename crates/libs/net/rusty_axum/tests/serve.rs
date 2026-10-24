@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use futures_core::Stream;
 use rcgen::{CertificateParams, KeyPair};
-use rusty_axum::response::sse::{Event, Sse};
+use rusty_axum::response::sse::{Event, KeepAlive, Sse};
 use rusty_axum::routing::{get, post};
-use rusty_axum::{serve, IntoResponse, Router, ServeOptions, Server};
+use rusty_axum::{serve, ConnectInfo, IntoResponse, Router, ServeOptions, Server};
 use rusty_http::async_tokio::AsyncTransport;
 use rusty_http::body::{response_framing, Framing};
 use rusty_http::head::{RequestHead, ResponseHead};
@@ -31,6 +31,8 @@ static EVENTS: Mutex<Option<Events>> = Mutex::new(None);
 /// The same for `/events10`, the HTTP/1.0 test's own, so the two tests
 /// cannot race for one channel.
 static EVENTS_10: Mutex<Option<Events>> = Mutex::new(None);
+/// The same for `/quiet`, the keep-alive test's own.
+static QUIET: Mutex<Option<Events>> = Mutex::new(None);
 
 fn app() -> Router {
     Router::new()
@@ -39,6 +41,19 @@ fn app() -> Router {
         .route("/events", get(events))
         .route("/events10", get(events_10))
         .route("/finite", get(finite))
+        .route("/quiet", get(quiet))
+        .route(
+            "/peer",
+            get(|ConnectInfo(peer)| async move { peer.to_string() }),
+        )
+}
+
+async fn quiet() -> impl IntoResponse {
+    let rx = QUIET.lock().unwrap().take().unwrap();
+    let keep_alive = KeepAlive::new()
+        .interval(Duration::from_millis(50))
+        .text("ping");
+    Sse::new(Recv(Some(Box::pin(next(rx))))).keep_alive(keep_alive)
 }
 
 /// A short stream that ends on its own.
@@ -288,6 +303,47 @@ async fn sse_streams_and_shutdown_ends_it() {
         None,
         "the body ends with its terminating chunk"
     );
+    drop(tx);
+}
+
+#[rusty_tokio::test]
+async fn handlers_see_the_peer_address() {
+    let server = start(ServeOptions::default(), None);
+    let tcp = TcpStream::connect_addr(server.local_addr()).await.unwrap();
+    let local = tcp.local_addr().unwrap();
+    let mut conn = AsyncTransport::new(tcp);
+    send(&mut conn, Method::Get, "/peer", &[], b"").await;
+    assert_eq!(read(&mut conn, &Method::Get).await.1, local.to_string());
+}
+
+/// A quiet stream gets the keep-alive comment; an event resets the wait.
+#[rusty_tokio::test]
+async fn sse_keep_alive_fills_quiet_time() {
+    let (tx, rx) = unbounded_channel();
+    *QUIET.lock().unwrap() = Some(rx);
+    let server = start(ServeOptions::default(), None);
+    let mut conn = connect(&server).await;
+    send(&mut conn, Method::Get, "/quiet", &[], b"").await;
+    let head = conn.read_response_head(1024).await.unwrap();
+    let framing = response_framing(&head.headers, &Method::Get, head.status).unwrap();
+    let mut reader = conn.into_body_reader(framing);
+    macro_rules! chunk {
+        () => {
+            timeout(Duration::from_secs(5), reader.next_chunk())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        };
+    }
+    assert_eq!(chunk!(), b":ping\n\n");
+    tx.send(Ok(Event::default().data("a"))).unwrap();
+    let mut seen = chunk!();
+    while seen == b":ping\n\n" {
+        seen = chunk!();
+    }
+    assert_eq!(seen, b"data: a\n\n");
+    assert_eq!(chunk!(), b":ping\n\n");
     drop(tx);
 }
 

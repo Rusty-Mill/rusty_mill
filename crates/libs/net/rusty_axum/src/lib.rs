@@ -31,7 +31,7 @@ pub mod serve;
 mod stop;
 
 pub use body::{Body, BodyStream, BoxError};
-pub use extract::{FromRequest, Json, Path, Query, Rejection, State};
+pub use extract::{ConnectInfo, FromRequest, Json, Path, Query, Rejection, State};
 pub use handler::Handler;
 pub use request::Request;
 pub use response::{IntoResponse, Response};
