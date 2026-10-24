@@ -310,12 +310,16 @@ Fixed in this change:
 - **Stale statements** in this note and in the change fragments (nothing implemented, nothing past step 1, no pins or CI,
   "CI runs all of it") are corrected.
 
-Open, for the owner:
-- **The AES types are exported unconditionally** from `rusty_aead`. Nothing in the repository uses them, but that is not a
-  gate: a downstream user could. A default-off cargo feature (for example `experimental-aes-gcm`) would make the status
-  explicit; it is a public-API change, so it has not been made.
-  **Decided 2026-10-23** (the owner's answer in the working session on 2026-10-23 ("Go with your recommendation"), the implementer's transcription, not yet restated from the owner's GitHub account): the AES types stay exported unconditionally. Inside the repository their
-  only user is `rusty_tls`'s native backend. The TLS gates (`native-crypto` plus `--cfg rusty_tls_native_crypto`) cover only `rusty_tls`'s use. The AES types themselves stay public, so any crate that depends on `rusty_aead` can call them directly. A default-off feature would make that use opt-in. The owner chose not to add one.
+Export decision (2026-10-23): the earlier unconditional-export decision recorded in #942
+was superseded by the owner's later working-session concurrence ("Concur", 23:12:54 UTC).
+`rusty_aead` now requires its default-off `aes-gcm` feature for `Aes128Gcm`, `Aes256Gcm`,
+`GCM_NONCE_LEN`, `GCM_TAG_LEN` and the AES/GHASH implementation. Direct consumers must opt in;
+`rusty_tls` does so through `native-crypto`, preserving its cipher suites and cfg gates.
+Cargo features unify, so a dependency may enable the API for the resolved crate. This is API
+opt-in, not a security boundary. The AES implementation and prior review are complete; the
+owner's review-completion attestation is recorded in the plan section 11b.
+
+Other evidence follow-ups (historical items, unchanged by this API decision):
 - The ChaCha20-Poly1305 timing baselines have the same workload mismatch (erratum, item 3).
 - Everything under "Not done" in section 9.
 
