@@ -3,7 +3,9 @@
 Status: proposed, 2026-10-24. The owner chose to write a first-party `.replay` parser
 instead of keeping `boxcars` (board card w7). This note sizes that work before any code
 is written. ADR-0008 kept `boxcars` and `subtr-actor` as Tier T until a first-party
-parser was decided; this is that decision's plan.
+parser was decided; this is that decision's plan. The estimates and slices below are a
+proposal: each PR is still reviewed and approved on its own, and this note does not
+authorize implementation.
 
 ## What we use today
 
@@ -49,15 +51,26 @@ with a clear "unsupported version" error rather than a guess.
 
 ## How we prove it
 
-`boxcars` and `subtr-actor` stay as **dev-dependencies**, which Tier S allows as test
-oracles that never ship.
+`boxcars` and `subtr-actor` stay as **oracles only**: dev-dependencies, which Tier S allows
+as test oracles that never ship. A dev-dependency is visible to `tests/`, `examples/` and
+benches, not to a crate's library or `[[bin]]` targets, so oracle use has to move there:
+
+- **`recon-check`** today is a library plus a bin with `boxcars` and `subtr-actor` as normal
+  dependencies. Its comparator stays in the library, typed on our model only; the
+  `subtr-actor` side moves into its `tests/` (the committed samples, in CI) and an
+  `examples/recon_corpus.rs` for the private corpus (`cargo run --example`).
+- **`corpus_check`** (a `[[bin]]` in `rb_replay_ingest` that runs `boxcars` and
+  `subtr-actor`) becomes `examples/corpus_check.rs`, with the new differential mode.
+- No bounded tooling exception is proposed. If a later slice finds an oracle that cannot
+  live in tests or examples, it asks for one explicitly, naming the crate and its exit.
 
 1. **Differential decode.** For every replay we can reach, our `DecodedReplay` must equal
    the one `boxcars_adapter` builds, update for update. In CI: the three committed replays.
-   On the game machine: the private corpus, through a differential mode added to
-   `rb_replay_ingest`'s existing `corpus_check` bin (real replays never enter the repo).
+   On the game machine: the private corpus, through the `corpus_check` example's
+   differential mode (real replays never enter the repo).
 2. **Downstream unchanged.** `replay-analyzer`, `replay-viewer` and `bc-clone` goldens pass
-   unmodified after the switch; `recon-check` keeps comparing against `subtr-actor`.
+   unmodified after the switch; `recon-check`'s tests and corpus example keep comparing
+   against `subtr-actor`.
 3. **`rb_replay_ingest`.** Same `PhysicsFrame`s as today within float rounding, checked by
    the existing tests and `rb-verify`'s replay mode.
 
@@ -67,10 +80,10 @@ oracles that never ship.
 |---|---|---|
 | P1 | `rl_replay`: bit reader, container, CRC, header | Headers of all three samples equal `boxcars`'s |
 | P2 | Tables and the network stream, all attribute types | Every frame of the samples decodes; differential test green |
-| P3 | `RlReplayParser` adapter; `replay-analyzer` switches to it, `boxcars` moves to dev | All downstream goldens unchanged; corpus run clean on the game machine |
-| P4 | `rb_replay_ingest` off `subtr-actor` | Its tests and `rb-verify` replay scores unchanged |
+| P3 | `RlReplayParser` adapter; `replay-analyzer` switches to it; its `boxcars` use moves to tests | All downstream goldens unchanged; corpus run clean on the game machine |
+| P4 | `rb_replay_ingest` off `subtr-actor`; `corpus_check` and `recon-check`'s oracle side move to tests and examples | Its tests and `rb-verify` replay scores unchanged |
 | P5 | Input hints for r6: `ReplicatedThrottle`/`Steer`, `ReplicatedTorqueInput`, dodge `DodgeTorque`, jump, double-jump and dodge `ReplicatedActive`, handbrake | New `ActorUpdate` variants and per-car input hints in `PhysicsFrame` |
-| P6 | Drop `boxcars` and `subtr-actor` from normal dependencies everywhere; record `rl_replay` as Tier S | Lock shows them only as dev-dependencies |
+| P6 | Drop `boxcars` and `subtr-actor` from normal dependencies everywhere; record `rl_replay` as Tier S | `cargo tree -e normal` (no dev edges) on every workspace member shows neither crate, checked from manifests or `cargo metadata` dependency kinds; `Cargo.lock` cannot show this, it does not record kinds |
 
 P1 to P4 are the replacement; P5 is what input recovery (r6) wants from a parser. P5 does
 not strictly need our own parser: `boxcars` already decodes those attributes and our
