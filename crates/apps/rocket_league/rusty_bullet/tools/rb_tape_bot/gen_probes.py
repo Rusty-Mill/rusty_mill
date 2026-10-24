@@ -155,14 +155,24 @@ for ang in (10, 20, 30, 45, 60):
 print(len(names5), "round-5 scenarios")
 
 
-# ---- round 6: ball speed cap and rest (board b19; the captures so far reach 3,541 uu/s and never stop)
+# ---- round 6: ball speed cap and rest (board b19; the captures so far reach 3,541 uu/s and never stop).
+# Every ball state is explicit, spin included: an omitted angular_velocity is zero in the port's
+# scenario but left as the game has it by the tape bot. settle=0 because settling is simulated
+# motion, not a hold.
+BALL_R = 91.25  # contact radius (ADR-0034)
 names6 = []
 for v in (4500, 6500):
     n = f"probe_ball_fast_{v}"
     add(n, f"ball launched along the floor at {v} uu/s toward the side wall (6000 cap)", ball_car, [st(180)],
-        ball={"location": [-3000, 0, 93.15], "velocity": [v, 0, 0]})
+        ball={"location": [-3000, 0, 93.15], "velocity": [v, 0, 0], "angular_velocity": [0, 0, 0]}, settle=0)
     names6.append(n)
-add("probe_ball_rest", "ball rolling on the floor at 600 uu/s until it stops (rolling and sleep thresholds)", ball_car, [st(1200)],
-    ball={"location": [0, -2000, 93.15], "velocity": [0, 600, 0]})
-names6.append("probe_ball_rest")
+# Rest: the ball already rolling without sliding (spin = v / r) at a ladder of low speeds, held 5 s.
+# Rolling only decays about 3%/s, so a ball started faster never gets near rest in a capture; the
+# ladder brackets the speed below which the game freezes it instead. The port's own thresholds
+# (20 uu/s and 0.5 rad/s for 0.5 s, unmeasured) stop 10 and 20 and let 40 and 80 roll on.
+for v in (10, 20, 40, 80):
+    n = f"probe_ball_rest_{v}"
+    add(n, f"ball rolling at {v} uu/s with matching spin, held 5 s (does it freeze?)", ball_car, [st(600)],
+        ball={"location": [0, -2000, 93.15], "velocity": [0, v, 0], "angular_velocity": [-v / BALL_R, 0, 0]}, settle=0)
+    names6.append(n)
 print(len(names6), "round-6 scenarios")

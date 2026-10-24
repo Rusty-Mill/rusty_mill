@@ -1,6 +1,6 @@
 {
   "name": "probe_ball_fast_6500: ball launched along the floor at 6500 uu/s toward the side wall (6000 cap)",
-  "settle_ticks": 60,
+  "settle_ticks": 0,
   "car": {
     "location": [
       -3500,
@@ -32,6 +32,11 @@
     ],
     "velocity": [
       6500,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
       0,
       0
     ]

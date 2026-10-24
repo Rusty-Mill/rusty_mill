@@ -1,6 +1,6 @@
 {
-  "name": "probe_ball_rest: ball rolling on the floor at 600 uu/s until it stops (rolling and sleep thresholds)",
-  "settle_ticks": 60,
+  "name": "probe_ball_rest_40: ball rolling at 40 uu/s with matching spin, held 5 s (does it freeze?)",
+  "settle_ticks": 0,
   "car": {
     "location": [
       -3500,
@@ -32,13 +32,18 @@
     ],
     "velocity": [
       0,
-      600,
+      40,
+      0
+    ],
+    "angular_velocity": [
+      -0.4383561643835616,
+      0,
       0
     ]
   },
   "steps": [
     {
-      "ticks": 1200
+      "ticks": 600
     }
   ]
 }
