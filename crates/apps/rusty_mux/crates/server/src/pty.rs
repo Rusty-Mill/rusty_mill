@@ -1,9 +1,11 @@
-//! A block's PTY, driven by the reactor through a non-blocking master fd.
+//! A block's PTY, driven by the reactor through a non-blocking master fd,
+//! and the program running on it.
 
 use std::io;
+use std::time::{Duration, Instant};
 
 use platform::error::{ErrorKind, PlatformError};
-use platform::process::{Child, Command};
+use platform::process::{Child, Command, Signal};
 use platform::pty::PtyMaster;
 use platform::term::WinSize;
 use platform_linux::{LinuxChild, LinuxPty, LinuxPtyMaster};
@@ -12,27 +14,103 @@ use rusty_tokio::io::AsyncFd;
 
 use crate::Config;
 
+/// How long a closed block's program has to exit after `SIGHUP` before its
+/// process group gets `SIGKILL`.
+const GRACE: Duration = Duration::from_secs(1);
+/// How often [`Process::reap`] polls for the exit.
+const POLL: Duration = Duration::from_millis(10);
+
+/// The master side of a block's PTY. Shared by the reader and by writers;
+/// the fd closes when the last handle drops.
 pub(crate) struct Pty {
     master: AsyncFd<LinuxPtyMaster>,
-    child: LinuxChild,
+}
+
+/// A block's program, owned until it is reaped. The pty child leads its own
+/// session and process group, so signals go to the whole group.
+pub(crate) struct Process {
+    child: Option<LinuxChild>,
+}
+
+/// Starts `config`'s program on a new PTY of `size`.
+pub(crate) fn spawn(config: &Config, size: Size) -> io::Result<(Pty, Process)> {
+    let mut cmd = Command::new(config.program.clone(), config.cwd.clone());
+    for arg in &config.args {
+        cmd = cmd.arg(arg.clone());
+    }
+    let (master, child) = LinuxPty
+        .spawn_concrete(&cmd, win_size(size))
+        .map_err(to_io)?;
+    // Owned before anything else can fail, so an error below still reaps it.
+    let process = Process { child: Some(child) };
+    master.set_nonblocking(true).map_err(to_io)?;
+    let pty = Pty {
+        master: AsyncFd::new(master)?,
+    };
+    Ok((pty, process))
+}
+
+impl Process {
+    /// Hangs up the program's process group and waits for it to exit,
+    /// escalating to `SIGKILL` after [`GRACE`]; a program that ignores
+    /// `SIGHUP` is still reaped. Runs as its own task so the server keeps
+    /// serving meanwhile.
+    pub(crate) async fn reap(mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let deadline = Instant::now() + GRACE;
+        let mut killed = false;
+        // An unreaped leader keeps its pgid, so signalling the group before
+        // `try_wait` reports the exit cannot reach an unrelated group.
+        if matches!(child.try_wait(), Ok(None)) {
+            signal(&child, Signal::Hup);
+        }
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => {}
+                Err(err) => {
+                    // Put back so the drop fallback still kills and reaps it.
+                    eprintln!("rusty-mux-server: polling pid {}: {err:?}", child.id());
+                    self.child = Some(child);
+                    return;
+                }
+            }
+            if !killed && Instant::now() >= deadline {
+                signal(&child, Signal::Kill);
+                killed = true;
+            }
+            rusty_tokio::time::sleep(POLL).await;
+        }
+    }
+}
+
+fn signal(child: &LinuxChild, sig: Signal) {
+    if let Err(err) = child.kill_tree(sig) {
+        eprintln!("rusty-mux-server: signalling pid {}: {err:?}", child.id());
+    }
+}
+
+impl Drop for Process {
+    /// The fallback when a block is dropped without [`Process::reap`], for
+    /// instance when the server stops: kill the group and reap it now.
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        signal(&child, Signal::Kill);
+        let pid = child.id();
+        if let Err(err) = Box::new(child).wait() {
+            eprintln!("rusty-mux-server: reaping pid {pid}: {err:?}");
+        }
+    }
 }
 
 impl Pty {
-    pub(crate) fn spawn(config: &Config, size: Size) -> io::Result<Self> {
-        let mut cmd = Command::new(config.program.clone(), config.cwd.clone());
-        for arg in &config.args {
-            cmd = cmd.arg(arg.clone());
-        }
-        let (master, child) = LinuxPty
-            .spawn_concrete(&cmd, win_size(size))
-            .map_err(to_io)?;
-        master.set_nonblocking(true).map_err(to_io)?;
-        Ok(Self {
-            master: AsyncFd::new(master)?,
-            child,
-        })
-    }
-
     /// Reads output; `Ok(0)` means the program exited.
     pub(crate) async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
@@ -59,16 +137,6 @@ impl Pty {
 
     pub(crate) fn resize(&self, size: Size) -> io::Result<()> {
         self.master.get_ref().resize(win_size(size)).map_err(to_io)
-    }
-}
-
-impl Drop for Pty {
-    /// Closing the master hangs up the program; reap it if it already exited
-    /// so it does not linger as a zombie.
-    fn drop(&mut self) {
-        if let Err(err) = self.child.try_wait() {
-            eprintln!("rusty-mux-server: reaping pid {}: {err:?}", self.child.id());
-        }
     }
 }
 

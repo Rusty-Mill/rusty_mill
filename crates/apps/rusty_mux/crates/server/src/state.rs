@@ -12,7 +12,7 @@ use rusty_uuid::Uuid;
 
 use crate::Config;
 use crate::outbox::Outbox;
-use crate::pty::Pty;
+use crate::pty::{self, Process, Pty};
 
 pub(crate) type Shared = Rc<RefCell<State>>;
 
@@ -24,9 +24,22 @@ pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
 
 struct BlockRt {
     pty: Rc<Pty>,
+    process: Process,
     grid: Grid,
     parser: AnsiParser,
     reader: JoinHandle<()>,
+}
+
+impl BlockRt {
+    /// Stops reading (unless the reader is the caller), closes this handle
+    /// on the master, and reaps the program in the background.
+    fn release(self, abort_reader: bool) {
+        if abort_reader {
+            self.reader.abort();
+        }
+        drop(self.pty);
+        rusty_tokio::task::spawn_local(self.process.reap());
+    }
 }
 
 pub(crate) struct State {
@@ -160,10 +173,9 @@ impl State {
         if self.mux.window(window).is_none() {
             return Err(rusty_mux_core::Error::UnknownWindow(window).to_string());
         }
-        let pty = Rc::new(
-            Pty::spawn(&self.config, size)
-                .map_err(|e| format!("spawning the block's program: {e}"))?,
-        );
+        let (pty, process) = pty::spawn(&self.config, size)
+            .map_err(|e| format!("spawning the block's program: {e}"))?;
+        let pty = Rc::new(pty);
         let block = self
             .mux
             .create_block(window, size)
@@ -174,6 +186,7 @@ impl State {
             block,
             BlockRt {
                 pty,
+                process,
                 grid,
                 parser: AnsiParser::new(),
                 reader,
@@ -243,8 +256,10 @@ impl State {
 
     /// The program exited: close its block.
     fn exited(&mut self, block: BlockId) {
-        // Removed first so closing does not abort the reader that is calling this.
-        self.blocks.remove(&block);
+        // Released first, without aborting the reader that is calling this.
+        if let Some(rt) = self.blocks.remove(&block) {
+            rt.release(false);
+        }
         if self.mux.close_block(block).is_ok() {
             self.flush();
         }
@@ -291,7 +306,7 @@ impl State {
                 if let Event::BlockClosed { block } = event
                     && let Some(rt) = self.blocks.remove(&block)
                 {
-                    rt.reader.abort();
+                    rt.release(true);
                 }
                 let frame = match encode(&Message::Event(event)) {
                     Ok(frame) => frame,
