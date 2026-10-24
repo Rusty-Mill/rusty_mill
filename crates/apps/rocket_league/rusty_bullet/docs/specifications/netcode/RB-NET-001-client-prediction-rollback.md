@@ -12,10 +12,11 @@ Implement server-authoritative simulation with client-side prediction and
 reconciliation, reproducing the architecture Psyonix has publicly disclosed
 (GDC 2018, Jared Cone): both client and server run the same physics
 simulation; the client predicts locally from player input for
-responsiveness; the server periodically sends authoritative correction
-snapshots rather than continuous full state. This is the layer this
-project believes is the actual source of the owner's observed lag/
-rubber-banding (reconciliation-smoothing behavior, not raw latency) — see
+responsiveness; the server sends authoritative, frame-stamped physics
+state that the client reconciles against. Whether that traffic is periodic
+snapshots rather than continuous full state is unverified (ADR-0001 H1).
+The project's working hypothesis is that this layer, not raw latency, is
+the source of the owner's observed lag/rubber-banding (ADR-0001 H2) — see
 [docs/research/RESEARCH-BACKLOG.md](../../research/RESEARCH-BACKLOG.md).
 
 ## Non-goals

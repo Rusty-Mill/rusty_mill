@@ -14,11 +14,26 @@ Cone, GDC 2018, "It IS Rocket Science! The Physics and Networking of Rocket
 League"), and one of this project's two purposes is to diagnose the exact
 lag/rubber-banding behavior the owner experiences in the live game.
 
-The GDC talk states plainly: client and server both run the same physics
-simulation; clients predict locally from input so play feels instant;
-network traffic is periodic authoritative-snapshot corrections, not
-continuous full state; visible lag/rubber-banding is almost certainly
-reconciliation-smoothing behavior, not raw network latency.
+The GDC slides state: client and server both run the same physics
+simulation; the server is 100% authoritative; clients predict everything,
+the ball included, from their own input so play feels instant; the server
+returns a frame number and physics state, and on a large difference the
+client reverts to that frame and re-simulates forward.
+
+Two further claims come only from a third-party summary of the talk video,
+not from the slides, and are unverified hypotheses until someone checks the
+spoken talk (see [rl-physics-sources.md](../research/rl-physics-sources.md),
+section 3):
+
+- *H1*: network traffic is periodic snapshot corrections rather than
+  continuous full state. Rocket Science #16 (auto-captions) reports the
+  server sending 60 packets/s, which this does not rule out but does not
+  confirm either.
+- *H2*: visible lag/rubber-banding is reconciliation-smoothing behavior,
+  not raw network latency. This is the project's working hypothesis for
+  the lag-diagnosis goal, to be tested on its own client/server pair.
+
+The decision below rests only on the slide-backed points.
 
 ## Decision drivers
 
@@ -36,8 +51,10 @@ reconciliation-smoothing behavior, not raw network latency.
 ## Considered options
 
 1. **Server-authoritative, client-predicted** (the disclosed Psyonix
-   model). Client runs local prediction for responsiveness; server is
-   ground truth; periodic correction snapshots reconcile the two.
+   model: authority, prediction and correction are on the slides). Client
+   runs local prediction for responsiveness; server is ground truth;
+   server corrections reconcile the two. Sending them as periodic
+   snapshots is this project's engineering choice, not disclosed (H1).
 2. **Client-authoritative / peer-to-peer**, each client trusts its own or a
    peer's simulation. Simpler to implement, no server process needed, but
    diverges from the actual system this project exists to understand, and
@@ -45,14 +62,16 @@ reconciliation-smoothing behavior, not raw network latency.
 3. **Lockstep** (deterministic simulation, all clients simulate identically
    from synchronized input, no server correction). Requires very tight
    determinism guarantees and doesn't match the disclosed architecture
-   (which explicitly uses correction snapshots, implying clients aren't
+   (which explicitly uses server corrections, implying clients aren't
    expected to stay in perfect lockstep).
 
 ## Decision
 
 Adopt option 1: server-authoritative simulation with client-side
-prediction and periodic correction snapshots, matching Psyonix's disclosed
-design.
+prediction and server corrections, matching Psyonix's disclosed design.
+The corrections are sent as periodic snapshots; that is this project's
+engineering choice, consistent with but not confirmed by the disclosure
+(H1).
 
 ## Consequences
 
@@ -72,8 +91,9 @@ design.
   meaningfully more work than a simpler peer-to-peer model.
 - This project cannot validate its reconciliation behavior against live
   official-server traffic (no legitimate data source), so confidence in
-  "this matches the real game" rests on the GDC talk's description plus
-  this project's own client/server pair, not on direct comparison.
+  "this matches the real game" rests on the GDC slides plus this
+  project's own client/server pair, not on direct comparison. H1 and H2
+  above are inputs to test, not evidence.
 
 ## Validation and revisit triggers
 
