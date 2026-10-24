@@ -12223,10 +12223,10 @@ name = "rusty_fedora"
 version = "0.1.0"
 dependencies = [
  "rusty_request",
+ "rusty_tokio",
  "rusty_wiremock",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -12309,11 +12309,11 @@ dependencies = [
  "rusty_opnsense",
  "rusty_proxmox",
  "rusty_serve",
+ "rusty_tokio",
  "rusty_wiremock",
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "tokio",
  "toml 0.8.2",
 ]
 
@@ -12617,10 +12617,10 @@ name = "rusty_opnsense"
 version = "0.1.0"
 dependencies = [
  "rusty_request",
+ "rusty_tokio",
  "rusty_wiremock",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -12677,10 +12677,10 @@ name = "rusty_proxmox"
 version = "0.1.0"
 dependencies = [
  "rusty_request",
+ "rusty_tokio",
  "rusty_wiremock",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
