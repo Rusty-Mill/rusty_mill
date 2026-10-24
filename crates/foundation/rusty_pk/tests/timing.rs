@@ -1,4 +1,4 @@
-//! dudect-style timing tests for X25519, ECDH P-256 / P-384 and Ed25519 signing. Statistical and machine-dependent,
+//! dudect-style timing tests for X25519, ECDH P-256 / P-384, Ed25519 signing and ECDSA P-256 signing. Statistical and machine-dependent,
 //! so ignored by default; run in the scheduled job with
 //! `cargo test -p rusty_pk --release --test timing -- --ignored --nocapture`.
 //! A pass means "no leak detected here", nothing more.
@@ -8,6 +8,7 @@
 
 use rusty_ct_check::timing::{leak_statistic_split, THRESHOLD};
 use rusty_pk::ecdh::{Curve, PrivateKey};
+use rusty_pk::ecdsa::{self, CurveId};
 use rusty_pk::ed25519::SigningKey;
 use rusty_pk::x25519::x25519;
 use std::cell::RefCell;
@@ -166,4 +167,87 @@ fn ed25519_sign_key_classes_not_distinguishable() {
 fn ed25519_sign_null_calibration_identical_classes() {
     let t = ed25519_classes(0x55, 0x55, 22, 2_000).expect("enough samples");
     eprintln!("A/A ed25519 sign: |t| = {t:.2}");
+}
+
+/// ECDSA `sign` under two keys, same message and fixed noise (so both classes run the
+/// identical path apart from the key). Keys are built in `prepare` (untimed) into the one
+/// slot the timed closure reads: a sparse scalar (0x01 bytes) and a dense one (0x7f, then
+/// 0xff bytes, then one chosen last byte).
+///
+/// The timed region includes DER encoding, whose length depends on the published `r` and
+/// `s`. With fixed noise each class always gets the same nonce, so a pair whose signatures
+/// differ in DER layout shows a real but harmless gap (an early P-256 pair gave 72 vs 70
+/// bytes and |t| up to 3.27). The last bytes are chosen so that both classes' `r` and `s`
+/// have the same encoded lengths, which the set-up asserts; only the secret differs.
+fn ecdsa_classes(curve: CurveId, a: &[u8], b: &[u8], seed: u64, samples: usize) -> Option<f64> {
+    let slot = RefCell::new(ecdsa::SigningKey::from_bytes(curve, a).expect("valid scalar"));
+    let sign = |key: &ecdsa::SigningKey| {
+        key.sign(black_box(b"a public message"), |h: &mut [u8]| {
+            h.fill(0x5a);
+            Ok::<(), ()>(())
+        })
+    };
+    let (sa, sb) = (sign(&slot.borrow()).ok()?, {
+        let k = ecdsa::SigningKey::from_bytes(curve, b).expect("valid scalar");
+        sign(&k).ok()?
+    });
+    // r's length byte follows the short-form sequence header on both curves.
+    assert_eq!(
+        (sa.len(), sa[3]),
+        (sb.len(), sb[3]),
+        "classes must give the same r and s lengths"
+    );
+    leak_statistic_split(
+        samples,
+        seed,
+        |class| {
+            let bytes = if class { b } else { a };
+            *slot.borrow_mut() = ecdsa::SigningKey::from_bytes(curve, bytes).expect("valid scalar");
+        },
+        || sign(&slot.borrow()).map(|s| s.len()),
+    )
+}
+
+fn sparse_and_dense(len: usize, last: u8) -> (Vec<u8>, Vec<u8>) {
+    let sparse = vec![0x01u8; len];
+    let mut dense = vec![0xffu8; len];
+    dense[0] = 0x7f;
+    dense[len - 1] = last;
+    (sparse, dense)
+}
+
+#[test]
+#[ignore = "timing-sensitive; scheduled job only"]
+fn ecdsa_p256_sign_sparse_vs_dense_key() {
+    let (sparse, dense) = sparse_and_dense(32, 0x06);
+    check(
+        "ecdsa p256 sign: sparse vs dense key",
+        ecdsa_classes(CurveId::P256, &sparse, &dense, 31, 2_000),
+    );
+}
+
+#[test]
+#[ignore = "calibration; scheduled job only"]
+fn ecdsa_p256_sign_null_calibration_identical_classes() {
+    let (sparse, _) = sparse_and_dense(32, 0x06);
+    let t = ecdsa_classes(CurveId::P256, &sparse, &sparse, 32, 2_000).expect("enough samples");
+    eprintln!("A/A ecdsa p256 sign: |t| = {t:.2}");
+}
+
+#[test]
+#[ignore = "timing-sensitive; scheduled job only"]
+fn ecdsa_p384_sign_sparse_vs_dense_key() {
+    let (sparse, dense) = sparse_and_dense(48, 0x01);
+    check(
+        "ecdsa p384 sign: sparse vs dense key",
+        ecdsa_classes(CurveId::P384, &sparse, &dense, 33, 2_000),
+    );
+}
+
+#[test]
+#[ignore = "calibration; scheduled job only"]
+fn ecdsa_p384_sign_null_calibration_identical_classes() {
+    let (sparse, _) = sparse_and_dense(48, 0x01);
+    let t = ecdsa_classes(CurveId::P384, &sparse, &sparse, 34, 2_000).expect("enough samples");
+    eprintln!("A/A ecdsa p384 sign: |t| = {t:.2}");
 }
