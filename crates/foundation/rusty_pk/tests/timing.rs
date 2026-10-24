@@ -1,4 +1,4 @@
-//! dudect-style timing tests for X25519 and ECDH P-256 / P-384. Statistical and machine-dependent,
+//! dudect-style timing tests for X25519, ECDH P-256 / P-384 and Ed25519 signing. Statistical and machine-dependent,
 //! so ignored by default; run in the scheduled job with
 //! `cargo test -p rusty_pk --release --test timing -- --ignored --nocapture`.
 //! A pass means "no leak detected here", nothing more.
@@ -8,6 +8,7 @@
 
 use rusty_ct_check::timing::{leak_statistic_split, THRESHOLD};
 use rusty_pk::ecdh::{Curve, PrivateKey};
+use rusty_pk::ed25519::SigningKey;
 use rusty_pk::x25519::x25519;
 use std::cell::RefCell;
 use std::hint::black_box;
@@ -126,4 +127,43 @@ fn ecdh_null_calibration_identical_classes() {
 fn ecdh_p384_null_calibration_identical_classes() {
     let t = ecdh_classes(Curve::P384, 0x55, 0x55, 14, 2_000).expect("enough samples");
     eprintln!("A/A ecdh p384: |t| = {t:.2}");
+}
+
+/// Ed25519 `sign` under two keys, same public message. The class's key is built in `prepare`
+/// (untimed) into the one slot the timed closure reads. Seeds of all zero and all ones bytes
+/// expand (through SHA-512) to unrelated scalars and nonce prefixes, so this compares two
+/// arbitrary secrets: a key-dependent branch or table index in the fixed-base
+/// multiplications or the reductions would separate them.
+fn ed25519_classes(seed_a: u8, seed_b: u8, seed: u64, samples: usize) -> Option<f64> {
+    let slot = RefCell::new(SigningKey::from_seed(&[seed_a; 32]).expect("key"));
+    leak_statistic_split(
+        samples,
+        seed,
+        |class| {
+            let fill = if class { seed_b } else { seed_a };
+            *slot.borrow_mut() = SigningKey::from_seed(&[fill; 32]).expect("key");
+        },
+        || {
+            slot.borrow()
+                .sign(black_box(b"a public message"))
+                .map(|s| s[63])
+        },
+    )
+}
+
+#[test]
+#[ignore = "timing-sensitive; scheduled job only"]
+fn ed25519_sign_key_classes_not_distinguishable() {
+    check(
+        "ed25519 sign: zero-seed vs ones-seed key",
+        ed25519_classes(0x00, 0xff, 21, 2_000),
+    );
+}
+
+/// A/A calibration for Ed25519 signing, with the leak test's own sample count.
+#[test]
+#[ignore = "calibration; scheduled job only"]
+fn ed25519_sign_null_calibration_identical_classes() {
+    let t = ed25519_classes(0x55, 0x55, 22, 2_000).expect("enough samples");
+    eprintln!("A/A ed25519 sign: |t| = {t:.2}");
 }

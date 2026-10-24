@@ -1,4 +1,19 @@
-//! Ed25519 signature verification. **Not strict RFC 8032:** it reproduces `ring` 0.17.14's
+//! Ed25519 signing ([`SigningKey`], RFC 8032 section 5.1.6) and signature
+//! verification ([`verify`]).
+//!
+//! # Signing handles a secret
+//!
+//! [`SigningKey`] holds the expanded private scalar and the nonce prefix and
+//! wipes both on drop. Its scalar multiplication is a fixed-base
+//! double-and-add-always over complete twisted-Edwards formulas with a masked
+//! select: the same 256 iterations and the same operations whatever the
+//! scalar, and no branch or index on it. The scalar reductions modulo `L` use
+//! only the Montgomery core's branch-free routines. Signing is deterministic
+//! (RFC 8032): there is no per-signature randomness to fail.
+//!
+//! # Verification
+//!
+//! **Not strict RFC 8032:** it reproduces `ring` 0.17.14's
 //! acceptance, including two leniencies the RFC forbids, as a documented compatibility
 //! exception (see `docs/research/CRYPTO-REPLACEMENT-PLAN.md`, stage 2, for the regression
 //! vectors and the unreviewed security implication):
@@ -18,8 +33,9 @@
 //! messages. A caller that admits keys from untrusted input must screen small-order keys
 //! itself. (Owner decision after Codex review round 3 on #540, which had this rejected.)
 //!
-//! All inputs are public, so the arithmetic is variable time.
+//! All inputs to [`verify`] are public, so its arithmetic is variable time.
 
+use rusty_crypto_key::wipe;
 use rusty_sha2::{Hash, Sha512};
 
 use crate::field::{Field, E};
@@ -57,6 +73,158 @@ pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(),
         Ok(())
     } else {
         Err(VerifyError)
+    }
+}
+
+/// Signing failed. It cannot for a well-formed key; the only failure is an
+/// internal parameter that does not build, which carries no detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignError;
+
+impl core::fmt::Display for SignError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Ed25519 signing failed")
+    }
+}
+
+/// Why [`SigningKey::generate`] failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerateError<E> {
+    /// The caller's fill function failed.
+    Source(E),
+    /// Building the key failed (see [`SignError`]).
+    Sign(SignError),
+}
+
+/// An Ed25519 private key: the clamped secret scalar and the nonce prefix
+/// expanded from a 32-byte seed (RFC 8032 section 5.1.5), and the public key.
+/// Wiped on drop; never printed.
+pub struct SigningKey {
+    /// `s`, clamped, little-endian.
+    scalar: [u8; 32],
+    /// The upper half of `SHA-512(seed)`, which keys the per-message nonce.
+    prefix: [u8; 32],
+    public: [u8; 32],
+}
+
+impl Drop for SigningKey {
+    fn drop(&mut self) {
+        wipe(&mut self.scalar);
+        wipe(&mut self.prefix);
+    }
+}
+
+impl core::fmt::Debug for SigningKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SigningKey(..)")
+    }
+}
+
+impl SigningKey {
+    /// The key for a 32-byte seed (RFC 8032's private key).
+    pub fn from_seed(seed: &[u8; 32]) -> Result<Self, SignError> {
+        let mut h = Sha512::digest(seed);
+        let mut key = Self {
+            scalar: [0; 32],
+            prefix: [0; 32],
+            public: [0; 32],
+        };
+        key.scalar.copy_from_slice(&h[..32]);
+        key.prefix.copy_from_slice(&h[32..]);
+        wipe(&mut h);
+        key.scalar[0] &= 0xf8;
+        key.scalar[31] &= 0x7f;
+        key.scalar[31] |= 0x40;
+        let curve = Edwards::new().ok_or(SignError)?;
+        let mut s = limbs_le(&key.scalar);
+        key.public = curve.encode(&curve.mul_base(&s));
+        wipe(&mut s.0);
+        Ok(key)
+    }
+
+    /// A fresh key from 32 bytes that `fill` supplies (an OS random source).
+    pub fn generate<E>(
+        fill: impl FnOnce(&mut [u8]) -> Result<(), E>,
+    ) -> Result<Self, GenerateError<E>> {
+        let mut seed = [0u8; 32];
+        let filled = fill(&mut seed);
+        let key = match filled {
+            Ok(()) => Self::from_seed(&seed).map_err(GenerateError::Sign),
+            Err(e) => Err(GenerateError::Source(e)),
+        };
+        wipe(&mut seed);
+        key
+    }
+
+    /// The 32-byte public key.
+    pub fn public_key(&self) -> &[u8; 32] {
+        &self.public
+    }
+
+    /// The RFC 8032 signature `R || S` over `message`.
+    pub fn sign(&self, message: &[u8]) -> Result<[u8; 64], SignError> {
+        let curve = Edwards::new().ok_or(SignError)?;
+        let order = Field::new(&ED_L).ok_or(SignError)?;
+
+        let mut hasher = Sha512::new();
+        hasher.update(&self.prefix);
+        hasher.update(message);
+        let mut nonce_digest = hasher.finalize();
+        let mut r = reduce_digest(&order, &nonce_digest);
+        wipe(&mut nonce_digest);
+        let r_point = curve.encode(&curve.mul_base(&r));
+
+        let mut hasher = Sha512::new();
+        hasher.update(&r_point);
+        hasher.update(&self.public);
+        hasher.update(message);
+        let k = reduce_digest(&order, &hasher.finalize());
+
+        // S = r + k*s mod L. `s` is a 255-bit clamped value, not reduced; `enter`
+        // accepts any 256-bit input and returns it reduced, in Montgomery form.
+        let mut s = limbs_le(&self.scalar);
+        let mut ks = order.mul(&order.enter(&k), &order.enter(&s));
+        let mut sum = order.leave(&order.add(&order.enter(&r), &ks));
+        wipe(&mut s.0);
+        wipe(&mut r.0);
+        wipe(&mut ks.0);
+
+        let mut be = [0u8; 32];
+        let encoded = order.to_be_bytes(&sum, &mut be);
+        wipe(&mut sum.0);
+        encoded.ok_or(SignError)?;
+        let mut signature = [0u8; 64];
+        signature[..32].copy_from_slice(&r_point);
+        signature[32..].copy_from_slice(&reversed::<32>(&be));
+        wipe(&mut be);
+        Ok(signature)
+    }
+}
+
+/// 32 little-endian bytes as plain limbs. No branch on the value.
+fn limbs_le(bytes: &[u8; 32]) -> E {
+    let limb = |i: usize| {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&bytes[8 * i..8 * i + 8]);
+        u64::from_le_bytes(word)
+    };
+    E::from_limbs(&[limb(0), limb(1), limb(2), limb(3)])
+}
+
+/// `a` if `mask` is all ones, `b` if it is zero, with no branch on `mask`.
+fn select(mask: u64, a: &Point, b: &Point) -> Point {
+    let pick = |a: &E, b: &E| {
+        let mut out = E::ZERO;
+        for i in 0..out.0.len() {
+            out.0[i] = b.0[i] ^ (mask & (a.0[i] ^ b.0[i]));
+        }
+        out
+    };
+    Point {
+        x: pick(&a.x, &b.x),
+        y: pick(&a.y, &b.y),
+        z: pick(&a.z, &b.z),
+        t: pick(&a.t, &b.t),
     }
 }
 
@@ -177,6 +345,22 @@ impl Edwards {
             t: f.mul(&e, &h),
             z: f.mul(&ff, &g),
         }
+    }
+
+    /// `k*B` for a **secret** 256-bit scalar `k` (plain limbs): double-and-add-always
+    /// over the complete formulas above, the sum kept or discarded by a masked select.
+    /// The same work for every `k`; nothing branches on or indexes by it.
+    #[inline(never)]
+    fn mul_base(&self, k: &E) -> Point {
+        let mut acc = self.identity();
+        for bit in (0..256).rev() {
+            acc = self.double(&acc);
+            let sum = self.add(&acc, &self.base);
+            let b = (k.0[bit / 64] >> (bit % 64)) & 1;
+            let mask = core::hint::black_box(0u64.wrapping_sub(b));
+            acc = select(mask, &sum, &acc);
+        }
+        acc
     }
 
     /// `s*B + h*Q` (Shamir). Scalars are plain limbs. Variable time.
