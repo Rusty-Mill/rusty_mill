@@ -1,35 +1,38 @@
-//! Tokio runtime: a single async reactor drives the terminal on every platform.
+//! Async runtime: a single [`rusty_tokio`] reactor drives the terminal on every
+//! platform.
 //!
 //! On **Unix** the PTY master and a fresh `/dev/tty` open are registered with
-//! the reactor via [`AsyncFd`]; `SIGWINCH` arrives as a [`tokio::signal`] stream.
-//! On **Windows** ConPTY's pipes are synchronous (no pollable fd), so blocking
-//! reader / writer / stdin threads bridge into tokio channels and a timer polls
+//! the reactor via [`AsyncFd`]; `SIGWINCH` arrives as a [`rusty_tokio::signal`]
+//! stream. On **Windows** ConPTY's pipes are synchronous (no pollable fd), so
+//! blocking reader / writer / stdin threads bridge into async channels and a timer polls
 //! the console size for resizes. Both paths share [`run`] and the
 //! [`Notify`]-driven render loop.
 //!
 //! Locking note: the grid uses a `parking_lot::Mutex` (sync), and a guard is
 //! **never** held across an `.await` — every critical section locks, mutates or
 //! snapshots, and drops the guard before any await. So a sync mutex is correct
-//! here, not `tokio::sync::Mutex`.
+//! here, not `rusty_tokio::sync::Mutex`.
 
 use std::io::Write;
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
-use tokio::sync::Notify;
+use rusty_tokio::sync::Notify;
 
+use super::fair::fair_select;
 use crate::backend::Backend;
 use crate::core::{AnsiParser, Grid};
 use crate::input::{Scroll, split_input};
 use crate::render::{FRAME_BUDGET, RawModeGuard, RenderState, render_once, restore_host_modes};
 
 #[cfg(unix)]
+use rusty_tokio::io::AsyncFd;
+#[cfg(unix)]
+use rusty_tokio::signal::{SignalKind, signal};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-#[cfg(unix)]
-use tokio::io::unix::AsyncFd;
-#[cfg(unix)]
-use tokio::signal::unix::{SignalKind, signal};
 
 #[cfg(windows)]
 use std::io::Read;
@@ -39,7 +42,7 @@ use std::time::Duration;
 /// Signals the render loop to stop when a task ends — on its own, the task's
 /// `running.store(false)` + `frame.notify_one()` only run after the loop body,
 /// so a panic anywhere inside (e.g. in the untrusted-byte parser) would skip
-/// them and leave the main `select!` waiting forever with the host terminal
+/// them and leave the render loop waiting forever with the host terminal
 /// stuck in raw mode. As a `Drop` guard this fires on every exit, panic
 /// included. (Unix only — the Windows path bridges through blocking threads
 /// and channels rather than these reactor-driven tasks.)
@@ -57,29 +60,36 @@ impl Drop for ShutdownOnDrop {
     }
 }
 
-/// Duplicate `fd` into a descriptor this runtime owns outright, so
-/// registering it with the reactor never depends on how a (safe, possibly
-/// external) `BackendHandle` manages the fd it reports. The dup shares the open
-/// file description, so reads, writes and `O_NONBLOCK` are unchanged. A
-/// closed `fd` fails here with `EBADF` rather than later inside the reactor.
+/// What woke the render loop: a repaint request, a size change, or (Windows,
+/// where output arrives over a channel) a chunk of PTY output or its EOF.
+enum Wake {
+    Frame,
+    Resize,
+    #[cfg(windows)]
+    Output(Option<Vec<u8>>),
+}
+
+/// Duplicate `fd` into a descriptor this runtime owns (close-on-exec), for
+/// registering with the reactor.
+///
+/// `fd` comes from the safe [`BackendHandle::pty_fd`](crate::backend::BackendHandle::pty_fd),
+/// so nothing guarantees it stays open: a third-party backend may close or
+/// reuse it at any time. Registering the raw number would then poll, read and
+/// write whatever file later took that number. `F_DUPFD_CLOEXEC` is checked
+/// by the kernel (`EBADF` for a closed fd), and the copy it returns is ours
+/// alone, so the `AsyncFd` that owns it stays valid however the backend
+/// handles its own descriptor. The copy shares the open file description, so
+/// `O_NONBLOCK` set on the master applies to it too.
 #[cfg(unix)]
 fn dup_owned(fd: RawFd) -> std::io::Result<OwnedFd> {
-    // SAFETY: `F_DUPFD_CLOEXEC` accepts any integer and has no memory operands;
-    // an invalid `fd` returns -1/EBADF.
+    // SAFETY: fcntl takes no memory operands; an invalid `fd` is an `EBADF`
+    // error, not undefined behaviour.
     let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     if dup < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    // SAFETY: `dup` is a freshly allocated descriptor nothing else refers to.
+    // SAFETY: `dup` is a fresh descriptor that nothing else refers to.
     Ok(unsafe { OwnedFd::from_raw_fd(dup) })
-}
-
-/// Register an owned descriptor with the reactor.
-#[cfg(unix)]
-fn register_owned(fd: OwnedFd) -> std::io::Result<AsyncFd<OwnedFd>> {
-    // SAFETY: the `OwnedFd` is moved into the `AsyncFd`, so it stays open and
-    // returns the same fd until the `AsyncFd` drops (and closes) it.
-    unsafe { AsyncFd::register(fd) }.map_err(std::io::Error::from)
 }
 
 /// Put `fd`'s open file description into non-blocking mode, as `AsyncFd`
@@ -184,7 +194,7 @@ async fn write_all(afd: &AsyncFd<OwnedFd>, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Build a small multi-threaded tokio runtime and drive the terminal on it.
+/// Build a small multi-threaded runtime and drive the terminal on it.
 /// Runs the TUI to completion and returns the child shell's exit status as a
 /// `std::process::exit`-compatible value (the caller is expected to exit the
 /// process with it) — its own exit code on a normal exit, 128+signal on a
@@ -213,9 +223,8 @@ pub fn run(
         config.cwd.as_deref(),
     )?;
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    let rt = rusty_tokio::Builder::new_multi_thread()
         .worker_threads(2)
-        .enable_all()
         .build()?;
     rt.block_on(run_async(backend, reader, grid, config))
 }
@@ -281,9 +290,8 @@ async fn run_async(
 
     // `reader` (the shell, spawned before the runtime started) owns the master
     // fd + child and reaps it on drop; keeping it in this top-level future
-    // means the child is reaped on every exit path. Independent dups feed the
-    // read, write, and resize paths; the read/write dups are owned here, so
-    // their reactor registrations cannot be invalidated by the backend.
+    // means the child is reaped on every exit path. Independent owned dups
+    // feed the read and write paths, and a handle clone the resize path.
     let read_fd = dup_owned(reader.pty_fd())?;
     let write_fd = dup_owned(reader.pty_fd())?;
     let mut resizer = reader.try_clone()?;
@@ -324,7 +332,7 @@ async fn run_async(
         let frame = Arc::clone(&frame);
         let exit_status = Arc::clone(&exit_status);
         let pid = reader.child_pid();
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             let Some(pid) = pid else { return };
             let Ok(mut sigchld) = signal(SignalKind::child()) else {
                 return;
@@ -357,14 +365,14 @@ async fn run_async(
         let running = Arc::clone(&running);
         let frame = Arc::clone(&frame);
         let parser = Arc::clone(&parser);
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             // Wakes the render loop on every exit from this task — including a
             // panic in `parser.advance` on hostile child bytes.
             let _shutdown = ShutdownOnDrop {
                 running: Arc::clone(&running),
                 frame: Arc::clone(&frame),
             };
-            let master = match register_owned(read_fd) {
+            let master = match AsyncFd::new(read_fd) {
                 Ok(m) => m,
                 Err(_) => return,
             };
@@ -405,16 +413,16 @@ async fn run_async(
         let grid = Arc::clone(&grid);
         let running = Arc::clone(&running);
         let frame = Arc::clone(&frame);
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             let _shutdown = ShutdownOnDrop {
                 running: Arc::clone(&running),
                 frame: Arc::clone(&frame),
             };
-            let tty = match open_tty_nonblocking().and_then(register_owned) {
+            let tty = match open_tty_nonblocking().and_then(AsyncFd::new) {
                 Ok(t) => t,
                 Err(_) => return,
             };
-            let writer = match register_owned(write_fd) {
+            let writer = match AsyncFd::new(write_fd) {
                 Ok(w) => w,
                 Err(_) => return,
             };
@@ -473,12 +481,25 @@ async fn run_async(
     // A pinned `Notified` future re-armed in place: no await sits between its
     // completion and the next arm, so a `notify_one` in that gap is not lost,
     // and the `sigwinch` branch never drops a pending notification.
-    let notified = frame.notified();
-    tokio::pin!(notified);
+    let mut notified = pin!(frame.notified());
+    let mut turn = 0;
 
     loop {
-        tokio::select! {
-            _ = &mut notified => {
+        // Round-robin, not `select!`'s fixed order: sustained output keeps
+        // the frame `Notify` ready, and must not starve resizes.
+        let woke = {
+            let frame_arm = pin!(async {
+                (&mut notified).await;
+                Wake::Frame
+            });
+            let resize_arm = pin!(async {
+                sigwinch.recv().await;
+                Wake::Resize
+            });
+            fair_select(&mut turn, &mut [frame_arm, resize_arm]).await
+        };
+        match woke {
+            Wake::Frame => {
                 notified.set(frame.notified());
                 if !running.load(Ordering::Relaxed) {
                     break;
@@ -487,11 +508,11 @@ async fn run_async(
                 // last paint has elapsed, so a flood repaints at ~60 Hz.
                 let since = render_state.last_frame.elapsed();
                 if since < FRAME_BUDGET {
-                    tokio::time::sleep(FRAME_BUDGET - since).await;
+                    rusty_tokio::time::sleep(FRAME_BUDGET - since).await;
                 }
                 render_once(&grid, &mut render_state);
             }
-            _ = sigwinch.recv() => {
+            Wake::Resize => {
                 // Reflow the grid, tell the child its new size, and clear the
                 // screen for a clean full repaint. Only act on a real change so a
                 // spurious SIGWINCH doesn't blank the screen.
@@ -546,7 +567,7 @@ async fn run_async(
 
 /// Windows ConPTY driver: the pipes are synchronous (no readiness-pollable fd),
 /// so dedicated blocking threads bridge PTY output, PTY input, and host stdin
-/// into tokio channels, while the async render loop coalesces repaints and polls
+/// into async channels, while the async render loop coalesces repaints and polls
 /// the console size for resizes (there is no `SIGWINCH`).
 #[cfg(windows)]
 async fn run_async(
@@ -597,7 +618,7 @@ async fn run_async(
     // 64 * 4096-byte reads is 256 KiB of slack, comfortably more than one
     // frame's worth of output at any reasonable render cadence.
     const OUTPUT_CHANNEL_CAPACITY: usize = 64;
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(OUTPUT_CHANNEL_CAPACITY);
+    let (out_tx, mut out_rx) = rusty_tokio::sync::mpsc::channel::<Vec<u8>>(OUTPUT_CHANNEL_CAPACITY);
     {
         let running = Arc::clone(&running);
         std::thread::spawn(move || {
@@ -619,7 +640,7 @@ async fn run_async(
 
     // PTY input: the async side queues bytes; a blocking `WriteFile` thread
     // drains them so reply/keystroke writes never block the reactor.
-    let (in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let (in_tx, in_rx) = rusty_tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     {
         let mut in_rx = in_rx;
         std::thread::spawn(move || {
@@ -693,13 +714,27 @@ async fn run_async(
     let parser = Arc::new(Mutex::new(AnsiParser::with_theme(config.theme)));
     watch_config(Arc::clone(&parser), Arc::clone(&grid), Arc::clone(&frame));
     let mut render_state = RenderState::new();
-    let mut resize_poll = tokio::time::interval(Duration::from_millis(150));
-    let notified = frame.notified();
-    tokio::pin!(notified);
+    let mut resize_poll = rusty_tokio::time::interval(Duration::from_millis(150));
+    let mut notified = pin!(frame.notified());
+    let mut turn = 0;
 
     loop {
-        tokio::select! {
-            data = out_rx.recv() => {
+        // Round-robin, not `select!`'s fixed order: a never-empty output
+        // channel must not starve repaints, shutdown checks or resizes.
+        let woke = {
+            let output_arm = pin!(async { Wake::Output(out_rx.recv().await) });
+            let frame_arm = pin!(async {
+                (&mut notified).await;
+                Wake::Frame
+            });
+            let resize_arm = pin!(async {
+                resize_poll.tick().await;
+                Wake::Resize
+            });
+            fair_select(&mut turn, &mut [output_arm, frame_arm, resize_arm]).await
+        };
+        match woke {
+            Wake::Output(data) => {
                 match data {
                     Some(data) => {
                         let (responses, should_notify) = {
@@ -719,18 +754,18 @@ async fn run_async(
                     None => break, // PTY EOF: the shell exited
                 }
             }
-            _ = &mut notified => {
+            Wake::Frame => {
                 notified.set(frame.notified());
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }
                 let since = render_state.last_frame.elapsed();
                 if since < FRAME_BUDGET {
-                    tokio::time::sleep(FRAME_BUDGET - since).await;
+                    rusty_tokio::time::sleep(FRAME_BUDGET - since).await;
                 }
                 render_once(&grid, &mut render_state);
             }
-            _ = resize_poll.tick() => {
+            Wake::Resize => {
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }
@@ -778,57 +813,85 @@ async fn run_async(
 mod tests {
     use super::*;
 
+    /// A pipe as two owned fds: (read end, write end).
     fn pipe() -> (OwnedFd, OwnedFd) {
         let mut fds = [0; 2];
-        // SAFETY: `pipe` writes two fds into a two-element array.
+        // SAFETY: `fds` is a valid two-element out-array.
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        // SAFETY: both fds are freshly opened and owned only here.
+        // SAFETY: both are fresh descriptors we exclusively own.
         unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
     }
 
-    fn is_open(fd: RawFd) -> bool {
-        // SAFETY: `F_GETFD` on any integer; no memory operands.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        flags >= 0
+    #[test]
+    fn dup_owned_survives_the_backend_closing_its_fd() {
+        let (backend_fd, tx) = pipe();
+        let dup = dup_owned(backend_fd.as_raw_fd()).unwrap();
+        assert_ne!(dup.as_raw_fd(), backend_fd.as_raw_fd());
+        // SAFETY: `dup` is a valid fd; F_GETFD only reads its flags.
+        let flags = unsafe { libc::fcntl(dup.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0, "dup must be close-on-exec");
+
+        // The backend closes (and the number may be reused); ours still reads.
+        drop(backend_fd);
+        let _reuse = pipe();
+        assert_eq!(write_some(tx.as_raw_fd(), b"ok").unwrap(), 2);
+        assert_eq!(read_nonblocking(dup.as_raw_fd()).unwrap(), b"ok");
     }
 
     #[test]
     fn dup_owned_rejects_an_invalid_fd() {
-        // -1 is never a valid descriptor; a closed fd's number could be
-        // reused concurrently by a parallel test.
-        let err = dup_owned(-1).expect_err("invalid fd must not be duplicated");
-        assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+        // EBADF, never a silently registered stranger.
+        assert_eq!(dup_owned(-1).unwrap_err().raw_os_error(), Some(libc::EBADF));
     }
 
-    #[tokio::test]
-    async fn registration_survives_the_source_fd_closing() {
-        let (r, w) = pipe();
-        set_nonblocking(r.as_raw_fd()).unwrap();
-        let afd = register_owned(dup_owned(r.as_raw_fd()).unwrap()).unwrap();
-        // The backend closes its handle; the registered dup is unaffected.
-        drop(r);
-        write_some(w.as_raw_fd(), b"hi").unwrap();
-        let mut guard = afd.readable().await.unwrap();
-        let data = guard
-            .try_io(|inner| read_nonblocking(inner.as_raw_fd()))
-            .expect("readable")
+    /// Registered in the reactor, the owned dup keeps delivering readiness
+    /// and data after the backend's own fd is closed.
+    #[test]
+    fn registered_dup_reads_after_backend_close() {
+        let rt = rusty_tokio::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
             .unwrap();
-        assert_eq!(data, b"hi");
+        let (backend_fd, tx) = pipe();
+        set_nonblocking(backend_fd.as_raw_fd()).unwrap();
+        let dup = dup_owned(backend_fd.as_raw_fd()).unwrap();
+        drop(backend_fd);
+        rt.block_on(async move {
+            let afd = AsyncFd::new(dup).unwrap();
+            write_some(tx.as_raw_fd(), b"hi").unwrap();
+            loop {
+                let mut guard = afd.readable().await.unwrap();
+                if let Ok(data) = guard.try_io(|inner| read_nonblocking(inner.as_raw_fd())) {
+                    assert_eq!(data.unwrap(), b"hi");
+                    break;
+                }
+            }
+        });
     }
 
-    #[tokio::test]
+    /// Dropping a registration, or cancelling the task that waits on it,
+    /// closes only the runtime's dup, never the backend's fd.
+    #[rusty_tokio::test]
     async fn dropping_or_cancelling_the_registration_leaves_the_source_open() {
-        let (r, _w) = pipe();
-        set_nonblocking(r.as_raw_fd()).unwrap();
-        let src = r.as_raw_fd();
+        let is_open = |fd: RawFd| {
+            // SAFETY: F_GETFD takes no memory operands; a closed fd is EBADF.
+            unsafe { libc::fcntl(fd, libc::F_GETFD) >= 0 }
+        };
+        let (backend_fd, _tx) = pipe();
+        set_nonblocking(backend_fd.as_raw_fd()).unwrap();
+        let src = backend_fd.as_raw_fd();
 
-        let afd = register_owned(dup_owned(src).unwrap()).unwrap();
-        drop(afd);
+        drop(AsyncFd::new(dup_owned(src).unwrap()).unwrap());
         assert!(is_open(src));
 
-        let afd = register_owned(dup_owned(src).unwrap()).unwrap();
-        let task = tokio::spawn(async move {
-            let _ = afd.readable().await;
+        let afd = AsyncFd::new(dup_owned(src).unwrap()).unwrap();
+        let task = rusty_tokio::spawn(async move {
+            // Registration starts optimistically ready; `try_io` clears
+            // that on `WouldBlock`, so this parks until aborted.
+            loop {
+                let mut guard = afd.readable().await.unwrap();
+                let _ = guard.try_io(|inner| read_nonblocking(inner.as_raw_fd()));
+            }
         });
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());

@@ -3171,7 +3171,7 @@ impl WindowState<'_> {
     /// a `--profile` given at launch is reapplied via `profile_override`
     /// below — otherwise this window's profile-selected theme would silently
     /// revert to the file's top-level default on every save (mirrors
-    /// `runtime::tokio_rt::watch_config`'s fix for the TUI front-end).
+    /// `runtime::reactor::watch_config`'s fix for the TUI front-end).
     fn reload_config(&mut self) {
         let Some(path) = self.config_path.clone() else {
             return;
