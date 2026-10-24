@@ -562,6 +562,9 @@ pub enum Cost {
 /// it states, summed over every result: `Err` says why there is no such
 /// account (a result without it or without a `result_index`, a gap in the
 /// index, a missing cost). It does not judge whether the turn completed.
+/// Provenance: Claude Code 2.1.310's result schema, not a captured resumed
+/// run. Requiring an index is a conservative accounting policy: without it,
+/// sequence gaps cannot be detected; no live provider run verified this field.
 pub fn own_usage(stream: &str) -> Result<(BTreeMap<String, Usage>, f64), String> {
     let mut models: BTreeMap<String, Usage> = BTreeMap::new();
     let mut usd = 0.0;
