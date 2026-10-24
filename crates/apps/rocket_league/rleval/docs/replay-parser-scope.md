@@ -14,8 +14,12 @@ authorize implementation.
 | `boxcars` 0.11.5 (MIT) | 6.0k (attributes 1.75k, parser 0.7k, object-to-attribute table 0.6k, header 0.4k) | The whole decode: header properties, CRC, the object/name/net-cache tables, the bit-level network stream, about 44 attribute types | `replay-analyzer` (through `decode::boxcars_adapter`, 678 lines), `rb_replay_ingest`, `recon-check` |
 | `subtr-actor` 1.2 (MIT) | 95k, nearly all stats we do not call | Its frame collector: per-tick ball and player rigid bodies, boost, and throttle/steer bytes, resampled to a fixed rate | `rb_replay_ingest` (`convert.rs`, 322 lines); `recon-check` as an independent oracle |
 
-They also pull in `bitter`, `encoding_rs`, `fnv` and `phf`, and they pin each other:
-`subtr-actor ~1.2` needs `boxcars 0.11`, which is why the lock holds `boxcars` back.
+They also pull in `bitter`, `encoding_rs`, `fnv` and `phf`. `subtr-actor` 1.2.0 accepts
+`boxcars >=0.11.3, <1.0`; it does not require 0.11. Our direct `boxcars = "0.11"`
+dependencies and workspace lock unify both callers on 0.11.5 so they share the same
+`boxcars::Replay` type. A fresh resolution can select a separate newer version for
+`subtr-actor`, so this unification is a lock choice, not its upper bound (see
+[`rb_replay_ingest/Cargo.toml`](../../crates/rb_replay_ingest/Cargo.toml)).
 
 The seam already exists. `replay-analyzer`'s analyze layer depends only on the
 `ReplayParser` trait and its neutral `DecodedReplay` (header metadata plus a per-frame
@@ -26,8 +30,8 @@ stream of `ActorUpdate`s), so a new parser is one more adapter. The format is wr
 ## What we would write
 
 A new crate, `rl_replay`, in `crates/apps/rocket_league/crates`, Tier S: no external
-normal dependencies. UTF-16 strings come from `std`, Windows-1252 from a 128-entry table,
-CRC-32 from a 256-entry table, class lookups from `match`.
+normal or build dependencies. UTF-16 strings come from `std`, Windows-1252 from a
+128-entry table, CRC-32 from a 256-entry table, class lookups from `match`.
 
 | Part | Estimate (lines, excluding tests) |
 |---|---|
@@ -52,15 +56,24 @@ with a clear "unsupported version" error rather than a guess.
 ## How we prove it
 
 `boxcars` and `subtr-actor` stay as **oracles only**: dev-dependencies, which Tier S allows
-as test oracles that never ship. A dev-dependency is visible to `tests/`, `examples/` and
-benches, not to a crate's library or `[[bin]]` targets, so oracle use has to move there:
+as test oracles that never ship. A dev-dependency is available to tests, examples and
+benches, not to ordinary library or binary builds, so oracle use has to move there:
 
-- **`recon-check`** today is a library plus a bin with `boxcars` and `subtr-actor` as normal
-  dependencies. Its comparator stays in the library, typed on our model only; the
-  `subtr-actor` side moves into its `tests/` (the committed samples, in CI) and an
-  `examples/recon_corpus.rs` for the private corpus (`cargo run --example`).
-- **`corpus_check`** (a `[[bin]]` in `rb_replay_ingest` that runs `boxcars` and
-  `subtr-actor`) becomes `examples/corpus_check.rs`, with the new differential mode.
+- **`recon-check`** today is a library plus two binaries (`recon-check` and
+  `batch-recon-check`) with `boxcars` and `subtr-actor` as normal dependencies. Its
+  comparator stays in the library, typed on our model only; oracle decoding and
+  reconstruction move out of the library into test/example support. The single-replay
+  runner becomes `examples/recon_check.rs`, and the batch runner becomes
+  `examples/recon_corpus.rs`, retaining its manifest/directory/limit options, R1 `--gate`
+  exit behavior and no-op when the corpus is absent. Committed-sample tests run in CI;
+  the private corpus runs locally with
+  `cargo run -p recon-check --release --example recon_corpus -- ...`.
+- **`corpus_check`** (an ordinary binary in `rb_replay_ingest` using its current
+  `boxcars`/`subtr-actor` pipeline) becomes `examples/corpus_check.rs`, with the new
+  differential mode. Preserve the directory argument and corpus-absent no-op; invoke it
+  with `cargo run -p rb_replay_ingest --release --example corpus_check -- <dir>`.
+- **`boxcars_adapter`** remains only in test/example support for differential decoding,
+  with no oracle types exposed by ordinary libraries or binaries.
 - No bounded tooling exception is proposed. If a later slice finds an oracle that cannot
   live in tests or examples, it asks for one explicitly, naming the crate and its exit.
 
@@ -81,9 +94,16 @@ benches, not to a crate's library or `[[bin]]` targets, so oracle use has to mov
 | P1 | `rl_replay`: bit reader, container, CRC, header | Headers of all three samples equal `boxcars`'s |
 | P2 | Tables and the network stream, all attribute types | Every frame of the samples decodes; differential test green |
 | P3 | `RlReplayParser` adapter; `replay-analyzer` switches to it; its `boxcars` use moves to tests | All downstream goldens unchanged; corpus run clean on the game machine |
-| P4 | `rb_replay_ingest` off `subtr-actor`; `corpus_check` and `recon-check`'s oracle side move to tests and examples | Its tests and `rb-verify` replay scores unchanged |
+| P4 | `rb_replay_ingest` off `subtr-actor`; `corpus_check` and both `recon-check` runners move to examples; library oracle code moves to test/example support | Its tests and `rb-verify` replay scores unchanged; example runners retain the corpus options and gate behavior above |
 | P5 | Input hints for r6: `ReplicatedThrottle`/`Steer`, `ReplicatedTorqueInput`, dodge `DodgeTorque`, jump, double-jump and dodge `ReplicatedActive`, handbrake | New `ActorUpdate` variants and per-car input hints in `PhysicsFrame` |
-| P6 | Drop `boxcars` and `subtr-actor` from normal dependencies everywhere; record `rl_replay` as Tier S | `cargo tree -e normal` (no dev edges) on every workspace member shows neither crate, checked from manifests or `cargo metadata` dependency kinds; `Cargo.lock` cannot show this, it does not record kinds |
+| P6 | Keep `boxcars` and `subtr-actor` only as dev-dependencies everywhere; record `rl_replay` as Tier S | Manifests and `cargo metadata` dependency kinds show oracle declarations only as dev dependencies; normal/build dependency paths from every workspace member reach neither oracle, including optional/target-specific paths |
+
+For P6, validate the resolved graph with
+`cargo tree --locked --workspace --all-features --target all -e normal,build` (no dev
+edges), alongside manifest/metadata inspection. `Cargo.lock` records resolved packages,
+not dependency kinds: both oracles may remain there for development, so their presence
+or absence alone cannot prove the dev-only boundary. These are future acceptance checks;
+this documentation PR changes no dependency declarations or runner commands.
 
 P1 to P4 are the replacement; P5 is what input recovery (r6) wants from a parser. P5 does
 not strictly need our own parser: `boxcars` already decodes those attributes and our
