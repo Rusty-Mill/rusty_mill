@@ -261,7 +261,8 @@ impl Grid {
         g.scrollback_max = g.scrollback_max.max(history);
         g.scrollback = scrollback;
         g.primary = primary;
-        g.dirty = vec![true; rows];
+        g.reset_damage();
+        g.touch_hist();
         Ok(g)
     }
 }
