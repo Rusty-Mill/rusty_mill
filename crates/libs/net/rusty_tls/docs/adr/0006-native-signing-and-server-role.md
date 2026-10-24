@@ -51,8 +51,8 @@ signatures, can expose the long-term private key.
    - the `crypto-constant-time` job extended to every new secret path;
    - the ring-only suites re-enabled on native, except named RSA-signing tests;
    - a native BoGo floor that includes server scenarios;
-   - an **independent review of the signing code, recorded with reviewer, scope and commit, before the
-     `rusty_tls` wiring merges.**
+   - an **owner review of the signing code (plan D4), recorded with reviewer, scope and commit, before the
+     `rusty_tls` wiring merges.** *Amended 2026-10-24:* the owner is the S5 reviewer ("S5 is me", working session; the implementer's transcription, not yet restated from the owner's GitHub account). That is plan D4's "owner alone" option, not an independent review: one reviewer, who owns the project and whose account authored commit `32db5c131` in #992.
 5. **Unchanged:** no default moves, `rustls` stays the crate's engine, and no consumer changes. Choosing a first
    native consumer is a separate decision.
 
