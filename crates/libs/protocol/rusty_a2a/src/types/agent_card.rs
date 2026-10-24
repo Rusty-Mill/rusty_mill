@@ -60,9 +60,9 @@ impl AgentInterface {
         }
     }
 
-    /// An interface using the gRPC binding (spec Section 10). `url` is a
-    /// `host:port` gRPC endpoint (no scheme), as accepted by
-    /// [`tonic::transport::Endpoint`].
+    /// An interface using the gRPC binding (spec Section 10). `url` is the gRPC endpoint with its
+    /// scheme, `http://host:port` or `https://host:port`: that is what
+    /// [`GrpcClient`](crate::client::GrpcClient) dials, and it refuses an endpoint without one.
     pub fn grpc(url: impl Into<String>) -> Self {
         AgentInterface {
             url: url.into(),
