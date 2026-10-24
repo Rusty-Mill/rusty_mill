@@ -5,7 +5,7 @@
 #   1. A stock croc client pair transfers a file through the rusty-croc relay.
 #   2. The rusty-croc relay-client handshake works against the stock Go relay.
 #
-# Requirements: cargo, go, git, network access to github.com (to fetch croc).
+# Requirements: cargo, go, git, python3, network access to github.com (to fetch croc).
 # Override CROC_SRC to point at an existing croc checkout.
 
 set -euo pipefail
@@ -18,18 +18,29 @@ PASS="pass123"
 SECRET="$((1000 + RANDOM % 9000))-interop-test-phrase"
 
 mkdir -p "$WORK"
+# Keep remembered options isolated from the caller's configuration.
+export XDG_CONFIG_HOME="$WORK/config"
+mkdir -p "$XDG_CONFIG_HOME"
 cleanup() { kill $(jobs -p) 2>/dev/null || true; }
 trap cleanup EXIT
 
 echo "==> building rusty-croc"
-cargo build --release --manifest-path "$ROOT/Cargo.toml" --bin rusty-croc
-cargo build --release --manifest-path "$ROOT/Cargo.toml" --example join_room
-RUSTY="$ROOT/target/release/rusty-croc"
+cargo build --locked --release --manifest-path "$ROOT/Cargo.toml" --bin rusty-croc
+cargo build --locked --release --manifest-path "$ROOT/Cargo.toml" --example join_room
+# Cargo uses the monorepo target directory, or the caller's CARGO_TARGET_DIR.
+TARGET_DIR="$(cargo metadata --no-deps --format-version 1 --manifest-path "$ROOT/Cargo.toml" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+RUSTY="$TARGET_DIR/release/rusty-croc"
 
 echo "==> building stock Go croc"
 if [ ! -d "$CROC_SRC" ]; then
-  git clone --depth 1 https://github.com/schollz/croc "$CROC_SRC"
+  # croc v10.7.0: pin the wire-protocol oracle, rather than following main.
+  git init "$CROC_SRC"
+  git -C "$CROC_SRC" remote add origin https://github.com/schollz/croc
+  git -C "$CROC_SRC" fetch --depth 1 origin 2d9db41befec73287d727506409d87493f513a00
+  git -C "$CROC_SRC" checkout --detach FETCH_HEAD
 fi
+echo "    Go oracle: $(git -C "$CROC_SRC" rev-parse HEAD)"
 (cd "$CROC_SRC" && go build -o "$WORK/croc-go" .)
 CROC="$WORK/croc-go"
 
@@ -60,7 +71,7 @@ fi
 echo "==> test 2: rusty-croc client handshake against the stock Go relay"
 "$CROC" relay --ports 9130,9131 &>"$WORK/go-relay.log" &
 sleep 1.5
-OUT="$("$ROOT/target/release/examples/join_room" 127.0.0.1:9130 "$PASS" interop-room)"
+OUT="$("$TARGET_DIR/release/examples/join_room" 127.0.0.1:9130 "$PASS" interop-room)"
 echo "    OK: $OUT"
 
 # --- phase 2: file-transfer engine interop --------------------------------
@@ -102,6 +113,18 @@ transfer_case rust-to-go \
 transfer_case go-to-rust \
   "$CROC" --relay 127.0.0.1:9119 --pass "$PASS" send -- \
   "$RUSTY" receive --yes --relay 127.0.0.1:9119 --pass "$PASS"
+
+# Exercise the migrated NIST backends and the retained SIEC backend in both
+# wire directions. Set both peers explicitly: croc negotiates the receiver's choice.
+echo "==> curve compatibility: Go <-> Rust on every supported curve"
+for curve in p256 p384 p521 siec; do
+  transfer_case "rust-to-go-$curve" \
+    "$RUSTY" send --curve "$curve" --relay 127.0.0.1:9119 --pass "$PASS" -- \
+    "$CROC" --curve "$curve" --yes --relay 127.0.0.1:9119 --pass "$PASS"
+  transfer_case "go-to-rust-$curve" \
+    "$CROC" --curve "$curve" --relay 127.0.0.1:9119 --pass "$PASS" send -- \
+    "$RUSTY" receive --curve "$curve" --yes --relay 127.0.0.1:9119 --pass "$PASS"
+done
 
 echo "==> test 4: local-network route via ips? probe (recipient hops to sender's local relay)"
 code="$((1000 + RANDOM % 9000))-interop-local-route"
