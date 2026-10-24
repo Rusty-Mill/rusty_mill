@@ -28,9 +28,11 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+#[cfg(test)]
+use crate::core::Grid;
 use crate::core::{
     ATTR_BOLD, ATTR_ITALIC, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell, CursorShape,
-    Grid, UnderlineStyle, WIDE_TRAILER, char_width,
+    FrameView, UnderlineStyle, WIDE_TRAILER, char_width,
 };
 
 use super::font::{FontCache, Glyph, GlyphSource, Style};
@@ -784,7 +786,16 @@ impl GpuCore {
         let row_off = if chrome.is_empty() { 0 } else { 1 };
         let mut frame = FrameLists::default();
         self.append_chrome(&mut frame, chrome, font);
-        self.append_grid(&mut frame, grid, 0, row_off, true, cursor_on, None, font);
+        self.append_grid(
+            &mut frame,
+            &grid.frame_view(),
+            0,
+            row_off,
+            true,
+            cursor_on,
+            None,
+            font,
+        );
         self.draw_frame(view, &frame, 0x000000);
     }
 
@@ -848,7 +859,7 @@ impl GpuCore {
     fn append_grid(
         &mut self,
         frame: &mut FrameLists,
-        grid: &Grid,
+        grid: &FrameView,
         col0: usize,
         row0: usize,
         focused: bool,
@@ -856,8 +867,6 @@ impl GpuCore {
         hover_link: Option<(usize, usize, usize)>,
         font: &mut FontCache,
     ) {
-        // Resolve the fold-aware viewport once; per-cell lookups below reuse it.
-        let view = grid.view();
         let cursor = (focused && grid.cursor_visible && grid.view_offset == 0 && cursor_on)
             .then_some(grid.cursor);
         let status = grid.status_row();
@@ -888,7 +897,7 @@ impl GpuCore {
             // `None` (identity) for pure-LTR/status rows — mirrors the CPU
             // renderer. Cell state stays logical; only the emitted instance
             // X position (and glyph mirroring) go through the map.
-            let bidi = if on_status { None } else { view.bidi_row(row) };
+            let bidi = grid.bidi_row(row);
             let vis = |col: usize| -> usize {
                 bidi.as_ref()
                     .and_then(|b| b.log2vis.get(col))
@@ -899,7 +908,7 @@ impl GpuCore {
                 let cell = if on_status {
                     status.unwrap()[col]
                 } else {
-                    view.cell(col, row)
+                    grid.cell(col, row)
                 };
                 if cell.flags & WIDE_TRAILER != 0 {
                     cols.push(Resolved {
@@ -922,7 +931,7 @@ impl GpuCore {
                         CursorShape::Bar => (cell.fg, cell.bg, 3u32, grid.cursor_color),
                     };
                     (fg, bg, curs, ccol, false)
-                } else if !on_status && let Some(cur) = view.search_highlight(col, row) {
+                } else if !on_status && let Some(cur) = grid.search_highlight(col, row) {
                     (
                         SEARCH_FG,
                         if cur { SEARCH_CUR_BG } else { SEARCH_BG },
@@ -930,7 +939,7 @@ impl GpuCore {
                         0,
                         false,
                     )
-                } else if !on_status && view.is_selected(col, row) {
+                } else if !on_status && grid.is_selected(col, row) {
                     (cell.bg, cell.fg, 0, 0, false)
                 } else {
                     (cell.fg, cell.bg, 0, 0, true)
@@ -1102,28 +1111,18 @@ impl GpuCore {
             if im.pw == 0 || im.ph == 0 || im.cols == 0 || im.rows == 0 {
                 continue;
             }
-            // An animated image (inline GIF) uploads its backing animation's
-            // current frame, keyed by frame index so each frame gets its own
-            // cached texture; the stored snapshot is the eviction fallback.
-            let anim = im.anim.and_then(|id| {
-                let (w, h, px) = grid.kitty_frame(id)?;
-                (w == im.pw && h == im.ph).then_some(())?;
-                let cur = grid.kitty_images.iter().find(|i| i.id == id)?.current;
-                Some((id, cur, px))
-            });
-            let (key, pixels): (_, &[Option<u32>]) = match anim {
-                Some((id, cur, px)) => ((3u8, id as u64, cur as u64), px),
-                None => (
-                    (1u8, im.serial as u64, ((im.pw as u64) << 32) | im.ph as u64),
-                    &im.pixels,
-                ),
+            // An animated image (inline GIF) arrives as its current frame,
+            // keyed by frame index so each frame gets its own cached texture.
+            let key = match im.anim {
+                Some((id, cur)) => (3u8, id as u64, cur as u64),
+                None => (1u8, im.serial as u64, ((im.pw as u64) << 32) | im.ph as u64),
             };
-            if let Some(bind) = self.image_texture(key, im.pw, im.ph, pixels) {
+            if let Some(bind) = self.image_texture(key, im.pw, im.ph, &im.pixels) {
                 frame.images.push((
                     bind,
                     ImgInstance {
                         col: (col0 + im.col) as i32,
-                        row: row0 as i32 + grid.image_top_row(im) as i32,
+                        row: row0 as i32 + im.top as i32,
                         cols: im.cols as u32,
                         rows: im.rows as u32,
                         uv: [0.0, 0.0, 1.0, 1.0],
@@ -1151,12 +1150,7 @@ impl GpuCore {
                 if prow >= prows || pcol >= pcols {
                     continue;
                 }
-                let frame_idx = grid
-                    .kitty_images
-                    .iter()
-                    .find(|im| im.id == id)
-                    .map(|im| im.current as u64)
-                    .unwrap_or(0);
+                let frame_idx = grid.kitty_current(id).unwrap_or(0) as u64;
                 let key = (2u8, id as u64, frame_idx);
                 let pixels = pixels.to_vec();
                 if let Some(bind) = self.image_texture(key, iw, ih, &pixels) {
@@ -1188,7 +1182,7 @@ impl GpuCore {
                 if col + w > grid.cols {
                     break;
                 }
-                let base = view.cell(col, crow);
+                let base = grid.cell(col, crow);
                 let (rect, is_color) = self.tile_for_char(pch, Style::Regular, font);
                 let fg = if is_color { 0xFFFFFF } else { base.bg };
                 frame.base.push(Self::base_inst(

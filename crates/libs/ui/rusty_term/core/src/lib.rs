@@ -61,6 +61,8 @@ pub use grid::BlockMark;
 #[cfg(any(test, feature = "gui"))]
 pub use grid::View;
 pub use grid::{CursorShape, DirtyFrame, Grid, LineAttr, SCROLLBACK_MAX, SnapshotError};
+#[cfg(any(test, feature = "gui"))]
+pub use grid::{FrameImage, FrameView};
 #[cfg(feature = "gui")]
 pub use grid::{MouseModes, Selection};
 pub use parser::AnsiParser;
