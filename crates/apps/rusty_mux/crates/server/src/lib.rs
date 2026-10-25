@@ -7,6 +7,10 @@
 //! parses those bytes itself; the server never re-renders. Input reaches a
 //! PTY only from the client holding that block's lease ([`rusty_mux_core`]).
 //!
+//! Every model change is broadcast as an event. With `EVENT_SEQ` events are
+//! numbered, and a client that reconnects with the last number it saw gets
+//! the events it missed, if the server still holds them (the newest 4096).
+//!
 //! Everything runs on one thread (`rusty_tokio`'s `LocalRuntime`), so the
 //! model, the grids and the client queues are plain `Rc<RefCell<_>>` state
 //! and every handler sees a consistent view between awaits.
@@ -16,6 +20,8 @@
 pub mod checkpoint;
 #[cfg(target_os = "linux")]
 mod conn;
+#[cfg(target_os = "linux")]
+mod history;
 #[cfg(target_os = "linux")]
 mod outbox;
 #[cfg(target_os = "linux")]

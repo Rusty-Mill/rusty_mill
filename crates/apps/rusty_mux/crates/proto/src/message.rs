@@ -23,12 +23,20 @@ impl Features {
     /// RTCP v2 headless checkpoints transferred in ordered Checkpoint chunks.
     pub const CHECKPOINT_V2: Self = Self(1 << 2);
 
+    /// Numbered events and resuming the stream after a reconnect: a
+    /// [`Cursor`] in Hello and Welcome, and `seq` on every event.
+    pub const EVENT_SEQ: Self = Self(1 << 3);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
 
     pub const fn bits(self) -> u64 {
         self.0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 
     /// The features both peers support.
@@ -41,6 +49,15 @@ impl Features {
     }
 }
 
+/// A position in one server run's event stream: the run's `epoch` and the
+/// `seq` of the last event delivered. Sequence numbers start at 1 in each
+/// run, so `seq` 0 is the position before the first event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cursor {
+    pub epoch: Uuid,
+    pub seq: u64,
+}
+
 /// One frame's content.
 ///
 /// Requests from a client carry a `req` number that the server echoes in
@@ -51,6 +68,9 @@ pub enum Message {
     // Client to server.
     Hello {
         features: Features,
+        /// With [`Features::EVENT_SEQ`]: the last event this client saw
+        /// before reconnecting, to continue from there.
+        resume: Option<Cursor>,
     },
     CreateSession {
         req: u64,
@@ -96,9 +116,14 @@ pub enum Message {
         block: BlockId,
     },
     // Server to client.
+    /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
+    /// stream starts: events after it follow, the replayed ones first. It
+    /// equals the Hello's `resume` when the server resumed the stream;
+    /// otherwise events in between are lost and the client starts afresh.
     Welcome {
         features: Features,
         client: ClientId,
+        cursor: Option<Cursor>,
     },
     /// The request succeeded; `created` is the new entity's id, if it made one.
     Done {
@@ -109,7 +134,11 @@ pub enum Message {
         req: u64,
         reason: String,
     },
-    Event(Event),
+    /// A model change; `seq` is its number with [`Features::EVENT_SEQ`].
+    Event {
+        seq: Option<u64>,
+        event: Event,
+    },
     /// Legacy drawable snapshot; not a raw-output continuation checkpoint.
     /// The Phase 1 server uses negotiated Checkpoint chunks for attach.
     Snapshot {
@@ -152,8 +181,10 @@ const KIND: u32 = 13;
 const OFFSET: u32 = 15;
 const TOTAL: u32 = 16;
 const HOLDER: u32 = 14;
-// IDs 1..=TOTAL are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = TOTAL as usize;
+const EPOCH: u32 = 17;
+const SEQ: u32 = 18;
+// IDs 1..=SEQ are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = SEQ as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -181,8 +212,8 @@ impl Message {
     pub(crate) fn encode_body(&self, out: &mut Out) -> u8 {
         use Message as M;
         match self {
-            M::Hello { features } => {
-                out.varint(FEATURES, features.bits());
+            M::Hello { features, resume } => {
+                put_cursor(out.varint(FEATURES, features.bits()), *resume);
                 ty::HELLO
             }
             M::CreateSession { req, name } => {
@@ -217,9 +248,15 @@ impl Message {
                 ty::RESIZE
             }
             M::CloseBlock { req, block } => req_block(out, *req, *block, ty::CLOSE_BLOCK),
-            M::Welcome { features, client } => {
-                out.varint(FEATURES, features.bits())
+            M::Welcome {
+                features,
+                client,
+                cursor,
+            } => {
+                let out = out
+                    .varint(FEATURES, features.bits())
                     .uuid(CLIENT, client.uuid());
+                put_cursor(out, *cursor);
                 ty::WELCOME
             }
             M::Done { req, created } => {
@@ -233,7 +270,10 @@ impl Message {
                 out.varint(REQ, *req).bytes(REASON, reason.as_bytes());
                 ty::FAILED
             }
-            M::Event(event) => {
+            M::Event { seq, event } => {
+                if let Some(seq) = seq {
+                    out.varint(SEQ, *seq);
+                }
                 put_event(out, event);
                 ty::EVENT
             }
@@ -270,6 +310,7 @@ impl Message {
         Ok(match message {
             ty::HELLO => M::Hello {
                 features: Features(f.varint(FEATURES)?),
+                resume: get_cursor(&f)?,
             },
             ty::CREATE_SESSION => M::CreateSession {
                 req: f.varint(REQ)?,
@@ -317,6 +358,7 @@ impl Message {
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
                 client: client(&f, CLIENT)?,
+                cursor: get_cursor(&f)?,
             },
             ty::DONE => M::Done {
                 req: f.varint(REQ)?,
@@ -326,7 +368,10 @@ impl Message {
                 req: f.varint(REQ)?,
                 reason: f.string(REASON)?,
             },
-            ty::EVENT => M::Event(get_event(&f)?),
+            ty::EVENT => M::Event {
+                seq: f.opt(SEQ, In::varint)?,
+                event: get_event(&f)?,
+            },
             ty::SNAPSHOT => M::Snapshot {
                 block: block(&f, BLOCK)?,
                 data: f.bytes(DATA)?.to_vec(),
@@ -361,6 +406,23 @@ fn put_size(out: &mut Out, size: Size) {
 
 fn get_size(f: &In<'_>) -> Result<Size, Error> {
     Size::new(f.u16(COLS)?, f.u16(ROWS)?).map_err(|_| f.invalid(COLS))
+}
+
+fn put_cursor(out: &mut Out, cursor: Option<Cursor>) {
+    if let Some(Cursor { epoch, seq }) = cursor {
+        out.uuid(EPOCH, epoch).varint(SEQ, seq);
+    }
+}
+
+/// Both cursor fields or neither.
+fn get_cursor(f: &In<'_>) -> Result<Option<Cursor>, Error> {
+    if f.opt(EPOCH, In::uuid)?.is_none() && f.opt(SEQ, In::varint)?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(Cursor {
+        epoch: f.uuid(EPOCH)?,
+        seq: f.varint(SEQ)?,
+    }))
 }
 
 fn session(f: &In<'_>, id: u32) -> Result<SessionId, Error> {

@@ -54,6 +54,7 @@ fn scripted_server(lease: bool, end: End) -> (PathBuf, JoinHandle<()>) {
         conn.send(&Message::Welcome {
             features: Features::CHECKPOINT_V2,
             client: ClientId::from_uuid(Uuid::nil()),
+            cursor: None,
         })
         .expect("welcome");
         while let Ok(message) = conn.recv() {
@@ -118,8 +119,11 @@ fn finish(conn: &mut Conn<std::os::unix::net::UnixStream>, block: BlockId, end: 
     match end {
         End::Eof => true,
         End::Closed => {
-            conn.send(&Message::Event(Event::BlockClosed { block }))
-                .expect("closed");
+            conn.send(&Message::Event {
+                seq: None,
+                event: Event::BlockClosed { block },
+            })
+            .expect("closed");
             false
         }
         End::Open => false,

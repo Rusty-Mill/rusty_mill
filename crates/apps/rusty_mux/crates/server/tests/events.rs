@@ -1,0 +1,109 @@
+//! The resumable event stream (C05): numbered events, and replay of the
+//! events a client missed while disconnected.
+
+#![cfg(target_os = "linux")]
+
+mod common;
+
+use common::{Client, start_server};
+use rusty_mux_core::{Event, SessionId};
+use rusty_mux_proto::{Cursor, Features, Message};
+use rusty_uuid::Uuid;
+
+const SEQ: Features = Features::EVENT_SEQ;
+
+fn create_session(client: &mut Client, name: &str) -> SessionId {
+    let id = client
+        .request(|req| Message::CreateSession {
+            req,
+            name: name.into(),
+        })
+        .expect("id");
+    SessionId::from_uuid(id)
+}
+
+/// Reads until the event announcing `session` arrives.
+fn wait_for_session(client: &mut Client, session: SessionId) {
+    let created = Event::SessionCreated { session };
+    while !client.events.iter().any(|(_, e)| *e == created) {
+        client.recv();
+    }
+}
+
+fn numbers(client: &Client) -> Vec<u64> {
+    client
+        .events
+        .iter()
+        .map(|(seq, _)| seq.expect("numbered"))
+        .collect()
+}
+
+fn last_seen(client: &Client) -> Cursor {
+    let start = client.cursor.expect("cursor");
+    Cursor {
+        seq: numbers(client).last().copied().unwrap_or(start.seq),
+        ..start
+    }
+}
+
+#[test]
+fn a_resumed_stream_has_no_gap_and_no_repeat() {
+    let path = start_server();
+    let mut a = Client::connect_with(&path, SEQ, None);
+    assert_eq!(a.cursor.map(|c| c.seq), Some(0));
+    let first = create_session(&mut a, "first");
+    wait_for_session(&mut a, first);
+    let seen = last_seen(&a);
+    drop(a);
+
+    // Changes made while A is away, by someone else.
+    let mut b = Client::connect(&path);
+    let missed = create_session(&mut b, "missed");
+
+    let mut a = Client::connect_with(&path, SEQ, Some(seen));
+    assert_eq!(a.cursor, Some(seen), "the server resumed the stream");
+    let after = create_session(&mut a, "after");
+    wait_for_session(&mut a, after);
+
+    let resumed = numbers(&a);
+    let expected: Vec<u64> = (seen.seq + 1..=seen.seq + resumed.len() as u64).collect();
+    assert_eq!(resumed, expected, "contiguous from the resume point");
+    assert!(
+        a.events
+            .iter()
+            .any(|(_, e)| *e == Event::SessionCreated { session: missed }),
+        "the missed change was replayed"
+    );
+}
+
+#[test]
+fn a_cursor_from_another_run_starts_afresh() {
+    let path = start_server();
+    let mut b = Client::connect(&path);
+    create_session(&mut b, "before");
+
+    let stale = Cursor {
+        epoch: Uuid::from_bytes([7; 16]),
+        seq: 1,
+    };
+    let mut a = Client::connect_with(&path, SEQ, Some(stale));
+    let start = a.cursor.expect("cursor");
+    assert_ne!(start, stale, "not resumed");
+    let session = create_session(&mut a, "after");
+    wait_for_session(&mut a, session);
+    assert_eq!(
+        numbers(&a).first(),
+        Some(&(start.seq + 1)),
+        "nothing replayed"
+    );
+}
+
+#[test]
+fn a_client_without_the_feature_gets_unnumbered_events() {
+    let path = start_server();
+    let mut a = Client::connect_with(&path, Features::NONE, None);
+    assert_eq!(a.cursor, None);
+    let session = create_session(&mut a, "s");
+    wait_for_session(&mut a, session);
+    assert!(a.events.iter().all(|(seq, _)| seq.is_none()));
+}
