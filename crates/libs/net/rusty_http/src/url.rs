@@ -250,6 +250,8 @@ fn parse_authority(authority: &str, default_port: u16, original: &str) -> Result
                 .map_err(|_| Error::InvalidUrl(format!("bad port in `{original}`")))?;
             Ok((host.to_string(), port))
         }
+        // `:port` is a port with no host, not a host called `:port`.
+        Some(("", _)) => Err(Error::InvalidUrl(format!("missing host in `{original}`"))),
         _ => Ok((authority.to_string(), default_port)),
     }
 }
@@ -302,6 +304,21 @@ mod tests {
     #[test]
     fn rejects_missing_scheme_separator() {
         assert!(Url::parse("example.com/a").is_err());
+    }
+
+    #[test]
+    fn rejects_a_port_with_no_host() {
+        // `rsplit_once(':')` leaves an empty host here; it must not become the host `":50051"`.
+        for input in [
+            "https://:50051",
+            "http://:50051/path",
+            "http://:80?q=1",
+            "https://:",
+        ] {
+            assert!(Url::parse(input).is_err(), "{input}");
+        }
+        // An unbracketed IPv6 literal has colons but a host; it is left as it was.
+        assert_eq!(Url::parse("http://[::1]:8080/").unwrap().port, 8080);
     }
 
     #[test]
