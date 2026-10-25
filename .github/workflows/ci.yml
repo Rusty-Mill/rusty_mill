@@ -1260,10 +1260,19 @@ jobs:
       cancel-in-progress: false
     # `check_rust_versions.py` (dependency policy) compares declared
     # rust-versions; this builds. Each workspace crate that declares one is
-    # `cargo check`ed with a rustc of exactly that version (default features),
-    # grouped by floor. Only the affected crates on a PR; every crate on a full
-    # sweep. Floors at the pinned toolchain are covered by the ordinary jobs.
-    # The build output stays under RUNNER_TEMP.
+    # `cargo check`ed with a rustc of exactly that version, grouped by floor:
+    # default features, then `--all-features` for a crate that has any (#844).
+    # Only the affected crates on a PR; every crate on a full sweep. Floors at
+    # the pinned toolchain are covered by the ordinary jobs. The build output
+    # stays under RUNNER_TEMP.
+    #
+    # `--all-features-exclude` lists crates whose declared floor is
+    # deliberately the default build's, with an opt-in feature above it:
+    # platform-linux (`track-p` -> rusty_libc 1.88, see its Cargo.toml),
+    # rusty_json (the optional rusty_json-derive, 1.85), rusty_tls
+    # (`native-crypto` -> rusty_aead/rusty_pk at the pinned toolchain),
+    # rusty_rdp and rusty_tonic (their READMEs: optional transports raise
+    # the floor). Raising any of these floors cascades into many dependents.
     name: compile at declared rust-version
     needs: plan
     if: (needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != '') && needs.plan.outputs.linux == 'true'
@@ -1288,6 +1297,7 @@ jobs:
             "${scope[@]}" \
             --skip-from "$RUST_TOOLCHAIN" \
             --exclude "$REMIND_ME_PACKAGES rusty_multimodal_db" \
+            --all-features-exclude "platform-linux rusty_json rusty_tls rusty_rdp rusty_tonic" \
             --target-base "$RUNNER_TEMP/msrv"
           test "$(sha256sum Cargo.lock)" = "$lock_before"
 
