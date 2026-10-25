@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod codec;
+pub mod coedit;
 pub mod command;
 pub mod engine;
 pub mod event;
@@ -23,6 +24,7 @@ pub mod store;
 pub mod wake;
 
 pub use codec::{decode_artifact, encode_artifact, spec_markdown, SpecFile};
+pub use coedit::{Doc, LineId, LineOp, SpecEdit, Version};
 pub use command::{AgentAction, Code, Command, HumanAction, OpenTask, Rejection, Response};
 pub use engine::{handle, Handled};
 pub use event::{

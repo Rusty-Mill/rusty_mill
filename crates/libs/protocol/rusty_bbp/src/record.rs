@@ -1,5 +1,6 @@
 //! Records: principals, artifacts, messages and their typed payloads.
 
+use crate::coedit::SpecEdit;
 use crate::ids::*;
 use rusty_serde::{Deserialize, Serialize};
 
@@ -35,6 +36,8 @@ pub enum ArtifactPayload {
     Spec {
         brief: ArtId,
     },
+    /// A co-edited spec version: line edits on a base version (step 4).
+    SpecEdit(SpecEdit),
     Diff,
     Candidate(Candidate),
     TestReport(Report),
@@ -59,7 +62,7 @@ impl ArtifactPayload {
     pub fn kind(&self) -> ArtifactKind {
         match self {
             ArtifactPayload::Brief => ArtifactKind::Brief,
-            ArtifactPayload::Spec { .. } => ArtifactKind::Spec,
+            ArtifactPayload::Spec { .. } | ArtifactPayload::SpecEdit(_) => ArtifactKind::Spec,
             ArtifactPayload::Diff => ArtifactKind::Diff,
             ArtifactPayload::Candidate(_) => ArtifactKind::Candidate,
             ArtifactPayload::TestReport(_) => ArtifactKind::TestReport,

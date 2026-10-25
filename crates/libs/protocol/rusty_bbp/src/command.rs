@@ -209,6 +209,10 @@ pub enum Code {
     BadRoster,
     /// `open` carried a `max_live_turns` outside 1 to the roster size.
     BadLiveTurns,
+    /// A co-edited spec edit touches a section that changed since its base.
+    StaleBase,
+    /// A co-edited spec edit is malformed: no ops, an empty insert, a line break.
+    BadEdit,
     /// Driver boundary: the referenced blob is not in the store.
     BlobMissing,
     /// Driver boundary: the claimed payload is not what the stored bytes decode to.
