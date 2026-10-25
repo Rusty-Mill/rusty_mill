@@ -74,6 +74,7 @@ mod client {
 
         conn.send(&Message::Hello {
             features: Features::CHECKPOINT_V3,
+            resume: None,
         })
         .map_err(|e| e.to_string())?;
         let mut req = Requests {
@@ -230,7 +231,10 @@ mod client {
                     }
                 }
                 Message::Output { block: b, data } if b == block => data,
-                Message::Event(rusty_mux_core::Event::BlockClosed { block: b }) if b == block => {
+                Message::Event {
+                    event: rusty_mux_core::Event::BlockClosed { block: b },
+                    ..
+                } if b == block => {
                     return Ended::Closed;
                 }
                 _ => continue,

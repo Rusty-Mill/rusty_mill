@@ -5,13 +5,14 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use rusty_mux_core::{BlockId, ClientId, Event, Mux, Size};
-use rusty_mux_proto::{Features, Message, encode};
+use rusty_mux_proto::{Cursor, Features, Message, encode};
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::task::JoinHandle;
 use rusty_uuid::Uuid;
 
 use crate::Config;
 use crate::checkpoint::validate_size;
+use crate::history::History;
 use crate::outbox::Outbox;
 use crate::pty::{self, Process, Pty};
 
@@ -19,6 +20,12 @@ pub(crate) type Shared = Rc<RefCell<State>>;
 
 /// Bytes read from a PTY per output frame.
 const CHUNK: usize = 16 << 10;
+
+/// Events kept for clients that reconnect.
+const HISTORY: usize = 4096;
+
+/// What the server offers; a client gets the intersection with its own.
+const OFFERED: Features = Features::CHECKPOINT_V3.union(Features::EVENT_SEQ);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -49,6 +56,7 @@ pub(crate) struct State {
     blocks: HashMap<BlockId, BlockRt>,
     clients: HashMap<ClientId, Outbox>,
     features: HashMap<ClientId, Features>,
+    history: History,
 }
 
 impl State {
@@ -59,6 +67,7 @@ impl State {
             blocks: HashMap::new(),
             clients: HashMap::new(),
             features: HashMap::new(),
+            history: History::new(Uuid::new_v4(), HISTORY),
         }))
     }
 
@@ -66,15 +75,51 @@ impl State {
         self.clients.contains_key(&client)
     }
 
-    /// Registers a client and negotiates checkpoint support.
-    pub(crate) fn connect(&mut self, outbox: Outbox, theirs: Features) -> ClientId {
+    /// Registers a client, negotiates features and, with `EVENT_SEQ`,
+    /// replays the events after `resume` when they are all still held.
+    pub(crate) fn connect(
+        &mut self,
+        outbox: Outbox,
+        theirs: Features,
+        resume: Option<Cursor>,
+    ) -> ClientId {
         let client = self.mux.connect();
         self.clients.insert(client, outbox);
-        let features = theirs.intersection(Features::CHECKPOINT_V3);
+        let features = theirs.intersection(OFFERED);
         self.features.insert(client, features);
-        self.send(client, &Message::Welcome { features, client });
+        let (cursor, missed) = if features.contains(Features::EVENT_SEQ) {
+            let (cursor, missed) = self.missed(resume);
+            (Some(cursor), missed)
+        } else {
+            (None, Vec::new())
+        };
+        self.send(
+            client,
+            &Message::Welcome {
+                features,
+                client,
+                cursor,
+            },
+        );
+        missed.iter().for_each(|m| self.send(client, m));
         self.flush();
         client
+    }
+
+    /// Where a client's stream starts, and the events it missed: from
+    /// `resume` when possible, else from now with nothing to replay.
+    fn missed(&self, resume: Option<Cursor>) -> (Cursor, Vec<Message>) {
+        let replay = resume.and_then(|from| Some((from, self.history.since(from)?)));
+        let Some((from, events)) = replay else {
+            return (self.history.cursor(), Vec::new());
+        };
+        let messages = events
+            .map(|(seq, event)| Message::Event {
+                seq: Some(*seq),
+                event: event.clone(),
+            })
+            .collect();
+        (from, messages)
     }
 
     /// Forgets a client whose connection ended. A client the server already
@@ -339,20 +384,34 @@ impl State {
                 {
                     rt.release(true);
                 }
-                let frame = match encode(&Message::Event(event)) {
-                    Ok(frame) => frame,
-                    Err(err) => {
-                        eprintln!("rusty-mux-server: encoding an event: {err}");
-                        continue;
-                    }
+                let seq = self.history.push(event.clone());
+                let (Some(plain), Some(numbered)) =
+                    (event_frame(None, &event), event_frame(Some(seq), &event))
+                else {
+                    continue;
                 };
-                let clients: Vec<ClientId> = self.clients.keys().copied().collect();
-                clients
-                    .into_iter()
-                    .for_each(|c| self.send_frame(c, frame.clone()));
+                let clients: Vec<(ClientId, bool)> = self
+                    .features
+                    .iter()
+                    .map(|(c, f)| (*c, f.contains(Features::EVENT_SEQ)))
+                    .collect();
+                for (client, numbers) in clients {
+                    let frame = if numbers { &numbered } else { &plain };
+                    self.send_frame(client, frame.clone());
+                }
             }
         }
     }
+}
+
+fn event_frame(seq: Option<u64>, event: &Event) -> Option<Vec<u8>> {
+    let message = Message::Event {
+        seq,
+        event: event.clone(),
+    };
+    encode(&message)
+        .map_err(|err| eprintln!("rusty-mux-server: encoding an event: {err}"))
+        .ok()
 }
 
 enum Outcome {
@@ -424,7 +483,7 @@ mod regression {
         });
         let (out, inbox, _) = outbox();
         let mut state = shared.borrow_mut();
-        let client = state.connect(out, Features::CHECKPOINT_V3);
+        let client = state.connect(out, Features::CHECKPOINT_V3, None);
         let session = state.mux.create_session("s");
         let window = state.mux.create_window(session, "w").unwrap();
         let Outcome::Done(Some(id)) = state

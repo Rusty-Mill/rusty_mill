@@ -30,8 +30,8 @@ Exit criteria:
 Schema-first API, CLI, resumable events, block methods, program status, MCP. Exit: CLI and MCP are generated from one schema catalog (test); CLI exit codes 0/1/2/3/4/130 covered by tests; events resume after a disconnect without loss or duplication (test); status OSC round-trips server to client (test).
 
 Started 2026-10-25 (owner go-ahead). One PR per step, in order:
-1. Request schema catalog in `rusty_mux_proto::schema` (C17). In progress.
-2. Resumable event stream: sequence numbers and replay (C05).
+1. Request schema catalog in `rusty_mux_proto::schema` (C17). Done (#1051).
+2. Resumable event stream: sequence numbers and replay (C05). In progress.
 3. `rusty_mux_ctl`, generated from the catalog, with `--json` and exit codes (C04).
 4. Block methods and screen capture (C06, C18).
 5. Program status OSC, `rusty_mux_status` (C20).
