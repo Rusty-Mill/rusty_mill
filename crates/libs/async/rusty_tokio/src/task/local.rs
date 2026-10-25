@@ -263,13 +263,13 @@ where
     // docs for why call sites don't need to `#[cfg]` around this.
     #[allow(clippy::let_unit_value)]
     let span = super::trace::spawn_span("task", None, id.as_u64());
-    let wrapped: LocalBoxFuture = Box::pin(super::trace::instrument(
-        async move {
-            let output = future.await;
-            join_inner.complete(output);
-        },
-        span,
-    ));
+    // Only `future` runs inside the span: completing the join after it
+    // exits means a subscriber has seen the last poll end by the time the
+    // `JoinHandle` resolves.
+    let wrapped: LocalBoxFuture = Box::pin(async move {
+        let output = super::trace::instrument(future, span).await;
+        join_inner.complete(output);
+    });
 
     let task = Arc::new(LocalTask {
         id,

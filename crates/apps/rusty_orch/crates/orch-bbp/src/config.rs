@@ -67,14 +67,25 @@ pub struct Config {
     #[rusty_serde(default)]
     pub end_grace_secs: Option<u64>,
 }
+/// BBP's bound on a claim's `priority_secs`: a day.
+const MAX_PRIORITY_SECS: u64 = 86_400;
 /// `bbp mod --slots`: how many harnesses (agents) and runners (validators)
-/// may run at once across every task using `dir`.
+/// may run at once across every task using `dir`, and how this goal's tasks
+/// queue for them (`bbp mod --claim`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Slots {
     #[rusty_serde(with = "path_json")]
     pub dir: PathBuf,
     pub agents: u32,
     pub validators: u32,
+    /// The most agent slots this goal's tasks hold at once, all together.
+    /// Unset bounds them by `agents` alone.
+    #[rusty_serde(default)]
+    pub ceiling: Option<u32>,
+    /// How many seconds earlier than its arrival a waiting turn or run of
+    /// this goal is ranked: precedence that a long enough wait outranks.
+    #[rusty_serde(default)]
+    pub priority_secs: u64,
 }
 impl Config {
     /// Validate roster and independent-review policy before any host mutation.
@@ -92,6 +103,13 @@ impl Config {
             .is_some_and(|s| s.agents == 0 || s.validators == 0)
         {
             return Err("slots must admit at least one agent and one validator".into());
+        }
+        if let Some(slots) = &self.slots {
+            if slots.ceiling == Some(0) || slots.priority_secs > MAX_PRIORITY_SECS {
+                return Err(format!(
+                    "slots ceiling must be positive and priority_secs at most {MAX_PRIORITY_SECS}"
+                ));
+            }
         }
         if self.assignments.len() != self.roster.len() {
             return Err("assign every roster role exactly once".into());

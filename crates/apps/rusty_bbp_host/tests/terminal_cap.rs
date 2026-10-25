@@ -58,7 +58,7 @@ fn config(dir: &Path, task: &TaskId, cost_cap: Option<CostCap>) -> Config {
         end_grace: Duration::ZERO,
         deadline: None,
         cost_cap,
-        slots: None,
+        admission: None,
     }
 }
 
