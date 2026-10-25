@@ -121,12 +121,14 @@ impl Record {
 /// queue; a moderator that dies leaves it too, as its lock is released.
 #[derive(Debug)]
 pub struct Ticket {
-    _lock: File,
+    lock: Option<File>,
     stem: PathBuf,
 }
 
 impl Drop for Ticket {
     fn drop(&mut self) {
+        // Closed first: Windows may keep the name of an open file it deletes.
+        drop(self.lock.take());
         remove(&self.stem);
     }
 }
@@ -233,7 +235,10 @@ impl Admission {
             .map_err(|e| format!("{}: {e}", lock.display()))?;
         file.try_lock()
             .map_err(|e| format!("{}: {e}", lock.display()))?;
-        let ticket = Ticket { _lock: file, stem };
+        let ticket = Ticket {
+            lock: Some(file),
+            stem,
+        };
         let record = Record {
             task: self.task.clone(),
             rank_ms: now_ms.saturating_sub(self.claim.priority_secs * 1000),

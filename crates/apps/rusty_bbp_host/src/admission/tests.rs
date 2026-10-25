@@ -17,6 +17,16 @@ fn slots(tag: &str, agents: u32) -> Result<Slots, String> {
     )
 }
 
+/// `path` as an absolute path here: lease paths are Unix-shaped, so on
+/// Windows they gain a drive.
+fn abs(path: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{path}")
+    } else {
+        path.into()
+    }
+}
+
 fn claim(parent: Option<(&str, u32)>, priority_secs: u64, write: &[&str]) -> Claim {
     Claim {
         parent: parent.map(|(id, agents)| Parent {
@@ -24,7 +34,7 @@ fn claim(parent: Option<(&str, u32)>, priority_secs: u64, write: &[&str]) -> Cla
             agents,
         }),
         priority_secs,
-        write: write.iter().map(|w| (*w).into()).collect(),
+        write: write.iter().map(|w| abs(w)).collect(),
     }
 }
 
@@ -185,8 +195,11 @@ fn claims_are_validated_at_the_boundary() -> Result<(), String> {
     }
     assert!(Admission::new(slots, " ".into(), Claim::default()).is_err());
     let file = dir("claim_file").with_extension("json");
-    std::fs::write(&file, r#"{"parent":{"id":"g","agents":2},"write":["/w"]}"#)
-        .map_err(|e| e.to_string())?;
+    let json = format!(
+        r#"{{"parent":{{"id":"g","agents":2}},"write":["{}"]}}"#,
+        abs("/w")
+    );
+    std::fs::write(&file, json).map_err(|e| e.to_string())?;
     assert_eq!(Claim::read_file(&file)?, claim(Some(("g", 2)), 0, &["/w"]));
     Ok(())
 }
