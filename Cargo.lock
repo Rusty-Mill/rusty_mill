@@ -13024,7 +13024,7 @@ name = "rusty_tonic"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "futures-util",
+ "futures-core",
  "http",
  "http-body-util",
  "prost",
@@ -13036,6 +13036,7 @@ dependencies = [
  "rusty_hyper",
  "rusty_percent",
  "rusty_prost",
+ "rusty_stream",
  "rusty_tls",
  "rusty_tokio",
  "tokio",

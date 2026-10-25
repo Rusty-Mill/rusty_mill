@@ -143,6 +143,9 @@ checks (`tokio::process`, `time::timeout`) run inside `rk-app` (tier C);
 tokio-to-`rusty_tokio` I/O bridge for `agentgateway`; and
 `rusty-hister-model`'s tests drive `sqlx` through `rusty-db`. Each moves with
 the tier C crate that holds it.
+`rusty_tonic` (tier B) builds its tonic-oracle test streams with
+`rusty_stream` through `Compat` instead of `futures-util`. `tokio` stays a
+dev-dependency only to host the tonic oracle server.
 
 ## 4. Per-crate table
 
