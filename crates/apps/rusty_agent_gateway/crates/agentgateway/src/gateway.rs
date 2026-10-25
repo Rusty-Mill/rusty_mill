@@ -26,7 +26,7 @@ use agentgateway_core::{
 use agentgateway_llm::LlmBackend;
 use agentgateway_mcp::Override as McpOverride;
 use agentgateway_mcp::{Federation, TokenClaims};
-use agentgateway_proxy::{Headers, HostProxy, RequestBody, Rewrite, Scheme};
+use agentgateway_proxy::{Headers, HostProxy, Rewrite, Scheme};
 use agentgateway_tls::{Passthrough, TlsBinds, TlsTerminator};
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, StatusCode, header};
@@ -34,7 +34,7 @@ use http_body_util::BodyExt as _;
 use rusty_mcp::otel::metrics::{Instruments, McpMetricsLayer};
 use rusty_mcp_server::{HttpConfig, HttpHandler};
 
-use crate::body::Body;
+use crate::body::{Body, RequestBody};
 use crate::mcp_service::McpService;
 use tower_layer::Layer as _;
 use tower_service::Service as _;
@@ -63,7 +63,15 @@ pub struct Gateway {
     tls: TlsBinds,
     /// Ports that forward connections rather than serving requests on them.
     passthrough: BTreeMap<u16, Arc<Passthrough>>,
+    /// Largest request body a proxied backend is sent: the proxy reads a
+    /// body whole before forwarding it. `limits.maxRequestBodyBytes`.
+    max_proxied_body: usize,
 }
+
+/// [`Gateway`]'s `max_proxied_body` when `limits.maxRequestBodyBytes` is not
+/// set: room for any API call, and a bound on what a burst of uploads can
+/// hold in memory.
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Resolve a route's `urlRewrite` into the parts of a single MCP target's
 /// address it replaces.
@@ -287,12 +295,12 @@ impl Gateway {
             rusty_log::info!(port = bind.port, "passthrough listener ready");
             passthrough.insert(bind.port, Arc::new(forwarder));
         }
-        let default_timeout = config
-            .config
-            .as_ref()
-            .and_then(|c| c.limits.as_ref())
-            .and_then(|l| l.request_timeout)
-            .map(Duration::from);
+        let limits = config.config.as_ref().and_then(|c| c.limits.as_ref());
+        let default_timeout = limits.and_then(|l| l.request_timeout).map(Duration::from);
+        let max_proxied_body = limits
+            .and_then(|l| l.max_request_body_bytes)
+            .unwrap_or(DEFAULT_MAX_REQUEST_BODY_BYTES);
+        let max_proxied_body = usize::try_from(max_proxied_body).unwrap_or(usize::MAX);
 
         let mut routes = Vec::with_capacity(router.route_count());
         routes.resize_with(router.route_count(), || RouteState {
@@ -553,6 +561,7 @@ impl Gateway {
             routes,
             tls,
             passthrough,
+            max_proxied_body,
         })
     }
 
@@ -794,11 +803,9 @@ impl Gateway {
                 }
 
                 let Some(a2a) = a2a else {
-                    let request = Request::from_parts(parts, body);
-                    return proxy
-                        .proxy(request, prefix, peer, scheme)
-                        .await
-                        .map(Body::new);
+                    return self
+                        .forward(proxy, selection, peer, scheme, parts, body)
+                        .await;
                 };
 
                 // Discovery is answered here rather than forwarded: the point
@@ -859,7 +866,7 @@ impl Gateway {
                     Decision::NotJsonRpc => {}
                 }
 
-                let request = Request::from_parts(parts, RequestBody::Buffered(bytes));
+                let request = Request::from_parts(parts, bytes);
                 proxy
                     .proxy(request, prefix, peer, scheme)
                     .await
@@ -894,11 +901,9 @@ impl Gateway {
         let route = selection.route.name.clone().unwrap_or_default();
 
         if parts.method != Method::POST {
-            let request = Request::from_parts(parts, body);
-            return proxy
-                .proxy(request, prefix, peer, scheme)
-                .await
-                .map(Body::new);
+            return self
+                .forward(proxy, selection, peer, scheme, parts, body)
+                .await;
         }
 
         let bytes = match collect_limited(body, agentgateway_llm::MAX_REQUEST_BYTES as usize).await
@@ -931,7 +936,7 @@ impl Gateway {
             }
             AguiDecision::Permitted(summary) => summary,
             AguiDecision::NotARun => {
-                let request = Request::from_parts(parts, RequestBody::Buffered(bytes));
+                let request = Request::from_parts(parts, bytes);
                 return proxy
                     .proxy(request, prefix, peer, scheme)
                     .await
@@ -940,7 +945,7 @@ impl Gateway {
         };
         audit::record_decision(&route, Some(&summary), true, "allowed");
 
-        let request = Request::from_parts(parts, RequestBody::Buffered(bytes));
+        let request = Request::from_parts(parts, bytes);
         let response = proxy.proxy(request, prefix, peer, scheme).await;
         let code = response.status().as_u16();
         response.map(|body| {
@@ -948,6 +953,39 @@ impl Gateway {
                 audit::record_outcome(&route, &summary, code, &report);
             }))
         })
+    }
+}
+
+impl Gateway {
+    /// Read `body` within `limits.maxRequestBodyBytes` and proxy the request.
+    ///
+    /// The proxy sends a request whole, so a retry can send it again; a body
+    /// over the cap is refused with 413 rather than forwarded in part.
+    async fn forward(
+        &self,
+        proxy: &HostProxy,
+        selection: &agentgateway_core::Selection<'_>,
+        peer: Option<IpAddr>,
+        scheme: Scheme,
+        parts: http::request::Parts,
+        body: RequestBody,
+    ) -> Response {
+        let Ok(bytes) = collect_limited(body, self.max_proxied_body).await else {
+            rusty_log::info!(
+                route = ?selection.route.name,
+                limit = self.max_proxied_body,
+                "refusing a request body over `limits.maxRequestBodyBytes`"
+            );
+            return status(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "the request body is larger than this gateway forwards",
+            );
+        };
+        let prefix = selection.matched_prefix.as_deref();
+        proxy
+            .proxy(Request::from_parts(parts, bytes), prefix, peer, scheme)
+            .await
+            .map(Body::new)
     }
 }
 

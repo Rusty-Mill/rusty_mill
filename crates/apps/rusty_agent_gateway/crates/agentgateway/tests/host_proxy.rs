@@ -802,3 +802,170 @@ binds:
         "{findings:?}"
     );
 }
+
+/// Reads one request head from `stream`, returning its bytes and its
+/// `Content-Length` body; `None` once the client hangs up.
+async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<(String, Vec<u8>)> {
+    use tokio::io::AsyncReadExt as _;
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 4096];
+    let head_end = loop {
+        if let Some(i) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+        let n = stream.read(&mut buf).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        seen.extend_from_slice(&buf[..n]);
+    };
+    let head = String::from_utf8_lossy(&seen[..head_end]).to_string();
+    let length: usize = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())?
+        })
+        .unwrap_or(0);
+    while seen.len() < head_end + length {
+        let n = stream.read(&mut buf).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        seen.extend_from_slice(&buf[..n]);
+    }
+    Some((head, seen[head_end..head_end + length].to_vec()))
+}
+
+/// A keep-alive upstream that answers every request with `body`, counting
+/// the connections it accepts and the request bodies it receives.
+async fn raw_upstream(
+    body: Vec<u8>,
+) -> (u16, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+    use tokio::io::AsyncWriteExt as _;
+    let port = free_port().await;
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .expect("upstream should bind");
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (counter, recorder) = (Arc::clone(&accepted), Arc::clone(&bodies));
+    let body = Arc::new(body);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let (recorder, body) = (Arc::clone(&recorder), Arc::clone(&body));
+            tokio::spawn(async move {
+                while let Some((_, received)) = read_request(&mut stream).await {
+                    recorder.lock().expect("lock").push(received);
+                    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                    if stream.write_all(head.as_bytes()).await.is_err()
+                        || stream.write_all(&body).await.is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (port, accepted, bodies)
+}
+
+fn route_to(port: u16) -> String {
+    format!(
+        r#"          - name: proxy
+            backends:
+              - host: "127.0.0.1:{port}""#
+    )
+}
+
+#[tokio::test]
+async fn upstream_connections_are_reused_across_requests() {
+    let (port, accepted, _) = raw_upstream(b"ok".to_vec()).await;
+    let (base, shutdown) = start(&route_to(port)).await;
+    let client = reqwest::Client::new();
+    for _ in 0..3 {
+        let response = client
+            .get(format!("{base}/"))
+            .send()
+            .await
+            .expect("should answer");
+        assert_eq!(response.text().await.expect("body"), "ok");
+    }
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "one upstream connection"
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_large_response_streams_through_intact() {
+    let big: Vec<u8> = (0..4 * 1024 * 1024).map(|i: u32| (i % 251) as u8).collect();
+    let (port, _, _) = raw_upstream(big.clone()).await;
+    let (base, shutdown) = start(&route_to(port)).await;
+    let response = reqwest::get(format!("{base}/"))
+        .await
+        .expect("should answer");
+    assert_eq!(
+        response.bytes().await.expect("body").as_ref(),
+        big.as_slice()
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_body_over_max_request_body_bytes_is_refused() {
+    let (port, _, bodies) = raw_upstream(b"ok".to_vec()).await;
+    let (base, shutdown) = start_with_inventory(
+        &route_to(port),
+        "config:\n  limits:\n    maxRequestBodyBytes: 16",
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let at_cap = client
+        .post(format!("{base}/"))
+        .body("x".repeat(16))
+        .send()
+        .await
+        .expect("should answer");
+    assert_eq!(at_cap.status(), 200);
+    let over = client
+        .post(format!("{base}/"))
+        .body("x".repeat(17))
+        .send()
+        .await
+        .expect("should answer");
+    assert_eq!(over.status(), 413);
+    assert_eq!(
+        *bodies.lock().expect("lock"),
+        vec![b"x".repeat(16)],
+        "only the body within the cap reached the upstream"
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_chunked_request_body_is_forwarded_whole() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (port, _, bodies) = raw_upstream(b"ok".to_vec()).await;
+    let (base, shutdown) = start(&route_to(port)).await;
+    let gateway = base.trim_start_matches("http://");
+    let mut client = tokio::net::TcpStream::connect(gateway)
+        .await
+        .expect("connect");
+    client
+        .write_all(
+            b"POST / HTTP/1.1\r\nHost: gateway\r\nTransfer-Encoding: chunked\r\n\
+              Connection: close\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+        )
+        .await
+        .expect("write");
+    let mut answer = String::new();
+    client.read_to_string(&mut answer).await.expect("read");
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    assert_eq!(*bodies.lock().expect("lock"), vec![b"hello world".to_vec()]);
+    shutdown.cancel();
+}

@@ -160,7 +160,7 @@ through `Cargo.lock`. The counts are not a vetted audit.
 | `agentgateway-auth` | `apps/rusty_agent_gateway/crates/agentgateway-auth` | t(dev) | 1 | t::test×12 | reqwest | rusty-mcp | G9 | C |
 | `agentgateway-llm` | `apps/rusty_agent_gateway/crates/agentgateway-llm` | as fu t | 2 | t::test×2, fu::StreamExt×1, t::time::sleep×1, as::stream!×1 | hyper, reqwest | — | G7 G9 | C |
 | `agentgateway-mcp` | `apps/rusty_agent_gateway/crates/agentgateway-mcp` | t tu(dev) | 3 | t::test×28, t::task::spawn_blocking×2, t::time::timeout×2, t::runtime::Handle×1, t::net::TcpListener×1, tu::sync::CancellationToken×1, +2 | tonic, tonic-prost | rusty-mcp, rusty_mcp_client_native, rusty_mcp_server | G1 G8 G9 | C |
-| `agentgateway-proxy` | `apps/rusty_agent_gateway/crates/agentgateway-proxy` | t | 1 | t::time::sleep×1, t::time::timeout×1 | hyper, hyper-util | — | G9 | C |
+| `agentgateway-proxy` | `apps/rusty_agent_gateway/crates/agentgateway-proxy` | t | 1 | t::time::sleep×1, t::time::timeout×1 | — (client on rusty_request, #885) | — | — | C |
 | `agentgateway-tls` | `apps/rusty_agent_gateway/crates/agentgateway-tls` | t | 3 | t::test×3, t::io::duplex×3, t::net::TcpStream×2, t::io::AsyncRead×2, t::io::AsyncWrite×2, t::time::timeout×1, +7 | — | — | G1 | A |
 | `rusty-hister-model` | `apps/rusty_hister/crates/rusty-hister-model` | t(dev) | 7 | t::test×120 | — | rusty-db | — | A |
 | `rusty_homelab_mcp` | `apps/rusty_homelab_mcp` | t | 7 | t::test×23, t::runtime::Handle×5, t::runtime::Handle::current×2, t::main×1, t::task::spawn_blocking×1 | — | rusty_fedora, rusty_http, rusty_mcp_server, rusty_opnsense, rusty_proxmox | G1 G4 | B |

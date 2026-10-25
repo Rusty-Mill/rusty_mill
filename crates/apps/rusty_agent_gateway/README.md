@@ -2001,12 +2001,13 @@ the least likely way to succeed.
 
 ### Why a body has to be buffered
 
-A retry replays the request, and a streaming body can only be read once. A body
-is buffered only when its size is **known in advance** and fits in 64 KiB — so
-the body is never partially consumed to find out how big it is, which would
-leave a stream that can be neither replayed nor forwarded. Requests with a
-`Content-Length` inside the limit get retries; chunked or oversized ones are
-streamed straight through and simply do not.
+A retry replays the request, and a streaming body can only be read once. So a
+proxied backend (`host`, `service`, `dynamic`) is sent every request whole: the
+gateway reads the body first, chunked or not, within
+`config.limits.maxRequestBodyBytes` (10 MiB unless set). A larger body is
+refused with `413` rather than forwarded in part, and every body that is
+forwarded can be retried. Responses are not buffered: they stream back to the
+client as they arrive.
 
 ### Which backends retry
 
@@ -2180,6 +2181,7 @@ config:
   limits:
     maxConcurrentRequests: 256
     requestTimeout: 30s
+    maxRequestBodyBytes: 10485760
 ```
 
 With `tracing` set, spans and metrics go to an OTLP collector. Sampling is
@@ -2204,6 +2206,12 @@ an unauthenticated flood costs a token validation each.
 Both limits are off unless configured. There is no concurrency number right for
 everyone, and a default would be a silent regression for a gateway already
 serving more than it.
+
+`maxRequestBodyBytes` bounds the body of a request to a proxied backend, which
+the gateway reads whole before forwarding (see
+[Why a body has to be buffered](#why-a-body-has-to-be-buffered)). It defaults
+to 10 MiB: room for any API call, and a bound on what a burst of uploads can
+hold in memory.
 
 ## On `rusty_mcp`
 
