@@ -1,6 +1,6 @@
 """Read physics constants straight off the committed game captures (PHYSICS-PARITY pass 2).
 
-    python -I tools/rb_tape_bot/fixture_checks.py [all|caps|ball-spin|boost-taps|ball-roll|bounces|pads]
+    python -I tools/rb_tape_bot/fixture_checks.py [all|caps|ball-spin|boost-taps|ball-roll|ball-rest|bounces|pads]
 
 Reads `fixtures/*.jsonl` (BakkesMod state and recorded inputs, 120 Hz) with the standard library
 only and prints the numbers `docs/research/PHYSICS-PARITY-VS-ROCKETSIM.md` quotes. Nothing here
@@ -191,6 +191,40 @@ def ball_roll(data):
           "central difference, exponential drag removed")
 
 
+def freeze(rows):
+    """The first frame at which a moving ball is held at exactly zero speed, or None.
+
+    `rows` are (time, speed, spin) per frame, the first the state set. Returns (frame, seconds since
+    the first frame, the most speed and spin on any stepped frame before it): the ball stayed under
+    the thresholds on all of those, so the thresholds lie above them."""
+    for k in range(2, len(rows)):
+        if rows[k][1] == 0 and rows[k][2] == 0 and rows[k - 1][1] > 0:
+            moving = rows[1:k]
+            return k, rows[k][0] - rows[0][0], max(r[1] for r in moving), max(r[2] for r in moving)
+    return None
+
+
+def ball_rest(data):
+    """When a ball rolling without sliding is frozen, and at what speed (probe_ball_rest_*, board b19)."""
+    frozen, rolling = [], []
+    for name, frames in data:
+        if not name.startswith("probe_ball_rest_"):
+            continue
+        rows = [(f["timestamp_secs"], norm(f["ball"]["velocity"]), norm(f["ball"]["angular_velocity"])) for f in frames]
+        hit = freeze(rows)
+        if hit is None:
+            rolling.append((min(r[1] for r in rows), name))
+            print(f"{name}: never frozen; slowest {rolling[-1][0]:.1f} uu/s")
+            continue
+        k, secs, speed, spin = hit
+        frozen.append((speed, spin, secs))
+        print(f"{name}: frozen at frame {k} (file line {k + 1}), {secs:.3f} s in; at most {speed:.2f} uu/s and {spin:.3f} rad/s before")
+    if frozen and rolling:
+        print(f"linear threshold in ({max(f[0] for f in frozen):.2f}, {min(r[0] for r in rolling):.1f}] uu/s; "
+              f"angular threshold at least {max(f[1] for f in frozen):.3f} rad/s; "
+              f"timer {min(f[2] for f in frozen):.3f} to {max(f[2] for f in frozen):.3f} s")
+
+
 def bounces(data):
     """Vertical bounce ratios from the ceiling and floor hits in probe_ball_ceiling."""
     frames = dict(data)["probe_ball_ceiling.jsonl"]
@@ -244,7 +278,7 @@ def pads(data):
 
 
 COMMANDS = {"caps": caps, "ball-spin": ball_spin, "boost-taps": boost_taps,
-            "ball-roll": ball_roll, "bounces": bounces, "pads": pads}
+            "ball-roll": ball_roll, "ball-rest": ball_rest, "bounces": bounces, "pads": pads}
 
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"

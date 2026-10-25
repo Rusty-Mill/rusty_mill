@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.161.0
+- Version: 0.162.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -2157,16 +2157,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     per-body sleeping is the natural fit, not a simplification of a richer
     mechanism this crate lacks. No kinematic/deactivation-disabled body
     concept exists to exempt from sleeping, since this crate has no
-    kinematic bodies at all. `LINEAR_SLEEP_VELOCITY_THRESHOLD`,
-    `ANGULAR_SLEEP_VELOCITY_THRESHOLD`, and `SLEEP_TIME_THRESHOLD` are this
-    project's own uncalibrated placeholders — no public reference states
-    what threshold, if any, real Rocket League's own physics engine uses
-    internally for this (a purely implementation-internal stabilization
-    detail no replay or capture could ever directly reveal, even with real
-    `RB-VERIFY-002` data); chosen only to sit clearly above this crate's own
-    single-frame gravity/restitution velocity noise and clearly below any
-    deliberate motion this crate models (see the constants' own doc
-    comment in `body.rs` for the specific numbers behind that reasoning). A
+    kinematic bodies at all. The three thresholds were placeholders
+    (20 uu/s, 0.5 rad/s, 0.5 s) until spec 0.162.0 calibrated them to the
+    game (see **Calibration** below). A
     sleeping body waking only from a contact impulse or active input, never
     from a sustained-but-below-threshold external push (e.g. a very slow
     car nudging it), is a deliberate modeling choice matching real Bullet's
@@ -2205,6 +2198,24 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     (a ball put to sleep before the car even exists in the scene, then a
     fast-moving car added and driven into it). 8 new tests, bringing the
     crate to 267 total (+8 over FR-036's 259).
+  - **Calibration (spec 0.162.0, 2026-10-25, board b19).** The thresholds
+    are 40 uu/s, 1.0 rad/s and 2.0 s: Bullet's defaults at 50 uu per metre
+    (0.8 m/s, 1.0 rad/s, `gDeactivationTime`). The game's
+    `probe_ball_rest_{10,20,40}` captures (a ball rolling without sliding,
+    spin = v / 91.25) are frozen 2.017 s in, all on the same tick, so the
+    game times sleep rather than cutting off at a speed; `probe_ball_rest_80`
+    still rolls at 68.5 uu/s 5 s in (`fixture_checks.py ball-rest`). The
+    linear threshold is bracketed to (40.0, 68.5] uu/s and the angular one
+    bounded below by 0.44 rad/s; `probe_ball_rest_50`/`_60` await the next
+    game session. The placeholders froze the 10 and 20 uu/s balls 1.5 s early
+    and never froze the 40 uu/s one: ball error max 13.6 / 22.6 / 113.0 uu,
+    now 1.1 / 1.6 / 11.1. The remaining rest_40 error is rolling decay
+    (the port's rolling ball slows 2.1%/s, the game's 3.0%/s), which delays
+    its drop under 40 uu/s by about 0.25 s. Cars use the same thresholds,
+    as Bullet's bodies do by default; no car capture measures it. The six
+    captures are golden fixtures (`golden_captures.rs`); `wob_0_200`'s ball
+    and `wob_0_500`'s car bounds rose, since the old 0.5 s timer froze those
+    non-parity drops early.
 - `RB-PHYSICS-001-FR-038` (car-vs-net contact, implemented): closes this
   port's own former Non-goal that "a car still passes straight through a
   `net::NetMesh`'s spatial footprint untouched" (`RB-PHYSICS-001-FR-033`'s
@@ -3989,6 +4000,14 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     API. All 302 of `rb_physics_bullet`'s pre-existing tests (as of
     `FR-060`) pass unchanged (net +4 tests over `FR-060`'s 302, bringing
     the crate to 306).
+  - **Amendment (spec 0.162.0).** The ball is also capped at the start of
+    `step`, before this tick's drag, friction and move: the game moves a
+    ball state-set at 6500 uu/s by 5996.6 / 120 uu on its first tick (the
+    cap, then one tick of drag and sliding friction), where the end-of-tick
+    cap alone moved it 6496.6 / 120 uu (`probe_ball_fast_6500`: ball error
+    mean 10.3 -> 5.4 uu, 0.3 uu until the side wall). The end-of-tick cap
+    still bounds a hit. Test
+    `a_ball_set_over_the_cap_is_capped_before_its_first_step_moves_it`.
 - `RB-PHYSICS-001-FR-062` (real ball material properties via a new
   `RigidBody::ball` constructor, implemented): `RB-PHYSICS-001-FR-061`'s
   own Non-goals had explicitly deferred adopting RocketSim's own
@@ -8061,9 +8080,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   genuinely separate, still-open item, tracked in this spec's own Non-goals
   rather than here now that it no longer shares a bullet with sleeping.
   `LINEAR_SLEEP_VELOCITY_THRESHOLD`/`ANGULAR_SLEEP_VELOCITY_THRESHOLD`/
-  `SLEEP_TIME_THRESHOLD` (`body.rs`) are FR-037's own uncalibrated
-  placeholders, worth revisiting once real recorded ball/car-hit behavior
-  exists to compare against — see FR-037's own entry.
+  `SLEEP_TIME_THRESHOLD` (`body.rs`) are calibrated to the game's ball
+  since spec 0.162.0; the linear threshold's upper bound and the car's
+  values stay open — see FR-037's **Calibration**.
 - `box_vs_box`'s edge-edge contact point (the midpoint of the two closest
   points on the involved edges) and its face-contact clipping's fallback
   to a single clamped-center point when clipping ever yields zero points
@@ -8470,6 +8489,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.162.0 (2026-10-25): `RB-PHYSICS-001-FR-037` calibrated (sleep at 40 uu/s and 1.0 rad/s for 2.0 s, from the
+  game's `probe_ball_rest_*`); `RB-PHYSICS-001-FR-061` amended (the ball is also capped before a tick moves it).
+  519 tests in `rb_physics_bullet`.
 - 0.161.0 (2026-10-08): `RB-PHYSICS-001-FR-160` (match flow around a goal, with clock, overtime and the first-kickoff intro, in `rb_env`).
 - 0.160.0 (2026-10-08): `RB-PHYSICS-001-FR-159` (the ground bump follows the bumper's climb). 508 tests in
   `rb_physics_bullet`.

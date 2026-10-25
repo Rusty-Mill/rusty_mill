@@ -105,5 +105,27 @@ class Friction(unittest.TestCase):
         self.assertEqual(fc.friction_samples(rows), [])
 
 
+
+class Freeze(unittest.TestCase):
+    def rows(self, moving, held, start=(40.0, 0.44)):
+        """The state set at `start`, `moving` frames slowing by 0.01 uu/s a tick, then `held` at zero."""
+        rows = [(0.0, *start)]
+        for k in range(1, moving + 1):
+            rows.append((k * DT, start[0] - 0.01 * k, start[1] - 0.0001 * k))
+        return rows + [((moving + 1 + k) * DT, 0.0, 0.0) for k in range(held)]
+
+    def test_finds_the_freeze_and_the_most_speed_and_spin_while_timed(self):
+        k, secs, speed, spin = fc.freeze(self.rows(240, 5))
+        self.assertEqual(k, 241)
+        self.assertAlmostEqual(secs, 241 * DT)
+        self.assertAlmostEqual(speed, 39.99)
+        self.assertAlmostEqual(spin, 0.4399)
+
+    def test_a_ball_that_never_stops_has_no_freeze(self):
+        self.assertIsNone(fc.freeze(self.rows(240, 0)))
+
+    def test_a_ball_set_at_rest_is_not_a_freeze(self):
+        self.assertIsNone(fc.freeze([(k * DT, 0.0, 0.0) for k in range(10)]))
+
 if __name__ == "__main__":
     unittest.main()
