@@ -67,7 +67,7 @@ impl App {
             .build()
             .unwrap();
         let server = runtime.block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             serve(listener, None, options, router).unwrap()
         });
         App {
