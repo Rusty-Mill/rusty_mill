@@ -65,7 +65,6 @@ members = [
     "crates/libs/protocol/rusty_mcp_proto",
     "crates/libs/protocol/rusty_mcp_server",
     "crates/libs/protocol/rusty_mcp_client_native",
-    "crates/libs/protocol/rusty_mcp_axum",
     "crates/libs/protocol/rusty_a2a",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client",

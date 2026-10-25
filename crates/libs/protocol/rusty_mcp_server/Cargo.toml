@@ -20,8 +20,9 @@ default = []
 # stdio-only server pulls in no HTTP stack.
 http = ["dep:rusty_serve", "dep:rusty_http"]
 # `rusty-axum`: `mount::Mount`, the Streamable HTTP handler inside a
-# `rusty_axum` app (replacing `rusty_mcp_axum`, #875). Off by default: it
-# brings the async server stack (`rusty_axum`, `rusty_tokio`, `rusty_tls`).
+# `rusty_axum` app (it replaced `rusty_mcp_axum`, removed in #875). Off by
+# default: it brings the async server stack (`rusty_axum`, `rusty_tokio`,
+# `rusty_tls`).
 rusty-axum = ["http", "dep:rusty_axum", "dep:rusty_tokio"]
 # `request-state`: seal the `requestState` of multi-round-trip input with an
 # HMAC, so a client cannot forge or alter what it echoes back.
