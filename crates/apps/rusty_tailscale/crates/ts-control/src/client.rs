@@ -482,28 +482,77 @@ mod tests {
         }
     }
 
-    /// Builds `interop/h2c-server-go` (Go's own `net/http` HTTP/2 server) if
-    /// a Go toolchain is available; `None` skips the test, as `go_interop`.
-    async fn go_h2c_server() -> Option<std::path::PathBuf> {
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../interop/h2c-server-go");
-        let bin = dir.join("h2c-server-go");
-        if bin.exists() {
-            return Some(bin);
-        }
-        let go = ["/usr/local/go/bin/go", "go"].into_iter().find(|g| {
+    /// The Go toolchain, if one is installed.
+    fn go_toolchain() -> Option<&'static str> {
+        ["/usr/local/go/bin/go", "go"].into_iter().find(|g| {
             std::process::Command::new(g)
                 .arg("version")
                 .output()
                 .is_ok()
-        })?;
-        let status = rusty_tokio::process::Command::new(go)
-            .args(["build", "-o", "h2c-server-go", "."])
-            .current_dir(&dir)
-            .status()
+        })
+    }
+
+    /// Builds the Go package in `dir` to `dir/name`. Once Go is found, any
+    /// failure is an error carrying the build's output, never a skip.
+    async fn go_build(
+        go: &str,
+        dir: &std::path::Path,
+        name: &str,
+    ) -> Result<std::path::PathBuf, String> {
+        let out = rusty_tokio::process::Command::new(go)
+            .args(["build", "-o", name, "."])
+            .current_dir(dir)
+            .output()
             .await
-            .ok()?;
-        status.success().then_some(bin)
+            .map_err(|e| format!("running `{go} build` in {}: {e}", dir.display()))?;
+        if !out.status.success() {
+            return Err(format!(
+                "`{go} build` in {} failed ({}):\n{}",
+                dir.display(),
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(dir.join(name))
+    }
+
+    /// `interop/h2c-server-go` (Go's own `net/http` HTTP/2 server), built if
+    /// needed. `Ok(None)` skips the test, as `go_interop` does: no Go
+    /// toolchain and no prebuilt binary. A failed build is an `Err`.
+    async fn go_h2c_server() -> Result<Option<std::path::PathBuf>, String> {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../interop/h2c-server-go");
+        let bin = dir.join("h2c-server-go");
+        if bin.exists() {
+            return Ok(Some(bin));
+        }
+        let Some(go) = go_toolchain() else {
+            return Ok(None);
+        };
+        go_build(go, &dir, "h2c-server-go").await.map(Some)
+    }
+
+    #[rusty_tokio::test]
+    async fn a_go_fixture_that_fails_to_build_is_an_error_not_a_skip() {
+        let Some(go) = go_toolchain() else {
+            eprintln!("SKIPPED: no Go toolchain");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("ts-control-go-build-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("go.mod"), "module broken\n\ngo 1.21\n").unwrap();
+        std::fs::write(
+            dir.join("main.go"),
+            "package main\n\nfunc main() { not go }\n",
+        )
+        .unwrap();
+        let built = go_build(go, &dir, "broken").await;
+        std::fs::remove_dir_all(&dir).unwrap();
+        let err = built.expect_err("a broken package must not build");
+        assert!(
+            err.contains("failed"),
+            "the error carries the build output: {err}"
+        );
     }
 
     /// The session against Go's HTTP/2, the implementation real control
@@ -513,9 +562,13 @@ mod tests {
     async fn session_speaks_http2_with_gos_net_http() {
         use rusty_tokio::io::AsyncBufReadExt;
 
-        let Some(bin) = go_h2c_server().await else {
-            eprintln!("SKIPPED: no Go toolchain and no prebuilt h2c-server-go binary");
-            return;
+        let bin = match go_h2c_server().await {
+            Ok(Some(bin)) => bin,
+            Ok(None) => {
+                eprintln!("SKIPPED: no Go toolchain and no prebuilt h2c-server-go binary");
+                return;
+            }
+            Err(build) => panic!("the Go h2c fixture did not build: {build}"),
         };
         let mut child = rusty_tokio::process::Command::new(&bin)
             .stdout(std::process::Stdio::piped())
