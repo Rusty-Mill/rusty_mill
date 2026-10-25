@@ -4,15 +4,17 @@ pub mod jwt;
 pub mod routes;
 pub mod state;
 
+use std::io;
 use std::sync::Arc;
+use std::time::Instant;
 
-use axum::extract::DefaultBodyLimit;
-use axum::middleware::from_fn_with_state;
-use axum::routing::{get, patch, post};
-use axum::Router as AxumRouter;
-use rusty_mcp_server::{HttpConfig, HttpHandler};
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
-use tower_http::trace::TraceLayer;
+use rusty_axum::cors::{Allow, Cors};
+use rusty_axum::middleware::{from_fn, Next};
+use rusty_axum::routing::{any, get, patch, post};
+use rusty_axum::{Request, Response, Router, ServeOptions, Server};
+use rusty_axum_tokio::TokioBridge;
+use rusty_mcp_server::{HttpConfig, HttpHandler, Mount};
+use rusty_tokio::io::TcpListener;
 
 use crate::state::AppState;
 
@@ -21,70 +23,96 @@ use crate::state::AppState;
 /// exactly those origins. Methods/headers stay wildcard either way, since
 /// this is scoped to origin restriction, not the rest of the CORS surface
 /// -- and there's no credentialed (cookie-based) auth here for a wildcard
-/// origin to be unsafe with. An entry that doesn't parse as a valid
-/// `Origin` header value is skipped with a startup warning rather than
-/// failing the whole list, same soft-failure posture as an invalid
-/// `[[guardrails]]` pattern.
-fn build_cors_layer(cors_allowed_origins: &Option<Vec<String>>) -> CorsLayer {
+/// origin to be unsafe with. An entry that isn't a valid `Origin` header
+/// value is skipped with a startup warning rather than failing the whole
+/// list, same soft-failure posture as an invalid `[[guardrails]]` pattern.
+fn build_cors(cors_allowed_origins: &Option<Vec<String>>) -> Cors {
     let Some(origins) = cors_allowed_origins else {
-        return CorsLayer::permissive();
+        return Cors::permissive();
     };
-    let parsed: Vec<axum::http::HeaderValue> = origins
+    let valid: Vec<String> = origins
         .iter()
-        .filter_map(|origin| match origin.parse() {
-            Ok(value) => Some(value),
-            Err(e) => {
-                rusty_log::warn!(origin, error = %e, "skipping invalid cors_allowed_origins entry");
-                None
+        .filter(|origin| {
+            let ok = is_header_value(origin);
+            if !ok {
+                rusty_log::warn!(origin = %origin, "skipping invalid cors_allowed_origins entry");
             }
+            ok
         })
+        .cloned()
         .collect();
-    CorsLayer::new()
-        .allow_origin(AllowOrigin::list(parsed))
-        .allow_methods(Any)
-        .allow_headers(Any)
+    Cors::new()
+        .allow_origin(Allow::List(valid))
+        .allow_methods(Allow::Any)
+        .allow_headers(Allow::Any)
 }
 
-/// Mount the MCP endpoint at `state.mcp_path`, guarded by [`routes::mcp_auth`]
-/// (the same `check_auth` every other route already uses -- see that
-/// function's doc comment for why this isn't an OAuth 2.1 resource-server
-/// auth of the MCP library's own).
+/// What `http::HeaderValue::from_str` accepted: visible ASCII, space and tab.
+fn is_header_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b == b'\t' || (b' '..=b'~').contains(&b))
+}
+
+/// Logs each request's method, path, status and latency at debug level,
+/// in place of tower-http's `TraceLayer`.
+async fn trace(request: Request, next: Next) -> Response {
+    let method = request.method().as_str().to_owned();
+    let path = request.path().to_owned();
+    let started = Instant::now();
+    let response = next.run(request).await;
+    rusty_log::debug!(
+        %method,
+        %path,
+        status = response.status.as_u16(),
+        latency_ms = started.elapsed().as_millis() as u64,
+        "request"
+    );
+    response
+}
+
+/// Routes the MCP endpoint at `state.mcp_path`, guarded by
+/// [`routes::mcp`]'s `check_auth` (see that function's doc comment for why
+/// this isn't an OAuth 2.1 resource-server auth of the MCP library's own).
 ///
 /// The handler serves both generations of the protocol: clients that open
 /// with the legacy `initialize` handshake (most desktop clients today) get a
 /// session, and clients on spec 2026-07-28 use the stateless `server/discover`
 /// bootstrap. Its default `Host`/`Origin` rules apply (loopback hosts, no
-/// browser origins).
-fn mount_mcp(router: AxumRouter<AppState>, state: &AppState) -> AxumRouter<AppState> {
+/// browser origins). An empty path (`/`) takes every path no other route
+/// matches, as axum's `fallback_service` did.
+fn mount_mcp(router: Router<AppState>, state: &AppState) -> Router<AppState> {
     let Some(mcp) = state.mcp.clone() else {
         return router;
     };
 
     let path = state.mcp_path.trim_end_matches('/');
+    let path = if path.is_empty() { "/" } else { path };
     let handler = Arc::new(HttpHandler::new(
         mcp,
         HttpConfig {
-            path: if path.is_empty() { "/" } else { path }.to_owned(),
+            path: path.to_owned(),
             ..HttpConfig::default()
         },
     ));
-    let guarded = rusty_mcp_axum::router(handler, state.max_body_bytes)
-        .layer(from_fn_with_state(state.clone(), routes::mcp_auth));
+    let mount = Mount::new(handler);
+    let guarded = move |rusty_axum::State(state): rusty_axum::State<AppState>, request: Request| {
+        routes::mcp(state, mount.clone(), request)
+    };
 
-    if path.is_empty() {
-        router.fallback_service(guarded)
+    if path == "/" {
+        router.fallback(guarded)
     } else {
-        router.nest_service(path, guarded)
+        router.route(path, any(guarded))
     }
 }
 
-/// Builds the full axum app (routes + middleware) over the given state.
-/// Shared by `main` (serving on a real listener) and integration tests
-/// (serving on an ephemeral port via the same `axum::serve` path).
-pub fn build_app(state: AppState) -> AxumRouter {
-    let max_body_bytes = state.max_body_bytes;
-    let cors_layer = build_cors_layer(&state.cors_allowed_origins);
-    let router = AxumRouter::new()
+/// Builds the full app (routes + middleware) over the given state. `tokio`
+/// is the runtime the handlers' tokio libraries (reqwest, `tokio::sync`)
+/// run on: the router's outermost layer enters it on every poll.
+pub fn build_app(state: AppState, tokio: tokio::runtime::Handle) -> Router {
+    let cors = build_cors(&state.cors_allowed_origins);
+    let router = Router::new()
         .route("/health", get(routes::health))
         .route("/ready", get(routes::ready))
         .route("/dashboard", get(routes::dashboard))
@@ -116,14 +144,36 @@ pub fn build_app(state: AppState) -> AxumRouter {
             "/v1/admin/clients/{name}/usage-history",
             get(routes::admin_client_usage_history),
         );
-    let router = mount_mcp(router, &state);
-    router
-        .layer(TraceLayer::new_for_http())
-        .layer(cors_layer)
-        .layer(DefaultBodyLimit::max(max_body_bytes))
-        // Outermost: a shed request costs a semaphore try-acquire and
-        // nothing else -- ahead of body-limit/CORS/tracing, the same
-        // "cheapest rejection first" ordering `mount_mcp`'s own guard uses.
-        .layer(from_fn_with_state(state.clone(), routes::concurrency_limit))
+    let limiter_state = state.clone();
+    mount_mcp(router, &state)
         .with_state(state)
+        .layer(from_fn(trace))
+        .layer(cors)
+        // A shed request costs a semaphore try-acquire and nothing else --
+        // ahead of CORS and tracing, "cheapest rejection first". The body
+        // limit is the server's (`serve`), applied before any layer.
+        .layer(from_fn(move |request, next| {
+            routes::concurrency_limit(limiter_state.clone(), request, next)
+        }))
+        // Outermost, so every layer and handler above runs inside tokio.
+        .layer(TokioBridge::new(tokio))
+}
+
+/// Serves `state` on `listener` -- the one path for `main` and the
+/// integration tests. Must be called inside a `rusty_tokio` runtime; request
+/// bodies over `state.max_body_bytes` are answered `413`.
+///
+/// # Errors
+///
+/// When the listener's address cannot be read.
+pub fn serve(
+    state: AppState,
+    tokio: tokio::runtime::Handle,
+    listener: TcpListener,
+) -> io::Result<Server> {
+    let options = ServeOptions {
+        max_body_bytes: state.max_body_bytes as u64,
+        ..ServeOptions::default()
+    };
+    rusty_axum::serve(listener, None, options, build_app(state, tokio))
 }
