@@ -4,7 +4,6 @@ cargo metadata.
 Run from the repo root:
     python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 """
-import copy
 import json
 import subprocess
 import sys
@@ -17,7 +16,6 @@ from lockfile_diff import (
     changed_package_keys,
     full_dependency_closure,
     lockfile_package_keys,
-    manifest_change_impact,
     reliable_lockfile_impact,
 )
 
@@ -64,15 +62,6 @@ def metadata(crates: dict[str, tuple[str, list[str]]], external: dict[str, str])
         "packages": packages,
         "resolve": {"nodes": nodes},
     }
-
-
-def with_features(md: dict, name: str, features: list[str]) -> dict:
-    """A copy of `md` whose resolve enables `features` on package `name`."""
-    md = copy.deepcopy(md)
-    for node in md["resolve"]["nodes"]:
-        if node["id"] == name:
-            node["features"] = features
-    return md
 
 
 class LockfilePackageKeysTests(unittest.TestCase):
@@ -266,53 +255,6 @@ class AffectedByLockfileChangesTests(unittest.TestCase):
         affected = affected_by_lockfile_changes(md, {("a", "0.0.0")})
         self.assertEqual(affected, ["a", "b"])
 
-    def test_with_manifests_a_package_that_left_the_lock_needs_no_consumer(self) -> None:
-        # A migration drops `tokio` from its own manifest; the lock loses it. The migrated
-        # crate is selected by path, so nothing else is.
-        md = metadata(
-            {"app": ("crates/app", ["rusty_tokio"]), "rusty_tokio": ("crates/rusty_tokio", []),
-             "other": ("crates/other", [])},
-            external={},
-        )
-        old = lock([("tokio", "1.40.0", "registry", "abc")])
-        self.assertEqual(manifest_change_impact(md, md, old, lock([])), [])
-        self.assertIsNone(reliable_lockfile_impact(md, changed_package_keys(old, lock([]))))
-
-    def test_with_manifests_a_package_that_changed_selects_its_consumers(self) -> None:
-        md = metadata(
-            {"a": ("crates/a", ["serde"]), "b": ("crates/b", ["a"]), "c": ("crates/c", [])},
-            external={"serde": "1.0.2"},
-        )
-        old = lock([("serde", "1.0.1", "registry", "x"), ("gone", "0.1.0", "registry", "y")])
-        new = lock([("serde", "1.0.2", "registry", "z")])
-        self.assertEqual(manifest_change_impact(md, md, old, new), ["a", "b"])
-
-    def test_with_manifests_an_entry_in_the_new_lock_but_not_metadata_is_unknown(self) -> None:
-        md = metadata({"a": ("crates/a", [])}, external={})
-        new = lock([("stale", "2.0.0", "registry", "z")])
-        self.assertIsNone(manifest_change_impact(md, md, lock([]), new))
-
-    def test_with_manifests_a_shared_feature_change_is_unknown(self) -> None:
-        # The lock records no features: `a` turns on `shared/mode` and drops `gone`. Only
-        # `gone` leaves the lock, yet `b`'s unified build of `shared` changes too.
-        base = metadata(
-            {"a": ("crates/a", ["shared"]), "b": ("crates/b", ["shared"])},
-            external={"shared": "1.0.0"},
-        )
-        head = with_features(base, "shared", ["mode"])
-        old = lock([("shared", "1.0.0", "registry", "s"), ("gone", "0.1.0", "registry", "g")])
-        new = lock([("shared", "1.0.0", "registry", "s")])
-        self.assertEqual(manifest_change_impact(base, base, old, new), [])
-        self.assertIsNone(manifest_change_impact(base, head, old, new))
-
-    def test_with_manifests_features_compare_across_checkout_paths(self) -> None:
-        # The base resolves in another worktree: path package ids differ, features match.
-        head = with_features(metadata({"a": ("crates/a", [])}, external={}), "a", ["x"])
-        base = copy.deepcopy(head)
-        base["packages"][0]["id"] = base["resolve"]["nodes"][0]["id"] = "path+file:///tmp/base/a"
-        base["workspace_members"] = ["path+file:///tmp/base/a"]
-        self.assertEqual(manifest_change_impact(base, head, lock([]), lock([])), [])
-
     def test_cli_narrows_valid_input_and_rejects_malformed_or_mixed_unknown_input(self) -> None:
         md = metadata(
             {"rusty_fair_play": ("crates/apps/rusty_fair_play", ["known"])},
@@ -336,30 +278,14 @@ class AffectedByLockfileChangesTests(unittest.TestCase):
             mixed = self._run_cli(metadata_path, old_path, new_path)
             self.assertNotEqual(mixed.returncode, 0)
 
-            removed_only = self._run_cli(
-                metadata_path, old_path, new_path, "--with-manifests", str(metadata_path)
-            )
-            self.assertEqual(removed_only.returncode, 0, removed_only.stderr)
-            self.assertEqual(removed_only.stdout, "rusty_fair_play\n")
-
-            base_path = root / "base-metadata.json"
-            base_path.write_text(json.dumps(with_features(md, "known", ["extra"])), encoding="utf-8")
-            drifted = self._run_cli(metadata_path, old_path, new_path, "--with-manifests", str(base_path))
-            self.assertEqual(drifted.returncode, 2)
-
-            missing_base = self._run_cli(metadata_path, old_path, new_path, "--with-manifests")
-            self.assertNotEqual(missing_base.returncode, 0)
-
             new_path.write_text("not = [valid", encoding="utf-8")
             malformed = self._run_cli(metadata_path, old_path, new_path)
             self.assertNotEqual(malformed.returncode, 0)
 
     @staticmethod
-    def _run_cli(
-        metadata_path: Path, old_path: Path, new_path: Path, *flags: str
-    ) -> subprocess.CompletedProcess[str]:
+    def _run_cli(metadata_path: Path, old_path: Path, new_path: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, str(SCRIPT), str(metadata_path), str(old_path), str(new_path), *flags],
+            [sys.executable, str(SCRIPT), str(metadata_path), str(old_path), str(new_path)],
             capture_output=True,
             text=True,
             check=False,
