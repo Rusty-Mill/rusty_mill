@@ -3,7 +3,7 @@ name = "ts-control"
 description = "ts2021 control-plane client: Noise IK channel, registration, netmap long-poll"
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_tailscale"
 
@@ -14,9 +14,11 @@ layer = "apps"
 ts-types.workspace = true
 ts-key.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "rt", "macros", "time"] }
-h2.workspace = true
-bytes.workspace = true
-http.workspace = true
+# HTTP/2 over the Noise channel. Its connection driver reads and writes
+# through `rusty_tokio`'s I/O traits (`src/rusty_io.rs` adapts tokio streams
+# to them) and needs no `rusty_tokio` runtime, so it runs on tokio here.
+rusty_h2 = { path = "../../../../libs/net/rusty_h2", features = ["rusty-tokio"] }
+rusty_tokio.workspace = true
 chacha20poly1305.workspace = true
 blake2.workspace = true
 hkdf.workspace = true
