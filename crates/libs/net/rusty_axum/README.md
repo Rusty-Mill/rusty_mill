@@ -21,6 +21,8 @@ let response = app.call(rusty_axum::Request::new(rusty_axum::Method::Get, "/heal
 - `Method`, `StatusCode` and `HeaderMap` come from `rusty_http`.
 - `routing::any` takes every method a path has no handler of its own for, and
   `Router::fallback` every unmatched path (the shape an MCP mount needs).
+- `Form` decodes an `application/x-www-form-urlencoded` body as `Query` decodes
+  a query string (415 for another type, 422 for the wrong shape, as axum).
 - `ConnectInfo` extracts the client's address, which the server sets on every
   request (`Request::with_peer_addr` in tests).
 - `Sse::keep_alive(KeepAlive::new())` sends a comment after each quiet
@@ -35,4 +37,4 @@ let response = app.call(rusty_axum::Request::new(rusty_axum::Method::Get, "/heal
   or `nest`: guard one route by wrapping its handler, and route a mounted
   service with `any` or `fallback`.
 
-Status: `rk-app` has moved (#948); `rp-server` is next (#875).
+Status: `rk-app` (#948), `rp-server` and `remind_me_remote` have moved (#875).

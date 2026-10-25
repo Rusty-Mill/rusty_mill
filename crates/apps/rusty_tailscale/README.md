@@ -8,7 +8,7 @@ first; the hosted control plane is a later milestone.
 **Status: Phase 7** — embeddable node + hardening. On top of the Phase-6
 daemon, `ts-net` provides a **fully userspace TCP/IP stack (smoltcp) on the
 tailnet — no TUN device and no root**. An application `bind`s a port on its
-tailnet IP and serves connections as ordinary `tokio` streams, so a plain
+tailnet IP and serves connections as ordinary `rusty_tokio` streams, so a plain
 `cargo run` becomes a tailnet service. Verified end-to-end: the
 [`serve_http` example](crates/ts-net/examples/serve_http.rs) serves a page
 that another node fetches with `curl`, entirely in userspace. The wire
@@ -166,7 +166,7 @@ let ip = node.wait_ip().await.unwrap();          // our 100.64.x.y
 let mut listener = node.bind(8080).await?;        // TCP listener on the tailnet
 while let Some(mut stream) = listener.accept().await {
     // stream: AsyncRead + AsyncWrite, like a std TcpStream
-    tokio::spawn(async move { /* serve HTTP, etc. */ });
+    rusty_tokio::spawn(async move { /* serve HTTP, etc. */ });
 }
 ```
 

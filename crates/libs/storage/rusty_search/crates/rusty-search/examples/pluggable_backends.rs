@@ -92,7 +92,7 @@ async fn run_demo(backend: Arc<dyn SearchBackend>, label: &str) -> rusty_search:
     Ok(())
 }
 
-#[tokio::main]
+#[rusty_tokio::main]
 async fn main() -> rusty_search::Result<()> {
     #[cfg(feature = "memory")]
     run_demo(

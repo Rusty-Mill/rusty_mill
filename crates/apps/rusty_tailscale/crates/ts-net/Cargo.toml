@@ -14,7 +14,7 @@ layer = "apps"
 ts-types.workspace = true
 ts-key.workspace = true
 ts-engine.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "io-util"] }
+rusty_tokio.workspace = true
 smoltcp = { version = "0.13", default-features = false, features = [
     "std",
     "medium-ip",
@@ -28,4 +28,3 @@ thiserror.workspace = true
 parking_lot = "0.12"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "io-util", "net"] }

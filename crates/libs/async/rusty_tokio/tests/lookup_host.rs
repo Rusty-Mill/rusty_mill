@@ -79,3 +79,14 @@ fn a_resolved_address_can_actually_be_connected_to() {
         assert_eq!(received, b"hello over a resolved addr");
     });
 }
+
+/// A borrowed, non-`'static` host string resolves, as with tokio.
+#[test]
+fn lookup_host_takes_a_borrowed_str() {
+    let rt = Runtime::new().unwrap();
+    let host = String::from("127.0.0.1:9999");
+    rt.block_on(async {
+        let addrs: Vec<SocketAddr> = lookup_host(host.as_str()).await.unwrap().collect();
+        assert_eq!(addrs, vec!["127.0.0.1:9999".parse().unwrap()]);
+    });
+}

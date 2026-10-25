@@ -55,7 +55,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use rusty_sqlite::rusqlite::params;
-use tokio::sync::RwLock;
+use rusty_tokio::sync::RwLock;
 
 use rusty_search_core::{
     BoxError, Document, Hit, Result, Schema as CoreSchema, SearchBackend, SearchError,
@@ -433,7 +433,7 @@ mod tests {
         backend
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_rejects_duplicates() {
         let backend = SqliteFts5Backend::in_memory();
         backend.create_index("a", articles_schema()).await.unwrap();
@@ -444,7 +444,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexAlreadyExists(name) if name == "a"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_rejects_path_traversal_names() {
         let dir = tempfile::tempdir().unwrap();
         let backend = SqliteFts5Backend::on_disk(dir.path());
@@ -461,7 +461,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn delete_index_rejects_path_traversal_names() {
         let dir = tempfile::tempdir().unwrap();
         let backend = SqliteFts5Backend::on_disk(dir.path());
@@ -470,7 +470,7 @@ mod tests {
         assert!(matches!(err, SearchError::InvalidSchema(_)));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn operations_on_missing_index_error() {
         let backend = SqliteFts5Backend::in_memory();
         let err = backend
@@ -480,7 +480,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexNotFound(name) if name == "missing"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn full_text_match_finds_relevant_documents() {
         let backend = seeded_backend().await;
         let results = backend
@@ -495,7 +495,7 @@ mod tests {
         assert!(results.hits.iter().any(|h| h.score != 0.0));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn term_and_bool_queries_filter_exactly() {
         let backend = seeded_backend().await;
         let results = backend
@@ -511,7 +511,7 @@ mod tests {
         assert_eq!(results.hits[0].id, "1");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn range_query_filters_numerically() {
         let backend = seeded_backend().await;
         let results = backend
@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(results.hits[0].id, "1");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn native_sort_orders_by_any_field_type() {
         let backend = seeded_backend().await;
         // Unlike rusty-search-tantivy, sorting doesn't need `fast: true` or
@@ -556,7 +556,7 @@ mod tests {
         assert_eq!(statuses, sorted);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn sort_by_views_ascending() {
         let backend = seeded_backend().await;
         let results = backend
@@ -571,7 +571,7 @@ mod tests {
         assert_eq!(ids, vec!["3", "1"]); // views: 50 then 100
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn must_not_wrapping_bare_match_works() {
         // rusty-search-meilisearch/rusty-search-algolia reject this shape
         // outright (ADR-0003); plain SQL `NOT (...)` handles it natively.
@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(results.hits[0].id, "3");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn second_match_clause_is_rejected() {
         let backend = seeded_backend().await;
         let err = backend
@@ -599,7 +599,7 @@ mod tests {
         assert!(matches!(err, SearchError::InvalidQuery(_)));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn delete_removes_document_from_results() {
         let backend = seeded_backend().await;
         backend.delete("articles", "1").await.unwrap();
@@ -612,7 +612,7 @@ mod tests {
         assert!(results.hits.iter().all(|h| h.id != "1"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn reindexing_same_id_replaces_document() {
         let backend = seeded_backend().await;
         backend
@@ -643,7 +643,7 @@ mod tests {
         assert!(stale.hits.iter().all(|h| h.id != "1"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn index_without_id_gets_one_assigned() {
         let backend = SqliteFts5Backend::in_memory();
         backend.create_index("a", articles_schema()).await.unwrap();
@@ -659,7 +659,7 @@ mod tests {
         assert!(!results.hits[0].id.is_empty());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn vector_search_is_rejected() {
         let backend = seeded_backend().await;
         assert!(!backend.supports_vector_search());
@@ -672,7 +672,7 @@ mod tests {
         assert!(matches!(err, SearchError::InvalidQuery(_)));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn on_disk_backend_persists_within_process() {
         let dir = tempfile::tempdir().unwrap();
         let backend = SqliteFts5Backend::on_disk(dir.path());
@@ -696,7 +696,7 @@ mod tests {
         assert_eq!(results.total, 1);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn on_disk_backend_rejects_reopening_existing_index() {
         let dir = tempfile::tempdir().unwrap();
         let backend = SqliteFts5Backend::on_disk(dir.path());
@@ -714,7 +714,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexAlreadyExists(_)));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn date_field_round_trips_through_rusty_time_parsing() {
         let backend = SqliteFts5Backend::in_memory();
         backend
@@ -772,7 +772,7 @@ mod tests {
 
     /// Review 2.5: a delete that fails after removing the full-text row
     /// rolls that removal back; the document stays whole and findable.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_failed_delete_leaves_the_document_whole() {
         let backend = seeded_backend().await;
         let handle = backend.handle("articles").await.unwrap();

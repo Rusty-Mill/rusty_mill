@@ -13,7 +13,7 @@ fn client(base_url: String) -> ProxmoxClient {
     })
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_nodes_unwraps_the_data_field() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":[{"node":"pve","status":"online"}]}"#,
@@ -25,7 +25,7 @@ async fn list_nodes_unwraps_the_data_field() {
     assert_eq!(nodes[0]["status"], "online");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_guests_builds_the_kind_specific_path() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":[{"vmid":100,"name":"web","status":"running"}]}"#,
@@ -39,7 +39,7 @@ async fn list_guests_builds_the_kind_specific_path() {
     assert_eq!(guests[0]["vmid"], 100);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn guest_power_returns_the_task_upid() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmstart:100:automation@pve!test:"}"#,
@@ -53,7 +53,7 @@ async fn guest_power_returns_the_task_upid() {
     assert!(upid.starts_with("UPID:pve:"), "unexpected upid: {upid}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn task_status_reports_a_finished_task() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":{"status":"stopped","exitstatus":"OK"}}"#,
@@ -71,7 +71,7 @@ async fn task_status_reports_a_finished_task() {
     assert_eq!(status["exitstatus"], "OK");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn task_log_returns_the_log_lines() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":[{"n":1,"t":"TASK OK"}]}"#,
@@ -88,7 +88,7 @@ async fn task_log_returns_the_log_lines() {
     assert_eq!(log[0]["t"], "TASK OK");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn guest_config_returns_the_data_field() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":{"cores":2,"memory":2048}}"#,
@@ -102,7 +102,7 @@ async fn guest_config_returns_the_data_field() {
     assert_eq!(config["cores"], 2);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn update_guest_config_sends_the_fields_as_a_json_body() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"data":null}"#)]);
 
@@ -119,7 +119,7 @@ async fn update_guest_config_sends_the_fields_as_a_json_body() {
     assert!(result.is_null());
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn create_guest_returns_the_task_upid() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmcreate:200:automation@pve!test:"}"#,
@@ -137,7 +137,7 @@ async fn create_guest_returns_the_task_upid() {
     assert!(upid.starts_with("UPID:pve:"), "unexpected upid: {upid}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn delete_guest_returns_the_task_upid() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmdestroy:100:automation@pve!test:"}"#,
@@ -151,7 +151,7 @@ async fn delete_guest_returns_the_task_upid() {
     assert!(upid.starts_with("UPID:pve:"), "unexpected upid: {upid}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn clone_guest_returns_the_task_upid() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmclone:100:automation@pve!test:"}"#,
@@ -170,7 +170,7 @@ async fn clone_guest_returns_the_task_upid() {
     assert!(upid.starts_with("UPID:pve:"), "unexpected upid: {upid}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_snapshots_unwraps_the_data_field() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":[{"name":"before-upgrade","snaptime":1735689600}]}"#,
@@ -184,7 +184,7 @@ async fn list_snapshots_unwraps_the_data_field() {
     assert_eq!(snapshots[0]["name"], "before-upgrade");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn create_snapshot_returns_the_task_upid() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmsnapshot:100:automation@pve!test:"}"#,
@@ -203,7 +203,7 @@ async fn create_snapshot_returns_the_task_upid() {
     assert!(upid.starts_with("UPID:pve:"), "unexpected upid: {upid}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn delete_snapshot_returns_the_task_upid() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmdelsnapshot:100:automation@pve!test:"}"#,
@@ -217,7 +217,7 @@ async fn delete_snapshot_returns_the_task_upid() {
     assert!(upid.starts_with("UPID:pve:"), "unexpected upid: {upid}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rollback_snapshot_returns_the_task_upid() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmrollback:100:automation@pve!test:"}"#,
@@ -231,7 +231,7 @@ async fn rollback_snapshot_returns_the_task_upid() {
     assert!(upid.starts_with("UPID:pve:"), "unexpected upid: {upid}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn cluster_resources_with_no_filter_hits_the_bare_endpoint() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":[{"type":"qemu","vmid":100,"status":"running"}]}"#,
@@ -245,7 +245,7 @@ async fn cluster_resources_with_no_filter_hits_the_bare_endpoint() {
     assert_eq!(resources[0]["vmid"], 100);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn cluster_resources_with_a_filter_appends_the_type_query_param() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":[{"type":"storage","storage":"local"}]}"#,
@@ -259,7 +259,7 @@ async fn cluster_resources_with_a_filter_appends_the_type_query_param() {
     assert_eq!(resources[0]["storage"], "local");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_storage_unwraps_the_data_field() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":[{"storage":"local","type":"dir"}]}"#,
@@ -270,7 +270,7 @@ async fn list_storage_unwraps_the_data_field() {
     assert_eq!(storage[0]["storage"], "local");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn node_storage_status_builds_the_node_path() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":[{"storage":"local","avail":123456,"total":654321}]}"#,
@@ -284,7 +284,7 @@ async fn node_storage_status_builds_the_node_path() {
     assert_eq!(status[0]["storage"], "local");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_backup_jobs_unwraps_the_data_field() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":[{"id":"backup-abc123","schedule":"0 2 * * *"}]}"#,
@@ -298,7 +298,7 @@ async fn list_backup_jobs_unwraps_the_data_field() {
     assert_eq!(jobs[0]["id"], "backup-abc123");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn run_backup_sends_the_fields_as_a_json_body() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:vzdump::automation@pve!test:"}"#,
@@ -315,7 +315,7 @@ async fn run_backup_sends_the_fields_as_a_json_body() {
     assert!(upid.starts_with("UPID:pve:"), "unexpected upid: {upid}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn migrate_guest_returns_the_task_upid() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmigrate:100:automation@pve!test:"}"#,
@@ -334,7 +334,7 @@ async fn migrate_guest_returns_the_task_upid() {
     assert!(upid.starts_with("UPID:pve:"), "unexpected upid: {upid}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_4xx_status_becomes_an_api_error() {
     let base_url = support::spawn(vec![MockResponse::status(
         401,
@@ -356,7 +356,7 @@ async fn a_4xx_status_becomes_an_api_error() {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_response_without_a_data_field_is_a_shape_error() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"unexpected":true}"#)]);
 

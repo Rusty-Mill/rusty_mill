@@ -4,11 +4,11 @@
 //!
 //! Mirrors Go `control/controlclient` at the level Phase 2 needs.
 
-use bytes::Bytes;
-use h2::client::SendRequest;
-use http::{Method, Request};
+use rusty_h2::client::builder::Builder as H2Builder;
+use rusty_h2::driver::{self, Body, ClientHandle, RecvStream};
+use rusty_h2::hpack::HeaderField;
+use rusty_tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use ts_key::MachinePrivate;
 use ts_types::tailcfg::{
     CURRENT_CAPABILITY_VERSION, MapRequest, MapResponse, RegisterRequest, RegisterResponse,
@@ -26,7 +26,7 @@ pub enum ClientError {
     #[error(transparent)]
     ControlHttp(#[from] ControlHttpError),
     #[error("HTTP/2 error: {0}")]
-    H2(#[from] h2::Error),
+    H2(#[from] driver::Error),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
@@ -88,7 +88,7 @@ impl ControlClient {
         )
         .await?;
         let conn = skip_early_payload(conn).await?;
-        h2_handshake(conn, H2_HANDSHAKE_TIMEOUT).await
+        h2_handshake(conn, self.url.authority.clone(), H2_HANDSHAKE_TIMEOUT).await
     }
 
     /// Registers the node key with the control server using a preauth key.
@@ -113,9 +113,7 @@ impl ControlClient {
         let body = serde_json::to_vec(&req)?;
 
         let mut session = self.open_h2().await?;
-        let resp_bytes = session
-            .request(self.machine_url("/machine/register"), body)
-            .await?;
+        let resp_bytes = session.request("/machine/register", body).await?;
         let resp: RegisterResponse = serde_json::from_slice(&resp_bytes)?;
 
         if !resp.error.is_empty() {
@@ -154,9 +152,7 @@ impl ControlClient {
         let body = serde_json::to_vec(&req)?;
         let mut session = self.open_h2().await?;
         // The lite response (a single netmap frame) is not needed.
-        let _ = session
-            .request(self.machine_url("/machine/map"), body)
-            .await?;
+        let _ = session.request("/machine/map", body).await?;
         Ok(())
     }
 
@@ -193,9 +189,7 @@ impl ControlClient {
         let body = serde_json::to_vec(&req)?;
 
         let mut session = self.open_h2().await?;
-        let mut frames = session
-            .request_stream(self.machine_url("/machine/map"), body)
-            .await?;
+        let mut frames = session.request_stream("/machine/map", body).await?;
 
         while let Some(frame) = frames.next_frame().await? {
             let resp: MapResponse = serde_json::from_slice(&frame)?;
@@ -205,39 +199,40 @@ impl ControlClient {
         }
         Ok(())
     }
-
-    fn machine_url(&self, path: &str) -> http::Uri {
-        format!("http://{}{}", self.url.authority, path)
-            .parse()
-            .expect("machine URL is well-formed")
-    }
 }
 
-/// Bound on the HTTP/2 client preface exchange once the Noise channel is
-/// open, mirroring `controlhttp`'s own connect-chain timeout -- a peer that
-/// completes the Noise handshake but never speaks HTTP/2 must not hang the
-/// caller forever.
+/// Bound on the HTTP/2 handshake once the Noise channel is open (until the
+/// server's first SETTINGS arrive), mirroring `controlhttp`'s own
+/// connect-chain timeout -- a peer that completes the Noise handshake but
+/// never speaks HTTP/2 must not hang the caller forever.
 const H2_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Performs the HTTP/2 client preface exchange over an already-established
-/// transport, bounded by `timeout`. A free function (rather than inlined in
-/// `open_h2`) so tests can drive it directly over a `tokio::io::duplex` pair
-/// without needing a full Noise handshake.
-async fn h2_handshake<T>(conn: T, timeout: Duration) -> Result<H2Session, ClientError>
+/// Starts an HTTP/2 client connection over an already-established transport
+/// and waits, bounded by `timeout`, for the server's first SETTINGS. A free
+/// function (rather than inlined in `open_h2`) so tests can drive it
+/// directly over a `rusty_tokio::io::duplex` pair without needing a full Noise
+/// handshake. `authority` is the `:authority` of the session's requests.
+async fn h2_handshake<T>(
+    conn: T,
+    authority: String,
+    timeout: Duration,
+) -> Result<H2Session, ClientError>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (send, connection) = tokio::time::timeout(timeout, h2::client::handshake(conn))
-        .await
-        .map_err(|_| ClientError::Timeout)??;
+    let (send, connection) = driver::client(conn, H2Builder::new());
     // Drive the HTTP/2 connection in the background; it ends when the
     // session is dropped or the server closes.
-    let driver = tokio::spawn(async move {
+    let driver = DriverGuard(rusty_tokio::spawn(async move {
         let _ = connection.await;
-    });
+    }));
+    rusty_tokio::time::timeout(timeout, send.ready())
+        .await
+        .map_err(|_| ClientError::Timeout)??;
     Ok(H2Session {
         send,
-        _driver: DriverGuard(driver),
+        authority,
+        _driver: driver,
     })
 }
 
@@ -248,9 +243,9 @@ where
 ///
 /// Generic over the Noise conn's own transport `T` (rather than the
 /// concrete `TcpStream`) because `controlhttp::dial`'s upgrade handoff may
-/// hand back a `Conn` wrapping `rusty_http::tokio_native::Replay<TcpStream>`
+/// hand back a `Conn` wrapping `rusty_http::async_tokio::Replay<TcpStream>`
 /// instead, when Noise bytes arrived bundled with the upgrade response.
-async fn skip_early_payload<T: AsyncRead + AsyncWrite + Unpin>(
+async fn skip_early_payload<T: AsyncRead + AsyncWrite + Unpin + Send>(
     mut conn: Conn<T>,
 ) -> Result<crate::prefixed::Prefixed<Conn<T>>, ClientError> {
     let mut header = [0u8; EARLY_HEADER_LEN];
@@ -274,7 +269,7 @@ async fn skip_early_payload<T: AsyncRead + AsyncWrite + Unpin>(
 
 /// Keeps the HTTP/2 driver task alive for the session's lifetime and aborts
 /// it on drop.
-struct DriverGuard(tokio::task::JoinHandle<()>);
+struct DriverGuard(rusty_tokio::task::JoinHandle<()>);
 impl Drop for DriverGuard {
     fn drop(&mut self) {
         self.0.abort();
@@ -288,15 +283,17 @@ const MAX_RESPONSE_BODY_LEN: usize = 16 << 20;
 
 /// One HTTP/2 session over a Noise channel.
 struct H2Session {
-    send: SendRequest<Bytes>,
+    send: ClientHandle,
+    /// The `:authority` of every request.
+    authority: String,
     _driver: DriverGuard,
 }
 
 impl H2Session {
     /// Sends a POST and reads the full response body (for unary requests
     /// like register).
-    async fn request(&mut self, uri: http::Uri, body: Vec<u8>) -> Result<Vec<u8>, ClientError> {
-        let mut stream = self.request_stream(uri, body).await?;
+    async fn request(&mut self, path: &str, body: Vec<u8>) -> Result<Vec<u8>, ClientError> {
+        let mut stream = self.request_stream(path, body).await?;
         let mut out = Vec::new();
         while let Some(chunk) = stream.next_chunk().await? {
             if out.len() + chunk.len() > MAX_RESPONSE_BODY_LEN {
@@ -311,52 +308,57 @@ impl H2Session {
     /// streaming map long-poll.
     async fn request_stream(
         &mut self,
-        uri: http::Uri,
+        path: &str,
         body: Vec<u8>,
     ) -> Result<BodyReader, ClientError> {
-        let path = uri.path().to_string();
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri(uri)
-            .header("content-type", "application/json")
-            .body(())
-            .expect("request builds");
-
-        // SendRequest::ready consumes and returns self when the connection
-        // has capacity for a new stream.
-        let mut send = self.send.clone().ready().await?;
-        let (response, mut stream) = send.send_request(request, false)?;
-        stream.send_data(Bytes::from(body), true)?;
+        let fields = vec![
+            HeaderField::new(":method", "POST"),
+            HeaderField::new(":scheme", "http"),
+            HeaderField::new(":path", path),
+            HeaderField::new(":authority", self.authority.as_str()),
+            HeaderField::new("content-type", "application/json"),
+        ];
+        // Waits while the server's concurrent-stream limit is reached.
+        let (mut stream, response) = self.send.send_request(fields, false).await?;
+        stream.send_data(body, true).await?;
 
         let response = response.await?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(ClientError::HttpStatus(status.as_u16(), path));
+        let status = status(&response.headers);
+        if !(200..300).contains(&status) {
+            return Err(ClientError::HttpStatus(status, path.to_string()));
         }
         Ok(BodyReader {
-            body: response.into_body(),
+            body: response.body,
             buf: Vec::new(),
         })
     }
 }
 
+/// A response's `:status`, or 0 when it is missing or malformed (which the
+/// caller rejects as a non-success status).
+fn status(headers: &[HeaderField]) -> u16 {
+    headers
+        .iter()
+        .find(|h| h.name == b":status")
+        .and_then(|h| std::str::from_utf8(&h.value).ok()?.parse().ok())
+        .unwrap_or(0)
+}
+
 /// Reads an HTTP/2 response body, either chunk-by-chunk or as
 /// length-prefixed netmap frames.
 struct BodyReader {
-    body: h2::RecvStream,
+    body: RecvStream,
     buf: Vec<u8>,
 }
 
 impl BodyReader {
-    /// Next raw data chunk, releasing flow-control capacity as it goes.
-    async fn next_chunk(&mut self) -> Result<Option<Bytes>, ClientError> {
-        match self.body.data().await {
-            Some(chunk) => {
-                let chunk = chunk?;
-                let _ = self.body.flow_control().release_capacity(chunk.len());
-                Ok(Some(chunk))
-            }
-            None => Ok(None),
+    /// Next raw data chunk; taking it returns its flow-control capacity.
+    /// Trailers, always last, end the body.
+    async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, ClientError> {
+        match self.body.next().await {
+            Some(Ok(Body::Data(chunk))) => Ok(Some(chunk)),
+            Some(Ok(Body::Trailers(_))) | None => Ok(None),
+            Some(Err(e)) => Err(e.into()),
         }
     }
 
@@ -396,20 +398,18 @@ impl BodyReader {
 mod tests {
     use super::*;
 
-    /// `h2::client::handshake` writes the client preface (and buffers the
-    /// initial SETTINGS frame) but never waits for anything from the peer,
-    /// so it can only hang on a stalled *write* -- e.g. a peer that stops
-    /// reading and lets the transport's send buffer fill. A tiny
-    /// `tokio::io::duplex` with nobody ever draining the far end reproduces
-    /// exactly that: the preface write blocks forever without the timeout.
-    /// Uses a duplex pair rather than a full Noise handshake because
-    /// `h2_handshake` only needs an `AsyncRead + AsyncWrite` transport.
-    #[tokio::test]
+    /// The handshake waits for the server's first SETTINGS, so a peer that
+    /// never speaks HTTP/2 must hit the timeout. A tiny `rusty_tokio::io::duplex`
+    /// that nobody ever drains is such a peer: the client preface write
+    /// stalls and nothing is ever read back. Uses a duplex pair rather than
+    /// a full Noise handshake because `h2_handshake` only needs an
+    /// `AsyncRead + AsyncWrite` transport.
+    #[rusty_tokio::test]
     async fn h2_handshake_times_out_on_silent_peer() {
-        let (near, _far) = tokio::io::duplex(1);
+        let (near, _far) = rusty_tokio::io::duplex(1);
 
         let start = std::time::Instant::now();
-        let result = h2_handshake(near, Duration::from_millis(200)).await;
+        let result = h2_handshake(near, "control".into(), Duration::from_millis(200)).await;
         let elapsed = start.elapsed();
 
         match result {
@@ -426,57 +426,192 @@ mod tests {
     /// A control server streaming a response body past the sanity cap must
     /// be rejected before `H2Session::request` grows its accumulation
     /// buffer without limit.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn request_rejects_oversized_response_body() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = rusty_tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
 
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
-            let mut connection = h2::server::handshake(socket).await.unwrap();
-            if let Some(result) = connection.accept().await {
-                let (_request, mut respond) = result.unwrap();
-                if let Ok(mut send) = respond.send_response(http::Response::new(()), false) {
+            let (mut acceptor, connection) =
+                driver::server(socket, rusty_h2::server::builder::Builder::new());
+            rusty_tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            if let Some(Ok((_request, respond))) = acceptor.accept().await {
+                let status = vec![HeaderField::new(":status", "200")];
+                if let Ok(mut send) = respond.send_response(status, false).await {
                     // One chunk past `MAX_RESPONSE_BODY_LEN`; a capped
                     // reader must give up long before this loop finishes.
-                    let chunk = Bytes::from(vec![0u8; 1 << 20]);
                     let chunks = (MAX_RESPONSE_BODY_LEN >> 20) + 1;
                     for i in 0..chunks {
-                        if send.send_data(chunk.clone(), i + 1 == chunks).is_err() {
+                        let chunk = vec![0u8; 1 << 20];
+                        if send.send_data(chunk, i + 1 == chunks).await.is_err() {
                             break;
                         }
                     }
                 }
             }
-            while connection.accept().await.is_some() {}
+            while let Some(Ok(_)) = acceptor.accept().await {}
         });
 
-        let client_stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let (send_request, connection) = h2::client::handshake(client_stream).await.unwrap();
-        let driver = tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        let mut session = H2Session {
-            send: send_request,
-            _driver: DriverGuard(driver),
-        };
+        let client_stream = rusty_tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut session = h2_handshake(client_stream, addr.to_string(), Duration::from_secs(10))
+            .await
+            .unwrap();
 
-        let uri: http::Uri = format!("http://{addr}/machine/register").parse().unwrap();
-        // Default h2 flow-control windows (64 KiB) mean streaming past the
-        // 16 MiB cap needs hundreds of WINDOW_UPDATE round trips; under
+        // Default HTTP/2 flow-control windows (64 KiB) mean streaming past
+        // the 16 MiB cap needs hundreds of WINDOW_UPDATE round trips; under
         // loaded/virtualized CI runners this legitimately takes longer
         // than a tight bound, so this margin is generous on purpose --
         // the assertion below is what actually proves the cap works, not
         // how fast it fires.
-        let result =
-            tokio::time::timeout(Duration::from_secs(30), session.request(uri, Vec::new()))
-                .await
-                .expect("request should not hang");
+        let result = rusty_tokio::time::timeout(
+            Duration::from_secs(30),
+            session.request("/machine/register", Vec::new()),
+        )
+        .await
+        .expect("request should not hang");
 
         match result {
             Err(ClientError::ResponseTooLarge(_)) => {}
             Err(other) => panic!("expected ResponseTooLarge, got: {other}"),
             Ok(body) => panic!("expected rejection, got {} byte body", body.len()),
+        }
+    }
+
+    /// The Go toolchain, if one is installed.
+    fn go_toolchain() -> Option<&'static str> {
+        ["/usr/local/go/bin/go", "go"].into_iter().find(|g| {
+            std::process::Command::new(g)
+                .arg("version")
+                .output()
+                .is_ok()
+        })
+    }
+
+    /// Builds the Go package in `dir` to `dir/name`. Once Go is found, any
+    /// failure is an error carrying the build's output, never a skip.
+    async fn go_build(
+        go: &str,
+        dir: &std::path::Path,
+        name: &str,
+    ) -> Result<std::path::PathBuf, String> {
+        let out = rusty_tokio::process::Command::new(go)
+            .args(["build", "-o", name, "."])
+            .current_dir(dir)
+            .output()
+            .await
+            .map_err(|e| format!("running `{go} build` in {}: {e}", dir.display()))?;
+        if !out.status.success() {
+            return Err(format!(
+                "`{go} build` in {} failed ({}):\n{}",
+                dir.display(),
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(dir.join(name))
+    }
+
+    /// `interop/h2c-server-go` (Go's own `net/http` HTTP/2 server), built if
+    /// needed. `Ok(None)` skips the test, as `go_interop` does: no Go
+    /// toolchain and no prebuilt binary. A failed build is an `Err`.
+    async fn go_h2c_server() -> Result<Option<std::path::PathBuf>, String> {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../interop/h2c-server-go");
+        let bin = dir.join("h2c-server-go");
+        if bin.exists() {
+            return Ok(Some(bin));
+        }
+        let Some(go) = go_toolchain() else {
+            return Ok(None);
+        };
+        go_build(go, &dir, "h2c-server-go").await.map(Some)
+    }
+
+    #[rusty_tokio::test]
+    async fn a_go_fixture_that_fails_to_build_is_an_error_not_a_skip() {
+        let Some(go) = go_toolchain() else {
+            eprintln!("SKIPPED: no Go toolchain");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("ts-control-go-build-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("go.mod"), "module broken\n\ngo 1.21\n").unwrap();
+        std::fs::write(
+            dir.join("main.go"),
+            "package main\n\nfunc main() { not go }\n",
+        )
+        .unwrap();
+        let built = go_build(go, &dir, "broken").await;
+        std::fs::remove_dir_all(&dir).unwrap();
+        let err = built.expect_err("a broken package must not build");
+        assert!(
+            err.contains("failed"),
+            "the error carries the build output: {err}"
+        );
+    }
+
+    /// The session against Go's HTTP/2, the implementation real control
+    /// servers run: a unary request, a streamed length-prefixed body, and a
+    /// non-success status.
+    #[rusty_tokio::test]
+    async fn session_speaks_http2_with_gos_net_http() {
+        use rusty_tokio::io::AsyncBufReadExt;
+
+        let bin = match go_h2c_server().await {
+            Ok(Some(bin)) => bin,
+            Ok(None) => {
+                eprintln!("SKIPPED: no Go toolchain and no prebuilt h2c-server-go binary");
+                return;
+            }
+            Err(build) => panic!("the Go h2c fixture did not build: {build}"),
+        };
+        let mut child = rusty_tokio::process::Command::new(&bin)
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn go h2c server");
+        let stdout = child.stdout.take().unwrap();
+        let line = rusty_tokio::io::BufReader::new(stdout)
+            .lines()
+            .next_line()
+            .await
+            .unwrap()
+            .expect("listen line");
+        let addr = line.strip_prefix("LISTENING ").expect("LISTENING prefix");
+
+        let tcp = rusty_tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut session = h2_handshake(tcp, addr.to_string(), Duration::from_secs(10))
+            .await
+            .unwrap();
+
+        let body = session
+            .request("/machine/register", b"hello".to_vec())
+            .await
+            .unwrap();
+        let echo: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(echo["proto"], "HTTP/2.0");
+        assert_eq!(echo["host"], addr);
+        assert_eq!(echo["len"], 5);
+
+        let mut frames = session
+            .request_stream("/machine/map", b"{}".to_vec())
+            .await
+            .unwrap();
+        for i in 0..3 {
+            let frame = frames.next_frame().await.unwrap().expect("frame");
+            let frame: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+            assert_eq!(frame["frame"], i);
+        }
+        assert!(frames.next_frame().await.unwrap().is_none());
+
+        match session.request("/missing", Vec::new()).await {
+            Err(ClientError::HttpStatus(404, path)) => assert_eq!(path, "/missing"),
+            other => panic!("expected HTTP 404, got {other:?}"),
         }
     }
 }

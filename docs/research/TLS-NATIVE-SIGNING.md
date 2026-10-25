@@ -222,7 +222,8 @@ Rough, plus or minus 50 percent, like the plan's figures. Suggested order of PRs
 ## 7. Not in scope
 
 - RSA signing (decision S3) and any change to verification.
-- Any consumer, and any default. A first native consumer is a separate decision, next in the owner's queue.
+- Any consumer, and any default. The first native consumer was decided separately on 2026-10-24: `rleval-app`'s
+  OIDC transport, client only (ADR-0002 Amendment 2). It uses none of the signing or server code scoped here.
 - `ring` elsewhere in the lockfile (#979), AES-GCM evidence gaps (#978).
 
 ## 8. Limits

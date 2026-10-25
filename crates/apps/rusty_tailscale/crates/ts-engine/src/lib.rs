@@ -19,7 +19,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, oneshot};
+use rusty_tokio::sync::{mpsc, oneshot};
 use ts_control::ControlClient;
 use ts_derp::{DerpClient, DerpSender};
 use ts_filter::Filter;
@@ -144,7 +144,7 @@ impl EngineHandle {
             .send(Command::Ping { target, reply })
             .await
             .map_err(|_| PingError::EngineGone)?;
-        match tokio::time::timeout(timeout, rx).await {
+        match rusty_tokio::time::timeout(timeout, rx).await {
             Ok(Ok(res)) => res,
             Ok(Err(_)) => Err(PingError::EngineGone),
             Err(_) => Err(PingError::Timeout),
@@ -409,7 +409,7 @@ impl Engine {
         // Stream the netmap into an unbounded channel (the poll handler is
         // sync; unbounded send never blocks it).
         let (netmap_tx, netmap_rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             let r = control
                 .poll_netmap(node_key, disco_key, endpoints, move |resp| {
                     if netmap_tx.send(resp).is_err() {
@@ -451,20 +451,20 @@ impl Engine {
             stack_tx: config.stack_io.as_ref().map(|s| s.inbound.clone()),
             stack_rx: config.stack_io.map(|s| s.outbound),
         };
-        tokio::spawn(engine.run());
+        rusty_tokio::spawn(engine.run());
         Ok(EngineHandle { cmd_tx })
     }
 
     async fn run(mut self) {
-        let mut tick = tokio::time::interval(TICK_INTERVAL);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut tick = rusty_tokio::time::interval(TICK_INTERVAL);
+        tick.set_missed_tick_behavior(rusty_tokio::time::MissedTickBehavior::Delay);
         loop {
             // Clone the TUN handle and UDP socket (cheap Arc, or None) so the
             // read futures borrow locals rather than `self`, leaving the other
             // branches free to take `&mut self`.
             let tun = self.tun.clone();
             let udp = self.magicsock.as_ref().map(|m| m.udp());
-            tokio::select! {
+            rusty_tokio::select! {
                 Some(resp) = self.netmap_rx.recv() => self.apply_netmap(resp).await,
                 maybe_pkt = self.derp.recv() => match maybe_pkt {
                     Some(pkt) => self.on_derp_packet(pkt.peer, pkt.payload).await,
@@ -1370,7 +1370,7 @@ mod tests {
     /// stalled netstack task let the queue (and memory) grow without bound.
     /// `forward_to_stack` now uses a bounded channel and drops the newest
     /// packet once it's full, instead of growing forever.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn stack_queue_drops_newest_packet_once_full() {
         let (tx, mut rx) = mpsc::channel(2);
         assert!(
