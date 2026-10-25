@@ -1268,8 +1268,9 @@ jobs:
     #
     # `--all-features-exclude` lists crates whose declared floor is
     # deliberately the default build's, with an opt-in feature above it:
-    # platform-linux (`track-p` -> rusty_libc 1.88, see its Cargo.toml),
-    # rusty_json (the optional rusty_json-derive, 1.85), rusty_tls
+    # platform-linux (`track-p` -> rusty_libc 1.88) and platform-windows
+    # (`track-w` -> rusty_win32 1.88, found by the Windows leg), see their
+    # Cargo.tomls; rusty_json (the optional rusty_json-derive, 1.85), rusty_tls
     # (`native-crypto` -> rusty_aead/rusty_pk at the pinned toolchain),
     # rusty_rdp (its README: optional features raise the effective MSRV) and
     # rusty_tonic (`rusty-tokio` -> rusty_h2 1.88; its README keeps the
@@ -1312,7 +1313,7 @@ jobs:
             "${scope[@]}" \
             --skip-from "$RUST_TOOLCHAIN" \
             --exclude "$REMIND_ME_PACKAGES rusty_multimodal_db $OS_EXCLUDE" \
-            --all-features-exclude "platform-linux rusty_json rusty_tls rusty_rdp rusty_tonic" \
+            --all-features-exclude "platform-linux platform-windows rusty_json rusty_tls rusty_rdp rusty_tonic" \
             --target-base "$RUNNER_TEMP/msrv"
           test "$(sha256sum Cargo.lock)" = "$lock_before"
 
