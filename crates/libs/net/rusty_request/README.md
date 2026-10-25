@@ -187,8 +187,11 @@ protection against an active man-in-the-middle). TLS 1.2/1.3, no ALPN
   naming the origin); an `https://` request instead opens a `CONNECT`
   tunnel to the origin and runs the TLS handshake and the real request
   through it, invisible to the proxy. `.proxy_from_env()` reads
-  `HTTP_PROXY`/`http_proxy` and `NO_PROXY`/`no_proxy`, matching
-  `requests`' convention -- with an ["httpoxy"](https://httpoxy.org)
+  `HTTP_PROXY`/`http_proxy` for `http://` requests,
+  `HTTPS_PROXY`/`https_proxy` for `https://` ones, `ALL_PROXY`/`all_proxy`
+  as the fallback for both, and `NO_PROXY`/`no_proxy`, matching curl's and
+  `requests`' convention (a value without a scheme is `http://`; an
+  invalid one is an error naming the variable, never its value) -- with an ["httpoxy"](https://httpoxy.org)
   mitigation: `HTTP_PROXY` is ignored whenever `REQUEST_METHOD` is also
   set (the standard CGI-context signal), since a CGI/FastCGI handler can
   map an inbound `Proxy:` header onto that variable. `.proxy_bypass(hosts)`

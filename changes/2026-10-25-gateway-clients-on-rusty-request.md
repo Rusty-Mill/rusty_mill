@@ -1,8 +1,10 @@
 ---
 category: Changed
-changelog: agentgateway's extAuthz, LLM, moderation, webhook and agent-card clients move from reqwest to rusty_request (#885).
+changelog: agentgateway's extAuthz, LLM, moderation, webhook and agent-card clients move from reqwest to rusty_request (#885); rusty_request's proxy_from_env reads a proxy per scheme.
 ---
 ## 2026-10-25 - agentgateway: outbound calls on rusty_request
 
 - **Changed:** `agentgateway-auth` (`extAuthz`), `agentgateway-llm` (providers, `promptGuard` moderation and webhooks) and `agentgateway-a2a` (agent cards) call out with `rusty_request` instead of `reqwest`, so none of the three depends on `reqwest` and `agentgateway-llm` no longer depends on `hyper` or `futures-util`. This is the first step of moving the gateway onto `rusty_axum` and `rusty_tokio`: `rusty_request` runs on either runtime. Timeouts, retries (a connect failure or a listed status) and the 32 MiB response cap behave as before. An `ai` route's timeout still covers a streamed answer to its last byte. An `extAuthz` denial stands once its status arrives: a body that is cut short, too large (over 64 KiB) or late is dropped rather than turning the denial into an unreachable authorizer that `failOpen` would allow.
-- **Known limitations:** `rusty_request` reads only `HTTP_PROXY` from the environment, not `HTTPS_PROXY`, and these clients configure no proxy, so a gateway that reached its providers through an environment proxy needs one set another way. Requests now carry `rusty_request`'s `User-Agent`. Tests still use `reqwest` until they move with the server.
+- **Changed:** these clients take their proxy from the environment as `reqwest` did. `rusty_request`'s `ClientBuilder::proxy_from_env` now reads a proxy per scheme: `HTTP_PROXY` for `http://` requests, `HTTPS_PROXY` for `https://` ones (tunnelled with `CONNECT`) and `ALL_PROXY` as the fallback for both, with `NO_PROXY` as before. `HTTP_PROXY` alone no longer routes `https://` requests. A value without a scheme is taken as `http://`. An invalid value is an error that names the variable but not its value, and the gateway logs it and connects directly.
+- **Fixed:** a `rusty_http` header value with CR/LF is rejected without echoing the value, which is often a credential.
+- **Known limitations:** `rusty_request` has no proxy authentication, so a proxy URL with `user:pass@` is reported and ignored, and `NO_PROXY` matches host names but not IP ranges. Requests now carry `rusty_request`'s `User-Agent`. Tests still use `reqwest` until they move with the server.

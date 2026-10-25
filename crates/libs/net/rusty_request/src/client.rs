@@ -2,7 +2,7 @@ use crate::body::Body;
 use crate::error::{Error, Result};
 use crate::multipart::Multipart;
 use crate::pool::{ConnectionPool, PoolKey};
-use crate::proxy::{NoProxyRules, Proxy};
+use crate::proxy::{self, NoProxyRules, Proxies, Proxy};
 use crate::request::Request;
 use crate::response::Response;
 use crate::retry::RetryPolicy;
@@ -73,7 +73,7 @@ pub struct Client {
     cookie_jar: Option<Arc<Mutex<CookieJar>>>,
     pool: Option<Arc<ConnectionPool>>,
     retry_policy: Option<RetryPolicy>,
-    proxy: Option<Proxy>,
+    proxy: Proxies,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
     max_body_len: u64,
@@ -147,7 +147,7 @@ pub struct ClientBuilder {
     pool_idle_timeout: Duration,
     pool_enabled: bool,
     retry_policy: Option<RetryPolicy>,
-    proxy: Option<Proxy>,
+    proxy: Proxies,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
     max_body_len: u64,
@@ -168,7 +168,7 @@ impl ClientBuilder {
             pool_idle_timeout: DEFAULT_POOL_IDLE_TIMEOUT,
             pool_enabled: true,
             retry_policy: None,
-            proxy: None,
+            proxy: Proxies::default(),
             proxy_bypass: NoProxyRules::default(),
             trust_policy: TrustPolicy::default(),
             max_body_len: body::DEFAULT_MAX_BODY_LEN,
@@ -300,41 +300,49 @@ impl ClientBuilder {
         self
     }
 
-    /// Routes every plain `http://` request built from the resulting
-    /// [`Client`] through the given HTTP forward proxy instead of
-    /// connecting to the origin directly, unless a
-    /// [`ClientBuilder::proxy_bypass`] rule matches the origin host.
-    /// Disabled by default. See [`Proxy::http`] for the URL format and
-    /// scope (no `https://` proxy, no `CONNECT` tunnel).
+    /// Routes every request built from the resulting [`Client`] through
+    /// the given HTTP forward proxy instead of connecting to the origin
+    /// directly, unless a [`ClientBuilder::proxy_bypass`] rule matches
+    /// the origin host: `http://` requests are forwarded, `https://` ones
+    /// tunnel through a `CONNECT`. Disabled by default. See
+    /// [`Proxy::http`] for the URL format (the proxy itself is reached
+    /// over plain `http://`).
     pub fn proxy(mut self, proxy_url: &str) -> Result<Self> {
-        self.proxy = Some(Proxy::http(proxy_url)?);
+        self.proxy = Proxies::all(Proxy::http(proxy_url)?);
         Ok(self)
     }
 
-    /// Reads a proxy configuration from the environment, matching
-    /// `requests`' `HTTP_PROXY`/`NO_PROXY` convention: `HTTP_PROXY` (or
-    /// lowercase `http_proxy`) sets the proxy exactly like
-    /// [`ClientBuilder::proxy`], and `NO_PROXY`/`no_proxy` sets the
-    /// bypass rules exactly like [`ClientBuilder::proxy_bypass`]. Either
-    /// left unset simply leaves that part of the configuration alone.
+    /// Reads a proxy configuration from the environment, matching curl's
+    /// and `requests`' convention: `HTTP_PROXY`/`http_proxy` sets the
+    /// proxy for `http://` requests, `HTTPS_PROXY`/`https_proxy` the one
+    /// for `https://` requests, `ALL_PROXY`/`all_proxy` is the fallback
+    /// for both, and `NO_PROXY`/`no_proxy` sets the bypass rules exactly
+    /// like [`ClientBuilder::proxy_bypass`]. A part whose variables are
+    /// unset is left alone. A value without a scheme is taken as
+    /// `http://`; an invalid one is an error that names the variable but
+    /// not its value.
     ///
-    /// `HTTPS_PROXY` isn't read -- this crate is `http://`-only, so it
-    /// could never apply to anything today. As a mitigation for
-    /// ["httpoxy"](https://httpoxy.org) (CVE-2016-5385 and siblings) --
-    /// a CGI/FastCGI handler that maps an inbound `Proxy:` request
-    /// header onto the `HTTP_PROXY` environment variable, letting a
-    /// remote client redirect this process's own outbound requests --
-    /// the uppercase `HTTP_PROXY` is ignored whenever `REQUEST_METHOD`
-    /// is also set (the standard signal that the process is running in
-    /// a CGI context, the same check curl uses); the lowercase
-    /// `http_proxy` is never attacker-reachable via a header and is
-    /// always trusted.
+    /// As a mitigation for ["httpoxy"](https://httpoxy.org)
+    /// (CVE-2016-5385 and siblings) -- a CGI/FastCGI handler that maps an
+    /// inbound `Proxy:` request header onto the `HTTP_PROXY` environment
+    /// variable, letting a remote client redirect this process's own
+    /// outbound requests -- the uppercase `HTTP_PROXY` is ignored whenever
+    /// `REQUEST_METHOD` is also set (the standard signal that the process
+    /// is running in a CGI context, the same check curl uses); the
+    /// lowercase `http_proxy` is never attacker-reachable via a header and
+    /// is always trusted.
     pub fn proxy_from_env(mut self) -> Result<Self> {
-        if let Some(url) = env_http_proxy() {
-            self.proxy = Some(Proxy::http(&url)?);
+        let read = proxy::from_env(|name| {
+            std::env::var_os(name).map(|v| v.to_string_lossy().into_owned())
+        })?;
+        if let Some(http) = read.http {
+            self.proxy.http = Some(http);
         }
-        if let Some(spec) = env_no_proxy() {
-            self.proxy_bypass = NoProxyRules::parse(&spec);
+        if let Some(https) = read.https {
+            self.proxy.https = Some(https);
+        }
+        if let Some(bypass) = read.bypass {
+            self.proxy_bypass = bypass;
         }
         Ok(self)
     }
@@ -358,7 +366,7 @@ impl ClientBuilder {
     /// override a previously-set proxy earlier in the same builder
     /// chain.
     pub fn no_proxy(mut self) -> Self {
-        self.proxy = None;
+        self.proxy = Proxies::default();
         self
     }
 
@@ -396,28 +404,6 @@ impl ClientBuilder {
     }
 }
 
-/// httpoxy mitigation (see [`ClientBuilder::proxy_from_env`]'s docs):
-/// `HTTP_PROXY` is only trusted outside a CGI context; `http_proxy`
-/// always is.
-fn env_http_proxy() -> Option<String> {
-    let in_cgi_context = std::env::var_os("REQUEST_METHOD").is_some();
-    if !in_cgi_context {
-        if let Ok(v) = std::env::var("HTTP_PROXY") {
-            if !v.is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    std::env::var("http_proxy").ok().filter(|v| !v.is_empty())
-}
-
-fn env_no_proxy() -> Option<String> {
-    std::env::var("NO_PROXY")
-        .ok()
-        .or_else(|| std::env::var("no_proxy").ok())
-        .filter(|v| !v.is_empty())
-}
-
 impl Default for ClientBuilder {
     fn default() -> Self {
         ClientBuilder::new()
@@ -434,7 +420,7 @@ pub struct RequestBuilder {
     cookie_jar: Option<Arc<Mutex<CookieJar>>>,
     pool: Option<Arc<ConnectionPool>>,
     retry_policy: Option<RetryPolicy>,
-    proxy: Option<Proxy>,
+    proxy: Proxies,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
     max_body_len: u64,
@@ -570,7 +556,7 @@ impl RequestBuilder {
     /// Routes this request through the given HTTP forward proxy,
     /// overriding the `Client`'s default. See [`ClientBuilder::proxy`].
     pub fn proxy(mut self, proxy_url: &str) -> Result<Self> {
-        self.proxy = Some(Proxy::http(proxy_url)?);
+        self.proxy = Proxies::all(Proxy::http(proxy_url)?);
         Ok(self)
     }
 
@@ -588,7 +574,7 @@ impl RequestBuilder {
     /// Disables proxying for this request, overriding the `Client`'s
     /// default.
     pub fn no_proxy(mut self) -> Self {
-        self.proxy = None;
+        self.proxy = Proxies::default();
         self
     }
 
@@ -716,7 +702,7 @@ async fn send_with_retries(
     cookie_jar: Option<Arc<Mutex<CookieJar>>>,
     pool: Option<Arc<ConnectionPool>>,
     retry_policy: Option<RetryPolicy>,
-    proxy: Option<Proxy>,
+    proxy: Proxies,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
     max_body_len: u64,
@@ -787,7 +773,7 @@ async fn send_with_redirects(
     policy: RedirectPolicy,
     cookie_jar: Option<Arc<Mutex<CookieJar>>>,
     pool: Option<Arc<ConnectionPool>>,
-    proxy: Option<Proxy>,
+    proxy: Proxies,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
     max_body_len: u64,
@@ -869,15 +855,11 @@ async fn send_with_redirects(
     }
 }
 
-/// Whether `proxy` applies to a request to `url`, re-evaluated fresh
-/// for every hop (a redirect can land on a host `bypass` matches even
-/// if the original one didn't, or vice versa).
-fn active_proxy<'a>(
-    proxy: &'a Option<Proxy>,
-    bypass: &NoProxyRules,
-    url: &Url,
-) -> Option<&'a Proxy> {
-    proxy.as_ref().filter(|_| !bypass.bypasses(&url.host))
+/// The proxy, if any, a request to `url` goes through, re-evaluated
+/// fresh for every hop (a redirect can change scheme, or land on a host
+/// `bypass` matches even if the original one didn't, or vice versa).
+fn active_proxy<'a>(proxy: &'a Proxies, bypass: &NoProxyRules, url: &Url) -> Option<&'a Proxy> {
+    proxy.for_url(url).filter(|_| !bypass.bypasses(&url.host))
 }
 
 /// Builds the headers actually sent on the wire for one hop: a default
@@ -950,7 +932,7 @@ async fn send_with_redirects_streaming(
     policy: RedirectPolicy,
     cookie_jar: Option<Arc<Mutex<CookieJar>>>,
     pool: Option<Arc<ConnectionPool>>,
-    proxy: Option<Proxy>,
+    proxy: Proxies,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
 ) -> Result<StreamingResponse> {

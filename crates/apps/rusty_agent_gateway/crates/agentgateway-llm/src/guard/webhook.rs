@@ -180,8 +180,17 @@ impl Webhook {
         let url = format!("{}{path}", self.base);
         let mut request =
             crate::post_json(&self.client, &url, body).map_err(|err| err.to_string())?;
+        // The first value of a name replaces any default, and later ones add
+        // to it, so a configured header and a forwarded one of the same name
+        // both arrive.
+        let mut sent: Vec<&str> = Vec::new();
         for (name, value) in headers {
-            request = request.header(name, value).map_err(|err| err.to_string())?;
+            request = match sent.iter().any(|seen| seen.eq_ignore_ascii_case(name)) {
+                true => request.header_append(name, value),
+                false => request.header(name, value),
+            }
+            .map_err(|err| err.to_string())?;
+            sent.push(name);
         }
         let response = request.send().await.map_err(|err| err.to_string())?;
         if !response.status().is_success() {

@@ -235,3 +235,21 @@ async fn nothing_to_classify_is_allowed_without_a_call() {
         Decision::Allowed
     ));
 }
+
+#[tokio::test]
+async fn a_key_that_cannot_be_sent_is_reported_without_its_value() {
+    let secret = "sk-s3cr3t-moderation-key";
+    let moderation = Moderation {
+        endpoint: "http://127.0.0.1:9/v1/moderations".to_string(),
+        model: "omni-moderation-latest".to_string(),
+        key: format!("{secret}\r\nx-injected: 1"),
+        rejection: rejection(),
+        client: crate::client(std::time::Duration::from_secs(5)),
+    };
+
+    let reason = moderation
+        .ask(vec!["hello".to_string()])
+        .await
+        .expect_err("a CR/LF key must not be sent");
+    assert!(!reason.contains(secret), "leaked: {reason}");
+}

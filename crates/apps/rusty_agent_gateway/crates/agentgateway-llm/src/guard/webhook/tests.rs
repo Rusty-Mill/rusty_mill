@@ -200,3 +200,73 @@ fn a_literal_expression_is_a_literal_header() {
         Some("/api/guardrails/request")
     );
 }
+
+fn webhook_at(base: String) -> Webhook {
+    Webhook {
+        base,
+        headers: Vec::new(),
+        forward: Vec::new(),
+        fail_open: false,
+        client: crate::client(Duration::from_secs(5)),
+    }
+}
+
+/// A webhook that answers `{}` and hands back the request it read.
+async fn recording_webhook() -> (Webhook, tokio::sync::oneshot::Receiver<String>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        let mut request = vec![0u8; 8192];
+        let read = stream.read(&mut request).await.unwrap_or(0);
+        let _ = tx.send(String::from_utf8_lossy(&request[..read]).into_owned());
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+            .await;
+    });
+    (webhook_at(format!("http://{addr}")), rx)
+}
+
+#[tokio::test]
+async fn a_configured_and_a_forwarded_header_of_one_name_both_arrive() {
+    let (webhook, request) = recording_webhook().await;
+    let headers = [
+        ("x-tenant".to_string(), "configured".to_string()),
+        ("X-Tenant".to_string(), "forwarded".to_string()),
+    ];
+
+    let answered = webhook
+        .send("/request", &json!({}), &headers, "messages")
+        .await;
+    assert!(answered.is_ok(), "got: {answered:?}");
+
+    let request = request
+        .await
+        .expect("the webhook was called")
+        .to_ascii_lowercase();
+    let values: Vec<&str> = request
+        .lines()
+        .filter_map(|line| line.strip_prefix("x-tenant: "))
+        .collect();
+    assert_eq!(values, ["configured", "forwarded"], "request: {request}");
+}
+
+#[tokio::test]
+async fn a_header_that_cannot_be_sent_is_reported_without_its_value() {
+    let webhook = webhook_at("http://127.0.0.1:9".to_string());
+    let secret = "s3cr3t-tenant-token";
+    let headers = [("x-tenant".to_string(), format!("{secret}\r\nx-injected: 1"))];
+
+    let reason = webhook
+        .send("/request", &json!({}), &headers, "messages")
+        .await
+        .expect_err("a CR/LF value must not be sent");
+    assert!(!reason.contains(secret), "leaked: {reason}");
+}

@@ -152,10 +152,7 @@ impl ExtAuthz {
             include_body: policy.include_body,
             fail_open: policy.fail_open.unwrap_or(false),
             timeout,
-            client: rusty_request::Client::builder()
-                .timeout(timeout)
-                .no_cookie_store()
-                .build(),
+            client: client(timeout),
         })
     }
 
@@ -280,14 +277,14 @@ async fn denial_body(
 ) -> Vec<u8> {
     let mut body = Vec::new();
     loop {
-        let chunk = match tokio::time::timeout_at(deadline, response.chunk()).await {
-            Ok(Ok(Some(chunk))) => chunk,
-            Ok(Ok(None)) => return body,
-            Ok(Err(err)) => {
+        let chunk = match chunk_by(deadline, &mut response).await {
+            Some(Ok(Some(chunk))) => chunk,
+            Some(Ok(None)) => return body,
+            Some(Err(err)) => {
                 rusty_log::debug!(%err, "a denial's body could not be read; relaying it without one");
                 return Vec::new();
             }
-            Err(_) => {
+            None => {
                 rusty_log::debug!(
                     "a denial's body did not arrive in time; relaying it without one"
                 );
@@ -303,6 +300,20 @@ async fn denial_body(
         }
         body.extend_from_slice(&chunk);
     }
+}
+
+/// The next chunk of `response`, or `None` once `deadline` has passed --
+/// checked first, since `timeout_at` alone lets an already-ready read win.
+async fn chunk_by(
+    deadline: tokio::time::Instant,
+    response: &mut rusty_request::StreamingResponse,
+) -> Option<rusty_request::Result<Option<Vec<u8>>>> {
+    if tokio::time::Instant::now() >= deadline {
+        return None;
+    }
+    tokio::time::timeout_at(deadline, response.chunk())
+        .await
+        .ok()
 }
 
 /// `request` with the caller's `name` field copied onto it, when there is
@@ -337,6 +348,24 @@ fn passthrough_headers(from: &rusty_request::HeaderMap) -> HeaderMap {
         }
     }
     headers
+}
+
+/// A client bounded by `timeout`, with no cookie store. The environment's
+/// proxy (`HTTPS_PROXY` and kin, as reqwest read them) applies; an invalid
+/// proxy variable is logged and ignored rather than failing the gateway.
+fn client(timeout: Duration) -> rusty_request::Client {
+    let base = || {
+        rusty_request::Client::builder()
+            .timeout(timeout)
+            .no_cookie_store()
+    };
+    base()
+        .proxy_from_env()
+        .unwrap_or_else(|err| {
+            rusty_log::warn!(%err, "ignoring the environment's proxy settings");
+            base()
+        })
+        .build()
 }
 
 #[cfg(test)]
@@ -527,6 +556,23 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert!(headers.contains_key(http::header::WWW_AUTHENTICATE));
         assert!(body.is_empty(), "part of a reason is not one: {body:?}");
+    }
+
+    #[tokio::test]
+    async fn a_passed_deadline_drops_a_denial_body_even_with_bytes_waiting() {
+        let authz = answering(forbidden(4), b"nope".to_vec(), true).await;
+        let response = authz
+            .client
+            .get(&authz.target)
+            .expect("a valid URL")
+            .send_streaming()
+            .await
+            .expect("the head arrives");
+        // Let the body land, so the read itself would be ready at once.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let body = denial_body(response, tokio::time::Instant::now()).await;
+        assert!(body.is_empty(), "read past the deadline: {body:?}");
     }
 
     #[tokio::test]

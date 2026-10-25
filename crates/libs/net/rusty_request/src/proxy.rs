@@ -83,6 +83,86 @@ impl Proxy {
     }
 }
 
+/// Which [`Proxy`], if any, each request scheme routes through: an
+/// explicit [`crate::ClientBuilder::proxy`] covers both, while the
+/// environment can name a different one per scheme (see [`from_env`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Proxies {
+    pub(crate) http: Option<Proxy>,
+    pub(crate) https: Option<Proxy>,
+}
+
+impl Proxies {
+    /// One proxy for every scheme.
+    pub(crate) fn all(proxy: Proxy) -> Self {
+        Proxies {
+            http: Some(proxy.clone()),
+            https: Some(proxy),
+        }
+    }
+
+    /// The proxy a request to `url` routes through, before bypass rules.
+    pub(crate) fn for_url(&self, url: &Url) -> Option<&Proxy> {
+        match url.scheme.as_str() {
+            "http" => self.http.as_ref(),
+            "https" => self.https.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// A proxy configuration read from environment variables: each part is
+/// `None` when its variables are unset, so it leaves that part alone.
+#[derive(Debug, Default)]
+pub(crate) struct EnvProxy {
+    pub(crate) http: Option<Proxy>,
+    pub(crate) https: Option<Proxy>,
+    pub(crate) bypass: Option<NoProxyRules>,
+}
+
+/// Reads the curl/`requests` proxy variables through `var` (a variable's
+/// value, or `None` when unset): `HTTP_PROXY`/`http_proxy` for `http://`
+/// requests, `HTTPS_PROXY`/`https_proxy` for `https://` ones, with
+/// `ALL_PROXY`/`all_proxy` as the fallback for both, and
+/// `NO_PROXY`/`no_proxy` for bypass rules. Empty values count as unset.
+///
+/// httpoxy mitigation: the uppercase `HTTP_PROXY` is ignored whenever
+/// `REQUEST_METHOD` is set, since a CGI handler maps an inbound `Proxy:`
+/// header onto it. A value without a scheme is taken as `http://`. An
+/// invalid value is an error naming the variable but never its value,
+/// which may carry credentials.
+pub(crate) fn from_env(var: impl Fn(&str) -> Option<String>) -> Result<EnvProxy> {
+    let set = |name: &str| {
+        var(name)
+            .filter(|v| !v.is_empty())
+            .map(|v| (name.to_string(), v))
+    };
+    let first = |names: &[&str]| names.iter().find_map(|name| set(name));
+    let in_cgi_context = var("REQUEST_METHOD").is_some();
+    let all = first(&["ALL_PROXY", "all_proxy"]);
+    let http = if in_cgi_context {
+        first(&["http_proxy"])
+    } else {
+        first(&["HTTP_PROXY", "http_proxy"])
+    };
+    let https = first(&["HTTPS_PROXY", "https_proxy"]);
+    Ok(EnvProxy {
+        http: http.or_else(|| all.clone()).map(env_proxy).transpose()?,
+        https: https.or(all).map(env_proxy).transpose()?,
+        bypass: first(&["NO_PROXY", "no_proxy"]).map(|(_, spec)| NoProxyRules::parse(&spec)),
+    })
+}
+
+fn env_proxy((name, value): (String, String)) -> Result<Proxy> {
+    let url = if value.contains("://") {
+        value
+    } else {
+        format!("http://{value}")
+    };
+    Proxy::http(&url)
+        .map_err(|_| Error::InvalidUrl(format!("`{name}` is not an http:// proxy URL")))
+}
+
 /// `NO_PROXY`-style bypass rules: a request to a matching host skips
 /// the configured [`Proxy`] and connects directly. Each entry matches
 /// either exactly or as a dot-boundary suffix (`example.com` also
@@ -131,6 +211,114 @@ impl NoProxyRules {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    }
+
+    fn host(proxy: &Option<Proxy>) -> Option<&str> {
+        proxy.as_ref().map(|p| p.host.as_str())
+    }
+
+    #[test]
+    fn env_proxies_are_chosen_per_scheme() {
+        let read = from_env(env(&[
+            ("HTTP_PROXY", "http://plain.example:3128"),
+            ("HTTPS_PROXY", "http://tls.example:3128"),
+        ]))
+        .unwrap();
+        assert_eq!(host(&read.http), Some("plain.example"));
+        assert_eq!(host(&read.https), Some("tls.example"));
+        assert!(read.bypass.is_none());
+    }
+
+    #[test]
+    fn an_http_proxy_alone_leaves_https_direct() {
+        let read = from_env(env(&[("http_proxy", "http://plain.example")])).unwrap();
+        assert_eq!(host(&read.http), Some("plain.example"));
+        assert!(read.https.is_none());
+    }
+
+    #[test]
+    fn all_proxy_is_the_fallback_for_both_schemes() {
+        let read = from_env(env(&[
+            ("all_proxy", "http://all.example"),
+            ("https_proxy", "http://tls.example"),
+        ]))
+        .unwrap();
+        assert_eq!(host(&read.http), Some("all.example"));
+        assert_eq!(host(&read.https), Some("tls.example"));
+        let read = from_env(env(&[("ALL_PROXY", "http://all.example")])).unwrap();
+        assert_eq!(host(&read.http), Some("all.example"));
+        assert_eq!(host(&read.https), Some("all.example"));
+    }
+
+    #[test]
+    fn uppercase_http_proxy_is_ignored_in_a_cgi_context() {
+        let read = from_env(env(&[
+            ("REQUEST_METHOD", "GET"),
+            ("HTTP_PROXY", "http://attacker.example"),
+            ("HTTPS_PROXY", "http://tls.example"),
+        ]))
+        .unwrap();
+        assert!(read.http.is_none());
+        assert_eq!(host(&read.https), Some("tls.example"));
+    }
+
+    #[test]
+    fn env_no_proxy_sets_bypass_rules_and_empty_values_are_unset() {
+        let read = from_env(env(&[
+            ("HTTPS_PROXY", ""),
+            ("no_proxy", "internal.example"),
+        ]))
+        .unwrap();
+        assert!(read.https.is_none());
+        assert!(read
+            .bypass
+            .is_some_and(|rules| rules.bypasses("api.internal.example")));
+    }
+
+    #[test]
+    fn an_env_proxy_without_a_scheme_is_http() {
+        let read = from_env(env(&[("HTTPS_PROXY", "tls.example:3128")])).unwrap();
+        let proxy = read.https.unwrap();
+        assert_eq!((proxy.host.as_str(), proxy.port), ("tls.example", 3128));
+    }
+
+    #[test]
+    fn an_invalid_env_proxy_names_the_variable_but_not_its_value() {
+        let secret = "s3cr3t-proxy-password";
+        let err = from_env(env(&[(
+            "HTTPS_PROXY",
+            &format!("http://user:{secret}@proxy.example"),
+        )]))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("HTTPS_PROXY"), "{err}");
+        assert!(!err.contains(secret), "{err}");
+    }
+
+    #[test]
+    fn proxies_route_by_url_scheme() {
+        let read = from_env(env(&[("HTTPS_PROXY", "http://tls.example")])).unwrap();
+        let proxies = Proxies {
+            http: read.http,
+            https: read.https,
+        };
+        let plain = Url::parse("http://origin.example/").unwrap();
+        let tls = Url::parse("https://origin.example/").unwrap();
+        assert!(proxies.for_url(&plain).is_none());
+        assert_eq!(
+            proxies.for_url(&tls).map(|p| p.host.as_str()),
+            Some("tls.example")
+        );
+        let both = Proxies::all(Proxy::http("http://one.example").unwrap());
+        assert!(both.for_url(&plain).is_some() && both.for_url(&tls).is_some());
+    }
 
     #[test]
     fn http_proxy_parses_host_and_port() {

@@ -1094,11 +1094,21 @@ fn full(bytes: Bytes) -> LlmBody {
 /// A client for the calls this crate makes, bounded by `timeout`.
 ///
 /// No cookie store: a provider's cookies are no business of the next
-/// caller's request.
+/// caller's request. The environment's proxy (`HTTPS_PROXY` and kin, as
+/// reqwest read them) applies; an invalid proxy variable is logged and
+/// ignored rather than failing the gateway.
 pub(crate) fn client(timeout: Duration) -> rusty_request::Client {
-    rusty_request::Client::builder()
-        .timeout(timeout)
-        .no_cookie_store()
+    let base = || {
+        rusty_request::Client::builder()
+            .timeout(timeout)
+            .no_cookie_store()
+    };
+    base()
+        .proxy_from_env()
+        .unwrap_or_else(|err| {
+            rusty_log::warn!(%err, "ignoring the environment's proxy settings");
+            base()
+        })
         .build()
 }
 
@@ -1156,6 +1166,11 @@ impl Upstream {
 
     /// The next chunk of the body, `None` at its end.
     async fn chunk(&mut self) -> Result<Option<Bytes>, ResponseReadError> {
+        // `timeout_at` polls the read first, so a passed deadline alone
+        // would not stop a provider whose bytes keep arriving.
+        if tokio::time::Instant::now() >= self.deadline {
+            return Err(ResponseReadError::TimedOut);
+        }
         match tokio::time::timeout_at(self.deadline, self.response.chunk()).await {
             Ok(chunk) => Ok(chunk?.map(Bytes::from)),
             Err(_) => Err(ResponseReadError::TimedOut),
@@ -1406,6 +1421,46 @@ mod tests {
             "got: {read:?}"
         );
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn a_passed_deadline_ends_the_read_even_with_bytes_waiting() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc")
+                .await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let response = client(Duration::from_secs(5))
+            .get(&format!("http://{addr}/"))
+            .expect("a valid URL")
+            .send_streaming()
+            .await
+            .expect("the head arrives");
+        // Let the body land, so the read itself would be ready at once.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let response = Upstream {
+            response,
+            deadline: tokio::time::Instant::now(),
+        };
+
+        let read = read_capped(response, MAX_RESPONSE_BYTES).await;
+        assert!(
+            matches!(read, Err(ResponseReadError::TimedOut)),
+            "got: {read:?}"
+        );
     }
 
     #[tokio::test]

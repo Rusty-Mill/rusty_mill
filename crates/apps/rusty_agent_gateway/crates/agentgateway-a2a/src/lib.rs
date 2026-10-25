@@ -92,10 +92,7 @@ impl A2aGateway {
             });
         };
 
-        let client = rusty_request::Client::builder()
-            .timeout(CARD_TIMEOUT)
-            .no_cookie_store()
-            .build();
+        let client = client(CARD_TIMEOUT);
 
         let mut cards: Vec<(String, AgentCard)> = Vec::new();
         for agent in agents {
@@ -238,6 +235,24 @@ pub fn task_id(body: &[u8]) -> Option<String> {
         .or_else(|| params.get("id"))
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+/// A client bounded by `timeout`, with no cookie store. The environment's
+/// proxy (`HTTPS_PROXY` and kin, as reqwest read them) applies; an invalid
+/// proxy variable is logged and ignored rather than failing the gateway.
+fn client(timeout: Duration) -> rusty_request::Client {
+    let base = || {
+        rusty_request::Client::builder()
+            .timeout(timeout)
+            .no_cookie_store()
+    };
+    base()
+        .proxy_from_env()
+        .unwrap_or_else(|err| {
+            rusty_log::warn!(%err, "ignoring the environment's proxy settings");
+            base()
+        })
+        .build()
 }
 
 #[cfg(test)]
