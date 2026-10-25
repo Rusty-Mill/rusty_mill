@@ -16,7 +16,7 @@
 
 use crate::error::{Error, Result};
 use crate::jsonrpc::Message;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use rusty_tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const CONTENT_LENGTH: &str = "content-length";
 /// Guards against a malformed/hostile `Content-Length` exhausting memory.
@@ -33,7 +33,7 @@ const MAX_HEADER_BYTES: usize = 8 * 1024;
 /// mid-frame or the framing is malformed.
 pub async fn read_message<R>(reader: &mut R) -> Result<Option<Message>>
 where
-    R: AsyncBufRead + Unpin,
+    R: AsyncBufRead + Unpin + Send,
 {
     let Some(content_length) = read_headers(reader).await? else {
         return Ok(None);
@@ -57,7 +57,7 @@ where
 /// `Ok(None)` signals a clean EOF before any header bytes were seen.
 async fn read_headers<R>(reader: &mut R) -> Result<Option<usize>>
 where
-    R: AsyncBufRead + Unpin,
+    R: AsyncBufRead + Unpin + Send,
 {
     let mut content_length: Option<usize> = None;
     let mut line = String::new();
@@ -128,7 +128,7 @@ where
 /// Write a single framed [`Message`] to `writer` and flush it.
 pub async fn write_message<W>(writer: &mut W, message: &Message) -> Result<()>
 where
-    W: AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin + Send,
 {
     let mut buf = Vec::new();
     encode_message(&mut buf, message)?;
@@ -152,10 +152,10 @@ pub fn encode_message(buf: &mut Vec<u8>, message: &Message) -> Result<()> {
 
 /// Convenience: wrap a reader so [`read_message`] can be called repeatedly.
 ///
-/// Equivalent to `tokio::io::BufReader::new(reader)`, re-exported so callers do
+/// Equivalent to `rusty_tokio::io::BufReader::new(reader)`, re-exported so callers do
 /// not need to remember that [`read_message`] requires a buffered source.
-pub fn buffered<R: tokio::io::AsyncRead + Unpin>(reader: R) -> tokio::io::BufReader<R> {
-    tokio::io::BufReader::new(reader)
+pub fn buffered<R: rusty_tokio::io::AsyncRead + Unpin>(reader: R) -> rusty_tokio::io::BufReader<R> {
+    rusty_tokio::io::BufReader::new(reader)
 }
 
 #[cfg(test)]
@@ -173,13 +173,13 @@ mod tests {
         format!("Content-Length: {}\r\n\r\n{body}", body.len()).into_bytes()
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn round_trips_a_large_multibyte_message() {
         let note = Message::Notification(Notification {
             method: "window/logMessage".to_owned(),
             params: Some(serde_json::json!({"message": "héllo 😀 ".repeat(10_000)})),
         });
-        let (mut client, server) = tokio::io::duplex(1 << 20);
+        let (mut client, server) = rusty_tokio::io::duplex(1 << 20);
         write_message(&mut client, &note).await.expect("write");
         drop(client);
         let mut reader = buffered(server);
@@ -192,7 +192,7 @@ mod tests {
         assert!(read_message(&mut reader).await.expect("eof").is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn extra_headers_and_header_case_are_tolerated() {
         let body = r#"{"jsonrpc":"2.0","method":"m"}"#;
         let bytes = format!(
@@ -204,14 +204,14 @@ mod tests {
         assert!(matches!(message, Message::Notification(n) if n.method == "m"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn lf_only_header_termination_is_accepted() {
         let body = r#"{"jsonrpc":"2.0","method":"m"}"#;
         let bytes = format!("Content-Length: {}\n\n{body}", body.len());
         assert!(parse(bytes.as_bytes()).await.expect("ok").is_some());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn missing_invalid_and_oversized_content_length_are_errors() {
         assert!(parse(b"\r\n").await.is_err()); // no Content-Length at all
         assert!(parse(b"Content-Length: nope\r\n\r\n").await.is_err());
@@ -220,7 +220,7 @@ mod tests {
         assert!(parse(huge.as_bytes()).await.is_err());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn malformed_header_line_is_an_error() {
         assert!(parse(b"not a header\r\n\r\n").await.is_err());
     }
@@ -230,11 +230,11 @@ mod tests {
     /// header-line buffer without bound.
     struct EndlessLine;
 
-    impl tokio::io::AsyncRead for EndlessLine {
+    impl rusty_tokio::io::AsyncRead for EndlessLine {
         fn poll_read(
             self: std::pin::Pin<&mut Self>,
             _cx: &mut std::task::Context<'_>,
-            buf: &mut tokio::io::ReadBuf<'_>,
+            buf: &mut rusty_tokio::io::ReadBuf<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
             let fill = vec![b'a'; buf.remaining()];
             buf.put_slice(&fill);
@@ -242,12 +242,14 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn oversized_unterminated_header_line_is_rejected_not_unbounded() {
         let mut reader = buffered(EndlessLine);
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(5), read_message(&mut reader))
-                .await;
+        let result = rusty_tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_message(&mut reader),
+        )
+        .await;
         let message =
             result.expect("read_message must not hang reading an unterminated header line");
         assert!(
@@ -256,7 +258,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn eof_semantics_distinguish_boundary_from_mid_frame() {
         // Clean EOF before any bytes: Ok(None).
         assert!(parse(b"").await.expect("clean").is_none());
@@ -268,7 +270,7 @@ mod tests {
         assert!(parse(&bytes).await.is_err());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn request_ids_survive_the_wire() {
         let body = r#"{"jsonrpc":"2.0","id":"abc","method":"m"}"#;
         let message = parse(&frame(body)).await.expect("ok").expect("message");

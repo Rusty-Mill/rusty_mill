@@ -53,7 +53,7 @@ use serde_json::Value;
 /// [`crate::Server::serve`]) so handlers can push diagnostics and messages back
 /// to the editor. The backend is shared across concurrent requests behind an
 /// `Arc`, so all methods take `&self`; use interior mutability
-/// (`tokio::sync::RwLock`, `Mutex`, atomics, …) for any state you mutate.
+/// (`rusty_tokio::sync::RwLock`, `Mutex`, atomics, …) for any state you mutate.
 pub trait LanguageServer: Send + Sync + 'static {
     /// Handle the `initialize` request.
     ///

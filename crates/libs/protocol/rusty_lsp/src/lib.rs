@@ -8,7 +8,7 @@
 //! It is **not** a server for any particular language; it is the reusable engine
 //! you build one on top of. Compared to writing JSON-RPC by hand you get typed
 //! handlers and lifecycle correctness; compared to a `tower`-based stack you get
-//! a dependency footprint of just `tokio`, `serde`, and `serde_json`.
+//! a dependency footprint of just `rusty_tokio`, `serde`, and `serde_json`.
 //!
 //! ## Quick start
 //!
@@ -40,7 +40,7 @@
 //!     }
 //! }
 //!
-//! #[tokio::main]
+//! #[rusty_tokio::main]
 //! async fn main() -> Result<()> {
 //!     Server::stdio().serve(|client| Backend { client }).await
 //! }
@@ -66,10 +66,10 @@
 //!
 //! ## Cargo features
 //!
-//! - `runtime` (default) — the async server/client modules and their `tokio`
+//! - `runtime` (default) — the async server/client modules and their `rusty_tokio`
 //!   dependency. Disable default features for the protocol data types alone
 //!   (`error`, `jsonrpc`, `lsp`, `text`).
-//! - `tcp` — [`Server::from_tcp`], serving an accepted `tokio` TCP stream.
+//! - `tcp` — [`Server::from_tcp`], serving an accepted `rusty_tokio` TCP stream.
 //! - `tracing` — wire-level instrumentation via the `tracing` crate.
 //!
 //! [lsp]: https://microsoft.github.io/language-server-protocol/

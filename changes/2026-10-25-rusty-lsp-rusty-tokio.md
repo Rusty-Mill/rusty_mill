@@ -1,0 +1,8 @@
+---
+category: Changed
+changelog: rusty_lsp's runtime feature runs on rusty_tokio, and its public runtime signatures name rusty_tokio types (breaking, #911).
+---
+## 2026-10-25 - rusty_lsp on rusty_tokio (#911)
+
+- **Changed (breaking):** `rusty_lsp`'s `runtime` and `tcp` features use `rusty_tokio` instead of crates.io `tokio`. `Server::stdio`, `Server::from_tcp`, `serve_tcp`, `transport::buffered` and the `testing` harness take or return `rusty_tokio` types and must run on a `rusty_tokio` runtime. Readers and writers passed to `Server::new` and `transport::{read_message, write_message}` must be `Send`. The `rusty-tokio` feature remains as an alias of `runtime`. The owner approved the break; no workspace crate uses the runtime features.
+- **Added:** `rusty_tokio::sync::watch::Receiver::wait_for`, `AsyncBufRead` for `rusty_tokio::io::Take`, and `Debug` for `rusty_tokio::sync::Notify`, matching tokio.

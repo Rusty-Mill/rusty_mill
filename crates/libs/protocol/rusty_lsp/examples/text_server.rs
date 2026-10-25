@@ -308,7 +308,7 @@ fn completion_items(text: &str) -> Vec<CompletionItem> {
         .collect()
 }
 
-#[tokio::main]
+#[rusty_tokio::main]
 async fn main() -> Result<()> {
     Server::stdio().serve(TextServer::new).await
 }

@@ -7,7 +7,7 @@ description = "A small, reusable async Language Server Protocol framework. Own t
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/baileyrd/rusty_lsp"
-keywords = ["lsp", "language-server", "async", "tokio", "jsonrpc"]
+keywords = ["lsp", "language-server", "async", "rusty-tokio", "jsonrpc"]
 categories = ["development-tools", "asynchronous"]
 
 [package.metadata.rusty_mill]
@@ -45,31 +45,29 @@ required-features = ["runtime"]
 [features]
 default = ["runtime"]
 # The async server/client runtime (`server`, `client`, `service`,
-# `transport`, `documents`, `cancel`, `testing`) and its tokio dependency.
+# `transport`, `documents`, `cancel`, `testing`) on `rusty_tokio`.
 # Without it the crate is just the protocol data types (`error`, `jsonrpc`,
 # `lsp`, `text`), so a consumer that only parses JSON-RPC links no runtime.
-runtime = ["dep:tokio"]
-# `Server::from_tcp`: serve an accepted tokio TCP connection.
-tcp = ["runtime", "tokio/net"]
+runtime = ["dep:rusty_tokio"]
+# `Server::from_tcp`/`serve_tcp`: serve accepted `rusty_tokio` TCP connections.
+tcp = ["runtime"]
 # Wire-level instrumentation via the `tracing` crate.
 tracing = ["runtime", "dep:rusty_log"]
-# Sovereign async runtime adapter support via `rusty_tokio`.
-rusty-tokio = ["runtime", "dep:rusty_tokio"]
+# Kept so existing feature lists still build; `runtime` is `rusty_tokio` now.
+rusty-tokio = ["runtime"]
 # Sovereign JSON support via `rusty_json`.
 rusty-json = ["dep:rusty_json"]
 
 [dependencies]
 rusty_percent = { workspace = true }
-tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time"] }
 serde = { workspace = true }
 serde_json = "1"
 rusty_log = { workspace = true, optional = true }
-# Sovereign async runtime support over `rusty_tokio`; already merged into
-# this workspace at crates/rusty_tokio, so a plain path dependency.
+# The async runtime behind the `runtime` feature.
 rusty_tokio = { workspace = true, optional = true }
 # Sovereign JSON support over `rusty_json`; already merged into this
 # workspace at crates/rusty_json, so a plain path dependency.
 rusty_json = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync", "time"] }
+rusty_tokio = { workspace = true }

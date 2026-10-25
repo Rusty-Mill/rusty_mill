@@ -2149,3 +2149,45 @@ fn rwlock_debug_shows_the_value_or_locked_as_tokio_does() {
         assert_eq!(format!("{lock:?}"), "RwLock { data: <locked> }");
     });
 }
+
+#[test]
+fn watch_wait_for_returns_immediately_when_the_current_value_matches() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (_tx, mut rx) = rusty_tokio::sync::watch::channel(5);
+        assert_eq!(*rx.wait_for(|&v| v >= 5).await.unwrap(), 5);
+    });
+}
+
+#[test]
+fn watch_wait_for_skips_values_until_one_matches() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(0);
+        let waiter = rusty_tokio::spawn(async move { *rx.wait_for(|&v| v >= 3).await.unwrap() });
+        for v in 1..=3 {
+            rusty_tokio::time::sleep(Duration::from_millis(10)).await;
+            tx.send(v).unwrap();
+        }
+        assert_eq!(waiter.await.unwrap(), 3);
+    });
+}
+
+#[test]
+fn watch_wait_for_fails_once_the_sender_drops_without_a_match() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(0);
+        tx.send(1).unwrap();
+        drop(tx);
+        assert!(rx.wait_for(|&v| v >= 2).await.is_err());
+    });
+}
+
+#[test]
+fn notify_is_debug() {
+    assert_eq!(
+        format!("{:?}", rusty_tokio::sync::Notify::new()),
+        "Notify { .. }"
+    );
+}

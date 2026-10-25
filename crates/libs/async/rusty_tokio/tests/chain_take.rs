@@ -104,3 +104,32 @@ fn take_reads_gradually_across_multiple_small_calls() {
         assert_eq!(n4, 0, "limit reached -- should report EOF");
     });
 }
+
+#[test]
+fn take_over_a_buffered_reader_stops_read_line_at_the_limit() {
+    use rusty_tokio::io::AsyncBufReadExt;
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut inner = std::io::Cursor::new(b"abcdef\nrest".to_vec());
+        let mut line = String::new();
+        let n = (&mut inner).take(4).read_line(&mut line).await.unwrap();
+        assert_eq!((n, line.as_str()), (4, "abcd"));
+
+        // Consuming through `Take` advances the inner reader by exactly that much.
+        line.clear();
+        let n = (&mut inner).take(64).read_line(&mut line).await.unwrap();
+        assert_eq!((n, line.as_str()), (3, "ef\n"));
+    });
+}
+
+#[test]
+fn take_with_no_limit_left_is_eof_for_buffered_reads() {
+    use rusty_tokio::io::AsyncBufReadExt;
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut inner = std::io::Cursor::new(b"abc\n".to_vec());
+        let mut line = String::new();
+        assert_eq!((&mut inner).take(0).read_line(&mut line).await.unwrap(), 0);
+        assert_eq!(inner.position(), 0);
+    });
+}

@@ -42,6 +42,9 @@ use crate::lsp::{
 };
 use crate::service::LanguageServer;
 use crate::transport;
+use rusty_tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use rusty_tokio::sync::{Semaphore, mpsc, watch};
+use rusty_tokio::task::AbortHandle;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -51,9 +54,6 @@ use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Semaphore, mpsc, watch};
-use tokio::task::AbortHandle;
 
 /// Bookkeeping for one running request handler.
 struct InFlightEntry {
@@ -93,23 +93,23 @@ pub struct Server<R, W> {
 /// aborting them (see [`Server::with_teardown_grace`]).
 const DEFAULT_TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
-impl Server<tokio::io::Stdin, tokio::io::Stdout> {
+impl Server<rusty_tokio::io::Stdin, rusty_tokio::io::Stdout> {
     /// Build a server over the process's standard input and output.
     ///
     /// This is the transport editors use when they launch a language server as
     /// a child process.
     pub fn stdio() -> Self {
-        Server::new(tokio::io::stdin(), tokio::io::stdout())
+        Server::new(rusty_tokio::io::stdin(), rusty_tokio::io::stdout())
     }
 }
 
 #[cfg(feature = "tcp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
-impl Server<tokio::net::tcp::OwnedReadHalf, tokio::net::tcp::OwnedWriteHalf> {
+impl Server<rusty_tokio::net::tcp::OwnedReadHalf, rusty_tokio::net::tcp::OwnedWriteHalf> {
     /// Build a server over an accepted TCP connection (requires the `tcp`
     /// feature), for clients that connect over a socket instead of spawning
     /// the server as a child process.
-    pub fn from_tcp(stream: tokio::net::TcpStream) -> Self {
+    pub fn from_tcp(stream: rusty_tokio::net::TcpStream) -> Self {
         let (reader, writer) = stream.into_split();
         Server::new(reader, writer)
     }
@@ -127,7 +127,7 @@ impl Server<tokio::net::tcp::OwnedReadHalf, tokio::net::tcp::OwnedWriteHalf> {
 /// #         -> Result<rusty_lsp::lsp::InitializeResult> { unimplemented!() }
 /// # }
 /// # async fn run() -> Result<()> {
-/// let listener = tokio::net::TcpListener::bind("127.0.0.1:9257").await?;
+/// let listener = rusty_tokio::net::TcpListener::bind("127.0.0.1:9257").await?;
 /// rusty_lsp::server::serve_tcp(listener, |client| Backend { client }).await
 /// # }
 /// ```
@@ -136,7 +136,7 @@ impl Server<tokio::net::tcp::OwnedReadHalf, tokio::net::tcp::OwnedWriteHalf> {
 /// logged nowhere and simply ends (each connection is independent).
 #[cfg(feature = "tcp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
-pub async fn serve_tcp<B, F>(listener: tokio::net::TcpListener, factory: F) -> Result<()>
+pub async fn serve_tcp<B, F>(listener: rusty_tokio::net::TcpListener, factory: F) -> Result<()>
 where
     B: LanguageServer,
     F: Fn(Client) -> B + Send + Sync + 'static,
@@ -145,7 +145,7 @@ where
     loop {
         let (stream, _peer) = listener.accept().await?;
         let factory = Arc::clone(&factory);
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             let _ = Server::from_tcp(stream)
                 .serve(move |client| factory(client))
                 .await;
@@ -155,7 +155,7 @@ where
 
 impl<R, W> Server<R, W>
 where
-    R: AsyncRead + Unpin,
+    R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send + 'static,
 {
     /// Build a server over an arbitrary reader and writer.
@@ -174,7 +174,7 @@ where
     /// Stop serving when `signal` resolves, going through the normal
     /// teardown (in-flight aborts, notification grace) and returning
     /// `Ok(())` — an external termination path the wire cannot provide.
-    /// Typical signals: `tokio::signal::ctrl_c()`, or a watchdog future
+    /// Typical signals: `rusty_tokio::signal::ctrl_c()`, or a watchdog future
     /// that resolves when the parent editor process
     /// ([`InitializeParams::process_id`](crate::lsp::InitializeParams::process_id))
     /// has exited.
@@ -283,7 +283,7 @@ where
         // on a write error, which it signals so the read loop tears down
         // instead of serving a half-closed connection until reader EOF.
         let (writer_dead_tx, writer_dead) = watch::channel(false);
-        let writer_task = tokio::spawn(async move {
+        let writer_task = rusty_tokio::spawn(async move {
             let mut batch = Vec::new();
             loop {
                 let Some(first) = out_rx.recv().await else {
@@ -380,7 +380,7 @@ async fn run_loop<R, B>(
     backend: Arc<B>,
 ) -> Result<()>
 where
-    R: AsyncRead + Unpin,
+    R: AsyncRead + Unpin + Send,
     B: LanguageServer,
 {
     let mut reader = transport::buffered(reader);
@@ -399,7 +399,7 @@ where
     let (notes_done_tx, notes_done) = watch::channel(0u64);
     let worker_backend = Arc::clone(&backend);
     let worker_client = client.clone();
-    let mut notification_worker = tokio::spawn(async move {
+    let mut notification_worker = rusty_tokio::spawn(async move {
         while let Some(note) = note_rx.recv().await {
             // Catch panics per notification: an unwinding handler must not
             // kill the worker, which would wedge every request waiting on
@@ -433,7 +433,7 @@ where
     let mut notes_enqueued = 0u64;
 
     let loop_result = loop {
-        let read = tokio::select! {
+        let read = rusty_tokio::select! {
             result = transport::read_message(&mut reader) => result,
             // The writer failed: the client stopped reading (or the pipe
             // broke). Responses can no longer be delivered, so serving on
@@ -616,7 +616,7 @@ where
         entry.token.cancel();
         entry.abort.abort();
     }
-    if tokio::time::timeout(teardown_grace, &mut notification_worker)
+    if rusty_tokio::time::timeout(teardown_grace, &mut notification_worker)
         .await
         .is_err()
     {
@@ -700,11 +700,11 @@ fn spawn_request<B: LanguageServer>(
     // common case for a trivial or already-cached result) can run to
     // completion on another worker thread and reach its own "remove myself
     // to claim the response" line before this thread finishes registering
-    // it — `tokio::spawn` schedules eagerly on a multi-threaded runtime, so
+    // it — `rusty_tokio::spawn` schedules eagerly on a multi-threaded runtime, so
     // this is not theoretical, it reproduces under real concurrent load.
     // That removal also locks `in_flight`, so as long as *this* thread is
     // still holding the lock when the task reaches it, the task's own
-    // thread simply blocks — for the few nanoseconds `tokio::spawn` plus a
+    // thread simply blocks — for the few nanoseconds `rusty_tokio::spawn` plus a
     // `HashMap` insert take — until this scope ends, at which point the
     // entry is already there and the removal succeeds correctly. A tiny,
     // bounded `std::sync::Mutex` hold (no `.await` inside it) is the
@@ -721,7 +721,7 @@ fn spawn_request<B: LanguageServer>(
         return;
     }
 
-    let join = tokio::spawn(cancel::scope(task_token, async move {
+    let join = rusty_tokio::spawn(cancel::scope(task_token, async move {
         // Wait for every notification received before this request to be
         // applied, so the handler observes document state as if dispatch
         // were fully sequential.

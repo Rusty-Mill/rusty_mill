@@ -170,24 +170,55 @@ impl<T> Receiver<T> {
     /// if it already has by the time this is first polled. Fails once
     /// the sender has dropped and no further changes are possible.
     pub async fn changed(&mut self) -> Result<(), RecvError> {
-        let mut registered = false;
-        std::future::poll_fn(|cx| {
-            let mut guard = self.shared.inner.lock().unwrap();
-            if guard.version != self.seen_version {
-                self.seen_version = guard.version;
-                return Poll::Ready(Ok(()));
-            }
-            if !guard.sender_alive {
-                return Poll::Ready(Err(RecvError(())));
-            }
-            if !registered {
-                guard.wakers.push(cx.waker().clone());
-                registered = true;
-            }
-            Poll::Pending
-        })
-        .await
+        changed(&self.shared, &mut self.seen_version).await
     }
+
+    /// Waits until `f` accepts the current value, marking it seen, and
+    /// returns it. Checks the current value first, so it resolves
+    /// immediately if that already matches. Fails once the sender has
+    /// dropped without a matching value.
+    pub async fn wait_for(
+        &mut self,
+        mut f: impl FnMut(&T) -> bool,
+    ) -> Result<Ref<'_, T>, RecvError> {
+        // Split borrows: the returned guard borrows `shared` while the
+        // loop keeps updating `seen_version`.
+        let (shared, seen) = (&self.shared, &mut self.seen_version);
+        loop {
+            // Scoped, not `drop`ped, so the guard is not held across the
+            // await below and the future stays `Send`.
+            {
+                let guard = shared.inner.lock().unwrap();
+                if f(&guard.value) {
+                    *seen = guard.version;
+                    return Ok(Ref { guard });
+                }
+            }
+            changed(shared, seen).await?;
+        }
+    }
+}
+
+/// [`Receiver::changed`] over split borrows, so [`Receiver::wait_for`] can
+/// hold a borrow of `shared` across it.
+async fn changed<T>(shared: &Shared<T>, seen_version: &mut u64) -> Result<(), RecvError> {
+    let mut registered = false;
+    std::future::poll_fn(|cx| {
+        let mut guard = shared.inner.lock().unwrap();
+        if guard.version != *seen_version {
+            *seen_version = guard.version;
+            return Poll::Ready(Ok(()));
+        }
+        if !guard.sender_alive {
+            return Poll::Ready(Err(RecvError(())));
+        }
+        if !registered {
+            guard.wakers.push(cx.waker().clone());
+            registered = true;
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 impl<T> Clone for Receiver<T> {

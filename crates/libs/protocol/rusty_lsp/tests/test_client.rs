@@ -51,7 +51,7 @@ impl LanguageServer for Backend {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn test_client_drives_the_full_lifecycle() {
     let mut client = TestClient::spawn(|client| Backend { client });
 
@@ -83,7 +83,7 @@ async fn test_client_drives_the_full_lifecycle() {
     client.shutdown_and_exit().await.expect("clean teardown");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn test_client_answers_server_to_client_requests() {
     let mut client = TestClient::spawn(|client| Backend { client });
     client
@@ -110,7 +110,7 @@ async fn test_client_answers_server_to_client_requests() {
     client.shutdown_and_exit().await.expect("clean teardown");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn test_client_error_responses_become_errors() {
     let mut client = TestClient::spawn(|client| Backend { client });
     client
@@ -132,7 +132,7 @@ async fn test_client_error_responses_become_errors() {
     client.shutdown_and_exit().await.expect("clean teardown");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn test_client_receives_fail_instead_of_hanging() {
     let mut client = TestClient::spawn(|client| Backend { client })
         .with_timeout(std::time::Duration::from_millis(200));
@@ -151,7 +151,7 @@ async fn test_client_receives_fail_instead_of_hanging() {
     assert!(text.contains("no message"), "was: {text}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn spawn_configured_applies_server_options() {
     // A queue limit of 0 rejects Client-originated sends; the backend's
     // `initialized` log therefore never arrives, but responses still do.
