@@ -809,8 +809,9 @@ async fn send_with_redirects(
             timeout: None,
             max_body_len,
         };
-        let response =
-            send_one_hop(pool.as_deref(), &request, proxy_for_hop, &trust_policy).await?;
+        let response = send_one_hop(pool.as_deref(), &request, proxy_for_hop, &trust_policy)
+            .await
+            .map_err(|e| e.after_hop(hop))?;
 
         // Store cookies from every hop's response, not just the final
         // one -- an intermediate redirect can set cookies too, and they
@@ -971,7 +972,9 @@ async fn send_with_redirects_streaming(
             max_body_len: body::DEFAULT_MAX_BODY_LEN,
         };
         let (answer, reuse) =
-            send_one_hop_streaming(pool.as_ref(), &request, proxy_for_hop, &trust_policy).await?;
+            send_one_hop_streaming(pool.as_ref(), &request, proxy_for_hop, &trust_policy)
+                .await
+                .map_err(|e| e.after_hop(hop))?;
         let StreamingHop {
             status,
             headers: resp_headers,

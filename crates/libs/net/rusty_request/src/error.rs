@@ -85,16 +85,15 @@ impl std::error::Error for Error {
 
 impl Error {
     /// Whether the request failed before it was sent: resolving the host,
-    /// dialing it, or a proxy refusing the `CONNECT` tunnel. Such a
-    /// request never reached the server, so sending it again cannot
-    /// duplicate its effect. A TLS handshake failure is not counted: the
-    /// handshake runs with the first write, alongside the request itself.
+    /// dialing it, or the I/O of a proxy's `CONNECT` tunnel, on the first
+    /// hop. Such a request never reached any server, so sending it again
+    /// cannot duplicate its effect. Never true once a redirect was
+    /// followed, since an earlier hop delivered the request. A TLS
+    /// handshake failure is not counted, since the handshake runs with the
+    /// first write, alongside the request itself; nor is a proxy refusing
+    /// the tunnel, which is [`Error::ProxyConnectFailed`].
     pub fn is_connect(&self) -> bool {
-        match self {
-            Error::ProxyConnectFailed(_) => true,
-            Error::Io(e) => e.get_ref().is_some_and(|inner| inner.is::<Connect>()),
-            _ => false,
-        }
+        matches!(self, Error::Io(e) if marked(e))
     }
 
     /// Marks an I/O error from setting up a connection, for
@@ -105,6 +104,28 @@ impl Error {
             other => other,
         }
     }
+
+    /// This error as hop `hop` of a redirect chain reports it: past the
+    /// first, the request has already been delivered, so a connect failure
+    /// is no longer marked as one.
+    pub(crate) fn after_hop(self, hop: usize) -> Self {
+        match self {
+            Error::Io(e) if hop > 0 && marked(&e) => {
+                let kind = e.kind();
+                match e.into_inner().map(|inner| inner.downcast::<Connect>()) {
+                    Some(Ok(connect)) => Error::Io(connect.0),
+                    Some(Err(other)) => Error::Io(std::io::Error::new(kind, other)),
+                    None => Error::Io(kind.into()),
+                }
+            }
+            other => other,
+        }
+    }
+}
+
+/// Whether `e` carries the [`Connect`] mark.
+fn marked(e: &std::io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<Connect>())
 }
 
 /// The payload of an I/O error raised while connecting -- see
