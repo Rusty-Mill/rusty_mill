@@ -32,7 +32,8 @@ struct Load {
 struct Tally {
     accepted: u64,
     refused: u64,
-    same_line: u64,
+    /// Accepted edits whose base was not the head: merged by id, unseen work kept.
+    merged: u64,
     think_ms: u64,
     wasted_ms: u64,
 }
@@ -41,7 +42,7 @@ impl Tally {
     fn add(&mut self, o: Tally) {
         self.accepted += o.accepted;
         self.refused += o.refused;
-        self.same_line += o.same_line;
+        self.merged += o.merged;
         self.think_ms += o.think_ms;
         self.wasted_ms += o.wasted_ms;
     }
@@ -210,17 +211,16 @@ fn run<S: Store>(store: S, l: &Load) -> Tally {
         let d = &drafts[i];
         let (base, think) = (d.base, d.think);
         t.think_ms += think;
-        let anchors: Vec<Option<LineId>> = d.ops.iter().map(LineOp::anchor).collect();
-        let since = fx.st().since(base).unwrap().1;
+        let stale = !fx.st().since(base).unwrap().1.is_empty();
         match edit(&mut fx, &editor(i), Some(base), d.ops.clone()) {
             Response::Stored(_) => {
                 t.accepted += 1;
+                t.merged += u64::from(stale);
                 done[i] += 1;
             }
             Response::Rejected(r) if r.code == Code::StaleBase => {
                 t.refused += 1;
                 t.wasted_ms += think;
-                t.same_line += u64::from(anchors.iter().any(|a| since.contains(a)));
             }
             other => panic!("{} edit on {base}: {other:?}", editor(i)),
         }
@@ -261,7 +261,7 @@ fn disjoint_owners_never_clash() {
 }
 
 #[test]
-fn shared_sections_clash_and_a_clash_is_never_lost() {
+fn a_shared_section_clashes_and_a_clash_is_never_lost() {
     let l = Load {
         editors: 4,
         sections: 1,
@@ -272,7 +272,10 @@ fn shared_sections_clash_and_a_clash_is_never_lost() {
     let t = run(MemStore::new(), &l);
     assert_eq!(t.accepted, 20, "every editor finishes despite refusals");
     assert!(t.refused > 0, "one section, four editors: {t:?}");
-    assert!(t.same_line <= t.refused);
+    assert!(
+        t.merged > 0,
+        "most concurrent edits touch other lines: {t:?}"
+    );
     assert!(t.wasted_ms > 0 && t.wasted_ms < t.think_ms);
 }
 
@@ -295,7 +298,7 @@ fn the_durable_store_gives_the_same_run() {
 #[test]
 #[ignore = "the report: run with --release --ignored --nocapture"]
 fn report() {
-    println!("| N | sections | overlap | accepted | refused/edit | wasted work | same-line/edit |");
+    println!("| N | sections | overlap | accepted | refused/edit | wasted work | merged/edit |");
     println!("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
     for n in [2, 4, 8, 16, 32] {
         let shapes = if n == 4 { vec![4] } else { vec![4, n] };
@@ -308,7 +311,7 @@ fn report() {
                     t.accepted,
                     ratio(t.refused, t.accepted),
                     100.0 * ratio(t.wasted_ms, t.think_ms),
-                    ratio(t.same_line, t.accepted),
+                    ratio(t.merged, t.accepted),
                 );
             }
         }

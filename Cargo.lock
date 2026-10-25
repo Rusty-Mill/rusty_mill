@@ -429,9 +429,9 @@ dependencies = [
  "http-body-util",
  "rusty_agui",
  "rusty_log",
+ "rusty_tokio",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -523,7 +523,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
- "tonic",
 ]
 
 [[package]]
@@ -10762,6 +10761,7 @@ dependencies = [
  "rk-feed",
  "rk-observe",
  "rusty-mcp-client",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -11456,9 +11456,9 @@ dependencies = [
  "async-trait",
  "bigdecimal",
  "chrono",
- "futures-core",
- "futures-util",
  "heck 0.5.0",
+ "rusty_stream",
+ "rusty_tokio",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
@@ -11480,10 +11480,9 @@ dependencies = [
 name = "rusty-db-mysql"
 version = "0.1.0"
 dependencies = [
- "async-stream",
  "async-trait",
- "futures-util",
  "rusty-db-core",
+ "rusty_stream",
  "sqlx",
 ]
 
@@ -11491,10 +11490,9 @@ dependencies = [
 name = "rusty-db-postgres"
 version = "0.1.0"
 dependencies = [
- "async-stream",
  "async-trait",
- "futures-util",
  "rusty-db-core",
+ "rusty_stream",
  "sqlx",
 ]
 
@@ -11502,10 +11500,9 @@ dependencies = [
 name = "rusty-db-sqlite"
 version = "0.1.0"
 dependencies = [
- "async-stream",
  "async-trait",
- "futures-util",
  "rusty-db-core",
+ "rusty_stream",
  "sqlx",
 ]
 
@@ -11582,6 +11579,7 @@ version = "0.11.0"
 dependencies = [
  "axum",
  "http",
+ "http-body",
  "jsonwebtoken 11.0.0",
  "rand 0.8.8",
  "reqwest 0.13.4",
@@ -11590,7 +11588,6 @@ dependencies = [
  "rusty_http",
  "rusty_json",
  "rusty_log",
- "rusty_mcp_axum",
  "rusty_mcp_server",
  "rusty_oauth",
  "rusty_percent",
@@ -12532,10 +12529,10 @@ dependencies = [
  "rusty_rand",
  "rusty_request",
  "rusty_serve",
+ "rusty_tokio",
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "tokio",
  "uuid",
 ]
 
@@ -12600,6 +12597,18 @@ dependencies = [
 name = "rusty_mux_core"
 version = "0.1.0"
 dependencies = [
+ "rusty_uuid",
+]
+
+[[package]]
+name = "rusty_mux_ctl"
+version = "0.1.0"
+dependencies = [
+ "rusty_json",
+ "rusty_mux_core",
+ "rusty_mux_proto",
+ "rusty_mux_server",
+ "rusty_tokio",
  "rusty_uuid",
 ]
 
@@ -13015,7 +13024,7 @@ name = "rusty_tonic"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "futures-util",
+ "futures-core",
  "http",
  "http-body-util",
  "prost",
@@ -13027,6 +13036,7 @@ dependencies = [
  "rusty_hyper",
  "rusty_percent",
  "rusty_prost",
+ "rusty_stream",
  "rusty_tls",
  "rusty_tokio",
  "tokio",
@@ -13936,11 +13946,11 @@ dependencies = [
  "anyhow",
  "async-trait",
  "rand 0.8.8",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]

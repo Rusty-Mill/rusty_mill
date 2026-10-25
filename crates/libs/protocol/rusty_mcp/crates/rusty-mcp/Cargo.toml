@@ -57,15 +57,19 @@ rusty_rand = { workspace = true, optional = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 rand = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# The response body of the test adapter in `tests/support/mcp.rs`.
+http-body = { workspace = true }
 rusty_mcp_server = { workspace = true, features = ["http"] }
-rusty_mcp_axum = { workspace = true }
+# The test adapter hands requests to the handler's blocking `rusty_serve` API.
+rusty_serve = { workspace = true }
 rsa = "0.9"
 # Signs the RS256 test tokens: `rusty_oauth` only verifies RSA signatures.
 # `rust_crypto` keeps the build pure-Rust.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
-# The layers are tested behind axum and `rusty_mcp_axum`, which run on tokio,
-# and `limits` needs a tokio timer, so those tests stay on tokio (#906).
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
+# The layers are tested behind axum, which runs on tokio, and `limits` needs a
+# tokio timer, so those tests stay on tokio (#906). `sync` is for the test
+# adapter's stream pump.
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time"] }
 rusty_tokio = { workspace = true }
 
 [features]

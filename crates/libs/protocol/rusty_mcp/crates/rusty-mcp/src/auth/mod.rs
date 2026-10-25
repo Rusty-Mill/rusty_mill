@@ -59,8 +59,8 @@
 //!
 //! [`AuthConfig::required_scopes`] guards the whole endpoint. For finer grain,
 //! leave it empty and read the token inside a tool — the layer puts it in the
-//! request extensions (`CallContext::caller()` hands a handler the principal
-//! when the server is mounted through `rusty_mcp_axum`):
+//! request extensions (a handler sees it through `CallContext::caller()` when
+//! the mount passes it to `rusty_mcp_server`'s `HttpHandler::handle_with`):
 //!
 //! ```no_run
 //! use rusty_mcp::auth::VerifiedToken;

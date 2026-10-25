@@ -262,6 +262,12 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("Cargo.lock changed with a manifest", self.workflow)
         self.assertIn("Unable to establish Cargo.lock impact", self.workflow)
 
+    def test_member_dependency_edits_keep_the_full_sweep(self) -> None:
+        # Feature unification can reach crates that never depend on the edited member.
+        self.assertIn("cargo_toml_diff.py --members /tmp/metadata.json \"$base\"", self.workflow)
+        self.assertIn('emit_full "Member dependency declarations changed ($dependency_edits)"', self.workflow)
+        self.assertIn('emit_full "Unable to compare member manifests with the event base"', self.workflow)
+
     def test_unrelated_base_falls_back_after_fetch_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -649,6 +655,8 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("cargo metadata --locked --format-version=1", job)
         self.assertIn('test "$(sha256sum Cargo.lock)" = "$lock_before"', job)
         self.assertIn('--target-base "$RUNNER_TEMP/msrv"', job)
+        # Every crate with features is also checked with all of them; only documented exceptions opt out.
+        self.assertIn('--all-features-exclude "platform-linux rusty_json rusty_tls rusty_rdp rusty_tonic"', job)
         self.assertIn("      - msrv-compile\n", self.workflow.split("  required-gate:\n", 1)[1])
 
     def test_every_workflow_pin_matches_rust_toolchain_file(self) -> None:

@@ -2087,11 +2087,8 @@ impl ServerHandshake<'_> {
 }
 
 pub(super) fn random_bytes(len: usize) -> Result<Vec<u8>> {
-    use ring::rand::SecureRandom;
     let mut out = vec![0u8; len];
-    ring::rand::SystemRandom::new()
-        .fill(&mut out)
-        .map_err(|_| ServerError::Random)?;
+    super::crypto::fill_random(&mut out).map_err(|_| ServerError::Random)?;
     Ok(out)
 }
 

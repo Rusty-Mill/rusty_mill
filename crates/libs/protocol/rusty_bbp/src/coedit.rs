@@ -8,16 +8,14 @@
 //! with the edit's ops applied: inserted lines go directly after their anchor,
 //! newest first. That is RGA's order whenever ids follow the log (a new line
 //! is always the newest sibling), so this fold is already the CRDT fold. What
-//! a CRDT would change is admission: today an edit is refused when it touches
-//! a section that changed since its base ([`overlap`]); a CRDT accepts it.
-//!
-//! A section is a heading line (text starting with `#`) and the lines up to
-//! the next heading; lines before the first heading are the preamble, `None`.
+//! a CRDT would change is admission: today an edit is refused when it is
+//! anchored on a line that an edit made since its base also anchored on
+//! ([`overlap`]); a CRDT accepts it.
 
 use crate::command::{Code, Rejection};
 use crate::ids::ArtId;
 use rusty_serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// A line's identity: the version that inserted it and its index there.
@@ -65,12 +63,6 @@ struct Line {
     id: LineId,
     text: String,
     live: bool,
-}
-
-impl Line {
-    fn heading(&self) -> bool {
-        self.live && self.text.starts_with('#')
-    }
 }
 
 /// A co-edited spec's lines, tombstones included.
@@ -132,27 +124,6 @@ impl Doc {
         }
         Ok(doc)
     }
-
-    /// Each line's section, as `base` divides this doc: the nearest heading
-    /// before it that is visible in `base`. This doc must extend `base` (hold
-    /// its lines in the same order), as a later version always does.
-    fn sections_as(&self, base: &Doc) -> HashMap<LineId, Option<LineId>> {
-        let headings: HashSet<LineId> = base
-            .lines
-            .iter()
-            .filter(|l| l.heading())
-            .map(|l| l.id)
-            .collect();
-        let mut current = None;
-        let mut out = HashMap::with_capacity(self.lines.len());
-        for l in &self.lines {
-            if headings.contains(&l.id) {
-                current = Some(l.id);
-            }
-            out.insert(l.id, current);
-        }
-        out
-    }
 }
 
 /// Refuse an edit that is malformed against the version it names as its base.
@@ -181,27 +152,16 @@ pub fn validate(base: &Doc, ops: &[LineOp]) -> Result<(), Rejection> {
     Ok(())
 }
 
-/// The sections `ops` touch that the edits accepted since its base also
-/// touched (`since`, their anchors), as `base` divides `head`. Empty means
-/// the edit applies to `head` without overlapping anything its author did
-/// not see. Measuring both sides against one division means two edits of
-/// the same line always overlap, whatever headings moved in between.
-pub fn overlap(
-    head: &Doc,
-    base: &Doc,
-    ops: &[LineOp],
-    since: &[Option<LineId>],
-) -> Vec<Option<LineId>> {
-    if since.is_empty() {
-        return Vec::new();
-    }
-    let section = head.sections_as(base);
-    let of = |a: Option<LineId>| a.and_then(|id| section.get(&id).copied().flatten());
-    let theirs: HashSet<Option<LineId>> = since.iter().map(|a| of(*a)).collect();
+/// The anchors `ops` share with the edits accepted since its base (`since`,
+/// their anchors), `None` being the start of the spec. Empty means no op is
+/// placed against a line that someone else changed or placed lines against
+/// after its author read the base, so the edit applies to the head as meant.
+pub fn overlap(ops: &[LineOp], since: &[Option<LineId>]) -> Vec<Option<LineId>> {
+    let theirs: HashSet<Option<LineId>> = since.iter().copied().collect();
     let mut out: Vec<Option<LineId>> = ops
         .iter()
-        .map(|op| of(op.anchor()))
-        .filter(|s| theirs.contains(s))
+        .map(LineOp::anchor)
+        .filter(|a| theirs.contains(a))
         .collect();
     out.sort();
     out.dedup();
@@ -288,42 +248,21 @@ mod tests {
     }
 
     #[test]
-    fn edits_overlap_only_in_a_shared_section() {
-        let base = two_sections();
-        let in_a = [ins(Some(id(2, 1)), &["x"])];
-        let head = base.apply(at(3), &in_a).unwrap();
+    fn edits_overlap_only_on_a_shared_line() {
         let since = [Some(id(2, 1))];
-        let in_b = [LineOp::Delete { line: id(2, 4) }];
-        assert!(overlap(&head, &base, &in_b, &since).is_empty());
-        let also_a = [LineOp::Delete { line: id(2, 2) }];
-        assert_eq!(overlap(&head, &base, &also_a, &since), [Some(id(2, 0))]);
-        assert!(
-            overlap(&head, &base, &also_a, &[]).is_empty(),
-            "nothing since"
-        );
+        let same_section = [LineOp::Delete { line: id(2, 2) }];
+        assert!(overlap(&same_section, &since).is_empty());
+        let same_line = [LineOp::Delete { line: id(2, 1) }];
+        assert_eq!(overlap(&same_line, &since), [Some(id(2, 1))]);
+        let after_it = [ins(Some(id(2, 1)), &["y"])];
+        assert_eq!(overlap(&after_it, &since), [Some(id(2, 1))]);
+        assert!(overlap(&same_line, &[]).is_empty(), "nothing since");
     }
 
     #[test]
-    fn the_preamble_is_a_section_too() {
-        let base = two_sections();
-        let head = base.apply(at(3), &[ins(None, &["intro"])]).unwrap();
-        let since = [None];
+    fn the_start_of_the_spec_is_a_shared_anchor_too() {
         let other_intro = [ins(None, &["hello"])];
-        assert_eq!(overlap(&head, &base, &other_intro, &since), [None]);
-    }
-
-    #[test]
-    fn a_moved_heading_cannot_hide_a_same_line_overlap() {
-        // v3 splits section A with a new heading before a2; v4 (base v3) then
-        // deletes a2, which v3's base would place in A and v4's base in `# C`.
-        // An editor on base v2 also deleting a2 must still be refused.
-        let base = two_sections();
-        let v3 = base.apply(at(3), &[ins(Some(id(2, 1)), &["# C"])]).unwrap();
-        let v4 = v3
-            .apply(at(4), &[LineOp::Delete { line: id(2, 2) }])
-            .unwrap();
-        let since = [Some(id(2, 1)), Some(id(2, 2))];
-        let same = [LineOp::Delete { line: id(2, 2) }];
-        assert!(!overlap(&v4, &base, &same, &since).is_empty());
+        assert_eq!(overlap(&other_intro, &[None]), [None]);
+        assert!(overlap(&other_intro, &[Some(id(2, 0))]).is_empty());
     }
 }

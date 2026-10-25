@@ -179,13 +179,25 @@ reviewer.
   Every report is an `ecdh::ensure` verdict: 3 for ECDSA, 1 for Ed25519.
 - This code is part of the owner's S5 review scope.
 
-**Still outstanding before TLS wiring:**
-- the owner's signing-code review, recorded with reviewer, scope and exact commit
-  (S5 as amended). The ECDSA and Ed25519 code is on main at `698844212`; the PKCS#8
-  parser comes after that commit;
-- the engine suites and native BoGo with server scenarios.
+**`rusty_tls` wiring** (#1020):
+- The native `SigningKey` wraps `rusty_pk`'s ECDSA and Ed25519 keys. `SigningKey::rsa`
+  returns `SignError::RsaUnsupported`. The server, `server12`, tickets, the server half of
+  `negotiate` and client certificates compile on native. The ticket cipher and the
+  server's randomness go through `handrolled::crypto`.
+- **Suites:** all 41 `handrolled_*` suites run on native, including the 11 formerly marked
+  ring-only, and pass on both backends. The RSA signing cases are skipped on native by
+  name (`SIGNING_LEAVES` in `handrolled_server12.rs`, `SERVES_RSA` in
+  `handrolled_server12_socket_interop.rs`, and the RSA refusal in `handrolled_server.rs`).
+- **OpenSSL interop** runs in both directions on native: the four socket-interop suites.
+- **Native BoGo** with server scenarios: 494 pass, 0 fail (it was 445, client only). The
+  gap to `ring`'s 861 is scenarios whose own key is RSA: 390 shim runs refused one at
+  load. The CI floor is 480.
 
-The full gap-5 evidence plan is not complete.
+**S5 review:** done. The owner reviewed and approved `7a3267f5a` on 2026-10-25 (the
+implementer's transcription). That commit is the head of #1020 and contains the ECDSA and
+Ed25519 code from main at `698844212`, the PKCS#8 parser (#1012) and the wiring. Reviewer,
+scope and conclusion are recorded in plan section 11b. With it, the gap-5 evidence plan is
+complete.
 
 ## 5. Effort
 

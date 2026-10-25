@@ -69,13 +69,12 @@
 //!
 //! # Primitives
 //!
-//! AES-256-GCM from `ring`, per ADR-0002 §6: the record layer's own AEADs come
-//! from there for the same reason, and a ticket is exactly the kind of thing
-//! that wants an authenticated cipher rather than a hand-assembled
-//! encrypt-then-MAC.
+//! AES-256-GCM and the random source through the engine's private `crypto` module, like the
+//! record layers: `ring` on the default backend, `rusty_aead` and `rusty_rand`
+//! on the native one (ADR-0006). A ticket is exactly the kind of thing that
+//! wants an authenticated cipher rather than a hand-assembled encrypt-then-MAC.
 
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
-use ring::rand::{SecureRandom, SystemRandom};
+use super::crypto::{fill_random, AeadAlgorithm, AeadKey, AEAD_NONCE_LEN as NONCE_LEN};
 
 use super::client::CipherSuite;
 use super::schedule::Hash;
@@ -146,7 +145,7 @@ const TICKET_VERSION: u8 = 2;
 /// Read the module docs before deploying one. The short version: this is as
 /// sensitive as the certificate's private key, and it needs rotating.
 pub struct TicketKey {
-    key: LessSafeKey,
+    key: AeadKey,
 }
 
 impl TicketKey {
@@ -162,10 +161,8 @@ impl TicketKey {
         if secret.len() != Self::LEN {
             return Err(TicketError::BadKeyLength(secret.len()));
         }
-        let key = UnboundKey::new(&AES_256_GCM, secret).map_err(|_| TicketError::Seal)?;
-        Ok(Self {
-            key: LessSafeKey::new(key),
-        })
+        let key = AeadKey::new(AeadAlgorithm::Aes256Gcm, secret).map_err(|_| TicketError::Seal)?;
+        Ok(Self { key })
     }
 
     /// A fresh key from the system random source.
@@ -177,9 +174,7 @@ impl TicketKey {
     /// storing one.
     pub fn generate() -> Result<Self, TicketError> {
         let mut secret = [0u8; Self::LEN];
-        SystemRandom::new()
-            .fill(&mut secret)
-            .map_err(|_| TicketError::Random)?;
+        fill_random(&mut secret).map_err(|_| TicketError::Random)?;
         Self::new(&secret)
     }
 
@@ -191,17 +186,11 @@ impl TicketKey {
     /// PSKs, which is the failure mode GCM is least forgiving about.
     fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, TicketError> {
         let mut nonce = [0u8; NONCE_LEN];
-        SystemRandom::new()
-            .fill(&mut nonce)
-            .map_err(|_| TicketError::Random)?;
+        fill_random(&mut nonce).map_err(|_| TicketError::Random)?;
 
         let mut out = plaintext.to_vec();
         self.key
-            .seal_in_place_append_tag(
-                Nonce::assume_unique_for_key(nonce),
-                Aad::from(TICKET_AAD),
-                &mut out,
-            )
+            .seal_in_place_append_tag(nonce, TICKET_AAD, &mut out)
             .map_err(|_| TicketError::Seal)?;
 
         let mut ticket = Vec::with_capacity(NONCE_LEN + out.len());
@@ -215,16 +204,12 @@ impl TicketKey {
         let (nonce, sealed) = ticket
             .split_at_checked(NONCE_LEN)
             .ok_or(TicketError::Open)?;
-        let nonce: [u8; NONCE_LEN] = nonce.try_into().expect("split at exactly NONCE_LEN");
+        let nonce: [u8; NONCE_LEN] = nonce.try_into().map_err(|_| TicketError::Open)?;
 
         let mut buffer = sealed.to_vec();
         let opened = self
             .key
-            .open_in_place(
-                Nonce::assume_unique_for_key(nonce),
-                Aad::from(TICKET_AAD),
-                &mut buffer,
-            )
+            .open_in_place(nonce, TICKET_AAD, &mut buffer)
             .map_err(|_| TicketError::Open)?;
         Ok(opened.to_vec())
     }

@@ -22,7 +22,7 @@ fn spec() -> ServerSpec {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 #[ignore = "needs RK_MCP_SMOKE_SERVER pointing at a built MCP server"]
 async fn lists_tools_and_reconnects_over_stdio() {
     let client = client_from_spec(&spec()).await.expect("connect");

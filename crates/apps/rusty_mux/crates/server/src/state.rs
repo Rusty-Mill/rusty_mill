@@ -25,7 +25,9 @@ const CHUNK: usize = 16 << 10;
 const HISTORY: usize = 4096;
 
 /// What the server offers; a client gets the intersection with its own.
-const OFFERED: Features = Features::CHECKPOINT_V3.union(Features::EVENT_SEQ);
+const OFFERED: Features = Features::CHECKPOINT_V3
+    .union(Features::EVENT_SEQ)
+    .union(Features::SYNC);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -214,6 +216,7 @@ impl State {
             M::Input { req, block, data } => (req, self.input(client, block, data)),
             M::Resize { req, block, size } => (req, self.resize(client, block, size)),
             M::CloseBlock { req, block } => (req, done(self.mux.close_block(block))),
+            M::Sync { req } => (req, Ok(Outcome::Done(None))),
             other => (0, Err(format!("not a client request: {other:?}"))),
         }
     }

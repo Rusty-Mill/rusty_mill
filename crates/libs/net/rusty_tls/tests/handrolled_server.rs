@@ -23,12 +23,12 @@
 //! malformed ClientHellos and require each to be turned away — with the right
 //! alert, since a server that fails silently leaves every client guessing.
 
-// ring-only suite (ADR-0005): it needs the engine's server or a signing key,
-// and the native backend has neither.
 #![cfg(all(
-    feature = "handrolled-engine",
     rusty_tls_handrolled,
-    not(rusty_tls_native_crypto)
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
 ))]
 
 use std::sync::Arc;
@@ -978,10 +978,14 @@ fn a_key_of_the_wrong_kind_is_refused_when_it_is_loaded() {
         SigningKey::ecdsa_p384(&p256.leaf_pkcs8).err(),
         Some(SignError::BadKey)
     );
-    assert_eq!(
-        SigningKey::rsa(&p256.leaf_pkcs8).err(),
-        Some(SignError::BadKey)
-    );
+    // The native backend has no RSA signing at all (ADR-0006), so it refuses
+    // before reading the document.
+    let rsa_refusal = if cfg!(rusty_tls_native_crypto) {
+        SignError::RsaUnsupported
+    } else {
+        SignError::BadKey
+    };
+    assert_eq!(SigningKey::rsa(&p256.leaf_pkcs8).err(), Some(rsa_refusal));
     assert_eq!(
         SigningKey::ed25519(&p256.leaf_pkcs8).err(),
         Some(SignError::BadKey)

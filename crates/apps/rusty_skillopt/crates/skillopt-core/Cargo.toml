@@ -18,4 +18,4 @@ thiserror = "2"
 rand.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true }
+rusty_tokio.workspace = true

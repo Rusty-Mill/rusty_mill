@@ -156,77 +156,60 @@ pub mod authorization_error {
     }
 }
 
-/// The `ExtMcp` service, as a `tonic` client.
+/// The `ExtMcp` service, as a `rusty_tonic` client.
 ///
 /// Written out rather than generated for the same reason as the messages. Both
-/// methods are unary, so the whole client is two calls over one codec.
+/// methods are unary, so the whole client is two calls over one channel.
 pub mod client {
     use rusty_prost::Message;
-    use rusty_tonic::tonic_codec::WireCodec;
-    use tonic::client::GrpcService;
-    use tonic::codegen::{Body, Bytes, StdError};
+    use rusty_tonic::Status;
+    use rusty_tonic::bridge::spawn;
+    use rusty_tonic::client::{Channel, Request};
 
     use super::{McpRequest, McpRequestResult, McpResponse, McpResponseResult};
 
     /// A client for `agentgateway.dev.ext_mcp.ExtMcp`.
-    #[derive(Debug, Clone)]
-    pub struct ExtMcpClient<T> {
-        inner: tonic::client::Grpc<T>,
+    #[derive(Clone)]
+    pub struct ExtMcpClient {
+        channel: Channel,
     }
 
-    impl<T> ExtMcpClient<T>
-    where
-        T: GrpcService<tonic::body::Body>,
-        T::Error: Into<StdError>,
-        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
-        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
-    {
-        /// Wrap a transport.
-        pub fn new(inner: T) -> Self {
-            ExtMcpClient {
-                inner: tonic::client::Grpc::new(inner),
-            }
+    impl ExtMcpClient {
+        /// Wrap a channel.
+        pub fn new(channel: Channel) -> Self {
+            ExtMcpClient { channel }
         }
 
         /// `ExtMcp/CheckRequest`.
-        pub async fn check_request(
-            &mut self,
-            request: McpRequest,
-        ) -> Result<McpRequestResult, tonic::Status> {
+        pub async fn check_request(&self, request: McpRequest) -> Result<McpRequestResult, Status> {
             self.unary(request, "/agentgateway.dev.ext_mcp.ExtMcp/CheckRequest")
                 .await
         }
 
         /// `ExtMcp/CheckResponse`.
         pub async fn check_response(
-            &mut self,
+            &self,
             request: McpResponse,
-        ) -> Result<McpResponseResult, tonic::Status> {
+        ) -> Result<McpResponseResult, Status> {
             self.unary(request, "/agentgateway.dev.ext_mcp.ExtMcp/CheckResponse")
                 .await
         }
 
-        async fn unary<Req, Res>(
-            &mut self,
-            request: Req,
-            path: &'static str,
-        ) -> Result<Res, tonic::Status>
+        /// One call, made on the transport's runtime (this one is `tokio`) and cancelled on the
+        /// wire if the caller drops it.
+        async fn unary<Req, Res>(&self, request: Req, path: &'static str) -> Result<Res, Status>
         where
-            Req: Message + Send + Sync + 'static,
-            Res: Message + Send + Sync + 'static,
+            Req: Message + Send + 'static,
+            Res: Message + Send + 'static,
         {
-            self.inner.ready().await.map_err(|err| {
-                tonic::Status::unavailable(format!("the processor is not ready: {}", err.into()))
-            })?;
-            let path = http::uri::PathAndQuery::from_static(path);
-            self.inner
-                .unary(
-                    tonic::Request::new(request),
-                    path,
-                    WireCodec::<Req, Res>::default(),
-                )
-                .await
-                .map(|response| response.into_inner())
+            let channel = self.channel.clone();
+            spawn(async move {
+                channel
+                    .unary::<Req, Res>(path, Request::new(request))
+                    .await
+                    .map(|reply| reply.message)
+            })?
+            .await?
         }
     }
 }

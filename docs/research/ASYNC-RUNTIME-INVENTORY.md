@@ -129,7 +129,7 @@ edge but does not by itself move either `remind_me` crate out of tier C:
 | #906 | rusty_mcp | 5 | #903, #897, #899 |
 | #907 | rusty_tailscale | 9 | #903, #897, #899, #900 |
 | #908 | rusty_adk (includes G10) | 12 | #896, #897, #900 |
-| #909 | rusty_db | 2 | #896 |
+| #909 | rusty_db (streams done; runtime held by sqlx, G9) | 2 | #896 |
 | #910 | rusty_provider | 2 | #896, #897, #899 |
 | #911 | small crates (rusty_key, skillopt, lsp, tonic, misc) | 10 | #903, #897, #899, #896 |
 | #912 | tier C tracking | 27 | #687, #688 |
@@ -152,6 +152,21 @@ Four crates still run on tokio because they drive a tier C crate:
 - `mcp-tool-server`: it uses the stdio transport of `adk-mcp`.
 
 They move when `adk-models` or `adk-mcp` moves.
+
+#911 tier A (2026-10-25): `skillopt-core`, `agentgateway-agui` and
+`rusty_mill_board` are on `rusty_tokio`, and `rk-mcp`'s tests are. `rk-mcp`
+keeps `tokio::sync::Mutex` for its connection lock, which is held across
+remote awaits, until #1064 makes `rusty_tokio`'s mutex cancellation-safe. Four tier A rows stay on tokio because
+of the runtime boundary: `rusty_tokio`'s timers, I/O and processes need a
+`rusty_tokio` runtime, and these crates run on a tokio one. `rk-compose`'s
+checks (`tokio::process`, `time::timeout`) run inside `rk-app` (tier C);
+`skillopt-cli` drives `skillopt-model`'s `reqwest`; `agentgateway-tls` is the
+tokio-to-`rusty_tokio` I/O bridge for `agentgateway`; and
+`rusty-hister-model`'s tests drive `sqlx` through `rusty-db`. Each moves with
+the tier C crate that holds it.
+`rusty_tonic` (tier B) builds its tonic-oracle test streams with
+`rusty_stream` through `Compat` instead of `futures-util`. `tokio` stays a
+dev-dependency only to host the tonic oracle server.
 
 ## 4. Per-crate table
 
@@ -243,11 +258,11 @@ through `Cargo.lock`. The counts are not a vetted audit.
 | `agui-agent-server` | `libs/rusty_adk/examples/agui-agent-server` | t | 1 | t::runtime::Runtime::new×1 | — | rusty-adk | G1 | A |
 | `mcp-tool-server` | `libs/rusty_adk/examples/mcp-tool-server` | t | 1 | t::main×1 | — | rusty-adk | — | A |
 | `weather-agent` | `libs/rusty_adk/examples/weather-agent` | f t | 1 | f::StreamExt×1, t::main×1 | — | rusty-adk | G7 | B |
-| `rusty-db-core` | `libs/storage/rusty_db/crates/rusty-db-core` | fc fu t | 4 | fc::stream::BoxStream×3, fu::StreamExt×3, fu::stream::iter×2, fu::stream::once×1, t::time::timeout×1 | — | — | G7 | B |
-| `rusty-db-mysql` | `libs/storage/rusty_db/crates/rusty-db-mysql` | as fu | 1 | fu::StreamExt×1, as::try_stream!×1 | sqlx | rusty-db-core | G7 G9 | C |
-| `rusty-db-postgres` | `libs/storage/rusty_db/crates/rusty-db-postgres` | as fu | 1 | fu::StreamExt×1, as::try_stream!×1 | sqlx | rusty-db-core | G7 G9 | C |
-| `rusty-db-sqlite` | `libs/storage/rusty_db/crates/rusty-db-sqlite` | as fu | 1 | fu::StreamExt×1, as::try_stream!×1 | sqlx | rusty-db-core | G7 G9 | C |
-| `rusty-db` | `libs/storage/rusty_db/rusty_db` | t(dev) | 97 | t::test×391, t::time::sleep×13, t::task::spawn_local×7, t::task::LocalSet×7, t::time::timeout×3, t::sync::oneshot×3, +2 | — | rusty-db-core, rusty-db-mysql, rusty-db-postgres, rusty-db-sqlite | — | A |
+| `rusty-db-core` | `libs/storage/rusty_db/crates/rusty-db-core` | t | 1 | t::time::timeout×1 (`with_timeout`; every caller runs sqlx on tokio) | — | — | G9 (via drivers) | C; streams on `rusty_stream` (#909) |
+| `rusty-db-mysql` | `libs/storage/rusty_db/crates/rusty-db-mysql` | — | 0 | — (streams on `rusty_stream`, sqlx bridged by `Compat`, #909) | sqlx | rusty-db-core | G9 | C |
+| `rusty-db-postgres` | `libs/storage/rusty_db/crates/rusty-db-postgres` | — | 0 | — (streams on `rusty_stream`, sqlx bridged by `Compat`, #909) | sqlx | rusty-db-core | G9 | C |
+| `rusty-db-sqlite` | `libs/storage/rusty_db/crates/rusty-db-sqlite` | — | 0 | — (streams on `rusty_stream`, sqlx bridged by `Compat`, #909) | sqlx | rusty-db-core | G9 | C |
+| `rusty-db` | `libs/storage/rusty_db/rusty_db` | t(dev) | 97 | t::test×391, t::time::sleep×13, t::task::spawn_local×7, t::task::LocalSet×7, t::time::timeout×3, t::sync::oneshot×3, +2 | sqlx (via drivers) | rusty-db-core, rusty-db-mysql, rusty-db-postgres, rusty-db-sqlite | G9 | C: every test drives sqlx, which panics without a tokio runtime (#909) |
 | `rusty-search` | `libs/storage/rusty_search/crates/rusty-search` | t(dev) | 1 | t::main×1 | — | rusty-search-algolia, rusty-search-azure-search, rusty-search-elasticsearch, rusty-search-meilisearch, rusty-search-memory, rusty-search-opensearch, rusty-search-solr, rusty-search-sqlite-fts5, rusty-search-tantivy | — | A |
 | `rusty-search-algolia` | `libs/storage/rusty_search/crates/rusty-search-algolia` | t | 1 | t::test×13, t::sync::RwLock×1, t::time::sleep×1 | — | rusty_request | — | A |
 | `rusty-search-azure-search` | `libs/storage/rusty_search/crates/rusty-search-azure-search` | t | 1 | t::test×14, t::sync::RwLock×1 | — | rusty_request | — | A |

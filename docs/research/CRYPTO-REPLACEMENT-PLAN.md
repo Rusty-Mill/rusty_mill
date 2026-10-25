@@ -829,6 +829,23 @@ hold for the native client backend, which merged as #871. It is recorded as the 
 
 The "No" cells above describe the records that existed before the attestation.
 
+**S5: owner review of the signing code (gap 5, ADR-0006, 2026-10-25).** This is the review
+ADR-0006 requires before the `rusty_tls` wiring (#1020) merges. It follows S5 as amended:
+plan D4's "owner alone" option, not an independent review.
+
+- **Reviewer:** the owner (baileyrd).
+- **Commit:** `7a3267f5a`, the head of #1020 when the review was given. It contains the
+  ECDSA and Ed25519 signing code from main at `698844212`, the PKCS#8 parser (#1012) and the
+  `rusty_tls` wiring.
+- **Scope:** the S5 scope, which is `rusty_pk`'s ECDSA and Ed25519 signing (hedged nonces,
+  failure policy) and `rusty_pk::pkcs8`, as they stand at that commit.
+- **Conclusion:** approved. The owner's words, in the working session: "Reviewed the current
+  commit and approved". This is the implementer's transcription, not yet restated from the
+  owner's GitHub account.
+- **Not recorded:** the method and any findings.
+- **Automated reviews:** they are evidence only and are not part of this record. They include
+  the automated review of #1020 (review 5643306969), which found no blocking defect.
+
 ## 12. What I did not verify
 
 Added after review (current as of the evidence record):
