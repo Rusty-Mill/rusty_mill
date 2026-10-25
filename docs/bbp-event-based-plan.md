@@ -1,6 +1,6 @@
 # BBP: from loop-based to event-based
 
-Status: accepted by the owner, 2026-10-22. Step 1 merged (#880); step 2 approved.
+Status: accepted by the owner, 2026-10-22. Steps 1, 2 and 3 merged (#880, #919, #932, #938, #1005); step 4 approved 2026-10-25.
 Goal (owner): BBP reacts to events instead of running a loop. `rusty_crdt` is a means, not the goal.
 Builds on `docs/bbp-event-driven-design.md` (accepted Phase 1) and `docs/bbp-concurrency-design.md` (2a/2b).
 
@@ -100,6 +100,65 @@ editors and their edit rate, so a two-agent probe cannot rule a CRDT out (owner,
 - Decision rule, agreed before running: if stale refusals stay rare and cheap at the agent counts the
   factory will actually use, last-write-wins with a base check is enough. If they grow so that rebasing
   costs a large share of work or edits are lost, build `rusty_crdt` as the artifact fold.
+
+### Step 4a: what was built, and the rule fixed before the first harness run
+
+Approved 2026-10-25. No provider runs and no spend: the live N = 4 check waits for its own approval.
+
+**Op format (built).** A co-edited spec version is an `ArtifactStored` whose payload is
+`SpecEdit { brief, base, ops }` (`rusty_bbp/src/coedit.rs`); `base: None` starts a spec. An op is
+`Insert { after, lines }` or `Delete { line }`. Every line has a stable id, the version that inserted
+it and its index there, and a deleted line stays as a tombstone. Ops name lines by id, so an edit
+written against an old base still applies to the head. Each version is its own `ArtId` with its own
+immutable text (`TaskState::doc`), so a plan-gate request and the owner's approval still bind one
+exact text, and immutable-per-version holds.
+
+**One fold serves both.** The fold inserts directly after the anchor, newest first. When ids follow
+the log, a new line is always the newest sibling, which is exactly where RGA puts it; a property test
+checks the fold against a textbook RGA fed the same edits in random causal orders. So the op format
+already carries what RGA needs (stable ids and parents), and an RGA fold of these ops gives the same
+text. What `rusty_crdt` would change is **admission**, not the format or the fold: accept every edit
+instead of refusing a stale one. Building it as "the artifact fold" therefore means removing a check,
+not adding a crate.
+
+**Admission (built).** An edit is refused with `stale_base` when an op is anchored in a section that a
+version accepted after its base also touched. A section is a heading line and the lines up to the next
+heading; both sides are measured against the base's headings, so two edits of one line always clash
+however headings moved. An edit in an untouched section is applied to the head (rebased by id). A
+refused edit is logged as `rejected`, charges no bytes, and is the measurable event.
+
+**Old logs.** Snapshot specs are unchanged and never an edit base (`wrong_kind`), so every existing log
+replays as before. A build without `SpecEdit` fails loudly on a log that has one (an unknown variant),
+so no schema bump is needed to keep an old build from misreading it.
+
+**Harness (`rusty_bbp/tests/coedit_load.rs`).** Scripted editors drive the real `Driver`, engine and
+`MemStore` (one smoke run uses `FsStore`) in virtual time, so runs are deterministic and cost nothing.
+Each editor holds a planner role in an N-turn task. It reads the head through `get_artifact`, thinks,
+then submits one edit to one section: insert 1 to 3 lines, or replace one line. On `stale_base` it
+re-reads and redoes the edit, a full new think (the conservative cost of a rebase). The fixed workload:
+
+- Spec: 4 sections of 8 lines (32 lines), the median shape of the 2b specs (22 to 49 lines, 3 to 5
+  headings, about 1.1 to 3 KB).
+- Think time: uniform 10 to 17 s per edit, the 2b planners' spec times. Editors work back to back
+  (no idle time), the worst case for contention.
+- Section choice: editor i owns section i mod S; with probability `overlap` it edits a uniformly
+  random section instead.
+- Grid: N = 2, 4, 8, 16, 32; overlap 0, 0.25, 1; S = 4 and S = N; 20 accepted edits per editor;
+  5 seeds per cell.
+- Reported per cell: refused edits per accepted edit; wasted work (think time of refused attempts over
+  all think time); same-line clashes per accepted edit (refusals where both edits name one line, what a
+  line-level check would still refuse). Under blind last-write-wins each refusal is a lost edit; under
+  RGA each is an automatic merge, and a same-line one is a merge of two edits of one line.
+
+**Decision rule, fixed before the first run** (decision cell: N = 4, S = 4, overlap 0.25):
+
+1. Refused per edit at most 0.10 **and** wasted work at most 10%: the section check is enough. Keep it.
+2. Otherwise, same-line clashes per edit at most 0.10: refine the check to lines (same ops, same fold,
+   still no CRDT).
+3. Otherwise: accept every edit (the RGA admission) and flag same-line merges for review.
+
+The thresholds are this PR's proposal and need the owner's confirmation; the results are reported
+against them as written here.
 
 ## What this needs from the owner
 
