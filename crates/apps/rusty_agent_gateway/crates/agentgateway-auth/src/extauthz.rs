@@ -76,6 +76,10 @@ pub enum ExtAuthzError {
 /// slow gateway.
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// Largest denial body relayed to the caller. A denial explains itself in a
+/// sentence or a small JSON object; past this it is not an explanation.
+const MAX_DENIAL_BODY: usize = 64 * 1024;
+
 /// What the authorizer decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Authorization {
@@ -99,6 +103,8 @@ pub struct ExtAuthz {
     allowed_upstream: Vec<HeaderName>,
     include_body: Option<usize>,
     fail_open: bool,
+    /// How long one call may take, a denial's body included.
+    timeout: Duration,
     client: rusty_request::Client,
 }
 
@@ -145,6 +151,7 @@ impl ExtAuthz {
             allowed_upstream: names(&policy.allowed_upstream_headers, "allowedUpstreamHeaders")?,
             include_body: policy.include_body,
             fail_open: policy.fail_open.unwrap_or(false),
+            timeout,
             client: rusty_request::Client::builder()
                 .timeout(timeout)
                 .no_cookie_store()
@@ -175,6 +182,9 @@ impl ExtAuthz {
         headers: &HeaderMap,
         body: Option<&[u8]>,
     ) -> Authorization {
+        // `rusty_request` bounds only the wait for the head of a streamed
+        // response, so the rest of the timeout is kept for a denial's body.
+        let deadline = tokio::time::Instant::now() + self.timeout;
         let response = match self.ask(method, path, headers, body).await {
             Ok(response) => response,
             Err(err) => {
@@ -194,13 +204,16 @@ impl ExtAuthz {
             return Authorization::Allow(self.upstream_headers(response.headers()));
         }
 
-        // The authorizer's own body is what tells the caller why. Passing it
-        // through unchanged beats replacing it with a generic refusal.
+        // The authorizer decided once its status arrived: a body that then
+        // fails to arrive leaves the denial standing, without its reason.
+        // Only an answer that never came is unreachable, and only that may
+        // fail open. The body, when it does arrive, is what tells the caller
+        // why, and passing it through beats a generic refusal.
         let headers = passthrough_headers(response.headers());
         Authorization::Deny {
             status,
             headers,
-            body: response.into_bytes(),
+            body: denial_body(response, deadline).await,
         }
     }
 
@@ -212,7 +225,7 @@ impl ExtAuthz {
         path: &str,
         headers: &HeaderMap,
         body: Option<&[u8]>,
-    ) -> rusty_request::Result<rusty_request::Response> {
+    ) -> rusty_request::Result<rusty_request::StreamingResponse> {
         let url = format!("{}{}", self.target, path);
         let method = rusty_request::Method::parse(method.as_str());
         let mut request = self.client.request(method, &url)?;
@@ -229,7 +242,7 @@ impl ExtAuthz {
         if let Some(body) = body {
             request = request.body(body.to_vec());
         }
-        request.send().await
+        request.send_streaming().await
     }
 
     /// What to do when the authorizer never answered.
@@ -256,6 +269,39 @@ impl ExtAuthz {
                 Some((name.clone(), value))
             })
             .collect()
+    }
+}
+
+/// A denial's body, read by `deadline` and within [`MAX_DENIAL_BODY`]; empty
+/// when it cannot be read whole, since part of a reason is not one.
+async fn denial_body(
+    mut response: rusty_request::StreamingResponse,
+    deadline: tokio::time::Instant,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    loop {
+        let chunk = match tokio::time::timeout_at(deadline, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => chunk,
+            Ok(Ok(None)) => return body,
+            Ok(Err(err)) => {
+                rusty_log::debug!(%err, "a denial's body could not be read; relaying it without one");
+                return Vec::new();
+            }
+            Err(_) => {
+                rusty_log::debug!(
+                    "a denial's body did not arrive in time; relaying it without one"
+                );
+                return Vec::new();
+            }
+        };
+        if body.len() + chunk.len() > MAX_DENIAL_BODY {
+            rusty_log::debug!(
+                limit = MAX_DENIAL_BODY,
+                "a denial's body is too large; relaying it without one"
+            );
+            return Vec::new();
+        }
+        body.extend_from_slice(&chunk);
     }
 }
 
@@ -421,5 +467,99 @@ mod tests {
             headers.get("x-internal").is_none(),
             "an authorizer's internal headers are not the caller's business"
         );
+    }
+
+    /// A fail-open authorizer in front of a server that answers one call
+    /// with `head` and `body`, then stalls (`stall`) or hangs up.
+    async fn answering(head: String, body: Vec<u8>, stall: bool) -> ExtAuthz {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(&body).await;
+            if stall {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+        ExtAuthz::new(
+            &ExtAuthzPolicy {
+                target: format!("http://{addr}"),
+                fail_open: Some(true),
+                ..Default::default()
+            },
+            "t",
+        )
+        .expect("should build")
+    }
+
+    fn forbidden(content_length: usize) -> String {
+        format!(
+            "HTTP/1.1 403 Forbidden\r\nWWW-Authenticate: Bearer\r\n\
+             Content-Length: {content_length}\r\n\r\n"
+        )
+    }
+
+    async fn ask(authz: &ExtAuthz) -> Authorization {
+        authz
+            .check(&Method::GET, "/", &HeaderMap::new(), None)
+            .await
+    }
+
+    /// A denial with an empty body, its status and challenge intact.
+    fn assert_denied_without_a_body(decision: Authorization) {
+        let Authorization::Deny {
+            status,
+            headers,
+            body,
+        } = decision
+        else {
+            panic!("a denial must not become unreachable and fail open: {decision:?}");
+        };
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(headers.contains_key(http::header::WWW_AUTHENTICATE));
+        assert!(body.is_empty(), "part of a reason is not one: {body:?}");
+    }
+
+    #[tokio::test]
+    async fn a_denial_relays_its_body() {
+        let authz = answering(forbidden(4), b"nope".to_vec(), false).await;
+        let Authorization::Deny { status, body, .. } = ask(&authz).await else {
+            panic!("should deny");
+        };
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, b"nope");
+    }
+
+    #[tokio::test]
+    async fn a_denial_whose_body_is_cut_short_still_denies() {
+        let authz = answering(forbidden(100), b"short".to_vec(), false).await;
+        assert_denied_without_a_body(ask(&authz).await);
+    }
+
+    #[tokio::test]
+    async fn a_denial_whose_body_stalls_still_denies() {
+        let authz = answering(forbidden(100), b"short".to_vec(), true).await;
+        let started = std::time::Instant::now();
+        assert_denied_without_a_body(ask(&authz).await);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the timeout ends it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denial_whose_body_is_over_the_cap_still_denies() {
+        let size = MAX_DENIAL_BODY + 1;
+        let authz = answering(forbidden(size), vec![b'x'; size], false).await;
+        assert_denied_without_a_body(ask(&authz).await);
     }
 }

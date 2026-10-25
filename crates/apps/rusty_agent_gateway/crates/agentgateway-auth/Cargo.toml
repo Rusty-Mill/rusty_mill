@@ -32,6 +32,8 @@ jsonwebtoken = { version = "11", default-features = false, features = ["rust_cry
 http = { workspace = true }
 # Calls the `extAuthz` service; `tokio` because the gateway still runs on tokio.
 rusty_request = { workspace = true, features = ["tokio"] }
+# The deadline on a denial's body; goes with the gateway's move to rusty_tokio.
+tokio = { workspace = true, features = ["time"] }
 serde_json = { workspace = true }
 thiserror = "2"
 rusty_log = { workspace = true }
