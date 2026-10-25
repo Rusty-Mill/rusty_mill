@@ -4,8 +4,7 @@
 //! reconnecting to) an upstream server.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use rp_router::{Config, McpConfig, McpUpstreamConfig, McpUpstreamTransport, Router};
@@ -264,11 +263,15 @@ async fn a_restarted_upstream_is_reconnected_by_the_supervisor() {
 
 /// The most `up/sleep` calls the upstream ever ran at once when `calls`
 /// clients (one call each) go through an rp server with `connections`.
-/// Counting overlap, not wall time, keeps this independent of runner speed.
+/// Each call waits, up to [`RENDEZVOUS`], until `min(connections, calls)`
+/// calls run together, then holds for [`HOLD`] so that a call the pool should
+/// have held back would overlap too. Meeting at a rendezvous, not sleeping a
+/// fixed time, keeps the count independent of how close together the calls
+/// arrive and of runner speed.
 async fn peak_concurrency(connections: usize, calls: usize) -> usize {
-    let gauge = Arc::new(Gauge::default());
+    let gauge = Arc::new(Gauge::new(connections.min(calls)));
     let (up, up_stop) = serve(sleeping_upstream(gauge.clone()), "127.0.0.1:0");
-    let (rp, stop) = serve_rp(vec![upstream_config(up)], 10, connections).await;
+    let (rp, stop) = serve_rp(vec![upstream_config(up)], 30, connections).await;
     let mut clients = Vec::new();
     for _ in 0..calls {
         clients.push(McpClient::connect("rp", &spec(rp)).await.unwrap());
@@ -284,22 +287,62 @@ async fn peak_concurrency(connections: usize, calls: usize) -> usize {
     }
     stop.shutdown();
     up_stop.shutdown();
-    gauge.peak.load(Ordering::SeqCst)
+    gauge.peak()
+}
+
+/// Bound on waiting for a rendezvous that a pool which serializes calls never
+/// completes; the test then fails on the peak instead of hanging.
+const RENDEZVOUS: Duration = Duration::from_secs(5);
+/// How long a call stays running after its rendezvous.
+const HOLD: Duration = Duration::from_millis(200);
+
+/// Counts the upstream calls running at once.
+struct Gauge {
+    /// Calls that must run together before any finishes.
+    target: usize,
+    counts: Mutex<Counts>,
+    changed: Condvar,
 }
 
 #[derive(Default)]
-struct Gauge {
-    running: AtomicUsize,
-    peak: AtomicUsize,
+struct Counts {
+    running: usize,
+    peak: usize,
+}
+
+impl Gauge {
+    fn new(target: usize) -> Self {
+        Self {
+            target,
+            counts: Mutex::default(),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// One call: counted in, at the rendezvous, held, counted out.
+    fn call(&self) {
+        let mut counts = self.counts.lock().unwrap();
+        counts.running += 1;
+        counts.peak = counts.peak.max(counts.running);
+        self.changed.notify_all();
+        let (counts, _) = self
+            .changed
+            .wait_timeout_while(counts, RENDEZVOUS, |c| c.running < self.target)
+            .unwrap();
+        drop(counts);
+        std::thread::sleep(HOLD);
+        self.counts.lock().unwrap().running -= 1;
+    }
+
+    fn peak(&self) -> usize {
+        self.counts.lock().unwrap().peak
+    }
 }
 
 fn sleeping_upstream(gauge: Arc<Gauge>) -> Server {
     Server::builder("sleepy", "1")
         .tool(Tool::new("sleep", schema()), move |_c, _p| {
-            let now = gauge.running.fetch_add(1, Ordering::SeqCst) + 1;
-            gauge.peak.fetch_max(now, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(500));
-            gauge.running.fetch_sub(1, Ordering::SeqCst);
+            gauge.call();
             Ok(text("rested"))
         })
         .build()

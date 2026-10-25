@@ -36,7 +36,7 @@ use rusty_opnsense::OpnsenseClient;
 use rusty_proxmox::ProxmoxClient;
 use server::HomelabServer;
 
-#[tokio::main]
+#[rusty_tokio::main]
 async fn main() {
     let cli = HomelabCli::parse();
 
@@ -70,14 +70,15 @@ async fn main() {
     let opnsense = opnsense_config.map(OpnsenseClient::new);
     let homelab = HomelabServer::new(proxmox, opnsense, fedora_hosts);
 
-    let runtime = tokio::runtime::Handle::current();
+    let runtime = rusty_tokio::runtime::Handle::current();
     let server = homelab
         .wire_server(&runtime)
         .unwrap_or_else(|e| exit_with(&format!("invalid server description: {e}")));
     let args = cli.mcp.clone();
     // The server's handlers block, so serve from a thread of its own and keep
     // the runtime free to run the tools.
-    let served = tokio::task::spawn_blocking(move || serve::serve(server, &args, token)).await;
+    let served =
+        rusty_tokio::task::spawn_blocking(move || serve::serve(server, &args, token)).await;
     match served {
         Ok(Ok(())) => {}
         Ok(Err(msg)) => exit_with(&msg),

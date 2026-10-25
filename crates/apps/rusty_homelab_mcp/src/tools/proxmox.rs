@@ -566,7 +566,7 @@ fn proxmox_error(err: rusty_proxmox::Error) -> ErrorData {
 pub(crate) fn register_tools(
     builder: rusty_mcp_server::ServerBuilder,
     server: &HomelabServer,
-    rt: &tokio::runtime::Handle,
+    rt: &rusty_tokio::runtime::Handle,
 ) -> rusty_mcp_server::ServerBuilder {
     let builder = register::<NoArgs, _, _, _>(
         builder,

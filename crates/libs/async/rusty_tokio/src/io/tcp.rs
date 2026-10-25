@@ -671,8 +671,13 @@ impl AsyncWrite for &TcpStream {
         self.poll_write_priv(cx, buf)
     }
 
+    /// As tokio's: `NotConnected` (the peer already reset the connection)
+    /// counts as shut down.
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(socket::shutdown_write(self.inner.as_raw_io()))
+        Poll::Ready(match socket::shutdown_write(self.inner.as_raw_io()) {
+            Err(e) if e.kind() == io::ErrorKind::NotConnected => Ok(()),
+            result => result,
+        })
     }
 }
 

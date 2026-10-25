@@ -82,6 +82,32 @@ pub struct SceneCar {
     pub boost: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<u8>,
+    /// Linear velocity (uu/s, rounded to 1 uu/s), drawn as an arrow. Physics
+    /// scenes only (ADR-0085 b6); absent for replays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v: Option<[f32; 3]>,
+    /// Controller input this frame, for the input strip. Physics scenes only;
+    /// absent for replays and for a car whose source has no input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<SceneInput>,
+}
+
+/// One car's controller input, kept compact because it repeats every frame.
+///
+/// `axes` is `[throttle, steer, pitch, yaw, roll]` in -1..1, rounded to 0.01;
+/// an axis the source cannot recover is `null`, not a guessed 0.
+/// `buttons` is a bit set of [`SceneInput::JUMP`], [`SceneInput::BOOST`] and
+/// [`SceneInput::HANDBRAKE`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SceneInput {
+    pub axes: [Option<f32>; 5],
+    pub buttons: u8,
+}
+
+impl SceneInput {
+    pub const JUMP: u8 = 1;
+    pub const BOOST: u8 = 2;
+    pub const HANDBRAKE: u8 = 4;
 }
 
 /// One playback frame: time, ball position (absent if the ball isn't live), and
@@ -261,6 +287,8 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
                         .map(|b| field::boost_percent(b).round() as u8)
                         .unwrap_or(0),
                     role: None,
+                    v: None,
+                    input: None,
                 })
                 .collect(),
         })

@@ -1474,6 +1474,19 @@ jobs:
           bash .github/scripts/limbo_differential.sh
           cargo test -p rusty_tls --features native-crypto
           --test handrolled_limbo -- --ignored --nocapture --color never
+      # Tier 1 item 1 on the native backend (ADR-0002 Amendment 2): the same live
+      # check as the ring job, against the named consumer's hosts, with the
+      # rustls differential. The 10 consecutive scheduled runs are counted here.
+      - name: live internet (non-blocking)
+        continue-on-error: true
+        shell: bash
+        env:
+          LIVE_BACKEND: native
+        # Through the same tested script as the ring job; see its comment.
+        run: >-
+          bash .github/scripts/live_internet_check.sh
+          cargo test -p rusty_tls --features native-crypto
+          --test handrolled_live -- --ignored --nocapture --color never
 
   # The hand-rolled TLS engine (rusty_tls#25) compiles only with the cargo
   # feature `handrolled-engine` AND `--cfg rusty_tls_handrolled`
@@ -1620,6 +1633,8 @@ jobs:
       - name: live internet (non-blocking)
         continue-on-error: true
         shell: bash
+        env:
+          LIVE_BACKEND: ring
         # The script always prints and summarises the output, even when cargo
         # fails (a bare command substitution under `set -e` would lose it), and
         # fails the step on a failure or a zero-test run. It is tested offline
@@ -1717,6 +1732,8 @@ jobs:
           cache-dependency-path: crates/apps/rocket_league/crates/replay-viewer/tests/package-lock.json
       - name: Generate offline viewer
         run: cargo run -q -p replay-viewer -- crates/apps/rocket_league/rleval/assets/replays/42f2.replay --offline --hz 15 --html "$RUNNER_TEMP/viewer.html"
+      - name: Input strip helpers
+        run: node crates/apps/rocket_league/crates/replay-viewer/tests/input_strip.mjs
       - name: Install puppeteer
         working-directory: crates/apps/rocket_league/crates/replay-viewer/tests
         run: npm ci --no-audit --no-fund

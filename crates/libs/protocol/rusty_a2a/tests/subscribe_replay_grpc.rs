@@ -4,13 +4,15 @@
 //! buffered event log (unlike JSON-RPC/REST, which can resume precisely
 //! via the `Last-Event-ID` SSE header - see `tests/subscribe_replay.rs`).
 
+mod common;
+use common::tonic_oracle as pb;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use rusty_a2a::error::Result;
-use rusty_a2a::server::grpc::pb;
 use rusty_a2a::server::{AgentExecutor, AgentServer, EventSink, RequestContext};
 use rusty_a2a::types::{AgentCard, AgentInterface, Artifact, Message, Part, TaskState};
 use tokio::sync::Notify;

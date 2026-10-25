@@ -419,3 +419,15 @@ async fn an_agent_that_is_not_there_is_unavailable_and_not_a_hang() {
     }
     assert!(started.elapsed() < Duration::from_secs(10));
 }
+
+#[tokio::test]
+async fn an_endpoint_without_a_scheme_is_refused_up_front_with_a_clear_error() {
+    // The `tonic` client parsed `host:port` and then failed its first call with "transport error".
+    // Whether a scheme-less endpoint means plaintext or TLS is a choice this client does not make.
+    match GrpcClient::new("127.0.0.1:50051") {
+        Err(ClientError::GrpcConfig(message)) => {
+            assert!(message.contains("invalid gRPC endpoint"), "{message}");
+        }
+        other => panic!("expected a configuration error, got {:?}", other.err()),
+    }
+}

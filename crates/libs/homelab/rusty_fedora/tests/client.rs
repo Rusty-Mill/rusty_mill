@@ -10,7 +10,7 @@ fn client(base_url: String) -> FedoraAgentClient {
     })
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn system_status_returns_the_body_as_is() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"hostname":"baileyai","uptime_seconds":12345}"#,
@@ -21,7 +21,7 @@ async fn system_status_returns_the_body_as_is() {
     assert_eq!(status["hostname"], "baileyai");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_services_with_no_filter_hits_the_bare_path() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"[{"name":"ollama.service","load_state":"loaded","active_state":"active","sub_state":"running"}]"#,
@@ -35,7 +35,7 @@ async fn list_services_with_no_filter_hits_the_bare_path() {
     assert_eq!(services[0]["name"], "ollama.service");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_services_with_a_filter_passes_the_unit_type() {
     let base_url = support::spawn(vec![MockResponse::ok("[]")]);
 
@@ -47,7 +47,7 @@ async fn list_services_with_a_filter_passes_the_unit_type() {
     assert!(services.as_array().expect("array").is_empty());
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn service_control_posts_the_action_body() {
     let base_url = support::spawn(vec![MockResponse::ok("{}")]);
 
@@ -57,7 +57,7 @@ async fn service_control_posts_the_action_body() {
         .expect("service_control");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn read_journal_with_every_filter_set() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"[{"line":"hello"}]"#)]);
 
@@ -74,7 +74,7 @@ async fn read_journal_with_every_filter_set() {
     assert_eq!(lines[0]["line"], "hello");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn dnf_install_returns_the_task_id() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"task_id":"task-1"}"#)]);
 
@@ -86,7 +86,7 @@ async fn dnf_install_returns_the_task_id() {
     assert_eq!(result["task_id"], "task-1");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn task_status_returns_the_body_as_is() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"id":"task-1","state":"succeeded","exit_code":0}"#,
@@ -100,7 +100,7 @@ async fn task_status_returns_the_body_as_is() {
     assert_eq!(status["state"], "succeeded");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn read_config_passes_the_path_as_a_query_parameter() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"content":"Hello=World\n"}"#)]);
 
@@ -112,7 +112,7 @@ async fn read_config_passes_the_path_as_a_query_parameter() {
     assert_eq!(result["content"], "Hello=World\n");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn write_config_puts_the_full_body() {
     let base_url = support::spawn(vec![MockResponse::ok("{}")]);
 
@@ -126,7 +126,7 @@ async fn write_config_puts_the_full_body() {
         .expect("write_config");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_agent_error_surfaces_the_status_and_body() {
     let base_url = support::spawn(vec![MockResponse::status(
         400,

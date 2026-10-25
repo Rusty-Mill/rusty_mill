@@ -16,10 +16,13 @@ from pathlib import Path
 SCRIPT = Path(__file__).with_name("live_internet_check.sh")
 
 
-def run(*command: str) -> tuple[subprocess.CompletedProcess[str], str]:
+def run(
+    *command: str, extra_env: dict[str, str] | None = None
+) -> tuple[subprocess.CompletedProcess[str], str]:
     with tempfile.TemporaryDirectory() as tmp:
         summary = Path(tmp) / "summary.md"
-        env = {**os.environ, "GITHUB_STEP_SUMMARY": str(summary)}
+        env = {k: v for k, v in os.environ.items() if k != "LIVE_BACKEND"}
+        env.update({"GITHUB_STEP_SUMMARY": str(summary), **(extra_env or {})})
         result = subprocess.run(
             ["bash", str(SCRIPT), *command],
             capture_output=True,
@@ -64,6 +67,13 @@ class LiveInternetCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("did not report 1 passed", result.stdout)
         self.assertIn("0 passed", summary)
+
+    def test_the_heading_names_the_backend_only_when_given(self) -> None:
+        passing = fake("test result: ok. 1 passed", 0)
+        _, plain = run(*passing)
+        self.assertIn("### rusty_tls native engine, live internet\n", plain)
+        _, labelled = run(*passing, extra_env={"LIVE_BACKEND": "native"})
+        self.assertIn("live internet (native backend)", labelled)
 
     def test_a_failure_that_also_prints_a_pass_line_still_fails(self) -> None:
         result, _ = run(*fake("test result: ok. 1 passed", 1))

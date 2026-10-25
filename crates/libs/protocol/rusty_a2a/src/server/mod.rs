@@ -165,7 +165,7 @@ impl AgentServer {
     }
 
     /// Finalizes this builder into a shareable [`AgentServices`] handle:
-    /// `.router()` and (with the `grpc` feature) `.grpc_service()` can
+    /// `.router()` and (with the `grpc` feature) `.grpc_router(..)` can
     /// each be called on it as many times as needed, all serving the same
     /// underlying agent state.
     pub fn build(self) -> AgentServices {
@@ -223,21 +223,26 @@ impl AgentServices {
     }
 
     /// Builds the gRPC service for the `A2AService` binding (spec Section
-    /// 10), ready to hand to a [`tonic::transport::Server`] (e.g. via
-    /// `.add_service(...)`), or serve directly with
+    /// 10) as a [`rusty_tonic::server::Router`], ready to serve on a
+    /// `rusty_tokio` listener, or serve directly with
     /// [`AgentServices::serve_grpc`].
+    ///
+    /// The router runs on the transport's runtime; `app` is the application's `tokio` runtime,
+    /// where the agent's engine runs. Every call is handed across to it and is aborted if its
+    /// client leaves.
     #[cfg(feature = "grpc")]
-    pub fn grpc_service(&self) -> grpc::pb::a2a_service_server::A2aServiceServer<grpc::GrpcService> {
-        grpc::pb::a2a_service_server::A2aServiceServer::new(grpc::GrpcService::new(self.engine.clone()))
+    pub fn grpc_router(&self, app: tokio::runtime::Handle) -> rusty_tonic::server::Router {
+        Arc::new(grpc::GrpcService::new(self.engine.clone())).router(app)
     }
 
-    /// Binds `addr` and serves the gRPC binding until the process is
-    /// interrupted.
+    /// Binds `addr` and serves the gRPC binding until the returned future is dropped. It fails
+    /// if the address cannot be bound, and otherwise does not return.
+    ///
+    /// Must be awaited from a `tokio` runtime, which becomes the one the agent runs on. The
+    /// transport has a runtime of its own, started here and stopped when this is dropped.
     #[cfg(feature = "grpc")]
-    pub async fn serve_grpc(&self, addr: impl Into<SocketAddr>) -> Result<(), tonic::transport::Error> {
-        tonic::transport::Server::builder()
-            .add_service(self.grpc_service())
-            .serve(addr.into())
-            .await
+    pub async fn serve_grpc(&self, addr: impl Into<SocketAddr>) -> std::io::Result<()> {
+        let router = self.grpc_router(tokio::runtime::Handle::current());
+        crate::grpc_bridge::server::serve(router, addr.into()).await
     }
 }
