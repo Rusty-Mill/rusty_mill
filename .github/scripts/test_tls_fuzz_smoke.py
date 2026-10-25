@@ -80,6 +80,23 @@ class TlsFuzzSmokeTests(unittest.TestCase):
         self.assertIn("run a --target x86_64-unknown-linux-gnu", run("a b", FUZZ_TARGET_TRIPLE="x86_64-unknown-linux-gnu").stdout)
         self.assertNotIn("--target", run("a b").stdout)
 
+    def test_features_are_passed_to_run_only_when_set(self) -> None:
+        out = run("a b", FUZZ_FEATURES="--no-default-features --features native").stdout
+        self.assertIn("run --no-default-features --features native a", out)
+        self.assertIn("args: run a --", run("a b").stdout)
+
+    def test_a_target_filter_runs_only_the_named_targets(self) -> None:
+        r = run("a b c", FUZZ_TARGETS="b")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("fuzz target b: ok", r.stdout)
+        self.assertNotIn("fuzz target a", r.stdout)
+        self.assertIn("1 targets, 0 failed", r.stdout)
+
+    def test_a_filter_naming_an_unknown_target_fails(self) -> None:
+        r = run("a b", FUZZ_TARGETS="z")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no fuzz target named z", r.stdout)
+
     def test_the_default_command_uses_the_pinned_toolchain_and_never_floating_nightly(self) -> None:
         pinned = run_default_command(FUZZ_TOOLCHAIN="nightly-2026-10-07")
         self.assertEqual(pinned[0], "cargo +nightly-2026-10-07 fuzz list")

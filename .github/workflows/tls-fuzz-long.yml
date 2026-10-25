@@ -1,0 +1,103 @@
+name: TLS fuzz (long run)
+
+# The long fuzz run of the evidence bar (docs/research/TLS-EVIDENCE-BAR.md,
+# Tier 1 item 3): every rusty_tls fuzz target, one job each, for a fixed time.
+# The default, 3 hours on each of 8 targets, is 24 CPU hours, the bar's
+# example. Manual only. The smoke job in ci.yml runs the same targets for 30 s.
+# A crash or a target that runs nothing fails its job; crashing inputs and the
+# grown corpus are uploaded either way.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds per target (one CPU each)"
+        required: true
+        default: "10800"
+      backend:
+        description: "Crypto backend"
+        required: true
+        default: native
+        type: choice
+        options: [native, ring]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  # Same dated nightly as the smoke job in ci.yml.
+  FUZZ_TOOLCHAIN: nightly-2026-10-07
+
+jobs:
+  targets:
+    name: list targets
+    runs-on: ubuntu-latest
+    outputs:
+      names: ${{ steps.list.outputs.names }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: list
+        shell: python
+        run: |
+          import json, os, tomllib
+          with open("crates/libs/net/rusty_tls/fuzz/Cargo.toml", "rb") as f:
+              names = [b["name"] for b in tomllib.load(f)["bin"]]
+          if len(names) < 8:
+              raise SystemExit(f"found {len(names)} fuzz targets, expected at least 8")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"names={json.dumps(names)}\n")
+
+  fuzz:
+    name: fuzz ${{ matrix.target }} (${{ inputs.backend }})
+    needs: targets
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.names) }}
+    runs-on: ubuntu-latest
+    # Six hours is the hosted-runner limit; leave room for the build.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        with:
+          tool: cargo-fuzz@0.13.2
+      - name: fuzz
+        shell: bash
+        # Inputs reach the script through the environment, never interpolated.
+        env:
+          SECONDS_PER_TARGET: ${{ inputs.seconds }}
+          BACKEND: ${{ inputs.backend }}
+          FUZZ_TARGETS: ${{ matrix.target }}
+          # The installed cargo-fuzz is a musl binary; see the smoke job.
+          FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu
+        run: |
+          case "$SECONDS_PER_TARGET" in
+            ''|*[!0-9]*) echo "::error::seconds must be a whole number"; exit 1 ;;
+          esac
+          if [ "$SECONDS_PER_TARGET" -gt 19800 ]; then
+            echo "::error::at most 19800 s per target fits the job limit"; exit 1
+          fi
+          export RUSTFLAGS="--cfg rusty_tls_handrolled"
+          if [ "$BACKEND" = native ]; then
+            RUSTFLAGS="$RUSTFLAGS --cfg rusty_tls_native_crypto"
+            export FUZZ_FEATURES="--no-default-features --features native"
+          fi
+          echo "commit $GITHUB_SHA, backend $BACKEND, $SECONDS_PER_TARGET s" >> "$GITHUB_STEP_SUMMARY"
+          bash .github/scripts/tls_fuzz_smoke.sh "$SECONDS_PER_TARGET" 8 | tee fuzz.log
+          status=${PIPESTATUS[0]}
+          { echo '```'; grep -E '^#[0-9]+ +DONE|Done [0-9]+ runs|fuzz target' fuzz.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: tls-fuzz-${{ inputs.backend }}-${{ matrix.target }}
+          path: |
+            fuzz.log
+            crates/libs/net/rusty_tls/fuzz/artifacts
+            crates/libs/net/rusty_tls/fuzz/corpus/${{ matrix.target }}
+          if-no-files-found: ignore

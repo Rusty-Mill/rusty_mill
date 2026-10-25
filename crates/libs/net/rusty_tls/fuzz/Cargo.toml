@@ -27,7 +27,18 @@ libfuzzer-sys = "0.4"
 
 [dependencies.rusty_tls]
 path = ".."
-features = ["handrolled-engine"]
+default-features = false
+
+# The crypto backend. `ring` is the default; `native` runs the engine on
+# first-party primitives and also needs `--cfg rusty_tls_native_crypto`
+# (ADR-0005), as everywhere else:
+#
+#   RUSTFLAGS='--cfg rusty_tls_handrolled --cfg rusty_tls_native_crypto' \
+#     cargo +nightly fuzz run --no-default-features --features native der_reader
+[features]
+default = ["ring"]
+ring = ["rusty_tls/handrolled-engine"]
+native = ["rusty_tls/native-crypto"]
 
 [[bin]]
 name = "der_reader"

@@ -12,7 +12,10 @@
 # directory holding the fuzz package; `FUZZ_TARGET_TRIPLE`, when set, is passed
 # as `--target`. cargo-fuzz otherwise builds for the target it was itself
 # compiled for, and the prebuilt binary CI installs is musl, whose std the
-# runner does not have. Deliberately no `set -e`: one failing
+# runner does not have. `FUZZ_FEATURES`, when set, is passed to `run` as
+# cargo arguments (the long run uses `--no-default-features --features native`).
+# `FUZZ_TARGETS`, when set, runs only those targets; each must be listed.
+# Deliberately no `set -e`: one failing
 # target must not hide the others.
 set -uo pipefail
 
@@ -40,9 +43,19 @@ if [ "$count" -lt "$min" ]; then
   exit 1
 fi
 
+if [ -n "${FUZZ_TARGETS:-}" ]; then
+  for t in $FUZZ_TARGETS; do
+    printf '%s\n' "$targets" | grep -qxF "$t" || { echo "::error::no fuzz target named $t"; exit 1; }
+  done
+  targets="$FUZZ_TARGETS"
+  count="$(wc -w <<<"$targets")"
+fi
+# shellcheck disable=SC2206 # deliberate word splitting of cargo arguments
+features=(${FUZZ_FEATURES:-})
+
 failed=0
 for t in $targets; do
-  out="$("${fuzz[@]}" run "$t" ${FUZZ_TARGET_TRIPLE:+--target "$FUZZ_TARGET_TRIPLE"} -- "-max_total_time=$secs" 2>&1)"
+  out="$("${fuzz[@]}" run "${features[@]}" "$t" ${FUZZ_TARGET_TRIPLE:+--target "$FUZZ_TARGET_TRIPLE"} -- "-max_total_time=$secs" 2>&1)"
   status=$?
   printf '%s\n' "$out" | tail -n 25
   if [ "$status" -ne 0 ]; then
