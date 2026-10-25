@@ -57,7 +57,7 @@ use rusty_oauth::{
     jwks::{Jwk, JwkSet},
     jwt::{decode_unverified, es256, rsa},
 };
-use tokio::sync::RwLock;
+use rusty_tokio::sync::RwLock;
 
 use super::token::{TokenError, TokenValidator, ValidateFuture, VerifiedToken};
 
@@ -650,7 +650,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn rate_limits_refetches_provoked_by_unknown_kids() {
         let cache = JwksCache {
             keys: Some(JwkSet { keys: vec![] }),
@@ -664,7 +664,7 @@ mod tests {
         assert!(!cache.may_refetch(DEFAULT_MIN_REFETCH_INTERVAL));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_cold_cache_always_permits_a_fetch() {
         let cache = JwksCache::default();
         assert!(!cache.is_fresh(DEFAULT_JWKS_TTL));

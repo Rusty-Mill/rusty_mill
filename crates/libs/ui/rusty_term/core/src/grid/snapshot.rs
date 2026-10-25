@@ -123,7 +123,7 @@ impl Grid {
     /// self-contained, versioned snapshot.
     pub fn encode_snapshot(&self) -> Vec<u8> {
         let screen_cells = self.cols * self.rows;
-        let history_cells: usize = self.scrollback.iter().map(|l| l.cells.len()).sum();
+        let history_cells: usize = self.scrollback.iter().map(|l| l.cells().len()).sum();
         let mut enc = Encoder {
             out: Vec::with_capacity(history_cells + screen_cells + 1024),
             styles: HashMap::new(),
@@ -255,9 +255,9 @@ impl Grid {
         g.autowrap = flags & FLAG_AUTOWRAP != 0;
         g.cursor_shape = cursor_shape;
         g.title = title;
-        g.clusters_arc = Arc::from(clusters.clone());
         g.links_arc = Arc::from(links.clone());
         (g.clusters, g.links) = (clusters, links);
+        g.rebuild_cluster_caches();
         g.scrollback_max = g.scrollback_max.max(history);
         g.scrollback = scrollback;
         g.primary = primary;
@@ -289,7 +289,7 @@ impl Encoder {
     /// A line as runs: [`MIN_REPEAT`] or more identical cells become a
     /// repeat run; other cells group into literal runs of one style.
     fn line(&mut self, line: &Line) {
-        let cells = &line.cells[..];
+        let cells = &line.cells();
         self.varint(cells.len() as u64);
         let wrapped = if line.wrapped { META_WRAPPED } else { 0 };
         self.out.push(wrapped | attr_code(line.attr) << 1);
@@ -482,11 +482,11 @@ impl Decoder<'_> {
                 }
             }
         }
-        Ok(Line {
+        Ok(Line::new(
             cells,
-            wrapped: meta & META_WRAPPED != 0,
-            attr: attr_from(meta >> 1)?,
-        })
+            meta & META_WRAPPED != 0,
+            attr_from(meta >> 1)?,
+        ))
     }
 
     fn style(&mut self) -> Result<Style> {

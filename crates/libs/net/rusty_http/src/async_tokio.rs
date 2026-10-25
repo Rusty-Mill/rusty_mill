@@ -12,7 +12,10 @@
 //! ecosystem's answer to that -- two parallel, independently-readable
 //! adapter modules, not one generic-over-blocking-ness one.
 
-use rusty_tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use rusty_tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::body::{
     self, ChunkedDecoder, Framing, Progress, DEFAULT_MAX_BODY_LEN, DEFAULT_MAX_LINE_LEN,
@@ -314,6 +317,69 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncTransport<T> {
         let data = self.buf[self.start..self.start + take].to_vec();
         self.start += take;
         Ok(data)
+    }
+}
+
+/// Replays `prefix` before resuming reads from `inner`: pairs with
+/// [`AsyncTransport::into_parts`] when bytes of the next protocol (after a
+/// `101 Switching Protocols`, say) arrived with the response head. Writes
+/// go straight to `inner`. The `rusty_tokio` twin of
+/// `tokio_native::Replay`.
+pub struct Replay<T> {
+    prefix: Vec<u8>,
+    pos: usize,
+    inner: T,
+}
+
+impl<T> Replay<T> {
+    /// Wraps `inner`, replaying `prefix` first.
+    pub fn new(prefix: Vec<u8>, inner: T) -> Self {
+        Replay {
+            prefix,
+            pos: 0,
+            inner,
+        }
+    }
+
+    /// Consumes `self`, returning the wrapped value; any prefix bytes not
+    /// yet replayed are dropped.
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for Replay<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.pos < self.prefix.len() {
+            let n = (self.prefix.len() - self.pos).min(buf.remaining());
+            let start = self.pos;
+            buf.put_slice(&self.prefix[start..start + n]);
+            self.pos += n;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for Replay<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
@@ -791,5 +857,27 @@ mod tests {
             }
         }
         assert!(saw_error, "expected the truncated chunked body to error");
+    }
+
+    #[rusty_tokio::test]
+    async fn replay_yields_prefix_then_falls_through_to_inner() {
+        let (mut feeder, reader) = duplex(64);
+        feeder.write_all(b"-more-after").await.unwrap();
+        drop(feeder);
+
+        let mut replay = Replay::new(b"prefix-".to_vec(), reader);
+        let mut got = Vec::new();
+        replay.read_to_end(&mut got).await.unwrap();
+        assert_eq!(got, b"prefix--more-after");
+    }
+
+    #[rusty_tokio::test]
+    async fn replay_writes_go_to_inner() {
+        let (near, mut far) = duplex(64);
+        let mut replay = Replay::new(b"unread".to_vec(), near);
+        replay.write_all(b"out").await.unwrap();
+        let mut buf = [0u8; 3];
+        far.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"out");
     }
 }

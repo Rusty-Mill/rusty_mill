@@ -73,7 +73,8 @@ mod client {
             .map_err(|e| e.to_string())?;
 
         conn.send(&Message::Hello {
-            features: Features::CHECKPOINT_V2,
+            features: Features::CHECKPOINT_V3,
+            resume: None,
         })
         .map_err(|e| e.to_string())?;
         let mut req = Requests {
@@ -156,7 +157,7 @@ mod client {
     impl Requests<'_> {
         fn welcome(&mut self) -> Result<(), String> {
             match self.conn.recv().map_err(|e| e.to_string())? {
-                Message::Welcome { features, .. } if features.contains(Features::CHECKPOINT_V2) => {
+                Message::Welcome { features, .. } if features.contains(Features::CHECKPOINT_V3) => {
                     Ok(())
                 }
                 Message::Welcome { .. } => Err("the server cannot send checkpoints".into()),
@@ -230,7 +231,10 @@ mod client {
                     }
                 }
                 Message::Output { block: b, data } if b == block => data,
-                Message::Event(rusty_mux_core::Event::BlockClosed { block: b }) if b == block => {
+                Message::Event {
+                    event: rusty_mux_core::Event::BlockClosed { block: b },
+                    ..
+                } if b == block => {
                     return Ended::Closed;
                 }
                 _ => continue,

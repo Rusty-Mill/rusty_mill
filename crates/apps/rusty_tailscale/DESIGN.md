@@ -21,7 +21,7 @@ deviation from the Go implementation's behavior, as they are made.
 5. **Ports-and-adapters.** `ts-engine` owns domain logic and speaks only to
    traits — `ControlClient`, `PacketConduit`, `TunDevice`, `Clock` — so every
    layer is testable without network or root.
-6. **tokio runtime; Linux first.** TUN mode needs `CAP_NET_ADMIN`; userspace
+6. **`rusty_tokio` runtime (tokio until #907); Linux first.** TUN mode needs `CAP_NET_ADMIN`; userspace
    (`ts-net`) mode runs unprivileged. Windows second, macOS third.
 7. **Typed state machines.** One `enum` per connection lifecycle so illegal
    states are unrepresentable.
@@ -69,8 +69,7 @@ tree.
 | Crate | Used by | Justification |
 |-------|---------|---------------|
 | `serde`, `serde_json` | ts-types, ts-cli | LocalAPI and control protocol payloads are JSON; hand-rolling JSON is not a good use of risk budget. |
-| `tokio` | ts-cli (net) | Async runtime decision fixed at project start. |
-| `hyper` + `hyper-util` + `http-body-util` (dev-dependency only, `ts-localapi`) | `ts-localapi/tests/roundtrip.rs` | No longer a runtime dependency anywhere (see the `rusty_http` row below) — kept as an independent HTTP/1.1 client in the LocalAPI server's own interop test, proving the migrated server is wire-compatible with a totally separate implementation rather than only ever talking to itself. |
+| `hyper` + `http-body-util` (dev-dependency only, `ts-localapi`) | `ts-localapi/tests/roundtrip.rs` | No longer a runtime dependency anywhere (see the `rusty_http` row below) — kept as an independent HTTP/1.1 client in the LocalAPI server's own interop test, proving the migrated server is wire-compatible with a totally separate implementation rather than only ever talking to itself. |
 | `thiserror` | all | Error ergonomics, zero runtime cost. |
 | `tracing` | daemon/engine | Structured logging; standard. |
 | `x25519-dalek`, `chacha20poly1305`, `blake2`, `hkdf` | ts-control | Noise IK primitives (hand-rolled controlbase); see Phase 2 decisions. |
@@ -136,7 +135,7 @@ revisited if the CLI surface grows), `hex` (two 30-line functions in ts-types),
   `Connection: close` semantics. Simplest correct thing.
 - **LocalAPI's client and server migrated onto `rusty_http`** (this session,
   after `ts-control`/`ts-derp` already had): `ts-cli/localapi.rs`'s
-  `request()` now writes/reads via `rusty_http::tokio_native::AsyncTransport`
+  `request()` now writes/reads via `rusty_http::async_tokio::AsyncTransport`
   instead of `hyper::client::conn::http1`; `ts-localapi`'s `serve()` gained a
   `serve_connection` loop over the same adapter's request-direction API
   (`read_request_head`/`write_response_head`) instead of
@@ -196,9 +195,9 @@ Full protocol notes are in `PROTOCOL.md` (the Phase-0 recon artifact); the
 - **`controlhttp.rs`'s HTTP/1.1 framing migrated onto `rusty_http`** (this
   session, ahead of any later phase): `fetch_control_key`'s `GET /key` and
   `dial`'s `POST /ts2021` upgrade now go through
-  `rusty_http::tokio_native::AsyncTransport` instead of hand-rolled
+  `rusty_http::async_tokio::AsyncTransport` instead of hand-rolled
   string-formatted requests and a byte-at-a-time response-head reader.
-  `dial`'s return type is now `Conn<rusty_http::tokio_native::Replay<TcpStream>>`
+  `dial`'s return type is now `Conn<rusty_http::async_tokio::Replay<TcpStream>>`
   rather than `Conn<TcpStream>` — `into_parts`/`Replay` is how any Noise
   bytes bundled with the upgrade response survive the switch to a buffered
   parser; `skip_early_payload` (client.rs) became generic over the Noise
@@ -248,7 +247,7 @@ First real connectivity. Full protocol notes in `PROTOCOL.md`; decisions here.
   daemon-hardening phase (Phase 6).
 - **`derp/client.rs`'s HTTP upgrade migrated onto `rusty_http`** (this
   session): `http_upgrade` now writes/reads the `GET /derp` request and its
-  `101` response via `rusty_http::tokio_native::AsyncTransport` instead of a
+  `101` response via `rusty_http::async_tokio::AsyncTransport` instead of a
   hand-rolled byte-at-a-time reader, and itself returns the split stream
   (`Replay<OwnedReadHalf>`, `OwnedWriteHalf`) rather than a plain `()` the
   caller then split itself. `into_parts`/`Replay` is what reclaims any

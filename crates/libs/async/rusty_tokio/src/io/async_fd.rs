@@ -33,6 +33,45 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+/// Why [`AsyncFd::register`] failed, with the object it was given.
+pub struct AsyncFdRegisterError<T> {
+    inner: T,
+    cause: io::Error,
+}
+
+impl<T> AsyncFdRegisterError<T> {
+    /// The object passed to `register`, and the error.
+    pub fn into_parts(self) -> (T, io::Error) {
+        (self.inner, self.cause)
+    }
+}
+
+impl<T> std::fmt::Debug for AsyncFdRegisterError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncFdRegisterError")
+            .field("cause", &self.cause)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> std::fmt::Display for AsyncFdRegisterError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.cause.fmt(f)
+    }
+}
+
+impl<T> std::error::Error for AsyncFdRegisterError<T> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
+impl<T> From<AsyncFdRegisterError<T>> for io::Error {
+    fn from(e: AsyncFdRegisterError<T>) -> io::Error {
+        e.cause
+    }
+}
+
 /// An arbitrary caller-owned I/O object, registered with this crate's
 /// reactor for readiness notifications. See the module docs.
 pub struct AsyncFd<T: AsRawFd> {
@@ -68,9 +107,48 @@ impl<T: AsRawFd> AsyncFd<T> {
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
     pub fn with_interest(inner: T, interest: Interest) -> io::Result<Self> {
+        Self::try_register(inner, interest).map_err(|(_, e)| e)
+    }
+
+    /// As tokio's: [`new`](Self::new) with the I/O-safety contract stated,
+    /// handing `inner` back on failure. tokio deprecated `new` for this.
+    ///
+    /// # Safety
+    /// `inner.as_raw_fd()` must return a valid, open file descriptor, the
+    /// same one on every call, that stays open until this `AsyncFd` is
+    /// dropped, [`into_inner`](Self::into_inner)ed or forgotten.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub unsafe fn register(inner: T) -> Result<Self, AsyncFdRegisterError<T>> {
+        // SAFETY: the caller upholds this function's contract, which is
+        // `register_with_interest`'s.
+        unsafe { Self::register_with_interest(inner, Interest::READABLE | Interest::WRITABLE) }
+    }
+
+    /// [`register`](Self::register) with an explicit `interest`, as
+    /// [`with_interest`](Self::with_interest).
+    ///
+    /// # Safety
+    /// As [`register`](Self::register).
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub unsafe fn register_with_interest(
+        inner: T,
+        interest: Interest,
+    ) -> Result<Self, AsyncFdRegisterError<T>> {
+        Self::try_register(inner, interest)
+            .map_err(|(inner, cause)| AsyncFdRegisterError { inner, cause })
+    }
+
+    fn try_register(inner: T, interest: Interest) -> Result<Self, (T, io::Error)> {
         let fd = inner.as_raw_fd();
         let reactor = Handle::current().shared.reactor.clone();
-        let io = reactor.register(fd)?;
+        let io = match reactor.register(fd) {
+            Ok(io) => io,
+            Err(e) => return Err((inner, e)),
+        };
         Ok(AsyncFd {
             inner: Some(inner),
             fd,

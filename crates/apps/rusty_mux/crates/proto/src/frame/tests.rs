@@ -3,8 +3,8 @@ use rusty_uuid::Uuid;
 use rusty_wire::Writer;
 
 use super::*;
-use crate::Features;
 use crate::field::Out;
+use crate::{Cursor, Features};
 
 const REQ_ID: u32 = 1;
 
@@ -44,6 +44,14 @@ fn every_message_round_trips() {
         },
         Message::Hello {
             features: Features::from_bits(0b101),
+            resume: None,
+        },
+        Message::Hello {
+            features: Features::EVENT_SEQ,
+            resume: Some(Cursor {
+                epoch: block.uuid(),
+                seq: u64::MAX,
+            }),
         },
         Message::CreateSession {
             req: 1,
@@ -77,6 +85,15 @@ fn every_message_round_trips() {
         Message::Welcome {
             features: Features::NONE,
             client,
+            cursor: None,
+        },
+        Message::Welcome {
+            features: Features::EVENT_SEQ,
+            client,
+            cursor: Some(Cursor {
+                epoch: client.uuid(),
+                seq: 0,
+            }),
         },
         Message::Done {
             req: 11,
@@ -140,7 +157,14 @@ fn every_event_round_trips() {
         },
     ];
     for event in events {
-        round_trip(Message::Event(event));
+        round_trip(Message::Event {
+            seq: None,
+            event: event.clone(),
+        });
+        round_trip(Message::Event {
+            seq: Some(7),
+            event,
+        });
     }
 }
 
@@ -198,7 +222,8 @@ fn decode_state_is_bounded_by_ids_not_by_field_count() {
     assert_eq!(
         decode(&unknown).unwrap().unwrap().0,
         Message::Hello {
-            features: Features::NONE
+            features: Features::NONE,
+            resume: None,
         }
     );
     // A known id repeated: the last occurrence wins.
@@ -210,7 +235,8 @@ fn decode_state_is_bounded_by_ids_not_by_field_count() {
     assert_eq!(
         decode(&repeated).unwrap().unwrap().0,
         Message::Hello {
-            features: Features::from_bits(REPEATS)
+            features: Features::from_bits(REPEATS),
+            resume: None,
         }
     );
 }
@@ -370,7 +396,8 @@ fn near_limit_unknown_and_duplicate_fields_decode_last_value() {
             decode(&frame),
             Ok(Some((
                 Message::Hello {
-                    features: Features::from_bits(42)
+                    features: Features::from_bits(42),
+                    resume: None,
                 },
                 frame.len()
             )))
@@ -424,4 +451,49 @@ fn maximum_size_snapshot_still_round_trips() {
     let frame = encode(&message).unwrap();
     assert_eq!(frame.len(), MAX_FRAME as usize + 4);
     assert_eq!(decode(&frame), Ok(Some((message, frame.len()))));
+}
+
+#[test]
+fn a_cursor_needs_both_its_fields() {
+    const EPOCH_ID: u32 = 17;
+    const SEQ_ID: u32 = 18;
+    let seq_only = raw_frame(0x01, |o| {
+        o.varint(10, 0).varint(SEQ_ID, 3);
+    });
+    assert_eq!(
+        decode(&seq_only),
+        Err(Error::MissingField {
+            message: 0x01,
+            field: EPOCH_ID
+        })
+    );
+    let epoch_only = raw_frame(0x81, |o| {
+        o.varint(10, 0)
+            .uuid(5, Uuid::nil())
+            .uuid(EPOCH_ID, Uuid::nil());
+    });
+    assert_eq!(
+        decode(&epoch_only),
+        Err(Error::MissingField {
+            message: 0x81,
+            field: SEQ_ID
+        })
+    );
+}
+
+#[test]
+fn feature_bits_are_distinct() {
+    let all = [
+        Features::REPLAY_SNAPSHOT,
+        Features::CHECKPOINT_V1,
+        Features::CHECKPOINT_V2,
+        Features::CHECKPOINT_V3,
+        Features::EVENT_SEQ,
+    ];
+    let mut seen = 0u64;
+    for feature in all {
+        assert_eq!(feature.bits().count_ones(), 1, "{feature:?}");
+        assert_eq!(seen & feature.bits(), 0, "{feature:?} reuses a bit");
+        seen |= feature.bits();
+    }
 }

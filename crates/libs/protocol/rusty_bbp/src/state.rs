@@ -1,5 +1,6 @@
 //! `TaskState`: the indexed fold over events that rules consult. `Card` is its projection.
 
+use crate::coedit::{Doc, LineId, Version};
 use crate::command::Response;
 use crate::event::{EscalateReason, Event};
 use crate::ids::*;
@@ -8,6 +9,7 @@ use crate::record::*;
 use crate::role::{Cap, Role, Roster, Stage};
 use rusty_serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum State {
@@ -226,6 +228,10 @@ pub struct TaskState {
     pub revoked_runs: HashSet<RunId>,
     pub next_run: u64,
     pub artifacts: BTreeMap<ArtId, ArtifactRecord>,
+    /// Co-edited spec versions, by artifact id.
+    pub versions: BTreeMap<ArtId, Version>,
+    /// Each co-edited spec's latest version, keyed by its first.
+    pub heads: HashMap<ArtId, ArtId>,
     pub messages: Vec<Message>,
     /// Live turns in grant order, at most one per role and `max_live_turns` in all.
     pub turns: Vec<Turn>,
@@ -292,6 +298,8 @@ impl TaskState {
             revoked_runs: HashSet::new(),
             next_run: 1,
             artifacts: BTreeMap::new(),
+            versions: BTreeMap::new(),
+            heads: HashMap::new(),
             messages: Vec::new(),
             turns: Vec::new(),
             next_turn: 1,
@@ -510,6 +518,52 @@ impl TaskState {
         ArtId(self.artifacts.len() as u64 + 1)
     }
 
+    /// The text of a co-edited spec version.
+    pub fn doc(&self, id: ArtId) -> Option<&Doc> {
+        self.versions.get(&id).map(|v| &*v.doc)
+    }
+
+    /// The latest version of the co-edited spec `base` belongs to, and the
+    /// anchors of every version accepted after `base`, oldest first.
+    pub fn since(&self, base: ArtId) -> Option<(ArtId, Vec<Option<LineId>>)> {
+        let head = *self.heads.get(&self.versions.get(&base)?.root)?;
+        let mut chain = Vec::new();
+        let mut at = head;
+        while at != base {
+            let v = self.versions.get(&at)?;
+            chain.push(v.anchors.clone());
+            at = v.prev?;
+        }
+        let anchors = chain.iter().rev().flat_map(|a| a.iter().copied()).collect();
+        Some((head, anchors))
+    }
+
+    /// Index a co-edited version: applied on its spec's head, or on nothing
+    /// when it starts a spec. The engine admits only edits whose anchors
+    /// exist, so a log it wrote always applies; one that does not is left
+    /// unindexed rather than guessed at, and any edit on it is then refused.
+    fn add_version(&mut self, id: ArtId, e: &crate::coedit::SpecEdit) {
+        let (root, prev) = match e.base.and_then(|b| self.versions.get(&b)) {
+            Some(b) => (b.root, self.heads.get(&b.root).copied()),
+            None => (id, None),
+        };
+        let empty = Doc::default();
+        let on = prev.and_then(|p| self.doc(p)).unwrap_or(&empty);
+        let Ok(doc) = on.apply(id, &e.ops) else {
+            return;
+        };
+        self.versions.insert(
+            id,
+            Version {
+                root,
+                prev,
+                doc: Arc::new(doc),
+                anchors: e.ops.iter().map(|op| op.anchor()).collect(),
+            },
+        );
+        self.heads.insert(root, id);
+    }
+
     pub fn message(&self, id: MsgId) -> Option<&Message> {
         self.messages.get(id.0.checked_sub(1)? as usize)
     }
@@ -707,6 +761,9 @@ impl TaskState {
                             _ => {}
                         }
                     }
+                }
+                if let ArtifactPayload::SpecEdit(e) = &a.payload {
+                    self.add_version(a.id, e);
                 }
                 self.art_rev.insert(a.id, self.rev);
                 self.artifacts.insert(a.id, a.clone());

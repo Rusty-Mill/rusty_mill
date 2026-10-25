@@ -5,7 +5,7 @@
 //! [`UdpSocket::send_to`](super::UdpSocket::send_to) accept -- not just a
 //! concrete [`SocketAddr`], but a `"host:port"` string, an `(&str, u16)`
 //! pair, a reference to any of these, or anything else covered below,
-//! resolved via the existing [`lookup_host`] (itself a
+//! resolved via the existing [`lookup_host`](super::lookup_host) (itself a
 //! [`crate::spawn_blocking`] round trip -- DNS resolution is genuinely
 //! blocking, no portable non-blocking `getaddrinfo` exists) for whichever
 //! forms actually need it. An IP literal skips the lookup. Mirrors
@@ -23,7 +23,7 @@
 //! docs give for using `-> impl Future + Send` rather than a plain
 //! `async fn` here too.
 
-use super::lookup_host;
+use super::lookup::resolve;
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -39,6 +39,13 @@ mod sealed {
 
         fn to_socket_addrs(&self) -> impl Future<Output = io::Result<Self::Iter>> + Send;
     }
+}
+
+/// Resolves `addr` to all its candidates; backs [`super::lookup_host`].
+pub(crate) async fn resolve_all(
+    addr: &(impl ToSocketAddrs + ?Sized),
+) -> io::Result<impl Iterator<Item = SocketAddr>> {
+    sealed::ToSocketAddrsSealed::to_socket_addrs(addr).await
 }
 
 /// Resolves `addr` and returns the first candidate `attempt` accepts,
@@ -82,7 +89,7 @@ impl<T: sealed::ToSocketAddrsSealed + ?Sized + Sync> sealed::ToSocketAddrsSealed
 }
 
 /// A single already-known address, wrapped to implement `Iterator` --
-/// backs every impl below that doesn't need [`lookup_host`] at all
+/// backs every impl below that doesn't need [`lookup_host`](super::lookup_host) at all
 /// (nothing to resolve -- it's already a concrete address).
 #[doc(hidden)]
 pub struct Once(std::option::IntoIter<SocketAddr>);
@@ -172,7 +179,7 @@ impl sealed::ToSocketAddrsSealed for str {
             if let Some(addr) = fast {
                 return Ok(super::LookupHost::single(addr));
             }
-            lookup_host(owned).await
+            resolve(owned).await
         }
     }
 }
@@ -202,7 +209,7 @@ impl sealed::ToSocketAddrsSealed for (&str, u16) {
             if let Some(addr) = fast {
                 return Ok(super::LookupHost::single(addr));
             }
-            lookup_host(owned).await
+            resolve(owned).await
         }
     }
 }
@@ -224,7 +231,7 @@ impl sealed::ToSocketAddrsSealed for (String, u16) {
             if let Some(addr) = fast {
                 return Ok(super::LookupHost::single(addr));
             }
-            lookup_host(owned).await
+            resolve(owned).await
         }
     }
 }

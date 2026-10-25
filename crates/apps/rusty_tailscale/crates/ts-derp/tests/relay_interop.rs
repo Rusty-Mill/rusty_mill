@@ -10,12 +10,12 @@ use ts_key::NodePrivate;
 const DERP_URL: &str = "http://127.0.0.1:8080";
 
 async fn relay_reachable() -> bool {
-    tokio::net::TcpStream::connect("127.0.0.1:8080")
+    rusty_tokio::net::TcpStream::connect("127.0.0.1:8080")
         .await
         .is_ok()
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn relay_packet_between_two_clients() {
     if !relay_reachable().await {
         eprintln!("SKIPPED: no DERP relay on 127.0.0.1:8080 (run interop/up.sh)");
@@ -38,7 +38,7 @@ async fn relay_packet_between_two_clients() {
     assert_eq!(client_a.server_key(), client_b.server_key());
 
     // Give the server a moment to register both clients' presence.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    rusty_tokio::time::sleep(Duration::from_millis(200)).await;
 
     let msg = b"wireguard-over-derp payload".to_vec();
     client_a
@@ -46,7 +46,7 @@ async fn relay_packet_between_two_clients() {
         .await
         .expect("A sends to B");
 
-    let got = tokio::time::timeout(Duration::from_secs(5), client_b.recv())
+    let got = rusty_tokio::time::timeout(Duration::from_secs(5), client_b.recv())
         .await
         .expect("B receives before timeout")
         .expect("B receives a packet");
@@ -55,7 +55,7 @@ async fn relay_packet_between_two_clients() {
     assert_eq!(got.peer, pub_a, "source key is A");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn connect_learns_server_key() {
     if !relay_reachable().await {
         eprintln!("SKIPPED: no DERP relay on 127.0.0.1:8080");

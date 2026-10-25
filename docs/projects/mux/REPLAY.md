@@ -1,4 +1,4 @@
-# Phase 1 attach: RTCP v2 headless checkpoints
+# Phase 1 attach: RTCP v3 headless checkpoints
 
 The former experimental RMRP lifetime replay mechanism is removed. There is
 no cumulative output cutoff, no replay log, and no reduction of the engine's
@@ -8,9 +8,11 @@ output, subject to current-state memory limits.
 
 ## Negotiation and transfer
 
-`Features::CHECKPOINT_V2` is bit 2 (value 4). Bits 0 and 1 are reserved for
-rejected RMRP replay and incomplete RTCP v1 respectively; neither enables attach.
-Hello/Welcome negotiate bit 2; Attach without it returns Failed. Existing frame layouts and the drawable
+`Features::CHECKPOINT_V3` is bit 3 (value 8). Bits 0, 1 and 2 are reserved for
+rejected RMRP replay, incomplete RTCP v1 and superseded fixed-width RTCP v2
+respectively; none enables attach. Hello/Welcome negotiate bit 3; Attach
+without it returns Failed. No released client spoke v2, so the server does not
+offer it. Existing frame layouts and the drawable
 RTSN v1 API remain unchanged.
 
 A successful attach sends Done, then ordered `Checkpoint` messages (type `0x88`),
@@ -36,11 +38,11 @@ reader/writer futures and socket halves. It does not modify the block or its
 ability to produce a fresh checkpoint for another attach. A blocked non-reading
 peer cannot retain the transfer indefinitely after eviction.
 
-## RTCP v2 binary format
+## RTCP v3 binary format
 
 The codec is `rusty_term_core::checkpoint::{encode,decode}`. Magic `RTCP` is
-followed by version byte `2`, then Grid fields and AnsiParser fields in the
-explicit order in their `Wire` implementations. Field order is part of v2;
+followed by version byte `3`, then Grid fields and AnsiParser fields in the
+explicit order in their `Wire` implementations. Field order is part of v3;
 changing it or its meaning requires another version. This is an independent
 continuation format, not a reinterpretation of RTSN's drawable snapshot.
 
@@ -54,6 +56,15 @@ continuation format, not a reinterpretation of RTSN's drawable snapshot.
   saved screens, palettes, image frames and transmissions use the corresponding
   explicit `fields!` order. These lists are the authoritative schema beside
   the types they encode; they never serialize Rust object memory or pointers.
+- A line is a LEB128 varint cell count (at most 4096, checked before
+  allocating), then runs that cover exactly that many cells, then the wrapped
+  flag and line attribute. A run is a style reference, a varint
+  `len << 1 | repeat`, then one UTF-8 scalar repeated `len` times or `len`
+  UTF-8 scalars. A style is every Cell field but `ch`, in Cell's field order.
+  Style reference 0 defines the next style in a per-checkpoint table; `i + 1`
+  reuses entry `i`. The writer uses a repeat run for four or more identical
+  cells. Zero-length runs, runs past the count, unknown style indices, varint
+  overflow and invalid UTF-8 fail.
 - Process-local timer Instants store elapsed seconds u64 and nanoseconds u32 at
   capture, rebased at restore. Transfer latency is excluded from timer ages.
 - Unknown versions, trailing bytes, truncation, invalid values/indices and
@@ -72,9 +83,30 @@ Front-end selection/search/folds, render caches and spare allocations, pending
 host clipboard/notification/bell effects, and L13 application channel state are
 outside this *headless VT* profile. Pixel overlays present only in GUI builds
 are front-end state; headless Sixel/iTerm display cells and Kitty stored pixels
-are preserved. Enabling a library feature does not change RTCP v2's schema.
+are preserved. Enabling a library feature does not change RTCP v3's schema.
 The Phase 1 server does not enable GUI or L13. Clients must not treat RTCP as a
 GUI/L13 session checkpoint or replay host actions during restore.
+
+## Size and speed
+
+Fixed-width v2 cells cost 22 bytes each, so a 200x50 terminal with 10,000
+history rows checkpointed to 44.3 MB. Run encoding brings it to the drawable
+RTSN snapshot's size. Measured in release builds on one machine, the best of
+15 runs in each of three sessions, on 12,000 lines of eight-colour text with
+ragged tails:
+
+| Grid | v2 size | v3 size | RTSN v1 | v2 encode | v3 encode | v2 decode | v3 decode |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 120x40 + 10k | 26.61 MB | 0.62 MB | 0.63 MB | 29.1 ms | 9.5 ms | 20.7 ms | 11.7 ms |
+| 200x50 + 10k | 44.32 MB | 0.64 MB | 0.65 MB | 67.3 ms | 18.9 ms | 45.1 ms | 24.6 ms |
+
+Encoding still runs under the server's state borrow, so its time is a stall
+for the server's other blocks. Most of it is the per-cell run scan; the
+existing pre-encode grid validation is about a fifth.
+`coloured_history_checkpoint_stays_compact` fails if the 200x50 case grows
+past twice the RTSN size.
+Incremental deltas for reconnecting clients are designed in
+[DELTA.md](DELTA.md) and not built.
 
 ## Limits
 
@@ -99,7 +131,8 @@ to KILL after one second, and reaps it. Setup/teardown fallback kills and waits.
 ## Durable-field audit
 
 The review correction adds cursor_visible symmetrically after tab_stops in the
-Grid schema and uses version 2/capability bit 2 so old v1 layouts fail closed.
+Grid schema and used version 2/capability bit 2 so old v1 layouts fail closed;
+v3 (bit 3) changes only the line encoding, so v2 layouts fail closed too.
 An independent inventory test covers all 87 Grid fields: 60 durable fields are
 encoded and decoded, and 27 excluded fields have explicit profile reasons.
 Exclusions are rebuildable caches/allocations, client view/render configuration,

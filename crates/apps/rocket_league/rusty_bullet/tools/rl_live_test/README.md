@@ -46,10 +46,15 @@ so scrub them before sharing.
   and the log path to `%USERPROFILE%\OneDrive\Documents\My Games\Rocket League\TAGame\Logs`.
   These are machine-specific; inspect `rl-lib.ps1` before running elsewhere.
 - Preflight refuses existing game/bot/bridge processes. Cleanup uses only retained native handles,
-  never matching process names. Epic URL activation commonly delegates through an existing launcher:
-  if a direct child of the retained, still-live launch process cannot be verified, the run aborts,
-  leaves the unowned game alone, and requires manual operator cleanup. No assumption that a newly
-  appeared process belongs to this run is safe. This restriction may prevent automated Epic startup.
+  never matching process names. Bootstrap adoption requires a direct child of this run's retained,
+  still-live launch process, the expected image, creation after that launch, and a matching Init
+  command line. Its native handle is pinned and its identity rechecked before adoption.
+  Epic URL activation normally delegates through `EpicGamesLauncher.exe`; that parent, a recent
+  creation time and a matching shared `Launch.log` line cannot prove this invocation launched the
+  game. Delegated launches therefore abort without adopting or stopping the game. The operator
+  must close the bootstrap game manually before retrying; ordinary delegated Epic startup remains
+  unavailable until launch-specific correlation is implemented. There is no automatic cleanup
+  or ownership override for the unowned game. Errors never include the command line.
 - The watcher uses separate .NET argument entries (including paths with spaces), a readiness file,
   and an exit check before cleanup. A failed watcher marks the timeline incomplete.
 - Every analyzer has a passed/failed/skipped status; native nonzero exit codes or missing inputs

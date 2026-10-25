@@ -10,9 +10,9 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
-use tokio::process::Command;
+use rusty_tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use rusty_tokio::net::TcpStream;
+use rusty_tokio::process::Command;
 use ts_control::controlbase;
 use ts_key::MachinePrivate;
 
@@ -43,7 +43,7 @@ async fn ensure_server_binary() -> Option<PathBuf> {
     status.success().then_some(bin)
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn handshake_and_echo_against_real_go_controlbase() {
     let Some(bin) = ensure_server_binary().await else {
         eprintln!("SKIPPED: no Go toolchain and no prebuilt noise-server-go binary");
@@ -98,7 +98,7 @@ async fn handshake_and_echo_against_real_go_controlbase() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn wrong_control_key_fails_cleanly() {
     let Some(bin) = ensure_server_binary().await else {
         eprintln!("SKIPPED: no Go toolchain and no prebuilt noise-server-go binary");
@@ -123,7 +123,7 @@ async fn wrong_control_key_fails_cleanly() {
     let machine_key = MachinePrivate::generate();
     let wrong_key = MachinePrivate::generate().public().0;
     let tcp = TcpStream::connect(addr).await.expect("connect");
-    let res = tokio::time::timeout(
+    let res = rusty_tokio::time::timeout(
         std::time::Duration::from_secs(10),
         controlbase::connect(tcp, &machine_key, &wrong_key, PROTOCOL_VERSION),
     )

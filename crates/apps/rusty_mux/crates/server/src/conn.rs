@@ -17,14 +17,14 @@ pub(crate) async fn run(state: Shared, stream: UnixStream) {
     let (mut rd, wr) = stream.into_split();
     let mut frames = Frames::default();
 
-    let features = match frames.next(&mut rd).await {
-        Ok(Some(Message::Hello { features })) => features,
+    let (features, resume) = match frames.next(&mut rd).await {
+        Ok(Some(Message::Hello { features, resume })) => (features, resume),
         Ok(Some(other)) => return eprintln!("rusty-mux-server: expected Hello, got {other:?}"),
         Ok(None) => return,
         Err(err) => return eprintln!("rusty-mux-server: handshake: {err}"),
     };
     let (out, inbox, cancel) = outbox();
-    let client = state.borrow_mut().connect(out, features);
+    let client = state.borrow_mut().connect(out, features, resume);
     // One owning future races both halves and eviction. Dropping the losing
     // futures closes both socket halves and discards the receiver/backlog,
     // including a writer currently blocked inside write_all.
@@ -135,7 +135,8 @@ mod regression {
             let (peer, server) = UnixStream::pair().unwrap();
             peer.write_all(
                 &encode(&Message::Hello {
-                    features: Features::CHECKPOINT_V2,
+                    features: Features::CHECKPOINT_V3,
+                    resume: None,
                 })
                 .unwrap(),
             )

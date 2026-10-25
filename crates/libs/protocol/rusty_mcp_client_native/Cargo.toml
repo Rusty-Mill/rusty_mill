@@ -38,6 +38,8 @@ rusty_serve = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
 axum = { workspace = true }
 serde_json = "1"
+# Hosts the `rmcp` server above, and runs `async_client`, which checks the client on
+# the executor its consumers use. The library itself is on `rusty_tokio` (#906).
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net"] }
 
 [lints.rust]

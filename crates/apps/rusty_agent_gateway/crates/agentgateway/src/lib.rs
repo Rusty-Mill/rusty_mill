@@ -7,7 +7,9 @@
 //! The binary is a thin wrapper over [`gateway::Gateway`] and [`serve`], so
 //! integration tests can drive the same data plane the binary runs.
 
+pub mod body;
 pub mod gateway;
+mod mcp_service;
 pub mod serve;
 pub mod telemetry;
 

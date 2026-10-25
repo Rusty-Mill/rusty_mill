@@ -82,7 +82,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     Ok(Args { socket, command })
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[rusty_tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse_args(&argv) {

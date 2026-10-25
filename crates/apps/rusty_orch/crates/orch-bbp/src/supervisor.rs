@@ -95,7 +95,9 @@ impl Supervisor for StdSupervisor {
                 .arg("--slots")
                 .arg(&slots.dir)
                 .args(["--agent-slots", &slots.agents.to_string()])
-                .args(["--validator-slots", &slots.validators.to_string()]);
+                .args(["--validator-slots", &slots.validators.to_string()])
+                .arg("--claim")
+                .arg(agents.with_file_name(crate::CLAIM));
         }
         if let Some(secs) = config.end_grace_secs {
             command.args(["--end-grace-secs", &secs.to_string()]);

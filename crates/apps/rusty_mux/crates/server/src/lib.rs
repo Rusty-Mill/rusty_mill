@@ -2,10 +2,14 @@
 //!
 //! The server owns one PTY per block and feeds its output to a server-side
 //! `rusty_term_core` grid, so a client that attaches gets a snapshot of the
-//! terminal (negotiated RTCP v2 checkpoint chunks), then a ready frame and
+//! terminal (negotiated RTCP v3 checkpoint chunks), then a ready frame and
 //! raw PTY bytes. Every attached client
 //! parses those bytes itself; the server never re-renders. Input reaches a
 //! PTY only from the client holding that block's lease ([`rusty_mux_core`]).
+//!
+//! Every model change is broadcast as an event. With `EVENT_SEQ` events are
+//! numbered, and a client that reconnects with the last number it saw gets
+//! the events it missed, if the server still holds them (the newest 4096).
 //!
 //! Everything runs on one thread (`rusty_tokio`'s `LocalRuntime`), so the
 //! model, the grids and the client queues are plain `Rc<RefCell<_>>` state
@@ -16,6 +20,8 @@
 pub mod checkpoint;
 #[cfg(target_os = "linux")]
 mod conn;
+#[cfg(target_os = "linux")]
+mod history;
 #[cfg(target_os = "linux")]
 mod outbox;
 #[cfg(target_os = "linux")]

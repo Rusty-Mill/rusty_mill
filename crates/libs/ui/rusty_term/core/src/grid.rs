@@ -5,17 +5,17 @@
 //! …) that the [`AnsiParser`](super::parser::AnsiParser) drives, and produces a
 //! [`DirtyFrame`] snapshot for the renderer.
 
-#[cfg(any(test, feature = "gui"))]
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, OnceLock};
 
 use super::cell::{Cell, DEFAULT_BG, DEFAULT_FG, Pen, WIDE_TRAILER, char_width};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::sixel::SixelImage;
 
+mod line;
 mod snapshot;
+pub(crate) use line::Line;
 #[cfg(test)]
 mod stamp_tests;
 pub use snapshot::SnapshotError;
@@ -422,6 +422,11 @@ pub struct Grid {
     /// reuse on the next entry, so an app that toggles the alternate screen
     /// does not allocate a row per switch. Empty until first use.
     spare_screen: Vec<Line>,
+    /// One row of blank cells that [`Line::clear`] copies from, so blanking a
+    /// row is a single `memcpy` instead of a per-cell store loop (the bulk of
+    /// a line feed's cost). Uniform by construction; refreshed by
+    /// [`Grid::prime_blank_row`] when the width or the fill cell changes.
+    blank_row: Vec<Cell>,
     /// Monotonic counter bumped on every parsed batch; lets the renderer
     /// reason about frame freshness.
     pub epoch: u64,
@@ -483,8 +488,16 @@ pub struct Grid {
     /// to `clusters[n - 1]` (`0` means a lone `ch`). Append-only and bounded by
     /// [`CLUSTER_MAX`], so ids stay stable for cells held in scrollback.
     pub clusters: Vec<String>,
-    /// `Arc` snapshot of `clusters`, mirroring `links_arc`.
-    pub(crate) clusters_arc: Arc<[String]>,
+    /// `Arc` snapshot of `clusters`, mirroring `links_arc` but built on the
+    /// first frame after the table grows, not on every insert: a burst of new
+    /// clusters between two frames costs one copy of the table, not one each.
+    clusters_arc: OnceLock<Arc<[String]>>,
+    /// Id of each `clusters` entry, so interning a combining mark is one hash
+    /// lookup instead of a scan of the table.
+    cluster_ids: HashMap<String, u16>,
+    /// Reused buffer for the grown continuation in `append_to_glyph`, so a
+    /// mark whose continuation is already interned allocates nothing.
+    cluster_scratch: String,
     /// The hyperlink id stamped onto cells written while an OSC 8 link is open
     /// (`0` when none). Set by the parser via [`Grid::set_link`].
     current_link: u16,
@@ -841,43 +854,6 @@ struct SavedScreen {
     mode: AltMode,
 }
 
-/// One row of cells, on the live screen or in scrollback. The same value moves
-/// from the screen into history when it scrolls off the top, and an evicted
-/// history line is recycled as the new bottom row, so a scroll moves no cells.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Line {
-    /// The row's cells: exactly `cols` on the live screen; a history line keeps
-    /// the width it had when it left the screen until the next reflow.
-    pub cells: Vec<Cell>,
-    /// Soft wrap: set when DECAWM autowrap overflowed this row into the next,
-    /// marking the two as one logical line. A *hard* line break (LF, NEL, IND)
-    /// leaves it clear. The reflow uses it to rejoin wrapped runs on resize.
-    pub wrapped: bool,
-    /// Line size (DECDWL/DECDHL). The renderer relays it to the host. Always
-    /// [`LineAttr::Single`] in scrollback: a double-width line is meaningless
-    /// once scrolled off.
-    pub attr: LineAttr,
-}
-
-impl Line {
-    /// A row of `cols` copies of `fill`, unwrapped and single-width.
-    fn blank(cols: usize, fill: Cell) -> Self {
-        Line {
-            cells: vec![fill; cols],
-            wrapped: false,
-            attr: LineAttr::Single,
-        }
-    }
-
-    /// Reset to [`Line::blank`] in place, reusing the cell allocation.
-    fn clear(&mut self, cols: usize, fill: Cell) {
-        self.cells.clear();
-        self.cells.resize(cols, fill);
-        self.wrapped = false;
-        self.attr = LineAttr::Single;
-    }
-}
-
 /// A `rows`-high screen of [`Line::blank`] rows.
 /// A process-unique [`Grid`] id.
 fn next_grid_id() -> u64 {
@@ -896,8 +872,8 @@ fn blank_screen(cols: usize, rows: usize, fill: Cell) -> Vec<Line> {
 fn reflow_clip(old: &[Line], cols: usize, rows: usize) -> Vec<Line> {
     let mut new = blank_screen(cols, rows, Cell::blank());
     for (dst, src) in new.iter_mut().zip(old) {
-        let n = cols.min(src.cells.len());
-        dst.cells[..n].copy_from_slice(&src.cells[..n]);
+        let n = cols.min(src.cells().len());
+        dst.cells_mut()[..n].copy_from_slice(&src.cells()[..n]);
     }
     new
 }
@@ -998,13 +974,13 @@ fn reflow_history(
     let phys = |i: usize| -> (&[Cell], bool, LineAttr) {
         if i < hist {
             (
-                &scrollback[i].cells,
+                scrollback[i].cells(),
                 scrollback[i].wrapped,
                 LineAttr::Single,
             )
         } else {
             let line = &screen[i - hist];
-            (&line.cells, line.wrapped, line.attr)
+            (line.cells(), line.wrapped, line.attr)
         }
     };
 
@@ -1155,17 +1131,9 @@ fn reflow_history(
             continue; // oldest history beyond the scrollback cap
         }
         if r < screen_top {
-            new_scrollback.push_back(Line {
-                cells: row,
-                wrapped: out_wrapped[r],
-                attr: LineAttr::Single,
-            });
+            new_scrollback.push_back(Line::new(row, out_wrapped[r], LineAttr::Single));
         } else if r < screen_top + new_rows {
-            new_screen.push(Line {
-                cells: row,
-                wrapped: out_wrapped[r],
-                attr: out_attr[r],
-            });
+            new_screen.push(Line::new(row, out_wrapped[r], out_attr[r]));
         }
         // r >= screen_top + new_rows: below the cursor's window, dropped.
     }
@@ -1329,6 +1297,7 @@ impl Grid {
             scroll_bottom: rows.saturating_sub(1),
             primary: None,
             spare_screen: Vec::new(),
+            blank_row: Vec::new(),
             epoch: 0,
             title: String::new(),
             title_stack: Vec::new(),
@@ -1348,7 +1317,9 @@ impl Grid {
             links: Vec::new(),
             links_arc: Arc::from(Vec::<String>::new()),
             clusters: Vec::new(),
-            clusters_arc: Arc::from(Vec::<String>::new()),
+            clusters_arc: OnceLock::new(),
+            cluster_ids: HashMap::new(),
+            cluster_scratch: String::new(),
             current_link: 0,
             tab_stops: default_tab_stops(cols),
             cursor_visible: true,
@@ -1429,7 +1400,7 @@ impl Grid {
         if x >= self.cols || y >= self.rows {
             return;
         }
-        let row = &mut self.screen[y].cells;
+        let row = self.screen[y].cells_mut();
         if row[x].flags & WIDE_TRAILER != 0 {
             // Overwriting the trailing half: blank the head to its left.
             if x >= 1 {
@@ -1446,7 +1417,7 @@ impl Grid {
     /// The cells of live screen row `y` (`cols` of them); empty past the
     /// last row.
     pub fn row(&self, y: usize) -> &[Cell] {
-        self.screen.get(y).map_or(&[], |line| &line.cells)
+        self.screen.get(y).map_or(&[], |line| line.cells())
     }
 
     /// Whether live screen row `y` soft-wraps into the next one.
@@ -1460,7 +1431,7 @@ impl Grid {
     /// not mark the row dirty.
     pub fn row_mut(&mut self, y: usize) -> &mut [Cell] {
         match self.screen.get_mut(y) {
-            Some(line) => &mut line.cells,
+            Some(line) => line.cells_mut(),
             None => &mut [],
         }
     }
@@ -1655,7 +1626,7 @@ impl Grid {
         for y in top..bottom {
             self.copy_band(y + 1, y, l, r);
         }
-        self.screen[bottom].cells[l..=r].fill(blank);
+        self.screen[bottom].cells_mut()[l..=r].fill(blank);
         self.touch_rows(top..=bottom);
     }
 
@@ -1670,7 +1641,7 @@ impl Grid {
         } else {
             (&hi[0], &mut lo[dst])
         };
-        to.cells[l..=r].copy_from_slice(&from.cells[l..=r]);
+        to.cells_mut()[l..=r].copy_from_slice(&from.cells()[l..=r]);
     }
 
     /// Scroll the margin band down one row (the [`Grid::scroll_band_up`]
@@ -1682,7 +1653,7 @@ impl Grid {
         for y in (top..bottom).rev() {
             self.copy_band(y, y + 1, l, r);
         }
-        self.screen[top].cells[l..=r].fill(blank);
+        self.screen[top].cells_mut()[l..=r].fill(blank);
         self.touch_rows(top..=bottom);
     }
 
@@ -2036,7 +2007,8 @@ impl Grid {
                 self.touch_all();
             }
         }
-        self.screen[bottom].clear(self.cols, blank);
+        self.prime_blank_row(blank);
+        self.screen[bottom].clear(&self.blank_row);
         self.touch_rows(top..=bottom);
     }
 
@@ -2066,6 +2038,7 @@ impl Grid {
     pub fn put_char(&mut self, ch: char, pen: Pen) {
         // A non-ASCII scalar may belong to the glyph on its left. ASCII is
         // always its own glyph, so the common path skips the check entirely.
+        let w = char_width(ch);
         if !ch.is_ascii() {
             if self.grapheme_clustering {
                 // Mode 2027: join anything that continues the UAX #29
@@ -2076,7 +2049,7 @@ impl Grid {
                     self.append_to_glyph(bx, by, ch);
                     return;
                 }
-            } else if char_width(ch) == 0
+            } else if w == 0
                 && let Some((bx, by)) = self.left_base()
             {
                 // Default (wcwidth) widths: only a zero-width scalar (combining
@@ -2086,11 +2059,10 @@ impl Grid {
                 return;
             }
             // Not joined: a zero-width scalar has no cell of its own.
-            if char_width(ch) == 0 {
+            if w == 0 {
                 return;
             }
         }
-        let w = char_width(ch); // >= 1 here (zero-width non-continuations dropped above)
         // With DECSLRM margins, a cursor inside them wraps (or pins) at the
         // right margin instead of the screen edge.
         let limit = if self.side_margins_active() && self.cursor.0 >= self.left_margin {
@@ -2180,6 +2152,91 @@ impl Grid {
         }
     }
 
+    /// Write a run of non-ASCII text at the cursor, as [`Grid::put_char`]
+    /// would one scalar at a time. Glyphs that fit before the right edge are
+    /// filled straight into the row; a wrap, a zero-width scalar, insert mode,
+    /// DECSLRM margins and mode 2027 fall back to [`Grid::put_char`] for one
+    /// scalar. `text` holds no C0 control (the parser only passes bytes at or
+    /// above 0x80).
+    pub(crate) fn put_text(&mut self, text: &str, pen: Pen) {
+        let mut rest = text;
+        while let Some(ch) = rest.chars().next() {
+            let filled = if self.can_fill_text() {
+                self.fill_text(rest, pen)
+            } else {
+                0
+            };
+            let used = if filled == 0 {
+                self.put_char(ch, pen);
+                ch.len_utf8()
+            } else {
+                filled
+            };
+            rest = &rest[used..];
+        }
+    }
+
+    /// Whether [`Grid::fill_text`] may write at the cursor: no mode that
+    /// changes where a glyph lands or what it joins.
+    fn can_fill_text(&self) -> bool {
+        !self.insert_mode
+            && !self.side_margins_active()
+            && !self.grapheme_clustering
+            && self.cursor.1 < self.rows
+    }
+
+    /// Fill the leading glyphs of `text` into the cursor row while each has a
+    /// width and fits before the right edge, advancing the cursor. Returns
+    /// the bytes consumed (`0` when the first glyph does not qualify). A wide
+    /// glyph cut by either end of the run loses its other half, as
+    /// [`Grid::set_cell`] does.
+    fn fill_text(&mut self, text: &str, pen: Pen) -> usize {
+        let (x0, y) = self.cursor;
+        let (cols, link) = (self.cols, self.current_link);
+        let Some(line) = self.screen.get_mut(y) else {
+            return 0;
+        };
+        let row = line.cells_mut();
+        let (mut x, mut used) = (x0, 0);
+        for ch in text.chars() {
+            let w = char_width(ch);
+            if w == 0 || x + w > cols {
+                break;
+            }
+            if x == x0 && x >= 1 && row[x].flags & WIDE_TRAILER != 0 {
+                row[x - 1] = Cell::blank();
+            }
+            let head = Cell {
+                ch,
+                cluster: 0,
+                fg: pen.fg,
+                bg: pen.bg,
+                flags: pen.attrs,
+                link,
+                underline_color: pen.underline_color,
+            };
+            row[x] = head;
+            if w == 2 {
+                row[x + 1] = Cell {
+                    ch: ' ',
+                    flags: WIDE_TRAILER,
+                    ..head
+                };
+            }
+            x += w;
+            used += ch.len_utf8();
+        }
+        if used == 0 {
+            return 0;
+        }
+        if x < cols && row[x].flags & WIDE_TRAILER != 0 {
+            row[x] = Cell::blank();
+        }
+        self.touch(y);
+        self.cursor.0 = x;
+        used
+    }
+
     /// Overwrite `bytes.len()` cells of row `y` from column `x` (the caller
     /// keeps them on the row) with ASCII glyphs. A wide glyph cut by either
     /// end of the run loses its other half, as [`Grid::set_cell`] does.
@@ -2188,7 +2245,7 @@ impl Grid {
         let Some(line) = self.screen.get_mut(y) else {
             return;
         };
-        let row = &mut line.cells;
+        let row = line.cells_mut();
         let end = x + bytes.len();
         if x >= 1 && row[x].flags & WIDE_TRAILER != 0 {
             row[x - 1] = Cell::blank();
@@ -2218,7 +2275,7 @@ impl Grid {
             return None;
         }
         let left = cx - 1;
-        if self.screen[cy].cells[left].flags & WIDE_TRAILER != 0 && left >= 1 {
+        if self.screen[cy].cells()[left].flags & WIDE_TRAILER != 0 && left >= 1 {
             Some((left - 1, cy)) // land on the wide glyph's head, not its trailer
         } else {
             Some((left, cy))
@@ -2237,7 +2294,7 @@ impl Grid {
     /// The full glyph text at `(x, y)` of the live grid: the base scalar plus
     /// any interned grapheme continuation.
     fn glyph_text(&self, x: usize, y: usize) -> String {
-        self.cell_text(self.screen[y].cells[x])
+        self.cell_text(self.screen[y].cells()[x])
     }
 
     /// The full glyph text of `cell` (live or scrollback — the cluster table is
@@ -2749,33 +2806,74 @@ impl Grid {
     /// Append `ch` to the grapheme continuation of the cell at `(x, y)`,
     /// re-interning the grown suffix and marking the row dirty.
     fn append_to_glyph(&mut self, x: usize, y: usize, ch: char) {
-        let mut suffix = match self.screen[y].cells[x].cluster {
-            0 => String::new(),
-            id => self
-                .clusters
-                .get((id - 1) as usize)
-                .cloned()
-                .unwrap_or_default(),
-        };
+        let mut suffix = std::mem::take(&mut self.cluster_scratch);
+        suffix.clear();
+        let old = self.screen[y].cells()[x].cluster;
+        if let Some(prev) = old
+            .checked_sub(1)
+            .and_then(|i| self.clusters.get(usize::from(i)))
+        {
+            suffix.push_str(prev);
+        }
         suffix.push(ch);
-        let id = self.intern_cluster(suffix);
-        self.screen[y].cells[x].cluster = id;
+        let id = self.intern_cluster(&suffix);
+        self.cluster_scratch = suffix;
+        self.screen[y].cells_mut()[x].cluster = id;
         self.touch(y);
     }
 
     /// Return the id for grapheme continuation `suffix`, interning it on first
     /// use. Ids are `index + 1` so `0` means "no continuation". Returns `0` once
     /// the table is full (the continuation is dropped; the base glyph remains).
-    fn intern_cluster(&mut self, suffix: String) -> u16 {
-        if let Some(i) = self.clusters.iter().position(|c| *c == suffix) {
-            return (i + 1) as u16;
+    fn intern_cluster(&mut self, suffix: &str) -> u16 {
+        if let Some(&id) = self.cluster_ids.get(suffix) {
+            return id;
         }
         if self.clusters.len() >= CLUSTER_MAX {
             return 0;
         }
-        self.clusters.push(suffix);
-        self.clusters_arc = Arc::from(self.clusters.clone());
-        self.clusters.len() as u16
+        self.clusters.push(suffix.to_owned());
+        let id = self.clusters.len() as u16;
+        self.cluster_ids.insert(suffix.to_owned(), id);
+        self.clusters_arc = OnceLock::new();
+        id
+    }
+
+    /// The grapheme table as handed to a frame: shared until the next insert.
+    pub(crate) fn clusters_arc(&self) -> Arc<[String]> {
+        Arc::clone(
+            self.clusters_arc
+                .get_or_init(|| self.clusters.clone().into()),
+        )
+    }
+
+    /// Rebuild the caches derived from `clusters` after a restore replaced it.
+    /// Every entry is indexed: an RTSN snapshot may hold up to `u16::MAX`
+    /// (every id a cell can name), more than [`CLUSTER_MAX`], and a longer
+    /// table indexes only the ids a cell can name instead of overflowing.
+    pub(crate) fn rebuild_cluster_caches(&mut self) {
+        self.cluster_ids = self
+            .clusters
+            .iter()
+            .zip(1..=u16::MAX)
+            .map(|(c, id)| (c.clone(), id))
+            .collect();
+        self.clusters_arc = OnceLock::new();
+    }
+
+    /// Heap a checkpoint decode spends rebuilding the tables derived from
+    /// `links` and `clusters` (their `Arc` copies and the cluster id index,
+    /// with the map's spare capacity). Encode charges the same amount, so a
+    /// state that encodes within a budget also decodes within it.
+    fn table_cache_cost(&self) -> usize {
+        let bytes = |t: &[String]| t.iter().map(String::len).sum::<usize>();
+        let index_entry = 2 * (size_of::<(String, u16)>() + 1);
+        (self.links.len() + self.clusters.len())
+            .saturating_mul(2 * size_of::<String>())
+            .saturating_add(self.clusters.len().saturating_mul(index_entry))
+            .saturating_add(4 * size_of::<usize>())
+            .saturating_add(bytes(&self.links))
+            .saturating_add(bytes(&self.clusters).saturating_mul(2))
     }
 
     /// Blank columns `[from, to)` of row `y`, marking it dirty.
@@ -2822,7 +2920,7 @@ impl Grid {
         let (c0, c1) = cols.unwrap_or((0, self.cols.saturating_sub(1)));
         for y in y0..=y1.min(self.rows.saturating_sub(1)) {
             for x in c0..=c1.min(self.cols.saturating_sub(1)) {
-                let cell = &mut self.screen[y].cells[x];
+                let cell = &mut self.screen[y].cells_mut()[x];
                 if cell.flags & super::cell::ATTR_PROTECTED == 0 {
                     *cell = erase;
                 }
@@ -2841,7 +2939,7 @@ impl Grid {
         }
         let blank = self.erase_cell();
         let line = &mut self.screen[y];
-        line.cells[from..to].fill(blank);
+        line.cells_mut()[from..to].fill(blank);
         // Erasing through the right margin ends the line here: it no longer
         // wraps into the row below (EL, the tail of ED, ECH at the margin).
         if to >= self.cols {
@@ -2863,7 +2961,7 @@ impl Grid {
         }
         let blank = self.erase_cell();
         for y in top..=bottom {
-            self.screen[y].cells[left..=right].fill(blank);
+            self.screen[y].cells_mut()[left..=right].fill(blank);
             self.touch(y);
         }
     }
@@ -2895,7 +2993,7 @@ impl Grid {
             underline_color: pen.underline_color,
         };
         for y in top..=bottom {
-            self.screen[y].cells[left..=right].fill(cell);
+            self.screen[y].cells_mut()[left..=right].fill(cell);
             self.touch(y);
         }
     }
@@ -2928,10 +3026,10 @@ impl Grid {
         let w = (right - left + 1).min(self.cols - dst_left);
         let mut buf = Vec::with_capacity(h * w);
         for y in 0..h {
-            buf.extend_from_slice(&self.screen[top + y].cells[left..left + w]);
+            buf.extend_from_slice(&self.screen[top + y].cells()[left..left + w]);
         }
         for (y, src) in buf.chunks(w).enumerate() {
-            self.screen[dst_top + y].cells[dst_left..dst_left + w].copy_from_slice(src);
+            self.screen[dst_top + y].cells_mut()[dst_left..dst_left + w].copy_from_slice(src);
             self.touch(dst_top + y);
         }
     }
@@ -2953,8 +3051,7 @@ impl Grid {
     pub(crate) fn clear_all(&mut self) {
         let blank = self.erase_cell();
         for line in &mut self.screen {
-            line.cells.fill(blank);
-            line.wrapped = false;
+            line.fill(blank);
         }
         #[cfg(any(test, feature = "gui"))]
         self.images.clear();
@@ -2982,6 +3079,18 @@ impl Grid {
         let mut c = self.default_cell();
         c.bg = self.erase_bg.unwrap_or(self.default_bg);
         c
+    }
+
+    /// Make [`Grid::blank_row`] `cols` copies of `fill`, rebuilding it only
+    /// when the width or the fill differs. The row is uniform, so its first
+    /// cell stands for all of them.
+    fn prime_blank_row(&mut self, fill: Cell) {
+        let stale =
+            self.blank_row.len() != self.cols || self.blank_row.first().is_some_and(|c| *c != fill);
+        if stale {
+            self.blank_row.clear();
+            self.blank_row.resize(self.cols, fill);
+        }
     }
 
     /// A blank cell in the default colors, for fills that are not erases
@@ -3085,7 +3194,7 @@ impl Grid {
             .chain(&mut self.scrollback)
             .chain(stashed)
         {
-            for cell in &mut line.cells {
+            for cell in line.cells_mut() {
                 map(&mut cell.fg);
                 map(&mut cell.bg);
             }
@@ -3251,8 +3360,9 @@ impl Grid {
     fn take_spare_screen(&mut self, fill: Cell) -> Vec<Line> {
         let mut screen = std::mem::take(&mut self.spare_screen);
         screen.resize_with(self.rows, Line::default);
+        self.prime_blank_row(fill);
         for line in &mut screen {
-            line.clear(self.cols, fill);
+            line.clear(&self.blank_row);
         }
         screen
     }
@@ -3304,7 +3414,7 @@ impl Grid {
         }
         let n = n.min(self.cols - x);
         let blank = self.erase_cell();
-        let row = &mut self.screen[y].cells;
+        let row = self.screen[y].cells_mut();
         row[x..].rotate_left(n);
         let end = row.len();
         row[end - n..].fill(blank);
@@ -3320,7 +3430,7 @@ impl Grid {
         }
         let n = n.min(self.cols - x);
         let blank = self.erase_cell();
-        let row = &mut self.screen[y].cells;
+        let row = self.screen[y].cells_mut();
         row[x..].rotate_right(n);
         row[x..x + n].fill(blank);
         self.touch(y);
@@ -3354,7 +3464,7 @@ impl Grid {
                 self.copy_band(y - n, y, l, r);
             }
             for line in &mut self.screen[cy..(cy + n).min(self.scroll_bottom + 1)] {
-                line.cells[l..=r].fill(blank);
+                line.cells_mut()[l..=r].fill(blank);
             }
             self.touch_rows(cy..=self.scroll_bottom);
             return;
@@ -3364,8 +3474,9 @@ impl Grid {
         // the region bottom come round to the cursor row and are blanked.
         let blank = self.erase_cell();
         self.screen[cy..=self.scroll_bottom].rotate_right(n);
+        self.prime_blank_row(blank);
         for line in &mut self.screen[cy..cy + n] {
-            line.clear(self.cols, blank);
+            line.clear(&self.blank_row);
         }
         self.touch_rows(cy..=self.scroll_bottom);
     }
@@ -3396,7 +3507,7 @@ impl Grid {
                 }
             }
             for line in &mut self.screen[(self.scroll_bottom + 1 - n)..=self.scroll_bottom] {
-                line.cells[l..=r].fill(blank);
+                line.cells_mut()[l..=r].fill(blank);
             }
             self.touch_rows(cy..=self.scroll_bottom);
             return;
@@ -3406,8 +3517,9 @@ impl Grid {
         // round to the region bottom and are blanked.
         let blank = self.erase_cell();
         self.screen[cy..=self.scroll_bottom].rotate_left(n);
+        self.prime_blank_row(blank);
         for line in &mut self.screen[self.scroll_bottom + 1 - n..=self.scroll_bottom] {
-            line.clear(self.cols, blank);
+            line.clear(&self.blank_row);
         }
         self.touch_rows(cy..=self.scroll_bottom);
     }
@@ -3451,8 +3563,9 @@ impl Grid {
         // Rotate the region down by n and blank the n rows freed at its top.
         let blank = self.erase_cell();
         self.screen[top..=bottom].rotate_right(n);
+        self.prime_blank_row(blank);
         for line in &mut self.screen[top..top + n] {
-            line.clear(self.cols, blank);
+            line.clear(&self.blank_row);
         }
         self.touch_rows(top..=bottom);
     }
@@ -3644,8 +3757,9 @@ impl Grid {
     pub(crate) fn fill_alignment(&mut self) {
         let mut e = Cell::blank();
         e.ch = 'E';
+        self.prime_blank_row(e);
         for line in &mut self.screen {
-            line.clear(self.cols, e);
+            line.clear(&self.blank_row);
         }
         self.touch_all();
         self.cursor = (0, 0);
@@ -4290,10 +4404,10 @@ impl Grid {
     pub fn abs_line_text(&self, abs: usize) -> String {
         let history = self.scrollback.len();
         let cells = if abs < history {
-            &self.scrollback[abs].cells[..]
+            &self.scrollback[abs].cells()
         } else {
             match self.screen.get(abs - history) {
-                Some(line) => &line.cells[..],
+                Some(line) => &line.cells(),
                 None => return String::new(),
             }
         };
@@ -4313,9 +4427,9 @@ impl Grid {
                 out.push('\n');
             }
             let cells = if i < history {
-                &self.scrollback[i].cells[..]
+                &self.scrollback[i].cells()
             } else {
-                &self.screen[i - history].cells[..]
+                &self.screen[i - history].cells()
             };
             out.push_str(&row_text(cells, &self.clusters));
         }
@@ -4359,7 +4473,7 @@ impl Grid {
             .map(|(y, _)| {
                 let cells = match (y + 1 == self.rows).then(|| self.status_row()).flatten() {
                     Some(s) => s.to_vec(),
-                    None => self.screen[y].cells.clone(),
+                    None => self.screen[y].cells().to_vec(),
                 };
                 (y, cells)
             })
@@ -4368,7 +4482,7 @@ impl Grid {
             cursor: self.cursor,
             rows,
             links: self.links_arc.clone(),
-            clusters: self.clusters_arc.clone(),
+            clusters: self.clusters_arc(),
             line_attrs: self.screen.iter().map(|l| l.attr).collect(),
         }
     }
@@ -4405,7 +4519,7 @@ impl Grid {
         } else {
             &self.screen[abs - h]
         };
-        (&line.cells, line.wrapped)
+        (line.cells(), line.wrapped)
     }
 
     /// Scroll the viewport so absolute row `abs` is visible, about a third
@@ -4943,14 +5057,14 @@ impl Grid {
                 s.to_vec()
             } else if y < off {
                 // Top `off` viewport rows show the tail of history.
-                let line = &self.scrollback[history - off + y].cells;
+                let line = &self.scrollback[history - off + y].cells();
                 let mut row = vec![Cell::blank(); self.cols];
                 let n = line.len().min(self.cols);
                 row[..n].copy_from_slice(&line[..n]);
                 row
             } else {
                 // The rest shows the live grid, shifted down by `off`.
-                self.screen[y - off].cells.clone()
+                self.screen[y - off].cells().to_vec()
             };
             rows.push((y, cells));
             attrs.push(if status.is_some() || y < off {
@@ -4963,7 +5077,7 @@ impl Grid {
             cursor: self.cursor,
             rows,
             links: self.links_arc.clone(),
-            clusters: self.clusters_arc.clone(),
+            clusters: self.clusters_arc(),
             line_attrs: attrs,
         }
     }
@@ -5020,7 +5134,7 @@ impl rusty_term_l13::TerminalState for Grid {
         let mut lines: Vec<String> = self
             .screen
             .iter()
-            .map(|line| row_text(&line.cells, &self.clusters))
+            .map(|line| row_text(line.cells(), &self.clusters))
             .collect();
         while lines.last().is_some_and(String::is_empty) {
             lines.pop();
@@ -5033,7 +5147,7 @@ impl rusty_term_l13::TerminalState for Grid {
         self.scrollback
             .iter()
             .skip(skip)
-            .map(|line| row_text(&line.cells, &self.clusters))
+            .map(|line| row_text(line.cells(), &self.clusters))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -5125,7 +5239,7 @@ pub(crate) fn row_text(cells: &[Cell], clusters: &[String]) -> String {
     s.trim_end().to_string()
 }
 
-// RTCP v2 deliberately excludes view selection/search/folds, render caches,
+// RTCP deliberately excludes view selection/search/folds, render caches,
 // recycled spare rows, pending host actions and L13 channel state.
 impl crate::checkpoint::Wire for Grid {
     fn write(&self, w: &mut crate::checkpoint::Writer) -> crate::checkpoint::Result<()> {
@@ -5189,17 +5303,7 @@ impl crate::checkpoint::Wire for Grid {
         crate::checkpoint::Wire::write(&self.status_line, w)?;
         crate::checkpoint::Wire::write(&self.clusters, w)?;
         crate::checkpoint::Wire::write(&self.links, w)?;
-        w.charge(
-            (self.links.len() + self.clusters.len()) * 2 * size_of::<String>()
-                + 4 * size_of::<usize>()
-                + self
-                    .links
-                    .iter()
-                    .chain(&self.clusters)
-                    .map(String::len)
-                    .sum::<usize>()
-                + self.rows,
-        )?;
+        w.charge(self.table_cache_cost().saturating_add(self.rows))?;
         Ok(())
     }
     fn read(r: &mut crate::checkpoint::Reader<'_>) -> crate::checkpoint::Result<Self> {
@@ -5264,19 +5368,14 @@ impl crate::checkpoint::Wire for Grid {
         grid.status_line = crate::checkpoint::Wire::read(r)?;
         grid.clusters = crate::checkpoint::Wire::read(r)?;
         grid.links = crate::checkpoint::Wire::read(r)?;
-        // Charge cache rebuilds too: they duplicate String headers and bytes.
-        r.charge(
-            (grid.links.len() + grid.clusters.len()) * 2 * size_of::<String>()
-                + 4 * size_of::<usize>()
-                + grid
-                    .links
-                    .iter()
-                    .chain(&grid.clusters)
-                    .map(String::len)
-                    .sum::<usize>(),
-        )?;
+        // Bound the tables before building caches from them; the full
+        // validation runs after the parser is read.
+        if grid.clusters.len() > CLUSTER_MAX || grid.links.len() > LINK_MAX {
+            return Err(crate::checkpoint::Error("grid bounds"));
+        }
+        r.charge(grid.table_cache_cost())?;
         grid.links_arc = grid.links.clone().into();
-        grid.clusters_arc = grid.clusters.clone().into();
+        grid.rebuild_cluster_caches();
         r.charge(grid.rows)?;
         if grid.rows > 4096 {
             return Err(crate::checkpoint::Error("grid dimensions"));
@@ -5285,7 +5384,6 @@ impl crate::checkpoint::Wire for Grid {
         Ok(grid)
     }
 }
-crate::checkpoint::fields!(Line, [cells, wrapped, attr]);
 crate::checkpoint::fields!(SavedScreen, [screen, cursor, saved_cursor, mode]);
 crate::checkpoint::fields!(MouseModes, [base, extended]);
 crate::checkpoint::fields!(
@@ -5335,8 +5433,8 @@ impl Grid {
         }
         let primary = self.primary.iter().flat_map(|p| p.screen.iter());
         for line in self.screen.iter().chain(primary).chain(&self.scrollback) {
-            if line.cells.len() > 4096
-                || line.cells.iter().any(|c| {
+            if line.cells().len() > 4096
+                || line.cells().iter().any(|c| {
                     usize::from(c.cluster) > self.clusters.len()
                         || usize::from(c.link) > self.links.len()
                 })
@@ -5344,11 +5442,11 @@ impl Grid {
                 return Err(Error("cell bounds"));
             }
         }
-        if self.screen.iter().any(|l| l.cells.len() != self.cols)
+        if self.screen.iter().any(|l| l.cells().len() != self.cols)
             || self
                 .primary
                 .iter()
-                .any(|p| p.screen.iter().any(|l| l.cells.len() != self.cols))
+                .any(|p| p.screen.iter().any(|l| l.cells().len() != self.cols))
         {
             return Err(Error("screen width"));
         }

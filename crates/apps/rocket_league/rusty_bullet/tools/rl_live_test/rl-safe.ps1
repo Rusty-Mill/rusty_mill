@@ -28,18 +28,26 @@ function Assert-RlPreflight([string]$Bin, [string]$GameDir) {
     throw 'matching processes already running; close them manually before starting a live test'
   }
 }
-function Get-RlOwnedBootstrap($Launcher, [string]$GamePath) {
-  # A new name/PID alone proves no ownership. Epic can delegate to an existing launcher;
-  # in that case refuse to kill the game. Only a direct child of our still-live launcher
-  # with the expected image is eligible. Retain its native handle before validating it.
-  if ($Launcher.HasExited) { throw 'Epic launch ownership unavailable; no game process will be stopped' }
-  $candidates = @(Get-CimInstance Win32_Process -Filter "Name='RocketLeague.exe'" |
-    Where-Object { $_.ParentProcessId -eq $Launcher.Id -and $_.ExecutablePath -eq $GamePath })
-  if ($candidates.Count -ne 1) { throw 'Epic launch ownership unavailable; no game process will be stopped' }
-  $game = Get-Process -Id $candidates[0].ProcessId -ErrorAction Stop
+function Get-RlOwnedBootstrap($Launcher, [string]$GamePath, [string]$InitLine) {
+  # Only a direct child of our retained, still-live launch process proves ownership.
+  # Epic delegation, recent creation and a matching shared log do not correlate a game
+  # to this invocation. Refuse delegated launches; the operator must clean up manually.
+  # Never include the command line in errors: it holds the Epic login.
+  $refuse = 'Epic launch ownership unavailable; no game process will be stopped; close the bootstrap game manually before retrying'
+  if ($Launcher.HasExited) { throw "$refuse (launch process exited)" }
+  $command = ($InitLine -replace '^.*Init: Command line:\s*', '').Trim()
+  $games = @(Get-CimInstance Win32_Process -Filter "Name='RocketLeague.exe'")
+  if ($games.Count -ne 1) { throw "$refuse ($($games.Count) game processes)" }
+  $cim = $games[0]
+  if ($cim.ParentProcessId -ne $Launcher.Id) { throw "$refuse (not a direct child of this launch process)" }
+  if ($cim.ExecutablePath -ne $GamePath) { throw "$refuse (unexpected image path)" }
+  if ($cim.CreationDate -lt $Launcher.StartTime) { throw "$refuse (started before this launch)" }
+  if (-not $command -or "$($cim.CommandLine)".Trim() -cne $command) { throw "$refuse (command line differs from the new Init line)" }
+  # Pin the native handle, then confirm it is the process CIM described. CIM times carry
+  # microseconds and StartTime 100 ns ticks, so equal means within a millisecond.
+  $game = Get-Process -Id $cim.ProcessId -ErrorAction Stop
   $null = $game.Handle
-  if ($game.HasExited -or $game.StartTime -lt $Launcher.StartTime -or $Launcher.HasExited -or
-      $game.Path -ne $GamePath -or $game.StartTime -ne $candidates[0].CreationDate) {
+  if ($Launcher.HasExited -or $game.HasExited -or $game.Path -ne $GamePath -or [Math]::Abs(($game.StartTime - $cim.CreationDate).TotalMilliseconds) -ge 1) {
     throw 'Epic launch identity changed; no game process will be stopped'
   }
   return $game

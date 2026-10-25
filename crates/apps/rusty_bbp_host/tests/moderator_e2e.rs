@@ -191,7 +191,7 @@ fn happy_run_polling(
         end_grace: Duration::ZERO,
         deadline: None,
         cost_cap: None,
-        slots: None,
+        admission: None,
     };
     let moderator = std::thread::spawn(move || moderator::run(&cfg));
 
@@ -369,7 +369,7 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
         end_grace: Duration::ZERO,
         deadline: None,
         cost_cap: None,
-        slots: None,
+        admission: None,
     };
     let first = card(&dir, &task);
     let out = moderator::run(&cfg);
@@ -494,7 +494,7 @@ fn config(dir: &Path, task: &TaskId, repo: PathBuf, launchers: Launchers, wall: 
         end_grace: Duration::ZERO,
         deadline: None,
         cost_cap: None,
-        slots: None,
+        admission: None,
     }
 }
 
