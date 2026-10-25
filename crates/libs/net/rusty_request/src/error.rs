@@ -88,7 +88,8 @@ impl Error {
     /// dialing it, or the I/O of a proxy's `CONNECT` tunnel, on the first
     /// hop. Such a request never reached any server, so sending it again
     /// cannot duplicate its effect. Never true once a redirect was
-    /// followed, since an earlier hop delivered the request. A TLS
+    /// followed, or once an earlier retry attempt may have delivered the
+    /// request: one that got a response, or failed after connecting. A TLS
     /// handshake failure is not counted, since the handshake runs with the
     /// first write, alongside the request itself; nor is a proxy refusing
     /// the tunnel, which is [`Error::ProxyConnectFailed`].
@@ -105,12 +106,12 @@ impl Error {
         }
     }
 
-    /// This error as hop `hop` of a redirect chain reports it: past the
-    /// first, the request has already been delivered, so a connect failure
-    /// is no longer marked as one.
-    pub(crate) fn after_hop(self, hop: usize) -> Self {
+    /// This error once the request may already have been `delivered`, by an
+    /// earlier redirect hop or retry attempt: a connect failure is then no
+    /// longer marked as one.
+    pub(crate) fn once_delivered(self, delivered: bool) -> Self {
         match self {
-            Error::Io(e) if hop > 0 && marked(&e) => {
+            Error::Io(e) if delivered && marked(&e) => {
                 let kind = e.kind();
                 match e.into_inner().map(|inner| inner.downcast::<Connect>()) {
                     Some(Ok(connect)) => Error::Io(connect.0),
