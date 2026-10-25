@@ -10505,6 +10505,8 @@ dependencies = [
 name = "replay-viewer"
 version = "0.1.0"
 dependencies = [
+ "rb_capture_ingest",
+ "rb_domain",
  "replay-analyzer",
  "replay-scoring",
  "replay-skills",

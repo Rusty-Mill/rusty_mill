@@ -312,6 +312,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 const S = /*SCENE_DATA*/;
 const F = S.field;
 const TEAM = { 0: 0x3b82f6, 1: 0xf97316 };
+const GHOST = 0xdfe6ee; // the port's simulated car (ADR-0085)
 const TEAM_CSS = { 0: '#3b82f6', 1: '#f97316' };
 const ICON_PLAY = '<svg width="14" height="14" viewBox="0 0 14 14"><path d="M3 2l9 5-9 5z" fill="currentColor"/></svg>';
 const ICON_PAUSE = '<svg width="14" height="14" viewBox="0 0 14 14"><rect x="3" y="2" width="3" height="10" fill="currentColor"/><rect x="8" y="2" width="3" height="10" fill="currentColor"/></svg>';
@@ -923,7 +924,9 @@ function buildCars() {
   const teamSeen = new Map(); // team -> how many of its players already built
   const HULL = carHullGeometry();
   for (const pl of S.players) {
-    const hex = TEAM[pl.team] ?? 0x9aa4b2;
+    // A ghost is the port's simulated car (ADR-0085): pale and see-through, so
+    // the recorded car under it stays visible.
+    const hex = pl.ghost ? GHOST : (TEAM[pl.team] ?? 0x9aa4b2);
     // A per-player shade of the team colour, for "team colour" off: keep the team
     // hue recognizable but nudge lightness/hue per teammate so they're tellable
     // apart. Slot 0 stays the exact team colour.
@@ -969,6 +972,10 @@ function buildCars() {
     const flame = new THREE.Mesh(new THREE.ConeGeometry(20, 72, 12),
       new THREE.MeshBasicMaterial({ color: 0xff9a3c, transparent: true, opacity: .9, blending: THREE.AdditiveBlending, depthWrite: false }));
     flame.rotation.z = Math.PI / 2; flame.position.set(-78, 0, 18); flame.visible = false; g.add(flame);
+    if (pl.ghost) g.traverse(o => {
+      o.castShadow = false;
+      if (o.isMesh) { o.material.transparent = true; o.material.opacity = 0.35; o.material.depthWrite = false; }
+    });
     map.set(pl.pri, { g, label, boostPill, trail, callout, ring, flame, paint, dark, teamHex: hex, distinct });
   }
   return map;

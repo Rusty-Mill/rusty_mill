@@ -65,6 +65,10 @@ pub struct ScenePlayer {
     /// "impact" readout. Filled by [`crate::impact::attach_impact`]; `None` until.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impact: Option<f32>,
+    /// A simulated car drawn translucent over the recorded one (ADR-0085).
+    /// Always `false` for a replay.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ghost: bool,
 }
 
 /// One car's pose at a frame. `rot` is `[pitch, yaw, roll]` (rad); `boost` is a
@@ -230,6 +234,7 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
                 assists: meta.map(|p| p.assists).unwrap_or(0),
                 saves: meta.map(|p| p.saves).unwrap_or(0),
                 impact: None,
+                ghost: false,
             }
         })
         .collect();
