@@ -38,6 +38,10 @@ required-features = ["runtime"]
 name = "test_client"
 required-features = ["runtime"]
 
+[[test]]
+name = "stdio"
+required-features = ["runtime"]
+
 [[example]]
 name = "text_server"
 required-features = ["runtime"]
