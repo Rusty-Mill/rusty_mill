@@ -144,11 +144,17 @@ async fn a_client_that_cancels_a_stream_that_is_being_sent_drops_the_handler() {
 
 #[rusty_tokio::test]
 async fn a_client_that_cancels_makes_the_handlers_read_fail_cancelled() {
+    // A cancel races the handler's read against its drop (see the `server` docs): the handler
+    // either reads `CANCELLED` or is dropped where it waits. Either ends the call; nothing else may.
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = dropped.clone();
     let (tx, mut rx) = mpsc::channel(4);
     let router =
         Router::new().bidirectional(PATH, move |r: Request<Incoming<Blob>>, _out: Sink<Blob>| {
             let tx = tx.clone();
+            let guard = Dropped(flag.clone());
             async move {
+                let _guard = guard;
                 let mut incoming = r.message;
                 loop {
                     match incoming.message().await {
@@ -171,7 +177,14 @@ async fn a_client_that_cancels_makes_the_handlers_read_fail_cancelled() {
     assert_eq!(next(&mut rx).await, None, "the handler read the message");
     drop(stream);
     drop(sender);
-    assert_eq!(next(&mut rx).await, Some(Code::Cancelled));
+    // `None`: dropped first. A read that wins must be `CANCELLED`.
+    let read = rusty_tokio::select! {
+        code = next(&mut rx) => Some(code),
+        true = set_soon(&dropped) => None,
+    };
+    if let Some(code) = read {
+        assert_eq!(code, Some(Code::Cancelled));
+    }
     server.shutdown().await;
 }
 
