@@ -179,7 +179,7 @@ reviewer.
   Every report is an `ecdh::ensure` verdict: 3 for ECDSA, 1 for Ed25519.
 - This code is part of the owner's S5 review scope.
 
-**`rusty_tls` wiring** (the wiring PR, not merged while S5 is outstanding):
+**`rusty_tls` wiring** (#1020):
 - The native `SigningKey` wraps `rusty_pk`'s ECDSA and Ed25519 keys. `SigningKey::rsa`
   returns `SignError::RsaUnsupported`. The server, `server12`, tickets, the server half of
   `negotiate` and client certificates compile on native. The ticket cipher and the
@@ -193,11 +193,11 @@ reviewer.
   gap to `ring`'s 861 is scenarios whose own key is RSA: 390 shim runs refused one at
   load. The CI floor is 480.
 
-**Still outstanding before the wiring merges:** the owner's signing-code review, recorded
-with reviewer, scope and exact commit (S5 as amended). The ECDSA and Ed25519 code is on
-main at `698844212`, and the PKCS#8 parser is #1012.
-
-Once that review is recorded, the gap-5 evidence plan is complete.
+**S5 review:** done. The owner reviewed and approved `7a3267f5a` on 2026-10-25 (the
+implementer's transcription). That commit is the head of #1020 and contains the ECDSA and
+Ed25519 code from main at `698844212`, the PKCS#8 parser (#1012) and the wiring. Reviewer,
+scope and conclusion are recorded in plan section 11b. With it, the gap-5 evidence plan is
+complete.
 
 ## 5. Effort
 
