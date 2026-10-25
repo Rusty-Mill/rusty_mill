@@ -1973,3 +1973,105 @@ fn rwlock_and_mutex_build_from_default_and_from_a_value() {
         assert_eq!(*mutex.lock().await, 9);
     });
 }
+
+/// A waker that records whether it was woken, so a test can poll futures
+/// by hand in an exact order.
+struct WakeFlag(std::sync::atomic::AtomicBool);
+
+impl std::task::Wake for WakeFlag {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn wake_flag() -> (Arc<WakeFlag>, std::task::Waker) {
+    let flag = Arc::new(WakeFlag(std::sync::atomic::AtomicBool::new(false)));
+    (flag.clone(), std::task::Waker::from(flag))
+}
+
+fn poll_once<F: std::future::Future>(
+    fut: std::pin::Pin<&mut F>,
+    waker: &std::task::Waker,
+) -> std::task::Poll<F::Output> {
+    fut.poll(&mut std::task::Context::from_waker(waker))
+}
+
+/// Write held, then a reader queues, then a writer queues. Dropping the
+/// first writer must let the reader through (it is ahead of the queued
+/// writer), and dropping the reader must then let the writer through.
+#[test]
+fn rwlock_reader_queued_before_a_writer_runs_once_the_holding_writer_drops() {
+    let lock = RwLock::new(0);
+    let held = lock.try_write().expect("free lock");
+    let (r_flag, r_waker) = wake_flag();
+    let (w_flag, w_waker) = wake_flag();
+    let mut read = std::pin::pin!(lock.read());
+    let mut write = std::pin::pin!(lock.write());
+    assert!(poll_once(read.as_mut(), &r_waker).is_pending());
+    assert!(poll_once(write.as_mut(), &w_waker).is_pending());
+
+    drop(held);
+    assert!(
+        r_flag.0.load(std::sync::atomic::Ordering::SeqCst),
+        "reader woken"
+    );
+    let std::task::Poll::Ready(read_guard) = poll_once(read.as_mut(), &r_waker) else {
+        panic!("the woken reader must acquire, not requeue behind the writer");
+    };
+    assert!(poll_once(write.as_mut(), &w_waker).is_pending());
+
+    drop(read_guard);
+    assert!(
+        w_flag.0.load(std::sync::atomic::Ordering::SeqCst),
+        "writer woken"
+    );
+    assert!(poll_once(write.as_mut(), &w_waker).is_ready());
+}
+
+/// A queued writer whose future is dropped must stop holding back readers:
+/// the reader queued behind it is woken and acquires.
+#[test]
+fn rwlock_cancelled_queued_writer_releases_the_readers_behind_it() {
+    let lock = RwLock::new(0);
+    let reading = lock.try_read().expect("free lock");
+    let (_, w_waker) = wake_flag();
+    let (r_flag, r_waker) = wake_flag();
+    let mut write = Box::pin(lock.write());
+    assert!(poll_once(write.as_mut(), &w_waker).is_pending());
+    let mut read = std::pin::pin!(lock.read());
+    assert!(
+        poll_once(read.as_mut(), &r_waker).is_pending(),
+        "behind the writer"
+    );
+
+    drop(write);
+    assert!(
+        r_flag.0.load(std::sync::atomic::Ordering::SeqCst),
+        "reader woken"
+    );
+    assert!(poll_once(read.as_mut(), &r_waker).is_ready());
+    assert!(lock.try_read().is_some(), "no stale writer left queued");
+    drop(reading);
+}
+
+/// A writer cancelled while queued behind a reader and a writer must not
+/// strand the writer behind it once the lock is released.
+#[test]
+fn rwlock_cancelled_waiter_leaves_the_rest_of_the_queue_moving() {
+    let lock = RwLock::new(0);
+    let held = lock.try_write().expect("free lock");
+    let (_, a_waker) = wake_flag();
+    let (b_flag, b_waker) = wake_flag();
+    let mut first = Box::pin(lock.write());
+    let mut second = std::pin::pin!(lock.write());
+    assert!(poll_once(first.as_mut(), &a_waker).is_pending());
+    assert!(poll_once(second.as_mut(), &b_waker).is_pending());
+
+    drop(first);
+    drop(held);
+    assert!(
+        b_flag.0.load(std::sync::atomic::Ordering::SeqCst),
+        "second writer woken"
+    );
+    assert!(poll_once(second.as_mut(), &b_waker).is_ready());
+}

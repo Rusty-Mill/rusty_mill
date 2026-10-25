@@ -9,6 +9,13 @@
 //! Readers only ever check "is a writer queued at all" (not just "is one
 //! currently holding"), which is what makes that guarantee hold.
 //!
+//! Each waiting `read()`/`write()` holds a place in one FIFO queue until
+//! it acquires or its future is dropped; a dropped waiter leaves the
+//! queue and wakes whoever that makes eligible, so cancellation never
+//! strands the waiters behind it. A queued reader is held back only by a
+//! writer *ahead of it* in the queue, so one woken behind a released
+//! writer is not sent back behind a writer that queued after it.
+//!
 //! Release (`RwLockReadGuard`/`RwLockWriteGuard`'s `Drop`) only ever
 //! *clears* this lock's own contribution and wakes whichever waiters
 //! are now eligible -- it never mutates `readers`/`writer_locked` on
@@ -39,18 +46,68 @@ enum Mode {
     Write,
 }
 
+struct Waiter {
+    id: u64,
+    mode: Mode,
+    waker: Waker,
+}
+
 struct State {
     writer_locked: bool,
     readers: usize,
-    waiters: VecDeque<(Mode, Waker)>,
+    waiters: VecDeque<Waiter>,
+    next_id: u64,
 }
 
 impl State {
     fn writer_pending(&self) -> bool {
-        self.waiters.iter().any(|(mode, _)| *mode == Mode::Write)
+        self.waiters.iter().any(|w| w.mode == Mode::Write)
     }
 
-    /// Pops and returns the wakers of every waiter now eligible to run,
+    /// Whether a writer is queued ahead of waiter `id`.
+    fn writer_ahead_of(&self, id: u64) -> bool {
+        self.waiters
+            .iter()
+            .take_while(|w| w.id != id)
+            .any(|w| w.mode == Mode::Write)
+    }
+
+    fn is_front(&self, id: u64) -> bool {
+        self.waiters.front().is_some_and(|w| w.id == id)
+    }
+
+    /// Queues a new waiter, returning its id.
+    fn enqueue(&mut self, mode: Mode, waker: &Waker) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.waiters.push_back(Waiter {
+            id,
+            mode,
+            waker: waker.clone(),
+        });
+        id
+    }
+
+    /// Refreshes waiter `id`'s waker for its next wake.
+    fn rewait(&mut self, id: u64, waker: &Waker) {
+        if let Some(w) = self.waiters.iter_mut().find(|w| w.id == id) {
+            if !w.waker.will_wake(waker) {
+                w.waker = waker.clone();
+            }
+        }
+    }
+
+    fn dequeue(&mut self, id: u64) -> bool {
+        match self.waiters.iter().position(|w| w.id == id) {
+            Some(pos) => {
+                self.waiters.remove(pos);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Returns the wakers of every waiter now eligible to run,
     /// given the current (already-updated) state -- called from both
     /// guards' `Drop` after clearing their own contribution, at which
     /// point `writer_locked` is always already `false` (either just
@@ -60,11 +117,19 @@ impl State {
     /// happen: a writer never holds while any reader is active). Never
     /// mutates `readers`/`writer_locked` itself; see this module's docs
     /// for why that matters.
+    ///
+    /// Waiters stay queued when woken: each leaves the queue itself once
+    /// its re-poll acquires (or its future is dropped).
     fn wake_eligible(&mut self) -> Vec<Waker> {
-        let mut woken = Vec::new();
-        while matches!(self.waiters.front(), Some((Mode::Read, _))) {
-            woken.push(self.waiters.pop_front().unwrap().1);
+        if self.writer_locked {
+            return Vec::new();
         }
+        let mut woken: Vec<Waker> = self
+            .waiters
+            .iter()
+            .take_while(|w| w.mode == Mode::Read)
+            .map(|w| w.waker.clone())
+            .collect();
         // Only ever check for a queued writer in the *same* release
         // event when no readers were just woken above -- waking a
         // writer alongside a just-woken reader batch would mean
@@ -75,11 +140,34 @@ impl State {
         // The writer gets its turn one release later instead, once the
         // last of that reader batch's own guards actually drops.
         if woken.is_empty() && self.readers == 0 {
-            if let Some((Mode::Write, _)) = self.waiters.front() {
-                woken.push(self.waiters.pop_front().unwrap().1);
+            if let Some(w) = self.waiters.front().filter(|w| w.mode == Mode::Write) {
+                woken.push(w.waker.clone());
             }
         }
         woken
+    }
+}
+
+/// A waiter's place in the queue, left on drop (a cancelled `read()` or
+/// `write()`), waking whoever that makes eligible.
+struct Place<'a> {
+    state: &'a StdMutex<State>,
+    id: Option<u64>,
+}
+
+impl Drop for Place<'_> {
+    fn drop(&mut self) {
+        let Some(id) = self.id else { return };
+        let mut state = self.state.lock().unwrap();
+        let woken = if state.dequeue(id) {
+            state.wake_eligible()
+        } else {
+            Vec::new()
+        };
+        drop(state);
+        for waker in woken {
+            waker.wake();
+        }
     }
 }
 
@@ -104,32 +192,65 @@ impl<T> RwLock<T> {
                 writer_locked: false,
                 readers: 0,
                 waiters: VecDeque::new(),
+                next_id: 0,
             }),
             data: UnsafeCell::new(value),
         }
     }
 
+    /// A new reader waits for any queued writer; a queued one only for a
+    /// writer ahead of it.
     async fn acquire_read(&self) {
+        let mut place = Place {
+            state: &self.state,
+            id: None,
+        };
         std::future::poll_fn(|cx| {
             let mut guard = self.state.lock().unwrap();
-            if !guard.writer_locked && !guard.writer_pending() {
+            let blocked = match place.id {
+                None => guard.writer_pending(),
+                Some(id) => guard.writer_ahead_of(id),
+            };
+            if !guard.writer_locked && !blocked {
                 guard.readers += 1;
+                if let Some(id) = place.id.take() {
+                    guard.dequeue(id);
+                }
                 return Poll::Ready(());
             }
-            guard.waiters.push_back((Mode::Read, cx.waker().clone()));
+            match place.id {
+                Some(id) => guard.rewait(id, cx.waker()),
+                None => place.id = Some(guard.enqueue(Mode::Read, cx.waker())),
+            }
             Poll::Pending
         })
         .await;
     }
 
+    /// A writer acquires a free lock when no one is queued, or when it is
+    /// at the front of the queue.
     async fn acquire_write(&self) {
+        let mut place = Place {
+            state: &self.state,
+            id: None,
+        };
         std::future::poll_fn(|cx| {
             let mut guard = self.state.lock().unwrap();
-            if !guard.writer_locked && guard.readers == 0 {
+            let turn = match place.id {
+                None => guard.waiters.is_empty(),
+                Some(id) => guard.is_front(id),
+            };
+            if !guard.writer_locked && guard.readers == 0 && turn {
                 guard.writer_locked = true;
+                if let Some(id) = place.id.take() {
+                    guard.dequeue(id);
+                }
                 return Poll::Ready(());
             }
-            guard.waiters.push_back((Mode::Write, cx.waker().clone()));
+            match place.id {
+                Some(id) => guard.rewait(id, cx.waker()),
+                None => place.id = Some(guard.enqueue(Mode::Write, cx.waker())),
+            }
             Poll::Pending
         })
         .await;
