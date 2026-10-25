@@ -10421,16 +10421,16 @@ dependencies = [
 name = "remind_me_remote"
 version = "0.4.0"
 dependencies = [
- "axum",
  "remind_me_core",
  "remind_me_mcp",
  "reqwest 0.13.4",
+ "rusty_axum",
  "rusty_base64",
  "rusty_hex",
- "rusty_mcp_axum",
  "rusty_mcp_server",
  "rusty_oauth",
  "rusty_percent",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "sha256",
@@ -11788,7 +11788,7 @@ dependencies = [
  "rusty-search-solr",
  "rusty-search-sqlite-fts5",
  "rusty-search-tantivy",
- "tokio",
+ "rusty_tokio",
 ]
 
 [[package]]
@@ -11800,9 +11800,9 @@ dependencies = [
  "rusty-search-core",
  "rusty_request",
  "rusty_serde",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11816,9 +11816,9 @@ dependencies = [
  "rusty_request",
  "rusty_serde",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11828,7 +11828,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rusty-search-core",
- "tokio",
+ "rusty_tokio",
 ]
 
 [[package]]
@@ -11850,9 +11850,9 @@ dependencies = [
  "rusty-search-core",
  "rusty_request",
  "rusty_serde",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11877,7 +11877,7 @@ dependencies = [
  "async-trait",
  "rusty-search-core",
  "rusty_serde",
- "tokio",
+ "rusty_tokio",
 ]
 
 [[package]]
@@ -11888,8 +11888,8 @@ dependencies = [
  "rusty-search-core",
  "rusty-search-elasticsearch",
  "rusty_request",
+ "rusty_tokio",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11903,9 +11903,9 @@ dependencies = [
  "rusty_request",
  "rusty_serde",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11918,9 +11918,9 @@ dependencies = [
  "rusty_serde",
  "rusty_sqlite",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
  "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -11931,11 +11931,11 @@ dependencies = [
  "rusty-search-core",
  "rusty_serde",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
  "tantivy",
  "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -12238,10 +12238,10 @@ name = "rusty_fedora"
 version = "0.1.0"
 dependencies = [
  "rusty_request",
+ "rusty_tokio",
  "rusty_wiremock",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -12324,11 +12324,11 @@ dependencies = [
  "rusty_opnsense",
  "rusty_proxmox",
  "rusty_serve",
+ "rusty_tokio",
  "rusty_wiremock",
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "tokio",
  "toml 0.8.2",
 ]
 
@@ -12634,6 +12634,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_mux_tui"
+version = "0.1.0"
+dependencies = [
+ "platform",
+ "platform-linux",
+ "rusty_mux_core",
+ "rusty_mux_proto",
+ "rusty_mux_server",
+ "rusty_term_core",
+ "rusty_uuid",
+]
+
+[[package]]
 name = "rusty_oauth"
 version = "0.1.0"
 dependencies = [
@@ -12649,10 +12662,10 @@ name = "rusty_opnsense"
 version = "0.1.0"
 dependencies = [
  "rusty_request",
+ "rusty_tokio",
  "rusty_wiremock",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -12709,10 +12722,10 @@ name = "rusty_proxmox"
 version = "0.1.0"
 dependencies = [
  "rusty_request",
+ "rusty_tokio",
  "rusty_wiremock",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -16101,9 +16114,9 @@ name = "ts-cli"
 version = "0.0.1"
 dependencies = [
  "rusty_http",
+ "rusty_tokio",
  "serde_json",
  "thiserror 1.0.69",
- "tokio",
  "ts-types",
 ]
 
@@ -16112,17 +16125,15 @@ name = "ts-control"
 version = "0.0.1"
 dependencies = [
  "blake2",
- "bytes",
  "chacha20poly1305",
- "h2",
  "hkdf 0.12.4",
- "http",
  "rusty_base64",
+ "rusty_h2",
  "rusty_http",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
- "tokio",
  "ts-key",
  "ts-types",
 ]
@@ -16132,7 +16143,7 @@ name = "ts-daemon"
 version = "0.0.1"
 dependencies = [
  "rusty_log",
- "tokio",
+ "rusty_tokio",
  "ts-engine",
  "ts-key",
  "ts-localapi",
@@ -16146,8 +16157,8 @@ dependencies = [
  "crypto_box",
  "rusty_http",
  "rusty_log",
+ "rusty_tokio",
  "thiserror 1.0.69",
- "tokio",
  "ts-key",
  "ts-types",
 ]
@@ -16167,8 +16178,8 @@ name = "ts-engine"
 version = "0.0.1"
 dependencies = [
  "rusty_log",
+ "rusty_tokio",
  "thiserror 1.0.69",
- "tokio",
  "ts-control",
  "ts-derp",
  "ts-disco",
@@ -16207,14 +16218,13 @@ version = "0.0.1"
 dependencies = [
  "http-body-util",
  "hyper",
- "hyper-util",
  "libc 0.2.189",
  "rusty_http",
  "rusty_log",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
- "tokio",
  "ts-types",
 ]
 
@@ -16226,7 +16236,7 @@ dependencies = [
  "platform-linux",
  "rand_core 0.6.4",
  "rusty_log",
- "tokio",
+ "rusty_tokio",
  "ts-derp",
  "ts-disco",
  "ts-key",
@@ -16240,9 +16250,9 @@ version = "0.0.1"
 dependencies = [
  "parking_lot",
  "rusty_log",
+ "rusty_tokio",
  "smoltcp",
  "thiserror 1.0.69",
- "tokio",
  "ts-engine",
  "ts-key",
  "ts-types",
@@ -16275,8 +16285,8 @@ name = "ts-stun"
 version = "0.0.1"
 dependencies = [
  "rand_core 0.6.4",
+ "rusty_tokio",
  "thiserror 1.0.69",
- "tokio",
 ]
 
 [[package]]
@@ -16285,7 +16295,7 @@ version = "0.0.1"
 dependencies = [
  "platform",
  "platform-linux",
- "tokio",
+ "rusty_tokio",
 ]
 
 [[package]]

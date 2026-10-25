@@ -18,13 +18,13 @@ use crypto_box::{
     PublicKey, SalsaBox, SecretKey,
     aead::{Aead, AeadCore, OsRng},
 };
+use rusty_http::async_tokio::{AsyncTransport, Replay};
 use rusty_http::head::RequestHead;
-use rusty_http::tokio_native::{AsyncTransport, Replay};
 use rusty_http::{HeaderMap, Method, Version};
-use tokio::io::AsyncRead;
-use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::mpsc;
+use rusty_tokio::io::AsyncRead;
+use rusty_tokio::net::TcpStream;
+use rusty_tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use rusty_tokio::sync::mpsc;
 use ts_key::NodePrivate;
 use ts_types::NodePublic;
 
@@ -130,7 +130,7 @@ impl DerpClient {
         node_key: &NodePrivate,
         timeout: Duration,
     ) -> Result<Self, DerpError> {
-        match tokio::time::timeout(timeout, async {
+        match rusty_tokio::time::timeout(timeout, async {
             let (host_port, host_header) = parse_http_url(url)?;
             let stream = TcpStream::connect(&host_port).await?;
             stream.set_nodelay(true).ok();
@@ -241,8 +241,8 @@ impl DerpClient {
         let (inbound_tx, inbound_rx) = mpsc::channel::<RelayedPacket>(256);
 
         let pong_tx = outbound_tx.clone();
-        let reader = tokio::spawn(reader_loop(read_half, inbound_tx, pong_tx));
-        let writer = tokio::spawn(writer_loop(write_half, outbound_rx));
+        let reader = rusty_tokio::spawn(reader_loop(read_half, inbound_tx, pong_tx));
+        let writer = rusty_tokio::spawn(writer_loop(write_half, outbound_rx));
 
         Ok(DerpClient {
             server_key,
@@ -332,7 +332,7 @@ async fn writer_loop(mut write_half: OwnedWriteHalf, mut rx: mpsc::Receiver<Outb
 }
 
 /// Aborts a background task when the client is dropped.
-struct TaskGuard(tokio::task::JoinHandle<()>);
+struct TaskGuard(rusty_tokio::task::JoinHandle<()>);
 impl Drop for TaskGuard {
     fn drop(&mut self) {
         self.0.abort();
@@ -399,8 +399,7 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use rusty_tokio::net::TcpListener;
 
     #[test]
     fn url_parsing() {
@@ -415,7 +414,7 @@ mod tests {
     /// A relay that accepts the TCP connection but never sends a byte back
     /// must not hang `connect` forever -- it should give up within the
     /// caller-supplied bound.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn connect_times_out_on_unresponsive_relay() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -446,14 +445,14 @@ mod tests {
     /// must not cause the handshake to proceed unvalidated: a ServerInfo
     /// box that fails to authenticate must fail the handshake loudly, even
     /// when it isn't the very first frame after ClientInfo.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn handshake_rejects_unvalidated_serverinfo_after_other_frames() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let client_key = NodePrivate::generate();
 
-        let server_task = tokio::spawn(async move {
+        let server_task = rusty_tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
 
             // Consume the HTTP upgrade request, then answer with 101.
@@ -502,7 +501,7 @@ mod tests {
 
             // Keep the connection open briefly so the client's read doesn't
             // race a reset.
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            rusty_tokio::time::sleep(Duration::from_millis(200)).await;
         });
 
         let url = format!("http://{addr}");

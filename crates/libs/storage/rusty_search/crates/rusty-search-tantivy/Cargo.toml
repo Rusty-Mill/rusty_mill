@@ -20,10 +20,9 @@ rusty_serde = { workspace = true }
 # alongside `rusty_serde` for exactly that boundary; see convert.rs.
 serde_json = { workspace = true }
 tantivy = { workspace = true }
-tokio = { workspace = true, features = ["sync", "rt"] }
+rusty_tokio.workspace = true
 rusty_time.workspace = true
 rusty_uuid.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true }
 tempfile = { workspace = true }

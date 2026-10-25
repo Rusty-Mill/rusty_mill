@@ -143,6 +143,20 @@ pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
 }
 
+/// As tokio's: a `Mutex` around `value`.
+impl<T> From<T> for Mutex<T> {
+    fn from(value: T) -> Self {
+        Mutex::new(value)
+    }
+}
+
+/// As tokio's: a `Mutex` around `T::default()`.
+impl<T: Default> Default for Mutex<T> {
+    fn default() -> Self {
+        Mutex::new(T::default())
+    }
+}
+
 impl<T> Deref for MutexGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {

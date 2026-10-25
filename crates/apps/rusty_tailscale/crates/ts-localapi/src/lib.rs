@@ -20,11 +20,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rusty_http::async_tokio::AsyncTransport;
 use rusty_http::head::{RequestHead, ResponseHead};
-use rusty_http::tokio_native::AsyncTransport;
 use rusty_http::{HeaderMap, Method, StatusCode, Version};
 #[cfg(unix)]
-use tokio::net::{UnixListener, UnixStream};
+use rusty_tokio::net::{UnixListener, UnixStream};
 use ts_types::{MaskedPrefs, PingResult, Prefs, Status};
 
 /// Cap on the HTTP/1.1 request head we'll buffer before giving up.
@@ -79,7 +79,7 @@ pub async fn serve<B: LocalBackend>(
     loop {
         let (stream, _addr) = listener.accept().await.map_err(ServeError::Accept)?;
         let backend = backend.clone();
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             if let Err(e) = serve_connection(stream, &*backend).await {
                 rusty_log::debug!("localapi: connection error: {e}");
             }
@@ -160,7 +160,7 @@ async fn write_response(
 /// Removes a stale socket, then binds a fresh one with permissions
 /// already narrowed to `0600` *before* it starts accepting connections.
 ///
-/// `tokio::net::UnixListener::bind`/`std::os::unix::net::UnixListener::bind`
+/// `rusty_tokio::net::UnixListener::bind`/`std::os::unix::net::UnixListener::bind`
 /// both `bind` *and* `listen` in one call, so a caller that narrows
 /// permissions only afterwards (as this function used to) leaves a TOCTOU
 /// window: the socket is already connectable, at whatever mode the
@@ -446,9 +446,9 @@ mod tests {
     /// for bytes to read. The cap must reject it up front with a 413,
     /// without ever trying to read the body.
     #[cfg(unix)]
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn oversized_content_length_is_rejected_before_reading_the_body() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         struct EmptyBackend;
         impl LocalBackend for EmptyBackend {
@@ -464,7 +464,7 @@ mod tests {
         }
 
         let (mut client, server) = UnixStream::pair().unwrap();
-        let server_task = tokio::spawn(async move {
+        let server_task = rusty_tokio::spawn(async move {
             let backend = EmptyBackend;
             let _ = serve_connection(server, &backend).await;
         });
@@ -479,7 +479,7 @@ mod tests {
         client.write_all(request.as_bytes()).await.unwrap();
 
         let mut response = Vec::new();
-        tokio::time::timeout(
+        rusty_tokio::time::timeout(
             std::time::Duration::from_secs(2),
             client.read_to_end(&mut response),
         )

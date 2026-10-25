@@ -2,7 +2,7 @@
 //! length-prefixed frame off an untrusted stream, so a hostile server (or a
 //! MITM before the NaCl handshake) must not be able to crash or OOM us.
 //!
-//! Stable-only, deterministic (xorshift seed). `&[u8]` implements tokio's
+//! Stable-only, deterministic (xorshift seed). `&[u8]` implements `rusty_tokio`'s
 //! `AsyncRead`, so random buffers stand in for the socket.
 
 use ts_derp::frame::read_frame;
@@ -27,7 +27,7 @@ impl Rng {
 
 const MAX_FRAME: u32 = 1 << 20; // 1 MiB cap, as the real client uses
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn read_frame_never_panics_or_overallocates() {
     let mut rng = Rng(0x0BAD_C0DE_F00D_1971);
     for _ in 0..100_000 {
