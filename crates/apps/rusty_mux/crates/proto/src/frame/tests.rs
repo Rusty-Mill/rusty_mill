@@ -36,6 +36,12 @@ fn every_message_round_trips() {
     let block = BlockId::from_uuid(Uuid::new_v4());
     let client = ClientId::from_uuid(Uuid::new_v4());
     let messages = [
+        Message::Checkpoint {
+            block,
+            offset: u64::MAX,
+            total: u64::MAX,
+            data: vec![1, 2, 3],
+        },
         Message::Hello {
             features: Features::from_bits(0b101),
         },

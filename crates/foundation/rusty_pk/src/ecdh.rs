@@ -293,7 +293,7 @@ pub(crate) fn limbs_from_be(bytes: &[u8]) -> E {
 }
 
 /// 1 if `x != 0`, else 0, without a branch.
-fn nonzero(x: u64) -> u64 {
+pub(crate) fn nonzero(x: u64) -> u64 {
     let x = core::hint::black_box(x);
     (x | x.wrapping_neg()) >> 63
 }

@@ -5124,3 +5124,264 @@ pub(crate) fn row_text(cells: &[Cell], clusters: &[String]) -> String {
     }
     s.trim_end().to_string()
 }
+
+// RTCP v2 deliberately excludes view selection/search/folds, render caches,
+// recycled spare rows, pending host actions and L13 channel state.
+impl crate::checkpoint::Wire for Grid {
+    fn write(&self, w: &mut crate::checkpoint::Writer) -> crate::checkpoint::Result<()> {
+        crate::checkpoint::Wire::write(&self.cols, w)?;
+        crate::checkpoint::Wire::write(&self.rows, w)?;
+        crate::checkpoint::Wire::write(&self.screen, w)?;
+        crate::checkpoint::Wire::write(&self.cursor, w)?;
+        crate::checkpoint::Wire::write(&self.saved_cursor, w)?;
+        crate::checkpoint::Wire::write(&self.scroll_top, w)?;
+        crate::checkpoint::Wire::write(&self.scroll_bottom, w)?;
+        crate::checkpoint::Wire::write(&self.primary, w)?;
+        crate::checkpoint::Wire::write(&self.title, w)?;
+        crate::checkpoint::Wire::write(&self.title_stack, w)?;
+        crate::checkpoint::Wire::write(&self.kitty_flags_stack, w)?;
+        crate::checkpoint::Wire::write(&self.cwd, w)?;
+        crate::checkpoint::Wire::write(&self.scrollback, w)?;
+        crate::checkpoint::Wire::write(&self.scrollback_max, w)?;
+        crate::checkpoint::Wire::write(&self.current_link, w)?;
+        crate::checkpoint::Wire::write(&self.tab_stops, w)?;
+        crate::checkpoint::Wire::write(&self.cursor_visible, w)?;
+        crate::checkpoint::Wire::write(&self.sync_output, w)?;
+        crate::checkpoint::Wire::write(&self.sync_output_since, w)?;
+        crate::checkpoint::Wire::write(&self.bracketed_paste, w)?;
+        crate::checkpoint::Wire::write(&self.app_cursor_keys, w)?;
+        crate::checkpoint::Wire::write(&self.alt_scroll, w)?;
+        crate::checkpoint::Wire::write(&self.kitty_images, w)?;
+        crate::checkpoint::Wire::write(&self.next_anim_id, w)?;
+        crate::checkpoint::Wire::write(&self.kitty_virtual, w)?;
+        crate::checkpoint::Wire::write(&self.progress, w)?;
+        crate::checkpoint::Wire::write(&self.report_color_scheme, w)?;
+        crate::checkpoint::Wire::write(&self.bdsm, w)?;
+        crate::checkpoint::Wire::write(&self.bidi_autodetect, w)?;
+        crate::checkpoint::Wire::write(&self.bidi_para_rtl, w)?;
+        crate::checkpoint::Wire::write(&self.notif99_pending, w)?;
+        crate::checkpoint::Wire::write(&self.focus_reporting, w)?;
+        crate::checkpoint::Wire::write(&self.win32_input, w)?;
+        crate::checkpoint::Wire::write(&self.app_keypad, w)?;
+        crate::checkpoint::Wire::write(&self.line_feed_new_line, w)?;
+        crate::checkpoint::Wire::write(&self.mouse_modes, w)?;
+        crate::checkpoint::Wire::write(&self.cell_px, w)?;
+        crate::checkpoint::Wire::write(&self.cursor_icon, w)?;
+        crate::checkpoint::Wire::write(&self.autowrap, w)?;
+        crate::checkpoint::Wire::write(&self.grapheme_clustering, w)?;
+        crate::checkpoint::Wire::write(&self.allow_deccolm, w)?;
+        crate::checkpoint::Wire::write(&self.column_mode_132, w)?;
+        crate::checkpoint::Wire::write(&self.origin_mode, w)?;
+        crate::checkpoint::Wire::write(&self.lr_margin_mode, w)?;
+        crate::checkpoint::Wire::write(&self.left_margin, w)?;
+        crate::checkpoint::Wire::write(&self.right_margin, w)?;
+        crate::checkpoint::Wire::write(&self.insert_mode, w)?;
+        crate::checkpoint::Wire::write(&self.default_fg, w)?;
+        crate::checkpoint::Wire::write(&self.default_bg, w)?;
+        crate::checkpoint::Wire::write(&self.erase_bg, w)?;
+        crate::checkpoint::Wire::write(&self.cursor_color, w)?;
+        crate::checkpoint::Wire::write(&self.cursor_shape, w)?;
+        crate::checkpoint::Wire::write(&self.cursor_blink, w)?;
+        crate::checkpoint::Wire::write(&self.default_cursor_shape, w)?;
+        crate::checkpoint::Wire::write(&self.default_cursor_blink, w)?;
+        crate::checkpoint::Wire::write(&self.prompt_marks, w)?;
+        crate::checkpoint::Wire::write(&self.last_exit, w)?;
+        crate::checkpoint::Wire::write(&self.status_line, w)?;
+        crate::checkpoint::Wire::write(&self.clusters, w)?;
+        crate::checkpoint::Wire::write(&self.links, w)?;
+        w.charge(
+            (self.links.len() + self.clusters.len()) * 2 * size_of::<String>()
+                + 4 * size_of::<usize>()
+                + self
+                    .links
+                    .iter()
+                    .chain(&self.clusters)
+                    .map(String::len)
+                    .sum::<usize>()
+                + self.rows,
+        )?;
+        Ok(())
+    }
+    fn read(r: &mut crate::checkpoint::Reader<'_>) -> crate::checkpoint::Result<Self> {
+        let mut grid = Self::new(1, 1);
+        grid.cols = crate::checkpoint::Wire::read(r)?;
+        grid.rows = crate::checkpoint::Wire::read(r)?;
+        grid.screen = crate::checkpoint::Wire::read(r)?;
+        grid.cursor = crate::checkpoint::Wire::read(r)?;
+        grid.saved_cursor = crate::checkpoint::Wire::read(r)?;
+        grid.scroll_top = crate::checkpoint::Wire::read(r)?;
+        grid.scroll_bottom = crate::checkpoint::Wire::read(r)?;
+        grid.primary = crate::checkpoint::Wire::read(r)?;
+        grid.title = crate::checkpoint::Wire::read(r)?;
+        grid.title_stack = crate::checkpoint::Wire::read(r)?;
+        grid.kitty_flags_stack = crate::checkpoint::Wire::read(r)?;
+        grid.cwd = crate::checkpoint::Wire::read(r)?;
+        grid.scrollback = crate::checkpoint::Wire::read(r)?;
+        grid.scrollback_max = crate::checkpoint::Wire::read(r)?;
+        grid.current_link = crate::checkpoint::Wire::read(r)?;
+        grid.tab_stops = crate::checkpoint::Wire::read(r)?;
+        grid.cursor_visible = crate::checkpoint::Wire::read(r)?;
+        grid.sync_output = crate::checkpoint::Wire::read(r)?;
+        grid.sync_output_since = crate::checkpoint::Wire::read(r)?;
+        grid.bracketed_paste = crate::checkpoint::Wire::read(r)?;
+        grid.app_cursor_keys = crate::checkpoint::Wire::read(r)?;
+        grid.alt_scroll = crate::checkpoint::Wire::read(r)?;
+        grid.kitty_images = crate::checkpoint::Wire::read(r)?;
+        grid.next_anim_id = crate::checkpoint::Wire::read(r)?;
+        grid.kitty_virtual = crate::checkpoint::Wire::read(r)?;
+        grid.progress = crate::checkpoint::Wire::read(r)?;
+        grid.report_color_scheme = crate::checkpoint::Wire::read(r)?;
+        grid.bdsm = crate::checkpoint::Wire::read(r)?;
+        grid.bidi_autodetect = crate::checkpoint::Wire::read(r)?;
+        grid.bidi_para_rtl = crate::checkpoint::Wire::read(r)?;
+        grid.notif99_pending = crate::checkpoint::Wire::read(r)?;
+        grid.focus_reporting = crate::checkpoint::Wire::read(r)?;
+        grid.win32_input = crate::checkpoint::Wire::read(r)?;
+        grid.app_keypad = crate::checkpoint::Wire::read(r)?;
+        grid.line_feed_new_line = crate::checkpoint::Wire::read(r)?;
+        grid.mouse_modes = crate::checkpoint::Wire::read(r)?;
+        grid.cell_px = crate::checkpoint::Wire::read(r)?;
+        grid.cursor_icon = crate::checkpoint::Wire::read(r)?;
+        grid.autowrap = crate::checkpoint::Wire::read(r)?;
+        grid.grapheme_clustering = crate::checkpoint::Wire::read(r)?;
+        grid.allow_deccolm = crate::checkpoint::Wire::read(r)?;
+        grid.column_mode_132 = crate::checkpoint::Wire::read(r)?;
+        grid.origin_mode = crate::checkpoint::Wire::read(r)?;
+        grid.lr_margin_mode = crate::checkpoint::Wire::read(r)?;
+        grid.left_margin = crate::checkpoint::Wire::read(r)?;
+        grid.right_margin = crate::checkpoint::Wire::read(r)?;
+        grid.insert_mode = crate::checkpoint::Wire::read(r)?;
+        grid.default_fg = crate::checkpoint::Wire::read(r)?;
+        grid.default_bg = crate::checkpoint::Wire::read(r)?;
+        grid.erase_bg = crate::checkpoint::Wire::read(r)?;
+        grid.cursor_color = crate::checkpoint::Wire::read(r)?;
+        grid.cursor_shape = crate::checkpoint::Wire::read(r)?;
+        grid.cursor_blink = crate::checkpoint::Wire::read(r)?;
+        grid.default_cursor_shape = crate::checkpoint::Wire::read(r)?;
+        grid.default_cursor_blink = crate::checkpoint::Wire::read(r)?;
+        grid.prompt_marks = crate::checkpoint::Wire::read(r)?;
+        grid.last_exit = crate::checkpoint::Wire::read(r)?;
+        grid.status_line = crate::checkpoint::Wire::read(r)?;
+        grid.clusters = crate::checkpoint::Wire::read(r)?;
+        grid.links = crate::checkpoint::Wire::read(r)?;
+        // Charge cache rebuilds too: they duplicate String headers and bytes.
+        r.charge(
+            (grid.links.len() + grid.clusters.len()) * 2 * size_of::<String>()
+                + 4 * size_of::<usize>()
+                + grid
+                    .links
+                    .iter()
+                    .chain(&grid.clusters)
+                    .map(String::len)
+                    .sum::<usize>(),
+        )?;
+        grid.links_arc = grid.links.clone().into();
+        grid.clusters_arc = grid.clusters.clone().into();
+        r.charge(grid.rows)?;
+        if grid.rows > 4096 {
+            return Err(crate::checkpoint::Error("grid dimensions"));
+        }
+        grid.reset_damage();
+        Ok(grid)
+    }
+}
+crate::checkpoint::fields!(Line, [cells, wrapped, attr]);
+crate::checkpoint::fields!(SavedScreen, [screen, cursor, saved_cursor, mode]);
+crate::checkpoint::fields!(MouseModes, [base, extended]);
+crate::checkpoint::fields!(
+    KittyImage,
+    [id, w, h, frames, current, playing, last_advance]
+);
+crate::checkpoint::fields!(KittyFrame, [pixels, gap_ms]);
+crate::checkpoint::fields!(StatusLine, [text, fg, bg, cells]);
+crate::checkpoint::variants!(CursorShape, [Block, Underline, Bar]);
+crate::checkpoint::variants!(LineAttr, [Single, DoubleWidth, DoubleTop, DoubleBottom]);
+crate::checkpoint::variants!(AltMode, [Dec47, Dec1047, Dec1049]);
+
+impl Grid {
+    pub(crate) fn validate_checkpoint(&self) -> crate::checkpoint::Result<()> {
+        use crate::checkpoint::Error;
+        if self.cols == 0
+            || self.rows == 0
+            || self.cols > 4096
+            || self.rows > 4096
+            || self.screen.len() != self.rows
+            || self.tab_stops.len() != self.cols
+            || self.scroll_top > self.scroll_bottom
+            || self.scroll_bottom >= self.rows
+            || self.left_margin > self.right_margin
+            || self.right_margin >= self.cols
+            || self.scrollback_max > SCROLLBACK_MAX
+            || self.scrollback.len() > self.scrollback_max
+            || self.clusters.len() > CLUSTER_MAX
+            || self.links.len() > LINK_MAX
+            || self.title_stack.len() > TITLE_STACK_MAX
+            || self.kitty_flags_stack.len() > KITTY_FLAGS_STACK_MAX
+            || usize::from(self.current_link) > self.links.len()
+            || self.kitty_virtual.len() > 16
+            || self.prompt_marks.len() > PROMPT_MARKS_MAX
+            || self.notif99_pending.len() > 4
+        {
+            return Err(Error("grid bounds"));
+        }
+        let point = |p: (usize, usize)| p.0 <= self.cols && p.1 < self.rows;
+        if !point(self.cursor) || !point(self.saved_cursor) {
+            return Err(Error("cursor bounds"));
+        }
+        if let Some(p) = &self.primary
+            && (p.screen.len() != self.rows || !point(p.cursor) || !point(p.saved_cursor))
+        {
+            return Err(Error("primary screen bounds"));
+        }
+        let primary = self.primary.iter().flat_map(|p| p.screen.iter());
+        for line in self.screen.iter().chain(primary).chain(&self.scrollback) {
+            if line.cells.len() > 4096
+                || line.cells.iter().any(|c| {
+                    usize::from(c.cluster) > self.clusters.len()
+                        || usize::from(c.link) > self.links.len()
+                })
+            {
+                return Err(Error("cell bounds"));
+            }
+        }
+        if self.screen.iter().any(|l| l.cells.len() != self.cols)
+            || self
+                .primary
+                .iter()
+                .any(|p| p.screen.iter().any(|l| l.cells.len() != self.cols))
+        {
+            return Err(Error("screen width"));
+        }
+        if let Some(s) = &self.status_line
+            && (s.cells.len() != self.cols
+                || s.cells.iter().any(|c| {
+                    usize::from(c.cluster) > self.clusters.len()
+                        || usize::from(c.link) > self.links.len()
+                }))
+        {
+            return Err(Error("status bounds"));
+        }
+        let mut pixels = 0usize;
+        for image in &self.kitty_images {
+            let n = image
+                .w
+                .checked_mul(image.h)
+                .ok_or(Error("image dimensions"))?;
+            if n == 0 || image.frames.is_empty() || image.current >= image.frames.len() {
+                return Err(Error("image bounds"));
+            }
+            for frame in &image.frames {
+                pixels = pixels
+                    .checked_add(frame.pixels.len())
+                    .ok_or(Error("pixel overflow"))?;
+                if frame.pixels.len() != n {
+                    return Err(Error("image frame size"));
+                }
+            }
+        }
+        if pixels > crate::checkpoint::MAX_DECODED / size_of::<Option<u32>>() {
+            return Err(Error("image store budget"));
+        }
+        Ok(())
+    }
+}
