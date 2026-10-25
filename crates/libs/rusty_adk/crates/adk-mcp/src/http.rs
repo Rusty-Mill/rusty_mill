@@ -11,12 +11,13 @@ use std::time::Duration;
 
 use adk_core::{AdkError, Result};
 use rusty_axum::routing::any;
-use rusty_axum::{Router, ServeOptions, StatusCode};
+use rusty_axum::{BoxFuture, Request, Response, Router, ServeOptions, StatusCode};
 use rusty_mcp_server::{HttpConfig, HttpHandler, Mount};
 
 use crate::server::McpServer;
 
-/// The largest request body accepted.
+/// The largest request body accepted, by the router itself: an app that
+/// mounts it may allow larger bodies on its other routes.
 const MAX_BODY_BYTES: u64 = 2 * 1024 * 1024;
 
 /// A reply is always plain JSON: this is far past any tool's runtime.
@@ -60,10 +61,20 @@ pub fn router(server: Arc<McpServer>, path: &str) -> Router {
     ));
     let mcp = Mount::new(handler).at(path);
     if path == "/" {
-        Router::new().fallback(move |req| mcp.call(req))
+        Router::new().fallback(move |req| bounded(&mcp, req))
     } else {
-        Router::new().route(path, any(move |req| mcp.call(req)))
+        Router::new().route(path, any(move |req| bounded(&mcp, req)))
     }
+}
+
+/// Answers `req` with `mcp`, or 413 when its body is over [`MAX_BODY_BYTES`].
+fn bounded(mcp: &Mount, req: Request) -> BoxFuture<'static, Response> {
+    if req.body().len() as u64 > MAX_BODY_BYTES {
+        return Box::pin(async {
+            Response::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+        });
+    }
+    mcp.call(req)
 }
 
 /// Serves `server` over HTTP on `addr` at `path`, until the process ends.
@@ -101,4 +112,44 @@ fn serve_until_exit(listener: std::net::TcpListener, app: Router) -> std::io::Re
             .await;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adk_core::Services;
+    use adk_sessions::InMemorySessionService;
+    use rusty_axum::Method;
+
+    /// The status `router` answers a POST of `len` bytes to `/mcp` with, the
+    /// way a host app that allows larger bodies would hand it over.
+    fn status_for(len: usize) -> StatusCode {
+        let tokio = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let services = Services::new(Arc::new(InMemorySessionService::new()));
+        let server = Arc::new(McpServer::new("test", Vec::new(), services));
+        let app = tokio.block_on(async { router(server, "/mcp") });
+        let request = Request::new(Method::Post, "/mcp")
+            .with_header("content-type", "application/json")
+            .unwrap()
+            .with_body(vec![b' '; len]);
+        let runtime = rusty_tokio::Builder::new_current_thread().build().unwrap();
+        runtime.block_on(app.call(request)).status
+    }
+
+    #[test]
+    fn a_body_over_the_limit_is_refused_whatever_the_host_allows() {
+        let over = usize::try_from(MAX_BODY_BYTES).unwrap() + 1;
+        assert_eq!(status_for(over), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn a_body_at_the_limit_reaches_the_handler() {
+        let at = usize::try_from(MAX_BODY_BYTES).unwrap();
+        let status = status_for(at);
+        assert_ne!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_ne!(status, StatusCode::NOT_FOUND);
+    }
 }
