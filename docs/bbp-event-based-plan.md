@@ -1,6 +1,6 @@
 # BBP: from loop-based to event-based
 
-Status: accepted by the owner, 2026-10-22. Steps 1, 2 and 3 merged (#880, #919, #932, #938, #1005); step 4 approved 2026-10-25.
+Status: accepted by the owner, 2026-10-22. Steps 1, 2 and 3 merged (#880, #919, #932, #938, #1005); step 4 approved 2026-10-25; 4a merged (#1052).
 Goal (owner): BBP reacts to events instead of running a loop. `rusty_crdt` is a means, not the goal.
 Builds on `docs/bbp-event-driven-design.md` (accepted Phase 1) and `docs/bbp-concurrency-design.md` (2a/2b).
 
@@ -211,6 +211,51 @@ What the grid says beyond the decision cell:
   measurement of the line check. A rerun after the refinement measures it directly.
 - Under blind last-write-wins every refusal above would be a lost edit; under RGA admission every one
   would be a silent merge, the same-line ones being merges of two edits of one line.
+
+### Step 4b: the line check (2026-10-25)
+
+The owner confirmed the thresholds and rule 2 on 2026-10-25. An edit is now refused with `stale_base` only
+when an op is anchored on a line (or the start of the spec) that an edit accepted since its base also
+anchored on: deleted it, or placed lines against it. Sections are gone from admission; a heading is an
+ordinary line. Same ops, same fold, no CRDT. The same harness and workload, rerun on this check, with
+`merged/edit` the share of accepted edits whose base was not the head (concurrent work kept by id):
+
+| N | sections | overlap | accepted | refused/edit | wasted work | merged/edit |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 4 | 0.00 | 200 | 0.00 | 0% | 0.89 |
+| 2 | 4 | 0.25 | 200 | 0.01 | 0% | 0.89 |
+| 2 | 4 | 1.00 | 200 | 0.03 | 3% | 0.85 |
+| 2 | 2 | 0.00 | 200 | 0.00 | 0% | 0.89 |
+| 2 | 2 | 0.25 | 200 | 0.02 | 2% | 0.86 |
+| 2 | 2 | 1.00 | 200 | 0.02 | 2% | 0.86 |
+| 4 | 4 | 0.00 | 400 | 0.00 | 0% | 0.98 |
+| 4 | 4 | 0.25 | 400 | 0.03 | 3% | 0.98 |
+| 4 | 4 | 1.00 | 400 | 0.04 | 4% | 0.98 |
+| 8 | 4 | 0.00 | 800 | 0.04 | 4% | 0.99 |
+| 8 | 4 | 0.25 | 800 | 0.06 | 6% | 0.99 |
+| 8 | 4 | 1.00 | 800 | 0.09 | 8% | 0.99 |
+| 8 | 8 | 0.00 | 800 | 0.00 | 0% | 0.99 |
+| 8 | 8 | 0.25 | 800 | 0.03 | 3% | 0.99 |
+| 8 | 8 | 1.00 | 800 | 0.06 | 6% | 0.99 |
+| 16 | 4 | 0.00 | 1600 | 0.09 | 8% | 0.99 |
+| 16 | 4 | 0.25 | 1600 | 0.11 | 10% | 1.00 |
+| 16 | 4 | 1.00 | 1600 | 0.11 | 10% | 1.00 |
+| 16 | 16 | 0.00 | 1600 | 0.00 | 0% | 1.00 |
+| 16 | 16 | 0.25 | 1600 | 0.03 | 3% | 1.00 |
+| 16 | 16 | 1.00 | 1600 | 0.06 | 6% | 0.99 |
+| 32 | 4 | 0.00 | 3200 | 0.12 | 11% | 1.00 |
+| 32 | 4 | 0.25 | 3200 | 0.14 | 12% | 1.00 |
+| 32 | 4 | 1.00 | 3200 | 0.15 | 13% | 1.00 |
+| 32 | 32 | 0.00 | 3200 | 0.00 | 0% | 1.00 |
+| 32 | 32 | 0.25 | 3200 | 0.02 | 2% | 1.00 |
+| 32 | 32 | 1.00 | 3200 | 0.08 | 7% | 1.00 |
+
+**At the decision cell (N = 4, S = 4, overlap 0.25):** 0.03 refused per edit and 3% wasted work, within
+rule 1's bars (0.10 and 10%), against 0.21 and 18% for the section check. 98% of accepted edits were
+made on a base that was no longer the head and still landed. Refusals pass the bars at every N with a
+section per editor; the four-section spec crosses them only at 16 editors (overlap 0.25 and up) and
+32. The line check stays; a CRDT would remove the remaining 3% by accepting edits of one line, which
+then need someone to reconcile them.
 
 ## What this needs from the owner
 
