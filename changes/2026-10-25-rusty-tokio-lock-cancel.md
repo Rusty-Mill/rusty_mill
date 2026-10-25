@@ -1,0 +1,11 @@
+---
+category: Fixed
+changelog: `rusty_tokio`'s `sync::Mutex` and `sync::Semaphore` no longer stall or leak permits when a queued `lock()`/`acquire()` future is dropped.
+---
+## 2026-10-25 - rusty_tokio: cancellation-safe Mutex and Semaphore waiters (#1064)
+
+- **Fixed:** `sync::Mutex` handed its release to a cancelled waiter's dead waker, so the next live waiter slept until an unrelated `lock()` came along. Each waiter now holds a place in the queue, as `RwLock`'s do. A dropped `lock()` future leaves the queue, and a dropped front waiter passes its wake to the next one. A re-polled waiter refreshes its waker instead of queuing it again.
+- **Fixed:** `sync::Semaphore` had the same defect, with worse effects. A dropped queued `acquire()` stayed at the front of the FIFO queue and blocked every waiter behind it. Once a release granted it permits, those permits were lost for good. A dropped claim now leaves the queue, or hands back permits it was granted but never took, and then grants the waiters behind it. `close` now sets each waiter's outcome while it holds the state lock, so a claim's outcome is final when its drop reads it.
+- **Changed:** both modules recover a poisoned inner `std::sync::Mutex` instead of calling `unwrap`. No code that can panic runs while it is held.
+- **Checked:** `RwLock` was already cancellation-safe (#1024).
+- **Verified:** `tests/lock_cancel.rs` has 9 hand-polled tests with no sleeps. They cover a cancelled head waiter, a head waiter cancelled after its wake, a cancelled middle waiter, a re-polled waker, a cancelled large semaphore head, a granted-then-dropped claim and `close`. On `main`'s code, 8 fail. Disabling the pass-on in `Mutex` or the permit return in `Semaphore` each fails its test. `cargo test -p rusty_tokio -p rusty_tokio-macros --all-features`, clippy `-D warnings`, fmt and `cargo test -p rusty_tonic` pass.
