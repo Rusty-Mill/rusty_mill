@@ -18,7 +18,7 @@
 
 use std::time::{Duration, Instant};
 
-use platform::process::{Command, GroupSpec};
+use platform::process::{Child, Command, GroupSpec};
 use platform::pty::{Pty, PtyMaster};
 use platform::term::WinSize;
 use platform_linux::LinuxPty;
@@ -164,4 +164,24 @@ fn resize_is_visible_to_the_spawned_child() {
         "expected stty to report the resized dimensions, saw: {output:?}"
     );
     let _ = child.wait();
+}
+
+#[test]
+fn concrete_master_reads_nonblocking() {
+    let pty = LinuxPty;
+    let cmd = Command::new("sh", "/").arg("-c").arg("read x; echo got-$x");
+    let (master, child) = pty.spawn_concrete(&cmd, size()).expect("spawn");
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    assert_send_sync(&master);
+
+    master.set_nonblocking(true).expect("set O_NONBLOCK");
+    let mut buf = [0u8; 64];
+    let err = master.read(&mut buf).expect_err("nothing written yet");
+    assert_eq!(err.kind, platform::error::ErrorKind::WouldBlock);
+
+    master.set_nonblocking(false).expect("clear O_NONBLOCK");
+    master.write(b"ok\n").expect("write");
+    let out = read_until(&master, "got-ok", 20);
+    assert!(out.contains("got-ok"), "output: {out:?}");
+    Box::new(child).wait().expect("wait");
 }

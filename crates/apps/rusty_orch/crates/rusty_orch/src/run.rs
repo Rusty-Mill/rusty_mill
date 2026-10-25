@@ -10,7 +10,9 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use orch_core::board::{Author, Board, EntryKind, NewEntry};
-use orch_core::factory::{ExecutionLink, ExecutionState, Factory, FactoryError, Grant, Identity};
+use orch_core::factory::{
+    ExecutionLink, ExecutionState, Factory, FactoryError, Grant, Identity, Lease,
+};
 use orch_core::goal::Goal;
 use orch_core::task::Plan;
 use orch_core::{EntryId, GoalId, TaskId, Text};
@@ -196,6 +198,43 @@ pub struct Hosting {
     pub card: Option<CardHosting>,
     /// Cancel the goal's hosted tasks for this reason instead of running.
     pub cancel: Option<Text>,
+    /// The permission lease each run grants the goal's orchestrator. `None`
+    /// leaves the host's configuration as the only bound.
+    pub lease: Option<LeaseSpec>,
+}
+
+/// The paths a goal's hosted work may reach, and for how long each run's
+/// grant lasts. Each run takes the assignment over with a fresh end, so a
+/// lease is renewed by running again, never widened in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseSpec {
+    /// Absolute, normalized paths workers may read.
+    pub read: Vec<String>,
+    /// Absolute, normalized paths workers may read and write.
+    pub write: Vec<String>,
+    /// Seconds each run's lease lasts; `None` never ends.
+    pub ttl_secs: Option<u64>,
+}
+
+impl LeaseSpec {
+    /// The lease granted at this moment.
+    fn grant(&self) -> Result<Lease, RunError> {
+        let expires = self
+            .ttl_secs
+            .map(|ttl| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .and_then(|now| now.as_secs().checked_add(ttl))
+                    .ok_or_else(|| RunError::Lease("no lease end is representable".into()))
+            })
+            .transpose()?;
+        Ok(Lease {
+            read: self.read.clone(),
+            write: self.write.clone(),
+            expires,
+        })
+    }
 }
 
 /// The Millboard card a hosted goal works for.
@@ -217,13 +256,15 @@ fn take_over(
     resume: &mut Option<Resume<'_>>,
     goal: &Goal,
     goal_id: GoalId,
-    card: Option<&mut CardHosting>,
+    hosting: &mut Hosting,
 ) -> Result<Fence, RunError> {
+    let lease = hosting.lease.as_ref().map(LeaseSpec::grant).transpose()?;
+    let card = hosting.card.as_mut();
     let mut factory = match resume {
         Some(r) => r.store.load_factory(goal_id)?,
         None => Factory::default(),
     };
-    let lease = |e: FactoryError| RunError::Lease(format!("{e:?}"));
+    let refused = |e: FactoryError| RunError::Lease(format!("{e:?}"));
     if let (None, Some(linked)) = (&card, factory.links().next()) {
         return Err(RunError::Lease(format!(
             "this state is linked to card {}; resume it with --card and --board",
@@ -241,9 +282,10 @@ fn take_over(
                 projects: Vec::new(),
                 delegation_budget: 0,
                 call_budget: goal.budget().max_calls().get(),
+                lease: lease.clone(),
             },
         )
-        .map_err(lease)?;
+        .map_err(refused)?;
     let link = card
         .as_ref()
         .map(|c| link_card(&mut factory, c, goal_id, generation))
@@ -259,6 +301,7 @@ fn take_over(
             .ok_or_else(|| RunError::Lease("blank assignment".into()))?,
         generation,
         holder: holder().map_err(RunError::Lease)?,
+        lease,
     })
 }
 
@@ -329,7 +372,7 @@ pub fn execute_hosted<R: AgentRunner>(
             });
         }
         Some(mut h) => {
-            let fence = take_over(&mut resume, &goal, goal_id, h.card.as_mut())?;
+            let fence = take_over(&mut resume, &goal, goal_id, &mut h)?;
             Some((h.host, fence))
         }
         None => None,
@@ -410,7 +453,7 @@ fn cancel(
     if retired {
         return Ok(Ended::Cancelled);
     }
-    let fence = take_over(resume, goal, goal_id, hosting.card.as_mut())?;
+    let fence = take_over(resume, goal, goal_id, hosting)?;
     // Every card a host would serve, handle or not: an open can start work
     // before its handle is checkpointed, and the host finds that work itself.
     let hosted = plan

@@ -189,6 +189,7 @@ fn happy_run_polling(
         poll,
         max_wall: Duration::from_secs(90),
         end_grace: Duration::ZERO,
+        deadline: None,
         cost_cap: None,
         slots: None,
     };
@@ -366,6 +367,7 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(5),
         end_grace: Duration::ZERO,
+        deadline: None,
         cost_cap: None,
         slots: None,
     };
@@ -490,6 +492,7 @@ fn config(dir: &Path, task: &TaskId, repo: PathBuf, launchers: Launchers, wall: 
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(wall),
         end_grace: Duration::ZERO,
+        deadline: None,
         cost_cap: None,
         slots: None,
     }
@@ -2508,6 +2511,13 @@ fn a_session_launchers_turns_share_one_session_one_process_at_a_time() {
         expected,
         "one process at a time"
     );
+    for t in 1..=4 {
+        assert_eq!(
+            moderator::resumed_path(&dir, &task, TurnId(t)).exists(),
+            t > 1,
+            "turn {t} is recorded as resumed only if it resumed"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2531,31 +2541,21 @@ fn session_ids_are_namespaced_by_store() {
 }
 
 #[test]
-fn session_launchers_are_refused_capped_confined_or_naming_a_turn() {
+fn session_launchers_are_refused_naming_a_turn() {
     let dir = tempdir("session-refused");
     let (repo, _) = repo(&dir);
     let task = TaskId("T1".into());
     open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
-    let session = session_launcher(&dir);
-    let base = config(&dir, &task, repo, Launchers::default(), 5);
-    let refused = |cfg: Config| moderator::run(&cfg).unwrap_err();
-
-    let mut capped = base.clone();
-    capped.launchers = Launchers::default().with("planner", session.clone());
-    capped.cost_cap = Some(cost_cap(1.0));
-    assert!(refused(capped).contains("cannot run under a cost cap"));
-
-    let mut turn = base.clone();
-    let mut l = session.clone();
+    let mut l = session_launcher(&dir);
     l.args.push("{turn}".into());
-    turn.launchers = Launchers::default().with("planner", l);
-    assert!(refused(turn).contains("drop {turn}"));
-
-    let mut confined = base;
-    let mut l = session;
-    l.sandbox = Some(rusty_bbp_host::confine::HarnessSandbox::default());
-    confined.launchers = Launchers::default().with("planner", l);
-    assert!(refused(confined).contains("cannot be confined yet"));
+    let cfg = config(
+        &dir,
+        &task,
+        repo,
+        Launchers::default().with("planner", l),
+        5,
+    );
+    assert!(moderator::run(&cfg).unwrap_err().contains("drop {turn}"));
     assert_eq!(card(&dir, &task).state, State::Planning, "nothing ran");
     let _ = std::fs::remove_dir_all(&dir);
 }

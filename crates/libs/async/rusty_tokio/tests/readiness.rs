@@ -35,7 +35,7 @@ fn raw_write(fd: std::os::fd::RawFd, buf: &[u8]) -> std::io::Result<usize> {
 fn tcp_stream_readable_then_try_io_reads_real_data() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -67,7 +67,7 @@ fn tcp_stream_readable_then_try_io_reads_real_data() {
 fn tcp_stream_writable_and_try_io_write_succeeds() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -92,7 +92,7 @@ fn tcp_stream_writable_and_try_io_write_succeeds() {
 fn tcp_stream_ready_reports_which_direction_fired() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = rusty_tokio::spawn(async move {
             let (_stream, _peer) = listener.accept().await.unwrap();
@@ -114,7 +114,7 @@ fn tcp_stream_ready_reports_which_direction_fired() {
 fn tcp_listener_poll_accept_resolves_once_a_connection_arrives() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let accepted = rusty_tokio::spawn(async move {
@@ -132,8 +132,8 @@ fn tcp_listener_poll_accept_resolves_once_a_connection_arrives() {
 fn udp_socket_poll_send_to_and_poll_recv_from() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let b_addr = b.local_addr().unwrap();
 
         std::future::poll_fn(|cx| a.poll_send_to(cx, b"hi", b_addr))
@@ -153,10 +153,10 @@ fn udp_socket_poll_send_to_and_poll_recv_from() {
 fn udp_socket_poll_send_and_poll_recv_after_connect() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        a.connect(b.local_addr().unwrap()).unwrap();
-        b.connect(a.local_addr().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        a.connect(b.local_addr().unwrap()).await.unwrap();
+        b.connect(a.local_addr().unwrap()).await.unwrap();
 
         std::future::poll_fn(|cx| a.poll_send(cx, b"yo"))
             .await
@@ -173,8 +173,8 @@ fn udp_socket_poll_send_and_poll_recv_after_connect() {
 fn udp_socket_poll_recv_ready_and_poll_send_ready() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let b_addr = b.local_addr().unwrap();
 
         // A fresh, unconnected UDP socket is always writable.
@@ -197,10 +197,10 @@ fn udp_socket_poll_recv_ready_and_poll_send_ready() {
 fn udp_socket_try_io_sends_and_receives_via_a_raw_syscall() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        a.connect(b.local_addr().unwrap()).unwrap();
-        b.connect(a.local_addr().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        a.connect(b.local_addr().unwrap()).await.unwrap();
+        b.connect(a.local_addr().unwrap()).await.unwrap();
 
         a.writable().await.unwrap();
         let a_fd = a.as_raw_fd();

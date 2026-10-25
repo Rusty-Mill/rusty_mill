@@ -1,5 +1,5 @@
-//! A strict, minimal DER reader: just enough for RSAPublicKey and ECDSA
-//! signatures. Rejects non-minimal lengths and integers, indefinite lengths,
+//! A strict, minimal DER reader: just enough for RSAPublicKey, ECDSA
+//! signatures and PKCS#8 private keys. Rejects non-minimal lengths and integers, indefinite lengths,
 //! and trailing data, as `ring` does.
 
 /// A cursor over DER bytes.
@@ -61,6 +61,27 @@ impl<'a> Reader<'a> {
         .filter(|magnitude| magnitude.iter().any(|&b| b != 0))
     }
 
+    /// Whether the next TLV has tag `tag`, without consuming it.
+    pub(crate) fn peek(&self, tag: u8) -> bool {
+        self.0.first() == Some(&tag)
+    }
+
+    /// Reads an INTEGER that must be 0 or 1 (a version number).
+    pub(crate) fn small_version(&mut self) -> Option<u8> {
+        match self.tlv(0x02)? {
+            [v @ (0 | 1)] => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Reads a BIT STRING (tag `tag`) with no unused bits and returns its bytes.
+    pub(crate) fn bit_string(&mut self, tag: u8) -> Option<&'a [u8]> {
+        match self.tlv(tag)? {
+            [0, bits @ ..] => Some(bits),
+            _ => None,
+        }
+    }
+
     /// Whether every byte has been consumed.
     pub(crate) fn at_end(&self) -> bool {
         self.0.is_empty()
@@ -102,6 +123,19 @@ mod tests {
         let mut ok = vec![0x30, 0x81, 0x90];
         ok.extend(vec![0u8; 0x90]);
         assert_eq!(Reader::new(&ok).tlv(0x30).unwrap().len(), 0x90);
+    }
+
+    #[test]
+    fn reads_versions_and_bit_strings() {
+        let mut r = Reader::new(&[0x02, 1, 1, 0x03, 3, 0, 0xab, 0xcd]);
+        assert!(r.peek(0x02));
+        assert_eq!(r.small_version(), Some(1));
+        assert_eq!(r.bit_string(0x03), Some(&[0xab, 0xcd][..]));
+        assert!(r.at_end());
+        assert_eq!(Reader::new(&[0x02, 1, 2]).small_version(), None);
+        assert_eq!(Reader::new(&[0x02, 2, 0, 1]).small_version(), None);
+        assert_eq!(Reader::new(&[0x03, 2, 1, 0xff]).bit_string(0x03), None);
+        assert_eq!(Reader::new(&[0x03, 0]).bit_string(0x03), None);
     }
 
     #[test]

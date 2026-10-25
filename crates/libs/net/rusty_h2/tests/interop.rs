@@ -161,7 +161,9 @@ async fn ours_call(
 /// Our server on a rusty_tokio runtime, echoing like the oracle's.
 fn ours_echo_server(rt: &rusty_tokio::Runtime) -> SocketAddr {
     let listener = rt.block_on(async {
-        rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap()
+        rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
     });
     let addr = listener.local_addr().unwrap();
     rt.spawn(async move {
@@ -534,7 +536,9 @@ fn h2s_hpack_encoder_and_decoder_agree_with_ours_across_many_requests() {
 fn an_h2_reset_reaches_our_server_body_as_cancel() {
     let (ours, theirs) = runtimes();
     let listener = ours.block_on(async {
-        rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap()
+        rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
     });
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();

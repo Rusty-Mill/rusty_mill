@@ -35,4 +35,8 @@ ed25519::SigningKey>::from_seed 4
 # the (public) curve.
 ecdsa::SigningKey>::sign_seeded 41
 ecdsa::Rfc6979>::mac 5
-rusty_pk::ecdh::generator_x 9
+# generator_x 9 -> 16 (2026-10-24, PKCS#8 PR): the same calls as before (Curve::build twice, mul,
+# ensure, pow_vartime on the public exponent, Modulus::mul twice), but LLVM now inlines the
+# Curve drop glue: the 7 extra jumps are its per-buffer capacity checks and cleanup flow, all on
+# public sizes. Compared against main's disassembly of the same function, not inferred.
+rusty_pk::ecdh::generator_x 16

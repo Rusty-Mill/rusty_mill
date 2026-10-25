@@ -1,12 +1,10 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use futures_util::StreamExt;
 use rp_core::RateLimiter;
 use rp_router::{Config, Router as ProviderRouter};
-use rp_server::build_app;
 use rp_server::jwt::JwtVerifier;
 use rp_server::state::AppState;
 use serde_json::{json, Value};
@@ -24,9 +22,22 @@ fn unique_env_var(label: &str) -> String {
     )
 }
 
-/// Builds an `AppState` from a TOML config string and starts the real axum
-/// app on an ephemeral localhost port, exactly as `main` does. Returns the
-/// base URL to hit with a plain HTTP client.
+/// The `rusty_tokio` runtime every test's server runs on, as `main`'s does.
+/// Shared: one runtime for the whole binary, not one per test.
+fn server_runtime() -> &'static rusty_tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<rusty_tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        rusty_tokio::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .expect("server runtime")
+    })
+}
+
+/// Builds an `AppState` from a TOML config string and starts the real app
+/// on an ephemeral localhost port through `rp_server::serve`, exactly as
+/// `main` does. Returns the base URL to hit with a plain HTTP client. The
+/// test's own (multi-threaded) tokio runtime is the handlers' tokio.
 async fn spawn_app(config_toml: &str) -> String {
     let config = Config::from_toml_str(config_toml).expect("valid test config");
     let router = Arc::new(ProviderRouter::from_config(&config).await);
@@ -96,25 +107,22 @@ async fn spawn_app(config_toml: &str) -> String {
         allow_unauthenticated: true,
     };
 
-    let app = build_app(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .expect("test server should not fail");
-    });
+    let tokio = tokio::runtime::Handle::current();
+    let runtime = server_runtime();
+    let server = {
+        let _entered = runtime.enter();
+        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap())
+            .expect("bind ephemeral port");
+        rp_server::serve(state, tokio, listener).expect("serve")
+    };
+    let addr = server.local_addr();
+    // Dropping the server would stop it; it lives as long as the test binary.
+    std::mem::forget(server);
 
     format!("http://{addr}")
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_endpoint_returns_ok_with_no_config() {
     let base_url = spawn_app("providers = {}").await;
 
@@ -126,7 +134,7 @@ async fn health_endpoint_returns_ok_with_no_config() {
     assert_eq!(resp.text().await.unwrap(), "ok");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dashboard_serves_html_unauthenticated_even_with_a_key_configured() {
     // The page itself carries no secrets, so it's reachable without a
     // token even when server.api_key_env is set -- the JS inside it is
@@ -161,7 +169,7 @@ async fn dashboard_serves_html_unauthenticated_even_with_a_key_configured() {
     assert!(body.contains("/v1/admin/clients"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dashboard_ships_the_i18n_framework_with_english_populated() {
     // Framework-only per the scoping decision (issue #128): the switching
     // mechanism must be present and wired up, but only `en` needs real
@@ -194,7 +202,7 @@ async fn dashboard_ships_the_i18n_framework_with_english_populated() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ready_endpoint_returns_200_when_no_persistence_is_configured() {
     // Without [persistence] there's nothing external to check, so
     // readiness always passes -- distinct from /health only in principle,
@@ -210,7 +218,7 @@ async fn ready_endpoint_returns_200_when_no_persistence_is_configured() {
     assert_eq!(body["status"], "ready");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_models_includes_route_aliases_and_provider_wildcards() {
     let server = MockServer::start().await;
     let key_var = unique_env_var("OPENAI_KEY");
@@ -251,7 +259,7 @@ async fn list_models_includes_route_aliases_and_provider_wildcards() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_models_reports_rich_metadata_for_a_priced_model() {
     let server = MockServer::start().await;
     let key_var = unique_env_var("OPENAI_KEY");
@@ -299,7 +307,7 @@ async fn list_models_reports_rich_metadata_for_a_priced_model() {
     assert!(!supported.contains(&"cache_control"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn protected_endpoint_rejects_missing_or_wrong_key_and_accepts_correct_one() {
     let key_var = unique_env_var("SERVER_API_KEY");
     std::env::set_var(&key_var, "s3cret");
@@ -355,7 +363,7 @@ fn future_exp() -> i64 {
         .as_secs() as i64
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn protected_endpoint_accepts_a_valid_jwt_when_no_static_key_is_configured() {
     let secret_var = unique_env_var("JWT_SECRET");
     std::env::set_var(&secret_var, "jwt-s3cret");
@@ -392,7 +400,7 @@ async fn protected_endpoint_accepts_a_valid_jwt_when_no_static_key_is_configured
     assert_eq!(with_jwt.status(), 200);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn protected_endpoint_rejects_an_expired_or_wrongly_signed_jwt() {
     let secret_var = unique_env_var("JWT_SECRET");
     std::env::set_var(&secret_var, "jwt-s3cret");
@@ -430,7 +438,7 @@ async fn protected_endpoint_rejects_an_expired_or_wrongly_signed_jwt() {
     assert_eq!(wrong_secret_resp.status(), 401);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn protected_endpoint_still_accepts_the_static_key_when_jwt_is_also_configured() {
     // [jwt] is additive, never a replacement for server.api_key_env /
     // [[clients]] -- a caller with the plain static key must keep working
@@ -462,7 +470,7 @@ async fn protected_endpoint_still_accepts_the_static_key_when_jwt_is_also_config
     assert_eq!(resp.status(), 200);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_enforces_budget_for_a_jwt_mapped_client_identity() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -549,7 +557,7 @@ async fn chat_completions_enforces_budget_for_a_jwt_mapped_client_identity() {
     assert!(err["error"]["message"].as_str().unwrap().contains("acme"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_rate_limits_a_jwt_mapped_client_under_its_own_bucket() {
     let secret_var = unique_env_var("JWT_SECRET");
     std::env::set_var(&secret_var, "jwt-s3cret");
@@ -601,7 +609,7 @@ async fn chat_completions_rate_limits_a_jwt_mapped_client_under_its_own_bucket()
     assert_eq!(second.status(), 429);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_does_not_map_a_jwt_claim_when_client_claim_is_unconfigured() {
     // Same claim, same matching client name -- but [jwt] doesn't set
     // client_claim, so this must behave exactly like pre-mapping [jwt]:
@@ -674,7 +682,7 @@ async fn chat_completions_does_not_map_a_jwt_claim_when_client_claim_is_unconfig
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn usage_stats_endpoint_returns_empty_list_before_any_requests() {
     let base_url = spawn_app("providers = {}").await;
 
@@ -686,7 +694,7 @@ async fn usage_stats_endpoint_returns_empty_list_before_any_requests() {
     assert_eq!(body["data"].as_array().unwrap().len(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn free_tiers_endpoint_returns_empty_list_when_unconfigured() {
     let base_url = spawn_app("providers = {}").await;
 
@@ -700,7 +708,7 @@ async fn free_tiers_endpoint_returns_empty_list_when_unconfigured() {
     assert_eq!(body["data"].as_array().unwrap().len(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn free_tiers_endpoint_reports_configured_budget_before_any_requests() {
     let base_url = spawn_app(
         r#"
@@ -728,7 +736,7 @@ async fn free_tiers_endpoint_reports_configured_budget_before_any_requests() {
     assert_eq!(data[0]["period"], "monthly");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn free_tiers_endpoint_tracks_usage_after_a_dispatch() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -788,7 +796,7 @@ async fn free_tiers_endpoint_tracks_usage_after_a_dispatch() {
     assert_eq!(data[0]["tokens_remaining"], 975);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_stats_endpoint_returns_empty_list_before_any_requests() {
     let base_url = spawn_app("providers = {}").await;
 
@@ -802,7 +810,7 @@ async fn provider_stats_endpoint_returns_empty_list_before_any_requests() {
     assert_eq!(body["data"].as_array().unwrap().len(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_endpoint_returns_prometheus_text_with_configured_provider_gauge() {
     let server = MockServer::start().await;
     let key_var = unique_env_var("OPENAI_KEY");
@@ -834,7 +842,7 @@ async fn metrics_endpoint_returns_prometheus_text_with_configured_provider_gauge
     assert!(body.contains(r#"provider="openai""#));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_rejects_empty_messages_with_400() {
     let base_url = spawn_app("providers = {}").await;
 
@@ -853,7 +861,7 @@ async fn chat_completions_rejects_empty_messages_with_400() {
         .contains("messages"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_rejects_a_body_over_the_configured_max_body_bytes_with_413() {
     let base_url = spawn_app(
         r#"
@@ -879,7 +887,7 @@ async fn chat_completions_rejects_a_body_over_the_configured_max_body_bytes_with
     assert_eq!(resp.status(), 413);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_routes_a_short_prompt_to_the_simple_auto_routing_tier() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -937,7 +945,7 @@ async fn chat_completions_routes_a_short_prompt_to_the_simple_auto_routing_tier(
     assert_eq!(body["model"], "openai/gpt-4o-mini");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_returns_400_for_auto_when_auto_routing_is_not_configured() {
     let base_url = spawn_app("providers = {}").await;
 
@@ -954,7 +962,7 @@ async fn chat_completions_returns_400_for_auto_when_auto_routing_is_not_configur
     assert_eq!(resp.status(), 400);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_applies_a_preset_model_override_and_system_prompt() {
     let server = MockServer::start().await;
     // The mock only matches a request whose model is the preset's
@@ -1007,7 +1015,7 @@ async fn chat_completions_applies_a_preset_model_override_and_system_prompt() {
     assert_eq!(body["model"], "anthropic/claude-sonnet-5");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_rejects_an_unknown_preset_name_with_400() {
     let base_url = spawn_app("providers = {}").await;
 
@@ -1030,7 +1038,7 @@ async fn chat_completions_rejects_an_unknown_preset_name_with_400() {
         .contains("does-not-exist"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_blocks_a_request_matching_a_block_guardrail() {
     let config = r#"
         providers = {}
@@ -1060,7 +1068,7 @@ async fn chat_completions_blocks_a_request_matching_a_block_guardrail() {
         .contains("no-ssn"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_blocks_a_request_flagged_by_moderation() {
     let moderation_server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1106,7 +1114,7 @@ async fn chat_completions_blocks_a_request_flagged_by_moderation() {
         .contains("violence"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_allows_the_request_through_when_the_moderation_backend_is_unreachable() {
     let provider_server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1162,7 +1170,7 @@ async fn chat_completions_allows_the_request_through_when_the_moderation_backend
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_weaves_web_search_results_into_the_request_before_dispatch() {
     let search_server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1237,7 +1245,7 @@ async fn chat_completions_weaves_web_search_results_into_the_request_before_disp
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_redacts_a_request_matching_a_redact_guardrail_before_dispatch() {
     let server = MockServer::start().await;
     // The mock only matches if the request body's content has already
@@ -1294,7 +1302,7 @@ async fn chat_completions_redacts_a_request_matching_a_redact_guardrail_before_d
     assert_eq!(body["choices"][0]["message"]["content"], "got it");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_success_roundtrips_through_a_mocked_provider() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1385,7 +1393,7 @@ async fn chat_completions_success_roundtrips_through_a_mocked_provider() {
     assert_eq!(generation["total_tokens"], 15);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_sets_decision_headers_for_a_direct_provider_model_request() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1442,7 +1450,7 @@ async fn chat_completions_sets_decision_headers_for_a_direct_provider_model_requ
     assert_eq!(resp.headers().get("x-rp-fallback-attempts").unwrap(), "1");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_sets_decision_headers_for_a_route_alias_request() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1504,7 +1512,7 @@ async fn chat_completions_sets_decision_headers_for_a_route_alias_request() {
     assert_eq!(resp.headers().get("x-rp-fallback-attempts").unwrap(), "1");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_sets_decision_headers_when_the_chain_falls_through() {
     // Anthropic is unreachable (connection refused, retryable), so the
     // chain should fall through to openai -- the decision headers should
@@ -1576,7 +1584,7 @@ async fn chat_completions_sets_decision_headers_when_the_chain_falls_through() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_sets_decision_headers_on_a_streaming_response() {
     let server = MockServer::start().await;
     let sse_body = concat!(
@@ -1630,7 +1638,7 @@ async fn chat_completions_sets_decision_headers_on_a_streaming_response() {
     assert_eq!(resp.headers().get("x-rp-fallback-attempts").unwrap(), "1");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_uses_a_byok_key_from_the_request_instead_of_the_configured_one() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1680,7 +1688,7 @@ async fn chat_completions_uses_a_byok_key_from_the_request_instead_of_the_config
     assert_eq!(resp.status(), 200);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generation_endpoint_returns_404_for_an_unknown_id() {
     let base_url = spawn_app("providers = {}").await;
 
@@ -1690,7 +1698,7 @@ async fn generation_endpoint_returns_404_for_an_unknown_id() {
     assert_eq!(resp.status(), 404);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_streams_sse_chunks_and_terminates_with_done() {
     let server = MockServer::start().await;
     let sse_body = concat!(
@@ -1748,7 +1756,7 @@ async fn chat_completions_streams_sse_chunks_and_terminates_with_done() {
     assert!(full.trim_end().ends_with("data: [DONE]"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_maps_unresolvable_model_to_424() {
     // No providers configured at all -- the chain resolves syntactically
     // but its only entry has no registered provider, which dispatch
@@ -1768,7 +1776,7 @@ async fn chat_completions_maps_unresolvable_model_to_424() {
     assert_eq!(resp.status(), 424);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_rejects_malformed_model_string_with_400() {
     // No slash -- fails at resolve_chain before any provider lookup.
     let base_url = spawn_app("providers = {}").await;
@@ -1786,7 +1794,7 @@ async fn chat_completions_rejects_malformed_model_string_with_400() {
     assert_eq!(resp.status(), 400);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_enforces_per_client_inbound_rate_limit() {
     let key_var = unique_env_var("CLIENT_KEY");
     std::env::set_var(&key_var, "client-secret");
@@ -1845,7 +1853,7 @@ async fn chat_completions_enforces_per_client_inbound_rate_limit() {
         .contains("rate limit"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_enforces_default_ip_rate_limit_when_no_client_matches() {
     let config = r#"
         providers = {}
@@ -1880,7 +1888,7 @@ async fn chat_completions_enforces_default_ip_rate_limit_when_no_client_matches(
     assert!(second.headers().get("retry-after").is_some());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_has_no_rate_limit_when_unmatched_and_no_default_configured() {
     // No clients configured and no default_rate_limit_rpm -- an unmatched
     // caller has no cap at all, so repeated requests never see a 429.
@@ -1902,7 +1910,7 @@ async fn chat_completions_has_no_rate_limit_when_unmatched_and_no_default_config
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_cuts_off_a_client_after_a_non_streaming_response_exceeds_its_budget() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1997,7 +2005,7 @@ async fn chat_completions_cuts_off_a_client_after_a_non_streaming_response_excee
     assert!(metrics.contains(r#"client="acme""#));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_endpoints_are_404_when_admin_key_env_is_not_configured() {
     let base_url = spawn_app("providers = {}").await;
     let client = reqwest::Client::new();
@@ -2039,7 +2047,7 @@ async fn admin_endpoints_are_404_when_admin_key_env_is_not_configured() {
     assert_eq!(resp.status(), 404);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_list_clients_rejects_missing_wrong_and_regular_client_keys() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -2088,7 +2096,7 @@ async fn admin_list_clients_rejects_missing_wrong_and_regular_client_keys() {
     assert_eq!(client_key.status(), 401);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_list_clients_reports_configured_clients_and_live_spend() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -2180,7 +2188,7 @@ async fn spawn_two_org_app() -> (String, String, String) {
     )
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_list_clients_scopes_results_to_an_admin_role_clients_own_organization() {
     let (base_url, acme_admin_key, _globex_member_key) = spawn_two_org_app().await;
     let client = reqwest::Client::new();
@@ -2202,7 +2210,7 @@ async fn admin_list_clients_scopes_results_to_an_admin_role_clients_own_organiza
     assert_eq!(data[0]["organization"], "acme-corp");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_list_clients_is_401_for_a_member_role_clients_own_key() {
     let (base_url, _acme_admin_key, globex_member_key) = spawn_two_org_app().await;
     let client = reqwest::Client::new();
@@ -2216,7 +2224,7 @@ async fn admin_list_clients_is_401_for_a_member_role_clients_own_key() {
     assert_eq!(resp.status(), 401);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_create_client_pins_organization_to_a_scoped_admins_own_org() {
     let (base_url, acme_admin_key, _globex_member_key) = spawn_two_org_app().await;
     let client = reqwest::Client::new();
@@ -2239,7 +2247,7 @@ async fn admin_create_client_pins_organization_to_a_scoped_admins_own_org() {
     assert_eq!(body["organization"], "acme-corp");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_update_client_is_404_for_a_client_outside_a_scoped_admins_organization() {
     let (base_url, acme_admin_key, _globex_member_key) = spawn_two_org_app().await;
     let client = reqwest::Client::new();
@@ -2254,7 +2262,7 @@ async fn admin_update_client_is_404_for_a_client_outside_a_scoped_admins_organiz
     assert_eq!(resp.status(), 404);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_delete_client_is_404_for_a_client_outside_a_scoped_admins_organization() {
     let (base_url, acme_admin_key, _globex_member_key) = spawn_two_org_app().await;
     let client = reqwest::Client::new();
@@ -2280,7 +2288,7 @@ async fn admin_delete_client_is_404_for_a_client_outside_a_scoped_admins_organiz
     assert_eq!(body["data"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_list_organizations_groups_clients_by_organization_with_a_global_key() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -2334,7 +2342,7 @@ async fn admin_list_organizations_groups_clients_by_organization_with_a_global_k
     assert_eq!(acme_clients[0]["workspace"], "prod");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_list_organizations_scopes_to_the_callers_own_organization() {
     let (base_url, acme_admin_key, _globex_member_key) = spawn_two_org_app().await;
     let client = reqwest::Client::new();
@@ -2354,7 +2362,7 @@ async fn admin_list_organizations_scopes_to_the_callers_own_organization() {
     assert_eq!(data[0]["clients"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_reset_client_spend_zeroes_spend_and_unblocks_the_client() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -2447,7 +2455,7 @@ async fn admin_reset_client_spend_zeroes_spend_and_unblocks_the_client() {
     assert_eq!(unblocked.status(), 200);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_reset_client_spend_is_404_for_a_client_with_no_configured_budget() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -2497,7 +2505,7 @@ fn unique_temp_db_path(label: &str) -> String {
     path.to_str().unwrap().to_string()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_client_usage_history_reports_a_dispatched_requests_usage() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -2596,7 +2604,7 @@ async fn admin_client_usage_history_reports_a_dispatched_requests_usage() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_client_usage_history_is_empty_without_persistence_configured() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -2630,7 +2638,7 @@ async fn admin_client_usage_history_is_empty_without_persistence_configured() {
     assert_eq!(body["data"].as_array().unwrap().len(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_client_usage_history_is_404_for_an_unknown_client() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -2654,7 +2662,7 @@ async fn admin_client_usage_history_is_404_for_an_unknown_client() {
     assert_eq!(resp.status(), 404);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_client_usage_history_rejects_missing_or_wrong_admin_key() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -2693,7 +2701,7 @@ async fn admin_client_usage_history_rejects_missing_or_wrong_admin_key() {
     assert_eq!(wrong_key.status(), 401);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completions_cuts_off_a_client_after_a_streaming_response_exceeds_its_budget() {
     let server = MockServer::start().await;
     let sse_body = concat!(
@@ -2777,7 +2785,7 @@ fn admin_config(admin_key_var: &str) -> String {
     )
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_create_client_generates_a_key_when_none_is_given() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -2823,7 +2831,7 @@ async fn admin_create_client_generates_a_key_when_none_is_given() {
     assert!(data.iter().any(|c| c["name"] == "acme"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_create_client_honors_an_explicit_api_key() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -2854,7 +2862,7 @@ async fn admin_create_client_honors_an_explicit_api_key() {
     assert_eq!(chat_resp.status(), 200);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_create_client_rejects_a_duplicate_name() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -2879,7 +2887,7 @@ async fn admin_create_client_rejects_a_duplicate_name() {
     assert_eq!(create("acme").await.status(), 409);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_create_client_rejects_a_duplicate_api_key() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -2905,7 +2913,7 @@ async fn admin_create_client_rejects_a_duplicate_api_key() {
     assert_eq!(resp.status(), 409);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_create_client_rejects_invalid_fields() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -2949,7 +2957,7 @@ async fn admin_create_client_rejects_invalid_fields() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_create_client_wires_a_budget_into_the_router_immediately() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -3028,7 +3036,7 @@ async fn admin_create_client_wires_a_budget_into_the_router_immediately() {
     assert_eq!(second.status(), 402);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_update_client_changes_requests_per_minute_and_budget() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -3077,7 +3085,7 @@ async fn admin_update_client_changes_requests_per_minute_and_budget() {
     assert_eq!(acme["budget_usd"], 5.0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_update_client_clears_budget_when_set_to_null() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -3122,7 +3130,7 @@ async fn admin_update_client_clears_budget_when_set_to_null() {
     assert!(acme["spent_usd"].is_null());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_update_client_rotates_the_api_key_and_revokes_the_old_one() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -3171,7 +3179,7 @@ async fn admin_update_client_rotates_the_api_key_and_revokes_the_old_one() {
     assert_eq!(new_key_resp.status(), 200);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_update_client_is_404_for_an_unknown_client() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -3188,7 +3196,7 @@ async fn admin_update_client_is_404_for_an_unknown_client() {
     assert_eq!(resp.status(), 404);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_update_client_rejects_a_zero_requests_per_minute() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -3213,7 +3221,7 @@ async fn admin_update_client_rejects_a_zero_requests_per_minute() {
     assert_eq!(resp.status(), 400);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_delete_client_removes_it_and_revokes_the_admin_listing_entry() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -3246,7 +3254,7 @@ async fn admin_delete_client_removes_it_and_revokes_the_admin_listing_entry() {
     assert!(list_body["data"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_delete_client_is_404_for_an_unknown_client() {
     let admin_key_var = unique_env_var("ADMIN_KEY");
     std::env::set_var(&admin_key_var, "admin-secret");
@@ -3264,7 +3272,7 @@ async fn admin_delete_client_is_404_for_an_unknown_client() {
 
 // --- embeddings --------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embeddings_success_roundtrips_through_a_mocked_provider() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -3308,7 +3316,7 @@ async fn embeddings_success_roundtrips_through_a_mocked_provider() {
     assert_eq!(body["usage"]["prompt_tokens"], 2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embeddings_falls_back_past_a_provider_with_no_embeddings_support() {
     // Anthropic has no embeddings API at all -- its adapter always
     // returns UnsupportedFeature (retryable), so a chain naming it ahead
@@ -3361,7 +3369,7 @@ async fn embeddings_falls_back_past_a_provider_with_no_embeddings_support() {
     assert_eq!(body["model"], "openai/text-embedding-3-small");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embeddings_rejects_missing_or_wrong_key_and_accepts_correct_one() {
     let key_var = unique_env_var("SERVER_API_KEY");
     std::env::set_var(&key_var, "s3cret");
@@ -3395,7 +3403,7 @@ async fn embeddings_rejects_missing_or_wrong_key_and_accepts_correct_one() {
     assert_eq!(wrong_key.status(), 401);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embeddings_maps_an_unconfigured_provider_to_424() {
     let base_url = spawn_app("providers = {}").await;
 
@@ -3409,7 +3417,7 @@ async fn embeddings_maps_an_unconfigured_provider_to_424() {
     assert_eq!(resp.status(), 424);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_endpoint_rejects_unauthenticated_requests_when_a_key_is_configured() {
     let key_var = unique_env_var("MCP_SERVER_API_KEY");
     std::env::set_var(&key_var, "s3cret");
@@ -3442,7 +3450,7 @@ async fn mcp_endpoint_rejects_unauthenticated_requests_when_a_key_is_configured(
 /// wire protocol a desktop client would use -- covering the whole path:
 /// `check_auth` guarding the nest, the Streamable HTTP transport, and
 /// the merged `tools/list`/`tools/call` of `rp_mcp::build`'s server.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_endpoint_serves_native_tools_to_a_real_mcp_client() {
     use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
     use rmcp::transport::StreamableHttpClientTransport;
@@ -3557,7 +3565,7 @@ async fn mcp_chat_completion_streams_a_slow_reply_through_the_mounted_endpoint()
     let _ = client.cancel().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn max_concurrent_requests_sheds_a_second_request_with_503_while_the_first_is_in_flight() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -3632,7 +3640,7 @@ async fn max_concurrent_requests_sheds_a_second_request_with_503_while_the_first
     assert_eq!(first.status(), 200);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn max_concurrent_requests_unset_never_sheds() {
     let base_url = spawn_app("providers = {}").await;
 
@@ -3647,7 +3655,7 @@ async fn max_concurrent_requests_unset_never_sheds() {
 
 // --- CORS -------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cors_is_permissive_by_default_when_cors_allowed_origins_is_unset() {
     let base_url = spawn_app("providers = {}").await;
 
@@ -3667,7 +3675,7 @@ async fn cors_is_permissive_by_default_when_cors_allowed_origins_is_unset() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cors_reflects_an_allowlisted_origin() {
     let config = r#"
         providers = {}
@@ -3693,7 +3701,7 @@ async fn cors_reflects_an_allowlisted_origin() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cors_omits_the_header_for_an_origin_not_on_the_allowlist() {
     let config = r#"
         providers = {}
@@ -3714,7 +3722,7 @@ async fn cors_omits_the_header_for_an_origin_not_on_the_allowlist() {
     assert!(resp.headers().get("access-control-allow-origin").is_none());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cors_skips_an_invalid_allowlist_entry_but_keeps_the_valid_ones() {
     let config = r#"
         providers = {}

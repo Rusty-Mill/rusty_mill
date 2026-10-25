@@ -303,3 +303,147 @@ fn interval_reset_at_reschedules_to_the_given_absolute_deadline() {
         assert_eq!(second, deadline);
     });
 }
+
+// ---- `time::Instant` (#898, gap G3) and auto-advance ----
+
+#[test]
+fn instant_now_moves_by_exactly_the_advanced_duration() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        let before = time::Instant::now();
+        time::advance(Duration::from_secs(90)).await;
+        assert_eq!(time::Instant::now() - before, Duration::from_secs(90));
+        assert_eq!(before.elapsed(), Duration::from_secs(90));
+    });
+}
+
+#[test]
+fn instant_now_is_frozen_while_paused() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        let first = time::Instant::now();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(time::Instant::now(), first);
+    });
+}
+
+#[test]
+fn instant_now_outside_a_runtime_reads_real_time() {
+    let before = std::time::Instant::now();
+    let now = time::Instant::now().into_std();
+    assert!(now >= before);
+    assert!(now <= std::time::Instant::now());
+}
+
+#[test]
+fn sleep_deadline_and_interval_ticks_are_on_the_runtime_clock() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        let start = time::Instant::now();
+        let sleeper = time::sleep(Duration::from_secs(5));
+        assert_eq!(sleeper.deadline(), start + Duration::from_secs(5));
+
+        let mut ticker = time::interval_at(start + Duration::from_secs(1), Duration::from_secs(1));
+        let first = ticker.tick().await;
+        assert_eq!(first, start + Duration::from_secs(1));
+        assert_eq!(time::Instant::now(), first);
+    });
+}
+
+#[test]
+fn instant_arithmetic_matches_tokio() {
+    let a = time::Instant::now();
+    let b = a + Duration::from_secs(2);
+    assert_eq!(b - a, Duration::from_secs(2));
+    // `Sub<Instant>` and `duration_since` saturate, as tokio's do.
+    assert_eq!(a - b, Duration::ZERO);
+    assert_eq!(a.duration_since(b), Duration::ZERO);
+    assert_eq!(a.saturating_duration_since(b), Duration::ZERO);
+    assert_eq!(a.checked_duration_since(b), None);
+    assert_eq!(b.checked_duration_since(a), Some(Duration::from_secs(2)));
+    assert_eq!(a.checked_add(Duration::from_secs(2)), Some(b));
+    assert_eq!(b.checked_sub(Duration::from_secs(2)), Some(a));
+    assert_eq!(b - Duration::from_secs(2), a);
+
+    let mut c = a;
+    c += Duration::from_secs(3);
+    c -= Duration::from_secs(1);
+    assert_eq!(c, b);
+    assert!(a < b);
+
+    let std_a: std::time::Instant = a.into();
+    assert_eq!(time::Instant::from_std(std_a), a);
+    assert_eq!(time::Instant::from(a.into_std()), a);
+    assert_eq!(format!("{a:?}"), format!("{std_a:?}"));
+}
+
+#[test]
+fn paused_clock_auto_advances_a_long_sleep_when_idle() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        let wall = std::time::Instant::now();
+        let start = time::Instant::now();
+        time::sleep(Duration::from_secs(3600)).await;
+        assert_eq!(start.elapsed(), Duration::from_secs(3600));
+        assert!(wall.elapsed() < Duration::from_secs(5));
+    });
+}
+
+#[test]
+fn auto_advance_fires_spawned_sleeps_in_deadline_order() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        let start = time::Instant::now();
+        let (tx, mut rx) = rusty_tokio::sync::mpsc::unbounded_channel();
+        for secs in [30u64, 10, 20] {
+            let tx = tx.clone();
+            rusty_tokio::spawn(async move {
+                time::sleep(Duration::from_secs(secs)).await;
+                let _ = tx.send((secs, time::Instant::now()));
+            });
+        }
+        drop(tx);
+        let mut seen = Vec::new();
+        while let Some((secs, at)) = rx.recv().await {
+            assert_eq!(at - start, Duration::from_secs(secs));
+            seen.push(secs);
+        }
+        assert_eq!(seen, [10, 20, 30]);
+    });
+}
+
+#[test]
+fn auto_advance_waits_for_in_flight_spawn_blocking() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        // Without the hold-off, the idle scheduler would jump straight
+        // past the 1s timeout while the blocking job still runs.
+        let job = rusty_tokio::spawn_blocking(|| {
+            std::thread::sleep(Duration::from_millis(100));
+            7
+        });
+        let result = time::timeout(Duration::from_secs(1), job).await;
+        assert_eq!(result.unwrap().unwrap(), 7);
+    });
+}
+
+#[test]
+fn auto_advance_skips_timers_whose_sleep_was_dropped() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        let start = time::Instant::now();
+        // The timeout's inner future wins; its 10s `Sleep` is dropped
+        // but its heap entry stays until reached.
+        let won = time::timeout(Duration::from_secs(10), async { 1 }).await;
+        assert_eq!(won, Ok(1));
+        time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+    });
+}

@@ -177,6 +177,7 @@ impl App {
             // below, once, after the race has already resolved.
             let tick = rusty_tokio::time::sleep(POLL_INTERVAL);
             let woken = rusty_tokio::select! {
+                biased;
                 input = input_rx.recv() => Woken::Input(input),
                 session = session_rx.recv() => Woken::Session(session),
                 _ = tick => Woken::Tick,

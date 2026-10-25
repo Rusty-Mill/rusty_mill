@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
 publish = false
-description = "Self-contained 3D HTML replay viewer over the canonical match model"
+description = "Self-contained 3D HTML viewer for replays (canonical match model) and physics captures"
 default-run = "replay-viewer"
 
 [lib]
@@ -21,6 +21,8 @@ replay-analyzer = { path = "../replay-analyzer" }
 replay-skills = { path = "../replay-skills" }
 replay-scoring = { path = "../replay-scoring" }
 replay-value = { path = "../replay-value" }
+rb_capture_ingest = { path = "../rb_capture_ingest" }
+rb_domain = { path = "../rb_domain" }
 serde = { workspace = true }
 serde_json = "1"
 

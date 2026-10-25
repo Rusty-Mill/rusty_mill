@@ -5,6 +5,7 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 mod config;
+mod lease;
 mod supervisor;
 pub use config::{Agent, Assignment, Config, Sandbox, Slots};
 pub use supervisor::{StdSupervisor, Supervised, Supervisor};
@@ -50,6 +51,12 @@ fn transient(e: impl std::fmt::Display) -> ClassifiedError {
 }
 fn permanent(e: impl std::fmt::Display) -> ClassifiedError {
     ClassifiedError::Permanent(AgentError(e.to_string()))
+}
+fn unix_now() -> Result<u64, ClassifiedError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(transient)
 }
 fn text(s: &str) -> Result<Text, ClassifiedError> {
     Text::new(s).ok_or_else(|| permanent("empty host field"))
@@ -106,6 +113,25 @@ struct Frozen {
     config: Config,
     brief: String,
     profiles: String,
+    /// The lease paths the pool was confined to at the first admission;
+    /// absent for a task frozen unleased, or before leases existed.
+    #[rusty_serde(default)]
+    lease: Option<LeasePaths>,
+}
+/// The paths of a hosting lease, as granted. Its end is not frozen: a later
+/// generation may renew it, never change where it reaches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LeasePaths {
+    read: Vec<String>,
+    write: Vec<String>,
+}
+impl LeasePaths {
+    fn of(fence: &Fence) -> Option<Self> {
+        fence.lease.as_ref().map(|l| Self {
+            read: l.read.clone(),
+            write: l.write.clone(),
+        })
+    }
 }
 /// Who holds one admitted generation of a hosted task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,19 +255,32 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
             _ => Err(permanent("unexpected BBP response")),
         }
     }
-    fn freeze(&self, h: &Handle, task: &Task, board: &Board) -> Result<Frozen, ClassifiedError> {
+    /// Freeze the task's configuration once, its pool confined to the
+    /// lease of the fence that first freezes it.
+    fn freeze(
+        &self,
+        h: &Handle,
+        task: &Task,
+        board: &Board,
+        fence: &Fence,
+    ) -> Result<Frozen, ClassifiedError> {
         let dir = Self::manifest(h);
         std::fs::create_dir_all(&dir).map_err(transient)?;
         let path = dir.join("manifest.json");
         if path.exists() {
             return Self::load(h);
         }
+        let config = match &fence.lease {
+            Some(lease) => lease::confine(&self.config, lease).map_err(permanent)?,
+            None => self.config.clone(),
+        };
         let profiles = std::fs::read_to_string(&self.config.profiles).map_err(transient)?;
         let brief = format!("{}\n\n{}", self.context, orch_cli::render(task, board, ""));
         let frozen = Frozen {
-            config: self.config.clone(),
+            config,
             brief,
             profiles,
+            lease: LeasePaths::of(fence),
         };
         let bytes = rusty_serde::json::to_string(&frozen).map_err(permanent)?;
         publish_once(&dir, "manifest.json", bytes.as_bytes())?;
@@ -307,6 +346,31 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
             .map(|g| Ok((g, Self::holder(&dir.join(format!("{g:020}")))?)))
             .transpose()
     }
+    /// Refuse a fence whose lease has ended, so a lapsed holder stops
+    /// driving the task without failing it, and one whose lease reaches
+    /// other paths than the task's pool was confined to: changing access
+    /// needs a task started under the new lease.
+    fn leased(frozen: &Frozen, fence: &Fence) -> Result<(), ClassifiedError> {
+        if let Some(lease) = &fence.lease {
+            if !lease.live(unix_now()?) {
+                return Err(ClassifiedError::Unavailable(AgentError(
+                    "the hosting lease has ended".into(),
+                )));
+            }
+        }
+        if frozen.lease != LeasePaths::of(fence) {
+            return Err(permanent(
+                "the hosted task was confined under another lease; \
+                 changing access needs a task started under the new one",
+            ));
+        }
+        Ok(())
+    }
+    /// The absolute end, in unix seconds, every process the fence starts
+    /// must be gone by: its lease's.
+    fn deadline(fence: &Fence) -> Option<u64> {
+        fence.lease.as_ref().and_then(|l| l.expires)
+    }
     fn holder(path: &std::path::Path) -> Result<Holder, ClassifiedError> {
         let bytes = std::fs::read_to_string(path).map_err(transient)?;
         rusty_serde::json::from_str(&bytes).map_err(permanent)
@@ -351,10 +415,15 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
         }
         Ok(dir.join("agents.json"))
     }
-    fn ensure(&mut self, h: &Handle, frozen: &Frozen) -> Result<(), ClassifiedError> {
+    fn ensure(
+        &mut self,
+        h: &Handle,
+        frozen: &Frozen,
+        fence: &Fence,
+    ) -> Result<(), ClassifiedError> {
         let agents = Self::materialize(h, frozen)?;
         self.supervisor
-            .ensure(&frozen.config, &h.task, &agents)
+            .ensure(&frozen.config, &h.task, &agents, Self::deadline(fence))
             .map_err(transient)?;
         Ok(())
     }
@@ -571,7 +640,8 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
     ) -> Result<HostHandle, ClassifiedError> {
         let h = self.located(task, board);
         Self::admit(&h, fence)?;
-        let frozen = self.freeze(&h, task, board)?;
+        let frozen = self.freeze(&h, task, board, fence)?;
+        Self::leased(&frozen, fence)?;
         let config = &frozen.config;
         let agents = Self::materialize(&h, &frozen)?;
         self.open_once(config, &h)?;
@@ -617,7 +687,7 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
                 )?)?;
             }
             self.supervisor
-                .ensure(config, &h.task, &agents)
+                .ensure(config, &h.task, &agents, Self::deadline(fence))
                 .map_err(transient)?;
         }
         Ok(HostHandle(text(&format!(
@@ -629,11 +699,12 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
         let h = self.handle(handle)?;
         Self::admit(&h, fence)?;
         let frozen = Self::load(&h)?;
+        Self::leased(&frozen, fence)?;
         let view = self
             .show(&frozen.config, &h)?
             .ok_or_else(|| transient("hosted task missing"))?;
         if !view.card.state.terminal() {
-            self.ensure(&h, &frozen)?;
+            self.ensure(&h, &frozen, fence)?;
         }
         Self::progress(view)
     }
@@ -647,6 +718,7 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
         let h = self.handle(handle)?;
         Self::admit(&h, fence)?;
         let frozen = Self::load(&h)?;
+        Self::leased(&frozen, fence)?;
         let refs: Vec<_> = gate
             .content()
             .refs
@@ -732,6 +804,8 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
     /// `open` derives it. One never opened is opened now and cancelled at
     /// once, with no principal assigned and no moderator started, so a
     /// superseded holder's late `open` finds it ended and starts nothing.
+    /// A cancel only takes authority away, so it is not refused for an
+    /// ended or different lease.
     fn cancel(
         &mut self,
         task: &Task,
@@ -749,7 +823,7 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
             None => self.located(task, board),
         };
         Self::admit(&h, fence)?;
-        let frozen = self.freeze(&h, task, board)?;
+        let frozen = self.freeze(&h, task, board, fence)?;
         Self::materialize(&h, &frozen)?;
         self.open_once(&frozen.config, &h)?;
         self.request_cancel(&h, &frozen.config, &words, reason)?;

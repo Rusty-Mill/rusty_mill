@@ -513,7 +513,7 @@ async fn a_channel_reconnects_after_its_server_goes_away_and_comes_back() {
         .unwrap_err();
     assert_eq!(err.code(), Code::Unavailable);
 
-    let l = rusty_tokio::io::TcpListener::bind(addr).unwrap();
+    let l = rusty_tokio::io::TcpListener::bind(addr).await.unwrap();
     let again = serve(l, None, ServeOptions::default(), echo).unwrap();
     let reply = channel
         .unary::<Blob, Blob>(PATH, request(blob(3, 1)))
@@ -535,7 +535,7 @@ async fn a_call_made_after_the_server_said_goodbye_is_retried_on_a_new_connectio
         .await
         .unwrap();
     server.shutdown().await;
-    let l = rusty_tokio::io::TcpListener::bind(addr).unwrap();
+    let l = rusty_tokio::io::TcpListener::bind(addr).await.unwrap();
     let again = serve(l, None, ServeOptions::default(), echo).unwrap();
     // Let the client take in the goodbye: its connection is closed, and nothing is sent on it.
     sleep(SHORT).await;

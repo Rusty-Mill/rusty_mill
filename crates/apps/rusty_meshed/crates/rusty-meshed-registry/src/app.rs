@@ -347,7 +347,9 @@ mod tests {
     /// work together, not just each piece in isolation.
     #[rusty_tokio::test]
     async fn serve_answers_a_real_http_request_over_tcp() {
-        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         let router = Arc::new(build_router(Arc::new(AppState::new())));
         rusty_tokio::spawn(async move {
