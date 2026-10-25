@@ -159,9 +159,7 @@ impl<S: io::Read + Write> Session<'_, S> {
 
     /// Sends a Sync numbered `req`, which the server needs to support.
     fn sync(&mut self, features: Features, req: u64) -> Result<(), Failure> {
-        if !features.contains(Features::SYNC) {
-            return Err(Failure::Protocol("the server does not support sync".into()));
-        }
+        require_sync(features)?;
         Ok(self.conn.send(&Message::Sync { req })?)
     }
 
@@ -169,6 +167,13 @@ impl<S: io::Read + Write> Session<'_, S> {
         // Attach needs a checkpoint format; the screen it sends is ignored.
         let wanted = Features::CHECKPOINT_V3.union(Features::SYNC);
         let (features, _) = self.hello(wanted, None)?;
+        // Refuse a chain the server cannot confirm before any of it runs.
+        let needs_sync = calls
+            .iter()
+            .any(|c| c.method.returns == Returns::Unanswered || c.method.name == "sync");
+        if needs_sync {
+            require_sync(features)?;
+        }
         let mut reqs = 1..;
         for call in calls {
             let req = reqs.next().unwrap_or(u64::MAX);
@@ -255,4 +260,13 @@ impl<S: io::Read + Write> Session<'_, S> {
             }
         }
     }
+}
+
+fn require_sync(features: Features) -> Result<(), Failure> {
+    if features.contains(Features::SYNC) {
+        return Ok(());
+    }
+    Err(Failure::Protocol(
+        "the server does not support sync, needed to confirm input".into(),
+    ))
 }

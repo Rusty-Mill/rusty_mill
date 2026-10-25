@@ -320,6 +320,64 @@ fn garbage_from_the_server_exits_4() {
     assert_eq!(output.status.code(), Some(4));
 }
 
+/// A server from before SYNC: it welcomes the client and then counts the
+/// request frames it receives until the client hangs up.
+fn legacy_server() -> (PathBuf, std::sync::mpsc::Receiver<usize>) {
+    use rusty_mux_core::ClientId;
+    use rusty_mux_proto::{Features, Message, decode, encode};
+
+    let path = socket_path("legacy");
+    let listener = StdListener::bind(&path).expect("bind");
+    let (count_tx, count_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream.set_read_timeout(Some(PATIENCE)).expect("timeout");
+        let mut buf = Vec::new();
+        let mut frames = 0usize;
+        let mut chunk = [0u8; 4096];
+        loop {
+            while let Ok(Some((message, used))) = decode(&buf) {
+                buf.drain(..used);
+                if let Message::Hello { .. } = message {
+                    let welcome = Message::Welcome {
+                        features: Features::CHECKPOINT_V3,
+                        client: ClientId::from_uuid(rusty_uuid::Uuid::nil()),
+                        cursor: None,
+                    };
+                    stream
+                        .write_all(&encode(&welcome).expect("encode"))
+                        .expect("write");
+                } else {
+                    frames += 1;
+                }
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        count_tx.send(frames).expect("report");
+    });
+    (path, count_rx)
+}
+
+#[test]
+fn a_chain_needing_sync_sends_nothing_to_a_legacy_server() {
+    let block = "00000000-0000-0000-0000-000000000001";
+    let chains: [&[&str]; 2] = [
+        &[
+            "attach", "--block", block, "+", "input", "--block", block, "--data", "x",
+        ],
+        &["sync"],
+    ];
+    for chain in chains {
+        let (path, frames) = legacy_server();
+        assert_eq!(ctl(&path, chain).status.code(), Some(4), "{chain:?}");
+        let sent = frames.recv_timeout(PATIENCE).expect("frame count");
+        assert_eq!(sent, 0, "{chain:?} sent requests before refusing");
+    }
+}
+
 fn cursor_of(line: &str) -> String {
     line.strip_prefix("cursor ")
         .expect("a cursor line")
