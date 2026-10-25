@@ -60,4 +60,5 @@ Like the rest of the pool configuration, it is frozen with the task.
 
 The slot directory gains `admit.lock`, `queue/` and `<class>-<n>.owner`.
 A moderator without `--claim` queues fairly with no parent, no priority and no
-writes. A slot taken outside admission still counts against capacity.
+writes. A slot taken outside admission still counts against capacity, and only
+against capacity: every acquisition clears the slot's earlier owner record.

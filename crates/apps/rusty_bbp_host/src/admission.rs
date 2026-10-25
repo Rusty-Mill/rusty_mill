@@ -226,7 +226,7 @@ impl Admission {
             return Ok(None);
         };
         let record = &queue[order].1;
-        let owner = self.owner_path(class, slot.index());
+        let owner = self.slots.owner_path(class, slot.index());
         let json = rusty_serde::json::to_string(record).map_err(|e| e.to_string())?;
         rusty_atomic_file::write(&owner, json.as_bytes())
             .map_err(|e| format!("{}: {e}", owner.display()))?;
@@ -289,7 +289,7 @@ impl Admission {
         self.slots
             .held(class)?
             .into_iter()
-            .map(|index| read_record(&self.owner_path(class, index)))
+            .map(|index| read_record(&self.slots.owner_path(class, index)))
             .collect()
     }
 
@@ -320,12 +320,6 @@ impl Admission {
         }
         queue.sort_by(|(a, x), (b, y)| (x.rank_ms, a).cmp(&(y.rank_ms, b)));
         Ok(queue)
-    }
-
-    fn owner_path(&self, class: Class, index: u32) -> PathBuf {
-        self.slots
-            .dir()
-            .join(format!("{}-{index}.owner", class.name()))
     }
 }
 

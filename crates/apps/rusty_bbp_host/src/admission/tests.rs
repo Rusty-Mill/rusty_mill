@@ -66,6 +66,21 @@ impl Waiter {
         })
     }
 
+    /// A slot this waiter is due, awaited briefly: another test's fork may
+    /// hold a copy of a just-released lock until it execs.
+    fn admitted(&mut self, now_ms: u64, what: &str) -> Result<Slot, String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(slot) = self.agent(now_ms)? {
+                return Ok(slot);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!("{what}: not admitted"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     fn agent(&mut self, now_ms: u64) -> Result<Option<Slot>, String> {
         self.admission
             .admit_at(Class::Agent, &mut self.ticket, now_ms)
@@ -78,19 +93,19 @@ fn waiters_are_served_in_arrival_order_and_a_newcomer_waits_its_turn() -> Result
     let mut holder = Waiter::new(&slots, "H", Claim::default())?;
     let mut first = Waiter::new(&slots, "A", Claim::default())?;
     let mut second = Waiter::new(&slots, "B", Claim::default())?;
-    let held = holder.agent(1_000)?.ok_or("free slot")?;
+    let held = holder.admitted(1_000, "free slot")?;
     assert!(first.agent(2_000)?.is_none());
     assert!(second.agent(3_000)?.is_none());
     drop(held);
     // The slot is reserved for the earlier ticket, however often B asks.
     assert!(second.agent(4_000)?.is_none());
-    let a = first.agent(5_000)?.ok_or("A's turn")?;
+    let a = first.admitted(5_000, "A's turn")?;
     assert!(
         first.ticket.is_none(),
         "the ticket is given up with the slot"
     );
     drop(a);
-    second.agent(6_000)?.ok_or("B's turn")?;
+    second.admitted(6_000, "B's turn")?;
     Ok(())
 }
 
@@ -99,7 +114,7 @@ fn priority_is_precedence_in_seconds_so_low_priority_never_starves() -> Result<(
     let slots = slots("priority", 1)?;
     let mut holder = Waiter::new(&slots, "H", Claim::default())?;
     let mut low = Waiter::new(&slots, "L", Claim::default())?;
-    let mut held = holder.agent(0)?.ok_or("free slot")?;
+    let mut held = holder.admitted(0, "free slot")?;
     assert!(low.agent(100_000)?.is_none());
     // High priority, 60 s of precedence: a ticket taken within 60 s after
     // the low one is served first, one taken later is not.
@@ -110,7 +125,7 @@ fn priority_is_precedence_in_seconds_so_low_priority_never_starves() -> Result<(
         assert!(high.agent(t)?.is_none());
         drop(held);
         assert!(low.agent(t)?.is_none(), "{task} ranks ahead");
-        held = high.agent(t)?.ok_or("high's turn")?;
+        held = high.admitted(t, "high's turn")?;
     }
     let mut late = Waiter::new(&slots, "P3", claim(None, 60, &[]))?;
     assert!(late.agent(170_000)?.is_none());
@@ -119,7 +134,7 @@ fn priority_is_precedence_in_seconds_so_low_priority_never_starves() -> Result<(
         late.agent(170_000)?.is_none(),
         "the low ticket ranks ahead now"
     );
-    low.agent(170_000)?.ok_or("low's turn")?;
+    low.admitted(170_000, "low's turn")?;
     Ok(())
 }
 
@@ -131,14 +146,14 @@ fn a_parent_ceiling_counts_each_slot_once_and_blocks_no_one_else() -> Result<(),
     let mut b = Waiter::new(&slots, "B", claim(goal, 0, &[]))?;
     let mut other = Waiter::new(&slots, "O", claim(Some(("other", 2)), 0, &[]))?;
     // Two of the goal's tasks, each wanting two harnesses: two slots in all.
-    let a1 = a.agent(1)?.ok_or("A's first")?;
-    let _b1 = b.agent(2)?.ok_or("B's first")?;
+    let a1 = a.admitted(1, "A's first")?;
+    let _b1 = b.admitted(2, "B's first")?;
     assert!(a.agent(3)?.is_none(), "the goal is at its ceiling");
     assert!(b.agent(4)?.is_none());
     // A waiter at its ceiling leaves the free slot to the next.
-    let _o = other.agent(5)?.ok_or("another parent's task")?;
+    let _o = other.admitted(5, "another parent's task")?;
     drop(a1);
-    a.agent(6)?.ok_or("A again under the ceiling")?;
+    a.admitted(6, "A again under the ceiling")?;
     Ok(())
 }
 
@@ -150,21 +165,42 @@ fn overlapping_write_leases_of_two_tasks_never_run_together() -> Result<(), Stri
     let mut c = Waiter::new(&slots, "C", claim(None, 0, &["/srv/outside"]))?;
     let mut d = Waiter::new(&slots, "D", claim(None, 0, &["/srv/out"]))?;
     // Harnesses of one task share its writes.
-    let a1 = a.agent(1)?.ok_or("A")?;
-    let a2 = a.agent(2)?.ok_or("A's second harness")?;
+    let a1 = a.admitted(1, "A")?;
+    let a2 = a.admitted(2, "A's second harness")?;
     assert!(b.agent(3)?.is_none(), "B writes beneath A");
     // A sibling spelling is no overlap.
-    let _c = c.agent(4)?.ok_or("C")?;
+    let _c = c.admitted(4, "C")?;
     // B, waiting, now holds back A's next harness as well as D.
     assert!(a.agent(5)?.is_none(), "A cannot pass a waiting B");
     a.ticket = None;
     assert!(d.agent(5)?.is_none());
     drop((a1, a2));
     assert!(d.agent(6)?.is_none(), "B keeps its paths while it waits");
-    let b1 = b.agent(7)?.ok_or("B")?;
+    let b1 = b.admitted(7, "B")?;
     assert!(d.agent(8)?.is_none(), "B now holds them");
     drop(b1);
-    d.agent(9)?.ok_or("D")?;
+    d.admitted(9, "D")?;
+    Ok(())
+}
+
+#[test]
+fn a_slot_taken_outside_admission_inherits_no_earlier_owner() -> Result<(), String> {
+    let slots = slots("raw", 2)?;
+    let goal = Some(("goal", 1));
+    let mut a = Waiter::new(&slots, "A", claim(goal, 0, &["/raw/out"]))?;
+    let a1 = a.admitted(1, "A")?;
+    drop(a1);
+    // A raw holder takes slot 0, A's old slot: it holds capacity alone.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let _raw = loop {
+        match slots.try_acquire(Class::Agent)? {
+            Some(slot) if slot.name() == "agent-0" => break slot,
+            _ if std::time::Instant::now() >= deadline => return Err("slot 0 never freed".into()),
+            _ => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    };
+    let mut b = Waiter::new(&slots, "B", claim(goal, 0, &["/raw/out"]))?;
+    let _b = b.admitted(2, "B is under its ceiling and conflicts with no one")?;
     Ok(())
 }
 
@@ -176,15 +212,13 @@ fn the_same_task_id_in_another_store_is_another_task() -> Result<(), String> {
     let mut a = Waiter::of(&slots, Path::new(&one), "T", write.clone())?;
     let mut b = Waiter::of(&slots, Path::new(&two), "T", write.clone())?;
     let mut again = Waiter::of(&slots, Path::new(&one), "T", write)?;
-    let _a = a.agent(1)?.ok_or("A")?;
+    let _a = a.admitted(1, "A")?;
     assert!(
         b.agent(2)?.is_none(),
         "T of store two writes where T of store one does"
     );
     b.ticket = None;
-    again
-        .agent(3)?
-        .ok_or("T of store one shares its own writes")?;
+    again.admitted(3, "T of store one shares its own writes")?;
     Ok(())
 }
 
@@ -192,7 +226,7 @@ fn the_same_task_id_in_another_store_is_another_task() -> Result<(), String> {
 fn tickets_of_gone_waiters_are_dropped_and_validators_queue_alone() -> Result<(), String> {
     let slots = slots("stale", 1)?;
     let mut holder = Waiter::new(&slots, "H", Claim::default())?;
-    let held = holder.agent(1)?.ok_or("free slot")?;
+    let held = holder.admitted(1, "free slot")?;
     let mut gone = Waiter::new(&slots, "G", Claim::default())?;
     assert!(gone.agent(2)?.is_none());
     let mut next = Waiter::new(&slots, "N", Claim::default())?;
@@ -204,14 +238,21 @@ fn tickets_of_gone_waiters_are_dropped_and_validators_queue_alone() -> Result<()
     std::fs::write(with_ext(&stem, "lock"), "").map_err(|e| e.to_string())?;
     std::fs::write(with_ext(&stem, "json"), json).map_err(|e| e.to_string())?;
     drop(held);
-    let _n = next.agent(4)?.ok_or("the dead ticket is passed")?;
+    let _n = next.admitted(4, "the dead ticket is passed")?;
     assert!(!with_ext(&stem, "lock").exists(), "and removed");
 
     // Agent claims bound agents only: a validator conflicts with nothing.
     let mut v = Waiter::new(&slots, "V", claim(Some(("p", 1)), 0, &["/srv"]))?;
     let mut ticket = None;
-    let run = v.admission.admit_at(Class::Validator, &mut ticket, 5)?;
-    assert!(run.is_some());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while v
+        .admission
+        .admit_at(Class::Validator, &mut ticket, 5)?
+        .is_none()
+    {
+        assert!(std::time::Instant::now() < deadline, "the validator slot");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(v.agent(6)?.is_none(), "the agent slot is N's");
     Ok(())
 }

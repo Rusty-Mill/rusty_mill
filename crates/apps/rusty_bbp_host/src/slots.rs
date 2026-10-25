@@ -145,6 +145,11 @@ impl Slots {
         Ok(held)
     }
 
+    /// Where fair admission records who holds slot `index` of `class`.
+    pub(crate) fn owner_path(&self, class: Class, index: u32) -> PathBuf {
+        self.dir.join(format!("{}-{index}.owner", class.name()))
+    }
+
     fn lock_path(&self, class: Class, index: u32) -> PathBuf {
         self.dir.join(format!("{}-{index}.lock", class.name()))
     }
@@ -170,6 +175,15 @@ impl Slots {
                     // opened for append: Windows refuses to truncate such a handle.
                     file.set_len(0)
                         .map_err(|e| format!("{}: {e}", path.display()))?;
+                    // An earlier holder's owner record is no one's either:
+                    // a holder taken here counts as capacity alone until
+                    // admission records it.
+                    let owner = self.owner_path(class, index);
+                    match std::fs::remove_file(&owner) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(format!("{}: {e}", owner.display())),
+                    }
                     return Ok(Some(Slot { file, class, index }));
                 }
                 Err(TryLockError::WouldBlock) => continue,
