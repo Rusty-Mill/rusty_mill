@@ -1,6 +1,5 @@
 use async_trait::async_trait;
-use futures_core::stream::BoxStream;
-use futures_util::StreamExt;
+use rusty_stream::{BoxStream, StreamExt};
 
 use crate::error::{Error, Result};
 use crate::pool::PoolStats;
@@ -98,12 +97,12 @@ pub trait Connection: Executor {
         Self: 'static,
     {
         let mut this = self;
-        futures_util::stream::once(async move { this.fetch_all(&sql, &params).await })
-            .flat_map(|result| match result {
-                Ok(rows) => futures_util::stream::iter(rows.into_iter().map(Ok)).boxed(),
-                Err(err) => futures_util::stream::iter(std::iter::once(Err(err))).boxed(),
-            })
-            .boxed()
+        rusty_stream::try_stream! {
+            for row in this.fetch_all(&sql, &params).await? {
+                yield row;
+            }
+        }
+        .boxed()
     }
 }
 
@@ -148,5 +147,60 @@ pub trait Driver: Send + Sync {
     /// `sqlx::Pool` plus a small amount of their own bookkeeping.
     fn pool_stats(&self) -> PoolStats {
         PoolStats::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    /// A connection whose `fetch_all` returns a fixed result, to exercise
+    /// the default `fetch_stream`.
+    struct Fixed(Option<Result<Vec<Row>>>);
+
+    #[async_trait]
+    impl Executor for Fixed {
+        async fn execute(&mut self, _sql: &str, _params: &[Value]) -> Result<u64> {
+            Ok(0)
+        }
+
+        async fn fetch_all(&mut self, _sql: &str, _params: &[Value]) -> Result<Vec<Row>> {
+            self.0.take().unwrap_or(Ok(Vec::new()))
+        }
+
+        async fn fetch_optional(&mut self, _sql: &str, _params: &[Value]) -> Result<Option<Row>> {
+            Ok(None)
+        }
+    }
+
+    impl Connection for Fixed {}
+
+    fn row(n: i64) -> Row {
+        Row::new(Arc::from(["n".to_string()]), vec![Value::I64(n)])
+    }
+
+    async fn drain(result: Result<Vec<Row>>) -> Vec<Result<i64>> {
+        let stream = Box::new(Fixed(Some(result))).fetch_stream(String::new(), Vec::new());
+        stream
+            .map(|row| row.and_then(|row| row.get::<i64>(0)))
+            .collect()
+            .await
+    }
+
+    #[rusty_tokio::test]
+    async fn default_fetch_stream_yields_every_row_then_ends() {
+        let got = drain(Ok(vec![row(1), row(2)])).await;
+        assert!(matches!(got.as_slice(), [Ok(1), Ok(2)]), "{got:?}");
+    }
+
+    #[rusty_tokio::test]
+    async fn default_fetch_stream_yields_the_error_once() {
+        let got = drain(Err(Error::RowNotFound)).await;
+        assert!(
+            matches!(got.as_slice(), [Err(Error::RowNotFound)]),
+            "{got:?}"
+        );
     }
 }
