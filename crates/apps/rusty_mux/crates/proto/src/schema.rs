@@ -259,8 +259,9 @@ impl Args<'_> {
             Value::Cells(n) => Ok(*n),
             _ => Err(self.wrong(name, Ty::Cells)),
         };
-        Size::new(cells("cols")?, cells("rows")?).map_err(|e| CallError::Invalid {
-            param: "cols",
+        let (cols, rows) = (cells("cols")?, cells("rows")?);
+        Size::new(cols, rows).map_err(|e| CallError::Invalid {
+            param: if cols == 0 { "cols" } else { "rows" },
             why: e.to_string(),
         })
     }

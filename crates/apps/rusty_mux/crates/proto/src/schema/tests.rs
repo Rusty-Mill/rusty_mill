@@ -150,17 +150,22 @@ fn rejects_bad_argument_lists() {
 }
 
 #[test]
-fn rejects_a_zero_size() {
+fn rejects_a_zero_size_naming_the_zero_side() {
     let resize = method("resize").expect("resize");
-    let args = [
-        ("block", Value::Id(id(1))),
-        ("cols", Value::Cells(0)),
-        ("rows", Value::Cells(24)),
-    ];
-    assert!(matches!(
-        resize.request(1, &args),
-        Err(CallError::Invalid { param: "cols", .. })
-    ));
+    for (cols, rows, side) in [(0, 24, "cols"), (80, 0, "rows"), (0, 0, "cols")] {
+        let args = [
+            ("block", Value::Id(id(1))),
+            ("cols", Value::Cells(cols)),
+            ("rows", Value::Cells(rows)),
+        ];
+        assert!(
+            matches!(
+                resize.request(1, &args),
+                Err(CallError::Invalid { param, .. }) if param == side
+            ),
+            "{cols}x{rows}"
+        );
+    }
 }
 
 #[test]
