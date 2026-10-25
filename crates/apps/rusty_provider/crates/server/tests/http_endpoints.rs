@@ -111,8 +111,9 @@ async fn spawn_app(config_toml: &str) -> String {
     let runtime = server_runtime();
     let server = {
         let _entered = runtime.enter();
-        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap())
-            .expect("bind ephemeral port");
+        // `bind` is async; this helper is not, so bind with std and adopt it.
+        let bound = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let listener = rusty_tokio::io::TcpListener::from_std(bound).expect("register listener");
         rp_server::serve(state, tokio, listener).expect("serve")
     };
     let addr = server.local_addr();

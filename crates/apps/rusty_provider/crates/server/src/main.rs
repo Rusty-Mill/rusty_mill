@@ -125,7 +125,7 @@ fn serve_on_rusty_tokio(
         .thread_name("rp-server")
         .build()?;
     runtime.block_on(async {
-        let listener = rusty_tokio::io::TcpListener::bind_addrs(addr).await?;
+        let listener = rusty_tokio::io::TcpListener::bind(addr).await?;
         let server = rp_server::serve(state, tokio, listener)?;
         rusty_log::info!(addr = %server.local_addr(), "rusty_provider listening");
         server.shutdown_on(std::future::pending()).await;
