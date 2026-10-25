@@ -219,7 +219,7 @@ mod tests {
         session
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn search_finds_the_matching_entry_and_ranks_it() {
         let svc = service().await;
         svc.add_session_to_memory(&session_with(
@@ -243,7 +243,7 @@ mod tests {
             .is_empty());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn another_user_and_another_app_cannot_see_it() {
         let svc = service().await;
         svc.add_session_to_memory(&session_with("app", "u1", "s1", &["I love hiking"]))
@@ -262,7 +262,7 @@ mod tests {
             .is_empty());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn results_come_back_best_first() {
         let svc = service().await;
         let mut session = Session::new("s1", "app", "u1");
@@ -286,7 +286,7 @@ mod tests {
         assert!(hits[0].content.text().starts_with("rust rust rust"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn partial_and_empty_events_are_not_ingested() {
         let svc = service().await;
         let mut session = Session::new("s1", "app", "u1");
@@ -308,7 +308,7 @@ mod tests {
             .is_empty());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn an_empty_or_punctuation_only_query_matches_nothing() {
         let svc = service().await;
         svc.add_session_to_memory(&session_with("app", "u1", "s1", &["I love hiking"]))
@@ -329,7 +329,7 @@ mod tests {
     /// FTS5 reads its MATCH argument as a query language. A caller's prose is
     /// not that language, so these must be searched literally rather than
     /// erroring or changing the query's meaning.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn fts_operators_in_a_query_are_treated_as_words() {
         let svc = service().await;
         svc.add_session_to_memory(&session_with(
@@ -355,7 +355,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn re_ingesting_a_session_replaces_rather_than_duplicates() {
         let svc = service().await;
         let first = session_with("app", "u1", "s1", &["I love hiking"]);
@@ -389,7 +389,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_second_session_adds_to_the_same_users_memory() {
         let svc = service().await;
         svc.add_session_to_memory(&session_with("app", "u1", "s1", &["I love hiking"]))
@@ -408,7 +408,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn the_entry_carries_its_author_and_timestamp() {
         let svc = service().await;
         let mut session = Session::new("s1", "app", "u1");
@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(hits[0].timestamp, timestamp);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn memory_survives_reopening_the_file() {
         let path = temp_db();
         {
@@ -446,7 +446,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn search_is_case_insensitive() {
         let svc = service().await;
         svc.add_session_to_memory(&session_with("app", "u1", "s1", &["I love Hiking"]))

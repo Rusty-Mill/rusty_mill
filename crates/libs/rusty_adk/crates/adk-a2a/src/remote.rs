@@ -4,12 +4,11 @@ use std::sync::Arc;
 
 use adk_agents::Agent;
 use adk_core::{AdkError, Content, Event, InvocationContext, RequestInput, Result};
-use futures::stream::BoxStream;
-use futures::StreamExt;
 use rusty_a2a::client::A2aClient;
 use rusty_a2a::types::{
     AgentCard, Message as A2aMessage, StreamResponse, Task, TaskState, TaskStatus,
 };
+use rusty_stream::{BoxStream, Compat, StreamExt};
 
 use crate::convert::{content_to_message, message_to_content, part_to_adk};
 
@@ -29,13 +28,13 @@ fn task_key(agent_name: &str) -> String {
 /// that it is a process away in another language stops mattering.
 ///
 /// ```no_run
-/// # tokio_test::block_on(async {
+/// # async fn demo() -> Result<(), adk_core::AdkError> {
 /// use adk_a2a::RemoteA2aAgent;
 ///
 /// let researcher = RemoteA2aAgent::discover("researcher", "http://localhost:8080").await?;
 /// // ...then `.sub_agent(Arc::new(researcher))` on an LlmAgent builder.
-/// # Ok::<(), adk_core::AdkError>(())
-/// # }).unwrap();
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # How a turn travels
@@ -241,7 +240,7 @@ impl Agent for RemoteA2aAgent {
     }
 
     fn run<'a>(&'a self, ctx: &'a InvocationContext) -> BoxStream<'a, Result<Event>> {
-        Box::pin(async_stream::try_stream! {
+        Box::pin(rusty_stream::try_stream! {
             let Some(mut message) = self.outbound_message(ctx) else {
                 // Nothing to relay. Saying so beats sending the remote an empty
                 // turn and reporting whatever it makes of that.
@@ -260,11 +259,13 @@ impl Agent for RemoteA2aAgent {
             }
 
             if self.streaming {
-                let mut stream = self
-                    .client
-                    .send_streaming_message(message, None)
-                    .await
-                    .map_err(remote_error)?;
+                // `rusty_a2a`'s client speaks `futures` (tier C, reqwest).
+                let mut stream = Compat::new(
+                    self.client
+                        .send_streaming_message(message, None)
+                        .await
+                        .map_err(remote_error)?,
+                );
 
                 while let Some(item) = stream.next().await {
                     let response = item.map_err(remote_error)?;

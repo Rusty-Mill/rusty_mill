@@ -37,7 +37,7 @@
 //! # Concurrency
 //!
 //! [`rusqlite`] is a blocking library, so every query runs on
-//! [`tokio::task::spawn_blocking`] with the connection lock taken *inside* the
+//! [`rusty_tokio::task::spawn_blocking`] with the connection lock taken *inside* the
 //! blocking closure — it is never held across an await point. The database is
 //! opened in WAL mode with a busy timeout so a second process reading the same
 //! file does not immediately fail.
@@ -47,7 +47,7 @@
 //! One database, all three services:
 //!
 //! ```
-//! # tokio_test::block_on(async {
+//! # rusty_tokio::Runtime::new()?.block_on(async {
 //! use adk_core::{ArtifactService, Event, MemoryService, Part, SessionService};
 //! use adk_sessions::SqliteStore;
 //!
@@ -75,7 +75,8 @@
 //! let services = store.services();
 //! assert!(services.artifact.is_some() && services.memory.is_some());
 //! # Ok::<(), adk_core::AdkError>(())
-//! # }).unwrap();
+//! # })?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 mod artifacts;
@@ -222,7 +223,7 @@ where
     F: FnOnce() -> Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    match tokio::task::spawn_blocking(f).await {
+    match rusty_tokio::task::spawn_blocking(f).await {
         Ok(result) => result,
         Err(join) => Err(AdkError::storage(format!(
             "sqlite worker did not finish: {join}"
@@ -329,12 +330,13 @@ impl Db {
 /// memory all land in the same database and the same transaction log.
 ///
 /// ```
-/// # tokio_test::block_on(async {
+/// # rusty_tokio::Runtime::new()?.block_on(async {
 /// # use adk_sessions::SqliteStore;
 /// let store = SqliteStore::in_memory().await?;
 /// let services = store.services();
 /// # Ok::<(), adk_core::AdkError>(())
-/// # }).unwrap();
+/// # })?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Debug, Clone)]
 pub struct SqliteStore {
@@ -399,7 +401,7 @@ mod tests {
     use super::*;
     use adk_core::{ArtifactService, Content, Event, MemoryService, Part, Session, SessionService};
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn all_three_services_share_one_database() {
         let store = SqliteStore::in_memory().await.unwrap();
         let sessions = store.sessions();
@@ -444,7 +446,7 @@ mod tests {
 
     /// A file written before artifacts and memory existed catches up on open,
     /// rather than being refused or quietly missing its newer tables.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_v1_database_migrates_all_the_way_forward() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(V1_SESSIONS).unwrap();
@@ -485,7 +487,7 @@ mod tests {
 
     /// The step that matters for anyone already running the previous release:
     /// v2 on disk, memory added on top.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_v2_database_gains_the_memory_table() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(V1_SESSIONS).unwrap();
@@ -513,7 +515,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_newer_schema_version_is_refused() {
         let conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)

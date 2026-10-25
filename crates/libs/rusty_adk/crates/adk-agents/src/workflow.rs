@@ -6,8 +6,7 @@
 
 use adk_core::{AdkError, Event, InvocationContext, Result};
 use async_trait::async_trait;
-use futures::stream::BoxStream;
-use futures::StreamExt;
+use rusty_stream::{BoxStream, StreamExt};
 use std::sync::Arc;
 
 use crate::agent::{Agent, SharedAgent};
@@ -59,7 +58,7 @@ impl Agent for SequentialAgent {
     }
 
     fn run<'a>(&'a self, ctx: &'a InvocationContext) -> BoxStream<'a, Result<Event>> {
-        Box::pin(async_stream::try_stream! {
+        Box::pin(rusty_stream::try_stream! {
             let ctx = ctx.for_agent(&self.name);
             for sub in &self.sub_agents {
                 ctx.check_cancelled()?;
@@ -141,7 +140,7 @@ impl Agent for ParallelAgent {
                 // don't pre-nest its name here — that would double it up.
                 let branch_ctx = ctx.clone();
                 let branch = ctx.for_agent(sub.name()).branch;
-                Box::pin(async_stream::try_stream! {
+                Box::pin(rusty_stream::try_stream! {
                     let mut stream = sub.run_owned(branch_ctx);
                     while let Some(event) = stream.next().await {
                         let mut event = event?;
@@ -154,7 +153,7 @@ impl Agent for ParallelAgent {
             })
             .collect();
 
-        Box::pin(futures::stream::select_all(branches))
+        Box::pin(rusty_stream::stream::select_all(branches))
     }
 }
 
@@ -216,7 +215,7 @@ impl Agent for LoopAgent {
     }
 
     fn run<'a>(&'a self, ctx: &'a InvocationContext) -> BoxStream<'a, Result<Event>> {
-        Box::pin(async_stream::try_stream! {
+        Box::pin(rusty_stream::try_stream! {
             let ctx = ctx.for_agent(&self.name);
             let mut iteration = 0u32;
 
@@ -262,7 +261,7 @@ pub trait AgentRunOwned {
 
 impl<A: Agent + ?Sized> AgentRunOwned for A {
     fn run_owned(&self, ctx: InvocationContext) -> BoxStream<'_, Result<Event>> {
-        Box::pin(async_stream::try_stream! {
+        Box::pin(rusty_stream::try_stream! {
             let mut stream = self.run(&ctx);
             while let Some(event) = stream.next().await {
                 yield event?;

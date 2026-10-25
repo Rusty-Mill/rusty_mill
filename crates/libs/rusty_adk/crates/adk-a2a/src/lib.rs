@@ -6,7 +6,7 @@
 //! [`AdkAgentExecutor`] and any A2A client, in any language, can talk to it.
 //!
 //! ```
-//! # tokio_test::block_on(async {
+//! # rusty_tokio::Runtime::new()?.block_on(async {
 //! use adk_a2a::{card_for_agent, AdkAgentExecutor};
 //! use adk_agents::LlmAgent;
 //! use adk_core::Services;
@@ -34,7 +34,8 @@
 //! // server.serve(([127, 0, 0, 1], 8080)).await
 //! # let _ = server;
 //! # Ok::<(), adk_core::AdkError>(())
-//! # }).unwrap();
+//! # })?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! # What maps to what

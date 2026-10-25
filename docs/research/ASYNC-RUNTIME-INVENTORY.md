@@ -134,6 +134,19 @@ edge but does not by itself move either `remind_me` crate out of tier C:
 | #911 | small crates (rusty_key, skillopt, lsp, tonic, misc) | 10 | #903, #897, #899, #896 |
 | #912 | tier C tracking | 27 | #687, #688 |
 
+**#908 status (2026-10-25).** `adk-tools`, `adk-graph`, `adk-agents`,
+`adk-runner`, `adk-agui`, `adk-macros`, `adk-sessions`, `rusty-adk` and
+`agui-agent-server` have no `tokio`, `tokio-test`, `futures` or
+`async-stream` dependency left. G10 is closed. The library half of
+`adk-a2a` moved too. Its tests keep `tokio` as a dev-dependency because
+they serve `rusty_a2a` over axum and call it with reqwest. Streams cross
+into tier C at two places, both through `rusty_stream::Compat`: the model
+stream from `adk-models` (in `adk-agents`) and the streaming client of
+`rusty_a2a` (in `adk-a2a`). Two examples still run a tokio `main`.
+`weather-agent` does so for the live models in `adk-models`, which use
+reqwest. `mcp-tool-server` does so for the stdio transport of `adk-mcp`.
+Each example moves when that crate moves.
+
 ## 4. Per-crate table
 
 Deps: `t` tokio, `f` futures, `fu` futures-util, `as` async-stream, `tu`

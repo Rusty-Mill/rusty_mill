@@ -6,11 +6,10 @@ use adk_core::{AdkError, Event, Result as AdkResult, RunConfig};
 use adk_graph::{PendingInterrupt, ResumeRequest, PENDING_STATE_KEY};
 use adk_runner::Runner;
 use async_trait::async_trait;
-use futures::stream::BoxStream;
-use futures::StreamExt;
 use rusty_a2a::error::{A2aError, Result as A2aResult};
 use rusty_a2a::server::{AgentExecutor, EventSink, RequestContext};
 use rusty_a2a::types::{Artifact, Message as A2aMessage, Part as A2aPart, TaskState};
+use rusty_stream::{BoxStream, StreamExt};
 use serde_json::Value;
 
 use crate::convert::{content_to_message, message_to_content, part_to_a2a};
@@ -245,7 +244,7 @@ impl AgentExecutor for AdkAgentExecutor {
 
         let mut answer: Option<A2aMessage> = None;
         loop {
-            let next = tokio::select! {
+            let next = rusty_tokio::select! {
                 biased;
                 _ = ctx.cancellation.cancelled() => {
                     // The client called CancelTask. Stop consuming; dropping

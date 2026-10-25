@@ -16,11 +16,11 @@ use adk_models::MockModel;
 use adk_runner::Runner;
 use adk_sessions::{InMemoryArtifactService, InMemorySessionService};
 use async_trait::async_trait;
-use futures::StreamExt;
 use rusty_a2a::client::A2aClient;
 use rusty_a2a::error::Result as A2aResult;
 use rusty_a2a::server::{AgentExecutor, AgentServer, EventSink, RequestContext};
 use rusty_a2a::types::{AgentCard, AgentInterface, Artifact, Message, Part, TaskState};
+use rusty_stream::StreamExt;
 use tokio::net::TcpListener;
 
 /// Serves any A2A executor on an ephemeral port; returns its base URL.

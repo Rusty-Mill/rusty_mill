@@ -16,6 +16,8 @@ live = []
 
 [dependencies]
 rusty-adk = { path = "../../crates/rusty-adk" }
-futures.workspace = true
 serde_json.workspace = true
+# Stays on tokio: the live Gemini/Anthropic models in `adk-models` (tier C) use
+# reqwest, which needs a tokio runtime (#908).
 tokio = { workspace = true, features = ["full"] }
+rusty_stream.workspace = true

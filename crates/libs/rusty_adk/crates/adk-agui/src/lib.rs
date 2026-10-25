@@ -16,7 +16,7 @@
 //! use rusty_agui::serve::AgentHandler;
 //! use std::sync::Arc;
 //!
-//! let runtime = tokio::runtime::Runtime::new()?;
+//! let runtime = rusty_tokio::runtime::Runtime::new()?;
 //! let agent = LlmAgent::builder("greeter")
 //!     .model(Arc::new(MockModel::new().push_text("Hello!")))
 //!     .description("Greets people.")
@@ -74,12 +74,12 @@ pub mod convert;
 use adk_core::{AdkError, Content, Event as AdkEvent, RunConfig, Session};
 use adk_graph::{PendingInterrupt, ResumeRequest, PENDING_STATE_KEY};
 use adk_runner::Runner;
-use futures::StreamExt;
 use rusty_agui::serve::{Agent, Emitter};
 use rusty_agui::{Error, Message, RunAgentInput};
 use rusty_json::Value;
+use rusty_stream::StreamExt;
+use rusty_tokio::runtime::Handle;
 use std::sync::Arc;
-use tokio::runtime::Handle;
 
 use convert::{resume_payload, to_agui};
 

@@ -6,11 +6,11 @@
 //! [`Event::output`](adk_core::Event::output) rather than through session state.
 //!
 //! ```
-//! # tokio_test::block_on(async {
+//! # rusty_tokio::Runtime::new()?.block_on(async {
 //! use adk_core::{InvocationContext, RunConfig, Services, Session};
 //! use adk_graph::{chain, FunctionNode, Graph, NodeConfig, NodeOutcome};
 //! use adk_sessions::InMemorySessionService;
-//! use futures::StreamExt;
+//! use rusty_stream::StreamExt;
 //! use serde_json::json;
 //! use std::sync::Arc;
 //!
@@ -38,6 +38,7 @@
 //! let last = events.last().unwrap().as_ref().unwrap();
 //! assert_eq!(last.output, Some(json!("TOKYO")));
 //! # });
+//! # Ok::<(), std::io::Error>(())
 //! ```
 
 #![deny(missing_docs)]
@@ -58,7 +59,7 @@ mod tests {
     use super::*;
     use adk_core::{AdkError, Event, InvocationContext, RunConfig, Services, Session};
     use adk_sessions::InMemorySessionService;
-    use futures::StreamExt;
+    use rusty_stream::StreamExt;
     use serde_json::{json, Value};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
@@ -125,7 +126,7 @@ mod tests {
 
     // ---- data flow ----
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn output_flows_from_one_node_to_the_next() {
         let double = FunctionNode::new("double", NodeConfig::default(), |ctx| {
             let input = ctx.input.clone();
@@ -146,7 +147,7 @@ mod tests {
         assert_eq!(events.last().unwrap().output, Some(json!(42)));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn events_carry_node_info_with_step_and_predecessor() {
         let graph = Graph::new(
             vec![value_node("a", json!(1)), value_node("b", json!(2))],
@@ -162,7 +163,7 @@ mod tests {
         assert_eq!(info.predecessor.as_deref(), Some("a"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_typed_node_reports_an_input_type_mismatch() {
         let typed =
             FunctionNode::typed::<i64, i64, _>("needs_int", NodeConfig::default(), |n, _ctx| {
@@ -189,7 +190,7 @@ mod tests {
         .shared()
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_matching_route_selects_its_branch() {
         let graph = Graph::new(
             vec![
@@ -210,7 +211,7 @@ mod tests {
         assert!(!events.iter().any(|e| e.author == "support"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn an_unmatched_route_falls_back_to_default() {
         let graph = Graph::new(
             vec![
@@ -230,7 +231,7 @@ mod tests {
         assert!(events.iter().any(|e| e.author == "fallback"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn an_unmatched_route_with_no_default_is_an_error() {
         let graph = Graph::new(
             vec![router("classify", "NOPE"), value_node("bug", json!(1))],
@@ -247,7 +248,7 @@ mod tests {
 
     // ---- fan-out and join ----
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_join_aggregates_every_branch_keyed_by_node() {
         let graph = Graph::new(
             vec![
@@ -275,7 +276,7 @@ mod tests {
         assert_eq!(joined, json!({"a": "alpha", "b": "beta"}));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_join_that_never_fills_is_reported_rather_than_silently_skipped() {
         // `b` is routed around, so `gather` only ever sees one predecessor.
         let graph = Graph::new(
@@ -300,7 +301,7 @@ mod tests {
 
     // ---- concurrent frontier reconciliation ----
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_sibling_error_does_not_discard_a_successful_branchs_events() {
         let bad = FunctionNode::new("bad", NodeConfig::default(), |_ctx| {
             Box::pin(async { Err(AdkError::validation("bad", "boom")) })
@@ -333,7 +334,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_join_with_duplicate_edges_from_one_source_fires_on_distinct_predecessors() {
         let graph = Graph::new(
             vec![
@@ -364,7 +365,7 @@ mod tests {
 
     // ---- retries ----
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_retryable_failure_is_retried_up_to_the_budget() {
         let attempts = Arc::new(AtomicU32::new(0));
         let counter = Arc::clone(&attempts);
@@ -390,7 +391,7 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_non_retryable_failure_is_not_retried() {
         let attempts = Arc::new(AtomicU32::new(0));
         let counter = Arc::clone(&attempts);
@@ -408,7 +409,7 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_retried_attempts_events_do_not_leak_into_the_successful_output() {
         let attempts = Arc::new(AtomicU32::new(0));
         let counter = Arc::clone(&attempts);
@@ -458,7 +459,7 @@ mod tests {
         Graph::new(vec![ask, after], chain(["ask", "after"])).unwrap()
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_node_can_suspend_the_run_for_human_input() {
         let graph = approval_graph();
         let ctx = context();
@@ -477,7 +478,7 @@ mod tests {
         assert_eq!(pending.interrupt_id, request.interrupt_id);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn resuming_re_runs_the_node_and_continues_the_graph() {
         let graph = approval_graph();
         let ctx = context();
@@ -505,7 +506,7 @@ mod tests {
         assert_eq!(last.output, Some(json!("approved")));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn resuming_with_the_wrong_interrupt_id_is_rejected() {
         let graph = approval_graph();
         let ctx = context();
@@ -522,7 +523,7 @@ mod tests {
 
     // ---- limits, cancellation, and emitted messages ----
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_cycle_is_stopped_by_the_step_budget() {
         let loop_node = value_node("loop", json!(1));
         let graph = Graph::new(
@@ -542,7 +543,7 @@ mod tests {
         assert!(matches!(err, AdkError::LimitExceeded(_)), "got: {err}");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn cancellation_stops_the_run() {
         let graph = Graph::new(vec![value_node("a", json!(1))], chain(["a"])).unwrap();
         let ctx = context();
@@ -551,7 +552,7 @@ mod tests {
         assert!(matches!(err, AdkError::Cancelled));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn nodes_can_emit_progress_messages_before_their_output() {
         let chatty = FunctionNode::new("chatty", NodeConfig::default(), |ctx| {
             let ctx = ctx.clone();
@@ -568,7 +569,7 @@ mod tests {
         assert_eq!(events[1].output, Some(json!("done")));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn state_written_by_a_node_rides_out_on_its_event() {
         let writer = FunctionNode::new("writer", NodeConfig::default(), |ctx| {
             let ctx = ctx.clone();
@@ -587,7 +588,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn concurrent_frontier_writers_keep_separate_state_deltas() {
         let writer_a = FunctionNode::new("writer_a", NodeConfig::default(), |ctx| {
             let ctx = ctx.clone();

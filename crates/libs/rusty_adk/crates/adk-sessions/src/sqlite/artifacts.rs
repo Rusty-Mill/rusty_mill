@@ -237,7 +237,7 @@ mod tests {
         std::env::temp_dir().join(format!("{}.sqlite3", adk_core::new_id("adk-artifact-test")))
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn artifacts_are_versioned_per_filename() {
         let svc = service().await;
 
@@ -277,7 +277,7 @@ mod tests {
             .is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn user_scoped_artifacts_cross_sessions() {
         let svc = service().await;
         let part = Part::text("profile");
@@ -302,7 +302,7 @@ mod tests {
             .is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn another_user_and_another_app_are_isolated() {
         let svc = service().await;
         svc.save_artifact("app", "u1", "s1", "user:profile", Part::text("mine"))
@@ -321,7 +321,7 @@ mod tests {
             .is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn missing_artifact_loads_as_none() {
         let svc = service().await;
         assert!(svc
@@ -335,7 +335,7 @@ mod tests {
             .is_err());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn listing_shows_this_thread_and_the_users_own_files() {
         let svc = service().await;
         svc.save_artifact("app", "u1", "s1", "report.md", Part::text("a"))
@@ -363,7 +363,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn deleting_removes_every_version() {
         let svc = service().await;
         for data in ["v0", "v1", "v2"] {
@@ -394,7 +394,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn versions_survive_reopening_the_file() {
         let path = temp_db();
         {
@@ -426,7 +426,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn every_part_variant_round_trips() {
         let svc = service().await;
         // Payloads are stored as JSON, so a non-text part must survive too.

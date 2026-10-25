@@ -15,12 +15,10 @@ adk-core.workspace = true
 adk-graph.workspace = true
 adk-models.workspace = true
 adk-tools.workspace = true
-async-stream.workspace = true
 async-trait.workspace = true
-futures.workspace = true
 serde_json.workspace = true
+rusty_stream = { workspace = true, features = ["futures-core"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
-tokio-test.workspace = true
 adk-sessions.workspace = true
+rusty_tokio.workspace = true

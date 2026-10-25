@@ -15,4 +15,4 @@ rusty-adk = { path = "../../crates/rusty-adk", features = ["agui"] }
 rusty_agui = { workspace = true, features = ["serve"] }
 rusty_serve.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["full"] }
+rusty_tokio.workspace = true
