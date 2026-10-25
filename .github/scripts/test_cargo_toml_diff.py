@@ -51,9 +51,26 @@ class IsSafePureAdditionTests(unittest.TestCase):
         new = BASE.replace('"crates/rusty_b"', '"crates/rusty_b_renamed"')
         self.assertFalse(is_safe_pure_addition(BASE, new))
 
-    def test_workspace_dependencies_change_is_unsafe(self) -> None:
+    def test_adding_workspace_dependencies_is_safe(self) -> None:
+        # Inert until a member references it; that member's manifest is selected by path.
         new = BASE + '\n[workspace.dependencies]\nserde = "1.0"\n'
-        self.assertFalse(is_safe_pure_addition(BASE, new))
+        self.assertTrue(is_safe_pure_addition(BASE, new))
+
+    def test_adding_a_member_and_its_workspace_dependency_is_safe(self) -> None:
+        # The #1030 shape: a new crate plus the path entry its siblings will use.
+        old = BASE + '\n[workspace.dependencies]\nrusty_a = { path = "crates/rusty_a" }\n'
+        new = old.replace(
+            '    "crates/rusty_b",\n', '    "crates/rusty_b",\n    "crates/rusty_c",\n'
+        ) + 'rusty_c = { path = "crates/rusty_c" }\n'
+        self.assertTrue(is_safe_pure_addition(old, new))
+
+    def test_changing_a_workspace_dependency_is_unsafe(self) -> None:
+        old = BASE + '\n[workspace.dependencies]\nserde = "1.0"\n'
+        self.assertFalse(is_safe_pure_addition(old, old.replace('"1.0"', '"1.1"')))
+
+    def test_removing_a_workspace_dependency_is_unsafe(self) -> None:
+        old = BASE + '\n[workspace.dependencies]\nserde = "1.0"\nlog = "0.4"\n'
+        self.assertFalse(is_safe_pure_addition(old, old.replace('log = "0.4"\n', "")))
 
     def test_workspace_package_edit_is_unsafe(self) -> None:
         new = BASE.replace('edition = "2021"', 'edition = "2024"')

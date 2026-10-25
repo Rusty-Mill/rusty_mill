@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Classify a root `Cargo.toml` change as a safe pure-addition to
-`[workspace] members`, or not.
+"""Classify a root `Cargo.toml` change as a safe pure addition to
+`[workspace] members` and `[workspace.dependencies]`, or not.
 
 `plan`'s blanket rule -- any root `Cargo.toml` edit triggers the full
 workspace sweep -- exists because a `Cargo.toml` change can alter what
@@ -15,8 +15,11 @@ normally -- so it doesn't need a ~90-crate full sweep to validate safely.
 
 A change is "safe" only when, comparing old (base) to new (HEAD) content:
   - `[workspace.members]` gained zero or more entries and lost none.
-  - Every other `[workspace]` key (`exclude`, `resolver`, `dependencies`,
-    `package`, ...) is unchanged.
+  - `[workspace.dependencies]` gained zero or more keys; no existing key
+    changed or went away. A new entry is inert until a member's manifest
+    references it, and that manifest change selects the member by path.
+  - Every other `[workspace]` key (`exclude`, `resolver`, `package`, ...) is
+    unchanged.
   - Every top-level table other than `[workspace]` (`[profile.*]`,
     `[patch.*]`, ...) is unchanged.
 
@@ -52,9 +55,13 @@ def is_safe_pure_addition(old_text: str, new_text: str) -> bool:
     new_ws = dict(new.get("workspace", {}))
     old_members = old_ws.pop("members", [])
     new_members = new_ws.pop("members", [])
+    old_deps = old_ws.pop("dependencies", {})
+    new_deps = new_ws.pop("dependencies", {})
 
     if old_ws != new_ws:
         return False
+    if any(new_deps.get(name) != spec for name, spec in old_deps.items()):
+        return False  # an existing workspace dependency changed or was removed
 
     new_members_set = set(new_members)
     if any(member not in new_members_set for member in old_members):
