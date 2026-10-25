@@ -1170,27 +1170,55 @@ fn a_streamed_response_dropped_early_or_closing_is_not_pooled() {
 #[test]
 fn a_connection_switched_to_another_protocol_is_never_pooled() {
     run(async {
-        let server = start_test_server(|req| match req.target.as_str() {
-            "/up" => b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n\
-                       Upgrade: websocket\r\n\r\n"
-                .to_vec(),
-            _ => http_response(200, "OK", &[], b"ok"),
-        });
+        // The server keeps each connection open after a 101 and would answer
+        // a GET on it, so only the client's own rule keeps it out of the pool.
+        let (addr, accepted) = start_upgrading_server();
+        let url = |path: &str| format!("http://{addr}{path}");
         let client = Client::new();
         for streaming in [false, true] {
-            let request = client.get(&server.url("/up")).unwrap();
+            let request = client.get(&url("/up")).unwrap();
             let status = if streaming {
                 request.send_streaming().await.unwrap().status()
             } else {
                 request.send().await.unwrap().status()
             };
             assert_eq!(status.as_u16(), 101);
-            client.get(&server.url("/b")).unwrap().send().await.unwrap();
+            client.get(&url("/b")).unwrap().send().await.unwrap();
         }
         // Each upgrade on its own connection; each GET on a fresh one, the
         // second reusing the first GET's.
-        assert_eq!(server.connections_accepted(), 3);
+        assert_eq!(accepted.load(Ordering::SeqCst), 3);
     });
+}
+
+/// Answers `/up` with a bare 101 and anything else with 200, serving every
+/// request on a connection until the client hangs up -- after a 101 too.
+fn start_upgrading_server() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = rusty_tokio::io::TcpListener::from_std(std_listener).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let accepted_in_task = accepted.clone();
+    rusty_tokio::spawn(async move {
+        while let Ok((stream, _peer)) = listener.accept().await {
+            accepted_in_task.fetch_add(1, Ordering::SeqCst);
+            rusty_tokio::spawn(async move {
+                while let Ok(req) = common::read_request(&stream).await {
+                    let response = if req.target == "/up" {
+                        b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n\
+                          Upgrade: websocket\r\n\r\n"
+                            .to_vec()
+                    } else {
+                        http_response(200, "OK", &[], b"ok")
+                    };
+                    if stream.write_all(&response).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (addr, accepted)
 }
 
 #[test]
