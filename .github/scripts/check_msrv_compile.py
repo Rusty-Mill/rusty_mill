@@ -8,8 +8,8 @@ the pinned toolchain and `RUSTC` set to that rustc. One invocation per member ke
 member's features from being unified into another's: a no_std default is checked as
 declared, not with a sibling's `std`. A member with features beyond `default` is checked a
 second time with `--all-features`, since an optional feature can need a newer rustc than its
-defaults do; `--all-features-exclude` leaves out members whose features need system
-libraries the runner lacks. Cargo itself refuses a package whose `rust-version`
+defaults do; `--all-features-exclude` leaves out members whose declared floor deliberately
+covers only their default build. Cargo itself refuses a package whose `rust-version`
 exceeds that rustc, so a dependency above the floor fails too. Cargo from the pinned
 toolchain is used on purpose: a cargo older than 1.85 cannot read this workspace's
 edition-2024 manifests. Versions at or above `--skip-from` (the pinned toolchain) are
