@@ -29,6 +29,7 @@ serve_stdio(Arc::new(server))?;
 | `serve_stdio` / `serve_lines` | Newline-delimited JSON; each request runs on its own thread so a cancellation can reach a running tool; an over-long line is refused and skipped. At end of input running requests get `StdioConfig::drain_timeout` (10 s) to finish, then are cancelled, and a tool that still ignores the flag is abandoned after half a second, so the server can always exit. |
 
 | `http` (feature `http`) | Streamable HTTP on `rusty_serve`: `bind_http(server, addr, HttpConfig, Limits)` or mount `HttpHandler` in your own `rusty_serve` server. One `POST` per message, a connection of its own; classic `initialize` opens a lightweight session for cancellation, 2026-07-28 is stateless. |
+| `mount` (feature `rusty-axum`) | `Mount`: the same handler inside a `rusty_axum` app, `route("/mcp", any(move \|req\| mcp.call(req)))`. The handler runs on a blocking thread and streamed replies are pumped into the body; a client that hangs up ends the handler's work. `at(path)` pins the path, `call_as(req, principal)` passes the caller through. Replaces `rusty_mcp_axum` (#875). |
 
 Both protocol generations are served from the same handlers: a classic client
 sends `initialize` and its revision is remembered per connection; a stateless

@@ -221,9 +221,11 @@
 //!   there's no window for a round to complete between a waiter
 //!   checking it hasn't yet and registering to be woken -- see that
 //!   module's own docs for the two-lock race this sidesteps.
-//! - [`select!`]: race two to five futures, running whichever resolves
-//!   first and dropping the rest -- see that macro's own docs for
-//!   exactly what's (and isn't) supported.
+//! - [`select!`]: race any number of futures, running the handler of
+//!   whichever resolves first and dropping the rest -- tokio's full
+//!   syntax (refutable patterns, `, if` guards, `biased;`, `else`) and
+//!   semantics, including randomized polling order for fairness; see
+//!   that macro's own docs.
 //! - [`join!`]/[`try_join!`]: run two to five futures concurrently
 //!   within the calling task (no extra `spawn`) and resolve once every
 //!   one of them has, returning a tuple of their outputs; `try_join!` is
@@ -383,6 +385,13 @@ pub use runtime::{
     RuntimeMetrics, TryCurrentError,
 };
 pub use rusty_tokio_macros::{main, test};
+// `select!`'s engine. Re-exported so the `macro_rules! select` wrapper
+// can reach it as `$crate::__select_internal!` from any caller crate;
+// `macros::support` is reached the same way from the expansion.
+#[doc(hidden)]
+pub use macros::support as __macro_support;
+#[doc(hidden)]
+pub use rusty_tokio_macros::select_internal as __select_internal;
 pub use std::pin::pin;
 pub use task::{JoinError, JoinHandle};
 

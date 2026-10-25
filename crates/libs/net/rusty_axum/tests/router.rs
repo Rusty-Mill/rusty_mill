@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures_core::Stream;
+use rusty_axum::middleware::{from_fn, Next};
 use rusty_axum::response::sse::{Event, Sse};
-use rusty_axum::routing::{get, post};
+use rusty_axum::routing::{any, get, post};
 use rusty_axum::{
     HeaderMap, IntoResponse, Json, Method, Path, Query, Request, Response, Router, State,
     StatusCode,
@@ -245,4 +246,61 @@ async fn head_keeps_status_and_headers_but_no_body() {
 
     let r = app.call(Request::new(Method::Get, "/text")).await;
     assert_eq!(r.body.as_bytes(), Some(&b"twelve bytes"[..]));
+}
+
+#[rusty_tokio::test]
+async fn any_takes_the_methods_a_path_has_no_handler_for() {
+    let app = Router::new().route("/mcp", get(|| async { "get" })).route(
+        "/mcp",
+        any(|method: Method| async move { method.as_str().to_string() }),
+    );
+    for (method, expected) in [
+        (Method::Get, "get"),
+        (Method::Post, "POST"),
+        (Method::Delete, "DELETE"),
+    ] {
+        let response = app.call(Request::new(method, "/mcp")).await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(text(response).await, expected);
+    }
+    let other = app.call(Request::new(Method::Post, "/elsewhere")).await;
+    assert_eq!(other.status, StatusCode::NOT_FOUND);
+}
+
+#[rusty_tokio::test]
+async fn fallback_answers_unmatched_paths_with_state_and_layers() {
+    let app = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .fallback(
+            |State(name): State<&'static str>, req: Request| async move {
+                format!("{name} {}", req.target())
+            },
+        )
+        .with_state("fb")
+        .layer(from_fn(|req: Request, next: Next| async move {
+            next.run(req).await.with_header("x-layer", "1")
+        }));
+    let hit = app.call(Request::new(Method::Get, "/health")).await;
+    assert_eq!(text(hit).await, "ok");
+    let missed = app.call(Request::new(Method::Post, "/a/b?q=1")).await;
+    assert_eq!(missed.status, StatusCode::OK);
+    assert_eq!(missed.headers.get("x-layer"), Some("1"));
+    assert_eq!(text(missed).await, "fb /a/b?q=1");
+}
+
+#[rusty_tokio::test]
+async fn merge_takes_the_other_routers_fallback() {
+    let app = Router::<()>::new()
+        .route("/a", get(|| async { "a" }))
+        .merge(Router::new().fallback(|| async { "fallback" }));
+    let missed = app.call(Request::new(Method::Get, "/b")).await;
+    assert_eq!(text(missed).await, "fallback");
+}
+
+#[test]
+#[should_panic(expected = "both routers have a fallback")]
+fn merge_refuses_two_fallbacks() {
+    let _ = Router::<()>::new()
+        .fallback(|| async {})
+        .merge(Router::new().fallback(|| async {}));
 }

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Generate ADR-0003's workspace map from cargo metadata, or verify its bytes.
 
-Usage: generate_workspace_map.py METADATA [--verify PATH]
-The checked-in map replaces hand-maintained crate relationship prose.
+Usage: generate_workspace_map.py METADATA [--verify PATH | --counts]
+The checked-in map replaces hand-maintained crate relationship prose. It holds
+no dependents counts: those change on every dependency edit, so two unrelated
+PRs would rewrite the same row (#1034). `--counts` prints them on demand.
 """
 import argparse
 import json
@@ -25,13 +27,19 @@ def markdown_cell(value: str) -> str:
     ).replace("\\", "\\\\").replace("|", "\\|").replace("`", "\\`")
 
 
-def generate_workspace_map(metadata: dict) -> str:
-    """Render deterministic rows with unique other-member dependent counts."""
+def dependent_counts(metadata: dict) -> dict[str, int]:
+    """Count distinct other workspace members depending on each member."""
     packages = workspace_packages(metadata)
-    dependents = {pkg_id: set() for pkg_id in packages}
+    dependents: dict[str, set[str]] = {pkg_id: set() for pkg_id in packages}
     for caller, target in workspace_edges(metadata):
         if caller != target:
             dependents[target].add(caller)
+    return {packages[pkg_id]["name"]: len(callers) for pkg_id, callers in dependents.items()}
+
+
+def generate_workspace_map(metadata: dict) -> str:
+    """Render deterministic rows that change only when a crate itself does."""
+    packages = workspace_packages(metadata)
     rows = []
     for pkg_id, pkg in packages.items():
         layer = package_layer(pkg)
@@ -39,7 +47,7 @@ def generate_workspace_map(metadata: dict) -> str:
             raise ValueError(f"{pkg['name']}: missing or unrecognized rusty_mill.layer")
         family = package_family(pkg, metadata["workspace_root"])
         rows.append((LAYER_ORDER.index(layer), family, pkg["name"],
-                     pkg.get("description") or "", len(dependents[pkg_id])))
+                     pkg.get("description") or ""))
     lines = [
         "# Workspace map",
         "",
@@ -52,14 +60,15 @@ def generate_workspace_map(metadata: dict) -> str:
         "python3 .github/scripts/generate_workspace_map.py /tmp/metadata.json > docs/WORKSPACE-MAP.md",
         "```",
         "",
-        "Dependents count distinct other workspace members with a dependency of any kind.",
         "Families are the current directories immediately below `crates/`.",
+        "Dependents counts change with every dependency edit, so they are not",
+        "committed; print them with `generate_workspace_map.py /tmp/metadata.json --counts`.",
         "",
-        "| Layer | Family | Crate name | Description | Dependents count |",
-        "| --- | --- | --- | --- | ---: |",
+        "| Layer | Family | Crate name | Description |",
+        "| --- | --- | --- | --- |",
     ]
-    for rank, family, name, description, count in sorted(rows):
-        cells = (LAYER_ORDER[rank], family, name, description, str(count))
+    for rank, family, name, description in sorted(rows):
+        cells = (LAYER_ORDER[rank], family, name, description)
         lines.append("| " + " | ".join(markdown_cell(cell) for cell in cells) + " |")
     return "\n".join(lines) + "\n"
 
@@ -68,9 +77,17 @@ def main() -> None:
     """Write UTF-8 Markdown, or fail silently except for a stale-file message."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("metadata", type=Path)
-    parser.add_argument("--verify", type=Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--verify", type=Path)
+    mode.add_argument("--counts", action="store_true",
+                      help="print 'crate<TAB>dependents' lines, most depended-on first")
     args = parser.parse_args()
     metadata = json.loads(args.metadata.read_text(encoding="utf-8"))
+    if args.counts:
+        counts = dependent_counts(metadata)
+        for name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+            print(f"{name}\t{count}")
+        return
     generated = generate_workspace_map(metadata).encode("utf-8")
     if args.verify is None:
         sys.stdout.buffer.write(generated)

@@ -8,6 +8,9 @@
 //! core — deterministic and golden-testable; the only non-determinism is the
 //! browser that renders the output.
 //!
+//! [`physics::build_physics_scene`] builds the same scene from a recorded
+//! capture and the port's candidate run of it (ADR-0085).
+//!
 //! # Example
 //! ```no_run
 //! use replay_analyzer::{analyze::build_canonical, decode::{ReplayParser, boxcars_adapter::BoxcarsParser}};
@@ -22,6 +25,7 @@
 //! ```
 
 pub mod impact;
+pub mod physics;
 pub mod playerstats;
 pub mod render;
 pub mod roles;
@@ -29,6 +33,7 @@ pub mod scene;
 pub mod winprob;
 
 pub use impact::attach_impact;
+pub use physics::build_physics_scene;
 pub use playerstats::attach_player_stats;
 pub use render::{html, html_offline};
 pub use roles::attach_roles;

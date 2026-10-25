@@ -174,6 +174,67 @@ fn a_confined_harness_cannot_reach_the_task_directory_yet_plans_through_its_rela
     println!("BBP_ACCEPTANCE PASS bbp-confined");
 }
 
+/// A confined session planner: it reports what its turn finds, leaves a file
+/// in its workspace and counts its turns in `$HOME`, passing the first three
+/// and planning on the fourth. It reaches the gate only if `$HOME` outlives
+/// each turn.
+const SESSION: &str = r##"#!/bin/sh
+set -e
+echo "turn $BBP_TURN resume $BBP_SESSION_RESUME cwd $PWD left $(ls -A | wc -l)"
+echo "$BBP_TURN" >> "$HOME/turns"
+touch left-behind
+init='{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"sh","version":"0"}}}'
+call() { printf '{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":%s}\n' "$1" "$2"; }
+if [ "$(wc -l < "$HOME/turns")" -le 3 ]; then
+  { echo "$init"; call 1 '{"name":"post","arguments":{"op":"pass-'"$BBP_TURN"'","kind":"pass"}}'; } | "$BBP_BIN" mcp
+else
+  { echo "$init"
+    call 1 '{"name":"put_artifact","arguments":{"op":"s","kind":"spec","brief":1,"body":"# Spec"}}'
+    call 2 '{"name":"post","arguments":{"op":"g","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve?","gate":true}}'
+  } | "$BBP_BIN" mcp
+fi
+"##;
+
+/// A confined session keeps its home across turns, so its conversation
+/// survives, while every turn starts in an empty workspace at one path.
+#[test]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn a_confined_session_keeps_its_home_and_one_fresh_workspace_across_turns() {
+    let root = root("session");
+    let mut cfg = setup(&root, "T1", SESSION, vec![], Some(scripts(&root)));
+    let mut l = cfg.launchers.iter().next().unwrap().1.clone();
+    l.session = true;
+    cfg.launchers = Launchers::default().with("planner", l);
+    let (dir, task) = (cfg.dir.clone(), cfg.task.clone());
+    plan(cfg);
+    let id = moderator::session_id(
+        &rusty_bbp_host::master::load(&dir).unwrap(),
+        &task,
+        &Who::Planner.id(),
+    );
+    let workspace = root
+        .join("work/turns")
+        .join(Sha256::of(task.0.as_bytes()).hex())
+        .join(format!("session-{id}"));
+    for turn in 1..=4u64 {
+        let said = std::fs::read_to_string(moderator::log_path(&dir, &task, TurnId(turn))).unwrap();
+        println!("{said}");
+        let resume = if turn == 1 { "no" } else { "yes" };
+        let line = format!(
+            "turn {turn} resume {resume} cwd {} left 0",
+            workspace.display()
+        );
+        assert!(said.contains(&line), "{line}:\n{said}");
+        assert_eq!(
+            moderator::resumed_path(&dir, &task, TurnId(turn)).exists(),
+            turn > 1,
+            "turn {turn}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    println!("BBP_ACCEPTANCE PASS session-confined");
+}
+
 #[test]
 fn a_sandbox_that_would_expose_the_task_directory_is_refused() {
     let root = root("exposed");

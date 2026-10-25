@@ -2,10 +2,13 @@
 //! (spec Section 10).
 //!
 //! Mirrors [`super::A2aClient`]'s API one-for-one (same method names and
-//! signatures) but speaks gRPC instead of JSON-RPC, wrapping the
-//! `tonic`/`prost`-generated [`crate::pb::a2a_service_client::A2aServiceClient`]
-//! with the same [`crate::types`] conversions the server uses (in the
-//! opposite direction).
+//! signatures) but speaks gRPC instead of JSON-RPC, with the same [`crate::types`] conversions
+//! the server uses (in the opposite direction).
+//!
+//! The transport is first-party (`rusty_tonic` over `rusty_hyper`), run on its own two-thread
+//! `rusty_tokio` runtime that starts on first use; the caller stays on `tokio`. `https://`
+//! endpoints are verified against the operating system's trust anchors, or the policy given to
+//! [`GrpcClient::with_channel_options`]. Dropping a call, or a stream, cancels it on the wire.
 //!
 //! ```no_run
 //! # async fn run() -> rusty_a2a::client::Result<()> {
@@ -22,10 +25,13 @@ use std::pin::Pin;
 
 use futures_core::Stream;
 use futures_util::StreamExt;
-use tonic::transport::{Channel, Endpoint};
-use tonic::{Code, Request, Status};
+use rusty_prost::Message as ProtoMessage;
+use rusty_tonic::client::{Channel, ChannelOptions, Request};
+use rusty_tonic::{Code, Status};
 
 use crate::error::A2aError;
+use crate::grpc_bridge;
+use crate::pb;
 
 use crate::grpc_convert::{
     our_cancel_task_request_to_pb, our_delete_push_notification_config_request_to_pb,
@@ -36,7 +42,6 @@ use crate::grpc_convert::{
     pb_list_push_notification_configs_response_to_ours, pb_list_tasks_response_to_ours,
     pb_push_config_to_ours, pb_send_message_response_to_ours, pb_stream_response_to_ours, pb_task_to_ours,
 };
-use crate::pb::a2a_service_client::A2aServiceClient;
 use crate::types::{
     AgentCard, AgentInterface, CancelTaskRequest, DeleteTaskPushNotificationConfigRequest,
     GetExtendedAgentCardRequest, GetTaskPushNotificationConfigRequest, GetTaskRequest,
@@ -61,7 +66,7 @@ use super::{A2aClient, ClientError, Result};
 /// [`ClientError::Grpc`] instead of guessing either way.
 fn status_to_client_error(status: Status) -> ClientError {
     let message = status.message().to_string();
-    if let Some(info) = crate::grpc_convert::error_info(&status) {
+    if let Some(info) = status.error_info() {
         let err = match info.reason.as_str() {
             "TASK_NOT_FOUND" => Some(A2aError::TaskNotFound(message.clone())),
             "TASK_NOT_CANCELABLE" => Some(A2aError::TaskNotCancelable(message.clone())),
@@ -91,12 +96,43 @@ fn status_to_client_error(status: Status) -> ClientError {
     ClientError::Protocol(err)
 }
 
+/// The updates a streaming call yields, in order; dropping it cancels the call.
+pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamResponse>> + Send>>;
+
+/// The path of each RPC in a request: `/{package}.{Service}/{Method}`.
+mod path {
+    pub(super) const SEND_MESSAGE: &str = "/lf.a2a.v1.A2AService/SendMessage";
+    pub(super) const SEND_STREAMING_MESSAGE: &str = "/lf.a2a.v1.A2AService/SendStreamingMessage";
+    pub(super) const GET_TASK: &str = "/lf.a2a.v1.A2AService/GetTask";
+    pub(super) const LIST_TASKS: &str = "/lf.a2a.v1.A2AService/ListTasks";
+    pub(super) const CANCEL_TASK: &str = "/lf.a2a.v1.A2AService/CancelTask";
+    pub(super) const SUBSCRIBE_TO_TASK: &str = "/lf.a2a.v1.A2AService/SubscribeToTask";
+    pub(super) const CREATE_TASK_PUSH_NOTIFICATION_CONFIG: &str =
+        "/lf.a2a.v1.A2AService/CreateTaskPushNotificationConfig";
+    pub(super) const GET_TASK_PUSH_NOTIFICATION_CONFIG: &str =
+        "/lf.a2a.v1.A2AService/GetTaskPushNotificationConfig";
+    pub(super) const LIST_TASK_PUSH_NOTIFICATION_CONFIGS: &str =
+        "/lf.a2a.v1.A2AService/ListTaskPushNotificationConfigs";
+    pub(super) const DELETE_TASK_PUSH_NOTIFICATION_CONFIG: &str =
+        "/lf.a2a.v1.A2AService/DeleteTaskPushNotificationConfig";
+    pub(super) const GET_EXTENDED_AGENT_CARD: &str = "/lf.a2a.v1.A2AService/GetExtendedAgentCard";
+}
+
+/// A reply the peer sent that this crate could not convert to its own types. `grpc_convert` still
+/// reports that as a `tonic::Status`; the server side moves off `tonic` in the next change.
+fn bad_reply(status: tonic::Status) -> ClientError {
+    ClientError::Grpc(Status::new(
+        Code::from_i32(status.code() as i32),
+        status.message(),
+    ))
+}
+
 /// A client for one A2A agent interface, speaking the gRPC protocol
 /// binding. Cheap to clone (the underlying [`Channel`] shares its
 /// connection pool across clones).
 #[derive(Clone)]
 pub struct GrpcClient {
-    inner: A2aServiceClient<Channel>,
+    channel: Channel,
     tenant: Option<String>,
     bearer_token: Option<String>,
     protocol_version: String,
@@ -113,12 +149,20 @@ impl GrpcClient {
     /// this never blocks and never fails for a merely-unreachable
     /// endpoint - only for a malformed URI.
     pub fn new(endpoint: impl Into<String>) -> Result<Self> {
+        Self::with_channel_options(endpoint, ChannelOptions::default())
+    }
+
+    /// Like [`GrpcClient::new`], with the channel configured by `options`: the trust policy and
+    /// client identity for TLS (an `https://` endpoint verifies the agent against the operating
+    /// system's trust anchors unless `options.connect.trust` says otherwise), a deadline for every
+    /// call, message size limits, and so on.
+    pub fn with_channel_options(endpoint: impl Into<String>, options: ChannelOptions) -> Result<Self> {
         let endpoint = endpoint.into();
-        let channel = Endpoint::from_shared(endpoint.clone())
-            .map_err(|e| ClientError::GrpcConfig(format!("invalid gRPC endpoint {endpoint:?}: {e}")))?
-            .connect_lazy();
+        let channel = Channel::new(&endpoint, options).map_err(|e| {
+            ClientError::GrpcConfig(format!("invalid gRPC endpoint {endpoint:?}: {}", e.message()))
+        })?;
         Ok(GrpcClient {
-            inner: A2aServiceClient::new(channel),
+            channel,
             tenant: None,
             bearer_token: None,
             protocol_version: crate::PROTOCOL_VERSION.to_string(),
@@ -195,31 +239,48 @@ impl GrpcClient {
     /// keys (see `server::grpc::GrpcService::credentials`).
     fn request<T>(&self, message: T) -> Result<Request<T>> {
         let mut req = Request::new(message);
-        let metadata = req.metadata_mut();
-        metadata.insert(
-            "a2a-version",
-            self.protocol_version
-                .parse()
-                .map_err(|_| ClientError::GrpcConfig("invalid A2A-Version".to_string()))?,
-        );
+        let metadata = &mut req.metadata;
+        metadata
+            .insert("a2a-version", &self.protocol_version)
+            .map_err(|_| ClientError::GrpcConfig("invalid A2A-Version".to_string()))?;
         if !self.extensions.is_empty() {
-            metadata.insert(
-                "a2a-extensions",
-                self.extensions
-                    .join(",")
-                    .parse()
-                    .map_err(|_| ClientError::GrpcConfig("invalid A2A-Extensions".to_string()))?,
-            );
+            metadata
+                .insert("a2a-extensions", &self.extensions.join(","))
+                .map_err(|_| ClientError::GrpcConfig("invalid A2A-Extensions".to_string()))?;
         }
         if let Some(token) = &self.bearer_token {
-            metadata.insert(
-                "authorization",
-                format!("Bearer {token}")
-                    .parse()
-                    .map_err(|_| ClientError::GrpcConfig("invalid bearer token".to_string()))?,
-            );
+            metadata
+                .insert("authorization", &format!("Bearer {token}"))
+                .map_err(|_| ClientError::GrpcConfig("invalid bearer token".to_string()))?;
         }
         Ok(req)
+    }
+
+    /// One unary call to `path`.
+    async fn unary<Req, Resp>(&self, path: &'static str, message: Req) -> Result<Resp>
+    where
+        Req: ProtoMessage + Send + 'static,
+        Resp: ProtoMessage + Send + 'static,
+    {
+        let request = self.request(message)?;
+        grpc_bridge::unary(&self.channel, path, request)
+            .await
+            .map_err(status_to_client_error)
+    }
+
+    /// One server-streaming call to `path`, its replies converted as they arrive.
+    async fn events<Req>(&self, path: &'static str, message: Req) -> Result<EventStream>
+    where
+        Req: ProtoMessage + Send + 'static,
+    {
+        let request = self.request(message)?;
+        let replies = grpc_bridge::server_streaming::<Req, pb::StreamResponse>(&self.channel, path, request)
+            .await
+            .map_err(status_to_client_error)?;
+        Ok(Box::pin(replies.map(|item| match item {
+            Ok(reply) => pb_stream_response_to_ours(reply).map_err(bad_reply),
+            Err(status) => Err(status_to_client_error(status)),
+        })))
     }
 
     /// `SendMessage` (spec Section 3.1.1). Blocks until the task reaches a
@@ -236,15 +297,10 @@ impl GrpcClient {
             configuration,
             metadata: None,
         };
-        let request = self.request(our_send_message_request_to_pb(req))?;
         let response = self
-            .inner
-            .clone()
-            .send_message(request)
-            .await
-            .map_err(status_to_client_error)?
-            .into_inner();
-        Ok(pb_send_message_response_to_ours(response)?)
+            .unary(path::SEND_MESSAGE, our_send_message_request_to_pb(req))
+            .await?;
+        pb_send_message_response_to_ours(response).map_err(bad_reply)
     }
 
     /// `SendStreamingMessage` (spec Section 3.1.2): sends a message and
@@ -254,25 +310,15 @@ impl GrpcClient {
         &self,
         message: Message,
         configuration: Option<SendMessageConfiguration>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamResponse>> + Send>>> {
+    ) -> Result<EventStream> {
         let req = SendMessageRequest {
             tenant: self.tenant.clone(),
             message,
             configuration,
             metadata: None,
         };
-        let request = self.request(our_send_message_request_to_pb(req))?;
-        let stream = self
-            .inner
-            .clone()
-            .send_streaming_message(request)
+        self.events(path::SEND_STREAMING_MESSAGE, our_send_message_request_to_pb(req))
             .await
-            .map_err(status_to_client_error)?
-            .into_inner();
-        Ok(Box::pin(stream.map(|item| match item {
-            Ok(pb_item) => Ok(pb_stream_response_to_ours(pb_item)?),
-            Err(status) => Err(status_to_client_error(status)),
-        })))
     }
 
     /// `GetTask` (spec Section 3.1.3).
@@ -282,29 +328,19 @@ impl GrpcClient {
             id: id.into(),
             history_length,
         };
-        let request = self.request(our_get_task_request_to_pb(req))?;
         let task = self
-            .inner
-            .clone()
-            .get_task(request)
-            .await
-            .map_err(status_to_client_error)?
-            .into_inner();
-        Ok(pb_task_to_ours(task)?)
+            .unary(path::GET_TASK, our_get_task_request_to_pb(req))
+            .await?;
+        pb_task_to_ours(task).map_err(bad_reply)
     }
 
     /// `ListTasks` (spec Section 3.1.4).
     pub async fn list_tasks(&self, mut req: ListTasksRequest) -> Result<ListTasksResponse> {
         req.tenant = self.tenant.clone();
-        let request = self.request(our_list_tasks_request_to_pb(req))?;
         let res = self
-            .inner
-            .clone()
-            .list_tasks(request)
-            .await
-            .map_err(status_to_client_error)?
-            .into_inner();
-        Ok(pb_list_tasks_response_to_ours(res)?)
+            .unary(path::LIST_TASKS, our_list_tasks_request_to_pb(req))
+            .await?;
+        pb_list_tasks_response_to_ours(res).map_err(bad_reply)
     }
 
     /// `CancelTask` (spec Section 3.1.5).
@@ -314,15 +350,10 @@ impl GrpcClient {
             id: id.into(),
             metadata: None,
         };
-        let request = self.request(our_cancel_task_request_to_pb(req))?;
         let task = self
-            .inner
-            .clone()
-            .cancel_task(request)
-            .await
-            .map_err(status_to_client_error)?
-            .into_inner();
-        Ok(pb_task_to_ours(task)?)
+            .unary(path::CANCEL_TASK, our_cancel_task_request_to_pb(req))
+            .await?;
+        pb_task_to_ours(task).map_err(bad_reply)
     }
 
     /// `SubscribeToTask` (spec Section 3.1.6): streams updates for a task
@@ -331,26 +362,13 @@ impl GrpcClient {
     /// `Last-Event-ID`, which the JSON-RPC/REST bindings support), so a
     /// gRPC (re)subscribe always replays this task's whole buffered event
     /// log, then continues live - see `server::engine::Engine::subscribe_to_task`.
-    pub async fn subscribe_to_task(
-        &self,
-        id: impl Into<String>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamResponse>> + Send>>> {
+    pub async fn subscribe_to_task(&self, id: impl Into<String>) -> Result<EventStream> {
         let req = SubscribeToTaskRequest {
             tenant: self.tenant.clone(),
             id: id.into(),
         };
-        let request = self.request(our_subscribe_to_task_request_to_pb(req))?;
-        let stream = self
-            .inner
-            .clone()
-            .subscribe_to_task(request)
+        self.events(path::SUBSCRIBE_TO_TASK, our_subscribe_to_task_request_to_pb(req))
             .await
-            .map_err(status_to_client_error)?
-            .into_inner();
-        Ok(Box::pin(stream.map(|item| match item {
-            Ok(pb_item) => Ok(pb_stream_response_to_ours(pb_item)?),
-            Err(status) => Err(status_to_client_error(status)),
-        })))
     }
 
     /// `CreateTaskPushNotificationConfig` (spec Section 3.1.7).
@@ -359,14 +377,12 @@ impl GrpcClient {
         mut config: TaskPushNotificationConfig,
     ) -> Result<TaskPushNotificationConfig> {
         config.tenant = self.tenant.clone();
-        let request = self.request(our_push_config_to_pb(config))?;
         let created = self
-            .inner
-            .clone()
-            .create_task_push_notification_config(request)
-            .await
-            .map_err(status_to_client_error)?
-            .into_inner();
+            .unary(
+                path::CREATE_TASK_PUSH_NOTIFICATION_CONFIG,
+                our_push_config_to_pb(config),
+            )
+            .await?;
         Ok(pb_push_config_to_ours(created))
     }
 
@@ -381,14 +397,12 @@ impl GrpcClient {
             task_id: task_id.into(),
             id: id.into(),
         };
-        let request = self.request(our_get_push_notification_config_request_to_pb(req))?;
         let config = self
-            .inner
-            .clone()
-            .get_task_push_notification_config(request)
-            .await
-            .map_err(status_to_client_error)?
-            .into_inner();
+            .unary(
+                path::GET_TASK_PUSH_NOTIFICATION_CONFIG,
+                our_get_push_notification_config_request_to_pb(req),
+            )
+            .await?;
         Ok(pb_push_config_to_ours(config))
     }
 
@@ -403,14 +417,12 @@ impl GrpcClient {
             page_size: None,
             page_token: None,
         };
-        let request = self.request(our_list_push_notification_configs_request_to_pb(req))?;
         let res = self
-            .inner
-            .clone()
-            .list_task_push_notification_configs(request)
-            .await
-            .map_err(status_to_client_error)?
-            .into_inner();
+            .unary(
+                path::LIST_TASK_PUSH_NOTIFICATION_CONFIGS,
+                our_list_push_notification_configs_request_to_pb(req),
+            )
+            .await?;
         Ok(pb_list_push_notification_configs_response_to_ours(res))
     }
 
@@ -425,12 +437,12 @@ impl GrpcClient {
             task_id: task_id.into(),
             id: id.into(),
         };
-        let request = self.request(our_delete_push_notification_config_request_to_pb(req))?;
-        self.inner
-            .clone()
-            .delete_task_push_notification_config(request)
-            .await
-            .map_err(status_to_client_error)?;
+        let _: rusty_prost::wkt::Empty = self
+            .unary(
+                path::DELETE_TASK_PUSH_NOTIFICATION_CONFIG,
+                our_delete_push_notification_config_request_to_pb(req),
+            )
+            .await?;
         Ok(())
     }
 
@@ -439,14 +451,12 @@ impl GrpcClient {
         let req = GetExtendedAgentCardRequest {
             tenant: self.tenant.clone(),
         };
-        let request = self.request(our_get_extended_agent_card_request_to_pb(req))?;
         let card = self
-            .inner
-            .clone()
-            .get_extended_agent_card(request)
-            .await
-            .map_err(status_to_client_error)?
-            .into_inner();
-        Ok(pb_agent_card_to_ours(card)?)
+            .unary(
+                path::GET_EXTENDED_AGENT_CARD,
+                our_get_extended_agent_card_request_to_pb(req),
+            )
+            .await?;
+        pb_agent_card_to_ours(card).map_err(bad_reply)
     }
 }

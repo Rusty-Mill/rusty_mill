@@ -116,6 +116,7 @@ impl LocalTask {
     pub(crate) fn run(self: Arc<Self>) {
         if !self.state.begin_poll() {
             self.future.borrow_mut().take();
+            self.state.end_poll(true);
             self.fire_abnormal_hook(Outcome::Aborted);
             return;
         }

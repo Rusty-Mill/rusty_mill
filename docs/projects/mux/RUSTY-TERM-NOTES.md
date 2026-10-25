@@ -1,6 +1,6 @@
 # rusty_term notes: handoff to Rusty Mux
 
-Source: the rusty_term performance session of 2026-10-21 to 2026-10-23 (branch `claude/new-session-s68lms`). Facts come from the merged change fragments, `docs/research/RUSTY-TERM-PERF-BACKLOG.md`, `docs/research/rusty-term-perf/FIDELITY.md` and `docs/projects/mux/DECISIONS.md`. **No `rusty_mux_*` crate exists yet.**
+Source: the rusty_term performance session of 2026-10-21 to 2026-10-23 (branch `claude/new-session-s68lms`). Facts come from the merged change fragments, `docs/research/RUSTY-TERM-PERF-BACKLOG.md`, `docs/research/rusty-term-perf/FIDELITY.md` and `docs/projects/mux/DECISIONS.md`. **Mux crates on `main`:** `rusty_mux_core` (#953, the domain model: sessions, windows, blocks, clients, input lease, events; no I/O) and `rusty_mux_proto` (#982, the wire protocol on `rusty_wire`), both under `crates/apps/rusty_mux/crates/`. The server, `rusty_mux_server`, is still an open PR (#994).
 
 ⚠ marks a point that touches the handoff constraints: rusty_tokio runtime, clean-room, no Rex/tmux compatibility, no new third-party dependencies without approval.
 
@@ -114,9 +114,9 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 |---|---|---|
 | PR #940: frame-time benchmark (`bench_frame_time`, `render::composite`) | `rusty_term` (gui) | Merged (`5c24bf8c`) |
 | Backlog #3 = rows 8 + 9 + 7 (short lock, row map once per frame, dirty rows) | `rusty_term` gui, `rusty_term_core` | Rows 9 (#952) and 8 (#974) done; row 7 not started, needs the owner's go-ahead |
-| Incremental snapshot: per-row seqno plus stable row index | `rusty_term_core`, future `rusty_mux_proto` | Not started; belongs to the mux protocol work |
+| Incremental snapshot: per-row seqno plus stable row index | `rusty_term_core`, `rusty_mux_proto` | Not started. `rusty_mux_proto` (#982) has `Snapshot` (opaque bytes) and `Ready` messages, but no incremental update yet; its fragment defers a resumable event stream to Phase 2 |
 | Compact cell (row 5) and contiguous scrollback (row 6) | `rusty_term_core`, snapshot version | Deferred (D10) |
-| PTY read batching (row 10) | `rusty_term` backends; relevant to `rusty_mux_server` | Not started (P2) |
+| PTY read batching (row 10) | `rusty_term` backends; relevant to `rusty_mux_server` (open, #994) | Not started (P2) |
 | ConPTY spike 1 | the mux PTY layer on Windows | Owner pending |
 
 ## 5. References
@@ -139,6 +139,8 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 | #955 | `rusty_term` on `rusty_tokio` (another session) |
 | #974 | Short frame lock, row 8 (another session) |
 | #956 | std-backed mutex instead of `parking_lot` in `rusty_term` (another session) |
+| #953 | `rusty_mux_core` (another session) |
+| #982 | `rusty_mux_proto` (another session) |
 | #943 | ctutils 0.4.4 (not from this session) |
 | #944 | ctutils 0.4.5 duplicate, closed |
 
