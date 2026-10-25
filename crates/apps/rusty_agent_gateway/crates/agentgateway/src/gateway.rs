@@ -28,18 +28,19 @@ use agentgateway_mcp::Override as McpOverride;
 use agentgateway_mcp::{Federation, TokenClaims};
 use agentgateway_proxy::{Headers, HostProxy, RequestBody, Rewrite, Scheme};
 use agentgateway_tls::{Passthrough, TlsBinds, TlsTerminator};
-use axum::body::Body;
-use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::BodyExt as _;
 use rusty_mcp::otel::metrics::{Instruments, McpMetricsLayer};
 use rusty_mcp_server::{HttpConfig, HttpHandler};
+
+use crate::body::Body;
+use crate::mcp_service::McpService;
 use tower_layer::Layer as _;
 use tower_service::Service as _;
 
-/// A federated MCP endpoint, ready to serve.
-type McpService = axum::Router;
+/// What the data plane answers with.
+type Response = http::Response<Body>;
 
 /// The path the federation's handler answers on. Every request to an MCP route
 /// is treated as addressed to it, whatever path the route matched.
@@ -397,12 +398,7 @@ impl Gateway {
                         },
                     ));
                     BackendState::Mcp {
-                        service: rusty_mcp_axum::router_at_with_principal(
-                            handler,
-                            MAX_MCP_BODY,
-                            MCP_PATH,
-                            principal_of,
-                        ),
+                        service: McpService::new(handler, MCP_PATH, MAX_MCP_BODY, principal_of),
                         metrics,
                     }
                 }
@@ -774,15 +770,15 @@ impl Gateway {
                 // behind it are shared, which is what makes the counts add up.
                 Some(metrics) => {
                     let mut service = metrics.layer(service.clone());
-                    match service.call(request.map(Body::new)).await {
+                    match service.call(request).await {
                         Ok(response) => response,
                         Err(never) => match never {},
                     }
                 }
                 None => {
                     let mut service = service.clone();
-                    match service.call(request.map(Body::new)).await {
-                        Ok(response) => response.into_response(),
+                    match service.call(request).await {
+                        Ok(response) => response,
                         Err(never) => match never {},
                     }
                 }
@@ -1006,18 +1002,27 @@ fn kind_name(target: &BackendTarget) -> &'static str {
 
 /// A response carrying the authorizer's own body, whatever it was.
 fn status_bytes(code: StatusCode, body: Bytes) -> Response {
-    (code, body).into_response()
+    with_type(code, "application/octet-stream", body)
 }
 
 fn json(code: StatusCode, body: Bytes) -> Response {
-    (code, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+    with_type(code, "application/json", body)
 }
 
 fn status(code: StatusCode, message: &str) -> Response {
-    (
+    with_type(
         code,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        message.to_string(),
+        "text/plain; charset=utf-8",
+        Bytes::copy_from_slice(message.as_bytes()),
     )
-        .into_response()
+}
+
+fn with_type(code: StatusCode, content_type: &'static str, body: Bytes) -> Response {
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = code;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        http::HeaderValue::from_static(content_type),
+    );
+    response
 }
