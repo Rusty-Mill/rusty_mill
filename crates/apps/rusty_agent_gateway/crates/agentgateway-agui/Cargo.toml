@@ -43,4 +43,4 @@ rusty_log = { workspace = true }
 
 [dev-dependencies]
 http-body-util = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+rusty_tokio = { workspace = true }

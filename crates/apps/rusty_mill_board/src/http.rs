@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use rusty_request::Client;
-use tokio::runtime::{Builder, Runtime};
+use rusty_tokio::{Builder, Runtime};
 
 /// A blocking HTTP client.
 pub struct Http {
