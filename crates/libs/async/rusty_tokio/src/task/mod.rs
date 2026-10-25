@@ -227,9 +227,12 @@ where
     let span = trace::spawn_span("task", name.as_deref(), id.as_u64());
     // Only `future` runs inside the span: completing the join after it
     // exits means a subscriber has seen the last poll end by the time the
-    // `JoinHandle` resolves.
+    // `JoinHandle` resolves. It is instrumented out here, not inside the
+    // block, so a task aborted before its first poll still drops `future`
+    // inside its span.
+    let instrumented = trace::instrument(future, span);
     let wrapped: BoxFuture = Box::pin(async move {
-        let output = trace::instrument(future, span).await;
+        let output = instrumented.await;
         join_inner.complete(output);
     });
 
