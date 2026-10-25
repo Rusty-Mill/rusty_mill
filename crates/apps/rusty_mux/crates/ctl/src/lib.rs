@@ -140,64 +140,66 @@ impl<S: io::Read + Write> Session<'_, S> {
         writeln!(self.out, "{line}").map_err(Failure::Unreachable)
     }
 
-    /// Sends Hello and returns the Welcome's cursor.
+    /// Sends Hello and returns the Welcome's features and cursor.
     fn hello(
         &mut self,
         features: Features,
         resume: Option<Cursor>,
-    ) -> Result<Option<Cursor>, Failure> {
+    ) -> Result<(Features, Option<Cursor>), Failure> {
         self.conn.send(&Message::Hello { features, resume })?;
         match self.conn.recv()? {
-            Message::Welcome { cursor, .. } => Ok(cursor),
+            Message::Welcome {
+                features, cursor, ..
+            } => Ok((features, cursor)),
             other => Err(Failure::Protocol(format!(
                 "expected Welcome, got {other:?}"
             ))),
         }
     }
 
+    /// Sends a Sync numbered `req`, which the server needs to support.
+    fn sync(&mut self, features: Features, req: u64) -> Result<(), Failure> {
+        if !features.contains(Features::SYNC) {
+            return Err(Failure::Protocol("the server does not support sync".into()));
+        }
+        Ok(self.conn.send(&Message::Sync { req })?)
+    }
+
     fn calls(&mut self, calls: &[Call]) -> Result<(), Failure> {
         // Attach needs a checkpoint format; the screen it sends is ignored.
-        self.hello(Features::CHECKPOINT_V3, None)?;
-        // Unanswered requests sent since the last reply; a later reply
-        // means they succeeded, since the server answers in order.
-        let mut unconfirmed: Vec<u64> = Vec::new();
-        for (req, call) in (1..).zip(calls) {
+        let wanted = Features::CHECKPOINT_V3.union(Features::SYNC);
+        let (features, _) = self.hello(wanted, None)?;
+        let mut reqs = 1..;
+        for call in calls {
+            let req = reqs.next().unwrap_or(u64::MAX);
             let message = call
                 .method
                 .request(req, &call.args)
                 .map_err(|e| Failure::Protocol(e.to_string()))?;
             self.conn.send(&message)?;
-            if call.method.returns == Returns::Unanswered {
-                unconfirmed.push(req);
-                continue;
-            }
-            let created = self.reply(req, calls, &unconfirmed)?;
-            self.confirm(&mut unconfirmed, calls)?;
-            self.done(call.method.name, created)?;
-        }
-        if !unconfirmed.is_empty() {
-            // Detach is answered and harmless at the end of a connection.
-            let barrier = calls.len() as u64 + 1;
-            self.conn.send(&Message::Detach { req: barrier })?;
-            self.reply(barrier, calls, &unconfirmed)?;
-            self.confirm(&mut unconfirmed, calls)?;
+            let name = call.method.name;
+            let created = if call.method.returns == Returns::Unanswered {
+                // Learn the outcome before anything else is sent, so a
+                // refusal stops the chain. Sync's reply follows any Failed.
+                let barrier = reqs.next().unwrap_or(u64::MAX);
+                self.sync(features, barrier)?;
+                self.reply(barrier, req, name)?;
+                None
+            } else {
+                self.reply(req, req, name)?
+            };
+            self.done(name, created)?;
         }
         Ok(())
     }
 
-    /// Waits for `req`'s reply, failing on a refusal of it or of an
-    /// unconfirmed earlier request.
-    fn reply(
-        &mut self,
-        req: u64,
-        calls: &[Call],
-        unconfirmed: &[u64],
-    ) -> Result<Option<Uuid>, Failure> {
+    /// Waits for the reply to `wait`, failing if it or request `call` (the
+    /// method `name`) is refused.
+    fn reply(&mut self, wait: u64, call: u64, name: &str) -> Result<Option<Uuid>, Failure> {
         loop {
             match self.conn.recv()? {
-                Message::Done { req: r, created } if r == req => return Ok(created),
-                Message::Failed { req: r, reason } if r == req || unconfirmed.contains(&r) => {
-                    let name = name_of(calls, r);
+                Message::Done { req, created } if req == wait => return Ok(created),
+                Message::Failed { req, reason } if req == wait || req == call => {
                     if self.json {
                         self.line(&render::failed_line(name, &reason))?;
                     }
@@ -208,13 +210,6 @@ impl<S: io::Read + Write> Session<'_, S> {
         }
     }
 
-    fn confirm(&mut self, unconfirmed: &mut Vec<u64>, calls: &[Call]) -> Result<(), Failure> {
-        for req in std::mem::take(unconfirmed) {
-            self.done(name_of(calls, req), None)?;
-        }
-        Ok(())
-    }
-
     fn done(&mut self, method: &str, created: Option<Uuid>) -> Result<(), Failure> {
         match render::done_line(method, created, self.json) {
             Some(line) => self.line(&line),
@@ -223,9 +218,10 @@ impl<S: io::Read + Write> Session<'_, S> {
     }
 
     fn events(&mut self, after: Option<Cursor>, follow: bool) -> Result<(), Failure> {
-        let start = self
-            .hello(Features::EVENT_SEQ, after)?
-            .ok_or_else(|| Failure::Protocol("the server does not number events".into()))?;
+        let wanted = Features::EVENT_SEQ.union(Features::SYNC);
+        let (features, start) = self.hello(wanted, after)?;
+        let start =
+            start.ok_or_else(|| Failure::Protocol("the server does not number events".into()))?;
         self.line(&render::cursor_line(start, self.json))?;
         if let Some(after) = after.filter(|a| *a != start) {
             return Err(Failure::Refused(format!(
@@ -234,10 +230,10 @@ impl<S: io::Read + Write> Session<'_, S> {
                 render::cursor_text(start)
             )));
         }
-        // Without --follow, the reply to a request sent now marks the end of
+        // Without --follow, the reply to a Sync sent now marks the end of
         // the replay: the server sends it only after the missed events.
         if !follow {
-            self.conn.send(&Message::Detach { req: 1 })?;
+            self.sync(features, 1)?;
         }
         let mut last = start;
         loop {
@@ -259,11 +255,4 @@ impl<S: io::Read + Write> Session<'_, S> {
             }
         }
     }
-}
-
-/// The method behind request number `req`; the one past the end is the
-/// closing Detach.
-fn name_of(calls: &[Call], req: u64) -> &'static str {
-    let index = usize::try_from(req - 1).unwrap_or(usize::MAX);
-    calls.get(index).map_or("detach", |c| c.method.name)
 }

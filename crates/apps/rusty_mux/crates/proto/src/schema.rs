@@ -123,8 +123,8 @@ pub enum Returns {
     /// Only success: [`Message::Done`] without an id.
     Nothing,
     /// No reply on success; [`Message::Failed`] if it fails. A caller that
-    /// must know the outcome follows it with an answered request and waits
-    /// for that request's reply.
+    /// must know the outcome sends `sync` next and waits for its reply: a
+    /// failure arrives before it.
     Unanswered,
     /// The id of the entity it created, in [`Message::Done`].
     Created(Entity),
@@ -441,6 +441,13 @@ pub static CATALOG: &[Method] = &[
                 size: a.size()?,
             })
         },
+    },
+    Method {
+        name: "sync",
+        doc: "Change nothing; the reply means every earlier request was handled.",
+        params: &[],
+        returns: Returns::Nothing,
+        build: |req, _| Ok(Message::Sync { req }),
     },
     Method {
         name: "close-block",

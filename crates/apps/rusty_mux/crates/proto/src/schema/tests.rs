@@ -67,7 +67,7 @@ fn catalog_covers_each_request_type_once() {
         .collect();
     let unique: BTreeSet<u8> = types.iter().copied().collect();
     assert_eq!(unique.len(), types.len(), "two methods build one type");
-    assert_eq!(unique, (0x02..=0x0b).collect());
+    assert_eq!(unique, (0x02..=0x0c).collect());
 }
 
 #[test]

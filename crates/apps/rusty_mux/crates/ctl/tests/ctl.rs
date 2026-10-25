@@ -169,6 +169,110 @@ fn a_refused_request_exits_1() {
     assert!(stdout(&output).contains("\"ok\":false"));
 }
 
+/// Whether `block` still exists: only an existing block can be attached.
+fn exists(socket: &Path, block: &str) -> bool {
+    ctl(socket, &["attach", "--block", block]).status.code() == Some(0)
+}
+
+#[test]
+fn a_refused_input_stops_the_chain() {
+    let socket = start_server();
+    let block = block(&socket);
+    // Without the lease the input is refused, so close-block is never sent.
+    let chain = [
+        "input",
+        "--block",
+        &block,
+        "--data",
+        "x",
+        "+",
+        "close-block",
+        "--block",
+        &block,
+    ];
+    assert_eq!(ctl(&socket, &chain).status.code(), Some(1));
+    assert!(
+        exists(&socket, &block),
+        "the block outlived the refused chain"
+    );
+}
+
+#[test]
+fn each_input_is_confirmed_in_order() {
+    let socket = start_server();
+    let block = block(&socket);
+    let chain = [
+        "--json",
+        "attach",
+        "--block",
+        &block,
+        "+",
+        "acquire-lease",
+        "--block",
+        &block,
+        "+",
+        "input",
+        "--block",
+        &block,
+        "--data",
+        "true",
+        "+",
+        "input",
+        "--block",
+        &block,
+        "--data",
+        "\r",
+        "+",
+        "release-lease",
+        "--block",
+        &block,
+        "+",
+        "input",
+        "--block",
+        &block,
+        "--data",
+        "x",
+        "+",
+        "close-block",
+        "--block",
+        &block,
+    ];
+    let output = ctl(&socket, &chain);
+    assert_eq!(output.status.code(), Some(1));
+    let methods: Vec<(String, bool)> = stdout(&output)
+        .lines()
+        .map(|line| {
+            let rusty_json::Value::Object(map) =
+                rusty_json::Value::from_json_str(line).expect("json")
+            else {
+                panic!("object")
+            };
+            let method = match map.get("method") {
+                Some(rusty_json::Value::String(m)) => m.clone(),
+                other => panic!("method: {other:?}"),
+            };
+            (
+                method,
+                map.get("ok") == Some(&rusty_json::Value::Bool(true)),
+            )
+        })
+        .collect();
+    let expect = [
+        ("attach", true),
+        ("acquire-lease", true),
+        ("input", true),
+        ("input", true),
+        ("release-lease", true),
+        ("input", false),
+    ];
+    let expect: Vec<(String, bool)> = expect.iter().map(|(m, ok)| (m.to_string(), *ok)).collect();
+    assert_eq!(methods, expect);
+    assert!(
+        exists(&socket, &block),
+        "close-block after the refusal never ran"
+    );
+}
+
 #[test]
 fn a_bad_command_line_exits_2() {
     let socket = start_server();
