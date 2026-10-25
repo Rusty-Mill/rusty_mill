@@ -20,8 +20,12 @@ impl Features {
     /// Reserved: incomplete RTCP v1 checkpoint capability.
     pub const CHECKPOINT_V1: Self = Self(1 << 1);
 
-    /// RTCP v2 headless checkpoints transferred in ordered Checkpoint chunks.
+    /// Reserved: superseded fixed-width RTCP v2 checkpoint capability.
     pub const CHECKPOINT_V2: Self = Self(1 << 2);
+
+    /// RTCP v3 (run-encoded) headless checkpoints transferred in ordered
+    /// Checkpoint chunks.
+    pub const CHECKPOINT_V3: Self = Self(1 << 3);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -116,7 +120,7 @@ pub enum Message {
         block: BlockId,
         data: Vec<u8>,
     },
-    /// A chunk of RTCP v2, negotiated with CHECKPOINT_V2. Offsets must be
+    /// A chunk of RTCP v3, negotiated with CHECKPOINT_V3. Offsets must be
     /// contiguous from zero and total is constant throughout one transfer.
     Checkpoint {
         block: BlockId,

@@ -5081,7 +5081,7 @@ pub(crate) fn row_text(cells: &[Cell], clusters: &[String]) -> String {
     s.trim_end().to_string()
 }
 
-// RTCP v2 deliberately excludes view selection/search/folds, render caches,
+// RTCP deliberately excludes view selection/search/folds, render caches,
 // recycled spare rows, pending host actions and L13 channel state.
 impl crate::checkpoint::Wire for Grid {
     fn write(&self, w: &mut crate::checkpoint::Writer) -> crate::checkpoint::Result<()> {

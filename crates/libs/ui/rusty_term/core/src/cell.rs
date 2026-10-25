@@ -163,7 +163,7 @@ pub fn char_width(ch: char) -> usize {
 /// glyphs that span more than one code point (combining marks, ZWJ emoji
 /// sequences, …), and truecolor attributes. Kept `Copy` so the grid can shift
 /// cells with `copy_within`.
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash)]
 pub struct Cell {
     /// The base (first) scalar of the grapheme. Used for width classification
     /// and as the whole glyph when [`cluster`](Self::cluster) is `0`.
