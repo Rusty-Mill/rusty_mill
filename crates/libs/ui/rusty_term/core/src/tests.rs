@@ -60,6 +60,17 @@ fn newline_and_carriage_return() {
 }
 
 #[test]
+fn line_text_spans_scrollback_then_screen() {
+    // Two rows: "a" scrolls off, leaving the wide glyph and "c" on screen.
+    let g = parse("a\r\n\u{4e2d} x  \r\nc".as_bytes(), 8, 2);
+    assert_eq!(g.scrollback_len(), 1);
+    assert_eq!(g.line_text(0).as_deref(), Some("a"));
+    assert_eq!(g.line_text(1).as_deref(), Some("\u{4e2d} x"));
+    assert_eq!(g.line_text(2).as_deref(), Some("c"));
+    assert_eq!(g.line_text(3), None);
+}
+
+#[test]
 fn put_char_wraps_at_right_margin() {
     let g = parse(b"abc", 2, 24);
     assert_eq!(row_text(&g, 0), "ab");

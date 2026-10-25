@@ -34,6 +34,10 @@ impl Features {
     /// [`Message::Sync`], a request that changes nothing.
     pub const SYNC: Self = Self(1 << 5);
 
+    /// [`Message::Capture`] and [`Message::List`], which read the server's
+    /// state without changing it.
+    pub const INSPECT: Self = Self(1 << 6);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -63,6 +67,29 @@ impl Features {
 pub struct Cursor {
     pub epoch: Uuid,
     pub seq: u64,
+}
+
+/// One entity in the reply to [`Message::List`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Entry {
+    Session {
+        session: SessionId,
+        name: String,
+    },
+    Window {
+        window: WindowId,
+        session: SessionId,
+        name: String,
+    },
+    Block {
+        block: BlockId,
+        window: WindowId,
+        size: Size,
+        /// The input lease's holder, if anyone holds it.
+        holder: Option<ClientId>,
+        /// The title the program last set; empty if it never set one.
+        title: String,
+    },
 }
 
 /// One frame's content.
@@ -127,6 +154,20 @@ pub enum Message {
     Sync {
         req: u64,
     },
+    /// The block's text: the last `history` scrollback lines, then the
+    /// screen. Answered with [`Message::Text`]. Negotiated with
+    /// [`Features::INSPECT`].
+    Capture {
+        req: u64,
+        block: BlockId,
+        history: u32,
+    },
+    /// Every session, window and block. Answered with one
+    /// [`Message::Entry`] per entity, each parent before its children, then
+    /// [`Message::Done`]. Negotiated with [`Features::INSPECT`].
+    List {
+        req: u64,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -145,6 +186,17 @@ pub enum Message {
     Failed {
         req: u64,
         reason: String,
+    },
+    /// The reply to [`Message::Capture`]: one line per row, each without
+    /// trailing blanks, joined by `\n`.
+    Text {
+        req: u64,
+        text: String,
+    },
+    /// One entity of the reply to [`Message::List`].
+    Entry {
+        req: u64,
+        entry: Entry,
     },
     /// A model change; `seq` is its number with [`Features::EVENT_SEQ`].
     Event {
@@ -195,8 +247,10 @@ const TOTAL: u32 = 16;
 const HOLDER: u32 = 14;
 const EPOCH: u32 = 17;
 const SEQ: u32 = 18;
-// IDs 1..=SEQ are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = SEQ as usize;
+const HISTORY: u32 = 19;
+const TITLE: u32 = 20;
+// IDs 1..=TITLE are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = TITLE as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -211,6 +265,8 @@ mod ty {
     pub const RESIZE: u8 = 0x0a;
     pub const CLOSE_BLOCK: u8 = 0x0b;
     pub const SYNC: u8 = 0x0c;
+    pub const CAPTURE: u8 = 0x0d;
+    pub const LIST: u8 = 0x0e;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -219,6 +275,8 @@ mod ty {
     pub const READY: u8 = 0x86;
     pub const OUTPUT: u8 = 0x87;
     pub const CHECKPOINT: u8 = 0x88;
+    pub const TEXT: u8 = 0x89;
+    pub const ENTRY: u8 = 0x8a;
 }
 
 impl Message {
@@ -265,6 +323,20 @@ impl Message {
                 out.varint(REQ, *req);
                 ty::SYNC
             }
+            M::Capture {
+                req,
+                block,
+                history,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .varint(HISTORY, (*history).into());
+                ty::CAPTURE
+            }
+            M::List { req } => {
+                out.varint(REQ, *req);
+                ty::LIST
+            }
             M::Welcome {
                 features,
                 client,
@@ -286,6 +358,14 @@ impl Message {
             M::Failed { req, reason } => {
                 out.varint(REQ, *req).bytes(REASON, reason.as_bytes());
                 ty::FAILED
+            }
+            M::Text { req, text } => {
+                out.varint(REQ, *req).bytes(DATA, text.as_bytes());
+                ty::TEXT
+            }
+            M::Entry { req, entry } => {
+                put_entry(out.varint(REQ, *req), entry);
+                ty::ENTRY
             }
             M::Event { seq, event } => {
                 if let Some(seq) = seq {
@@ -375,6 +455,14 @@ impl Message {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
             },
+            ty::CAPTURE => M::Capture {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                history: f.u32(HISTORY)?,
+            },
+            ty::LIST => M::List {
+                req: f.varint(REQ)?,
+            },
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
                 client: client(&f, CLIENT)?,
@@ -387,6 +475,14 @@ impl Message {
             ty::FAILED => M::Failed {
                 req: f.varint(REQ)?,
                 reason: f.string(REASON)?,
+            },
+            ty::TEXT => M::Text {
+                req: f.varint(REQ)?,
+                text: f.string(DATA)?,
+            },
+            ty::ENTRY => M::Entry {
+                req: f.varint(REQ)?,
+                entry: get_entry(&f)?,
             },
             ty::EVENT => M::Event {
                 seq: f.opt(SEQ, In::varint)?,
@@ -591,6 +687,71 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         kind::LEASE_CHANGED => E::LeaseChanged {
             block: block(f, BLOCK)?,
             holder: f.opt(HOLDER, client)?,
+        },
+        _ => return Err(f.invalid(KIND)),
+    })
+}
+
+mod entry {
+    pub const SESSION: u64 = 1;
+    pub const WINDOW: u64 = 2;
+    pub const BLOCK: u64 = 3;
+}
+
+fn put_entry(out: &mut Out, entry: &Entry) {
+    match entry {
+        Entry::Session { session, name } => {
+            out.varint(KIND, entry::SESSION)
+                .uuid(SESSION, session.uuid())
+                .bytes(NAME, name.as_bytes());
+        }
+        Entry::Window {
+            window,
+            session,
+            name,
+        } => {
+            out.varint(KIND, entry::WINDOW)
+                .uuid(WINDOW, window.uuid())
+                .uuid(SESSION, session.uuid())
+                .bytes(NAME, name.as_bytes());
+        }
+        Entry::Block {
+            block,
+            window,
+            size,
+            holder,
+            title,
+        } => {
+            let o = out
+                .varint(KIND, entry::BLOCK)
+                .uuid(BLOCK, block.uuid())
+                .uuid(WINDOW, window.uuid())
+                .bytes(TITLE, title.as_bytes());
+            if let Some(holder) = holder {
+                o.uuid(HOLDER, holder.uuid());
+            }
+            put_size(o, *size);
+        }
+    }
+}
+
+fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
+    Ok(match f.varint(KIND)? {
+        entry::SESSION => Entry::Session {
+            session: session(f, SESSION)?,
+            name: f.string(NAME)?,
+        },
+        entry::WINDOW => Entry::Window {
+            window: window(f, WINDOW)?,
+            session: session(f, SESSION)?,
+            name: f.string(NAME)?,
+        },
+        entry::BLOCK => Entry::Block {
+            block: block(f, BLOCK)?,
+            window: window(f, WINDOW)?,
+            size: get_size(f)?,
+            holder: f.opt(HOLDER, client)?,
+            title: f.string(TITLE)?,
         },
         _ => return Err(f.invalid(KIND)),
     })

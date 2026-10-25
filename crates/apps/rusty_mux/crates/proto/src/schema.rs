@@ -25,7 +25,7 @@ use std::fmt;
 use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
 use rusty_uuid::Uuid;
 
-use crate::Message;
+use crate::{Features, Message};
 
 /// Which entity an id names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +56,8 @@ pub enum Ty {
     Bytes,
     /// A count of cells, at least 1.
     Cells,
+    /// A count of lines, possibly 0.
+    Lines,
 }
 
 impl Ty {
@@ -73,6 +75,7 @@ impl Ty {
                 Ok(n) if n > 0 => Value::Cells(n),
                 _ => return Err(bad()),
             },
+            Self::Lines => Value::Lines(text.parse().map_err(|_| bad())?),
         })
     }
 
@@ -84,6 +87,7 @@ impl Ty {
                 | (Self::Text, Value::Text(_))
                 | (Self::Bytes, Value::Bytes(_))
                 | (Self::Cells, Value::Cells(_))
+                | (Self::Lines, Value::Lines(_))
         )
     }
 }
@@ -95,6 +99,7 @@ impl fmt::Display for Ty {
             Self::Text => f.write_str("text"),
             Self::Bytes => f.write_str("bytes"),
             Self::Cells => f.write_str("cell count"),
+            Self::Lines => f.write_str("line count"),
         }
     }
 }
@@ -106,6 +111,7 @@ pub enum Value {
     Text(String),
     Bytes(Vec<u8>),
     Cells(u16),
+    Lines(u32),
 }
 
 /// One parameter of a request. Every parameter is required.
@@ -128,6 +134,10 @@ pub enum Returns {
     Unanswered,
     /// The id of the entity it created, in [`Message::Done`].
     Created(Entity),
+    /// [`Message::Text`] instead of [`Message::Done`].
+    Text,
+    /// Zero or more [`Message::Entry`], then [`Message::Done`].
+    Entries,
 }
 
 /// One client request.
@@ -138,6 +148,8 @@ pub struct Method {
     pub doc: &'static str,
     pub params: &'static [Param],
     pub returns: Returns,
+    /// The features a connection must have negotiated to send it.
+    pub needs: Features,
     build: fn(u64, &Args<'_>) -> Result<Message, CallError>,
 }
 
@@ -147,6 +159,7 @@ impl fmt::Debug for Method {
             .field("name", &self.name)
             .field("params", &self.params)
             .field("returns", &self.returns)
+            .field("needs", &self.needs)
             .finish_non_exhaustive()
     }
 }
@@ -266,6 +279,13 @@ impl Args<'_> {
         }
     }
 
+    fn lines(&self, name: &'static str) -> Result<u32, CallError> {
+        match self.get(name)? {
+            Value::Lines(n) => Ok(*n),
+            _ => Err(self.wrong(name, Ty::Lines)),
+        }
+    }
+
     fn size(&self) -> Result<Size, CallError> {
         let cells = |name| match self.get(name)? {
             Value::Cells(n) => Ok(*n),
@@ -313,6 +333,7 @@ pub static CATALOG: &[Method] = &[
             ty: Ty::Text,
             doc: "The session's name.",
         }],
+        needs: Features::NONE,
         returns: Returns::Created(Entity::Session),
         build: |req, a| {
             Ok(Message::CreateSession {
@@ -336,6 +357,7 @@ pub static CATALOG: &[Method] = &[
                 doc: "The window's name.",
             },
         ],
+        needs: Features::NONE,
         returns: Returns::Created(Entity::Window),
         build: |req, a| {
             Ok(Message::CreateWindow {
@@ -357,6 +379,7 @@ pub static CATALOG: &[Method] = &[
             COLS,
             ROWS,
         ],
+        needs: Features::NONE,
         returns: Returns::Created(Entity::Block),
         build: |req, a| {
             Ok(Message::CreateBlock {
@@ -370,6 +393,7 @@ pub static CATALOG: &[Method] = &[
         name: "attach",
         doc: "Receive the block's screen, then its output.",
         params: &[BLOCK],
+        needs: Features::CHECKPOINT_V3,
         returns: Returns::Nothing,
         build: |req, a| {
             Ok(Message::Attach {
@@ -382,6 +406,7 @@ pub static CATALOG: &[Method] = &[
         name: "detach",
         doc: "Stop receiving the attached block's output.",
         params: &[],
+        needs: Features::NONE,
         returns: Returns::Nothing,
         build: |req, _| Ok(Message::Detach { req }),
     },
@@ -389,6 +414,7 @@ pub static CATALOG: &[Method] = &[
         name: "acquire-lease",
         doc: "Become the block's only writer of input and size.",
         params: &[BLOCK],
+        needs: Features::NONE,
         returns: Returns::Nothing,
         build: |req, a| {
             Ok(Message::AcquireLease {
@@ -401,6 +427,7 @@ pub static CATALOG: &[Method] = &[
         name: "release-lease",
         doc: "Give up the block's input lease.",
         params: &[BLOCK],
+        needs: Features::NONE,
         returns: Returns::Nothing,
         build: |req, a| {
             Ok(Message::ReleaseLease {
@@ -420,6 +447,7 @@ pub static CATALOG: &[Method] = &[
                 doc: "The bytes to send.",
             },
         ],
+        needs: Features::NONE,
         returns: Returns::Unanswered,
         build: |req, a| {
             Ok(Message::Input {
@@ -433,6 +461,7 @@ pub static CATALOG: &[Method] = &[
         name: "resize",
         doc: "Change the block's size. Needs the lease.",
         params: &[BLOCK, COLS, ROWS],
+        needs: Features::NONE,
         returns: Returns::Nothing,
         build: |req, a| {
             Ok(Message::Resize {
@@ -446,13 +475,44 @@ pub static CATALOG: &[Method] = &[
         name: "sync",
         doc: "Change nothing; the reply means every earlier request was handled.",
         params: &[],
+        needs: Features::SYNC,
         returns: Returns::Nothing,
         build: |req, _| Ok(Message::Sync { req }),
+    },
+    Method {
+        name: "capture",
+        doc: "Read the block's screen as text, after some lines of its history.",
+        params: &[
+            BLOCK,
+            Param {
+                name: "history",
+                ty: Ty::Lines,
+                doc: "How many scrollback lines above the screen to include.",
+            },
+        ],
+        needs: Features::INSPECT,
+        returns: Returns::Text,
+        build: |req, a| {
+            Ok(Message::Capture {
+                req,
+                block: a.block()?,
+                history: a.lines("history")?,
+            })
+        },
+    },
+    Method {
+        name: "list",
+        doc: "List every session, window and block.",
+        params: &[],
+        needs: Features::INSPECT,
+        returns: Returns::Entries,
+        build: |req, _| Ok(Message::List { req }),
     },
     Method {
         name: "close-block",
         doc: "Stop the block's program and remove the block.",
         params: &[BLOCK],
+        needs: Features::NONE,
         returns: Returns::Nothing,
         build: |req, a| {
             Ok(Message::CloseBlock {

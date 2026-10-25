@@ -169,6 +169,52 @@ fn a_refused_request_exits_1() {
     assert!(stdout(&output).contains("\"ok\":false"));
 }
 
+#[test]
+fn capture_prints_the_screen_and_list_the_tree() {
+    let socket = start_server();
+    let block = block(&socket);
+    let chain = [
+        "attach",
+        "--block",
+        &block,
+        "+",
+        "acquire-lease",
+        "--block",
+        &block,
+        "+",
+        "input",
+        "--block",
+        &block,
+        "--data",
+        "echo HI$((6*7))\r",
+    ];
+    ok(&socket, &chain);
+    let capture = ["capture", "--block", &block, "--history", "0"];
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !ok(&socket, &capture).lines().any(|l| l == "HI42") {
+        assert!(std::time::Instant::now() < deadline, "no HI42 on screen");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let listing = ok(&socket, &["--json", "list"]);
+    let kinds: Vec<String> = listing
+        .lines()
+        .map(|line| {
+            let rusty_json::Value::Object(map) =
+                rusty_json::Value::from_json_str(line).expect("json")
+            else {
+                panic!("object")
+            };
+            match map.get("kind") {
+                Some(rusty_json::Value::String(kind)) => kind.clone(),
+                _ => "done".into(),
+            }
+        })
+        .collect();
+    assert_eq!(kinds, ["session", "window", "block", "done"]);
+    assert!(listing.contains(&format!("\"block\":\"{block}\"")));
+}
+
 /// Whether `block` still exists: only an existing block can be attached.
 fn exists(socket: &Path, block: &str) -> bool {
     ctl(socket, &["attach", "--block", block]).status.code() == Some(0)
@@ -362,13 +408,15 @@ fn legacy_server() -> (PathBuf, std::sync::mpsc::Receiver<usize>) {
 }
 
 #[test]
-fn a_chain_needing_sync_sends_nothing_to_a_legacy_server() {
+fn a_chain_the_server_cannot_run_sends_nothing() {
     let block = "00000000-0000-0000-0000-000000000001";
-    let chains: [&[&str]; 2] = [
+    let chains: [&[&str]; 4] = [
         &[
             "attach", "--block", block, "+", "input", "--block", block, "--data", "x",
         ],
         &["sync"],
+        &["create-session", "--name", "s", "+", "list"],
+        &["capture", "--block", block, "--history", "0"],
     ];
     for chain in chains {
         let (path, frames) = legacy_server();
