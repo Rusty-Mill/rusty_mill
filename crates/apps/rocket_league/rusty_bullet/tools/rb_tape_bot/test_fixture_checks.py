@@ -105,5 +105,50 @@ class Friction(unittest.TestCase):
         self.assertEqual(fc.friction_samples(rows), [])
 
 
+
+class Freeze(unittest.TestCase):
+    def rows(self, moving, held, start=(40.0, 0.44)):
+        """The state set at `start`, `moving` frames slowing by 0.01 uu/s a tick, then `held` at zero."""
+        rows = [(0.0, *start)]
+        for k in range(1, moving + 1):
+            rows.append((k * DT, start[0] - 0.01 * k, start[1] - 0.0001 * k))
+        return rows + [((moving + 1 + k) * DT, 0.0, 0.0) for k in range(held)]
+
+    def test_finds_the_freeze_and_the_most_speed_and_spin_while_timed(self):
+        k, secs, speed, spin = fc.freeze(self.rows(240, 5))
+        self.assertEqual(k, 241)
+        self.assertAlmostEqual(secs, 241 * DT)
+        self.assertAlmostEqual(speed, 39.99)
+        self.assertAlmostEqual(spin, 0.4399)
+
+    def test_a_ball_that_never_stops_has_no_freeze(self):
+        self.assertIsNone(fc.freeze(self.rows(240, 0)))
+
+    def test_a_ball_set_at_rest_is_not_a_freeze(self):
+        self.assertIsNone(fc.freeze([(k * DT, 0.0, 0.0) for k in range(10)]))
+
+
+class AwakeBound(unittest.TestCase):
+    def rows(self, ticks, speed=(80.0, -0.02), spin=(0.88, -0.0002)):
+        """The state set, then `ticks` stepped frames with speed and spin falling linearly."""
+        return [(k * DT, speed[0] + speed[1] * k, spin[0] + spin[1] * k) for k in range(ticks + 1)]
+
+    def test_bounds_by_the_slowest_full_window_not_the_slowest_frame(self):
+        # 600 ticks: the last frame is at 68.0 uu/s, but a window of 240 ticks ending there
+        # peaks 240 ticks earlier, at 72.8 uu/s and 0.808 rad/s.
+        speed, spin = fc.awake_bound(self.rows(600), 240 * DT)
+        self.assertAlmostEqual(speed, 80.0 - 0.02 * 360)
+        self.assertAlmostEqual(spin, 0.88 - 0.0002 * 360)
+
+    def test_reports_the_window_spin_beside_its_speed(self):
+        # A spin that rises at the end: the slowest-speed window carries it, so the bound
+        # stays a disjunction (linear or angular), never a linear bound alone.
+        rows = self.rows(600, spin=(0.5, 0.001))
+        _, spin = fc.awake_bound(rows, 240 * DT)
+        self.assertAlmostEqual(spin, 0.5 + 0.001 * 600)
+
+    def test_a_recording_shorter_than_the_dwell_bounds_nothing(self):
+        self.assertIsNone(fc.awake_bound(self.rows(100), 240 * DT))
+
 if __name__ == "__main__":
     unittest.main()
