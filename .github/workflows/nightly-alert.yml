@@ -1,0 +1,46 @@
+name: Nightly alert
+
+# The daily CI sweep is the only full check of `main` (ADR-0009). Nothing
+# gates on it, so a failure is easy to miss. Keep one open issue per red
+# streak: open it on the first failure, comment on later ones, close it on
+# the next green sweep. A separate workflow keeps ci.yml read-only.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    if: >-
+      github.event.workflow_run.event == 'schedule' &&
+      contains(fromJSON('["success","failure"]'), github.event.workflow_run.conclusion)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open, update or close the nightly issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          TITLE: "Nightly CI sweep is failing on main"
+        run: |
+          set -euo pipefail
+          open="$(gh issue list --state open --search "in:title \"$TITLE\"" --json number,title \
+            --jq "map(select(.title == env.TITLE)) | .[0].number // empty")"
+          if [ "$CONCLUSION" = "success" ]; then
+            [ -z "$open" ] || gh issue close "$open" --comment "Green again: $RUN_URL ($HEAD_SHA)."
+            exit 0
+          fi
+          body="Failed: $RUN_URL ($HEAD_SHA)."
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh issue create --title "$TITLE" --body "$body Fix it, or its flake, by PR (ADR-0009)."
+          fi
