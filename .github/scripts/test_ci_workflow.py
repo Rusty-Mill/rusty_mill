@@ -651,6 +651,15 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn('--target-base "$RUNNER_TEMP/msrv"', job)
         # Every crate with features is also checked with all of them; only documented exceptions opt out.
         self.assertIn('--all-features-exclude "platform-linux rusty_json rusty_tls rusty_rdp rusty_tonic"', job)
+        # Windows joins on the scheduled and manual sweeps only, minus the crates no Windows leg builds (#845).
+        self.assertIn("runs-on: ${{ matrix.os }}", job)
+        self.assertIn(
+            "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') "
+            "&& needs.plan.outputs.windows == 'true' && '[\"ubuntu-latest\",\"windows-latest\"]' || '[\"ubuntu-latest\"]'",
+            job,
+        )
+        self.assertIn("'rusty_journal rusty_fedora_agent'", job)
+        self.assertIn("shell: bash", job)
         self.assertIn("      - msrv-compile\n", self.workflow.split("  required-gate:\n", 1)[1])
 
     def test_every_workflow_pin_matches_rust_toolchain_file(self) -> None:
