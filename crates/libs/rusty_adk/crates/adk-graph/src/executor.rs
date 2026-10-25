@@ -312,17 +312,11 @@ impl Graph {
                 let mut frontier_error: Option<AdkError> = None;
                 let mut interrupted = false;
 
-                for ((item, node, _), (outcome, ctx, mut rx)) in running.into_iter().zip(attempts) {
+                for ((item, node, _), (outcome, ctx, rx)) in running.into_iter().zip(attempts) {
                     // Collect whatever the node emitted while it ran. These are
                     // held rather than yielded immediately so that a suspension
-                    // can attach its resume record to the outgoing event. The
-                    // node has returned, so the queue holds all it emitted;
-                    // `rx` drops at the end of this iteration, failing any
-                    // later send.
-                    let mut emitted: Vec<Event> = Vec::new();
-                    while let Ok(event) = rx.try_recv() {
-                        emitted.push(event);
-                    }
+                    // can attach its resume record to the outgoing event.
+                    let mut emitted = drain(rx);
 
                     let outcome = match outcome {
                         Ok(outcome) => {
@@ -514,4 +508,15 @@ impl ResumeRequest {
             payload,
         }
     }
+}
+
+/// Takes everything a finished node emitted and closes its channel, so a
+/// context the node kept fails to emit instead of queueing events nobody reads.
+/// The node has returned, so the queue already holds all it emitted in time.
+fn drain(mut rx: mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
+    let mut emitted = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        emitted.push(event);
+    }
+    emitted
 }

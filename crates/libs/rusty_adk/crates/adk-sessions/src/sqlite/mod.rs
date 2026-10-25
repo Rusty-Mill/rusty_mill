@@ -36,9 +36,11 @@
 //!
 //! # Concurrency
 //!
-//! [`rusqlite`] is a blocking library, so every query runs on
-//! [`rusty_tokio::task::spawn_blocking`] with the connection lock taken *inside* the
-//! blocking closure — it is never held across an await point. The database is
+//! [`rusqlite`] is a blocking library, so every query runs on a thread of its
+//! own with the connection lock taken *inside* the blocking closure — it is
+//! never held across an await point. The result comes back on a runtime-free
+//! oneshot channel, so the services work under any executor: `rusty_tokio`,
+//! or the tokio runtime the live models in `adk-models` need. The database is
 //! opened in WAL mode with a busy timeout so a second process reading the same
 //! file does not immediately fail.
 //!
@@ -217,18 +219,27 @@ impl<T> SqlExt<T> for std::result::Result<T, rusqlite::Error> {
     }
 }
 
-/// Runs a blocking database closure on tokio's blocking pool.
+/// Runs a blocking database closure on a thread of its own.
+///
+/// Not a runtime's blocking pool, which would tie the services to one runtime.
+/// Spawning a thread costs tens of microseconds, which is small next to a
+/// SQLite write that reaches disk.
 async fn blocking<F, T>(f: F) -> Result<T>
 where
     F: FnOnce() -> Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    match rusty_tokio::task::spawn_blocking(f).await {
-        Ok(result) => result,
-        Err(join) => Err(AdkError::storage(format!(
-            "sqlite worker did not finish: {join}"
-        ))),
-    }
+    let (tx, rx) = rusty_tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("adk-sqlite".into())
+        .spawn(move || {
+            // An error means the caller stopped waiting; nobody wants the result.
+            let _ = tx.send(f());
+        })
+        .map_err(|e| AdkError::storage(format!("sqlite worker did not start: {e}")))?;
+    // A panic in `f` drops the sender unsent.
+    rx.await
+        .map_err(|_| AdkError::storage("sqlite worker did not finish"))?
 }
 
 /// Applies connection pragmas and brings the schema up to date.
@@ -400,6 +411,47 @@ impl SqliteStore {
 mod tests {
     use super::*;
     use adk_core::{ArtifactService, Content, Event, MemoryService, Part, Session, SessionService};
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+    use std::thread::Thread;
+
+    /// Drives `future` with no runtime at all, parking the thread between polls.
+    fn block_on<F: Future>(future: F) -> F::Output {
+        struct Unpark(Thread);
+        impl Wake for Unpark {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::park(),
+            }
+        }
+    }
+
+    #[test]
+    fn the_services_need_no_runtime() {
+        let session = block_on(async {
+            let store = SqliteStore::in_memory().await?;
+            let sessions = store.sessions();
+            let created = sessions.create_session("app", "u1", None, None).await?;
+            sessions.get_session("app", "u1", &created.id).await
+        })
+        .unwrap();
+        assert!(session.is_some());
+    }
+
+    #[test]
+    fn a_panicking_query_is_an_error_not_a_hang() {
+        let result: Result<()> = block_on(blocking(|| panic!("boom")));
+        assert!(matches!(result, Err(AdkError::Storage { .. })));
+    }
 
     #[rusty_tokio::test]
     async fn all_three_services_share_one_database() {

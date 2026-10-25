@@ -13,9 +13,9 @@ use rusty_agui::client::HttpAgent;
 use rusty_agui::serve::AgentHandler;
 use rusty_agui::{Event, EventKind, Message, Reducer, RunAgentInput, RunOutcome};
 use rusty_json::json;
-use rusty_tokio::runtime::Runtime;
 use serde_json::json as adk_json;
 use std::sync::Arc;
+use tokio::runtime::Runtime;
 
 struct Served {
     client: HttpAgent,

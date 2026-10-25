@@ -15,4 +15,5 @@ rusty-adk = { path = "../../crates/rusty-adk", features = ["agui"] }
 rusty_agui = { workspace = true, features = ["serve"] }
 rusty_serve.workspace = true
 serde_json.workspace = true
-rusty_tokio.workspace = true
+# Stays on tokio with `adk-agui`: the live models in `adk-models` need it.
+tokio = { workspace = true, features = ["full"] }

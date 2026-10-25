@@ -410,6 +410,32 @@ mod tests {
     }
 
     #[rusty_tokio::test]
+    async fn a_kept_context_cannot_emit_once_its_node_has_returned() {
+        let kept: Arc<std::sync::Mutex<Option<NodeContext>>> = Arc::default();
+        let slot = Arc::clone(&kept);
+        let keeper = FunctionNode::new("keeper", NodeConfig::default(), move |ctx| {
+            *slot.lock().unwrap() = Some(ctx.clone());
+            let ctx = ctx.clone();
+            Box::pin(async move {
+                ctx.emit_message("in time")?;
+                Ok(NodeOutcome::output(json!("done")))
+            })
+        })
+        .shared();
+        let graph = Graph::new(vec![keeper], chain(["keeper"])).unwrap();
+
+        // Paused at the first event the node emitted, before the rest of the run.
+        let mut stream = graph.run(context(), None);
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.text(), "in time");
+
+        let ctx = kept.lock().unwrap().take().unwrap();
+        assert!(matches!(ctx.emit_message("late"), Err(AdkError::Cancelled)));
+        let rest: Vec<Event> = stream.map(|e| e.unwrap()).collect().await;
+        assert!(rest.iter().all(|e| e.text() != "late"));
+    }
+
+    #[rusty_tokio::test]
     async fn a_retried_attempts_events_do_not_leak_into_the_successful_output() {
         let attempts = Arc::new(AtomicU32::new(0));
         let counter = Arc::clone(&attempts);

@@ -21,4 +21,3 @@ rusty_tokio.workspace = true
 
 [dev-dependencies]
 adk-sessions.workspace = true
-rusty_tokio.workspace = true

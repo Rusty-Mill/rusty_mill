@@ -198,8 +198,8 @@ dependencies = [
  "rusty_json",
  "rusty_serve",
  "rusty_stream",
- "rusty_tokio",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -568,8 +568,8 @@ dependencies = [
  "rusty-adk",
  "rusty_agui",
  "rusty_serve",
- "rusty_tokio",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

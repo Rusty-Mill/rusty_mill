@@ -68,7 +68,7 @@ const BIND: &str = "127.0.0.1:8080";
 fn main() -> std::io::Result<()> {
     // The runner is async; the server is blocking. The agent is driven on
     // this runtime from the handler's thread.
-    let runtime = rusty_tokio::runtime::Runtime::new()?;
+    let runtime = tokio::runtime::Runtime::new()?;
 
     // An ordinary ADK agent. Nothing about it knows AG-UI exists.
     let assistant = LlmAgent::builder("assistant")
