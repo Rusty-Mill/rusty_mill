@@ -25,7 +25,9 @@ unwrap_used = "warn"
 [dependencies]
 # The client is `rusty_mcp_client_native` (the HTTP transport is on `rusty_request`
 # and `rusty_tls`). `rusty_request` is also used here for the OAuth token fetch;
-# its `tokio` feature makes it run on the caller's tokio runtime.
+# its `tokio` feature makes it run on the caller's tokio runtime. That stays until
+# the consumers (adk-mcp, rk-mcp, rp-mcp) leave tokio: `rusty_tokio`'s I/O needs
+# its own runtime (#906).
 rusty_mcp_client_native = { workspace = true, features = ["http"] }
 rusty_request = { workspace = true, features = ["tokio"] }
 serde = { workspace = true }
@@ -37,4 +39,6 @@ toml = "1.1"
 # The server the end-to-end tests talk to, in process.
 rusty_mcp_server = { workspace = true, features = ["http"] }
 rusty_serve = { workspace = true }
+rusty_tokio = { workspace = true }
+# Only the OAuth token-fetch tests: that fetch runs on the caller's tokio runtime (#906).
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }

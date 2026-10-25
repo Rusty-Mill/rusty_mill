@@ -37,7 +37,7 @@ fn env_auth() -> McpAuth {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn env_indirection_resolves_when_set() {
     if !in_child(
         "env_indirection_resolves_when_set",
@@ -55,7 +55,7 @@ async fn env_indirection_resolves_when_set() {
     assert!(resolved.extra_headers.is_empty());
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn env_indirection_errors_when_unset() {
     if !in_child("env_indirection_errors_when_unset", None) {
         return;
@@ -66,7 +66,7 @@ async fn env_indirection_errors_when_unset() {
     assert!(matches!(error, AuthError::MissingEnv { name } if name == SECRET));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn http_transport_auth_missing_env_surfaces_as_auth_error() {
     if !in_child(
         "http_transport_auth_missing_env_surfaces_as_auth_error",
@@ -74,7 +74,7 @@ async fn http_transport_auth_missing_env_surfaces_as_auth_error() {
     ) {
         return;
     }
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = rusty_tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let spec = McpServerSpec {
@@ -86,7 +86,7 @@ async fn http_transport_auth_missing_env_surfaces_as_auth_error() {
         auth: Some(env_auth()),
         ..McpServerSpec::default()
     };
-    let error = tokio::time::timeout(
+    let error = rusty_tokio::time::timeout(
         std::time::Duration::from_secs(2),
         McpClient::connect("missing-secret", &spec),
     )
@@ -97,7 +97,7 @@ async fn http_transport_auth_missing_env_surfaces_as_auth_error() {
         matches!(error, McpClientError::Auth(AuthError::MissingEnv { name }) if name == SECRET)
     );
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+        rusty_tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
             .await
             .is_err(),
         "missing credentials must fail before contacting the server"

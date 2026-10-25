@@ -45,6 +45,8 @@ rusty_tokio = { workspace = true, optional = true }
 # Interop oracle only (never shipped): the `rmcp` client, which the MCP crates
 # use today, drives this server over real stdio in `tests/interop.rs`.
 rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "reqwest"] }
+# Only the `rmcp` interop tests (`interop`, `http_interop`): `rmcp` and its child-process
+# transport run on tokio. The library itself is on `rusty_tokio` (#906).
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "process", "time"] }
 serde = "1"
 serde_json = "1"
