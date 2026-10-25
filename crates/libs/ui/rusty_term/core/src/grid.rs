@@ -1414,14 +1414,20 @@ impl Grid {
         self.touch(y);
     }
 
-    /// The cells of live screen row `y` (`cols` of them), by value; empty
-    /// past the last row.
+    /// The cells of live screen row `y` (`cols` of them), collected; empty
+    /// past the last row. Per-frame readers use [`Grid::row_cells`].
     pub fn row(&self, y: usize) -> Vec<Cell> {
-        self.screen.get(y).map_or_else(Vec::new, |line| {
-            (0..line.cells().len())
-                .map(|x| self.line_cell(line, x))
-                .collect()
-        })
+        self.row_cells(y).collect()
+    }
+
+    /// The cells of live screen row `y`, by value and without allocating;
+    /// empty past the last row. Always the live screen, never the scrolled
+    /// or folded viewport.
+    pub fn row_cells(&self, y: usize) -> impl Iterator<Item = Cell> + '_ {
+        self.screen
+            .get(y)
+            .into_iter()
+            .flat_map(move |line| (0..line.cells().len()).map(move |x| self.line_cell(line, x)))
     }
 
     /// The cell at `col` of `line`; a blank past the line's width. Every

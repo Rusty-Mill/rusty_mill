@@ -1667,6 +1667,20 @@ fn viewport_composites_history_above_live_grid() {
 }
 
 #[test]
+fn row_cells_reads_the_live_screen_while_scrolled_back() {
+    let mut g = Grid::new(4, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"AAAA\r\nBBBB\r\nCCCC");
+    assert!(g.scroll_view_up(1));
+    let live: Vec<String> = (0..g.rows)
+        .map(|y| g.row_cells(y).map(|c| c.ch).collect())
+        .collect();
+    assert_eq!(live, vec!["BBBB".to_string(), "CCCC".to_string()]);
+    assert_eq!(g.row_cells(1).collect::<Vec<_>>(), g.row(1));
+    assert_eq!(g.row_cells(g.rows).count(), 0, "past the last row");
+}
+
+#[test]
 fn scroll_view_clamps_and_resets() {
     let mut g = Grid::new(4, 2);
     let mut p = AnsiParser::new();
