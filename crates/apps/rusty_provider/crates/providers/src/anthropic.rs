@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::http::{map_error_response, map_reqwest_error};
-use crate::util::{effort_thinking_budget, gen_id, now};
+use crate::util::{chat_stream, effort_thinking_budget, gen_id, now};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Anthropic requires `max_tokens`; used when the client doesn't specify one.
@@ -841,7 +841,7 @@ impl Provider for AnthropicProvider {
             async move { result }
         });
 
-        Ok(Box::pin(stream))
+        Ok(chat_stream(stream))
     }
 
     /// Anthropic has no embeddings API of its own -- unlike audio content

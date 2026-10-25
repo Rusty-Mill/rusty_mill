@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use futures::stream::BoxStream;
+use rusty_stream::BoxStream;
 
 use crate::error::ProviderError;
 use crate::types::{ChatChunk, ChatRequest, ChatResponse, EmbeddingsRequest, EmbeddingsResponse};

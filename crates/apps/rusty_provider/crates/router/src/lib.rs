@@ -37,13 +37,13 @@ use persistence::{Persistence, PersistenceTarget};
 use web_search::WebSearchClient;
 use webhook::WebhookNotifier;
 
-use futures::stream::StreamExt;
 use rp_core::{
     ChatMessage, ChatRequest, ChatResponse, ChatStream, EmbeddingsInput, EmbeddingsRequest,
     EmbeddingsResponse, ModelInfo, ModelPricing, Provider, ProviderError, ProviderPreferences,
     RateLimiter, Usage,
 };
 use rp_providers::{AnthropicProvider, GeminiProvider, OpenAiCompatibleProvider};
+use rusty_stream::StreamExt;
 
 /// Weight given to each new latency/throughput sample in its running
 /// average — higher reacts faster to recent conditions, lower smooths out
@@ -2680,7 +2680,7 @@ impl Router {
         }
 
         let panel_responses: Vec<(String, String, ChatResponse)> =
-            futures::future::join_all(futures)
+            rusty_stream::future::join_all(futures)
                 .await
                 .into_iter()
                 .flatten()
@@ -3010,11 +3010,11 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
-    use futures::stream;
     use rp_core::{
         ChatChunk, ChatMessage, ChatMessageDelta, Choice, ChunkChoice, EmbeddingData,
         EmbeddingsUsage, MessageContent, Role,
     };
+    use rusty_stream::stream;
     use serde_json::json;
     use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -3448,7 +3448,9 @@ mod tests {
             api_key_override: Option<&str>,
         ) -> Result<ChatStream, ProviderError> {
             *self.seen_key.lock().unwrap() = api_key_override.map(str::to_string);
-            Ok(Box::pin(stream::empty::<Result<ChatChunk, ProviderError>>()))
+            Ok(Box::pin(stream::iter(std::iter::empty::<
+                Result<ChatChunk, ProviderError>,
+            >())))
         }
 
         async fn embeddings(
@@ -3519,7 +3521,9 @@ mod tests {
             _model: &str,
             _api_key_override: Option<&str>,
         ) -> Result<ChatStream, ProviderError> {
-            Ok(Box::pin(stream::empty::<Result<ChatChunk, ProviderError>>()))
+            Ok(Box::pin(stream::iter(std::iter::empty::<
+                Result<ChatChunk, ProviderError>,
+            >())))
         }
 
         async fn embeddings(
@@ -3634,7 +3638,9 @@ mod tests {
             _model: &str,
             _api_key_override: Option<&str>,
         ) -> Result<ChatStream, ProviderError> {
-            Ok(Box::pin(stream::empty::<Result<ChatChunk, ProviderError>>()))
+            Ok(Box::pin(stream::iter(std::iter::empty::<
+                Result<ChatChunk, ProviderError>,
+            >())))
         }
 
         async fn embeddings(

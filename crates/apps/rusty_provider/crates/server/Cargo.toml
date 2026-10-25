@@ -24,6 +24,7 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures-util.workspace = true
+rusty_stream = { workspace = true, features = ["futures-core"] }
 rusty_log = { workspace = true, features = ["subscriber"] }
 anyhow.workspace = true
 ring.workspace = true

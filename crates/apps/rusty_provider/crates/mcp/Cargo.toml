@@ -16,6 +16,11 @@ rusty_mcp_server = { workspace = true }
 rusty-mcp-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Runtime-free; safe on the caller's tokio runtime.
+rusty_tokio.workspace = true
+# Stays (#910): the native tools block on rp-router (reqwest, tokio) and the
+# gateway drives rusty-mcp-client's tokio-backed transport, both on the tokio
+# runtime `build` is called from (rp-server's main). Moves with T7/#906.
 tokio.workspace = true
 rusty_log = { workspace = true }
 anyhow.workspace = true

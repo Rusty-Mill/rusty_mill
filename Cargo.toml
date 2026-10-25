@@ -556,6 +556,7 @@ rusty-db-mysql = { path = "crates/libs/storage/rusty_db/crates/rusty-db-mysql", 
 # Already-merged siblings rusty_db depends on -- plain path dependencies,
 # same pin-retirement pattern as everywhere else in this series.
 rusty_tokio = { path = "crates/libs/async/rusty_tokio" }
+rusty_stream = { path = "crates/libs/async/rusty_stream" }
 rusty_wire = { path = "crates/foundation/rusty_wire" }
 rusty_json = { path = "crates/foundation/rusty_json" }
 rusty_json_patch = { path = "crates/foundation/rusty_json_patch" }

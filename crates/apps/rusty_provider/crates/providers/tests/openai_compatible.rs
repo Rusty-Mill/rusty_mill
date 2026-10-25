@@ -1,11 +1,11 @@
 mod common;
 
-use futures_util::StreamExt;
 use rp_core::{
     ChatMessage, EmbeddingsInput, EmbeddingsRequest, FunctionCall, MessageContent, Provider,
     ProviderError, ReasoningConfig, Role, ToolCall,
 };
 use rp_providers::OpenAiCompatibleProvider;
+use rusty_stream::StreamExt;
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

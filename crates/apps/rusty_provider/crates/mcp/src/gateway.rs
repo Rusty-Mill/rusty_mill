@@ -34,8 +34,8 @@ use rusty_mcp_client::{
 use rusty_mcp_server::proto::{CallToolParams, CallToolResult, ErrorCode, ErrorData, Tool};
 use rusty_mcp_server::{CallContext, ToolSource};
 use rusty_retry::Backoff;
+use rusty_tokio::sync::RwLock;
 use tokio::runtime::Handle;
-use tokio::sync::RwLock;
 
 use rp_router::{McpConfig, McpUpstreamConfig, McpUpstreamTransport};
 
