@@ -57,10 +57,12 @@ coarse to time an 11 s spec (c3 was unmeasurable). Both point at the same fix: s
   process: an opt-in `"session": true` launcher gives every turn of a role one provider session id to
   resume, while each turn stays its own process, the only inference boundary the host can enforce (spec
   v0.5 §110). A long-lived process would need a bbp-owned adapter that drives the model API itself; the
-  session `bbp mcp` and `wait` are kept for that. Refused under a cost cap or a sandbox. 3c (confined
-  sessions, resumed-turn pricing) follows.
-- Launchers start one agent session per role for the whole task instead of one per turn. Cost accounting
-  (`bbp tokens`, the cap) moves from per-turn logs to per-session logs with turn markers.
+  session `bbp mcp` and `wait` are kept for that. 3c lets a session run confined (one home per session,
+  a fresh workspace at one path per turn) and under the cost cap, and the Claude launcher resumes its
+  session; the Codex launcher refuses one, since Codex names its own sessions.
+- Cost accounting (`bbp tokens`, the cap) stays per turn: each turn still has its own log. A resumed
+  turn is marked beside its log and priced from what its own process counted
+  (`model_usage_since_last_result`), since a resumed Claude Code session's totals include its earlier turns.
 - No CRDT: still one live turn at a time, but agents now react to events instead of being polled into
   existence.
 

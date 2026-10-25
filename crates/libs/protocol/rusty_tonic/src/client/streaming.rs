@@ -24,7 +24,7 @@ use crate::{
 pub(crate) async fn until<F: Future>(deadline: Option<Instant>, f: F) -> Option<F::Output> {
     match deadline {
         None => Some(f.await),
-        Some(at) => timeout_at(at, f).await.ok(),
+        Some(at) => timeout_at(at.into(), f).await.ok(),
     }
 }
 
@@ -319,6 +319,7 @@ impl<T: Message> Sender<T> {
     async fn write(&mut self, data: Vec<u8>, end: bool) -> Result<(), Status> {
         let outcome = until(self.deadline, async {
             select! {
+                biased;
                 r = self.send.send_data(data, end) => Sent::Done(r),
                 _ = self.cancelled.changed() => Sent::Cancelled,
             }

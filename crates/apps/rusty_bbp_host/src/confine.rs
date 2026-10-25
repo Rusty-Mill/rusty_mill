@@ -80,11 +80,15 @@ pub(crate) struct Turn {
 
 impl Turn {
     /// Make the workspace and the pipes afresh and write the turn's MCP
-    /// configuration and launch `facts` beside the workspace.
+    /// configuration and launch `facts` beside the workspace. A turn of
+    /// provider session `session` keeps the session's home, where its
+    /// conversation is, and gets a fresh workspace at the session's one path,
+    /// which a provider may key its conversations by.
     pub fn prepare(
         cfg: &Config,
         sandbox: &HarnessSandbox,
         turn: TurnId,
+        session: Option<&str>,
         facts: &Facts,
     ) -> Result<Turn, String> {
         // The sandbox takes absolute roots only; a relative `--work` is
@@ -94,17 +98,32 @@ impl Turn {
         let base = work
             .join("turns")
             .join(Sha256::of(cfg.task.0.as_bytes()).hex());
-        let workspace = base.join(format!("turn-{}", turn.0));
+        let place =
+            session.map_or_else(|| format!("turn-{}", turn.0), |id| format!("session-{id}"));
+        let workspace = base.join(&place);
         let pipes = base.join(format!("turn-{}.mcp", turn.0));
-        let scratch = base.join(format!("turn-{}.home", turn.0));
+        let scratch = base.join(format!("{place}.home"));
         let facts_path = base.join(format!("turn-{}.facts.json", turn.0));
         let status =
             task_dir(&cfg.dir, "agents", &cfg.task).join(format!("turn-{}.sandbox", turn.0));
         for dir in [&base, &scratch] {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        let repo = if sandbox.checkout {
-            let repo = Repo::open(&cfg.repo)?;
+        let repo = sandbox
+            .checkout
+            .then(|| Repo::open(&cfg.repo))
+            .transpose()?;
+        // What a session's earlier turn left, if its cleanup never ran.
+        if workspace.exists() {
+            if let Some(repo) = &repo {
+                repo.remove(&workspace)?;
+            }
+            if workspace.exists() {
+                std::fs::remove_dir_all(&workspace)
+                    .map_err(|e| format!("{}: {e}", workspace.display()))?;
+            }
+        }
+        let repo = if let Some(repo) = repo {
             repo.add_detached(&workspace, "HEAD")?;
             Some(repo)
         } else {
@@ -279,6 +298,81 @@ fn refuse_reaching(spec: &SandboxSpec, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuse launchers whose harnesses could replace a path some rule names
+/// before its rule is made: Landlock opens each root and follows a symlink
+/// there, so a root beneath a harness's write root is that harness's to
+/// redirect, for its own later turns or another role's. No sandbox path of
+/// any launcher, no system root, the `bbp` directory, or (with a checkout)
+/// the repository's git directory may lie strictly beneath any launcher's
+/// write root, and no write root may lie at or beneath the work directory.
+pub fn refuse_swappable(
+    launchers: &crate::moderator::Launchers,
+    bbp: &Path,
+    work: &Path,
+    repo: &Path,
+) -> Result<(), String> {
+    let sandboxes: Vec<&HarnessSandbox> = launchers
+        .iter()
+        .filter_map(|(_, l)| l.sandbox.as_ref())
+        .collect();
+    let writes = sandboxes
+        .iter()
+        .flat_map(|s| &s.write)
+        .map(|p| resolved(Path::new(p)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut roots = sandboxes
+        .iter()
+        .flat_map(|s| s.read.iter().chain(&s.write))
+        .map(|p| resolved(Path::new(p)))
+        .collect::<Result<Vec<_>, _>>()?;
+    roots.extend(
+        SYSTEM_ROOTS
+            .iter()
+            .map(PathBuf::from)
+            .filter(|p| p.exists()),
+    );
+    roots.push(
+        resolved(bbp)?
+            .parent()
+            .ok_or("bbp binary has no directory")?
+            .into(),
+    );
+    if sandboxes.iter().any(|s| s.checkout) {
+        roots.push(resolved(&Repo::open(repo)?.git_dir())?);
+    }
+    let work = resolved(&std::path::absolute(work).map_err(|e| e.to_string())?)?;
+    for write in &writes {
+        if write.starts_with(&work) {
+            return Err(format!(
+                "harness sandbox: write root {} lies in the work directory",
+                write.display()
+            ));
+        }
+        if let Some(root) = roots.iter().find(|r| *r != write && r.starts_with(write)) {
+            return Err(format!(
+                "harness sandbox: {} lies beneath write root {}, which a harness could swap",
+                root.display(),
+                write.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `path` with its existing ancestors resolved through symlinks.
+fn resolved(path: &Path) -> Result<PathBuf, String> {
+    if path.exists() {
+        return canonical(path);
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{}: no existing ancestor", path.display()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("{}: not a normal path", path.display()))?;
+    Ok(resolved(parent)?.join(name))
+}
+
 fn canonical(path: &Path) -> Result<PathBuf, String> {
     path.canonicalize()
         .map_err(|e| format!("{}: {e}", path.display()))
@@ -286,4 +380,79 @@ fn canonical(path: &Path) -> Result<PathBuf, String> {
 
 fn json(s: &str) -> Result<String, String> {
     rusty_serde::json::to_string(&s).map_err(|e| e.to_string())
+}
+
+// The swap hazard is a Unix symlink one; harnesses are confined only there.
+#[cfg(all(test, unix))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::moderator::{Launcher, Launchers};
+
+    fn dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("bbp_swap_{}_{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    }
+    fn launcher(read: &[&Path], write: &[&Path]) -> Launcher {
+        let paths = |ps: &[&Path]| {
+            ps.iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect()
+        };
+        Launcher {
+            program: "harness".into(),
+            args: vec![],
+            builtin_tools: false,
+            sandbox: Some(HarnessSandbox {
+                read: paths(read),
+                write: paths(write),
+                ..HarnessSandbox::default()
+            }),
+            session: false,
+        }
+    }
+    fn check(root: &Path, launchers: Launchers) -> Result<(), String> {
+        refuse_swappable(
+            &launchers,
+            &root.join("bin/bbp"),
+            &root.join("work"),
+            &root.join("repo"),
+        )
+    }
+
+    #[test]
+    fn no_root_may_lie_beneath_any_harnesss_write_root() {
+        let root = dir("roots");
+        let (src, sub) = (root.join("src"), root.join("src/sub"));
+        // One role writes what another's rule names: refused either way round.
+        let across = Launchers::default()
+            .with("a", launcher(&[], &[&src]))
+            .with("b", launcher(&[&sub], &[]));
+        assert!(check(&root, across).unwrap_err().contains("beneath"));
+        let own = Launchers::default().with("a", launcher(&[&sub], &[&src]));
+        assert!(check(&root, own).is_err());
+        let system = Launchers::default().with("a", launcher(&[], &[Path::new("/")]));
+        assert!(check(&root, system).is_err());
+        let work = Launchers::default().with("a", launcher(&[], &[&root.join("work")]));
+        assert!(check(&root, work).unwrap_err().contains("work"));
+        // Shared roots, and disjoint ones, are fine.
+        let shared = Launchers::default()
+            .with("a", launcher(&[], &[&src]))
+            .with("b", launcher(&[&src, &root.join("tools")], &[]));
+        assert_eq!(check(&root, shared), Ok(()));
+    }
+
+    #[test]
+    fn a_symlinked_spelling_does_not_hide_a_root_beneath_a_write_root() {
+        let root = dir("links");
+        let src = root.join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::os::unix::fs::symlink(src.join("sub"), root.join("alias")).unwrap();
+        let hidden = Launchers::default()
+            .with("a", launcher(&[], &[&src]))
+            .with("b", launcher(&[&root.join("alias")], &[]));
+        assert!(check(&root, hidden).is_err());
+    }
 }

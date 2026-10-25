@@ -383,7 +383,8 @@ fn reader_loop(
             Ok(data) if data.is_empty() => break, // EOF: child exited
             Ok(data) => {
                 let response = {
-                    let mut g = grid.lock();
+                    // Bulk: step aside for the UI thread between chunks.
+                    let mut g = grid.lock_bulk();
                     let mut parser = parser.lock();
                     parser.advance(&mut g, &data);
                     // host_out (clipboard/title relay) has no host here; dropped.

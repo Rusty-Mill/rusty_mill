@@ -246,8 +246,9 @@ async fn stream_over_a_socket_on_rusty_tokio() {
     let response = tokio::task::spawn_blocking(move || {
         let runtime = rusty_tokio::Builder::new_multi_thread().build().unwrap();
         runtime.block_on(async move {
-            let listener =
-                rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap();
             let server =
                 rusty_axum::serve(listener, None, rusty_axum::ServeOptions::default(), app)
                     .unwrap();

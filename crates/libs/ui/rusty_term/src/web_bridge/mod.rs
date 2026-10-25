@@ -93,7 +93,7 @@ impl Default for BridgeConfig {
 pub fn run(cfg: BridgeConfig) -> Result<(), Error> {
     let rt = rusty_tokio::Builder::new_multi_thread().build()?;
     rt.block_on(async move {
-        let listener = TcpListener::bind_addrs(cfg.listen.as_str()).await?;
+        let listener = TcpListener::bind(cfg.listen.as_str()).await?;
         eprintln!(
             "rusty_term web bridge: listening on ws://{} (shell: {})",
             listener.local_addr()?,
@@ -506,7 +506,7 @@ mod tests {
     /// fast.
     #[rusty_tokio::test]
     async fn handshake_read_times_out_on_a_stalled_peer() {
-        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let client = rusty_tokio::spawn(async move {

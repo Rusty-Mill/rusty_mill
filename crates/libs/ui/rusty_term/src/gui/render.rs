@@ -12,6 +12,7 @@ use winit::window::Window;
 use crate::core::{Cell, FrameView};
 
 use super::cpu;
+use super::damage::{Damage, Frame};
 use super::font::{FontCache, GlyphSource};
 
 /// Pixels of strip-colored band above the chrome bar's tabs, so a tab's top
@@ -21,6 +22,16 @@ use super::font::{FontCache, GlyphSource};
 /// row plus `pad` below the top.
 pub(super) fn bar_inset(pad: usize, cell_h: usize) -> usize {
     pad.min(cell_h / 6)
+}
+
+/// Pixel row where the pane grid starts: below the padding, pushed down by
+/// the chrome bar's [`bar_inset`] when there is one.
+pub(super) fn grid_top(chrome: &[Cell], pad: usize, cell_h: usize) -> usize {
+    if chrome.is_empty() {
+        pad
+    } else {
+        pad + bar_inset(pad, cell_h)
+    }
 }
 
 /// Search-match highlight, shared by both renderers: amber for a match, orange
@@ -91,11 +102,13 @@ pub(crate) trait Renderer {
     }
 }
 
-/// CPU compositor presented through `softbuffer`.
+/// CPU compositor presented through `softbuffer`. It repaints only the pane
+/// rows that changed since the frame whose pixels the buffer still holds.
 pub(crate) struct CpuRenderer {
     // The context must outlive the surface, so it is held alongside it.
     _context: softbuffer::Context<Arc<Window>>,
     surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
+    damage: Damage,
 }
 
 impl CpuRenderer {
@@ -105,6 +118,7 @@ impl CpuRenderer {
         Ok(CpuRenderer {
             _context: context,
             surface,
+            damage: Damage::default(),
         })
     }
 }
@@ -132,52 +146,143 @@ impl Renderer for CpuRenderer {
         let Ok(mut buffer) = self.surface.buffer_mut() else {
             return;
         };
+        let (w, h) = (width as usize, height as usize);
+        let frame = Frame::capture(
+            panes,
+            chrome,
+            status,
+            font.id(),
+            (w, h),
+            [divider, bg, bar_bg],
+            pad,
+        );
+        let plan = self.damage.plan(&frame, buffer.age());
+        let shown = self.damage.shown(&frame, &plan);
         composite(
             &mut buffer,
             panes,
             chrome,
             status,
             font,
-            width as usize,
-            height as usize,
+            w,
+            h,
             divider,
             bg,
             bar_bg,
             pad,
+            plan.rows(),
         );
-        let _ = buffer.present();
+        let presented = match shown {
+            Some(rows) => {
+                let top = grid_top(chrome, pad, font.cell_size().1);
+                let rects = damage_rects(panes, &rows, font.cell_size(), (pad, top), (w, h));
+                buffer.present_with_damage(&rects)
+            }
+            None => buffer.present(),
+        };
+        // A failed present leaves the buffer's age unknown to us.
+        match presented {
+            Ok(()) => self.damage.presented(frame),
+            Err(_) => self.damage.forget(),
+        }
     }
+}
+
+/// The window rectangles of the marked pane rows, one per run of rows.
+pub(super) fn damage_rects(
+    panes: &[PaneFrame],
+    rows: &[Vec<bool>],
+    (cw, ch): (usize, usize),
+    (ox, oy): (usize, usize),
+    (w, h): (usize, usize),
+) -> Vec<softbuffer::Rect> {
+    let mut rects = Vec::new();
+    for (p, marked) in panes.iter().zip(rows) {
+        let x0 = (ox + p.col0 * cw).min(w);
+        let x1 = (ox + (p.col0 + p.grid.cols) * cw).min(w);
+        let mut r = 0;
+        while r < marked.len() {
+            if !marked[r] {
+                r += 1;
+                continue;
+            }
+            let start = r;
+            while r < marked.len() && marked[r] {
+                r += 1;
+            }
+            let y0 = (oy + (p.row0 + start) * ch).min(h);
+            let y1 = (oy + (p.row0 + r) * ch).min(h);
+            let size = (
+                NonZeroU32::new((x1 - x0) as u32),
+                NonZeroU32::new((y1 - y0) as u32),
+            );
+            if let (Some(width), Some(height)) = size {
+                rects.push(softbuffer::Rect {
+                    x: x0 as u32,
+                    y: y0 as u32,
+                    width,
+                    height,
+                });
+            }
+        }
+    }
+    rects
 }
 
 /// Paint one frame into `buffer` (`width × height` pixels): everything
 /// [`Renderer::render`] does except presenting. Pure, so the frame-time
 /// bench drives the real frame path without a window.
+///
+/// `repaint` (per pane, per row; `None` repaints all) paints only those pane
+/// rows over a buffer that already holds a frame with the same layout: the
+/// padding, dividers, bars and marks are left as they are.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn composite(
     buffer: &mut [u32],
     panes: &[PaneFrame],
     chrome: &[Cell],
     status: &[Cell],
-    font: &mut FontCache,
+    font: &mut dyn GlyphSource,
     w: usize,
     h: usize,
     divider: u32,
     bg: u32,
     bar_bg: u32,
     pad: usize,
+    repaint: Option<&[Vec<bool>]>,
 ) {
-    buffer.fill(bg); // the padding band (and any slack) is background
     let (cw, ch) = font.cell_size();
     // The chrome bar sits `inset` px below the window's top edge (the
     // strip band shows above it); the grid shifts down by the same
     // amount so the pad-sized gap between bar and content survives —
     // the bottom pad absorbs the difference.
-    let inset = if chrome.is_empty() {
-        0
-    } else {
-        bar_inset(pad, ch)
-    };
-    let oy = pad + inset;
+    let oy = grid_top(chrome, pad, ch);
+    if let Some(rows) = repaint {
+        for (p, rows) in panes.iter().zip(rows) {
+            cpu::draw_grid(
+                buffer,
+                w,
+                h,
+                p.grid,
+                p.col0,
+                p.row0,
+                pad,
+                oy,
+                p.focused,
+                p.cursor_on,
+                p.hover_link,
+                font,
+                Some(rows),
+            );
+            let trail = Some(rows.as_slice());
+            cpu::draw_trail(
+                buffer, w, h, p.grid, p.col0, p.row0, pad, oy, &p.trail, font, trail,
+            );
+        }
+        return;
+    }
+    buffer.fill(bg); // the padding band (and any slack) is background
+    let inset = oy - pad;
     // Gaps between panes show the divider: fill the panes' bounding box
     // with it, then let the grids overpaint everything but the gaps.
     if let (Some(x1), Some(y1)) = (
@@ -214,9 +319,10 @@ pub(super) fn composite(
             p.cursor_on,
             p.hover_link,
             font,
+            None,
         );
         cpu::draw_trail(
-            buffer, w, h, p.grid, p.col0, p.row0, pad, oy, &p.trail, font,
+            buffer, w, h, p.grid, p.col0, p.row0, pad, oy, &p.trail, font, None,
         );
         cpu::draw_marks(buffer, w, h, p.col0, p.row0, pad, oy, &p.marks, font);
     }

@@ -47,7 +47,8 @@ pub fn blob(n: u32, len: usize) -> Blob {
 }
 
 pub fn listener() -> TcpListener {
-    TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap()
+    let std = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    TcpListener::from_std(std).unwrap()
 }
 
 /// Serves `handler` as a gRPC server on a fresh port.

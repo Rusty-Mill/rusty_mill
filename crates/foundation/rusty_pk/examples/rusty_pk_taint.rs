@@ -22,6 +22,10 @@
 //!   inside `ecdsa::output`, which handles only the published `r` and `s`.
 //! - `ecdsa-control`: a deliberate branch on a byte of the ECDSA private key, after signing;
 //!   must be caught, and must not pass as a verdict or an output report.
+//! - `pkcs8-ecdsa256`, `pkcs8-ed25519`: a PKCS#8 document whose private-key bytes (and only
+//!   those) are marked secret, then parsed. Structure is public. Every report must be an
+//!   `ecdh::ensure` verdict: ECDSA scalar valid, public key not at infinity, derived public
+//!   key equal to the encoded one (3); Ed25519 the last only (1). None anywhere else.
 //! - `control`: a deliberate branch on the secret; must be caught.
 //! - `ecdh-control`: a deliberate branch on the ECDH shared secret; must be caught.
 //!
@@ -31,6 +35,7 @@ use rusty_ct_check::taint::mark_secret;
 use rusty_pk::ecdh::{Curve, PrivateKey};
 use rusty_pk::ecdsa::{self, CurveId};
 use rusty_pk::ed25519::SigningKey;
+use rusty_pk::pkcs8;
 use rusty_pk::x25519::{agree, public_key, x25519};
 use std::hint::black_box;
 
@@ -71,6 +76,8 @@ fn main() {
         }
         "ecdsa-sign256" => ecdsa_sign(CurveId::P256, 32),
         "ecdsa-sign384" => ecdsa_sign(CurveId::P384, 48),
+        "pkcs8-ecdsa256" => pkcs8_ecdsa(),
+        "pkcs8-ed25519" => pkcs8_ed25519(),
         "ecdsa-control" => {
             let mut bytes = vec![0x77u8; 32];
             bytes[0] = 0x01;
@@ -95,7 +102,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("modes: x25519 | agree | control | ed25519-sign | ed25519-control | ecdsa-sign256 | ecdsa-sign384 | ecdsa-control | ecdh256 | ecdh384 | ecdh-import256 | ecdh-import384 | ecdh-generate256 | ecdh-generate384 | ecdh-control");
+            eprintln!("modes: x25519 | agree | control | ed25519-sign | ed25519-control | ecdsa-sign256 | ecdsa-sign384 | ecdsa-control | pkcs8-ecdsa256 | pkcs8-ed25519 | ecdh256 | ecdh384 | ecdh-import256 | ecdh-import384 | ecdh-generate256 | ecdh-generate384 | ecdh-control");
             std::process::exit(2);
         }
     }
@@ -177,4 +184,62 @@ fn ecdsa_sign(curve: CurveId, len: usize) {
         },
     );
     black_box(sig.is_ok());
+}
+
+/// A DER TLV with a short-form length (every part below is under 128 bytes).
+fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag, u8::try_from(body.len()).unwrap()];
+    out.extend_from_slice(body);
+    out
+}
+
+/// A PKCS#8 v1 P-256 document with its public key; the scalar's bytes are marked secret.
+fn pkcs8_ecdsa() {
+    let mut scalar = [0x77u8; 32];
+    scalar[0] = 0x01;
+    let public = ecdsa::SigningKey::from_bytes(CurveId::P256, &scalar)
+        .unwrap()
+        .public_key()
+        .unwrap();
+    let mut bits = vec![0u8];
+    bits.extend_from_slice(public.as_bytes());
+    let ec = tlv(
+        0x30,
+        &[
+            tlv(0x02, &[1]),
+            tlv(0x04, &scalar),
+            tlv(0xa1, &tlv(0x03, &bits)),
+        ]
+        .concat(),
+    );
+    let algorithm = [
+        &[0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01][..],
+        &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],
+    ]
+    .concat();
+    let doc = [tlv(0x02, &[0]), tlv(0x30, &algorithm), tlv(0x04, &ec)].concat();
+    let mut der = vec![0x30, 0x81, u8::try_from(doc.len()).unwrap()];
+    der.extend_from_slice(&doc);
+    let at = der.windows(32).position(|w| w == scalar).unwrap();
+    let der = black_box(der);
+    mark_secret(&der[at..at + 32]);
+    black_box(pkcs8::ecdsa(CurveId::P256, &der).is_ok());
+}
+
+/// A PKCS#8 v2 Ed25519 document with its public key; the seed's bytes are marked secret.
+fn pkcs8_ed25519() {
+    let seed = [0x42u8; 32];
+    let public = *SigningKey::from_seed(&seed).unwrap().public_key();
+    let mut bits = vec![0u8];
+    bits.extend_from_slice(&public);
+    let doc = [
+        tlv(0x02, &[1]),
+        tlv(0x30, &tlv(0x06, &[0x2b, 0x65, 0x70])),
+        tlv(0x04, &tlv(0x04, &seed)),
+        tlv(0x81, &bits),
+    ]
+    .concat();
+    let der = black_box(tlv(0x30, &doc));
+    mark_secret(&der[16..48]);
+    black_box(pkcs8::ed25519(&der).is_ok());
 }

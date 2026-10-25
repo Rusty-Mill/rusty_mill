@@ -93,7 +93,7 @@ async fn main() -> std::io::Result<()> {
         consumer_offsets: Arc::new(Mutex::new(consumer_offsets)),
     };
 
-    let listener = TcpListener::bind_addrs(addr.as_str()).await?;
+    let listener = TcpListener::bind(addr.as_str()).await?;
     println!("rusty_journal: listening on {addr}");
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

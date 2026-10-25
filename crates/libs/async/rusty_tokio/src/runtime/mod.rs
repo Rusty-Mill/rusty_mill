@@ -616,6 +616,25 @@ impl Builder {
         self
     }
 
+    /// Accepted for tokio compatibility and has no effect: every runtime
+    /// this crate builds always starts its I/O reactor and timer driver,
+    /// so there is nothing to opt into. tokio code that calls
+    /// `Builder::new_multi_thread().enable_all().build()` compiles
+    /// unchanged.
+    pub fn enable_all(self) -> Self {
+        self
+    }
+
+    /// See [`enable_all`](Self::enable_all): the reactor always runs.
+    pub fn enable_io(self) -> Self {
+        self
+    }
+
+    /// See [`enable_all`](Self::enable_all): the timer driver always runs.
+    pub fn enable_time(self) -> Self {
+        self
+    }
+
     pub fn build(self) -> std::io::Result<Runtime> {
         #[cfg(feature = "thread-per-core")]
         if self.flavor == Flavor::ThreadPerCore {
