@@ -19,6 +19,21 @@
 //! understated. The moderator pins both cache TTL variables to 1 hour, each
 //! turn's effective lifetime is logged, and the priced total must agree with
 //! the harness's own `total_cost_usd`.
+//!
+//! A turn that resumed a provider session (the moderator records it beside
+//! the log, see [`crate::moderator::resumed_path`]) is different: Claude Code
+//! (2.1.310) restores the session's saved totals on resume, so `modelUsage`
+//! and `total_cost_usd` carry the earlier turns too. Such a turn is priced
+//! from each result's `model_usage_since_last_result`, what its own process
+//! counted, summed over its results, with every write at the 1-hour rate and
+//! the per-model `costUSD` as the cross-check. A result without that field
+//! or without a `result_index`, or a gap in the index, makes the turn's cost
+//! unknown: a running total is never taken for one turn's cost. Both fields
+//! are, per Claude Code's own result schema, set by a stream-json `claude -p`
+//! run on every result it writes and missing only from older versions,
+//! relayed results and hand-built error results; the index counts from 0,
+//! and a write that fails still uses its number, so a gap is a lost result
+//! whose usage nothing states.
 
 use crate::moderator::log_path;
 use rusty_bbp::*;
@@ -270,6 +285,8 @@ struct ModelUsageLine {
     cache_read: u64,
     #[rusty_serde(rename = "cacheCreationInputTokens", default)]
     cache_creation: u64,
+    #[rusty_serde(rename = "costUSD", default)]
+    cost: Option<f64>,
 }
 
 impl ModelUsageLine {
@@ -326,6 +343,12 @@ struct Line {
     usage: Option<ResultUsage>,
     #[rusty_serde(rename = "modelUsage", default)]
     model_usage: BTreeMap<String, ModelUsageLine>,
+    /// What this process counted since its previous result (its start, for
+    /// its first), per model.
+    #[rusty_serde(default)]
+    model_usage_since_last_result: Option<BTreeMap<String, ModelUsageLine>>,
+    #[rusty_serde(default)]
+    result_index: Option<u64>,
 }
 
 /// A final `result` line.
@@ -535,11 +558,57 @@ pub enum Cost {
     Unknown(String),
 }
 
+/// What a resumed turn's own process counted, per model, and the `costUSD`
+/// it states, summed over every result: `Err` says why there is no such
+/// account (a result without it or without a `result_index`, a gap in the
+/// index, a missing cost). It does not judge whether the turn completed.
+/// Provenance: Claude Code 2.1.310's result schema, not a captured resumed
+/// run. Requiring an index is a conservative accounting policy: without it,
+/// sequence gaps cannot be detected; no live provider run verified this field.
+pub fn own_usage(stream: &str) -> Result<(BTreeMap<String, Usage>, f64), String> {
+    let mut models: BTreeMap<String, Usage> = BTreeMap::new();
+    let mut usd = 0.0;
+    let results = stream
+        .lines()
+        .filter_map(|l| rusty_serde::json::from_str::<Line>(l).ok())
+        .filter(|l| l.kind == "result");
+    for (n, l) in results.enumerate() {
+        match l.result_index {
+            Some(i) if i == n as u64 => {}
+            Some(i) => {
+                return Err(format!(
+                    "result_index {i} where {n} was due: a result is missing"
+                ))
+            }
+            None => return Err("a resumed turn's result is not numbered".into()),
+        }
+        let own = l
+            .model_usage_since_last_result
+            .ok_or("a resumed turn's result does not state its own usage")?;
+        for (m, u) in own {
+            usd += u.cost.ok_or(format!("{m}: no costUSD to cross-check"))?;
+            let e = models.entry(m).or_default();
+            *e = e.plus(u.usage());
+        }
+    }
+    Ok((models, usd))
+}
+
 /// Price a harness's output. `Err` means the output is refusable (a model with
 /// no price, fast mode, a priority tier, regional inference, or a total that
 /// disagrees with the harness's own `total_cost_usd`);
 /// `Ok(Unknown)` means there is nothing to price.
 pub fn price_turn(stream: &str, c: &Criteria) -> Result<Cost, String> {
+    price(stream, c, false)
+}
+
+/// [`price_turn`] for a turn that resumed a provider session: priced from
+/// [`own_usage`], never from the running totals.
+pub fn price_resumed_turn(stream: &str, c: &Criteria) -> Result<Cost, String> {
+    price(stream, c, true)
+}
+
+fn price(stream: &str, c: &Criteria, resumed: bool) -> Result<Cost, String> {
     let Some(r) = last_result(stream) else {
         return Ok(Cost::Unknown("no result line".into()));
     };
@@ -549,8 +618,16 @@ pub fn price_turn(stream: &str, c: &Criteria) -> Result<Cost, String> {
             r.is_error, r.terminal_reason
         )));
     }
-    let usage = r.models.values().fold(Usage::default(), |a, u| a.plus(*u));
-    if r.models.is_empty() || usage.total() == 0 {
+    let (own, own_usd) = match resumed {
+        true => match own_usage(stream) {
+            Ok((m, usd)) => (Some(m), Some(usd)),
+            Err(why) => return Ok(Cost::Unknown(why)),
+        },
+        false => (None, None),
+    };
+    let reported = own.as_ref().unwrap_or(&r.models);
+    let usage = reported.values().fold(Usage::default(), |a, u| a.plus(*u));
+    if reported.is_empty() || usage.total() == 0 {
         return Ok(Cost::Unknown("the result reports no usage".into()));
     }
     for (what, got, ok) in [
@@ -576,8 +653,10 @@ pub fn price_turn(stream: &str, c: &Criteria) -> Result<Cost, String> {
     // The main agent's split belongs to the run's one model (subagents are
     // forbidden); with several models it cannot be assigned, and every write
     // is priced at the 1-hour rate.
-    let mut models = r.models.clone();
-    if r.five_minute_writes > 0 && models.len() == 1 {
+    // A resumed turn's `usage` split may be a running total: its writes stay
+    // at the 1-hour rate.
+    let mut models = reported.clone();
+    if !resumed && r.five_minute_writes > 0 && models.len() == 1 {
         for u in models.values_mut() {
             u.cache_creation = CacheCreation {
                 ephemeral_5m_input_tokens: r.five_minute_writes,
@@ -586,8 +665,8 @@ pub fn price_turn(stream: &str, c: &Criteria) -> Result<Cost, String> {
         }
     }
     let usd = c.dollars(&models)?;
-    let total = r
-        .total_cost_usd
+    let total = own_usd
+        .or(r.total_cost_usd)
         .filter(|t| t.is_finite())
         .ok_or("the result has no total_cost_usd to cross-check")?;
     if (usd - total).abs() > COST_CROSS_CHECK * total + 1e-9 {
@@ -761,6 +840,7 @@ fn read_tokens(
             }
             out.errors.push(error);
         }
+        let resumed = crate::moderator::resumed_path(dir, task, *turn).exists();
         let lower = by_model(&text);
         // What was printed after the last result is spend that result does not
         // account for: the turn is not complete, and the floor counts it.
@@ -768,7 +848,7 @@ fn read_tokens(
         let trailing = by_model(tail);
         let cost = criteria
             .map(|c| {
-                price_turn(if tail.is_empty() { &text } else { head }, c)
+                price(if tail.is_empty() { &text } else { head }, c, resumed)
                     .map_err(|e| format!("turn {}: {e}", turn.0))
             })
             .transpose()?;
@@ -798,8 +878,16 @@ fn read_tokens(
             None => {
                 // No prices given: the tokens only, from the result if there is
                 // one, else the printed messages.
-                match last_result(&text).filter(|r| !r.is_error && !r.models.is_empty()) {
-                    Some(r) => (true, None, None, r.models),
+                // Either way only a turn whose last result is not an error
+                // is complete.
+                let own = last_result(&text)
+                    .filter(|r| !r.is_error)
+                    .and_then(|r| match resumed {
+                        true => own_usage(&text).ok().map(|(m, _)| m),
+                        false => Some(r.models),
+                    });
+                match own.filter(|m| !m.is_empty()) {
+                    Some(m) => (true, None, None, m),
                     None => (
                         false,
                         Some("no usable result line".into()),
@@ -815,7 +903,7 @@ fn read_tokens(
             (Some(_), Some(d)) => Some(d),
             (Some(c), None) => {
                 // The result's own account, if it has one, plus what followed it.
-                let head_floor = match price_turn(head, c) {
+                let head_floor = match price(head, c, resumed) {
                     Ok(Cost::Known { usd, .. }) => usd,
                     _ => c
                         .dollars(&by_model(head))
@@ -1021,6 +1109,80 @@ mod tests {
             .into(),
             min_commit: None,
         }
+    }
+
+    /// A completed result whose running totals carry an earlier turn
+    /// (input 1000, output 5000, $0.052) and, when given, what its own process
+    /// counted: `(index, own json)`.
+    fn resumed_result(own: Option<(u64, &str)>) -> String {
+        let model = "\"claude-sonnet-5-5\"";
+        let total = r#"{"inputTokens":1010,"outputTokens":5100,"cacheReadInputTokens":10000,"cacheCreationInputTokens":1000,"webSearchRequests":0,"costUSD":0.05802}"#;
+        let own = own.map_or(String::new(), |(i, o)| {
+            format!(r#","result_index":{i},"model_usage_since_last_result":{{{model}:{o}}}"#)
+        });
+        format!(
+            r#"{{"type":"result","is_error":false,"terminal_reason":"completed","total_cost_usd":0.05802,"modelUsage":{{{model}:{total}}}{own}}}"#
+        )
+    }
+
+    /// Its own share at Sonnet prices: 10 in, 100 out, 1000 1-hour writes,
+    /// 10000 reads, $0.00602.
+    const OWN: &str = r#"{"inputTokens":10,"outputTokens":100,"cacheReadInputTokens":10000,"cacheCreationInputTokens":1000,"webSearchRequests":0,"costUSD":0.00602}"#;
+
+    fn known_usd(cost: Cost) -> f64 {
+        match cost {
+            Cost::Known { usd, .. } => usd,
+            Cost::Unknown(why) => panic!("unknown: {why}"),
+        }
+    }
+
+    #[test]
+    fn a_resumed_turn_is_priced_from_its_own_process_not_the_running_totals() {
+        let stream = resumed_result(Some((0, OWN)));
+        let own = known_usd(price_resumed_turn(&stream, &criteria()).unwrap());
+        assert!((own - 0.00602).abs() < 1e-9, "{own}");
+        // Read as a fresh process, the same result counts the earlier turn.
+        let fresh = known_usd(price_turn(&stream, &criteria()).unwrap());
+        assert!(fresh > 5.0 * own, "{fresh}");
+    }
+
+    #[test]
+    fn a_resumed_turn_without_its_own_account_has_an_unknown_cost() {
+        let missing = resumed_result(None);
+        let gap = format!(
+            "{}\n{}",
+            resumed_result(Some((0, OWN))),
+            resumed_result(Some((2, OWN)))
+        );
+        for stream in [missing, gap] {
+            assert!(matches!(
+                price_resumed_turn(&stream, &criteria()),
+                Ok(Cost::Unknown(_))
+            ));
+        }
+        let unnumbered = resumed_result(Some((0, OWN))).replace(r#""result_index":0,"#, "");
+        assert!(matches!(
+            price_resumed_turn(&unnumbered, &criteria()),
+            Ok(Cost::Unknown(_))
+        ));
+        let uncosted = OWN.replace(r#","costUSD":0.00602"#, "");
+        assert!(matches!(
+            price_resumed_turn(&resumed_result(Some((0, &uncosted))), &criteria()),
+            Ok(Cost::Unknown(_))
+        ));
+    }
+
+    #[test]
+    fn a_resumed_turns_results_are_summed_and_cross_checked() {
+        let two = format!(
+            "{}\n{}",
+            resumed_result(Some((0, OWN))),
+            resumed_result(Some((1, OWN)))
+        );
+        let usd = known_usd(price_resumed_turn(&two, &criteria()).unwrap());
+        assert!((usd - 2.0 * 0.00602).abs() < 1e-9, "{usd}");
+        let understated = OWN.replace("0.00602", "0.003");
+        assert!(price_resumed_turn(&resumed_result(Some((0, &understated))), &criteria()).is_err());
     }
 
     fn usage(i: u64, o: u64, w: u64, r: u64) -> Usage {

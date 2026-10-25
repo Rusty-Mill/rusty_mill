@@ -80,11 +80,15 @@ pub(crate) struct Turn {
 
 impl Turn {
     /// Make the workspace and the pipes afresh and write the turn's MCP
-    /// configuration and launch `facts` beside the workspace.
+    /// configuration and launch `facts` beside the workspace. A turn of
+    /// provider session `session` keeps the session's home, where its
+    /// conversation is, and gets a fresh workspace at the session's one path,
+    /// which a provider may key its conversations by.
     pub fn prepare(
         cfg: &Config,
         sandbox: &HarnessSandbox,
         turn: TurnId,
+        session: Option<&str>,
         facts: &Facts,
     ) -> Result<Turn, String> {
         // The sandbox takes absolute roots only; a relative `--work` is
@@ -94,17 +98,32 @@ impl Turn {
         let base = work
             .join("turns")
             .join(Sha256::of(cfg.task.0.as_bytes()).hex());
-        let workspace = base.join(format!("turn-{}", turn.0));
+        let place =
+            session.map_or_else(|| format!("turn-{}", turn.0), |id| format!("session-{id}"));
+        let workspace = base.join(&place);
         let pipes = base.join(format!("turn-{}.mcp", turn.0));
-        let scratch = base.join(format!("turn-{}.home", turn.0));
+        let scratch = base.join(format!("{place}.home"));
         let facts_path = base.join(format!("turn-{}.facts.json", turn.0));
         let status =
             task_dir(&cfg.dir, "agents", &cfg.task).join(format!("turn-{}.sandbox", turn.0));
         for dir in [&base, &scratch] {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        let repo = if sandbox.checkout {
-            let repo = Repo::open(&cfg.repo)?;
+        let repo = sandbox
+            .checkout
+            .then(|| Repo::open(&cfg.repo))
+            .transpose()?;
+        // What a session's earlier turn left, if its cleanup never ran.
+        if workspace.exists() {
+            if let Some(repo) = &repo {
+                repo.remove(&workspace)?;
+            }
+            if workspace.exists() {
+                std::fs::remove_dir_all(&workspace)
+                    .map_err(|e| format!("{}: {e}", workspace.display()))?;
+            }
+        }
+        let repo = if let Some(repo) = repo {
             repo.add_detached(&workspace, "HEAD")?;
             Some(repo)
         } else {
