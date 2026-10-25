@@ -266,6 +266,12 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn('--packages "$packages" --full-if-most)" || components_status=$?', self.workflow)
         self.assertIn('emit_full "Affected crates span most of the workspace\'s components"', self.workflow)
 
+    def test_member_dependency_edits_keep_the_full_sweep(self) -> None:
+        # Feature unification can reach crates that never depend on the edited member.
+        self.assertIn("cargo_toml_diff.py --members /tmp/metadata.json \"$base\"", self.workflow)
+        self.assertIn('emit_full "Member dependency declarations changed ($dependency_edits)"', self.workflow)
+        self.assertIn('emit_full "Unable to compare member manifests with the event base"', self.workflow)
+
     def test_unrelated_base_falls_back_after_fetch_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
