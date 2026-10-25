@@ -7,12 +7,14 @@
 //! (negative IDs) and a roster entry with [`ScenePlayer::ghost`] set,
 //! which the page draws translucent over the recorded car. Frames stay at the
 //! capture rate, and time is rebased so the first recorded frame is `t = 0`.
+//! Each car also carries its velocity and controller input (b6), which the
+//! page draws as an arrow and an input strip.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rb_domain::{PhysicsFrame, Quat};
+use rb_domain::{ControllerInput, PhysicsFrame, Quat};
 
-use crate::scene::{Field, Scene, SceneCar, SceneFrame, ScenePlayer};
+use crate::scene::{Field, Scene, SceneCar, SceneFrame, SceneInput, ScenePlayer};
 
 /// The team colour used for every car: a capture has no teams.
 const CAPTURE_TEAM: i32 = 0;
@@ -144,9 +146,29 @@ fn cars_of(frame: &PhysicsFrame, ghost: bool) -> Result<Vec<SceneCar>, String> {
                 rot: quat_to_euler(car.rotation).map(|a| round(a, 3)),
                 boost: car.boost_amount.clamp(0.0, 100.0).round() as u8,
                 role: None,
+                v: Some(pos(car.velocity)),
+                input: car.input.map(scene_input),
             })
         })
         .collect()
+}
+
+/// The compact [`SceneInput`] for one frame's controller state.
+pub fn scene_input(input: ControllerInput) -> SceneInput {
+    let axis = |a: f32| round(a.clamp(-1.0, 1.0), 2);
+    let flag = |on: bool, bit: u8| if on { bit } else { 0 };
+    SceneInput {
+        axes: [
+            Some(axis(input.throttle)),
+            Some(axis(input.steer)),
+            input.pitch.map(axis),
+            input.yaw.map(axis),
+            input.roll.map(axis),
+        ],
+        buttons: flag(input.jump, SceneInput::JUMP)
+            | flag(input.boost, SceneInput::BOOST)
+            | flag(input.handbrake, SceneInput::HANDBRAKE),
+    }
 }
 
 /// One roster entry per player id seen in each run, recorded first.
@@ -309,6 +331,41 @@ mod tests {
         assert_ne!(pri(1_000_000, false), pri(0, true));
         assert_eq!(pri(i32::MAX as u32, true), Ok(i32::MIN));
         assert!(pri(u32::MAX, false).is_err());
+    }
+
+    #[test]
+    fn input_keeps_missing_axes_and_packs_buttons() {
+        let input = ControllerInput {
+            throttle: 1.0,
+            steer: -0.333,
+            pitch: Some(2.0),
+            yaw: None,
+            roll: Some(-0.5),
+            jump: true,
+            boost: false,
+            handbrake: true,
+        };
+        let got = scene_input(input);
+        assert_eq!(
+            got.axes,
+            [Some(1.0), Some(-0.33), Some(1.0), None, Some(-0.5)]
+        );
+        assert_eq!(got.buttons, SceneInput::JUMP | SceneInput::HANDBRAKE);
+        assert_eq!(scene_input(ControllerInput::default()).buttons, 0);
+    }
+
+    #[test]
+    fn cars_carry_velocity_and_input() {
+        let mut frame = with_car(frame_at(0.0));
+        frame.cars[0].velocity = rb_domain::Vec3::new(1.4, -2300.6, 0.0);
+        frame.cars[0].input = Some(ControllerInput::default());
+        let car = &cars_of(&frame, false).unwrap()[0];
+        assert_eq!(car.v, Some([1.0, -2301.0, 0.0]));
+        assert!(car.input.is_some());
+        assert_eq!(
+            cars_of(&with_car(frame_at(0.0)), false).unwrap()[0].input,
+            None
+        );
     }
 
     #[test]
