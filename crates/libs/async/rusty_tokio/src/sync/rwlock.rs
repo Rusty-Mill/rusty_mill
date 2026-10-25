@@ -6,8 +6,9 @@
 //! waiting, later readers queue behind it too rather than jumping ahead
 //! just because the write lock itself isn't held yet -- otherwise
 //! constant read traffic could starve a waiting writer indefinitely.
-//! Readers only ever check "is a writer queued at all" (not just "is one
-//! currently holding"), which is what makes that guarantee hold.
+//! A new reader checks "is a writer queued at all" (not just "is one
+//! currently holding"), which is what makes that guarantee hold; a reader
+//! already queued checks only for a writer queued ahead of it.
 //!
 //! Each waiting `read()`/`write()` holds a place in one FIFO queue until
 //! it acquires or its future is dropped; a dropped waiter leaves the
