@@ -445,24 +445,22 @@ impl AnsiParser {
                     }
                 }
                 ParserState::Esc => match b {
-                    // Fast path: a plain CSI wholly inside this chunk is
-                    // parsed and dispatched in one step. Its effects match
-                    // the byte-wise path below exactly.
-                    b'[' if let Some(n) = plain_csi_len(&bytes[i..]) => {
-                        self.param_buffer.clear();
-                        self.csi_private = false;
-                        self.csi_marker = 0;
-                        self.csi_intermediate = 0;
-                        self.state = ParserState::Ground;
-                        self.dispatch_csi(bytes[i + n - 1], g, &bytes[i..i + n - 1]);
-                        i += n;
-                    }
                     b'[' => {
                         self.param_buffer.clear();
                         self.csi_private = false;
                         self.csi_marker = 0;
                         self.csi_intermediate = 0;
-                        self.state = ParserState::Csi;
+                        // Fast path: a plain CSI wholly inside this chunk is
+                        // parsed and dispatched in one step, with the same
+                        // effects as the byte-wise `Csi` state.
+                        match plain_csi_len(&bytes[i..]) {
+                            Some(n) => {
+                                self.state = ParserState::Ground;
+                                self.dispatch_csi(bytes[i + n - 1], g, &bytes[i..i + n - 1]);
+                                i += n;
+                            }
+                            None => self.state = ParserState::Csi,
+                        }
                     }
                     b']' => {
                         self.osc_buffer.clear();
