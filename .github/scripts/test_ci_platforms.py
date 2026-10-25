@@ -244,7 +244,7 @@ class WorkflowPlatformTests(unittest.TestCase):
         # by every run, and PR saves would evict it from the quota.
         action = WORKFLOW.parents[1] / "actions" / "setup-build-env" / "action.yml"
         for path in (WORKFLOW, action):
-            blocks = re.findall(r"uses: Swatinem/rust-cache@\S+.*\n\s+with:\n((?:\s+[a-z-]+: .*\n)+)", path.read_text(encoding="utf-8"))
+            blocks = re.findall(r"uses: Swatinem/rust-cache@\S+.*\n(?:\s+if: .*\n)?\s+with:\n((?:\s+[a-z-]+: .*\n)+)", path.read_text(encoding="utf-8"))
             self.assertTrue(blocks, path.name)
             for block in blocks:
                 with self.subTest(workflow=path.name):
@@ -257,6 +257,17 @@ class WorkflowPlatformTests(unittest.TestCase):
         self.assertIn("cache-shared-key: clippy-${{ matrix.os }}\n", text)
         self.assertIn("cache-shared-key: test-${{ matrix.os }}\n", text)
         self.assertNotRegex(text, r"(?:cache-)?shared-key: .*matrix\.scope")
+
+    def test_main_saves_only_the_workspace_target_caches(self) -> None:
+        # The 10 GB quota holds the workspace clippy/test target caches only; a
+        # target cache per component job as well evicted them within hours.
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r"cache-shared-key: (\S+)", text), ["clippy-${{", "test-${{"])
+        steps = re.findall(r"uses: Swatinem/rust-cache@\S+.*\n(?:\s+[a-z-]+:.*\n)+", text)
+        self.assertEqual(len(steps), 2)
+        for step in steps:
+            with self.subTest(step=step):
+                self.assertIn("cache-targets: false", step)
 
 
 if __name__ == "__main__":
