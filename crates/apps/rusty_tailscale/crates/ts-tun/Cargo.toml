@@ -11,7 +11,7 @@ repository = "https://github.com/baileyrd/rusty_tailscale"
 layer = "apps"
 
 [dependencies]
-tokio = { workspace = true, features = ["net", "rt", "macros"] }
+rusty_tokio.workspace = true
 # rustils' Tun/virtual-link surface (rustils#56, decision D14) — justified in DESIGN.md:
 platform = { workspace = true }
 platform-linux = { workspace = true }

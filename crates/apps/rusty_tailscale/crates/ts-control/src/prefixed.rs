@@ -6,7 +6,7 @@ use std::io::Cursor;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 pub(crate) struct Prefixed<T> {
     prefix: Cursor<Vec<u8>>,

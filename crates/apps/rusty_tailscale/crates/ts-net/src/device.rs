@@ -4,11 +4,11 @@
 
 use std::collections::VecDeque;
 
+use rusty_tokio::sync::mpsc::UnboundedSender;
 use smoltcp::phy::{
     Checksum, ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken,
 };
 use smoltcp::time::Instant;
-use tokio::sync::mpsc::UnboundedSender;
 
 /// The tailnet MTU (matches `ts_tun::DEFAULT_MTU`); WireGuard + DERP framing
 /// fits comfortably under the physical path MTU.

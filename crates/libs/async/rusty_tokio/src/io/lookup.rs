@@ -1,5 +1,5 @@
-//! [`lookup_host`] resolves a hostname (`"example.com:443"`, or anything
-//! else implementing `std::net::ToSocketAddrs`) to one or more
+//! [`lookup_host`] resolves a hostname (`"example.com:443"`, or any other
+//! [`ToSocketAddrs`](super::ToSocketAddrs) form) to one or more
 //! [`SocketAddr`]s without blocking a worker thread.
 //!
 //! There's no portable non-blocking `getaddrinfo` -- DNS resolution (and
@@ -21,14 +21,24 @@ fn blocking_pool_panicked() -> io::Error {
     io::Error::other("the blocking-pool task resolving this host panicked")
 }
 
-/// Resolves `host` (a `"host:port"` string, an `(&str, u16)` pair, or
-/// anything else implementing `std::net::ToSocketAddrs`) to its
+/// Resolves `host` (a `"host:port"` string, borrowed or owned, an
+/// `(&str, u16)` pair, or any other [`super::ToSocketAddrs`] form) to its
 /// [`SocketAddr`]s, on the blocking-task pool rather than the calling
 /// task's own worker thread.
 ///
 /// # Panics
 /// Panics if called from a thread with no ambient runtime.
-pub async fn lookup_host<T>(host: T) -> io::Result<LookupHost>
+pub async fn lookup_host<T: super::ToSocketAddrs>(host: T) -> io::Result<LookupHost> {
+    // Through this crate's own `ToSocketAddrs`, as tokio's is: it takes
+    // borrowed forms (`&str`), resolves IP literals without a thread hop,
+    // and sends real hostnames to `resolve`.
+    let addrs = super::addr::resolve_all(&host).await?;
+    Ok(LookupHost(addrs.collect::<Vec<_>>().into_iter()))
+}
+
+/// The blocking `std` resolution behind [`lookup_host`], on the
+/// blocking-task pool.
+pub(crate) async fn resolve<T>(host: T) -> io::Result<LookupHost>
 where
     T: ToSocketAddrs + Send + 'static,
 {

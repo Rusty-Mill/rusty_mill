@@ -1,5 +1,5 @@
 //! The userspace TCP/IP stack task: owns the smoltcp interface and sockets,
-//! bridges each TCP connection to a tokio [`TcpStream`], and shuttles IP
+//! bridges each TCP connection to a `rusty_tokio` [`TcpStream`], and shuttles IP
 //! packets to/from the engine.
 //!
 //! smoltcp is single-threaded (no locks): one task owns all of it. Everything
@@ -17,12 +17,12 @@ use std::task::{Context, Poll, Waker};
 use std::time::Instant as StdInstant;
 
 use parking_lot::Mutex;
+use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use rusty_tokio::sync::{mpsc, oneshot};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
 use smoltcp::time::{Duration as SmolDuration, Instant as SmolInstant};
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{mpsc, oneshot};
 
 use crate::device::{ChannelDevice, MTU};
 
@@ -65,7 +65,7 @@ pub(crate) fn spawn(
 ) -> mpsc::UnboundedSender<Request> {
     let (req_tx, req_rx) = mpsc::unbounded_channel();
     let stack = Stack::new(req_tx.clone(), inbound_rx, req_rx, outbound_tx);
-    tokio::spawn(stack.run());
+    rusty_tokio::spawn(stack.run());
     req_tx
 }
 
@@ -164,7 +164,7 @@ impl Stack {
 
             let delay = self.iface.poll_delay(self.now(), &self.sockets);
 
-            tokio::select! {
+            rusty_tokio::select! {
                 pkt = self.inbound_rx.recv() => match pkt {
                     Some(p) => self.device.push_rx(p),
                     None => break, // engine gone
@@ -385,7 +385,9 @@ impl Stack {
 /// pending", handled by the `select!` guard.
 async fn sleep_for(delay: Option<SmolDuration>) {
     match delay {
-        Some(d) => tokio::time::sleep(std::time::Duration::from_micros(d.total_micros())).await,
+        Some(d) => {
+            rusty_tokio::time::sleep(std::time::Duration::from_micros(d.total_micros())).await
+        }
         None => std::future::pending().await,
     }
 }
@@ -519,8 +521,8 @@ impl Drop for TcpStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_tokio::io::AsyncReadExt;
     use std::time::Duration;
-    use tokio::io::AsyncReadExt;
 
     /// RFC 1071 Internet checksum.
     fn checksum(data: &[u8]) -> u16 {
@@ -596,13 +598,13 @@ mod tests {
     /// Drives the stack with no engine and no network: inject a TCP handshake
     /// for a bound port and confirm we accept the connection and can read the
     /// bytes the peer sent — the whole userspace stack, exercised hermetically.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn accepts_a_handshake_and_reads_payload() {
         let (inbound_tx, inbound_rx) = mpsc::channel(16);
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (req_tx, req_rx) = mpsc::unbounded_channel();
         let stack = Stack::new(req_tx.clone(), inbound_rx, req_rx, outbound_tx);
-        tokio::spawn(stack.run());
+        rusty_tokio::spawn(stack.run());
 
         let our = Ipv4Addr::new(100, 64, 0, 1);
         let peer = Ipv4Addr::new(100, 64, 0, 9);
@@ -615,7 +617,7 @@ mod tests {
         inbound_tx
             .try_send(tcp_segment(peer, our, 40000, 8080, 100, 0, SYN, &[]))
             .unwrap();
-        let synack = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+        let synack = rusty_tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
             .await
             .expect("stack should emit a SYN-ACK")
             .expect("outbound channel open");
@@ -650,14 +652,14 @@ mod tests {
             .unwrap();
 
         // The listener should hand us the accepted connection.
-        let mut stream = tokio::time::timeout(Duration::from_secs(2), accept_rx.recv())
+        let mut stream = rusty_tokio::time::timeout(Duration::from_secs(2), accept_rx.recv())
             .await
             .expect("accept should complete")
             .expect("a connection");
         assert_eq!(stream.peer_addr().ip(), IpAddr::V4(peer));
 
         let mut buf = [0u8; 64];
-        let n = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf))
+        let n = rusty_tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf))
             .await
             .expect("read should complete")
             .expect("read ok");
