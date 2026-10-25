@@ -92,7 +92,7 @@ mod tests {
         assert_eq!(backend.endpoint, "https://search.rusty-mill.org");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn every_method_reports_not_implemented_instead_of_fake_success() {
         let backend = CloudSearchBackend::new("https://search.rusty-mill.org");
 

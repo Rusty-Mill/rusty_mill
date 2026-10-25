@@ -37,8 +37,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use rusty_request::{Client, Method, RequestBuilder, Response};
+use rusty_tokio::sync::RwLock;
 use serde_json::{json, Map, Value};
-use tokio::sync::RwLock;
 
 use rusty_search_core::{
     BoxError, Document, Hit, Result, Schema as CoreSchema, SearchBackend, SearchError,
@@ -431,7 +431,7 @@ mod tests {
             .build()
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_sends_mapping_and_registers_locally() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -449,7 +449,7 @@ mod tests {
         assert!(backend.index_exists("articles").await.unwrap());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_rejects_duplicates_without_a_second_request() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -473,7 +473,7 @@ mod tests {
         // `.expect(1)` above is checked on drop - a second HTTP call would fail it.
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_maps_es_conflict_response_to_already_exists() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -492,7 +492,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexAlreadyExists(name) if name == "articles"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn operations_on_unknown_index_error_without_any_http_call() {
         // No mocks registered at all - if any of these made a request, they'd
         // get a connection error, not `IndexNotFound`.
@@ -531,7 +531,7 @@ mod tests {
         backend
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn index_batch_sends_bulk_ndjson() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -568,7 +568,7 @@ mod tests {
         assert_eq!(source["title"], "Rust async search");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn index_batch_surfaces_per_item_bulk_errors() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -589,7 +589,7 @@ mod tests {
         assert!(matches!(err, SearchError::Backend(_)));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn delete_treats_404_as_a_no_op() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -618,7 +618,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn commit_calls_refresh() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -634,7 +634,7 @@ mod tests {
         backend.commit("articles").await.unwrap();
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn search_sends_translated_query_and_parses_hits() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -675,7 +675,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn search_maps_an_es_side_404_to_index_not_found() {
         // Covers the cluster's view diverging from our local registry (e.g.
         // the index was dropped through some other client).
@@ -697,7 +697,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexNotFound(name) if name == "articles"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn basic_auth_header_is_sent() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -714,7 +714,7 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_percent_encodes_a_traversal_shaped_name() {
         // A name like "../_cluster/settings" must not be able to escape the
         // index namespace and reach an arbitrary cluster endpoint once
@@ -740,7 +740,7 @@ mod tests {
         assert_eq!(requests[0].url.path(), "/..%2F_cluster%2Fsettings");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn delete_index_percent_encodes_a_traversal_shaped_name() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -768,7 +768,7 @@ mod tests {
         assert_eq!(delete_request.url.path(), "/..%2F_cluster%2Fsettings");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn search_percent_encodes_a_traversal_shaped_index_name() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -805,7 +805,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn commit_percent_encodes_a_traversal_shaped_index_name() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))

@@ -14,7 +14,7 @@ it to search.
 use std::sync::Arc;
 use rusty_search::{Document, Query, Schema, SearchBackend};
 
-#[tokio::main]
+#[rusty_tokio::main]
 async fn main() -> rusty_search::Result<()> {
     // Swap this line for `TantivyBackend::in_memory()` (or your own
     // `SearchBackend` impl) and every line below stays exactly the same.

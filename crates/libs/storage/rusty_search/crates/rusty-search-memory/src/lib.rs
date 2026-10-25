@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
+use rusty_tokio::sync::RwLock;
 
 use rusty_search_core::{
     Document, DocumentId, Hit, Result, Schema, SearchBackend, SearchError, SearchRequest,
@@ -178,7 +178,7 @@ mod tests {
         backend
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_rejects_duplicates() {
         let backend = MemoryBackend::new();
         backend
@@ -192,7 +192,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexAlreadyExists(name) if name == "a"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn operations_on_missing_index_error() {
         let backend = MemoryBackend::new();
         let err = backend
@@ -202,7 +202,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexNotFound(name) if name == "missing"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn search_full_text_and_filters() {
         let backend = seeded_backend().await;
 
@@ -226,7 +226,7 @@ mod tests {
         assert_eq!(results.hits[0].id, "1");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn search_respects_sort_and_pagination() {
         let backend = seeded_backend().await;
 
@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(results.hits[0].id, "1"); // views: 3 -> 50 then 100, offset 1 skips "3"
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn delete_removes_document_from_results() {
         let backend = seeded_backend().await;
         backend.delete("articles", "1").await.unwrap();
@@ -257,7 +257,7 @@ mod tests {
         assert!(results.hits.iter().all(|h| h.id != "1"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn index_without_id_gets_one_assigned() {
         let backend = MemoryBackend::new();
         backend
@@ -276,7 +276,7 @@ mod tests {
         assert!(!results.hits[0].id.is_empty());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn auto_id_does_not_collide_with_prior_explicit_id() {
         let backend = MemoryBackend::new();
         backend
@@ -311,7 +311,7 @@ mod tests {
         assert!(results.hits.iter().any(|h| h.id != "_auto_1"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn auto_id_does_not_collide_with_explicit_id_in_same_batch() {
         let backend = MemoryBackend::new();
         backend
@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(explicit.hits[0].id, "_auto_1");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn delete_index_removes_all_documents() {
         let backend = seeded_backend().await;
         backend.delete_index("articles").await.unwrap();
@@ -354,7 +354,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexNotFound(_)));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn vector_search_is_rejected() {
         let backend = seeded_backend().await;
         assert!(!backend.supports_vector_search());
