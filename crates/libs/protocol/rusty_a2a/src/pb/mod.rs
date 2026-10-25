@@ -10,14 +10,11 @@
 //! (`part::Content`), `optional` scalars are `Option`s, and a map is a `BTreeMap` (sorted, so
 //! encoding is deterministic). Unknown fields are dropped on decode.
 
-mod service;
-
 use std::collections::BTreeMap;
 
 pub use rusty_prost::wkt::{Empty, Struct, Timestamp, Value};
 pub use rusty_prost::UnknownEnumValue;
 use rusty_prost::{message, oneof, open_enum};
-pub use service::{a2a_service_client, a2a_service_server};
 
 open_enum! {
     /// The lifecycle state of a [`Task`].
@@ -549,4 +546,33 @@ message! {
         1 configs: Vec<TaskPushNotificationConfig> = rep_msg,
         2 next_page_token: String = string,
     }
+}
+
+/// The path of each `A2AService` RPC in a request: `/{package}.{Service}/{Method}`.
+pub mod path {
+    /// `SendMessage`.
+    pub const SEND_MESSAGE: &str = "/lf.a2a.v1.A2AService/SendMessage";
+    /// `SendStreamingMessage`.
+    pub const SEND_STREAMING_MESSAGE: &str = "/lf.a2a.v1.A2AService/SendStreamingMessage";
+    /// `GetTask`.
+    pub const GET_TASK: &str = "/lf.a2a.v1.A2AService/GetTask";
+    /// `ListTasks`.
+    pub const LIST_TASKS: &str = "/lf.a2a.v1.A2AService/ListTasks";
+    /// `CancelTask`.
+    pub const CANCEL_TASK: &str = "/lf.a2a.v1.A2AService/CancelTask";
+    /// `SubscribeToTask`.
+    pub const SUBSCRIBE_TO_TASK: &str = "/lf.a2a.v1.A2AService/SubscribeToTask";
+    /// `CreateTaskPushNotificationConfig`.
+    pub const CREATE_TASK_PUSH_NOTIFICATION_CONFIG: &str =
+        "/lf.a2a.v1.A2AService/CreateTaskPushNotificationConfig";
+    /// `GetTaskPushNotificationConfig`.
+    pub const GET_TASK_PUSH_NOTIFICATION_CONFIG: &str = "/lf.a2a.v1.A2AService/GetTaskPushNotificationConfig";
+    /// `ListTaskPushNotificationConfigs`.
+    pub const LIST_TASK_PUSH_NOTIFICATION_CONFIGS: &str =
+        "/lf.a2a.v1.A2AService/ListTaskPushNotificationConfigs";
+    /// `DeleteTaskPushNotificationConfig`.
+    pub const DELETE_TASK_PUSH_NOTIFICATION_CONFIG: &str =
+        "/lf.a2a.v1.A2AService/DeleteTaskPushNotificationConfig";
+    /// `GetExtendedAgentCard`.
+    pub const GET_EXTENDED_AGENT_CARD: &str = "/lf.a2a.v1.A2AService/GetExtendedAgentCard";
 }

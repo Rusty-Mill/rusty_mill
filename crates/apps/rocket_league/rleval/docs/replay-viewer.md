@@ -69,6 +69,15 @@ writing, and publishes a completely serialized file without overwriting data. Th
 overlays (events, roles, stats, win probability) stay empty. The viewer reads
 capture files through `rb_capture_ingest`, so it never links the physics.
 
+Each capture car also carries its velocity (`v`, uu/s) and controller input
+(`input`: `axes` = `[throttle, steer, pitch, yaw, roll]`, `null` where the
+source cannot recover an axis, and a `buttons` bit set, 1 jump, 2 boost,
+4 handbrake). The page draws the velocity as an arrow on each car (Settings →
+velocity) and the input as a strip above the timeline: one lane per control,
+the recording solid and the sim run dashed and pale, for the followed car or
+else the first recorded car. Replay scenes carry neither field, so neither
+appears there.
+
 
 Filmic (ACES) tone mapping, real soft shadow maps, a painted pitch (lines, centre
 circle, goal areas, mow stripes), goal nets, four-wheeled cars, a gradient sky,
