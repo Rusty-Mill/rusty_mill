@@ -6,3 +6,4 @@ changelog: rusty-mcp's integration tests mount the MCP handler through a test-on
 
 - **Changed:** `tests/support/mcp.rs` mounts the blocking `rusty_mcp_server` handler in an axum router as `rusty_mcp_axum` did: same 1 MiB body limit, path, `VerifiedToken` principal, default headers and streamed replies. The tower layers are still tested in an axum stack.
 - **Changed:** the `rusty_mcp_axum` dev-dependency is removed (`http-body`, `rusty_serve` and tokio `sync` added, all already in the workspace). axum stays a dev-dependency until the layers' tests move to another stack. No shipped code changes; one doc comment in `auth` no longer names `rusty_mcp_axum`.
+- **Changed:** the root `[workspace.dependencies]` entry for `rusty_mcp_axum` is removed: nothing depends on the crate any more. The crate itself stays a workspace member until its deletion PR.
