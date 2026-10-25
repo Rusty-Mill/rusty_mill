@@ -1,4 +1,4 @@
-//! RTCP v2 attach validation and bounded chunk assembly.
+//! RTCP v3 attach validation and bounded chunk assembly.
 use rusty_mux_core::Size;
 use rusty_term_core::{AnsiParser, Grid};
 
@@ -27,7 +27,7 @@ pub fn validate_size(size: Size) -> Result<(), String> {
 pub(crate) fn grid(size: Size) -> Grid {
     Grid::new(size.cols().into(), size.rows().into())
 }
-/// Decode one complete RTCP v2 headless checkpoint.
+/// Decode one complete RTCP v3 headless checkpoint.
 pub fn restore(data: &[u8]) -> Result<(Grid, AnsiParser), String> {
     rusty_term_core::checkpoint::decode(data).map_err(|e| e.to_string())
 }
