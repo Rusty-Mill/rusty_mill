@@ -37,10 +37,18 @@ impl Served {
     }
 }
 
+/// A loopback listener on an ephemeral port, registered with the runtime
+/// entered by the caller (`TcpListener::bind` is async).
+fn local_listener() -> rusty_tokio::io::TcpListener {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    rusty_tokio::io::TcpListener::from_std(listener).unwrap()
+}
+
 fn serve_router(router: Router, tls: Option<TlsAcceptor>, options: ServeOptions) -> Served {
     let runtime = rusty_tokio::Runtime::new().unwrap();
     let _guard = runtime.enter();
-    let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = local_listener();
     let server = router.serve(listener, tls, options).unwrap();
     drop(_guard);
     Served {
@@ -167,7 +175,7 @@ async fn a_malformed_status_details_header_is_an_error_and_not_a_panic() {
     // client's call with this one header. The status keeps its code and message.
     let runtime = rusty_tokio::Runtime::new().unwrap();
     let _guard = runtime.enter();
-    let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = local_listener();
     let server = serve(
         listener,
         None,
