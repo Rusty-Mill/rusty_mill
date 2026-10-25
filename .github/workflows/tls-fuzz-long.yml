@@ -31,12 +31,22 @@ env:
 
 jobs:
   targets:
-    name: list targets
+    name: check inputs and list targets
     runs-on: ubuntu-latest
     outputs:
       names: ${{ steps.list.outputs.names }}
+      seconds: ${{ steps.seconds.outputs.seconds }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Before any fuzz job starts: a whole number in 1..19800 (0 would mean
+      # no limit to libFuzzer). The input reaches the script only through env.
+      - id: seconds
+        env:
+          SECONDS_INPUT: ${{ inputs.seconds }}
+        # A refusal fails the step (bash -e); an accepted value is already canonical.
+        run: |
+          python3 .github/scripts/fuzz_seconds.py "$SECONDS_INPUT"
+          echo "seconds=$SECONDS_INPUT" >> "$GITHUB_OUTPUT"
       - id: list
         shell: python
         run: |
@@ -70,18 +80,12 @@ jobs:
         shell: bash
         # Inputs reach the script through the environment, never interpolated.
         env:
-          SECONDS_PER_TARGET: ${{ inputs.seconds }}
+          SECONDS_PER_TARGET: ${{ needs.targets.outputs.seconds }}
           BACKEND: ${{ inputs.backend }}
           FUZZ_TARGETS: ${{ matrix.target }}
           # The installed cargo-fuzz is a musl binary; see the smoke job.
           FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu
         run: |
-          case "$SECONDS_PER_TARGET" in
-            ''|*[!0-9]*) echo "::error::seconds must be a whole number"; exit 1 ;;
-          esac
-          if [ "$SECONDS_PER_TARGET" -gt 19800 ]; then
-            echo "::error::at most 19800 s per target fits the job limit"; exit 1
-          fi
           export RUSTFLAGS="--cfg rusty_tls_handrolled"
           if [ "$BACKEND" = native ]; then
             RUSTFLAGS="$RUSTFLAGS --cfg rusty_tls_native_crypto"
