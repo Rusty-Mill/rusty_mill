@@ -198,11 +198,16 @@ reach a libs crate by relative path break again at that point).
    suite includes it as an accepted case so the exemption can't silently
    widen later. It is wired into the existing `dependency-policy` job.
 3. A generated `docs/WORKSPACE-MAP.md` (layer, family, crate, one-line
-   description from `[package] description`, dependents count) replaces
+   description from `[package] description`) replaces
    the hand-maintained "How the crates relate" narrative in `README.md`;
    the README keeps its history section and links to the generated map.
    CI fails if the committed map is stale, the way nexus's
    `check_ipc_drift.sh` already works for its IPC schemas.
+   *Amended 2026-10-25 (#1034):* the map first carried a dependents-count
+   column. It changed on nearly every dependency edit (30 of 33 changed rows
+   from 2026-10-10 to 10-25), so unrelated PRs rewrote and line-merged the
+   same rows into duplicates that failed this check. The column is dropped;
+   `generate_workspace_map.py METADATA --counts` prints the counts on demand.
 
 **What each move phase touches besides `git mv`.**
 
