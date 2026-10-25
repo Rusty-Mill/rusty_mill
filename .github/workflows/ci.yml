@@ -1717,6 +1717,8 @@ jobs:
           cache-dependency-path: crates/apps/rocket_league/crates/replay-viewer/tests/package-lock.json
       - name: Generate offline viewer
         run: cargo run -q -p replay-viewer -- crates/apps/rocket_league/rleval/assets/replays/42f2.replay --offline --hz 15 --html "$RUNNER_TEMP/viewer.html"
+      - name: Input strip helpers
+        run: node crates/apps/rocket_league/crates/replay-viewer/tests/input_strip.mjs
       - name: Install puppeteer
         working-directory: crates/apps/rocket_league/crates/replay-viewer/tests
         run: npm ci --no-audit --no-fund
