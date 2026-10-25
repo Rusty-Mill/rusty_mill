@@ -420,3 +420,24 @@ fn runtime_name_defaults_to_none_then_reflects_the_builder() {
 fn runtime_name_panics_on_an_empty_name() {
     let _ = Runtime::builder().name("");
 }
+
+/// `Handle::block_on` from a plain thread outside the runtime can spawn and
+/// sleep on it, on both flavors.
+#[test]
+fn handle_block_on_drives_a_future_from_an_outside_thread() {
+    for rt in [
+        rusty_tokio::Runtime::new().unwrap(),
+        rusty_tokio::Builder::new_current_thread().build().unwrap(),
+    ] {
+        let handle = rt.handle().clone();
+        let got = std::thread::spawn(move || {
+            handle.block_on(async {
+                rusty_tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                rusty_tokio::spawn(async { 21 * 2 }).await.unwrap()
+            })
+        })
+        .join()
+        .unwrap();
+        assert_eq!(got, 42);
+    }
+}

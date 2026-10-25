@@ -17,7 +17,7 @@ use rusty_tokio::time::timeout;
 /// A connected pair of loopback sockets. (Not `duplex`: dropping one half of
 /// a `DuplexStream` can deadlock, see the PR description.)
 async fn pair() -> (TcpStream, TcpStream) {
-    let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (a, b) = rusty_tokio::join!(TcpStream::connect(addr), listener.accept());
     (a.unwrap(), b.unwrap().0)
@@ -319,6 +319,229 @@ async fn a_transport_that_dies_fails_pending_calls() {
         .await
         .unwrap()
         .is_err());
+}
+
+// ---- a stream that goes away while the application is idle -----------------
+
+/// Awaits `f`, which must finish promptly. A `timeout` polls its future once more when the
+/// deadline passes, so a lost wake-up would otherwise be rescued after the full wait and pass.
+async fn promptly<F: std::future::Future>(what: &str, f: F) -> F::Output {
+    let start = std::time::Instant::now();
+    let out = timeout(Duration::from_secs(5), f)
+        .await
+        .unwrap_or_else(|_| panic!("{what}"));
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{what}: finished only when the timeout polled again, so a wake-up was lost"
+    );
+    out
+}
+
+/// A connected client and server; the client's driver task is returned so a test can kill it.
+async fn idle_pair() -> (
+    ClientHandle,
+    driver::Acceptor,
+    rusty_tokio::task::JoinHandle<Result<(), Error>>,
+) {
+    let (a, b) = pair().await;
+    let (h, cdrv) = driver::client(a, ClientBuilder::new());
+    let (acceptor, sdrv) = driver::server(b, ServerBuilder::new());
+    let client_task = rusty_tokio::spawn(cdrv);
+    rusty_tokio::spawn(sdrv);
+    (h, acceptor, client_task)
+}
+
+#[rusty_tokio::test]
+async fn closed_stays_pending_while_the_stream_lives() {
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (_send, _resp) = h.send_request(request("/svc/Idle"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    assert!(timeout(Duration::from_millis(150), respond.closed())
+        .await
+        .is_err());
+}
+
+#[rusty_tokio::test]
+async fn closed_completes_when_the_client_resets_after_the_request_was_fully_read() {
+    // The server forgets such a stream outright, so a write only learns of it later.
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (mut send, _resp) = h.send_request(request("/svc/Cancel"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    let closed = respond.closed();
+    rusty_tokio::spawn(async move {
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+        send.reset(ErrorCode::Cancel);
+    });
+    promptly("the reset was never reported", closed).await;
+}
+
+#[rusty_tokio::test]
+async fn closed_completes_when_the_client_resets_a_request_still_being_sent() {
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (mut send, _resp) = h.send_request(request("/svc/Cancel"), false).await.unwrap();
+    send.send_data(b"part".to_vec(), false).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    let closed = respond.closed();
+    rusty_tokio::spawn(async move {
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+        send.reset(ErrorCode::Cancel);
+    });
+    promptly("the reset was never reported", closed).await;
+}
+
+#[rusty_tokio::test]
+async fn closed_completes_after_the_response_has_started() {
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (mut send, _resp) = h.send_request(request("/svc/Cancel"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    let reply = respond.send_response(ok_response(), false).await.unwrap();
+    let closed = reply.closed();
+    rusty_tokio::spawn(async move {
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+        send.reset(ErrorCode::Cancel);
+    });
+    promptly("the reset was never reported", closed).await;
+}
+
+#[rusty_tokio::test]
+async fn closed_completes_when_the_connection_dies() {
+    let (h, mut acceptor, client) = idle_pair().await;
+    let (_send, _resp) = h.send_request(request("/svc/Idle"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    let closed = respond.closed();
+    client.abort();
+    drop(h);
+    promptly("the dead connection was never reported", closed).await;
+}
+
+#[rusty_tokio::test]
+async fn every_waiting_closed_future_is_woken() {
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (mut send, _resp) = h.send_request(request("/svc/Cancel"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    let (first, second) = (respond.closed(), respond.closed());
+    rusty_tokio::spawn(async move {
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+        send.reset(ErrorCode::Cancel);
+    });
+    promptly("one of the waiters was never woken", async {
+        rusty_tokio::join!(first, second)
+    })
+    .await;
+}
+
+#[rusty_tokio::test]
+async fn closed_completes_when_the_stream_finishes_normally() {
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (_send, resp) = h.send_request(request("/svc/Done"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    // Already waiting when the stream ends, so only a wake-up can resolve it.
+    let waiting = rusty_tokio::spawn(respond.closed());
+    rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut reply = respond.send_response(ok_response(), false).await.unwrap();
+    reply
+        .send_trailers(vec![hf("grpc-status", "0")])
+        .await
+        .unwrap();
+    let mut resp = resp.await.unwrap();
+    drain(&mut resp.body).await.unwrap();
+    promptly("a finished stream was never reported", waiting)
+        .await
+        .unwrap();
+}
+
+#[rusty_tokio::test]
+async fn closed_is_ready_at_once_for_a_stream_that_is_already_gone() {
+    let (h, mut acceptor, _client) = idle_pair().await;
+    let (mut send, _resp) = h.send_request(request("/svc/Cancel"), true).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    send.reset(ErrorCode::Cancel);
+    // Give the reset time to arrive, then ask afterwards.
+    rusty_tokio::time::sleep(Duration::from_millis(200)).await;
+    timeout(Duration::from_secs(1), respond.closed())
+        .await
+        .expect("a stream that was already gone");
+}
+
+/// Leave the completed response's headers, DATA and trailers unread. A PING
+/// acknowledgement is a wire-order barrier: the client has processed them all.
+async fn retained_response_closed_on_driver_death(register_before: bool) {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
+
+    #[derive(Default)]
+    struct Woken(AtomicBool);
+    impl Wake for Woken {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let (h, mut acceptor, client) = idle_pair().await;
+    let (send, response) = h
+        .send_request(request("/svc/Retained"), true)
+        .await
+        .unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    let mut reply = respond.send_response(ok_response(), false).await.unwrap();
+    reply.send_data(b"buffered".to_vec(), false).await.unwrap();
+    reply
+        .send_trailers(vec![hf("grpc-status", "0")])
+        .await
+        .unwrap();
+    promptly("the completed response was not received", h.ping())
+        .await
+        .unwrap();
+
+    let mut waiters = [send.closed(), send.closed()];
+    let probes = [Arc::new(Woken::default()), Arc::new(Woken::default())];
+    let wakers = probes.each_ref().map(|p| Waker::from(p.clone()));
+    if register_before {
+        for (waiter, waker) in waiters.iter_mut().zip(&wakers) {
+            assert!(Pin::new(waiter)
+                .poll(&mut Context::from_waker(waker))
+                .is_pending());
+        }
+    }
+    client.abort();
+    assert!(client.await.unwrap_err().is_cancelled());
+    if register_before {
+        // Assert the actual wakes before polling again: a timeout could mask a lost wake.
+        for probe in &probes {
+            assert!(
+                probe.0.load(Ordering::SeqCst),
+                "retained stream waiter was not woken"
+            );
+        }
+    } else {
+        waiters = [send.closed(), send.closed()];
+    }
+    for (waiter, waker) in waiters.iter_mut().zip(&wakers) {
+        assert!(Pin::new(waiter)
+            .poll(&mut Context::from_waker(waker))
+            .is_ready());
+    }
+
+    let mut response = response
+        .await
+        .expect("buffered headers survive driver death");
+    assert_eq!(response.headers, ok_response());
+    let (data, trailers) = drain(&mut response.body).await.unwrap();
+    assert_eq!(data, b"buffered");
+    assert_eq!(trailers, Some(vec![hf("grpc-status", "0")]));
+}
+
+#[rusty_tokio::test]
+async fn retained_response_closed_waiters_registered_before_driver_death_are_woken() {
+    retained_response_closed_on_driver_death(true).await;
+}
+
+#[rusty_tokio::test]
+async fn retained_response_closed_waiters_registered_after_driver_death_are_ready() {
+    retained_response_closed_on_driver_death(false).await;
 }
 
 // ---- a raw, hostile peer ---------------------------------------------------

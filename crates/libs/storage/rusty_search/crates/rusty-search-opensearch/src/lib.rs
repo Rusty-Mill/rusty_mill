@@ -118,7 +118,7 @@ mod tests {
             .build()
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_reaches_the_server_through_the_wrapper() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -136,7 +136,7 @@ mod tests {
         assert!(backend.index_exists("articles").await.unwrap());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_maps_a_conflict_response_to_already_exists() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -155,7 +155,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexAlreadyExists(name) if name == "articles"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn operations_on_unknown_index_error_without_any_http_call() {
         let server = MockServer::start().await;
         let backend = OpenSearchBackend::new(server.uri());
@@ -181,7 +181,7 @@ mod tests {
         backend
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn index_batch_search_delete_and_commit_round_trip_through_the_wrapper() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -240,7 +240,7 @@ mod tests {
         backend.delete("articles", "1").await.unwrap();
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn with_basic_auth_sends_the_credentials() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -257,7 +257,7 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn with_client_uses_the_supplied_client() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))

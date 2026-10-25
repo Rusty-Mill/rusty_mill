@@ -166,7 +166,7 @@ impl A2aError {
     /// errors) and picks `UNIMPLEMENTED` for an unrecognized method name,
     /// matching gRPC's own convention for that case. Used both by the
     /// REST binding's `google.rpc.Status.status` field and by the gRPC
-    /// binding's `tonic::Status` mapping.
+    /// binding's `rusty_tonic::Status` mapping.
     pub fn grpc_status_name(&self) -> &'static str {
         match self {
             A2aError::TaskNotFound(_) => "NOT_FOUND",

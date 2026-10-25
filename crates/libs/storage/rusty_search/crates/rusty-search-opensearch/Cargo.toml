@@ -15,9 +15,9 @@ layer = "libs"
 rusty-search-core = { workspace = true }
 rusty-search-elasticsearch = { workspace = true }
 async-trait = { workspace = true }
-rusty_request = { workspace = true, features = ["tokio"] }
+rusty_request = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+rusty_tokio.workspace = true
 wiremock = { workspace = true }
 serde_json = { workspace = true }

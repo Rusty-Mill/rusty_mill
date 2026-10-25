@@ -6,6 +6,7 @@ mod client;
 pub mod controlbase;
 pub mod controlhttp;
 mod prefixed;
+mod rusty_io;
 
 pub use client::{ClientError, ControlClient};
 pub use controlhttp::{ControlHttpError, ControlUrl};

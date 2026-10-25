@@ -25,6 +25,7 @@ fn reviewer_has_no_builtin_tools_or_extra_mcp_sources() {
         Path::new("/turn/mcp.json"),
         Path::new("/empty"),
         Some("review-model"),
+        None,
     )
     .unwrap();
     for pair in [
@@ -66,6 +67,7 @@ fn author_pins_one_required_mcp_server_and_uses_ephemeral_sandbox() {
         Path::new("/bin/bbp"),
         Path::new("/turn/mcp.json"),
         Path::new("/private/checkout"),
+        None,
         None,
     )
     .unwrap();
@@ -203,6 +205,7 @@ fn author_preapproves_only_named_bbp_agent_tools_and_scrubs_git_context() {
         Path::new("/mcp"),
         Path::new("/clone"),
         None,
+        None,
     )
     .unwrap();
     let config = args.iter().find(|a| a.starts_with("mcp_servers=")).unwrap();
@@ -314,6 +317,7 @@ fn a_relayed_provider_gets_only_the_relay_and_keeps_its_restrictions() {
         Path::new("/mcp"),
         Path::new("/clone"),
         None,
+        None,
     )
     .unwrap();
     let config = args.iter().find(|a| a.starts_with("mcp_servers=")).unwrap();
@@ -324,4 +328,63 @@ fn a_relayed_provider_gets_only_the_relay_and_keeps_its_restrictions() {
         .windows(2)
         .any(|w| w == ["--sandbox", "workspace-write"]));
     assert!(args.last().unwrap().contains("t7-"));
+}
+
+#[test]
+fn a_session_is_both_variables_a_uuid_and_yes_or_no() {
+    let id = "0123abcd-0123-4567-89ab-0123456789ab";
+    let some = |v: &str| Some(v.to_owned());
+    assert_eq!(Session::parse(None, None), Ok(None));
+    assert_eq!(
+        Session::parse(some(id), some("yes")),
+        Ok(Some(Session {
+            id: id.into(),
+            resume: true
+        }))
+    );
+    for (i, r) in [
+        (some(id), None),
+        (None, some("no")),
+        (some("0123ABCD-0123-4567-89ab-0123456789ab"), some("no")),
+        (some("../../etc/passwd"), some("no")),
+        (some(id), some("maybe")),
+    ] {
+        assert!(Session::parse(i, r).is_err());
+    }
+}
+
+#[test]
+fn a_reviewer_session_starts_then_resumes_and_persists_only_then() {
+    let args = |session: Option<&Session>| {
+        arguments(
+            Provider::Claude,
+            &direct(),
+            Path::new("/bin/bbp"),
+            Path::new("/turn/mcp.json"),
+            Path::new("/empty"),
+            None,
+            session,
+        )
+        .unwrap()
+    };
+    let id = "0123abcd-0123-4567-89ab-0123456789ab".to_owned();
+    let has = |a: &[String], pair: [&str; 2]| a.windows(2).any(|w| w == pair);
+    let none = args(None);
+    assert!(none.iter().any(|a| a == "--no-session-persistence"));
+    assert!(!none.iter().any(|a| a == "--resume" || a == "--session-id"));
+    let first = args(Some(&Session {
+        id: id.clone(),
+        resume: false,
+    }));
+    assert!(has(&first, ["--session-id", &id]));
+    let later = args(Some(&Session {
+        id: id.clone(),
+        resume: true,
+    }));
+    assert!(has(&later, ["--resume", &id]));
+    for a in [&first, &later] {
+        assert!(!a.iter().any(|x| x == "--no-session-persistence"));
+        // The prompt still comes last, after the separator.
+        assert_eq!(a[a.len() - 2], "--");
+    }
 }

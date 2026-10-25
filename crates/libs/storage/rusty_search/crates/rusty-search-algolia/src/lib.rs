@@ -54,8 +54,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use rusty_request::{Client, Method, RequestBuilder, Response};
+use rusty_tokio::sync::RwLock;
 use serde_json::{json, Value};
-use tokio::sync::RwLock;
 
 use rusty_search_core::{
     BoxError, Document, Hit, Result, Schema as CoreSchema, SearchBackend, SearchError,
@@ -196,7 +196,7 @@ impl AlgoliaBackend {
             if json.get("status").and_then(Value::as_str) == Some("published") {
                 return Ok(());
             }
-            tokio::time::sleep(TASK_POLL_INTERVAL).await;
+            rusty_tokio::time::sleep(TASK_POLL_INTERVAL).await;
         }
         Err(SearchError::backend_msg(format!(
             "timed out waiting for algolia task {task_id} on index `{index}`"
@@ -496,7 +496,7 @@ mod tests {
             .await;
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_sends_settings_and_registers_locally() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -515,7 +515,7 @@ mod tests {
         assert!(backend.index_exists("articles").await.unwrap());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_rejects_duplicates_without_a_second_request() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -539,7 +539,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexAlreadyExists(name) if name == "articles"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn operations_on_unknown_index_error_without_any_http_call() {
         let server = MockServer::start().await;
         let backend = backend(&server);
@@ -578,7 +578,7 @@ mod tests {
         backend
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn index_batch_sends_update_object_commands() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(body["requests"][0]["body"]["title"], "Rust async search");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn delete_sends_a_delete_request() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -641,7 +641,7 @@ mod tests {
         backend.delete("articles", "1").await.unwrap();
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn delete_percent_encodes_a_slash_in_the_id() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -670,7 +670,7 @@ mod tests {
         assert_eq!(delete_req.url.path(), "/1/indexes/articles/1%2F2");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_percent_encodes_a_traversal_shaped_name() {
         let server = MockServer::start().await;
         let backend = backend(&server);
@@ -706,7 +706,7 @@ mod tests {
         assert_eq!(put_req.url.path(), "/1/indexes/%2E%2E%2Fkeys/settings");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn commit_makes_no_http_call() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -715,7 +715,7 @@ mod tests {
         backend.commit("articles").await.unwrap();
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn search_sends_translated_query_and_parses_hits() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -754,7 +754,7 @@ mod tests {
         assert_eq!(body["filters"], "status:\"published\"");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn search_maps_a_404_to_index_not_found() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -774,7 +774,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexNotFound(name) if name == "articles"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn requests_include_algolia_auth_headers() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -793,7 +793,7 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn fallback_sort_orders_results_by_field() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -824,7 +824,7 @@ mod tests {
         assert_eq!(results.total, 3);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn search_with_max_offset_and_fallback_sort_does_not_overflow() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;

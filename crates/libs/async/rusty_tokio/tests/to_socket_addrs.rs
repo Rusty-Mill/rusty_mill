@@ -5,7 +5,7 @@ use rusty_tokio::Runtime;
 fn tcp_stream_connect_accepts_a_plain_ip_port_string() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -33,7 +33,7 @@ fn tcp_stream_connect_accepts_a_plain_ip_port_string() {
 fn tcp_stream_connect_accepts_a_str_tuple() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -52,7 +52,7 @@ fn tcp_stream_connect_accepts_a_str_tuple() {
 fn tcp_stream_connect_resolves_a_hostname_via_dns() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind_addrs("localhost:0").await.unwrap();
+        let listener = TcpListener::bind("localhost:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -81,7 +81,7 @@ fn tcp_stream_connect_resolves_a_hostname_via_dns() {
 fn tcp_stream_connect_addr_still_takes_a_concrete_socket_addr() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -95,10 +95,10 @@ fn tcp_stream_connect_addr_still_takes_a_concrete_socket_addr() {
 }
 
 #[test]
-fn tcp_listener_bind_addrs_accepts_a_str() {
+fn tcp_listener_bind_accepts_a_str() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         assert_eq!(addr.ip().to_string(), "127.0.0.1");
 
@@ -110,14 +110,14 @@ fn tcp_listener_bind_addrs_accepts_a_str() {
 }
 
 #[test]
-fn udp_socket_bind_addrs_and_connect_addrs_accept_str_forms() {
+fn udp_socket_bind_and_connect_accept_str_forms() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind_addrs("127.0.0.1:0").await.unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let b_addr = b.local_addr().unwrap();
 
-        a.connect_addrs(format!("127.0.0.1:{}", b_addr.port()))
+        a.connect(format!("127.0.0.1:{}", b_addr.port()))
             .await
             .unwrap();
 

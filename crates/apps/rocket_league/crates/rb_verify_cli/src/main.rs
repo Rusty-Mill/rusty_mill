@@ -61,10 +61,10 @@ use rb_scenario::Scenario;
 use rb_verify_cli::{
     car_frame_spin, compare_scenario, compare_scenario_recorded, default_grid, k_step_capture,
     k_step_score, one_step_capture, rotation_rate, scenario_from_capture,
-    score_capture_against_candidate, score_capture_growth, score_replay_against_capture,
-    simulate_scenario, sweep, trace_capture, wheel_kstep_capture, wheel_trace_capture, Candidate,
-    SeedFrame, TraceRow, WheelKStepRow, WheelTraceRow, Window, DEFAULT_GROWTH_WINDOW_SECS,
-    DEFAULT_K_STEP, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+    score_and_write_candidate, score_capture_against_candidate, score_capture_growth,
+    score_replay_against_capture, simulate_scenario, sweep, trace_capture, wheel_kstep_capture,
+    wheel_trace_capture, Candidate, SeedFrame, TraceRow, WheelKStepRow, WheelTraceRow, Window,
+    DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
 use std::env;
 use std::path::Path;
@@ -564,6 +564,24 @@ fn parse_max_timestamp_delta_secs(raw: Option<String>) -> Result<f32, String> {
     }
 }
 
+/// Splits `--write-candidate <path>` out of the remaining `--self` arguments.
+fn take_write_candidate(args: Vec<String>) -> Result<(Vec<String>, Option<String>), String> {
+    let mut rest = Vec::new();
+    let mut out = None;
+    let mut it = args.into_iter();
+    while let Some(arg) = it.next() {
+        if arg == "--write-candidate" {
+            if out.is_some() {
+                return Err("duplicate --write-candidate".into());
+            }
+            out = Some(it.next().ok_or("--write-candidate needs a path")?);
+        } else {
+            rest.push(arg);
+        }
+    }
+    Ok((rest, out))
+}
+
 fn parse_window_secs(raw: Option<String>) -> Result<f32, String> {
     match raw {
         Some(raw) => raw
@@ -574,7 +592,7 @@ fn parse_window_secs(raw: Option<String>) -> Result<f32, String> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  rb-verify [--seed-first-frame] <mode> ...\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>\n  rb-verify --self-onestep <capture-file> [count]\n  rb-verify --self-kstep <capture-file> [k] [count]\n  rb-verify --scenario <scenario.json> [every]\n  rb-verify --scenario <scenario.json> --against <capture> [every]\n  rb-verify --scenario-from <capture> <from-secs> <to-secs> [name]\n  rb-verify --sweep-hit <k> <capture> <from-secs> <to-secs> [<capture> <from-secs> <to-secs>]...\n\n  --seed-first-frame, given first, makes the --self* modes seed the simulation\n  from the capture's first frame instead of its first grounded, neutral frame\n  (for a recording whose start was set by the tape bot)."
+    "usage:\n  rb-verify [--seed-first-frame] <mode> ...\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs] [--write-candidate <out.jsonl>]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>\n  rb-verify --self-onestep <capture-file> [count]\n  rb-verify --self-kstep <capture-file> [k] [count]\n  rb-verify --scenario <scenario.json> [every]\n  rb-verify --scenario <scenario.json> --against <capture> [every]\n  rb-verify --scenario-from <capture> <from-secs> <to-secs> [name]\n  rb-verify --sweep-hit <k> <capture> <from-secs> <to-secs> [<capture> <from-secs> <to-secs>]...\n\n  --seed-first-frame, given first, makes the --self* modes seed the simulation\n  from the capture's first frame instead of its first grounded, neutral frame\n  (for a recording whose start was set by the tape bot).\n\n  --write-candidate saves the --self simulation in the capture format, for\n  `replay-viewer <capture> --sim <out.jsonl>`."
 }
 
 fn main() -> ExitCode {
@@ -859,6 +877,18 @@ fn main() -> ExitCode {
             eprintln!("{}", usage());
             return ExitCode::FAILURE;
         };
+        let (rest, candidate_out) = match take_write_candidate(args.collect()) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{e}\n{}", usage());
+                return ExitCode::FAILURE;
+            }
+        };
+        if rest.len() > 1 {
+            eprintln!("unexpected --self arguments");
+            return ExitCode::FAILURE;
+        }
+        let mut args = rest.into_iter();
         let max_timestamp_delta_secs = match parse_max_timestamp_delta_secs(args.next()) {
             Ok(v) => v,
             Err(e) => {
@@ -866,7 +896,22 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        score_capture_against_candidate(capture_path, seed_frame, max_timestamp_delta_secs)
+        if !max_timestamp_delta_secs.is_finite() || max_timestamp_delta_secs < 0.0 {
+            eprintln!("timestamp tolerance must be finite and nonnegative");
+            return ExitCode::FAILURE;
+        }
+        match candidate_out {
+            Some(out) => {
+                score_and_write_candidate(&capture_path, seed_frame, max_timestamp_delta_secs, &out)
+                    .map(|(score, n)| {
+                        eprintln!("wrote {n} candidate frames -> {out}");
+                        score
+                    })
+            }
+            None => {
+                score_capture_against_candidate(capture_path, seed_frame, max_timestamp_delta_secs)
+            }
+        }
     } else {
         let Some(capture_path) = args.next() else {
             eprintln!("{}", usage());

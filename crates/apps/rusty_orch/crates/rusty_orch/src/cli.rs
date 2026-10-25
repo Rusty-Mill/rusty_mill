@@ -21,7 +21,7 @@ use orch_dispatch::AgentRunner;
 
 use crate::args::Args;
 use crate::millboard::HttpMillboard;
-use crate::run::{self, CardHosting, Console, Ended, Hosting, Resume};
+use crate::run::{self, CardHosting, Console, Ended, Hosting, LeaseSpec, Resume};
 use crate::{input, report};
 
 /// Exit status for a finished run.
@@ -119,19 +119,13 @@ impl Console for Stdio<'_> {
 /// Configuration stays at the I/O composition root; orch-core remains pure.
 fn task_host(args: &Args, goal_json: &str) -> Result<Option<Hosting>, Box<dyn std::error::Error>> {
     let root: rusty_serde::json::Value = rusty_serde::json::from_str(goal_json)?;
-    let config: Option<orch_bbp::Config> = match &args.bbp {
+    let hosting: Option<rusty_serde::json::Value> = match &args.bbp {
         Some(file) => Some(rusty_serde::json::from_str(&std::fs::read_to_string(
             file,
         )?)?),
-        None => root
-            .get("bbp")
-            .filter(|v| !v.is_null())
-            .map(|v| {
-                rusty_serde::json::to_string(v).and_then(|json| rusty_serde::json::from_str(&json))
-            })
-            .transpose()?,
+        None => root.get("bbp").filter(|v| !v.is_null()).cloned(),
     };
-    let Some(config) = config else {
+    let Some(mut hosting) = hosting else {
         if args.cancel.is_some() {
             return Err("--cancel requires BBP task hosting (--bbp or the goal's bbp)".into());
         }
@@ -143,6 +137,16 @@ fn task_host(args: &Args, goal_json: &str) -> Result<Option<Hosting>, Box<dyn st
     if args.state.is_none() {
         return Err("BBP task hosting requires --state for recovery".into());
     }
+    // Orch grants the lease; the host enforces the fence's, so its own
+    // configuration never carries one. Decoded through text, as `from_value`
+    // does not read newtype ids from strings.
+    let lease = hosting
+        .remove("lease")
+        .filter(|v| !v.is_null())
+        .map(|v| decode::<LeaseJson>(&v))
+        .transpose()?
+        .map(LeaseSpec::from);
+    let config: orch_bbp::Config = decode(&hosting)?;
     let spec = input::parse(goal_json)?;
     let lines = |values: &[orch_core::Text]| {
         values
@@ -170,5 +174,34 @@ fn task_host(args: &Args, goal_json: &str) -> Result<Option<Hosting>, Box<dyn st
         host: Box::new(host),
         card,
         cancel: args.cancel.clone(),
+        lease,
     }))
+}
+
+fn decode<T: for<'de> rusty_serde::Deserialize<'de>>(
+    value: &rusty_serde::json::Value,
+) -> Result<T, rusty_serde::json::Error> {
+    rusty_serde::json::from_str(&rusty_serde::json::to_string(value)?)
+}
+
+/// The hosting configuration's `lease` object.
+#[derive(rusty_serde::Deserialize)]
+#[rusty_serde(deny_unknown_fields)]
+struct LeaseJson {
+    #[rusty_serde(default)]
+    read: Vec<String>,
+    #[rusty_serde(default)]
+    write: Vec<String>,
+    #[rusty_serde(default)]
+    ttl_secs: Option<u64>,
+}
+
+impl From<LeaseJson> for LeaseSpec {
+    fn from(lease: LeaseJson) -> Self {
+        Self {
+            read: lease.read,
+            write: lease.write,
+            ttl_secs: lease.ttl_secs,
+        }
+    }
 }

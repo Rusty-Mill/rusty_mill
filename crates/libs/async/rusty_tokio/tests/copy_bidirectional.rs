@@ -11,9 +11,9 @@ use std::task::{Context, Poll};
 fn copy_bidirectional_relays_both_directions_with_independent_half_close() {
     let rt = Runtime::builder().worker_threads(4).build().unwrap();
     rt.block_on(async {
-        let client_listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let client_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client_addr = client_listener.local_addr().unwrap();
-        let server_listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let server_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = server_listener.local_addr().unwrap();
 
         // Client sends "ping" then half-closes its write side while
@@ -56,9 +56,9 @@ fn copy_bidirectional_relays_both_directions_with_independent_half_close() {
 fn copy_bidirectional_with_sizes_relays_correctly_with_tiny_asymmetric_buffers() {
     let rt = Runtime::builder().worker_threads(4).build().unwrap();
     rt.block_on(async {
-        let client_listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let client_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client_addr = client_listener.local_addr().unwrap();
-        let server_listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let server_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = server_listener.local_addr().unwrap();
 
         let client = rusty_tokio::spawn(async move {

@@ -36,13 +36,15 @@ use rusty_multimodal_db_engine::durability::DurabilityError;
 use rusty_multimodal_db_engine::generic::query::GetById;
 use rusty_multimodal_db_engine::generic::GenericMmapStore;
 
-use assignments::AssignmentRecord;
+use assignments::{AssignmentRecord, LegacyAssignmentRecord};
 use record::{ById, GoalRecord, Revision};
 
 /// The store's files inside its directory.
 const LOCK_FILE: &str = "lock";
 const GOALS_FILE: &str = "goals.mmap";
-const ASSIGNMENTS_FILE: &str = "assignments.mmap";
+/// v1 assignment records, read for goals not saved since leases.
+const LEGACY_ASSIGNMENTS_FILE: &str = "assignments.mmap";
+const ASSIGNMENTS_FILE: &str = "assignments-v2.mmap";
 
 /// Everything a later process needs to continue a goal. The goal contract
 /// itself is not stored: `fingerprint` ties the snapshot to the goal file
@@ -123,6 +125,7 @@ pub fn fingerprint(goal_json: &str) -> u64 {
 pub struct Store {
     goals: GenericMmapStore<GoalRecord, ById, Revision>,
     assignments: GenericMmapStore<AssignmentRecord, ById, Revision>,
+    legacy: Option<GenericMmapStore<LegacyAssignmentRecord, ById, Revision>>,
     _lock: DirLock,
 }
 
@@ -149,9 +152,16 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
+        let path = dir.join(LEGACY_ASSIGNMENTS_FILE);
+        let legacy = if path.exists() {
+            Some(GenericMmapStore::open_portable(&path)?)
+        } else {
+            None
+        };
         Ok(Self {
             goals,
             assignments,
+            legacy,
             _lock: lock,
         })
     }
@@ -220,9 +230,19 @@ impl Store {
     /// [`StoreError::Corrupt`] when the record does not rebuild through
     /// [`Factory::restore`].
     pub fn load_factory(&self, goal: GoalId) -> Result<Factory, StoreError> {
-        self.assignments
-            .get(record::key(goal))
+        self.assignment_record(goal)
             .map_or_else(|| Ok(Factory::default()), AssignmentRecord::into_factory)
+    }
+
+    /// The v2 record of `goal`, or its v1 record read as unleased.
+    fn assignment_record(&self, goal: GoalId) -> Option<AssignmentRecord> {
+        let key = record::key(goal);
+        self.assignments.get(key).or_else(|| {
+            self.legacy
+                .as_ref()
+                .and_then(|legacy| legacy.get(key))
+                .map(AssignmentRecord::from)
+        })
     }
 
     /// Save `factory` as the assignment record of `goal`. A successful return
@@ -232,13 +252,13 @@ impl Store {
     ///
     /// [`StoreError::Engine`] when the write fails.
     pub fn save_factory(&mut self, goal: GoalId, factory: &Factory) -> Result<(), StoreError> {
+        let first = self.assignments.get(record::key(goal)).is_none();
         let revision = self
-            .assignments
-            .get(record::key(goal))
+            .assignment_record(goal)
             .map_or(0, |r| r.revision as u64)
             + 1;
         let record = AssignmentRecord::from_factory(goal, factory, revision);
-        if revision == 1 {
+        if first {
             self.assignments
                 .insert(record)
                 .map_err(|e| StoreError::Engine(engine_error(e)))

@@ -71,7 +71,7 @@ pub enum ClientError {
     GrpcConfig(String),
     #[cfg(feature = "grpc")]
     #[error("gRPC error: {0}")]
-    Grpc(#[from] tonic::Status),
+    Grpc(#[from] rusty_tonic::Status),
     #[error("unexpected response (HTTP {status}): {body}")]
     UnexpectedResponse { status: u16, body: String },
     #[cfg(feature = "signing")]

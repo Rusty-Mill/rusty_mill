@@ -30,6 +30,8 @@
 //!   `_meta`) handshakes from the same handlers, with cancellation, progress
 //!   and cursor pagination. Transports are thin loops over
 //!   [`Connection::start`].
+//! - `mount` (feature `rusty-axum`): the Streamable HTTP handler inside a
+//!   `rusty_axum` app.
 //! - [`stdio`]: newline-delimited JSON on stdin/stdout, requests running
 //!   concurrently; end of input drains them for a bounded time, then cancels.
 //!
@@ -44,6 +46,8 @@ pub mod connection;
 #[cfg(feature = "http")]
 pub mod http;
 mod methods;
+#[cfg(feature = "rusty-axum")]
+pub mod mount;
 mod page;
 #[cfg(feature = "http")]
 mod push;
@@ -70,6 +74,8 @@ pub use connection::Turn;
 pub use connection::{CallContext, Caller, CancelToken, Connection, Job, Notifier, Started};
 #[cfg(feature = "http")]
 pub use http::{bind_http, HttpConfig, HttpHandler};
+#[cfg(feature = "rusty-axum")]
+pub use mount::Mount;
 pub use server::{
     BuildError, CompletionHandler, PromptHandler, PromptSource, ResourceHandler, ResourceSource,
     Server, ServerBuilder, TemplateHandler, ToolHandler, ToolSource,

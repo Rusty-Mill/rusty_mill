@@ -8,6 +8,7 @@ pub mod oneshot;
 pub mod watch;
 
 mod barrier;
+mod cancellation_token;
 mod mutex;
 mod notify;
 mod once_cell;
@@ -16,6 +17,10 @@ mod semaphore;
 mod set_once;
 
 pub use barrier::{Barrier, BarrierWaitResult};
+// tokio-util's, not tokio's (#901): here so a migration needs no second crate.
+pub use cancellation_token::{
+    CancellationToken, DropGuard, WaitForCancellationFuture, WaitForCancellationFutureOwned,
+};
 pub use mutex::{MappedMutexGuard, Mutex, MutexGuard, OwnedMappedMutexGuard, OwnedMutexGuard};
 pub use notify::{Notified, Notify, OwnedNotified};
 pub use once_cell::{OnceCell, SetError};

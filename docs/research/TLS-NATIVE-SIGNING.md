@@ -168,10 +168,21 @@ reviewer.
   taint-mode control only.
 - The 100,000-signature test is not in CI.
 
+**PKCS#8 parsing** (`rusty_pk::pkcs8`, added after `698844212`):
+- `pkcs8::ecdsa(curve, der)` and `pkcs8::ed25519(der)` follow the acceptance rules of
+  `ring`'s `EcdsaKeyPair::from_pkcs8` and `Ed25519KeyPair::from_pkcs8_maybe_unchecked`.
+- A differential test against `ring` covers 20 generated keys per type, hand-built edge cases,
+  and every single-byte mutation (three masks), truncation and one-byte extension. Each case
+  checks that both libraries accept or reject alike, and derive the same public key when both
+  accept.
+- Taint modes `pkcs8-ecdsa256` and `pkcs8-ed25519` mark only the private-key bytes secret.
+  Every report is an `ecdh::ensure` verdict: 3 for ECDSA, 1 for Ed25519.
+- This code is part of the owner's S5 review scope.
+
 **Still outstanding before TLS wiring:**
 - the owner's signing-code review, recorded with reviewer, scope and exact commit
-  (S5 as amended; the reviewed code is on main at `698844212`);
-- PKCS#8 parsing;
+  (S5 as amended). The ECDSA and Ed25519 code is on main at `698844212`; the PKCS#8
+  parser comes after that commit;
 - the engine suites and native BoGo with server scenarios.
 
 The full gap-5 evidence plan is not complete.
