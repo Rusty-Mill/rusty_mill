@@ -31,9 +31,12 @@
 # Grapheme id index (hash lookup, reused buffer, frame table built lazily),
 # measured: alt 75.8, ascii 41.6, cursor 87.5, scroll 112.7, sgr 110.5,
 # unicode 102.2. Only unicode moves.
-alt_screen_flicker    81
+# Plain-CSI fast path (whole `[0-9;]* final` sequences parsed in place, no
+# per-CSI allocation), measured: alt 69.9, ascii 41.8, cursor 54.6, scroll
+# 112.3, sgr 80.4, unicode 101.9. alt, cursor and sgr move.
+alt_screen_flicker    77
 ascii_throughput      45
-cursor_thrash         93
+cursor_thrash         60
 scroll_heavy         123
-sgr_churn            120
+sgr_churn             88
 unicode_heavy        112
