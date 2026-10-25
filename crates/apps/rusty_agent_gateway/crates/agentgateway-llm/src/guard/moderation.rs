@@ -122,7 +122,7 @@ pub struct Moderation {
     model: String,
     key: String,
     rejection: Rejection,
-    client: reqwest::Client,
+    client: rusty_request::Client,
 }
 
 impl Moderation {
@@ -175,10 +175,7 @@ impl Moderation {
                 .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             key,
             rejection,
-            client: reqwest::Client::builder()
-                .timeout(TIMEOUT)
-                .build()
-                .unwrap_or_default(),
+            client: crate::client(TIMEOUT),
         })
     }
 
@@ -207,11 +204,10 @@ impl Moderation {
     }
 
     async fn ask(&self, inputs: Vec<String>) -> Result<bool, String> {
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .bearer_auth(&self.key)
-            .json(&json!({"input": inputs, "model": self.model}))
+        let body = json!({"input": inputs, "model": self.model});
+        let response = crate::post_json(&self.client, &self.endpoint, &body)
+            .and_then(|request| request.bearer_auth(&self.key))
+            .map_err(|err| err.to_string())?
             .send()
             .await
             .map_err(|err| err.to_string())?;
@@ -219,10 +215,11 @@ impl Moderation {
         if !response.status().is_success() {
             // An endpoint that answers 401 or 500 has classified nothing, so
             // this is the unreachable case rather than a verdict it reached.
-            return Err(format!("it answered {}", response.status()));
+            return Err(format!("it answered {}", response.status().as_u16()));
         }
 
-        let answered: Value = response.json().await.map_err(|err| err.to_string())?;
+        let answered: Value =
+            serde_json::from_slice(response.bytes()).map_err(|err| err.to_string())?;
         read_flagged(&answered).ok_or_else(|| "it answered without any `results`".to_string())
     }
 }

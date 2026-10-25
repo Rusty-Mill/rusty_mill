@@ -402,8 +402,7 @@ pub struct EventParser {
 /// [`crate::MAX_RESPONSE_BYTES`] before a blank-line separator ever arrived.
 ///
 /// Every other buffered path in this crate ([`crate::read_capped`], used by
-/// `buffered`/`guarded_stream`/error handling) enforces the same cap by hand
-/// because `reqwest::Response` has no `Limited` wrapper of its own. The true
+/// `buffered`/`guarded_stream`/error handling) enforces the same cap. The true
 /// streaming path forwards bytes as they arrive rather than buffering the
 /// whole response, but [`EventParser::buffer`](EventParser) still accumulates
 /// unbounded state of its own: a provider that never emits the blank-line

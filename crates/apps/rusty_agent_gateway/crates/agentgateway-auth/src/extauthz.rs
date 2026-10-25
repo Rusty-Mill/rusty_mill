@@ -99,7 +99,7 @@ pub struct ExtAuthz {
     allowed_upstream: Vec<HeaderName>,
     include_body: Option<usize>,
     fail_open: bool,
-    client: reqwest::Client,
+    client: rusty_request::Client,
 }
 
 impl std::fmt::Debug for ExtAuthz {
@@ -145,10 +145,10 @@ impl ExtAuthz {
             allowed_upstream: names(&policy.allowed_upstream_headers, "allowedUpstreamHeaders")?,
             include_body: policy.include_body,
             fail_open: policy.fail_open.unwrap_or(false),
-            client: reqwest::Client::builder()
+            client: rusty_request::Client::builder()
                 .timeout(timeout)
-                .build()
-                .unwrap_or_default(),
+                .no_cookie_store()
+                .build(),
         })
     }
 
@@ -175,28 +175,7 @@ impl ExtAuthz {
         headers: &HeaderMap,
         body: Option<&[u8]>,
     ) -> Authorization {
-        let url = format!("{}{}", self.target, path);
-        let mut request = self.client.request(method.clone(), &url);
-
-        for name in &self.include {
-            if let Some(value) = headers.get(name) {
-                request = request.header(name, value);
-            }
-        }
-
-        if let Some(body) = body {
-            // The type travels with the payload whether or not
-            // `includeHeaders` names it: a body the authorizer has to guess
-            // the format of is not much use.
-            if !self.include.contains(&http::header::CONTENT_TYPE)
-                && let Some(value) = headers.get(http::header::CONTENT_TYPE)
-            {
-                request = request.header(http::header::CONTENT_TYPE, value);
-            }
-            request = request.body(body.to_vec());
-        }
-
-        let response = match request.send().await {
+        let response = match self.ask(method, path, headers, body).await {
             Ok(response) => response,
             Err(err) => {
                 rusty_log::warn!(
@@ -211,20 +190,46 @@ impl ExtAuthz {
 
         let status = StatusCode::from_u16(response.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let response_headers = response.headers().clone();
-
         if status.is_success() {
-            return Authorization::Allow(self.upstream_headers(&response_headers));
+            return Authorization::Allow(self.upstream_headers(response.headers()));
         }
 
         // The authorizer's own body is what tells the caller why. Passing it
         // through unchanged beats replacing it with a generic refusal.
-        let body = response.bytes().await.unwrap_or_default().to_vec();
+        let headers = passthrough_headers(response.headers());
         Authorization::Deny {
             status,
-            headers: passthrough_headers(&response_headers),
-            body,
+            headers,
+            body: response.into_bytes(),
         }
+    }
+
+    /// Send the authorization call: the original method and path, the
+    /// `includeHeaders`, and the body when there is one.
+    async fn ask(
+        &self,
+        method: &Method,
+        path: &str,
+        headers: &HeaderMap,
+        body: Option<&[u8]>,
+    ) -> rusty_request::Result<rusty_request::Response> {
+        let url = format!("{}{}", self.target, path);
+        let method = rusty_request::Method::parse(method.as_str());
+        let mut request = self.client.request(method, &url)?;
+
+        for name in &self.include {
+            request = with_header(request, headers, name)?;
+        }
+        if body.is_some() && !self.include.contains(&http::header::CONTENT_TYPE) {
+            // The type travels with the payload whether or not
+            // `includeHeaders` names it: a body the authorizer has to guess
+            // the format of is not much use.
+            request = with_header(request, headers, &http::header::CONTENT_TYPE)?;
+        }
+        if let Some(body) = body {
+            request = request.body(body.to_vec());
+        }
+        request.send().await
     }
 
     /// What to do when the authorizer never answered.
@@ -243,19 +248,32 @@ impl ExtAuthz {
     }
 
     /// The subset of the authorizer's headers allowed onto the upstream call.
-    fn upstream_headers(
-        &self,
-        from: &reqwest::header::HeaderMap,
-    ) -> Vec<(HeaderName, HeaderValue)> {
+    fn upstream_headers(&self, from: &rusty_request::HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
         self.allowed_upstream
             .iter()
             .filter_map(|name| {
-                let value = from.get(name.as_str())?;
-                let value = HeaderValue::from_bytes(value.as_bytes()).ok()?;
+                let value = HeaderValue::from_str(from.get(name.as_str())?).ok()?;
                 Some((name.clone(), value))
             })
             .collect()
     }
+}
+
+/// `request` with the caller's `name` field copied onto it, when there is
+/// one. A value that is not text cannot be sent and is left out.
+fn with_header(
+    request: rusty_request::RequestBuilder,
+    headers: &HeaderMap,
+    name: &HeaderName,
+) -> rusty_request::Result<rusty_request::RequestBuilder> {
+    let Some(value) = headers.get(name) else {
+        return Ok(request);
+    };
+    let Ok(value) = value.to_str() else {
+        rusty_log::debug!(header = %name, "not forwarding a header that is not text");
+        return Ok(request);
+    };
+    request.header(name.as_str(), value)
 }
 
 /// Headers worth relaying from a denial.
@@ -263,11 +281,11 @@ impl ExtAuthz {
 /// `WWW-Authenticate` is the one that matters: a `401` without it leaves the
 /// client no way to learn how to authenticate. Content headers are left to the
 /// caller, which sets them from the body it actually sends.
-fn passthrough_headers(from: &reqwest::header::HeaderMap) -> HeaderMap {
+fn passthrough_headers(from: &rusty_request::HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
     for name in [http::header::WWW_AUTHENTICATE, http::header::CONTENT_TYPE] {
         if let Some(value) = from.get(name.as_str())
-            && let Ok(value) = HeaderValue::from_bytes(value.as_bytes())
+            && let Ok(value) = HeaderValue::from_str(value)
         {
             headers.insert(name, value);
         }
@@ -363,9 +381,9 @@ mod tests {
         )
         .expect("should build");
 
-        let mut from = reqwest::header::HeaderMap::new();
-        from.insert("x-user-id", "u-1".parse().expect("valid"));
-        from.insert("x-is-admin", "true".parse().expect("valid"));
+        let mut from = rusty_request::HeaderMap::new();
+        from.insert("x-user-id", "u-1").expect("valid");
+        from.insert("x-is-admin", "true").expect("valid");
 
         let allowed = authz.upstream_headers(&from);
         assert_eq!(allowed.len(), 1);
@@ -376,8 +394,8 @@ mod tests {
     #[test]
     fn nothing_reaches_the_upstream_without_a_list() {
         let authz = ExtAuthz::new(&policy("http://authz:9000"), "t").expect("should build");
-        let mut from = reqwest::header::HeaderMap::new();
-        from.insert("x-user-id", "u-1".parse().expect("valid"));
+        let mut from = rusty_request::HeaderMap::new();
+        from.insert("x-user-id", "u-1").expect("valid");
         assert!(
             authz.upstream_headers(&from).is_empty(),
             "an empty allow-list allows nothing, not everything"
@@ -388,9 +406,9 @@ mod tests {
     fn a_denial_relays_the_authenticate_challenge() {
         // A 401 without it leaves the client no way to learn how to
         // authenticate.
-        let mut from = reqwest::header::HeaderMap::new();
-        from.insert("www-authenticate", "Bearer".parse().expect("valid"));
-        from.insert("x-internal", "leak".parse().expect("valid"));
+        let mut from = rusty_request::HeaderMap::new();
+        from.insert("www-authenticate", "Bearer").expect("valid");
+        from.insert("x-internal", "leak").expect("valid");
 
         let headers = passthrough_headers(&from);
         assert_eq!(

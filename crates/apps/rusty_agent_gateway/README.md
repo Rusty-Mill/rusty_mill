@@ -2296,8 +2296,9 @@ That also settles what looked like the main integration cost. `rusty_a2a` pins
 `axum` 0.7, `tonic` and `reqwest` 0.12 against this workspace's 0.8 and 0.13,
 which would mean two copies of `reqwest` with separate TLS stacks. All of it is
 behind the `client`, `server`, `grpc` and `signing` features, so
-`default-features = false` pulls **45 crates with no `axum`, no `tonic` and a
-single `reqwest` 0.13**. `build.rs` is gated on `grpc`, so no `protoc` either.
+`default-features = false` pulls **45 crates with no `axum` and no `tonic`**.
+Agent cards are fetched with `rusty_request`, so there is no `reqwest` either.
+`build.rs` is gated on `grpc`, so no `protoc` either.
 
 The one real friction is strictness, described under
 [Agent-to-agent](#agent-to-agent): the types enforce required fields exactly as

@@ -67,7 +67,7 @@ pub struct Webhook {
     /// Which of the caller's own headers travel along.
     forward: Vec<String>,
     fail_open: bool,
-    client: reqwest::Client,
+    client: rusty_request::Client,
 }
 
 /// What a webhook said.
@@ -103,10 +103,7 @@ impl Webhook {
                 .map(|name| name.to_ascii_lowercase())
                 .collect::<Vec<String>>(),
             fail_open: config.failure_mode == FailureMode::FailOpen,
-            client: reqwest::Client::builder()
-                .timeout(TIMEOUT)
-                .build()
-                .unwrap_or_default(),
+            client: crate::client(TIMEOUT),
         }
     }
 
@@ -160,12 +157,7 @@ impl Webhook {
             }
         }
 
-        let mut request = self.client.post(format!("{}{path}", self.base)).json(&body);
-        for (name, value) in headers {
-            request = request.header(name, value);
-        }
-
-        match self.send(request, key).await {
+        match self.send(&path, &body, &headers, key).await {
             Ok(verdict) => verdict,
             Err(reason) => {
                 rusty_log::warn!(
@@ -178,14 +170,27 @@ impl Webhook {
         }
     }
 
-    async fn send(&self, request: reqwest::RequestBuilder, key: &str) -> Result<Verdict, String> {
+    async fn send(
+        &self,
+        path: &str,
+        body: &Value,
+        headers: &[(String, String)],
+        key: &str,
+    ) -> Result<Verdict, String> {
+        let url = format!("{}{path}", self.base);
+        let mut request =
+            crate::post_json(&self.client, &url, body).map_err(|err| err.to_string())?;
+        for (name, value) in headers {
+            request = request.header(name, value).map_err(|err| err.to_string())?;
+        }
         let response = request.send().await.map_err(|err| err.to_string())?;
         if !response.status().is_success() {
             // A webhook that answers 500 has not made a decision, so this is
             // the unreachable case rather than a refusal it chose.
-            return Err(format!("it answered {}", response.status()));
+            return Err(format!("it answered {}", response.status().as_u16()));
         }
-        let answered: Value = response.json().await.map_err(|err| err.to_string())?;
+        let answered: Value =
+            serde_json::from_slice(response.bytes()).map_err(|err| err.to_string())?;
         Ok(read_action(&answered, key))
     }
 

@@ -30,7 +30,8 @@ rusty-mcp = { workspace = true, default-features = false, features = ["jwt"] }
 rusty_json = { workspace = true }
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 http = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# Calls the `extAuthz` service; `tokio` because the gateway still runs on tokio.
+rusty_request = { workspace = true, features = ["tokio"] }
 serde_json = { workspace = true }
 thiserror = "2"
 rusty_log = { workspace = true }

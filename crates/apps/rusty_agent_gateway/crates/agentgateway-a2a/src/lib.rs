@@ -4,7 +4,7 @@
 //! gateway does not become an agent — it fronts them — so it takes only
 //! [`rusty_a2a`]'s protocol types and leaves the agent harness alone. With
 //! `default-features = false` that is a types-only dependency: no `axum`, no
-//! `tonic`, no second `reqwest`.
+//! `tonic`.
 //!
 //! Two things happen on such a route:
 //!
@@ -92,10 +92,10 @@ impl A2aGateway {
             });
         };
 
-        let client = reqwest::Client::builder()
+        let client = rusty_request::Client::builder()
             .timeout(CARD_TIMEOUT)
-            .build()
-            .unwrap_or_default();
+            .no_cookie_store()
+            .build();
 
         let mut cards: Vec<(String, AgentCard)> = Vec::new();
         for agent in agents {
@@ -213,20 +213,17 @@ fn refusal(id: RequestId) -> Vec<u8> {
         .unwrap_or_else(|_| b"{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32011}}".to_vec())
 }
 
-async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
+async fn fetch(client: &rusty_request::Client, url: &str) -> Result<Vec<u8>, String> {
     let response = client
         .get(url)
+        .map_err(|err| err.to_string())?
         .send()
         .await
         .map_err(|err| err.to_string())?;
     if !response.status().is_success() {
-        return Err(format!("HTTP {}", response.status()));
+        return Err(format!("HTTP {}", response.status().as_u16()));
     }
-    response
-        .bytes()
-        .await
-        .map(|bytes| bytes.to_vec())
-        .map_err(|err| err.to_string())
+    Ok(response.into_bytes())
 }
 
 /// Extract a task id from an A2A request, for observability.
