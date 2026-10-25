@@ -229,9 +229,18 @@ fn slots_are_optional_must_admit_each_class_and_are_pinned_absolute() {
         dir: "slots".into(),
         agents: 2,
         validators: 0,
+        ceiling: None,
+        priority_secs: 0,
     });
     assert!(c.validate().unwrap_err().contains("slots"));
     c.slots.as_mut().unwrap().validators = 1;
+    c.validate().unwrap();
+    c.slots.as_mut().unwrap().ceiling = Some(0);
+    assert!(c.validate().unwrap_err().contains("ceiling"));
+    c.slots.as_mut().unwrap().ceiling = Some(1);
+    c.slots.as_mut().unwrap().priority_secs = 86_401;
+    assert!(c.validate().unwrap_err().contains("priority_secs"));
+    c.slots.as_mut().unwrap().priority_secs = 86_400;
     c.validate().unwrap();
     let pinned = c.absolute().unwrap();
     assert!(pinned.slots.unwrap().dir.is_absolute());
@@ -636,6 +645,13 @@ fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
             ..Sandbox::default()
         });
     }
+    c.slots = Some(crate::Slots {
+        dir: dir.join("slots"),
+        agents: 4,
+        validators: 1,
+        ceiling: Some(2),
+        priority_secs: 30,
+    });
     let now = unix_now().unwrap();
     let leased = |write: &str, expires: u64| {
         let mut f = fence();
@@ -683,6 +699,18 @@ fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
     )
     .unwrap();
     assert!(!agents.contains(&format!("{}\"", path("src"))), "{agents}");
+    // Fair admission is asked for the goal's ceiling and priority, and
+    // knows the paths the task was confined to write.
+    let claim = std::fs::read_to_string(
+        BbpHost::<Contract, WallSupervisor>::manifest(&h).join(crate::CLAIM),
+    )
+    .unwrap();
+    let expected = format!(
+        r#"{{"parent":{{"id":"goal","agents":2}},"priority_secs":30,"write":[{}]}}"#,
+        json(&path("src/a"))
+    );
+    let parse = |t: &str| rusty_serde::json::from_str::<rusty_serde::json::Value>(t).unwrap();
+    assert_eq!(parse(&claim), parse(&expected));
 
     // Wider, absent, or ended leases are refused before BBP is asked.
     assert!(matches!(

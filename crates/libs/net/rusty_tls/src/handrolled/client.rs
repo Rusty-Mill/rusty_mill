@@ -141,8 +141,7 @@ pub enum AlertLevel {
 
 impl AlertLevel {
     /// Decode a wire value. Shared with [`super::server`], which reads alerts
-    /// from the other direction (and which the native backend does not have).
-    #[cfg_attr(rusty_tls_native_crypto, allow(dead_code))]
+    /// from the other direction.
     pub(crate) const fn from_wire(value: u8) -> Self {
         Self::from_u8(value)
     }
@@ -2461,9 +2460,7 @@ pub enum Incoming {
     Closed,
 }
 
-// Server-side constructors and builders: unused on the native backend, which
-// has no server role (ADR-0005).
-#[cfg_attr(rusty_tls_native_crypto, allow(dead_code))]
+// Server-side constructors and builders.
 impl Connection {
     /// Assemble a connection from an already-completed handshake.
     ///

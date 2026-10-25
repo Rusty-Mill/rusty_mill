@@ -99,8 +99,11 @@ comes from `RUSTFLAGS` and no dependency can reach it. See
 
 The engine can also run on first-party primitives instead of `ring`
 ([ADR-0005](./docs/adr/0005-first-party-primitives-for-the-client-engine.md)):
-the `native-crypto` feature plus a second cfg. That build is a client only —
-no server role, no client certificates — and offers ChaCha20-Poly1305 first,
+the `native-crypto` feature plus a second cfg. That build has both roles,
+session tickets and client certificates, with ECDSA (P-256, P-384) and Ed25519
+keys only: it has no RSA signing
+([ADR-0006](./docs/adr/0006-native-signing-and-server-role.md)), though it
+still verifies a peer's RSA signatures. It offers ChaCha20-Poly1305 first,
 because its AES-GCM is portable and slow. It has no direct `ring` dependency,
 so the compiler checks that the engine makes no `ring` call (`ring` is still
 in the build through `rustls`).

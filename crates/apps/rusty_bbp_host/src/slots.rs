@@ -39,7 +39,7 @@ pub enum Class {
 }
 
 impl Class {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Agent => "agent",
             Self::Validator => "validator",
@@ -112,6 +112,48 @@ impl Slots {
         })
     }
 
+    /// The slot directory.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// How many slots of `class` exist.
+    pub(crate) fn capacity(&self, class: Class) -> u32 {
+        self.capacity.of(class)
+    }
+
+    /// The indices of the slots of `class` some process holds now.
+    ///
+    /// # Errors
+    /// When a slot file cannot be opened or probed.
+    pub(crate) fn held(&self, class: Class) -> Result<Vec<u32>, String> {
+        let mut held = Vec::new();
+        for index in 0..self.capacity.of(class) {
+            let path = self.lock_path(class, index);
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(TryLockError::WouldBlock) => held.push(index),
+                Err(TryLockError::Error(e)) => return Err(format!("{}: {e}", path.display())),
+            }
+        }
+        Ok(held)
+    }
+
+    /// Where fair admission records who holds slot `index` of `class`.
+    pub(crate) fn owner_path(&self, class: Class, index: u32) -> PathBuf {
+        self.dir.join(format!("{}-{index}.owner", class.name()))
+    }
+
+    fn lock_path(&self, class: Class, index: u32) -> PathBuf {
+        self.dir.join(format!("{}-{index}.lock", class.name()))
+    }
+
     /// Take a free slot of `class`, or `None` when every one is held.
     ///
     /// # Errors
@@ -119,7 +161,7 @@ impl Slots {
     /// being held.
     pub fn try_acquire(&self, class: Class) -> Result<Option<Slot>, String> {
         for index in 0..self.capacity.of(class) {
-            let path = self.dir.join(format!("{}-{index}.lock", class.name()));
+            let path = self.lock_path(class, index);
             let file = OpenOptions::new()
                 .create(true)
                 .truncate(false)
@@ -133,6 +175,15 @@ impl Slots {
                     // opened for append: Windows refuses to truncate such a handle.
                     file.set_len(0)
                         .map_err(|e| format!("{}: {e}", path.display()))?;
+                    // An earlier holder's owner record is no one's either:
+                    // a holder taken here counts as capacity alone until
+                    // admission records it.
+                    let owner = self.owner_path(class, index);
+                    match std::fs::remove_file(&owner) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(format!("{}: {e}", owner.display())),
+                    }
                     return Ok(Some(Slot { file, class, index }));
                 }
                 Err(TryLockError::WouldBlock) => continue,
@@ -162,6 +213,11 @@ impl Slot {
     /// When the holder cannot be started.
     pub fn holder(&self, bbp: &Path) -> Result<Child, String> {
         holder(bbp, Some(self), None)
+    }
+
+    /// Its index within its class.
+    pub(crate) fn index(&self) -> u32 {
+        self.index
     }
 
     /// `agent-0`, `validator-0`, ...

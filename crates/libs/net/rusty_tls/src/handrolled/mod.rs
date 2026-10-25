@@ -24,8 +24,8 @@
 //!   cryptographic backend: hashes, HMAC, AEAD, key exchange, signature
 //!   checks and randomness. The backend is `ring` by default, or the
 //!   first-party crates with `native-crypto` and
-//!   `--cfg rusty_tls_native_crypto` (ADR-0005). Signing and the server's
-//!   ticket cipher call `ring` directly, and the native build has neither.
+//!   `--cfg rusty_tls_native_crypto` (ADR-0005). Signing ([`sign`]) has its
+//!   own backend split: `ring` by default, `rusty_pk` on native (ADR-0006).
 //! - [`record`] — the TLS 1.3 record layer (stage 1): AEAD protection and
 //!   framing for an already-established connection.
 //! - [`record12`] — the TLS 1.2 record layer (stage 4b-i): the same AEADs as
@@ -129,13 +129,10 @@ pub mod record;
 pub mod record12;
 pub mod schedule;
 pub mod schedule12;
-#[cfg(not(rusty_tls_native_crypto))]
 pub mod server;
-#[cfg(not(rusty_tls_native_crypto))]
 pub mod server12;
 pub mod sign;
 pub mod stream;
-#[cfg(not(rusty_tls_native_crypto))]
 pub mod ticket;
 pub mod verify;
 pub mod wire;

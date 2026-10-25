@@ -7,7 +7,7 @@
 #
 #   RUSTFLAGS='--cfg rusty_tls_handrolled' cargo build --release
 #
-# On the native backend (ADR-0005), client role only:
+# On the native backend (ADR-0005, ADR-0006), without RSA signing:
 #
 #   RUSTFLAGS='--cfg rusty_tls_handrolled --cfg rusty_tls_native_crypto' \
 #     cargo build --release --no-default-features --features native
@@ -25,7 +25,7 @@ path = ".."
 default = ["ring"]
 # The engine's `ring` backend: both roles.
 ring = ["rusty_tls/handrolled-engine"]
-# The first-party backend: client role only. Needs `--cfg rusty_tls_native_crypto`.
+# The first-party backend: both roles, no RSA signing. Needs `--cfg rusty_tls_native_crypto`.
 native = ["rusty_tls/native-crypto"]
 
 [lints.rust]

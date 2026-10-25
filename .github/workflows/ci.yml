@@ -1308,14 +1308,13 @@ jobs:
       - name: cargo check -p rusty_config --no-default-features
         run: cargo check -p rusty_config --no-default-features --all-targets
 
-  # The same engine on its first-party backend (ADR-0005): `native-crypto`
-  # with `--cfg rusty_tls_native_crypto`, no `handrolled-engine`. That build
-  # has no direct `ring` dependency, so compiling it is itself the check that
-  # the engine makes no `ring` call. It is client-only coverage, not a second
-  # copy of the job above: the native backend has no server role or signing,
-  # so the suites that need them are `ring`-only (their inner `cfg` says so)
-  # and stay covered there. BoGo runs here client-side only: on this backend
-  # the shim reports server and client-certificate scenarios as unimplemented.
+  # The same engine on its first-party backend (ADR-0005, ADR-0006):
+  # `native-crypto` with `--cfg rusty_tls_native_crypto`, no
+  # `handrolled-engine`. That build has no direct `ring` dependency, so
+  # compiling it is itself the check that the engine makes no `ring` call. It
+  # has the client and server roles, tickets and client certificates, with
+  # ECDSA and Ed25519 signing only: the tests that need an RSA signing key are
+  # skipped on this backend by name (see each suite), and stay covered above.
   rusty-tls-engine-native:
     concurrency:
       group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-tls-engine-native
@@ -1359,18 +1358,23 @@ jobs:
       # the same inputs through both backends, byte-identical outputs.
       - name: cargo test -p rusty_tls --features native-crypto
         run: cargo test -p rusty_tls --features native-crypto
-      - name: socket interop against OpenSSL (client direction)
+      # Both directions, as in the ring job: the TLS 1.3 server, the TLS 1.2
+      # client and server, and version negotiation, each against OpenSSL.
+      - name: socket interop against OpenSSL (both directions)
         shell: bash
         run: |
           set -euo pipefail
           openssl version
-          out=$(cargo test -p rusty_tls --features native-crypto \
-            --test handrolled_client12_socket_interop -- --ignored --nocapture --color never)
-          echo "$out"
-          echo "$out" | grep -qE 'test result: ok\. [1-9][0-9]* passed' || {
-            echo "::error::the OpenSSL client interop suite ran no tests"
-            exit 1
-          }
+          for suite in handrolled_socket_interop handrolled_client12_socket_interop \
+            handrolled_server12_socket_interop handrolled_negotiate_socket_interop; do
+            out=$(cargo test -p rusty_tls --features native-crypto \
+              --test "$suite" -- --ignored --nocapture --color never)
+            echo "$out"
+            echo "$out" | grep -qE 'test result: ok\. [1-9][0-9]* passed' || {
+              echo "::error::the $suite suite ran no tests"
+              exit 1
+            }
+          done
       # The zero-tests trap again, with an explicit split: a suite marked
       # `// ring-only suite (ADR-0005)` (its inner cfg excludes the native
       # backend) must compile to zero tests here, and
@@ -1403,8 +1407,8 @@ jobs:
             fi
           done
           echo "native suites: $native, ring-only suites: $ring_only"
-          if [ "$native" -lt 25 ]; then
-            echo "::error::only $native handrolled suites ran on the native backend; expected 25 or more"
+          if [ "$native" -lt 36 ]; then
+            echo "::error::only $native handrolled suites ran on the native backend; expected 36 or more"
             exit 1
           fi
           d=$(cargo test -p rusty_tls --features native-crypto --doc -- --list | grep -c ': test$' || true)
@@ -1413,21 +1417,22 @@ jobs:
             echo "::error::the handrolled doctests did not run -- is RUSTDOCFLAGS set?"
             exit 1
           fi
-      # BoGo against the client role on the first-party backend (ADR-0005
-      # decision 4). The engine has no server or signing here, so the shim
-      # reports those scenarios as unimplemented (exit 89). The floor is set
-      # from the first full run (445 passed at the pinned commit). A shim that
+      # BoGo on the first-party backend, both roles (ADR-0005 decision 4,
+      # ADR-0006). The engine has no RSA signing here, so scenarios whose key is
+      # RSA (BoGo's default server certificate) are refused at load and reported
+      # as unimplemented (exit 89). The floor is set from the first full run
+      # with server scenarios (494 passed at the pinned commit). A shim that
       # skipped everything would also exit 0, which is what the floor catches.
-      # The ring job's BoGo run keeps covering the server role.
-      - name: BoGo, client role (BoringSSL protocol suite)
+      # The ring job's BoGo run keeps covering RSA signing.
+      - name: BoGo, both roles (BoringSSL protocol suite)
         shell: bash
         run: |
           set -euo pipefail
           go version
           NATIVE=1 crates/libs/net/rusty_tls/bogo/run.sh | tee bogo-native.out
           passed=$(sed -nE 's/^BoGo: ([0-9]+) passed.*/\1/p' bogo-native.out)
-          if [ "${passed:-0}" -lt 430 ]; then
-            echo "::error::native BoGo passed only ${passed:-0} tests (expected 430+) -- is the shim skipping everything?"
+          if [ "${passed:-0}" -lt 480 ]; then
+            echo "::error::native BoGo passed only ${passed:-0} tests (expected 480+) -- is the shim skipping everything?"
             exit 1
           fi
       - name: x509-limbo certificate differential
