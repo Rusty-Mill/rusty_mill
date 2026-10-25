@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use rusty_mux_core::{BlockId, ClientId, SessionId, Size, WindowId};
-use rusty_mux_proto::{Features, Message, decode, encode};
+use rusty_mux_core::{BlockId, ClientId, Event, SessionId, Size, WindowId};
+use rusty_mux_proto::{Cursor, Features, Message, decode, encode};
 use rusty_mux_server::{Config, serve};
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::io::UnixListener;
@@ -63,10 +63,18 @@ pub struct Client {
     /// Whether output is fed to the terminals. The flood test turns it off so
     /// it measures the server, not this debug-built client's parser.
     pub parse: bool,
+    /// Where the Welcome said this client's event stream starts.
+    pub cursor: Option<Cursor>,
+    /// Every event received, with its number.
+    pub events: Vec<(Option<u64>, Event)>,
 }
 
 impl Client {
     pub fn connect(path: &PathBuf) -> Self {
+        Self::connect_with(path, Features::CHECKPOINT_V3, None)
+    }
+
+    pub fn connect_with(path: &PathBuf, features: Features, resume: Option<Cursor>) -> Self {
         let stream = UnixStream::connect(path).expect("connect");
         stream.set_read_timeout(Some(PATIENCE)).expect("timeout");
         let mut client = Self {
@@ -79,12 +87,14 @@ impl Client {
             output: HashMap::new(),
             ready: HashMap::new(),
             parse: true,
+            cursor: None,
+            events: Vec::new(),
         };
-        client.send(&Message::Hello {
-            features: Features::CHECKPOINT_V3,
-        });
+        client.send(&Message::Hello { features, resume });
         match client.recv() {
-            Message::Welcome { client: id, .. } => client.id = id,
+            Message::Welcome {
+                client: id, cursor, ..
+            } => (client.id, client.cursor) = (id, cursor),
             other => panic!("expected Welcome, got {other:?}"),
         }
         client
@@ -112,6 +122,9 @@ impl Client {
     }
 
     fn apply(&mut self, message: &Message) {
+        if let Message::Event { seq, event } = message {
+            self.events.push((*seq, event.clone()));
+        }
         match message {
             Message::Checkpoint {
                 block,
@@ -130,7 +143,10 @@ impl Client {
                 self.output.insert(*block, Vec::new());
                 self.ready.insert(*block, false);
             }
-            Message::Event(rusty_mux_core::Event::BlockResized { block, size }) => {
+            Message::Event {
+                event: rusty_mux_core::Event::BlockResized { block, size },
+                ..
+            } => {
                 if let Some((grid, _)) = self.terms.get_mut(block) {
                     grid.resize(size.cols().into(), size.rows().into());
                 }

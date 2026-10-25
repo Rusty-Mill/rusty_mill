@@ -1833,7 +1833,7 @@ fn links_arc_and_clusters_arc_stay_in_sync_with_the_backing_vecs() {
     // track the source of truth or the renderer silently sees stale data.
     let mut g = Grid::new(20, 3);
     assert_eq!(g.links_arc.len(), g.links.len());
-    assert_eq!(g.clusters_arc.len(), g.clusters.len());
+    assert_eq!(g.clusters_arc().len(), g.clusters.len());
 
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b]8;;http://example.com\x1b\\hi\x1b]8;;\x1b\\");
@@ -1849,8 +1849,67 @@ fn links_arc_and_clusters_arc_stay_in_sync_with_the_backing_vecs() {
         1,
         "the combining accent should be interned"
     );
-    assert_eq!(g.clusters_arc.len(), g.clusters.len());
-    assert_eq!(&*g.clusters_arc, &g.clusters[..]);
+    assert_eq!(&*g.clusters_arc(), &g.clusters[..]);
+    let frame = g.snapshot_dirty().clusters;
+    assert!(
+        std::sync::Arc::ptr_eq(&frame, &g.snapshot_viewport().clusters),
+        "frames share the table until it grows"
+    );
+    p.advance(&mut g, "a\u{0308}".as_bytes());
+    assert_eq!(&*g.snapshot_dirty().clusters, &g.clusters[..]);
+    assert_eq!(frame.len(), 1, "a frame already handed out keeps its table");
+}
+
+#[test]
+fn combining_marks_reuse_interned_continuations() {
+    let mut g = Grid::new(20, 3);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        "e\u{301}a\u{301}o\u{301}\u{323}u\u{301}\u{323}".as_bytes(),
+    );
+    assert_eq!(g.clusters, ["\u{301}", "\u{301}\u{323}"]);
+    let ids: Vec<u16> = g.row(0)[..4].iter().map(|c| c.cluster).collect();
+    assert_eq!(ids, [1, 1, 2, 2], "equal continuations share one id");
+    assert_eq!(glyph(&g, 3, 0), "u\u{301}\u{323}");
+}
+
+#[test]
+fn a_full_rtsn_cluster_table_restores_and_interns() {
+    // RTSN accepts up to u16::MAX entries, every id a cell can name. Restoring
+    // one must index them all without overflowing the id counter.
+    let mut g = Grid::new(4, 2);
+    g.clusters = (1..u16::MAX).map(|i| i.to_string()).collect();
+    g.clusters.push("\u{302}".into());
+    let mut back = Grid::decode_snapshot(&g.encode_snapshot()).expect("decode");
+    AnsiParser::new().advance(&mut back, "a\u{302}".as_bytes());
+    assert_eq!(
+        back.row(0)[0].cluster,
+        u16::MAX,
+        "the last entry keeps its id"
+    );
+    assert_eq!(back.clusters.len(), usize::from(u16::MAX));
+}
+
+#[test]
+fn restored_grids_reuse_interned_continuations() {
+    // Both restore paths rebuild the id index: interning a continuation the
+    // restored table already holds must return its id, not append a copy.
+    let mut g = Grid::new(20, 3);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, "e\u{301}\u{323}a\u{308}".as_bytes());
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut a, mut pa) = crate::checkpoint::decode(&bytes).expect("decode");
+    let mut b = Grid::decode_snapshot(&g.encode_snapshot()).expect("decode snapshot");
+    let mut pb = AnsiParser::new();
+    pa.advance(&mut a, "\r\no\u{308}i\u{301}\u{323}".as_bytes());
+    pb.advance(&mut b, "\x1b[2;1Ho\u{308}i\u{301}\u{323}".as_bytes());
+    for r in [&a, &b] {
+        assert_eq!(r.clusters, g.clusters, "no duplicate entries");
+        let ids: Vec<u16> = r.row(1)[..2].iter().map(|c| c.cluster).collect();
+        assert_eq!(ids, [3, 2]);
+        assert_eq!(&*r.snapshot_viewport().clusters, &r.clusters[..]);
+    }
 }
 
 #[test]

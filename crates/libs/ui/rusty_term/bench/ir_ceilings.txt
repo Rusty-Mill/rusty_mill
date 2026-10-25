@@ -28,9 +28,12 @@
 # cursor 87.5, scroll 112.7, sgr 110.4, unicode 115.5 (main on the same
 # machine: cursor 85.0, scroll 111.9, sgr 109.0, unicode 167.5). Only
 # unicode moves.
+# Grapheme id index (hash lookup, reused buffer, frame table built lazily),
+# measured: alt 75.8, ascii 41.6, cursor 87.5, scroll 112.7, sgr 110.5,
+# unicode 102.2. Only unicode moves.
 alt_screen_flicker    81
 ascii_throughput      45
 cursor_thrash         93
 scroll_heavy         123
 sgr_churn            120
-unicode_heavy        128
+unicode_heavy        112

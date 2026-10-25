@@ -134,7 +134,8 @@ mod tests {
     #[test]
     fn high_count_unknown_fields_retain_no_state() {
         let mut out = Out(Writer::new());
-        for id in 17..100_017 {
+        let first = crate::message::FIELD_COUNT as u32 + 1;
+        for id in first..first + 100_000 {
             out.varint(id, 0).bytes(id, b"unknown");
         }
         out.varint(0, 0).bytes(u32::MAX, b"also unknown");
