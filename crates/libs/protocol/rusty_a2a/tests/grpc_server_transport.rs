@@ -234,7 +234,8 @@ fn a_stream_cut_short_by_the_application_stopping_ends_in_an_error() {
     };
     let _server = {
         let _enter = transport.enter();
-        rusty_tokio::io::TcpListener::bind(([127, 0, 0, 1], port).into())
+        std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+            .and_then(rusty_tokio::io::TcpListener::from_std)
             .and_then(|listener| router.serve(listener, None, rusty_hyper::ServeOptions::default()))
             .unwrap()
     };

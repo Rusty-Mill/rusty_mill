@@ -141,7 +141,8 @@ pub(crate) async fn serve(router: Router, addr: SocketAddr) -> std::io::Result<(
     let runtime = rusty_tokio::Runtime::new()?;
     let started = {
         let _enter = runtime.enter();
-        rusty_tokio::io::TcpListener::bind(addr)
+        std::net::TcpListener::bind(addr)
+            .and_then(rusty_tokio::io::TcpListener::from_std)
             .and_then(|listener| router.serve(listener, None, ServeOptions::default()))
     };
     let server = match started {
