@@ -189,7 +189,18 @@ impl<T> Receiver<T> {
             // await below and the future stays `Send`.
             {
                 let guard = shared.inner.lock().unwrap();
-                if f(&guard.value) {
+                // As in tokio, a panicking predicate must not poison the
+                // channel: release the lock before resuming the unwind.
+                let matched =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&guard.value)));
+                let matched = match matched {
+                    Ok(matched) => matched,
+                    Err(panic) => {
+                        drop(guard);
+                        std::panic::resume_unwind(panic);
+                    }
+                };
+                if matched {
                     *seen = guard.version;
                     return Ok(Ref { guard });
                 }

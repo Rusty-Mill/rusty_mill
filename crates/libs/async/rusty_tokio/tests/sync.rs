@@ -2191,3 +2191,24 @@ fn notify_is_debug() {
         "Notify { .. }"
     );
 }
+
+#[test]
+fn watch_wait_for_predicate_panic_does_not_poison_the_channel() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(0);
+        let rx2 = rx.clone();
+        let waiter = rusty_tokio::spawn(async move {
+            let _ = rx.wait_for(|_| panic!("predicate")).await;
+        });
+        assert!(
+            waiter.await.is_err(),
+            "the predicate's panic reaches the task"
+        );
+
+        tx.send(1).unwrap();
+        assert_eq!(*rx2.borrow(), 1);
+        drop(rx2);
+        drop(tx);
+    });
+}
