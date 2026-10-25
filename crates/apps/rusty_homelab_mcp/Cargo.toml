@@ -44,7 +44,7 @@ schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"
 clap = { workspace = true }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros"] }
+rusty_tokio.workspace = true
 rusty_log = { workspace = true, features = ["subscriber"] }
 # Parses hosts.toml, the Fedora host registry -- already a workspace
 # dependency (rusty_fedora_agent's own allowlist.toml loader).
@@ -56,4 +56,3 @@ toml = { workspace = true }
 rusty_wiremock = { workspace = true, features = ["std"] }
 rusty-mcp-client = { workspace = true }
 serde_json = "1"
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util"] }

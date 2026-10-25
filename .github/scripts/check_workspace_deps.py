@@ -32,6 +32,9 @@ from pathlib import Path
 #
 # `rusty-mcp` is Tier T under ADR-0002 Amendment 1: sovereign except for these.
 PINNED_EXTERNAL_DEPENDENCIES: dict[str, dict[str, str]] = {
+    # Tier S: the first-party replay parser (rleval/docs/replay-parser-scope.md).
+    # boxcars stays a dev-dependency oracle only.
+    "rl_replay": {},
     "rusty-mcp": {
         "http": "request and response types of the tower layers; adapter boundary only (D4)",
         "tower-layer": "the Layer impls of the tower adapters, until the gateway leaves axum",

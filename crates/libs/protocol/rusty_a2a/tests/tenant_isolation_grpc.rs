@@ -3,12 +3,14 @@
 //! proto3 zero-value standing in for "unset" (see
 //! `src/server/grpc/convert.rs`'s `non_empty` helper).
 
+mod common;
+use common::tonic_oracle as pb;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use rusty_a2a::error::Result;
-use rusty_a2a::server::grpc::pb;
 use rusty_a2a::server::{AgentExecutor, AgentServer, EventSink, RequestContext};
 use rusty_a2a::types::{AgentCard, AgentInterface, Message, TaskState};
 use tonic::service::interceptor::InterceptedService;

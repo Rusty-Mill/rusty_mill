@@ -10505,6 +10505,8 @@ dependencies = [
 name = "replay-viewer"
 version = "0.1.0"
 dependencies = [
+ "rb_capture_ingest",
+ "rb_domain",
  "replay-analyzer",
  "replay-scoring",
  "replay-skills",
@@ -10785,6 +10787,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rl_replay"
+version = "0.1.0"
+dependencies = [
+ "boxcars",
+]
+
+[[package]]
 name = "rleval-app"
 version = "0.1.0"
 dependencies = [
@@ -10930,7 +10939,6 @@ name = "rp-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
  "futures-util",
  "jsonwebtoken 9.3.1",
  "reqwest 0.13.4",
@@ -10939,14 +10947,15 @@ dependencies = [
  "rp-core",
  "rp-mcp",
  "rp-router",
+ "rusty_axum",
+ "rusty_axum_tokio",
  "rusty_log",
- "rusty_mcp_axum",
  "rusty_mcp_server",
  "rusty_oauth",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "tokio",
- "tower-http",
  "wiremock",
 ]
 
@@ -11779,7 +11788,7 @@ dependencies = [
  "rusty-search-solr",
  "rusty-search-sqlite-fts5",
  "rusty-search-tantivy",
- "tokio",
+ "rusty_tokio",
 ]
 
 [[package]]
@@ -11791,9 +11800,9 @@ dependencies = [
  "rusty-search-core",
  "rusty_request",
  "rusty_serde",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11807,9 +11816,9 @@ dependencies = [
  "rusty_request",
  "rusty_serde",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11819,7 +11828,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rusty-search-core",
- "tokio",
+ "rusty_tokio",
 ]
 
 [[package]]
@@ -11841,9 +11850,9 @@ dependencies = [
  "rusty-search-core",
  "rusty_request",
  "rusty_serde",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11868,7 +11877,7 @@ dependencies = [
  "async-trait",
  "rusty-search-core",
  "rusty_serde",
- "tokio",
+ "rusty_tokio",
 ]
 
 [[package]]
@@ -11879,8 +11888,8 @@ dependencies = [
  "rusty-search-core",
  "rusty-search-elasticsearch",
  "rusty_request",
+ "rusty_tokio",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11894,9 +11903,9 @@ dependencies = [
  "rusty_request",
  "rusty_serde",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
- "tokio",
  "wiremock",
 ]
 
@@ -11909,9 +11918,9 @@ dependencies = [
  "rusty_serde",
  "rusty_sqlite",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
  "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -11922,11 +11931,11 @@ dependencies = [
  "rusty-search-core",
  "rusty_serde",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
  "serde_json",
  "tantivy",
  "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -11957,12 +11966,18 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "p256",
+ "rcgen",
  "reqwest 0.13.4",
+ "rustls",
  "rusty_base64",
+ "rusty_h2",
+ "rusty_hyper",
  "rusty_ip",
  "rusty_log",
  "rusty_prost",
  "rusty_retry",
+ "rusty_tls",
+ "rusty_tokio",
  "rusty_tonic",
  "rusty_uuid",
  "serde",
@@ -12223,10 +12238,10 @@ name = "rusty_fedora"
 version = "0.1.0"
 dependencies = [
  "rusty_request",
+ "rusty_tokio",
  "rusty_wiremock",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -12309,11 +12324,11 @@ dependencies = [
  "rusty_opnsense",
  "rusty_proxmox",
  "rusty_serve",
+ "rusty_tokio",
  "rusty_wiremock",
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "tokio",
  "toml 0.8.2",
 ]
 
@@ -12492,15 +12507,18 @@ name = "rusty_mcp_server"
 version = "0.1.0"
 dependencies = [
  "rmcp",
+ "rusty_axum",
  "rusty_base64",
  "rusty_crypto_key",
  "rusty_http",
  "rusty_json",
+ "rusty_mcp_client_native",
  "rusty_mcp_proto",
  "rusty_oauth",
  "rusty_rand",
  "rusty_serve",
  "rusty_time",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "tokio",
@@ -12602,6 +12620,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_mux_server"
+version = "0.1.0"
+dependencies = [
+ "platform",
+ "platform-linux",
+ "rusty_libc",
+ "rusty_mux_core",
+ "rusty_mux_proto",
+ "rusty_term_core",
+ "rusty_tokio",
+ "rusty_uuid",
+]
+
+[[package]]
 name = "rusty_oauth"
 version = "0.1.0"
 dependencies = [
@@ -12617,10 +12649,10 @@ name = "rusty_opnsense"
 version = "0.1.0"
 dependencies = [
  "rusty_request",
+ "rusty_tokio",
  "rusty_wiremock",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -12677,10 +12709,10 @@ name = "rusty_proxmox"
 version = "0.1.0"
 dependencies = [
  "rusty_request",
+ "rusty_tokio",
  "rusty_wiremock",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -15948,7 +15980,6 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
  "url",
 ]
 

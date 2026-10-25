@@ -111,7 +111,15 @@ edge but does not by itself move either `remind_me` crate out of tier C:
    #898 (G2, G3), #899 (G4, G5), #900 (G6), #901 (G8). #895 renames the log
    server to `rusty_journal`, then #896 builds `rusty_stream` (G7).
 3. Providers: #903 moves `rusty_http`, `rusty_request`, `rusty_h2` and
-   `rusty_hyper`.
+   `rusty_hyper` (done). Their shipped builds already used `rusty_tokio` or
+   no runtime, with `tokio` an opt-in feature. What remained were the
+   `h2`-oracle interop tests in `rusty_h2` and `rusty_hyper`, which now run
+   the oracle on `rusty_tokio` too, keeping `tokio` only for the `tokio::io`
+   traits `h2` names. `tokio` stays a dev-dependency in two cases: those
+   trait definitions, and the tests of `rusty_http`'s and `rusty_request`'s
+   own opt-in `tokio` feature. Running the oracle on `rusty_tokio` found a
+   parity bug: `TcpStream::poll_shutdown` failed with `NotConnected` where
+   tokio succeeds.
 4. Families, each blocked as its ticket says:
 
 | Ticket | Family | Crates | After |

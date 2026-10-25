@@ -160,7 +160,7 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<Stop>
         let Some(accepted) = until_stopped(listener.accept(), &stop).await else {
             break;
         };
-        let Ok((tcp, _)) = accepted else {
+        let Ok((tcp, peer)) = accepted else {
             // Out of descriptors, say: back off rather than spin.
             sleep(Duration::from_millis(10)).await;
             continue;
@@ -169,7 +169,7 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<Stop>
         let Ok(permit) = permits.clone().try_acquire_owned() else {
             continue;
         };
-        rusty_tokio::spawn(connection(tcp, shared.clone(), stop.clone(), permit));
+        rusty_tokio::spawn(connection(tcp, peer, shared.clone(), stop.clone(), permit));
     }
     drop(listener);
     // Every connection holds a permit until it ends.
@@ -179,17 +179,18 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<Stop>
 /// One accepted connection: the TLS handshake if any, then HTTP/1.1.
 async fn connection(
     tcp: TcpStream,
+    peer: SocketAddr,
     shared: Arc<Shared>,
     stop: Arc<Stop>,
     _permit: OwnedSemaphorePermit,
 ) {
     let _ = tcp.set_nodelay(true);
     let Some(acceptor) = shared.tls.clone() else {
-        return run(tcp, &shared, &stop).await;
+        return run(tcp, peer, &shared, &stop).await;
     };
     let deadline = Instant::now() + shared.options.handshake_timeout;
     if let Ok(Ok(io)) = timeout_at(deadline, handshake(acceptor, tcp)).await {
-        run(io, &shared, &stop).await;
+        run(io, peer, &shared, &stop).await;
     }
 }
 
@@ -202,9 +203,9 @@ async fn handshake(
     Ok(tls)
 }
 
-/// Serves requests on `io` in order until the client is done, a limit is
-/// hit, or the server stops.
-async fn run<T>(io: T, shared: &Shared, stop: &Arc<Stop>)
+/// Serves requests from `peer` on `io` in order until the client is done,
+/// a limit is hit, or the server stops.
+async fn run<T>(io: T, peer: SocketAddr, shared: &Shared, stop: &Arc<Stop>)
 where
     T: AsyncRead + AsyncWrite + Unpin + Send,
 {
@@ -227,7 +228,7 @@ where
             chunked: head.version == Version::Http11,
         };
         let req = match conn.read_request(head, options).await {
-            Ok(req) => req,
+            Ok(req) => req.with_peer_addr(peer),
             Err(e) => return conn.refuse(&e).await,
         };
         let response = shared.router.call(req).await;

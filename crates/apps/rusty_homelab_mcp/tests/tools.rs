@@ -64,7 +64,7 @@ impl Client {
 
 async fn connect(server: HomelabServer) -> Client {
     let wire = server
-        .wire_server(&tokio::runtime::Handle::current())
+        .wire_server(&rusty_tokio::runtime::Handle::current())
         .expect("the server description is valid");
     let http = bind_http(
         Arc::clone(&wire),
@@ -134,7 +134,7 @@ fn fedora_hosts(base_url: String) -> FedoraHosts {
     FedoraHosts::load(None, Some(base_url)).expect("legacy-url-only registry never errors")
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn every_backend_contributes_its_tools() {
     let client = connect(HomelabServer::new(None, None, FedoraHosts::default())).await;
 
@@ -225,7 +225,7 @@ async fn every_backend_contributes_its_tools() {
 /// the whole `tools/list` result and refused to start the server at all.
 /// `JsonResult` (see `src/json_result.rs`) is the fix -- this guards it
 /// stays fixed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn every_declared_output_schema_is_a_json_object() {
     let client = connect(HomelabServer::new(None, None, FedoraHosts::default())).await;
 
@@ -244,7 +244,7 @@ async fn every_declared_output_schema_is_a_json_object() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn an_unconfigured_backend_fails_with_a_clear_error() {
     let client = connect(HomelabServer::new(None, None, FedoraHosts::default())).await;
 
@@ -261,7 +261,7 @@ async fn an_unconfigured_backend_fails_with_a_clear_error() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn proxmox_list_nodes_returns_structured_data_from_the_real_client_path() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":[{"node":"pve","status":"online"}]}"#,
@@ -280,7 +280,7 @@ async fn proxmox_list_nodes_returns_structured_data_from_the_real_client_path() 
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn a_proxmox_api_error_surfaces_as_a_protocol_error() {
     let base_url = support::spawn(vec![MockResponse::status(
         401,
@@ -303,7 +303,7 @@ async fn a_proxmox_api_error_surfaces_as_a_protocol_error() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn proxmox_task_status_returns_structured_data_from_the_real_client_path() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":{"status":"stopped","exitstatus":"OK"}}"#,
@@ -328,7 +328,7 @@ async fn proxmox_task_status_returns_structured_data_from_the_real_client_path()
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn opnsense_system_status_returns_structured_data_from_the_real_client_path() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"status":"ok"}"#)]);
     let server = HomelabServer::new(
@@ -349,7 +349,7 @@ async fn opnsense_system_status_returns_structured_data_from_the_real_client_pat
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn opnsense_create_firewall_rule_sends_the_rule_as_a_json_body() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"result":"saved","uuid":"new-uuid"}"#,
@@ -384,7 +384,7 @@ async fn opnsense_create_firewall_rule_sends_the_rule_as_a_json_body() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn opnsense_create_vlan_sends_the_vlan_as_a_json_body() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"result":"saved","uuid":"new-vlan-uuid"}"#,
@@ -412,7 +412,7 @@ async fn opnsense_create_vlan_sends_the_vlan_as_a_json_body() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn opnsense_download_backup_returns_the_raw_xml_as_plain_text() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"<?xml version="1.0"?><opnsense><version>25.7</version></opnsense>"#,
@@ -438,7 +438,7 @@ async fn opnsense_download_backup_returns_the_raw_xml_as_plain_text() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn opnsense_list_dhcp_leases_returns_structured_data_from_the_real_client_path() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"rows":[{"address":"10.0.0.42","hostname":"nas"}],"rowCount":1}"#,
@@ -461,7 +461,7 @@ async fn opnsense_list_dhcp_leases_returns_structured_data_from_the_real_client_
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn proxmox_update_guest_config_sends_the_config_as_a_json_body() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"data":null}"#)]);
     let server = HomelabServer::new(Some(proxmox_client(base_url)), None, FedoraHosts::default());
@@ -486,7 +486,7 @@ async fn proxmox_update_guest_config_sends_the_config_as_a_json_body() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn proxmox_create_guest_returns_the_task_upid_as_plain_text() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmcreate:200:automation@pve!test:"}"#,
@@ -512,7 +512,7 @@ async fn proxmox_create_guest_returns_the_task_upid_as_plain_text() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn proxmox_cluster_resources_with_a_filter_returns_structured_data() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":[{"type":"storage","storage":"local"}]}"#,
@@ -534,7 +534,7 @@ async fn proxmox_cluster_resources_with_a_filter_returns_structured_data() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn proxmox_guest_power_returns_the_task_upid_as_plain_text() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmstart:100:automation@pve!test:"}"#,
@@ -556,7 +556,7 @@ async fn proxmox_guest_power_returns_the_task_upid_as_plain_text() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn fedora_system_status_returns_structured_data_from_the_real_client_path() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"hostname":"baileyai","uptime_seconds":12345}"#,
@@ -575,7 +575,7 @@ async fn fedora_system_status_returns_structured_data_from_the_real_client_path(
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn fedora_system_status_can_target_a_second_registered_host() {
     let baileyai_url = support::spawn(vec![MockResponse::ok(
         r#"{"hostname":"baileyai","uptime_seconds":12345}"#,
@@ -612,7 +612,7 @@ async fn fedora_system_status_can_target_a_second_registered_host() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn an_unknown_fedora_host_id_surfaces_as_a_protocol_error() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"hostname":"baileyai","uptime_seconds":12345}"#,
@@ -636,7 +636,7 @@ async fn an_unknown_fedora_host_id_surfaces_as_a_protocol_error() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn fedora_service_control_posts_the_action_body() {
     let base_url = support::spawn(vec![MockResponse::ok("{}")]);
     let server = HomelabServer::new(None, None, fedora_hosts(base_url));
@@ -655,7 +655,7 @@ async fn fedora_service_control_posts_the_action_body() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn a_disallowed_fedora_unit_surfaces_as_a_protocol_error() {
     let base_url = support::spawn(vec![MockResponse::status(
         400,
@@ -681,7 +681,7 @@ async fn a_disallowed_fedora_unit_surfaces_as_a_protocol_error() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn fedora_dnf_install_returns_the_task_id() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"task_id":"task-1"}"#)]);
     let server = HomelabServer::new(None, None, fedora_hosts(base_url));
@@ -701,7 +701,7 @@ async fn fedora_dnf_install_returns_the_task_id() {
     client.cancel().await.expect("cancel");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn an_unconfigured_fedora_backend_fails_with_a_clear_error() {
     let client = connect(HomelabServer::new(None, None, FedoraHosts::default())).await;
 
@@ -720,7 +720,7 @@ async fn an_unconfigured_fedora_backend_fails_with_a_clear_error() {
 
 /// The argument schemas come from the argument types, so they keep what the
 /// types say: which fields are required and which values an enum allows.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rusty_tokio::test(worker_threads = 2)]
 async fn input_schemas_keep_required_fields_and_enum_values() {
     let client = connect(HomelabServer::new(None, None, FedoraHosts::default())).await;
     let listing = client.list_tools(None).await.expect("tools/list");

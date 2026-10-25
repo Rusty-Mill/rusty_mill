@@ -131,37 +131,49 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", job)
         self.assertIn("      - rusty-tls-fuzz\n", self.workflow[self.workflow.index("required-gate:") :])
 
+    # Both engine jobs, `ring` and native (ADR-0002 Amendment 2), carry the same
+    # limbo and live steps; each is checked with the same rules.
+    ENGINE_JOBS = (("rusty-tls-engine", "ring"), ("rusty-tls-engine-native", "native"))
+
+    def engine_job(self, name: str) -> str:
+        start = self.workflow.index(f"  {name}:\n")
+        end = self.workflow.find("\n  # ", start + 1)
+        return self.workflow[start : end if end != -1 else None]
+
     def test_the_limbo_differential_step_runs_through_its_script_before_the_live_step(self) -> None:
-        start = self.workflow.index("  rusty-tls-engine:\n")
-        end = self.workflow.find("\n  # ----", start)
-        job = self.workflow[start : end if end != -1 else None]
-        marker = "      - name: x509-limbo certificate differential"
-        step = job[job.index(marker) :]
-        step = step[: step.index("\n      - name:", len(marker))]
-        self.assertIn("bash .github/scripts/limbo_differential.sh", step)
-        self.assertIn("--test handrolled_limbo -- --ignored", step)
-        # Blocking when the corpus matches (the script itself skips otherwise).
-        self.assertNotIn("continue-on-error", step)
-        # Before the live step, which must stay last in the job.
-        self.assertLess(job.index(marker), job.index("      - name: live internet (non-blocking)"))
+        for name, _ in self.ENGINE_JOBS:
+            with self.subTest(job=name):
+                job = self.engine_job(name)
+                marker = "      - name: x509-limbo certificate differential"
+                step = job[job.index(marker) :]
+                step = step[: step.index("\n      - name:", len(marker))]
+                self.assertIn("bash .github/scripts/limbo_differential.sh", step)
+                self.assertIn("--test handrolled_limbo -- --ignored", step)
+                # Blocking when the corpus matches (the script itself skips otherwise).
+                self.assertNotIn("continue-on-error", step)
+                # Before the live step, which must stay last in the job.
+                self.assertLess(
+                    job.index(marker), job.index("      - name: live internet (non-blocking)")
+                )
 
     def test_the_live_internet_step_can_inform_but_never_gate(self) -> None:
         # A third party's server must not decide whether a PR merges, so the
         # live step is continue-on-error. Its output and exit logic live in
         # live_internet_check.sh (tested offline, including a failing command),
         # so the step must go through that script and not inline its own.
-        start = self.workflow.index("  rusty-tls-engine:\n")
-        end = self.workflow.find("\n  # ----", start)
-        job = self.workflow[start : end if end != -1 else None]
-        marker = "      - name: live internet (non-blocking)"
-        step = job[job.index(marker) :]
-        self.assertIn("continue-on-error: true", step)
-        self.assertIn("bash .github/scripts/live_internet_check.sh", step)
-        self.assertIn("--test handrolled_live -- --ignored", step)
-        # No inline `out=$(cargo ...)`: under `set -e` that loses the output.
-        self.assertNotIn("out=$(", step)
-        # Last in the job, so nothing after it can be skipped by its failure.
-        self.assertNotIn("\n      - name:", step[len(marker) :])
+        for name, backend in self.ENGINE_JOBS:
+            with self.subTest(job=name):
+                job = self.engine_job(name)
+                marker = "      - name: live internet (non-blocking)"
+                step = job[job.index(marker) :]
+                self.assertIn("continue-on-error: true", step)
+                self.assertIn("bash .github/scripts/live_internet_check.sh", step)
+                self.assertIn("--test handrolled_live -- --ignored", step)
+                self.assertIn(f"LIVE_BACKEND: {backend}", step)
+                # No inline `out=$(cargo ...)`: under `set -e` that loses the output.
+                self.assertNotIn("out=$(", step)
+                # Last in the job, so nothing after it can be skipped by its failure.
+                self.assertNotIn("\n      - name:", step[len(marker) :])
 
     def test_every_handrolled_suite_is_gated_on_the_cfg_the_job_sets(self) -> None:
         # The guard above only works if each suite really is cfg-gated: an
@@ -671,6 +683,17 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("run: cargo shear", shear)
         root = tomllib.loads((REPO / "Cargo.toml").read_text(encoding="utf-8"))
         self.assertTrue(root["workspace"]["metadata"]["cargo-shear"]["ignored"])
+
+    def test_a_failed_nightly_sweep_files_an_issue(self) -> None:
+        alert = (WORKFLOW.parent / "nightly-alert.yml").read_text(encoding="utf-8")
+        self.assertIn("  workflow_run:\n    workflows: [CI]\n    types: [completed]\n", alert)
+        self.assertIn("github.event.workflow_run.event == 'schedule'", alert)
+        # Read-only by default; only the reporting job may write, and only issues.
+        self.assertRegex(alert, r"(?m)^permissions:\n  contents: read$")
+        self.assertEqual(re.findall(r"(?m)^\s+[a-z-]+: write$", alert), ["      issues: write"])
+        # Run data reaches the script through env, never by interpolation.
+        script = alert.split("        run: |\n", 1)[1]
+        self.assertNotIn("${{", script)
 
     def test_dependabot_tracks_github_actions(self) -> None:
         text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")

@@ -192,6 +192,9 @@ const TEMPLATE: &str = r##"<!doctype html>
   #tlwrap { position:relative; flex:1; display:flex; flex-direction:column; gap:1px; }
   #wp { width:100%; height:20px; display:block; border-radius:3px; }
   #pressure { width:100%; height:14px; display:block; border-radius:3px; margin-bottom:2px; }
+  #inwrap { position:relative; margin-bottom:2px; }
+  #inputs { width:100%; height:72px; display:block; border-radius:3px; }
+  #incursor { position:absolute; top:0; height:72px; width:1px; background:#fff; opacity:.7; pointer-events:none; }
   #wpcursor { position:absolute; top:0; height:20px; width:1px; background:#fff; opacity:.7; pointer-events:none; }
   #tltrack { position:relative; height:24px; display:flex; align-items:center; }
   #timeline { width:100%; }
@@ -269,6 +272,7 @@ const TEMPLATE: &str = r##"<!doctype html>
     <label><input type="checkbox" id="tgHeat"> heatmap</label>
     <label title="colour each pad by how often it was collected"><input type="checkbox" id="tgPadHeat"> pad heatmap</label>
     <label title="per-player boost / speed / positioning strips in the roster"><input type="checkbox" id="tgPlayerStats"> player stats</label>
+    <label id="tgVelRow" style="display:none" title="velocity arrow on each car (physics runs)"><input type="checkbox" id="tgVel" checked> velocity</label>
   </div>
   <div class="setrow ov">
     <span>field overlay</span>
@@ -290,6 +294,7 @@ const TEMPLATE: &str = r##"<!doctype html>
   <button id="play" class="icon" title="play/pause (space)"></button>
   <span id="clock" title="click: RL game clock / elapsed">0:00.0</span>
   <div id="tlwrap">
+    <div id="inwrap" style="display:none"><canvas id="inputs" title="controller input of the followed car (else the first car): recording solid, sim run dashed and pale"></canvas><div id="incursor"></div></div>
     <canvas id="pressure" title="pressure — which half the ball is in: blue pressing above, orange below"></canvas>
     <canvas id="wp" title="momentum — P(next goal): blue above, orange below"></canvas>
     <div id="wpcursor"></div>
@@ -312,6 +317,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 const S = /*SCENE_DATA*/;
 const F = S.field;
 const TEAM = { 0: 0x3b82f6, 1: 0xf97316 };
+const GHOST = 0xdfe6ee; // the port's simulated car (ADR-0085)
 const TEAM_CSS = { 0: '#3b82f6', 1: '#f97316' };
 const ICON_PLAY = '<svg width="14" height="14" viewBox="0 0 14 14"><path d="M3 2l9 5-9 5z" fill="currentColor"/></svg>';
 const ICON_PAUSE = '<svg width="14" height="14" viewBox="0 0 14 14"><rect x="3" y="2" width="3" height="10" fill="currentColor"/><rect x="8" y="2" width="3" height="10" fill="currentColor"/></svg>';
@@ -923,7 +929,9 @@ function buildCars() {
   const teamSeen = new Map(); // team -> how many of its players already built
   const HULL = carHullGeometry();
   for (const pl of S.players) {
-    const hex = TEAM[pl.team] ?? 0x9aa4b2;
+    // A ghost is the port's simulated car (ADR-0085): pale and see-through, so
+    // the recorded car under it stays visible.
+    const hex = pl.ghost ? GHOST : (TEAM[pl.team] ?? 0x9aa4b2);
     // A per-player shade of the team colour, for "team colour" off: keep the team
     // hue recognizable but nudge lightness/hue per teammate so they're tellable
     // apart. Slot 0 stays the exact team colour.
@@ -969,7 +977,14 @@ function buildCars() {
     const flame = new THREE.Mesh(new THREE.ConeGeometry(20, 72, 12),
       new THREE.MeshBasicMaterial({ color: 0xff9a3c, transparent: true, opacity: .9, blending: THREE.AdditiveBlending, depthWrite: false }));
     flame.rotation.z = Math.PI / 2; flame.position.set(-78, 0, 18); flame.visible = false; g.add(flame);
-    map.set(pl.pri, { g, label, boostPill, trail, callout, ring, flame, paint, dark, teamHex: hex, distinct });
+    // Velocity arrow (physics runs): world-space, so it lives beside the car group.
+    const vel = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 1, hex, 60, 36);
+    vel.visible = false; scene.add(vel);
+    if (pl.ghost) g.traverse(o => {
+      o.castShadow = false;
+      if (o.isMesh) { o.material.transparent = true; o.material.opacity = 0.35; o.material.depthWrite = false; }
+    });
+    map.set(pl.pri, { g, label, boostPill, trail, callout, ring, flame, vel, paint, dark, teamHex: hex, distinct });
   }
   return map;
 }
@@ -1009,7 +1024,8 @@ function stateAt(t) {
     const c2 = nb.get(ca.pri);
     const q = quatOf(ca.rot);
     if (c2) q.slerp(quatOf(c2.rot), w); // smooth spin across frames
-    out.set(ca.pri, { p: c2 ? lerp3(ca.p, c2.p, w) : ca.p, q, boost: ca.boost, role: ca.role });
+    const v = ca.v && c2 && c2.v ? lerp3(ca.v, c2.v, w) : ca.v;
+    out.set(ca.pri, { p: c2 ? lerp3(ca.p, c2.p, w) : ca.p, q, boost: ca.boost, role: ca.role, v });
   }
   return { ball, cars: out };
 }
@@ -1077,7 +1093,17 @@ function updateCallouts(t, st) {
   }
 }
 
-let show = { trails: true, labels: true, boost: true, pads: true };
+let show = { trails: true, labels: true, boost: true, pads: true, vel: true };
+const VEL_SCALE = 0.25; // arrow length (uu) per uu/s: supersonic (2200) ≈ 550 uu
+const velDir = new THREE.Vector3();
+function applyVelocity(o, c) {
+  const sp = c && c.v ? Math.hypot(c.v[0], c.v[1], c.v[2]) : 0;
+  o.vel.visible = show.vel && sp > 1;
+  if (!o.vel.visible) return;
+  o.vel.position.set(c.p[0], c.p[1], c.p[2] + 20);
+  o.vel.setDirection(velDir.set(c.v[0], c.v[1], c.v[2]).divideScalar(sp));
+  o.vel.setLength(Math.max(sp * VEL_SCALE, 80), 60, 36);
+}
 let prevBall = null;
 const prevBoost = new Map();
 function applyState(st) {
@@ -1094,6 +1120,7 @@ function applyState(st) {
   for (const [pri, o] of cars) {
     const c = st.cars.get(pri);
     const live = !!c;
+    applyVelocity(o, c);
     o.g.visible = live; o.label.visible = live && show.labels;
     o.trail.visible = live && show.trails;
     o.boostPill.visible = live && show.boost;
@@ -1487,6 +1514,91 @@ function drawPressure() {
 }
 drawPressure();
 
+// Input strip (ADR-0085 b6): one car's controller input over the run, the
+// recording solid and the port's run of it (its ghost, pri -1 - id) dashed and
+// pale. It shows the followed car, else the first recorded car. Physics runs
+// only: a replay scene carries no input, so the strip stays hidden.
+const hasVel = frames.some(f => f.cars.some(c => c.v));
+const hasInput = frames.some(f => f.cars.some(c => c.input));
+if (hasVel) document.getElementById('tgVelRow').style.display = '';
+const inWrap = document.getElementById('inwrap'), inCanvas = document.getElementById('inputs');
+const inCursor = document.getElementById('incursor');
+const IN_LANES = ['thr', 'str', 'pit', 'yaw', 'rol', 'jmp', 'bst', 'hb'];
+const IN_BITS = [1, 2, 4]; // jump, boost, handbrake (SceneInput's bit set)
+const IN_LABEL_W = 26, IN_H = 72, LANE_H = IN_H / IN_LANES.length;
+let inSubject;
+function inputSubject() {
+  const p = cam.mode === 'player' ? cam.pri : null;
+  if (p == null) return S.players.find(pl => !pl.ghost)?.pri ?? null;
+  return p < 0 ? -1 - p : p; // following a ghost shows its recorded car
+}
+const inX = (t, W) => IN_LABEL_W + (dur > 0 ? t / dur : 0) * (W - IN_LABEL_W);
+// INPUT_STRIP_BEGIN: pure helpers, also run by tests/input_strip.mjs.
+// One [t, input | null] sample per frame for one car: null where the car is
+// absent (no candidate frame matched) or carries no input, so a gap stays a gap.
+function inputSamples(frames, pri) {
+  return frames.map(f => { const c = f.cars.find(c => c.pri === pri); return [f.t, c && c.input ? c.input : null]; });
+}
+// Axis k as polylines: runs of consecutive samples that have a value. A missing
+// sample or an axis the source can't recover (null) ends the run.
+function axisRuns(samples, k) {
+  const runs = []; let run = null;
+  for (const [t, inp] of samples) {
+    const a = inp ? inp.axes[k] : null;
+    if (a == null) { run = null; continue; }
+    if (!run) runs.push(run = []);
+    run.push([t, a]);
+  }
+  return runs;
+}
+// Pressed spans [t0, t1] for one button bit: a pressed sample lasts until the
+// next frame's time (its own time if it is the last frame), never further.
+function buttonSpans(samples, bit) {
+  const spans = [];
+  samples.forEach(([t, inp], i) => { if (inp && inp.buttons & bit) spans.push([t, samples[i + 1]?.[0] ?? t]); });
+  return spans;
+}
+// INPUT_STRIP_END
+function drawInputs() {
+  inSubject = inputSubject();
+  if (!hasInput || inSubject == null) { inWrap.style.display = 'none'; return; }
+  inWrap.style.display = '';
+  const W = inCanvas.clientWidth || 600;
+  inCanvas.width = W; inCanvas.height = IN_H;
+  const x = inCanvas.getContext('2d'); x.clearRect(0, 0, W, IN_H);
+  x.font = '9px sans-serif'; x.textBaseline = 'middle';
+  IN_LANES.forEach((name, k) => {
+    x.fillStyle = k % 2 ? 'rgba(255,255,255,.03)' : 'rgba(255,255,255,.07)';
+    x.fillRect(0, k * LANE_H, W, LANE_H);
+    x.fillStyle = '#8b949e'; x.fillText(name, 3, (k + .5) * LANE_H);
+  });
+  const team = S.players.find(pl => pl.pri === inSubject)?.team;
+  const runs = [[inSubject, TEAM_CSS[team] ?? '#3b82f6', [], 0], [-1 - inSubject, '#dfe6ee', [3, 3], 1]];
+  for (const [pri, colour, dash, half] of runs) {
+    const s = inputSamples(frames, pri);
+    if (!s.some(([, inp]) => inp)) continue;
+    x.strokeStyle = x.fillStyle = colour; x.setLineDash(dash); x.lineWidth = 1;
+    for (let k = 0; k < 5; k++) { // analog lanes: -1 at the lane's bottom, +1 at its top
+      const py = a => (k + .5 - a * .42) * LANE_H;
+      for (const run of axisRuns(s, k)) {
+        if (run.length === 1) { x.fillRect(inX(run[0][0], W), py(run[0][1]) - .5, 1, 1); continue; }
+        x.beginPath();
+        run.forEach(([t, a], i) => i ? x.lineTo(inX(t, W), py(a)) : x.moveTo(inX(t, W), py(a)));
+        x.stroke();
+      }
+    }
+    x.setLineDash([]);
+    IN_BITS.forEach((bit, j) => { // button lanes: recording in the top half, sim in the bottom
+      const y = (5 + j + half * .5) * LANE_H + 1;
+      for (const [t0, t1] of buttonSpans(s, bit)) {
+        const x0 = inX(t0, W);
+        x.fillRect(x0, y, Math.max(1, inX(t1, W) - x0), LANE_H / 2 - 1.5);
+      }
+    });
+  }
+}
+drawInputs();
+
 // --- playback ---
 let T = 0, playing = true, speed = 1, loop = false, last = performance.now(), lastState = null;
 let loopA = null, loopB = null; // A–B film-review loop
@@ -1504,7 +1616,7 @@ playBtn.onclick = () => setPlaying(!playing);
 tl.oninput = () => { T = parseFloat(tl.value); setPlaying(false); };
 document.getElementById('speed').onchange = e => { speed = parseFloat(e.target.value); };
 document.getElementById('loop').onchange = e => { loop = e.target.checked; };
-for (const id of ['Trails', 'Labels', 'Boost', 'Pads']) {
+for (const id of ['Trails', 'Labels', 'Boost', 'Pads', 'Vel']) {
   document.getElementById('tg' + id).onchange = e => { show[id.toLowerCase()] = e.target.checked; };
 }
 document.getElementById('trailLen').oninput = e => { trailSecs = parseFloat(e.target.value); };
@@ -1555,6 +1667,10 @@ function animate(now) {
   if (playing) { T += dt * speed; if (T >= segEnd) { if (loop || seg) T = segStart; else { T = dur; setPlaying(false); } } }
   tl.value = T;
   wpCursor.style.left = (T / dur * 100) + '%';
+  if (hasInput) {
+    if (inputSubject() !== inSubject) drawInputs();
+    inCursor.style.left = inX(T, inCanvas.clientWidth || 600) + 'px';
+  }
   const st = stateAt(T); lastState = st;
   applyState(st);
   updatePads(T);
@@ -1602,6 +1718,7 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
   drawWP();
   drawPressure();
+  drawInputs();
   sizeDraw();
 });
 </script>
