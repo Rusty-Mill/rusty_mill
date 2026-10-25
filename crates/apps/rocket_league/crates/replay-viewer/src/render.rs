@@ -1533,11 +1533,32 @@ function inputSubject() {
   return p < 0 ? -1 - p : p; // following a ghost shows its recorded car
 }
 const inX = (t, W) => IN_LABEL_W + (dur > 0 ? t / dur : 0) * (W - IN_LABEL_W);
-function inputSeries(pri) {
-  const out = [];
-  for (const f of frames) { const c = f.cars.find(c => c.pri === pri); if (c && c.input) out.push([f.t, c.input]); }
-  return out;
+// INPUT_STRIP_BEGIN: pure helpers, also run by tests/input_strip.mjs.
+// One [t, input | null] sample per frame for one car: null where the car is
+// absent (no candidate frame matched) or carries no input, so a gap stays a gap.
+function inputSamples(frames, pri) {
+  return frames.map(f => { const c = f.cars.find(c => c.pri === pri); return [f.t, c && c.input ? c.input : null]; });
 }
+// Axis k as polylines: runs of consecutive samples that have a value. A missing
+// sample or an axis the source can't recover (null) ends the run.
+function axisRuns(samples, k) {
+  const runs = []; let run = null;
+  for (const [t, inp] of samples) {
+    const a = inp ? inp.axes[k] : null;
+    if (a == null) { run = null; continue; }
+    if (!run) runs.push(run = []);
+    run.push([t, a]);
+  }
+  return runs;
+}
+// Pressed spans [t0, t1] for one button bit: a pressed sample lasts until the
+// next frame's time (its own time if it is the last frame), never further.
+function buttonSpans(samples, bit) {
+  const spans = [];
+  samples.forEach(([t, inp], i) => { if (inp && inp.buttons & bit) spans.push([t, samples[i + 1]?.[0] ?? t]); });
+  return spans;
+}
+// INPUT_STRIP_END
 function drawInputs() {
   inSubject = inputSubject();
   if (!hasInput || inSubject == null) { inWrap.style.display = 'none'; return; }
@@ -1554,27 +1575,25 @@ function drawInputs() {
   const team = S.players.find(pl => pl.pri === inSubject)?.team;
   const runs = [[inSubject, TEAM_CSS[team] ?? '#3b82f6', [], 0], [-1 - inSubject, '#dfe6ee', [3, 3], 1]];
   for (const [pri, colour, dash, half] of runs) {
-    const s = inputSeries(pri);
-    if (!s.length) continue;
+    const s = inputSamples(frames, pri);
+    if (!s.some(([, inp]) => inp)) continue;
     x.strokeStyle = x.fillStyle = colour; x.setLineDash(dash); x.lineWidth = 1;
     for (let k = 0; k < 5; k++) { // analog lanes: -1 at the lane's bottom, +1 at its top
-      x.beginPath(); let pen = false;
-      for (const [t, inp] of s) {
-        const a = inp.axes[k];
-        if (a == null) { pen = false; continue; } // an axis the source can't recover
-        const px = inX(t, W), py = (k + .5 - a * .42) * LANE_H;
-        pen ? x.lineTo(px, py) : x.moveTo(px, py); pen = true;
+      const py = a => (k + .5 - a * .42) * LANE_H;
+      for (const run of axisRuns(s, k)) {
+        if (run.length === 1) { x.fillRect(inX(run[0][0], W), py(run[0][1]) - .5, 1, 1); continue; }
+        x.beginPath();
+        run.forEach(([t, a], i) => i ? x.lineTo(inX(t, W), py(a)) : x.moveTo(inX(t, W), py(a)));
+        x.stroke();
       }
-      x.stroke();
     }
     x.setLineDash([]);
     IN_BITS.forEach((bit, j) => { // button lanes: recording in the top half, sim in the bottom
       const y = (5 + j + half * .5) * LANE_H + 1;
-      s.forEach(([t, inp], i) => {
-        if (!(inp.buttons & bit)) return;
-        const x0 = inX(t, W), x1 = inX(s[i + 1]?.[0] ?? t, W);
-        x.fillRect(x0, y, Math.max(1, x1 - x0), LANE_H / 2 - 1.5);
-      });
+      for (const [t0, t1] of buttonSpans(s, bit)) {
+        const x0 = inX(t0, W);
+        x.fillRect(x0, y, Math.max(1, inX(t1, W) - x0), LANE_H / 2 - 1.5);
+      }
     });
   }
 }
