@@ -259,7 +259,9 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_lockfile_is_not_an_unconditional_global_fallback(self) -> None:
         self.assertEqual(self._planner("--requires-full", input="Cargo.lock\n").returncode, 1)
         self.assertIn("lockfile_diff.py", self.workflow)
-        self.assertIn("Cargo.lock changed with a manifest", self.workflow)
+        # A lock change with manifest edits is narrowed, not swept (lockfile_diff --with-manifests).
+        self.assertNotIn('emit_full "Cargo.lock changed with a manifest"', self.workflow)
+        self.assertIn('lock_mode="--with-manifests"', self.workflow)
         self.assertIn("Unable to establish Cargo.lock impact", self.workflow)
 
     def test_unrelated_base_falls_back_after_fetch_verification(self) -> None:

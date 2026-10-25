@@ -16,6 +16,7 @@ from lockfile_diff import (
     changed_package_keys,
     full_dependency_closure,
     lockfile_package_keys,
+    manifest_change_impact,
     reliable_lockfile_impact,
 )
 
@@ -255,6 +256,32 @@ class AffectedByLockfileChangesTests(unittest.TestCase):
         affected = affected_by_lockfile_changes(md, {("a", "0.0.0")})
         self.assertEqual(affected, ["a", "b"])
 
+    def test_with_manifests_a_package_that_left_the_lock_needs_no_consumer(self) -> None:
+        # A migration drops `tokio` from its own manifest; the lock loses it. The migrated
+        # crate is selected by path, so nothing else is.
+        md = metadata(
+            {"app": ("crates/app", ["rusty_tokio"]), "rusty_tokio": ("crates/rusty_tokio", []),
+             "other": ("crates/other", [])},
+            external={},
+        )
+        old = lock([("tokio", "1.40.0", "registry", "abc")])
+        self.assertEqual(manifest_change_impact(md, old, lock([])), [])
+        self.assertIsNone(reliable_lockfile_impact(md, changed_package_keys(old, lock([]))))
+
+    def test_with_manifests_a_package_that_changed_selects_its_consumers(self) -> None:
+        md = metadata(
+            {"a": ("crates/a", ["serde"]), "b": ("crates/b", ["a"]), "c": ("crates/c", [])},
+            external={"serde": "1.0.2"},
+        )
+        old = lock([("serde", "1.0.1", "registry", "x"), ("gone", "0.1.0", "registry", "y")])
+        new = lock([("serde", "1.0.2", "registry", "z")])
+        self.assertEqual(manifest_change_impact(md, old, new), ["a", "b"])
+
+    def test_with_manifests_an_entry_in_the_new_lock_but_not_metadata_is_unknown(self) -> None:
+        md = metadata({"a": ("crates/a", [])}, external={})
+        new = lock([("stale", "2.0.0", "registry", "z")])
+        self.assertIsNone(manifest_change_impact(md, lock([]), new))
+
     def test_cli_narrows_valid_input_and_rejects_malformed_or_mixed_unknown_input(self) -> None:
         md = metadata(
             {"rusty_fair_play": ("crates/apps/rusty_fair_play", ["known"])},
@@ -278,14 +305,20 @@ class AffectedByLockfileChangesTests(unittest.TestCase):
             mixed = self._run_cli(metadata_path, old_path, new_path)
             self.assertNotEqual(mixed.returncode, 0)
 
+            removed_only = self._run_cli(metadata_path, old_path, new_path, "--with-manifests")
+            self.assertEqual(removed_only.returncode, 0, removed_only.stderr)
+            self.assertEqual(removed_only.stdout, "rusty_fair_play\n")
+
             new_path.write_text("not = [valid", encoding="utf-8")
             malformed = self._run_cli(metadata_path, old_path, new_path)
             self.assertNotEqual(malformed.returncode, 0)
 
     @staticmethod
-    def _run_cli(metadata_path: Path, old_path: Path, new_path: Path) -> subprocess.CompletedProcess[str]:
+    def _run_cli(
+        metadata_path: Path, old_path: Path, new_path: Path, *flags: str
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, str(SCRIPT), str(metadata_path), str(old_path), str(new_path)],
+            [sys.executable, str(SCRIPT), str(metadata_path), str(old_path), str(new_path), *flags],
             capture_output=True,
             text=True,
             check=False,
