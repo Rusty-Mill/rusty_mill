@@ -106,6 +106,7 @@ impl Driver {
         self.submit(0)?;
         loop {
             self.reap();
+            let mut retry = false;
             // Retain unrelated completions for normal readiness dispatch. In
             // particular, never invoke a waker while holding the ring lock.
             self.completions.retain(|&(token, result)| {
@@ -116,17 +117,26 @@ impl Driver {
                 if token == remove_id {
                     // ENOENT means the one-shot poll had already fired. Its
                     // terminal CQE still has to be consumed before returning.
-                    // EALREADY likewise requires waiting for that terminal CQE
-                    // (liburing io_uring_prep_poll_remove(3)).
+                    // EALREADY means a wakeup owns the poll. That wakeup may
+                    // find the event already consumed and silently re-arm,
+                    // posting no CQE, so the remove must be retried.
                     assert!(
                         result == 0 || result == -libc::ENOENT || result == -libc::EALREADY,
                         "io_uring PollRemove failed: {result}"
                     );
-                    remove_done = true;
+                    retry |= result == -libc::EALREADY;
+                    remove_done |= result != -libc::EALREADY;
                     return false;
                 }
                 true
             });
+            // A terminal poll CQE makes the retry moot; only one remove is
+            // ever in flight, so none is left to reap.
+            if retry && poll_done {
+                remove_done = true;
+            } else if retry {
+                self.push(opcode::PollRemove::new(id).build().user_data(remove_id))?;
+            }
             if poll_done && remove_done {
                 // A CQE can become visible on another submitter's task-work
                 // thread BEFORE io_free_batch_list drops the poll's file ref.
@@ -426,6 +436,41 @@ mod tests {
         let rebound = TcpListener::bind(addr).unwrap();
         drop(rebound);
         drop(connection);
+    }
+
+    // A readiness wakeup can race a PollRemove: the remove gets EALREADY,
+    // then the poll re-checks, finds the event already consumed and re-arms.
+    // No terminal CQE follows, so cancellation must retry the remove.
+    // DEFER_TASKRUN holds the woken poll's task work until the next wait,
+    // making that window deterministic.
+    #[test]
+    fn cancellation_retries_a_remove_that_races_a_spurious_wakeup() {
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut driver = Driver {
+                ring: IoUring::builder()
+                    .setup_single_issuer()
+                    .setup_defer_taskrun()
+                    .build(8)
+                    .unwrap(),
+                next_id: 1,
+                ids: HashMap::new(),
+                registry: HashMap::new(),
+                completions: VecDeque::new(),
+            };
+            driver.arm(listener.as_raw_fd(), 0).unwrap();
+            driver.submit(0).unwrap();
+            let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let accepted = listener.accept().unwrap();
+            done_tx.send(driver.cancel(0)).unwrap();
+            drop((client, accepted));
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(10));
+        assert!(
+            matches!(result, Ok(Ok(()))),
+            "cancellation did not finish: {result:?}"
+        );
     }
 
     struct DropFromWake {
