@@ -307,7 +307,8 @@ pub struct LimitsConfig {
     /// Largest request body, in bytes, forwarded to a `host`, `service` or
     /// `dynamic` backend; a larger one is refused with `413`. The proxy reads
     /// a body whole before sending it, so that a retry can send it again.
-    /// 10 MiB when unset.
+    /// An `a2a` or `agui` route is held to the lower of this and the LLM
+    /// request bound. 10 MiB when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_request_body_bytes: Option<u64>,
 }

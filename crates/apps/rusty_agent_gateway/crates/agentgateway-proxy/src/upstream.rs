@@ -22,22 +22,34 @@ pub(crate) type SendError = rusty_request::Error;
 ///
 /// `Host` is not copied: `rusty_request` writes it from the URI, which the
 /// proxy has already pointed at the upstream. The `Content-Length` it
-/// writes is the body's own.
+/// writes is the body's own. A field the client sent replaces the one
+/// `rusty_request` would add by default (its `User-Agent`), and every value
+/// of a repeated field is kept; a request without a `User-Agent` goes up
+/// with `rusty_request`'s.
 pub(crate) async fn send(
     client: &Client,
     request: &Request<Bytes>,
 ) -> Result<Response<Body>, SendError> {
     let method = rusty_request::Method::parse(request.method().as_str());
     let mut builder = client.request(method, &request.uri().to_string())?;
-    for (name, value) in request.headers() {
+    let headers = request.headers();
+    for name in headers.keys() {
         if name == header::HOST || name == header::CONTENT_LENGTH {
             continue;
         }
-        let Ok(value) = value.to_str() else {
-            rusty_log::debug!(header = %name, "dropping a request header that is not text");
-            continue;
-        };
-        builder = builder.header_append(name.as_str(), value)?;
+        let mut replaced = false;
+        for value in headers.get_all(name) {
+            let Ok(value) = value.to_str() else {
+                rusty_log::debug!(header = %name, "dropping a request header that is not text");
+                continue;
+            };
+            builder = if replaced {
+                builder.header_append(name.as_str(), value)?
+            } else {
+                builder.header(name.as_str(), value)?
+            };
+            replaced = true;
+        }
     }
     let response = builder
         .body(request.body().to_vec())

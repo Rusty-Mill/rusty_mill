@@ -2211,7 +2211,8 @@ serving more than it.
 the gateway reads whole before forwarding (see
 [Why a body has to be buffered](#why-a-body-has-to-be-buffered)). It defaults
 to 10 MiB: room for any API call, and a bound on what a burst of uploads can
-hold in memory.
+hold in memory. An `a2a` or `agui` route reads a call whole to gate it, within
+the lower of this limit and the 4 MiB an LLM request is allowed.
 
 ## On `rusty_mcp`
 

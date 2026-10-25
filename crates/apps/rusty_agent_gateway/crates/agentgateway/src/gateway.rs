@@ -823,21 +823,14 @@ impl Gateway {
 
                 // Gating needs the method, and the method is in the body, so
                 // the body has to be read. It is handed to the proxy already
-                // buffered rather than re-read. Capped the same way the
-                // `extAuthz` body read above is: an A2A call has no reason to
-                // be larger than an LLM request, so it reuses that bound
-                // rather than buffering an unbounded body.
-                let bytes = match collect_limited(
-                    body,
-                    agentgateway_llm::MAX_REQUEST_BYTES as usize,
-                )
-                .await
-                {
+                // buffered rather than re-read, within the protocol cap.
+                let limit = self.protocol_body_cap();
+                let bytes = match collect_limited(body, limit).await {
                     Ok(bytes) => bytes,
                     Err(()) => {
                         rusty_log::info!(
                             route = ?selection.route.name,
-                            limit = agentgateway_llm::MAX_REQUEST_BYTES,
+                            limit,
                             "refusing an A2A request body that is too large"
                         );
                         return status(
@@ -881,8 +874,8 @@ impl Gateway {
 impl Gateway {
     /// Gate an AG-UI run and forward it with an audit record either side.
     ///
-    /// The run input is in the body, so a `POST` is read in full (bounded like
-    /// the A2A read) before the rules see it. Anything else on the route is
+    /// The run input is in the body, so a `POST` is read in full (within
+    /// [`Self::protocol_body_cap`]) before the rules see it. Anything else on the route is
     /// proxied untouched. The decision is recorded before the upstream is
     /// called; the outcome is recorded by the body wrapper once the event
     /// stream ends, or when the client goes away.
@@ -906,8 +899,7 @@ impl Gateway {
                 .await;
         }
 
-        let bytes = match collect_limited(body, agentgateway_llm::MAX_REQUEST_BYTES as usize).await
-        {
+        let bytes = match collect_limited(body, self.protocol_body_cap()).await {
             Ok(bytes) => bytes,
             Err(()) => {
                 audit::record_decision(&route, None, false, "run input too large");
@@ -957,6 +949,14 @@ impl Gateway {
 }
 
 impl Gateway {
+    /// The bound on an A2A or AG-UI body, which is read whole to be gated:
+    /// `limits.maxRequestBodyBytes`, or an LLM request's bound if that is
+    /// lower, since neither protocol has reason to send a larger body.
+    fn protocol_body_cap(&self) -> usize {
+        self.max_proxied_body
+            .min(agentgateway_llm::MAX_REQUEST_BYTES as usize)
+    }
+
     /// Read `body` within `limits.maxRequestBodyBytes` and proxy the request.
     ///
     /// The proxy sends a request whole, so a retry can send it again; a body

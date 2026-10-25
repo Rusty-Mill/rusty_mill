@@ -838,27 +838,28 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<(String, Vec
     Some((head, seen[head_end..head_end + length].to_vec()))
 }
 
+/// What a [`raw_upstream`] received: each request's head and body.
+type Received = Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+
 /// A keep-alive upstream that answers every request with `body`, counting
-/// the connections it accepts and the request bodies it receives.
-async fn raw_upstream(
-    body: Vec<u8>,
-) -> (u16, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+/// the connections it accepts and recording the requests it receives.
+async fn raw_upstream(body: Vec<u8>) -> (u16, Arc<AtomicUsize>, Received) {
     use tokio::io::AsyncWriteExt as _;
     let port = free_port().await;
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
         .await
         .expect("upstream should bind");
     let accepted = Arc::new(AtomicUsize::new(0));
-    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (counter, recorder) = (Arc::clone(&accepted), Arc::clone(&bodies));
+    let received: Received = Arc::default();
+    let (counter, recorder) = (Arc::clone(&accepted), Arc::clone(&received));
     let body = Arc::new(body);
     tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
             counter.fetch_add(1, Ordering::SeqCst);
             let (recorder, body) = (Arc::clone(&recorder), Arc::clone(&body));
             tokio::spawn(async move {
-                while let Some((_, received)) = read_request(&mut stream).await {
-                    recorder.lock().expect("lock").push(received);
+                while let Some(request) = read_request(&mut stream).await {
+                    recorder.lock().expect("lock").push(request);
                     let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
                     if stream.write_all(head.as_bytes()).await.is_err()
                         || stream.write_all(&body).await.is_err()
@@ -869,7 +870,22 @@ async fn raw_upstream(
             });
         }
     });
-    (port, accepted, bodies)
+    (port, accepted, received)
+}
+
+/// The bodies of the requests `received` holds, in order.
+fn bodies(received: &Received) -> Vec<Vec<u8>> {
+    let received = received.lock().expect("lock");
+    received.iter().map(|(_, body)| body.clone()).collect()
+}
+
+/// The values of every `name` field in `head`, in order.
+fn header_values(head: &str, name: &str) -> Vec<String> {
+    head.lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(field, _)| field.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.trim().to_string())
+        .collect()
 }
 
 fn route_to(port: u16) -> String {
@@ -918,7 +934,7 @@ async fn a_large_response_streams_through_intact() {
 
 #[tokio::test]
 async fn a_body_over_max_request_body_bytes_is_refused() {
-    let (port, _, bodies) = raw_upstream(b"ok".to_vec()).await;
+    let (port, _, received) = raw_upstream(b"ok".to_vec()).await;
     let (base, shutdown) = start_with_inventory(
         &route_to(port),
         "config:\n  limits:\n    maxRequestBodyBytes: 16",
@@ -940,7 +956,7 @@ async fn a_body_over_max_request_body_bytes_is_refused() {
         .expect("should answer");
     assert_eq!(over.status(), 413);
     assert_eq!(
-        *bodies.lock().expect("lock"),
+        bodies(&received),
         vec![b"x".repeat(16)],
         "only the body within the cap reached the upstream"
     );
@@ -950,7 +966,7 @@ async fn a_body_over_max_request_body_bytes_is_refused() {
 #[tokio::test]
 async fn a_chunked_request_body_is_forwarded_whole() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    let (port, _, bodies) = raw_upstream(b"ok".to_vec()).await;
+    let (port, _, received) = raw_upstream(b"ok".to_vec()).await;
     let (base, shutdown) = start(&route_to(port)).await;
     let gateway = base.trim_start_matches("http://");
     let mut client = tokio::net::TcpStream::connect(gateway)
@@ -966,6 +982,43 @@ async fn a_chunked_request_body_is_forwarded_whole() {
     let mut answer = String::new();
     client.read_to_string(&mut answer).await.expect("read");
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
-    assert_eq!(*bodies.lock().expect("lock"), vec![b"hello world".to_vec()]);
+    assert_eq!(bodies(&received), vec![b"hello world".to_vec()]);
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn request_headers_reach_the_upstream_as_the_client_sent_them() {
+    let (port, _, received) = raw_upstream(b"ok".to_vec()).await;
+    let (base, shutdown) = start(&route_to(port)).await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("user-agent", "caller/1".parse().expect("value"));
+    headers.append("x-multi", "a".parse().expect("value"));
+    headers.append("x-multi", "b".parse().expect("value"));
+    let client = reqwest::Client::new();
+    client
+        .get(format!("{base}/"))
+        .headers(headers)
+        .send()
+        .await
+        .expect("should answer");
+    client
+        .get(format!("{base}/"))
+        .send()
+        .await
+        .expect("should answer");
+
+    let received = received.lock().expect("lock");
+    let (with_agent, without_agent) = (&received[0].0, &received[1].0);
+    assert_eq!(
+        header_values(with_agent, "user-agent"),
+        vec!["caller/1"],
+        "the client's User-Agent replaces the library's"
+    );
+    assert_eq!(header_values(with_agent, "x-multi"), vec!["a", "b"]);
+    let agent = header_values(without_agent, "user-agent");
+    assert!(
+        agent.len() == 1 && agent[0].starts_with("rusty_request/"),
+        "a request without one goes up with rusty_request's: {agent:?}"
+    );
     shutdown.cancel();
 }
