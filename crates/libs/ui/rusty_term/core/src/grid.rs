@@ -5,10 +5,8 @@
 //! …) that the [`AnsiParser`](super::parser::AnsiParser) drives, and produces a
 //! [`DirtyFrame`] snapshot for the renderer.
 
-#[cfg(any(test, feature = "gui"))]
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, OnceLock};
 
 use super::cell::{Cell, DEFAULT_BG, DEFAULT_FG, Pen, WIDE_TRAILER, char_width};
 use unicode_segmentation::UnicodeSegmentation;
@@ -490,8 +488,16 @@ pub struct Grid {
     /// to `clusters[n - 1]` (`0` means a lone `ch`). Append-only and bounded by
     /// [`CLUSTER_MAX`], so ids stay stable for cells held in scrollback.
     pub clusters: Vec<String>,
-    /// `Arc` snapshot of `clusters`, mirroring `links_arc`.
-    pub(crate) clusters_arc: Arc<[String]>,
+    /// `Arc` snapshot of `clusters`, mirroring `links_arc` but built on the
+    /// first frame after the table grows, not on every insert: a burst of new
+    /// clusters between two frames costs one copy of the table, not one each.
+    clusters_arc: OnceLock<Arc<[String]>>,
+    /// Id of each `clusters` entry, so interning a combining mark is one hash
+    /// lookup instead of a scan of the table.
+    cluster_ids: HashMap<String, u16>,
+    /// Reused buffer for the grown continuation in `append_to_glyph`, so a
+    /// mark whose continuation is already interned allocates nothing.
+    cluster_scratch: String,
     /// The hyperlink id stamped onto cells written while an OSC 8 link is open
     /// (`0` when none). Set by the parser via [`Grid::set_link`].
     current_link: u16,
@@ -1311,7 +1317,9 @@ impl Grid {
             links: Vec::new(),
             links_arc: Arc::from(Vec::<String>::new()),
             clusters: Vec::new(),
-            clusters_arc: Arc::from(Vec::<String>::new()),
+            clusters_arc: OnceLock::new(),
+            cluster_ids: HashMap::new(),
+            cluster_scratch: String::new(),
             current_link: 0,
             tab_stops: default_tab_stops(cols),
             cursor_visible: true,
@@ -2798,16 +2806,18 @@ impl Grid {
     /// Append `ch` to the grapheme continuation of the cell at `(x, y)`,
     /// re-interning the grown suffix and marking the row dirty.
     fn append_to_glyph(&mut self, x: usize, y: usize, ch: char) {
-        let mut suffix = match self.screen[y].cells()[x].cluster {
-            0 => String::new(),
-            id => self
-                .clusters
-                .get((id - 1) as usize)
-                .cloned()
-                .unwrap_or_default(),
-        };
+        let mut suffix = std::mem::take(&mut self.cluster_scratch);
+        suffix.clear();
+        let old = self.screen[y].cells()[x].cluster;
+        if let Some(prev) = old
+            .checked_sub(1)
+            .and_then(|i| self.clusters.get(usize::from(i)))
+        {
+            suffix.push_str(prev);
+        }
         suffix.push(ch);
-        let id = self.intern_cluster(suffix);
+        let id = self.intern_cluster(&suffix);
+        self.cluster_scratch = suffix;
         self.screen[y].cells_mut()[x].cluster = id;
         self.touch(y);
     }
@@ -2815,16 +2825,35 @@ impl Grid {
     /// Return the id for grapheme continuation `suffix`, interning it on first
     /// use. Ids are `index + 1` so `0` means "no continuation". Returns `0` once
     /// the table is full (the continuation is dropped; the base glyph remains).
-    fn intern_cluster(&mut self, suffix: String) -> u16 {
-        if let Some(i) = self.clusters.iter().position(|c| *c == suffix) {
-            return (i + 1) as u16;
+    fn intern_cluster(&mut self, suffix: &str) -> u16 {
+        if let Some(&id) = self.cluster_ids.get(suffix) {
+            return id;
         }
         if self.clusters.len() >= CLUSTER_MAX {
             return 0;
         }
-        self.clusters.push(suffix);
-        self.clusters_arc = Arc::from(self.clusters.clone());
-        self.clusters.len() as u16
+        self.clusters.push(suffix.to_owned());
+        let id = self.clusters.len() as u16;
+        self.cluster_ids.insert(suffix.to_owned(), id);
+        self.clusters_arc = OnceLock::new();
+        id
+    }
+
+    /// The grapheme table as handed to a frame: shared until the next insert.
+    pub(crate) fn clusters_arc(&self) -> Arc<[String]> {
+        Arc::clone(
+            self.clusters_arc
+                .get_or_init(|| self.clusters.clone().into()),
+        )
+    }
+
+    /// Rebuild the caches derived from `clusters` after a restore replaced it.
+    pub(crate) fn rebuild_cluster_caches(&mut self) {
+        self.cluster_ids = (1..)
+            .zip(&self.clusters)
+            .map(|(id, c)| (c.clone(), id))
+            .collect();
+        self.clusters_arc = OnceLock::new();
     }
 
     /// Blank columns `[from, to)` of row `y`, marking it dirty.
@@ -4433,7 +4462,7 @@ impl Grid {
             cursor: self.cursor,
             rows,
             links: self.links_arc.clone(),
-            clusters: self.clusters_arc.clone(),
+            clusters: self.clusters_arc(),
             line_attrs: self.screen.iter().map(|l| l.attr).collect(),
         }
     }
@@ -5028,7 +5057,7 @@ impl Grid {
             cursor: self.cursor,
             rows,
             links: self.links_arc.clone(),
-            clusters: self.clusters_arc.clone(),
+            clusters: self.clusters_arc(),
             line_attrs: attrs,
         }
     }
@@ -5329,19 +5358,18 @@ impl crate::checkpoint::Wire for Grid {
         grid.status_line = crate::checkpoint::Wire::read(r)?;
         grid.clusters = crate::checkpoint::Wire::read(r)?;
         grid.links = crate::checkpoint::Wire::read(r)?;
-        // Charge cache rebuilds too: they duplicate String headers and bytes.
+        // Charge cache rebuilds too: they duplicate String headers and bytes,
+        // and the cluster id index copies the cluster strings once more.
+        let cluster_bytes = grid.clusters.iter().map(String::len).sum::<usize>();
         r.charge(
             (grid.links.len() + grid.clusters.len()) * 2 * size_of::<String>()
+                + grid.clusters.len() * (size_of::<String>() + size_of::<u16>())
                 + 4 * size_of::<usize>()
-                + grid
-                    .links
-                    .iter()
-                    .chain(&grid.clusters)
-                    .map(String::len)
-                    .sum::<usize>(),
+                + grid.links.iter().map(String::len).sum::<usize>()
+                + 2 * cluster_bytes,
         )?;
         grid.links_arc = grid.links.clone().into();
-        grid.clusters_arc = grid.clusters.clone().into();
+        grid.rebuild_cluster_caches();
         r.charge(grid.rows)?;
         if grid.rows > 4096 {
             return Err(crate::checkpoint::Error("grid dimensions"));

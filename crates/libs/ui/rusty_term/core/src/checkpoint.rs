@@ -447,6 +447,8 @@ mod tests {
             ("host_out", "pending host side effects"),
             ("links_arc", "rebuilt hyperlink cache"),
             ("clusters_arc", "rebuilt grapheme cache"),
+            ("cluster_ids", "rebuilt grapheme id index"),
+            ("cluster_scratch", "reused append buffer"),
             ("bell", "pending host bell"),
             ("min_contrast", "renderer configuration"),
             ("bidi", "renderer configuration; VT bdsm state is encoded"),
