@@ -10421,16 +10421,16 @@ dependencies = [
 name = "remind_me_remote"
 version = "0.4.0"
 dependencies = [
- "axum",
  "remind_me_core",
  "remind_me_mcp",
  "reqwest 0.13.4",
+ "rusty_axum",
  "rusty_base64",
  "rusty_hex",
- "rusty_mcp_axum",
  "rusty_mcp_server",
  "rusty_oauth",
  "rusty_percent",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "sha256",

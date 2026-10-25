@@ -114,6 +114,40 @@ fn query_pairs(query: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A form body (`application/x-www-form-urlencoded`), deserialized as
+/// [`Query`] deserializes a query string. 415 for any other content type and
+/// 422 for a form of the wrong shape, as axum answers.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Form<T>(pub T);
+
+impl<T: DeserializeOwned, S> FromRequest<S> for Form<T> {
+    type Rejection = Rejection;
+
+    fn from_request(req: &mut Request, _state: &S) -> Result<Self, Rejection> {
+        if essence(req.headers()).as_deref() != Some("application/x-www-form-urlencoded") {
+            return Err(Rejection::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "expected a request with Content-Type: application/x-www-form-urlencoded",
+            ));
+        }
+        let body = req.take_body();
+        let Ok(body) = std::str::from_utf8(&body) else {
+            return Err(Rejection::new(
+                StatusCode::BAD_REQUEST,
+                "form body is not valid UTF-8",
+            ));
+        };
+        T::deserialize(Pairs(&query_pairs(body)))
+            .map(Form)
+            .map_err(|e| {
+                Rejection::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("invalid form body: {e}"),
+                )
+            })
+    }
+}
+
 /// The matched route's path parameters, deserialized: one value for one
 /// parameter, a tuple by position, or a struct or map by name.
 #[derive(Debug, Clone, Copy, Default)]
@@ -158,17 +192,24 @@ impl<T: DeserializeOwned, S> FromRequest<S> for Json<T> {
 }
 
 fn is_json(headers: &HeaderMap) -> bool {
-    let Some(value) = headers.get("content-type") else {
+    let Some(essence) = essence(headers) else {
         return false;
     };
-    let essence = value
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
     essence == "application/json"
         || (essence.starts_with("application/") && essence.ends_with("+json"))
+}
+
+/// The content type without its parameters, lowercased.
+fn essence(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get("content-type")?;
+    Some(
+        value
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase(),
+    )
 }
 
 impl<T: Serialize> IntoResponse for Json<T> {
@@ -315,6 +356,48 @@ mod tests {
         let r = Json(serde_json::json!({"ok": true})).into_response();
         assert_eq!(r.headers.get("content-type"), Some("application/json"));
         assert_eq!(r.body.as_bytes(), Some(&b"{\"ok\":true}"[..]));
+    }
+
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    struct Grant {
+        grant_type: String,
+        scope: Option<String>,
+    }
+
+    fn form_req(content_type: &str, body: &str) -> Request {
+        Request::new(Method::Post, "/")
+            .with_header("content-type", content_type)
+            .map(|r| r.with_body(body.as_bytes().to_vec()))
+            .unwrap()
+    }
+
+    #[test]
+    fn form_decodes_a_urlencoded_body() {
+        let mut req = form_req(
+            "application/x-www-form-urlencoded; charset=utf-8",
+            "grant_type=authorization_code&scope=a+b%2Fc",
+        );
+        let Form(grant) = Form::<Grant>::from_request(&mut req, &()).unwrap();
+        assert_eq!(
+            grant,
+            Grant {
+                grant_type: "authorization_code".into(),
+                scope: Some("a b/c".into()),
+            }
+        );
+        let mut req = form_req("application/x-www-form-urlencoded", "grant_type=x");
+        let Form(grant) = Form::<Grant>::from_request(&mut req, &()).unwrap();
+        assert_eq!(grant.scope, None);
+    }
+
+    #[test]
+    fn form_refuses_other_types_and_wrong_shapes() {
+        let mut json = form_req("application/json", "grant_type=x");
+        let err = Form::<Grant>::from_request(&mut json, &()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let mut missing = form_req("application/x-www-form-urlencoded", "scope=a");
+        let err = Form::<Grant>::from_request(&mut missing, &()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[test]
