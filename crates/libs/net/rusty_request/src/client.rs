@@ -739,6 +739,8 @@ async fn send_with_retries(
     };
 
     let mut attempt = 0usize;
+    // Whether an earlier attempt may have reached a server.
+    let mut delivered = false;
     loop {
         let result = send_with_redirects(
             method.clone(),
@@ -764,8 +766,9 @@ async fn send_with_retries(
         };
 
         if !should_retry || !policy.allows_method(&method) || attempt >= policy.max_retries() {
-            return result;
+            return result.map_err(|e| e.once_delivered(delivered));
         }
+        delivered |= !matches!(&result, Err(e) if e.is_connect());
 
         rt::sleep(policy.delay_for(attempt, retry_after)).await;
         attempt += 1;
@@ -811,7 +814,7 @@ async fn send_with_redirects(
         };
         let response = send_one_hop(pool.as_deref(), &request, proxy_for_hop, &trust_policy)
             .await
-            .map_err(|e| e.after_hop(hop))?;
+            .map_err(|e| e.once_delivered(hop > 0))?;
 
         // Store cookies from every hop's response, not just the final
         // one -- an intermediate redirect can set cookies too, and they
@@ -974,7 +977,7 @@ async fn send_with_redirects_streaming(
         let (answer, reuse) =
             send_one_hop_streaming(pool.as_ref(), &request, proxy_for_hop, &trust_policy)
                 .await
-                .map_err(|e| e.after_hop(hop))?;
+                .map_err(|e| e.once_delivered(hop > 0))?;
         let StreamingHop {
             status,
             headers: resp_headers,

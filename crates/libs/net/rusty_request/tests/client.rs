@@ -1269,6 +1269,69 @@ fn a_refused_connection_is_a_connect_error() {
 }
 
 #[test]
+fn a_connection_refused_on_every_retry_is_a_connect_error() {
+    run(async {
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let err = Client::new()
+            .post(&format!("http://{addr}/"))
+            .unwrap()
+            .retry(retry_posts_once())
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_connect(), "{err:?}");
+    });
+}
+
+#[test]
+fn a_refusal_after_a_delivered_attempt_is_not_a_connect_error() {
+    run(async {
+        // Answers one POST with 503, then stops listening, so the retry is
+        // refused after the first attempt reached the server.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = rusty_tokio::io::TcpListener::from_std(std_listener).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let posts = Arc::new(AtomicUsize::new(0));
+        let posts_in_task = posts.clone();
+        rusty_tokio::spawn(async move {
+            let Ok((stream, _peer)) = listener.accept().await else {
+                return;
+            };
+            drop(listener);
+            if common::read_request(&stream).await.is_ok() {
+                posts_in_task.fetch_add(1, Ordering::SeqCst);
+                let close = [("Connection", "close")];
+                let _ = stream
+                    .write_all(&http_response(503, "Service Unavailable", &close, b""))
+                    .await;
+            }
+        });
+        let err = Client::new()
+            .post(&format!("http://{addr}/"))
+            .unwrap()
+            .retry(retry_posts_once())
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
+        assert!(matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::ConnectionRefused));
+        assert!(!err.is_connect(), "{err:?}");
+    });
+}
+
+/// Retries a POST once, on a 503 or an I/O error, after a pause long
+/// enough for a test server to stop listening.
+fn retry_posts_once() -> RetryPolicy {
+    RetryPolicy::new(1)
+        .backoff(Backoff::fixed(Duration::from_millis(50)))
+        .retry_statuses([503])
+        .retry_non_idempotent()
+}
+
+#[test]
 fn no_pool_never_reuses_a_connection() {
     run(async {
         let server = start_test_server(|_req| http_response(200, "OK", &[], b"ok"));
