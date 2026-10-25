@@ -2212,3 +2212,22 @@ fn watch_wait_for_predicate_panic_does_not_poison_the_channel() {
         drop(tx);
     });
 }
+
+#[test]
+fn watch_wait_for_inspects_each_version_once() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(0);
+        tx.send(1).unwrap();
+        drop(tx);
+        let mut calls = 0;
+        assert!(rx
+            .wait_for(|_| {
+                calls += 1;
+                false
+            })
+            .await
+            .is_err());
+        assert_eq!(calls, 1, "the pre-sent version is inspected once");
+    });
+}

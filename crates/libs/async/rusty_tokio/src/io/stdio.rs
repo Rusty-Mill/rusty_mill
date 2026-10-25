@@ -118,6 +118,7 @@ impl AsyncRead for Stdin {
 /// interleaving.
 pub struct Stdout {
     state: State<usize>,
+    flush: State<usize>,
 }
 
 /// Returns a new handle to the process's standard output. See
@@ -127,7 +128,10 @@ pub struct Stdout {
 /// Writing to the returned handle panics if there's no running
 /// [`crate::Runtime`] -- construction itself doesn't need one.
 pub fn stdout() -> Stdout {
-    Stdout { state: State::Idle }
+    Stdout {
+        state: State::Idle,
+        flush: State::Idle,
+    }
 }
 
 impl AsyncWrite for Stdout {
@@ -139,16 +143,21 @@ impl AsyncWrite for Stdout {
         poll_write_locked(&mut self.state, cx, buf, stdout_lock, std::io::stdout)
     }
 
-    /// A no-op: every `poll_write` call above already writes the whole
-    /// buffer (or fails) before returning `Ready`, so there's never
-    /// anything left in flight for a later `flush` to wait on.
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let _ = self;
-        Poll::Ready(Ok(()))
+    /// Flushes `std::io::Stdout`'s own line buffer, which otherwise holds
+    /// bytes after the last newline (an LSP frame's JSON body, say) until
+    /// a later write or process exit. Its own state, so a flush never
+    /// completes an unrelated in-flight write in its place.
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        poll_locked(&mut self.flush, cx, stdout_lock, || {
+            || {
+                std::io::Write::flush(&mut std::io::stdout())?;
+                Ok(0)
+            }
+        })
+        .map_ok(drop)
     }
 
-    /// No OS-level "half-close" concept applies to stdio -- just flushes
-    /// (a no-op, per [`poll_flush`](Self::poll_flush)).
+    /// No OS-level "half-close" concept applies to stdio -- just flushes.
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.poll_flush(cx)
     }
@@ -203,28 +212,43 @@ fn poll_write_locked<W>(
 where
     W: io::Write + Send + 'static,
 {
-    loop {
-        match state {
-            State::Idle => {
-                let data = buf.to_vec();
-                let len = data.len();
-                *state = State::Busy(Box::pin(async move {
-                    let _guard = lock().lock().await;
-                    crate::spawn_blocking(move || {
-                        std::io::Write::write_all(&mut stream(), &data)?;
-                        Ok(len)
-                    })
-                    .await
-                    .unwrap_or_else(|_| Err(blocking_pool_panicked()))
-                }));
-            }
-            State::Busy(fut) => {
-                let result = std::task::ready!(fut.as_mut().poll(cx));
-                *state = State::Idle;
-                return Poll::Ready(result);
-            }
+    poll_locked(state, cx, lock, || {
+        let data = buf.to_vec();
+        move || {
+            std::io::Write::write_all(&mut stream(), &data)?;
+            Ok(data.len())
         }
+    })
+}
+
+/// Drives one blocking stdio operation under `lock`: when idle, builds it
+/// with `start` and runs it on the blocking pool; otherwise keeps polling
+/// the operation already in flight (`start` is not called).
+fn poll_locked<F>(
+    state: &mut State<usize>,
+    cx: &mut Context<'_>,
+    lock: fn() -> &'static Mutex<()>,
+    start: impl FnOnce() -> F,
+) -> Poll<io::Result<usize>>
+where
+    F: FnOnce() -> io::Result<usize> + Send + 'static,
+{
+    if let State::Idle = state {
+        let op = start();
+        *state = State::Busy(Box::pin(async move {
+            let _guard = lock().lock().await;
+            crate::spawn_blocking(op)
+                .await
+                .unwrap_or_else(|_| Err(blocking_pool_panicked()))
+        }));
     }
+    let State::Busy(fut) = state else {
+        // Unreachable: an idle state was made busy just above.
+        return Poll::Ready(Ok(0));
+    };
+    let result = std::task::ready!(fut.as_mut().poll(cx));
+    *state = State::Idle;
+    Poll::Ready(result)
 }
 
 fn stdin_lock() -> &'static Mutex<()> {

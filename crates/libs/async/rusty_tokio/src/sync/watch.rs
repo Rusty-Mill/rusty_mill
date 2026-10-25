@@ -189,6 +189,10 @@ impl<T> Receiver<T> {
             // await below and the future stays `Send`.
             {
                 let guard = shared.inner.lock().unwrap();
+                // Mark this version seen before inspecting it, so `changed`
+                // below waits for a newer one rather than handing the
+                // predicate the same value twice.
+                *seen = guard.version;
                 // As in tokio, a panicking predicate must not poison the
                 // channel: release the lock before resuming the unwind.
                 let matched =
@@ -201,7 +205,6 @@ impl<T> Receiver<T> {
                     }
                 };
                 if matched {
-                    *seen = guard.version;
                     return Ok(Ref { guard });
                 }
             }
