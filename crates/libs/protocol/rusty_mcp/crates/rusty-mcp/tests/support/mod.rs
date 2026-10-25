@@ -1,6 +1,8 @@
-//! A real `rusty_mcp_server` behind `rusty_mcp_axum`, on a real socket: the
+//! A real `rusty_mcp_server` in an axum router, on a real socket: the
 //! stack these layers ship in, so each layer is tested where it runs.
 #![allow(dead_code, clippy::unwrap_used)]
+
+pub mod mcp;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -73,12 +75,7 @@ pub fn mcp_router(changes: &ChangeBroadcaster) -> Router {
             ..HttpConfig::default()
         },
     ));
-    rusty_mcp_axum::router_with_principal(handler, 1 << 20, |parts| {
-        let token = parts.extensions.get::<rusty_mcp::auth::VerifiedToken>()?;
-        let mut principal = Value::object();
-        principal.insert("sub", token.subject.clone()?);
-        Some(principal)
-    })
+    mcp::router(handler, PATH)
 }
 
 /// Serve `app` (which nests [`mcp_router`] at [`PATH`]) and return where.

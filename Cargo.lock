@@ -11591,6 +11591,7 @@ version = "0.11.0"
 dependencies = [
  "axum",
  "http",
+ "http-body",
  "jsonwebtoken 11.0.0",
  "rand 0.8.8",
  "reqwest 0.13.4",
@@ -11599,7 +11600,6 @@ dependencies = [
  "rusty_http",
  "rusty_json",
  "rusty_log",
- "rusty_mcp_axum",
  "rusty_mcp_server",
  "rusty_oauth",
  "rusty_percent",
