@@ -354,7 +354,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn accepts_edit_that_improves_validation_score() {
         let env = Arc::new(EchoEnv {
             train: vec![ex("t1", "hi", "HELLO")],
@@ -390,7 +390,7 @@ mod tests {
         assert_eq!(outcome.best_val_score, outcome.initial_val_score);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn rejects_edit_with_unparseable_optimizer_output() {
         let env = Arc::new(EchoEnv {
             train: vec![ex("t1", "hi", "HELLO")],
@@ -418,7 +418,7 @@ mod tests {
         assert!(outcome.steps[0].rationale.contains("parse failed"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn accepts_edit_when_executor_output_changes_with_skill() {
         // Executor backend that reads the skill from the system message and
         // "obeys" it: if the skill contains "Always answer: X", it answers X.

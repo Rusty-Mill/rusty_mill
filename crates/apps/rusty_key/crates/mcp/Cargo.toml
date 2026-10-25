@@ -19,11 +19,8 @@ serde = { workspace = true }
 serde_json.workspace = true
 thiserror = "2"
 toml.workspace = true
-tokio = { workspace = true, features = ["sync", "time", "process"] }
+rusty_tokio.workspace = true
 rusty-mcp-client = { workspace = true, optional = true }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [features]
 # Expose the in-process FakeMcpClient for downstream offline tests.

@@ -437,9 +437,9 @@ dependencies = [
  "http-body-util",
  "rusty_agui",
  "rusty_log",
+ "rusty_tokio",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -10770,10 +10770,10 @@ dependencies = [
  "rk-feed",
  "rk-observe",
  "rusty-mcp-client",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
  "toml 0.8.2",
 ]
 
@@ -12541,10 +12541,10 @@ dependencies = [
  "rusty_rand",
  "rusty_request",
  "rusty_serve",
+ "rusty_tokio",
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "tokio",
  "uuid",
 ]
 
@@ -13945,11 +13945,11 @@ dependencies = [
  "anyhow",
  "async-trait",
  "rand 0.8.8",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
