@@ -94,7 +94,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_agui | rusty_agui | Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint | 7 |
 | libs | rusty_ansi | rusty_ansi | A zero-allocation, no_std VT/CSI/OSC ANSI escape sequence parser core for Rust | 2 |
 | libs | rusty_audio | rusty_audio | A #![no_std] + alloc sovereign PCM audio capture and playback device driver library | 2 |
-| libs | rusty_axum | rusty_axum | An in-house web framework replacing axum: a router, extractors, responses and SSE over rusty_http's types, runtime-free at its core | 2 |
+| libs | rusty_axum | rusty_axum | An in-house web framework replacing axum: a router, extractors, responses and SSE over rusty_http's types, runtime-free at its core | 3 |
 | libs | rusty_axum_tokio | rusty_axum_tokio | Migration bridge: lets rusty_axum handlers that still call tokio libraries run on rusty_tokio, by entering a tokio runtime on every poll. Deleted when the last consumer leaves tokio. | 1 |
 | libs | rusty_bbp | rusty_bbp | Blackboard Protocol core: records, rules, lifecycle for multi-vendor agents collaborating on one software task. Pure, no I/O. | 3 |
 | libs | rusty_bot | rusty_bot | Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary | 0 |
@@ -125,7 +125,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_mcp | rusty-mcp-client | Protocol-only MCP client: stdio child process and Streamable HTTP, with API-key, bearer and OAuth client-credentials auth | 4 |
 | libs | rusty_mcp | rusty-mcp-demo | Example MCP server built on rusty_mcp_server | 0 |
 | libs | rusty_mcp_axum | rusty_mcp_axum | Mount a rusty_mcp_server Streamable HTTP handler inside an axum app | 5 |
-| libs | rusty_mcp_client_native | rusty_mcp_client_native | Sovereign MCP client core on rusty_mcp_proto: a sans-IO session for the classic and stateless handshakes, a server-sent-events parser, and a blocking client over a child-process transport | 3 |
+| libs | rusty_mcp_client_native | rusty_mcp_client_native | Sovereign MCP client core on rusty_mcp_proto: a sans-IO session for the classic and stateless handshakes, a server-sent-events parser, and a blocking client over a child-process transport | 4 |
 | libs | rusty_mcp_proto | rusty_mcp_proto | Sovereign MCP wire types on rusty_json: JSON-RPC 2.0 envelope, error codes, protocol versions, content, tools and paginated lists, with a hand-written codec and no serde | 2 |
 | libs | rusty_mcp_server | rusty_mcp_server | Sovereign MCP server core on rusty_mcp_proto: a tool registry, a sans-IO connection dispatcher for the classic and stateless handshakes, cancellation and progress, pagination, and a stdio transport | 16 |
 | libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 9 |

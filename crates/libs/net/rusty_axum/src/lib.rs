@@ -32,6 +32,9 @@ mod stop;
 
 pub use body::{Body, BodyStream, BoxError};
 pub use extract::{ConnectInfo, FromRequest, Json, Path, Query, Rejection, State};
+/// The trait [`Body::from_stream`] takes, so a consumer can implement it
+/// without depending on `futures-core` itself.
+pub use futures_core::Stream;
 pub use handler::Handler;
 pub use request::Request;
 pub use response::{IntoResponse, Response};
