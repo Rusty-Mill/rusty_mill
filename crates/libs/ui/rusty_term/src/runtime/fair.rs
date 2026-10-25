@@ -1,10 +1,11 @@
 //! Round-robin event selection for the runtime's event loops.
 //!
-//! `rusty_tokio::select!` polls its arms in written order every time, unlike
-//! tokio's randomized default, so an always-ready earlier arm (a flooded output
-//! channel, a `Notify` that keeps collecting permits) starves every later one.
-//! [`fair_select`] rotates the first arm polled on each call instead, so with
-//! `n` arms every ready arm wins within `n` consecutive calls.
+//! A `select!` that polls its arms in written order (`biased;`) lets an
+//! always-ready earlier arm (a flooded output channel, a `Notify` that keeps
+//! collecting permits) starve every later one, and a randomized `select!`
+//! only bounds that probabilistically. [`fair_select`] rotates the first arm
+//! polled on each call instead, so with `n` arms every ready arm wins within
+//! `n` consecutive calls.
 
 use std::future::{Future, poll_fn};
 use std::pin::Pin;

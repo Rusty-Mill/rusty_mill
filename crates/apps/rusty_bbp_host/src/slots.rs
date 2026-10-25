@@ -161,7 +161,7 @@ impl Slot {
     /// # Errors
     /// When the holder cannot be started.
     pub fn holder(&self, bbp: &Path) -> Result<Child, String> {
-        holder(bbp, Some(self))
+        holder(bbp, Some(self), None)
     }
 
     /// `agent-0`, `validator-0`, ...
@@ -177,11 +177,16 @@ impl Slot {
 /// member: however the group's processes treat their stdio, and whether or
 /// not the caller outlives them. So while the holder lives its pid names
 /// exactly this group, and once it is gone the group is empty. Should the
-/// caller die before starting anyone, the slot is freed.
+/// caller die before starting anyone, the slot is freed. With a `deadline`,
+/// the holder kills its whole group, itself included, when it comes.
 ///
 /// # Errors
-/// When the holder cannot be started.
-pub fn holder(bbp: &Path, slot: Option<&Slot>) -> Result<Child, String> {
+/// When the holder cannot be started, or the deadline predates the epoch.
+pub fn holder(
+    bbp: &Path,
+    slot: Option<&Slot>,
+    deadline: Option<std::time::SystemTime>,
+) -> Result<Child, String> {
     let stdout = match slot {
         Some(slot) => slot.stdio()?,
         None => Stdio::null(),
@@ -194,6 +199,13 @@ pub fn holder(bbp: &Path, slot: Option<&Slot>) -> Result<Child, String> {
         .stderr(Stdio::inherit());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    if let Some(deadline) = deadline {
+        let millis = deadline
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| format!("deadline: {e}"))?
+            .as_millis();
+        command.args(["--deadline-ms", &millis.to_string()]);
+    }
     command.spawn().map_err(|e| format!("slot holder: {e}"))
 }
 
@@ -221,8 +233,17 @@ pub fn process_start(_pid: u32) -> Option<u64> {
 /// `bbp slot-hold`: return once stdin is closed and this process is the
 /// last member of the process group it leads. The slot lock, its stdout,
 /// stays open until then. The group's id is this process's pid, which is
-/// not reused while the process or its group lives.
-pub fn hold_while_alive() {
+/// not reused while the process or its group lives. At `deadline`, the
+/// whole group, this process included, is killed.
+pub fn hold_while_alive(deadline: Option<std::time::SystemTime>) {
+    if let Some(deadline) = deadline {
+        std::thread::spawn(move || {
+            if let Ok(wait) = deadline.duration_since(std::time::SystemTime::now()) {
+                std::thread::sleep(wait);
+            }
+            kill_own_group();
+        });
+    }
     // Nothing is written; end of file means the caller is done starting the
     // group's members, or is gone.
     let _ = std::io::stdin().lock().read_to_end(&mut Vec::new());
@@ -233,6 +254,22 @@ pub fn hold_while_alive() {
         empty = if others_in_group() { 0 } else { empty + 1 };
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// SIGKILL the group this process leads, which ends this process too.
+#[cfg(target_os = "linux")]
+fn kill_own_group() {
+    let Ok(me) = i32::try_from(std::process::id()) else {
+        std::process::abort();
+    };
+    let _ = rusty_libc::process::killpg(me, rusty_libc::signal::SIGKILL);
+    // Unreachable once the signal lands; never outlive the deadline.
+    std::process::abort();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_own_group() {
+    std::process::abort();
 }
 
 /// Whether a process other than this one is in the group this one leads.

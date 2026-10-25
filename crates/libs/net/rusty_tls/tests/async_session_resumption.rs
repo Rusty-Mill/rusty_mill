@@ -45,7 +45,7 @@ async fn async_second_connection_through_a_shared_connector_resumes() {
     let acceptor = TlsAcceptor::new(vec![cert_der], key_der).unwrap();
     let connector = TlsConnector::new(&TrustPolicy::DangerNoVerification).unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     let first_resumed = connect_once(&listener, addr, &acceptor, &connector).await;

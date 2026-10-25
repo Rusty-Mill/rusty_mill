@@ -18,7 +18,7 @@ async fn async_client_and_async_server_interoperate_end_to_end() {
     let (cert_der, key_der) = self_signed_leaf("localhost");
     let acceptor = TlsAcceptor::new(vec![cert_der], key_der).unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     let server = rusty_tokio::spawn(async move {
@@ -46,7 +46,7 @@ async fn complete_handshake_works_on_the_async_server_side_too() {
     let (cert_der, key_der) = self_signed_leaf("localhost");
     let acceptor = TlsAcceptor::new(vec![cert_der], key_der).unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     let server = rusty_tokio::spawn(async move {

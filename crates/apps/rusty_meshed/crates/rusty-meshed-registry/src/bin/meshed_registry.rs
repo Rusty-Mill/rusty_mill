@@ -50,14 +50,14 @@ async fn main() {
     }
 
     let bind = std::env::var(BIND_ENV).unwrap_or_else(|_| DEFAULT_BIND.to_string());
-    let addr = match bind.parse() {
+    let addr: std::net::SocketAddr = match bind.parse() {
         Ok(addr) => addr,
         Err(err) => {
             eprintln!("meshed-registry: {BIND_ENV}={bind:?} is not a socket address: {err}");
             std::process::exit(2);
         }
     };
-    let listener = match TcpListener::bind(addr) {
+    let listener = match TcpListener::bind(addr).await {
         Ok(listener) => listener,
         Err(err) => {
             eprintln!("meshed-registry: failed to bind {bind}: {err}");

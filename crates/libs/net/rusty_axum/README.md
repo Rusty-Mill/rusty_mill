@@ -19,12 +19,20 @@ let response = app.call(rusty_axum::Request::new(rusty_axum::Method::Get, "/heal
 - Request bodies arrive whole, so extractors are synchronous (`FromRequest`).
   Response bodies may stream (`Body::from_stream`, `Sse`).
 - `Method`, `StatusCode` and `HeaderMap` come from `rusty_http`.
+- `routing::any` takes every method a path has no handler of its own for, and
+  `Router::fallback` every unmatched path (the shape an MCP mount needs).
+- `ConnectInfo` extracts the client's address, which the server sets on every
+  request (`Request::with_peer_addr` in tests).
+- `Sse::keep_alive(KeepAlive::new())` sends a comment after each quiet
+  interval; such a stream is polled inside `rusty_tokio`, as the server does.
 
 - `serve(listener, tls, options, router)` runs HTTP/1.1 on `rusty_tokio`, plain
   or over `rusty_tls`: keep-alive, `Expect: 100-continue`, bounded head, body,
   idle time and connections, and graceful shutdown that ends SSE streams cleanly.
 
 - `Router::layer` wraps every request: `middleware::from_fn(|req, next| ..)` or
-  `cors::Cors` (tower-http's `CorsLayer` behaviour).
+  `cors::Cors` (tower-http's `CorsLayer` behaviour). There is no `route_layer`
+  or `nest`: guard one route by wrapping its handler, and route a mounted
+  service with `any` or `fallback`.
 
-Status: no consumer has moved yet; `rk-app` is the pilot.
+Status: `rk-app` has moved (#948); `rp-server` is next (#875).

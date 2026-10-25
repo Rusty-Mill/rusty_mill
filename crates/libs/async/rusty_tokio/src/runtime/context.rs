@@ -35,6 +35,15 @@ impl Handle {
         CURRENT.with(|c| c.borrow().clone())
     }
 
+    /// Like [`try_current`](Self::try_current), but `None` instead of a
+    /// panic once this thread's thread-locals are being torn down --
+    /// for `time::Instant::now`, which falls back to real time without
+    /// a runtime and so must not panic from a value's `Drop` during
+    /// thread exit just because it read the clock.
+    pub(crate) fn try_current_no_panic() -> Option<Handle> {
+        CURRENT.try_with(|c| c.borrow().clone()).ok().flatten()
+    }
+
     /// Like [`try_current`](Self::try_current), but reports *why* there
     /// isn't a usable ambient runtime instead of collapsing every
     /// failure into one bare `None` -- see [`TryCurrentError`]. Doesn't

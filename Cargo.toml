@@ -12,6 +12,7 @@ members = [
     "crates/apps/rocket_league/crates/rleval-app",
     "crates/apps/rocket_league/crates/rb_capture_ingest",
     "crates/apps/rocket_league/crates/rb_domain",
+    "crates/apps/rocket_league/crates/rl_replay",
     "crates/apps/rocket_league/crates/rb_env",
     "crates/apps/rocket_league/crates/rb_physics_bullet",
     "crates/apps/rocket_league/crates/rb_replay_ingest",
@@ -104,6 +105,7 @@ members = [
     "crates/libs/storage/rusty_multimodal_db_engine",
     "crates/apps/rusty_mux/crates/core",
     "crates/apps/rusty_mux/crates/proto",
+    "crates/apps/rusty_mux/crates/server",
     "crates/apps/rusty_remind_me/crates/remind_me_core",
     "crates/apps/rusty_remind_me/crates/remind_me_mcp",
     "crates/apps/rusty_remind_me/crates/remind_me_api",
@@ -818,7 +820,6 @@ rusty-mcp-client = { path = "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-cli
 rmcp = { version = "3.1", default-features = false }
 axum = { version = "0.8", features = ["json"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
 prometheus = { version = "0.13", default-features = false }
 wiremock = "0.6"
 tokio-postgres = "0.7"
@@ -946,6 +947,9 @@ remind_me_hub = { path = "crates/apps/rusty_remind_me/crates/remind_me_hub" }
 
 # rusty_mux family (docs/projects/mux/).
 rusty_mux_core = { path = "crates/apps/rusty_mux/crates/core" }
+rusty_mux_proto = { path = "crates/apps/rusty_mux/crates/proto" }
+# rusty_term's headless engine, for consumers that must not link its tokio front end.
+rusty_term_core = { path = "crates/libs/ui/rusty_term/core" }
 tracing-appender = "0.2"
 # Markdown parsing
 comrak = { version = "0.52", default-features = false, features = [] }

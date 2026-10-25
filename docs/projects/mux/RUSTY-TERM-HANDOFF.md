@@ -54,7 +54,7 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
    - A per-row seqno plus stable row numbers.
    - Add parser state and modes, or define how a client receives them on attach.
    - A version bump of `RTSN` if the format changes.
-   - Lands with the `rusty_mux_proto` work that consumes it, not before.
+   - Lands with the `rusty_mux_proto` work that consumes it, not before. `rusty_mux_proto` exists since #982, with full `Snapshot` and `Ready` messages only, so incremental sync is still to be designed with its owner.
 6. **Compact cell + style interning (row 5) and contiguous scrollback (row 6).**
    - The largest memory win: 24.4 vs 8.3 B/cell.
    - Deferred by the owner until the row and wire formats settle. Bump the snapshot version.
@@ -188,6 +188,6 @@ The ratchet rule: a PR that lowers a count lowers that ceiling to about measured
   - `docs/projects/mux/{CHARTER,DECISIONS,RISKS,SPIKES}.md`
   - `crates/libs/ui/rusty_term/bench/README.md`
   - `docs/projects/mux/RUSTY-TERM-NOTES.md`
-- **Pull requests:** #851, #857, #862, #872, #894, #925, #930, #936, #939, #940, #943, #944 (closed), #952, #955, #956, #974 (by other sessions).
+- **Pull requests:** #851, #857, #862, #872, #894, #925, #930, #936, #939, #940, #943, #944 (closed), #952, #953, #955, #956, #974, #982 (by other sessions).
 - **Issues:** #850 (closed by #949), #854, #855, #856 (closed).
 - **Branch used:** `claude/new-session-s68lms`. Start new work from `origin/main` on a fresh branch.
