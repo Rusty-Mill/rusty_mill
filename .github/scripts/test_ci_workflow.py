@@ -672,6 +672,17 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         root = tomllib.loads((REPO / "Cargo.toml").read_text(encoding="utf-8"))
         self.assertTrue(root["workspace"]["metadata"]["cargo-shear"]["ignored"])
 
+    def test_a_failed_nightly_sweep_files_an_issue(self) -> None:
+        alert = (WORKFLOW.parent / "nightly-alert.yml").read_text(encoding="utf-8")
+        self.assertIn("  workflow_run:\n    workflows: [CI]\n    types: [completed]\n", alert)
+        self.assertIn("github.event.workflow_run.event == 'schedule'", alert)
+        # Read-only by default; only the reporting job may write, and only issues.
+        self.assertRegex(alert, r"(?m)^permissions:\n  contents: read$")
+        self.assertEqual(re.findall(r"(?m)^\s+[a-z-]+: write$", alert), ["      issues: write"])
+        # Run data reaches the script through env, never by interpolation.
+        script = alert.split("        run: |\n", 1)[1]
+        self.assertNotIn("${{", script)
+
     def test_dependabot_tracks_github_actions(self) -> None:
         text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")
         self.assertIn("package-ecosystem: github-actions", text)

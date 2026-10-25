@@ -4,15 +4,18 @@
 //! own split, so these functions are unit-testable with hand-built values
 //! instead of needing a real capture file on disk.
 //!
+//! The same types serialize back (`to_line`), so a candidate run can be saved in
+//! the format it is compared against (ADR-0085).
+//!
 //! One JSON object per line: `{"timestamp_secs", "ball", "cars"}`, matching
 //! `rb_domain::PhysicsFrame`'s shape. `serde`'s field names are the wire
 //! format itself — changing a field name here is a capture-format change,
 //! not a refactor.
 
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Quat, Vec3};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct WireVec3 {
     x: f32,
     y: f32,
@@ -25,12 +28,22 @@ impl From<WireVec3> for Vec3 {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct WireQuat {
     x: f32,
     y: f32,
     z: f32,
     w: f32,
+}
+
+impl From<Vec3> for WireVec3 {
+    fn from(v: Vec3) -> WireVec3 {
+        WireVec3 {
+            x: v.x,
+            y: v.y,
+            z: v.z,
+        }
+    }
 }
 
 impl From<WireQuat> for Quat {
@@ -39,10 +52,21 @@ impl From<WireQuat> for Quat {
     }
 }
 
+impl From<Quat> for WireQuat {
+    fn from(q: Quat) -> WireQuat {
+        WireQuat {
+            x: q.x,
+            y: q.y,
+            z: q.z,
+            w: q.w,
+        }
+    }
+}
+
 /// Mirrors `rb_domain::ControllerInput` field-for-field (see ADR-0005) — a
 /// BakkesMod capture is expected to always have all eight fields, unlike
 /// replay-sourced input where `pitch`/`yaw`/`roll` are structurally absent.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct WireInput {
     throttle: f32,
     steer: f32,
@@ -72,7 +96,22 @@ impl From<WireInput> for ControllerInput {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl From<ControllerInput> for WireInput {
+    fn from(i: ControllerInput) -> WireInput {
+        WireInput {
+            throttle: i.throttle,
+            steer: i.steer,
+            pitch: i.pitch,
+            yaw: i.yaw,
+            roll: i.roll,
+            jump: i.jump,
+            boost: i.boost,
+            handbrake: i.handbrake,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct WireCar {
     player_id: u32,
     position: WireVec3,
@@ -97,7 +136,27 @@ impl From<WireCar> for CarState {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl TryFrom<&CarState> for WireCar {
+    type Error = String;
+
+    /// Fails for a car without input: the format requires it on every car.
+    fn try_from(c: &CarState) -> Result<WireCar, String> {
+        let input = c
+            .input
+            .ok_or_else(|| format!("car {} has no input to write", c.player_id))?;
+        Ok(WireCar {
+            player_id: c.player_id,
+            position: c.position.into(),
+            rotation: c.rotation.into(),
+            velocity: c.velocity.into(),
+            angular_velocity: c.angular_velocity.into(),
+            boost_amount: c.boost_amount,
+            input: input.into(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct WireBall {
     position: WireVec3,
     rotation: WireQuat,
@@ -116,7 +175,18 @@ impl From<WireBall> for BallState {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl From<&BallState> for WireBall {
+    fn from(b: &BallState) -> WireBall {
+        WireBall {
+            position: b.position.into(),
+            rotation: b.rotation.into(),
+            velocity: b.velocity.into(),
+            angular_velocity: b.angular_velocity.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct WireFrame {
     timestamp_secs: f32,
     ball: WireBall,
@@ -138,6 +208,22 @@ impl From<WireFrame> for PhysicsFrame {
 /// only — `lib.rs` is the one caller that has an actual line to parse.
 pub(crate) fn parse_line(line: &str) -> Result<PhysicsFrame, serde_json::Error> {
     serde_json::from_str::<WireFrame>(line).map(PhysicsFrame::from)
+}
+
+/// Serializes one `PhysicsFrame` as a JSON-Lines line (no trailing newline), the
+/// inverse of [`parse_line`]. Fails if a car carries no input.
+pub(crate) fn to_line(frame: &PhysicsFrame) -> Result<String, String> {
+    let wire = WireFrame {
+        timestamp_secs: frame.timestamp_secs,
+        ball: (&frame.ball).into(),
+        cars: frame
+            .cars
+            .iter()
+            .map(WireCar::try_from)
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("t={}: {e}", frame.timestamp_secs))?,
+    };
+    serde_json::to_string(&wire).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -209,5 +295,20 @@ mod tests {
     #[test]
     fn parse_line_rejects_a_frame_missing_the_ball() {
         assert!(parse_line(r#"{"timestamp_secs":0.0}"#).is_err());
+    }
+
+    #[test]
+    fn to_line_round_trips_through_parse_line() {
+        let line = r#"{"timestamp_secs":1.5,"ball":{"position":{"x":0.0,"y":0.0,"z":93.0},"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},"velocity":{"x":0.0,"y":0.0,"z":0.0},"angular_velocity":{"x":0.0,"y":0.0,"z":0.0}},"cars":[{"player_id":0,"position":{"x":10.0,"y":20.0,"z":17.0},"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},"velocity":{"x":1.0,"y":0.0,"z":0.0},"angular_velocity":{"x":0.0,"y":0.0,"z":0.0},"boost_amount":33.3,"input":{"throttle":1.0,"steer":0.0,"pitch":0.2,"yaw":null,"roll":-0.4,"jump":false,"boost":true,"handbrake":false}}]}"#;
+        let frame = parse_line(line).unwrap();
+        assert_eq!(parse_line(&to_line(&frame).unwrap()).unwrap(), frame);
+    }
+
+    #[test]
+    fn to_line_rejects_a_car_without_input() {
+        let mut frame = parse_line(r#"{"timestamp_secs":0.0,"ball":{"position":{"x":0.0,"y":0.0,"z":93.0},"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},"velocity":{"x":0.0,"y":0.0,"z":0.0},"angular_velocity":{"x":0.0,"y":0.0,"z":0.0}},"cars":[{"player_id":3,"position":{"x":0.0,"y":0.0,"z":17.0},"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},"velocity":{"x":0.0,"y":0.0,"z":0.0},"angular_velocity":{"x":0.0,"y":0.0,"z":0.0},"boost_amount":0.0,"input":{"throttle":0.0,"steer":0.0,"jump":false,"boost":false,"handbrake":false}}]}"#).unwrap();
+        frame.cars[0].input = None;
+        let err = to_line(&frame).unwrap_err();
+        assert!(err.contains("car 3"), "{err}");
     }
 }

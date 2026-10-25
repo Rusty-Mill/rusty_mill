@@ -1,6 +1,6 @@
-use rusty_tokio::time::{interval_at, timeout_at, MissedTickBehavior};
+use rusty_tokio::time::{interval_at, timeout_at, Instant, MissedTickBehavior};
 use rusty_tokio::Runtime;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[test]
 fn interval_at_fires_its_first_tick_at_the_given_start() {

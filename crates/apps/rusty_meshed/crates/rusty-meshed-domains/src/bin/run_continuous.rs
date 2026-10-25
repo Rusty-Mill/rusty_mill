@@ -328,6 +328,7 @@ async fn main() {
         // instead evaluates to `interrupted: bool`, checked (and acted
         // on) *outside* the macro.
         let interrupted = rusty_tokio::select! {
+            biased;
             (correlation_id, events) = async {
                 let reading = ClockReading::now().unwrap_or_else(|err| {
                     eprintln!("Cannot read the system clock: {err}");
@@ -353,6 +354,7 @@ async fn main() {
         }
 
         let interrupted = rusty_tokio::select! {
+            biased;
             _ = rusty_tokio::time::sleep(Duration::from_secs_f64(scenario_interval)) => false,
             _ = rusty_tokio::signal::ctrl_c() => true,
         };

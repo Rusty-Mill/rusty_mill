@@ -22,6 +22,7 @@ pub mod bench;
 mod boxdraw;
 pub mod control;
 mod cpu;
+mod damage;
 mod font;
 #[cfg(feature = "gui-gpu")]
 mod gpu;

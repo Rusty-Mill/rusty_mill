@@ -112,7 +112,7 @@ fn tokio_spellings_compile_and_run() {
     let rt = Builder::new_current_thread().build().unwrap();
     rt.block_on(async {
         assert!(Handle::try_current().is_some());
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let accept = rusty_tokio::spawn(async move { listener.accept().await.unwrap().0 });
         let client = TcpStream::connect(addr).await.unwrap();

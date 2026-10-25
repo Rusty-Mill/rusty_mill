@@ -6,7 +6,7 @@ use std::time::Duration;
 fn tcp_peek_sees_data_without_consuming_it() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -34,7 +34,7 @@ fn tcp_peek_sees_data_without_consuming_it() {
 fn tcp_poll_peek_resolves_once_data_arrives() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -59,7 +59,7 @@ fn tcp_poll_peek_resolves_once_data_arrives() {
 fn tcp_try_peek_fails_would_block_before_data_arrives_then_succeeds_after() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -86,8 +86,8 @@ fn tcp_try_peek_fails_would_block_before_data_arrives_then_succeeds_after() {
 fn udp_peek_from_sees_the_datagram_without_dequeuing_it() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let a_addr = a.local_addr().unwrap();
 
         a.send_to(b"datagram", b.local_addr().unwrap())
@@ -113,8 +113,8 @@ fn udp_peek_from_sees_the_datagram_without_dequeuing_it() {
 fn udp_peek_sender_reports_the_source_without_consuming_the_datagram() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let a_addr = a.local_addr().unwrap();
 
         a.send_to(b"who's there", b.local_addr().unwrap())
@@ -136,7 +136,7 @@ fn udp_peek_sender_reports_the_source_without_consuming_the_datagram() {
 fn udp_try_peek_from_fails_would_block_before_a_datagram_arrives() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut buf = [0u8; 8];
         let err = b.try_peek_from(&mut buf).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
@@ -147,7 +147,7 @@ fn udp_try_peek_from_fails_would_block_before_a_datagram_arrives() {
 fn udp_try_peek_sender_fails_would_block_before_a_datagram_arrives() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let err = b.try_peek_sender().unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
     });
@@ -157,8 +157,8 @@ fn udp_try_peek_sender_fails_would_block_before_a_datagram_arrives() {
 fn udp_poll_peek_from_resolves_once_a_datagram_arrives() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let a_addr = a.local_addr().unwrap();
         let b_addr = b.local_addr().unwrap();
 

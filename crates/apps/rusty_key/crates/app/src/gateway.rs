@@ -547,7 +547,7 @@ fn serve_on_rusty_tokio(
         .thread_name("rk-gateway")
         .build()?;
     runtime.block_on(async {
-        let listener = rusty_tokio::io::TcpListener::bind_addrs(addr).await?;
+        let listener = rusty_tokio::io::TcpListener::bind(addr).await?;
         let server = rusty_axum::serve(listener, None, ServeOptions::default(), app)?;
         // A oneshot needs no reactor, so it can be awaited on rusty_tokio.
         server

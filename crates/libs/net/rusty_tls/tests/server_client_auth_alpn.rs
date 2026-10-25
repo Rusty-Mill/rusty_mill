@@ -276,7 +276,7 @@ mod asynchronous {
     #[rusty_tokio::test]
     async fn the_async_server_negotiates_the_protocol_while_requiring_a_client_certificate() {
         let f = fixture(vec![b"h2".to_vec()]);
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let acceptor = f.acceptor.clone();
         let server = rusty_tokio::spawn(async move {

@@ -1,36 +1,72 @@
-//! `select!`: race two or more futures, running whichever one resolves
-//! first and dropping (cancelling) the rest. This crate's first macro
-//! -- see [`crate::Handle::shutdown_notified`]'s doc comment, which
-//! flagged this as a real, repeated limitation before it existed.
+//! `select!`, `join!`/`try_join!` and `task_local!`.
 //!
-//! ## Scope, stated up front rather than discovered by surprise
+//! ## `select!`: tokio's syntax and semantics, as a proc macro
 //!
-//! - **2 to 5 branches.** `macro_rules!` has no clean way to generate a
-//!   fresh, uniquely-named local binding per repetition of a `$()*`
-//!   pattern on stable Rust without either a `paste!`-style proc macro
-//!   (a new dependency) or a recursive tt-muncher (fiddly to get right
-//!   and harder to verify by inspection than explicit enumeration for a
-//!   macro this central). Five explicit arities, each spelled out
-//!   directly, covers the overwhelming majority of real `select!` uses
-//!   and is mechanical to extend if a real need for more ever comes up.
-//! - **Every branch's pattern must be irrefutable** (a plain binding
-//!   like `result`, or `_` -- not `Some(x)` or `Ok(v)`). Real tokio's
-//!   `select!` lets a branch's future resolve to a value that *doesn't*
-//!   match its pattern, in which case that branch is treated as not
-//!   ready yet and polling continues on the others -- supporting that
-//!   needs meaningfully more machinery (re-arming just the one branch,
-//!   not the whole `select!`) than a first pass needs to take on.
-//! - **No `else` branch, no `,if <condition>` guards, no biased mode.**
-//!   Branches are polled in the order written, every time the combined
-//!   future is polled -- not tokio's own randomized order (meant to
-//!   keep an always-ready earlier branch from permanently starving a
-//!   later one under contention). A deliberate simplicity trade-off,
-//!   not an oversight: worth knowing about if two branches are ever
-//!   simultaneously and permanently ready in the same program.
+//! `select!` races any number of futures and runs the handler of
+//! whichever completes first (and matches its pattern), dropping the
+//! rest. It accepts tokio's full grammar -- refutable patterns,
+//! `, if <precondition>` guards, `biased;`, an `else` branch, and up to
+//! 64 branches -- with tokio's semantics; see [`select!`] for the
+//! details.
+//!
+//! It started life as a `macro_rules!` limited to 2 to 5 branches with
+//! irrefutable patterns and none of the above, because generating a
+//! fresh binding per branch declaratively needed either a recursive
+//! tt-muncher or a `paste!`-style proc macro, and a proc macro was a new
+//! dependency. `rusty_tokio-macros` has since taken on `syn`/`quote`/
+//! `proc-macro2` for `#[main]`/`#[test]`, so that reason is gone, and 9
+//! of the workspace's 25 `tokio::select!` sites needed something the
+//! old macro lacked (gap G6 in `docs/research/ASYNC-RUNTIME-INVENTORY.md`).
+//! The work now happens in `rusty_tokio-macros`' `select_internal`;
+//! the `macro_rules! select` here only forwards to it with `$crate`,
+//! which a proc macro cannot name for itself -- the same split tokio
+//! uses.
+//!
+//! ## `join!`/`try_join!`: still 2 to 5 branches
+//!
+//! These remain explicit `macro_rules!` arities. A declarative macro has
+//! no clean way to generate a fresh, uniquely-named local binding per
+//! repetition on stable Rust, so each arity is spelled out directly --
+//! mechanical to extend if a real need for more branches comes up, and
+//! easy to verify by inspection.
 
-/// Race two or more futures; run whichever one resolves first and drop
-/// the rest. See this module's docs for exactly what's (and isn't)
-/// supported.
+/// Race several futures; run the handler of the first one to complete
+/// with a value matching its pattern, and drop the rest. Same syntax and
+/// semantics as tokio's `select!`:
+///
+/// ```text
+/// select! {
+///     [biased;]
+///     <pattern> = <async expression> [, if <precondition>] => <handler>,
+///     ...
+///     [else => <expression>]
+/// }
+/// ```
+///
+/// 1. Every `if <precondition>` is evaluated first, in order. A branch
+///    whose precondition is `false` is disabled for this `select!`.
+/// 2. Every branch's `<async expression>` is then evaluated (disabled
+///    branches included, as in tokio -- their futures are built but
+///    never polled) and pinned in place. Anything implementing
+///    `IntoFuture` works, so `&mut fut` and `JoinHandle`s do too.
+/// 3. The futures are polled concurrently. Each poll starts at a
+///    randomly chosen branch, so a branch that is always ready can't
+///    starve the others; with `biased;` they are polled in the order
+///    written instead (cheaper, and useful when one branch -- usually
+///    cancellation -- must win ties).
+/// 4. When a future completes, its output is matched against the
+///    branch's pattern. On a mismatch (`Some(x) = rx.recv()` seeing
+///    `None`) that branch is disabled and the race goes on.
+/// 5. On a match, the remaining futures are dropped and the handler
+///    runs with the pattern's bindings; its value is the value of
+///    `select!`. Because it runs after the futures are gone and in the
+///    caller's own context, a handler may borrow what they borrowed and
+///    may `.await`, `?`, `return`, `break` or `continue`.
+/// 6. If every branch ends up disabled, the `else` expression runs; with
+///    no `else`, `select!` panics with "all branches are disabled and
+///    there is no else branch".
+///
+/// Must be used inside an `async` context.
 ///
 /// ```
 /// # use rusty_tokio::Runtime;
@@ -41,123 +77,70 @@
 ///     b = async { 2 } => b,
 /// };
 /// assert!(winner == 1 || winner == 2);
+///
+/// let none: Option<u8> = None;
+/// let fell_through = rusty_tokio::select! {
+///     biased;
+///     Some(v) = async { none } => v,
+///     _ = std::future::pending::<()>(), if false => 0,
+///     else => 255,
+/// };
+/// assert_eq!(fell_through, 255);
 /// # });
 /// ```
 #[macro_export]
 macro_rules! select {
-    ($p0:pat = $f0:expr => $b0:expr, $p1:pat = $f1:expr => $b1:expr $(,)?) => {{
-        use ::std::future::Future as _;
-        let mut __f0 = ::std::pin::pin!($f0);
-        let mut __f1 = ::std::pin::pin!($f1);
-        ::std::future::poll_fn(move |cx| {
-            if let ::std::task::Poll::Ready(__out) = __f0.as_mut().poll(cx) {
-                let $p0 = __out;
-                return ::std::task::Poll::Ready($b0);
+    ($($tokens:tt)*) => {
+        $crate::__select_internal! { ($crate) $($tokens)* }
+    };
+}
+
+/// Runtime support for macro expansions -- public only because a
+/// macro expanded in another crate has to name it. Not API.
+#[doc(hidden)]
+pub mod support {
+    use std::cell::Cell;
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
+
+    thread_local! {
+        /// xorshift64* state; 0 means "not seeded yet" (0 is also the
+        /// one state xorshift can never leave, so it can't be a real
+        /// state anyway).
+        static RNG: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// A per-thread seed from std's `RandomState` keys (seeded from the
+    /// OS once per thread) mixed with the thread's id, so threads don't
+    /// share a sequence. `select!` only needs "not the same branch
+    /// first every time", not anything cryptographic, and this keeps
+    /// the crate free of a `rand`/`fastrand` dependency.
+    fn seed() -> u64 {
+        RandomState::new().hash_one(std::thread::current().id()) | 1
+    }
+
+    /// A pseudo-random number in `0..n` (`n` must be non-zero; `select!`
+    /// always passes its branch count). Lemire's multiply-shift rather
+    /// than `%`, which is both cheaper and less biased. During
+    /// thread-local teardown, when the state can't be reached, it
+    /// returns 0 -- polling in declaration order is a fine fallback.
+    pub fn thread_rng_n(n: u32) -> u32 {
+        let next = RNG.try_with(|state| {
+            let mut x = state.get();
+            if x == 0 {
+                x = seed();
             }
-            if let ::std::task::Poll::Ready(__out) = __f1.as_mut().poll(cx) {
-                let $p1 = __out;
-                return ::std::task::Poll::Ready($b1);
-            }
-            ::std::task::Poll::Pending
-        })
-        .await
-    }};
-    (
-        $p0:pat = $f0:expr => $b0:expr,
-        $p1:pat = $f1:expr => $b1:expr,
-        $p2:pat = $f2:expr => $b2:expr $(,)?
-    ) => {{
-        use ::std::future::Future as _;
-        let mut __f0 = ::std::pin::pin!($f0);
-        let mut __f1 = ::std::pin::pin!($f1);
-        let mut __f2 = ::std::pin::pin!($f2);
-        ::std::future::poll_fn(move |cx| {
-            if let ::std::task::Poll::Ready(__out) = __f0.as_mut().poll(cx) {
-                let $p0 = __out;
-                return ::std::task::Poll::Ready($b0);
-            }
-            if let ::std::task::Poll::Ready(__out) = __f1.as_mut().poll(cx) {
-                let $p1 = __out;
-                return ::std::task::Poll::Ready($b1);
-            }
-            if let ::std::task::Poll::Ready(__out) = __f2.as_mut().poll(cx) {
-                let $p2 = __out;
-                return ::std::task::Poll::Ready($b2);
-            }
-            ::std::task::Poll::Pending
-        })
-        .await
-    }};
-    (
-        $p0:pat = $f0:expr => $b0:expr,
-        $p1:pat = $f1:expr => $b1:expr,
-        $p2:pat = $f2:expr => $b2:expr,
-        $p3:pat = $f3:expr => $b3:expr $(,)?
-    ) => {{
-        use ::std::future::Future as _;
-        let mut __f0 = ::std::pin::pin!($f0);
-        let mut __f1 = ::std::pin::pin!($f1);
-        let mut __f2 = ::std::pin::pin!($f2);
-        let mut __f3 = ::std::pin::pin!($f3);
-        ::std::future::poll_fn(move |cx| {
-            if let ::std::task::Poll::Ready(__out) = __f0.as_mut().poll(cx) {
-                let $p0 = __out;
-                return ::std::task::Poll::Ready($b0);
-            }
-            if let ::std::task::Poll::Ready(__out) = __f1.as_mut().poll(cx) {
-                let $p1 = __out;
-                return ::std::task::Poll::Ready($b1);
-            }
-            if let ::std::task::Poll::Ready(__out) = __f2.as_mut().poll(cx) {
-                let $p2 = __out;
-                return ::std::task::Poll::Ready($b2);
-            }
-            if let ::std::task::Poll::Ready(__out) = __f3.as_mut().poll(cx) {
-                let $p3 = __out;
-                return ::std::task::Poll::Ready($b3);
-            }
-            ::std::task::Poll::Pending
-        })
-        .await
-    }};
-    (
-        $p0:pat = $f0:expr => $b0:expr,
-        $p1:pat = $f1:expr => $b1:expr,
-        $p2:pat = $f2:expr => $b2:expr,
-        $p3:pat = $f3:expr => $b3:expr,
-        $p4:pat = $f4:expr => $b4:expr $(,)?
-    ) => {{
-        use ::std::future::Future as _;
-        let mut __f0 = ::std::pin::pin!($f0);
-        let mut __f1 = ::std::pin::pin!($f1);
-        let mut __f2 = ::std::pin::pin!($f2);
-        let mut __f3 = ::std::pin::pin!($f3);
-        let mut __f4 = ::std::pin::pin!($f4);
-        ::std::future::poll_fn(move |cx| {
-            if let ::std::task::Poll::Ready(__out) = __f0.as_mut().poll(cx) {
-                let $p0 = __out;
-                return ::std::task::Poll::Ready($b0);
-            }
-            if let ::std::task::Poll::Ready(__out) = __f1.as_mut().poll(cx) {
-                let $p1 = __out;
-                return ::std::task::Poll::Ready($b1);
-            }
-            if let ::std::task::Poll::Ready(__out) = __f2.as_mut().poll(cx) {
-                let $p2 = __out;
-                return ::std::task::Poll::Ready($b2);
-            }
-            if let ::std::task::Poll::Ready(__out) = __f3.as_mut().poll(cx) {
-                let $p3 = __out;
-                return ::std::task::Poll::Ready($b3);
-            }
-            if let ::std::task::Poll::Ready(__out) = __f4.as_mut().poll(cx) {
-                let $p4 = __out;
-                return ::std::task::Poll::Ready($b4);
-            }
-            ::std::task::Poll::Pending
-        })
-        .await
-    }};
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            state.set(x);
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        });
+        let Ok(random) = next else {
+            return 0;
+        };
+        (((random >> 32) * u64::from(n)) >> 32) as u32
+    }
 }
 
 /// `join!`/`try_join!`: run two or more futures concurrently *within the
@@ -166,8 +149,8 @@ macro_rules! select {
 /// outputs.
 ///
 /// Shares [`select!`]'s "poll N sub-futures every wake, sharing one
-/// `poll_fn`" shape and the same **2 to 5 branches** scope limit and the
-/// same reasoning for it (see that macro's docs) -- the difference is
+/// `poll_fn`" shape, but keeps a **2 to 5 branches** scope limit (see
+/// this module's docs for why) -- the difference is
 /// `join!` waits for *all* branches instead of stopping at the first.
 /// Each branch is polled at most once per already-resolved -> not
 /// re-polled after it completes, so a branch that finishes early doesn't

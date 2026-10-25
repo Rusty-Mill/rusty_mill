@@ -10505,6 +10505,8 @@ dependencies = [
 name = "replay-viewer"
 version = "0.1.0"
 dependencies = [
+ "rb_capture_ingest",
+ "rb_domain",
  "replay-analyzer",
  "replay-scoring",
  "replay-skills",
@@ -10785,6 +10787,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rl_replay"
+version = "0.1.0"
+dependencies = [
+ "boxcars",
+]
+
+[[package]]
 name = "rleval-app"
 version = "0.1.0"
 dependencies = [
@@ -10930,7 +10939,6 @@ name = "rp-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
  "futures-util",
  "jsonwebtoken 9.3.1",
  "reqwest 0.13.4",
@@ -10939,14 +10947,15 @@ dependencies = [
  "rp-core",
  "rp-mcp",
  "rp-router",
+ "rusty_axum",
+ "rusty_axum_tokio",
  "rusty_log",
- "rusty_mcp_axum",
  "rusty_mcp_server",
  "rusty_oauth",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "tokio",
- "tower-http",
  "wiremock",
 ]
 
@@ -12492,15 +12501,18 @@ name = "rusty_mcp_server"
 version = "0.1.0"
 dependencies = [
  "rmcp",
+ "rusty_axum",
  "rusty_base64",
  "rusty_crypto_key",
  "rusty_http",
  "rusty_json",
+ "rusty_mcp_client_native",
  "rusty_mcp_proto",
  "rusty_oauth",
  "rusty_rand",
  "rusty_serve",
  "rusty_time",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "tokio",
@@ -12599,6 +12611,20 @@ dependencies = [
  "rusty_mux_core",
  "rusty_uuid",
  "rusty_wire",
+]
+
+[[package]]
+name = "rusty_mux_server"
+version = "0.1.0"
+dependencies = [
+ "platform",
+ "platform-linux",
+ "rusty_libc",
+ "rusty_mux_core",
+ "rusty_mux_proto",
+ "rusty_term_core",
+ "rusty_tokio",
+ "rusty_uuid",
 ]
 
 [[package]]
@@ -15948,7 +15974,6 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
  "url",
 ]
 
