@@ -7,7 +7,7 @@ use crate::request::Request;
 use crate::response::Response;
 use crate::retry::RetryPolicy;
 use crate::stream::{Conn, RawStream};
-use crate::streaming::StreamingResponse;
+use crate::streaming::{Reuse, StreamingResponse};
 use rusty_http::async_tokio::{AsyncTransport, BodyReader};
 use rusty_http::body::{self, Framing};
 use rusty_http::cookie::CookieJar;
@@ -446,6 +446,14 @@ impl RequestBuilder {
         Ok(self)
     }
 
+    /// Adds a header field without replacing earlier ones of the same
+    /// name, as [`RequestBuilder::header`] does: for a field that may
+    /// repeat, such as one a proxy forwards as it arrived.
+    pub fn header_append(mut self, name: &str, value: &str) -> Result<Self> {
+        self.headers.append(name, value)?;
+        Ok(self)
+    }
+
     /// Sets `Authorization: Basic <base64(username:password)>` (RFC
     /// 7617) on this request, overriding any `Authorization` set at the
     /// `Client` level.
@@ -639,16 +647,16 @@ impl RequestBuilder {
     /// hop's own body is still read and discarded eagerly, same as
     /// before; only the final, returned response is left unread).
     ///
-    /// Two differences from `.send()`, both deliberate first-pass
-    /// scope boundaries (see the streaming-bodies issue): any
-    /// configured [`RetryPolicy`] is ignored -- retrying a request whose
-    /// body may itself be a single-use stream isn't supported yet -- and
-    /// the connection used for the final hop is never returned to the
-    /// pool afterward, since whether it's still safe to reuse isn't
-    /// known until the body has been fully drained, which this first
-    /// pass doesn't track. A pooled connection is still tried first
+    /// One difference from `.send()`, a deliberate scope boundary (see
+    /// the streaming-bodies issue): any configured [`RetryPolicy`] is
+    /// ignored -- retrying a request whose body may itself be a
+    /// single-use stream isn't supported yet. The final hop's connection
+    /// goes back to the pool once [`StreamingResponse::chunk`] has
+    /// returned `None`, when the server left it open; dropping the
+    /// response before then closes it. A pooled connection is tried first
     /// for the request itself, same as `.send()` -- and, with no retry
-    /// loop here, a stale one surfaces as an I/O error.
+    /// loop here, a stale one the pool could not detect surfaces as an
+    /// I/O error.
     ///
     /// The configured timeout, if any, only bounds getting to the
     /// `StreamingResponse` (through any redirects) -- not each
@@ -962,8 +970,14 @@ async fn send_with_redirects_streaming(
             timeout: None,
             max_body_len: body::DEFAULT_MAX_BODY_LEN,
         };
-        let (status, resp_headers, mut streaming_body) =
-            send_one_hop_streaming(pool.as_deref(), &request, proxy_for_hop, &trust_policy).await?;
+        let (answer, reuse) =
+            send_one_hop_streaming(pool.as_ref(), &request, proxy_for_hop, &trust_policy).await?;
+        let StreamingHop {
+            status,
+            headers: resp_headers,
+            body: mut streaming_body,
+            ..
+        } = answer;
 
         if let Some(jar) = &cookie_jar {
             let set_cookie_values: Vec<&str> = resp_headers
@@ -978,24 +992,20 @@ async fn send_with_redirects_streaming(
             }
         }
 
-        if !is_redirect_status(status.as_u16()) {
-            return Ok(StreamingResponse::new(
-                status,
-                resp_headers,
-                url,
-                streaming_body,
-            ));
-        }
-        let RedirectPolicy::Follow(max) = policy else {
-            return Ok(StreamingResponse::new(
-                status,
-                resp_headers,
-                url,
-                streaming_body,
-            ));
+        let follow = match policy {
+            RedirectPolicy::Follow(max) if is_redirect_status(status.as_u16()) => max,
+            _ => {
+                return Ok(StreamingResponse::new(
+                    status,
+                    resp_headers,
+                    url,
+                    streaming_body,
+                    reuse,
+                ));
+            }
         };
-        if hop >= max {
-            return Err(Error::TooManyRedirects(max));
+        if hop >= follow {
+            return Err(Error::TooManyRedirects(follow));
         }
 
         // This hop won't be returned to the caller -- drain and discard
@@ -1355,8 +1365,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let resp_head = read_final_head(&mut t).await?;
     let framing = body::response_framing(&resp_head.headers, &request.method, resp_head.status)?;
-    let header_says_close = connection_says_close(&resp_head.headers);
-    let keep_alive = !matches!(framing, Framing::Close) && !header_says_close;
+    let keep_alive = keeps_alive(&resp_head.headers, framing);
     let body_bytes = t
         .read_body_with_limit(framing, request.max_body_len)
         .await?;
@@ -1374,7 +1383,7 @@ async fn attempt_streaming<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: S,
     request: &Request,
     request_target: &str,
-) -> Result<(StatusCode, HeaderMap, BodyReader<S>)> {
+) -> Result<StreamingHop<S>> {
     let mut t = AsyncTransport::new(stream);
     let head = build_request_head(request, request_target)?;
     t.write_request_head(&head).await?;
@@ -1382,8 +1391,30 @@ async fn attempt_streaming<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let resp_head = read_final_head(&mut t).await?;
     let framing = body::response_framing(&resp_head.headers, &request.method, resp_head.status)?;
-    let reader = t.into_body_reader(framing);
-    Ok((resp_head.status, resp_head.headers, reader))
+    let keep_alive = keeps_alive(&resp_head.headers, framing);
+    Ok(StreamingHop {
+        status: resp_head.status,
+        headers: resp_head.headers,
+        body: t.into_body_reader(framing),
+        keep_alive,
+    })
+}
+
+/// One hop's response with its body still unread -- see
+/// [`attempt_streaming`].
+struct StreamingHop<S> {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: BodyReader<S>,
+    /// Whether the connection may be reused once `body` has been read.
+    keep_alive: bool,
+}
+
+/// Whether the connection can carry another request once this response's
+/// body is read: not when the body runs to the close, nor when the server
+/// said it will close.
+fn keeps_alive(headers: &HeaderMap, framing: Framing) -> bool {
+    !matches!(framing, Framing::Close) && !connection_says_close(headers)
 }
 
 /// Sends one request, reusing a pooled connection for this origin (or,
@@ -1420,24 +1451,30 @@ async fn send_one_hop(
 }
 
 /// Like [`send_one_hop`], but leaves the body unread -- see
-/// [`attempt_streaming`]. The connection is never returned to the pool
-/// afterward (deliberate; see [`RequestBuilder::send_streaming`]'s
-/// docs). Same single-attempt rule as the buffered path, and since the
-/// streaming path has no retry loop above it at all, a stale pooled
-/// connection surfaces straight to the caller.
+/// [`attempt_streaming`]. The connection goes back to the pool once the
+/// caller has read the body to its end, when the server left it open
+/// (the [`Reuse`] returned alongside). Same single-attempt rule as the
+/// buffered path, and since the streaming path has no retry loop above
+/// it at all, a stale pooled connection surfaces straight to the caller.
 async fn send_one_hop_streaming(
-    pool: Option<&ConnectionPool>,
+    pool: Option<&Arc<ConnectionPool>>,
     request: &Request,
     proxy: Option<&Proxy>,
     trust_policy: &TrustPolicy,
-) -> Result<(StatusCode, HeaderMap, BodyReader<Conn>)> {
+) -> Result<(StreamingHop<Conn>, Option<Reuse>)> {
     let target = hop_target(&request.url, proxy);
-    let stream = take_or_dial(pool, &target, trust_policy).await?;
-    attempt_streaming(stream, request, &target.request_target).await
+    let stream = take_or_dial(pool.map(Arc::as_ref), &target, trust_policy).await?;
+    let hop = attempt_streaming(stream, request, &target.request_target).await?;
+    let reuse = pool.filter(|_| hop.keep_alive).map(|pool| Reuse {
+        pool: pool.clone(),
+        key: target.pool_key,
+    });
+    Ok((hop, reuse))
 }
 
 /// A pooled idle connection for `target` when there is one, else a
-/// freshly dialed and established one.
+/// freshly dialed and established one. A failure on the way to a fresh
+/// connection is marked as one, for [`Error::is_connect`].
 async fn take_or_dial(
     pool: Option<&ConnectionPool>,
     target: &HopTarget,
@@ -1446,9 +1483,13 @@ async fn take_or_dial(
     if let Some(stream) = pool.and_then(|p| p.take(&target.pool_key)) {
         return Ok(stream);
     }
-    let addrs = resolve(target.connect_host.clone(), target.connect_port).await?;
-    let raw = connect(&addrs).await?;
-    establish(raw, target, trust_policy).await
+    let addrs = resolve(target.connect_host.clone(), target.connect_port)
+        .await
+        .map_err(Error::connecting)?;
+    let raw = connect(&addrs).await.map_err(Error::connecting)?;
+    establish(raw, target, trust_policy)
+        .await
+        .map_err(Error::connecting)
 }
 
 /// DNS resolution is a blocking OS call (`getaddrinfo` under the hood);
@@ -1725,9 +1766,14 @@ mod tests {
                 usize::MAX,
                 b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
             );
-            let (status, _headers, mut reader) =
-                attempt_streaming(io, &request, "/submit").await.unwrap();
+            let StreamingHop {
+                status,
+                body: mut reader,
+                keep_alive,
+                ..
+            } = attempt_streaming(io, &request, "/submit").await.unwrap();
             assert_eq!(status.as_u16(), 200);
+            assert!(keep_alive);
             assert_eq!(
                 reader.next_chunk().await.unwrap().as_deref(),
                 Some(&b"ok"[..])

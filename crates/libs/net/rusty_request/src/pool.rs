@@ -8,8 +8,11 @@
 //! own "never more than one response in flight" assumption.
 
 use crate::stream::Conn;
+use rusty_tokio::io::{AsyncRead, ReadBuf};
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Mutex;
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 pub(crate) type PoolKey = (String, String, u16);
@@ -35,20 +38,22 @@ impl ConnectionPool {
     }
 
     /// Takes the most recently idled connection for `key`, if one
-    /// exists and hasn't sat idle past the configured timeout. LIFO,
-    /// not FIFO: the most recently returned connection is the one least
-    /// likely to have been closed by the peer's own idle timeout in the
-    /// meantime.
+    /// exists, hasn't sat idle past the configured timeout, and still
+    /// looks open (see [`still_open`]). LIFO, not FIFO: the most recently
+    /// returned connection is the one least likely to have been closed by
+    /// the peer's own idle timeout in the meantime.
     pub(crate) fn take(&self, key: &PoolKey) -> Option<Conn> {
         let mut idle = self.idle.lock().unwrap();
         let entries = idle.get_mut(key)?;
         let now = Instant::now();
         while let Some(entry) = entries.pop() {
-            if now.duration_since(entry.since) < self.idle_timeout {
-                return Some(entry.stream);
+            let mut stream = entry.stream;
+            if now.duration_since(entry.since) < self.idle_timeout && still_open(&mut stream) {
+                return Some(stream);
             }
-            // Past the idle timeout -- drop it (closing the socket) and
-            // keep looking at the next-most-recently-idled entry.
+            // Past the idle timeout, or closed by the peer while idle --
+            // drop it (closing the socket) and keep looking at the
+            // next-most-recently-idled entry.
         }
         None
     }
@@ -71,6 +76,21 @@ impl ConnectionPool {
             });
         }
     }
+}
+
+/// Whether an idle connection can still carry a request: one read
+/// attempt that must find nothing waiting. A peer that closed the
+/// connection while it sat idle shows as end of stream (or an error), and
+/// one that sent bytes nobody asked for has left it out of step; either
+/// way it is not reused. This catches the common stale case -- the
+/// server's own idle timeout fired first -- without ever sending a
+/// request on a connection already known to be dead. The read never
+/// waits: the no-op waker it registers is replaced by the next real poll.
+fn still_open(stream: &mut Conn) -> bool {
+    let mut byte = [0u8; 1];
+    let mut buf = ReadBuf::new(&mut byte);
+    let mut cx = Context::from_waker(Waker::noop());
+    matches!(Pin::new(stream).poll_read(&mut cx, &mut buf), Poll::Pending)
 }
 
 /// Manual impl -- `Conn` doesn't implement `Debug` (neither of its

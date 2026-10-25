@@ -1088,6 +1088,102 @@ fn connection_is_not_reused_when_response_says_close() {
     });
 }
 
+/// Makes two streaming GETs, reading the first one's body to its end
+/// when `drain`, and returns how many connections the server accepted.
+async fn two_streaming_gets(server: &common::TestServer, drain: bool) -> usize {
+    let client = Client::new();
+    let mut first = client
+        .get(&server.url("/a"))
+        .unwrap()
+        .send_streaming()
+        .await
+        .unwrap();
+    if drain {
+        while first.chunk().await.unwrap().is_some() {}
+    }
+    drop(first);
+    let mut second = client
+        .get(&server.url("/b"))
+        .unwrap()
+        .send_streaming()
+        .await
+        .unwrap();
+    while second.chunk().await.unwrap().is_some() {}
+    server.connections_accepted()
+}
+
+#[test]
+fn a_streamed_response_read_to_its_end_returns_its_connection_to_the_pool() {
+    run(async {
+        let server = start_test_server(|_req| http_response(200, "OK", &[], b"ok"));
+        assert_eq!(two_streaming_gets(&server, true).await, 1);
+        let server = start_test_server(|_req| http_chunked_response(200, "OK", &[], &[b"o", b"k"]));
+        assert_eq!(two_streaming_gets(&server, true).await, 1, "chunked");
+    });
+}
+
+#[test]
+fn a_streamed_response_dropped_early_or_closing_is_not_pooled() {
+    run(async {
+        let server = start_test_server(|_req| http_response(200, "OK", &[], b"ok"));
+        assert_eq!(
+            two_streaming_gets(&server, false).await,
+            2,
+            "dropped unread"
+        );
+        let server =
+            start_test_server(|_req| http_response(200, "OK", &[("Connection", "close")], b"ok"));
+        assert_eq!(two_streaming_gets(&server, true).await, 2, "server closes");
+    });
+}
+
+#[test]
+fn header_append_keeps_every_value() {
+    run(async {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_in_handler = seen.clone();
+        let server = start_test_server(move |req| {
+            let values = req
+                .headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("x-hop"))
+                .map(|(_, v)| v.clone());
+            seen_in_handler.lock().unwrap().extend(values);
+            http_response(200, "OK", &[], b"ok")
+        });
+        Client::new()
+            .get(&server.url("/"))
+            .unwrap()
+            .header_append("x-hop", "a")
+            .unwrap()
+            .header_append("x-hop", "b")
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["a", "b"]);
+    });
+}
+
+#[test]
+fn a_refused_connection_is_a_connect_error() {
+    run(async {
+        // Bound and closed at once: nothing listens there now.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let err = Client::new()
+            .get(&format!("http://{addr}/"))
+            .unwrap()
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_connect(), "{err:?}");
+        assert!(matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::ConnectionRefused));
+    });
+}
+
 #[test]
 fn no_pool_never_reuses_a_connection() {
     run(async {
@@ -1102,10 +1198,19 @@ fn no_pool_never_reuses_a_connection() {
 }
 
 /// A server that serves exactly one request per accepted connection,
-/// then drops the connection: from the client's point of view, every
-/// pooled connection is stale by the time it is reused. Returns the
+/// then hangs up on the next one as it arrives: the connection looks open
+/// while it sits in the client's pool, and fails only once a request has
+/// gone out on it -- the stale race no pool check can catch. Returns the
 /// address and a count of accepted connections.
 fn start_one_request_per_connection_server() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+    start_one_request_server(true)
+}
+
+/// A server that serves one request per connection and then closes it
+/// at once, as after a short keep-alive timeout, while the client still
+/// holds it idle (`wait_for_next == false`); or only when the next
+/// request arrives (`true`).
+fn start_one_request_server(wait_for_next: bool) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
     let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener = rusty_tokio::io::TcpListener::from_std(std_listener).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1124,8 +1229,10 @@ fn start_one_request_per_connection_server() -> (std::net::SocketAddr, Arc<Atomi
                         .write_all(&http_response(200, "OK", &[], b"ok"))
                         .await;
                 }
-                // `stream` drops here: the server hangs up right after
-                // its one response, as after its own keep-alive timeout.
+                if wait_for_next {
+                    let _ = common::read_request(&stream).await;
+                }
+                // `stream` drops here: the server hangs up.
             });
         }
     });
@@ -1146,6 +1253,26 @@ async fn pool_a_stale_connection(client: &Client, addr: std::net::SocketAddr) {
 }
 
 #[test]
+fn a_pooled_connection_the_server_closed_while_idle_is_not_reused() {
+    for streaming in [false, true] {
+        run(async {
+            let (addr, accepted) = start_one_request_server(false);
+            let client = Client::new();
+            pool_a_stale_connection(&client, addr).await;
+
+            let request = client.get(&format!("http://{addr}/b")).unwrap();
+            let status = if streaming {
+                request.send_streaming().await.unwrap().status()
+            } else {
+                request.send().await.unwrap().status()
+            };
+            assert_eq!(status.as_u16(), 200, "streaming: {streaming}");
+            assert_eq!(accepted.load(Ordering::SeqCst), 2, "a fresh connection");
+        });
+    }
+}
+
+#[test]
 fn stale_pooled_connection_is_an_error_without_a_retry_policy() {
     // The intentional behavior change: a request that lands on a pooled
     // connection the server already closed is not silently replayed on
@@ -1163,6 +1290,7 @@ fn stale_pooled_connection_is_an_error_without_a_retry_policy() {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Io(_)), "{err:?}");
+        assert!(!err.is_connect(), "the request went out: {err:?}");
         assert_eq!(
             accepted.load(Ordering::SeqCst),
             1,

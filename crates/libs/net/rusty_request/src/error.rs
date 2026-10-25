@@ -83,6 +83,47 @@ impl std::error::Error for Error {
     }
 }
 
+impl Error {
+    /// Whether the request failed before it was sent: resolving the host,
+    /// dialing it, or a proxy refusing the `CONNECT` tunnel. Such a
+    /// request never reached the server, so sending it again cannot
+    /// duplicate its effect. A TLS handshake failure is not counted: the
+    /// handshake runs with the first write, alongside the request itself.
+    pub fn is_connect(&self) -> bool {
+        match self {
+            Error::ProxyConnectFailed(_) => true,
+            Error::Io(e) => e.get_ref().is_some_and(|inner| inner.is::<Connect>()),
+            _ => false,
+        }
+    }
+
+    /// Marks an I/O error from setting up a connection, for
+    /// [`Error::is_connect`]. Its kind and message are unchanged.
+    pub(crate) fn connecting(self) -> Self {
+        match self {
+            Error::Io(e) => Error::Io(std::io::Error::new(e.kind(), Connect(e))),
+            other => other,
+        }
+    }
+}
+
+/// The payload of an I/O error raised while connecting -- see
+/// [`Error::connecting`]. Displays as the error it wraps.
+#[derive(Debug)]
+struct Connect(std::io::Error);
+
+impl fmt::Display for Connect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for Connect {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::Io(e)

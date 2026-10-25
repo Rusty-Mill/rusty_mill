@@ -215,3 +215,72 @@ fn request_from_inside_rusty_tokio_still_runs_on_rusty_tokio() {
     });
     assert_eq!(text, "hello from rusty_tokio");
 }
+
+/// A blocking server that answers bodiless GETs with `ok`, keeping each
+/// connection open for more unless `one_per_connection`, in which case it
+/// hangs up after the first answer. Returns its address and how many
+/// connections it has accepted.
+fn serve_keep_alive(
+    one_per_connection: bool,
+) -> (SocketAddr, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind test server");
+    let addr = listener.local_addr().unwrap();
+    let accepted = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = accepted.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            counter.fetch_add(1, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => seen.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    seen.clear();
+                    let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+                    if stream.write_all(reply).is_err() || one_per_connection {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (addr, accepted)
+}
+
+/// Two streamed GETs on one client, each body read to its end.
+async fn two_drained_gets(addr: SocketAddr) {
+    let client = Client::new();
+    for path in ["/a", "/b"] {
+        let mut resp = client
+            .get(&format!("http://{addr}{path}"))
+            .unwrap()
+            .send_streaming()
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status().as_u16(), 200);
+        while resp.chunk().await.unwrap().is_some() {}
+        // Long enough for a one-request server to have hung up.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn streamed_responses_reuse_a_pooled_connection_on_real_tokio() {
+    let (addr, accepted) = serve_keep_alive(false);
+    two_drained_gets(addr).await;
+    assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_connection_closed_while_idle_is_redialed_on_real_tokio() {
+    let (addr, accepted) = serve_keep_alive(true);
+    two_drained_gets(addr).await;
+    assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 2);
+}

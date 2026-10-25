@@ -119,12 +119,17 @@ protection against an active man-in-the-middle). TLS 1.2/1.3, no ALPN
   response body was close-delimited) -- capped at 8 idle connections
   per origin and a 90-second idle timeout by default
   (`ClientBuilder::pool_max_idle_per_host`/`pool_idle_timeout`). A
-  pooled connection the server already closed (a race no client can
-  fully avoid) fails like any other I/O error and is never silently
-  replayed: the request may already have reached the server, and only
-  a configured `RetryPolicy` (idempotent methods by default) decides
-  whether it is sent again. Set `pool_idle_timeout` below the server's
-  keep-alive timeout to make the race rare. `ClientBuilder::no_pool()`
+  pooled connection the server closed while it sat idle is noticed
+  before reuse and dropped, so the request goes out on a fresh one. One
+  the server closes only once the request is on its way (a race no
+  client can fully avoid) fails like any other I/O error and is never
+  silently replayed: the request may already have reached the server,
+  and only a configured `RetryPolicy` (idempotent methods by default)
+  decides whether it is sent again. `Error::is_connect()` tells apart a
+  request that failed before it was sent (resolving, dialing, a refused
+  `CONNECT` tunnel), which is always safe to send again. Set
+  `pool_idle_timeout` below the server's keep-alive timeout to make the
+  race rare. `ClientBuilder::no_pool()`
   reverts to a fresh connection with `Connection: close` on every
   request.
 - **Response body limit**: a buffered response is read up to 1 MiB by
@@ -168,9 +173,10 @@ protection against an active man-in-the-middle). TLS 1.2/1.3, no ALPN
   returns as soon as the status/headers arrive, then pull the body
   incrementally via `StreamingResponse::chunk()` instead of buffering
   it all first -- redirects are still followed exactly like `.send()`.
-  Two first-pass scope boundaries (documented on `send_streaming`): any
-  configured `RetryPolicy` is ignored, and the connection used isn't
-  returned to the pool afterward.
+  Any configured `RetryPolicy` is ignored (documented on
+  `send_streaming`); the connection goes back to the pool once the body
+  has been read to its end, and is closed if the response is dropped
+  before then.
 - **Proxy support**: `.proxy("http://host:port")` on `ClientBuilder`/
   `RequestBuilder` routes requests through an HTTP forward proxy instead
   of connecting to the origin directly -- reached over plain `http://`

@@ -3,10 +3,19 @@
 //! hasn't been read yet, pulled incrementally instead of requiring it
 //! all in memory at once.
 
+use std::sync::Arc;
+
 use crate::error::Result;
+use crate::pool::{ConnectionPool, PoolKey};
 use crate::stream::Conn;
 use rusty_http::async_tokio::BodyReader;
 use rusty_http::{HeaderMap, StatusCode, Url};
+
+/// Where a connection goes back to once its body has been read whole.
+pub(crate) struct Reuse {
+    pub(crate) pool: Arc<ConnectionPool>,
+    pub(crate) key: PoolKey,
+}
 
 /// A response whose body hasn't been read yet. Unlike [`crate::Response`]
 /// (always fully buffered), the body here is pulled incrementally via
@@ -17,7 +26,10 @@ pub struct StreamingResponse {
     status: StatusCode,
     headers: HeaderMap,
     url: Url,
-    body: BodyReader<Conn>,
+    /// `None` once the body has been read to its end.
+    body: Option<BodyReader<Conn>>,
+    /// Set when the connection may be pooled after the body ends.
+    reuse: Option<Reuse>,
 }
 
 impl StreamingResponse {
@@ -26,12 +38,14 @@ impl StreamingResponse {
         headers: HeaderMap,
         url: Url,
         body: BodyReader<Conn>,
+        reuse: Option<Reuse>,
     ) -> Self {
         StreamingResponse {
             status,
             headers,
             url,
-            body,
+            body: Some(body),
+            reuse,
         }
     }
 
@@ -54,11 +68,30 @@ impl StreamingResponse {
     /// count, only on the concatenation of every chunk returned before
     /// `None`.
     ///
-    /// Dropping a `StreamingResponse` before this returns `None` simply
-    /// closes the underlying connection (it's never pooled either way --
-    /// see [`crate::RequestBuilder::send_streaming`]'s docs) rather than
-    /// leaving anything to clean up.
+    /// Once this returns `None`, a connection the server left open goes
+    /// back to the client's pool. Dropping a `StreamingResponse` before
+    /// then simply closes the connection, since its framing is mid-body,
+    /// rather than leaving anything to clean up.
     pub async fn chunk(&mut self) -> Result<Option<Vec<u8>>> {
-        Ok(self.body.next_chunk().await?)
+        let Some(body) = self.body.as_mut() else {
+            return Ok(None);
+        };
+        let chunk = body.next_chunk().await?;
+        if chunk.is_none() {
+            self.finish();
+        }
+        Ok(chunk)
+    }
+
+    /// Pools the connection whose body just ended, unless the server
+    /// asked to close it or sent bytes past the body.
+    fn finish(&mut self) {
+        let (Some(body), Some(reuse)) = (self.body.take(), self.reuse.take()) else {
+            return;
+        };
+        let (stream, leftover) = body.into_inner().into_parts();
+        if leftover.is_empty() {
+            reuse.pool.put(reuse.key, stream);
+        }
     }
 }
