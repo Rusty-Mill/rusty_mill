@@ -387,7 +387,7 @@ fn fedora_error(err: rusty_fedora::Error) -> ErrorData {
 pub(crate) fn register_tools(
     builder: rusty_mcp_server::ServerBuilder,
     server: &HomelabServer,
-    rt: &tokio::runtime::Handle,
+    rt: &rusty_tokio::runtime::Handle,
 ) -> rusty_mcp_server::ServerBuilder {
     let builder = register::<HostArgs, _, _, _>(
         builder,
