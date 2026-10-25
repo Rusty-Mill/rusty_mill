@@ -3,9 +3,16 @@
 Run from the repo root:
     python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 """
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
-from cargo_toml_diff import is_safe_pure_addition
+from cargo_toml_diff import is_safe_pure_addition, member_dependencies_unchanged
+
+SCRIPT = Path(__file__).with_name("cargo_toml_diff.py")
 
 BASE = """\
 [workspace]
@@ -92,6 +99,85 @@ class IsSafePureAdditionTests(unittest.TestCase):
 
     def test_unparsable_old_toml_is_unsafe(self) -> None:
         self.assertFalse(is_safe_pure_addition("not valid toml [[[", BASE))
+
+
+MEMBER = """\
+[package]
+name = "a"
+version = "0.1.0"
+
+[dependencies]
+shared = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+shared = { workspace = true, features = ["mode"] }
+"""
+
+
+class MemberDependenciesUnchangedTests(unittest.TestCase):
+    def test_package_metadata_edit_is_local(self) -> None:
+        new = MEMBER.replace('version = "0.1.0"', 'version = "0.2.0"\nedition = "2024"')
+        self.assertTrue(member_dependencies_unchanged(MEMBER, new))
+
+    def test_a_feature_moved_to_another_target_is_a_change(self) -> None:
+        # The review's case: the all-target feature union is unchanged, Linux's build is not.
+        new = MEMBER.replace("cfg(windows)", "cfg(unix)")
+        self.assertFalse(member_dependencies_unchanged(MEMBER, new))
+
+    def test_a_feature_moved_between_dependency_kinds_is_a_change(self) -> None:
+        old = '[package]\nname = "a"\n[build-dependencies]\nshared = { version = "1", features = ["mode"] }\n'
+        new = old.replace("build-dependencies", "dependencies")
+        self.assertFalse(member_dependencies_unchanged(old, new))
+
+    def test_an_added_dependency_or_feature_is_a_change(self) -> None:
+        self.assertFalse(member_dependencies_unchanged(MEMBER, MEMBER + 'gone = "0.1"\n'))
+        self.assertFalse(
+            member_dependencies_unchanged(MEMBER, MEMBER + '\n[features]\nfast = ["shared/mode"]\n')
+        )
+
+    def test_unparsable_manifest_is_a_change(self) -> None:
+        self.assertFalse(member_dependencies_unchanged(MEMBER, "not valid toml [[["))
+
+
+class MemberDependencyEditsCliTests(unittest.TestCase):
+    def test_lists_only_members_whose_dependencies_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("a", "b", "outside"):
+                (root / name).mkdir()
+                (root / name / "Cargo.toml").write_text(MEMBER.replace('"a"', f'"{name}"'))
+            self._git(root, "init", "-q")
+            self._git(root, "add", ".")
+            self._git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+            base = self._git(root, "rev-parse", "HEAD").strip()
+            (root / "a" / "Cargo.toml").write_text(MEMBER.replace("cfg(windows)", "cfg(unix)"))
+            (root / "b" / "Cargo.toml").write_text(MEMBER.replace('"a"', '"b"') + "[lints]\n")
+            (root / "outside" / "Cargo.toml").write_text(MEMBER + 'gone = "0.1"\n')
+            (root / "c").mkdir()
+            (root / "c" / "Cargo.toml").write_text(MEMBER.replace('"a"', '"c"'))
+            metadata = {
+                "workspace_root": str(root),
+                "workspace_members": ["a", "b", "c"],
+                "packages": [
+                    {"id": name, "manifest_path": str(root / name / "Cargo.toml")}
+                    for name in ("a", "b", "c", "outside")
+                ],
+            }
+            (root / "metadata.json").write_text(json.dumps(metadata))
+            changed = "a/Cargo.toml\nb/Cargo.toml\nc/Cargo.toml\noutside/Cargo.toml\nCargo.toml\n"
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--members", str(root / "metadata.json"), base],
+                input=changed, capture_output=True, text=True, cwd=root, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # a: feature moved to another target; c: new member; b: lints only; outside: not a member.
+            self.assertEqual(result.stdout, "a/Cargo.toml c/Cargo.toml\n")
+
+    @staticmethod
+    def _git(root: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, text=True, check=True
+        ).stdout
 
 
 if __name__ == "__main__":

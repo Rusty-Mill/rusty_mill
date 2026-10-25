@@ -134,6 +134,21 @@ edge but does not by itself move either `remind_me` crate out of tier C:
 | #911 | small crates (rusty_key, skillopt, lsp, tonic, misc) | 10 | #903, #897, #899, #896 |
 | #912 | tier C tracking | 27 | #687, #688 |
 
+#911 tier A (2026-10-25): `skillopt-core`, `agentgateway-agui` and
+`rusty_mill_board` are on `rusty_tokio`, and `rk-mcp`'s tests are. `rk-mcp`
+keeps `tokio::sync::Mutex` for its connection lock, which is held across
+remote awaits, until #1064 makes `rusty_tokio`'s mutex cancellation-safe. Four tier A rows stay on tokio because
+of the runtime boundary: `rusty_tokio`'s timers, I/O and processes need a
+`rusty_tokio` runtime, and these crates run on a tokio one. `rk-compose`'s
+checks (`tokio::process`, `time::timeout`) run inside `rk-app` (tier C);
+`skillopt-cli` drives `skillopt-model`'s `reqwest`; `agentgateway-tls` is the
+tokio-to-`rusty_tokio` I/O bridge for `agentgateway`; and
+`rusty-hister-model`'s tests drive `sqlx` through `rusty-db`. Each moves with
+the tier C crate that holds it.
+`rusty_tonic` (tier B) builds its tonic-oracle test streams with
+`rusty_stream` through `Compat` instead of `futures-util`. `tokio` stays a
+dev-dependency only to host the tonic oracle server.
+
 ## 4. Per-crate table
 
 Deps: `t` tokio, `f` futures, `fu` futures-util, `as` async-stream, `tu`

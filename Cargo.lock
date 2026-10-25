@@ -437,9 +437,9 @@ dependencies = [
  "http-body-util",
  "rusty_agui",
  "rusty_log",
+ "rusty_tokio",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -10767,6 +10767,7 @@ dependencies = [
  "rk-feed",
  "rk-observe",
  "rusty-mcp-client",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -12535,10 +12536,10 @@ dependencies = [
  "rusty_rand",
  "rusty_request",
  "rusty_serve",
+ "rusty_tokio",
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "tokio",
  "uuid",
 ]
 
@@ -13030,7 +13031,7 @@ name = "rusty_tonic"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "futures-util",
+ "futures-core",
  "http",
  "http-body-util",
  "prost",
@@ -13042,6 +13043,7 @@ dependencies = [
  "rusty_hyper",
  "rusty_percent",
  "rusty_prost",
+ "rusty_stream",
  "rusty_tls",
  "rusty_tokio",
  "tokio",
@@ -13951,11 +13953,11 @@ dependencies = [
  "anyhow",
  "async-trait",
  "rand 0.8.8",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
