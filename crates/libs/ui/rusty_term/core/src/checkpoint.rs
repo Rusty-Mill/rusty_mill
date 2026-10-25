@@ -120,7 +120,7 @@ impl Writer {
             self.last = Some((key, i));
             return self.varint(i as u64 + 1);
         }
-        self.charge(size_of::<Cell>())?;
+        self.charge(style_growth(self.styles.len()) * size_of::<Cell>())?;
         self.varint(0)?;
         write_style(&key, self)?;
         self.last = Some((key, self.styles.len()));
@@ -210,7 +210,13 @@ impl<'a> Reader<'a> {
     pub(crate) fn style(&mut self) -> Result<Cell> {
         let i = self.varint()?;
         if i == 0 {
-            self.charge(size_of::<Cell>())?;
+            let grow = style_growth(self.styles.len());
+            if grow > 0 {
+                self.charge(grow * size_of::<Cell>())?;
+                self.styles
+                    .try_reserve_exact(grow)
+                    .map_err(|_| Error("allocation failed"))?;
+            }
             let style = read_style(self)?;
             self.styles.push(style);
             return Ok(style);
@@ -431,6 +437,17 @@ impl Wire for Instant {
         r.now
             .checked_sub(Duration::new(s, n))
             .ok_or(Error("time origin"))
+    }
+}
+/// Style-table cells to reserve before defining entry `len`: 16, then
+/// doubling. The reader charges and reserves exactly this capacity and the
+/// writer charges the same, so the table's spare capacity is inside the
+/// budget and both sides stop at the same point.
+fn style_growth(len: usize) -> usize {
+    match len {
+        0 => 16,
+        n if n >= 16 && n.is_power_of_two() => n,
+        _ => 0,
     }
 }
 /// A run style: every [`Cell`] field but `ch`, in `Cell`'s v2 field order.
@@ -858,6 +875,34 @@ mod tests {
                 bad[i] ^= 1 << bit;
                 let _ = read_lines(&bad, 1);
             }
+        }
+    }
+
+    #[test]
+    fn style_table_capacity_is_charged_symmetrically() {
+        let cell = size_of::<Cell>();
+        for n in [1usize, 16, 17, 32, 33, 64, 65] {
+            // One row of `n` distinct styles: the row's cells plus the table's
+            // reserved capacity, 16 then doubling.
+            let cells = (0..n)
+                .map(|i| Cell {
+                    fg: i as u32,
+                    ..Cell::blank()
+                })
+                .collect();
+            let line = Line::new(cells, false, LineAttr::Single);
+            let capacity = n.next_power_of_two().max(16);
+            let need = (n + capacity) * cell;
+            let bytes = line_bytes(std::slice::from_ref(&line));
+            for (budget, ok) in [(need, true), (need - 1, false)] {
+                let mut w = Writer::new(budget);
+                assert_eq!(line.write(&mut w).is_ok(), ok, "write {n} at {budget}");
+                let mut r = Reader::new(&bytes, budget);
+                assert_eq!(Line::read(&mut r).is_ok(), ok, "read {n} at {budget}");
+            }
+            let mut r = Reader::new(&bytes, need);
+            Line::read(&mut r).unwrap();
+            assert_eq!(r.styles.capacity(), capacity, "{n}");
         }
     }
 
