@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use rusty_term_core::{
     ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_REVERSE, ATTR_STRIKE,
     ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, AnsiParser, Grid, UnderlineStyle, WIDE_TRAILER,
+    checkpoint,
 };
 
 /// Every recording is made on an 80x24 PTY (see `record.py`).
@@ -30,6 +31,11 @@ fn corpus_dir() -> PathBuf {
 }
 
 fn replay(data: &[u8], chunk: usize) -> Grid {
+    replay_with_parser(data, chunk).0
+}
+
+/// [`replay`], keeping the parser, which a checkpoint also encodes.
+fn replay_with_parser(data: &[u8], chunk: usize) -> (Grid, AnsiParser) {
     let mut grid = Grid::new(COLS, ROWS);
     let mut parser = AnsiParser::new();
     for piece in data.chunks(chunk) {
@@ -37,7 +43,7 @@ fn replay(data: &[u8], chunk: usize) -> Grid {
         parser.take_responses();
         grid.take_host_out();
     }
-    grid
+    (grid, parser)
 }
 
 /// `-` for the grid's default color, else `#rrggbb`.
@@ -231,14 +237,92 @@ fn dump_pins_wide_trailer_columns() {
     let mut parser = AnsiParser::new();
     let mut good = Grid::new(4, 1);
     parser.advance(&mut good, "日A".as_bytes());
+    // [日, trailer, A, ·] -> [日, A, trailer, ·], written left to right so
+    // `set_cell`'s wide-glyph repair never fires.
+    let row = good.row(0);
     let mut moved = Grid::new(4, 1);
-    parser.advance(&mut moved, "日A".as_bytes());
-    // [日, trailer, A, ·] -> [日, A, trailer, ·]
-    moved.row_mut(0).swap(1, 2);
+    moved.cursor = good.cursor;
+    for (x, from) in [0, 2, 1].into_iter().enumerate() {
+        moved.set_cell(x, 0, row[from]);
+    }
     assert_ne!(
         good.row(0)[1].flags & WIDE_TRAILER,
         0,
         "fixture: cell 1 is the trailer"
     );
     assert_ne!(dump(&good), dump(&moved));
+}
+
+/// Inputs the recordings miss but the wire formats carry: OSC 8 links,
+/// DECSCA-protected cells with DECSED, deep scrollback, and one grapheme
+/// cluster drawn in two pens.
+const WIRE_EXTRAS: [(&str, &[u8]); 4] = [
+    (
+        "x_osc8_links",
+        b"\x1b]8;;https://a.example\x1b\\one\x1b]8;;\x1b\\ \x1b]8;id=2;https://b.example\x1b\\two\x1b]8;;\x1b\\\r\n",
+    ),
+    (
+        "x_decsca_decsed",
+        b"keep \x1b[1\"qguard\x1b[0\"q gone\r\n\x1b[?2J",
+    ),
+    (
+        "x_scrollback",
+        b"\x1b[31m01\r\n02\r\n03\r\n04\r\n05\r\n06\r\n07\r\n08\r\n09\r\n10\r\n\x1b[42m11\r\n12\r\n13\r\n14\r\n15\r\n16\r\n17\r\n18\r\n19\r\n20\r\n\x1b[0;1m21\r\n22\r\n23\r\n24\r\n25\r\n26\r\n27\r\n28\r\n29\r\n30",
+    ),
+    (
+        "x_cluster_two_pens",
+        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} \x1b[35m\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\x1b[0m".as_bytes(),
+    ),
+];
+
+/// FNV-1a, 64-bit: a stable, dependency-free fingerprint of encoded bytes.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// `name rtcp=<hash> rtsn=<hash>` for one replayed input. Encoding twice a
+/// few milliseconds apart must give the same bytes, so no timer age (sync
+/// output, animation, command start) can leak into the pinned hash.
+fn wire_line(name: &str, data: &[u8]) -> String {
+    let (grid, parser) = replay_with_parser(data, CHUNK);
+    let rtcp = checkpoint::encode(&grid, &parser).expect("encode checkpoint");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let again = checkpoint::encode(&grid, &parser).expect("encode checkpoint");
+    assert_eq!(rtcp, again, "{name}: checkpoint depends on the clock");
+    let rtsn = grid.encode_snapshot();
+    format!(
+        "{name} rtcp={:016x} rtsn={:016x}",
+        fnv1a64(&rtcp),
+        fnv1a64(&rtsn)
+    )
+}
+
+/// RTCP and RTSN bytes for every recording and extra input are pinned, so a
+/// storage change behind `Grid` cannot change either wire format.
+/// Regenerate with `UPDATE_GOLDEN=1`, like the grid goldens.
+#[test]
+fn wire_bytes_match_pinned_hashes() {
+    let mut lines: Vec<String> = recordings()
+        .iter()
+        .map(|vt| {
+            let name = vt.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+            wire_line(name, &fs::read(vt).expect("read recording"))
+        })
+        .collect();
+    lines.extend(WIRE_EXTRAS.iter().map(|(name, data)| wire_line(name, data)));
+    let actual = lines.join("\n") + "\n";
+    let golden = corpus_dir().join("wire.hashes");
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        fs::write(&golden, &actual).expect("write wire hashes");
+        return;
+    }
+    let expected = fs::read_to_string(&golden)
+        .unwrap_or_else(|e| panic!("no {} ({e}); run with UPDATE_GOLDEN=1", golden.display()));
+    assert!(
+        expected == actual,
+        "wire bytes changed:\n{}",
+        line_diff(&expected, &actual)
+    );
 }

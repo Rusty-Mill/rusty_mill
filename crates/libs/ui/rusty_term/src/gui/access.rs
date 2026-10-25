@@ -99,7 +99,7 @@ impl AccessState {
 /// re-exported).
 fn visible_rows(grid: &Grid) -> Vec<String> {
     (0..grid.rows)
-        .map(|y| row_text(grid.row(y), &grid.clusters))
+        .map(|y| row_text(&grid.row(y), &grid.clusters))
         .collect()
 }
 
@@ -170,7 +170,9 @@ mod tests {
         let mut g = Grid::new(cols.max(1), rows.len().max(1));
         for (y, line) in rows.iter().enumerate() {
             for (x, ch) in line.chars().enumerate() {
-                g.row_mut(y)[x].ch = ch;
+                let mut cell = g.row(y)[x];
+                cell.ch = ch;
+                g.set_cell(x, y, cell);
             }
         }
         g.cursor = cursor;

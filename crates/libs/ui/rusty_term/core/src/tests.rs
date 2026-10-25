@@ -1616,16 +1616,6 @@ fn erase_with_a_new_background_repaints_blank_rows() {
 }
 
 #[test]
-fn row_mut_write_is_cleared() {
-    // `row_mut` bypasses the parser; the write must still drop the blank flag.
-    let mut g = parse(b"\x1b[2J", 3, 2);
-    g.row_mut(1)[2].ch = 'x';
-    let mut p = AnsiParser::new();
-    p.advance(&mut g, b"\x1b[2J");
-    assert_eq!(row_text(&g, 1), "   ");
-}
-
-#[test]
 fn partial_region_scroll_is_not_captured() {
     // A DECSTBM sub-region scroll (TUI behavior) must not feed scrollback.
     let mut g = Grid::new(4, 5);
