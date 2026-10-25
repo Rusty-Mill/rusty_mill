@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -91,6 +92,42 @@ fn app() -> Router {
             }),
         )
         .route("/hang", get(hang))
+        .route("/big", get(|| async { "x".repeat(BIG) }))
+        .route(
+            "/bigstream",
+            get(|| async { Sse::new(One(Some(Event::default().data("x".repeat(BIG))))) }),
+        )
+        .route("/park", get(park))
+}
+
+/// Larger than any flow-control window a test leaves open.
+const BIG: usize = 256 * 1024;
+
+/// How many `/park` handlers are running.
+static PARKED: AtomicUsize = AtomicUsize::new(0);
+/// What releases them.
+static PARK: Mutex<Vec<oneshot::Sender<()>>> = Mutex::new(Vec::new());
+
+async fn park() -> impl IntoResponse {
+    let (release, wait) = oneshot::channel::<()>();
+    PARK.lock().unwrap().push(release);
+    PARKED.fetch_add(1, Ordering::SeqCst);
+    let _ = wait.await;
+    "released"
+}
+
+/// One event, then the end.
+struct One(Option<Event>);
+
+impl Stream for One {
+    type Item = Result<Event, Infallible>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::task::Poll::Ready(self.0.take().map(Ok))
+    }
 }
 
 async fn hang() -> impl IntoResponse {
@@ -142,6 +179,10 @@ async fn h2(server: &Server, trust: &TrustPolicy) -> ClientHandle {
         trust: trust.clone(),
         ..ConnectOptions::default()
     };
+    h2_with(server, options).await
+}
+
+async fn h2_with(server: &Server, options: ConnectOptions) -> ClientHandle {
     let url = format!("https://{}", server.local_addr());
     connect(&url, options).await.unwrap().client().clone()
 }
@@ -153,12 +194,24 @@ async fn call(
     path: &str,
     body: &[u8],
 ) -> (u16, Vec<HeaderField>, Vec<u8>) {
-    let fields = vec![
+    call_with(h, method, path, &[], body).await
+}
+
+/// [`call`] with extra header fields after the pseudo-headers.
+async fn call_with(
+    h: &ClientHandle,
+    method: &str,
+    path: &str,
+    extra: &[(&str, &str)],
+    body: &[u8],
+) -> (u16, Vec<HeaderField>, Vec<u8>) {
+    let mut fields = vec![
         HeaderField::new(":method", method),
         HeaderField::new(":scheme", "https"),
         HeaderField::new(":path", path),
         HeaderField::new(":authority", "example.test"),
     ];
+    fields.extend(extra.iter().map(|(n, v)| HeaderField::new(*n, *v)));
     let (mut send, resp) = h.send_request(fields, body.is_empty()).await.unwrap();
     if !body.is_empty() {
         send.send_data(body.to_vec(), true).await.unwrap();
@@ -295,5 +348,164 @@ async fn a_client_reset_drops_the_handler() {
     timeout(FIVE, started).await.unwrap().unwrap();
     send.reset(rusty_h2::error::ErrorCode::Cancel);
     timeout(FIVE, dropped).await.unwrap().unwrap();
+    server.shutdown().await;
+}
+
+/// A request for `path` whose response headers have arrived; the body is
+/// left unread.
+async fn opened(h: &ClientHandle, path: &str) -> rusty_hyper::Response {
+    let fields = vec![
+        HeaderField::new(":method", "GET"),
+        HeaderField::new(":scheme", "https"),
+        HeaderField::new(":path", path),
+        HeaderField::new(":authority", "localhost"),
+    ];
+    let (_send, resp) = h.send_request(fields, true).await.unwrap();
+    timeout(FIVE, resp).await.unwrap().unwrap()
+}
+
+/// Reads `resp`'s body to its end: whether it ended in an error.
+async fn ends_in_error(mut resp: rusty_hyper::Response) -> bool {
+    loop {
+        match timeout(FIVE, resp.body.next()).await.unwrap() {
+            None => return false,
+            Some(Err(_)) => return true,
+            Some(Ok(_)) => {}
+        }
+    }
+}
+
+#[rusty_tokio::test]
+async fn a_client_that_stops_reading_cannot_hold_a_response_or_shutdown() {
+    for path in ["/big", "/bigstream"] {
+        let options = ServeOptions {
+            idle_timeout: Duration::from_millis(300),
+            ..ServeOptions::default()
+        };
+        let (server, trust) = start(options);
+        // A stream window of zero: the server can send headers, no data.
+        let mut options = ConnectOptions {
+            trust: trust.clone(),
+            ..ConnectOptions::default()
+        };
+        options.h2.initial_window_size(0);
+        let h = h2_with(&server, options).await;
+        let resp = opened(&h, path).await;
+        let stopping = rusty_tokio::spawn(server.shutdown());
+        assert!(
+            ends_in_error(resp).await,
+            "{path}: the stalled body is reset"
+        );
+        timeout(FIVE, stopping).await.unwrap().unwrap();
+    }
+}
+
+#[rusty_tokio::test]
+async fn a_connection_with_no_open_stream_is_closed() {
+    let options = ServeOptions {
+        idle_timeout: Duration::from_millis(200),
+        ..ServeOptions::default()
+    };
+    let (server, trust) = start(options);
+    let h = h2(&server, &trust).await;
+    let (status, _, _) = call(&h, "GET", "/health", b"").await;
+    assert_eq!(status, 200);
+    rusty_tokio::time::sleep(Duration::from_millis(1000)).await;
+    let fields = vec![
+        HeaderField::new(":method", "GET"),
+        HeaderField::new(":scheme", "https"),
+        HeaderField::new(":path", "/health"),
+        HeaderField::new(":authority", "localhost"),
+    ];
+    let refused = match h.send_request(fields, true).await {
+        Err(_) => true,
+        Ok((_send, resp)) => timeout(FIVE, resp).await.unwrap().is_err(),
+    };
+    assert!(refused, "the idle connection was closed");
+    server.shutdown().await;
+}
+
+#[rusty_tokio::test]
+async fn a_header_list_over_max_head_bytes_is_refused() {
+    let options = ServeOptions {
+        max_head_bytes: 1024,
+        ..ServeOptions::default()
+    };
+    let (server, trust) = start(options);
+    let h = h2(&server, &trust).await;
+    // Under the limit, as HTTP/2 counts it, is served.
+    let small = "v".repeat(600);
+    let (status, _, _) = call_with(&h, "GET", "/health", &[("x-a", &small)], b"").await;
+    assert_eq!(status, 200);
+    // One field repeated: HPACK sends the repeats as one-byte indexes, so
+    // only the decoded size shows them.
+    let value = "v".repeat(60);
+    let repeated: Vec<(&str, &str)> = (0..30).map(|_| ("x-r", value.as_str())).collect();
+    let (status, _, _) = call_with(&h, "GET", "/health", &repeated, b"").await;
+    assert_eq!(status, 431);
+    server.shutdown().await;
+}
+
+#[rusty_tokio::test]
+async fn streams_past_the_cap_wait_while_others_are_pending() {
+    let (server, trust) = start(ServeOptions::default());
+    let h = h2(&server, &trust).await;
+    let mut calls = Vec::new();
+    for _ in 0..110 {
+        let h = h.clone();
+        calls.push(rusty_tokio::spawn(async move {
+            let fields = vec![
+                HeaderField::new(":method", "GET"),
+                HeaderField::new(":scheme", "https"),
+                HeaderField::new(":path", "/park"),
+                HeaderField::new(":authority", "localhost"),
+            ];
+            match h.send_request(fields, true).await {
+                Ok((_send, resp)) => resp.await.is_ok(),
+                Err(_) => false,
+            }
+        }));
+    }
+    let deadline = rusty_tokio::time::Instant::now() + FIVE;
+    while PARKED.load(Ordering::SeqCst) < 100 && rusty_tokio::time::Instant::now() < deadline {
+        rusty_tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    rusty_tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        PARKED.load(Ordering::SeqCst),
+        100,
+        "at most 100 handlers at once"
+    );
+
+    // Released, the parked calls finish and the rest are served or refused.
+    while PARKED.load(Ordering::SeqCst) <= 110 {
+        let waiting: Vec<_> = PARK.lock().unwrap().drain(..).collect();
+        for release in waiting {
+            let _ = release.send(());
+        }
+        if calls.iter().all(|c| c.is_finished()) {
+            break;
+        }
+        rusty_tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut served = 0;
+    for call in calls {
+        served += usize::from(timeout(FIVE, call).await.unwrap().unwrap());
+    }
+    assert!(served >= 100, "{served} served");
+    server.shutdown().await;
+}
+
+#[rusty_tokio::test]
+async fn host_must_agree_with_authority() {
+    let (server, trust) = start(ServeOptions::default());
+    let h = h2(&server, &trust).await;
+    let (status, _, host) = call_with(&h, "GET", "/host", &[("host", "Example.Test")], b"").await;
+    assert_eq!((status, host.as_slice()), (200, &b"Example.Test"[..]));
+    let (status, _, _) = call_with(&h, "GET", "/host", &[("host", "other.test")], b"").await;
+    assert_eq!(status, 400, "a Host that differs from :authority");
+    let twice = [("host", "example.test"), ("host", "example.test")];
+    let (status, _, _) = call_with(&h, "GET", "/host", &twice, b"").await;
+    assert_eq!(status, 400, "two Host fields");
     server.shutdown().await;
 }

@@ -54,6 +54,11 @@ pub struct ServeOptions {
     /// Serve HTTP/2 on a TLS connection that negotiates ALPN `h2`; others
     /// stay HTTP/1.1. The acceptor must offer `h2`, usually with
     /// `http/1.1`. There is no cleartext h2c. Off by default.
+    ///
+    /// The limits above apply per stream (`max_head_bytes` to the decoded
+    /// header list), `idle_timeout` also bounds each blocked write and a
+    /// connection with no open stream, and a connection has at most 100
+    /// streams open at once.
     #[cfg(feature = "http2")]
     pub http2: bool,
 }
