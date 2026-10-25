@@ -12,6 +12,16 @@
 //! - `ecdh-import256`, `ecdh-import384`: `from_bytes` on tainted accepted scalars (1, 2^64,
 //!   2^128, a high-bit scalar, n-1) and rejected ones (0, n, all ones); same expectation.
 //! - `ecdh-generate256`, `ecdh-generate384`: `generate` with a source that marks its output secret.
+//! - `ed25519-sign`: an Ed25519 seed marked secret before `from_seed`, then `sign` on a
+//!   public message. Key expansion, the fixed-base multiplications, the reductions and
+//!   `S = r + k*s` must report 0 errors.
+//! - `ed25519-control`: a deliberate branch on the (secret-derived) signature; must be caught.
+//! - `ecdsa-sign256`, `ecdsa-sign384`: an ECDSA private key marked secret before import, and
+//!   noise Z marked secret, then `sign`. Every report must be either the branch on an
+//!   `ecdh::ensure` verdict (scalar valid, nonce candidate valid, result not at infinity) or
+//!   inside `ecdsa::output`, which handles only the published `r` and `s`.
+//! - `ecdsa-control`: a deliberate branch on a byte of the ECDSA private key, after signing;
+//!   must be caught, and must not pass as a verdict or an output report.
 //! - `control`: a deliberate branch on the secret; must be caught.
 //! - `ecdh-control`: a deliberate branch on the ECDH shared secret; must be caught.
 //!
@@ -19,6 +29,8 @@
 
 use rusty_ct_check::taint::mark_secret;
 use rusty_pk::ecdh::{Curve, PrivateKey};
+use rusty_pk::ecdsa::{self, CurveId};
+use rusty_pk::ed25519::SigningKey;
 use rusty_pk::x25519::{agree, public_key, x25519};
 use std::hint::black_box;
 
@@ -47,6 +59,35 @@ fn main() {
         "ecdh-import384" => import(Curve::P384, &N384),
         "ecdh-generate256" => generate(Curve::P256),
         "ecdh-generate384" => generate(Curve::P384),
+        "ed25519-sign" => {
+            let key = SigningKey::from_seed(&scalar).unwrap();
+            black_box(key.sign(black_box(b"a public message")).unwrap());
+        }
+        "ed25519-control" => {
+            let key = SigningKey::from_seed(&scalar).unwrap();
+            if key.sign(b"a public message").unwrap()[40] == black_box(0) {
+                black_box(1);
+            }
+        }
+        "ecdsa-sign256" => ecdsa_sign(CurveId::P256, 32),
+        "ecdsa-sign384" => ecdsa_sign(CurveId::P384, 48),
+        "ecdsa-control" => {
+            let mut bytes = vec![0x77u8; 32];
+            bytes[0] = 0x01;
+            let bytes = black_box(bytes);
+            mark_secret(&bytes);
+            let key = ecdsa::SigningKey::from_bytes(CurveId::P256, &bytes).unwrap();
+            black_box(
+                key.sign(b"m", |h: &mut [u8]| -> Result<(), ()> {
+                    h.fill(1);
+                    Ok(())
+                })
+                .is_ok(),
+            );
+            if bytes[7] == black_box(0x77) {
+                black_box(1);
+            }
+        }
         "ecdh-control" => {
             let (key, peer) = ecdh_key(Curve::P256);
             if key.agree(&peer).unwrap().as_bytes()[0] == black_box(0) {
@@ -54,7 +95,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("modes: x25519 | agree | control | ecdh256 | ecdh384 | ecdh-import256 | ecdh-import384 | ecdh-generate256 | ecdh-generate384 | ecdh-control");
+            eprintln!("modes: x25519 | agree | control | ed25519-sign | ed25519-control | ecdsa-sign256 | ecdsa-sign384 | ecdsa-control | ecdh256 | ecdh384 | ecdh-import256 | ecdh-import384 | ecdh-generate256 | ecdh-generate384 | ecdh-control");
             std::process::exit(2);
         }
     }
@@ -118,4 +159,22 @@ fn generate(curve: Curve) {
         Ok(())
     });
     black_box(key.is_ok());
+}
+
+fn ecdsa_sign(curve: CurveId, len: usize) {
+    let mut bytes = vec![0x77u8; len];
+    bytes[0] = 0x01; // below both group orders
+    let bytes = black_box(bytes);
+    mark_secret(&bytes);
+    let key = ecdsa::SigningKey::from_bytes(curve, &bytes).unwrap();
+    let sig = key.sign(
+        black_box(b"a public message"),
+        |noise: &mut [u8]| -> Result<(), ()> {
+            noise.fill(0x5a);
+            let noise = black_box(noise);
+            mark_secret(noise);
+            Ok(())
+        },
+    );
+    black_box(sig.is_ok());
 }

@@ -1,0 +1,12 @@
+---
+category: Changed
+changelog: rusty_term's window repaints only the terminal rows that changed since the frame already on screen, on both the CPU and the GPU renderer.
+---
+## 2026-10-24 - rusty_term: repaint only changed rows
+
+- **Changed:** the grid gives every screen row a change stamp, bumped on every write that can change the row, and one stamp for the scrollback. Stamps only grow and carry the grid's id, so any number of readers can compare them. They are the per-row sequence number the mux protocol's incremental sync needs (backlog rows 7 and 16). `FrameView` carries a key per viewport row built from them.
+- **Changed:** the CPU renderer remembers what each of its last 3 presented frames drew per pane row: the key, selection and search bits, cursor, IME preedit, hovered link, bidi order and trail ghosts. Given the buffer's age from softbuffer, it repaints only the rows that differ from the frame that buffer holds (and their neighbors, since a glyph may overhang into them) and presents with damage rectangles. A change to the window size, font, colors, bars, pane layout, scrollbar or gutter marks repaints everything, as does a buffer of unknown age.
+- **Changed:** the GPU renderer caches each pane row's instances under the same row state and rebuilds only the rows whose state changed.
+- **Changed:** `bench_frame_time` runs the window's damage path and adds a typing case. At 120x40 (local, 2026-10-24): a static screen paints in 0.06-0.07 ms p50 against 0.83-0.99 ms repainting every row, and typing a character a frame paints in 0.10 ms against 1.06 ms. Streaming workloads, which change most rows, run 1.1-2.3 ms p50 against 1.4-2.4 ms on `main`.
+- **Changed:** a glyph now draws only inside its pane and its own row or a neighbor's. Before, an overhanging glyph could paint into the padding, a neighboring pane, or rows further away. A bar or underline cursor at the pending-wrap column draws on the last column instead of past the pane's edge.
+- **Known limitations:** the stamp bookkeeping costs the parser 3-4.5% more instructions per byte (ascii_throughput 47.8 to 49.4, scroll_heavy 136.7 to 142.9, unicode_heavy 167.8 to 173.0; all within the gate's ceilings). On macOS softbuffer reports no buffer age, so every frame there still repaints in full. Rows under a pixel image or Kitty placeholders repaint every frame. Any scrollback change repaints every history row in a scrolled-back view. The GPU renderer still uploads and draws every instance each frame; only building them is skipped.

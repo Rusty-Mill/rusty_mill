@@ -240,7 +240,7 @@ fn fill_buf_returns_empty_at_eof() {
 fn buf_reader_and_buf_writer_round_trip_over_a_real_tcp_socket() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -311,7 +311,7 @@ fn buf_stream_get_ref_get_mut_into_inner_reach_the_wrapped_stream() {
 fn buf_stream_round_trips_over_a_real_tcp_socket() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {

@@ -21,7 +21,7 @@ async fn async_client_and_server_negotiate_a_shared_alpn_protocol() {
     )
     .unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     let server = rusty_tokio::spawn(async move {

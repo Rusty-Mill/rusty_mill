@@ -27,7 +27,7 @@ fn tcp_listener_from_std_accepts_a_connection() {
 fn tcp_listener_into_std_can_still_accept_blocking() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let std_listener = listener.into_std().unwrap();
 
@@ -51,7 +51,7 @@ fn tcp_listener_into_std_can_still_accept_blocking() {
 fn tcp_stream_from_std_adopts_an_already_connected_socket() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -84,7 +84,7 @@ fn tcp_stream_from_std_adopts_an_already_connected_socket() {
 fn tcp_stream_into_std_keeps_the_same_connection_alive() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {

@@ -13,3 +13,4 @@ changelog: rusty_mux_server, the multiplexer's Phase 1 server on rusty_tokio (PT
 
 - **Fixed (checkpoint audit):** Preserve DECTCEM cursor visibility, with direct state/DECRQM regressions and an exhaustive Grid field inventory. Advance the checkpoint to RTCP v2 / CHECKPOINT_V2 (bit 2); incomplete v1 is rejected rather than silently changing its layout.
 - **Fixed (Windows validation):** Compile the internal Grid construction helper only on Linux, matching its sole caller in the Linux-only server state; keep checkpoint decoding and chunk assembly available cross-platform.
+- **Fixed (main integration):** After merging main's per-row change stamps (7e3cc112), a restored checkpoint rebuilds the stamps with the dirty flags at its own size instead of keeping the 1×1 placeholder's, which panicked on the first write after attach. The Grid field inventory records the four new renderer fields as rebuilt, not encoded.

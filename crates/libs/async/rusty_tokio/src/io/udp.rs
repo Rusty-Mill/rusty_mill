@@ -62,9 +62,19 @@ pub struct UdpSocket {
 }
 
 impl UdpSocket {
+    /// Binds a UDP socket at `addr`, anything [`ToSocketAddrs`] covers, as
+    /// in tokio. Candidates are tried in order; see
+    /// [`TcpListener::bind`](super::TcpListener::bind) for why this is
+    /// `async` and how to bind synchronously ([`from_std`](Self::from_std)).
+    ///
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
-    pub fn bind(addr: SocketAddr) -> io::Result<UdpSocket> {
+    pub async fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<UdpSocket> {
+        super::addr::first_ok(addr, UdpSocket::bind_addr).await
+    }
+
+    /// Binds one concrete address, synchronously.
+    fn bind_addr(addr: SocketAddr) -> io::Result<UdpSocket> {
         let reactor = Handle::current().shared.reactor.clone();
         let inner = PlatformUdpSocket::bind(addr).map_err(from_platform_err)?;
         inner.set_nonblocking(true).map_err(from_platform_err)?;
@@ -72,32 +82,11 @@ impl UdpSocket {
         Ok(UdpSocket { inner, io, reactor })
     }
 
-    /// The [`ToSocketAddrs`]-based counterpart of [`bind`](Self::bind) --
-    /// see [`TcpListener::bind_addrs`](super::TcpListener::bind_addrs)
-    /// for the full contract (additive alongside the existing
-    /// synchronous `bind`, not a replacement for it) and why this is
-    /// `async fn` where `bind` itself isn't.
-    ///
-    /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
-    pub async fn bind_addrs(addr: impl ToSocketAddrs) -> io::Result<UdpSocket> {
-        let addrs = addr.to_socket_addrs().await?;
-        let mut last_err = None;
-        for addr in addrs {
-            match UdpSocket::bind(addr) {
-                Ok(socket) => return Ok(socket),
-                Err(e) => last_err = Some(e),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "could not resolve to any address",
-            )
-        }))
-    }
-
-    pub async fn send_to(&self, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
+    /// Sends `buf` to `target`, anything [`ToSocketAddrs`] covers, as in
+    /// tokio. A form that resolves to several addresses sends to the
+    /// first.
+    pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> io::Result<usize> {
+        let addr = super::addr::first_ok(target, Ok).await?;
         std::future::poll_fn(|cx| self.poll_send_to(cx, buf, addr)).await
     }
 
@@ -209,42 +198,18 @@ impl UdpSocket {
     }
 
     /// Fixes `addr` as this socket's peer, so [`send`](Self::send)/
-    /// [`recv`](Self::recv) can omit it on every call afterward. Unlike
-    /// TCP's `connect`, this is a local, synchronous operation -- UDP's
-    /// `connect(2)` doesn't perform a network handshake, it just records
-    /// a default peer address (and, for a socket that was never bound,
-    /// picks one) -- so there's nothing to `.await` here, and this
-    /// crate's usual hand-rolled non-blocking-connect dance (`connect`
-    /// in `socket/mod.rs`, needed because *TCP*'s `connect(2)` can
-    /// return `EINPROGRESS`) is reused directly: for UDP, its
-    /// `EINPROGRESS` branch simply never triggers.
-    pub fn connect(&self, addr: SocketAddr) -> io::Result<()> {
-        socket::connect(self.inner.as_raw_io(), addr).map(|_outcome| ())
-    }
-
-    /// The [`ToSocketAddrs`]-based counterpart of [`connect`
-    /// ](Self::connect) -- see [`TcpListener::bind_addrs`
-    /// ](super::TcpListener::bind_addrs) for the full contract (additive
-    /// alongside the existing synchronous `connect`, not a replacement
-    /// for it) and why this is `async fn` where `connect` itself isn't.
-    ///
-    /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
-    pub async fn connect_addrs(&self, addr: impl ToSocketAddrs) -> io::Result<()> {
-        let addrs = addr.to_socket_addrs().await?;
-        let mut last_err = None;
-        for addr in addrs {
-            match self.connect(addr) {
-                Ok(()) => return Ok(()),
-                Err(e) => last_err = Some(e),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "could not resolve to any address",
-            )
-        }))
+    /// [`recv`](Self::recv) can omit it on every call afterward. `addr` is
+    /// anything [`ToSocketAddrs`] covers, as in tokio, and candidates are
+    /// tried in order. Resolving a hostname is the only part that waits:
+    /// UDP's `connect(2)` performs no handshake, it records a default peer
+    /// (and, for a never-bound socket, picks a local address), so this
+    /// crate's non-blocking-connect helper (`connect` in `socket/mod.rs`,
+    /// built for TCP's `EINPROGRESS`) completes immediately here.
+    pub async fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
+        super::addr::first_ok(addr, |addr| {
+            socket::connect(self.inner.as_raw_io(), addr).map(|_outcome| ())
+        })
+        .await
     }
 
     /// Sends to whichever peer [`connect`](Self::connect) fixed.

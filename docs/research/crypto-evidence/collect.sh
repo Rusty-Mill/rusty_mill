@@ -79,7 +79,7 @@ for f in glob.glob("crates/foundation/rusty_pk/tests/vectors/rsa_pss_*.json"):
             native += (g["sha"] == g["mgfSha"] and g["sLen"] == H.get(g["sha"], -1))
 print(f"rsa_pss: {pss} cases across files; {native} use parameters in our profile (hash = mgf hash, salt = hash length); the rest are checked only for equality with ring and, if valid under other parameters, rejection")
 PY
-for f in crates/foundation/rusty_pk/tests/vectors/ecdsa_p256_sha384.txt crates/foundation/rusty_pk/tests/vectors/rsa_forgeries.txt; do echo "generated: $f lines=$(wc -l < $f)"; done
+for f in crates/foundation/rusty_pk/tests/vectors/ecdsa_p256_sha384.txt crates/foundation/rusty_pk/tests/vectors/rsa_forgeries.txt crates/foundation/rusty_pk/tests/vectors/hedged_ecdsa.txt; do echo "generated: $f lines=$(wc -l < $f)"; done
 
 section "tests (executed / failed / ignored per binary)"
 cargo test --release -p rusty_ct_check -p rusty_sha2 -p rusty_pk -p rusty_aead -p rusty_crypto_key --features rusty_aead/aes-gcm >/dev/null 2>&1 || fail "cargo test"
@@ -126,7 +126,7 @@ How to read this: each number is |t| from one run (dudect-style Welch t, slowest
 seed, ignored tests run with --ignored). Threshold 4.5; an alarm is a printed |t| >= 4.5. The A/A tests do identical work in both
 classes, so their spread is this machine's noise: a leak claim needs a clear, repeatable gap above
 the A/A spread, and a pass is only "no leak detected under these conditions". Samples per run:
-rusty_sha2 200000, rusty_aead 100000 (ChaCha20-Poly1305) and 50000 (AES-GCM), rusty_pk 20000 (X25519), 4000 (ECDH P-256) and 2000 (ECDH P-384). Classes are written in each test's comments.
+rusty_sha2 200000, rusty_aead 100000 (ChaCha20-Poly1305) and 50000 (AES-GCM), rusty_pk 20000 (X25519), 4000 (ECDH P-256), 2000 (ECDH P-384), 2000 (Ed25519 sign) and 2000 (ECDSA P-256 sign). Classes are written in each test's comments.
 The tests time only the operation; class-dependent setup is outside the clock and writes into one
 buffer shared by both classes. An earlier version that set up inside the timed region reported
 |t| up to 25 on this same code (see "harness history" in the plan, stage 3/4 notes).
@@ -162,6 +162,12 @@ rusty_pk|ecdh_null_calibration_identical_classes|A/A  ECDH P-256 agree (baseline
 rusty_pk|ecdh_p256_sparse_vs_dense_scalar|ecdh p256: sparse vs dense scalar
 rusty_pk|ecdh_p384_null_calibration_identical_classes|A/A  ECDH P-384 agree (baseline)
 rusty_pk|ecdh_p384_sparse_vs_dense_scalar|ecdh p384: sparse vs dense scalar
+rusty_pk|ed25519_sign_null_calibration_identical_classes|A/A  Ed25519 sign (baseline)
+rusty_pk|ed25519_sign_key_classes_not_distinguishable|ed25519 sign: zero-seed vs ones-seed key
+rusty_pk|ecdsa_p256_sign_null_calibration_identical_classes|A/A  ECDSA P-256 sign (baseline)
+rusty_pk|ecdsa_p256_sign_sparse_vs_dense_key|ecdsa p256 sign: sparse vs dense key
+rusty_pk|ecdsa_p384_sign_null_calibration_identical_classes|A/A  ECDSA P-384 sign (baseline)
+rusty_pk|ecdsa_p384_sign_sparse_vs_dense_key|ecdsa p384 sign: sparse vs dense key
 SPECS
 for tf in test_timing_series.py test_check_manifests.py test_planted_leak.py; do
   python3 -I docs/research/crypto-evidence/$tf >/dev/null 2>&1 && echo "collector self-test $tf: passed" || { echo "collector self-test $tf: FAILED"; fail "$tf"; }

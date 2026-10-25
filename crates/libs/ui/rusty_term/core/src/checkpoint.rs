@@ -434,6 +434,10 @@ mod tests {
         // to be outside the headless VT profile.
         let excluded = [
             ("dirty", "rebuilt row damage cache"),
+            ("row_stamp", "rebuilt row damage stamps"),
+            ("hist_stamp", "rebuilt scrollback damage stamp"),
+            ("stamp", "renderer change counter"),
+            ("id", "fresh per-grid renderer cache key"),
             ("spare_screen", "recycled blank allocation"),
             ("epoch", "renderer freshness counter"),
             ("view_offset", "client viewport"),
