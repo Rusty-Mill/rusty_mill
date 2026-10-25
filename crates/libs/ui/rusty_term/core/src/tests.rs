@@ -1422,7 +1422,7 @@ fn full_screen_scroll_captures_into_scrollback() {
     assert_eq!(g.scrollback.len(), 0);
     p.advance(&mut g, b"\r\nCCCC"); // scrolls AAAA off the top
     assert_eq!(g.scrollback.len(), 1);
-    let line: String = g.scrollback[0].cells.iter().map(|c| c.ch).collect();
+    let line: String = g.scrollback[0].cells().iter().map(|c| c.ch).collect();
     assert_eq!(line, "AAAA");
     // Live grid now shows BBBB / CCCC.
     assert_eq!(row_text(&g, 0), "BBBB");
@@ -1431,7 +1431,7 @@ fn full_screen_scroll_captures_into_scrollback() {
 
 /// Text of scrollback line `i`.
 fn hist_text(g: &Grid, i: usize) -> String {
-    g.scrollback[i].cells.iter().map(|c| c.ch).collect()
+    g.scrollback[i].cells().iter().map(|c| c.ch).collect()
 }
 
 /// Every live row holds exactly `cols` cells (rows rotate and are recycled,
@@ -1578,6 +1578,51 @@ fn alternate_screen_rows_are_reused_blank() {
     assert_rows_sized(&g);
     p.advance(&mut g, b"\x1b[?1049l");
     assert_eq!(row_text(&g, 0), "main  ");
+}
+
+#[test]
+fn alt_screen_write_survives_the_blank_row_skip() {
+    // Rows are flagged blank by a clear and skipped by the next one; text
+    // written in between must still be erased on every later entry and ED 2.
+    // Words start past column 0 so a first-cell check alone can't catch them.
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"main");
+    for word in [&b"one"[..], b"two", b"three"] {
+        p.advance(&mut g, b"\x1b[?1049h");
+        assert_eq!(row_text(&g, 0), " ".repeat(10));
+        p.advance(&mut g, b"\x1b[2J\x1b[1;4H");
+        p.advance(&mut g, word);
+        p.advance(&mut g, b"\x1b[2J");
+        assert_eq!(row_text(&g, 0), " ".repeat(10));
+        p.advance(&mut g, b"\x1b[1;4H");
+        p.advance(&mut g, word);
+        p.advance(&mut g, b"\x1b[?1049l");
+        assert_eq!(row_text(&g, 0), "main      ");
+    }
+}
+
+#[test]
+fn erase_with_a_new_background_repaints_blank_rows() {
+    // A row already blank in the default background is not blank in red: BCE
+    // must repaint it.
+    let mut g = parse(b"\x1b[2J\x1b[41m\x1b[2J", 3, 2);
+    let red = cells(&g)[0].bg;
+    assert_ne!(red, Cell::blank().bg);
+    assert!(cells(&g).iter().all(|c| c.bg == red && c.ch == ' '));
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[0m\x1b[2J");
+    assert!(cells(&g).iter().all(|c| c.bg == Cell::blank().bg));
+}
+
+#[test]
+fn row_mut_write_is_cleared() {
+    // `row_mut` bypasses the parser; the write must still drop the blank flag.
+    let mut g = parse(b"\x1b[2J", 3, 2);
+    g.row_mut(1)[2].ch = 'x';
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[2J");
+    assert_eq!(row_text(&g, 1), "   ");
 }
 
 #[test]
@@ -2412,7 +2457,7 @@ fn ind_at_bottom_scrolls_and_captures_scrollback() {
     assert_eq!(row_text(&g, 0), "BBBB");
     assert_eq!(row_text(&g, 1), "    ");
     assert_eq!(g.scrollback.len(), 1);
-    let line: String = g.scrollback[0].cells.iter().map(|c| c.ch).collect();
+    let line: String = g.scrollback[0].cells().iter().map(|c| c.ch).collect();
     assert_eq!(line, "AAAA");
 }
 
@@ -4822,7 +4867,7 @@ fn retheme_recolors_scrollback() {
     let old = p.retheme(new);
     g.retheme(&old, &new);
     for line in &g.scrollback {
-        for cell in &line.cells {
+        for cell in line.cells() {
             assert_ne!(cell.fg, 0xd8d8d8, "old themed fg gone from history");
         }
     }
