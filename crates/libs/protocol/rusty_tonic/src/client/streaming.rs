@@ -319,6 +319,7 @@ impl<T: Message> Sender<T> {
     async fn write(&mut self, data: Vec<u8>, end: bool) -> Result<(), Status> {
         let outcome = until(self.deadline, async {
             select! {
+                biased;
                 r = self.send.send_data(data, end) => Sent::Done(r),
                 _ = self.cancelled.changed() => Sent::Cancelled,
             }

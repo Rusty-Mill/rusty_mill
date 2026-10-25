@@ -88,6 +88,7 @@ pub async fn serve_with_drain_timeout(
         // the actual `return`/`break` happens below, back in `serve`'s
         // own scope.
         let accepted = rusty_tokio::select! {
+            biased;
             result = listener.accept() => Some(result),
             _ = shutdown.changed() => None,
         };
