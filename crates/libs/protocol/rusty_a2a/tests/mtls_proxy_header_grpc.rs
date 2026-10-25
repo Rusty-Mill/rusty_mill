@@ -4,13 +4,15 @@
 //! already follows on this binding (spec's gRPC metadata keys are
 //! ASCII-lowercase-only).
 
+mod common;
+use common::tonic_oracle as pb;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use rusty_a2a::error::{A2aError, Result};
-use rusty_a2a::server::grpc::pb;
 use rusty_a2a::server::{
     AgentExecutor, AgentServer, AuthContext, AuthVerifier, Credentials, EventSink, RequestContext,
 };

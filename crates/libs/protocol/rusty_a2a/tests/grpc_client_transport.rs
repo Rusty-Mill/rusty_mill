@@ -40,7 +40,8 @@ impl Served {
 fn serve_router(router: Router, tls: Option<TlsAcceptor>, options: ServeOptions) -> Served {
     let runtime = rusty_tokio::Runtime::new().unwrap();
     let _guard = runtime.enter();
-    let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener =
+        rusty_tokio::io::TcpListener::from_std(std::net::TcpListener::bind("127.0.0.1:0").unwrap()).unwrap();
     let server = router.serve(listener, tls, options).unwrap();
     drop(_guard);
     Served {
@@ -167,7 +168,8 @@ async fn a_malformed_status_details_header_is_an_error_and_not_a_panic() {
     // client's call with this one header. The status keeps its code and message.
     let runtime = rusty_tokio::Runtime::new().unwrap();
     let _guard = runtime.enter();
-    let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener =
+        rusty_tokio::io::TcpListener::from_std(std::net::TcpListener::bind("127.0.0.1:0").unwrap()).unwrap();
     let server = serve(
         listener,
         None,
@@ -416,4 +418,16 @@ async fn an_agent_that_is_not_there_is_unavailable_and_not_a_hang() {
         other => panic!("expected an unavailable agent, got {other:?}"),
     }
     assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[tokio::test]
+async fn an_endpoint_without_a_scheme_is_refused_up_front_with_a_clear_error() {
+    // The `tonic` client parsed `host:port` and then failed its first call with "transport error".
+    // Whether a scheme-less endpoint means plaintext or TLS is a choice this client does not make.
+    match GrpcClient::new("127.0.0.1:50051") {
+        Err(ClientError::GrpcConfig(message)) => {
+            assert!(message.contains("invalid gRPC endpoint"), "{message}");
+        }
+        other => panic!("expected a configuration error, got {:?}", other.err()),
+    }
 }

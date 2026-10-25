@@ -31,7 +31,7 @@ use rusty_tonic::{Code, Status};
 
 use crate::error::A2aError;
 use crate::grpc_bridge;
-use crate::pb;
+use crate::pb::{self, path};
 
 use crate::grpc_convert::{
     our_cancel_task_request_to_pb, our_delete_push_notification_config_request_to_pb,
@@ -98,34 +98,6 @@ fn status_to_client_error(status: Status) -> ClientError {
 
 /// The updates a streaming call yields, in order; dropping it cancels the call.
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamResponse>> + Send>>;
-
-/// The path of each RPC in a request: `/{package}.{Service}/{Method}`.
-mod path {
-    pub(super) const SEND_MESSAGE: &str = "/lf.a2a.v1.A2AService/SendMessage";
-    pub(super) const SEND_STREAMING_MESSAGE: &str = "/lf.a2a.v1.A2AService/SendStreamingMessage";
-    pub(super) const GET_TASK: &str = "/lf.a2a.v1.A2AService/GetTask";
-    pub(super) const LIST_TASKS: &str = "/lf.a2a.v1.A2AService/ListTasks";
-    pub(super) const CANCEL_TASK: &str = "/lf.a2a.v1.A2AService/CancelTask";
-    pub(super) const SUBSCRIBE_TO_TASK: &str = "/lf.a2a.v1.A2AService/SubscribeToTask";
-    pub(super) const CREATE_TASK_PUSH_NOTIFICATION_CONFIG: &str =
-        "/lf.a2a.v1.A2AService/CreateTaskPushNotificationConfig";
-    pub(super) const GET_TASK_PUSH_NOTIFICATION_CONFIG: &str =
-        "/lf.a2a.v1.A2AService/GetTaskPushNotificationConfig";
-    pub(super) const LIST_TASK_PUSH_NOTIFICATION_CONFIGS: &str =
-        "/lf.a2a.v1.A2AService/ListTaskPushNotificationConfigs";
-    pub(super) const DELETE_TASK_PUSH_NOTIFICATION_CONFIG: &str =
-        "/lf.a2a.v1.A2AService/DeleteTaskPushNotificationConfig";
-    pub(super) const GET_EXTENDED_AGENT_CARD: &str = "/lf.a2a.v1.A2AService/GetExtendedAgentCard";
-}
-
-/// A reply the peer sent that this crate could not convert to its own types. `grpc_convert` still
-/// reports that as a `tonic::Status`; the server side moves off `tonic` in the next change.
-fn bad_reply(status: tonic::Status) -> ClientError {
-    ClientError::Grpc(Status::new(
-        Code::from_i32(status.code() as i32),
-        status.message(),
-    ))
-}
 
 /// A client for one A2A agent interface, speaking the gRPC protocol
 /// binding. Cheap to clone (the underlying [`Channel`] shares its
@@ -278,7 +250,7 @@ impl GrpcClient {
             .await
             .map_err(status_to_client_error)?;
         Ok(Box::pin(replies.map(|item| match item {
-            Ok(reply) => pb_stream_response_to_ours(reply).map_err(bad_reply),
+            Ok(reply) => pb_stream_response_to_ours(reply).map_err(ClientError::from),
             Err(status) => Err(status_to_client_error(status)),
         })))
     }
@@ -300,7 +272,7 @@ impl GrpcClient {
         let response = self
             .unary(path::SEND_MESSAGE, our_send_message_request_to_pb(req))
             .await?;
-        pb_send_message_response_to_ours(response).map_err(bad_reply)
+        pb_send_message_response_to_ours(response).map_err(ClientError::from)
     }
 
     /// `SendStreamingMessage` (spec Section 3.1.2): sends a message and
@@ -331,7 +303,7 @@ impl GrpcClient {
         let task = self
             .unary(path::GET_TASK, our_get_task_request_to_pb(req))
             .await?;
-        pb_task_to_ours(task).map_err(bad_reply)
+        pb_task_to_ours(task).map_err(ClientError::from)
     }
 
     /// `ListTasks` (spec Section 3.1.4).
@@ -340,7 +312,7 @@ impl GrpcClient {
         let res = self
             .unary(path::LIST_TASKS, our_list_tasks_request_to_pb(req))
             .await?;
-        pb_list_tasks_response_to_ours(res).map_err(bad_reply)
+        pb_list_tasks_response_to_ours(res).map_err(ClientError::from)
     }
 
     /// `CancelTask` (spec Section 3.1.5).
@@ -353,7 +325,7 @@ impl GrpcClient {
         let task = self
             .unary(path::CANCEL_TASK, our_cancel_task_request_to_pb(req))
             .await?;
-        pb_task_to_ours(task).map_err(bad_reply)
+        pb_task_to_ours(task).map_err(ClientError::from)
     }
 
     /// `SubscribeToTask` (spec Section 3.1.6): streams updates for a task
@@ -457,6 +429,6 @@ impl GrpcClient {
                 our_get_extended_agent_card_request_to_pb(req),
             )
             .await?;
-        pb_agent_card_to_ours(card).map_err(bad_reply)
+        pb_agent_card_to_ours(card).map_err(ClientError::from)
     }
 }

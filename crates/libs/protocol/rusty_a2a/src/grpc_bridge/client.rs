@@ -1,29 +1,15 @@
-//! Runs the gRPC transport for callers on `tokio`.
-//!
-//! The first-party gRPC stack (`rusty_tonic` over `rusty_hyper` and `rusty_h2`) is async on
-//! `rusty_tokio`, its own runtime. This crate's callers, its engine, `axum` and `reqwest` run on
-//! `tokio`. The two meet here and nowhere else, by message passing only: a task on the transport's
-//! runtime is awaited from `tokio` through its `JoinHandle`, and a stream crosses through a
-//! `tokio::sync::mpsc` channel. Neither side enters the other's runtime context.
-//!
-//! Dropping the future a caller was awaiting, or the stream it was reading, aborts the transport
-//! task, which drops the call and so resets its HTTP/2 stream: cancelling a call from `tokio`
-//! cancels it on the wire.
-//!
-//! When this crate leaves `tokio` altogether, this module goes with it.
+//! The client half of the bridge: calls made from `tokio` onto the transport's runtime.
+
+use futures_core::Stream;
+use rusty_prost::Message;
+use rusty_tonic::client::{Channel, Request};
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::OnceLock;
 use std::task::{Context, Poll};
 
-use futures_core::Stream;
-use rusty_prost::Message;
-use rusty_tonic::client::{Channel, Request};
 use rusty_tonic::Status;
-
-/// Replies read ahead of a slow consumer. HTTP/2 flow control pushes back on the server beyond it.
-const PREFETCH: usize = 16;
 
 /// Threads of the transport's runtime: it moves bytes and frames, nothing heavier.
 const WORKERS: usize = 2;
@@ -60,6 +46,9 @@ impl<T> Future for Task<T> {
         })
     }
 }
+
+/// Replies read ahead of a slow consumer. HTTP/2 flow control pushes back on the server beyond it.
+const PREFETCH: usize = 16;
 
 /// One request, one reply.
 pub(crate) async fn unary<Req, Resp>(
