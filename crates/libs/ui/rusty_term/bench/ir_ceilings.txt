@@ -21,9 +21,12 @@
 # Blank-row flag (a clear skips rows already blank in the same fill),
 # measured: alt 73.4, ascii 44.4, cursor 84.3, scroll 123.8, sgr 112.6,
 # unicode 164.5. cursor and unicode keep their ceilings.
+# Cached blank row on top of the blank-row flag (a clear that misses copies
+# one prebuilt row), measured: alt 74.9, ascii 41.3, cursor 85.0, scroll
+# 111.8, sgr 109.0, unicode 167.5. alt, cursor and unicode keep their ceilings.
 alt_screen_flicker    81
-ascii_throughput      49
+ascii_throughput      45
 cursor_thrash         93
-scroll_heavy         136
-sgr_churn            124
+scroll_heavy         123
+sgr_churn            120
 unicode_heavy        184

@@ -70,11 +70,21 @@ impl Line {
         &mut self.cells
     }
 
-    /// Reset to [`Line::blank`] in place, reusing the cell allocation.
-    pub(crate) fn clear(&mut self, cols: usize, fill: Cell) {
-        if !self.is_blank_with(cols, fill) {
-            self.cells.clear();
-            self.cells.resize(cols, fill);
+    /// Reset in place to a copy of `blank`, a uniform row (see
+    /// `Grid::blank_row`), reusing the cell allocation. A row already blank
+    /// in that fill and width is left as it is.
+    pub(crate) fn clear(&mut self, blank: &[Cell]) {
+        let hit = match blank.first() {
+            Some(&fill) => self.is_blank_with(blank.len(), fill),
+            None => self.cells.is_empty(),
+        };
+        if !hit {
+            if self.cells.len() == blank.len() {
+                self.cells.copy_from_slice(blank);
+            } else {
+                self.cells.clear();
+                self.cells.extend_from_slice(blank);
+            }
             self.blank = true;
         }
         self.wrapped = false;
