@@ -13,6 +13,7 @@ use adk_core::{AdkError, Result};
 use rusty_axum::routing::any;
 use rusty_axum::{BoxFuture, Request, Response, Router, ServeOptions, StatusCode};
 use rusty_mcp_server::{HttpConfig, HttpHandler, Mount};
+use tokio::sync::oneshot;
 
 use crate::server::McpServer;
 
@@ -77,27 +78,44 @@ fn bounded(mcp: &Mount, req: Request) -> BoxFuture<'static, Response> {
     mcp.call(req)
 }
 
-/// Serves `server` over HTTP on `addr` at `path`, until the process ends.
+/// Serves `server` over HTTP on `addr` at `path`, until the returned future
+/// is dropped.
 ///
 /// Call it from inside a tokio runtime, which tool calls run on. The server
-/// itself runs on a `rusty_tokio` runtime of its own, on a blocking thread of
-/// the caller's runtime, so dropping the returned future does not stop it.
+/// itself runs on a `rusty_tokio` runtime on a thread of its own, so the
+/// caller's runtime never waits for it. Dropping the future (aborting its
+/// task, or shutting its runtime down) shuts the server down gracefully and
+/// releases the listener.
 pub async fn serve_http(server: Arc<McpServer>, addr: &str, path: &str) -> Result<()> {
     let listener = std::net::TcpListener::bind(addr)
         .and_then(|listener| listener.set_nonblocking(true).map(|()| listener))
         .map_err(|e| AdkError::Config(format!("cannot bind {addr}: {e}")))?;
     let app = router(server, path);
+    // Held by this future: dropping it is the server's signal to stop.
+    let (_stop, stopped) = oneshot::channel::<()>();
+    let (done, finished) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("adk-mcp-http".to_owned())
+        .spawn(move || {
+            let _ = done.send(serve_until(listener, app, stopped));
+        })
+        .map_err(|e| AdkError::Other(format!("cannot start the HTTP server: {e}")))?;
 
     rusty_log::info!(%addr, %path, "MCP server listening");
 
-    tokio::task::spawn_blocking(move || serve_until_exit(listener, app))
+    finished
         .await
-        .map_err(|e| AdkError::Other(format!("HTTP server task failed: {e}")))?
+        .map_err(|_| AdkError::Other("HTTP server thread panicked".to_owned()))?
         .map_err(|e| AdkError::Other(format!("HTTP server failed: {e}")))
 }
 
-/// Runs `app` on `listener` on a new `rusty_tokio` runtime, forever.
-fn serve_until_exit(listener: std::net::TcpListener, app: Router) -> std::io::Result<()> {
+/// Runs `app` on `listener` on a new `rusty_tokio` runtime until `stop`
+/// resolves, which its sender's drop does.
+fn serve_until(
+    listener: std::net::TcpListener,
+    app: Router,
+    stop: oneshot::Receiver<()>,
+) -> std::io::Result<()> {
     let runtime = rusty_tokio::Builder::new_multi_thread()
         .thread_name("adk-mcp-http")
         .build()?;
@@ -108,7 +126,9 @@ fn serve_until_exit(listener: std::net::TcpListener, app: Router) -> std::io::Re
             ..ServeOptions::default()
         };
         rusty_axum::serve(listener, None, options, app)?
-            .shutdown_on(std::future::pending())
+            .shutdown_on(async {
+                let _ = stop.await;
+            })
             .await;
         Ok(())
     })
@@ -143,6 +163,43 @@ mod tests {
     fn a_body_over_the_limit_is_refused_whatever_the_host_allows() {
         let over = usize::try_from(MAX_BODY_BYTES).unwrap() + 1;
         assert_eq!(status_for(over), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// Dropping `serve_http`'s future stops the server: its runtime shuts
+    /// down without waiting on it, and the listener is released.
+    #[test]
+    fn cancelling_serve_http_releases_the_listener_and_the_runtime() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let addr = std::net::TcpListener::bind("127.0.0.1:0")
+                .and_then(|probe| probe.local_addr())
+                .unwrap();
+            let tokio = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let services = Services::new(Arc::new(InMemorySessionService::new()));
+            let server = Arc::new(McpServer::new("test", Vec::new(), services));
+            let task =
+                tokio.spawn(async move { serve_http(server, &addr.to_string(), "/mcp").await });
+            let up = (0..200).any(|_| {
+                std::thread::sleep(Duration::from_millis(10));
+                std::net::TcpStream::connect(addr).is_ok()
+            });
+            task.abort();
+            drop(tokio);
+            let released = (0..200).any(|_| {
+                std::thread::sleep(Duration::from_millis(10));
+                std::net::TcpListener::bind(addr).is_ok()
+            });
+            let _ = tx.send((up, released));
+        });
+        let (up, released) = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the caller's runtime did not shut down");
+        assert!(up, "the server never accepted a connection");
+        assert!(released, "the listener was not released");
     }
 
     #[test]
