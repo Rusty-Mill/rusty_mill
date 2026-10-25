@@ -255,9 +255,9 @@ impl Grid {
         g.autowrap = flags & FLAG_AUTOWRAP != 0;
         g.cursor_shape = cursor_shape;
         g.title = title;
-        g.clusters_arc = Arc::from(clusters.clone());
         g.links_arc = Arc::from(links.clone());
         (g.clusters, g.links) = (clusters, links);
+        g.rebuild_cluster_caches();
         g.scrollback_max = g.scrollback_max.max(history);
         g.scrollback = scrollback;
         g.primary = primary;
