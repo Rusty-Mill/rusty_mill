@@ -78,7 +78,7 @@ proposed to start until Tier 1 has been in use.
 ## Questions for you (answers recorded 2026-10-10)
 
 1. Tier 1: **approved**, fuzz length left to the reviewer.
-2. Candidate: `rleval-app` OIDC transport (client only, TLS 1.3, named hosts) **chosen by the owner on 2026-10-14**, in the working session ("3 approved recommendation"). Naming it wires nothing.
+2. Candidate: `rleval-app` OIDC transport (client only, TLS 1.3, named hosts) **chosen by the owner on 2026-10-14**, in the working session ("3 approved recommendation"). Naming it wires nothing. **Chosen by the owner on 2026-10-24 for the native backend** (ADR-0002 Amendment 2). Accepted there by the owner the same day: before wiring on that backend, item 1's runs are counted in the native CI job, and item 4 also covers `handrolled/crypto/native.rs` (a widening of `TLS-REVIEW-SCOPE.md`).
 3. ADR: amendment before any wiring. **Amendment 1 accepted by the owner on 2026-10-14** (same session message).
 4. Reviewer: **David Bailey**, nominated by the owner on 2026-10-16 and **confirmed by the owner as independent on 2026-10-17** (session message: "1 yes"). **Time box set by the owner on 2026-10-17: three weeks, about 40 hours of review effort** (session message: "2: three weeks, 40 hours"), in the scope's priority order; findings must be closed for item 4 to be met, so running out of time with findings open leaves it unmet. Open: the review itself. Tier 1 item 4 stays unmet.
 5. `ring`: keep (my recommendation).
