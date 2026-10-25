@@ -25,8 +25,10 @@
 //!   parent of the task holding it, so a parent's tasks share its ceiling and
 //!   never add up past it.
 //! - **Leases.** No other task's write lease overlaps its own, whether that
-//!   task holds a slot or waits ahead of it. Harnesses of one task share
-//!   their writes; two tasks share none. An earlier waiter keeps its paths
+//!   task holds a slot or waits ahead of it. Harnesses of one task (one
+//!   task id in one BBP store) share their writes; two tasks share none.
+//!   Write paths must exist and be canonical, so overlap by component is
+//!   overlap in fact. An earlier waiter keeps its paths
 //!   while it waits, so later conflicting tickets cannot starve it.
 //!
 //! Validator slots are served in rank order alone.
@@ -46,7 +48,9 @@ pub struct Claim {
     /// How many seconds earlier than its arrival a ticket is ranked.
     #[rusty_serde(default)]
     pub priority_secs: u64,
-    /// The task's leased write paths: absolute, compared by component.
+    /// The task's leased write paths: existing and canonical, as lease
+    /// paths are (ADR-0017), so comparing them by component compares what
+    /// they reach.
     #[rusty_serde(default)]
     pub write: Vec<String>,
 }
@@ -80,8 +84,12 @@ impl Claim {
         if self.priority_secs > MAX_PRIORITY_SECS {
             return Err(format!("priority_secs must be at most {MAX_PRIORITY_SECS}"));
         }
-        if !self.write.iter().all(|p| Path::new(p).is_absolute()) {
-            return Err("a claim's write paths must be absolute".into());
+        for path in &self.write {
+            if !canonical(Path::new(path)) {
+                return Err(format!(
+                    "claim write path {path} must exist and be its own canonical path"
+                ));
+            }
         }
         Ok(())
     }
@@ -102,6 +110,8 @@ const MAX_PRIORITY_SECS: u64 = 86_400;
 /// Who waits for, or holds, a slot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Record {
+    /// The task's BBP store, canonical: task ids are unique only within it.
+    store: String,
     task: String,
     rank_ms: u64,
     claim: Claim,
@@ -113,7 +123,8 @@ impl Record {
     }
 
     fn conflicts(&self, other: &Record) -> bool {
-        self.task != other.task && self.claim.overlaps(&other.claim)
+        (&self.store, &self.task) != (&other.store, &other.task)
+            && self.claim.overlaps(&other.claim)
     }
 }
 
@@ -137,21 +148,41 @@ impl Drop for Ticket {
 #[derive(Clone, Debug)]
 pub struct Admission {
     slots: Slots,
+    store: String,
     task: String,
     claim: Claim,
 }
 
 impl Admission {
-    /// Admission to `slots` for `task` under `claim`.
+    /// Admission to `slots` for `task` of the BBP store `store` under
+    /// `claim`.
     ///
     /// # Errors
-    /// When the claim is invalid or the task id is blank.
-    pub fn new(slots: Slots, task: String, claim: Claim) -> Result<Admission, String> {
+    /// When the claim is invalid, the task id is blank, or the store cannot
+    /// be resolved to a UTF-8 path.
+    pub fn new(
+        slots: Slots,
+        store: &Path,
+        task: String,
+        claim: Claim,
+    ) -> Result<Admission, String> {
         if task.trim().is_empty() {
             return Err("admission needs a task id".into());
         }
         claim.validate()?;
-        Ok(Admission { slots, task, claim })
+        let resolved = store
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", store.display()))?;
+        let store = resolved
+            .to_str()
+            .ok_or_else(|| format!("{}: not UTF-8", resolved.display()))?
+            .to_owned();
+        Ok(Admission {
+            slots,
+            store,
+            task,
+            claim,
+        })
     }
 
     /// Take a slot of `class` if this task's turn has come, or wait in the
@@ -240,6 +271,7 @@ impl Admission {
             stem,
         };
         let record = Record {
+            store: self.store.clone(),
             task: self.task.clone(),
             rank_ms: now_ms.saturating_sub(self.claim.priority_secs * 1000),
             claim: self.claim.clone(),
@@ -339,6 +371,12 @@ fn under_ceiling<'a>(record: &Record, taken: impl Iterator<Item = &'a Record>) -
     };
     let count = taken.filter(|other| record.same_parent(other)).count();
     count < parent.agents as usize
+}
+
+/// Whether `path` exists and is its own canonical path: absolute, with no
+/// `.`, `..` or symlink along it.
+fn canonical(path: &Path) -> bool {
+    path.canonicalize().is_ok_and(|resolved| resolved == path)
 }
 
 /// Whether some open file description holds the lock on `path`.

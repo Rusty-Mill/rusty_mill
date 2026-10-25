@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 use super::*;
 use crate::slots::Capacity;
 
@@ -17,14 +18,22 @@ fn slots(tag: &str, agents: u32) -> Result<Slots, String> {
     )
 }
 
-/// `path` as an absolute path here: lease paths are Unix-shaped, so on
-/// Windows they gain a drive.
+/// A canonical fixture directory every test shares, made once.
+fn root() -> PathBuf {
+    let root = std::env::temp_dir().join(format!("bbp_admission_{}_fs", std::process::id()));
+    std::fs::create_dir_all(&root).expect("fixture root");
+    root.canonicalize().expect("canonical fixture root")
+}
+
+/// `path` beneath the fixture root, made, as the canonical path a claim
+/// needs.
 fn abs(path: &str) -> String {
-    if cfg!(windows) {
-        format!("C:{path}")
-    } else {
-        path.into()
-    }
+    let path = root().join(path.trim_start_matches('/'));
+    std::fs::create_dir_all(&path).expect("fixture path");
+    path.canonicalize()
+        .expect("canonical fixture path")
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn claim(parent: Option<(&str, u32)>, priority_secs: u64, write: &[&str]) -> Claim {
@@ -45,9 +54,14 @@ struct Waiter {
 }
 
 impl Waiter {
+    /// A waiter for `task` of the shared fixture store.
     fn new(slots: &Slots, task: &str, claim: Claim) -> Result<Waiter, String> {
+        Self::of(slots, &root(), task, claim)
+    }
+
+    fn of(slots: &Slots, store: &Path, task: &str, claim: Claim) -> Result<Waiter, String> {
         Ok(Waiter {
-            admission: Admission::new(slots.clone(), task.into(), claim)?,
+            admission: Admission::new(slots.clone(), store, task.into(), claim)?,
             ticket: None,
         })
     }
@@ -155,6 +169,26 @@ fn overlapping_write_leases_of_two_tasks_never_run_together() -> Result<(), Stri
 }
 
 #[test]
+fn the_same_task_id_in_another_store_is_another_task() -> Result<(), String> {
+    let slots = slots("stores", 2)?;
+    let (one, two) = (abs("/store-one"), abs("/store-two"));
+    let write = claim(None, 0, &["/shared"]);
+    let mut a = Waiter::of(&slots, Path::new(&one), "T", write.clone())?;
+    let mut b = Waiter::of(&slots, Path::new(&two), "T", write.clone())?;
+    let mut again = Waiter::of(&slots, Path::new(&one), "T", write)?;
+    let _a = a.agent(1)?.ok_or("A")?;
+    assert!(
+        b.agent(2)?.is_none(),
+        "T of store two writes where T of store one does"
+    );
+    b.ticket = None;
+    again
+        .agent(3)?
+        .ok_or("T of store one shares its own writes")?;
+    Ok(())
+}
+
+#[test]
 fn tickets_of_gone_waiters_are_dropped_and_validators_queue_alone() -> Result<(), String> {
     let slots = slots("stale", 1)?;
     let mut holder = Waiter::new(&slots, "H", Claim::default())?;
@@ -185,19 +219,48 @@ fn tickets_of_gone_waiters_are_dropped_and_validators_queue_alone() -> Result<()
 #[test]
 fn claims_are_validated_at_the_boundary() -> Result<(), String> {
     let slots = slots("invalid", 1)?;
-    for bad in [
+    let out = abs("/valid/out");
+    abs("/valid/sub");
+    let raw = |path: String| Claim {
+        write: vec![path],
+        ..Claim::default()
+    };
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut bad = vec![
         claim(Some(("", 1)), 0, &[]),
         claim(Some(("p", 0)), 0, &[]),
         claim(None, MAX_PRIORITY_SECS + 1, &[]),
-        claim(None, 0, &["relative"]),
-    ] {
-        assert!(Admission::new(slots.clone(), "T".into(), bad).is_err());
+        raw("relative".into()),
+        // A parent component and a missing path both validate as absolute
+        // yet do not name what they spell.
+        raw(Path::new(&abs("/valid/sub"))
+            .join("..")
+            .join("out")
+            .to_string_lossy()
+            .into_owned()),
+        raw(Path::new(&out)
+            .join("missing")
+            .to_string_lossy()
+            .into_owned()),
+    ];
+    #[cfg(unix)]
+    {
+        let alias = root().join("valid/alias");
+        let _ = std::fs::remove_file(&alias);
+        std::os::unix::fs::symlink(&out, &alias).map_err(|e| e.to_string())?;
+        bad.push(raw(alias.to_string_lossy().into_owned()));
     }
-    assert!(Admission::new(slots, " ".into(), Claim::default()).is_err());
+    for claim in bad {
+        assert!(
+            Admission::new(slots.clone(), &root(), "T".into(), claim.clone()).is_err(),
+            "{claim:?}"
+        );
+    }
+    assert!(Admission::new(slots, &root(), " ".into(), Claim::default()).is_err());
     let file = dir("claim_file").with_extension("json");
     let json = format!(
-        r#"{{"parent":{{"id":"g","agents":2}},"write":["{}"]}}"#,
-        abs("/w")
+        r#"{{"parent":{{"id":"g","agents":2}},"write":[{}]}}"#,
+        rusty_serde::json::to_string(&abs("/w")).map_err(|e| e.to_string())?
     );
     std::fs::write(&file, json).map_err(|e| e.to_string())?;
     assert_eq!(Claim::read_file(&file)?, claim(Some(("g", 2)), 0, &["/w"]));

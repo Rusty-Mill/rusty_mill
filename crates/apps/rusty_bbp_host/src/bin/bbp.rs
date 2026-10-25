@@ -227,7 +227,7 @@ fn run() -> Result<String, String> {
                         return Err("--claim needs --slots".into())
                     }
                     None => None,
-                    Some(dir) => {
+                    Some(slot_dir) => {
                         let count = |k: &str| -> Result<u32, String> {
                             a.flag(k)?
                                 .parse()
@@ -241,8 +241,13 @@ fn run() -> Result<String, String> {
                             Some(file) => admission::Claim::read_file(&PathBuf::from(file))?,
                             None => admission::Claim::default(),
                         };
-                        let slots = slots::Slots::open(&PathBuf::from(dir), capacity)?;
-                        Some(admission::Admission::new(slots, task.0.clone(), claim)?)
+                        let slots = slots::Slots::open(&PathBuf::from(slot_dir), capacity)?;
+                        Some(admission::Admission::new(
+                            slots,
+                            &dir,
+                            task.0.clone(),
+                            claim,
+                        )?)
                     }
                 },
             };

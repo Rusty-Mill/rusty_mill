@@ -33,8 +33,11 @@ leave behind:
   does the lease.
 - **Lease-aware.** Two different tasks whose lease write paths overlap, by
   path component, never hold agent slots at once. A task's own harnesses
-  share their writes. A waiting task keeps its paths against later tickets,
-  so a task whose writes are busy waits its turn and is not passed forever.
+  share their writes. A task is its id within its canonical BBP store, so
+  equal ids in two stores are two tasks. Claim write paths must exist and
+  be canonical, so a `..` or symlink alias cannot hide an overlap. A
+  waiting task keeps its paths against later tickets, so a task whose
+  writes are busy waits its turn and is not passed forever.
   The write paths are the ones the task was frozen under (ADR-0017).
 - **Validators** are served in rank order alone.
 
