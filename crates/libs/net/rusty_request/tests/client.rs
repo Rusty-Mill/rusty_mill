@@ -1168,6 +1168,32 @@ fn a_streamed_response_dropped_early_or_closing_is_not_pooled() {
 }
 
 #[test]
+fn a_connection_switched_to_another_protocol_is_never_pooled() {
+    run(async {
+        let server = start_test_server(|req| match req.target.as_str() {
+            "/up" => b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n\
+                       Upgrade: websocket\r\n\r\n"
+                .to_vec(),
+            _ => http_response(200, "OK", &[], b"ok"),
+        });
+        let client = Client::new();
+        for streaming in [false, true] {
+            let request = client.get(&server.url("/up")).unwrap();
+            let status = if streaming {
+                request.send_streaming().await.unwrap().status()
+            } else {
+                request.send().await.unwrap().status()
+            };
+            assert_eq!(status.as_u16(), 101);
+            client.get(&server.url("/b")).unwrap().send().await.unwrap();
+        }
+        // Each upgrade on its own connection; each GET on a fresh one, the
+        // second reusing the first GET's.
+        assert_eq!(server.connections_accepted(), 3);
+    });
+}
+
+#[test]
 fn header_append_keeps_every_value() {
     run(async {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
