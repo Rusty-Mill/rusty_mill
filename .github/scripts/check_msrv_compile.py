@@ -156,7 +156,7 @@ def main() -> None:
     parser.add_argument("--print-plan", action="store_true", help="print the groups and exit")
     args = parser.parse_args()
 
-    metadata = json.loads(args.metadata.read_text())
+    metadata = json.loads(args.metadata.read_text(encoding="utf-8"))
     groups = msrv_groups(
         metadata,
         only=set(args.packages.split()) if args.packages is not None else None,

@@ -3,10 +3,12 @@
 Run from the repo root:
     python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 """
+import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -96,6 +98,21 @@ class CheckCommandsTests(unittest.TestCase):
         commands = check_commands(["a", "b", "c"], "t", all_features=frozenset({"b", "z"}))
         self.assertEqual([describe(c) for c in commands], ["a", "b", "b (--all-features)", "c"])
         self.assertEqual(commands[2], [*commands[1], "--all-features"])
+
+
+class MainTests(unittest.TestCase):
+    def test_metadata_is_read_as_utf8_whatever_the_locale(self) -> None:
+        # Windows runners default to cp1252; cargo metadata is UTF-8 (a description with a curly quote broke #1081).
+        md = metadata({"a": "1.75"})
+        md["packages"][0]["description"] = "caf\u00e9 \u201cquoted\u201d"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "m.json")
+            path.write_text(json.dumps(md, ensure_ascii=False), encoding="utf-8")
+            env = {**os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0"}
+            script = Path(__file__).with_name("check_msrv_compile.py")
+            out = subprocess.run([sys.executable, str(script), str(path), "--print-plan"], env=env, capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("1.75.0: 1 crates", out.stdout)
 
 
 class FeaturedMembersTests(unittest.TestCase):
