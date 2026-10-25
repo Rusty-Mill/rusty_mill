@@ -1370,7 +1370,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let resp_head = read_final_head(&mut t).await?;
     let framing = body::response_framing(&resp_head.headers, &request.method, resp_head.status)?;
-    let keep_alive = keeps_alive(&resp_head.headers, framing);
+    let keep_alive = keeps_alive(resp_head.status, &resp_head.headers, framing);
     let body_bytes = t
         .read_body_with_limit(framing, request.max_body_len)
         .await?;
@@ -1396,7 +1396,7 @@ async fn attempt_streaming<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let resp_head = read_final_head(&mut t).await?;
     let framing = body::response_framing(&resp_head.headers, &request.method, resp_head.status)?;
-    let keep_alive = keeps_alive(&resp_head.headers, framing);
+    let keep_alive = keeps_alive(resp_head.status, &resp_head.headers, framing);
     let remaining = match framing {
         Framing::None => Some(0),
         Framing::ContentLength(n) => Some(n),
@@ -1425,9 +1425,10 @@ struct StreamingHop<S> {
 
 /// Whether the connection can carry another request once this response's
 /// body is read: not when the body runs to the close, nor when the server
-/// said it will close.
-fn keeps_alive(headers: &HeaderMap, framing: Framing) -> bool {
-    !matches!(framing, Framing::Close) && !connection_says_close(headers)
+/// said it will close, nor after `101 Switching Protocols`, past which the
+/// connection no longer speaks HTTP.
+fn keeps_alive(status: StatusCode, headers: &HeaderMap, framing: Framing) -> bool {
+    status.as_u16() != 101 && !matches!(framing, Framing::Close) && !connection_says_close(headers)
 }
 
 /// Sends one request, reusing a pooled connection for this origin (or,
