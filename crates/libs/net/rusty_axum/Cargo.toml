@@ -30,11 +30,22 @@ serde_json = { workspace = true }
 # The `Stream` trait for streamed bodies and SSE: the interop trait every
 # consumer's streams already implement. The trait only, not `futures`.
 futures-core = { workspace = true }
+# Optional (feature `http2`): HTTP/2 on a TLS connection that negotiates
+# ALPN `h2`, served by rusty_hyper's per-connection loop (#885).
+rusty_hyper = { path = "../rusty_hyper", features = ["rusty-tokio"], optional = true }
+
+[features]
+default = []
+# HTTP/2 over TLS (ALPN `h2`), next to HTTP/1.1 on the same port.
+http2 = ["dep:rusty_hyper"]
 
 [dev-dependencies]
 # Test certificates and the client's trust anchor, as rusty_hyper's tests.
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+# The HTTP/2 client for the `http2` tests, and its reset code.
+rusty_hyper = { path = "../rusty_hyper", features = ["rusty-tokio"] }
+rusty_h2 = { path = "../rusty_h2" }
 
 [lints.rust]
 unsafe_code = "forbid"

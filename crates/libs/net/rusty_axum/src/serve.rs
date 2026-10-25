@@ -6,6 +6,13 @@
 //! whole before routing. Shutdown is graceful: no new connections, idle
 //! connections close, a request in flight finishes, and a streamed body
 //! (SSE) is ended cleanly with its terminating chunk.
+//!
+//! With the `http2` feature and [`ServeOptions::http2`], a TLS connection
+//! that negotiates ALPN `h2` is served as HTTP/2 instead, with the same
+//! limits and the same shutdown (GOAWAY, then drain).
+
+#[cfg(feature = "http2")]
+mod h2;
 
 use std::future::{poll_fn, Future};
 use std::io;
@@ -42,13 +49,18 @@ pub struct ServeOptions {
     /// How long a connection may wait for its next request, and the limit
     /// on each read of a request and each write of a response.
     pub idle_timeout: Duration,
-    /// The limit on a TLS handshake.
+    /// The limit on a TLS handshake (and, for HTTP/2, the client's preface).
     pub handshake_timeout: Duration,
+    /// Serve HTTP/2 on a TLS connection that negotiates ALPN `h2`; others
+    /// stay HTTP/1.1. The acceptor must offer `h2`, usually with
+    /// `http/1.1`. There is no cleartext h2c. Off by default.
+    #[cfg(feature = "http2")]
+    pub http2: bool,
 }
 
 impl Default for ServeOptions {
     /// 1024 connections, an 8 KiB head, a 2 MiB body (axum's default body
-    /// limit), 60 s idle and a 10 s handshake.
+    /// limit), 60 s idle, a 10 s handshake and no HTTP/2.
     fn default() -> Self {
         ServeOptions {
             max_connections: 1024,
@@ -56,6 +68,8 @@ impl Default for ServeOptions {
             max_body_bytes: 2 << 20,
             idle_timeout: Duration::from_secs(60),
             handshake_timeout: Duration::from_secs(10),
+            #[cfg(feature = "http2")]
+            http2: false,
         }
     }
 }
@@ -176,7 +190,8 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<Stop>
     let _ = permits.acquire_many(max as u32).await;
 }
 
-/// One accepted connection: the TLS handshake if any, then HTTP/1.1.
+/// One accepted connection: the TLS handshake if any, then HTTP/1.1, or
+/// HTTP/2 when enabled and negotiated.
 async fn connection(
     tcp: TcpStream,
     peer: SocketAddr,
@@ -189,9 +204,14 @@ async fn connection(
         return run(tcp, peer, &shared, &stop).await;
     };
     let deadline = Instant::now() + shared.options.handshake_timeout;
-    if let Ok(Ok(io)) = timeout_at(deadline, handshake(acceptor, tcp)).await {
-        run(io, peer, &shared, &stop).await;
+    let Ok(Ok(io)) = timeout_at(deadline, handshake(acceptor, tcp)).await else {
+        return;
+    };
+    #[cfg(feature = "http2")]
+    if shared.options.http2 && io.negotiated_alpn_protocol() == Some(&b"h2"[..]) {
+        return h2::run(io, peer, shared, stop, deadline).await;
     }
+    run(io, peer, &shared, &stop).await;
 }
 
 async fn handshake(
