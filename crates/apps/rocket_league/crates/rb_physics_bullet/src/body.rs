@@ -95,10 +95,12 @@ impl Shape {
 /// `probe_ball_rest_*` captures (`fixture_checks.py ball-rest`): a ball
 /// rolling without sliding at 10, 20 or 40 uu/s (spin up to 0.44 rad/s) is
 /// frozen 2.017 s in, every one on the same tick, so the game times it
-/// rather than cutting off at a speed; one at 80 uu/s still rolls at
-/// 68.5 uu/s 5 s in. The linear threshold is so far bracketed to
-/// (40.0, 68.5] uu/s (`probe_ball_rest_50`/`_60` narrow it) and the angular
-/// one only bounded below. The game's cars are assumed to share them, as
+/// rather than cutting off at a speed, and the thresholds lie above
+/// 39.98 uu/s and 0.438 rad/s. One at 80 uu/s is never frozen: its slowest
+/// 2 s window peaks at 72.95 uu/s and 0.80 rad/s, so the linear threshold is
+/// at most 72.95 or the angular one at most 0.80, not a linear bound alone.
+/// `probe_ball_rest_50`/`_60` (spin 0.55 and 0.66 rad/s) test the linear
+/// one further. The game's cars are assumed to share them, as
 /// Bullet's bodies do by default; no car capture measures it yet.
 pub const LINEAR_SLEEP_VELOCITY_THRESHOLD: f32 = 40.0;
 /// See `LINEAR_SLEEP_VELOCITY_THRESHOLD`'s own doc comment.

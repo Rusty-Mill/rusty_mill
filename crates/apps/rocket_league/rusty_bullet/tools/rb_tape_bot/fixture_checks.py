@@ -204,25 +204,52 @@ def freeze(rows):
     return None
 
 
+def awake_bound(rows, dwell):
+    """What a ball that is never frozen says about the thresholds, or None if it is shorter than `dwell`.
+
+    Over every window of `dwell` seconds of stepped frames, the ball was at or above the linear
+    threshold or the angular one on some frame (or it would have been frozen). Returns the window
+    whose peak speed is lowest, as (its peak speed, its peak spin): either the linear threshold is at
+    most that speed or the angular one is at most that spin. Its slowest frame alone bounds nothing."""
+    stepped = rows[1:]
+    best = None
+    for i, first in enumerate(stepped):
+        j = next((j for j in range(i, len(stepped)) if stepped[j][0] - first[0] >= dwell), None)
+        if j is None:
+            break
+        window = stepped[i:j + 1]
+        peak = (max(r[1] for r in window), max(r[2] for r in window))
+        if best is None or peak[0] < best[0]:
+            best = peak
+    return best
+
+
 def ball_rest(data):
-    """When a ball rolling without sliding is frozen, and at what speed (probe_ball_rest_*, board b19)."""
-    frozen, rolling = [], []
+    """When a ball rolling without sliding is frozen, and what that bounds (probe_ball_rest_*, board b19)."""
+    frozen, awake = [], []
     for name, frames in data:
         if not name.startswith("probe_ball_rest_"):
             continue
         rows = [(f["timestamp_secs"], norm(f["ball"]["velocity"]), norm(f["ball"]["angular_velocity"])) for f in frames]
         hit = freeze(rows)
         if hit is None:
-            rolling.append((min(r[1] for r in rows), name))
-            print(f"{name}: never frozen; slowest {rolling[-1][0]:.1f} uu/s")
+            awake.append((name, rows))
             continue
         k, secs, speed, spin = hit
         frozen.append((speed, spin, secs))
         print(f"{name}: frozen at frame {k} (file line {k + 1}), {secs:.3f} s in; at most {speed:.2f} uu/s and {spin:.3f} rad/s before")
-    if frozen and rolling:
-        print(f"linear threshold in ({max(f[0] for f in frozen):.2f}, {min(r[0] for r in rolling):.1f}] uu/s; "
-              f"angular threshold at least {max(f[1] for f in frozen):.3f} rad/s; "
-              f"timer {min(f[2] for f in frozen):.3f} to {max(f[2] for f in frozen):.3f} s")
+    if not frozen:
+        return
+    dwell = min(f[2] for f in frozen)
+    print(f"timer {dwell:.3f} to {max(f[2] for f in frozen):.3f} s; linear threshold above {max(f[0] for f in frozen):.2f} uu/s, "
+          f"angular above {max(f[1] for f in frozen):.3f} rad/s")
+    for name, rows in awake:
+        bound = awake_bound(rows, dwell)
+        if bound is None:
+            print(f"{name}: never frozen, shorter than {dwell:.3f} s; bounds nothing")
+            continue
+        print(f"{name}: never frozen; its slowest {dwell:.3f} s window peaks at {bound[0]:.2f} uu/s and {bound[1]:.3f} rad/s, "
+              f"so linear threshold at most {bound[0]:.2f} uu/s or angular at most {bound[1]:.3f} rad/s")
 
 
 def bounces(data):

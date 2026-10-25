@@ -2203,11 +2203,12 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     (0.8 m/s, 1.0 rad/s, `gDeactivationTime`). The game's
     `probe_ball_rest_{10,20,40}` captures (a ball rolling without sliding,
     spin = v / 91.25) are frozen 2.017 s in, all on the same tick, so the
-    game times sleep rather than cutting off at a speed; `probe_ball_rest_80`
-    still rolls at 68.5 uu/s 5 s in (`fixture_checks.py ball-rest`). The
-    linear threshold is bracketed to (40.0, 68.5] uu/s and the angular one
-    bounded below by 0.44 rad/s; `probe_ball_rest_50`/`_60` await the next
-    game session. The placeholders froze the 10 and 20 uu/s balls 1.5 s early
+    game times sleep rather than cutting off at a speed, and the thresholds
+    lie above 39.98 uu/s and 0.438 rad/s. `probe_ball_rest_80` is never
+    frozen; its slowest 2 s window peaks at 72.95 uu/s and 0.80 rad/s, so
+    either the linear threshold is at most 72.95 uu/s or the angular one at
+    most 0.80 rad/s (`fixture_checks.py ball-rest`): no upper bound on either
+    alone. `probe_ball_rest_50`/`_60` await the next game session. The placeholders froze the 10 and 20 uu/s balls 1.5 s early
     and never froze the 40 uu/s one: ball error max 13.6 / 22.6 / 113.0 uu,
     now 1.1 / 1.6 / 11.1. The remaining rest_40 error is rolling decay
     (the port's rolling ball slows 2.1%/s, the game's 3.0%/s), which delays
