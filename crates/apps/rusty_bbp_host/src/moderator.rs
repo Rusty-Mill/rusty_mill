@@ -20,6 +20,7 @@
 //! is in its own process group and is killed, group and all, on every exit
 //! path, the error ones included.
 
+use crate::admission::Ticket;
 use crate::confine::{HarnessSandbox, Turn};
 use crate::runner::Confinement;
 use crate::slots::{self, Class, Slot};
@@ -130,10 +131,11 @@ pub struct Config {
     pub deadline: Option<std::time::SystemTime>,
     /// Stop the run when its harnesses have cost more than this.
     pub cost_cap: Option<CostCap>,
-    /// Machine-wide admission. With slots, a granted turn's harness starts
-    /// only when an agent slot is free, and a selected run's runner only when
-    /// a validator slot is; until then the turn or run waits.
-    pub slots: Option<crate::slots::Slots>,
+    /// Machine-wide admission. With it, a granted turn's harness starts only
+    /// when admission gives it an agent slot, and a selected run's runner
+    /// only when it gives a validator slot; until then the turn or run waits
+    /// in the slot directory's queue.
+    pub admission: Option<crate::admission::Admission>,
 }
 
 /// A live dollar cap on one run. Checked each poll from the harness output the
@@ -441,14 +443,26 @@ struct ActiveRun {
     _slot: Option<Slot>,
 }
 
-/// A free slot of `class` with the stdio that hands it to the child, or
-/// `None` when admission is configured and every slot is held. Without
-/// admission the child gets a null stdio in its place.
-fn admit(cfg: &Config, class: Class) -> Result<Option<(Option<Slot>, Stdio)>, String> {
-    let Some(slots) = &cfg.slots else {
+/// The moderator's place in each class's admission queue, while something
+/// of the task waits for a slot of it.
+#[derive(Debug, Default)]
+struct Tickets {
+    agent: Option<Ticket>,
+    validator: Option<Ticket>,
+}
+
+/// A slot of `class` with the stdio that hands it to the child, or `None`
+/// while admission keeps the task waiting, its place held by `ticket`.
+/// Without admission the child gets a null stdio in its place.
+fn admit(
+    cfg: &Config,
+    class: Class,
+    ticket: &mut Option<Ticket>,
+) -> Result<Option<(Option<Slot>, Stdio)>, String> {
+    let Some(admission) = &cfg.admission else {
         return Ok(Some((None, Stdio::null())));
     };
-    let Some(slot) = slots.try_acquire(class)? else {
+    let Some(slot) = admission.admit(class, ticket)? else {
         return Ok(None);
     };
     let stdio = slot.stdio()?;
@@ -672,6 +686,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
     };
     let mut launched: HashSet<TurnId> = HashSet::new();
     let mut waiting: HashSet<TurnId> = HashSet::new();
+    let mut tickets = Tickets::default();
     let mut ran: HashSet<RunId> = HashSet::new();
     let mut waker = crate::waker::Waker::new(&log_path_for(&cfg.dir, &cfg.task));
 
@@ -784,7 +799,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             .map(|r| r.id);
         if let Some(run) = pending {
             // Without a validator slot the run stays pending for a later poll.
-            if let Some((slot, stdout)) = admit(cfg, Class::Validator)? {
+            if let Some((slot, stdout)) = admit(cfg, Class::Validator, &mut tickets.validator)? {
                 ran.insert(run);
                 sup.runner = Some(ActiveRun {
                     run,
@@ -792,6 +807,9 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                     _slot: slot,
                 });
             }
+        } else {
+            // Nothing waits for a runner: leave the queue.
+            tickets.validator = None;
         }
 
         let live: Vec<(TurnId, RoleId)> = d
@@ -840,6 +858,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
         }
 
         // Launch: one harness per granted turn.
+        let mut wants_agent = false;
         for (turn, role) in live {
             if launched.contains(&turn) {
                 continue;
@@ -869,7 +888,8 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                 continue;
             }
             // Without an agent slot the turn waits for a later poll, or its deadline.
-            let Some((slot, stdin)) = admit(cfg, Class::Agent)? else {
+            wants_agent = true;
+            let Some((slot, stdin)) = admit(cfg, Class::Agent, &mut tickets.agent)? else {
                 if waiting.insert(turn) {
                     eprintln!("bbp mod: turn {} waits for an agent slot", turn.0);
                 }
@@ -929,6 +949,10 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                 hold,
                 record,
             });
+        }
+        // No turn waits for an agent slot: leave the queue.
+        if !wants_agent {
+            tickets.agent = None;
         }
         let children: Vec<u32> = sup
             .harnesses

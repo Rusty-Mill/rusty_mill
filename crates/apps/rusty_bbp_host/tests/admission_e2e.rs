@@ -175,7 +175,13 @@ fn task(root: &Path, name: &str, probe: &Path, gate: Option<&Path>, prelude: &st
 
 /// `bbp mod` for `t`, admitted through `slots`.
 fn moderator(t: &Task, slots: &Path, agents: u32) -> Child {
-    Proc::new(env!("CARGO_BIN_EXE_bbp"))
+    claimed(t, slots, agents, None)
+}
+
+/// `bbp mod` for `t`, admitted through `slots` under the claim in `claim`.
+fn claimed(t: &Task, slots: &Path, agents: u32, claim: Option<&Path>) -> Child {
+    let mut command = Proc::new(env!("CARGO_BIN_EXE_bbp"));
+    command
         .arg("mod")
         .arg("--dir")
         .arg(&t.dir)
@@ -201,7 +207,11 @@ fn moderator(t: &Task, slots: &Path, agents: u32) -> Child {
             &agents.to_string(),
             "--validator-slots",
             "1",
-        ])
+        ]);
+    if let Some(claim) = claim {
+        command.arg("--claim").arg(claim);
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -294,6 +304,61 @@ fn wait_until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+fn a_parent_ceiling_bounds_its_tasks_together_and_no_other_parent() {
+    let root = tempdir("ceiling");
+    let (probe, slots) = (root.join("probe"), root.join("slots"));
+    std::fs::create_dir_all(&probe).expect("mkdir");
+    let claim = |name: &str, parent: &str| {
+        let path = root.join(format!("{name}.claim.json"));
+        let json = format!(r#"{{"parent":{{"id":"{parent}","agents":2}}}}"#);
+        std::fs::write(&path, json).expect("claim");
+        path
+    };
+    let (goal, other) = (claim("goal", "goal"), claim("other", "other"));
+    let tasks: Vec<(Task, &PathBuf)> = (1..=4)
+        .map(|i| {
+            let t = task(&root, &format!("T{i}"), &probe, None, "");
+            (t, if i == 4 { &other } else { &goal })
+        })
+        .collect();
+    let mut mods: Vec<Child> = tasks
+        .iter()
+        .map(|(t, c)| claimed(t, &slots, 3, Some(c)))
+        .collect();
+
+    let mut closed = vec![false; tasks.len()];
+    wait_until("every task to close", Duration::from_secs(120), || {
+        for ((t, _), done) in tasks.iter().zip(&mut closed) {
+            *done = *done || play_human(t);
+        }
+        closed.iter().all(|c| *c)
+    });
+    for m in &mut mods {
+        assert!(m.wait().expect("wait").success(), "moderator failed");
+    }
+
+    let goal_agents: Vec<(u128, u128)> = (1..=3)
+        .flat_map(|i| intervals(&probe, &format!("agent-T{i}-")))
+        .collect();
+    assert_eq!(
+        goal_agents.len(),
+        12,
+        "four turns in each of the goal's tasks"
+    );
+    assert_eq!(
+        peak(&goal_agents),
+        2,
+        "the goal's three tasks shared two slots"
+    );
+    assert_eq!(
+        peak(&intervals(&probe, "agent-")),
+        3,
+        "the other parent's task took the third"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
