@@ -1,6 +1,7 @@
 # Our own replay parser: scope
 
-Status: proposed, 2026-10-24. The owner chose to write a first-party `.replay` parser
+Status: proposed, 2026-10-24; P1 done 2026-10-24 (the bit reader moved to P2, the
+first slice that reads bits). The owner chose to write a first-party `.replay` parser
 instead of keeping `boxcars` (board card w7). This note sizes that work before any code
 is written. ADR-0008 kept `boxcars` and `subtr-actor` as Tier T until a first-party
 parser was decided; this is that decision's plan. The estimates and slices below are a
@@ -49,9 +50,11 @@ normal or build dependencies. UTF-16 strings come from `std`, Windows-1252 from 
 For scale, that is a bit over two thirds of `boxcars` (we skip serde output and very old
 replay versions) and under a fifth of `rb_physics_bullet` (24.8k).
 
-**Version scope.** Replays with net version 10 or later (the committed samples are engine
-868, licensee 27, net 10; the private corpus is recent ranked play). Anything older fails
-with a clear "unsupported version" error rather than a guess.
+**Version scope.** Replays from version 868.23.8 on (engine.licensee.net). The committed
+samples are 868.23.8 (`419a`), 868.27.10 (`42f2`) and 868.32.11 (the `rb_replay_ingest`
+sample); the private corpus is recent ranked play. Anything older fails with a clear
+"unsupported version" error rather than a guess. (This note first said net 10 or later,
+which would have refused `419a`; P1 found that.)
 
 ## How we prove it
 
@@ -91,8 +94,8 @@ benches, not to ordinary library or binary builds, so oracle use has to move the
 
 | PR | Content | Done when |
 |---|---|---|
-| P1 | `rl_replay`: bit reader, container, CRC, header | Headers of all three samples equal `boxcars`'s |
-| P2 | Tables and the network stream, all attribute types | Every frame of the samples decodes; differential test green |
+| P1 | `rl_replay`: container, CRC, header (done) | Headers of all three samples equal `boxcars`'s |
+| P2 | Bit reader, tables and the network stream, all attribute types | Every frame of the samples decodes; differential test green |
 | P3 | `RlReplayParser` adapter; `replay-analyzer` switches to it; its `boxcars` use moves to tests | All downstream goldens unchanged; corpus run clean on the game machine |
 | P4 | `rb_replay_ingest` off `subtr-actor`; `corpus_check` and both `recon-check` runners move to examples; library oracle code moves to test/example support | Its tests and `rb-verify` replay scores unchanged; example runners retain the corpus options and gate behavior above |
 | P5 | Input hints for r6: `ReplicatedThrottle`/`Steer`, `ReplicatedTorqueInput`, dodge `DodgeTorque`, jump, double-jump and dodge `ReplicatedActive`, handbrake | New `ActorUpdate` variants and per-car input hints in `PhysicsFrame` |

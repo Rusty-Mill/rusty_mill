@@ -135,16 +135,21 @@ def platform_outputs(event: str, linux_tested: bool = False) -> dict[str, str]:
     tested the queue entry's exact tree on the same first parent. Every other
     event (manual, scheduled) runs all three. Each tree is therefore tested once
     per platform before it merges.
+
+    Clippy is the exception: a pull request also lints on Windows, because
+    Windows-only lints were the most common reason a queue entry was ejected.
     """
     linux = event != "merge_group" or not linux_tested
     others = event != "pull_request"
     rust_os = [os for os, on in (("ubuntu-latest", linux), ("windows-latest", others)) if on]
+    clippy_os = [os for os, on in (("ubuntu-latest", linux), ("windows-latest", True)) if on]
     rand_os = [os for os, on in (("ubuntu-latest", linux), ("macos-latest", others)) if on]
     return {
         "linux": str(linux).lower(),
         "windows": str(others).lower(),
         "macos": str(others).lower(),
         "rust_os": json.dumps(rust_os, separators=(",", ":")),
+        "clippy_os": json.dumps(clippy_os, separators=(",", ":")),
         "rand_os": json.dumps(rand_os, separators=(",", ":")),
     }
 

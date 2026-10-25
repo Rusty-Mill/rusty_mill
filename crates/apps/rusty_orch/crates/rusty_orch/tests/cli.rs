@@ -411,3 +411,15 @@ fn a_card_without_bbp_hosting_is_refused_before_any_invocation() {
         "{error}"
     );
 }
+
+#[test]
+fn a_misspelled_lease_is_refused_before_any_invocation() {
+    let c = include_str!("../../../docs/examples/bbp.json");
+    let c = c.trim_end().strip_suffix('}').unwrap();
+    let goal = GOAL.trim_end().strip_suffix('}').unwrap();
+    let goal = format!("{goal},\"bbp\":{c},\"lease\":{{\"write\":[\"/srv\"],\"ttl\":60}}}}}}");
+    let mut args = args(false, true);
+    args.state = Some(std::env::temp_dir().join(format!("orch_lease_{}", std::process::id())));
+    let error = run_goal(&args, &goal, FakeAgent::new([]), "").unwrap_err();
+    assert!(error.contains("ttl"), "{error}");
+}

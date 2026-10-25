@@ -18,7 +18,7 @@
 mod wire;
 
 use rb_domain::{IngestError, PhysicsFrame, PhysicsStateSource};
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 pub struct CaptureFileSource {
@@ -50,6 +50,17 @@ impl PhysicsStateSource for CaptureFileSource {
 
         Ok(frames)
     }
+}
+
+/// Writes `frames` in the capture format, one line each, so
+/// [`CaptureFileSource`] reads them back unchanged. Every car must carry input,
+/// as the format requires; a car without it is `IngestError::Malformed`.
+pub fn write_frames(frames: &[PhysicsFrame], mut out: impl Write) -> Result<(), IngestError> {
+    for frame in frames {
+        let line = wire::to_line(frame).map_err(IngestError::Malformed)?;
+        writeln!(out, "{line}").map_err(|e| IngestError::Io(e.to_string()))?;
+    }
+    out.flush().map_err(|e| IngestError::Io(e.to_string()))
 }
 
 #[cfg(test)]
@@ -112,5 +123,19 @@ mod tests {
             frames_with_input > 0,
             "unlike rb_replay_ingest, capture frames should always carry input"
         );
+    }
+
+    #[test]
+    fn written_frames_read_back_unchanged() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/human/clean-dodge.capture.jsonl"
+        );
+        let frames = CaptureFileSource::new(fixture).frames().unwrap();
+        let path = std::env::temp_dir().join("rb_capture_ingest_test_round_trip.jsonl");
+        write_frames(&frames, std::fs::File::create(&path).unwrap()).unwrap();
+        let read_back = CaptureFileSource::new(path.clone()).frames();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(read_back.unwrap(), frames);
     }
 }

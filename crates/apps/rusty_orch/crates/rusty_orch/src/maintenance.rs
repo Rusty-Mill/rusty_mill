@@ -695,6 +695,7 @@ fn advance(journal: &mut Journal, index: usize, path: &Path, state_dir: &Path) -
         assignment: Text::new(MAINTENANCE).ok_or("blank assignment")?,
         generation: attempt.generation,
         holder: crate::run::holder()?,
+        lease: None,
     };
     save(path, journal)?;
     let attempt = &mut journal.attempts[index];

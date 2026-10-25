@@ -1,0 +1,30 @@
+[package]
+name = "rl_replay"
+description = "First-party Rocket League .replay parser: container, CRC and header (P1 of rleval/docs/replay-parser-scope.md)."
+version.workspace = true
+edition.workspace = true
+rust-version = "1.75"
+license.workspace = true
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[dependencies]
+# None: ADR-0002 Tier S. `check_workspace_deps.py` pins this crate to no
+# external normal or build dependencies.
+
+[dev-dependencies]
+# Test oracle only (Tier S allows it; never shipped): every header must equal
+# what boxcars decodes from the same file. The same 0.11 the workspace locks.
+boxcars = "0.11"
+
+[package.metadata.rusty_mill]
+layer = "apps"
