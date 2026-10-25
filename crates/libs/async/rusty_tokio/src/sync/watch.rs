@@ -22,14 +22,19 @@
 //! the one it just missed -- a real lost wakeup, not a hypothetical one.
 
 use std::fmt;
+use std::future::Future;
 use std::ops::Deref;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
-use std::task::{Poll, Waker};
+use std::task::{Context, Poll, Waker};
 
 struct Inner<T> {
     value: T,
     version: u64,
-    wakers: Vec<Waker>,
+    /// Waiting `changed()` futures, keyed so a dropped wait can remove its
+    /// own entry instead of leaving it until the next send.
+    wakers: Vec<(u64, Waker)>,
+    next_key: u64,
     sender_alive: bool,
     receivers_alive: usize,
 }
@@ -44,6 +49,7 @@ pub fn channel<T>(initial: T) -> (Sender<T>, Receiver<T>) {
             value: initial,
             version: 0,
             wakers: Vec::new(),
+            next_key: 0,
             sender_alive: true,
             receivers_alive: 1,
         }),
@@ -78,7 +84,7 @@ impl<T> Sender<T> {
         guard.version += 1;
         let wakers = std::mem::take(&mut guard.wakers);
         drop(guard);
-        for waker in wakers {
+        for (_, waker) in wakers {
             waker.wake();
         }
         Ok(())
@@ -94,7 +100,7 @@ impl<T> Sender<T> {
         guard.version += 1;
         let wakers = std::mem::take(&mut guard.wakers);
         drop(guard);
-        for waker in wakers {
+        for (_, waker) in wakers {
             waker.wake();
         }
     }
@@ -120,7 +126,7 @@ impl<T> Drop for Sender<T> {
         drop(guard);
         // Wake everyone still waiting so they observe the channel is
         // now closed instead of waiting forever.
-        for waker in wakers {
+        for (_, waker) in wakers {
             waker.wake();
         }
     }
@@ -215,24 +221,86 @@ impl<T> Receiver<T> {
 
 /// [`Receiver::changed`] over split borrows, so [`Receiver::wait_for`] can
 /// hold a borrow of `shared` across it.
-async fn changed<T>(shared: &Shared<T>, seen_version: &mut u64) -> Result<(), RecvError> {
-    let mut registered = false;
-    std::future::poll_fn(|cx| {
-        let mut guard = shared.inner.lock().unwrap();
-        if guard.version != *seen_version {
-            *seen_version = guard.version;
+fn changed<'a, T>(shared: &'a Shared<T>, seen_version: &'a mut u64) -> Changed<'a, T> {
+    Changed {
+        shared,
+        seen_version,
+        key: None,
+    }
+}
+
+/// The future behind `changed()`. It keeps at most one waker registered,
+/// refreshes it on each poll, and removes it when dropped, so a wait that
+/// keeps losing a `select!` does not leave registrations behind.
+struct Changed<'a, T> {
+    shared: &'a Shared<T>,
+    seen_version: &'a mut u64,
+    key: Option<u64>,
+}
+
+impl<T> Future for Changed<'_, T> {
+    type Output = Result<(), RecvError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut guard = this.shared.inner.lock().unwrap();
+        if guard.version != *this.seen_version {
+            *this.seen_version = guard.version;
+            let stale = this.unregister(&mut guard);
+            drop(guard);
+            drop(stale);
             return Poll::Ready(Ok(()));
         }
         if !guard.sender_alive {
+            let stale = this.unregister(&mut guard);
+            drop(guard);
+            drop(stale);
             return Poll::Ready(Err(RecvError(())));
         }
-        if !registered {
-            guard.wakers.push(cx.waker().clone());
-            registered = true;
-        }
+        let slot = this
+            .key
+            .and_then(|key| guard.wakers.iter_mut().find(|(k, _)| *k == key));
+        let stale = match slot {
+            Some((_, waker)) if waker.will_wake(cx.waker()) => None,
+            Some((_, waker)) => Some(std::mem::replace(waker, cx.waker().clone())),
+            None => {
+                let key = guard.next_key;
+                guard.next_key += 1;
+                guard.wakers.push((key, cx.waker().clone()));
+                this.key = Some(key);
+                None
+            }
+        };
+        drop(guard);
+        // Dropped outside the lock: a waker's destructor may re-enter.
+        drop(stale);
         Poll::Pending
-    })
-    .await
+    }
+}
+
+impl<T> Changed<'_, T> {
+    /// Removes this future's waker, if a send has not already drained it.
+    fn unregister(&mut self, inner: &mut Inner<T>) -> Option<Waker> {
+        let key = self.key.take()?;
+        let index = inner.wakers.iter().position(|(k, _)| *k == key)?;
+        Some(inner.wakers.swap_remove(index).1)
+    }
+}
+
+impl<T> Drop for Changed<'_, T> {
+    fn drop(&mut self) {
+        if self.key.is_none() {
+            return;
+        }
+        let shared = self.shared;
+        // Never panic in drop: a poisoned lock has nothing left to clean.
+        let Ok(mut guard) = shared.inner.lock() else {
+            return;
+        };
+        let stale = self.unregister(&mut guard);
+        drop(guard);
+        drop(stale);
+    }
 }
 
 impl<T> Clone for Receiver<T> {
@@ -301,3 +369,56 @@ impl std::fmt::Display for RecvError {
 }
 
 impl std::error::Error for RecvError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registrations<T>(shared: &Shared<T>) -> usize {
+        shared.inner.lock().unwrap().wakers.len()
+    }
+
+    fn poll_once<F: Future>(fut: F) -> Poll<F::Output> {
+        let mut fut = std::pin::pin!(fut);
+        fut.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[test]
+    fn dropped_waits_do_not_accumulate_registrations() {
+        let (_tx, mut rx) = channel(0);
+        let shared = rx.shared.clone();
+        for _ in 0..1000 {
+            assert!(poll_once(rx.changed()).is_pending());
+        }
+        assert_eq!(registrations(&shared), 0);
+    }
+
+    #[test]
+    fn repolled_wait_keeps_one_registration() {
+        let (tx, mut rx) = channel(0);
+        let shared = rx.shared.clone();
+        {
+            let mut fut = std::pin::pin!(rx.changed());
+            let mut cx = Context::from_waker(Waker::noop());
+            for _ in 0..10 {
+                assert!(fut.as_mut().poll(&mut cx).is_pending());
+            }
+            assert_eq!(registrations(&shared), 1);
+            tx.send(1).unwrap();
+            assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+        }
+        assert_eq!(registrations(&shared), 0);
+    }
+
+    #[test]
+    fn dropping_one_wait_keeps_the_others_registered() {
+        let (_tx, mut rx) = channel(0);
+        let mut other = rx.clone();
+        let shared = rx.shared.clone();
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut kept = std::pin::pin!(other.changed());
+        assert!(kept.as_mut().poll(&mut cx).is_pending());
+        assert!(poll_once(rx.changed()).is_pending());
+        assert_eq!(registrations(&shared), 1);
+    }
+}
