@@ -30,7 +30,7 @@ fn server_binary() -> PathBuf {
         .join(format!("server{}", std::env::consts::EXE_SUFFIX))
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn stdio_connects_calls_and_shuts_down() {
     let spec = McpServerSpec {
         transport: McpTransport::Stdio,
@@ -42,13 +42,13 @@ async fn stdio_connects_calls_and_shuts_down() {
     let args = serde_json::json!({ "a": 40, "b": 2 }).as_object().cloned();
     let r = client.call_tool("add", args).await.unwrap();
     assert!(matches!(&r.content[0], ContentBlock::Text { text, .. } if text == "42"));
-    tokio::time::timeout(std::time::Duration::from_secs(8), client.shutdown())
+    rusty_tokio::time::timeout(std::time::Duration::from_secs(8), client.shutdown())
         .await
         .expect("shutdown hung")
         .unwrap();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn connect_with_bounds_the_handshake_too() {
     use std::time::{Duration, Instant};
     // `cat` never speaks MCP; with a short budget the connect fails fast.

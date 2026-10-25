@@ -11621,6 +11621,7 @@ dependencies = [
  "rusty_mcp_server",
  "rusty_request",
  "rusty_serve",
+ "rusty_tokio",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

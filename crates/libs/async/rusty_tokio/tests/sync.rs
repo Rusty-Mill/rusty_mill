@@ -2138,3 +2138,14 @@ fn rwlock_cancelled_waiter_leaves_the_rest_of_the_queue_moving() {
     );
     assert!(poll_once(second.as_mut(), &b_waker).is_ready());
 }
+
+#[test]
+fn rwlock_debug_shows_the_value_or_locked_as_tokio_does() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let lock = RwLock::new(7);
+        assert_eq!(format!("{lock:?}"), "RwLock { data: 7 }");
+        let _held = lock.write().await;
+        assert_eq!(format!("{lock:?}"), "RwLock { data: <locked> }");
+    });
+}
