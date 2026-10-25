@@ -408,22 +408,29 @@ jobs:
           # placeable, or the change is ambiguous. With manifest edits (a root
           # Cargo.toml only reaches here when cargo_toml_diff calls it safe), a
           # package leaving the lock is explained by those edited manifests,
-          # whose crates are already selected by path. Any unreadable or
-          # unknown entry keeps the full sweep.
+          # whose crates are already selected by path; but the lock records no
+          # features, so the base is resolved too and any package whose enabled
+          # features changed keeps the full sweep. Any unreadable or unknown
+          # entry keeps the full sweep.
           if echo "$changed" | grep -Eq '^Cargo\.lock$'; then
-            lock_mode=""
+            lock_mode=()
             if echo "$changed" | grep -Eq '(^|/)Cargo\.toml$'; then
-              lock_mode="--with-manifests"
+              if ! git worktree add --detach /tmp/base "$base" > /dev/null \
+                || ! (cd /tmp/base && cargo metadata --format-version=1 --all-features) > /tmp/base-metadata.json; then
+                emit_full "Unable to resolve the event base's features"
+                exit 0
+              fi
+              lock_mode=(--with-manifests /tmp/base-metadata.json)
             fi
             if ! git show "$base:Cargo.lock" > /tmp/old-Cargo.lock; then
               emit_full "Event base has no readable Cargo.lock"
               exit 0
             fi
-            if ! lockfile_packages="$(python3 .github/scripts/lockfile_diff.py /tmp/metadata.json /tmp/old-Cargo.lock Cargo.lock ${lock_mode:+"$lock_mode"})"; then
+            if ! lockfile_packages="$(python3 .github/scripts/lockfile_diff.py /tmp/metadata.json /tmp/old-Cargo.lock Cargo.lock "${lock_mode[@]}")"; then
               emit_full "Unable to establish Cargo.lock impact"
               exit 0
             fi
-            if [ -z "$lockfile_packages" ] && [ -z "$lock_mode" ]; then
+            if [ -z "$lockfile_packages" ] && [ "${#lock_mode[@]}" -eq 0 ]; then
               emit_full "Cargo.lock changed with no resolvable package impact"
               exit 0
             fi

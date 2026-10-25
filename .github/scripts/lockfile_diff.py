@@ -137,18 +137,41 @@ def workspace_consumers(metadata: dict, changed_ids: set[str]) -> list[str]:
     return sorted(packages_by_id[pkg_id]["name"] for pkg_id in affected)
 
 
+def resolved_features(metadata: dict) -> dict[tuple[str, str, str | None], frozenset[str]]:
+    """Enabled features per resolved package, keyed by (name, version, source).
+
+    The key leaves out the package id, which embeds a path package's checkout
+    directory, so a base resolved in another worktree compares equal.
+    """
+    packages_by_id = {pkg["id"]: pkg for pkg in metadata["packages"]}
+    features = {}
+    for node in metadata["resolve"]["nodes"]:
+        pkg = packages_by_id[node["id"]]
+        features[(pkg["name"], pkg["version"], pkg.get("source"))] = frozenset(node.get("features", []))
+    return features
+
+
 def manifest_change_impact(
-    metadata: dict, old_lock_text: str, new_lock_text: str
+    base_metadata: dict, metadata: dict, old_lock_text: str, new_lock_text: str
 ) -> list[str] | None:
     """Lock impact of a diff that also edits member manifests, or None when unknown.
 
-    A package that left the lock is explained by the manifest edits: whoever
-    used it either changed its own manifest (already selected by path) or
-    reached it through a package whose lock entry changed (selected below).
+    Cargo.lock does not record features, and one member's manifest can enable
+    a feature of a package that unchanged members share: their unified build
+    changes with no lock entry of theirs changing. So any package resolved in
+    both base and head with a different feature set is unknown impact.
+
+    Otherwise a package that left the lock is explained by the manifest edits:
+    whoever used it either changed its own manifest (already selected by path)
+    or reached it through a package whose lock entry changed (selected below).
     Every changed entry still present in the new lock must be found in head
     metadata, and all of its workspace consumers are selected. The result may
     be empty: the path-selected crates then cover the whole change.
     """
+    base_features = resolved_features(base_metadata)
+    head_features = resolved_features(metadata)
+    if any(base_features[key] != head_features[key] for key in base_features.keys() & head_features.keys()):
+        return None
     present = set(lockfile_package_keys(new_lock_text))
     changed = changed_package_keys(old_lock_text, new_lock_text) & present
     ids_by_key: dict[PackageKey, set[str]] = {}
@@ -186,16 +209,19 @@ def affected_by_lockfile_changes(metadata: dict, changed_keys: set[PackageKey]) 
 
 
 def main() -> None:
-    """`METADATA OLD_LOCK NEW_LOCK [--with-manifests]`: print affected crates, or exit 2."""
+    """`METADATA OLD_LOCK NEW_LOCK [--with-manifests BASE_METADATA]`: print affected crates, or exit 2."""
     metadata_path, old_lock_path, new_lock_path = sys.argv[1], sys.argv[2], sys.argv[3]
-    with_manifests = sys.argv[4:] == ["--with-manifests"]
+    extra = sys.argv[4:]
+    if extra and (len(extra) != 2 or extra[0] != "--with-manifests"):
+        raise SystemExit(f"unexpected arguments: {extra}")
     import json
 
     metadata = json.loads(Path(metadata_path).read_text())
     old_lock_text = Path(old_lock_path).read_text()
     new_lock_text = Path(new_lock_path).read_text()
-    if with_manifests:
-        impact = manifest_change_impact(metadata, old_lock_text, new_lock_text)
+    if extra:
+        base_metadata = json.loads(Path(extra[1]).read_text())
+        impact = manifest_change_impact(base_metadata, metadata, old_lock_text, new_lock_text)
     else:
         impact = reliable_lockfile_impact(
             metadata, changed_package_keys(old_lock_text, new_lock_text)
