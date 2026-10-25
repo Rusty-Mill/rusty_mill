@@ -7,6 +7,9 @@
 //! queued; a dropped front waiter passes that wake to the next one, so
 //! cancellation (a `timeout`, a losing `select!` branch) never strands
 //! the waiters behind it.
+//!
+//! A waker's destructor may re-enter this mutex, so wakers removed from
+//! or replaced in the queue are only dropped after `state` is released.
 
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
@@ -39,21 +42,18 @@ impl State {
     }
 
     /// Refreshes waiter `id`'s waker, so a re-poll never queues twice.
-    fn rewait(&mut self, id: u64, waker: &Waker) {
-        if let Some((_, w)) = self.waiters.iter_mut().find(|(i, _)| *i == id) {
-            if !w.will_wake(waker) {
-                *w = waker.clone();
-            }
-        }
+    /// Returns the replaced waker, for the caller to drop once unlocked.
+    fn rewait(&mut self, id: u64, waker: &Waker) -> Option<Waker> {
+        let (_, w) = self.waiters.iter_mut().find(|(i, _)| *i == id)?;
+        (!w.will_wake(waker)).then(|| std::mem::replace(w, waker.clone()))
     }
 
-    /// Removes waiter `id`, returning whether it was at the front.
-    fn dequeue(&mut self, id: u64) -> bool {
-        let Some(pos) = self.waiters.iter().position(|(i, _)| *i == id) else {
-            return false;
-        };
-        self.waiters.remove(pos);
-        pos == 0
+    /// Removes waiter `id`, returning its waker (to drop once unlocked)
+    /// and whether it was at the front.
+    fn dequeue(&mut self, id: u64) -> Option<(Waker, bool)> {
+        let pos = self.waiters.iter().position(|(i, _)| *i == id)?;
+        let (_, waker) = self.waiters.remove(pos)?;
+        Some((waker, pos == 0))
     }
 
     /// The front waiter's waker, if the lock is free for it to take.
@@ -82,12 +82,13 @@ impl Drop for Place<'_> {
     fn drop(&mut self) {
         let Some(id) = self.id else { return };
         let mut state = lock(self.state);
-        let next = if state.dequeue(id) {
-            state.next_waker()
-        } else {
-            None
+        let removed = state.dequeue(id);
+        let next = match removed {
+            Some((_, true)) => state.next_waker(),
+            _ => None,
         };
         drop(state);
+        drop(removed);
         if let Some(waker) = next {
             waker.wake();
         }
@@ -137,15 +138,20 @@ impl<T> Mutex<T> {
             let mut state = lock(&self.state);
             if !state.locked {
                 state.locked = true;
-                if let Some(id) = place.id.take() {
-                    state.dequeue(id);
-                }
+                let removed = place.id.take().and_then(|id| state.dequeue(id));
+                drop(state);
+                drop(removed);
                 return Poll::Ready(());
             }
-            match place.id {
+            let replaced = match place.id {
                 Some(id) => state.rewait(id, cx.waker()),
-                None => place.id = Some(state.enqueue(cx.waker())),
-            }
+                None => {
+                    place.id = Some(state.enqueue(cx.waker()));
+                    None
+                }
+            };
+            drop(state);
+            drop(replaced);
             Poll::Pending
         })
         .await;

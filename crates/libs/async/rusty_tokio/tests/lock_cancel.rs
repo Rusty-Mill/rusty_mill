@@ -9,6 +9,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
+use std::time::Duration;
 
 struct Flag(AtomicBool);
 
@@ -27,6 +28,40 @@ impl Flag {
 fn flag() -> (Arc<Flag>, Waker) {
     let flag = Arc::new(Flag(AtomicBool::new(false)));
     (flag.clone(), Waker::from(flag))
+}
+
+/// A waker whose last drop runs `on_drop`, as a user-defined one may.
+struct OnDrop<F: Fn() + Send + Sync>(F);
+
+#[allow(
+    clippy::manual_noop_waker,
+    reason = "the destructor is the point; `Waker::noop` has none"
+)]
+impl<F: Fn() + Send + Sync> Wake for OnDrop<F> {
+    fn wake(self: Arc<Self>) {}
+}
+
+impl<F: Fn() + Send + Sync> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)();
+    }
+}
+
+fn on_drop(f: impl Fn() + Send + Sync + 'static) -> Waker {
+    Waker::from(Arc::new(OnDrop(f)))
+}
+
+/// Runs `f` on its own thread, so a deadlock fails the test instead of
+/// hanging it.
+fn bounded(f: impl FnOnce() + Send + 'static) {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        f();
+        let _ = done.send(());
+    });
+    finished
+        .recv_timeout(Duration::from_secs(10))
+        .expect("finished without deadlocking or panicking");
 }
 
 fn poll<F: Future>(fut: Pin<&mut F>, waker: &Waker) -> Poll<F::Output> {
@@ -186,4 +221,57 @@ fn semaphore_close_still_fails_a_queued_waiter() {
     drop(b);
     sem.add_permits(1);
     assert_eq!(sem.available_permits(), 1, "a closed claim keeps nothing");
+}
+
+/// A waker's destructor may re-enter the lock, so `lock()` must drop the
+/// wakers it removes or replaces only after releasing its internal state.
+#[test]
+fn mutex_drops_removed_and_replaced_wakers_outside_its_state_lock() {
+    let reentrant = |mutex: &Arc<Mutex<()>>| {
+        let mutex = mutex.clone();
+        on_drop(move || drop(mutex.try_lock()))
+    };
+    bounded(move || {
+        let mutex = Arc::new(Mutex::new(()));
+        let held = mutex.try_lock_owned().expect("free");
+        let (_, plain) = flag();
+
+        let mut cancelled = Box::pin(mutex.lock());
+        assert!(poll(cancelled.as_mut(), &reentrant(&mutex)).is_pending());
+        drop(cancelled);
+
+        let mut repolled = Box::pin(mutex.lock());
+        assert!(poll(repolled.as_mut(), &reentrant(&mutex)).is_pending());
+        assert!(poll(repolled.as_mut(), &plain).is_pending());
+        drop(repolled);
+
+        let mut acquiring = Box::pin(mutex.lock());
+        assert!(poll(acquiring.as_mut(), &reentrant(&mutex)).is_pending());
+        drop(held);
+        assert!(poll(acquiring.as_mut(), &plain).is_ready());
+    });
+}
+
+/// As for `Mutex`: a cancelled or re-polled `acquire()` drops the waker
+/// it gives up only after releasing the semaphore's state.
+#[test]
+fn semaphore_drops_removed_and_replaced_wakers_outside_its_state_lock() {
+    let reentrant = |sem: &Arc<Semaphore>| {
+        let sem = sem.clone();
+        on_drop(move || sem.add_permits(1))
+    };
+    bounded(move || {
+        let sem = Arc::new(Semaphore::new(0));
+        let (_, plain) = flag();
+
+        let mut cancelled = Box::pin(sem.acquire_many(100));
+        assert!(poll(cancelled.as_mut(), &reentrant(&sem)).is_pending());
+        drop(cancelled);
+
+        let mut repolled = Box::pin(sem.acquire_many(100));
+        assert!(poll(repolled.as_mut(), &reentrant(&sem)).is_pending());
+        assert!(poll(repolled.as_mut(), &plain).is_pending());
+        drop(repolled);
+        assert_eq!(sem.available_permits(), 2, "both destructors ran");
+    });
 }

@@ -26,7 +26,9 @@
 //! A dropped `acquire` future (a `timeout`, a losing `select!` branch)
 //! settles its claim: still queued, it leaves the queue and lets the
 //! waiters behind it be granted; already granted, it hands the permits
-//! back. Neither strands the queue nor leaks permits.
+//! back. Neither strands the queue nor leaks permits. A waker's
+//! destructor may re-enter the semaphore, so wakers removed from or
+//! replaced in the queue are only dropped after `state` is released.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -76,15 +78,24 @@ impl State {
         woken
     }
 
-    /// Refreshes the waker of the waiter owning `outcome`.
-    fn rewait(&mut self, outcome: &Arc<AtomicU8>, waker: &Waker) {
-        let queued = self
+    /// Refreshes the waker of the waiter owning `outcome`. Returns the
+    /// replaced waker, for the caller to drop once unlocked.
+    fn rewait(&mut self, outcome: &Arc<AtomicU8>, waker: &Waker) -> Option<Waker> {
+        let w = self
             .waiters
             .iter_mut()
-            .find(|w| Arc::ptr_eq(&w.outcome, outcome));
-        if let Some(w) = queued.filter(|w| !w.waker.will_wake(waker)) {
-            w.waker = waker.clone();
-        }
+            .find(|w| Arc::ptr_eq(&w.outcome, outcome))?;
+        (!w.waker.will_wake(waker)).then(|| std::mem::replace(&mut w.waker, waker.clone()))
+    }
+
+    /// Removes the waiter owning `outcome`, for the caller to drop once
+    /// unlocked.
+    fn dequeue(&mut self, outcome: &Arc<AtomicU8>) -> Option<Waiter> {
+        let pos = self
+            .waiters
+            .iter()
+            .position(|w| Arc::ptr_eq(&w.outcome, outcome))?;
+        self.waiters.remove(pos)
     }
 }
 
@@ -117,20 +128,20 @@ impl Drop for Claim<'_> {
             return;
         }
         let mut state = lock(self.state);
+        let mut removed = None;
         let woken = match self.outcome.load(Ordering::Acquire) {
             WAITER_GRANTED => {
                 state.permits += self.needed;
                 state.grant()
             }
             WAITER_PENDING => {
-                state
-                    .waiters
-                    .retain(|w| !Arc::ptr_eq(&w.outcome, &self.outcome));
+                removed = state.dequeue(&self.outcome);
                 state.grant()
             }
             _ => Vec::new(),
         };
         drop(state);
+        drop(removed);
         wake_all(woken);
     }
 }
@@ -374,7 +385,9 @@ impl Semaphore {
                     WAITER_GRANTED => Ok(()),
                     WAITER_CLOSED => Err(AcquireError(())),
                     _ => {
-                        guard.rewait(&claim.outcome, cx.waker());
+                        let replaced = guard.rewait(&claim.outcome, cx.waker());
+                        drop(guard);
+                        drop(replaced);
                         return Poll::Pending;
                     }
                 };
