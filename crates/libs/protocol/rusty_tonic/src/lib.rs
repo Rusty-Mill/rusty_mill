@@ -9,6 +9,8 @@
 //! the only encoding.
 
 #[cfg(feature = "rusty-tokio")]
+pub mod bridge;
+#[cfg(feature = "rusty-tokio")]
 pub mod client;
 mod code;
 mod frame;
