@@ -2030,6 +2030,7 @@ impl Grid {
     pub fn put_char(&mut self, ch: char, pen: Pen) {
         // A non-ASCII scalar may belong to the glyph on its left. ASCII is
         // always its own glyph, so the common path skips the check entirely.
+        let w = char_width(ch);
         if !ch.is_ascii() {
             if self.grapheme_clustering {
                 // Mode 2027: join anything that continues the UAX #29
@@ -2040,7 +2041,7 @@ impl Grid {
                     self.append_to_glyph(bx, by, ch);
                     return;
                 }
-            } else if char_width(ch) == 0
+            } else if w == 0
                 && let Some((bx, by)) = self.left_base()
             {
                 // Default (wcwidth) widths: only a zero-width scalar (combining
@@ -2050,11 +2051,10 @@ impl Grid {
                 return;
             }
             // Not joined: a zero-width scalar has no cell of its own.
-            if char_width(ch) == 0 {
+            if w == 0 {
                 return;
             }
         }
-        let w = char_width(ch); // >= 1 here (zero-width non-continuations dropped above)
         // With DECSLRM margins, a cursor inside them wraps (or pins) at the
         // right margin instead of the screen edge.
         let limit = if self.side_margins_active() && self.cursor.0 >= self.left_margin {
@@ -2142,6 +2142,91 @@ impl Grid {
             self.cursor.0 = x + n;
             rest = &rest[n..];
         }
+    }
+
+    /// Write a run of non-ASCII text at the cursor, as [`Grid::put_char`]
+    /// would one scalar at a time. Glyphs that fit before the right edge are
+    /// filled straight into the row; a wrap, a zero-width scalar, insert mode,
+    /// DECSLRM margins and mode 2027 fall back to [`Grid::put_char`] for one
+    /// scalar. `text` holds no C0 control (the parser only passes bytes at or
+    /// above 0x80).
+    pub(crate) fn put_text(&mut self, text: &str, pen: Pen) {
+        let mut rest = text;
+        while let Some(ch) = rest.chars().next() {
+            let filled = if self.can_fill_text() {
+                self.fill_text(rest, pen)
+            } else {
+                0
+            };
+            let used = if filled == 0 {
+                self.put_char(ch, pen);
+                ch.len_utf8()
+            } else {
+                filled
+            };
+            rest = &rest[used..];
+        }
+    }
+
+    /// Whether [`Grid::fill_text`] may write at the cursor: no mode that
+    /// changes where a glyph lands or what it joins.
+    fn can_fill_text(&self) -> bool {
+        !self.insert_mode
+            && !self.side_margins_active()
+            && !self.grapheme_clustering
+            && self.cursor.1 < self.rows
+    }
+
+    /// Fill the leading glyphs of `text` into the cursor row while each has a
+    /// width and fits before the right edge, advancing the cursor. Returns
+    /// the bytes consumed (`0` when the first glyph does not qualify). A wide
+    /// glyph cut by either end of the run loses its other half, as
+    /// [`Grid::set_cell`] does.
+    fn fill_text(&mut self, text: &str, pen: Pen) -> usize {
+        let (x0, y) = self.cursor;
+        let (cols, link) = (self.cols, self.current_link);
+        let Some(line) = self.screen.get_mut(y) else {
+            return 0;
+        };
+        let row = line.cells_mut();
+        let (mut x, mut used) = (x0, 0);
+        for ch in text.chars() {
+            let w = char_width(ch);
+            if w == 0 || x + w > cols {
+                break;
+            }
+            if x == x0 && x >= 1 && row[x].flags & WIDE_TRAILER != 0 {
+                row[x - 1] = Cell::blank();
+            }
+            let head = Cell {
+                ch,
+                cluster: 0,
+                fg: pen.fg,
+                bg: pen.bg,
+                flags: pen.attrs,
+                link,
+                underline_color: pen.underline_color,
+            };
+            row[x] = head;
+            if w == 2 {
+                row[x + 1] = Cell {
+                    ch: ' ',
+                    flags: WIDE_TRAILER,
+                    ..head
+                };
+            }
+            x += w;
+            used += ch.len_utf8();
+        }
+        if used == 0 {
+            return 0;
+        }
+        if x < cols && row[x].flags & WIDE_TRAILER != 0 {
+            row[x] = Cell::blank();
+        }
+        self.touch(y);
+        self.cursor.0 = x;
+        used
     }
 
     /// Overwrite `bytes.len()` cells of row `y` from column `x` (the caller

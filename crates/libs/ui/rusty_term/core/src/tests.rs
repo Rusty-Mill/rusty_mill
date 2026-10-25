@@ -6717,6 +6717,119 @@ fn ascii_fast_path_matches_put_char_one_byte_at_a_time() {
     }
 }
 
+#[test]
+fn text_fast_path_matches_put_char_one_scalar_at_a_time() {
+    // As the ASCII test above, for runs of non-ASCII text: narrow and wide
+    // glyphs, a combining mark and a C1 control (both zero width), under each
+    // mode the fast path must defer to put_char for.
+    let setups: [&str; 6] = [
+        "",
+        "\x1b[?7l",           // DECAWM off
+        "\x1b[4h",            // insert mode
+        "\x1b[?69h\x1b[3;7s", // DECSLRM margins, columns 3..=7
+        "\x1b[2;3r",          // scroll region
+        "\x1b[?2027h",        // grapheme clustering
+    ];
+    let run: Vec<char> = "é世ñ界\u{301}ü日Ω😀\u{85}ç字µ".chars().collect();
+    let style = "\x1b[1;31;44;4:3;58;2;1;2;3m";
+    let link = "\x1b]8;;https://x.test\x07";
+    let probe = cells(&parse(format!("{style}X").as_bytes(), 2, 1))[0];
+    let pen = Pen {
+        fg: probe.fg,
+        bg: probe.bg,
+        attrs: probe.flags,
+        underline_color: probe.underline_color,
+    };
+    for setup in setups {
+        for x in 1..=9 {
+            for len in 1..=run.len() {
+                let text: String = run[..len].iter().collect();
+                let prefix = format!("世界世界世\r\n日本日本日{setup}{link}\x1b[2;{x}H");
+                let setup_bytes = format!("{prefix}{style}");
+                let mut fast = Grid::new(9, 3);
+                let mut p = AnsiParser::new();
+                p.advance(&mut fast, setup_bytes.as_bytes());
+                p.advance(&mut fast, text.as_bytes());
+                let mut slow = parse(setup_bytes.as_bytes(), 9, 3);
+                for &ch in &run[..len] {
+                    slow.put_char(ch, pen);
+                }
+                assert_eq!(
+                    grid_state(&fast),
+                    grid_state(&slow),
+                    "setup {setup:?}, column {x}, {len} scalars"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn utf8_fast_path_matches_the_bytewise_decoder() {
+    // Fed one byte per call, the parser never sees a whole sequence, so every
+    // byte goes through the byte-wise decoder: the reference. Whole input and
+    // every two-chunk split must match it, malformed sequences included.
+    // 31 two-byte scalars, then a three-byte one across the 64-byte window.
+    let window_edge = format!("{}日本", "é".repeat(31));
+    let inputs: [&[u8]; 10] = [
+        "日本語 é😀 x".as_bytes(),
+        window_edge.as_bytes(),
+        b"\xc3\xa9\x80\xc3\xa9",              // stray continuation mid-run
+        b"\xe6\x97\xa5\xe6\x97A\xe6\x97\xa5", // truncated, then ASCII
+        b"\xe0\x80\x9b\xc3\xa9",              // overlong ESC
+        b"\xed\xa0\x80\xc3\xa9",              // UTF-16 surrogate
+        b"\xf4\x90\x80\x80\xc3\xa9",          // above U+10FFFF
+        b"\xc2\x85\xc3\xa9\xcc\x81",          // C1 NEL, then e + combining acute
+        b"\xc3\xa9\x1b[31m\xc3\xa9",          // run broken by a CSI
+        b"\xff\xfe\xc3",                      // invalid leads, truncated tail
+    ];
+    for input in inputs {
+        let mut reference = Grid::new(6, 3);
+        let mut p = AnsiParser::new();
+        for b in input {
+            p.advance(&mut reference, std::slice::from_ref(b));
+        }
+        for split in 0..=input.len() {
+            let mut g = Grid::new(6, 3);
+            let mut p = AnsiParser::new();
+            p.advance(&mut g, &input[..split]);
+            p.advance(&mut g, &input[split..]);
+            assert_eq!(
+                grid_state(&g),
+                grid_state(&reference),
+                "{input:x?} split at {split}"
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_high_bytes_parse_in_linear_time() {
+    // Each byte below is rejected by the text fast path and taken by the
+    // byte-wise decoder. If finding that out scanned the rest of the input,
+    // one advance over 256 KiB would do ~10^10 steps and this test would hang.
+    for unit in [&[0xff][..], &[0xc3, 0xa9, 0x80]] {
+        let input = unit.repeat(256 * 1024 / unit.len());
+        let mut g = Grid::new(80, 24);
+        AnsiParser::new().advance(&mut g, &input);
+        let (x, y) = g.cursor;
+        assert_eq!(g.row(y)[x - 1].ch, '\u{FFFD}', "{unit:x?}");
+    }
+}
+
+#[test]
+fn utf8_run_stops_at_ascii_and_malformed_bytes() {
+    assert_eq!(utf8_run("é世x".as_bytes()), Some("é世"));
+    assert_eq!(utf8_run(b"\xc3\xa9\xc3"), Some("é")); // incomplete tail
+    assert_eq!(utf8_run(b"\xc3\xa9\x80"), Some("é")); // stray continuation
+    assert_eq!(utf8_run(b"\xc3"), None);
+    assert_eq!(utf8_run(b"\x80"), None);
+    assert_eq!(utf8_run(b""), None);
+    // At most one window per call; a sequence the edge cuts starts the next.
+    let long = format!("{}日", "é".repeat(31));
+    assert_eq!(utf8_run(long.as_bytes()), Some("é".repeat(31).as_str()));
+}
+
 /// A grid exercising every part of a snapshot: styles, wide glyphs, a
 /// grapheme cluster, a hyperlink, a soft wrap, a double-width line, history,
 /// a title, a moved cursor and, when `alt`, the alternate screen.
