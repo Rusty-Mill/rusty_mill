@@ -2848,12 +2848,32 @@ impl Grid {
     }
 
     /// Rebuild the caches derived from `clusters` after a restore replaced it.
+    /// Every entry is indexed: an RTSN snapshot may hold up to `u16::MAX`
+    /// (every id a cell can name), more than [`CLUSTER_MAX`], and a longer
+    /// table indexes only the ids a cell can name instead of overflowing.
     pub(crate) fn rebuild_cluster_caches(&mut self) {
-        self.cluster_ids = (1..)
-            .zip(&self.clusters)
-            .map(|(id, c)| (c.clone(), id))
+        self.cluster_ids = self
+            .clusters
+            .iter()
+            .zip(1..=u16::MAX)
+            .map(|(c, id)| (c.clone(), id))
             .collect();
         self.clusters_arc = OnceLock::new();
+    }
+
+    /// Heap a checkpoint decode spends rebuilding the tables derived from
+    /// `links` and `clusters` (their `Arc` copies and the cluster id index,
+    /// with the map's spare capacity). Encode charges the same amount, so a
+    /// state that encodes within a budget also decodes within it.
+    fn table_cache_cost(&self) -> usize {
+        let bytes = |t: &[String]| t.iter().map(String::len).sum::<usize>();
+        let index_entry = 2 * (size_of::<(String, u16)>() + 1);
+        (self.links.len() + self.clusters.len())
+            .saturating_mul(2 * size_of::<String>())
+            .saturating_add(self.clusters.len().saturating_mul(index_entry))
+            .saturating_add(4 * size_of::<usize>())
+            .saturating_add(bytes(&self.links))
+            .saturating_add(bytes(&self.clusters).saturating_mul(2))
     }
 
     /// Blank columns `[from, to)` of row `y`, marking it dirty.
@@ -5283,17 +5303,7 @@ impl crate::checkpoint::Wire for Grid {
         crate::checkpoint::Wire::write(&self.status_line, w)?;
         crate::checkpoint::Wire::write(&self.clusters, w)?;
         crate::checkpoint::Wire::write(&self.links, w)?;
-        w.charge(
-            (self.links.len() + self.clusters.len()) * 2 * size_of::<String>()
-                + 4 * size_of::<usize>()
-                + self
-                    .links
-                    .iter()
-                    .chain(&self.clusters)
-                    .map(String::len)
-                    .sum::<usize>()
-                + self.rows,
-        )?;
+        w.charge(self.table_cache_cost().saturating_add(self.rows))?;
         Ok(())
     }
     fn read(r: &mut crate::checkpoint::Reader<'_>) -> crate::checkpoint::Result<Self> {
@@ -5358,16 +5368,12 @@ impl crate::checkpoint::Wire for Grid {
         grid.status_line = crate::checkpoint::Wire::read(r)?;
         grid.clusters = crate::checkpoint::Wire::read(r)?;
         grid.links = crate::checkpoint::Wire::read(r)?;
-        // Charge cache rebuilds too: they duplicate String headers and bytes,
-        // and the cluster id index copies the cluster strings once more.
-        let cluster_bytes = grid.clusters.iter().map(String::len).sum::<usize>();
-        r.charge(
-            (grid.links.len() + grid.clusters.len()) * 2 * size_of::<String>()
-                + grid.clusters.len() * (size_of::<String>() + size_of::<u16>())
-                + 4 * size_of::<usize>()
-                + grid.links.iter().map(String::len).sum::<usize>()
-                + 2 * cluster_bytes,
-        )?;
+        // Bound the tables before building caches from them; the full
+        // validation runs after the parser is read.
+        if grid.clusters.len() > CLUSTER_MAX || grid.links.len() > LINK_MAX {
+            return Err(crate::checkpoint::Error("grid bounds"));
+        }
+        r.charge(grid.table_cache_cost())?;
         grid.links_arc = grid.links.clone().into();
         grid.rebuild_cluster_caches();
         r.charge(grid.rows)?;

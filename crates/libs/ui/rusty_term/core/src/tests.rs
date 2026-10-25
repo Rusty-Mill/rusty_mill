@@ -1875,6 +1875,23 @@ fn combining_marks_reuse_interned_continuations() {
 }
 
 #[test]
+fn a_full_rtsn_cluster_table_restores_and_interns() {
+    // RTSN accepts up to u16::MAX entries, every id a cell can name. Restoring
+    // one must index them all without overflowing the id counter.
+    let mut g = Grid::new(4, 2);
+    g.clusters = (1..u16::MAX).map(|i| i.to_string()).collect();
+    g.clusters.push("\u{302}".into());
+    let mut back = Grid::decode_snapshot(&g.encode_snapshot()).expect("decode");
+    AnsiParser::new().advance(&mut back, "a\u{302}".as_bytes());
+    assert_eq!(
+        back.row(0)[0].cluster,
+        u16::MAX,
+        "the last entry keeps its id"
+    );
+    assert_eq!(back.clusters.len(), usize::from(u16::MAX));
+}
+
+#[test]
 fn restored_grids_reuse_interned_continuations() {
     // Both restore paths rebuild the id index: interning a continuation the
     // restored table already holds must return its id, not append a copy.

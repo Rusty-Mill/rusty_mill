@@ -697,6 +697,50 @@ mod tests {
         assert_eq!(grid.encode_snapshot(), back.encode_snapshot());
     }
 
+    /// The least budget at which `f` succeeds, by bisection.
+    fn least_budget(f: impl Fn(usize) -> bool) -> usize {
+        let (mut lo, mut hi) = (0, MAX_DECODED);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if f(mid) { hi = mid } else { lo = mid + 1 }
+        }
+        lo
+    }
+
+    #[test]
+    fn a_cluster_table_that_encodes_within_a_budget_decodes_within_it() {
+        // Decoding rebuilds the cluster index as well as the `Arc` tables, so
+        // encode must charge for it too, or a large continuation (here 1 MiB)
+        // would encode and then fail to decode under the same budget.
+        let mut grid = Grid::new(1, 1);
+        let mut parser = AnsiParser::new();
+        parser.advance(&mut grid, "e\u{301}".as_bytes());
+        grid.clusters.push("\u{301}".repeat(1 << 19));
+        grid.rebuild_cluster_caches();
+        let mut w = Writer::new(MAX_DECODED);
+        grid.write(&mut w).unwrap();
+        let bytes = w.bytes;
+        let write_need = least_budget(|b| grid.write(&mut Writer::new(b)).is_ok());
+        let read_need = least_budget(|b| Grid::read(&mut Reader::new(&bytes, b)).is_ok());
+        assert!(write_need > 1 << 20, "the continuation is charged");
+        assert_eq!(read_need, write_need);
+    }
+
+    #[test]
+    fn oversized_cluster_tables_fail_to_decode_without_panicking() {
+        // Encode refuses these tables (CLUSTER_MAX is 8192), so write the grid
+        // directly, past validation, as a hostile checkpoint would.
+        for n in [8193, usize::from(u16::MAX) + 1] {
+            let mut grid = Grid::new(2, 1);
+            grid.clusters = (0..n).map(|i| i.to_string()).collect();
+            let mut w = Writer::new(MAX_DECODED);
+            w.put(HEADER).unwrap();
+            grid.write(&mut w).unwrap();
+            AnsiParser::new().write(&mut w).unwrap();
+            assert_eq!(decode(&w.bytes).err(), Some(Error("grid bounds")), "{n}");
+        }
+    }
+
     #[test]
     fn retained_state_resizes_and_allocation_budgets_are_symmetric() {
         let mut grid = Grid::new(20, 12);
