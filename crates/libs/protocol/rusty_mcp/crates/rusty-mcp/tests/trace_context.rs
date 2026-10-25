@@ -51,7 +51,8 @@ async fn server(observed: Observed) -> std::net::SocketAddr {
         },
     ));
     support::serve(
-        axum::Router::new().nest_service(support::PATH, rusty_mcp_axum::router(handler, 1 << 20)),
+        axum::Router::new()
+            .nest_service(support::PATH, support::mcp::router(handler, support::PATH)),
     )
     .await
 }
