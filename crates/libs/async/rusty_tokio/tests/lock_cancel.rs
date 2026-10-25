@@ -8,7 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Wake, Waker};
 use std::time::Duration;
 
 struct Flag(AtomicBool);
@@ -273,5 +273,103 @@ fn semaphore_drops_removed_and_replaced_wakers_outside_its_state_lock() {
         assert!(poll(repolled.as_mut(), &plain).is_pending());
         drop(repolled);
         assert_eq!(sem.available_permits(), 2, "both destructors ran");
+    });
+}
+
+/// A waker whose clone runs `on_clone` once armed. That is legal for a
+/// custom `RawWaker`, and only an executor's own wakers can do it.
+struct CloneHook {
+    armed: AtomicBool,
+    on_clone: Box<dyn Fn() + Send + Sync>,
+}
+
+fn clone_hook(on_clone: impl Fn() + Send + Sync + 'static) -> (Arc<CloneHook>, Waker) {
+    unsafe fn clone(data: *const ()) -> RawWaker {
+        // SAFETY: `data` is a live `Arc<CloneHook>` from `Arc::into_raw`.
+        let hook = unsafe { &*data.cast::<CloneHook>() };
+        if hook.armed.load(Ordering::SeqCst) {
+            (hook.on_clone)();
+        }
+        // SAFETY: as above; the new `RawWaker` owns one more count.
+        unsafe { Arc::increment_strong_count(data.cast::<CloneHook>()) };
+        RawWaker::new(data, &VTABLE)
+    }
+    unsafe fn release(data: *const ()) {
+        // SAFETY: each `RawWaker` owns one count of the `Arc`.
+        unsafe { Arc::decrement_strong_count(data.cast::<CloneHook>()) };
+    }
+    unsafe fn wake_by_ref(_: *const ()) {}
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, release, wake_by_ref, release);
+
+    let hook = Arc::new(CloneHook {
+        armed: AtomicBool::new(false),
+        on_clone: Box::new(on_clone),
+    });
+    let raw = RawWaker::new(Arc::into_raw(hook.clone()).cast(), &VTABLE);
+    // SAFETY: `VTABLE` upholds the `RawWaker` contract over the `Arc`.
+    (hook, unsafe { Waker::from_raw(raw) })
+}
+
+/// A waker's clone may also re-enter the lock, so a queued waker is
+/// never cloned while the mutex's state is held: not to wake it on
+/// release, not to pass a cancelled head's wake on, not to re-poll.
+#[test]
+fn mutex_never_clones_a_waker_under_its_state_lock() {
+    bounded(|| {
+        let mutex = Arc::new(Mutex::new(()));
+        let reenter = |mutex: &Arc<Mutex<()>>| {
+            let mutex = mutex.clone();
+            clone_hook(move || drop(mutex.try_lock()))
+        };
+        let (_, plain) = flag();
+
+        let held = mutex.try_lock_owned().expect("free");
+        let (hook, waker) = reenter(&mutex);
+        let mut released_to = Box::pin(mutex.lock());
+        assert!(poll(released_to.as_mut(), &waker).is_pending());
+        hook.armed.store(true, Ordering::SeqCst);
+        drop(held);
+        assert!(poll(released_to.as_mut(), &plain).is_ready());
+
+        let held = mutex.try_lock_owned().expect("free");
+        let mut head = Box::pin(mutex.lock());
+        let (hook, waker) = reenter(&mutex);
+        let mut passed_to = Box::pin(mutex.lock());
+        assert!(poll(head.as_mut(), &plain).is_pending());
+        assert!(poll(passed_to.as_mut(), &waker).is_pending());
+        hook.armed.store(true, Ordering::SeqCst);
+        drop(held);
+        drop(head);
+        assert!(poll(passed_to.as_mut(), &plain).is_ready());
+
+        let held = mutex.try_lock_owned().expect("free");
+        let (hook, waker) = reenter(&mutex);
+        let mut repolled = Box::pin(mutex.lock());
+        assert!(poll(repolled.as_mut(), &plain).is_pending());
+        hook.armed.store(true, Ordering::SeqCst);
+        assert!(poll(repolled.as_mut(), &waker).is_pending());
+        drop(held);
+    });
+}
+
+/// As for `Mutex`: a re-polled `acquire()` clones its new waker only
+/// with the semaphore's state released.
+#[test]
+fn semaphore_never_clones_a_waker_under_its_state_lock() {
+    bounded(|| {
+        let sem = Arc::new(Semaphore::new(0));
+        let reenter = sem.clone();
+        let (hook, waker) = clone_hook(move || drop(reenter.try_acquire()));
+        let (_, plain) = flag();
+
+        let mut repolled = Box::pin(sem.acquire());
+        assert!(poll(repolled.as_mut(), &plain).is_pending());
+        hook.armed.store(true, Ordering::SeqCst);
+        assert!(poll(repolled.as_mut(), &waker).is_pending());
+        sem.add_permits(1);
+        assert!(matches!(
+            poll(repolled.as_mut(), &waker),
+            Poll::Ready(Ok(_))
+        ));
     });
 }

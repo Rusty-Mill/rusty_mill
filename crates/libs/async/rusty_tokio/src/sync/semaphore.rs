@@ -26,9 +26,13 @@
 //! A dropped `acquire` future (a `timeout`, a losing `select!` branch)
 //! settles its claim: still queued, it leaves the queue and lets the
 //! waiters behind it be granted; already granted, it hands the permits
-//! back. Neither strands the queue nor leaks permits. A waker's
-//! destructor may re-enter the semaphore, so wakers removed from or
-//! replaced in the queue are only dropped after `state` is released.
+//! back. Neither strands the queue nor leaks permits.
+//!
+//! A waker's clone or drop may run executor code that re-enters the
+//! semaphore, so neither ever happens with `state` held: a waiter's
+//! clone is made before it locks, a grant moves the queued waker out,
+//! and wakers removed from or replaced in the queue are dropped after
+//! unlocking.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -78,14 +82,25 @@ impl State {
         woken
     }
 
-    /// Refreshes the waker of the waiter owning `outcome`. Returns the
-    /// replaced waker, for the caller to drop once unlocked.
-    fn rewait(&mut self, outcome: &Arc<AtomicU8>, waker: &Waker) -> Option<Waker> {
-        let w = self
+    /// Whether the waiter owning `outcome` already wakes `waker`'s task.
+    fn wakes(&self, outcome: &Arc<AtomicU8>, waker: &Waker) -> bool {
+        self.waiters
+            .iter()
+            .any(|w| Arc::ptr_eq(&w.outcome, outcome) && w.waker.will_wake(waker))
+    }
+
+    /// Stores `waker` for the waiter owning `outcome`. Returns the waker
+    /// it displaces (or `waker`, if that waiter is gone), for the caller
+    /// to drop once unlocked.
+    fn rewait(&mut self, outcome: &Arc<AtomicU8>, waker: Waker) -> Waker {
+        match self
             .waiters
             .iter_mut()
-            .find(|w| Arc::ptr_eq(&w.outcome, outcome))?;
-        (!w.waker.will_wake(waker)).then(|| std::mem::replace(&mut w.waker, waker.clone()))
+            .find(|w| Arc::ptr_eq(&w.outcome, outcome))
+        {
+            Some(w) => std::mem::replace(&mut w.waker, waker),
+            None => waker,
+        }
     }
 
     /// Removes the waiter owning `outcome`, for the caller to drop once
@@ -379,35 +394,51 @@ impl Semaphore {
             queued: false,
         };
         std::future::poll_fn(|cx| {
-            let mut guard = lock(&self.state);
-            if claim.queued {
-                let result = match claim.outcome.load(Ordering::Acquire) {
-                    WAITER_GRANTED => Ok(()),
-                    WAITER_CLOSED => Err(AcquireError(())),
-                    _ => {
-                        let replaced = guard.rewait(&claim.outcome, cx.waker());
-                        drop(guard);
-                        drop(replaced);
-                        return Poll::Pending;
-                    }
+            // A clone made on a pass through the loop that had to store
+            // one; see the module docs. Dropped after `guard` on return.
+            let mut fresh: Option<Waker> = None;
+            loop {
+                let mut guard = lock(&self.state);
+                if claim.queued {
+                    let result = match claim.outcome.load(Ordering::Acquire) {
+                        WAITER_GRANTED => Ok(()),
+                        WAITER_CLOSED => Err(AcquireError(())),
+                        _ if guard.wakes(&claim.outcome, cx.waker()) => return Poll::Pending,
+                        _ => {
+                            let Some(waker) = fresh.take() else {
+                                drop(guard);
+                                fresh = Some(cx.waker().clone());
+                                continue;
+                            };
+                            let displaced = guard.rewait(&claim.outcome, waker);
+                            drop(guard);
+                            drop(displaced);
+                            return Poll::Pending;
+                        }
+                    };
+                    claim.queued = false;
+                    return Poll::Ready(result);
+                }
+                if guard.closed {
+                    return Poll::Ready(Err(AcquireError(())));
+                }
+                if guard.waiters.is_empty() && guard.permits >= needed {
+                    guard.permits -= needed;
+                    return Poll::Ready(Ok(()));
+                }
+                let Some(waker) = fresh.take() else {
+                    drop(guard);
+                    fresh = Some(cx.waker().clone());
+                    continue;
                 };
-                claim.queued = false;
-                return Poll::Ready(result);
+                guard.waiters.push_back(Waiter {
+                    needed,
+                    outcome: claim.outcome.clone(),
+                    waker,
+                });
+                claim.queued = true;
+                return Poll::Pending;
             }
-            if guard.closed {
-                return Poll::Ready(Err(AcquireError(())));
-            }
-            if guard.waiters.is_empty() && guard.permits >= needed {
-                guard.permits -= needed;
-                return Poll::Ready(Ok(()));
-            }
-            guard.waiters.push_back(Waiter {
-                needed,
-                outcome: claim.outcome.clone(),
-                waker: cx.waker().clone(),
-            });
-            claim.queued = true;
-            Poll::Pending
         })
         .await
     }
