@@ -86,7 +86,7 @@ fn text(r: &rusty_mcp_client::proto::CallToolResult) -> String {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn http_lists_calls_and_shuts_down() {
     let (spec, stop) = http_spec();
     let client = McpClient::connect("e2e", &spec).await.unwrap();
@@ -97,14 +97,14 @@ async fn http_lists_calls_and_shuts_down() {
     assert_eq!(client.list_resources().await.unwrap()[0].uri, "mem://a");
     let r = client.call_tool("add", args(40, 2)).await.unwrap();
     assert_eq!(text(&r), "42");
-    tokio::time::timeout(std::time::Duration::from_secs(5), client.shutdown())
+    rusty_tokio::time::timeout(std::time::Duration::from_secs(5), client.shutdown())
         .await
         .expect("shutdown hung")
         .unwrap();
     stop.shutdown();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_server_error_is_a_service_error_and_transient() {
     let (spec, stop) = http_spec();
     let client = McpClient::connect("e2e", &spec).await.unwrap();
@@ -114,14 +114,14 @@ async fn a_server_error_is_a_service_error_and_transient() {
     stop.shutdown();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[rusty_tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn calls_from_many_tasks_share_one_client() {
     let (spec, stop) = http_spec();
     let client = Arc::new(McpClient::connect("e2e", &spec).await.unwrap());
     let handles: Vec<_> = (0..8)
         .map(|i| {
             let c = Arc::clone(&client);
-            tokio::spawn(async move { text(&c.call_tool("add", args(i, 1)).await.unwrap()) })
+            rusty_tokio::spawn(async move { text(&c.call_tool("add", args(i, 1)).await.unwrap()) })
         })
         .collect();
     for (i, h) in handles.into_iter().enumerate() {
@@ -131,7 +131,8 @@ async fn calls_from_many_tasks_share_one_client() {
 }
 
 /// The OAuth client-credentials fetch runs on the caller's tokio runtime
-/// (via `rusty_request`'s `tokio` feature) against a raw token endpoint.
+/// (via `rusty_request`'s `tokio` feature) against a raw token endpoint, so
+/// these tests stay on tokio while the rest of the file runs on `rusty_tokio`.
 mod oauth {
     use rusty_mcp_client::client_auth::{AuthError, McpAuth, McpAuthSecret, resolve};
     use rusty_mcp_client::client_auth::{ClientIdSecret, ClientSecretSecret};
@@ -228,7 +229,7 @@ mod oauth {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn is_alive_tells_a_live_server_from_a_stopped_one() {
     let (spec, stop) = http_spec();
     let client = McpClient::connect("e2e", &spec).await.unwrap();
@@ -241,12 +242,12 @@ async fn is_alive_tells_a_live_server_from_a_stopped_one() {
         if !alive {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        rusty_tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert!(!alive, "a stopped server still looked alive");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn connect_with_bounds_each_call() {
     use std::time::{Duration, Instant};
     let slow = Server::builder("slow", "1")
@@ -284,7 +285,7 @@ async fn connect_with_bounds_each_call() {
 /// Discovery names the newest revision in `MCP-Protocol-Version`; a server
 /// that speaks only a classic one refuses it, and the `initialize` that
 /// follows must not carry it.
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_server_that_speaks_only_a_classic_revision_is_reachable() {
     use rusty_mcp_server::proto::ProtocolVersion;
     let classic = Server::builder("old", "1")
@@ -316,7 +317,7 @@ async fn a_server_that_speaks_only_a_classic_revision_is_reachable() {
     stop.shutdown();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_session_the_server_forgot_counts_as_dead() {
     use rusty_mcp_server::proto::ProtocolVersion;
     let classic = || {
@@ -360,7 +361,7 @@ async fn a_session_the_server_forgot_counts_as_dead() {
             rebound = Some(b);
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        rusty_tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let (_, stop) = rebound.expect("could not rebind the address");
     let mut alive = true;
@@ -369,7 +370,7 @@ async fn a_session_the_server_forgot_counts_as_dead() {
         if !alive {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        rusty_tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert!(!alive, "a forgotten session still looked alive");
     stop.shutdown();

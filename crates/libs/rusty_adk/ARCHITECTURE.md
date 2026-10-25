@@ -223,12 +223,14 @@ in-process object in each language. The one path a Rust tool has into a Python,
 Go, TypeScript, Java, or Kotlin agent is MCP, which every ADK SDK consumes via
 `McpToolset`. `adk-mcp` therefore implements both directions. The wire
 protocol is the workspace's first-party MCP stack (`rusty_mcp_server`,
-`rusty-mcp-client`, and `rusty_mcp_axum` to mount in axum), pinned to MCP
+`rusty-mcp-client`, and `rusty_mcp_server`'s `rusty_axum` mount), pinned to MCP
 `2025-06-18` (the revision the other SDKs speak); `adk-mcp` owns only the
 mapping between ADK tools and MCP tools. The stack's handlers block while
 ADK tools are async, so each call runs the tool with `block_on` on the tokio
-runtime the transport was started on. `tests/conformance.rs` holds that
-behavior in place at the wire.
+runtime the transport was started on. The HTTP transport serves on
+`rusty_axum`, which runs on a `rusty_tokio` runtime of its own beside that
+tokio runtime. `tests/conformance.rs` holds that behavior in place at the
+wire.
 
 For the workspace's own frontends the protocol is AG-UI, and `adk-agui`
 (feature `agui`) is the same shape as the A2A bridge below: `rusty_agui`'s

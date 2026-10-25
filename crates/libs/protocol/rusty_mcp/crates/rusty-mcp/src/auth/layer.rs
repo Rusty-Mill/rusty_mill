@@ -187,7 +187,7 @@ mod tests {
         http::HeaderValue::from_str(value).expect("valid header")
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn accepts_a_token_the_validator_vouches_for() {
         let validator = StaticTokenValidator::new().with_token(
             "good",
@@ -201,7 +201,7 @@ mod tests {
         assert_eq!(token.subject.as_deref(), Some("user-1"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn missing_header_is_distinct_from_an_invalid_token() {
         let config = config_with(StaticTokenValidator::new());
 
@@ -231,7 +231,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_non_text_header_is_a_bad_request_not_a_missing_one() {
         let config = config_with(StaticTokenValidator::new());
         let opaque = http::HeaderValue::from_bytes(b"Bearer \xff").expect("opaque bytes");
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(rejection.refusal(&config).status.as_u16(), 400);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_refusal_becomes_a_json_response_with_its_challenge() {
         let config = config_with(StaticTokenValidator::new());
         let response: Response<String> = into_response(Rejection::Missing.refusal(&config));
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(response.into_body(), r#"{"error":"unauthorized"}"#);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_challenge_free_refusal_sets_no_www_authenticate() {
         let config = config_with(StaticTokenValidator::new());
         let response: Response<String> = into_response(Rejection::Unavailable.refusal(&config));

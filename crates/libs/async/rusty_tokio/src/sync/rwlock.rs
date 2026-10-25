@@ -383,6 +383,18 @@ impl<T> From<T> for RwLock<T> {
     }
 }
 
+/// As tokio's: the value when a read lock is free right now, else `<locked>`.
+impl<T: std::fmt::Debug> std::fmt::Debug for RwLock<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("RwLock");
+        match self.try_read() {
+            Some(inner) => d.field("data", &&*inner),
+            None => d.field("data", &format_args!("<locked>")),
+        };
+        d.finish()
+    }
+}
+
 /// As tokio's: a `RwLock` around `T::default()`.
 impl<T: Default> Default for RwLock<T> {
     fn default() -> Self {

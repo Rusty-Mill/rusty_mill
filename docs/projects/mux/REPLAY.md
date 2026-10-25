@@ -105,6 +105,8 @@ for the server's other blocks. Most of it is the per-cell run scan; the
 existing pre-encode grid validation is about a fifth.
 `coloured_history_checkpoint_stays_compact` fails if the 200x50 case grows
 past twice the RTSN size.
+Incremental deltas for reconnecting clients are designed in
+[DELTA.md](DELTA.md) and not built.
 
 ## Limits
 
