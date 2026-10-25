@@ -190,6 +190,8 @@ Families are the current directories immediately below `crates/`.
 | apps | rocket_league | replay-scoring | Pure, config-driven decision-discipline scoring over the canonical match model | 3 |
 | apps | rocket_league | replay-skills | Pure, config-driven mechanical-skill detection and verification over the canonical match model | 2 |
 | apps | rocket_league | replay-value | Outcome-grounded value model over the canonical match model: states -&gt; P(team scores next within T), per-player ΔV | 4 |
+| apps | rocket_league | replay-viewer | Self-contained 3D HTML replay viewer over the canonical match model | 1 |
+| apps | rocket_league | rl_replay | First-party Rocket League .replay parser: container, CRC and header (P1 of rleval/docs/replay-parser-scope.md). | 0 |
 | apps | rocket_league | replay-viewer | Self-contained 3D HTML viewer for replays (canonical match model) and physics captures | 1 |
 | apps | rocket_league | rleval-app | Unified RLEvalSystem application: one binary that serves a web UI tying the analyzer, scoring, skills, value and 3D viewer into a single page. | 0 |
 | apps | rush | rush | A small, bash-compatible shell written in Rust | 1 |
