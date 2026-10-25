@@ -39,7 +39,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C14 | Live sharing | 3 | `rusty_mux_auth`, `rusty_mux_server` | not-started | |
 | C15 | Web client | 4 | `rusty_mux` web client | not-started | |
 | C16 | Client matrix (TUI, web, native) | 4 | `rusty_mux` clients | not-started | |
-| C17 | Self-describing API (schema-first) | 2 | `rusty_mux_proto` | not-started | |
+| C17 | Self-describing API (schema-first) | 2 | `rusty_mux_proto` | in-progress | `schema::CATALOG` |
 | C18 | Screen capture | 2 | `rusty_mux_server` | not-started | |
 | C19 | Scripting and config | 2 | `rusty_mux_script` | not-started | |
 | C20 | Program status signalling | 2 | `rusty_mux_status` | not-started | spike 1 (OSC pass-through) |

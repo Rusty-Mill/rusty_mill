@@ -23,6 +23,7 @@ mod error;
 mod field;
 mod frame;
 mod message;
+pub mod schema;
 mod varint;
 
 pub use error::Error;
