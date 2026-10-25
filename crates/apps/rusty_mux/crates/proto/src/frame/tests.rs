@@ -82,6 +82,7 @@ fn every_message_round_trips() {
             size: size(u16::MAX, 1),
         },
         Message::CloseBlock { req: 10, block },
+        Message::Sync { req: 14 },
         Message::Welcome {
             features: Features::NONE,
             client,
@@ -489,6 +490,7 @@ fn feature_bits_are_distinct() {
         Features::CHECKPOINT_V2,
         Features::CHECKPOINT_V3,
         Features::EVENT_SEQ,
+        Features::SYNC,
     ];
     let mut seen = 0u64;
     for feature in all {

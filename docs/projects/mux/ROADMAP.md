@@ -31,8 +31,8 @@ Schema-first API, CLI, resumable events, block methods, program status, MCP. Exi
 
 Started 2026-10-25 (owner go-ahead). One PR per step, in order:
 1. Request schema catalog in `rusty_mux_proto::schema` (C17). Done (#1051).
-2. Resumable event stream: sequence numbers and replay (C05). In progress.
-3. `rusty_mux_ctl`, generated from the catalog, with `--json` and exit codes (C04).
+2. Resumable event stream: sequence numbers and replay (C05). Done (#1057).
+3. `rusty_mux_ctl`, generated from the catalog, with `--json` and exit codes (C04). In progress.
 4. Block methods and screen capture (C06, C18).
 5. Program status OSC, `rusty_mux_status` (C20).
 6. `rusty_mux_mcp` on `rusty_mcp_server`, generated from the same catalog (C07).

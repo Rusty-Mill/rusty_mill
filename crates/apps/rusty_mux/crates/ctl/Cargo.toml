@@ -1,0 +1,26 @@
+[package]
+name = "rusty_mux_ctl"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "rusty-mux-ctl: scriptable rusty_mux client generated from the request catalog, with --json output and stable exit codes."
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[[bin]]
+name = "rusty-mux-ctl"
+path = "src/main.rs"
+
+[dependencies]
+rusty_json = { workspace = true }
+rusty_mux_core = { workspace = true }
+rusty_mux_proto = { workspace = true }
+rusty_uuid = { workspace = true }
+
+[dev-dependencies]
+rusty_mux_server = { workspace = true }
+rusty_tokio = { workspace = true }

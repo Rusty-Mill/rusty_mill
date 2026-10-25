@@ -31,6 +31,9 @@ impl Features {
     /// [`Cursor`] in Hello and Welcome, and `seq` on every event.
     pub const EVENT_SEQ: Self = Self(1 << 4);
 
+    /// [`Message::Sync`], a request that changes nothing.
+    pub const SYNC: Self = Self(1 << 5);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -119,6 +122,11 @@ pub enum Message {
         req: u64,
         block: BlockId,
     },
+    /// Changes nothing; its reply means every earlier request on this
+    /// connection has been handled. Negotiated with [`Features::SYNC`].
+    Sync {
+        req: u64,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -202,6 +210,7 @@ mod ty {
     pub const INPUT: u8 = 0x09;
     pub const RESIZE: u8 = 0x0a;
     pub const CLOSE_BLOCK: u8 = 0x0b;
+    pub const SYNC: u8 = 0x0c;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -252,6 +261,10 @@ impl Message {
                 ty::RESIZE
             }
             M::CloseBlock { req, block } => req_block(out, *req, *block, ty::CLOSE_BLOCK),
+            M::Sync { req } => {
+                out.varint(REQ, *req);
+                ty::SYNC
+            }
             M::Welcome {
                 features,
                 client,
@@ -354,6 +367,9 @@ impl Message {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
                 size: get_size(&f)?,
+            },
+            ty::SYNC => M::Sync {
+                req: f.varint(REQ)?,
             },
             ty::CLOSE_BLOCK => M::CloseBlock {
                 req: f.varint(REQ)?,

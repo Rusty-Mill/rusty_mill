@@ -104,6 +104,7 @@ members = [
     "crates/libs/storage/rusty_fair_play_domain",
     "crates/libs/storage/rusty_multimodal_db_engine",
     "crates/apps/rusty_mux/crates/core",
+    "crates/apps/rusty_mux/crates/ctl",
     "crates/apps/rusty_mux/crates/proto",
     "crates/apps/rusty_mux/crates/server",
     "crates/apps/rusty_mux/crates/tui",

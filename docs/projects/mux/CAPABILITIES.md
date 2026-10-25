@@ -26,7 +26,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C01 | Persistent sessions (outlive clients) | 1 | `rusty_mux_server` | in-progress | blocks and their PTYs outlive client connections; the server is not yet a daemon |
 | C02 | Multi-client attach, independent viewports | 1 | `rusty_mux_server` | in-progress | `server/tests/phase1.rs`: two clients converge on one PTY; viewports are client-side |
 | C03 | Snapshot + ready + background history | 1 | `rusty_mux_server`, `rusty_term_core` | in-progress | negotiated RTCP v3 (run-encoded, 0.64 MB at 200x50 + 10k history) checkpoint chunks then ready then raw output; normal 10,000-row history, no lifetime-output cutoff (see [REPLAY.md](REPLAY.md)); reattach test in `server/tests/phase1.rs`; newest-first history streaming not started |
-| C04 | CLI automation (`--json`, stable exit codes) | 2 | `rusty_mux_ctl` | not-started | |
+| C04 | CLI automation (`--json`, stable exit codes) | 2 | `rusty_mux_ctl` | in-progress | `rusty-mux-ctl`, `ctl/tests/ctl.rs` |
 | C05 | Resumable event stream | 2 | `rusty_mux_proto`, `rusty_mux_server` | in-progress | `Features::EVENT_SEQ`, `server/tests/events.rs` |
 | C06 | Per-resource (block) methods | 2 | `rusty_mux_server` | not-started | |
 | C07 | Agent / MCP integration | 2 | `rusty_mux_mcp` on `rusty_mcp_server` | not-started | |
