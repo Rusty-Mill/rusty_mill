@@ -120,9 +120,12 @@ pub struct Param {
 /// What a successful request returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Returns {
-    /// Only success: [`Message::Done`] without an id. An input request is
-    /// answered only when it fails.
+    /// Only success: [`Message::Done`] without an id.
     Nothing,
+    /// No reply on success; [`Message::Failed`] if it fails. A caller that
+    /// must know the outcome follows it with an answered request and waits
+    /// for that request's reply.
+    Unanswered,
     /// The id of the entity it created, in [`Message::Done`].
     Created(Entity),
 }
@@ -147,6 +150,15 @@ impl fmt::Debug for Method {
             .finish_non_exhaustive()
     }
 }
+
+/// Methods are equal when their names are, since names are unique.
+impl PartialEq for Method {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl Eq for Method {}
 
 impl Method {
     /// Builds the request message, numbered `req`, from named arguments.
@@ -408,7 +420,7 @@ pub static CATALOG: &[Method] = &[
                 doc: "The bytes to send.",
             },
         ],
-        returns: Returns::Nothing,
+        returns: Returns::Unanswered,
         build: |req, a| {
             Ok(Message::Input {
                 req,

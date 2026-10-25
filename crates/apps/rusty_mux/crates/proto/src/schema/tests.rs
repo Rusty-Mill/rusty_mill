@@ -84,6 +84,16 @@ fn only_create_methods_return_an_id() {
 }
 
 #[test]
+fn only_input_goes_unanswered() {
+    let unanswered: Vec<&str> = CATALOG
+        .iter()
+        .filter(|m| m.returns == Returns::Unanswered)
+        .map(|m| m.name)
+        .collect();
+    assert_eq!(unanswered, ["input"]);
+}
+
+#[test]
 fn arguments_land_in_their_fields() {
     let resize = method("resize").expect("resize");
     let args = [
