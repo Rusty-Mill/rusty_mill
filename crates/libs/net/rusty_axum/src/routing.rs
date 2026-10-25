@@ -3,7 +3,9 @@
 //! A path is static segments and `{name}` parameters (`/tasks/{id}`). When
 //! several routes match, the one whose earliest segments are static wins,
 //! so `/tasks/new` beats `/tasks/{id}`. A matched path with no handler for
-//! the method answers 405 with `Allow`; `HEAD` falls back to `GET`.
+//! the method answers 405 with `Allow`; `HEAD` falls back to `GET`. A
+//! handler routed with [`any`] takes every method its path has no handler
+//! of its own for, and [`Router::fallback`] takes every unmatched path.
 
 use std::sync::Arc;
 
@@ -21,6 +23,7 @@ use crate::BoxFuture;
 /// Cloning is cheap: routes and layers are shared.
 pub struct Router<S = ()> {
     routes: Arc<Vec<Route<S>>>,
+    fallback: Option<BoxHandler<S>>,
     layers: Arc<Vec<Arc<dyn Middleware>>>,
 }
 
@@ -28,6 +31,7 @@ impl<S> Clone for Router<S> {
     fn clone(&self) -> Self {
         Router {
             routes: self.routes.clone(),
+            fallback: self.fallback.clone(),
             layers: self.layers.clone(),
         }
     }
@@ -62,6 +66,7 @@ impl<S> Default for Router<S> {
     fn default() -> Self {
         Router {
             routes: Arc::new(Vec::new()),
+            fallback: None,
             layers: Arc::new(Vec::new()),
         }
     }
@@ -102,18 +107,34 @@ impl<S: Send + Sync + 'static> Router<S> {
         self
     }
 
-    /// Adds every route of `other`.
+    /// Answers every request whose path matches no route with `handler`,
+    /// instead of 404. Layers still run around it. A second call replaces
+    /// the first.
+    pub fn fallback<H, T>(mut self, handler: H) -> Self
+    where
+        H: Handler<T, S>,
+        T: 'static,
+    {
+        self.fallback = Some(erase(handler));
+        self
+    }
+
+    /// Adds every route of `other`, and its fallback.
     ///
     /// # Panics
     ///
-    /// As [`Router::route`], when the two routers overlap; and when `other`
-    /// has layers, which would silently apply to every route after the
-    /// merge. Merge first, then add layers.
-    pub fn merge(self, other: Router<S>) -> Self {
+    /// As [`Router::route`], when the two routers overlap; when both have a
+    /// fallback; and when `other` has layers, which would silently apply to
+    /// every route after the merge. Merge first, then add layers.
+    pub fn merge(mut self, other: Router<S>) -> Self {
         assert!(
             other.layers.is_empty(),
             "merge a router before adding its layers"
         );
+        if let Some(fallback) = other.fallback {
+            assert!(self.fallback.is_none(), "both routers have a fallback");
+            self.fallback = Some(fallback);
+        }
         other.routes.iter().fold(self, |router, route| {
             router.route(&route.path, route.methods.clone())
         })
@@ -143,6 +164,7 @@ impl<S: Send + Sync + 'static> Router<S> {
             .collect();
         Router {
             routes: Arc::new(routes),
+            fallback: self.fallback.map(|handler| bind(handler, state)),
             layers: self.layers,
         }
     }
@@ -174,7 +196,10 @@ impl Router<()> {
             return ready((StatusCode::BAD_REQUEST, "path is not valid UTF-8"));
         };
         let Some((route, params)) = self.best_match(&segments) else {
-            return ready(StatusCode::NOT_FOUND);
+            return match &self.fallback {
+                Some(fallback) => fallback(req, &()),
+                None => ready(StatusCode::NOT_FOUND),
+            };
         };
         let Some(handler) = route.methods.find(req.method()) else {
             return ready(route.methods.not_allowed());
@@ -295,14 +320,47 @@ fn specificity(pattern: &[Segment]) -> Vec<bool> {
 /// others, chained: `get(list).post(create)`.
 pub struct MethodRouter<S = ()> {
     handlers: Vec<(Method, BoxHandler<S>)>,
+    any: Option<BoxHandler<S>>,
 }
 
 impl<S> Clone for MethodRouter<S> {
     fn clone(&self) -> Self {
         MethodRouter {
             handlers: self.handlers.clone(),
+            any: self.any.clone(),
         }
     }
+}
+
+impl<S> Default for MethodRouter<S> {
+    fn default() -> Self {
+        MethodRouter {
+            handlers: Vec::new(),
+            any: None,
+        }
+    }
+}
+
+/// Routes every method to `handler`, as axum's `any`. Methods given their
+/// own handler on the same path keep it.
+pub fn any<H, T, S>(handler: H) -> MethodRouter<S>
+where
+    H: Handler<T, S>,
+    T: 'static,
+    S: Send + Sync + 'static,
+{
+    MethodRouter {
+        handlers: Vec::new(),
+        any: Some(erase(handler)),
+    }
+}
+
+/// `handler` with `state` supplied, needing `S2` instead.
+fn bind<S, S2>(handler: BoxHandler<S>, state: S) -> BoxHandler<S2>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    Arc::new(move |req, _: &S2| handler(req, &state))
 }
 
 impl<S: Send + Sync + 'static> MethodRouter<S> {
@@ -321,6 +379,10 @@ impl<S: Send + Sync + 'static> MethodRouter<S> {
     }
 
     fn merge(&mut self, other: MethodRouter<S>, path: &str) {
+        if let Some(any) = other.any {
+            assert!(self.any.is_none(), "route {path:?}: `any` has two handlers");
+            self.any = Some(any);
+        }
         for (method, handler) in other.handlers {
             assert!(
                 self.handlers.iter().all(|(m, _)| *m != method),
@@ -338,13 +400,12 @@ impl<S: Send + Sync + 'static> MethodRouter<S> {
         let handlers = self
             .handlers
             .into_iter()
-            .map(|(method, handler)| {
-                let state = state.clone();
-                let bound: BoxHandler<S2> = Arc::new(move |req, _: &S2| handler(req, &state));
-                (method, bound)
-            })
+            .map(|(method, handler)| (method, bind(handler, state.clone())))
             .collect();
-        MethodRouter { handlers }
+        MethodRouter {
+            handlers,
+            any: self.any.map(|handler| bind(handler, state)),
+        }
     }
 }
 
@@ -356,7 +417,10 @@ impl MethodRouter<()> {
                 .then(|| self.handlers.iter().find(|(m, _)| *m == Method::Get))
                 .flatten()
         };
-        exact.or_else(head_as_get).map(|(_, handler)| handler)
+        exact
+            .or_else(head_as_get)
+            .map(|(_, handler)| handler)
+            .or(self.any.as_ref())
     }
 
     fn not_allowed(&self) -> Response {
@@ -379,7 +443,7 @@ macro_rules! method_fns {
                 T: 'static,
                 S: Send + Sync + 'static,
             {
-                MethodRouter { handlers: Vec::new() }.on(Method::$method, handler)
+                MethodRouter::default().on(Method::$method, handler)
             }
         )*
         impl<S: Send + Sync + 'static> MethodRouter<S> {
