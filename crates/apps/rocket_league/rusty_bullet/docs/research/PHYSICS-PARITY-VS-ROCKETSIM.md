@@ -43,7 +43,7 @@ Not done: the audio. Digits garbled by auto-captions can only be settled by list
 | Air-control torque / damping | ✔ the three angular accelerations follow exactly from the torque constants and `CAR_TORQUE_SCALE` |
 | Dodge direction deadzone / axis snap | ✔ "≈11.5°" is the total width of a 0.1 band (2 × asin 0.1 = 11.48°) |
 | Flip input deadzone | ✔ 0.5, tested on the sum of all three axes |
-| Sleeping | ? the caption's thresholds have nothing to check against |
+| Sleeping | ✔ 40 uu/s fits; ✎ the timer is 2.0 s, not 2.5 (`probe_ball_rest_*`, board b19); 10 RPM (1.05 rad/s) fits the angular bound (at least 0.44 rad/s) but is not pinned |
 | GDC supersonic cell | ? not in the extracted slide text; source may be the spoken talk |
 
 ### Findings (no physics code was changed)
@@ -75,7 +75,7 @@ Basis: the 73 committed game captures in `tools/rb_tape_bot/fixtures/*.jsonl` (1
 
 Correction to pass 1, and to the first version of this section: the pad radii agreeing with RocketSim (208, 144, 160, 120) was not independent evidence, because RocketSim's pad constants are, by its own comment, mostly taken from the same Rocket Science video the caption column comes from. The first version of this section also claimed that RocketSim's 120 uu box would have triggered earlier than observed; that box is the retention test for a car already locked on the pad, so first pickups say nothing about it, and the claim was withdrawn.
 
-Still untested by these captures: the 6000 uu/s ball cap (the captures reach 3,541), big-pad and airborne pad pickups (the only big-looking increases are respawn boost after a demolition), pad retention (a car locked on consecutive ticks), pad height other than for cars on the ground, the ball's sleep thresholds, the suspension and jump "first N ticks" claims, and everything audio-only listed in pass 1. A slow-approach pad capture and a ball rolling to a stop would settle the last two groups and need the machine with the game.
+Still untested by these captures: big-pad and airborne pad pickups (the only big-looking increases are respawn boost after a demolition), pad retention (a car locked on consecutive ticks), pad height other than for cars on the ground, the suspension and jump "first N ticks" claims, and everything audio-only listed in pass 1. The 2026-10-24 batch (`probe_ball_fast_*`, `probe_ball_rest_*`) settled the ball cap (6000 uu/s, capped before the tick moves the ball) and the ball's sleep (FR-037, spec 0.162.0).
 
 ## 1. Constants
 
@@ -195,7 +195,7 @@ Still untested by these captures: the 6000 uu/s ball cap (the captures reach 3,5
 | Manifold capacity / breaking factor | 4 / 0.02 | 4 / 0.02 | ✅ | - | - |
 | Special ball–world manifold (averaged) | yes | yes (ADR-0038/0039) | ✅ | - | - |
 | Internal-edge utility | yes, on every contact | yes (ADR-0028) | ✅ | - | - |
-| Sleeping | ball forced asleep only at **exact zero** velocity; cars forced `ACTIVE_TAG` every tick | velocity-threshold sleep: 20 uu/s, 0.5 rad/s, 0.5 s (own placeholders) | ⚠ **repo-only mechanism, uncalibrated** — see §3 | ball stops when speed <40 uu/s for 2.5 s with spin <10 RPM; spin ≥10 RPM never stops (CC) — repo 20 uu/s, 0.5 rad/s, 0.5 s ⚠ [V1 ? unknown: RocketSim has no such rule (the ball sleeps only at exact zero velocity); the caption's 40 uu/s, 2.5 s and 10 RPM have nothing to check against; only a capture can test them] | - |
+| Sleeping | ball forced asleep only at **exact zero** velocity; cars forced `ACTIVE_TAG` every tick | velocity-threshold sleep: 40 uu/s, 1.0 rad/s, 2.0 s (Bullet's defaults at 50 uu/m) | ✅ calibrated to the game's ball (spec 0.162.0) | ball stops when speed <40 uu/s for 2.5 s with spin <10 RPM; spin ≥10 RPM never stops (CC) — repo 20 uu/s, 0.5 rad/s, 0.5 s ⚠ [V1 ? unknown: RocketSim has no such rule (the ball sleeps only at exact zero velocity); the caption's 40 uu/s, 2.5 s and 10 RPM have nothing to check against; only a capture can test them] [V2 ✔ real game, `probe_ball_rest_{10,20,40,80}`: a rolling ball under 40 uu/s is frozen 2.017 s in, every rung on the same tick; 80 uu/s rolls on; ✎ 2.5 s is wrong, it is 2.0 s; RocketSim's zero-only rule is not the game's] | - |
 | Tick rate | 15–120 Hz, `tickTime/(1/120)` scaling | 120 Hz (`TICK_SECS`); `dt` is a parameter; flip uses `TICK_120` scaling | ≈ other rates untested | 120 Hz (KB #12; CC #11, #19); #12 tested 500 Hz for post bounces [V1 ✔ GDC slides (extracted text): fixed 120 Hz, 8.33 ms; the 500 Hz test stays video-only] | 120 Hz fixed, 8.33 ms; higher tick costs more, esp. net corrections; 200 ms ping = 24 correction frames |
 
 ### Arena
@@ -226,7 +226,7 @@ Ranked by value to a Soccar verification pipeline (cheapest/most-testable first)
 ## 3. Things we have that RocketSim does not (review for removal or calibration)
 
 1. **Wall jump** (`WALL_JUMP_HORIZONTAL_SPEED = 550`). Its own doc comment says it substitutes for a missing surface-tracking orientation system. The car now has wheel rays and sticky forces (ADR-0017/0018), so that premise is stale; RocketSim has no wall-jump rule and a wall jump there is just a ground jump along the car's up. Candidate for deletion once the captures confirm.
-2. **Velocity-threshold sleeping** (20 uu/s, 0.5 rad/s, 0.5 s). Own placeholders. RocketSim forces the ball asleep only at exactly zero velocity and keeps cars active. A ball rolling at <20 uu/s for 0.5 s is frozen here but keeps moving in RocketSim — a plausible source of drift on slow balls. Candidate to match RocketSim (zero-only) and re-score.
+2. **Velocity-threshold sleeping**: resolved for the ball (spec 0.162.0). The game does freeze a rolling ball, after 2.0 s under 40 uu/s, unlike RocketSim's zero-only rule; the port uses Bullet's defaults at 50 uu/m. Cars share the thresholds unmeasured.
 3. **Mass-spring goal net** (`net.rs`, 802 lines, FR-033). Superseded by the real goal mesh in ADR-0033 (`standard_arena` no longer includes it). Check for remaining callers; if none, delete.
 4. **`BALL_RADIUS` 93.15 as the ball body radius** vs RocketSim's 91.25 sphere + Bullet margin. Intentional and capture-calibrated (ADR-0034/0036/0045), but worth keeping as an explicit named difference in the spec.
 5. **Stale doc in `arena.rs`** (`//!` block still describes analytic planes/cylinders/tori and soft nets that `standard_arena` no longer builds, ADR-0033/0037). Doc-only fix.

@@ -280,7 +280,10 @@ fn piecewise_linear(curve: &[(f32, f32)], input: f32) -> f32 {
 /// function, a same-step contact-solver impulse is clamped this same call
 /// (not deferred to next step), but a later force/impulse applied after
 /// this call within the same step (none currently exists for the ball)
-/// wouldn't be re-clamped until the next step's call.
+/// wouldn't be re-clamped until the next step's call. Also called at the
+/// start of each step, so a ball set over the caps between steps is capped
+/// before that step moves it, as the game does (`RB-PHYSICS-001-FR-061`'s
+/// amendment).
 fn clamp_ball_velocity(ball: &mut RigidBody) {
     let speed = ball.linear_velocity.length();
     if speed > BALL_MAX_SPEED {
@@ -1208,7 +1211,8 @@ impl PhysicsWorld {
     /// ball's own linear and angular speed are hard-capped
     /// (`clamp_ball_velocity`) at that same point — after contact
     /// resolution, before sleep evaluation and transform integration —
-    /// matching real RocketSim's own placement for this same clamp.
+    /// matching real RocketSim's own placement for this same clamp, and
+    /// again at the start of the step, before anything moves.
     pub fn step(&mut self, dt: f32) {
         // A car that came back last tick drops to its respawn height with its boost.
         for index in 0..self.cars.len() {
@@ -1273,6 +1277,11 @@ impl PhysicsWorld {
             })
             .collect();
 
+        // A ball set over the caps between ticks is capped before this tick
+        // moves it: the game's 6500 uu/s state set moves 5996.6 / 120 uu on
+        // its first tick, the cap followed by one tick of drag and friction
+        // (`probe_ball_fast_6500`). The end-of-tick cap below still bounds a hit.
+        clamp_ball_velocity(&mut self.ball);
         Self::apply_forces_and_integrate_velocities(&mut self.ball, self.gravity, dt);
         for (((((car, input), wheels), wall_normal), drive_state), gone) in self
             .cars
@@ -2312,6 +2321,23 @@ mod tests {
     }
 
     #[test]
+    fn a_ball_set_over_the_cap_is_capped_before_its_first_step_moves_it() {
+        // The game moves a 6500 uu/s state set 5996.6 / 120 uu on its first
+        // tick (`probe_ball_fast_6500`), not 6500 / 120.
+        let mut ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1000.0));
+        ball.linear_velocity = Vec3::new(6500.0, 0.0, 0.0);
+        let mut world = PhysicsWorld::new(ball, flat_ground());
+        let dt = 1.0 / 120.0;
+        world.step(dt);
+        let moved = world.ball.position.x;
+        assert!(
+            moved <= BALL_MAX_SPEED * dt + 1e-3,
+            "expected at most {} uu on the first tick, got {moved}",
+            BALL_MAX_SPEED * dt
+        );
+    }
+
+    #[test]
     fn a_bouncy_resting_ball_actually_settles_once_asleep() {
         // RB-PHYSICS-001-FR-037: this is the actual "bouncy resting contact
         // never settles" limitation `resting_ball_stays_at_rest`'s own
@@ -2326,7 +2352,7 @@ mod tests {
         };
         let mut world = PhysicsWorld::new(ball, ground);
         let dt = 1.0 / 60.0;
-        // SLEEP_TIME_THRESHOLD (0.5s) plus a generous margin for the
+        // SLEEP_TIME_THRESHOLD (2.0 s) plus a generous margin for the
         // per-frame gravity/restitution bounce to actually decay under the
         // sleep velocity thresholds before the timer can start counting.
         for _ in 0..300 {
@@ -2396,7 +2422,8 @@ mod tests {
         // Let the ball (already resting) go to sleep before the car exists
         // at all, so the car's own approach can't be mistaken for having
         // contributed to it.
-        for _ in 0..90 {
+        let settle_steps = (crate::body::SLEEP_TIME_THRESHOLD / dt).ceil() as usize + 30;
+        for _ in 0..settle_steps {
             world.step(dt);
         }
         assert!(
