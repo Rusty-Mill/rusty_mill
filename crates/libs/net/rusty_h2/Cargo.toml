@@ -30,4 +30,6 @@ required-features = ["rusty-tokio"]
 h2 = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true }
-tokio = { workspace = true }
+# Only for the `tokio::io` traits `h2` is written against; the oracle runs on
+# `rusty_tokio` through an adapter in `tests/interop.rs`, so no tokio runtime.
+tokio = { version = "1", default-features = false, features = ["io-util"] }
