@@ -261,11 +261,22 @@ fn tickets_of_gone_waiters_are_dropped_and_validators_queue_alone() -> Result<()
 fn claims_are_validated_at_the_boundary() -> Result<(), String> {
     let slots = slots("invalid", 1)?;
     let out = abs("/valid/out");
-    abs("/valid/sub");
     let raw = |path: String| Claim {
         write: vec![path],
         ..Claim::default()
     };
+    // `sub/../out`, spelled out: joining `..` onto a Windows verbatim path
+    // would resolve it away. Plain, not verbatim, so it keeps the component.
+    let sub = abs("/valid/sub");
+    let sub = sub.strip_prefix(r"\\?\").unwrap_or(&sub);
+    let sep = std::path::MAIN_SEPARATOR;
+    let parent_alias = format!("{sub}{sep}..{sep}out");
+    assert!(
+        Path::new(&parent_alias)
+            .components()
+            .any(|c| c == std::path::Component::ParentDir),
+        "{parent_alias}"
+    );
     #[cfg_attr(not(unix), allow(unused_mut))]
     let mut bad = vec![
         claim(Some(("", 1)), 0, &[]),
@@ -274,11 +285,7 @@ fn claims_are_validated_at_the_boundary() -> Result<(), String> {
         raw("relative".into()),
         // A parent component and a missing path both validate as absolute
         // yet do not name what they spell.
-        raw(Path::new(&abs("/valid/sub"))
-            .join("..")
-            .join("out")
-            .to_string_lossy()
-            .into_owned()),
+        raw(parent_alias.clone()),
         raw(Path::new(&out)
             .join("missing")
             .to_string_lossy()
