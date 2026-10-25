@@ -192,3 +192,33 @@ fn non_ascii_text_run_advances_its_row_stamp() {
     assert!(g.row_stamp(1).1 > before.1.1, "the written row moves");
     assert_eq!(g.row_stamp(0), before.0, "an untouched row keeps its stamp");
 }
+
+#[test]
+fn text_run_on_a_cleared_row_survives_erase_and_reuse() {
+    // A clear flags rows blank so the next clear can skip them. The text
+    // fast path must drop that flag (Line::cells_mut) or the second clear
+    // would leave its glyphs on screen.
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    let chars = |g: &Grid| -> String { g.screen[1].cells().iter().map(|c| c.ch).collect() };
+    for (col, text) in [("4", "日本é"), ("6", "ñü世")] {
+        p.advance(&mut g, b"\x1b[2J");
+        assert_eq!(chars(&g), " ".repeat(10), "the clear blanks the row");
+        let before = g.row_stamp(1);
+        p.advance(&mut g, format!("\x1b[2;{col}H{text}").as_bytes());
+        assert!(g.row_stamp(1).1 > before.1, "the written row moves");
+        assert_eq!(
+            chars(&g).replace(' ', ""),
+            text.replace(' ', ""),
+            "glyphs land"
+        );
+    }
+    let before = g.row_stamp(1);
+    p.advance(&mut g, b"\x1b[2J");
+    assert_eq!(
+        chars(&g),
+        " ".repeat(10),
+        "a clear after reuse still erases"
+    );
+    assert!(g.row_stamp(1).1 > before.1, "and stamps the row");
+}
