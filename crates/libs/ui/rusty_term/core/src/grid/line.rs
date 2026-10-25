@@ -7,6 +7,7 @@
 //! which drops the flag: a missed write site is a compile error, not stale text.
 
 use super::{Cell, LineAttr};
+use crate::checkpoint::{Reader, Result, Wire, Writer};
 
 /// One row of cells, on the live screen or in scrollback. The same value moves
 /// from the screen into history when it scrolls off the top, and an evicted
@@ -99,5 +100,22 @@ impl Line {
             "row flagged blank holds a written cell"
         );
         skip
+    }
+}
+
+/// Checkpoint wire form: cells, wrap, attr. The blank flag is a cache and is
+/// not written; a restored row starts unflagged, which is always safe.
+impl Wire for Line {
+    fn write(&self, w: &mut Writer) -> Result<()> {
+        self.cells.write(w)?;
+        self.wrapped.write(w)?;
+        self.attr.write(w)
+    }
+
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        let cells = Wire::read(r)?;
+        let wrapped = Wire::read(r)?;
+        let attr = Wire::read(r)?;
+        Ok(Line::new(cells, wrapped, attr))
     }
 }

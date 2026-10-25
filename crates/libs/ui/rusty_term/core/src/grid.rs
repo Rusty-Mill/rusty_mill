@@ -5241,7 +5241,6 @@ impl crate::checkpoint::Wire for Grid {
         Ok(grid)
     }
 }
-crate::checkpoint::fields!(Line, [cells, wrapped, attr]);
 crate::checkpoint::fields!(SavedScreen, [screen, cursor, saved_cursor, mode]);
 crate::checkpoint::fields!(MouseModes, [base, extended]);
 crate::checkpoint::fields!(
@@ -5291,8 +5290,8 @@ impl Grid {
         }
         let primary = self.primary.iter().flat_map(|p| p.screen.iter());
         for line in self.screen.iter().chain(primary).chain(&self.scrollback) {
-            if line.cells.len() > 4096
-                || line.cells.iter().any(|c| {
+            if line.cells().len() > 4096
+                || line.cells().iter().any(|c| {
                     usize::from(c.cluster) > self.clusters.len()
                         || usize::from(c.link) > self.links.len()
                 })
@@ -5300,11 +5299,11 @@ impl Grid {
                 return Err(Error("cell bounds"));
             }
         }
-        if self.screen.iter().any(|l| l.cells.len() != self.cols)
+        if self.screen.iter().any(|l| l.cells().len() != self.cols)
             || self
                 .primary
                 .iter()
-                .any(|p| p.screen.iter().any(|l| l.cells.len() != self.cols))
+                .any(|p| p.screen.iter().any(|l| l.cells().len() != self.cols))
         {
             return Err(Error("screen width"));
         }
