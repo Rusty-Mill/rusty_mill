@@ -22,11 +22,22 @@
 //! way a `Mutex` waiter re-checks the shared `locked` bit -- so there's
 //! no path by which two different decisions could end up made for the
 //! same waiter.
+//!
+//! A dropped `acquire` future (a `timeout`, a losing `select!` branch)
+//! settles its claim: still queued, it leaves the queue and lets the
+//! waiters behind it be granted; already granted, it hands the permits
+//! back. Neither strands the queue nor leaks permits.
+//!
+//! A waker's clone or drop may run executor code that re-enters the
+//! semaphore, so neither ever happens with `state` held: a waiter's
+//! clone is made before it locks, a grant moves the queued waker out,
+//! and wakers removed from or replaced in the queue are dropped after
+//! unlocking.
 
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdGuard, PoisonError};
 use std::task::{Poll, Waker};
 
 /// A queued waiter's outcome, decided at most once by whichever event
@@ -47,6 +58,107 @@ struct State {
     permits: usize,
     closed: bool,
     waiters: VecDeque<Waiter>,
+}
+
+impl State {
+    /// Grants queued waiters, in FIFO order, as many as the permit count
+    /// allows -- stopping at the first one that doesn't fit, since
+    /// granting out of order would break the fairness this module's
+    /// docs describe. Returns the wakers to call once unlocked.
+    fn grant(&mut self) -> Vec<Waker> {
+        let mut woken = Vec::new();
+        while self
+            .waiters
+            .front()
+            .is_some_and(|w| w.needed <= self.permits)
+        {
+            let Some(waiter) = self.waiters.pop_front() else {
+                break;
+            };
+            self.permits -= waiter.needed;
+            waiter.outcome.store(WAITER_GRANTED, Ordering::Release);
+            woken.push(waiter.waker);
+        }
+        woken
+    }
+
+    /// Whether the waiter owning `outcome` already wakes `waker`'s task.
+    fn wakes(&self, outcome: &Arc<AtomicU8>, waker: &Waker) -> bool {
+        self.waiters
+            .iter()
+            .any(|w| Arc::ptr_eq(&w.outcome, outcome) && w.waker.will_wake(waker))
+    }
+
+    /// Stores `waker` for the waiter owning `outcome`. Returns the waker
+    /// it displaces (or `waker`, if that waiter is gone), for the caller
+    /// to drop once unlocked.
+    fn rewait(&mut self, outcome: &Arc<AtomicU8>, waker: Waker) -> Waker {
+        match self
+            .waiters
+            .iter_mut()
+            .find(|w| Arc::ptr_eq(&w.outcome, outcome))
+        {
+            Some(w) => std::mem::replace(&mut w.waker, waker),
+            None => waker,
+        }
+    }
+
+    /// Removes the waiter owning `outcome`, for the caller to drop once
+    /// unlocked.
+    fn dequeue(&mut self, outcome: &Arc<AtomicU8>) -> Option<Waiter> {
+        let pos = self
+            .waiters
+            .iter()
+            .position(|w| Arc::ptr_eq(&w.outcome, outcome))?;
+        self.waiters.remove(pos)
+    }
+}
+
+/// No code that can panic runs while `state` is held, so a poisoned
+/// lock still guards consistent state.
+fn lock(state: &StdMutex<State>) -> StdGuard<'_, State> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn wake_all(wakers: Vec<Waker>) {
+    for waker in wakers {
+        waker.wake();
+    }
+}
+
+/// A queued `acquire`'s claim, settled on drop if its future never
+/// observed the outcome: a pending waiter leaves the queue, and a
+/// granted one hands its permits back. Outcomes are only ever set with
+/// `state` held, so reading one under it is final.
+struct Claim<'a> {
+    state: &'a StdMutex<State>,
+    outcome: Arc<AtomicU8>,
+    needed: usize,
+    queued: bool,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        if !self.queued {
+            return;
+        }
+        let mut state = lock(self.state);
+        let mut removed = None;
+        let woken = match self.outcome.load(Ordering::Acquire) {
+            WAITER_GRANTED => {
+                state.permits += self.needed;
+                state.grant()
+            }
+            WAITER_PENDING => {
+                removed = state.dequeue(&self.outcome);
+                state.grant()
+            }
+            _ => Vec::new(),
+        };
+        drop(state);
+        drop(removed);
+        wake_all(woken);
+    }
 }
 
 /// Error returned by [`Semaphore::acquire`]/[`acquire_many`](Semaphore::acquire_many)
@@ -132,7 +244,7 @@ impl Semaphore {
     }
 
     pub fn available_permits(&self) -> usize {
-        self.state.lock().unwrap().permits
+        lock(&self.state).permits
     }
 
     /// Permanently removes up to `n` permits, without ever needing to
@@ -142,7 +254,7 @@ impl Semaphore {
     /// were actually forgotten, which is `n` unless fewer than `n` were
     /// available, in which case it's however many were.
     pub fn forget_permits(&self, n: usize) -> usize {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = lock(&self.state);
         let forgotten = n.min(guard.permits);
         guard.permits -= forgotten;
         forgotten
@@ -166,22 +278,22 @@ impl Semaphore {
     /// by anyone else. Idempotent: closing an already-closed semaphore
     /// does nothing.
     pub fn close(&self) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = lock(&self.state);
         if guard.closed {
             return;
         }
         guard.closed = true;
         let waiters = std::mem::take(&mut guard.waiters);
-        drop(guard);
-        for waiter in waiters {
+        for waiter in &waiters {
             waiter.outcome.store(WAITER_CLOSED, Ordering::Release);
-            waiter.waker.wake();
         }
+        drop(guard);
+        wake_all(waiters.into_iter().map(|w| w.waker).collect());
     }
 
     /// Whether [`close`](Self::close) has been called.
     pub fn is_closed(&self) -> bool {
-        self.state.lock().unwrap().closed
+        lock(&self.state).closed
     }
 
     pub async fn acquire(&self) -> Result<SemaphorePermit<'_>, AcquireError> {
@@ -206,7 +318,7 @@ impl Semaphore {
 
     pub fn try_acquire_many(&self, n: u32) -> Result<SemaphorePermit<'_>, TryAcquireError> {
         let needed = n as usize;
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = lock(&self.state);
         if guard.closed {
             return Err(TryAcquireError::Closed);
         }
@@ -250,7 +362,7 @@ impl Semaphore {
         n: u32,
     ) -> Result<OwnedSemaphorePermit, TryAcquireError> {
         let needed = n as usize;
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = lock(&self.state);
         if guard.closed {
             return Err(TryAcquireError::Closed);
         }
@@ -275,16 +387,38 @@ impl Semaphore {
     /// before that happens.
     async fn acquire_permits(&self, needed: usize) -> Result<(), AcquireError> {
         assert!(needed > 0, "must acquire at least one permit");
-        let outcome = Arc::new(AtomicU8::new(WAITER_PENDING));
-        let mut registered = false;
+        let mut claim = Claim {
+            state: &self.state,
+            outcome: Arc::new(AtomicU8::new(WAITER_PENDING)),
+            needed,
+            queued: false,
+        };
         std::future::poll_fn(|cx| {
-            match outcome.load(Ordering::Acquire) {
-                WAITER_GRANTED => return Poll::Ready(Ok(())),
-                WAITER_CLOSED => return Poll::Ready(Err(AcquireError(()))),
-                _ => {}
-            }
-            let mut guard = self.state.lock().unwrap();
-            if !registered {
+            // A clone made on a pass through the loop that had to store
+            // one; see the module docs. Dropped after `guard` on return.
+            let mut fresh: Option<Waker> = None;
+            loop {
+                let mut guard = lock(&self.state);
+                if claim.queued {
+                    let result = match claim.outcome.load(Ordering::Acquire) {
+                        WAITER_GRANTED => Ok(()),
+                        WAITER_CLOSED => Err(AcquireError(())),
+                        _ if guard.wakes(&claim.outcome, cx.waker()) => return Poll::Pending,
+                        _ => {
+                            let Some(waker) = fresh.take() else {
+                                drop(guard);
+                                fresh = Some(cx.waker().clone());
+                                continue;
+                            };
+                            let displaced = guard.rewait(&claim.outcome, waker);
+                            drop(guard);
+                            drop(displaced);
+                            return Poll::Pending;
+                        }
+                    };
+                    claim.queued = false;
+                    return Poll::Ready(result);
+                }
                 if guard.closed {
                     return Poll::Ready(Err(AcquireError(())));
                 }
@@ -292,40 +426,31 @@ impl Semaphore {
                     guard.permits -= needed;
                     return Poll::Ready(Ok(()));
                 }
+                let Some(waker) = fresh.take() else {
+                    drop(guard);
+                    fresh = Some(cx.waker().clone());
+                    continue;
+                };
                 guard.waiters.push_back(Waiter {
                     needed,
-                    outcome: outcome.clone(),
-                    waker: cx.waker().clone(),
+                    outcome: claim.outcome.clone(),
+                    waker,
                 });
-                registered = true;
+                claim.queued = true;
+                return Poll::Pending;
             }
-            Poll::Pending
         })
         .await
     }
 
     /// Gives `n` permits back (a guard's `Drop`, or [`add_permits`]),
-    /// then grants as many queued waiters, in FIFO order, as the
-    /// resulting permit count allows -- stopping at the first one that
-    /// doesn't fit, since granting out of order would break the
-    /// fairness this module's docs describe.
+    /// then grants queued waiters (see [`State::grant`]).
     fn release(state: &StdMutex<State>, n: usize) {
-        let mut guard = state.lock().unwrap();
+        let mut guard = lock(state);
         guard.permits += n;
-        let mut woken = Vec::new();
-        while let Some(front) = guard.waiters.front() {
-            if front.needed > guard.permits {
-                break;
-            }
-            let waiter = guard.waiters.pop_front().unwrap();
-            guard.permits -= waiter.needed;
-            waiter.outcome.store(WAITER_GRANTED, Ordering::Release);
-            woken.push(waiter.waker);
-        }
+        let woken = guard.grant();
         drop(guard);
-        for waker in woken {
-            waker.wake();
-        }
+        wake_all(woken);
     }
 }
 
