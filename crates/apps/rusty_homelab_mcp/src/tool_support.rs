@@ -5,7 +5,7 @@
 //! source of truth for both parsing and the advertised schema.
 //!
 //! The server's handlers block; each call drives the tool's async method on
-//! the tokio runtime it was registered with, from a thread that is not one of
+//! the runtime it was registered with, from a thread that is not one of
 //! that runtime's workers (the HTTP and stdio transports use their own).
 
 use std::future::Future;
@@ -13,10 +13,10 @@ use std::future::Future;
 use rusty_mcp_server::ServerBuilder;
 use rusty_mcp_server::json::Value as WireValue;
 use rusty_mcp_server::proto::{CallToolParams, CallToolResult, ContentBlock, ErrorCode, Tool};
+use rusty_tokio::runtime::Handle;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::runtime::Handle;
 
 use crate::server::HomelabServer;
 

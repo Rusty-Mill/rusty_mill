@@ -38,6 +38,23 @@ impl<T> Mutex<T> {
         }
     }
 
+    /// Identical to [`new`](Self::new), but usable in a `const` context
+    /// -- `static LOCK: Mutex<Vec<u8>> = Mutex::const_new(Vec::new());`
+    /// -- the same way [`Notify::const_new`](super::Notify::const_new)
+    /// is. Every field's constructor (`std::sync::Mutex::new`,
+    /// `VecDeque::new`, `UnsafeCell::new`) is already a `const fn`, so
+    /// there's no lazy initialization to hide; `new` stays a plain `fn`
+    /// only to match tokio's signatures exactly.
+    pub const fn const_new(value: T) -> Self {
+        Mutex {
+            state: StdMutex::new(State {
+                locked: false,
+                waiters: VecDeque::new(),
+            }),
+            data: UnsafeCell::new(value),
+        }
+    }
+
     async fn acquire(&self) {
         std::future::poll_fn(|cx| {
             let mut guard = self.state.lock().unwrap();
@@ -124,6 +141,20 @@ impl<T> Mutex<T> {
 
 pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
+}
+
+/// As tokio's: a `Mutex` around `value`.
+impl<T> From<T> for Mutex<T> {
+    fn from(value: T) -> Self {
+        Mutex::new(value)
+    }
+}
+
+/// As tokio's: a `Mutex` around `T::default()`.
+impl<T: Default> Default for Mutex<T> {
+    fn default() -> Self {
+        Mutex::new(T::default())
+    }
 }
 
 impl<T> Deref for MutexGuard<'_, T> {

@@ -31,9 +31,9 @@ on:
   # post-merge run would repeat it (ADR-0009). The daily sweep below replaces
   # it as the full check of `main` and the writer of `main`'s caches.
   #
-  # Platforms (ci_plan.py `platform_outputs`): a PR runs Linux only; the queue
-  # runs Windows and macOS, and Linux too unless a green PR run already tested
-  # the identical tree on the same parent. Each tree is tested once per OS.
+  # Platforms (ci_plan.py `platform_outputs`): a PR runs Linux only, plus
+  # Windows clippy; the queue runs Windows and macOS, and Linux too unless a
+  # green PR run already tested the identical tree on the same parent.
   pull_request:
   # The merge queue (ADR-0009) validates each queued entry on a temporary
   # branch; `required-gate` must run here or the queue waits forever for a
@@ -46,6 +46,7 @@ on:
   workflow_dispatch:
   # Daily full-workspace sweep: catches drift that scoped runs cannot see
   # (ADR-0009) and refreshes the `main` caches that PR runs restore.
+  # nightly-alert.yml files an issue when it fails.
   # `ci_plan.py` treats any event other than push, PR and merge_group as full.
   schedule:
     - cron: "17 3 * * *"
@@ -228,9 +229,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: dependency-policy
           cache-targets: false
       - run: cargo metadata --format-version=1 --all-features > /tmp/metadata.json
@@ -254,7 +255,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-deny
       - run: cargo deny --workspace check
@@ -272,7 +273,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-shear
       - run: cargo shear
@@ -309,6 +310,7 @@ jobs:
       windows: ${{ steps.platforms.outputs.windows }}
       macos: ${{ steps.platforms.outputs.macos }}
       rust_os: ${{ steps.platforms.outputs.rust_os }}
+      clippy_os: ${{ steps.platforms.outputs.clippy_os }}
       rand_os: ${{ steps.platforms.outputs.rand_os }}
     # `actions: read` lets a merge-queue run find the PR run's tested-tree record.
     permissions:
@@ -324,9 +326,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: plan
           cache-targets: false
 
@@ -483,7 +485,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(needs.plan.outputs.rust_os) }}
+        os: ${{ fromJSON(needs.plan.outputs.clippy_os) }}
         scope: ${{ fromJson(needs.plan.outputs.components) }}
     runs-on: ${{ matrix.os }}
     steps:
@@ -492,7 +494,7 @@ jobs:
         timeout-minutes: 15
         with:
           components: clippy
-          cache-shared-key: clippy-${{ matrix.scope.component }}-${{ matrix.os }}
+          cache-shared-key: clippy-${{ matrix.os }}
 
       # rusty_journal is built on io_uring, a Linux-only kernel interface --
       # excluded on windows-latest rather than making its internals
@@ -566,7 +568,7 @@ jobs:
       - uses: ./.github/actions/setup-build-env
         timeout-minutes: 15
         with:
-          cache-shared-key: test-${{ matrix.scope.component }}-${{ matrix.os }}
+          cache-shared-key: test-${{ matrix.os }}
 
       - uses: ./.github/actions/select-packages
         id: scope
@@ -600,7 +602,7 @@ jobs:
 
       - name: Install cargo-nextest
         if: steps.scope.outputs.args != ''
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: nextest
 
@@ -817,9 +819,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: rusty-term-bench
       - name: Install valgrind
         run: |
@@ -899,9 +901,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: rusty-tick-e2e
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -949,9 +951,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: rusty-agui-conformance
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -1054,9 +1056,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: rusty-fair-play-e2e
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -1123,9 +1125,9 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: x86_64-pc-windows-gnu
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: win32-cross
       - name: Install mingw-w64
         run: sudo apt-get update && sudo apt-get install -y mingw-w64
@@ -1160,9 +1162,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.os == 'ubuntu-latest' && 'aarch64-unknown-linux-gnu,riscv64gc-unknown-linux-gnu' || '' }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: rand-platforms-${{ matrix.os }}
       - name: cargo test -p rusty_rand (macOS)
         if: matrix.os == 'macos-latest'
@@ -1215,9 +1217,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: multimodal-db-feature-sets
       - name: cargo clippy -p rusty_multimodal_db (default features)
         run: cargo clippy -p rusty_multimodal_db --all-targets -- -D warnings
@@ -1272,9 +1274,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # 1.89.0
         with:
           toolchain: "1.89.0"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: multimodal-db-msrv
       - name: cargo check on the declared rust-version
         run: cargo check -p rusty_multimodal_db --all-features --all-targets
@@ -1333,9 +1335,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: rusty-config-no-std
       - name: cargo check -p rusty_config --no-default-features
         run: cargo check -p rusty_config --no-default-features --all-targets
@@ -1366,9 +1368,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: rusty-tls-engine-native
       # `ring` must not be a direct dependency of this build. If a later change
       # makes `native-crypto` imply `handrolled-engine` (or adds `ring` some
@@ -1472,6 +1474,19 @@ jobs:
           bash .github/scripts/limbo_differential.sh
           cargo test -p rusty_tls --features native-crypto
           --test handrolled_limbo -- --ignored --nocapture --color never
+      # Tier 1 item 1 on the native backend (ADR-0002 Amendment 2): the same live
+      # check as the ring job, against the named consumer's hosts, with the
+      # rustls differential. The 10 consecutive scheduled runs are counted here.
+      - name: live internet (non-blocking)
+        continue-on-error: true
+        shell: bash
+        env:
+          LIVE_BACKEND: native
+        # Through the same tested script as the ring job; see its comment.
+        run: >-
+          bash .github/scripts/live_internet_check.sh
+          cargo test -p rusty_tls --features native-crypto
+          --test handrolled_live -- --ignored --nocapture --color never
 
   # The hand-rolled TLS engine (rusty_tls#25) compiles only with the cargo
   # feature `handrolled-engine` AND `--cfg rusty_tls_handrolled`
@@ -1501,9 +1516,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: rusty-tls-engine
       - name: cargo clippy -p rusty_tls --features handrolled-engine
         run: cargo clippy -p rusty_tls --all-targets --features handrolled-engine -- -D warnings
@@ -1618,6 +1633,8 @@ jobs:
       - name: live internet (non-blocking)
         continue-on-error: true
         shell: bash
+        env:
+          LIVE_BACKEND: ring
         # The script always prints and summarises the output, even when cargo
         # fails (a bare command substitution under `set -e` would lose it), and
         # fails the step on a failure or a zero-test run. It is tested offline
@@ -1662,12 +1679,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.FUZZ_TOOLCHAIN }}
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-fuzz@0.13.2
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: rusty-tls-fuzz
           workspaces: crates/libs/net/rusty_tls/fuzz
       - name: fuzz smoke (30 s per target)
@@ -1704,9 +1721,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: rleval-viewer-gl-smoke
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -1715,11 +1732,22 @@ jobs:
           cache-dependency-path: crates/apps/rocket_league/crates/replay-viewer/tests/package-lock.json
       - name: Generate offline viewer
         run: cargo run -q -p replay-viewer -- crates/apps/rocket_league/rleval/assets/replays/42f2.replay --offline --hz 15 --html "$RUNNER_TEMP/viewer.html"
+      - name: Input strip helpers
+        run: node crates/apps/rocket_league/crates/replay-viewer/tests/input_strip.mjs
       - name: Install puppeteer
         working-directory: crates/apps/rocket_league/crates/replay-viewer/tests
         run: npm ci --no-audit --no-fund
       - name: Headless-GL smoke test
         run: node crates/apps/rocket_league/crates/replay-viewer/tests/gl_smoke.mjs "$RUNNER_TEMP/viewer.html"
+      # ADR-0085: the same page built from a capture, with the port's run as ghosts.
+      - name: Generate capture viewer with a sim run
+        env:
+          CAPTURE: crates/apps/rocket_league/crates/rb_capture_ingest/fixtures/human/clean-dodge.capture.jsonl
+        run: |
+          cargo run -q -p rb_verify_cli --bin rb-verify -- --self "$CAPTURE" --write-candidate "$RUNNER_TEMP/candidate.jsonl"
+          cargo run -q -p replay-viewer -- "$CAPTURE" --sim "$RUNNER_TEMP/candidate.jsonl" --offline --html "$RUNNER_TEMP/capture.html"
+      - name: Headless-GL smoke test (capture)
+        run: node crates/apps/rocket_league/crates/replay-viewer/tests/gl_smoke.mjs "$RUNNER_TEMP/capture.html"
 
   # Every other Rust job passes --all-features, which hides a broken default or
   # single-feature build of rleval-app: its default build is the token-only
@@ -1740,9 +1768,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: rleval-app-feature-sets
       - name: cargo clippy -p rleval-app (default features)
         run: cargo clippy -p rleval-app --all-targets -- -D warnings
@@ -1819,9 +1847,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: remind-me
       - name: cargo build
         run: cargo build --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub
@@ -1870,9 +1898,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: remind-me-feature-${{ matrix.feature }}
       - name: Install system packages this feature needs
         if: matrix.apt
@@ -1903,9 +1931,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: remind-me-combined
       - name: cargo build --features ann,ocr,rerank,local-embed,pdf
         run: cargo build --locked -p remind_me_core --features ann,ocr,rerank,local-embed,pdf
@@ -1950,9 +1978,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: remind-me-hub
       - name: cargo clippy -p remind_me_hub --no-default-features
         run: cargo clippy --locked -p remind_me_hub --no-default-features --all-targets -- -D warnings
@@ -1990,9 +2018,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: remind-me-legacy-import
       - name: Lint the recovery feature and binaries
         run: cargo clippy --locked -p remind_me_hub --no-default-features --features postgres-import --all-targets -- -D warnings
@@ -2022,9 +2050,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: remind-me-windows
       - name: cargo build
         run: cargo build --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub
@@ -2061,9 +2089,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: crypto-constant-time
       - name: Install valgrind
         run: |
@@ -2114,9 +2142,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: orch-bbp-acceptance
       - name: Build real host and Orch binaries and acceptance tests
         run: |

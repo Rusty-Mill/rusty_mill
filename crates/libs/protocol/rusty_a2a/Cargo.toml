@@ -44,11 +44,12 @@ ed25519-dalek = { version = "3", optional = true }
 getrandom = { version = "0.4", optional = true }
 signature = { version = "3", optional = true }
 
-# grpc feature: the messages are `rusty_prost` (see `src/pb`); `tonic` is only the transport.
-tonic = { version = "0.14", optional = true }
+# grpc feature: the messages are `rusty_prost` (see `src/pb`) and the transport is first-party:
+# `rusty_tonic` over `rusty_hyper`, on `rusty_tokio`. `src/grpc_bridge` joins it to `tokio`.
 rusty_prost = { workspace = true, optional = true }
-# The codec between `rusty_prost` messages and `tonic`.
-rusty_tonic = { workspace = true, optional = true, features = ["tonic-codec"] }
+rusty_tonic = { workspace = true, optional = true, features = ["rusty-tokio"] }
+rusty_hyper = { path = "../../net/rusty_hyper", optional = true, features = ["rusty-tokio"] }
+rusty_tokio = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -75,9 +76,10 @@ server = [
 ]
 signing = ["dep:p256", "dep:ed25519-dalek", "dep:getrandom", "dep:signature"]
 grpc = [
-  "dep:tonic",
   "dep:rusty_prost",
   "dep:rusty_tonic",
+  "dep:rusty_hyper",
+  "dep:rusty_tokio",
   "dep:tokio",
   "dep:futures-core",
   "dep:futures-util",
@@ -87,6 +89,17 @@ full = ["client", "server", "signing", "grpc"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# `tonic` is the independent oracle for the first-party gRPC stack, in tests only: a `tonic`-shaped
+# client and server in `tests/common/tonic_oracle.rs`, on the shared codec.
+tonic = "0.14"
+rusty_tonic = { workspace = true, features = ["rusty-tokio", "tonic-codec"] }
+# For `tests/grpc_client_transport.rs`: servers built from the first-party stack, with TLS.
+rusty_tokio = { workspace = true }
+rusty_hyper = { path = "../../net/rusty_hyper", features = ["rusty-tokio"] }
+rusty_h2 = { path = "../../net/rusty_h2", features = ["rusty-tokio"] }
+rusty_tls = { workspace = true, features = ["rusty-tokio"] }
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 
 [[example]]
 name = "echo_server"
@@ -162,6 +175,26 @@ required-features = ["grpc", "server"]
 name = "rest_client"
 path = "tests/rest_client.rs"
 required-features = ["client", "server"]
+
+[[test]]
+name = "grpc_server_semantics"
+path = "tests/grpc_server_semantics.rs"
+required-features = ["server", "grpc"]
+
+[[test]]
+name = "grpc_server_transport"
+path = "tests/grpc_server_transport.rs"
+required-features = ["server", "grpc"]
+
+[[test]]
+name = "grpc_client_tonic_oracle"
+path = "tests/grpc_client_tonic_oracle.rs"
+required-features = ["client", "grpc"]
+
+[[test]]
+name = "grpc_client_transport"
+path = "tests/grpc_client_transport.rs"
+required-features = ["client", "grpc"]
 
 [[test]]
 name = "grpc_client"

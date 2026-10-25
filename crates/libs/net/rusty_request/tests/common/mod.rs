@@ -62,8 +62,9 @@ pub fn start_test_server<F>(handler: F) -> TestServer
 where
     F: Fn(&TestRequest) -> Vec<u8> + Send + Sync + 'static,
 {
-    let listener =
-        TcpListener::bind("127.0.0.1:0".parse().unwrap()).expect("failed to bind test server");
+    let std_listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind test server");
+    let listener = TcpListener::from_std(std_listener).expect("failed to register");
     let addr = listener.local_addr().expect("failed to read local_addr");
     let handler = Arc::new(handler);
     let connections = Arc::new(AtomicUsize::new(0));
@@ -598,8 +599,9 @@ fn read_request_sync<S: std::io::Read>(stream: &mut S) -> std::io::Result<TestRe
 /// until either side closes -- opaque to whatever protocol (TLS or
 /// otherwise) runs inside the tunnel, exactly like a real forward proxy.
 pub fn start_connect_proxy() -> TestServer {
-    let listener =
-        TcpListener::bind("127.0.0.1:0".parse().unwrap()).expect("failed to bind proxy server");
+    let std_listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind proxy server");
+    let listener = TcpListener::from_std(std_listener).expect("failed to register");
     let addr = listener.local_addr().expect("failed to read local_addr");
     let connections = Arc::new(AtomicUsize::new(0));
     let connections_for_task = connections.clone();

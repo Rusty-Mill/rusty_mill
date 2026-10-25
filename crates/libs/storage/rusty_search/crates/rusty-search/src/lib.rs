@@ -7,7 +7,7 @@
 //!
 //! ```
 //! # #[cfg(feature = "memory")]
-//! # #[tokio::main]
+//! # #[rusty_tokio::main]
 //! # async fn main() -> rusty_search::Result<()> {
 //! use std::sync::Arc;
 //! use rusty_search::{Document, Query, Schema, SearchBackend};

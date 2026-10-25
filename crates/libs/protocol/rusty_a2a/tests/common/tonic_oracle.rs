@@ -1,8 +1,10 @@
-//! `A2AService` on `tonic`, by hand: a codec that reads and writes the [`super`] messages with
-//! `rusty_prost`, the server trait and service that routes the eleven RPCs, and the client.
-//! The shapes follow what `tonic-prost-build` generated, so callers read the same.
+//! A `tonic`-shaped `A2AService` client and server, for tests only: the independent oracle that
+//! the first-party gRPC stack (`rusty_tonic`) is checked against, in both directions. It is what
+//! `tonic-prost-build` would generate, written out on `rusty_prost` messages and the shared
+//! `tonic` codec. The library no longer contains it; `tonic` is a dev-dependency for this.
+#![allow(dead_code, clippy::unwrap_used, missing_docs)]
 
-use rusty_tonic::tonic_codec::WireCodec;
+pub use rusty_a2a::pb::*;
 
 /// The service's name in a request path.
 const SERVICE: &str = "lf.a2a.v1.A2AService";
@@ -20,8 +22,9 @@ pub mod a2a_service_server {
     use tonic::server::{Grpc, ServerStreamingService, UnaryService};
     use tonic::{async_trait, Request, Response, Status};
 
-    use super::super::*;
-    use super::{WireCodec, SERVICE};
+    use super::SERVICE;
+    use rusty_a2a::pb::*;
+    use rusty_tonic::tonic_codec::WireCodec;
 
     type Reply<T> = Result<Response<T>, Status>;
     type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -30,7 +33,10 @@ pub mod a2a_service_server {
     #[async_trait]
     pub trait A2aService: Send + Sync + 'static {
         /// `SendMessage`.
-        async fn send_message(&self, request: Request<SendMessageRequest>) -> Reply<SendMessageResponse>;
+        async fn send_message(&self, request: Request<SendMessageRequest>) -> Reply<SendMessageResponse> {
+            let _ = request;
+            Err(Status::unimplemented("not implemented by this oracle server"))
+        }
 
         /// The stream of `SendStreamingMessage`.
         type SendStreamingMessageStream: futures_core::Stream<Item = Result<StreamResponse, Status>>
@@ -41,16 +47,28 @@ pub mod a2a_service_server {
         async fn send_streaming_message(
             &self,
             request: Request<SendMessageRequest>,
-        ) -> Reply<Self::SendStreamingMessageStream>;
+        ) -> Reply<Self::SendStreamingMessageStream> {
+            let _ = request;
+            Err(Status::unimplemented("not implemented by this oracle server"))
+        }
 
         /// `GetTask`.
-        async fn get_task(&self, request: Request<GetTaskRequest>) -> Reply<Task>;
+        async fn get_task(&self, request: Request<GetTaskRequest>) -> Reply<Task> {
+            let _ = request;
+            Err(Status::unimplemented("not implemented by this oracle server"))
+        }
 
         /// `ListTasks`.
-        async fn list_tasks(&self, request: Request<ListTasksRequest>) -> Reply<ListTasksResponse>;
+        async fn list_tasks(&self, request: Request<ListTasksRequest>) -> Reply<ListTasksResponse> {
+            let _ = request;
+            Err(Status::unimplemented("not implemented by this oracle server"))
+        }
 
         /// `CancelTask`.
-        async fn cancel_task(&self, request: Request<CancelTaskRequest>) -> Reply<Task>;
+        async fn cancel_task(&self, request: Request<CancelTaskRequest>) -> Reply<Task> {
+            let _ = request;
+            Err(Status::unimplemented("not implemented by this oracle server"))
+        }
 
         /// The stream of `SubscribeToTask`.
         type SubscribeToTaskStream: futures_core::Stream<Item = Result<StreamResponse, Status>>
@@ -61,37 +79,55 @@ pub mod a2a_service_server {
         async fn subscribe_to_task(
             &self,
             request: Request<SubscribeToTaskRequest>,
-        ) -> Reply<Self::SubscribeToTaskStream>;
+        ) -> Reply<Self::SubscribeToTaskStream> {
+            let _ = request;
+            Err(Status::unimplemented("not implemented by this oracle server"))
+        }
 
         /// `CreateTaskPushNotificationConfig`.
         async fn create_task_push_notification_config(
             &self,
             request: Request<TaskPushNotificationConfig>,
-        ) -> Reply<TaskPushNotificationConfig>;
+        ) -> Reply<TaskPushNotificationConfig> {
+            let _ = request;
+            Err(Status::unimplemented("not implemented by this oracle server"))
+        }
 
         /// `GetTaskPushNotificationConfig`.
         async fn get_task_push_notification_config(
             &self,
             request: Request<GetTaskPushNotificationConfigRequest>,
-        ) -> Reply<TaskPushNotificationConfig>;
+        ) -> Reply<TaskPushNotificationConfig> {
+            let _ = request;
+            Err(Status::unimplemented("not implemented by this oracle server"))
+        }
 
         /// `ListTaskPushNotificationConfigs`.
         async fn list_task_push_notification_configs(
             &self,
             request: Request<ListTaskPushNotificationConfigsRequest>,
-        ) -> Reply<ListTaskPushNotificationConfigsResponse>;
+        ) -> Reply<ListTaskPushNotificationConfigsResponse> {
+            let _ = request;
+            Err(Status::unimplemented("not implemented by this oracle server"))
+        }
 
         /// `GetExtendedAgentCard`.
         async fn get_extended_agent_card(
             &self,
             request: Request<GetExtendedAgentCardRequest>,
-        ) -> Reply<AgentCard>;
+        ) -> Reply<AgentCard> {
+            let _ = request;
+            Err(Status::unimplemented("not implemented by this oracle server"))
+        }
 
         /// `DeleteTaskPushNotificationConfig`.
         async fn delete_task_push_notification_config(
             &self,
             request: Request<DeleteTaskPushNotificationConfigRequest>,
-        ) -> Reply<Empty>;
+        ) -> Reply<Empty> {
+            let _ = request;
+            Err(Status::unimplemented("not implemented by this oracle server"))
+        }
     }
 
     /// Routes `A2AService` calls to a [`A2aService`].
@@ -261,8 +297,9 @@ pub mod a2a_service_client {
     use tonic::codegen::{http, Body, Bytes, InterceptedService, StdError};
     use tonic::{IntoRequest, Response, Status};
 
-    use super::super::*;
-    use super::{WireCodec, SERVICE};
+    use super::SERVICE;
+    use rusty_a2a::pb::*;
+    use rusty_tonic::tonic_codec::WireCodec;
 
     /// Calls `A2AService` over `T`, usually a `tonic::transport::Channel`.
     #[derive(Debug, Clone)]

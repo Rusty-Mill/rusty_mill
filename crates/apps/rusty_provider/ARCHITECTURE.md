@@ -45,7 +45,7 @@ before it:
   an opt-in response cache, persistence). This is the largest and most
   stateful crate — it holds the process's in-memory routing/uptime/spend
   state alongside whatever persistence backend is configured.
-- `rp-server` — the axum HTTP layer: route registration, request
+- `rp-server` — the HTTP layer (`rusty_axum`): route registration, request
   extraction/auth, and translating `Router` results to HTTP responses.
   Deliberately thin — almost no policy logic lives here, so the same
   `Router` could in principle be driven by a different transport.
