@@ -254,11 +254,11 @@ dependencies = [
  "adk-sessions",
  "adk-tools",
  "async-trait",
- "axum",
  "rusty-mcp-client",
+ "rusty_axum",
  "rusty_log",
- "rusty_mcp_axum",
  "rusty_mcp_server",
+ "rusty_tokio",
  "serde_json",
  "tokio",
 ]
