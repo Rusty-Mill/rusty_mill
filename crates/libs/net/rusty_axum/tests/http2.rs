@@ -14,13 +14,17 @@ use rcgen::{CertificateParams, KeyPair};
 use rusty_axum::response::sse::{Event, Sse};
 use rusty_axum::routing::{get, post};
 use rusty_axum::{serve, ConnectInfo, IntoResponse, Router, ServeOptions, Server};
+use rusty_h2::frame::headers::HeadersFrame;
+use rusty_h2::frame::settings::{Setting, SettingId, SettingsFrame};
+use rusty_h2::frame::window_update::WindowUpdateFrame;
+use rusty_h2::hpack::Encoder;
 use rusty_http::async_tokio::AsyncTransport;
 use rusty_http::body::response_framing;
 use rusty_http::head::RequestHead;
 use rusty_http::{HeaderMap, Method, Version};
 use rusty_hyper::{connect, Body, ClientHandle, ConnectOptions, HeaderField};
 use rusty_tls::{AsyncTlsStream, TlsAcceptor, TrustPolicy};
-use rusty_tokio::io::{AsyncWriteExt, TcpListener, TcpStream};
+use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt, TcpListener, TcpStream};
 use rusty_tokio::sync::oneshot;
 use rusty_tokio::time::timeout;
 
@@ -98,7 +102,19 @@ fn app() -> Router {
             get(|| async { Sse::new(One(Some(Event::default().data("x".repeat(BIG))))) }),
         )
         .route("/park", get(park))
+        .route("/huge", get(|| async { vec![b'x'; HUGE] }))
+        .route(
+            "/slow",
+            get(|| async {
+                rusty_tokio::time::sleep(Duration::from_millis(1000)).await;
+                "slow"
+            }),
+        )
 }
+
+/// More than loopback socket buffers hold, so a client that reads none of
+/// it leaves the server's writes blocked on the socket.
+const HUGE: usize = 32 * 1024 * 1024;
 
 /// Larger than any flow-control window a test leaves open.
 const BIG: usize = 256 * 1024;
@@ -425,8 +441,22 @@ async fn a_connection_with_no_open_stream_is_closed() {
     server.shutdown().await;
 }
 
+/// Sends a GET for `path` with `extra` fields: whether the server reset
+/// the stream instead of answering.
+async fn reset_with(h: &ClientHandle, path: &str, extra: &[(&str, &str)]) -> bool {
+    let mut fields = vec![
+        HeaderField::new(":method", "GET"),
+        HeaderField::new(":scheme", "https"),
+        HeaderField::new(":path", path),
+        HeaderField::new(":authority", "localhost"),
+    ];
+    fields.extend(extra.iter().map(|(n, v)| HeaderField::new(*n, *v)));
+    let (_send, resp) = h.send_request(fields, true).await.unwrap();
+    timeout(FIVE, resp).await.unwrap().is_err()
+}
+
 #[rusty_tokio::test]
-async fn a_header_list_over_max_head_bytes_is_refused() {
+async fn a_header_list_over_max_head_bytes_resets_only_its_stream() {
     let options = ServeOptions {
         max_head_bytes: 1024,
         ..ServeOptions::default()
@@ -441,8 +471,116 @@ async fn a_header_list_over_max_head_bytes_is_refused() {
     // only the decoded size shows them.
     let value = "v".repeat(60);
     let repeated: Vec<(&str, &str)> = (0..30).map(|_| ("x-r", value.as_str())).collect();
-    let (status, _, _) = call_with(&h, "GET", "/health", &repeated, b"").await;
-    assert_eq!(status, 431);
+    assert!(reset_with(&h, "/health", &repeated).await);
+    // The connection, and its HPACK table, carry on.
+    let (status, _, _) = call_with(&h, "GET", "/health", &[("x-a", &small)], b"").await;
+    assert_eq!(status, 200);
+    server.shutdown().await;
+}
+
+#[rusty_tokio::test]
+async fn trailers_over_max_head_bytes_reset_the_stream() {
+    let options = ServeOptions {
+        max_head_bytes: 1024,
+        ..ServeOptions::default()
+    };
+    let (server, trust) = start(options);
+    let h = h2(&server, &trust).await;
+    let fields = vec![
+        HeaderField::new(":method", "POST"),
+        HeaderField::new(":scheme", "https"),
+        HeaderField::new(":path", "/echo"),
+        HeaderField::new(":authority", "localhost"),
+    ];
+    let (mut send, resp) = h.send_request(fields, false).await.unwrap();
+    send.send_data(b"body".to_vec(), false).await.unwrap();
+    let value = "v".repeat(60);
+    let trailers = (0..30)
+        .map(|_| HeaderField::new("x-t", value.as_str()))
+        .collect();
+    send.send_trailers(trailers).await.unwrap();
+    assert!(timeout(FIVE, resp).await.unwrap().is_err(), "reset");
+    let (status, _, body) = call(&h, "POST", "/echo", b"next").await;
+    assert_eq!((status, body.as_slice()), (200, &b"next"[..]));
+    server.shutdown().await;
+}
+
+/// Opens an h2 connection asking for `path` with every window wide open,
+/// reads the server's first bytes, then never reads again.
+async fn stalled_client(
+    server: &Server,
+    trust: &TrustPolicy,
+    path: &str,
+) -> AsyncTlsStream<TcpStream> {
+    let tcp = TcpStream::connect_addr(server.local_addr()).await.unwrap();
+    let mut tls =
+        AsyncTlsStream::new_with_alpn(tcp, "localhost", trust, vec![b"h2".to_vec()]).unwrap();
+    let mut out = rusty_h2::CONNECTION_PREFACE.to_vec();
+    let window = Setting {
+        id: SettingId::InitialWindowSize,
+        value: 0x7fff_ffff,
+    };
+    SettingsFrame::new(vec![window]).encode(&mut out);
+    let grow = WindowUpdateFrame {
+        stream_id: 0,
+        window_size_increment: 0x7fff_ffff - 65_535,
+    };
+    grow.encode(&mut out);
+    let mut block = Vec::new();
+    let fields = [
+        HeaderField::new(":method", "GET"),
+        HeaderField::new(":scheme", "https"),
+        HeaderField::new(":path", path),
+        HeaderField::new(":authority", "localhost"),
+    ];
+    Encoder::new(4096).encode(&fields, &mut block);
+    let headers = HeadersFrame {
+        stream_id: 1,
+        end_stream: true,
+        end_headers: true,
+        priority: None,
+        header_block_fragment: block,
+    };
+    headers.encode(&mut out);
+    tls.write_all(&out).await.unwrap();
+    tls.flush().await.unwrap();
+    let mut first = [0u8; 64];
+    assert!(timeout(FIVE, tls.read(&mut first)).await.unwrap().unwrap() > 0);
+    tls
+}
+
+#[rusty_tokio::test]
+async fn a_client_that_stops_reading_the_socket_cannot_hold_shutdown() {
+    let options = ServeOptions {
+        idle_timeout: Duration::from_millis(300),
+        ..ServeOptions::default()
+    };
+    let (server, trust) = start(options);
+    let _held = stalled_client(&server, &trust, "/huge").await;
+    // Long enough for the server's writes to back up on the socket.
+    rusty_tokio::time::sleep(Duration::from_millis(500)).await;
+    timeout(FIVE, server.shutdown())
+        .await
+        .expect("shutdown is not held by an unread socket");
+}
+
+#[rusty_tokio::test]
+async fn idle_is_counted_from_when_the_last_stream_ended() {
+    let options = ServeOptions {
+        idle_timeout: Duration::from_millis(400),
+        ..ServeOptions::default()
+    };
+    let (server, trust) = start(options);
+    let h = h2(&server, &trust).await;
+    // Open for longer than the idle period.
+    let (status, _, _) = call(&h, "GET", "/slow", b"").await;
+    assert_eq!(status, 200);
+    // Each request comes inside the idle period of the one before.
+    for _ in 0..6 {
+        rusty_tokio::time::sleep(Duration::from_millis(150)).await;
+        let (status, _, _) = call(&h, "GET", "/health", b"").await;
+        assert_eq!(status, 200);
+    }
     server.shutdown().await;
 }
 

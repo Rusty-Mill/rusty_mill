@@ -4,20 +4,24 @@
 //! (preface deadline, GOAWAY, drain) is `rusty_hyper::serve_connection`'s.
 //!
 //! The HTTP/1.1 limits carry over: `max_head_bytes` bounds a request's
-//! decoded header list, `max_body_bytes` its body, and `idle_timeout` each
-//! body read, each blocked write, and a connection with no open stream. At
-//! most [`MAX_STREAMS`] streams are open per connection.
+//! header list (advertised, and enforced by `rusty_h2` as it decodes: a
+//! stream over it is reset), `max_body_bytes` its body, and `idle_timeout`
+//! each body read, each write blocked on the client's window or on the
+//! socket, and a connection with no open stream. At most [`MAX_STREAMS`]
+//! streams are open per connection.
 
-use std::future::poll_fn;
+use std::future::{poll_fn, Future};
+use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use rusty_http::{HeaderMap, Method, StatusCode};
 use rusty_hyper::{Body as Piece, HeaderField, Respond, SendStream};
-use rusty_tokio::io::{AsyncRead, AsyncWrite};
-use rusty_tokio::time::{sleep, timeout, Instant};
+use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use rusty_tokio::time::{sleep, sleep_until, timeout, Instant, Sleep};
 
 use super::{until_stopped, Shared};
 use crate::body::{BodyStream, Inner};
@@ -39,27 +43,39 @@ const CONNECTION_SPECIFIC: [&str; 5] = [
     "upgrade",
 ];
 
-/// Streams on one connection: how many are open, and how many have begun.
-#[derive(Default)]
-struct Activity {
-    open: AtomicUsize,
-    started: AtomicU64,
+/// Streams on one connection: how many are open, and since when none has
+/// been.
+struct Activity(Mutex<(usize, Instant)>);
+
+impl Activity {
+    fn new() -> Self {
+        Activity(Mutex::new((0, Instant::now())))
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, (usize, Instant)> {
+        // The counts stay consistent whatever a panicking holder did.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
-/// Counts a stream open until dropped.
+/// Counts a stream open until dropped; the last to close starts the idle
+/// period.
 struct Open(Arc<Activity>);
 
 impl Open {
     fn new(activity: &Arc<Activity>) -> Self {
-        activity.started.fetch_add(1, Ordering::Relaxed);
-        activity.open.fetch_add(1, Ordering::Relaxed);
+        activity.state().0 += 1;
         Open(activity.clone())
     }
 }
 
 impl Drop for Open {
     fn drop(&mut self) {
-        self.0.open.fetch_sub(1, Ordering::Relaxed);
+        let mut state = self.0.state();
+        state.0 -= 1;
+        if state.0 == 0 {
+            state.1 = Instant::now();
+        }
     }
 }
 
@@ -79,7 +95,8 @@ pub(super) async fn run<T>(
     settings
         .max_concurrent_streams(MAX_STREAMS)
         .max_header_list_size(options.max_head_bytes);
-    let activity = Arc::new(Activity::default());
+    let activity = Arc::new(Activity::new());
+    let io = WriteDeadline::new(io, options.idle_timeout);
     // Shut the connection down (GOAWAY, drain) when the server stops, or
     // when it has had no open stream for an idle period.
     let done = {
@@ -103,18 +120,96 @@ pub(super) async fn run<T>(
     rusty_hyper::serve_connection(io, settings, deadline, done, handler).await;
 }
 
-/// Completes once the connection has had no stream open and none begun for
-/// a whole `idle` period: between one and two `idle` periods after the
-/// last stream ended.
+/// Completes once the connection has had no stream open for `idle`,
+/// counted from when the last one closed.
 async fn idle_out(activity: &Activity, idle: Duration) {
-    let mut seen = activity.started.load(Ordering::Relaxed);
     loop {
-        sleep(idle).await;
-        let started = activity.started.load(Ordering::Relaxed);
-        if started == seen && activity.open.load(Ordering::Relaxed) == 0 {
+        let (open, quiet_since) = *activity.state();
+        if open > 0 {
+            sleep(idle).await;
+            continue;
+        }
+        let deadline = quiet_since + idle;
+        if Instant::now() >= deadline {
             return;
         }
-        seen = started;
+        sleep_until(deadline).await;
+    }
+}
+
+/// Fails a write, flush or shutdown that makes no progress for `idle`, so
+/// a peer that stops reading the socket cannot hold the connection, its
+/// slot or a shutdown draining it. The driver then ends the connection.
+/// Reads pass through: each stream bounds its own, and the idle close the
+/// connection's.
+struct WriteDeadline<T> {
+    io: T,
+    idle: Duration,
+    stalled: Option<Pin<Box<Sleep>>>,
+}
+
+impl<T> WriteDeadline<T> {
+    fn new(io: T, idle: Duration) -> Self {
+        WriteDeadline {
+            io,
+            idle,
+            stalled: None,
+        }
+    }
+
+    /// Passes `poll` on, starting the stall clock when it is pending and
+    /// failing it once the clock runs out.
+    fn guard<R>(&mut self, cx: &mut Context<'_>, poll: Poll<io::Result<R>>) -> Poll<io::Result<R>> {
+        if poll.is_ready() {
+            self.stalled = None;
+            return poll;
+        }
+        let idle = self.idle;
+        let stalled = self.stalled.get_or_insert_with(|| Box::pin(sleep(idle)));
+        match stalled.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(()) => {
+                self.stalled = None;
+                Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "write stalled",
+                )))
+            }
+        }
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for WriteDeadline<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for WriteDeadline<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.io).poll_write(cx, buf);
+        this.guard(cx, poll)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.io).poll_flush(cx);
+        this.guard(cx, poll)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.io).poll_shutdown(cx);
+        this.guard(cx, poll)
     }
 }
 
@@ -146,15 +241,15 @@ async fn stream(
     }
 }
 
-/// The request on a stream, its head within `max_head_bytes` and its body
-/// read whole within `max_body_bytes`, each read within `idle_timeout`.
+/// The request on a stream, its body read whole within `max_body_bytes`,
+/// each read within `idle_timeout`.
 /// The status to refuse it with otherwise.
 async fn read(
     mut req: rusty_hyper::Request,
     peer: SocketAddr,
     options: &super::ServeOptions,
 ) -> Result<Request, StatusCode> {
-    let (method, target, headers) = head(&req.headers, options.max_head_bytes)?;
+    let (method, target, headers) = head(&req.headers)?;
     let mut body = Vec::new();
     loop {
         let piece = timeout(options.idle_timeout, req.body.next()).await;
@@ -177,20 +272,12 @@ async fn read(
         .with_peer_addr(peer))
 }
 
-/// A header field's size as HTTP/2 counts it (RFC 9113 §6.5.2).
-fn field_size(field: &HeaderField) -> usize {
-    field.name.len() + field.value.len() + 32
-}
-
 /// The method, target and headers of a request's header block, as an
 /// HTTP/1.1 handler expects them: `:authority` as `Host` and split `cookie`
-/// fields joined (RFC 9113 §8.3.1, §8.2.3). Refused with 431 when the
-/// decoded list is over `max` bytes, and with 400 when it is malformed or
-/// names two hosts (repeated `Host`, or one that differs from `:authority`).
-fn head(fields: &[HeaderField], max: usize) -> Result<(Method, String, HeaderMap), StatusCode> {
-    if fields.iter().map(field_size).sum::<usize>() > max {
-        return Err(StatusCode::from_u16(431));
-    }
+/// fields joined (RFC 9113 §8.3.1, §8.2.3). Refused with 400 when it is
+/// malformed or names two hosts (repeated `Host`, or one that differs from
+/// `:authority`).
+fn head(fields: &[HeaderField]) -> Result<(Method, String, HeaderMap), StatusCode> {
     let bad = StatusCode::BAD_REQUEST;
     let (mut method, mut target, mut authority) = (None, None, None);
     let mut cookies = Vec::new();
