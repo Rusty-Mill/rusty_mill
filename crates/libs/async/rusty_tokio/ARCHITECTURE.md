@@ -88,5 +88,3 @@ split. Migrating those into ADRs is outstanding.
 - **A full io_uring runtime.** The `io-uring-reactor` feature is readiness-only
   (`IORING_OP_POLL_ADD`); the actual read/write syscalls are unchanged.
   `io-uring-fs` is separate, positional-file-only, and opt-in.
-- **A pausable clock, or multiple runtime flavors behind `#[main]` arguments.**
-  See #56.

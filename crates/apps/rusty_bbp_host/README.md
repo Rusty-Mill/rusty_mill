@@ -30,7 +30,7 @@ bbp card    --dir D --task T              the core card plus the task's scheduli
 bbp why     --dir D (--task T | T) [--turn N]   why each turn was granted, replayed from the log, as JSON
 bbp tick    --dir D --task T              fire deadlines and grant the first turn; `bbp mod` does this itself
 bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
-bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N]
+bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS]
 bbp human   --dir D --task T [--rev N] VERB ARGS...
   approve-plan ART | approve-merge ART RUN | reject STATE REASON... | decision MSG accept|reject NOTE...
   ask ROLE TEXT... | answer MSG TEXT... | rerun ART | receipt ART REVISION | resume STATE
@@ -73,7 +73,7 @@ The runner is Unix-shaped: profile sets take Unix absolute read roots and the de
 
 ## The moderator
 
-`bbp mod` is the loop that makes the core's decisions happen. Every poll it re-reads the store, fires deadlines (`Tick`), starts the runner once for a selected run with no report, launches one agent harness for a newly granted turn, and reaps a harness whose turn has ended. A harness whose turn ended gets `--end-grace-secs` (default 60) to exit on its own and print its final `result` line, which prices the turn; then it is killed. A cap or wall stop kills at once. Human gates are states with no turn, so the loop waits through them; `bbp human` from another shell moves the task on. It returns when the task is `closed` or `cancelled`, or fails after `--max-wall-secs`; at `escalated` it keeps polling until a human command moves the task on (`resume` or `cancel` are the usual choices; `reject` back to `planning` also leaves it).
+`bbp mod` is the loop that makes the core's decisions happen. Every poll it re-reads the store, fires deadlines (`Tick`), starts the runner once for a selected run with no report, launches one agent harness for a newly granted turn, and reaps a harness whose turn has ended. A harness whose turn ended gets `--end-grace-secs` (default 60) to exit on its own and print its final `result` line, which prices the turn; then it is killed. A cap or wall stop kills at once. `--deadline-unix` is an absolute end, a hosting lease's: no grace runs past it, the loop stops as at the wall when it comes, and each harness's `bbp slot-hold` holder kills its whole group at it, so it holds even if the moderator dies first. Human gates are states with no turn, so the loop waits through them; `bbp human` from another shell moves the task on. It returns when the task is `closed` or `cancelled`, or fails after `--max-wall-secs`; at `escalated` it keeps polling until a human command moves the task on (`resume` or `cancel` are the usual choices; `reject` back to `planning` also leaves it).
 
 One moderator per task: the loop holds an exclusive lock on `<dir>/mod/<task>.lock` for its lifetime and a second `bbp mod` on the same task is refused. A turn that is live before the loop's first tick belongs to an invocation this moderator cannot see or stop (a harness an earlier moderator launched), so it aborts that turn; the first turn of a freshly assigned task is granted by that tick and is the loop's own. On a stale turn it aborts: the old `bbp mcp` answers "turn has ended" to anything but the free card and an exact replay, and the replacement turn is launched here with a fresh token. Gates have no turn and keep waiting.
 
@@ -88,6 +88,8 @@ On Linux every harness gets a holder, with or without `--slots`, and the moderat
 An unconfined harness is trusted with the directory. It runs as the moderator's user, so a harness with shell or file tools can read `<dir>/master` or call `bbp human`; `bbp mcp` is the fence for the model's tool calls, not for the harness process.
 
 ### Confined harnesses
+
+`bbp mod` refuses to start when a launcher's sandbox root, a system root, the `bbp` directory or (with `checkout`) the repository's git directory lies strictly beneath any launcher's `write` path, or a `write` path lies in `--work`: Landlock follows a symlink at a rule's root, and such a root is one a harness could replace before its rule is made.
 
 A launcher with a `sandbox` object runs its harness under `rusty_sandbox` (Linux), through this binary's `__sandbox` helper:
 
@@ -119,7 +121,13 @@ The opinionated provider launchers (`codex-bbp-harness`, `claude-bbp-harness`) r
 
 Arguments may use `{dir}`, `{task}`, `{principal}`, `{turn}`, `{role}`, `{bbp}` (this binary) and `{mcp_config}`: a Claude Code MCP config written whole-or-nothing per turn at `<dir>/mcp/<sha256(task)>/turn-N.json` that starts `bbp mcp` bound to that turn. The harness also gets `BBP_DIR`, `BBP_TASK`, `BBP_PRINCIPAL`, `BBP_TURN`, `BBP_ROLE`, `BBP_BIN` and `BBP_MCP_CONFIG` in its environment; its output goes to `<dir>/agents/<sha256(task)>/turn-N.log`. A harness that exits without ending its turn forfeits it: the moderator aborts the turn so the protocol moves on. A role without a launcher is left to its deadline.
 
-`"session": true` (default `false`) keeps one provider conversation for the role across its turns. Each turn is still its own harness process with its own per-turn `bbp mcp` and token, stopped when the turn ends like any other: the process is the host-enforced boundary that cancels a generation and its queued calls. Every turn's harness gets the role's session id, a UUID keyed by the store's master and derived from task and role (`{session}`, `BBP_SESSION_ID`), so two stores reusing task and role names never share one, and `BBP_SESSION_RESUME` (`yes` once a turn of the role was launched with it, recorded beside its logs), so a harness such as Claude Code can start the conversation with `--session-id` and resume it with `--resume`. The next turn's harness starts only after the last one has exited or been stopped. Until confinement and resumed-turn pricing land, a session launcher is refused with a `sandbox` or under a cost cap, and its args may not use `{turn}`.
+`"session": true` (default `false`) keeps one provider conversation for the role across its turns. Each turn is still its own harness process with its own per-turn `bbp mcp` and token, stopped when the turn ends like any other: the process is the host-enforced boundary that cancels a generation and its queued calls. Every turn's harness gets the role's session id, a UUID keyed by the store's master and derived from task and role (`{session}`, `BBP_SESSION_ID`), so two stores reusing task and role names never share one, and `BBP_SESSION_RESUME` (`yes` once a turn of the role was launched with it, recorded beside its logs), so a harness such as Claude Code can start the conversation with `--session-id` and resume it with `--resume`. The next turn's harness starts only after the last one has exited or been stopped. Its args may not use `{turn}`.
+
+A confined session keeps one home (`HOME`, `TMPDIR`) for all its turns, `<work>/turns/<sha256(task)>/session-<id>.home`, where the provider keeps the conversation; each turn still gets a fresh workspace (or worktree), always at `session-<id>` beside it, since Claude Code keys conversations by their directory. Pipes, facts and the setup status stay per turn. The home is the harness's to write, so what one turn leaves there the next turn of the same role sees; no other role's sandbox reaches it.
+
+Under a cost cap, a turn launched with `BBP_SESSION_RESUME=yes` is recorded as `agents/<sha256(task)>/turn-N.resumed`. Claude Code restores a resumed session's totals, so that turn's `modelUsage` and `total_cost_usd` include the earlier turns; `bbp tokens` and the cap price it from each result's `model_usage_since_last_result` instead, cross-checked against its `costUSD`. A resumed turn whose results lack that field or skip a `result_index` has an unknown cost.
+
+`claude-bbp-harness` honours a session: `--session-id` on the first turn, `--resume` after, instead of `--no-session-persistence`, run in `session-<id>/workspace`, emptied each turn. `codex-bbp-harness` refuses one, since Codex picks its own session ids.
 
 ### Live smoke
 

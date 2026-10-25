@@ -1,6 +1,6 @@
 //! Field-by-field conversions between the generated `pb::*` (prost) types
 //! and this crate's own `crate::types::*`, plus the [`A2aError`] ->
-//! [`tonic::Status`] mapping.
+//! [`rusty_tonic::Status`] mapping.
 //!
 //! Shared by both the gRPC server (`server::grpc`, which needs
 //! `pb_*_request_to_ours` and `our_*_to_pb`/`our_*_response_to_pb`) and the
@@ -22,11 +22,8 @@
 #![allow(dead_code)]
 
 use chrono::{DateTime, TimeZone, Utc};
-use rusty_prost::rpc;
-use rusty_prost::wkt::Any;
-use rusty_prost::Message;
+use rusty_tonic::{Code, Status};
 use serde_json::{Map, Value};
-use tonic::{Code, Status};
 
 use crate::error::A2aError;
 use crate::pb;
@@ -37,7 +34,7 @@ use crate::types as ours;
 /// round-trips identically regardless of which binding a client used.
 const ERROR_DOMAIN: &str = "a2a-protocol.org";
 
-/// Maps `err` to a `tonic::Status`, attaching a `google.rpc.ErrorInfo`
+/// Maps `err` to a [`Status`], attaching a `google.rpc.ErrorInfo`
 /// detail (spec Section 10.6: "implementations MUST include a
 /// `google.rpc.ErrorInfo` message in the `status.details` array") whenever
 /// `err` has one of the nine A2A-specific `reason`s - mirroring
@@ -58,42 +55,9 @@ pub fn a2a_error_to_status(err: A2aError) -> Status {
     };
     let message = err.standard_message();
     match err.reason() {
-        Some(reason) => with_error_info(code, message, reason),
+        Some(reason) => Status::with_error_info(code, message, reason, ERROR_DOMAIN, Default::default()),
         None => Status::new(code, message),
     }
-}
-
-/// `code` and `message` with a `google.rpc.ErrorInfo` for `reason` in the status details (the
-/// `google.rpc.Status` that `grpc-status-details-bin` carries). If the details cannot be
-/// encoded the status goes without them: the code and message are still right.
-fn with_error_info(code: Code, message: String, reason: &str) -> Status {
-    let info = rpc::ErrorInfo {
-        reason: reason.to_string(),
-        domain: ERROR_DOMAIN.to_string(),
-        metadata: Default::default(),
-    };
-    let details = Any::pack(&info).ok().and_then(|any| {
-        rpc::Status {
-            code: code as i32,
-            message: message.clone(),
-            details: vec![any],
-        }
-        .encode_to_vec()
-        .ok()
-    });
-    match details {
-        Some(bytes) => Status::with_details(code, message, bytes.into()),
-        None => Status::new(code, message),
-    }
-}
-
-/// The `google.rpc.ErrorInfo` in `status`'s details, if it carries one.
-pub(crate) fn error_info(status: &Status) -> Option<rpc::ErrorInfo> {
-    let details = rpc::Status::decode(status.details()).ok()?;
-    details
-        .details
-        .iter()
-        .find_map(|any| any.unpack::<rpc::ErrorInfo>().ok().flatten())
 }
 
 fn non_empty(s: String) -> Option<String> {
@@ -1221,7 +1185,7 @@ mod tests {
         let status = a2a_error_to_status(A2aError::TaskNotFound("no such task".into()));
         assert_eq!(status.code(), Code::NotFound);
         assert_eq!(status.message(), "no such task");
-        let info = error_info(&status).expect("an ErrorInfo detail");
+        let info = status.error_info().expect("an ErrorInfo detail");
         assert_eq!(info.reason, "TASK_NOT_FOUND");
         assert_eq!(info.domain, ERROR_DOMAIN);
     }
@@ -1230,7 +1194,7 @@ mod tests {
     fn an_error_without_a_reason_has_no_details() {
         let status = a2a_error_to_status(A2aError::Internal("boom".into()));
         assert_eq!(status.code(), Code::Internal);
-        assert!(error_info(&status).is_none());
-        assert!(error_info(&Status::new(Code::Unknown, "plain")).is_none());
+        assert!(status.error_info().is_none());
+        assert!(Status::new(Code::Unknown, "plain").error_info().is_none());
     }
 }

@@ -6,6 +6,7 @@
 
 use std::convert::Infallible;
 use std::fmt;
+use std::net::SocketAddr;
 
 use rusty_http::{HeaderMap, Method, StatusCode};
 use serde::de::DeserializeOwned;
@@ -201,6 +202,25 @@ impl<S> FromRequest<S> for Method {
     }
 }
 
+/// The address of the client, as axum's `ConnectInfo<SocketAddr>`. The
+/// server always sets it; a request built in process has none unless
+/// [`Request::with_peer_addr`] set it, and is answered 500.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectInfo(pub SocketAddr);
+
+impl<S> FromRequest<S> for ConnectInfo {
+    type Rejection = Rejection;
+
+    fn from_request(req: &mut Request, _state: &S) -> Result<Self, Rejection> {
+        req.peer_addr().map(ConnectInfo).ok_or_else(|| {
+            Rejection::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the request has no peer address",
+            )
+        })
+    }
+}
+
 /// The raw body.
 impl<S> FromRequest<S> for Vec<u8> {
     type Rejection = Infallible;
@@ -295,6 +315,19 @@ mod tests {
         let r = Json(serde_json::json!({"ok": true})).into_response();
         assert_eq!(r.headers.get("content-type"), Some("application/json"));
         assert_eq!(r.body.as_bytes(), Some(&b"{\"ok\":true}"[..]));
+    }
+
+    #[test]
+    fn connect_info_needs_a_peer_address() {
+        let addr = SocketAddr::from(([10, 0, 0, 5], 8080));
+        let mut req = Request::new(Method::Get, "/").with_peer_addr(addr);
+        assert_eq!(
+            ConnectInfo::from_request(&mut req, &()).unwrap(),
+            ConnectInfo(addr)
+        );
+        let mut bare = Request::new(Method::Get, "/");
+        let err = ConnectInfo::from_request(&mut bare, &()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

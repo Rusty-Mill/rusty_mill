@@ -172,7 +172,7 @@ impl Config {
     }
 }
 
-fn resolved(path: &std::path::Path) -> Result<PathBuf, String> {
+pub(crate) fn resolved(path: &std::path::Path) -> Result<PathBuf, String> {
     // Resolve existing ancestors, including symlinks, before comparing paths
     // that do not exist yet. Canonicalize also removes `..` components.
     if path.exists() {

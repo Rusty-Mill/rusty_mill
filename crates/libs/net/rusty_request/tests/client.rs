@@ -561,7 +561,9 @@ fn error_for_status_passes_through_2xx() {
 #[test]
 fn request_times_out_when_the_server_never_responds() {
     run(async {
-        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         rusty_tokio::spawn(async move {
             // Accept and then simply never write a response. Keeping
@@ -1104,7 +1106,8 @@ fn no_pool_never_reuses_a_connection() {
 /// pooled connection is stale by the time it is reused. Returns the
 /// address and a count of accepted connections.
 fn start_one_request_per_connection_server() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
-    let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = rusty_tokio::io::TcpListener::from_std(std_listener).unwrap();
     let addr = listener.local_addr().unwrap();
     let accepted = Arc::new(AtomicUsize::new(0));
     let accepted_in_task = accepted.clone();
@@ -1252,7 +1255,8 @@ fn stale_pooled_connection_stays_an_error_when_the_policy_forbids_it() {
 fn start_drop_second_request_server() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
     let requests = Arc::new(AtomicUsize::new(0));
     let requests_in_task = requests.clone();
-    let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = rusty_tokio::io::TcpListener::from_std(std_listener).unwrap();
     let addr = listener.local_addr().unwrap();
     rusty_tokio::spawn(async move {
         loop {
@@ -1489,13 +1493,15 @@ fn connection_refused_is_retried_on_a_fresh_connection() {
         // with "connection refused". A delayed task rebinds the exact
         // same port a little later and serves one request, so the
         // retry (not the original attempt) is what actually succeeds.
-        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
 
         rusty_tokio::spawn(async move {
             rusty_tokio::time::sleep(Duration::from_millis(20)).await;
-            let listener = rusty_tokio::io::TcpListener::bind(addr).unwrap();
+            let listener = rusty_tokio::io::TcpListener::bind(addr).await.unwrap();
             if let Ok((stream, _peer)) = listener.accept().await {
                 if let Ok(_req) = common::read_request(&stream).await {
                     let _ = stream

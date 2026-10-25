@@ -27,7 +27,8 @@ pub fn header(fields: &[HeaderField], name: &str) -> Option<String> {
 }
 
 pub fn listener() -> TcpListener {
-    TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap()
+    let std = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    TcpListener::from_std(std).unwrap()
 }
 
 /// What a call came back with.

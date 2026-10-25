@@ -835,6 +835,7 @@ fn fence(generation: u64, holder: &str) -> orch_dispatch::Fence {
         assignment: text("goal-orchestrator"),
         generation,
         holder: text(holder),
+        lease: None,
     }
 }
 

@@ -80,3 +80,5 @@ fn dec_special_graphics(b: u8) -> char {
         _ => b as char,
     }
 }
+
+crate::checkpoint::variants!(Charset, [Ascii, DecSpecialGraphics]);

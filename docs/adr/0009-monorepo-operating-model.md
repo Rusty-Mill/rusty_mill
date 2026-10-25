@@ -171,9 +171,17 @@ PR and post-merge runs):
 - No `push` run on `main`. The queue run tested the exact tree that lands; the
   sweep is daily (was weekly) so `main` still gets a full check and its caches,
   which PR runs restore, stay fresh.
-- A `pull_request` run is Linux-only. The queue run adds Windows and macOS, so
-  a Windows-only failure now ejects the entry instead of failing the PR; run
-  the workflow manually on the branch first when a change is Windows-sensitive.
+- A `pull_request` run is Linux-only, except clippy, which also runs on
+  Windows (2026-10-24: Windows clippy caused most queue ejections). The queue
+  run adds Windows tests and macOS, so a Windows-only test failure still ejects
+  the entry instead of failing the PR; run the workflow manually on the branch
+  first when a change is Windows-sensitive.
+- Only `main` saves Rust caches (2026-10-24). Caches are scoped to the saving
+  ref, so PR and queue saves were unrestorable by other runs and evicted
+  `main`'s from the quota. Clippy and test key their cache by OS only, not by
+  planner component, so a scoped run restores the sweep's `workspace` cache.
+- A failed daily sweep opens (or comments on) one issue, closed by the next
+  green sweep (`nightly-alert.yml`); nothing else gates on the sweep.
 - The queue skips its Linux jobs when a green `pull_request` run of the same PR
   head recorded the identical tree and first parent (the `tested-tree`
   artifact; `ci_plan.py linux_already_tested`). With entries queued ahead the

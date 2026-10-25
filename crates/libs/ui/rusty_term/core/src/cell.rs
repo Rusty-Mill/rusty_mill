@@ -199,3 +199,6 @@ impl Cell {
         }
     }
 }
+
+crate::checkpoint::fields!(Pen, [fg, bg, attrs, underline_color]);
+crate::checkpoint::fields!(Cell, [ch, fg, bg, flags, link, cluster, underline_color]);

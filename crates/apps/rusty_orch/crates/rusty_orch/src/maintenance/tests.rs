@@ -76,6 +76,7 @@ fn fence() -> Fence {
         assignment: Text::new(MAINTENANCE).unwrap(),
         generation: 1,
         holder: Text::new("test").unwrap(),
+        lease: None,
     }
 }
 #[test]
