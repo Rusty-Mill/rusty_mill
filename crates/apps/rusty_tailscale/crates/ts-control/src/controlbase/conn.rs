@@ -4,7 +4,7 @@
 //! Records are `[1B type=0x04][2B BE ciphertext-len][ciphertext]`, AEAD is
 //! ChaCha20-Poly1305 with empty AAD and a nonce of 4 zero bytes plus an
 //! 8-byte big-endian counter (Tailscale deviates from the Noise spec's
-//! little-endian here). Implements tokio `AsyncRead`/`AsyncWrite` so an
+//! little-endian here). Implements `rusty_tokio`'s `AsyncRead`/`AsyncWrite` so an
 //! HTTP/2 client connection can run directly on top.
 
 use std::io;
@@ -13,7 +13,7 @@ use std::task::{Context, Poll, ready};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::handshake::{MSG_TYPE_RECORD, SessionKeys};
 
@@ -279,10 +279,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Conn<T> {
 mod tests {
     use super::*;
     use crate::controlbase::handshake::SessionKeys;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn pair() -> (Conn<tokio::io::DuplexStream>, Conn<tokio::io::DuplexStream>) {
-        let (a, b) = tokio::io::duplex(64 * 1024);
+    fn pair() -> (
+        Conn<rusty_tokio::io::DuplexStream>,
+        Conn<rusty_tokio::io::DuplexStream>,
+    ) {
+        let (a, b) = rusty_tokio::io::duplex(64 * 1024);
         let k1 = [1u8; 32];
         let k2 = [2u8; 32];
         let client = Conn::new(
@@ -305,14 +308,14 @@ mod tests {
         (client, server)
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn round_trip_small_and_large() {
         let (mut client, mut server) = pair();
         // Larger than one record to exercise chunking.
         let payload: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
         let expected = payload.clone();
 
-        let writer = tokio::spawn(async move {
+        let writer = rusty_tokio::spawn(async move {
             client.write_all(&payload).await.unwrap();
             client.flush().await.unwrap();
             client
@@ -323,7 +326,7 @@ mod tests {
         writer.await.unwrap();
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn tampered_record_poisons_connection() {
         let (mut client, server) = pair();
         client.write_all(b"hello").await.unwrap();
@@ -350,7 +353,7 @@ mod tests {
         assert!(server.read_exact(&mut out).await.is_err());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn oversize_record_rejected() {
         let (client, mut server) = pair();
         let mut raw_client = client.inner;
@@ -365,7 +368,7 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn zero_length_records_are_skipped() {
         let (mut client, mut server) = pair();
         // Manually produce an empty record followed by data.

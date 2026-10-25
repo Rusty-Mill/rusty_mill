@@ -7,8 +7,8 @@
 use rusty_h2::client::builder::Builder as H2Builder;
 use rusty_h2::driver::{self, Body, ClientHandle, RecvStream};
 use rusty_h2::hpack::HeaderField;
+use rusty_tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use ts_key::MachinePrivate;
 use ts_types::tailcfg::{
     CURRENT_CAPABILITY_VERSION, MapRequest, MapResponse, RegisterRequest, RegisterResponse,
@@ -16,7 +16,6 @@ use ts_types::tailcfg::{
 
 use crate::controlbase::Conn;
 use crate::controlhttp::{self, ControlHttpError, ControlUrl};
-use crate::rusty_io::RustyIo;
 
 /// The 5-byte magic prefixing an optional server "early payload".
 const EARLY_PAYLOAD_MAGIC: &[u8; 5] = b"\xff\xff\xffTS";
@@ -211,7 +210,7 @@ const H2_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Starts an HTTP/2 client connection over an already-established transport
 /// and waits, bounded by `timeout`, for the server's first SETTINGS. A free
 /// function (rather than inlined in `open_h2`) so tests can drive it
-/// directly over a `tokio::io::duplex` pair without needing a full Noise
+/// directly over a `rusty_tokio::io::duplex` pair without needing a full Noise
 /// handshake. `authority` is the `:authority` of the session's requests.
 async fn h2_handshake<T>(
     conn: T,
@@ -221,14 +220,13 @@ async fn h2_handshake<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (send, connection) = driver::client(RustyIo(conn), H2Builder::new());
-    // Drive the HTTP/2 connection in the background on tokio: `rusty_h2`'s
-    // driver needs only the I/O traits, not a `rusty_tokio` runtime. It ends
-    // when the session is dropped or the server closes.
-    let driver = DriverGuard(tokio::spawn(async move {
+    let (send, connection) = driver::client(conn, H2Builder::new());
+    // Drive the HTTP/2 connection in the background; it ends when the
+    // session is dropped or the server closes.
+    let driver = DriverGuard(rusty_tokio::spawn(async move {
         let _ = connection.await;
     }));
-    tokio::time::timeout(timeout, send.ready())
+    rusty_tokio::time::timeout(timeout, send.ready())
         .await
         .map_err(|_| ClientError::Timeout)??;
     Ok(H2Session {
@@ -245,9 +243,9 @@ where
 ///
 /// Generic over the Noise conn's own transport `T` (rather than the
 /// concrete `TcpStream`) because `controlhttp::dial`'s upgrade handoff may
-/// hand back a `Conn` wrapping `rusty_http::tokio_native::Replay<TcpStream>`
+/// hand back a `Conn` wrapping `rusty_http::async_tokio::Replay<TcpStream>`
 /// instead, when Noise bytes arrived bundled with the upgrade response.
-async fn skip_early_payload<T: AsyncRead + AsyncWrite + Unpin>(
+async fn skip_early_payload<T: AsyncRead + AsyncWrite + Unpin + Send>(
     mut conn: Conn<T>,
 ) -> Result<crate::prefixed::Prefixed<Conn<T>>, ClientError> {
     let mut header = [0u8; EARLY_HEADER_LEN];
@@ -271,7 +269,7 @@ async fn skip_early_payload<T: AsyncRead + AsyncWrite + Unpin>(
 
 /// Keeps the HTTP/2 driver task alive for the session's lifetime and aborts
 /// it on drop.
-struct DriverGuard(tokio::task::JoinHandle<()>);
+struct DriverGuard(rusty_tokio::task::JoinHandle<()>);
 impl Drop for DriverGuard {
     fn drop(&mut self) {
         self.0.abort();
@@ -401,14 +399,14 @@ mod tests {
     use super::*;
 
     /// The handshake waits for the server's first SETTINGS, so a peer that
-    /// never speaks HTTP/2 must hit the timeout. A tiny `tokio::io::duplex`
+    /// never speaks HTTP/2 must hit the timeout. A tiny `rusty_tokio::io::duplex`
     /// that nobody ever drains is such a peer: the client preface write
     /// stalls and nothing is ever read back. Uses a duplex pair rather than
     /// a full Noise handshake because `h2_handshake` only needs an
     /// `AsyncRead + AsyncWrite` transport.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn h2_handshake_times_out_on_silent_peer() {
-        let (near, _far) = tokio::io::duplex(1);
+        let (near, _far) = rusty_tokio::io::duplex(1);
 
         let start = std::time::Instant::now();
         let result = h2_handshake(near, "control".into(), Duration::from_millis(200)).await;
@@ -428,16 +426,18 @@ mod tests {
     /// A control server streaming a response body past the sanity cap must
     /// be rejected before `H2Session::request` grows its accumulation
     /// buffer without limit.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn request_rejects_oversized_response_body() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = rusty_tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
 
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let (mut acceptor, connection) =
-                driver::server(RustyIo(socket), rusty_h2::server::builder::Builder::new());
-            tokio::spawn(async move {
+                driver::server(socket, rusty_h2::server::builder::Builder::new());
+            rusty_tokio::spawn(async move {
                 let _ = connection.await;
             });
             if let Some(Ok((_request, respond))) = acceptor.accept().await {
@@ -457,7 +457,7 @@ mod tests {
             while let Some(Ok(_)) = acceptor.accept().await {}
         });
 
-        let client_stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let client_stream = rusty_tokio::net::TcpStream::connect(addr).await.unwrap();
         let mut session = h2_handshake(client_stream, addr.to_string(), Duration::from_secs(10))
             .await
             .unwrap();
@@ -468,7 +468,7 @@ mod tests {
         // than a tight bound, so this margin is generous on purpose --
         // the assertion below is what actually proves the cap works, not
         // how fast it fires.
-        let result = tokio::time::timeout(
+        let result = rusty_tokio::time::timeout(
             Duration::from_secs(30),
             session.request("/machine/register", Vec::new()),
         )
@@ -479,6 +479,139 @@ mod tests {
             Err(ClientError::ResponseTooLarge(_)) => {}
             Err(other) => panic!("expected ResponseTooLarge, got: {other}"),
             Ok(body) => panic!("expected rejection, got {} byte body", body.len()),
+        }
+    }
+
+    /// The Go toolchain, if one is installed.
+    fn go_toolchain() -> Option<&'static str> {
+        ["/usr/local/go/bin/go", "go"].into_iter().find(|g| {
+            std::process::Command::new(g)
+                .arg("version")
+                .output()
+                .is_ok()
+        })
+    }
+
+    /// Builds the Go package in `dir` to `dir/name`. Once Go is found, any
+    /// failure is an error carrying the build's output, never a skip.
+    async fn go_build(
+        go: &str,
+        dir: &std::path::Path,
+        name: &str,
+    ) -> Result<std::path::PathBuf, String> {
+        let out = rusty_tokio::process::Command::new(go)
+            .args(["build", "-o", name, "."])
+            .current_dir(dir)
+            .output()
+            .await
+            .map_err(|e| format!("running `{go} build` in {}: {e}", dir.display()))?;
+        if !out.status.success() {
+            return Err(format!(
+                "`{go} build` in {} failed ({}):\n{}",
+                dir.display(),
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(dir.join(name))
+    }
+
+    /// `interop/h2c-server-go` (Go's own `net/http` HTTP/2 server), built if
+    /// needed. `Ok(None)` skips the test, as `go_interop` does: no Go
+    /// toolchain and no prebuilt binary. A failed build is an `Err`.
+    async fn go_h2c_server() -> Result<Option<std::path::PathBuf>, String> {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../interop/h2c-server-go");
+        let bin = dir.join("h2c-server-go");
+        if bin.exists() {
+            return Ok(Some(bin));
+        }
+        let Some(go) = go_toolchain() else {
+            return Ok(None);
+        };
+        go_build(go, &dir, "h2c-server-go").await.map(Some)
+    }
+
+    #[rusty_tokio::test]
+    async fn a_go_fixture_that_fails_to_build_is_an_error_not_a_skip() {
+        let Some(go) = go_toolchain() else {
+            eprintln!("SKIPPED: no Go toolchain");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("ts-control-go-build-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("go.mod"), "module broken\n\ngo 1.21\n").unwrap();
+        std::fs::write(
+            dir.join("main.go"),
+            "package main\n\nfunc main() { not go }\n",
+        )
+        .unwrap();
+        let built = go_build(go, &dir, "broken").await;
+        std::fs::remove_dir_all(&dir).unwrap();
+        let err = built.expect_err("a broken package must not build");
+        assert!(
+            err.contains("failed"),
+            "the error carries the build output: {err}"
+        );
+    }
+
+    /// The session against Go's HTTP/2, the implementation real control
+    /// servers run: a unary request, a streamed length-prefixed body, and a
+    /// non-success status.
+    #[rusty_tokio::test]
+    async fn session_speaks_http2_with_gos_net_http() {
+        use rusty_tokio::io::AsyncBufReadExt;
+
+        let bin = match go_h2c_server().await {
+            Ok(Some(bin)) => bin,
+            Ok(None) => {
+                eprintln!("SKIPPED: no Go toolchain and no prebuilt h2c-server-go binary");
+                return;
+            }
+            Err(build) => panic!("the Go h2c fixture did not build: {build}"),
+        };
+        let mut child = rusty_tokio::process::Command::new(&bin)
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn go h2c server");
+        let stdout = child.stdout.take().unwrap();
+        let line = rusty_tokio::io::BufReader::new(stdout)
+            .lines()
+            .next_line()
+            .await
+            .unwrap()
+            .expect("listen line");
+        let addr = line.strip_prefix("LISTENING ").expect("LISTENING prefix");
+
+        let tcp = rusty_tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut session = h2_handshake(tcp, addr.to_string(), Duration::from_secs(10))
+            .await
+            .unwrap();
+
+        let body = session
+            .request("/machine/register", b"hello".to_vec())
+            .await
+            .unwrap();
+        let echo: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(echo["proto"], "HTTP/2.0");
+        assert_eq!(echo["host"], addr);
+        assert_eq!(echo["len"], 5);
+
+        let mut frames = session
+            .request_stream("/machine/map", b"{}".to_vec())
+            .await
+            .unwrap();
+        for i in 0..3 {
+            let frame = frames.next_frame().await.unwrap().expect("frame");
+            let frame: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+            assert_eq!(frame["frame"], i);
+        }
+        assert!(frames.next_frame().await.unwrap().is_none());
+
+        match session.request("/missing", Vec::new()).await {
+            Err(ClientError::HttpStatus(404, path)) => assert_eq!(path, "/missing"),
+            other => panic!("expected HTTP 404, got {other:?}"),
         }
     }
 }

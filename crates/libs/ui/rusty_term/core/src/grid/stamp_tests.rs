@@ -14,12 +14,12 @@ fn rows(g: &Grid) -> Vec<RowState> {
     g.screen
         .iter()
         .zip(&g.row_stamp)
-        .map(|(l, &s)| (s, l.cells.clone(), l.attr, l.wrapped))
+        .map(|(l, &s)| (s, l.cells().to_vec(), l.attr, l.wrapped))
         .collect()
 }
 
 fn history(g: &Grid) -> (u64, Vec<Vec<Cell>>) {
-    let lines = g.scrollback.iter().map(|l| l.cells.clone()).collect();
+    let lines = g.scrollback.iter().map(|l| l.cells().to_vec()).collect();
     (g.hist_stamp, lines)
 }
 

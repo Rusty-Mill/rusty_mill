@@ -16,7 +16,7 @@ ts-key.workspace = true
 ts-disco.workspace = true
 ts-derp.workspace = true
 ts-stun.workspace = true
-tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
+rusty_tokio.workspace = true
 rand_core.workspace = true
 rusty_log = { workspace = true }
 # rustils' D16 Net surface (rustils#41/#42) — justified in DESIGN.md:
@@ -24,4 +24,3 @@ platform = { workspace = true }
 platform-linux = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

@@ -142,14 +142,14 @@ impl Grid {
     pub(super) fn cell_of(&self, line: ViewLine, col: usize) -> Cell {
         match line {
             ViewLine::Hist(l) => self.scrollback[l]
-                .cells
+                .cells()
                 .get(col)
                 .copied()
                 .unwrap_or_else(Cell::blank),
             ViewLine::Summary(i) => {
                 self.summary_cell(self.summary_text(i).chars().nth(col).unwrap_or(' '))
             }
-            ViewLine::Live(r) => self.screen[r].cells[col],
+            ViewLine::Live(r) => self.screen[r].cells()[col],
         }
     }
 

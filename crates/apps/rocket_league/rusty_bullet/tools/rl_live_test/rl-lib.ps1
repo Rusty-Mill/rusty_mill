@@ -54,7 +54,8 @@ function Start-RlSession([string]$Dir, [string]$Stamp, [string[]]$Players, $Owne
     -ArgumentList (@('--record-in', "$Stamp-in.bin", '--record-out', "$Stamp-out.bin") + $Players) `
     -RedirectStandardOutput "$Dir\bridge.out.log" -RedirectStandardError "$Dir\bridge.err.log"
   $null = Add-RlOwnedProcess $Owned $bridge
-  $launcher = Add-RlOwnedProcess $Owned (Start-Process cmd.exe -PassThru -WindowStyle Hidden -ArgumentList "/c start `"`" `"$script:EpicUrl`"")
+  $launchedAt = Get-Date
+  $null = Add-RlOwnedProcess $Owned (Start-Process cmd.exe -PassThru -WindowStyle Hidden -ArgumentList "/c start `"`" `"$script:EpicUrl`"")
   $line = $null
   for ($i = 0; $i -lt 240; $i++) {
     $cur = Get-InitLine
@@ -62,7 +63,7 @@ function Start-RlSession([string]$Dir, [string]$Stamp, [string[]]$Players, $Owne
     Start-Sleep -Milliseconds 500
   }
   if (-not $line) { throw 'no new Init line from the Epic launch' }
-  $bootstrap = Add-RlOwnedProcess $Owned (Get-RlOwnedBootstrap $launcher (Join-Path $script:GameDir 'RocketLeague.exe'))
+  $bootstrap = Add-RlOwnedProcess $Owned (Get-RlOwnedBootstrap $launchedAt (Join-Path $script:GameDir 'RocketLeague.exe') $line)
   $bootstrap.Kill()
   if (-not $bootstrap.WaitForExit(10000)) { throw 'owned bootstrap game did not exit' }
   $raw = $line -replace '^.*Init: Command line:\s*', ''

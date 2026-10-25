@@ -7,7 +7,7 @@
 //! of handing them to the OS via a TUN device (Phase 4), a [`Node`] feeds them
 //! to an in-process smoltcp stack and encapsulates whatever smoltcp emits.
 //! Applications then [`bind`](Node::bind) a TCP port on the tailnet IP and
-//! serve connections as ordinary [`tokio::io`] streams — a plain `cargo run`
+//! serve connections as ordinary [`rusty_tokio::io`] streams — a plain `cargo run`
 //! becomes a tailnet service.
 
 mod device;
@@ -16,7 +16,7 @@ mod stack;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
+use rusty_tokio::sync::{mpsc, oneshot};
 use ts_engine::{Engine, EngineConfig, EngineHandle, StackIo};
 use ts_key::NodeState;
 
@@ -99,7 +99,7 @@ impl Node {
                 let _ = self.net.send(stack::Request::SetAddr(ip));
                 return Some(ip);
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            rusty_tokio::time::sleep(Duration::from_millis(100)).await;
         }
         None
     }
