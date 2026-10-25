@@ -9,6 +9,14 @@ use std::io::{self, Read, Write};
 use rusty_mux_proto::{Message, decode, encode};
 use rusty_term_core::{Grid, WIDE_TRAILER};
 
+/// Written on every exit after raw output stops: leaves the alternate
+/// screen, soft-resets (DECSTR: pen, cursor visibility and keys, margins,
+/// charsets), restores the numeric keypad and turns off bracketed paste,
+/// mouse and focus reporting. A block's program may have set any of them on
+/// this terminal through the passthrough.
+pub const RESTORE: &[u8] = b"\x1b[?1049l\x1b[!p\x1b[?25h\x1b>\x1b[?2004l\
+\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[0m";
+
 /// Repaints the local terminal from a restored grid: every visible row
 /// with its colours, then the cursor. Attributes other than colour are not
 /// painted; the next output redraws whatever the program redraws.

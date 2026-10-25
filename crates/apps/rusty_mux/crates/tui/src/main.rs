@@ -30,18 +30,35 @@ mod client {
 mod client {
     use std::ffi::OsString;
     use std::io::Write;
+    use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     use platform::term::Terminal;
     use platform_linux::LinuxTerminal;
     use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
     use rusty_mux_proto::{Features, Message};
     use rusty_mux_server::checkpoint::Receiver;
-    use rusty_mux_tui::{Conn, paint};
+    use rusty_mux_tui::{Conn, RESTORE, paint};
     use rusty_uuid::Uuid;
 
     /// Ctrl-]: detach.
     const DETACH: u8 = 0x1d;
+
+    /// How often the input loop checks whether the output side has ended.
+    const TICK: Duration = Duration::from_millis(100);
+
+    /// Why the output side stopped.
+    enum Ended {
+        /// The block's program exited or the block was closed.
+        Closed,
+        /// The server went away, or the stream was shut down on detach.
+        Disconnected,
+        /// The local terminal stopped taking output.
+        Stdout,
+    }
 
     pub fn run(args: &[OsString]) -> Result<(), String> {
         let stream = UnixStream::connect(&args[0]).map_err(|e| format!("connecting: {e}"))?;
@@ -76,16 +93,56 @@ mod client {
         }
 
         let held = std::mem::take(&mut req.held);
+        let input = stream.try_clone().map_err(|e| e.to_string())?;
         term.enter_raw().map_err(|e| format!("raw mode: {e:?}"))?;
-        let output = std::thread::spawn(move || show(conn, held, block));
-        let result = forward(&term, stream, block, writer);
+        let done = Arc::new(AtomicBool::new(false));
+        let output = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                let ended = show(conn, held, block);
+                done.store(true, Ordering::Release);
+                ended
+            })
+        };
+        let result = forward(&term, input, block, writer, &done);
+        // Stop the output side before touching the terminal, so nothing the
+        // block prints lands after the restore. Shutting the socket ends
+        // its read; an error only means the server already closed it.
+        let _ = stream.shutdown(Shutdown::Both);
+        let ended = output.join();
+        restore(&mut term);
+        match (ended, &result) {
+            (Ok(Ended::Closed), _) => println!("\r\nrusty-mux: block {block} closed"),
+            (Ok(_), Ok(Stop::Detached)) => {
+                println!("\r\nrusty-mux: detached from block {block}")
+            }
+            (Ok(Ended::Disconnected), _) => {
+                println!("\r\nrusty-mux: lost the server; block {block} may still be running")
+            }
+            (Ok(Ended::Stdout), _) => eprintln!("rusty-mux: the terminal stopped taking output"),
+            (Err(_), _) => eprintln!("rusty-mux: the output thread panicked"),
+        }
+        result.map(|_| ())
+    }
+
+    /// Why the input loop stopped.
+    enum Stop {
+        /// Ctrl-], end of keyboard input, or the server refused input.
+        Detached,
+        /// The output side ended first.
+        OutputEnded,
+    }
+
+    /// Undoes the modes a block's program may have set on this terminal,
+    /// then leaves raw mode.
+    fn restore(term: &mut LinuxTerminal) {
+        let mut stdout = std::io::stdout();
+        if let Err(err) = stdout.write_all(RESTORE).and_then(|()| stdout.flush()) {
+            eprintln!("rusty-mux: resetting the terminal: {err}");
+        }
         if let Err(err) = term.leave_raw() {
             eprintln!("rusty-mux: restoring the terminal: {err:?}");
         }
-        // Not joined: the output thread may sit in a read; exiting ends it.
-        drop(output);
-        println!("\r\nrusty-mux: detached from block {block}");
-        result
     }
 
     struct Requests<'a> {
@@ -146,8 +203,9 @@ mod client {
     }
 
     /// Server to screen: assemble the checkpoint and paint its grid at
-    /// Ready, then pass raw output through.
-    fn show(mut conn: Conn<UnixStream>, held: Vec<Message>, block: BlockId) {
+    /// Ready, then pass raw output through until the block closes or the
+    /// connection ends.
+    fn show(mut conn: Conn<UnixStream>, held: Vec<Message>, block: BlockId) -> Ended {
         // Locked per write: the main thread prints the detach line when it is done.
         let mut stdout = std::io::stdout();
         let mut held = held.into_iter();
@@ -173,7 +231,7 @@ mod client {
                 }
                 Message::Output { block: b, data } if b == block => data,
                 Message::Event(rusty_mux_core::Event::BlockClosed { block: b }) if b == block => {
-                    return;
+                    return Ended::Closed;
                 }
                 _ => continue,
             };
@@ -182,27 +240,39 @@ mod client {
                 .and_then(|()| stdout.flush())
                 .is_err()
             {
-                return;
+                return Ended::Stdout;
             }
         }
+        Ended::Disconnected
     }
 
-    /// Keyboard to server, until Ctrl-] or the connection ends.
+    /// Keyboard to server, until Ctrl-], the end of keyboard input, or the
+    /// output side ending (`done`), which it checks every [`TICK`].
     fn forward(
         term: &LinuxTerminal,
         stream: UnixStream,
         block: BlockId,
         writer: bool,
-    ) -> Result<(), String> {
+        done: &AtomicBool,
+    ) -> Result<Stop, String> {
         let mut conn = Conn::new(stream);
         let mut buf = [0u8; 4096];
         let mut req = 1_000_000;
         loop {
+            if done.load(Ordering::Acquire) {
+                return Ok(Stop::OutputEnded);
+            }
+            let ready = term
+                .poll_readable(Some(TICK))
+                .map_err(|e| format!("waiting for the keyboard: {e:?}"))?;
+            if !ready {
+                continue;
+            }
             let n = term
                 .read_chunk(&mut buf)
                 .map_err(|e| format!("reading the keyboard: {e:?}"))?;
             if n == 0 {
-                return Ok(());
+                return Ok(Stop::Detached);
             }
             let keys = &buf[..n];
             let (keys, detach) = match keys.iter().position(|&b| b == DETACH) {
@@ -217,11 +287,11 @@ mod client {
                     data: keys.to_vec(),
                 };
                 if conn.send(&input).is_err() {
-                    return Ok(());
+                    return Ok(Stop::Detached);
                 }
             }
             if detach {
-                return Ok(());
+                return Ok(Stop::Detached);
             }
         }
     }
