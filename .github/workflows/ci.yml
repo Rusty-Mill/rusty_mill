@@ -437,7 +437,16 @@ jobs:
           else
             echo "Affected crates: $packages"
           fi
-          components="$(python3 .github/scripts/ci_components.py /tmp/metadata.json --packages "$packages")"
+          # Lanes spanning most of the workspace each rebuild the shared
+          # dependencies; the full sweep runs fewer jobs and tests every crate.
+          components_status=0
+          components="$(python3 .github/scripts/ci_components.py /tmp/metadata.json --packages "$packages" --full-if-most)" || components_status=$?
+          if [ "$components_status" -eq 3 ]; then
+            emit_full "Affected crates span most of the workspace's components"
+            exit 0
+          elif [ "$components_status" -ne 0 ]; then
+            exit "$components_status"
+          fi
           {
             echo "full=false"
             echo "packages=$packages"

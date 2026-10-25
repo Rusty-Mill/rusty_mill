@@ -59,13 +59,33 @@ def component_scopes(metadata: dict, selected: Iterable[str]) -> list[dict[str, 
     ]
 
 
+def covers_most_of_workspace(metadata: dict, scopes: list[dict[str, str]]) -> bool:
+    """True when the scoped lanes span more than half of the workspace's components.
+
+    Past that point the full sweep is cheaper: every lane rebuilds the shared
+    dependencies for clippy and test, so #1066's 28 of 45 components ran 145
+    jobs and ~350 runner-minutes, where a full sweep runs 58 jobs and ~270.
+    """
+    members = set(metadata["workspace_members"])
+    every = [package["name"] for package in metadata["packages"] if package["id"] in members]
+    return 2 * len(scopes) > len(component_scopes(metadata, every))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("metadata", type=Path)
     parser.add_argument("--packages", required=True)
+    parser.add_argument(
+        "--full-if-most",
+        action="store_true",
+        help="print nothing and exit 3 when the lanes cover most of the workspace",
+    )
     args = parser.parse_args()
     metadata = json.loads(args.metadata.read_text(encoding="utf-8"))
-    print(json.dumps(component_scopes(metadata, args.packages.split()), separators=(",", ":")))
+    scopes = component_scopes(metadata, args.packages.split())
+    if args.full_if_most and covers_most_of_workspace(metadata, scopes):
+        raise SystemExit(3)
+    print(json.dumps(scopes, separators=(",", ":")))
 
 
 if __name__ == "__main__":
