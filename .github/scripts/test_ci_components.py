@@ -96,6 +96,11 @@ class CoversMostOfWorkspaceTests(unittest.TestCase):
         self.assertEqual(len(scopes), 3)
         self.assertTrue(covers_most_of_workspace(self.metadata, scopes))
 
+    def test_denominator_counts_components_past_the_matrix_limit(self) -> None:
+        # component_scopes collapses >128 lanes into one; the denominator must not.
+        md = metadata({f"app{i}": (f"crates/apps/app{i}", []) for i in range(130)})
+        self.assertFalse(covers_most_of_workspace(md, component_scopes(md, ["app0"])))
+
     def test_cli_exits_3_only_with_the_flag_and_most_components(self) -> None:
         script = Path(__file__).with_name("ci_components.py")
         with tempfile.TemporaryDirectory() as directory:

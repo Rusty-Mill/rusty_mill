@@ -67,8 +67,12 @@ def covers_most_of_workspace(metadata: dict, scopes: list[dict[str, str]]) -> bo
     jobs and ~350 runner-minutes, where a full sweep runs 58 jobs and ~270.
     """
     members = set(metadata["workspace_members"])
-    every = [package["name"] for package in metadata["packages"] if package["id"] in members]
-    return 2 * len(scopes) > len(component_scopes(metadata, every))
+    components = {
+        component_name(package["manifest_path"], metadata["workspace_root"])
+        for package in metadata["packages"]
+        if package["id"] in members
+    }
+    return 2 * len(scopes) > len(components)
 
 
 def main() -> None:
