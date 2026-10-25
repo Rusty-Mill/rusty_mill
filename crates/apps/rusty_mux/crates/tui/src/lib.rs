@@ -1,7 +1,7 @@
 //! Throwaway Phase 1 client for rusty_mux. It attaches the local terminal
-//! to one block: the snapshot is painted once, then the block's raw output
-//! goes straight to the local terminal, which does the parsing. Phase 2
-//! replaces it with real clients.
+//! to one block: the attach checkpoint's grid is painted once, then the
+//! block's raw output goes straight to the local terminal, which does the
+//! parsing. Phase 2 replaces it with real clients.
 
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};
@@ -9,7 +9,7 @@ use std::io::{self, Read, Write};
 use rusty_mux_proto::{Message, decode, encode};
 use rusty_term_core::{Grid, WIDE_TRAILER};
 
-/// Repaints the local terminal from a decoded snapshot: every visible row
+/// Repaints the local terminal from a restored grid: every visible row
 /// with its colours, then the cursor. Attributes other than colour are not
 /// painted; the next output redraws whatever the program redraws.
 pub fn paint(grid: &Grid) -> Vec<u8> {

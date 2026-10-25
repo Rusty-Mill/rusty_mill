@@ -18,6 +18,8 @@ path = "src/main.rs"
 [dependencies]
 rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
+# Only for `checkpoint::Receiver`, the documented client-side assembler.
+rusty_mux_server = { workspace = true }
 rusty_term_core = { workspace = true }
 rusty_uuid = { workspace = true }
 platform = { workspace = true }

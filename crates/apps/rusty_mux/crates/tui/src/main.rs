@@ -36,8 +36,8 @@ mod client {
     use platform_linux::LinuxTerminal;
     use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
     use rusty_mux_proto::{Features, Message};
+    use rusty_mux_server::checkpoint::Receiver;
     use rusty_mux_tui::{Conn, paint};
-    use rusty_term_core::Grid;
     use rusty_uuid::Uuid;
 
     /// Ctrl-]: detach.
@@ -56,7 +56,7 @@ mod client {
             .map_err(|e| e.to_string())?;
 
         conn.send(&Message::Hello {
-            features: Features::NONE,
+            features: Features::CHECKPOINT_V2,
         })
         .map_err(|e| e.to_string())?;
         let mut req = Requests {
@@ -92,14 +92,17 @@ mod client {
         conn: &'a mut Conn<UnixStream>,
         next: u64,
         /// Messages that arrived while waiting for a reply, such as the
-        /// snapshot that follows an attach, kept for [`show`].
+        /// checkpoint that follows an attach, kept for [`show`].
         held: Vec<Message>,
     }
 
     impl Requests<'_> {
         fn welcome(&mut self) -> Result<(), String> {
             match self.conn.recv().map_err(|e| e.to_string())? {
-                Message::Welcome { .. } => Ok(()),
+                Message::Welcome { features, .. } if features.contains(Features::CHECKPOINT_V2) => {
+                    Ok(())
+                }
+                Message::Welcome { .. } => Err("the server cannot send checkpoints".into()),
                 other => Err(format!("expected Welcome, got {other:?}")),
             }
         }
@@ -142,19 +145,30 @@ mod client {
         }
     }
 
-    /// Server to screen: paint the snapshot, then pass raw output through.
+    /// Server to screen: assemble the checkpoint and paint its grid at
+    /// Ready, then pass raw output through.
     fn show(mut conn: Conn<UnixStream>, held: Vec<Message>, block: BlockId) {
         // Locked per write: the main thread prints the detach line when it is done.
         let mut stdout = std::io::stdout();
         let mut held = held.into_iter();
+        let mut receiver = Some(Receiver::default());
         while let Some(message) = held.next().or_else(|| conn.recv().ok()) {
             let bytes = match message {
-                Message::Snapshot { block: b, data } if b == block => {
-                    match Grid::decode_snapshot(&data) {
-                        Ok(grid) => paint(&grid),
-                        Err(err) => {
-                            format!("\r\nrusty-mux: bad snapshot: {err:?}\r\n").into_bytes()
-                        }
+                Message::Checkpoint {
+                    block: b,
+                    offset,
+                    total,
+                    data,
+                } if b == block => match receiver.as_mut().map(|r| r.push(offset, total, &data)) {
+                    Some(Ok(())) => continue,
+                    Some(Err(err)) => fail(&format!("bad checkpoint: {err}")),
+                    None => fail("checkpoint after ready"),
+                },
+                Message::Ready { block: b } if b == block => {
+                    match receiver.take().map(Receiver::finish) {
+                        Some(Ok((grid, _parser))) => paint(&grid),
+                        Some(Err(err)) => fail(&format!("bad checkpoint: {err}")),
+                        None => fail("ready twice"),
                     }
                 }
                 Message::Output { block: b, data } if b == block => data,
@@ -210,6 +224,11 @@ mod client {
                 return Ok(());
             }
         }
+    }
+
+    /// A line for the user about a broken attach.
+    fn fail(why: &str) -> Vec<u8> {
+        format!("\r\nrusty-mux: {why}\r\n").into_bytes()
     }
 
     fn parse_uuid(text: &OsString) -> Result<Uuid, String> {
