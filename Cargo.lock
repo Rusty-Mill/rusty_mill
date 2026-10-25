@@ -11465,9 +11465,9 @@ dependencies = [
  "async-trait",
  "bigdecimal",
  "chrono",
- "futures-core",
- "futures-util",
  "heck 0.5.0",
+ "rusty_stream",
+ "rusty_tokio",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
@@ -11489,10 +11489,9 @@ dependencies = [
 name = "rusty-db-mysql"
 version = "0.1.0"
 dependencies = [
- "async-stream",
  "async-trait",
- "futures-util",
  "rusty-db-core",
+ "rusty_stream",
  "sqlx",
 ]
 
@@ -11500,10 +11499,9 @@ dependencies = [
 name = "rusty-db-postgres"
 version = "0.1.0"
 dependencies = [
- "async-stream",
  "async-trait",
- "futures-util",
  "rusty-db-core",
+ "rusty_stream",
  "sqlx",
 ]
 
@@ -11511,10 +11509,9 @@ dependencies = [
 name = "rusty-db-sqlite"
 version = "0.1.0"
 dependencies = [
- "async-stream",
  "async-trait",
- "futures-util",
  "rusty-db-core",
+ "rusty_stream",
  "sqlx",
 ]
 
