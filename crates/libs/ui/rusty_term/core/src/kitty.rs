@@ -295,3 +295,32 @@ fn parse_u32(v: &[u8]) -> u32 {
     }
     n
 }
+
+crate::checkpoint::fields!(
+    Transmission,
+    [
+        active, action, format, width, height, compressed, id, quiet, cols, rows, virt, frame_x,
+        frame_y, gap_ms, anim_state, delete, payload, truncated
+    ]
+);
+impl Transmission {
+    pub(crate) fn validate_checkpoint(&self) -> crate::checkpoint::Result<()> {
+        if self.payload.len() > MAX_PAYLOAD
+            || [
+                self.width,
+                self.height,
+                self.cols,
+                self.rows,
+                self.frame_x,
+                self.frame_y,
+            ]
+            .into_iter()
+            .any(|n| n > u32::MAX as usize)
+            || self.frame_x.checked_add(MAX_DECODED).is_none()
+            || self.frame_y.checked_add(MAX_DECODED).is_none()
+        {
+            return Err(crate::checkpoint::Error("Kitty payload limit"));
+        }
+        Ok(())
+    }
+}

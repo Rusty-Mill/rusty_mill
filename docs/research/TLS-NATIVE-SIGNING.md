@@ -116,7 +116,65 @@ Everything else in `server.rs`, `server12.rs` and the server half of `negotiate.
 | Nonce | The test-only unmodified path matches RFC 6979 exactly. Fixed-noise fixtures check the pinned hedged construction, both curve-specific noise lengths and both padding boundaries against an independently checked derivation; draft -05 §6 has no completed vectors. Zero/repeated-noise test fixtures produce valid reproducible hedged signatures, without asserting equality to plain RFC 6979. Injected production RNG errors return an error and no signature, with no fallback. With fresh noise, check for repeated `r` over 100,000 signatures of one message under one key and check the top bits of `k` for bias; these are statistical smoke tests, not uniqueness or security proofs. |
 | Constant time | The `crypto-constant-time` job gains ECDSA signing (scalar multiplication, inversion, the `s` computation, nonce derivation) and Ed25519 signing (fixed-base multiplication, scalar reduction): valgrind taint with the private key and nonce marked secret, exact disassembly jump counts, and the timing series against an A/A baseline with a planted-leak control. The claim stays "no leak found by these methods". |
 | Engine | The 11 suites marked `ring-only suite (ADR-0005)` run on the native backend again, except the tests that need an RSA signing key, which are gated individually and named. The native BoGo floor is re-set from a run that includes server scenarios. OpenSSL interop runs in the server direction. |
-| Review | An independent review of the new signing code before it is wired (plan section 13.2 D4). Its reviewer, scope and conclusion are recorded in plan section 11b. Automated reviews are labelled automated. |
+| Review | The owner's review of the new signing code before it is wired (plan section 13.2 D4, owner alone; S5 as amended). Its reviewer, scope and conclusion are recorded in plan section 11b. Automated reviews are labelled automated. |
+
+### ECDSA implementation checkpoint (PR #992 correction, 2026-10-24)
+
+The draft-05 correction follows source-reviewed design #989 at
+`263832fa92552fe6f0a7d99f168bba5a9344054c`. This reconciles a design mismatch;
+it is not a separately demonstrated algebraic signing vulnerability.
+Fixed-noise known answers use the checked-in Python reference
+`crates/foundation/rusty_pk/scripts/gen_hedged_ecdsa.py` (stdlib HMAC/hashlib,
+separate affine integer curve arithmetic), not draft-published vectors or an
+independent human review. They cover both curves, zero and repeated nonzero
+noise, both HMAC padding boundaries, and SHA message-padding boundaries;
+the public production signing path matches them and `ring` verifies them.
+
+A second, separately written reference,
+`crates/foundation/rusty_pk/scripts/check_hedged_ecdsa.py`, reproduces RFC 6979
+A.2.5 and A.2.6 and recomputes `r` and `s` for all 20 fixtures. It shares no code
+with the generator, and agreement between two implementations by the same
+implementer is not a human review.
+
+**Evidence run at `c8cf39c55`.** The implementer (Claude Code, the working session)
+ran these locally on rustc 1.98.1, x86-64. The results are not reproduced by any
+reviewer.
+
+- **100,000 signatures:** no repeated `r` over 100,000 signatures of one message per
+  curve, with OS CSPRNG noise (`ring` `SystemRandom`). This is
+  `hedged_nonces_do_not_repeat_over_100k_signatures`, ignored in ordinary runs. It
+  passed once in release in 337 s. The ordinary suite checks 2,000 signatures per
+  curve with a deterministic test noise stream.
+- **Nonce top-bit bias:** over 20,000 DRBG nonces per curve, each of the top 8 bits of
+  `k` is within 5 sigma of uniform (`nonce_top_bits_show_no_bias`). This is a
+  statistical smoke test only.
+- **Valgrind taint:** `scripts/ct_check.sh` with Valgrind 3.22.0 exited 0. In
+  `ecdsa-sign256` and `ecdsa-sign384`, with the key and the noise secret, exactly 4
+  reports are verdict sites and every other report passes through `ecdsa::output`.
+  The `ecdsa-control` planted branch is caught and refused. An earlier attempt on
+  another host, with Valgrind 3.24, could not start because that host lacked libc
+  debug symbols.
+- **Disassembly pins:** all pass. `sign_seeded` has 41 jumps, `Rfc6979::mac` 5 and
+  `generator_x` 9, with no divisions. A count match is drift detection, not proof.
+- **Timing:** both curves have sparse-vs-dense key tests and A/A baselines, with key
+  pairs whose classes give equal `r` and `s` encoded lengths. Three runs gave |t| at
+  most 1.13 for the key classes and at most 1.64 for A/A, against a threshold of 4.5.
+  An earlier P-256 run on another host gave an A/A |t| of 3.60.
+
+**Limits.**
+- These are machine-specific runs on one toolchain, not constant-time certification.
+  The claim stays "no leak found by these methods".
+- There is no planted-leak timing control for ECDSA signing. The control is a
+  taint-mode control only.
+- The 100,000-signature test is not in CI.
+
+**Still outstanding before TLS wiring:**
+- the owner's signing-code review, recorded with reviewer, scope and exact commit
+  (S5 as amended; the reviewed code is on main at `698844212`);
+- PKCS#8 parsing;
+- the engine suites and native BoGo with server scenarios.
+
+The full gap-5 evidence plan is not complete.
 
 ## 5. Effort
 
@@ -148,7 +206,7 @@ Rough, plus or minus 50 percent, like the plan's figures. Suggested order of PRs
 | S2 | ECDSA nonce | Plain RFC 6979 (deterministic); hedged RFC 6979 (the pinned §3 construction with fresh randomness); or random only, as `ring` does | **Decided 2026-10-24: hedged RFC 6979** |
 | S3 | RSA signing | Keep it out (native servers and client certificates use ECDSA or Ed25519 only), or build RSA-PSS signing (plan stage 7, "recommend never") | **Decided 2026-10-24: kept out** |
 | S4 | ADR | Accept ADR-0006 (extends ADR-0005 to signing and the server role), or amend ADR-0005 | **Decided 2026-10-24: ADR-0006 accepted** |
-| S5 | Review before wiring | Independent human review of the signing code before the `rusty_tls` wiring merges, or the owner alone (plan D4) | **Decided 2026-10-24: independent review, recorded with reviewer, scope and commit** |
+| S5 | Review before wiring | Independent human review of the signing code before the `rusty_tls` wiring merges, or the owner alone (plan D4) | **Decided 2026-10-24: independent review, recorded with reviewer, scope and commit. Amended 2026-10-24: owner review (plan D4), recorded the same way.** *Amended 2026-10-24:* the owner is the S5 reviewer ("S5 is me", working session; the implementer's transcription, not yet restated from the owner's GitHub account). That is plan D4's "owner alone" option, not an independent review: one reviewer, who owns the project and whose account authored commit `32db5c131` in #992. |
 
 ## 7. Not in scope
 

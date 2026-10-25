@@ -17,7 +17,7 @@ use rusty_tokio::time::timeout;
 /// A connected pair of loopback sockets. (Not `duplex`: dropping one half of
 /// a `DuplexStream` can deadlock, see the PR description.)
 async fn pair() -> (TcpStream, TcpStream) {
-    let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (a, b) = rusty_tokio::join!(TcpStream::connect(addr), listener.accept());
     (a.unwrap(), b.unwrap().0)

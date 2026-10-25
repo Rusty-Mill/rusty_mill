@@ -6,8 +6,17 @@
 //! `Instant::now()` directly, so [`pause`]/[`advance`] can swap in a
 //! manually-driven virtual clock for deterministic tests -- see that
 //! module's docs, and [`pause`]'s, for the full picture.
+//!
+//! Every public deadline is a [`time::Instant`](Instant) (tokio's type,
+//! read from that same clock), not `std::time::Instant` -- see
+//! `instant.rs`'s docs for why. Internally the driver still keys its
+//! heap on the wrapped `std::time::Instant`; conversion happens only at
+//! the public boundary.
 
 mod clock;
+mod instant;
+
+pub use instant::Instant;
 
 use crate::runtime::Handle;
 use clock::Clock;
@@ -16,12 +25,14 @@ use std::collections::{BinaryHeap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// The driver's own representation; the public type is `Instant` above.
+use std::time::Instant as StdInstant;
 
 struct Inner {
-    heap: BinaryHeap<Reverse<(Instant, u64)>>,
+    heap: BinaryHeap<Reverse<(StdInstant, u64)>>,
     wakers: HashMap<u64, Waker>,
 }
 
@@ -51,7 +62,7 @@ impl TimerDriver {
 
     /// What this driver currently considers "now" -- real wall-clock
     /// time, unless [`pause`] has switched it to a paused virtual clock.
-    pub(crate) fn now(&self) -> Instant {
+    pub(crate) fn now(&self) -> StdInstant {
         self.clock.now()
     }
 
@@ -107,6 +118,40 @@ impl TimerDriver {
         self.clock.set(target);
     }
 
+    /// Auto-advance, tokio's paused-clock behavior: called by the
+    /// current-thread scheduler when it is about to park with nothing
+    /// runnable, so a paused runtime that is only waiting on timers jumps
+    /// straight to the next one instead of waiting forever (nothing else
+    /// would ever move a paused clock). Moves the clock to the earliest
+    /// deadline something still waits on, fires it, and returns whether
+    /// it did; `false` when not paused or no timer is pending.
+    ///
+    /// Cancelled entries (their `Sleep` was dropped -- e.g. a `timeout`
+    /// whose future won) are popped first rather than advanced to: they
+    /// stay in the heap until reached (see `cancel`), and jumping the
+    /// clock to a deadline nobody waits on would make virtual time leap
+    /// for no observable reason.
+    pub(crate) fn auto_advance(&self) -> bool {
+        if !self.clock.is_paused() {
+            return false;
+        }
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let deadline = loop {
+            let Some(&Reverse((deadline, id))) = guard.heap.peek() else {
+                return false;
+            };
+            if guard.wakers.contains_key(&id) {
+                break deadline;
+            }
+            guard.heap.pop();
+        };
+        let Some(now) = self.clock.advance_to(deadline) else {
+            return false;
+        };
+        self.fire_due(guard, now);
+        true
+    }
+
     pub(crate) fn start(self: &Arc<Self>) {
         let driver = self.clone();
         let handle = std::thread::Builder::new()
@@ -154,7 +199,7 @@ impl TimerDriver {
         }
     }
 
-    fn fire_due(&self, mut guard: std::sync::MutexGuard<'_, Inner>, now: Instant) {
+    fn fire_due(&self, mut guard: std::sync::MutexGuard<'_, Inner>, now: StdInstant) {
         let mut due = Vec::new();
         while let Some(&Reverse((deadline, id))) = guard.heap.peek() {
             if deadline > now {
@@ -171,7 +216,7 @@ impl TimerDriver {
         }
     }
 
-    fn register(&self, deadline: Instant, waker: Waker) -> u64 {
+    fn register(&self, deadline: StdInstant, waker: Waker) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut guard = self.inner.lock().unwrap();
         guard.heap.push(Reverse((deadline, id)));
@@ -281,15 +326,37 @@ mod tests {
 /// What the current runtime's timer driver considers "now" -- shared by
 /// every place in this module that needs it but doesn't already have a
 /// `TimerDriver` reference at hand the way [`Sleep`] does.
-fn current_time() -> Instant {
+fn current_time() -> StdInstant {
     Handle::current().shared.timer.now()
+}
+
+/// [`Instant::now`]'s source: the current runtime's clock when there is
+/// one, real time otherwise (tokio's `Instant::now` works outside a
+/// runtime too, so this must not panic there).
+fn clock_now() -> StdInstant {
+    match Handle::try_current_no_panic() {
+        Some(handle) => handle.shared.timer.now(),
+        None => StdInstant::now(),
+    }
 }
 
 /// Freezes the current runtime's clock at its present real value --
 /// `sleep`/`interval`/etc. registered afterward stop advancing on their
-/// own; nothing fires until [`advance`] explicitly moves it forward.
-/// Deterministic timer tests can then assert on long-timeout/interval
-/// behavior without any real waiting.
+/// own; nothing fires until [`advance`] explicitly moves it forward, or
+/// until the runtime runs out of other work. Deterministic timer tests
+/// can then assert on long-timeout/interval behavior without any real
+/// waiting.
+///
+/// **Auto-advance**, as in tokio: when `block_on`'s future is not woken,
+/// no task is runnable and no `spawn_blocking` job is in flight, the
+/// scheduler moves the paused clock straight to the next pending timer
+/// and fires it, so `sleep(Duration::from_secs(3600)).await` on a paused
+/// runtime completes at once rather than hanging. Real I/O still arrives
+/// in real time from the reactor thread, so a paused test that races I/O
+/// against a timeout can see the timeout win; pause only tests that are
+/// timer-driven. Auto-advance runs in [`Runtime::block_on`](crate::Runtime::block_on)
+/// on a current-thread runtime -- not yet in `LocalRuntime::block_on` or
+/// `LocalSet::run_until`, where only explicit [`advance`] moves time.
 ///
 /// # Panics
 /// Panics if the current runtime isn't the current-thread flavor
@@ -336,15 +403,15 @@ pub async fn advance(duration: Duration) {
     timer.advance(duration).await;
 }
 
-/// A future that resolves once at a specific `Instant`.
+/// A future that resolves once at a specific [`Instant`].
 pub struct Sleep {
-    deadline: Instant,
+    deadline: StdInstant,
     timer: Arc<TimerDriver>,
     id: Option<u64>,
 }
 
 impl Sleep {
-    fn at(deadline: Instant) -> Self {
+    fn at(deadline: StdInstant) -> Self {
         let timer = Handle::current().shared.timer.clone();
         Sleep {
             deadline,
@@ -353,8 +420,9 @@ impl Sleep {
         }
     }
 
+    /// When this `Sleep` resolves, on the runtime's clock.
     pub fn deadline(&self) -> Instant {
-        self.deadline
+        Instant::from_std(self.deadline)
     }
 
     /// Re-arms this `Sleep` to resolve at a new `deadline`, in place --
@@ -367,7 +435,7 @@ impl Sleep {
         if let Some(id) = self.id.take() {
             self.timer.cancel(id);
         }
-        self.deadline = deadline;
+        self.deadline = deadline.into_std();
     }
 
     /// Checks whether this `Sleep`'s deadline has already passed, without
@@ -416,7 +484,7 @@ pub fn sleep(duration: Duration) -> Sleep {
 
 /// Resolves at `deadline`, or immediately if it's already passed.
 pub fn sleep_until(deadline: Instant) -> Sleep {
-    Sleep::at(deadline)
+    Sleep::at(deadline.into_std())
 }
 
 /// The error [`timeout`] resolves to when the inner future didn't
@@ -503,13 +571,13 @@ pub enum MissedTickBehavior {
 /// treat differently.
 pub struct Interval {
     period: Duration,
-    next_deadline: Instant,
+    next_deadline: StdInstant,
     sleep: Option<Sleep>,
     missed_tick_behavior: MissedTickBehavior,
 }
 
 pub fn interval(period: Duration) -> Interval {
-    interval_at(current_time() + period, period)
+    interval_at(Instant::from_std(current_time() + period), period)
 }
 
 /// Like [`interval`], but the first tick fires at `start` instead of
@@ -521,7 +589,7 @@ pub fn interval_at(start: Instant, period: Duration) -> Interval {
     assert!(period > Duration::ZERO, "interval period must be positive");
     Interval {
         period,
-        next_deadline: start,
+        next_deadline: start.into_std(),
         sleep: None,
         missed_tick_behavior: MissedTickBehavior::default(),
     }
@@ -564,7 +632,7 @@ impl Interval {
 
     /// Resets so the next tick fires at the given absolute `deadline`.
     pub fn reset_at(&mut self, deadline: Instant) {
-        self.next_deadline = deadline;
+        self.next_deadline = deadline.into_std();
         self.sleep = None;
     }
 
@@ -601,7 +669,7 @@ impl Interval {
                     }
                 };
                 self.sleep = None;
-                Poll::Ready(fired_at)
+                Poll::Ready(Instant::from_std(fired_at))
             }
             Poll::Pending => Poll::Pending,
         }

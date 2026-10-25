@@ -189,6 +189,7 @@ fn happy_run_polling(
         poll,
         max_wall: Duration::from_secs(90),
         end_grace: Duration::ZERO,
+        deadline: None,
         cost_cap: None,
         slots: None,
     };
@@ -366,6 +367,7 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(5),
         end_grace: Duration::ZERO,
+        deadline: None,
         cost_cap: None,
         slots: None,
     };
@@ -490,6 +492,7 @@ fn config(dir: &Path, task: &TaskId, repo: PathBuf, launchers: Launchers, wall: 
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(wall),
         end_grace: Duration::ZERO,
+        deadline: None,
         cost_cap: None,
         slots: None,
     }

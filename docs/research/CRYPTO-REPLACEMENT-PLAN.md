@@ -113,7 +113,7 @@ hedged RFC 6979 (S2), pinned to `draft-irtf-cfrg-det-sigs-with-noise-05` §4 as 
 `TLS-NATIVE-SIGNING.md` §3: padded HMAC inputs, 32-byte P-256 noise and 48-byte P-384 noise, with production
 RNG errors failing closed and deterministic paths confined to tests. Repeated/zero noise has deterministic-style
 security, not plain RFC 6979 output; mitigation is bounded by draft §5's exclusions. RSA signing stays out (S3).
-ADR-0006 is accepted (S4). An independent review of the signing code, recorded with reviewer, scope and commit, is required before the `rusty_tls` wiring merges (S5).
+ADR-0006 is accepted (S4). The owner's review of the signing code (plan D4, owner alone), recorded with reviewer, scope and commit, is required before the `rusty_tls` wiring merges (S5, amended 2026-10-24).
 
 Direct owner confirmation on 2026-10-24 is recorded in [PR #981 comment 6385229428](https://github.com/Rusty-Mill/rusty_mill/pull/981#issuecomment-6385229428). The S1–S5 scope is settled; the correction below specifies its nonce construction and failure policy.
 
@@ -899,6 +899,8 @@ re-derived.
   relative to the risk; the owner decides. *Decided 2026-10-10: no second reviewer* (owner's decision).
   *Gap 5 decision, 2026-10-24 (S5):* independent signing-code review recorded with reviewer, scope and exact
   commit is required before TLS wiring merges; the earlier decision does not waive this requirement.
+  *Amended 2026-10-24:* the owner is the S5 reviewer ("S5 is me", working session; the implementer's transcription, not yet restated from the owner's GitHub account). That is plan D4's "owner alone" option, not an independent review: one reviewer, who owns the project and whose account authored commit `32db5c131` in #992. A review recorded with reviewer, scope and exact commit is still required before
+  TLS wiring merges.
 - **D5 Where `ring` is allowed to remain:** it stays in the lockfile for `rustls`,
   `boringtun`, `jsonwebtoken`, `quinn` (section 2.2). Completion of this plan is "the native
   `rusty_tls` engine no longer needs `ring`", not "ring-free".

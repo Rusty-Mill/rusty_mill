@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusty_font::{Font, GlyphOutline as SovereignOutline, Point as SovereignPoint, Rasterizer};
 
@@ -100,6 +101,9 @@ pub(crate) trait GlyphSource {
     }
 }
 
+/// Source of [`FontCache::id`].
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
 /// A glyph cache over `rusty_font` fonts at a fixed pixel size, with
 /// bold/italic faces and a fallback chain.
 pub(crate) struct FontCache {
@@ -125,6 +129,9 @@ pub(crate) struct FontCache {
     /// Glyphs rasterized by glyph id (ligatures / contextual substitutions),
     /// which the `(char, Style)` cache can't key.
     gid_cache: HashMap<(u16, Style), Rc<Glyph>>,
+    /// Unique per cache built, so a frame drawn with another font (a zoom,
+    /// a config reload) never matches one drawn with this.
+    id: u64,
 }
 
 impl FontCache {
@@ -174,7 +181,14 @@ impl FontCache {
             baseline,
             cache: HashMap::new(),
             gid_cache: HashMap::new(),
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         })
+    }
+
+    /// This cache's identity: equal only for frames drawn with the same
+    /// faces, size and shaping.
+    pub(crate) fn id(&self) -> u64 {
+        self.id
     }
 
     /// Whether any face has an active GSUB shaper — i.e. ligatures are enabled

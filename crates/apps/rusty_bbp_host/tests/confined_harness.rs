@@ -99,6 +99,7 @@ fn setup(
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(60),
         end_grace: Duration::from_secs(5),
+        deadline: None,
         cost_cap: None,
         slots: None,
     }
@@ -530,6 +531,7 @@ fn a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone() {
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(60),
         end_grace: Duration::from_secs(5),
+        deadline: None,
         cost_cap: None,
         slots: None,
     };
