@@ -31,15 +31,34 @@ screen has none.
   is `hist_seq - scrollback_len`, so evictions need no separate count.
 - `hist_epoch: u64`: bumped when history is rewritten rather than appended
   (reflow, clear, retheme). A delta never crosses an epoch.
-- A base token, sent with Ready after every full checkpoint or delta:
-  `Base { grid_id, stamp, hist_seq, hist_epoch, cols, rows }`. The client keeps
-  it beside the grid it restored.
+- `screen_gen: u64`: bumped on every alternate-screen enter and leave. Row
+  stamps cannot describe the hidden saved screen, so this is what tells the
+  server it may have changed.
+- A base token: `Base { server, block, grid_id, stamp, hist_seq, hist_epoch,
+  screen_gen, cols, rows }`. `server` is a random incarnation id chosen at
+  server start and `block` is the block's UUID, so a token is bound to one
+  block in one server lifetime. `grid_id` alone is only process-local.
 - `Attach { block, since: Option<Base> }` and a feature bit for deltas.
+
+## Keeping the token exact
+
+A token is valid only for the exact grid state it describes. The client keeps
+applying raw Output after Ready, so a token sent only with Ready goes stale at
+once: history the client already holds would be appended again on reconnect.
+
+So the token advances with the stream. With the delta feature negotiated, every
+Output frame carries the token for the server's grid just after that frame's
+bytes were applied, and Ready carries it for the checkpoint or delta. Frames are
+applied whole and in order, so the client replaces its token only after it has
+applied the frame that carries it. Its token then always matches its grid
+byte for byte, at a cost of about 40 bytes a frame. A client that cannot
+vouch for its grid, for example after a failed apply or a local edit, drops
+the token and attaches without one.
 
 ## Server choice
 
 Send a delta only when all of these hold:
-- `grid_id` matches the block's live grid (same server process, same block);
+- `server`, `block` and `grid_id` match the block's live grid;
 - `hist_epoch` and the dimensions are unchanged;
 - `since.hist_seq` is no older than the oldest retained line;
 - the estimated delta is smaller than half the full checkpoint.
@@ -59,9 +78,14 @@ Header `RTCD\x01`, then:
 3. History: the new `hist_seq`, then the lines with seq in
    `(since.hist_seq, hist_seq]` in v3 line encoding. Lines evicted since the
    base follow from the new oldest seq.
-4. Live screen: a bitmap of rows whose `row_stamp > since.stamp`, then those
-   rows. The saved screen goes in full if it exists and the client's base was
-   taken on the other side of an alternate-screen switch.
+4. Screens. If `screen_gen` is unchanged since the base, a bitmap of live rows
+   whose `row_stamp > since.stamp`, then those rows; no saved screen exists or
+   it is untouched. If `screen_gen` changed, by any number of switches, the live
+   screen goes in full and so does the saved screen if one exists. The saved
+   cursor and the other per-screen state are in section 2 either way. This
+   covers alternate, then primary with an edit, then alternate again: the
+   switches end on the same side, but `screen_gen` moved, so the replaced
+   saved primary is sent.
 
 Styles use one table across sections 3 and 4, as in v3. The decoder keeps
 v3's budgets, applies into a copy, runs `validate_checkpoint`, and swaps only
@@ -84,6 +108,15 @@ on success, so a bad delta leaves the client's grid untouched.
 - Fallback cases: resize, reflow, scrollback clear, eviction past the base,
   a different grid id, an alternate-screen switch. Each must choose a full
   checkpoint or apply exactly.
+- Screen round trip: base taken in the alternate screen, then leave, edit the
+  primary and its saved cursor, and enter the alternate screen again. The
+  delta must restore the new saved primary.
+- Stale-token reconnect: attach, apply Output that pushes history, disconnect,
+  reconnect with the client's current token. The result must hold every
+  history line exactly once. Repeat with a disconnect mid-frame, where the
+  client must still hold the previous token.
+- Wrong lifetime: a token from a restarted server, or from another block with
+  the same `grid_id` value, gets a full checkpoint.
 - Hostile deltas: a wrong base, a bitmap longer than the row count, a history
   range past `hist_seq`, and budget overruns.
 
