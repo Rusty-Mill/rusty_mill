@@ -14,8 +14,8 @@ layer = "apps"
 ts-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt", "net", "macros"] }
-rusty_http = { workspace = true, features = ["tokio"] }
+rusty_tokio.workspace = true
+rusty_http = { workspace = true, features = ["rusty-tokio"] }
 rusty_log = { workspace = true }
 thiserror.workspace = true
 
@@ -31,7 +31,5 @@ libc = { workspace = true }
 # Independent HTTP/1.1 client for tests/roundtrip.rs -- proves real interop
 # with a totally separate implementation, not just this crate against
 # itself. Not a runtime dependency (see the dependency table in DESIGN.md).
-tokio = { workspace = true, features = ["rt", "net", "macros", "rt-multi-thread", "time"] }
 hyper = { workspace = true, features = ["client", "http1"] }
-hyper-util = { workspace = true, features = ["tokio"] }
 http-body-util.workspace = true

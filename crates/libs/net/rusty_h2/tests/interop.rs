@@ -1,9 +1,12 @@
 //! Live interop with the `h2` crate, the independent oracle, in both
-//! directions over loopback TCP. Our side runs on `rusty_tokio`, the oracle
-//! on `tokio`; each test owns one runtime of each kind.
+//! directions over loopback TCP. Both sides run on `rusty_tokio`, each on a
+//! runtime of its own; the oracle's sockets go through [`TokioIo`].
 
 use std::future::poll_fn;
+use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{ready, Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -36,6 +39,52 @@ fn pattern(n: usize) -> Vec<u8> {
 
 // ---- the oracle's halves ----------------------------------------------------
 
+/// A `rusty_tokio` socket under the `tokio::io` traits `h2` is written
+/// against, so the oracle runs on `rusty_tokio`: `tokio` supplies only the
+/// trait definitions, never a runtime (#903).
+struct TokioIo<T>(T);
+
+impl<T: rusty_tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for TokioIo<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let mut ours = rusty_tokio::io::ReadBuf::new(buf.initialize_unfilled());
+        ready!(Pin::new(&mut self.0).poll_read(cx, &mut ours))?;
+        let n = ours.filled().len();
+        buf.advance(n);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<T: rusty_tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for TokioIo<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
+/// A loopback listener for the oracle's server, bound on `rt`.
+fn oracle_listener(rt: &rusty_tokio::Runtime) -> rusty_tokio::io::TcpListener {
+    rt.block_on(async {
+        rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+    })
+}
+
 /// Sends `data` on an `h2` stream, waiting for the capacity it grants.
 async fn h2_send(send: &mut SendStream<Bytes>, mut data: Bytes, end: bool) {
     if data.is_empty() {
@@ -65,20 +114,18 @@ async fn h2_drain(
 
 /// An `h2` server that echoes each request body with `grpc-status: 0`
 /// trailers, and returns each request's `x-n` header as `x-echo`. Serves one
-/// connection on a tokio runtime and yields its address.
-fn h2_echo_server(rt: &tokio::runtime::Runtime) -> SocketAddr {
-    let listener = rt
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
+/// connection on the oracle's runtime and yields its address.
+fn h2_echo_server(rt: &rusty_tokio::Runtime) -> SocketAddr {
+    let listener = oracle_listener(rt);
     let addr = listener.local_addr().unwrap();
     rt.spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         tcp.set_nodelay(true).unwrap();
-        let Ok(mut conn) = h2::server::handshake(tcp).await else {
+        let Ok(mut conn) = h2::server::handshake(TokioIo(tcp)).await else {
             return;
         };
         while let Some(Ok((req, mut respond))) = conn.accept().await {
-            tokio::spawn(async move {
+            rusty_tokio::spawn(async move {
                 let echo = req.headers().get("x-n").cloned();
                 let mut body = req.into_body();
                 let Ok((bytes, _)) = h2_drain(&mut body).await else {
@@ -199,31 +246,17 @@ fn ours_echo_server(rt: &rusty_tokio::Runtime) -> SocketAddr {
     addr
 }
 
-fn runtimes() -> (rusty_tokio::Runtime, tokio::runtime::Runtime) {
+/// One runtime for our side, one for the oracle's.
+fn runtimes() -> (rusty_tokio::Runtime, rusty_tokio::Runtime) {
     (
         rusty_tokio::Runtime::new().unwrap(),
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap(),
+        rusty_tokio::Runtime::new().unwrap(),
     )
 }
 
 fn within<F: std::future::Future>(rt: &rusty_tokio::Runtime, secs: u64, f: F) -> F::Output {
     rt.block_on(async {
         rusty_tokio::time::timeout(Duration::from_secs(secs), f)
-            .await
-            .expect("timed out")
-    })
-}
-
-fn within_tokio<F: std::future::Future>(
-    rt: &tokio::runtime::Runtime,
-    secs: u64,
-    f: F,
-) -> F::Output {
-    rt.block_on(async {
-        tokio::time::timeout(Duration::from_secs(secs), f)
             .await
             .expect("timed out")
     })
@@ -307,14 +340,12 @@ fn our_ping_is_acknowledged_by_h2() {
 #[test]
 fn an_h2_reset_fails_our_response_with_its_reason() {
     let (ours, theirs) = runtimes();
-    let listener = theirs
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
+    let listener = oracle_listener(&theirs);
     let addr = listener.local_addr().unwrap();
     theirs.spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         tcp.set_nodelay(true).unwrap();
-        let Ok(mut conn) = h2::server::handshake(tcp).await else {
+        let Ok(mut conn) = h2::server::handshake(TokioIo(tcp)).await else {
             return;
         };
         while let Some(Ok((_req, mut respond))) = conn.accept().await {
@@ -337,14 +368,12 @@ fn an_h2_reset_fails_our_response_with_its_reason() {
 #[test]
 fn a_trailers_only_response_from_h2_has_headers_and_no_body() {
     let (ours, theirs) = runtimes();
-    let listener = theirs
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
+    let listener = oracle_listener(&theirs);
     let addr = listener.local_addr().unwrap();
     theirs.spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         tcp.set_nodelay(true).unwrap();
-        let Ok(mut conn) = h2::server::handshake(tcp).await else {
+        let Ok(mut conn) = h2::server::handshake(TokioIo(tcp)).await else {
             return;
         };
         while let Some(Ok((_req, mut respond))) = conn.accept().await {
@@ -373,22 +402,20 @@ fn a_trailers_only_response_from_h2_has_headers_and_no_body() {
 #[test]
 fn our_reset_reaches_h2_as_cancel() {
     let (ours, theirs) = runtimes();
-    let listener = theirs
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
+    let listener = oracle_listener(&theirs);
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     theirs.spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         tcp.set_nodelay(true).unwrap();
-        let Ok(mut conn) = h2::server::handshake(tcp).await else {
+        let Ok(mut conn) = h2::server::handshake(TokioIo(tcp)).await else {
             return;
         };
         let tx = tx.clone();
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             while let Some(Ok((req, _respond))) = conn.accept().await {
                 let tx = tx.clone();
-                tokio::spawn(async move {
+                rusty_tokio::spawn(async move {
                     let mut body = req.into_body();
                     while let Some(chunk) = body.data().await {
                         match chunk {
@@ -422,14 +449,12 @@ fn our_reset_reaches_h2_as_cancel() {
 #[test]
 fn an_h2_graceful_shutdown_ends_our_driver_and_refuses_new_calls() {
     let (ours, theirs) = runtimes();
-    let listener = theirs
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
+    let listener = oracle_listener(&theirs);
     let addr = listener.local_addr().unwrap();
     theirs.spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         tcp.set_nodelay(true).unwrap();
-        let Ok(mut conn) = h2::server::handshake(tcp).await else {
+        let Ok(mut conn) = h2::server::handshake(TokioIo(tcp)).await else {
             return;
         };
         conn.graceful_shutdown();
@@ -450,12 +475,12 @@ fn an_h2_graceful_shutdown_ends_our_driver_and_refuses_new_calls() {
 
 // ---- their client, our server --------------------------------------------------------------
 
-fn h2_client(rt: &tokio::runtime::Runtime, addr: SocketAddr) -> h2::client::SendRequest<Bytes> {
+fn h2_client(rt: &rusty_tokio::Runtime, addr: SocketAddr) -> h2::client::SendRequest<Bytes> {
     rt.block_on(async {
-        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let tcp = rusty_tokio::io::TcpStream::connect(addr).await.unwrap();
         tcp.set_nodelay(true).unwrap();
-        let (client, conn) = h2::client::handshake(tcp).await.unwrap();
-        tokio::spawn(async move {
+        let (client, conn) = h2::client::handshake(TokioIo(tcp)).await.unwrap();
+        rusty_tokio::spawn(async move {
             let _ = conn.await;
         });
         client
@@ -467,7 +492,7 @@ fn h2_gets_headers_body_and_trailers_from_our_server() {
     let (ours, theirs) = runtimes();
     let addr = ours_echo_server(&ours);
     let mut client = h2_client(&theirs, addr);
-    let (parts, body, trailers) = within_tokio(
+    let (parts, body, trailers) = within(
         &theirs,
         10,
         h2_call(&mut client, "/svc/Echo", None, b"hello".to_vec()),
@@ -483,7 +508,7 @@ fn h2_moves_two_megabytes_each_way_through_our_server() {
     let addr = ours_echo_server(&ours);
     let mut client = h2_client(&theirs, addr);
     let body = pattern(2 << 20);
-    let (_, got, _) = within_tokio(
+    let (_, got, _) = within(
         &theirs,
         30,
         h2_call(&mut client, "/svc/Echo", None, body.clone()),
@@ -496,11 +521,11 @@ fn h2_runs_many_concurrent_calls_against_our_server() {
     let (ours, theirs) = runtimes();
     let addr = ours_echo_server(&ours);
     let client = h2_client(&theirs, addr);
-    within_tokio(&theirs, 20, async move {
+    within(&theirs, 20, async move {
         let mut tasks = Vec::new();
         for i in 0..48usize {
             let mut c = client.clone();
-            tasks.push(tokio::spawn(async move {
+            tasks.push(rusty_tokio::spawn(async move {
                 let body = pattern(1 + i * 997);
                 let (_, got, _) = h2_call(&mut c, "/svc/Echo", None, body.clone()).await;
                 assert!(got == body);
@@ -517,7 +542,7 @@ fn h2s_hpack_encoder_and_decoder_agree_with_ours_across_many_requests() {
     let (ours, theirs) = runtimes();
     let addr = ours_echo_server(&ours);
     let mut client = h2_client(&theirs, addr);
-    within_tokio(&theirs, 30, async move {
+    within(&theirs, 30, async move {
         for i in 0..200usize {
             let n = format!("{}-{}", i, "v".repeat((i * 37) % 3000));
             let (parts, body, _) =
@@ -560,7 +585,7 @@ fn an_h2_reset_reaches_our_server_body_as_cancel() {
         }
     });
     let client = h2_client(&theirs, addr);
-    within_tokio(&theirs, 10, async move {
+    within(&theirs, 10, async move {
         let mut c = client.ready().await.unwrap();
         let req = http::Request::post("http://localhost/svc/Cancel")
             .body(())
@@ -568,10 +593,10 @@ fn an_h2_reset_reaches_our_server_body_as_cancel() {
         let (_fut, mut send) = c.send_request(req, false).unwrap();
         h2_send(&mut send, Bytes::from_static(b"part"), false).await;
         while accepted_rx.try_recv().is_err() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            rusty_tokio::time::sleep(Duration::from_millis(10)).await;
         }
         send.send_reset(Reason::CANCEL);
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        rusty_tokio::time::sleep(Duration::from_millis(500)).await;
     });
     assert_eq!(
         rx.recv_timeout(Duration::from_secs(5)).unwrap(),

@@ -15,7 +15,7 @@ layer = "libs"
 rusty-search-core = { workspace = true }
 async-trait = { workspace = true }
 rusty_serde = { workspace = true }
-tokio = { workspace = true, features = ["sync", "rt"] }
+rusty_tokio.workspace = true
 # Wraps the same rusqlite = "0.31" (bundled) this crate would otherwise
 # depend on directly, applying sane connection pragmas (WAL, foreign keys,
 # busy timeout) this crate didn't set on its own, plus a typed FTS5 table
@@ -27,5 +27,4 @@ rusty_time.workspace = true
 rusty_uuid.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true }
 tempfile = { workspace = true }

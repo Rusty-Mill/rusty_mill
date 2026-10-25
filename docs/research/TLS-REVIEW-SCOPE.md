@@ -1,6 +1,6 @@
 # TLS native engine: smaller independent review scope (approved 2026-10-16; review not started)
 
-Date: 2026-10-11. Status: **scope approved by the owner 2026-10-16; reviewer: David Bailey, confirmed independent by the owner 2026-10-17; review not started.** Recorded from the owner's message in the working session (originally a draft). Time box set by the owner 2026-10-17: three weeks, about 40 hours of review effort, in the priority order below; open findings at the end leave the item unmet. Still open: the fuzz long-run length (the reviewer's) and the review itself. Naming a reviewer is not a review and authorizes no wiring. Supports Tier 1 item 4 of
+Date: 2026-10-11. Status: **scope approved by the owner 2026-10-16, widened by the owner 2026-10-24 to add `handrolled/crypto/native.rs` (ADR-0002 Amendment 2); reviewer: David Bailey, confirmed independent by the owner 2026-10-17; review not started.** Recorded from the owner's message in the working session (originally a draft). Time box set by the owner 2026-10-17: three weeks, about 40 hours of review effort, in the priority order below; open findings at the end leave the item unmet. Still open: the fuzz long-run length (the reviewer's) and the review itself. Naming a reviewer is not a review and authorizes no wiring. Supports Tier 1 item 4 of
 `TLS-EVIDENCE-BAR.md`. The owner asked for a smaller scope than a review of the whole
 engine. This is the code the Tier 1 consumer (`rleval-app` OIDC, named by the owner on 2026-10-14, a TLS 1.3 client to
 named Google hosts) actually executes, and what is left out and why.
@@ -21,6 +21,7 @@ named Google hosts) actually executes, and what is left out and why.
 | Limits | `handrolled/limits.rs` | 139 | Resource bounds on hostile input |
 | Blocking stream | `handrolled/stream.rs` | 493 | The adapter the consumer would call; `close_notify`, truncation, permanent failure |
 | Trust loading | `trust.rs` | 240 | Which anchors are trusted (OS store reader) |
+| Native crypto seam (added 2026-10-24, ADR-0002 Amendment 2) | `handrolled/crypto/native.rs` | 628 | On the native backend, every hash, HMAC, AEAD, key exchange, signature check and random byte goes through it to the first-party crates. The primitives themselves rest on their own records (plan section 11b) |
 
 Suggested priority if time is short: `name.rs`, `path.rs`, `verify.rs`, then the client
 machine's CertificateVerify and Finished handling, then `stream.rs`.

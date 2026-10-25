@@ -119,7 +119,7 @@ options:
             .unwrap_or_else(|| "ts-rs-node".to_string())
     }
 
-    #[tokio::main(flavor = "current_thread")]
+    #[rusty_tokio::main(flavor = "current_thread")]
     pub async fn main() -> ExitCode {
         rusty_log::tracing_subscriber::fmt()
             .with_env_filter(
@@ -177,7 +177,7 @@ options:
             None => {
                 let backend = DaemonBackend::new(engine.clone(), control_url, hostname);
                 let socket = args.socket.clone();
-                tokio::spawn(async move {
+                rusty_tokio::spawn(async move {
                     if let Err(e) = ts_localapi::serve(&socket, backend).await {
                         rusty_log::error!("localapi: {e}");
                     }
@@ -201,17 +201,17 @@ options:
     }
 
     async fn wait_for_shutdown() {
-        use tokio::signal::unix::{SignalKind, signal};
+        use rusty_tokio::signal::unix::{SignalKind, signal};
         let mut term = match signal(SignalKind::terminate()) {
             Ok(s) => s,
             Err(e) => {
                 rusty_log::warn!("ts-daemon: cannot handle SIGTERM ({e}); Ctrl-C only");
-                tokio::signal::ctrl_c().await.ok();
+                rusty_tokio::signal::ctrl_c().await.ok();
                 return;
             }
         };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
+        rusty_tokio::select! {
+            _ = rusty_tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
         }
     }
@@ -224,7 +224,7 @@ options:
             if engine.peer_ips().await.contains(&target) {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            rusty_tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
         match engine.ping(target, Duration::from_secs(10)).await {

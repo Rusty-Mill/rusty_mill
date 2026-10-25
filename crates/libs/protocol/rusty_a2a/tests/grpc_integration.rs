@@ -2,12 +2,14 @@
 //! `AgentServices::serve_grpc` on a local TCP port and drives it with a
 //! real `tonic` client generated from the same `spec/a2a.proto`.
 
+mod common;
+use common::tonic_oracle as pb;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use rusty_a2a::error::Result;
-use rusty_a2a::server::grpc::pb;
 use rusty_a2a::server::{AgentExecutor, AgentServer, EventSink, RequestContext};
 use rusty_a2a::types::{AgentCard, AgentInterface, Artifact, Message, Part, TaskState};
 use tonic::service::interceptor::InterceptedService;

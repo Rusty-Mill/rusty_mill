@@ -12,7 +12,7 @@ layer = "apps"
 
 [dependencies]
 ts-key.workspace = true
-tokio = { workspace = true, features = ["rt", "macros", "signal", "time"] }
+rusty_tokio.workspace = true
 ts-engine.workspace = true
 ts-localapi.workspace = true
 ts-types.workspace = true

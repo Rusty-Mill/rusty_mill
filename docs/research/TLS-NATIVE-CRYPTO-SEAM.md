@@ -96,7 +96,8 @@ signing out under the cfg (about 1), the CI variant and seam differential (about
 - Signing (gap 5) and RSA signing (plan stage 7, "recommend never").
 - `ring` elsewhere in the lockfile (plan D5).
 - Any consumer. `rleval-app`'s Tier 1 opt-in (ADR-0002 Amendment 1) stays on the `ring` backend unless
-  the owner approves the native backend for it with its own evidence.
+  the owner approves the native backend for it with its own evidence. *(Approved 2026-10-24: ADR-0002
+  Amendment 2, which sets that evidence. Nothing is wired.)*
 
 ## 8. Limits
 

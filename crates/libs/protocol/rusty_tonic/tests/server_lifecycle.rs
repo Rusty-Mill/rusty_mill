@@ -142,18 +142,64 @@ async fn a_client_that_cancels_a_stream_that_is_being_sent_drops_the_handler() {
     server.shutdown().await;
 }
 
+/// Armed around one await: set `0` if the future is dropped there, and only then. Disarmed
+/// after the await completes, so a normal return, an EOF or an error never sets it.
+struct DroppedMidAwait(Option<Arc<AtomicBool>>);
+
+impl DroppedMidAwait {
+    fn arm(flag: &Arc<AtomicBool>) -> Self {
+        Self(Some(flag.clone()))
+    }
+
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for DroppedMidAwait {
+    fn drop(&mut self) {
+        if let Some(flag) = self.0.take().filter(|_| !std::thread::panicking()) {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+#[test]
+fn a_mid_await_guard_marks_a_drop_and_nothing_else() {
+    let flag = Arc::new(AtomicBool::new(false));
+    DroppedMidAwait::arm(&flag).disarm();
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "a completed await is not a drop"
+    );
+    drop(DroppedMidAwait::arm(&flag));
+    assert!(flag.load(Ordering::SeqCst), "a drop mid-await is");
+}
+
 #[rusty_tokio::test]
 async fn a_client_that_cancels_makes_the_handlers_read_fail_cancelled() {
+    // A cancel races the handler's read against its drop (see the `server` docs): the handler
+    // either reads `CANCELLED` or is dropped while awaiting that read. Every other end of the
+    // read is reported as its one terminal outcome (`OK` for an EOF) and fails the assertion.
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = dropped.clone();
     let (tx, mut rx) = mpsc::channel(4);
     let router =
         Router::new().bidirectional(PATH, move |r: Request<Incoming<Blob>>, _out: Sink<Blob>| {
             let tx = tx.clone();
+            let flag = flag.clone();
             async move {
                 let mut incoming = r.message;
                 loop {
-                    match incoming.message().await {
+                    let pending = DroppedMidAwait::arm(&flag);
+                    let read = incoming.message().await;
+                    pending.disarm();
+                    match read {
                         Ok(Some(_)) => tx.send(None).await.unwrap(),
-                        Ok(None) => return Ok(()),
+                        Ok(None) => {
+                            tx.send(Some(Code::Ok)).await.unwrap();
+                            return Ok(());
+                        }
                         Err(e) => {
                             tx.send(Some(e.code())).await.unwrap();
                             return Err(e);
@@ -171,7 +217,18 @@ async fn a_client_that_cancels_makes_the_handlers_read_fail_cancelled() {
     assert_eq!(next(&mut rx).await, None, "the handler read the message");
     drop(stream);
     drop(sender);
-    assert_eq!(next(&mut rx).await, Some(Code::Cancelled));
+    // `None`: dropped mid-read, so no outcome follows. An outcome that arrives is the only one.
+    let outcome = rusty_tokio::select! {
+        code = next(&mut rx) => Some(code),
+        true = set_soon(&dropped) => None,
+    };
+    if let Some(code) = outcome {
+        assert_eq!(
+            code,
+            Some(Code::Cancelled),
+            "the read ended other than CANCELLED"
+        );
+    }
     server.shutdown().await;
 }
 

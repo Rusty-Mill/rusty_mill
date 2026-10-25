@@ -15,7 +15,6 @@ layer = "libs"
 rusty-search-core = { workspace = true }
 async-trait = { workspace = true }
 rusty_serde = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+rusty_tokio.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true }

@@ -98,13 +98,9 @@ impl Pool {
 
     /// The connection with the fewest calls in flight (the first of equals).
     fn lease(&self) -> Lease<'_> {
-        let slot = self
-            .slots
-            .iter()
-            .min_by_key(|s| s.busy.load(Ordering::SeqCst))
-            .unwrap_or(&self.slots[0]);
-        slot.busy.fetch_add(1, Ordering::SeqCst);
-        Lease { slot }
+        Lease {
+            slot: claim(&self.slots, |s| &s.busy),
+        }
     }
 
     /// Whether every connection still works.
@@ -115,6 +111,26 @@ impl Pool {
             }
         }
         true
+    }
+}
+
+/// The item with the fewest calls in flight (the first of equals), its count
+/// raised by one. The raise only lands if that count is still the one read,
+/// so callers claiming at the same moment never share an idle connection
+/// while another sits free; a caller that loses the race picks again.
+fn claim<T>(items: &[T], busy: impl Fn(&T) -> &AtomicUsize) -> &T {
+    loop {
+        let (item, seen) = items
+            .iter()
+            .map(|i| (i, busy(i).load(Ordering::SeqCst)))
+            .min_by_key(|&(_, n)| n)
+            .unwrap_or((&items[0], 0));
+        if busy(item)
+            .compare_exchange(seen, seen + 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return item;
+        }
     }
 }
 
@@ -429,6 +445,32 @@ fn should_give_up(attempts: u32, max_attempts: Option<u32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Callers that claim at the same moment each get their own idle
+    /// connection. Each connection runs one call at a time, so two calls on
+    /// one would queue behind each other while another sat idle.
+    #[test]
+    fn simultaneous_claims_take_distinct_idle_slots() {
+        const SLOTS: usize = 3;
+        for _ in 0..2_000 {
+            let busy: Vec<AtomicUsize> = (0..SLOTS).map(|_| AtomicUsize::new(0)).collect();
+            let start = std::sync::Barrier::new(SLOTS);
+            let mut taken: Vec<usize> = std::thread::scope(|s| {
+                let handles: Vec<_> = (0..SLOTS)
+                    .map(|_| {
+                        s.spawn(|| {
+                            start.wait();
+                            let slot = claim(&busy, |b| b);
+                            busy.iter().position(|b| std::ptr::eq(b, slot)).unwrap()
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            taken.sort_unstable();
+            assert_eq!(taken, (0..SLOTS).collect::<Vec<_>>());
+        }
+    }
 
     #[test]
     fn should_give_up_is_false_when_max_attempts_is_unset() {

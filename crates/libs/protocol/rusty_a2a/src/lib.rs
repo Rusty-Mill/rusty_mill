@@ -27,9 +27,11 @@
 //! JSON-RPC 2.0, gRPC, and HTTP+JSON/REST (spec Sections 9-11). This
 //! crate's server implements all three - JSON-RPC and HTTP+JSON/REST from
 //! the same `axum` router/port (`server::AgentServer::into_router`), and
-//! gRPC via `server::AgentServices::grpc_service`/`serve_grpc` (feature
+//! gRPC via `server::AgentServices::grpc_router`/`serve_grpc` (feature
 //! `grpc`, with the messages of the vendored `spec/a2a.proto` written out in [`pb`] on
-//! `rusty_prost`; no `protoc` needed). All bindings share one task
+//! `rusty_prost`; no `protoc` needed), over a first-party transport (`rusty_tonic`
+//! on `rusty_hyper`) that runs on its own `rusty_tokio` runtime and is joined to the application's
+//! `tokio` by a private bridge. All bindings share one task
 //! store and executor. The client implements all three too, as three
 //! separate types (see [`client`] above) rather than one that speaks
 //! whichever binding a server happens to prefer. Per spec Section 5.1, an
@@ -39,7 +41,7 @@
 pub mod client;
 mod codec;
 pub mod error;
-#[cfg(all(feature = "client", feature = "grpc"))]
+#[cfg(all(feature = "grpc", any(feature = "client", feature = "server")))]
 mod grpc_bridge;
 #[cfg(feature = "grpc")]
 mod grpc_convert;

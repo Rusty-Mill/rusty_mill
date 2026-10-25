@@ -32,7 +32,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
-use std::task::{Poll, Waker};
+use std::task::{Context, Poll, Waker};
 
 struct Inner<T> {
     queue: VecDeque<T>,
@@ -705,6 +705,25 @@ impl<T> fmt::Display for SendTimeoutError<T> {
 impl<T> std::error::Error for SendTimeoutError<T> {}
 
 impl<T> Receiver<T> {
+    /// Takes a queued value without waiting, as tokio's: `Empty` while
+    /// senders remain, `Disconnected` once they are all gone and the queue
+    /// is drained.
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        let mut guard = self.shared.inner.lock().unwrap();
+        if let Some(v) = guard.queue.pop_front() {
+            let waker = guard.pop_send_waiter();
+            drop(guard);
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+            return Ok(v);
+        }
+        if guard.senders_alive == 0 {
+            return Err(TryRecvError::Disconnected);
+        }
+        Err(TryRecvError::Empty)
+    }
+
     /// Blocking form of [`recv`](Self::recv), for synchronous code -- a
     /// plain OS thread bridging blocking I/O into async tasks. Parks the
     /// calling thread until it completes; no runtime is needed.
@@ -716,28 +735,32 @@ impl<T> Receiver<T> {
     }
 
     pub async fn recv(&mut self) -> Option<T> {
-        std::future::poll_fn(|cx| {
-            if crate::coop::poll_proceed(cx).is_pending() {
-                return Poll::Pending;
-            }
-            let mut guard = self.shared.inner.lock().unwrap();
-            if let Some(v) = guard.queue.pop_front() {
-                let waker = guard.pop_send_waiter();
-                drop(guard);
-                if let Some(waker) = waker {
-                    waker.wake();
-                }
-                return Poll::Ready(Some(v));
-            }
-            if guard.senders_alive == 0 {
-                return Poll::Ready(None);
-            }
-            let stale = guard.recv_waker.replace(cx.waker().clone());
+        std::future::poll_fn(|cx| self.poll_recv(cx)).await
+    }
+
+    /// Poll form of [`recv`](Self::recv), for a hand-written `Future` or
+    /// `Stream`: `Ready(None)` once every sender is gone and the queue is
+    /// drained.
+    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        if crate::coop::poll_proceed(cx).is_pending() {
+            return Poll::Pending;
+        }
+        let mut guard = self.shared.inner.lock().unwrap();
+        if let Some(v) = guard.queue.pop_front() {
+            let waker = guard.pop_send_waiter();
             drop(guard);
-            drop(stale); // after unlocking: a waker may own a `Sender`
-            Poll::Pending
-        })
-        .await
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+            return Poll::Ready(Some(v));
+        }
+        if guard.senders_alive == 0 {
+            return Poll::Ready(None);
+        }
+        let stale = guard.recv_waker.replace(cx.waker().clone());
+        drop(guard);
+        drop(stale); // after unlocking: a waker may own a `Sender`
+        Poll::Pending
     }
 }
 
@@ -895,6 +918,18 @@ impl<T> fmt::Debug for WeakUnboundedSender<T> {
 }
 
 impl<T> UnboundedReceiver<T> {
+    /// As [`Receiver::try_recv`].
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        let mut guard = self.shared.inner.lock().unwrap();
+        if let Some(v) = guard.queue.pop_front() {
+            return Ok(v);
+        }
+        if guard.senders_alive == 0 {
+            return Err(TryRecvError::Disconnected);
+        }
+        Err(TryRecvError::Empty)
+    }
+
     /// Blocking form of [`recv`](Self::recv), for synchronous code -- a
     /// plain OS thread bridging blocking I/O into async tasks. Parks the
     /// calling thread until it completes; no runtime is needed.
@@ -906,23 +941,25 @@ impl<T> UnboundedReceiver<T> {
     }
 
     pub async fn recv(&mut self) -> Option<T> {
-        std::future::poll_fn(|cx| {
-            if crate::coop::poll_proceed(cx).is_pending() {
-                return Poll::Pending;
-            }
-            let mut guard = self.shared.inner.lock().unwrap();
-            if let Some(v) = guard.queue.pop_front() {
-                return Poll::Ready(Some(v));
-            }
-            if guard.senders_alive == 0 {
-                return Poll::Ready(None);
-            }
-            let stale = guard.recv_waker.replace(cx.waker().clone());
-            drop(guard);
-            drop(stale); // after unlocking: a waker may own a `Sender`
-            Poll::Pending
-        })
-        .await
+        std::future::poll_fn(|cx| self.poll_recv(cx)).await
+    }
+
+    /// As [`Receiver::poll_recv`].
+    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        if crate::coop::poll_proceed(cx).is_pending() {
+            return Poll::Pending;
+        }
+        let mut guard = self.shared.inner.lock().unwrap();
+        if let Some(v) = guard.queue.pop_front() {
+            return Poll::Ready(Some(v));
+        }
+        if guard.senders_alive == 0 {
+            return Poll::Ready(None);
+        }
+        let stale = guard.recv_waker.replace(cx.waker().clone());
+        drop(guard);
+        drop(stale); // after unlocking: a waker may own a `Sender`
+        Poll::Pending
     }
 }
 
@@ -941,6 +978,31 @@ impl<T> Drop for UnboundedReceiver<T> {
         drop(undelivered);
     }
 }
+
+/// tokio's `mpsc::error` path for this module's error types.
+pub mod error {
+    pub use super::{SendError, SendTimeoutError, TryRecvError, TrySendError};
+}
+
+/// Why [`Receiver::try_recv`] returned no value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryRecvError {
+    /// Nothing is queued, but a sender remains.
+    Empty,
+    /// Nothing is queued, and every sender is gone.
+    Disconnected,
+}
+
+impl fmt::Display for TryRecvError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TryRecvError::Empty => write!(f, "receiving on an empty channel"),
+            TryRecvError::Disconnected => write!(f, "receiving on a closed channel"),
+        }
+    }
+}
+
+impl std::error::Error for TryRecvError {}
 
 /// The receiver was dropped, so the value in this error could not be
 /// delivered.
