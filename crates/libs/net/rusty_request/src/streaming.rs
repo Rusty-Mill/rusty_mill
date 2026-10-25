@@ -30,6 +30,11 @@ pub struct StreamingResponse {
     body: Option<BodyReader<Conn>>,
     /// Set when the connection may be pooled after the body ends.
     reuse: Option<Reuse>,
+    /// Body bytes still to come, when the framing says how many: the
+    /// connection is pooled as the last of them arrives, so a caller that
+    /// stops once it has them all (as an HTTP server framing by
+    /// `Content-Length` does) still returns it.
+    remaining: Option<u64>,
 }
 
 impl StreamingResponse {
@@ -39,14 +44,20 @@ impl StreamingResponse {
         url: Url,
         body: BodyReader<Conn>,
         reuse: Option<Reuse>,
+        remaining: Option<u64>,
     ) -> Self {
-        StreamingResponse {
+        let mut response = StreamingResponse {
             status,
             headers,
             url,
             body: Some(body),
             reuse,
+            remaining,
+        };
+        if remaining == Some(0) {
+            response.finish();
         }
+        response
     }
 
     pub fn status(&self) -> StatusCode {
@@ -68,17 +79,25 @@ impl StreamingResponse {
     /// count, only on the concatenation of every chunk returned before
     /// `None`.
     ///
-    /// Once this returns `None`, a connection the server left open goes
-    /// back to the client's pool. Dropping a `StreamingResponse` before
-    /// then simply closes the connection, since its framing is mid-body,
-    /// rather than leaving anything to clean up.
+    /// Once the whole body has arrived (the last of a `Content-Length`
+    /// body, or this returning `None`), a connection the server left open
+    /// goes back to the client's pool. Dropping a `StreamingResponse`
+    /// before then simply closes the connection, since its framing is
+    /// mid-body, rather than leaving anything to clean up.
     pub async fn chunk(&mut self) -> Result<Option<Vec<u8>>> {
         let Some(body) = self.body.as_mut() else {
             return Ok(None);
         };
         let chunk = body.next_chunk().await?;
-        if chunk.is_none() {
-            self.finish();
+        match (&chunk, self.remaining.as_mut()) {
+            (None, _) => self.finish(),
+            (Some(data), Some(remaining)) => {
+                *remaining = remaining.saturating_sub(data.len() as u64);
+                if *remaining == 0 {
+                    self.finish();
+                }
+            }
+            (Some(_), None) => {}
         }
         Ok(chunk)
     }

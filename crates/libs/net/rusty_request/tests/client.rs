@@ -1123,6 +1123,36 @@ fn a_streamed_response_read_to_its_end_returns_its_connection_to_the_pool() {
 }
 
 #[test]
+fn a_streamed_response_is_pooled_as_its_last_byte_arrives() {
+    // A caller framing by `Content-Length` stops once it has every byte,
+    // without asking for the end; and a bodiless answer has no bytes.
+    run(async {
+        let client = Client::new();
+        let server = start_test_server(|req| match req.target.as_str() {
+            "/empty" => http_response(204, "No Content", &[], b""),
+            _ => http_response(200, "OK", &[], b"ok"),
+        });
+        let mut first = client
+            .get(&server.url("/a"))
+            .unwrap()
+            .send_streaming()
+            .await
+            .unwrap();
+        assert_eq!(first.chunk().await.unwrap().as_deref(), Some(&b"ok"[..]));
+        drop(first);
+        let empty = client
+            .get(&server.url("/empty"))
+            .unwrap()
+            .send_streaming()
+            .await
+            .unwrap();
+        drop(empty);
+        client.get(&server.url("/b")).unwrap().send().await.unwrap();
+        assert_eq!(server.connections_accepted(), 1);
+    });
+}
+
+#[test]
 fn a_streamed_response_dropped_early_or_closing_is_not_pooled() {
     run(async {
         let server = start_test_server(|_req| http_response(200, "OK", &[], b"ok"));

@@ -976,6 +976,7 @@ async fn send_with_redirects_streaming(
             status,
             headers: resp_headers,
             body: mut streaming_body,
+            remaining,
             ..
         } = answer;
 
@@ -1001,6 +1002,7 @@ async fn send_with_redirects_streaming(
                     url,
                     streaming_body,
                     reuse,
+                    remaining,
                 ));
             }
         };
@@ -1392,11 +1394,17 @@ async fn attempt_streaming<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let resp_head = read_final_head(&mut t).await?;
     let framing = body::response_framing(&resp_head.headers, &request.method, resp_head.status)?;
     let keep_alive = keeps_alive(&resp_head.headers, framing);
+    let remaining = match framing {
+        Framing::None => Some(0),
+        Framing::ContentLength(n) => Some(n),
+        Framing::Chunked | Framing::Close => None,
+    };
     Ok(StreamingHop {
         status: resp_head.status,
         headers: resp_head.headers,
         body: t.into_body_reader(framing),
         keep_alive,
+        remaining,
     })
 }
 
@@ -1408,6 +1416,8 @@ struct StreamingHop<S> {
     body: BodyReader<S>,
     /// Whether the connection may be reused once `body` has been read.
     keep_alive: bool,
+    /// Body bytes to come, when the framing says how many.
+    remaining: Option<u64>,
 }
 
 /// Whether the connection can carry another request once this response's
