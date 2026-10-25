@@ -15,12 +15,12 @@
 //!    way at a time, each required to be refused with a named error and the
 //!    right alert, and each paired with a control that is right.
 
-// ring-only suite (ADR-0005): it needs the engine's server or a signing key,
-// and the native backend has neither.
 #![cfg(all(
-    feature = "handrolled-engine",
     rusty_tls_handrolled,
-    not(rusty_tls_native_crypto)
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
 ))]
 
 use std::sync::Arc;
@@ -90,6 +90,17 @@ enum Leaf {
     Ed25519,
     Rsa,
 }
+
+/// The leaf key types this backend can sign with. The native backend has no
+/// RSA signing (ADR-0006 decision 2), so these RSA cases are skipped there,
+/// by name: RSA-authenticated suites served by this engine, RSA client
+/// certificates, and the RSA half of the ffdhe refusal. Verifying a peer's RSA
+/// signature is unchanged and stays covered by the client suites.
+const SIGNING_LEAVES: &[Leaf] = if cfg!(rusty_tls_native_crypto) {
+    &[Leaf::P256, Leaf::P384, Leaf::Ed25519]
+} else {
+    &[Leaf::P256, Leaf::P384, Leaf::Ed25519, Leaf::Rsa]
+};
 
 impl Leaf {
     fn key(self) -> KeyPair {
@@ -416,7 +427,7 @@ fn server_to_client(established: &mut Established, data: &[u8]) -> Vec<u8> {
 
 #[test]
 fn a_full_tls12_handshake_with_a_rustls_client_completes_and_carries_data() {
-    for leaf in [Leaf::P256, Leaf::P384, Leaf::Ed25519, Leaf::Rsa] {
+    for &leaf in SIGNING_LEAVES {
         let server = Server::new(leaf);
         let mut established = handshake(&server);
 
@@ -484,6 +495,9 @@ fn every_suite_and_group_completes_with_a_rustls_client() {
     ];
 
     for (rustls_suite, suite, leaf) in suites {
+        if !SIGNING_LEAVES.contains(&leaf) {
+            continue;
+        }
         let server = Server::new(leaf);
         for (rustls_group, group) in groups {
             let config = server.config(CipherSuite12::SUPPORTED, ALL_GROUPS, None);
@@ -614,7 +628,7 @@ fn a_client_certificate_is_requested_verified_and_reported() {
 
 #[test]
 fn every_client_key_type_authenticates() {
-    for leaf in [Leaf::P256, Leaf::P384, Leaf::Ed25519, Leaf::Rsa] {
+    for &leaf in SIGNING_LEAVES {
         let server = Server::new(Leaf::P256);
         let client = pki(leaf, "client.example");
         with_client_auth(&server, &client, true, Some(&client), |outcome| {
@@ -747,7 +761,7 @@ mod self_interop {
     /// above are what prove correctness.
     #[test]
     fn every_suite_and_key_type_completes_against_this_crates_client() {
-        for leaf in [Leaf::P256, Leaf::P384, Leaf::Ed25519, Leaf::Rsa] {
+        for &leaf in SIGNING_LEAVES {
             let server = Server::new(leaf);
             for suite in CipherSuite12::SUPPORTED {
                 let (_, _, auth) = suite.parts().expect("supported");
@@ -1080,8 +1094,10 @@ fn a_hello_with_nothing_in_common_is_refused_with_the_error_that_says_what() {
         refusal(&server, &ffdhe_only).0,
         ServerError::NoSharedSignatureScheme
     );
-    let rsa = Server::new(Leaf::Rsa);
-    assert_eq!(refusal(&rsa, &ffdhe_only).0, ServerError::NoSharedGroup);
+    if SIGNING_LEAVES.contains(&Leaf::Rsa) {
+        let rsa = Server::new(Leaf::Rsa);
+        assert_eq!(refusal(&rsa, &ffdhe_only).0, ServerError::NoSharedGroup);
+    }
 
     assert_eq!(
         refusal(
@@ -1335,7 +1351,10 @@ fn every_one_bit_corruption_of_the_client_flight_is_refused() {
                 }
             }
         }
-        assert!(tested > 700, "the sweep ran {tested} cases");
+        // ChaCha20 (the native backend's first choice) has no explicit nonce in
+        // TLS 1.2 records, so its flight is shorter than AES-GCM's: 680 cases
+        // against more than 700.
+        assert!(tested > 640, "the sweep ran {tested} cases");
         assert_eq!(
             ignored, 16,
             "exactly the 2 x 8 version-hint flips are ignored"
@@ -1891,11 +1910,14 @@ mod scripted {
         let mut srv = ServerHandshake12::new(&config).expect("server");
         let client = Scripted::start(&mut srv, &hello);
 
-        // The server's own first preference that the key can serve.
-        assert_eq!(
-            client.suite,
+        // The server's own first preference that the key can serve: ChaCha20
+        // on the native backend (ADR-0005 D4), AES-128-GCM on `ring`.
+        let first = if cfg!(rusty_tls_native_crypto) {
+            CipherSuite12::ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+        } else {
             CipherSuite12::ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
-        );
+        };
+        assert_eq!(client.suite, first);
         assert!(client.server_hello_session_id.is_empty(), "no resumption");
         assert_eq!(client.server_random.len(), 32);
         let types: Vec<u16> = client.server_extensions.iter().map(|(t, _)| *t).collect();

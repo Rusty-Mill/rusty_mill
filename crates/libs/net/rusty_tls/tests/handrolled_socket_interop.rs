@@ -68,12 +68,12 @@
 //! assertion in the suite; `-noverify` would turn every one of these into a
 //! test that the bytes parse.
 
-// ring-only suite (ADR-0005): the engine as a server, against OpenSSL's
-// client, and the native backend has no server role.
 #![cfg(all(
-    feature = "handrolled-engine",
     rusty_tls_handrolled,
-    not(rusty_tls_native_crypto)
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
 ))]
 
 use std::io::{BufRead, BufReader, Read, Write};

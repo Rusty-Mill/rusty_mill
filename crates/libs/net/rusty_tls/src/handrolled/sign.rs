@@ -34,16 +34,20 @@
 //!
 //! # On the native backend
 //!
-//! With `--cfg rusty_tls_native_crypto` (ADR-0005) there is no signing at
-//! all: [`SigningKey`] is an enum with no variants, so no key, and therefore
-//! no client certificate, can exist in that build. Its methods keep their
-//! signatures so the client compiles unchanged, and none can be reached.
-//! [`SignError`] stays, because the client's error type names it.
+//! With `--cfg rusty_tls_native_crypto` the keys are first-party (ADR-0006):
+//! `rusty_pk::pkcs8` parses the document with `ring`'s acceptance rules, and
+//! `rusty_pk` signs. ECDSA nonces are hedged (draft-irtf-cfrg-det-sigs-with-noise-05
+//! section 4) with fresh noise from the engine's random source, and a failed
+//! source signs nothing. **There is no RSA signing** (ADR-0006 decision 2):
+//! [`SigningKey::rsa`] exists so callers compile unchanged, and always returns
+//! [`SignError::RsaUnsupported`]. Verifying a peer's RSA signature is unaffected.
 
 #[cfg(not(rusty_tls_native_crypto))]
 use ring::rand::SystemRandom;
 #[cfg(not(rusty_tls_native_crypto))]
 use ring::signature::{self, KeyPair};
+#[cfg(rusty_tls_native_crypto)]
+use rusty_pk::{ecdsa, ed25519, pkcs8};
 
 use super::verify::SignatureScheme;
 
@@ -60,9 +64,11 @@ pub enum SignError {
     /// an RSA key cannot produce an Ed25519 one. Refused rather than
     /// substituted.
     UnsupportedScheme(SignatureScheme),
-    /// Signing failed inside `ring`, which in practice means the random source
-    /// did.
+    /// Signing failed, which in practice means the random source did.
     Failed,
+    /// An RSA key on the native backend, which has no RSA signing
+    /// (ADR-0006 decision 2). Use an ECDSA or Ed25519 key.
+    RsaUnsupported,
 }
 
 impl core::fmt::Display for SignError {
@@ -73,6 +79,9 @@ impl core::fmt::Display for SignError {
                 write!(f, "this key cannot sign with scheme 0x{:04x}", scheme.0)
             }
             Self::Failed => f.write_str("signing failed"),
+            Self::RsaUnsupported => {
+                f.write_str("RSA signing keys are not supported on the native backend (ADR-0006)")
+            }
         }
     }
 }
@@ -89,49 +98,144 @@ enum Inner {
     Rsa(signature::RsaKeyPair),
 }
 
+#[cfg(rusty_tls_native_crypto)]
+enum Inner {
+    Ecdsa {
+        key: ecdsa::SigningKey,
+        scheme: SignatureScheme,
+        /// `d * G`, derived once at construction.
+        public: Vec<u8>,
+    },
+    Ed25519(ed25519::SigningKey),
+}
+
 /// A private key that can sign a TLS 1.3 handshake.
 ///
 /// Constructed from a PKCS#8 document with the algorithm named explicitly —
 /// there is no constructor that sniffs the document and decides for you. A
 /// server that guessed wrong about its own key would find out at handshake
 /// time, on a connection it could not complete.
-#[cfg(not(rusty_tls_native_crypto))]
 pub struct SigningKey {
     inner: Inner,
 }
 
-/// A private key that can sign a TLS handshake — of which, on the native
-/// backend, there are none. See the module docs.
-#[cfg(rusty_tls_native_crypto)]
-pub enum SigningKey {}
-
 #[cfg(rusty_tls_native_crypto)]
 impl SigningKey {
-    /// Unreachable: there is no `SigningKey` on the native backend.
+    /// An ECDSA P-256 key, which signs `ecdsa_secp256r1_sha256`.
+    pub fn ecdsa_p256(pkcs8: &[u8]) -> Result<Self, SignError> {
+        Self::ecdsa(
+            ecdsa::CurveId::P256,
+            pkcs8,
+            SignatureScheme::ECDSA_SECP256R1_SHA256,
+        )
+    }
+
+    /// An ECDSA P-384 key, which signs `ecdsa_secp384r1_sha384`.
+    pub fn ecdsa_p384(pkcs8: &[u8]) -> Result<Self, SignError> {
+        Self::ecdsa(
+            ecdsa::CurveId::P384,
+            pkcs8,
+            SignatureScheme::ECDSA_SECP384R1_SHA384,
+        )
+    }
+
+    fn ecdsa(
+        curve: ecdsa::CurveId,
+        pkcs8: &[u8],
+        scheme: SignatureScheme,
+    ) -> Result<Self, SignError> {
+        let key = pkcs8::ecdsa(curve, pkcs8).map_err(|_| SignError::BadKey)?;
+        let public = key
+            .public_key()
+            .map_err(|_| SignError::BadKey)?
+            .as_bytes()
+            .to_vec();
+        Ok(Self {
+            inner: Inner::Ecdsa {
+                key,
+                scheme,
+                public,
+            },
+        })
+    }
+
+    /// An Ed25519 key, from a PKCS#8 v1 (no public key) or v2 document.
+    pub fn ed25519(pkcs8: &[u8]) -> Result<Self, SignError> {
+        let key = pkcs8::ed25519(pkcs8).map_err(|_| SignError::BadKey)?;
+        Ok(Self {
+            inner: Inner::Ed25519(key),
+        })
+    }
+
+    /// Always [`SignError::RsaUnsupported`]: the native backend has no RSA
+    /// signing (ADR-0006 decision 2). The document is not parsed.
+    pub fn rsa(_pkcs8: &[u8]) -> Result<Self, SignError> {
+        Err(SignError::RsaUnsupported)
+    }
+
+    /// The schemes this key can sign with, most preferred first.
     pub fn schemes(&self) -> &'static [SignatureScheme] {
-        match *self {}
+        match &self.inner {
+            Inner::Ecdsa { scheme, .. } => match *scheme {
+                SignatureScheme::ECDSA_SECP384R1_SHA384 => {
+                    &[SignatureScheme::ECDSA_SECP384R1_SHA384]
+                }
+                _ => &[SignatureScheme::ECDSA_SECP256R1_SHA256],
+            },
+            Inner::Ed25519(_) => &[SignatureScheme::ED25519],
+        }
     }
 
-    /// Unreachable: there is no `SigningKey` on the native backend.
+    /// The TLS 1.2 `ClientCertificateType`: always `ecdsa_sign` (64), which
+    /// RFC 8422 section 3 also uses for Ed25519.
     pub fn certificate_type(&self) -> u8 {
-        match *self {}
+        64
     }
 
-    /// Unreachable: there is no `SigningKey` on the native backend.
+    /// The public key bytes: an uncompressed SEC 1 point for ECDSA, 32 bytes
+    /// for Ed25519, as `ring` returns them.
     pub fn public_key(&self) -> Vec<u8> {
-        match *self {}
+        match &self.inner {
+            Inner::Ecdsa { public, .. } => public.clone(),
+            Inner::Ed25519(key) => key.public_key().to_vec(),
+        }
     }
 
-    /// Unreachable: there is no `SigningKey` on the native backend.
-    pub fn sign(&self, _scheme: SignatureScheme, _message: &[u8]) -> Result<Vec<u8>, SignError> {
-        match *self {}
+    /// Sign `message` with `scheme` (the whole message, not a hash of it).
+    pub fn sign(&self, scheme: SignatureScheme, message: &[u8]) -> Result<Vec<u8>, SignError> {
+        if !self.schemes().contains(&scheme) {
+            return Err(SignError::UnsupportedScheme(scheme));
+        }
+        match &self.inner {
+            Inner::Ecdsa { key, .. } => key
+                .sign(message, super::crypto::fill_random)
+                .map_err(|_| SignError::Failed),
+            Inner::Ed25519(key) => key
+                .sign(message)
+                .map(|signature| signature.to_vec())
+                .map_err(|_| SignError::Failed),
+        }
     }
 }
 
+/// Says what kind of key it is and nothing else.
 #[cfg(rusty_tls_native_crypto)]
 impl core::fmt::Debug for SigningKey {
-    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match *self {}
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let kind = match &self.inner {
+            Inner::Ecdsa { scheme, .. } => {
+                if *scheme == SignatureScheme::ECDSA_SECP384R1_SHA384 {
+                    "ECDSA P-384"
+                } else {
+                    "ECDSA P-256"
+                }
+            }
+            Inner::Ed25519(_) => "Ed25519",
+        };
+        f.debug_struct("SigningKey")
+            .field("algorithm", &kind)
+            .field("private", &"<redacted>")
+            .finish()
     }
 }
 
