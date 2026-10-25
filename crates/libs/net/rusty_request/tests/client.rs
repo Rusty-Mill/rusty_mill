@@ -1303,6 +1303,47 @@ fn a_pooled_connection_the_server_closed_while_idle_is_not_reused() {
 }
 
 #[test]
+fn a_refused_redirect_target_is_not_a_connect_error() {
+    // The first hop delivered the POST, so the request is not safe to send
+    // again, however the next hop fails.
+    for status in [303u16, 307] {
+        for streaming in [false, true] {
+            run(async {
+                let refused = std::net::TcpListener::bind("127.0.0.1:0")
+                    .unwrap()
+                    .local_addr()
+                    .unwrap();
+                let posts = Arc::new(AtomicUsize::new(0));
+                let counter = posts.clone();
+                let location = format!("http://{refused}/next");
+                let server = start_test_server(move |_req| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    http_response(status, "Redirect", &[("Location", &location)], b"")
+                });
+                let request = Client::new()
+                    .post(&server.url("/mutate"))
+                    .unwrap()
+                    .body("effect");
+                let err = if streaming {
+                    request.send_streaming().await.err().unwrap()
+                } else {
+                    request.send().await.unwrap_err()
+                };
+                assert!(
+                    matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::ConnectionRefused),
+                    "{err:?}"
+                );
+                assert!(
+                    !err.is_connect(),
+                    "{status}, streaming {streaming}: {err:?}"
+                );
+                assert_eq!(posts.load(Ordering::SeqCst), 1);
+            });
+        }
+    }
+}
+
+#[test]
 fn stale_pooled_connection_is_an_error_without_a_retry_policy() {
     // The intentional behavior change: a request that lands on a pooled
     // connection the server already closed is not silently replayed on

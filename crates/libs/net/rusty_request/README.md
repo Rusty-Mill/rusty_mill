@@ -126,8 +126,9 @@ protection against an active man-in-the-middle). TLS 1.2/1.3, no ALPN
   silently replayed: the request may already have reached the server,
   and only a configured `RetryPolicy` (idempotent methods by default)
   decides whether it is sent again. `Error::is_connect()` tells apart a
-  request that failed before it was sent (resolving, dialing, a refused
-  `CONNECT` tunnel), which is always safe to send again. Set
+  request that failed before it was sent (resolving, dialing, or the
+  I/O of a `CONNECT` tunnel, on the first hop), which is always safe to
+  send again; it is never true once a redirect was followed. Set
   `pool_idle_timeout` below the server's keep-alive timeout to make the
   race rare. `ClientBuilder::no_pool()`
   reverts to a fresh connection with `Connection: close` on every
