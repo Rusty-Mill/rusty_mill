@@ -6,7 +6,7 @@ temporary directory, runs `bench_vt_throughput <iterations> <file>` once per
 workload per run, and judges the slowest run of each workload against its
 floor. 4 MB is about 30k lines at 120 columns, so every run spends most of
 its time with the 10,000-line scrollback full: the steady state the floors
-are about. The 200 KB `quick` workloads CI uses never fill it.
+are about. The 200 KB `quick` workloads CI uses fill it late or not at all.
 
 Also prints each workload's peak RSS (the largest over the runs), for the
 memory figure #889 asks for. It needs `os.wait4`, so it is Linux and macOS

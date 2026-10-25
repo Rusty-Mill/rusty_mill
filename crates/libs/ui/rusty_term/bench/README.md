@@ -109,10 +109,12 @@ python3 bench/floors.py --bin ../../../../target/release/bench_vt_throughput
 
 It exits 1 below a floor. CI does not run it, because wall-clock time on a
 shared runner is noise; the instruction-count gate above is the CI check. The
-`quick` workloads in CI's informational MB/s line are 200 KB, which never fill
-the scrollback. They mostly measure a fresh grid's allocation (scroll_heavy
-spends more time in kernel page faults than in user code there), so they
-read lower and are not judged against the floors.
+`quick` workloads in CI's informational MB/s line are 200 KB: quick
+ascii_throughput (about 3.5k lines) never fills the scrollback, and quick
+scroll_heavy (about 13.8k) fills it only near the end. Both mostly measure a
+fresh grid's allocation (scroll_heavy spends more time in kernel page faults
+than in user code there), so they read lower and are not judged against the
+floors.
 
 ## `bench_frame_time` (Rust, windowed front-end's CPU frame path)
 
