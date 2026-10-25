@@ -221,7 +221,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn static_validator_rejects_unknown_tokens() {
         let validator = StaticTokenValidator::new().with_token("good", VerifiedToken::new(["r"]));
 

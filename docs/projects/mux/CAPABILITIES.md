@@ -25,7 +25,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 |---|---|---|---|---|---|
 | C01 | Persistent sessions (outlive clients) | 1 | `rusty_mux_server` | in-progress | blocks and their PTYs outlive client connections; the server is not yet a daemon |
 | C02 | Multi-client attach, independent viewports | 1 | `rusty_mux_server` | in-progress | `server/tests/phase1.rs`: two clients converge on one PTY; viewports are client-side |
-| C03 | Snapshot + ready + background history | 1 | `rusty_mux_server`, `rusty_term_core` | in-progress | negotiated RTCP v2 checkpoint chunks then ready then raw output; normal 10,000-row history, no lifetime-output cutoff (see [REPLAY.md](REPLAY.md)); reattach test in `server/tests/phase1.rs`; newest-first history streaming not started |
+| C03 | Snapshot + ready + background history | 1 | `rusty_mux_server`, `rusty_term_core` | in-progress | negotiated RTCP v3 (run-encoded, 0.64 MB at 200x50 + 10k history) checkpoint chunks then ready then raw output; normal 10,000-row history, no lifetime-output cutoff (see [REPLAY.md](REPLAY.md)); reattach test in `server/tests/phase1.rs`; newest-first history streaming not started |
 | C04 | CLI automation (`--json`, stable exit codes) | 2 | `rusty_mux_ctl` | not-started | |
 | C05 | Resumable event stream | 2 | `rusty_mux_proto`, `rusty_mux_server` | not-started | |
 | C06 | Per-resource (block) methods | 2 | `rusty_mux_server` | not-started | |
@@ -39,7 +39,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C14 | Live sharing | 3 | `rusty_mux_auth`, `rusty_mux_server` | not-started | |
 | C15 | Web client | 4 | `rusty_mux` web client | not-started | |
 | C16 | Client matrix (TUI, web, native) | 4 | `rusty_mux` clients | not-started | |
-| C17 | Self-describing API (schema-first) | 2 | `rusty_mux_proto` | not-started | |
+| C17 | Self-describing API (schema-first) | 2 | `rusty_mux_proto` | in-progress | `schema::CATALOG` |
 | C18 | Screen capture | 2 | `rusty_mux_server` | not-started | |
 | C19 | Scripting and config | 2 | `rusty_mux_script` | not-started | |
 | C20 | Program status signalling | 2 | `rusty_mux_status` | not-started | spike 1 (OSC pass-through) |

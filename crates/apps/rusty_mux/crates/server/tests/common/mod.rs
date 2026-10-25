@@ -81,7 +81,7 @@ impl Client {
             parse: true,
         };
         client.send(&Message::Hello {
-            features: Features::CHECKPOINT_V2,
+            features: Features::CHECKPOINT_V3,
         });
         match client.recv() {
             Message::Welcome { client: id, .. } => client.id = id,

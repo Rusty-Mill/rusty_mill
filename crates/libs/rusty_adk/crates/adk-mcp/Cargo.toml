@@ -15,7 +15,7 @@ default = ["stdio", "http", "client"]
 # Serve tools over stdio (newline-delimited JSON-RPC).
 stdio = ["tokio/io-std", "tokio/io-util", "tokio/sync"]
 # Serve tools over streamable HTTP.
-http = ["dep:axum", "dep:rusty_mcp_axum", "tokio/net", "rusty_mcp_server/http"]
+http = ["dep:rusty_axum", "dep:rusty_tokio", "rusty_mcp_server/rusty-axum", "tokio/sync"]
 # Consume tools from an external MCP server launched as a subprocess.
 client = ["dep:rusty-mcp-client", "tokio/sync"]
 
@@ -29,8 +29,9 @@ rusty_log = { workspace = true }
 # transports. This crate keeps only the ADK mapping.
 rusty_mcp_server = { workspace = true }
 rusty-mcp-client = { workspace = true, optional = true }
-rusty_mcp_axum = { workspace = true, optional = true }
-axum = { version = "0.8", optional = true }
+# The HTTP server: `rusty_axum` on its own runtime, `rusty_tokio`.
+rusty_axum = { workspace = true, optional = true }
+rusty_tokio = { workspace = true, optional = true }
 # Always needed: tool calls run on the runtime the transport was started on.
 tokio = { workspace = true, features = ["rt"] }
 

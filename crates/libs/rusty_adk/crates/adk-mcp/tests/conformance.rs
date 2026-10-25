@@ -583,13 +583,29 @@ fn dechunk(mut body: &str) -> String {
     out
 }
 
-async fn http_round_trip() -> Outcome {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| format!("bind: {e}"))?;
+/// Serves `app` on a `rusty_tokio` runtime of its own, as `serve_http` does,
+/// until the process ends. Returns the port.
+fn serve(app: rusty_axum::Router) -> Result<u16, String> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind: {e}"))?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-    let app = router(Arc::new(test_server()), "/mcp");
-    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let runtime = rusty_tokio::Builder::new_multi_thread()
+        .worker_threads(2)
+        .build()
+        .map_err(|e| format!("runtime: {e}"))?;
+    let server = {
+        let _entered = runtime.enter();
+        let listener =
+            rusty_tokio::io::TcpListener::from_std(listener).map_err(|e| e.to_string())?;
+        rusty_axum::serve(listener, None, rusty_axum::ServeOptions::default(), app)
+            .map_err(|e| format!("serve: {e}"))?
+    };
+    std::thread::spawn(move || runtime.block_on(server.shutdown_on(std::future::pending())));
+    Ok(port)
+}
+
+async fn http_round_trip() -> Outcome {
+    let port = serve(router(Arc::new(test_server()), "/mcp"))?;
 
     let init =
         json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": initialize_params()});
@@ -626,8 +642,6 @@ async fn http_round_trip() -> Outcome {
         text_payload(result_of(&response)?)?["text"] == "over http",
         "call: {response}"
     );
-
-    server.abort();
     Ok(())
 }
 

@@ -24,9 +24,13 @@
 # Cached blank row on top of the blank-row flag (a clear that misses copies
 # one prebuilt row), measured: alt 74.9, ascii 41.3, cursor 85.0, scroll
 # 111.8, sgr 109.0, unicode 167.5. alt, cursor and unicode keep their ceilings.
+# Non-ASCII run writer (Grid::put_text), measured: alt 75.8, ascii 41.6,
+# cursor 87.5, scroll 112.7, sgr 110.4, unicode 115.5 (main on the same
+# machine: cursor 85.0, scroll 111.9, sgr 109.0, unicode 167.5). Only
+# unicode moves.
 alt_screen_flicker    81
 ascii_throughput      45
 cursor_thrash         93
 scroll_heavy         123
 sgr_churn            120
-unicode_heavy        184
+unicode_heavy        128

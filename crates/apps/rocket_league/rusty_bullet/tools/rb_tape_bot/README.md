@@ -312,7 +312,7 @@ rb-verify --scenario experiments/probe_brake.json --against <capture> --recorded
 
 `--recorded-inputs` (`RB-VERIFY-003-FR-016`) feeds the port what the game
 actually applied instead of the tape, whose start the bot delays by a variable
-one to four ticks; what is left is physics. `fixtures/` holds 62 recordings,
+one to four ticks; what is left is physics. `fixtures/` holds 79 recordings,
 trimmed to their tapes by `make_fixture.py <scenario> <capture>`, and
 `crates/rb_verify_cli/tests/golden_captures.rs` fails `cargo test` if the port
 gets worse on any of them (ADR-0066). After a physics change that improves a
@@ -335,9 +335,9 @@ python -I tools/rb_tape_bot/spread_report.py replays/batch_<stamp>
 pad 14 or 18 at known offsets, or drops onto pad 14); read the pickups off the
 `.pads.jsonl` sidecar.
 
-`fixture_checks.py [all|caps|ball-spin|boost-taps|ball-roll|bounces|pads]` reads physics constants
+`fixture_checks.py [all|caps|ball-spin|boost-taps|ball-roll|ball-rest|bounces|pads]` reads physics constants
 off the committed `fixtures/` captures with the standard library only: the angular and speed caps,
-the ball's friction, rolling threshold and restitution, how long a boost tap really burns, and how
+the ball's friction, rolling threshold and restitution, when a rolling ball is frozen, how long a boost tap really burns, and how
 far a car's origin is from a small pad when it takes it. Its numbers are the ones
 `docs/research/PHYSICS-PARITY-VS-ROCKETSIM.md` (pass 2) quotes. `test_fixture_checks.py` tests its
 reader and estimators (`python -I -m unittest discover -s tools/rb_tape_bot -p "test_fixture_checks.py"`).

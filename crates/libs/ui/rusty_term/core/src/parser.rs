@@ -154,6 +154,27 @@ pub(crate) fn printable_ascii_len(bytes: &[u8]) -> usize {
             .count()
 }
 
+/// The leading run of valid UTF-8 in the first [`UTF8_RUN_WINDOW`] bytes of
+/// `bytes`, made only of non-ASCII scalars (every byte at or above 0x80), or
+/// `None` when it is empty. It stops before the first ASCII byte and before a
+/// malformed or incomplete sequence, which the byte-wise decoder then
+/// handles; a sequence the window's edge cuts short starts the next call.
+///
+/// The window bounds the work per call, so a stream of rejected bytes costs
+/// linear time overall instead of a rescan of the rest of the input per byte.
+pub(crate) fn utf8_run(bytes: &[u8]) -> Option<&str> {
+    let window = &bytes[..bytes.len().min(UTF8_RUN_WINDOW)];
+    let high = window
+        .iter()
+        .position(|&b| b < 0x80)
+        .unwrap_or(window.len());
+    let text = window[..high].utf8_chunks().next()?.valid();
+    (!text.is_empty()).then_some(text)
+}
+
+/// The most bytes [`utf8_run`] examines per call.
+const UTF8_RUN_WINDOW: usize = 64;
+
 /// Upper bound on the bytes buffered for a single OSC string. Real titles and
 /// cwd URIs are far shorter; past this we keep consuming the string but stop
 /// storing it.
@@ -271,6 +292,17 @@ impl AnsiParser {
             let b = bytes[i];
             i += 1;
             match self.state {
+                // Fast path: a run of well-formed non-ASCII text goes to the
+                // grid in one call. A malformed or chunk-split sequence goes
+                // through the byte-wise decoder instead.
+                ParserState::Ground if b >= 0xc2 => match utf8_run(&bytes[i - 1..]) {
+                    Some(text) => {
+                        g.put_text(text, self.write_pen());
+                        self.last_char = text.chars().next_back();
+                        i += text.len() - 1;
+                    }
+                    None => self.ground_byte(b, g),
+                },
                 ParserState::Ground => self.ground_byte(b, g),
                 ParserState::Utf8 => {
                     if (0x80..=0xbf).contains(&b) {
