@@ -196,6 +196,36 @@ impl Client {
         }
     }
 
+    /// Sends a request and returns every message answering it, ending with
+    /// the one that completes it: `Done`, `Failed` or `Text`.
+    pub fn answer(&mut self, make: impl FnOnce(u64) -> Message) -> Vec<Message> {
+        let req = self.next_req;
+        self.next_req += 1;
+        self.send(&make(req));
+        let mut answer = Vec::new();
+        loop {
+            let message = self.recv();
+            let (r, last) = match &message {
+                Message::Entry { req, .. } => (*req, false),
+                Message::Done { req, .. }
+                | Message::Failed { req, .. }
+                | Message::Text { req, .. } => (*req, true),
+                _ => continue,
+            };
+            if r != req {
+                continue;
+            }
+            answer.push(message);
+            if last {
+                return answer;
+            }
+        }
+    }
+
+    pub fn id(&self) -> ClientId {
+        self.id
+    }
+
     pub fn input(&mut self, block: BlockId, data: &[u8]) {
         let req = self.next_req;
         self.next_req += 1;

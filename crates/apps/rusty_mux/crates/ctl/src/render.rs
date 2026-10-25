@@ -2,14 +2,15 @@
 //! `--json`.
 
 use rusty_json::{Map, Value};
-use rusty_mux_core::Event;
-use rusty_mux_proto::Cursor;
+use rusty_mux_core::{Event, Size};
+use rusty_mux_proto::{Cursor, Entry};
 use rusty_uuid::Uuid;
 
-/// An event field's value.
+/// An event or entry field's value.
 enum Field {
     Id(Uuid),
     Num(u64),
+    Text(String),
     /// No value, such as a lease nobody holds.
     Absent,
 }
@@ -48,20 +49,54 @@ pub(crate) fn failed_line(method: &str, reason: &str) -> String {
     ])
 }
 
+/// A captured screen: the text itself, or a JSON object holding it.
+pub(crate) fn text_line(method: &str, text: String, json: bool) -> String {
+    if !json {
+        return text;
+    }
+    object([
+        ("method", Value::from(method)),
+        ("ok", Value::Bool(true)),
+        ("text", Value::from(text)),
+    ])
+}
+
 pub(crate) fn event_line(seq: u64, event: &Event, json: bool) -> String {
     let (kind, fields) = describe(event);
     if json {
-        let head = [("seq", Value::from(seq)), ("kind", Value::from(kind))];
-        return object(
-            head.into_iter()
-                .chain(fields.into_iter().map(|(k, f)| (k, f.json()))),
+        return object_with(
+            [("seq", Value::from(seq)), ("kind", Value::from(kind))],
+            fields,
         );
     }
-    let mut line = format!("{seq} {kind}");
+    with_fields(format!("{seq} {kind}"), fields)
+}
+
+/// One entity of a listing: `KIND ID field=value…` in text.
+pub(crate) fn entry_line(entry: &Entry, json: bool) -> String {
+    let (kind, id, fields) = describe_entry(entry);
+    if json {
+        let head = [
+            ("kind", Value::from(kind)),
+            (kind, Value::from(id.to_string())),
+        ];
+        return object_with(head, fields);
+    }
+    with_fields(format!("{kind} {id}"), fields)
+}
+
+fn with_fields(mut line: String, fields: Vec<(&str, Field)>) -> String {
     for (name, field) in fields {
         line.push_str(&format!(" {name}={}", field.text()));
     }
     line
+}
+
+fn object_with<'a>(head: [(&'a str, Value); 2], fields: Vec<(&'a str, Field)>) -> String {
+    object(
+        head.into_iter()
+            .chain(fields.into_iter().map(|(k, f)| (k, f.json()))),
+    )
 }
 
 impl Field {
@@ -69,6 +104,7 @@ impl Field {
         match self {
             Self::Id(id) => Value::from(id.to_string()),
             Self::Num(n) => Value::from(n),
+            Self::Text(t) => Value::from(t),
             Self::Absent => Value::Null,
         }
     }
@@ -77,6 +113,8 @@ impl Field {
         match self {
             Self::Id(id) => id.to_string(),
             Self::Num(n) => n.to_string(),
+            // Quoted and escaped: a name can't add a line or reach the terminal.
+            Self::Text(t) => format!("\"{}\"", t.escape_debug()),
             Self::Absent => "-".into(),
         }
     }
@@ -90,9 +128,52 @@ fn object<'a>(fields: impl IntoIterator<Item = (&'a str, Value)>) -> String {
     Value::Object(map).to_json_string()
 }
 
+fn size_fields(size: Size) -> [(&'static str, Field); 2] {
+    [
+        ("cols", Field::Num(size.cols().into())),
+        ("rows", Field::Num(size.rows().into())),
+    ]
+}
+
+fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Field)>) {
+    use Field::{Id, Text};
+    match entry {
+        Entry::Session { session, name } => (
+            "session",
+            session.uuid(),
+            vec![("name", Text(name.clone()))],
+        ),
+        Entry::Window {
+            window,
+            session,
+            name,
+        } => (
+            "window",
+            window.uuid(),
+            vec![
+                ("session", Id(session.uuid())),
+                ("name", Text(name.clone())),
+            ],
+        ),
+        Entry::Block {
+            block,
+            window,
+            size,
+            holder,
+            title,
+        } => {
+            let mut fields = vec![("window", Id(window.uuid()))];
+            fields.extend(size_fields(*size));
+            fields.push(("holder", holder.map_or(Field::Absent, |c| Id(c.uuid()))));
+            fields.push(("title", Text(title.clone())));
+            ("block", block.uuid(), fields)
+        }
+    }
+}
+
 fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
     use Event as E;
-    use Field::{Id, Num};
+    use Field::Id;
     match *event {
         E::SessionCreated { session } => ("session-created", vec![("session", Id(session.uuid()))]),
         E::SessionClosed { session } => ("session-closed", vec![("session", Id(session.uuid()))]),
@@ -108,23 +189,16 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
             block,
             window,
             size,
-        } => (
-            "block-created",
-            vec![
-                ("block", Id(block.uuid())),
-                ("window", Id(window.uuid())),
-                ("cols", Num(size.cols().into())),
-                ("rows", Num(size.rows().into())),
-            ],
-        ),
-        E::BlockResized { block, size } => (
-            "block-resized",
-            vec![
-                ("block", Id(block.uuid())),
-                ("cols", Num(size.cols().into())),
-                ("rows", Num(size.rows().into())),
-            ],
-        ),
+        } => {
+            let mut fields = vec![("block", Id(block.uuid())), ("window", Id(window.uuid()))];
+            fields.extend(size_fields(size));
+            ("block-created", fields)
+        }
+        E::BlockResized { block, size } => {
+            let mut fields = vec![("block", Id(block.uuid()))];
+            fields.extend(size_fields(size));
+            ("block-resized", fields)
+        }
         E::BlockClosed { block } => ("block-closed", vec![("block", Id(block.uuid()))]),
         E::ClientConnected { client } => ("client-connected", vec![("client", Id(client.uuid()))]),
         E::ClientDisconnected { client } => {
@@ -150,7 +224,7 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
 
 #[cfg(test)]
 mod tests {
-    use rusty_mux_core::{BlockId, Size, WindowId};
+    use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
 
     use super::*;
 
@@ -191,6 +265,65 @@ mod tests {
         };
         assert!(event_line(1, &event, false).ends_with("holder=-"));
         assert!(event_line(1, &event, true).contains("\"holder\":null"));
+    }
+
+    #[test]
+    fn entries_render_as_text_and_json() {
+        let block = Entry::Block {
+            block: BlockId::from_uuid(id(1)),
+            window: WindowId::from_uuid(id(2)),
+            size: Size::new(80, 24).unwrap(),
+            holder: None,
+            title: "vim".into(),
+        };
+        assert_eq!(
+            entry_line(&block, false),
+            format!(
+                "block {} window={} cols=80 rows=24 holder=- title=\"vim\"",
+                id(1),
+                id(2)
+            )
+        );
+        let Value::Object(map) = Value::from_json_str(&entry_line(&block, true)).unwrap() else {
+            panic!("an object")
+        };
+        assert_eq!(map.get("kind"), Some(&Value::from("block")));
+        assert_eq!(map.get("block"), Some(&Value::from(id(1).to_string())));
+        assert_eq!(map.get("holder"), Some(&Value::Null));
+        assert_eq!(map.get("title"), Some(&Value::from("vim")));
+    }
+
+    #[test]
+    fn names_cannot_forge_lines_or_reach_the_terminal() {
+        let name = "a b\nsession x\r\u{1b}]0;pwn\u{7}\"";
+        let session = Entry::Session {
+            session: SessionId::from_uuid(id(1)),
+            name: name.into(),
+        };
+        let text = entry_line(&session, false);
+        assert_eq!(
+            text,
+            format!(
+                "session {} name=\"a b\\nsession x\\r\\u{{1b}}]0;pwn\\u{{7}}\\\"\"",
+                id(1)
+            )
+        );
+        let json = entry_line(&session, true);
+        assert!(
+            !text.chars().chain(json.chars()).any(char::is_control),
+            "{json}"
+        );
+        let Value::Object(map) = Value::from_json_str(&json).unwrap() else {
+            panic!("an object")
+        };
+        assert_eq!(map.get("name"), Some(&Value::from(name)));
+    }
+
+    #[test]
+    fn captured_text_is_printed_as_is_or_wrapped() {
+        assert_eq!(text_line("capture", "a\n b".into(), false), "a\n b");
+        let json = text_line("capture", "a\n b".into(), true);
+        assert!(json.contains("\"text\":\"a\\n b\""), "{json}");
     }
 
     #[test]

@@ -28,7 +28,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C03 | Snapshot + ready + background history | 1 | `rusty_mux_server`, `rusty_term_core` | in-progress | negotiated RTCP v3 (run-encoded, 0.64 MB at 200x50 + 10k history) checkpoint chunks then ready then raw output; normal 10,000-row history, no lifetime-output cutoff (see [REPLAY.md](REPLAY.md)); reattach test in `server/tests/phase1.rs`; newest-first history streaming not started |
 | C04 | CLI automation (`--json`, stable exit codes) | 2 | `rusty_mux_ctl` | in-progress | `rusty-mux-ctl`, `ctl/tests/ctl.rs` |
 | C05 | Resumable event stream | 2 | `rusty_mux_proto`, `rusty_mux_server` | in-progress | `Features::EVENT_SEQ`, `server/tests/events.rs` |
-| C06 | Per-resource (block) methods | 2 | `rusty_mux_server` | not-started | |
+| C06 | Per-resource (block) methods | 2 | `rusty_mux_server` | in-progress | addressed by block id without attaching: `input`, `resize`, `close-block`, `capture`; discovery with `list`; `server/tests/inspect.rs` |
 | C07 | Agent / MCP integration | 2 | `rusty_mux_mcp` on `rusty_mcp_server` | not-started | |
 | C08 | Command palette + directory browse | 4 | `rusty_mux` clients | not-started | |
 | C09 | Self-hosted, no account, no telemetry | 1 | all | not-started | |
@@ -40,7 +40,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C15 | Web client | 4 | `rusty_mux` web client | not-started | |
 | C16 | Client matrix (TUI, web, native) | 4 | `rusty_mux` clients | not-started | |
 | C17 | Self-describing API (schema-first) | 2 | `rusty_mux_proto` | in-progress | `schema::CATALOG` |
-| C18 | Screen capture | 2 | `rusty_mux_server` | not-started | |
+| C18 | Screen capture | 2 | `rusty_mux_server` | in-progress | `capture`: plain text of the screen after N history lines; `server/tests/inspect.rs`, `ctl/tests/ctl.rs` |
 | C19 | Scripting and config | 2 | `rusty_mux_script` | not-started | |
 | C20 | Program status signalling | 2 | `rusty_mux_status` | not-started | spike 1 (OSC pass-through) |
 | C21 | Tab indicators | 4 | `rusty_mux` clients | not-started | depends on C20 |
