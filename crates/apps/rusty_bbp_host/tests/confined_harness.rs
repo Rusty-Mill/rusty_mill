@@ -101,7 +101,7 @@ fn setup(
         end_grace: Duration::from_secs(5),
         deadline: None,
         cost_cap: None,
-        slots: None,
+        admission: None,
     }
 }
 
@@ -594,7 +594,7 @@ fn a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone() {
         end_grace: Duration::from_secs(5),
         deadline: None,
         cost_cap: None,
-        slots: None,
+        admission: None,
     };
     let said = plan(cfg);
     println!("{said}");

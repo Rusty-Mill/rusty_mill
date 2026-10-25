@@ -655,6 +655,8 @@ fn orch_binary_admits_two_goals_through_one_agent_slot() {
         dir: slots.clone(),
         agents: 1,
         validators: 1,
+        ceiling: None,
+        priority_secs: 0,
     });
     // The writer records its lifetime, holds its slot a while, then plans to
     // the gate. Its record lies inside the slot hold.
@@ -760,6 +762,8 @@ fn ticking(end_grace_secs: u64) -> Ticking {
         dir: slots.clone(),
         agents: 1,
         validators: 1,
+        ceiling: None,
+        priority_secs: 0,
     });
     c.end_grace_secs = Some(end_grace_secs);
     let (pids, ticks) = (dir.join("writer.pids"), dir.join("ticks"));

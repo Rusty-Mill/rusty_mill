@@ -20,15 +20,15 @@
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
 //! bbp tokens  --dir D --task T [--criteria FILE] [--api-usage FILE]   model tokens per turn, from the harness output, as JSON; weighted by the criteria file; a mismatch with the API usage is an error
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
-//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N]
+//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
 //! bbp slot-hold                           holds the slot lock on stdout until stdin closes and no other process is in the group it leads; started by bbp mod
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
-    admin, args::Args, broker, grade, human, mcp, moderator, pairs, pins, profiles, report,
-    response_json, runner, shadow, slots, tokens, why,
+    admin, admission, args::Args, broker, grade, human, mcp, moderator, pairs, pins, profiles,
+    report, response_json, runner, shadow, slots, tokens, why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -222,9 +222,12 @@ fn run() -> Result<String, String> {
                     (None, None) => None,
                     _ => return Err("--max-usd and --criteria go together".into()),
                 },
-                slots: match a.flags.get("slots") {
+                admission: match a.flags.get("slots") {
+                    None if a.flags.contains_key("claim") => {
+                        return Err("--claim needs --slots".into())
+                    }
                     None => None,
-                    Some(dir) => {
+                    Some(slot_dir) => {
                         let count = |k: &str| -> Result<u32, String> {
                             a.flag(k)?
                                 .parse()
@@ -234,7 +237,17 @@ fn run() -> Result<String, String> {
                             agents: count("agent-slots")?,
                             validators: count("validator-slots")?,
                         };
-                        Some(slots::Slots::open(&PathBuf::from(dir), capacity)?)
+                        let claim = match a.flags.get("claim") {
+                            Some(file) => admission::Claim::read_file(&PathBuf::from(file))?,
+                            None => admission::Claim::default(),
+                        };
+                        let slots = slots::Slots::open(&PathBuf::from(slot_dir), capacity)?;
+                        Some(admission::Admission::new(
+                            slots,
+                            &dir,
+                            task.0.clone(),
+                            claim,
+                        )?)
                     }
                 },
             };

@@ -39,6 +39,8 @@ pub const SCRUB: &[&str] = &[
 ];
 /// How often a cancel re-reads the task when another writer moved its
 /// revision in between.
+/// The claim file each task's manifest holds beside its agents file.
+pub(crate) const CLAIM: &str = "claim.json";
 const CANCEL_ATTEMPTS: usize = 5;
 /// BBP's end grace when the configuration leaves it unset.
 const BBP_END_GRACE_SECS: u64 = 60;
@@ -132,6 +134,18 @@ impl LeasePaths {
             write: l.write.clone(),
         })
     }
+}
+/// `bbp mod --claim`, written beside the agents file as [`CLAIM`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct Claim {
+    parent: Option<ClaimParent>,
+    priority_secs: u64,
+    write: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ClaimParent {
+    id: String,
+    agents: u32,
 }
 /// Who holds one admitted generation of a hosted task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,7 +389,25 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
         let bytes = std::fs::read_to_string(path).map_err(transient)?;
         rusty_serde::json::from_str(&bytes).map_err(permanent)
     }
-    fn materialize(h: &Handle, frozen: &Frozen) -> Result<PathBuf, ClassifiedError> {
+    /// What this task asks of fair admission: its goal as the parent whose
+    /// ceiling it shares, the goal's priority, and the write paths of the
+    /// lease it was frozen under.
+    fn claim(&self, frozen: &Frozen) -> Claim {
+        let slots = frozen.config.slots.as_ref();
+        Claim {
+            parent: slots.and_then(|s| s.ceiling).map(|agents| ClaimParent {
+                id: self.namespace.clone(),
+                agents,
+            }),
+            priority_secs: slots.map_or(0, |s| s.priority_secs),
+            write: frozen
+                .lease
+                .as_ref()
+                .map(|l| l.write.clone())
+                .unwrap_or_default(),
+        }
+    }
+    fn materialize(&self, h: &Handle, frozen: &Frozen) -> Result<PathBuf, ClassifiedError> {
         let dir = Self::manifest(h);
         let config = &frozen.config;
         let mut launchers = BTreeMap::new();
@@ -409,6 +441,10 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
                 "agents.json",
                 rusty_serde::json::to_string(&launchers).map_err(permanent)?,
             ),
+            (
+                CLAIM,
+                rusty_serde::json::to_string(&self.claim(frozen)).map_err(permanent)?,
+            ),
         ] {
             rusty_atomic_file::write_private(&dir.join(name), bytes.as_bytes())
                 .map_err(transient)?;
@@ -421,7 +457,7 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
         frozen: &Frozen,
         fence: &Fence,
     ) -> Result<(), ClassifiedError> {
-        let agents = Self::materialize(h, frozen)?;
+        let agents = self.materialize(h, frozen)?;
         self.supervisor
             .ensure(&frozen.config, &h.task, &agents, Self::deadline(fence))
             .map_err(transient)?;
@@ -643,7 +679,7 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
         let frozen = self.freeze(&h, task, board, fence)?;
         Self::leased(&frozen, fence)?;
         let config = &frozen.config;
-        let agents = Self::materialize(&h, &frozen)?;
+        let agents = self.materialize(&h, &frozen)?;
         self.open_once(config, &h)?;
         let view = self
             .show(config, &h)?
@@ -824,7 +860,7 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
         };
         Self::admit(&h, fence)?;
         let frozen = self.freeze(&h, task, board, fence)?;
-        Self::materialize(&h, &frozen)?;
+        self.materialize(&h, &frozen)?;
         self.open_once(&frozen.config, &h)?;
         self.request_cancel(&h, &frozen.config, &words, reason)?;
         self.await_quiesced(&frozen.config, &h)?;
