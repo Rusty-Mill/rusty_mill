@@ -160,6 +160,58 @@ re-reads and redoes the edit, a full new think (the conservative cost of a rebas
 The thresholds are this PR's proposal and need the owner's confirmation; the results are reported
 against them as written here.
 
+### Step 4a: result of the harness (2026-10-25)
+
+Run at this PR's head with the workload above (`report` in `tests/coedit_load.rs`, 5 seeds per cell,
+deterministic, about 13 minutes):
+
+| N | sections | overlap | accepted | refused/edit | wasted work | same-line/edit |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 4 | 0.00 | 200 | 0.00 | 0% | 0.00 |
+| 2 | 4 | 0.25 | 200 | 0.05 | 4% | 0.01 |
+| 2 | 4 | 1.00 | 200 | 0.20 | 17% | 0.04 |
+| 2 | 2 | 0.00 | 200 | 0.00 | 0% | 0.00 |
+| 2 | 2 | 0.25 | 200 | 0.15 | 13% | 0.01 |
+| 2 | 2 | 1.00 | 200 | 0.41 | 30% | 0.03 |
+| 4 | 4 | 0.00 | 400 | 0.00 | 0% | 0.00 |
+| 4 | 4 | 0.25 | 400 | 0.21 | 18% | 0.02 |
+| 4 | 4 | 1.00 | 400 | 0.74 | 43% | 0.04 |
+| 8 | 4 | 0.00 | 800 | 0.69 | 43% | 0.03 |
+| 8 | 4 | 0.25 | 800 | 0.97 | 50% | 0.04 |
+| 8 | 4 | 1.00 | 800 | 1.49 | 61% | 0.07 |
+| 8 | 8 | 0.00 | 800 | 0.00 | 0% | 0.00 |
+| 8 | 8 | 0.25 | 800 | 0.24 | 19% | 0.02 |
+| 8 | 8 | 1.00 | 800 | 0.77 | 44% | 0.05 |
+| 16 | 4 | 0.00 | 1600 | 2.12 | 70% | 0.08 |
+| 16 | 4 | 0.25 | 1600 | 2.45 | 73% | 0.10 |
+| 16 | 4 | 1.00 | 1600 | 3.17 | 77% | 0.10 |
+| 16 | 16 | 0.00 | 1600 | 0.00 | 0% | 0.00 |
+| 16 | 16 | 0.25 | 1600 | 0.26 | 21% | 0.02 |
+| 16 | 16 | 1.00 | 1600 | 0.81 | 46% | 0.05 |
+| 32 | 4 | 0.00 | 3200 | 5.15 | 85% | 0.10 |
+| 32 | 4 | 0.25 | 3200 | 5.44 | 86% | 0.13 |
+| 32 | 4 | 1.00 | 3200 | 6.25 | 88% | 0.12 |
+| 32 | 32 | 0.00 | 3200 | 0.00 | 0% | 0.00 |
+| 32 | 32 | 0.25 | 3200 | 0.26 | 21% | 0.02 |
+| 32 | 32 | 1.00 | 3200 | 0.89 | 48% | 0.06 |
+
+**Against the rule, at the decision cell (N = 4, S = 4, overlap 0.25):** 0.21 refused per edit and 18%
+wasted work, so the section check is **not** enough (rule 1 fails). Same-line clashes are 0.02 per
+edit, under 0.10, so **rule 2 applies: refine the check to lines**, with the same ops and fold and no CRDT.
+
+What the grid says beyond the decision cell:
+
+- Refusals follow editors per section, not editors. With a section per editor (S = N) they stay flat
+  from N = 4 to 32 (0.21 to 0.26 per edit at overlap 0.25); four sections shared by 16 or 32 editors
+  waste 70% to 88% of the work.
+- Same-line clashes stay at or under 0.13 per edit everywhere, and at or under 0.06 whenever S = N.
+  Most section refusals are edits that did not touch the same line, which a line check would accept.
+- Caveat: same-line clashes are counted among the attempts the section check refused, in its timeline.
+  A line check refuses less, so its own runs have fewer retries; the count is an estimate, not a
+  measurement of the line check. A rerun after the refinement measures it directly.
+- Under blind last-write-wins every refusal above would be a lost edit; under RGA admission every one
+  would be a silent merge, the same-line ones being merges of two edits of one line.
+
 ## What this needs from the owner
 
 1. Approve this plan's order (1, 2, 3, then 4).

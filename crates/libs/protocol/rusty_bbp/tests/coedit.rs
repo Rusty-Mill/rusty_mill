@@ -38,7 +38,11 @@ fn ins(after: Option<LineId>, lines: &[&str]) -> LineOp {
 
 fn edit(fx: &mut Fx, role: &str, base: Option<ArtId>, ops: Vec<LineOp>) -> Response {
     let brief = fx.st().brief.unwrap();
-    fx.put(role, ArtifactPayload::SpecEdit(SpecEdit { brief, base, ops }), b"")
+    fx.put(
+        role,
+        ArtifactPayload::SpecEdit(SpecEdit { brief, base, ops }),
+        b"",
+    )
 }
 
 /// The id of the visible line whose text is `text` in version `v`.
@@ -73,13 +77,22 @@ fn edits_in_different_sections_all_land_on_one_base() {
     for (role, sec) in EDITORS.iter().zip(["a", "b", "c", "d"]) {
         let after = line(&fx, v1, sec);
         let text = format!("{sec} by {role}");
-        head = stored(edit(&mut fx, role, Some(v1), vec![ins(Some(after), &[&text])]));
+        head = stored(edit(
+            &mut fx,
+            role,
+            Some(v1),
+            vec![ins(Some(after), &[&text])],
+        ));
     }
     assert_eq!(
         fx.st().doc(head).unwrap().text(),
         "# A\na\na by planner\n# B\nb\nb by planner2\n# C\nc\nc by planner3\n# D\nd\nd by planner4"
     );
-    assert_eq!(fx.st().doc(v1).unwrap().lines().count(), 8, "a version never changes");
+    assert_eq!(
+        fx.st().doc(v1).unwrap().lines().count(),
+        8,
+        "a version never changes"
+    );
 }
 
 #[test]
@@ -87,9 +100,19 @@ fn a_stale_edit_of_a_changed_section_is_refused_and_costs_nothing() {
     let mut fx = fx();
     let v1 = seed(&mut fx);
     let a = line(&fx, v1, "a");
-    stored(edit(&mut fx, "planner", Some(v1), vec![ins(Some(a), &["first"])]));
+    stored(edit(
+        &mut fx,
+        "planner",
+        Some(v1),
+        vec![ins(Some(a), &["first"])],
+    ));
     let spent = fx.st().spent.bytes;
-    let refused = edit(&mut fx, "planner2", Some(v1), vec![LineOp::Delete { line: a }]);
+    let refused = edit(
+        &mut fx,
+        "planner2",
+        Some(v1),
+        vec![LineOp::Delete { line: a }],
+    );
     assert_eq!(rejected(refused), Code::StaleBase);
     assert_eq!(fx.st().spent.bytes, spent, "a refused edit is not charged");
     let log = fx.d.store.events(&TaskId("T1".into()), 0).unwrap();
@@ -101,7 +124,12 @@ fn a_stale_edit_of_a_changed_section_is_refused_and_costs_nothing() {
         }
     )));
     let (head, _) = fx.st().since(v1).unwrap();
-    let rebased = stored(edit(&mut fx, "planner2", Some(head), vec![LineOp::Delete { line: a }]));
+    let rebased = stored(edit(
+        &mut fx,
+        "planner2",
+        Some(head),
+        vec![LineOp::Delete { line: a }],
+    ));
     assert_eq!(
         fx.st().doc(rebased).unwrap().text(),
         "# A\nfirst\n# B\nb\n# C\nc\n# D\nd"
@@ -112,17 +140,29 @@ fn a_stale_edit_of_a_changed_section_is_refused_and_costs_nothing() {
 fn malformed_edits_and_snapshot_bases_are_refused() {
     let mut fx = fx();
     let v1 = seed(&mut fx);
-    assert_eq!(rejected(edit(&mut fx, "planner", Some(v1), vec![])), Code::BadEdit);
+    assert_eq!(
+        rejected(edit(&mut fx, "planner", Some(v1), vec![])),
+        Code::BadEdit
+    );
     let ghost = LineId { art: v1, n: 99 };
     let hidden = vec![LineOp::Delete { line: ghost }];
-    assert_eq!(rejected(edit(&mut fx, "planner", Some(v1), hidden)), Code::RefUnresolved);
+    assert_eq!(
+        rejected(edit(&mut fx, "planner", Some(v1), hidden)),
+        Code::RefUnresolved
+    );
     let brief = fx.st().brief.unwrap();
     let snap = stored(fx.put("planner", ArtifactPayload::Spec { brief }, b"# S"));
     let on_snap = vec![ins(None, &["x"])];
-    assert_eq!(rejected(edit(&mut fx, "planner", Some(snap), on_snap)), Code::WrongKind);
+    assert_eq!(
+        rejected(edit(&mut fx, "planner", Some(snap), on_snap)),
+        Code::WrongKind
+    );
     let a = line(&fx, v1, "a");
     let on_brief = vec![ins(Some(a), &["x"])];
-    assert_eq!(rejected(edit(&mut fx, "planner", Some(brief), on_brief)), Code::WrongKind);
+    assert_eq!(
+        rejected(edit(&mut fx, "planner", Some(brief), on_brief)),
+        Code::WrongKind
+    );
 }
 
 #[test]
@@ -130,7 +170,12 @@ fn the_plan_gate_binds_one_co_edited_version() {
     let mut fx = fx();
     let v1 = seed(&mut fx);
     let a = line(&fx, v1, "a");
-    let v2 = stored(edit(&mut fx, "planner2", Some(v1), vec![ins(Some(a), &["more"])]));
+    let v2 = stored(edit(
+        &mut fx,
+        "planner2",
+        Some(v1),
+        vec![ins(Some(a), &["more"])],
+    ));
     let mut d = Draft::new(MessageKind::RequestDecision, "Please approve.")
         .to(Recipient::Human)
         .refs(vec![Ref::art(v2)]);
@@ -154,7 +199,12 @@ fn a_replayed_log_rebuilds_every_version() {
     let mut fx = fx();
     let v1 = seed(&mut fx);
     let b = line(&fx, v1, "b");
-    stored(edit(&mut fx, "planner3", Some(v1), vec![LineOp::Delete { line: b }]));
+    stored(edit(
+        &mut fx,
+        "planner3",
+        Some(v1),
+        vec![LineOp::Delete { line: b }],
+    ));
     let events = fx.d.store.events(&TaskId("T1".into()), 0).unwrap();
     let replay = TaskState::fold(TaskId("T1".into()), &events);
     assert_eq!(replay.versions, fx.st().versions);
@@ -169,15 +219,24 @@ fn a_co_edited_spec_round_trips_through_its_stored_bytes() {
         ops: vec![
             ins(None, &["# T"]),
             LineOp::Delete {
-                line: LineId { art: ArtId(2), n: 0 },
+                line: LineId {
+                    art: ArtId(2),
+                    n: 0,
+                },
             },
         ],
     });
     let bytes = encode_artifact(&payload, b"ignored").unwrap();
-    assert_eq!(decode_artifact(ArtifactKind::Spec, &bytes).unwrap(), payload);
+    assert_eq!(
+        decode_artifact(ArtifactKind::Spec, &bytes).unwrap(),
+        payload
+    );
     let snapshot = ArtifactPayload::Spec { brief: ArtId(1) };
     let bytes = encode_artifact(&snapshot, b"# S").unwrap();
-    assert_eq!(decode_artifact(ArtifactKind::Spec, &bytes).unwrap(), snapshot);
+    assert_eq!(
+        decode_artifact(ArtifactKind::Spec, &bytes).unwrap(),
+        snapshot
+    );
     let both = br#"{"brief":1,"markdown":"x","edit":{"base":null,"ops":[]}}"#;
     assert!(decode_artifact(ArtifactKind::Spec, both).is_err());
 }
@@ -204,7 +263,12 @@ impl Rga {
         self.0.iter_mut().find(|e| e.0 == id).unwrap().2 = false;
     }
     fn text(&self) -> String {
-        let live: Vec<&str> = self.0.iter().filter(|e| e.2).map(|e| e.1.as_str()).collect();
+        let live: Vec<&str> = self
+            .0
+            .iter()
+            .filter(|e| e.2)
+            .map(|e| e.1.as_str())
+            .collect();
         live.join("\n")
     }
 }

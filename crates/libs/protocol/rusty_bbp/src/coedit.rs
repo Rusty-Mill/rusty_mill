@@ -222,6 +222,7 @@ pub struct Version {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -258,10 +259,15 @@ mod tests {
     #[test]
     fn a_tombstoned_anchor_still_places_an_insert() {
         let d = two_sections();
-        let d = d.apply(at(3), &[LineOp::Delete { line: id(2, 1) }]).unwrap();
+        let d = d
+            .apply(at(3), &[LineOp::Delete { line: id(2, 1) }])
+            .unwrap();
         let d = d.apply(at(4), &[ins(Some(id(2, 1)), &["x"])]).unwrap();
         assert_eq!(d.text(), "# A\nx\na2\n# B\nb1");
-        assert_eq!(d.apply(at(5), &[ins(Some(id(9, 0)), &["?"])]), Err(id(9, 0)));
+        assert_eq!(
+            d.apply(at(5), &[ins(Some(id(9, 0)), &["?"])]),
+            Err(id(9, 0))
+        );
     }
 
     #[test]
@@ -273,7 +279,9 @@ mod tests {
         assert_eq!(code(&[ins(None, &["a\nb"])], &d), Err(Code::BadEdit));
         let unknown = [LineOp::Delete { line: id(7, 0) }];
         assert_eq!(code(&unknown, &d), Err(Code::RefUnresolved));
-        let gone = d.apply(at(3), &[LineOp::Delete { line: id(2, 1) }]).unwrap();
+        let gone = d
+            .apply(at(3), &[LineOp::Delete { line: id(2, 1) }])
+            .unwrap();
         let after_gone = [ins(Some(id(2, 1)), &["x"])];
         assert_eq!(code(&after_gone, &gone), Err(Code::RefUnresolved));
         assert!(validate(&d, &[ins(Some(id(2, 4)), &["b2"])]).is_ok());
@@ -289,7 +297,10 @@ mod tests {
         assert!(overlap(&head, &base, &in_b, &since).is_empty());
         let also_a = [LineOp::Delete { line: id(2, 2) }];
         assert_eq!(overlap(&head, &base, &also_a, &since), [Some(id(2, 0))]);
-        assert!(overlap(&head, &base, &also_a, &[]).is_empty(), "nothing since");
+        assert!(
+            overlap(&head, &base, &also_a, &[]).is_empty(),
+            "nothing since"
+        );
     }
 
     #[test]
@@ -308,7 +319,9 @@ mod tests {
         // An editor on base v2 also deleting a2 must still be refused.
         let base = two_sections();
         let v3 = base.apply(at(3), &[ins(Some(id(2, 1)), &["# C"])]).unwrap();
-        let v4 = v3.apply(at(4), &[LineOp::Delete { line: id(2, 2) }]).unwrap();
+        let v4 = v3
+            .apply(at(4), &[LineOp::Delete { line: id(2, 2) }])
+            .unwrap();
         let since = [Some(id(2, 1)), Some(id(2, 2))];
         let same = [LineOp::Delete { line: id(2, 2) }];
         assert!(!overlap(&v4, &base, &same, &since).is_empty());

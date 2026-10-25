@@ -23,8 +23,8 @@ pub mod state;
 pub mod store;
 pub mod wake;
 
-pub use coedit::{Doc, LineId, LineOp, SpecEdit, Version};
 pub use codec::{decode_artifact, encode_artifact, spec_markdown, SpecFile};
+pub use coedit::{Doc, LineId, LineOp, SpecEdit, Version};
 pub use command::{AgentAction, Code, Command, HumanAction, OpenTask, Rejection, Response};
 pub use engine::{handle, Handled};
 pub use event::{
