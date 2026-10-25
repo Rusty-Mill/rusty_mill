@@ -9,7 +9,7 @@ use rusty_tokio::io::{UnixListener, UnixStream};
 fn tcp_try_read_fails_would_block_then_succeeds_once_data_arrives() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -36,7 +36,7 @@ fn tcp_try_read_fails_would_block_then_succeeds_once_data_arrives() {
 fn tcp_try_write_succeeds_once_writable() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -59,7 +59,7 @@ fn tcp_try_write_succeeds_once_writable() {
 fn tcp_try_read_vectored_scatters_across_buffers() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -98,7 +98,7 @@ fn tcp_try_read_vectored_scatters_across_buffers() {
 fn tcp_try_write_vectored_gathers_from_buffers() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -123,7 +123,7 @@ fn tcp_try_write_vectored_gathers_from_buffers() {
 fn tcp_owned_split_halves_expose_try_read_and_try_write() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -174,8 +174,8 @@ fn tcp_owned_split_halves_expose_try_read_and_try_write() {
 fn udp_try_send_to_and_try_recv_from() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let a_addr = a.local_addr().unwrap();
         let b_addr = b.local_addr().unwrap();
 
@@ -198,10 +198,10 @@ fn udp_try_send_to_and_try_recv_from() {
 fn udp_try_send_and_try_recv_after_connect() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        a.connect(b.local_addr().unwrap()).unwrap();
-        b.connect(a.local_addr().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        a.connect(b.local_addr().unwrap()).await.unwrap();
+        b.connect(a.local_addr().unwrap()).await.unwrap();
 
         let n = a.try_send(b"yo").unwrap();
         assert_eq!(n, 2);

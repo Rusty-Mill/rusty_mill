@@ -9,7 +9,7 @@ use rusty_tokio::Runtime;
 fn main() -> std::io::Result<()> {
     let rt = Runtime::new()?;
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:7878".parse().unwrap())?;
+        let listener = TcpListener::bind("127.0.0.1:7878").await?;
         println!("listening on {}", listener.local_addr()?);
 
         loop {

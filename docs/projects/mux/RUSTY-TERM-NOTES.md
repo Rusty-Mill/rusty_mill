@@ -37,7 +37,7 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 - Core dependencies:
   - Without features: `rusty_base64`, `rusty_hex`, `rusty_wire`, `unicode-width`, `unicode-segmentation`.
   - Feature `gui` adds `rusty_regx`. Feature `l13` adds `rusty_term_l13`, which no longer pulls in tokio (#949; `cargo tree -p rusty_term_core --features l13` lists none).
-- The `rusty_term` front-end crate no longer depends on tokio: #955 moved it to `rusty_tokio` (`cargo tree -p rusty_term --all-features -i tokio` finds none). ⚠ It still depends on `parking_lot`; #956 (open) replaces it with a std-backed mutex. A mux crate should still link `rusty_term_core`, the headless engine, not the front-end crate. `l13` is safe to enable on the core since #949.
+- The `rusty_term` front-end crate no longer depends on tokio: #955 moved it to `rusty_tokio` (`cargo tree -p rusty_term --all-features -i tokio` finds none). #956 replaced its direct `parking_lot` dependency with `rusty_term::sync::Mutex`, a wrapper over `std::sync::Mutex`. With default features `cargo tree -p rusty_term -i parking_lot` finds none; it still arrives transitively with `gui` (through `arboard`) and `gui-gpu` (through `wgpu`). A mux crate should still link `rusty_term_core`, the headless engine, not the front-end crate. `l13` is safe to enable on the core since #949.
 
 **Grid API**
 - Rows: `Grid::row(y)` and `Grid::row_mut(y)`. `Grid::cells` is no longer public.
@@ -138,6 +138,7 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 | #952 | View-row map once per frame, row 9 (another session) |
 | #955 | `rusty_term` on `rusty_tokio` (another session) |
 | #974 | Short frame lock, row 8 (another session) |
+| #956 | std-backed mutex instead of `parking_lot` in `rusty_term` (another session) |
 | #943 | ctutils 0.4.4 (not from this session) |
 | #944 | ctutils 0.4.5 duplicate, closed |
 

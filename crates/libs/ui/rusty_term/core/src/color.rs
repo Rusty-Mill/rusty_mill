@@ -388,3 +388,6 @@ mod contrast_tests {
         assert!(r > g && r > b, "{fixed:06x}");
     }
 }
+
+crate::checkpoint::fields!(Theme, [fg, bg, cursor, palette16]);
+crate::checkpoint::fields!(Palette, [colors, fg, bg, cursor, seed]);

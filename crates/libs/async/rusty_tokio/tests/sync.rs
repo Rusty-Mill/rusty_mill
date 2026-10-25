@@ -31,6 +31,30 @@ fn mutex_serializes_increments() {
     });
 }
 
+/// #898 (gap G2): a `static` async mutex, built by `const_new`.
+static STATIC_COUNTER: Mutex<Vec<u32>> = Mutex::const_new(Vec::new());
+
+#[test]
+fn mutex_const_new_works_in_a_static_and_serializes_access() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    rt.block_on(async {
+        let mut handles = Vec::new();
+        for i in 0..100 {
+            handles.push(rusty_tokio::spawn(async move {
+                let mut guard = STATIC_COUNTER.lock().await;
+                rusty_tokio::time::sleep(Duration::from_micros(1)).await;
+                guard.push(i);
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        let guard = STATIC_COUNTER.lock().await;
+        assert_eq!(guard.len(), 100);
+        assert!(STATIC_COUNTER.try_lock().is_none());
+    });
+}
+
 #[test]
 fn mutex_lock_owned_serializes_increments_across_spawned_tasks() {
     let rt = Runtime::builder().worker_threads(4).build().unwrap();

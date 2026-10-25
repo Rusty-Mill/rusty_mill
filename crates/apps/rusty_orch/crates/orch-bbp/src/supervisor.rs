@@ -12,13 +12,27 @@ pub enum Supervised {
 }
 /// Long-lived process seam, separate from finite CommandRunner invocations.
 pub trait Supervisor: std::fmt::Debug {
-    fn ensure(&mut self, config: &Config, task: &str, agents: &Path) -> Result<Supervised, String>;
+    /// Start the task's moderator unless one runs. With a `deadline`, in
+    /// unix seconds, BBP has every harness of the task gone by then.
+    fn ensure(
+        &mut self,
+        config: &Config,
+        task: &str,
+        agents: &Path,
+        deadline: Option<u64>,
+    ) -> Result<Supervised, String>;
 }
 /// Supervisor for supported Linux sandboxed workloads. Never falls back to none.
 #[derive(Debug, Default)]
 pub struct StdSupervisor;
 impl Supervisor for StdSupervisor {
-    fn ensure(&mut self, config: &Config, task: &str, agents: &Path) -> Result<Supervised, String> {
+    fn ensure(
+        &mut self,
+        config: &Config,
+        task: &str,
+        agents: &Path,
+        deadline: Option<u64>,
+    ) -> Result<Supervised, String> {
         if !cfg!(target_os = "linux") {
             return Err("BBP sandboxed hosting requires Linux".into());
         }
@@ -85,6 +99,9 @@ impl Supervisor for StdSupervisor {
         }
         if let Some(secs) = config.end_grace_secs {
             command.args(["--end-grace-secs", &secs.to_string()]);
+        }
+        if let Some(unix) = deadline {
+            command.args(["--deadline-unix", &unix.to_string()]);
         }
         command.stdin(Stdio::null()).stdout(log).stderr(err);
         orch_cli::scrub_env(&mut command, SCRUB);
