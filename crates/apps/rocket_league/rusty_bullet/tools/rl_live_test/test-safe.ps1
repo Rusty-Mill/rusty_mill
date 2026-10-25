@@ -61,11 +61,50 @@ try {
   $null = Add-RlOwnedProcess $owned $exited
   Stop-RlOwnedProcesses $owned
   Assert ($first.Kills -eq 1 -and $second.Kills -eq 1 -and $exited.Kills -eq 0 -and $unrelated.Kills -eq 0) 'owned-only cleanup'
-  # Delegated Epic launches / exited launch handles are never accepted as ownership.
-  Throws { Get-RlOwnedBootstrap $exited 'C:\game\RocketLeague.exe' }
-  function Get-CimInstance { [pscustomobject]@{ ParentProcessId = 99; ExecutablePath = 'C:\game\RocketLeague.exe'; ProcessId = 88 } }
-  Throws { Get-RlOwnedBootstrap $first 'C:\game\RocketLeague.exe' }
-  Assert ($unrelated.Kills -eq 0) 'ambiguous bootstrap was killed'
+  # The Epic-launched game is accepted only when every criterion holds; any single mismatch,
+  # or zero or several games, refuses without stopping anything.
+  $launchedAt = [datetime]'2026-10-25T12:00:00'
+  $gamePath = 'C:\game\RocketLeague.exe'
+  $command = '"C:\game\RocketLeague.exe" -AUTH_LOGIN=unused -AUTH_PASSWORD=synthetic -epicapp=Sugar'
+  function Reset-Bootstrap {
+    $script:init = "[0005.12] Init: Command line: $command"
+    $script:cimGame = [pscustomobject]@{ ProcessId = 88; ParentProcessId = 77; ExecutablePath = $gamePath; CreationDate = $launchedAt.AddSeconds(5); CommandLine = $command }
+    $script:cimEpic = [pscustomobject]@{ ProcessId = 77; Name = 'EpicGamesLauncher.exe'; CreationDate = $launchedAt.AddHours(-1) }
+    $script:cimGames = @($script:cimGame)
+    $script:game = FakeProcess 88
+    $script:game | Add-Member NoteProperty Path $gamePath
+    $script:game | Add-Member NoteProperty StartTime $launchedAt.AddSeconds(5).AddTicks(7)
+  }
+  function Get-CimInstance($ClassName, $Filter) {
+    if ($Filter -eq "Name='RocketLeague.exe'") { return $script:cimGames }
+    @($script:cimEpic, $script:cimGame) | Where-Object { $Filter -eq "ProcessId=$($_.ProcessId)" }
+  }
+  function Get-Process([int]$Id) { if ($Id -eq $script:game.Id) { return $script:game }; throw 'no such process' }
+  Reset-Bootstrap
+  Assert ((Get-RlOwnedBootstrap $launchedAt $gamePath $init) -eq $game) 'Epic-launched game rejected'
+  $mismatches = @(
+    { $script:cimGames = @() },
+    { $script:cimGames = @($cimGame, $cimGame) },
+    { $cimGame.ParentProcessId = 66 },
+    { $cimEpic.Name = 'cmd.exe' },
+    { $cimEpic.CreationDate = $launchedAt.AddSeconds(6) },
+    { $cimGame.ExecutablePath = 'C:\other\RocketLeague.exe' },
+    { $cimGame.CreationDate = $launchedAt; $game.StartTime = $launchedAt },
+    { $cimGame.CommandLine = "$command -extra" },
+    { $cimGame.CommandLine = $command.ToLowerInvariant() },
+    { $script:init = 'Init: Command line: '; $cimGame.CommandLine = '' },
+    { $game.HasExited = $true },
+    { $game.Path = 'C:\other\RocketLeague.exe' },
+    { $game.StartTime = $launchedAt.AddSeconds(6) }
+  )
+  foreach ($mutate in $mismatches) {
+    Reset-Bootstrap
+    & $mutate
+    Throws { Get-RlOwnedBootstrap $launchedAt $gamePath $init }
+    Assert ($game.Kills -eq 0 -and $unrelated.Kills -eq 0) "refused bootstrap was killed: $mutate"
+  }
+  $refusal = try { Reset-Bootstrap; $cimGame.CommandLine = 'x'; Get-RlOwnedBootstrap $launchedAt $gamePath $init } catch { "$_" }
+  Assert ($refusal -notmatch 'AUTH|synthetic') 'refusal leaked the command line'
 
   $info = New-RlWatcherStartInfo (Join-Path $dir 'watch script.ps1') $dir
   Assert ($info.ArgumentList.Count -eq 4) 'watcher argument count'
