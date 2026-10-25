@@ -439,6 +439,7 @@ mod tests {
             ("stamp", "renderer change counter"),
             ("id", "fresh per-grid renderer cache key"),
             ("spare_screen", "recycled blank allocation"),
+            ("blank_row", "rebuilt blank-row template"),
             ("epoch", "renderer freshness counter"),
             ("view_offset", "client viewport"),
             ("selection", "client selection"),

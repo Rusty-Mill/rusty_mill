@@ -6432,6 +6432,56 @@ fn bce_keeps_attributes_and_foreground_out_of_erased_cells() {
 }
 
 #[test]
+fn scrolled_in_rows_follow_erase_colour_and_width_changes() {
+    // Line::clear copies from a cached blank row; it must be rebuilt when the
+    // erase colour or the width changes, not keep handing out the old one.
+    let mut g = Grid::new(10, 3);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[3;1H\x1b[42m\n");
+    assert_bce(&g, 2, 0..10, "first BCE scroll");
+    p.advance(&mut g, b"\x1b[49m\n");
+    assert!(g.row(2).iter().all(|c| c.bg == DEFAULT_BG), "after SGR 49");
+    p.advance(&mut g, b"\x1b[42m\n");
+    assert_bce(&g, 2, 0..10, "BCE again");
+    g.resize(14, 3);
+    p.advance(&mut g, b"\x1b[3;1H\n");
+    assert_eq!(g.row(2).len(), 14, "row width after resize");
+    assert_bce(&g, 2, 0..14, "BCE after resize");
+}
+
+#[test]
+fn decaln_rows_are_blanked_by_later_clears() {
+    // DECALN leaves rows uniform in 'E'; a scroll, IL or ED must still blank
+    // them, and repeated clears of an already-blank row must stay blank.
+    let mut g = Grid::new(6, 3);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b#8\x1b[3;1H\n");
+    assert_eq!(row_text(&g, 2), " ".repeat(6), "LF scroll after DECALN");
+    assert_eq!(row_text(&g, 0), "E".repeat(6), "untouched row keeps E");
+    p.advance(&mut g, b"\x1b[1;1H\x1b[L\x1b[L");
+    assert_eq!(row_text(&g, 0), " ".repeat(6), "IL twice");
+    p.advance(&mut g, b"\x1b[1;5Hx\x1b[1;1H\x1b[L");
+    assert_eq!(row_text(&g, 0), " ".repeat(6), "IL after a mid-row write");
+    p.advance(&mut g, b"\x1b#8\x1b[2J");
+    assert!(cells(&g).iter().all(|c| c.ch == ' '), "ED 2 after DECALN");
+}
+
+#[test]
+fn restored_rows_are_blanked_after_a_write() {
+    // A checkpoint restore starts rows unflagged and the blank-row template
+    // empty; a write then a clear must still produce blank rows.
+    let mut g = Grid::new(6, 3);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[42m\x1b[2J\x1b[0m");
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b[3;3Hab\x1b[42m\n");
+    assert_bce(&g, 2, 0..6, "restored grid scroll");
+    p.advance(&mut g, b"\x1b[1;4Hz\x1b[1;1H\x1b[L");
+    assert_bce(&g, 0, 0..6, "restored grid IL after write");
+}
+
+#[test]
 fn bce_does_not_apply_to_resize_fill() {
     // Growing the grid is not an erase: new cells use the default background.
     let mut g = parse(b"\x1b[42m", 4, 1);
