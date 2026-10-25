@@ -21,8 +21,9 @@ pub(crate) type Shared = Rc<RefCell<State>>;
 /// Bytes read from a PTY per output frame.
 const CHUNK: usize = 16 << 10;
 
-/// The largest capture sent, half a client's output budget.
-const CAPTURE_MAX: usize = crate::outbox::BUDGET / 2;
+/// The largest reply to `capture` or `list`, in encoded bytes: half a
+/// client's output budget, so a reply alone never gets a client dropped.
+const REPLY_MAX: usize = crate::outbox::BUDGET / 2;
 
 /// Events kept for clients that reconnect.
 const HISTORY: usize = 4096;
@@ -160,8 +161,8 @@ impl State {
                 this.send_snapshot(client, block);
                 None
             }
-            Ok(Outcome::Reply(messages)) => {
-                messages.iter().for_each(|m| this.send(client, m));
+            Ok(Outcome::Reply(frames)) => {
+                frames.into_iter().for_each(|f| this.send_frame(client, f));
                 None
             }
             Ok(Outcome::Write(write)) => Some(write),
@@ -233,7 +234,7 @@ impl State {
             M::List { req } => (
                 req,
                 self.require(client, Features::INSPECT, "list")
-                    .map(|()| self.list(req)),
+                    .and_then(|()| self.list(req)),
             ),
             other => (0, Err(format!("not a client request: {other:?}"))),
         }
@@ -268,18 +269,17 @@ impl State {
                 text.push('\n');
             }
             text.push_str(&rt.grid.line_text(abs).unwrap_or_default());
-            if text.len() > CAPTURE_MAX {
-                return Err(format!(
-                    "capture exceeds {CAPTURE_MAX} bytes; ask for less history"
-                ));
+            // Stop building early; `reply` checks the exact size.
+            if text.len() > REPLY_MAX {
+                break;
             }
         }
-        Ok(Outcome::Reply(vec![Message::Text { req, text }]))
+        reply("capture", &[Message::Text { req, text }])
     }
 
     /// Every session, window and block, each parent before its children:
     /// sessions in id order, windows and blocks in creation order.
-    fn list(&self, req: u64) -> Outcome {
+    fn list(&self, req: u64) -> Result<Outcome, String> {
         let mut entries = Vec::new();
         for session in self.mux.sessions() {
             entries.push(Entry::Session {
@@ -307,12 +307,12 @@ impl State {
                 }
             }
         }
-        let mut reply: Vec<Message> = entries
+        let mut messages: Vec<Message> = entries
             .into_iter()
             .map(|entry| Message::Entry { req, entry })
             .collect();
-        reply.push(Message::Done { req, created: None });
-        Outcome::Reply(reply)
+        messages.push(Message::Done { req, created: None });
+        reply("list", &messages)
     }
 
     fn create_block(
@@ -514,9 +514,25 @@ fn event_frame(seq: Option<u64>, event: &Event) -> Option<Vec<u8>> {
 enum Outcome {
     Done(Option<Uuid>),
     Attached(BlockId),
-    /// Messages answering the request, in order.
-    Reply(Vec<Message>),
+    /// Encoded messages answering the request, in order.
+    Reply(Vec<Vec<u8>>),
     Write(PtyWrite),
+}
+
+/// Encodes the messages answering a `what` request, all or nothing: a reply
+/// over [`REPLY_MAX`] is refused before any of it is sent.
+fn reply(what: &str, messages: &[Message]) -> Result<Outcome, String> {
+    let mut size = 0;
+    let mut frames = Vec::with_capacity(messages.len());
+    for message in messages {
+        let frame = encode(message).map_err(|e| format!("{what}: {e}"))?;
+        size += frame.len();
+        if size > REPLY_MAX {
+            return Err(format!("{what} reply exceeds {REPLY_MAX} bytes"));
+        }
+        frames.push(frame);
+    }
+    Ok(Outcome::Reply(frames))
 }
 
 /// Reads a block's PTY until its program exits.
@@ -806,5 +822,20 @@ mod regression {
             shared.borrow_mut().mux.detach(client).unwrap();
             State::request(&shared, client, Message::CloseBlock { req: 99, block });
         });
+    }
+
+    #[test]
+    fn a_reply_over_the_limit_is_refused_whole() {
+        let text = |req, len| Message::Text {
+            req,
+            text: "x".repeat(len),
+        };
+        let half = REPLY_MAX / 2;
+        assert!(matches!(
+            reply("t", &[text(1, half - 64), text(2, half - 64)]),
+            Ok(Outcome::Reply(frames)) if frames.len() == 2
+        ));
+        let refused = reply("t", &[text(1, half), text(2, half)]);
+        assert!(matches!(refused, Err(why) if why.contains("exceeds")));
     }
 }

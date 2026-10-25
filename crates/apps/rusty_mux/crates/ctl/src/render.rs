@@ -113,7 +113,8 @@ impl Field {
         match self {
             Self::Id(id) => id.to_string(),
             Self::Num(n) => n.to_string(),
-            Self::Text(t) => t,
+            // Quoted and escaped: a name can't add a line or reach the terminal.
+            Self::Text(t) => format!("\"{}\"", t.escape_debug()),
             Self::Absent => "-".into(),
         }
     }
@@ -223,7 +224,7 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
 
 #[cfg(test)]
 mod tests {
-    use rusty_mux_core::{BlockId, Size, WindowId};
+    use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
 
     use super::*;
 
@@ -278,7 +279,7 @@ mod tests {
         assert_eq!(
             entry_line(&block, false),
             format!(
-                "block {} window={} cols=80 rows=24 holder=- title=vim",
+                "block {} window={} cols=80 rows=24 holder=- title=\"vim\"",
                 id(1),
                 id(2)
             )
@@ -290,6 +291,32 @@ mod tests {
         assert_eq!(map.get("block"), Some(&Value::from(id(1).to_string())));
         assert_eq!(map.get("holder"), Some(&Value::Null));
         assert_eq!(map.get("title"), Some(&Value::from("vim")));
+    }
+
+    #[test]
+    fn names_cannot_forge_lines_or_reach_the_terminal() {
+        let name = "a b\nsession x\r\u{1b}]0;pwn\u{7}\"";
+        let session = Entry::Session {
+            session: SessionId::from_uuid(id(1)),
+            name: name.into(),
+        };
+        let text = entry_line(&session, false);
+        assert_eq!(
+            text,
+            format!(
+                "session {} name=\"a b\\nsession x\\r\\u{{1b}}]0;pwn\\u{{7}}\\\"\"",
+                id(1)
+            )
+        );
+        let json = entry_line(&session, true);
+        assert!(
+            !text.chars().chain(json.chars()).any(char::is_control),
+            "{json}"
+        );
+        let Value::Object(map) = Value::from_json_str(&json).unwrap() else {
+            panic!("an object")
+        };
+        assert_eq!(map.get("name"), Some(&Value::from(name)));
     }
 
     #[test]

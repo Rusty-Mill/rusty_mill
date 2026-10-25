@@ -128,3 +128,22 @@ fn inspecting_needs_the_feature_and_a_real_block() {
     }));
     assert!(reason.contains("unknown block"), "{reason}");
 }
+
+#[test]
+fn an_oversized_listing_is_refused_and_the_connection_kept() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, INSPECT, None);
+    // Each name fits one frame, but five exceed the bound on one reply.
+    for n in 0..5u8 {
+        client.request(|req| Message::CreateSession {
+            req,
+            name: char::from(b'a' + n).to_string().repeat(1 << 20),
+        });
+    }
+    let reason = refusal(client.answer(|req| Message::List { req }));
+    assert!(reason.contains("list reply exceeds"), "{reason}");
+    assert!(matches!(
+        client.answer(|req| Message::Sync { req }).as_slice(),
+        [Message::Done { .. }]
+    ));
+}
