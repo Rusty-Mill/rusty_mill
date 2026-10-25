@@ -58,6 +58,8 @@ CASES = (
          "two_confined_tasks_share_one_object_store_but_not_their_worktrees"),
     Case("launcher-confined", "rusty_bbp_host", ("--test", "confined_harness"),
          "a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone"),
+    Case("session-confined", "rusty_bbp_host", ("--test", "confined_harness"),
+         "a_confined_session_keeps_its_home_and_one_fresh_workspace_across_turns"),
     Case("rust-lld", "rusty_bbp_host", ("--test", "rust_lld_profile"),
          "confined_rust_lld_profile_passes_under_one_gib"),
     Case("maintenance", "rusty_orch", ("--lib",),

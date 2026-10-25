@@ -70,6 +70,46 @@ fn json(value: &impl rusty_serde::Serialize) -> Result<String, String> {
 /// Names the moderator-written facts file of a confined launch.
 pub const FACTS_ENV: &str = "BBP_LAUNCH_FACTS";
 
+/// The role's provider session, from a `"session": true` launcher.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Session {
+    /// A UUID, as `--session-id` and `--resume` take it.
+    id: String,
+    /// An earlier turn of the role started the conversation.
+    resume: bool,
+}
+
+impl Session {
+    /// `BBP_SESSION_ID` and `BBP_SESSION_RESUME` as the moderator sets them:
+    /// both or neither, a lowercase UUID and `yes` or `no`.
+    fn parse(id: Option<String>, resume: Option<String>) -> Result<Option<Session>, String> {
+        let (id, resume) = match (id, resume) {
+            (None, None) => return Ok(None),
+            (Some(id), Some(resume)) => (id, resume),
+            _ => return Err("BBP_SESSION_ID and BBP_SESSION_RESUME come together".into()),
+        };
+        let uuid = id.len() == 36
+            && id.char_indices().all(|(i, c)| match i {
+                8 | 13 | 18 | 23 => c == '-',
+                _ => matches!(c, '0'..='9' | 'a'..='f'),
+            });
+        if !uuid {
+            return Err("BBP_SESSION_ID is not a session UUID".into());
+        }
+        let resume = match resume.as_str() {
+            "yes" => true,
+            "no" => false,
+            _ => return Err("BBP_SESSION_RESUME must be yes or no".into()),
+        };
+        Ok(Some(Session { id, resume }))
+    }
+
+    fn from_env() -> Result<Option<Session>, String> {
+        let var = |k: &str| std::env::var_os(k).map(|v| v.to_string_lossy().into_owned());
+        Session::parse(var("BBP_SESSION_ID"), var("BBP_SESSION_RESUME"))
+    }
+}
+
 /// What a launcher checks before it starts its provider, taken from the
 /// task's state for one principal's turn.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,6 +419,7 @@ fn arguments(
     config: &Path,
     cwd: &Path,
     model: Option<&str>,
+    session: Option<&Session>,
 ) -> Result<Vec<String>, String> {
     let prompt = format!(
         "BBP task {}, turn {}. Prefix every operation id with t{}-.\n{}",
@@ -420,7 +461,6 @@ fn arguments(
             "--setting-sources",
             "",
             "--disable-slash-commands",
-            "--no-session-persistence",
             "--permission-mode",
             "dontAsk",
             "--permission-prompts",
@@ -434,6 +474,17 @@ fn arguments(
         .map(str::to_owned)
         .to_vec(),
     };
+    // A session persists its conversation, under the provider's id for it.
+    // Before `--mcp-config`, which ends the fixed flags.
+    if provider == Provider::Claude {
+        let flags: Vec<String> = match session {
+            None => vec!["--no-session-persistence".into()],
+            Some(s) if s.resume => vec!["--resume".into(), s.id.clone()],
+            Some(s) => vec!["--session-id".into(), s.id.clone()],
+        };
+        let at = args.len() - 1;
+        args.splice(at..at, flags);
+    }
     if provider == Provider::Codex {
         let env = channel
             .env()
@@ -474,6 +525,14 @@ pub fn run(provider: Provider) -> Result<(), String> {
     }
     let options = Options::parse(std::env::args().skip(1))?;
     let channel = Channel::from_env()?;
+    let session = Session::from_env()?;
+    // Codex names its sessions itself; resuming one would mean trusting an id
+    // read back from the provider's own store.
+    if provider == Provider::Codex && session.is_some() {
+        return Err(
+            "the codex launcher cannot keep a session: codex chooses its own session ids".into(),
+        );
+    }
     let bbp = PathBuf::from(std::env::var_os("BBP_BIN").ok_or("missing BBP_BIN")?);
     if !bbp.is_absolute() {
         return Err("BBP_BIN must be absolute".into());
@@ -509,7 +568,19 @@ pub fn run(provider: Provider) -> Result<(), String> {
     };
     check(provider, &facts)?;
     std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
-    let root = parent.join(format!("turn-{}", channel.turn().0));
+    // A session's turns share one working directory, which Claude Code keys
+    // its conversations by; each turn still starts it empty.
+    let root = match &session {
+        Some(s) => {
+            let root = parent.join(format!("session-{}", s.id));
+            if root.exists() {
+                std::fs::remove_dir_all(&root)
+                    .map_err(|e| format!("clearing {}: {e}", root.display()))?;
+            }
+            root
+        }
+        None => parent.join(format!("turn-{}", channel.turn().0)),
+    };
     std::fs::create_dir(&root)
         .map_err(|e| format!("turn workspace already exists or cannot be created: {e}"))?;
     #[cfg(unix)]
@@ -532,6 +603,7 @@ pub fn run(provider: Provider) -> Result<(), String> {
             &config,
             &cwd,
             options.model.as_deref(),
+            session.as_ref(),
         )?)
         .current_dir(cwd)
         .stdin(Stdio::null());

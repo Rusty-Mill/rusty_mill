@@ -360,3 +360,43 @@ git add flag
         "no\n"
     );
 }
+
+const SESSION: &str = "0123abcd-0123-4567-89ab-0123456789ab";
+
+#[test]
+fn reviewer_session_starts_then_resumes_in_one_emptied_directory() {
+    let f = Fixture::new(true);
+    let run = |resume: &str| {
+        let mut cmd = f.command();
+        cmd.env("BBP_SESSION_ID", SESSION)
+            .env("BBP_SESSION_RESUME", resume);
+        assert_eq!(cmd.status().unwrap().code(), Some(42));
+        let cwd = PathBuf::from(std::fs::read_to_string(f.dir.join("cwd")).unwrap().trim());
+        (cwd, f.captured_args())
+    };
+    let (first, args) = run("no");
+    assert!(args.windows(2).any(|w| w == ["--session-id", SESSION]));
+    assert!(!args.iter().any(|a| a == "--no-session-persistence"));
+    std::fs::write(first.join("left-behind"), "x").unwrap();
+    let (later, args) = run("yes");
+    assert!(args.windows(2).any(|w| w == ["--resume", SESSION]));
+    assert_eq!(
+        first, later,
+        "Claude Code keys a conversation by its directory"
+    );
+    assert!(std::fs::read_dir(later).unwrap().next().is_none());
+}
+
+#[test]
+fn author_refuses_a_session_before_provider_start() {
+    let f = Fixture::new(false);
+    let out = f
+        .command()
+        .env("BBP_SESSION_ID", SESSION)
+        .env("BBP_SESSION_RESUME", "no")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot keep a session"));
+    assert!(!f.dir.join("args").exists());
+}

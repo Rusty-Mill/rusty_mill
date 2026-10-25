@@ -138,13 +138,16 @@ struct Shared {
     options: ServeOptions,
 }
 
-/// Waits for `work`, or for the stop signal: `None` once stopped. The stop
-/// signal is polled first so that always-ready work cannot starve it.
+/// Waits for `work`, or for the stop signal: `None` once stopped. The
+/// `select!` is `biased;`, so the stop signal is polled first: always-ready
+/// work cannot starve it, and a stop that becomes ready together with the
+/// work always wins.
 async fn until_stopped<F: Future>(work: F, stop: &Arc<Stop>) -> Option<F::Output> {
     if stop.is_stopped() {
         return None;
     }
     rusty_tokio::select! {
+        biased;
         _ = stop.wait() => None,
         w = work => Some(w),
     }
@@ -157,7 +160,7 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<Stop>
         let Some(accepted) = until_stopped(listener.accept(), &stop).await else {
             break;
         };
-        let Ok((tcp, _)) = accepted else {
+        let Ok((tcp, peer)) = accepted else {
             // Out of descriptors, say: back off rather than spin.
             sleep(Duration::from_millis(10)).await;
             continue;
@@ -166,7 +169,7 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<Stop>
         let Ok(permit) = permits.clone().try_acquire_owned() else {
             continue;
         };
-        rusty_tokio::spawn(connection(tcp, shared.clone(), stop.clone(), permit));
+        rusty_tokio::spawn(connection(tcp, peer, shared.clone(), stop.clone(), permit));
     }
     drop(listener);
     // Every connection holds a permit until it ends.
@@ -176,17 +179,18 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<Stop>
 /// One accepted connection: the TLS handshake if any, then HTTP/1.1.
 async fn connection(
     tcp: TcpStream,
+    peer: SocketAddr,
     shared: Arc<Shared>,
     stop: Arc<Stop>,
     _permit: OwnedSemaphorePermit,
 ) {
     let _ = tcp.set_nodelay(true);
     let Some(acceptor) = shared.tls.clone() else {
-        return run(tcp, &shared, &stop).await;
+        return run(tcp, peer, &shared, &stop).await;
     };
     let deadline = Instant::now() + shared.options.handshake_timeout;
     if let Ok(Ok(io)) = timeout_at(deadline, handshake(acceptor, tcp)).await {
-        run(io, &shared, &stop).await;
+        run(io, peer, &shared, &stop).await;
     }
 }
 
@@ -199,9 +203,9 @@ async fn handshake(
     Ok(tls)
 }
 
-/// Serves requests on `io` in order until the client is done, a limit is
-/// hit, or the server stops.
-async fn run<T>(io: T, shared: &Shared, stop: &Arc<Stop>)
+/// Serves requests from `peer` on `io` in order until the client is done,
+/// a limit is hit, or the server stops.
+async fn run<T>(io: T, peer: SocketAddr, shared: &Shared, stop: &Arc<Stop>)
 where
     T: AsyncRead + AsyncWrite + Unpin + Send,
 {
@@ -224,7 +228,7 @@ where
             chunked: head.version == Version::Http11,
         };
         let req = match conn.read_request(head, options).await {
-            Ok(req) => req,
+            Ok(req) => req.with_peer_addr(peer),
             Err(e) => return conn.refuse(&e).await,
         };
         let response = shared.router.call(req).await;
@@ -465,6 +469,62 @@ mod tests {
     use super::*;
     use crate::response::sse::{Event, Sse};
     use crate::routing::get;
+
+    #[test]
+    fn stop_wins_when_both_become_ready_after_the_precheck() {
+        use std::cell::Cell;
+        use std::task::{Context, Poll, Waker};
+
+        for _ in 0..128 {
+            let stop = Arc::new(Stop::default());
+            let ready = Cell::new(false);
+            let work_polls = Cell::new(0);
+            let work = std::future::poll_fn(|_| {
+                work_polls.set(work_polls.get() + 1);
+                if ready.get() {
+                    Poll::Ready(7)
+                } else {
+                    Poll::Pending
+                }
+            });
+            let mut waiting = std::pin::pin!(until_stopped(work, &stop));
+            let mut cx = Context::from_waker(Waker::noop());
+            // Cross the initial level check with neither branch ready.
+            assert!(waiting.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(work_polls.get(), 1);
+            // Both branches are ready on the next poll of the selector.
+            ready.set(true);
+            stop.stop();
+            assert_eq!(waiting.as_mut().poll(&mut cx), Poll::Ready(None));
+            assert_eq!(work_polls.get(), 1, "shutdown must be polled before work");
+        }
+    }
+
+    #[test]
+    fn a_stop_that_becomes_ready_with_the_work_wins() {
+        // Past the precheck, both branches park; then the stop and the work
+        // become ready together. A current-thread runtime keeps the racing
+        // task from running between the two signals, so it next polls with
+        // both ready, and the stop must win every time, not whichever branch
+        // a fair `select!` polls first.
+        let rt = rusty_tokio::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            for _ in 0..200 {
+                let stop = Arc::new(Stop::default());
+                let (tx, rx) = rusty_tokio::sync::oneshot::channel::<u32>();
+                let racer = stop.clone();
+                let race = rusty_tokio::spawn(async move {
+                    until_stopped(async { rx.await.unwrap() }, &racer).await
+                });
+                while stop.waiters() == 0 {
+                    rusty_tokio::task::yield_now().await; // past the precheck, parked
+                }
+                tx.send(7).unwrap();
+                stop.stop();
+                assert_eq!(race.await.unwrap(), None);
+            }
+        });
+    }
 
     /// `n` events, each ready at once.
     struct Burst(u32);
