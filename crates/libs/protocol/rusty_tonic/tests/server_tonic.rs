@@ -9,8 +9,8 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use http::uri::PathAndQuery;
+use rusty_stream::{Compat, StreamExt};
 use rusty_tonic::client::{Request, Response};
 use rusty_tonic::server::{Incoming, Router, Sink};
 use rusty_tonic::{Code, Status};
@@ -197,7 +197,7 @@ fn a_server_stream() {
 #[test]
 fn a_client_stream() {
     with_client(|mut g| async move {
-        let items = futures_util::stream::iter((1..=10).map(|n| pblob(n, 100)));
+        let items = Compat::new(rusty_stream::stream::iter((1..=10).map(|n| pblob(n, 100))));
         let r = g
             .client_streaming(
                 tonic::Request::new(items),
@@ -213,12 +213,13 @@ fn a_client_stream() {
 #[test]
 fn a_bidirectional_stream() {
     with_client(|mut g| async move {
-        let items = futures_util::stream::iter((0..20).map(|n| pblob(n, 10)));
-        let mut out = g
-            .streaming(tonic::Request::new(items), path("/pkg.Svc/Bidi"), codec())
-            .await
-            .unwrap()
-            .into_inner();
+        let items = Compat::new(rusty_stream::stream::iter((0..20).map(|n| pblob(n, 10))));
+        let mut out = Compat::new(
+            g.streaming(tonic::Request::new(items), path("/pkg.Svc/Bidi"), codec())
+                .await
+                .unwrap()
+                .into_inner(),
+        );
         let mut got = Vec::new();
         while let Some(b) = out.next().await {
             got.push(b.unwrap().n);
