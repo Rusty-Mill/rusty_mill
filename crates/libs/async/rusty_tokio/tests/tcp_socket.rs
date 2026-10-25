@@ -28,7 +28,7 @@ fn bind_then_listen_accepts_a_connection() {
 fn connect_reaches_a_real_listener() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -268,7 +268,7 @@ fn tcp_socket_take_error_is_none_on_a_fresh_socket() {
 fn tcp_stream_take_error_is_none_on_a_healthy_connection() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -288,7 +288,7 @@ fn tcp_stream_take_error_is_none_on_a_healthy_connection() {
 fn tcp_stream_nodelay_getter_reflects_the_setter() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move { listener.accept().await.unwrap() });
@@ -308,7 +308,7 @@ fn tcp_stream_nodelay_getter_reflects_the_setter() {
 fn from_std_stream_adopts_an_already_connected_socket() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {

@@ -226,9 +226,24 @@ impl UnixListener {
     ///
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
-    pub fn bind(path: &Path) -> io::Result<UnixListener> {
+    pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
         let reactor = Handle::current().shared.reactor.clone();
-        let inner = PlatformUnixListener::bind(path).map_err(from_platform_err)?;
+        let inner = PlatformUnixListener::bind(path.as_ref()).map_err(from_platform_err)?;
+        inner.set_nonblocking(true).map_err(from_platform_err)?;
+        let io = reactor.register(inner.as_raw_io())?;
+        Ok(UnixListener { inner, io, reactor })
+    }
+
+    /// Adopts an already-bound-and-listening `std` listener, as tokio's
+    /// `UnixListener::from_std`: flips it non-blocking and registers it
+    /// with the reactor. Unix-only (std has no Windows `AF_UNIX` type).
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    #[cfg(unix)]
+    pub fn from_std(listener: std::os::unix::net::UnixListener) -> io::Result<UnixListener> {
+        let reactor = Handle::current().shared.reactor.clone();
+        let inner = PlatformUnixListener::from(std::os::fd::OwnedFd::from(listener));
         inner.set_nonblocking(true).map_err(from_platform_err)?;
         let io = reactor.register(inner.as_raw_io())?;
         Ok(UnixListener { inner, io, reactor })
@@ -610,10 +625,10 @@ impl UnixStream {
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
     #[cfg(unix)]
-    pub async fn connect(path: &Path) -> io::Result<UnixStream> {
+    pub async fn connect<P: AsRef<Path>>(path: P) -> io::Result<UnixStream> {
         let reactor = Handle::current().shared.reactor.clone();
         let fd = socket::new_unix_socket()?;
-        let outcome = socket::unix_connect(fd.as_raw_fd(), path)?;
+        let outcome = socket::unix_connect(fd.as_raw_fd(), path.as_ref())?;
         let io = reactor.register_with(fd.as_raw_fd(), InitialReadiness::for_connect(outcome))?;
         let inner = PlatformUnixStream::from(fd);
         // Same non-blocking-connect-completes-asynchronously reasoning
@@ -643,9 +658,9 @@ impl UnixStream {
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
     #[cfg(windows)]
-    pub async fn connect(path: &Path) -> io::Result<UnixStream> {
+    pub async fn connect<P: AsRef<Path>>(path: P) -> io::Result<UnixStream> {
         let reactor = Handle::current().shared.reactor.clone();
-        let path = path.to_path_buf();
+        let path = path.as_ref().to_path_buf();
         let inner = crate::spawn_blocking(move || PlatformUnixStream::connect(&path))
             .await
             .map_err(|_| {
@@ -715,6 +730,20 @@ impl UnixStream {
         let a = UnixStream::from_accepted(PlatformUnixStream::from(fd_a), reactor.clone())?;
         let b = UnixStream::from_accepted(PlatformUnixStream::from(fd_b), reactor)?;
         Ok((a, b))
+    }
+
+    /// Adopts an already-connected `std` stream, as tokio's
+    /// `UnixStream::from_std`: flips it non-blocking and registers it with
+    /// the reactor. Unix-only (std has no Windows `AF_UNIX` type).
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    #[cfg(unix)]
+    pub fn from_std(stream: std::os::unix::net::UnixStream) -> io::Result<UnixStream> {
+        let reactor = Handle::current().shared.reactor.clone();
+        let inner = PlatformUnixStream::from(std::os::fd::OwnedFd::from(stream));
+        inner.set_nonblocking(true).map_err(from_platform_err)?;
+        UnixStream::from_accepted(inner, reactor)
     }
 
     fn from_accepted(inner: PlatformUnixStream, reactor: Arc<Reactor>) -> io::Result<UnixStream> {

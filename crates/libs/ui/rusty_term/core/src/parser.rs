@@ -1676,3 +1676,52 @@ fn hex_decode(hex: &[u8]) -> Option<Vec<u8>> {
 fn push_hex(out: &mut Vec<u8>, data: &[u8]) {
     out.extend_from_slice(rusty_hex::encode(data).as_bytes());
 }
+
+crate::checkpoint::fields!(
+    AnsiParser,
+    [
+        state,
+        pen,
+        param_buffer,
+        csi_private,
+        csi_marker,
+        csi_intermediate,
+        utf8_acc,
+        utf8_remaining,
+        utf8_min,
+        responses,
+        protected,
+        osc_buffer,
+        dcs_buffer,
+        apc_buffer,
+        kitty,
+        last_char,
+        charsets,
+        gl,
+        charset_slot,
+        palette
+    ]
+);
+crate::checkpoint::variants!(
+    ParserState,
+    [
+        Ground, Esc, Csi, Utf8, Osc, OscEsc, EscCharset, EscHash, StrSink, StrSinkEsc, Dcs, DcsEsc,
+        Apc, ApcEsc
+    ]
+);
+impl AnsiParser {
+    pub(crate) fn validate_checkpoint(&self) -> crate::checkpoint::Result<()> {
+        if self.gl > 1
+            || self.charset_slot > 3
+            || self.utf8_remaining > 3
+            || (self.state == ParserState::Utf8 && self.utf8_remaining == 0)
+            || self.param_buffer.len() > CSI_PARAM_MAX
+            || self.osc_buffer.len() > OSC_IMAGE_MAX
+            || self.dcs_buffer.len() > DCS_MAX
+            || self.apc_buffer.len() > DCS_MAX
+        {
+            return Err(crate::checkpoint::Error("parser state bounds"));
+        }
+        self.kitty.validate_checkpoint()
+    }
+}

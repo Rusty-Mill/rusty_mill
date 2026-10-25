@@ -1,9 +1,7 @@
-use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 
 use rp_core::RateLimiter;
 use rp_router::{Config, Router as ProviderRouter};
-use rp_server::build_app;
 use rp_server::state::AppState;
 
 #[tokio::main]
@@ -110,16 +108,27 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let app = build_app(state);
-
     let addr = format!("{}:{}", config.server.host, config.server.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    rusty_log::info!(%addr, "rusty_provider listening");
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    let tokio = tokio::runtime::Handle::current();
+    // The server runs on a rusty_tokio runtime of its own (#875); this
+    // tokio runtime stays up for the handlers' tokio libraries.
+    tokio::task::spawn_blocking(move || serve_on_rusty_tokio(state, tokio, &addr)).await?
+}
 
-    Ok(())
+/// Serves until the process is stopped, as `axum::serve` did.
+fn serve_on_rusty_tokio(
+    state: AppState,
+    tokio: tokio::runtime::Handle,
+    addr: &str,
+) -> anyhow::Result<()> {
+    let runtime = rusty_tokio::Builder::new_multi_thread()
+        .thread_name("rp-server")
+        .build()?;
+    runtime.block_on(async {
+        let listener = rusty_tokio::io::TcpListener::bind(addr).await?;
+        let server = rp_server::serve(state, tokio, listener)?;
+        rusty_log::info!(addr = %server.local_addr(), "rusty_provider listening");
+        server.shutdown_on(std::future::pending()).await;
+        Ok(())
+    })
 }

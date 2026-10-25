@@ -1,13 +1,17 @@
 //! Server-sent events: a stream of [`Event`]s as a `text/event-stream`.
 //!
-//! Keep-alive comments need a timer, so they belong to the server driver,
-//! not this runtime-free module; no keep-alive is sent yet.
+//! Building one is runtime-free. [`Sse::keep_alive`] adds a timer, so a
+//! stream with keep-alive must be polled inside a `rusty_tokio` runtime, as
+//! the server does.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use futures_core::Stream;
 use rusty_http::StatusCode;
+use rusty_tokio::time::{sleep, Sleep};
 
 use super::{IntoResponse, Response};
 use crate::body::{Body, BoxError};
@@ -107,12 +111,62 @@ fn one_line(text: &str) -> String {
 
 /// A `text/event-stream` response from a stream of events. An `Err` item
 /// ends the stream.
-pub struct Sse<S>(S);
+pub struct Sse<S> {
+    stream: S,
+    keep_alive: Option<KeepAlive>,
+}
 
 impl<S> Sse<S> {
     /// Wraps `stream`.
     pub fn new(stream: S) -> Self {
-        Sse(stream)
+        Sse {
+            stream,
+            keep_alive: None,
+        }
+    }
+
+    /// Sends `keep_alive`'s comment whenever the stream has been quiet for
+    /// its interval, so proxies and clients do not time an idle stream out.
+    pub fn keep_alive(mut self, keep_alive: KeepAlive) -> Self {
+        self.keep_alive = Some(keep_alive);
+        self
+    }
+}
+
+/// How [`Sse::keep_alive`] keeps a quiet stream open: a comment after each
+/// interval without an event. As axum's, 15 s and an empty comment by
+/// default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeepAlive {
+    interval: Duration,
+    comment: Vec<u8>,
+}
+
+impl Default for KeepAlive {
+    fn default() -> Self {
+        KeepAlive {
+            interval: Duration::from_secs(15),
+            comment: Event::default().comment("").to_bytes(),
+        }
+    }
+}
+
+impl KeepAlive {
+    /// The default keep-alive.
+    pub fn new() -> Self {
+        KeepAlive::default()
+    }
+
+    /// The quiet time before each comment.
+    pub fn interval(mut self, interval: Duration) -> Self {
+        self.interval = interval;
+        self
+    }
+
+    /// The comment's text, one line.
+    pub fn text(mut self, text: impl AsRef<str>) -> Self {
+        self.comment = Event::default().comment(text).to_bytes();
+        self
     }
 }
 
@@ -122,14 +176,25 @@ where
     E: Into<BoxError>,
 {
     fn into_response(self) -> Response {
-        Response::new(StatusCode::OK, Body::from_stream(Encode(Box::pin(self.0))))
+        let encode = Encode {
+            stream: Box::pin(self.stream),
+            keep_alive: self.keep_alive,
+            timer: None,
+        };
+        Response::new(StatusCode::OK, Body::from_stream(encode))
             .with_header("content-type", "text/event-stream")
             .with_header("cache-control", "no-cache")
     }
 }
 
-/// Encodes each event as it arrives.
-struct Encode<S>(Pin<Box<S>>);
+/// Encodes each event as it arrives, and sends the keep-alive comment when
+/// none has for an interval. The timer starts on the first quiet poll, so a
+/// stream that is never quiet never needs a runtime.
+struct Encode<S> {
+    stream: Pin<Box<S>>,
+    keep_alive: Option<KeepAlive>,
+    timer: Option<Sleep>,
+}
 
 impl<S, E> Stream for Encode<S>
 where
@@ -138,11 +203,21 @@ where
 {
     type Item = Result<Vec<u8>, BoxError>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.0
-            .as_mut()
-            .poll_next(cx)
-            .map(|item| item.map(|r| r.map(|e| e.to_bytes()).map_err(Into::into)))
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if let Poll::Ready(item) = this.stream.as_mut().poll_next(cx) {
+            this.timer = None;
+            return Poll::Ready(item.map(|r| r.map(|e| e.to_bytes()).map_err(Into::into)));
+        }
+        let Some(keep_alive) = &this.keep_alive else {
+            return Poll::Pending;
+        };
+        let timer = this.timer.get_or_insert_with(|| sleep(keep_alive.interval));
+        if Pin::new(timer).poll(cx).is_pending() {
+            return Poll::Pending;
+        }
+        this.timer = None;
+        Poll::Ready(Some(Ok(keep_alive.comment.clone())))
     }
 }
 
