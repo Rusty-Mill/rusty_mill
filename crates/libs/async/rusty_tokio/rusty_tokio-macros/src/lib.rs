@@ -1,5 +1,6 @@
-//! Proc-macro attributes for `rusty_tokio`: `#[rusty_tokio::main]` and
-//! `#[rusty_tokio::test]`. Each rewrites an `async fn` into the plain
+//! Proc macros for `rusty_tokio`: the `#[rusty_tokio::main]` and
+//! `#[rusty_tokio::test]` attributes, and the engine behind
+//! `rusty_tokio::select!` (see the `select` module). Each attribute rewrites an `async fn` into the plain
 //! `fn` that builds a `Runtime` and blocks on the original body --
 //! exactly the boilerplate every example and test in the main crate
 //! used to spell out by hand (`let rt = Runtime::new().unwrap();
@@ -31,24 +32,47 @@
 //!   have no generic parameters -- the same restrictions `fn main`
 //!   itself already has, applied to `#[test]` functions too for
 //!   consistency.
-//! - The only accepted argument is `worker_threads = N` (e.g.
-//!   `#[rusty_tokio::main(worker_threads = 4)]`). Tokio's own attribute
-//!   also accepts `flavor`/`start_paused`/etc., none of which apply here
-//!   -- this crate has exactly one runtime flavor (multi-threaded; see
-//!   issue #22) and no pausable clock (issue #56).
+//! - Arguments, all optional, as in tokio:
+//!   - `flavor = "multi_thread"` -- `Builder::new_multi_thread()`, the
+//!     work-stealing pool; the default when `flavor` is omitted.
+//!   - `flavor = "current_thread"` -- `Builder::new_current_thread()`:
+//!     the body and its spawned tasks all run on the calling thread.
+//!   - `flavor = "thread_per_core"` -- `Builder::new_thread_per_core()`,
+//!     this crate's own; needs the main crate's `thread-per-core`
+//!     feature.
+//!   - `worker_threads = N` -- the pool size for `multi_thread` (or the
+//!     core count for `thread_per_core`). With `current_thread` it is a
+//!     compile error, as in tokio.
+//!   - `start_paused = true` -- calls `rusty_tokio::time::pause()` before
+//!     the body runs, so timers are driven by the paused clock's
+//!     auto-advance (see `time::pause`'s docs) instead of real time.
+//!     Like tokio, it requires `current_thread`; any other flavor is a
+//!     compile error. On `#[test]` with no `flavor`, it selects
+//!     `current_thread` itself (what tokio's test default builds).
+//!
+//!   An unknown argument or flavor is a compile error.
+//! - **Defaults differ from tokio's for `#[test]`**: with no `flavor`,
+//!   both `#[rusty_tokio::main]` and `#[rusty_tokio::test]` build the
+//!   multi-threaded runtime with `available_parallelism()` workers, as
+//!   they always have here. `#[tokio::test]` defaults to
+//!   `current_thread`. Kept so existing tests keep running on the
+//!   runtime they were written against; write
+//!   `flavor = "current_thread"` to get tokio's test default.
+//! - Not supported: tokio's `crate = "..."` and `unhandled_panic`.
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, ItemFn};
 
 mod args;
+mod select;
 
 use args::MacroArgs;
 
 /// Rewrites `async fn main() -> T { body }` into `fn main() -> T` that
 /// builds a `rusty_tokio::Runtime` and blocks on `body`. See the crate
-/// docs for the full scope (no arguments, no generics, the optional
-/// `worker_threads = N` argument).
+/// docs for the full scope (no arguments, no generics) and the accepted
+/// `flavor`/`worker_threads`/`start_paused` arguments.
 #[proc_macro_attribute]
 pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
     expand(args, item, false)
@@ -65,6 +89,10 @@ pub fn test(args: TokenStream, item: TokenStream) -> TokenStream {
 fn expand(args: TokenStream, item: TokenStream, is_test: bool) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
     let macro_args = parse_macro_input!(args as MacroArgs);
+    let config = match macro_args.resolve(is_test) {
+        Ok(config) => config,
+        Err(err) => return err.to_compile_error().into(),
+    };
 
     if input.sig.asyncness.is_none() {
         return syn::Error::new_spanned(
@@ -95,8 +123,8 @@ fn expand(args: TokenStream, item: TokenStream, is_test: bool) -> TokenStream {
     let vis = &input.vis;
     let ident = &input.sig.ident;
     let output = &input.sig.output;
-    let block = &input.block;
-    let rt_expr = macro_args.runtime_expr();
+    let body = config.body(&input.block);
+    let rt_expr = config.runtime_expr();
 
     let test_attr = if is_test {
         quote! { #[::core::prelude::v1::test] }
@@ -108,9 +136,20 @@ fn expand(args: TokenStream, item: TokenStream, is_test: bool) -> TokenStream {
         #test_attr
         #(#attrs)*
         #vis fn #ident() #output {
-            #rt_expr.block_on(async move #block)
+            #rt_expr.block_on(#body)
         }
     };
 
     expanded.into()
+}
+
+/// The engine behind `rusty_tokio::select!` -- not meant to be invoked
+/// directly. `rusty_tokio`'s own `macro_rules! select` forwards here as
+/// `$crate::__select_internal! { ($crate) <tokens> }`, handing over the
+/// crate path a proc macro has no other way to name. See the `select`
+/// module for the grammar, the expansion and why it is shaped that way.
+#[doc(hidden)]
+#[proc_macro]
+pub fn select_internal(input: TokenStream) -> TokenStream {
+    select::expand(input.into()).into()
 }

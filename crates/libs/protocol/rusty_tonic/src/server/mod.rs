@@ -2,9 +2,9 @@
 //! method, served on a listener. There is no trait to implement and no generated code.
 //!
 //! A call's deadline (`grpc-timeout`) is enforced by dropping the handler and sending
-//! `DEADLINE_EXCEEDED`. A client that cancels shows up as `CANCELLED` from the next
-//! [`Incoming::message`] or [`Sink::send`]; a handler that is only computing is not interrupted
-//! until then.
+//! `DEADLINE_EXCEEDED`. A client that cancels, or a connection that dies, drops the handler too,
+//! wherever it is waiting, and nothing more is sent; only a handler that is mid-way through a
+//! [`Incoming::message`] or [`Sink::send`] at that instant can see `CANCELLED` first.
 
 mod call;
 mod router;

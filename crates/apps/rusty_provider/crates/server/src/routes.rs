@@ -2,16 +2,16 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
-use axum::Json;
 use futures_util::{stream, StreamExt};
 use rp_core::{ChatRequest, EmbeddingsRequest, ModelInfo, RateLimitStatus};
 use rp_router::{
     BudgetPeriod, ClientConfig, ClientRole, DispatchTrace, FreeTierStatus, ProviderStats,
     UsageStats,
+};
+use rusty_axum::middleware::Next;
+use rusty_axum::response::sse::{Event, KeepAlive, Sse};
+use rusty_axum::{
+    ConnectInfo, HeaderMap, IntoResponse, Json, Path, Query, Request, Response, State, StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -21,8 +21,7 @@ use crate::state::AppState;
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
+        .get("authorization")
         .and_then(rusty_oauth::bearer::token_from_authorization)
 }
 
@@ -90,11 +89,7 @@ pub async fn check_auth(state: &AppState, headers: &HeaderMap) -> Option<Respons
 /// Sheds with an immediate `503` rather than queuing behind
 /// `Semaphore::acquire` -- a caller waiting behind a long queue at a
 /// saturated server is worse than a caller told plainly to retry.
-pub async fn concurrency_limit(
-    State(state): State<AppState>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
+pub async fn concurrency_limit(state: AppState, request: Request, next: Next) -> Response {
     let Some(limiter) = &state.concurrency_limiter else {
         return next.run(request).await;
     };
@@ -104,21 +99,16 @@ pub async fn concurrency_limit(
     }
 }
 
-/// Guards the MCP endpoint (`[mcp]`) with the exact same `check_auth` every
+/// The MCP endpoint (`[mcp]`), guarded by the exact same `check_auth` every
 /// other route already goes through -- deliberately not rusty_mcp's own
 /// OAuth 2.1 resource-server auth, since this endpoint is mounted inside
 /// this same already-authenticated app rather than run as a separate
 /// listener.
-pub async fn mcp_auth(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
-    if let Some(response) = check_auth(&state, &headers).await {
+pub async fn mcp(state: AppState, mount: rusty_mcp_server::Mount, request: Request) -> Response {
+    if let Some(response) = check_auth(&state, request.headers()).await {
         return response;
     }
-    next.run(request).await
+    mount.call(request).await
 }
 
 /// Who a `/v1/admin/*` request is authorized as, once `check_admin_auth`
@@ -268,7 +258,6 @@ fn rate_limited_response(state: &AppState, identity: &str, status: &RateLimitSta
 /// convention as `Retry-After`, since this is a continuously-refilling
 /// token bucket rather than a fixed window with a natural epoch boundary.
 fn apply_rate_limit_headers(resp: &mut Response, status: &RateLimitStatus) {
-    let headers = resp.headers_mut();
     for (name, value) in [
         ("x-ratelimit-limit", status.limit.to_string()),
         ("x-ratelimit-remaining", status.remaining.to_string()),
@@ -277,9 +266,8 @@ fn apply_rate_limit_headers(resp: &mut Response, status: &RateLimitStatus) {
             status.reset_secs.ceil().max(0.0).to_string(),
         ),
     ] {
-        if let Ok(value) = HeaderValue::from_str(&value) {
-            headers.insert(name, value);
-        }
+        // Numbers: always a valid header value.
+        let _ = resp.headers.insert(name, &value);
     }
 }
 
@@ -338,7 +326,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use axum::http::HeaderValue;
     use rp_core::RateLimiter;
     use rp_router::{Config, Router};
 
@@ -409,7 +396,7 @@ mod tests {
         let mut state = test_state_with_jwt(vec![], None, None).await;
         state.allow_unauthenticated = false;
         let refused = check_auth(&state, &HeaderMap::new()).await;
-        assert_eq!(refused.map(|r| r.status().as_u16()), Some(401));
+        assert_eq!(refused.map(|r| r.status.as_u16()), Some(401));
 
         state.allow_unauthenticated = true;
         assert!(check_auth(&state, &HeaderMap::new()).await.is_none());
@@ -417,10 +404,9 @@ mod tests {
 
     fn bearer_headers(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
-        );
+        headers
+            .insert("authorization", &format!("Bearer {token}"))
+            .unwrap();
         headers
     }
 
@@ -516,10 +502,10 @@ mod tests {
     async fn rate_limited_response_returns_429_with_a_rounded_up_retry_after_header() {
         let state = test_state(vec![], None).await;
         let resp = rate_limited_response(&state, "ip:127.0.0.1", &status(60, 0, 0.2, 0.2));
-        assert_eq!(resp.status(), 429);
+        assert_eq!(resp.status.as_u16(), 429);
         assert_eq!(
-            resp.headers().get("retry-after").unwrap(),
-            &HeaderValue::from_static("1"),
+            resp.headers.get("retry-after"),
+            Some("1"),
             "0.2s should round up to a minimum of 1s"
         );
     }
@@ -528,27 +514,18 @@ mod tests {
     async fn rate_limited_response_retry_after_ceils_fractional_seconds() {
         let state = test_state(vec![], None).await;
         let resp = rate_limited_response(&state, "ip:127.0.0.1", &status(60, 0, 4.1, 4.1));
-        assert_eq!(
-            resp.headers().get("retry-after").unwrap(),
-            &HeaderValue::from_static("5")
-        );
+        assert_eq!(resp.headers.get("retry-after"), Some("5"));
     }
 
     #[tokio::test]
     async fn rate_limited_response_sets_x_ratelimit_headers() {
         let state = test_state(vec![], None).await;
         let resp = rate_limited_response(&state, "ip:127.0.0.1", &status(60, 0, 4.1, 4.6));
+        assert_eq!(resp.headers.get("x-ratelimit-limit"), Some("60"));
+        assert_eq!(resp.headers.get("x-ratelimit-remaining"), Some("0"));
         assert_eq!(
-            resp.headers().get("x-ratelimit-limit").unwrap(),
-            &HeaderValue::from_static("60")
-        );
-        assert_eq!(
-            resp.headers().get("x-ratelimit-remaining").unwrap(),
-            &HeaderValue::from_static("0")
-        );
-        assert_eq!(
-            resp.headers().get("x-ratelimit-reset").unwrap(),
-            &HeaderValue::from_static("5"),
+            resp.headers.get("x-ratelimit-reset"),
+            Some("5"),
             "reset_secs is ceil'd, same rounding convention as retry-after"
         );
     }
@@ -566,9 +543,7 @@ mod tests {
     async fn rate_limited_response_body_reports_the_rounded_retry_after_in_the_message() {
         let state = test_state(vec![], None).await;
         let resp = rate_limited_response(&state, "ip:127.0.0.1", &status(60, 0, 4.1, 4.1));
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
+        let body = resp.body.collect().await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"]["code"], 429);
         assert!(json["error"]["message"]
@@ -735,7 +710,7 @@ mod tests {
     async fn check_admin_auth_is_404_when_admin_key_is_not_configured() {
         let state = test_state(vec![], None).await;
         let resp = check_admin_auth(&state, &HeaderMap::new()).unwrap_err();
-        assert_eq!(resp.status(), 404);
+        assert_eq!(resp.status.as_u16(), 404);
     }
 
     #[tokio::test]
@@ -745,7 +720,7 @@ mod tests {
             ..test_state(vec![], None).await
         };
         let resp = check_admin_auth(&state, &HeaderMap::new()).unwrap_err();
-        assert_eq!(resp.status(), 401);
+        assert_eq!(resp.status.as_u16(), 401);
     }
 
     #[tokio::test]
@@ -755,7 +730,7 @@ mod tests {
             ..test_state(vec![], None).await
         };
         let resp = check_admin_auth(&state, &bearer_headers("wrong")).unwrap_err();
-        assert_eq!(resp.status(), 401);
+        assert_eq!(resp.status.as_u16(), 401);
     }
 
     #[tokio::test]
@@ -773,7 +748,7 @@ mod tests {
             ..test_state(vec![("client-key", "acme", 30)], None).await
         };
         let resp = check_admin_auth(&state, &bearer_headers("client-key")).unwrap_err();
-        assert_eq!(resp.status(), 401);
+        assert_eq!(resp.status.as_u16(), 401);
     }
 
     #[tokio::test]
@@ -858,7 +833,7 @@ mod tests {
                 budget_usd: 10.0,
             },
         );
-        assert_eq!(resp.status(), 402);
+        assert_eq!(resp.status.as_u16(), 402);
     }
 
     #[tokio::test]
@@ -888,9 +863,7 @@ mod tests {
                 budget_usd: 10.0,
             },
         );
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
+        let body = resp.body.collect().await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"]["code"], 402);
         let message = json["error"]["message"].as_str().unwrap();
@@ -909,11 +882,7 @@ mod tests {
 /// already enforce. The page itself carries no secrets and needs none of
 /// its own, so it's served unauthenticated -- same reasoning as `/health`.
 pub async fn dashboard() -> Response {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!("../assets/dashboard.html"),
-    )
-        .into_response()
+    rusty_axum::response::Html(include_str!("../assets/dashboard.html")).into_response()
 }
 
 pub async fn health() -> &'static str {
@@ -1064,14 +1033,11 @@ pub async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> Respo
         return resp;
     }
 
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; version=0.0.4",
-        )],
-        state.router.render_prometheus_metrics(),
-    )
+    state
+        .router
+        .render_prometheus_metrics()
         .into_response()
+        .with_header("content-type", "text/plain; version=0.0.4")
 }
 
 #[derive(Serialize)]
@@ -1370,7 +1336,7 @@ struct ClientProvisionResponse {
 pub async fn admin_create_client(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: axum::body::Bytes,
+    body: Vec<u8>,
 ) -> Response {
     let identity = match check_admin_auth(&state, &headers) {
         Ok(identity) => identity,
@@ -1487,7 +1453,7 @@ pub async fn admin_update_client(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(name): Path<String>,
-    body: axum::body::Bytes,
+    body: Vec<u8>,
 ) -> Response {
     let identity = match check_admin_auth(&state, &headers) {
         Ok(identity) => identity,
@@ -1608,7 +1574,7 @@ pub async fn admin_delete_client(
 
 pub async fn chat_completions(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(addr): ConnectInfo,
     headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> Response {
@@ -1640,7 +1606,7 @@ pub async fn chat_completions(
 /// established meaning for an embeddings call yet.
 pub async fn embeddings(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(addr): ConnectInfo,
     headers: HeaderMap,
     Json(req): Json<EmbeddingsRequest>,
 ) -> Response {
@@ -1774,10 +1740,10 @@ fn apply_decision_headers(resp: &mut Response, trace: &DispatchTrace) {
         "strategy={}; provider={}; model={}; latency_ms={}",
         trace.strategy, trace.provider, trace.model, trace.latency_ms
     );
-    if let Ok(value) = HeaderValue::from_str(&decision) {
-        resp.headers_mut().insert("x-rp-decision", value);
-    }
-    if let Ok(value) = HeaderValue::from_str(&trace.fallback_attempts.to_string()) {
-        resp.headers_mut().insert("x-rp-fallback-attempts", value);
-    }
+    // A provider or model name with a control character is not sent.
+    let _ = resp.headers.insert("x-rp-decision", &decision);
+    let _ = resp.headers.insert(
+        "x-rp-fallback-attempts",
+        &trace.fallback_attempts.to_string(),
+    );
 }

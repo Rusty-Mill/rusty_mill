@@ -102,7 +102,7 @@ fn write_all_buf_drains_the_whole_buffer_even_past_one_duplex_chunk() {
 fn try_read_buf_fills_a_bytesmut_once_readable() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -131,8 +131,8 @@ fn try_read_buf_fills_a_bytesmut_once_readable() {
 fn recv_buf_from_fills_a_bytesmut_and_reports_the_sender() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let a_addr = a.local_addr().unwrap();
         let b_addr = b.local_addr().unwrap();
 
@@ -150,10 +150,10 @@ fn recv_buf_from_fills_a_bytesmut_and_reports_the_sender() {
 fn recv_buf_fills_a_bytesmut_after_connect() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        a.connect(b.local_addr().unwrap()).unwrap();
-        b.connect(a.local_addr().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        a.connect(b.local_addr().unwrap()).await.unwrap();
+        b.connect(a.local_addr().unwrap()).await.unwrap();
 
         a.send(b"connected payload").await.unwrap();
 
@@ -168,8 +168,8 @@ fn recv_buf_fills_a_bytesmut_after_connect() {
 fn recv_buf_from_truncates_to_the_buffers_remaining_capacity_like_a_real_datagram_read() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let b_addr = b.local_addr().unwrap();
 
         a.send_to(b"0123456789", b_addr).await.unwrap();

@@ -94,7 +94,9 @@ async fn connect_to_port_one_on_loopback_is_refused() {
 /// backend must report the socket writable once the handshake lands.
 #[rusty_tokio::test]
 async fn tcp_stream_connect_to_a_listening_port_still_succeeds() {
-    let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let accept = rusty_tokio::spawn(async move { listener.accept().await.map(|_| ()) });
     let stream = timeout(CONNECT_DEADLINE, TcpStream::connect_addr(addr))

@@ -35,7 +35,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 38 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_json_patch | rusty_json_patch | Sovereign JSON Pointer (RFC 6901), JSON Patch (RFC 6902) and JSON Merge Patch (RFC 7386) over rusty_json::Value: parse, apply atomically, and diff | 1 |
-| foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 12 |
+| foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 13 |
 | foundation | rusty_percent | rusty_percent | Hand-rolled, dependency-free percent-encoding for URL components and query strings: RFC 3986 unreserved encode, lenient decode, form decode ('+' is a space). | 12 |
 | foundation | rusty_pk | rusty_pk | Dependency-free public-key primitives for the native TLS engine: RSA and ECDSA (P-256, P-384) and Ed25519 signature verification, Ed25519 signing, X25519, ECDH on P-256 and P-384. Portable, no unsafe. Stages 2 and 4 and gap 2 of the native ring replacement plan. | 1 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 12 |
@@ -52,7 +52,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_sync | rusty_sync | A #![no_std] + alloc sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate | 3 |
 | foundation | rusty_time | rusty_time | A #![no_std] + alloc sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate | 7 |
 | foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 4 |
-| foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 16 |
+| foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 17 |
 | foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 10 |
 | foundation | rusty_wire | rusty_wire | A minimal, zero-dependency endian-explicit byte cursor Reader/Writer for Rust | 11 |
 | platform | portable-runtime | compat |  | 4 |
@@ -61,9 +61,9 @@ Families are the current directories immediately below `crates/`.
 | platform | portable-runtime | proc-runner |  | 0 |
 | platform | portable-runtime | pty-shell |  | 0 |
 | platform | portable-runtime | stat-tool |  | 0 |
-| platform | rustils | platform | Portable trait surface and types for rustils — the api layer. No I/O, no unsafe. | 19 |
+| platform | rustils | platform | Portable trait surface and types for rustils — the api layer. No I/O, no unsafe. | 20 |
 | platform | rustils | platform-bsd | BSD backend (net-only slice, rustils#48/#86): platform::net over libc for macOS, FreeBSD, OpenBSD, NetBSD and DragonFly, mirroring platform-linux's layering. | 2 |
-| platform | rustils | platform-linux | Linux backend: libc floor now (RFC v2 §2 D-2); raw-syscall Track P later, feature-gated. | 10 |
+| platform | rustils | platform-linux | Linux backend: libc floor now (RFC v2 §2 D-2); raw-syscall Track P later, feature-gated. | 11 |
 | platform | rustils | platform-mock | In-memory backend implementing every platform trait — the injectable test double (RFC v2 §4.1). | 6 |
 | platform | rustils | platform-parity | Shared behavior-spec assertion sets for the PAL parity suites. Test-support only; never a dependency of a shipped crate. | 4 |
 | platform | rustils | platform-windows | Windows backend: windows-sys floor (RFC v2 §2 D-1); typed handles and safe wrappers above it. | 4 |
@@ -94,8 +94,8 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_agui | rusty_agui | Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint | 7 |
 | libs | rusty_ansi | rusty_ansi | A zero-allocation, no_std VT/CSI/OSC ANSI escape sequence parser core for Rust | 2 |
 | libs | rusty_audio | rusty_audio | A #![no_std] + alloc sovereign PCM audio capture and playback device driver library | 2 |
-| libs | rusty_axum | rusty_axum | An in-house web framework replacing axum: a router, extractors, responses and SSE over rusty_http's types, runtime-free at its core | 2 |
-| libs | rusty_axum_tokio | rusty_axum_tokio | Migration bridge: lets rusty_axum handlers that still call tokio libraries run on rusty_tokio, by entering a tokio runtime on every poll. Deleted when the last consumer leaves tokio. | 1 |
+| libs | rusty_axum | rusty_axum | An in-house web framework replacing axum: a router, extractors, responses and SSE over rusty_http's types, runtime-free at its core | 4 |
+| libs | rusty_axum_tokio | rusty_axum_tokio | Migration bridge: lets rusty_axum handlers that still call tokio libraries run on rusty_tokio, by entering a tokio runtime on every poll. Deleted when the last consumer leaves tokio. | 2 |
 | libs | rusty_bbp | rusty_bbp | Blackboard Protocol core: records, rules, lifecycle for multi-vendor agents collaborating on one software task. Pure, no I/O. | 3 |
 | libs | rusty_bot | rusty_bot | Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary | 0 |
 | libs | rusty_channel | rusty_channel | Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack, Microsoft Teams and SMS (Twilio) adapters | 1 |
@@ -112,9 +112,9 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_git | rusty_git | Pure Rust implementation of Git object model, index, refs, and CLI binary | 1 |
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 3 |
 | libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 4 |
-| libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 2 |
+| libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 3 |
 | libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 30 |
-| libs | rusty_hyper | rusty_hyper | HTTP/2-only client and server packaging over rusty_h2: connect(url) for plain h2c or TLS with ALPN h2, serve(listener, tls, handler), timeouts, keepalive and graceful shutdown. No HTTP/1.1. | 1 |
+| libs | rusty_hyper | rusty_hyper | HTTP/2-only client and server packaging over rusty_h2: connect(url) for plain h2c or TLS with ALPN h2, serve(listener, tls, handler), timeouts, keepalive and graceful shutdown. No HTTP/1.1. | 2 |
 | libs | rusty_journal | rusty_journal | Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio. | 0 |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
@@ -124,8 +124,8 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_mcp | rusty-mcp | Transport-level building blocks for MCP servers and gateways: OAuth resource-server auth, load shedding, W3C trace context, OpenTelemetry | 3 |
 | libs | rusty_mcp | rusty-mcp-client | Protocol-only MCP client: stdio child process and Streamable HTTP, with API-key, bearer and OAuth client-credentials auth | 4 |
 | libs | rusty_mcp | rusty-mcp-demo | Example MCP server built on rusty_mcp_server | 0 |
-| libs | rusty_mcp_axum | rusty_mcp_axum | Mount a rusty_mcp_server Streamable HTTP handler inside an axum app | 5 |
-| libs | rusty_mcp_client_native | rusty_mcp_client_native | Sovereign MCP client core on rusty_mcp_proto: a sans-IO session for the classic and stateless handshakes, a server-sent-events parser, and a blocking client over a child-process transport | 3 |
+| libs | rusty_mcp_axum | rusty_mcp_axum | Mount a rusty_mcp_server Streamable HTTP handler inside an axum app | 4 |
+| libs | rusty_mcp_client_native | rusty_mcp_client_native | Sovereign MCP client core on rusty_mcp_proto: a sans-IO session for the classic and stateless handshakes, a server-sent-events parser, and a blocking client over a child-process transport | 4 |
 | libs | rusty_mcp_proto | rusty_mcp_proto | Sovereign MCP wire types on rusty_json: JSON-RPC 2.0 envelope, error codes, protocol versions, content, tools and paginated lists, with a hand-written codec and no serde | 2 |
 | libs | rusty_mcp_server | rusty_mcp_server | Sovereign MCP server core on rusty_mcp_proto: a tool registry, a sans-IO connection dispatcher for the classic and stateless handshakes, cancellation and progress, pagination, and a stdio transport | 16 |
 | libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 9 |
@@ -156,10 +156,10 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_stream | rusty_stream | The workspace's async Stream trait, its combinators and the stream!/try_stream! macros -- the in-house replacement for futures, futures-util, futures-core and async-stream. | 0 |
 | libs | rusty_stream | rusty_stream-macros | The stream!/try_stream! proc macros for rusty_stream -- not meant to be depended on directly, use rusty_stream's re-exports. | 1 |
 | libs | rusty_term | rusty_term | A terminal emulator written from scratch in Rust, with a deliberately small dependency surface. | 2 |
-| libs | rusty_term | rusty_term_core | rusty_term's headless VT engine: parser, grid, scrollback and OSC handling, with no async runtime, PTY or renderer. | 1 |
+| libs | rusty_term | rusty_term_core | rusty_term's headless VT engine: parser, grid, scrollback and OSC handling, with no async runtime, PTY or renderer. | 2 |
 | libs | rusty_term | rusty_term_l13 | rusty_term's L13 structured side-channel: a private-OSC JSON-RPC transport hosting MCP + LSP/ACP negotiation, addressed against a narrow TerminalState trait rather than rusty_term's own Grid type. | 1 |
-| libs | rusty_tls | rusty_tls | A TLS library implementation in Rust | 10 |
-| libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 38 |
+| libs | rusty_tls | rusty_tls | A TLS library implementation in Rust | 11 |
+| libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 42 |
 | libs | rusty_tokio | rusty_tokio-macros | Proc-macro attributes (#[main], #[test]) for rusty_tokio -- not meant to be depended on directly, use rusty_tokio's re-exports. | 1 |
 | libs | rusty_tonic | rusty_tonic | Dependency-free gRPC protocol core: status codes and error details, validated metadata, message framing with a receive limit, grpc-timeout, and request/response header lists. Sans-IO; no async, no HTTP/2, no code generation. | 2 |
 | libs | rusty_ttf_parser | rusty-ttf-parser | A #![no_std], allocation-free, zero-dependency TrueType/OpenType reader: cmap, GSUB lookups and PNG colour bitmaps | 1 |
@@ -171,8 +171,8 @@ Families are the current directories immediately below `crates/`.
 | apps | coreutils-async | coreutils-async | Reference consumer for platform-async: arun, an async port of rustils' rrun. | 0 |
 | apps | mill-term | mill-term | Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement) | 0 |
 | apps | rocket_league | bc-clone | Reverse-engineered clone of ballchasing.com's replay analyzer: .replay -&gt; a ballchasing-shaped stats document, plus a field-by-field validator against the real API. | 1 |
-| apps | rocket_league | rb_capture_ingest | BakkesMod offline-capture ingestion adapter (RB-VERIFY-002): implements PhysicsStateSource by parsing the JSON-Lines capture format (ADR-0005). BakkesMod-side plugin that writes it not yet built. | 1 |
-| apps | rocket_league | rb_domain | Domain types and ports for rusty_bullet: physics frames, divergence scoring, and the PhysicsStateSource port that ingestion adapters implement. | 8 |
+| apps | rocket_league | rb_capture_ingest | BakkesMod offline-capture ingestion adapter (RB-VERIFY-002): implements PhysicsStateSource by parsing the JSON-Lines capture format (ADR-0005). BakkesMod-side plugin that writes it not yet built. | 2 |
+| apps | rocket_league | rb_domain | Domain types and ports for rusty_bullet: physics frames, divergence scoring, and the PhysicsStateSource port that ingestion adapters implement. | 9 |
 | apps | rocket_league | rb_env | A stepping environment over the physics port: reset to a frame, apply controller inputs, step one tick, observe (ADR-0059). | 3 |
 | apps | rocket_league | rb_physics_bullet | Physics core: a Rust port of Bullet3's rigid-body integration and sequential-impulse contact solver (zlib-licensed), scoped to sphere-vs-static-plane for v0 (RB-PHYSICS-001). | 4 |
 | apps | rocket_league | rb_replay_ingest | Replay-file ingestion adapter (RB-VERIFY-001): implements PhysicsStateSource by parsing .replay files via boxcars + subtr-actor. | 1 |
@@ -190,7 +190,8 @@ Families are the current directories immediately below `crates/`.
 | apps | rocket_league | replay-scoring | Pure, config-driven decision-discipline scoring over the canonical match model | 3 |
 | apps | rocket_league | replay-skills | Pure, config-driven mechanical-skill detection and verification over the canonical match model | 2 |
 | apps | rocket_league | replay-value | Outcome-grounded value model over the canonical match model: states -&gt; P(team scores next within T), per-player ΔV | 4 |
-| apps | rocket_league | replay-viewer | Self-contained 3D HTML replay viewer over the canonical match model | 1 |
+| apps | rocket_league | replay-viewer | Self-contained 3D HTML viewer for replays (canonical match model) and physics captures | 1 |
+| apps | rocket_league | rl_replay | First-party Rocket League .replay parser: container, CRC and header (P1 of rleval/docs/replay-parser-scope.md). | 0 |
 | apps | rocket_league | rleval-app | Unified RLEvalSystem application: one binary that serves a web UI tying the analyzer, scoring, skills, value and 3D viewer into a single page. | 0 |
 | apps | rush | rush | A small, bash-compatible shell written in Rust | 1 |
 | apps | rusty_agent_gateway | agentgateway | An AI-native gateway for MCP, speaking agentgateway's configuration | 0 |
@@ -240,8 +241,9 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_mill_board | rusty_mill_board | Mill Board: a capability-gated kanban board for humans and agents, served over MCP and a live web UI. | 1 |
 | apps | rusty_mill_board | rusty_mill_runner | Optional runner for Mill Board: works cards through stages by running a configured agent command per column, sandboxed in a git worktree. | 0 |
 | apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends | 0 |
-| apps | rusty_mux | rusty_mux_core | rusty_mux's pure domain model: sessions, windows, blocks, clients, input leases and events. No I/O. | 1 |
-| apps | rusty_mux | rusty_mux_proto | rusty_mux's wire protocol: length-prefixed frames of tagged varint fields, with feature bits. No I/O. | 0 |
+| apps | rusty_mux | rusty_mux_core | rusty_mux's pure domain model: sessions, windows, blocks, clients, input leases and events. No I/O. | 2 |
+| apps | rusty_mux | rusty_mux_proto | rusty_mux's wire protocol: length-prefixed frames of tagged varint fields, with feature bits. No I/O. | 1 |
+| apps | rusty_mux | rusty_mux_server | rusty_mux's server: owns the PTYs, keeps one terminal per block, and tees raw output to attached clients over a Unix socket. | 0 |
 | apps | rusty_orch | orch-bbp | TaskHost adapter over the existing BBP CLI and moderator | 1 |
 | apps | rusty_orch | orch-claude | Orchestrator adapter: Agent::Claude over the Claude Code CLI, read-only tools, prompt on stdin, one schema-constrained JSON object out. | 1 |
 | apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 5 |

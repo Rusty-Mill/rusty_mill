@@ -384,7 +384,8 @@ async fn run_async(
                 match guard.try_io(|inner| read_nonblocking(inner.as_raw_fd())) {
                     Ok(Ok(data)) if !data.is_empty() => {
                         let (responses, should_notify) = {
-                            let mut g = grid.lock();
+                            // Bulk: step aside for the render loop between chunks.
+                            let mut g = grid.lock_bulk();
                             let mut parser = parser.lock();
                             parser.advance(&mut g, &data);
                             g.epoch += 1;

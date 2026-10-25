@@ -24,7 +24,8 @@ SDK/client at it.
   moves on — a rate limit or a structural mismatch (unsupported content/
   feature) moves on immediately instead, since retrying the same
   candidate can't fix either.
-- `crates/server` (`rp-server`) — the axum HTTP server exposing the
+- `crates/server` (`rp-server`) — the HTTP server (`rusty_axum` on
+  `rusty_tokio`) exposing the
   OpenAI-compatible API.
 - `crates/mcp` (`rp-mcp`) — MCP (Model Context Protocol) support, built on
   [`rusty_mcp`](https://github.com/baileyrd/rusty_mcp): rusty_provider's own
@@ -1180,9 +1181,10 @@ with `413 Payload Too Large` before a handler ever parses it:
 max_body_bytes = 20971520  # 20 MiB, this is the default
 ```
 
-axum's `Json`/`Bytes` extractors already refuse anything over 2 MB even
-without this section present — `max_body_bytes` replaces that built-in
-ceiling rather than adding a second one on top of it. The default is
+The server reads every request body whole, bounded by this limit, before
+routing, and answers `413` past it (its built-in default without this
+section would be 2 MB) — `max_body_bytes` replaces that built-in ceiling
+rather than adding a second one on top of it. The default is
 raised well past 2 MB because a legitimate multimodal request (an image,
 audio clip, or PDF passed inline) is base64-encoded, which alone adds
 ~33% over the original file's size — 2 MB is tight enough to reject

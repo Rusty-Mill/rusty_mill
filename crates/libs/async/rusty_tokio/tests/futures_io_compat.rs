@@ -43,7 +43,7 @@ fn compat_wrapped_tcpstream_roundtrips_through_futures_io_traits() {
     // this crate's own `AsyncRead`/`AsyncWrite`) would call.
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -71,7 +71,7 @@ fn compat_wrapped_tcpstream_roundtrips_through_futures_io_traits() {
 fn compat_get_mut_and_into_inner_reach_the_wrapped_stream() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {

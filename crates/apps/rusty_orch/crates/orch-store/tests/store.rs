@@ -242,7 +242,7 @@ fn failed_initial_insert_can_recover_with_a_synthesized_first_revision() {
 #[test]
 fn assignments_generations_and_links_survive_a_reopen() {
     use orch_core::factory::{
-        Assignment, ExecutionLink, ExecutionState, Factory, FactoryError, Grant, Identity,
+        Assignment, ExecutionLink, ExecutionState, Factory, FactoryError, Grant, Identity, Lease,
     };
     let dir = dir("assignments");
     let goal = GoalId::from_raw(1);
@@ -254,6 +254,11 @@ fn assignments_generations_and_links_survive_a_reopen() {
         projects: projects.iter().map(|p| (*p).into()).collect(),
         delegation_budget,
         call_budget,
+        lease: Some(Lease {
+            read: vec![format!("/src/{call_budget}")],
+            write: vec!["/src".into()],
+            expires: Some(100 + u64::from(call_budget)),
+        }),
     };
     let mut factory = Factory::default();
     {
@@ -415,6 +420,7 @@ fn hosted_handle_gate_fence_and_charge_survive_a_store_reopen() {
                 assignment: text("goal-orchestrator"),
                 generation: 1,
                 holder: text("test"),
+                lease: None,
             },
         )
     };

@@ -23,6 +23,21 @@ pub struct LinuxPty;
 
 impl Pty for LinuxPty {
     fn spawn(&self, cmd: &Command, size: WinSize) -> Result<(Box<dyn PtyMaster>, Box<dyn Child>)> {
+        let (master, child) = self.spawn_concrete(cmd, size)?;
+        Ok((Box::new(master), Box::new(child)))
+    }
+}
+
+impl LinuxPty {
+    /// [`Pty::spawn`] without the type erasure: the concrete master is
+    /// `Send + Sync` and exposes its fd, so a caller can move it to another
+    /// thread or register it with its own reactor (the same escape hatch
+    /// `LinuxTcpStream` ships). Additive; the trait method delegates here.
+    pub fn spawn_concrete(
+        &self,
+        cmd: &Command,
+        size: WinSize,
+    ) -> Result<(LinuxPtyMaster, LinuxChild)> {
         // A pty-hosted child is unconditionally a new session leader
         // (that's the mechanism that gives it the slave as its
         // controlling terminal) — which makes it a fresh process-group
@@ -60,7 +75,7 @@ impl Pty for LinuxPty {
         // pid — the same target `GroupSpec::NewGroup` gets in the plain
         // `Spawner::spawn` path (`LinuxSpawner::spawn`'s own comment).
         let child = LinuxChild::from_pid(pid, Some(pid));
-        Ok((Box::new(LinuxPtyMaster { master }), Box::new(child)))
+        Ok((LinuxPtyMaster { master }, child))
     }
 }
 
@@ -68,6 +83,16 @@ impl Pty for LinuxPty {
 /// v2 §5.1), the same reasoning `LinuxTcpStream`/`LinuxTunDevice` document.
 pub struct LinuxPtyMaster {
     master: OwnedFd,
+}
+
+impl LinuxPtyMaster {
+    /// Toggle `O_NONBLOCK` on the master fd, for a caller driving it from
+    /// its own reactor. Additive, like `LinuxTcpStream::set_nonblocking`
+    /// (rustils#41); a non-blocking `read`/`write` that would block fails
+    /// with `ErrorKind::WouldBlock`.
+    pub fn set_nonblocking(&self, nonblocking: bool) -> Result<()> {
+        crate::sys::net::set_nonblocking(&self.master, nonblocking)
+    }
 }
 
 impl PtyMaster for LinuxPtyMaster {

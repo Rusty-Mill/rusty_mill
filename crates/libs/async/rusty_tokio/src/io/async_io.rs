@@ -80,6 +80,62 @@ impl<'a> ReadBuf<'a> {
     pub fn capacity(&self) -> usize {
         self.buf.len()
     }
+
+    /// The filled portion, mutably.
+    pub fn filled_mut(&mut self) -> &mut [u8] {
+        &mut self.buf[..self.filled]
+    }
+
+    /// tokio's spelling of [`unfilled_mut`](Self::unfilled_mut). tokio
+    /// zero-initializes its `MaybeUninit` tail here; this buffer is always
+    /// initialized, so it only returns the unfilled slice.
+    pub fn initialize_unfilled(&mut self) -> &mut [u8] {
+        self.unfilled_mut()
+    }
+
+    /// The first `n` bytes of the unfilled portion, as tokio's
+    /// `initialize_unfilled_to`.
+    ///
+    /// # Panics
+    /// Panics if `n` exceeds [`remaining`](Self::remaining), as tokio does.
+    pub fn initialize_unfilled_to(&mut self, n: usize) -> &mut [u8] {
+        assert!(
+            n <= self.remaining(),
+            "ReadBuf::initialize_unfilled_to past the end of the buffer"
+        );
+        &mut self.buf[self.filled..self.filled + n]
+    }
+
+    /// Appends `data` to the filled portion.
+    ///
+    /// # Panics
+    /// Panics if `data` is longer than [`remaining`](Self::remaining), as
+    /// tokio does.
+    pub fn put_slice(&mut self, data: &[u8]) {
+        assert!(
+            data.len() <= self.remaining(),
+            "ReadBuf::put_slice past the end of the buffer"
+        );
+        self.buf[self.filled..self.filled + data.len()].copy_from_slice(data);
+        self.filled += data.len();
+    }
+
+    /// Sets the filled length to `n`, shrinking or growing it.
+    ///
+    /// # Panics
+    /// Panics if `n` exceeds [`capacity`](Self::capacity).
+    pub fn set_filled(&mut self, n: usize) {
+        assert!(
+            n <= self.buf.len(),
+            "ReadBuf::set_filled past the end of the buffer"
+        );
+        self.filled = n;
+    }
+
+    /// Marks the whole buffer unfilled again.
+    pub fn clear(&mut self) {
+        self.filled = 0;
+    }
 }
 
 pub trait AsyncRead {
@@ -859,6 +915,149 @@ impl AsyncWrite for Vec<u8> {
         Poll::Ready(Ok(()))
     }
 }
+
+/// An in-memory reader, as tokio's `impl AsyncRead for &[u8]`: reading
+/// advances the slice past the bytes copied out.
+impl AsyncRead for &[u8] {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let n = io::Read::read(self.get_mut(), buf.unfilled_mut())?;
+        buf.advance(n);
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// `std::io::Cursor` over any byte buffer reads, buffers and seeks
+/// synchronously in memory, so each `poll_*` is its `std` counterpart and
+/// always `Ready` -- tokio's impls, for tests and in-memory framing.
+impl<T: AsRef<[u8]> + Unpin> AsyncRead for io::Cursor<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let n = io::Read::read(self.get_mut(), buf.unfilled_mut())?;
+        buf.advance(n);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<T: AsRef<[u8]> + Unpin> AsyncBufRead for io::Cursor<T> {
+    fn poll_fill_buf(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+        Poll::Ready(io::BufRead::fill_buf(self.get_mut()))
+    }
+
+    fn consume(self: Pin<&mut Self>, amt: usize) {
+        io::BufRead::consume(self.get_mut(), amt);
+    }
+}
+
+impl<T: AsRef<[u8]> + Unpin> AsyncSeek for io::Cursor<T> {
+    fn poll_seek(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        pos: io::SeekFrom,
+    ) -> Poll<io::Result<u64>> {
+        Poll::Ready(io::Seek::seek(self.get_mut(), pos))
+    }
+}
+
+/// Writes through the matching `std::io::Write` impls -- the cursor types
+/// tokio implements `AsyncWrite` for.
+macro_rules! cursor_async_write {
+    ($($ty:ty),* $(,)?) => {$(
+        impl AsyncWrite for io::Cursor<$ty> {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                Poll::Ready(io::Write::write(self.get_mut(), buf))
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(io::Write::flush(self.get_mut()))
+            }
+
+            fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                self.poll_flush(cx)
+            }
+        }
+    )*};
+}
+
+cursor_async_write!(&mut [u8], &mut Vec<u8>, Vec<u8>, Box<[u8]>);
+
+/// Forwarding impls, as tokio's: a `&mut` or `Box` of a reader/writer is
+/// one too, so generic code can take `&mut R` and `Box<dyn AsyncRead>`.
+macro_rules! deref_async_io {
+    ($($ptr:ty),*) => {$(
+        impl<T: AsyncRead + Unpin + ?Sized> AsyncRead for $ptr {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                Pin::new(&mut **self).poll_read(cx, buf)
+            }
+        }
+
+        impl<T: AsyncBufRead + Unpin + ?Sized> AsyncBufRead for $ptr {
+            fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+                Pin::new(&mut **self.get_mut()).poll_fill_buf(cx)
+            }
+
+            fn consume(mut self: Pin<&mut Self>, amt: usize) {
+                Pin::new(&mut **self).consume(amt);
+            }
+        }
+
+        impl<T: AsyncWrite + Unpin + ?Sized> AsyncWrite for $ptr {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                Pin::new(&mut **self).poll_write(cx, buf)
+            }
+
+            fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Pin::new(&mut **self).poll_flush(cx)
+            }
+
+            fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Pin::new(&mut **self).poll_shutdown(cx)
+            }
+
+            fn poll_write_vectored(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                bufs: &[io::IoSlice<'_>],
+            ) -> Poll<io::Result<usize>> {
+                Pin::new(&mut **self).poll_write_vectored(cx, bufs)
+            }
+
+            fn is_write_vectored(&self) -> bool {
+                (**self).is_write_vectored()
+            }
+        }
+
+        impl<T: AsyncSeek + Unpin + ?Sized> AsyncSeek for $ptr {
+            fn poll_seek(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                pos: io::SeekFrom,
+            ) -> Poll<io::Result<u64>> {
+                Pin::new(&mut **self).poll_seek(cx, pos)
+            }
+        }
+    )*};
+}
+
+deref_async_io!(&mut T, Box<T>);
 
 /// Copies from `reader` to `writer` until EOF, returning the total byte
 /// count. Generic over the traits above, the same shape as

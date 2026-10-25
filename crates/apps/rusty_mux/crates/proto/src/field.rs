@@ -134,13 +134,13 @@ mod tests {
     #[test]
     fn high_count_unknown_fields_retain_no_state() {
         let mut out = Out(Writer::new());
-        for id in 15..100_015 {
+        for id in 17..100_017 {
             out.varint(id, 0).bytes(id, b"unknown");
         }
         out.varint(0, 0).bytes(u32::MAX, b"also unknown");
         let body = out.0.into_vec();
         let fields = In::parse(1, &body).unwrap();
-        assert_eq!(fields.fields.len(), 14);
+        assert_eq!(fields.fields.len(), crate::message::FIELD_COUNT);
         assert!(fields.fields.iter().all(Option::is_none));
         assert_eq!(fields.opt(10, In::varint), Ok(None));
     }
@@ -154,7 +154,7 @@ mod tests {
         out.varint(10, 42).bytes(14, b"short uuid");
         let mut body = out.0.into_vec();
         let fields = In::parse(1, &body).unwrap();
-        assert_eq!(fields.fields.len(), 14);
+        assert_eq!(fields.fields.len(), crate::message::FIELD_COUNT);
         assert_eq!(fields.fields.iter().flatten().count(), 2);
         assert_eq!(fields.varint(10), Ok(42));
         assert_eq!(fields.opt(14, In::uuid), Err(fields.invalid(14)));
