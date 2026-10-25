@@ -458,7 +458,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> BodyReader<T> {
                         }
                     }
                     Progress::Framing { consumed } => {
+                        // Saved with the bytes it consumed, before any
+                        // await: a caller that drops this future must find
+                        // the decoder where the transport now is.
                         self.transport.start += consumed;
+                        self.state = BodyReaderState::Chunked(decoder);
                     }
                     Progress::Data { len } => {
                         let data = self.transport.buf
@@ -810,6 +814,22 @@ mod tests {
         let framing = body::response_framing(&head.headers, &Method::Get, head.status).unwrap();
         let reader = t.into_body_reader(framing);
         assert_eq!(collect_all(reader).await, b"hello world");
+    }
+
+    #[rusty_tokio::test]
+    async fn body_reader_survives_a_dropped_chunk_read_after_framing() {
+        let (mut feeder, io) = duplex(64);
+        feeder.write_all(b"5\r\n").await.unwrap();
+        let mut reader = AsyncTransport::new(io).into_body_reader(Framing::Chunked);
+        {
+            // Consumes the size line, then waits for the data: dropped there.
+            let mut read = Box::pin(reader.next_chunk());
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            assert!(std::future::Future::poll(read.as_mut(), &mut cx).is_pending());
+        }
+        feeder.write_all(b"hello\r\n0\r\n\r\n").await.unwrap();
+        drop(feeder);
+        assert_eq!(collect_all(reader).await, b"hello");
     }
 
     #[rusty_tokio::test]
