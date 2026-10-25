@@ -480,3 +480,20 @@ fn a_cursor_needs_both_its_fields() {
         })
     );
 }
+
+#[test]
+fn feature_bits_are_distinct() {
+    let all = [
+        Features::REPLAY_SNAPSHOT,
+        Features::CHECKPOINT_V1,
+        Features::CHECKPOINT_V2,
+        Features::CHECKPOINT_V3,
+        Features::EVENT_SEQ,
+    ];
+    let mut seen = 0u64;
+    for feature in all {
+        assert_eq!(feature.bits().count_ones(), 1, "{feature:?}");
+        assert_eq!(seen & feature.bits(), 0, "{feature:?} reuses a bit");
+        seen |= feature.bits();
+    }
+}

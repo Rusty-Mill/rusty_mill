@@ -25,7 +25,7 @@ const CHUNK: usize = 16 << 10;
 const HISTORY: usize = 4096;
 
 /// What the server offers; a client gets the intersection with its own.
-const OFFERED: Features = Features::CHECKPOINT_V2.union(Features::EVENT_SEQ);
+const OFFERED: Features = Features::CHECKPOINT_V3.union(Features::EVENT_SEQ);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -193,9 +193,9 @@ impl State {
                 if !self
                     .features
                     .get(&client)
-                    .is_some_and(|f| f.contains(Features::CHECKPOINT_V2))
+                    .is_some_and(|f| f.contains(Features::CHECKPOINT_V3))
                 {
-                    return (req, Err("attach requires CHECKPOINT_V2 support".into()));
+                    return (req, Err("attach requires CHECKPOINT_V3 support".into()));
                 }
                 if self.clients.get(&client).is_some_and(|out| out.attaching()) {
                     return (req, Err("checkpoint transfer already in progress".into()));
@@ -483,7 +483,7 @@ mod regression {
         });
         let (out, inbox, _) = outbox();
         let mut state = shared.borrow_mut();
-        let client = state.connect(out, Features::CHECKPOINT_V2, None);
+        let client = state.connect(out, Features::CHECKPOINT_V3, None);
         let session = state.mux.create_session("s");
         let window = state.mux.create_window(session, "w").unwrap();
         let Outcome::Done(Some(id)) = state
@@ -557,6 +557,7 @@ mod regression {
                 Features::NONE,
                 Features::REPLAY_SNAPSHOT,
                 Features::CHECKPOINT_V1,
+                Features::CHECKPOINT_V2,
             ] {
                 shared.borrow_mut().features.insert(client, features);
                 State::request(&shared, client, Message::Attach { req: 10, block });
@@ -620,7 +621,10 @@ mod regression {
             let (shared, client, block, mut inbox) = fixture();
             // More than the rejected lifetime replay cap; only current Grid
             // state is retained. Fill the normal 10,000-row history as well.
-            let bytes = vec![b'x'; 16 << 10];
+            // Varied text, so the run-encoded checkpoint still spans many chunks.
+            let bytes: Vec<u8> = (0..16u32 << 10)
+                .map(|i| b'!' + (i * 7 % 94) as u8)
+                .collect();
             for _ in 0..320 {
                 shared.borrow_mut().output(block, &bytes);
             }
@@ -652,8 +656,8 @@ mod regression {
                         _ => {}
                     }
                 };
-                assert!(declared > rusty_mux_proto::MAX_FRAME as u64);
-                assert!(chunks > 1);
+                assert!(declared > 8 * crate::checkpoint::CHUNK_BYTES as u64);
+                assert!(chunks > 8);
                 loop {
                     if let Message::Output { data, .. } =
                         rusty_mux_proto::decode(&inbox.next().await.unwrap())
