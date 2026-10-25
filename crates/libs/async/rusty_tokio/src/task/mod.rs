@@ -83,6 +83,7 @@ impl Task {
             // Someone aborted us before we ever got polled; the future
             // (if still present) is dropped without being polled again.
             self.future.lock().unwrap().take();
+            self.state.end_poll(true);
             self.fire_abnormal_hook(Outcome::Aborted);
             self.mark_finished();
             return;

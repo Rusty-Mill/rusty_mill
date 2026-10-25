@@ -48,7 +48,9 @@ signature = { version = "3", optional = true }
 tonic = { version = "0.14", optional = true }
 rusty_prost = { workspace = true, optional = true }
 # The codec between `rusty_prost` messages and `tonic`.
-rusty_tonic = { workspace = true, optional = true, features = ["tonic-codec"] }
+rusty_tonic = { workspace = true, optional = true, features = ["tonic-codec", "rusty-tokio"] }
+# The first-party gRPC client runs on `rusty_tokio`; `src/grpc_bridge.rs` joins it to `tokio`.
+rusty_tokio = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -78,6 +80,7 @@ grpc = [
   "dep:tonic",
   "dep:rusty_prost",
   "dep:rusty_tonic",
+  "dep:rusty_tokio",
   "dep:tokio",
   "dep:futures-core",
   "dep:futures-util",
@@ -87,6 +90,13 @@ full = ["client", "server", "signing", "grpc"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# For `tests/grpc_client_transport.rs`: servers built from the first-party stack, with TLS.
+rusty_tokio = { workspace = true }
+rusty_hyper = { path = "../../net/rusty_hyper", features = ["rusty-tokio"] }
+rusty_h2 = { path = "../../net/rusty_h2", features = ["rusty-tokio"] }
+rusty_tls = { workspace = true, features = ["rusty-tokio"] }
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 
 [[example]]
 name = "echo_server"
@@ -162,6 +172,11 @@ required-features = ["grpc", "server"]
 name = "rest_client"
 path = "tests/rest_client.rs"
 required-features = ["client", "server"]
+
+[[test]]
+name = "grpc_client_transport"
+path = "tests/grpc_client_transport.rs"
+required-features = ["client", "grpc"]
 
 [[test]]
 name = "grpc_client"

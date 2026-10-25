@@ -221,9 +221,11 @@
 //!   there's no window for a round to complete between a waiter
 //!   checking it hasn't yet and registering to be woken -- see that
 //!   module's own docs for the two-lock race this sidesteps.
-//! - [`select!`]: race two to five futures, running whichever resolves
-//!   first and dropping the rest -- see that macro's own docs for
-//!   exactly what's (and isn't) supported.
+//! - [`select!`]: race any number of futures, running the handler of
+//!   whichever resolves first and dropping the rest -- tokio's full
+//!   syntax (refutable patterns, `, if` guards, `biased;`, `else`) and
+//!   semantics, including randomized polling order for fairness; see
+//!   that macro's own docs.
 //! - [`join!`]/[`try_join!`]: run two to five futures concurrently
 //!   within the calling task (no extra `spawn`) and resolve once every
 //!   one of them has, returning a tuple of their outputs; `try_join!` is
@@ -322,11 +324,74 @@ pub mod time;
 mod coop;
 mod macros;
 
+/// Compile-fail checks for [`macro@main`]/[`macro@test`]'s arguments
+/// (#899). They live here, not in `rusty_tokio-macros`, because the
+/// expansion only means anything with this crate in scope. Each
+/// `compile_fail` block has a passing twin first, so a block can't pass
+/// just by failing for some unrelated reason.
+///
+/// Every accepted flavor builds:
+///
+/// ```
+/// #[rusty_tokio::main(flavor = "current_thread", start_paused = true)]
+/// async fn main() {
+///     rusty_tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+/// }
+/// ```
+///
+/// ```
+/// #[rusty_tokio::main(flavor = "multi_thread", worker_threads = 2)]
+/// async fn main() {}
+/// ```
+///
+/// An unknown flavor is an error:
+///
+/// ```compile_fail
+/// #[rusty_tokio::main(flavor = "single_thread")]
+/// async fn main() {}
+/// ```
+///
+/// `worker_threads` on `current_thread` is an error, as in tokio:
+///
+/// ```compile_fail
+/// #[rusty_tokio::main(flavor = "current_thread", worker_threads = 2)]
+/// async fn main() {}
+/// ```
+///
+/// `start_paused = true` needs `current_thread`, as in tokio:
+///
+/// ```compile_fail
+/// #[rusty_tokio::main(flavor = "multi_thread", start_paused = true)]
+/// async fn main() {}
+/// ```
+///
+/// ```compile_fail
+/// // `main`'s default flavor is multi_thread.
+/// #[rusty_tokio::main(start_paused = true)]
+/// async fn main() {}
+/// ```
+///
+/// An unknown argument is an error:
+///
+/// ```compile_fail
+/// #[rusty_tokio::main(unhandled_panic = "shutdown_runtime")]
+/// async fn main() {}
+/// ```
+#[cfg(doctest)]
+pub struct MacroArgsCompileFail;
+
 pub use runtime::{
     Builder, EnterGuard, Handle, Id, LocalOptions, LocalRuntime, Runtime, RuntimeFlavor,
     RuntimeMetrics, TryCurrentError,
 };
 pub use rusty_tokio_macros::{main, test};
+// `select!`'s engine. Re-exported so the `macro_rules! select` wrapper
+// can reach it as `$crate::__select_internal!` from any caller crate;
+// `macros::support` is reached the same way from the expansion.
+#[doc(hidden)]
+pub use macros::support as __macro_support;
+#[doc(hidden)]
+pub use rusty_tokio_macros::select_internal as __select_internal;
 pub use std::pin::pin;
 pub use task::{JoinError, JoinHandle};
 

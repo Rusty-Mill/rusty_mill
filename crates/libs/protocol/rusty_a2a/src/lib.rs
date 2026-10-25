@@ -39,6 +39,8 @@
 pub mod client;
 mod codec;
 pub mod error;
+#[cfg(all(feature = "client", feature = "grpc"))]
+mod grpc_bridge;
 #[cfg(feature = "grpc")]
 mod grpc_convert;
 #[cfg(feature = "grpc")]

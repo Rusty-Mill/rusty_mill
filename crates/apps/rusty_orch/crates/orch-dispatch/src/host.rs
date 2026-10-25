@@ -47,6 +47,10 @@ pub struct Fence {
     /// Unique per holding process, so two holders that reached the same
     /// generation from diverged records cannot both act.
     pub holder: Text,
+    /// The assignment's permission lease at this generation. A host confines
+    /// what it starts to it and refuses commands once it has ended; `None`
+    /// leaves the host's own configuration as the only bound.
+    pub lease: Option<orch_core::factory::Lease>,
 }
 /// Idempotent, crash-recoverable task boundary. Poll and relay are unmetered.
 /// Every command carries the caller's [`Fence`].

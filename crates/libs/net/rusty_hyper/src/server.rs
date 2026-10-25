@@ -4,7 +4,7 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rusty_h2::driver::{self, Request, Respond};
 use rusty_h2::server::builder::Builder;
@@ -12,7 +12,7 @@ use rusty_tls::{AsyncTlsServerStream, TlsAcceptor};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpListener, TcpStream};
 use rusty_tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use rusty_tokio::task::JoinHandle;
-use rusty_tokio::time::{sleep, timeout_at};
+use rusty_tokio::time::{sleep, timeout_at, Instant};
 
 use crate::Error;
 
@@ -87,10 +87,11 @@ where
     })
 }
 
-/// Waits for `work`, or for the stop signal: `None` once stopped. `select!`
-/// polls its first branch first, so the stop signal goes first: work that is
+/// Waits for `work`, or for the stop signal: `None` once stopped. The
+/// `select!` is `biased;`, so the stop signal is polled first: work that is
 /// always ready (a full accept backlog, a steady stream of requests) cannot
-/// starve a shutdown.
+/// starve a shutdown, and a stop that becomes ready together with the work
+/// always wins.
 async fn until_stopped<F: Future>(
     work: F,
     stopped: &mut watch::Receiver<bool>,
@@ -101,6 +102,7 @@ async fn until_stopped<F: Future>(
         return None;
     }
     rusty_tokio::select! {
+        biased;
         _ = stopped.changed() => None,
         w = work => Some(w),
     }
@@ -265,6 +267,73 @@ mod tests {
             until_stopped(std::future::ready(7), &mut orphan).await,
             None
         );
+    }
+
+    #[rusty_tokio::test]
+    async fn a_dropped_sender_wins_over_ready_work_every_time() {
+        // The precheck sees `false`, then `changed()` is already ready with
+        // `Err` (the sender is gone) alongside the ready work: the stop must
+        // still be taken, not whichever branch a fair `select!` polls first.
+        for _ in 0..200 {
+            let (gone, mut orphan) = watch::channel(false);
+            drop(gone);
+            assert_eq!(
+                until_stopped(std::future::ready(7), &mut orphan).await,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn stop_wins_when_both_become_ready_after_the_precheck() {
+        use std::cell::Cell;
+        use std::task::{Context, Poll, Waker};
+
+        for _ in 0..128 {
+            let (stop, mut stopped) = watch::channel(false);
+            let ready = Cell::new(false);
+            let work_polls = Cell::new(0);
+            let work = std::future::poll_fn(|_| {
+                work_polls.set(work_polls.get() + 1);
+                if ready.get() {
+                    Poll::Ready(7)
+                } else {
+                    Poll::Pending
+                }
+            });
+            let mut waiting = std::pin::pin!(until_stopped(work, &mut stopped));
+            let mut cx = Context::from_waker(Waker::noop());
+            // Cross the initial level check with neither branch ready.
+            assert!(waiting.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(work_polls.get(), 1);
+            // Both branches are ready on the next poll of the selector.
+            ready.set(true);
+            stop.send(true).unwrap();
+            assert_eq!(waiting.as_mut().poll(&mut cx), Poll::Ready(None));
+            assert_eq!(work_polls.get(), 1, "shutdown must be polled before work");
+        }
+    }
+
+    #[test]
+    fn a_stop_that_becomes_ready_with_the_work_wins() {
+        // Past the precheck, both branches park; then the stop and the work
+        // become ready together. A current-thread runtime keeps the racing
+        // task from running between the two signals, so it next polls with
+        // both ready, and the stop must win every time.
+        let rt = rusty_tokio::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            for _ in 0..200 {
+                let (stop, mut stopped) = watch::channel(false);
+                let (tx, rx) = rusty_tokio::sync::oneshot::channel::<u32>();
+                let race = rusty_tokio::spawn(async move {
+                    until_stopped(async { rx.await.unwrap() }, &mut stopped).await
+                });
+                rusty_tokio::task::yield_now().await; // past the precheck, parked
+                tx.send(7).unwrap();
+                stop.send(true).unwrap();
+                assert_eq!(race.await.unwrap(), None);
+            }
+        });
     }
 
     #[rusty_tokio::test]

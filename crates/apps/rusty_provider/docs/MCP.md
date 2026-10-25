@@ -79,9 +79,9 @@ reconnecting" state a client needs to handle specially.
 
 ## Auth
 
-The MCP endpoint is mounted **inside** rp-server's existing axum app and
+The MCP endpoint is mounted **inside** rp-server's existing app and
 port, guarded by the exact same `server.api_key_env`/`[[clients]]`/`[jwt]`
-check every other route already goes through (`routes::mcp_auth`, which
+check every other route already goes through (`routes::mcp`, which
 just calls the same `check_auth` `/v1/chat/completions` does). This is a
 deliberate choice, not an oversight: an MCP OAuth 2.1 resource-server model
 would be a second auth system to reconcile with the one this router already
@@ -95,7 +95,7 @@ case.
 ## Transports
 
 **Streamable HTTP** (the default) is mounted at `[mcp].path` on the normal
-`rp-server` listener, through `rusty_mcp_axum`, which runs
+`rp-server` listener, through `rusty_mcp_server::Mount`, which runs
 the (blocking) `rusty_mcp_server` HTTP handler on a blocking thread per
 request and pumps a streamed reply into the response. It serves both
 generations: clients on the older `initialize` handshake get a session, and
