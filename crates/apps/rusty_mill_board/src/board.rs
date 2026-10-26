@@ -611,23 +611,13 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::NotFound(*dep));
             }
         }
-        // Two commits, not one: a store may keep priority and dependencies in different
-        // records (rusty_tick: the task and its board document), and each commit is atomic.
         if priority.is_none() && deps.is_none() {
             return Err(BoardError::Invalid("give a priority, deps or both"));
         }
-        let mut card = None;
-        if priority.is_some() {
-            card = Some(self.apply(id, by, EventKind::Edited, |c, now| {
-                c.plan(priority, None, now)
-            })?);
-        }
-        if deps.is_some() {
-            card = Some(self.apply(id, by, EventKind::Edited, |c, now| {
-                c.plan(None, deps.clone(), now)
-            })?);
-        }
-        card.ok_or(BoardError::NotFound(id))
+        // One commit: `Card::plan` validates the whole request before anything changes.
+        self.apply(id, by, EventKind::Edited, |c, now| {
+            c.plan(priority, deps.clone(), now)
+        })
     }
 
     /// Comment on a card.

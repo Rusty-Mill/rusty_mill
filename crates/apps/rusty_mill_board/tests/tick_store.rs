@@ -161,3 +161,152 @@ fn a_claim_rusty_tick_would_lowercase_is_refused() {
         Err(BoardError::Invalid(_))
     ));
 }
+
+fn link(execution: &str) -> rusty_mill_board::domain::ExecutionLink {
+    rusty_mill_board::domain::ExecutionLink {
+        execution: execution.into(),
+        goal: "g".into(),
+        bbp_task: "b".into(),
+        attempt: "a".into(),
+        assignment: "s".into(),
+        generation: 1,
+    }
+}
+
+/// Two boards (independent adapters over one rusty_tick) and a card both have read.
+fn two_readers() -> (TickStore<FakeTick>, TickStore<FakeTick>, FakeTick, Card) {
+    let tick = FakeTick::default();
+    let (a, b) = (TickStore::new(tick.clone()), TickStore::new(tick.clone()));
+    let card = Card::new("a", "", vec![], 0).expect("card");
+    a.insert(&card, Event::of(&card, EventKind::Created, "x"))
+        .expect("insert");
+    let read = a.get(card.id).expect("get").expect("card");
+    (a, b, tick, read)
+}
+
+#[test]
+fn of_two_bindings_from_the_same_read_only_the_first_lands() {
+    let (a, b, tick, read) = two_readers();
+    let first = read.bind_execution(link("e1"), 1).expect("bind");
+    let second = read.bind_execution(link("e2"), 1).expect("bind");
+    a.replace(&first, Event::of(&first, EventKind::ExecutionLinked, "a"))
+        .expect("first");
+    assert_eq!(
+        b.replace(&second, Event::of(&second, EventKind::ExecutionLinked, "b")),
+        Err(BoardError::Conflict)
+    );
+    assert_eq!(
+        tick.doc("board", read.id).expect("doc")["execution"]["execution"],
+        "e1"
+    );
+
+    // Through the board, the loser re-reads and is refused by the domain rule.
+    let board = Board::with_clock(b, Roles::default(), clock);
+    let dev = board.roles().actor("dev", "builder").expect("role");
+    assert!(matches!(
+        board.bind_execution(read.id, link("e2"), &dev),
+        Err(BoardError::Refused(_))
+    ));
+}
+
+#[test]
+fn a_dependency_write_and_a_binding_from_the_same_read_do_not_both_land() {
+    let (a, b, tick, read) = two_readers();
+    let planned = read
+        .plan(None, Some(vec![uuid::Uuid::now_v7()]), 1)
+        .expect("plan");
+    let bound = read.bind_execution(link("e1"), 1).expect("bind");
+    a.replace(&planned, Event::of(&planned, EventKind::Edited, "a"))
+        .expect("plan");
+    assert_eq!(
+        b.replace(&bound, Event::of(&bound, EventKind::ExecutionLinked, "b")),
+        Err(BoardError::Conflict)
+    );
+    let doc = tick.doc("board", read.id).expect("doc");
+    assert_eq!(
+        (doc["deps"].as_array().map(Vec::len), &doc["execution"]),
+        (Some(1), &json!(null))
+    );
+}
+
+#[test]
+fn a_comment_the_owner_adds_meanwhile_is_kept() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let store = TickStore::new(tick.clone());
+    let read = store.get(card.id).expect("get").expect("card");
+    tick.owner_comment(card.id, "from the phone");
+    let mine = read.comment(&human, "from the board", 1).expect("comment");
+    store
+        .replace(&mine, Event::of(&mine, EventKind::Commented, "nano"))
+        .expect("append");
+    let texts: Vec<String> = board
+        .get(card.id)
+        .expect("get")
+        .comments
+        .into_iter()
+        .map(|c| c.text)
+        .collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(
+        texts.contains(&"from the phone".to_owned())
+            && texts.contains(&"from the board".to_owned())
+    );
+}
+
+#[test]
+fn overlapping_board_comments_both_land_one_after_the_other() {
+    let (a, b, _tick, read) = two_readers();
+    let human = Roles::default().actor("nano", "human").expect("role");
+    let first = read.comment(&human, "one", 1).expect("comment");
+    let second = read.comment(&human, "two", 1).expect("comment");
+    a.replace(&first, Event::of(&first, EventKind::Commented, "a"))
+        .expect("first");
+    assert_eq!(
+        b.replace(&second, Event::of(&second, EventKind::Commented, "b")),
+        Err(BoardError::Conflict),
+        "the second append from the same read is refused, not merged blindly"
+    );
+    let board = Board::with_clock(b, Roles::default(), clock);
+    board.comment(read.id, &human, "two").expect("retried");
+    assert_eq!(board.get(read.id).expect("get").comments.len(), 2);
+}
+
+#[test]
+fn a_plan_interrupted_between_its_two_writes_is_finished_by_planning_again() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let dep = board.add(&human, "dep", "", vec![]).expect("add");
+    let card = board.add(&human, "card", "", vec![]).expect("add");
+    tick.fail_next("PUT", "/docs/board/");
+    assert!(
+        board
+            .plan(card.id, &human, Some(5), Some(vec![dep.id]))
+            .is_err()
+    );
+    let half = board.get(card.id).expect("get");
+    assert_eq!((half.priority, half.deps.len()), (5, 0));
+
+    let done = board
+        .plan(card.id, &human, Some(5), Some(vec![dep.id]))
+        .expect("plan again");
+    assert_eq!((done.priority, done.deps.clone()), (5, vec![dep.id]));
+}
+
+#[test]
+fn an_import_interrupted_before_its_link_keeps_the_id_that_names_its_issue() {
+    let (board, tick) = board();
+    let sync = board.roles().actor("github-sync", "human").expect("role");
+    tick.fail_next("PUT", "/docs/board/");
+    assert!(board.import(&sync, "from issue", "", vec![], 7).is_err());
+    let card = board
+        .get(rusty_mill_board::domain::import_id(7))
+        .expect("the task is there");
+    assert_eq!(card.issue, None, "the link is what the sync restores");
+    assert_eq!(
+        board.import(&sync, "from issue", "", vec![], 7),
+        Err(BoardError::Conflict),
+        "and the import is not repeated"
+    );
+}

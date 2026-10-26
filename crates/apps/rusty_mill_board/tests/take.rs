@@ -491,3 +491,21 @@ fn a_dependency_planned_during_an_automatic_take_skips_the_card() {
     let now = b.get(card).expect("card");
     assert_eq!((now.column, now.claim), (Column::Ready, None), "not taken");
 }
+
+#[test]
+fn an_invalid_plan_changes_nothing() {
+    let b = board();
+    let id = ready(&b, "card");
+    let h = who(&b, "nano", "human");
+    let before = b.get(id).expect("card");
+    let events = b.events(None, 100).expect("events").len();
+    for deps in [vec![id], (0..33).map(|_| uuid::Uuid::now_v7()).collect()] {
+        assert!(b.plan(id, &h, Some(5), Some(deps)).is_err());
+    }
+    let after = b.get(id).expect("card");
+    assert_eq!(
+        (after.rev, after.priority, after.deps),
+        (before.rev, 0, vec![])
+    );
+    assert_eq!(b.events(None, 100).expect("events").len(), events);
+}

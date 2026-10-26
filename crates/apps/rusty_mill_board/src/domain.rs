@@ -141,6 +141,11 @@ pub fn actionable(column: Column, caps: &BTreeSet<Capability>) -> bool {
 /// The id of the card imported from forge issue `issue`: derived from the number,
 /// so an import interrupted between two writes (a store that cannot commit a card
 /// and its link together) is finished, not repeated, by the next run.
+///
+/// The id depends on the number only, not on the repository. A board pointed at a
+/// second repository treats that repository's issue `n` as already imported when
+/// it has imported `n` from the first, and skips it; give such a repository its
+/// own board.
 pub fn import_id(issue: u64) -> Uuid {
     const NAMESPACE: Uuid = Uuid::from_u128(0x6d69_6c6c_2d62_6f61_7264_2d69_7373_7565);
     Uuid::new_v5(&NAMESPACE, &issue.to_be_bytes())

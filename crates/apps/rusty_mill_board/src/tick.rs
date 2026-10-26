@@ -11,17 +11,17 @@
 //! `board` document per task (id = task id); comments are rusty_tick `comment`
 //! documents, so the owner sees them.
 //!
-//! **Commit protocol.** Every write starts with a `PATCH` of the task under
-//! `If-Match: <rev the board read>`, carrying the task's changes, or nothing
-//! when the change is to the board document or a comment. That one write is the
-//! compare-and-swap, and it moves the version, so any other write since the
-//! board's read (which also starts this way) makes it fail with 412, the
-//! board's `Conflict`. A board-document write then follows under `If-Task-Match`
-//! of the new version and `If-Match` of the document as read, which rusty_tick
-//! checks under one lock; a comment follows with `If-None-Match: *`. No board
-//! operation changes both the task and a document (`Board::plan` commits
-//! priority and dependencies separately), so a crash between the two writes
-//! leaves at most a bumped version and an operation the caller sees fail.
+//! **Commit protocol.** Every write is one request fenced on the task version
+//! the board read, and every write moves that version: a task `PATCH` under
+//! `If-Match` (an empty one when nothing on the task changes), or a board
+//! document or comment `PUT` under `If-Task-Match`, which rusty_tick checks and
+//! then moves the version under one lock. So the version names the whole card
+//! (task and board document), and any write since the board's read fails with
+//! 412, the board's `Conflict`. A comment is an explicit append, so one the owner
+//! adds meanwhile is kept. Reads take the task before its document, so a read
+//! that races a write sees a newer document under an older version, and the
+//! write it makes is refused. Only `card_plan` with both a priority and
+//! dependencies needs two requests (task, then document), each fenced.
 //!
 //! **Events** are not durable: rusty_tick has no change log. They are kept in
 //! memory for this process: the board's own commits, plus `Edited` (or
@@ -191,12 +191,11 @@ struct List {
     name: String,
 }
 
-/// A stored document: its body and etag.
+/// A stored document's id and body.
 #[derive(Deserialize)]
 struct Doc {
     id: Uuid,
     body: Value,
-    etag: String,
 }
 
 /// The board's per-task document.
@@ -247,7 +246,7 @@ struct CommentBody {
 struct Parts {
     task: Task,
     project: String,
-    doc: Option<(BoardDoc, String)>,
+    doc: Option<BoardDoc>,
     comments: Vec<Comment>,
 }
 
@@ -303,7 +302,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         .filter(|t| !reserved_tag(t))
         .cloned()
         .collect();
-    let doc = doc.map(|(d, _)| d).unwrap_or_default();
+    let doc = doc.unwrap_or_default();
     Ok(Card {
         id: task.id,
         rev,
@@ -427,7 +426,7 @@ impl<T: TickApi> TickStore<T> {
         }
     }
 
-    fn board_docs(&self) -> Result<BTreeMap<Uuid, (BoardDoc, String)>, BoardError> {
+    fn board_docs(&self) -> Result<BTreeMap<Uuid, BoardDoc>, BoardError> {
         let docs: Vec<Doc> = Self::decode(
             self.call(TickRequest::new("GET", "/docs/board"), 200)?,
             "docs",
@@ -436,7 +435,7 @@ impl<T: TickApi> TickStore<T> {
             .into_iter()
             .filter_map(|d| {
                 let body = serde_json::from_value(d.body).ok()?;
-                Some((d.id, (body, d.etag)))
+                Some((d.id, body))
             })
             .collect())
     }
@@ -518,18 +517,27 @@ impl<T: TickApi> TickStore<T> {
         Ok(Value::Object(patch))
     }
 
-    fn put_doc(&self, card: &Card, version: u64, etag: Option<String>) -> Result<(), BoardError> {
+    /// `PATCH` the task if it is still at `version`; returns its new version.
+    fn patch_task(&self, id: Uuid, patch: Value, version: u64) -> Result<u64, BoardError> {
+        let mut request = TickRequest::new("PATCH", format!("/tasks/{id}")).body(patch);
+        request.if_match = Some(version.to_string());
+        let task: Task = serde_json::from_value(self.call(request, 200)?)
+            .map_err(|e| BoardError::Storage(format!("rusty_tick sent a bad task: {e}")))?;
+        task.version()
+    }
+
+    /// Write the card's board document if its task is still at `version`.
+    /// rusty_tick moves the task's version in the same locked step; returns it.
+    fn put_doc(&self, card: &Card, version: u64) -> Result<u64, BoardError> {
         let mut request = TickRequest::new("PUT", format!("/docs/board/{}", card.id))
             .body(BoardDoc::of(card).body());
         request.if_task_match = Some(version.to_string());
-        match etag {
-            Some(etag) => request.if_match = Some(etag),
-            None => request.if_absent = true,
-        }
-        self.call(request, 200).map(drop)
+        self.call(request, 200)?;
+        Ok(version + 1)
     }
 
-    fn put_comment(&self, card: &Card, comment: &Comment) -> Result<(), BoardError> {
+    /// Append `comment` if the task is still at `version`, moving it as `put_doc` does.
+    fn put_comment(&self, card: &Card, comment: &Comment, version: u64) -> Result<u64, BoardError> {
         let mut request = TickRequest::new("PUT", format!("/docs/comment/{}", Uuid::now_v7()))
             .body(json!({
                 "v": 1,
@@ -539,7 +547,9 @@ impl<T: TickApi> TickStore<T> {
                 "by": comment.by,
             }));
         request.if_absent = true;
-        self.call(request, 200).map(drop)
+        request.if_task_match = Some(version.to_string());
+        self.call(request, 200)?;
+        Ok(version + 1)
     }
 
     fn record(&self, event: Event, version: u64) -> Result<(), BoardError> {
@@ -630,72 +640,63 @@ impl<T: TickApi> Store for TickStore<T> {
             .send(&TickRequest::new("POST", "/tasks").body(body))?;
         match status {
             201 => {}
-            // The task exists: an earlier insert of this card (an import has a derived id)
-            // stopped before its document. Finish it; anything else is a real duplicate.
-            409 => {
-                let doc_missing = !self.board_docs()?.contains_key(&card.id);
-                let ours = self.task(card.id)?.is_some_and(|t| t.on_board());
-                if !(ours && doc_missing && BoardDoc::of(card) != BoardDoc::default()) {
-                    return Err(BoardError::Conflict);
-                }
-            }
+            409 => return Err(BoardError::Conflict),
             _ => {
                 return Err(BoardError::Storage(format!(
                     "rusty_tick answered {status} creating a task"
                 )));
             }
         }
-        if BoardDoc::of(card) != BoardDoc::default() {
-            let version = self
-                .task(card.id)?
-                .map(|t| t.version())
-                .transpose()?
-                .unwrap_or(1);
-            self.put_doc(card, version, None)?;
-        }
-        self.record(event, 1)
+        // A second request: a crash before it leaves the task without its document. Only
+        // an import has one at insert, and its id names its issue, so the sync relinks it.
+        let version = if BoardDoc::of(card) == BoardDoc::default() {
+            1
+        } else {
+            self.put_doc(card, 1)?
+        };
+        self.record(event, version)
     }
 
     fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError> {
         check_claim(card)?;
-        let parts = self.parts(card.id)?.ok_or(BoardError::NotFound(card.id))?;
-        let doc_etag = parts.doc.as_ref().map(|(_, etag)| etag.clone());
-        let current = card_of(parts)?;
-        if current.rev + 1 != card.rev {
+        // The task version the board read the card at (`rev = version - 1`, and the
+        // next revision is one more).
+        let read = card.rev;
+        let current = self
+            .parts(card.id)?
+            .map(card_of)
+            .transpose()?
+            .ok_or(BoardError::NotFound(card.id))?;
+        // Every write moves the version, so an unchanged version means the task and its
+        // board document are as the board read them; each request below is fenced on it.
+        if current.rev + 1 != read {
             return Err(BoardError::Conflict);
         }
-        let doc_changed = BoardDoc::of(card) != BoardDoc::of(&current);
-        let new_comment = match card.comments.len().checked_sub(current.comments.len()) {
-            Some(0) => None,
-            Some(1) => card.comments.last(),
-            _ => {
-                return Err(BoardError::Storage(
-                    "a board write adds at most one comment".into(),
-                ));
+        let version = if event.kind == EventKind::Commented {
+            // An explicit append: comments others add meanwhile do not move the version
+            // and are kept.
+            let comment = card
+                .comments
+                .last()
+                .ok_or_else(|| BoardError::Storage("a comment event carries no comment".into()))?;
+            self.put_comment(card, comment, read)?
+        } else {
+            let patch = self.task_patch(&current, card)?;
+            let task_changed = patch.as_object().is_some_and(|p| !p.is_empty());
+            let doc_changed = BoardDoc::of(card) != BoardDoc::of(&current);
+            let mut version = read;
+            // An empty patch still moves the version, so every write is a compare-and-swap.
+            if task_changed || !doc_changed {
+                version = self.patch_task(card.id, patch, version)?;
             }
+            // Both change only for `card_plan` with priority and dependencies: two fenced
+            // requests. A failure between them reports an error with the priority applied;
+            // the same plan again completes it.
+            if doc_changed {
+                version = self.put_doc(card, version)?;
+            }
+            version
         };
-        let patch = self.task_patch(&current, card)?;
-        let task_changed = patch.as_object().is_some_and(|p| !p.is_empty());
-        if usize::from(task_changed) + usize::from(doc_changed) + usize::from(new_comment.is_some())
-            > 1
-        {
-            return Err(BoardError::Storage(
-                "a board write changes the task, its board document or its comments, not two"
-                    .into(),
-            ));
-        }
-        // The compare-and-swap, and the version bump every write makes.
-        let mut request = TickRequest::new("PATCH", format!("/tasks/{}", card.id)).body(patch);
-        request.if_match = Some((current.rev + 1).to_string());
-        let task: Task = serde_json::from_value(self.call(request, 200)?)
-            .map_err(|e| BoardError::Storage(format!("rusty_tick sent a bad task: {e}")))?;
-        let version = task.version()?;
-        if doc_changed {
-            self.put_doc(card, version, doc_etag)?;
-        }
-        if let Some(comment) = new_comment {
-            self.put_comment(card, comment)?;
-        }
         self.record(event, version)
     }
 

@@ -53,12 +53,11 @@ struct Cli {
     #[arg(long, env = "MILL_BOARD_STORE", conflicts_with = "tick_url")]
     store: Option<PathBuf>,
     /// Keep the cards in this rusty_tick (e.g. `http://127.0.0.1:8788`) instead of a store
-    /// file: its tasks tagged `agent` are the board. The token comes from `RUSTY_TICK_TOKEN`.
-    #[arg(long, env = "MILL_BOARD_TICK_URL", requires = "tick_token")]
+    /// file: its tasks tagged `agent` are the board. The token is read from the
+    /// `RUSTY_TICK_TOKEN` environment variable only, never an argument (which process
+    /// listings show).
+    #[arg(long, env = "MILL_BOARD_TICK_URL")]
     tick_url: Option<String>,
-    /// rusty_tick bearer token.
-    #[arg(long, env = "RUSTY_TICK_TOKEN", hide_env_values = true)]
-    tick_token: Option<String>,
     /// Serve HTTP (UI + API + MCP) on this address instead of MCP over stdio.
     #[arg(long, env = "MILL_BOARD_HTTP")]
     http: Option<SocketAddr>,
@@ -213,10 +212,14 @@ fn run(cli: Cli) -> Result<(), String> {
         println!("{}", Projects::load(path)?.file_json()?);
         return Ok(());
     }
-    let store: Box<dyn Store> = match (&cli.store, &cli.tick_url, &cli.tick_token) {
-        (Some(path), _, _) => Box::new(MmdbStore::open(path).map_err(|e| e.to_string())?),
-        (None, Some(url), Some(token)) => Box::new(TickStore::new(TickHttp::new(url, token)?)),
-        _ => Box::new(MemStore::default()),
+    let store: Box<dyn Store> = match (&cli.store, &cli.tick_url) {
+        (Some(path), _) => Box::new(MmdbStore::open(path).map_err(|e| e.to_string())?),
+        (None, Some(url)) => {
+            let token = std::env::var("RUSTY_TICK_TOKEN")
+                .map_err(|_| "--tick-url needs RUSTY_TICK_TOKEN in the environment".to_owned())?;
+            Box::new(TickStore::new(TickHttp::new(url, &token)?))
+        }
+        (None, None) => Box::new(MemStore::default()),
     };
     let files = files(&cli);
     required(&cli.projects, "--projects")?;

@@ -89,14 +89,20 @@ whole-card revision does today.
    412, the board's `Conflict`, and the caller retries from 1 as it does
    today.
 
-**Commit order, as built.** Every board write starts with a `PATCH` of the task
-under `If-Match: <version the board read>`, carrying the task's changes, or an
-empty body when only the `board` document or a comment changes. An empty patch
-still moves the version, so the task version stays the card's revision
-(`rev = version - 1`) and every write is the same compare-and-swap. The
-document `PUT` then names the new version in `If-Task-Match`; a comment is
-written with `If-None-Match: *`. A crash between the two writes leaves at most a
-moved version and an operation its caller saw fail.
+**Commit order, as built.** Every board write is one request fenced on the
+task version the board read, and every write moves that version: a task `PATCH`
+under `If-Match` (an empty one still moves it), or a `board` document or
+comment `PUT` under `If-Task-Match`, which rusty_tick checks and then moves the
+task's version in the same locked step (task first, so a crash between leaves a
+moved version and the old document). The version therefore names the task and
+its board document together, the card's revision is `version - 1`, and a write
+from any read older than the latest write is refused. Reads take the task
+before its document, so a read racing a write sees a newer document under an
+older version, and the write it leads to is refused. A comment is an explicit
+append, so a comment the owner adds meanwhile (which does not move the
+version) is kept. Only `card_plan` with both a priority and dependencies needs
+two requests, each fenced; if the second fails, the caller sees an error with
+the priority applied, and the same plan again completes it.
 
 A document is one engine record, so a crash leaves the old document or the new
 one, never half of either. Two boards (or a board and a stray client) cannot
@@ -116,7 +122,8 @@ to commit together; the task version only fences the document write.
    document's `updated_ms`, kept strictly increasing per document, so `Doc`
    needs no new field. A `board` document's id must be a live task's id, and
    its writes also require `If-Task-Match: <task version>`, checked under the
-   same request lock.
+   same request lock, and move the task's version (as built; a comment may be
+   written the same way).
 3. Comments render an optional `by` (`features/tasks/detail/Comments.tsx`).
 
 One new route, no `Task` field, no schema bump.
@@ -134,7 +141,9 @@ projects, never a card someone else holds. Two changes:
   artifact board uses deps on 21 of 58 cards; the crate board has none.
 
 A card imported from a GitHub issue gets an id derived from the issue number,
-so an import retried after a crash finds its task instead of making a second.
+so an import retried after a crash finds its task instead of making a second,
+and the sync relinks a card whose link was lost before it would export it as a
+new issue. The id ignores the repository, so a board syncs one repository.
 
 Taking a card claims it in the same write, as today: `board:building` and
 `claim:<actor>` land together under `If-Match`, so two agents cannot take the

@@ -20,6 +20,8 @@ struct State {
     tasks: BTreeMap<Uuid, Value>,
     docs: BTreeMap<(String, Uuid), (Value, i64)>,
     clock: i64,
+    /// Answer the next request whose method and path start like this with a 500, unserved.
+    fail_next: Option<(String, String)>,
 }
 
 /// A shared handle: the store owns one clone, the test keeps another to act as the owner.
@@ -72,6 +74,20 @@ impl FakeTick {
         let task = state.tasks.get_mut(&id).expect("task");
         edit(task);
         bump(task, now);
+    }
+
+    /// The owner adds a comment in rusty_tick, which does not move the task's version.
+    pub fn owner_comment(&self, task: Uuid, text: &str) {
+        let mut state = self.0.lock().expect("lock");
+        let body = json!({ "v": 1, "taskId": task, "text": text, "createdMs": 0 });
+        state
+            .docs
+            .insert(("comment".into(), Uuid::now_v7()), (body, 1));
+    }
+
+    /// Fail the next `method` request whose path starts with `path`, before it is served.
+    pub fn fail_next(&self, method: &str, path: &str) {
+        self.0.lock().expect("lock").fail_next = Some((method.into(), path.into()));
     }
 
     /// The task as rusty_tick holds it.
@@ -189,12 +205,17 @@ impl FakeTick {
             }
             ("PUT", ["docs", kind, id]) => {
                 let id = parse(id);
-                if *kind == "board" {
-                    let Some(task) = state.tasks.get(&id) else {
+                // The task the write is fenced to; rusty_tick moves its version with the write.
+                let fenced = match (*kind, r.if_task_match.as_deref()) {
+                    ("board", None) => return (400, Value::Null),
+                    ("board", Some(v)) => Some((id, v)),
+                    ("comment", Some(v)) => Some((parse(body["taskId"].as_str().unwrap_or("")), v)),
+                    (_, Some(_)) => return (400, Value::Null),
+                    (_, None) => None,
+                };
+                if let Some((task, presented)) = fenced {
+                    let Some(task) = state.tasks.get_mut(&task) else {
                         return (404, Value::Null);
-                    };
-                    let Some(presented) = r.if_task_match.as_deref() else {
-                        return (400, Value::Null);
                     };
                     if presented != task["etag"] {
                         return (412, json!({ "current": task }));
@@ -208,6 +229,9 @@ impl FakeTick {
                 let etag = current.map(|e| e.to_string());
                 if r.if_match.is_some() && r.if_match != etag {
                     return (412, Value::Null);
+                }
+                if let Some((task, _)) = fenced {
+                    bump(state.tasks.get_mut(&task).expect("task"), now);
                 }
                 let etag = current.map_or(now, |e| now.max(e + 1));
                 state.docs.insert(key, (body.clone(), etag));
@@ -228,6 +252,14 @@ fn parse(id: &str) -> Uuid {
 impl TickApi for FakeTick {
     fn send(&self, request: &TickRequest<'_>) -> Result<(u16, Value), BoardError> {
         let mut state = self.0.lock().expect("lock");
+        let failing = state
+            .fail_next
+            .as_ref()
+            .is_some_and(|(m, p)| m == request.method && request.path.starts_with(p.as_str()));
+        if failing {
+            state.fail_next = None;
+            return Ok((500, json!({ "error": { "message": "injected" } })));
+        }
         Ok(Self::route(&mut state, request))
     }
 }

@@ -74,6 +74,18 @@ impl ScannableField<UpdatedAt> for Doc {
     }
 }
 
+/// The task a comment's body names (`taskId`), if it names a readable one.
+pub fn comment_owner(body: &str) -> Option<Uuid> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Owner {
+        task_id: String,
+    }
+    rusty_json::from_str::<Owner>(body)
+        .ok()
+        .and_then(|o| Uuid::parse_str(&o.task_id).ok())
+}
+
 pub struct DocStore {
     table: Table<Doc, ByKind, UpdatedAt>,
 }
@@ -108,20 +120,10 @@ impl DocStore {
         &mut self,
         doomed: impl Fn(Option<Uuid>) -> bool,
     ) -> Result<usize, TickError> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Owner {
-            task_id: String,
-        }
         let gone: Vec<Uuid> = self
             .of_kind("comment")
             .into_iter()
-            .filter(|d| {
-                let owner = rusty_json::from_str::<Owner>(&d.body)
-                    .ok()
-                    .and_then(|o| Uuid::parse_str(&o.task_id).ok());
-                doomed(owner)
-            })
+            .filter(|d| doomed(comment_owner(&d.body)))
             .map(|d| d.id)
             .collect();
         for id in &gone {
