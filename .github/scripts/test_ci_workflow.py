@@ -737,6 +737,8 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("on:\n  workflow_run:\n    workflows: [CI]\n    types: [requested]\n", reaper)
         self.assertNotRegex(reaper, r"(?m)^  (pull_request|pull_request_target|merge_group|push):")
         self.assertIn("    if: github.event.workflow_run.event == 'merge_group'\n", reaper)
+        # A skipped (non-merge_group) run must not share, and so cancel, the sweep's group.
+        self.assertIn("  group: merge-queue-reaper-${{ github.event.workflow_run.event }}\n", reaper)
         # Read-only by default; the sweep may only cancel runs.
         self.assertRegex(reaper, r"(?m)^permissions:\n  contents: read$")
         self.assertEqual(re.findall(r"(?m)^\s+[a-z-]+: write$", reaper), ["      actions: write"])
@@ -752,20 +754,23 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         fake_gh = textwrap.dedent("""\
             #!/usr/bin/env bash
             # Answers the three calls the sweep makes; --jq output is pre-shaped.
+            # Run listings have a second page that only --paginate returns.
             args="$*"
             case "$args" in
               *"-X POST"*"/cancel"*) id="${args##*/runs/}"; echo "${id%%/*}" >> "$STATE/cancelled" ;;
               *"/matching-refs/"*) [ -z "${FAIL_REFS:-}" ] || exit 1; cat "$STATE/refs" ;;
+              *"--paginate"*"status=in_progress"*) cat "$STATE/runs" "$STATE/runs2" ;;
               *"status=in_progress"*) cat "$STATE/runs" ;;
             esac
             """)
 
-        def sweep(runs: str, refs: str, fail_refs: bool = False) -> tuple[int, list[str]]:
+        def sweep(runs: str, refs: str, fail_refs: bool = False, runs2: str = "") -> tuple[int, list[str]]:
             with tempfile.TemporaryDirectory() as tmp:
                 state = Path(tmp)
                 (state / "gh").write_text(fake_gh)
                 (state / "gh").chmod(0o755)
                 (state / "runs").write_text(runs)
+                (state / "runs2").write_text(runs2)
                 (state / "refs").write_text(refs)
                 env = dict(os.environ, PATH=f"{state}:{os.environ['PATH']}", STATE=str(state), GH_REPO="o/r")
                 if fail_refs:
@@ -782,6 +787,8 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         # A prefix of a live ref is not that ref.
         self.assertEqual(sweep("103 gh-readonly-queue/main/pr-7\n", f"refs/heads/{live}\n"), (0, ["103"]))
         self.assertEqual(sweep("", f"refs/heads/{live}\n"), (0, []), "nothing in flight, nothing to do")
+        # A stale run past the first 100 of its status is still swept.
+        self.assertEqual(sweep(runs, f"refs/heads/{live}\n", runs2="104 gh-readonly-queue/main/pr-9-ccc\n"), (0, ["102", "104"]))
         code, cancelled = sweep(runs, "", fail_refs=True)
         self.assertNotEqual(code, 0)
         self.assertEqual(cancelled, [], "an unreadable queue must never cancel anything")

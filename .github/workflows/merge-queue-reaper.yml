@@ -18,8 +18,10 @@ permissions:
   contents: read
 
 concurrency:
-  # The newest sweep sees the newest queue; an older one adds nothing.
-  group: merge-queue-reaper
+  # The newest sweep sees the newest queue; an older one adds nothing. Keyed
+  # by event so a PR or push CI request, whose run skips the job, never
+  # cancels a merge_group sweep.
+  group: merge-queue-reaper-${{ github.event.workflow_run.event }}
   cancel-in-progress: true
 
 jobs:
@@ -40,7 +42,7 @@ jobs:
           # Runs first, then refs: a ref always exists before its run, so a
           # run listed here whose ref is missing from the later snapshot is dead.
           runs="$(for status in requested pending queued waiting in_progress; do
-            gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?event=merge_group&status=$status&per_page=100" \
+            gh api --paginate "repos/$GH_REPO/actions/workflows/ci.yml/runs?event=merge_group&status=$status&per_page=100" \
               --jq '.workflow_runs[] | "\(.id) \(.head_branch)"'
           done)"
           if [ -z "$runs" ]; then
