@@ -149,6 +149,17 @@ mod tests {
     }
 
     #[test]
+    fn a_report_after_an_overflowing_burst_still_lands() {
+        let (mut grid, mut parser, mut records) = status_grid();
+        let round = b"\x1b]7501;state=working:id=a\x07\x1b]133;A\x07";
+        let burst = round.repeat(rusty_term_core::PROGRAM_STATUS_MAX * 2);
+        parser.advance(&mut grid, &burst);
+        parser.advance(&mut grid, b"\x1b]7501;state=done\x07");
+        assert!(absorb_status(&mut grid, &mut records));
+        assert_eq!(records.bodies(), ["state=done"]);
+    }
+
+    #[test]
     fn format_stops_past_the_limit() {
         let mut grid = Grid::new(4, 3);
         let mut parser = rusty_term_core::AnsiParser::new();

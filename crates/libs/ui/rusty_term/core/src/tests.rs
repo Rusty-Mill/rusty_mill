@@ -7304,6 +7304,31 @@ fn program_status_queue_is_bounded() {
 }
 
 #[test]
+fn program_status_queue_merges_boundaries_and_admits_reports() {
+    let mut g = Grid::new(80, 24);
+    g.collect_program_status = true;
+    let mut p = AnsiParser::new();
+    // Each round is a report then a prompt; far more than the queue holds.
+    let round = b"\x1b]7501;state=working\x07\x1b]133;A\x07";
+    p.advance(&mut g, &round.repeat(PROGRAM_STATUS_MAX * 2));
+    p.advance(&mut g, b"\x1b]7501;state=done\x07");
+    let q = &g.program_status;
+    assert!(q.len() <= PROGRAM_STATUS_MAX);
+    assert_eq!(q.last(), Some(&StatusSignal::Report("state=done".into())));
+    assert_eq!(
+        q[q.len() - 2],
+        StatusSignal::Prompt,
+        "the last boundary kept"
+    );
+    assert!(
+        q.windows(2)
+            .all(|w| matches!(w[0], StatusSignal::Report(_))
+                || matches!(w[1], StatusSignal::Report(_))),
+        "no two boundaries adjacent"
+    );
+}
+
+#[test]
 fn program_status_queue_keeps_boundaries_when_full() {
     let mut g = Grid::new(80, 24);
     g.collect_program_status = true;

@@ -398,6 +398,23 @@ pub enum StatusSignal {
     Reset,
 }
 
+fn is_boundary(signal: &StatusSignal) -> bool {
+    !matches!(signal, StatusSignal::Report(_))
+}
+
+/// Removes the oldest report and, if that leaves two boundaries adjacent,
+/// the later one, which then changes nothing.
+fn evict_oldest_report(queue: &mut Vec<StatusSignal>) {
+    let Some(i) = queue.iter().position(|s| !is_boundary(s)) else {
+        return;
+    };
+    queue.remove(i);
+    let merged = i > 0 && queue.get(i - 1).is_some_and(is_boundary);
+    if merged && queue.get(i).is_some_and(is_boundary) {
+        queue.remove(i);
+    }
+}
+
 /// The authoritative screen buffer: a grid of [`Cell`]s held as one [`Line`]
 /// per row, plus a per-row damage (`dirty`) tracker and a cursor position.
 pub struct Grid {
@@ -5342,36 +5359,26 @@ impl Grid {
     }
 
     /// Queue `signal` when [`Grid::collect_program_status`] is set, holding
-    /// at most [`PROGRAM_STATUS_MAX`] without losing a lifecycle boundary: a
-    /// reset supersedes everything queued before it, a prompt right after a
-    /// prompt adds nothing, and when full the oldest report makes room. So
-    /// at most two non-reports are ever queued, every prompt and reset
-    /// survives, and what is kept stays in order.
+    /// at most [`PROGRAM_STATUS_MAX`] without losing a lifecycle boundary or
+    /// the order of what is kept. A reset supersedes everything queued
+    /// before it, a prompt right after a prompt or reset adds nothing, and
+    /// when full the oldest report makes room, merging the boundaries it
+    /// separated. So no two non-reports are ever adjacent: a full queue is
+    /// mostly reports, and a later report is always admitted.
     pub(crate) fn push_program_status(&mut self, signal: StatusSignal) {
         if !self.collect_program_status {
             return;
         }
+        let queue = &mut self.program_status;
         match signal {
-            StatusSignal::Reset => self.program_status.clear(),
-            StatusSignal::Prompt if self.program_status.last() == Some(&StatusSignal::Prompt) => {
-                return;
-            }
-            _ => {}
+            StatusSignal::Reset => queue.clear(),
+            StatusSignal::Prompt if queue.last().is_some_and(is_boundary) => return,
+            StatusSignal::Prompt | StatusSignal::Report(_) => {}
         }
-        if self.program_status.len() >= PROGRAM_STATUS_MAX {
-            let oldest = self
-                .program_status
-                .iter()
-                .position(|s| matches!(s, StatusSignal::Report(_)));
-            match oldest {
-                Some(i) => {
-                    self.program_status.remove(i);
-                }
-                // Unreachable: a full queue holds at most two non-reports.
-                None => return,
-            }
+        if queue.len() >= PROGRAM_STATUS_MAX {
+            evict_oldest_report(queue);
         }
-        self.program_status.push(signal);
+        queue.push(signal);
     }
 
     /// Return the id for `uri`, interning it on first use. Ids are `index + 1`
