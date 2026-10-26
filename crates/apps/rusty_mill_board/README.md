@@ -6,6 +6,7 @@ The board is the only state; it enforces who may move a card where.
 ```text
 rusty_mill_board --store board.mmap                                  # MCP over stdio
 rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
+RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.0.0.1:8787 --auth-token S
 # UI: http://127.0.0.1:8787/#token=S   API: POST /api/<op>   MCP: /mcp
 ```
 
@@ -59,6 +60,14 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   cursor (`board_events` returns a `cursor`; `tail: true` starts a watcher at the current end).
   A failed append is *unknown*, not "nothing happened" (the engine can fail after the record is durable): the store
   then refuses writes until reopened, and a reopen replays the log and shows what really committed.
+- **rusty_tick as the store** (`--tick-url`, token in `RUSTY_TICK_TOKEN`; [ADR-0012](../../../docs/adr/0012-one-task-store.md)):
+  the board is the rusty_tick tasks tagged `agent`, so the owner reads and edits the same tasks on the phone or web.
+  Column and claim are `board:`/`claim:` tags, the project is the task's list (the Inbox is `default`), comments are
+  rusty_tick comments with their author, and dependencies, the forge link and the execution link are one `board`
+  document per task. Every write is a compare-and-swap on the task's version; a document write is also fenced by it.
+  Tags come back lowercase, so actor names must be lowercase. Events are kept in memory only: the board's own
+  writes plus an `edited` event (actor `tick`) when a task changes in rusty_tick. `/health` is 503 while rusty_tick
+  is down. No `--backup-dir`: rusty_tick keeps the data.
 
 - **GitHub sync** (`--github-repo owner/name`, token in `GITHUB_TOKEN`, every
   `--github-secs`, default 60): stateless reconcile between cards and issues.
@@ -78,7 +87,7 @@ UI: the card dialog is kept in step with the board without touching unsaved text
 unsaved edit raises a conflict (keep mine / take theirs), and `card_update` takes the `rev` you last saw and refuses a
 stale one. `tests/ui/drafts.mjs` checks this in a real browser (Playwright; see the file's header).
 
-Layout: `domain` (pure) / `store` + `mmdb` (port and adapters) / `board` (service) /
+Layout: `domain` (pure) / `store` + `mmdb` + `tick` (port and adapters) / `board` (service) /
 `api` (operation table) / `mcp` + `web` (surfaces) / `sync` (forge port + reconcile) +
 `github` (adapter).
 

@@ -11,6 +11,9 @@
 //! 200 while the store can commit and 503 once it needs a restart. SIGTERM and
 //! SIGINT stop the server cleanly. `--backup-dir DIR` takes a pruned backup
 //! of the store and settings every `--backup-secs`.
+//!
+//! `--tick-url URL` (and `RUSTY_TICK_TOKEN`) keeps the cards in rusty_tick
+//! instead of `--store`: tasks tagged `agent` are the board (ADR-0012).
 
 use std::io::IsTerminal;
 use std::net::SocketAddr;
@@ -33,6 +36,7 @@ use rusty_mill_board::settings::{
 };
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
+use rusty_mill_board::tick::{TickHttp, TickStore};
 use rusty_mill_board::web::{Auth, Web, check_bind};
 
 /// How long a stop waits for requests and a running backup before it ends them.
@@ -46,8 +50,15 @@ struct Cli {
     #[arg(long, requires = "projects")]
     export_projects: bool,
     /// Board file (created if absent). Omit for an in-memory board.
-    #[arg(long, env = "MILL_BOARD_STORE")]
+    #[arg(long, env = "MILL_BOARD_STORE", conflicts_with = "tick_url")]
     store: Option<PathBuf>,
+    /// Keep the cards in this rusty_tick (e.g. `http://127.0.0.1:8788`) instead of a store
+    /// file: its tasks tagged `agent` are the board. The token comes from `RUSTY_TICK_TOKEN`.
+    #[arg(long, env = "MILL_BOARD_TICK_URL", requires = "tick_token")]
+    tick_url: Option<String>,
+    /// rusty_tick bearer token.
+    #[arg(long, env = "RUSTY_TICK_TOKEN", hide_env_values = true)]
+    tick_token: Option<String>,
     /// Serve HTTP (UI + API + MCP) on this address instead of MCP over stdio.
     #[arg(long, env = "MILL_BOARD_HTTP")]
     http: Option<SocketAddr>,
@@ -202,9 +213,10 @@ fn run(cli: Cli) -> Result<(), String> {
         println!("{}", Projects::load(path)?.file_json()?);
         return Ok(());
     }
-    let store: Box<dyn Store> = match &cli.store {
-        Some(path) => Box::new(MmdbStore::open(path).map_err(|e| e.to_string())?),
-        None => Box::new(MemStore::default()),
+    let store: Box<dyn Store> = match (&cli.store, &cli.tick_url, &cli.tick_token) {
+        (Some(path), _, _) => Box::new(MmdbStore::open(path).map_err(|e| e.to_string())?),
+        (None, Some(url), Some(token)) => Box::new(TickStore::new(TickHttp::new(url, token)?)),
+        _ => Box::new(MemStore::default()),
     };
     let files = files(&cli);
     required(&cli.projects, "--projects")?;

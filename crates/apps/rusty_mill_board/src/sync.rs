@@ -307,8 +307,13 @@ pub fn reconcile(board: &Shared, forge: &dyn Forge) -> Result<Report, SyncError>
             .filter(|l| !reserved_tag(l))
             .cloned()
             .collect();
-        board.import(&actor, &issue.title, &body, tags, issue.number)?;
-        report.cards_imported += 1;
+        // An import's card id is derived from the issue, so a conflict means it was imported
+        // before: its card was since relinked, or (rusty_tick) taken off the board by the owner.
+        match board.import(&actor, &issue.title, &body, tags, issue.number) {
+            Ok(_) => report.cards_imported += 1,
+            Err(BoardError::Conflict) => {}
+            Err(e) => return Err(e.into()),
+        }
     }
     Ok(report)
 }
@@ -645,6 +650,22 @@ mod tests {
         assert_eq!(r.issues_updated, 1);
         assert_eq!(forge.get(5).labels, ["bug", "board:backlog"]);
         assert!(reconcile(&b, &forge).expect("again").is_quiet());
+    }
+
+    #[test]
+    fn an_issue_imported_before_is_not_imported_again() {
+        let b = board();
+        let forge = Fake::default();
+        forge.put(5, "Open one", "", &[], false);
+        reconcile(&b, &forge).expect("sync");
+        let card = b.list(None).expect("list")[0].id;
+        // Its card now tracks another issue, so issue 5 looks unimported; its derived card id says otherwise.
+        forge.put(7, "Other", "", &[], false);
+        b.link_issue(card, 7, None, &human(&b)).expect("relink");
+
+        let r = reconcile(&b, &forge).expect("sync");
+        assert_eq!(r.cards_imported, 0);
+        assert_eq!(b.list(None).expect("list").len(), 1);
     }
 
     // ---- the text merge (review: timestamps are moved by unrelated activity)

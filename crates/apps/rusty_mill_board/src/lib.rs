@@ -29,4 +29,5 @@ pub mod settings;
 pub mod store;
 pub mod sync;
 pub mod syncer;
+pub mod tick;
 pub mod web;

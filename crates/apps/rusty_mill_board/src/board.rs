@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind, ExecutionLink,
-    WORK_QUEUES, actionable, entry_column, text_hash,
+    WORK_QUEUES, actionable, entry_column, import_id, text_hash,
 };
 use crate::projects::Projects;
 use crate::store::Store;
@@ -281,6 +281,7 @@ impl<S: Store> Board<S> {
         issue: u64,
     ) -> Result<Card, BoardError> {
         let mut card = Card::new(title, body, tags, (self.clock)())?;
+        card.id = import_id(issue);
         card.issue = Some(issue);
         card.synced_text = Some(text_hash(&card.title, &card.body));
         self.store
@@ -397,8 +398,9 @@ impl<S: Store> Board<S> {
             .filter(|c| id.is_some() || c.claim.as_deref().is_none_or(|h| h == by.name))
             .filter(|c| !waiting.contains(&c.id))
             .collect();
-        // Nearest Done first; within a queue the highest priority, then the oldest.
-        candidates.sort_by_key(|c| (rank(c), Reverse(c.priority), c.created_ms));
+        // Nearest Done first; within a queue the highest priority, then the manual order,
+        // then the oldest.
+        candidates.sort_by_key(|c| (rank(c), Reverse(c.priority), c.sort_order, c.created_ms));
         for card in candidates {
             match self.enter_and_claim(card, by) {
                 Ok(card) => return Ok(Some(card)),
@@ -609,9 +611,23 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::NotFound(*dep));
             }
         }
-        self.apply(id, by, EventKind::Edited, |c, now| {
-            c.plan(priority, deps.clone(), now)
-        })
+        // Two commits, not one: a store may keep priority and dependencies in different
+        // records (rusty_tick: the task and its board document), and each commit is atomic.
+        if priority.is_none() && deps.is_none() {
+            return Err(BoardError::Invalid("give a priority, deps or both"));
+        }
+        let mut card = None;
+        if priority.is_some() {
+            card = Some(self.apply(id, by, EventKind::Edited, |c, now| {
+                c.plan(priority, None, now)
+            })?);
+        }
+        if deps.is_some() {
+            card = Some(self.apply(id, by, EventKind::Edited, |c, now| {
+                c.plan(None, deps.clone(), now)
+            })?);
+        }
+        card.ok_or(BoardError::NotFound(id))
     }
 
     /// Comment on a card.
