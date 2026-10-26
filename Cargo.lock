@@ -12617,9 +12617,17 @@ dependencies = [
  "rusty_libc",
  "rusty_mux_core",
  "rusty_mux_proto",
+ "rusty_mux_status",
  "rusty_term_core",
  "rusty_tokio",
  "rusty_uuid",
+]
+
+[[package]]
+name = "rusty_mux_status"
+version = "0.1.0"
+dependencies = [
+ "rusty_base64",
 ]
 
 [[package]]

@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{Client, start_server};
+use common::{Client, block_for, start_server};
 use rusty_mux_core::{Event, SessionId};
 use rusty_mux_proto::{Cursor, Features, Message};
 use rusty_uuid::Uuid;
@@ -106,4 +106,29 @@ fn a_client_without_the_feature_gets_unnumbered_events() {
     let session = create_session(&mut a, "s");
     wait_for_session(&mut a, session);
     assert!(a.events.iter().all(|(seq, _)| seq.is_none()));
+}
+
+#[test]
+fn status_changes_reach_only_clients_that_asked() {
+    let path = start_server();
+    let wanted = SEQ.union(Features::STATUS).union(Features::CHECKPOINT_V3);
+    let mut watcher = Client::connect_with(&path, wanted, None);
+    let mut plain = Client::connect_with(&path, SEQ, None);
+    let block = block_for(&mut watcher);
+    watcher.input(block, b"printf '\\033]7501;state=working\\007'\r");
+    let status = Event::BlockStatus { block };
+    while !watcher.events.iter().any(|(_, e)| *e == status) {
+        watcher.recv();
+    }
+
+    // Events reach every client in one order, so once the plain client sees
+    // a later one it has missed the status event for good.
+    let later = create_session(&mut watcher, "later");
+    wait_for_session(&mut plain, later);
+    assert!(!plain.events.iter().any(|(_, e)| *e == status));
+    let gaps = numbers(&plain)
+        .windows(2)
+        .filter(|w| w[1] != w[0] + 1)
+        .count();
+    assert_eq!(gaps, 1, "its numbers skip the status event");
 }

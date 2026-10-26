@@ -7268,3 +7268,38 @@ fn clearing_history_releases_its_styles() {
     assert!(g.style_stats().live <= 5 * 20 + 2, "{:?}", g.style_stats());
     assert_rainbow(&g);
 }
+
+#[test]
+fn program_status_is_collected_only_when_asked() {
+    let input = b"\x1b]7501;state=working\x07\x1b]133;A\x07\x1bc";
+    assert!(parse(input, 80, 24).program_status.is_empty());
+
+    let mut g = Grid::new(80, 24);
+    g.collect_program_status = true;
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, input);
+    p.advance(&mut g, b"\x1b]7501;state=done:app=x\x1b\\\x1b]633;A\x07");
+    assert_eq!(
+        g.program_status,
+        [
+            StatusSignal::Report("state=working".into()),
+            StatusSignal::Prompt,
+            StatusSignal::Reset,
+            StatusSignal::Report("state=done:app=x".into()),
+            StatusSignal::Prompt,
+        ]
+    );
+    assert!(g.collect_program_status, "a full reset keeps collecting");
+}
+
+#[test]
+fn program_status_queue_is_bounded() {
+    let mut g = Grid::new(80, 24);
+    g.collect_program_status = true;
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        &b"\x1b]7501;state=idle\x07".repeat(PROGRAM_STATUS_MAX + 10),
+    );
+    assert_eq!(g.program_status.len(), PROGRAM_STATUS_MAX);
+}

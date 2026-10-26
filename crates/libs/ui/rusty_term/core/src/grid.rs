@@ -383,6 +383,23 @@ pub struct KittyFrame {
 
 /// The authoritative screen buffer: a grid of [`Cell`]s held as one [`Line`]
 /// per row, plus a per-row damage (`dirty`) tracker and a cursor position.
+/// The most program-status signals [`Grid::program_status`] holds between
+/// drains.
+pub const PROGRAM_STATUS_MAX: usize = 256;
+
+/// An input to a program-status (OSC 7501) record store, in the order the
+/// program produced it. The grid only collects them; the host interprets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusSignal {
+    /// An OSC 7501 body, the bytes after `7501;`, unvalidated.
+    Report(String),
+    /// A shell prompt started (OSC 133 or 633 `A`), which ends the records
+    /// of the command before it.
+    Prompt,
+    /// A full reset (RIS), which removes every record.
+    Reset,
+}
+
 pub struct Grid {
     /// Number of columns.
     pub cols: usize,
@@ -657,6 +674,13 @@ pub struct Grid {
     /// OSC to the host. Each entry is `(title, body)`; an empty title means the
     /// front-end picks a default. Bounded by [`Grid::push_notification`].
     pub notifications: Vec<(String, String)>,
+    /// Whether to queue [`StatusSignal`]s in [`Grid::program_status`]. Off by
+    /// default, so a host that never drains them stores nothing.
+    pub collect_program_status: bool,
+    /// Program-status signals (OSC 7501 reports and the events that end
+    /// records' lifetimes), in arrival order, for a host such as a
+    /// multiplexer to drain. Bounded by [`Grid::push_program_status`].
+    pub program_status: Vec<StatusSignal>,
     /// The active IME composition (preedit) text, shown reverse-video at the
     /// cursor by the windowed front-end; empty when not composing. Set by the
     /// window backend on `WindowEvent::Ime`, not by the parser.
@@ -1387,6 +1411,8 @@ impl Grid {
             clipboard_query: false,
             clipboard_query_primary: false,
             notifications: Vec::new(),
+            collect_program_status: false,
+            program_status: Vec::new(),
             ime_preedit: String::new(),
             mouse_modes: MouseModes::default(),
             cell_px: None,
@@ -5312,6 +5338,15 @@ impl Grid {
         const MAX: usize = 32;
         if self.notifications.len() < MAX {
             self.notifications.push((title, body));
+        }
+    }
+
+    /// Queue `signal` when [`Grid::collect_program_status`] is set. Past
+    /// [`PROGRAM_STATUS_MAX`] pending signals new ones are dropped, so a flood
+    /// between drains can't grow the queue without limit.
+    pub(crate) fn push_program_status(&mut self, signal: StatusSignal) {
+        if self.collect_program_status && self.program_status.len() < PROGRAM_STATUS_MAX {
+            self.program_status.push(signal);
         }
     }
 

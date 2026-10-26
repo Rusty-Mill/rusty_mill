@@ -226,6 +226,7 @@ fn every_event_round_trips() {
             block,
             holder: None,
         },
+        Event::BlockStatus { block },
     ];
     for event in events {
         round_trip(Message::Event {
@@ -563,6 +564,7 @@ fn feature_bits_are_distinct() {
         Features::SYNC,
         Features::INSPECT,
         Features::BLOCK_CALL,
+        Features::STATUS,
     ];
     let mut seen = 0u64;
     for feature in all {
