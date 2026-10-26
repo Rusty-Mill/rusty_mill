@@ -19,7 +19,6 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
 use rusty_mcp::limits::LimitsLayer;
 use serde_json::json;
@@ -76,7 +75,7 @@ binds:
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     config.validate().expect("config should validate");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
 
@@ -93,10 +92,9 @@ binds:
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving =
-        serve::run_with_shutdown_and_limits(gateway, vec![addr], shutdown.clone(), limits)
-            .await
-            .expect("gateway should bind");
+    let _serving = common::serve_with_limits(gateway, vec![addr], shutdown.clone(), limits)
+        .await
+        .expect("gateway should bind");
 
     (format!("http://127.0.0.1:{port}/mcp"), shutdown)
 }

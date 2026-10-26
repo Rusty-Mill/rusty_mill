@@ -43,25 +43,19 @@ rusty_mcp_server = { workspace = true, features = ["http"] }
 # The MCP handler's request and reply types, for `mcp_service`.
 rusty_serve = { workspace = true }
 rusty_http = { workspace = true }
-rusty-mcp = { workspace = true, default-features = false, features = ["otel"] }
+rusty-mcp = { workspace = true, default-features = false, features = ["otel", "rusty-axum"] }
+# The server. `http2` is load-bearing and must not be "tidied away": the TLS
+# listener advertises `h2` over ALPN, and a server that negotiates a protocol
+# it cannot speak closes the connection after a successful handshake -- which
+# looks like a network fault rather than a missing feature flag.
+rusty_axum = { workspace = true, features = ["http2"] }
+rusty_tokio = { workspace = true }
+# The MCP handler and its metrics are tower services until #886.
 tower-layer = "0.3"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "sync"] }
-tokio-util = { workspace = true }
 tower-service = "0.3"
 http = { workspace = true }
+http-body = { workspace = true }
 http-body-util = { workspace = true }
-# `http2` is load-bearing and must not be "tidied away": the TLS listener
-# advertises `h2` over ALPN, and a server that negotiates a protocol it cannot
-# speak closes the connection after a successful handshake -- which looks like
-# a network fault rather than a missing feature flag.
-#
-# No test can protect this. Cargo unifies features across a build and the dev
-# dependencies enable `hyper/http2` anyway, so the test binary always has it
-# while the shipped binary has only what is listed here. Verify with curl
-# against the built binary, not with `cargo test`.
-hyper = { workspace = true, features = ["http1", "http2", "server"] }
-hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio", "server", "service"] }
-tower = { workspace = true, features = ["util"] }
 bytes = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

@@ -25,6 +25,7 @@ todo = "warn"
 unwrap_used = "warn"
 
 [dependencies]
+rusty_axum = { workspace = true, optional = true }
 # Pagination cursors are base64 so clients treat them as opaque.
 rusty_base64 = { workspace = true }
 # The `limits` middleware's timeout and retry sleep run on its consumers' tokio
@@ -78,6 +79,8 @@ default = []
 serve = ["dep:rusty_serve"]
 # A JWKS-backed JWT validator for the authorization layer.
 jwt = ["dep:rusty_oauth", "dep:rusty_request", "dep:rusty_tokio"]
+# `LimitsLayer` as `rusty_axum` middleware, timed on `rusty_tokio`.
+rusty-axum = ["dep:rusty_axum", "dep:rusty_tokio"]
 # Export spans to an OpenTelemetry collector over OTLP.
 otel = [
     "dep:rusty_request",

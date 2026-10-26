@@ -2272,22 +2272,18 @@ TLS termination is [`rusty_tls`][rusty_tls] — a `rustls` 0.23 wrapper — rath
 than `tokio-rustls`, so the gateway is not the one consumer in this ecosystem
 that rolls its own TLS.
 
-Its async server adapter is written against `rusty_tokio`'s `AsyncRead` and
-`AsyncWrite`, while this gateway runs on `tokio` and hands connections to
-`hyper`, so a TLS stream is adapted twice: the socket goes in as a
-`rusty_tokio` stream and the decrypted stream comes back out as a `tokio` one.
-**That costs nothing per byte.** Both runtimes' `ReadBuf` is an initialized
-`&mut [u8]` plus a filled cursor, so the inner reader writes directly into the
-outer buffer's spare capacity and the adapter only forwards the count — no
-intermediate buffer, no copy, no `unsafe`. The price of the choice is
-dependency weight (`rusty_tokio` for its trait definitions, and `rustils`'
-`platform` crates that only client-side trust anchors use), not throughput.
+The gateway runs on `rusty_tokio`, the runtime `rusty_tls`'s async server
+adapter is written against, and serves with `rusty_axum`, so a TLS stream goes
+from the handshake straight to the HTTP server with no adapter between them.
+`serve.rs`'s acceptor runs the handshake with the certificate the SNI name
+picks and hands `rusty_axum` the decrypted stream, which serves `h2` or
+HTTP/1.1 by the protocol ALPN chose.
 
 One deliberate exception to the crate's "consumers import `rusty_tls`, never
 `rustls`" rule: `rusty_tls` does not install a `rustls` `CryptoProvider`, and
 `rustls` refuses to guess when more than one is present in a build. This
-workspace has two — `ring` via `rusty_tls`, `aws-lc-rs` via `reqwest` — so it
-panics on the first handshake. `agentgateway-tls` installs `ring` explicitly,
+workspace can have two — `ring` via `rusty_tls`, `aws-lc-rs` via `reqwest` in
+the test clients — and it then panics on the first handshake. `agentgateway-tls` installs `ring` explicitly,
 once, which needs a direct `rustls` dependency pinned to the same 0.23.
 
 ## On `rusty_a2a`

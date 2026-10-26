@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use agentgateway_config::TcpRoute;
 use agentgateway_core::{Endpoints, HostnamePattern, Registry, RegistryError, resolve_backends};
-use tokio::net::TcpStream;
+use rusty_tokio::io::TcpStream;
 
 /// A passthrough route that cannot be served.
 #[derive(Debug, thiserror::Error)]
@@ -161,7 +161,7 @@ impl Passthrough {
         // Both directions at once, and both halves shut down when either side
         // finishes: a TLS session ends when one peer closes, and holding the
         // other open would leak a connection per handshake.
-        match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
+        match rusty_tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
             Ok((from_client, from_upstream)) => rusty_log::debug!(
                 %destination,
                 from_client,

@@ -685,7 +685,7 @@ impl Compiled {
 
     async fn call_request(&self, request: McpRequest) -> Result<McpRequestResult, Status> {
         let client = self.connect()?;
-        match tokio::time::timeout(self.timeout, client.check_request(request)).await {
+        match rusty_tokio::time::timeout(self.timeout, client.check_request(request)).await {
             Ok(result) => result,
             Err(_) => Err(Status::deadline_exceeded("the processor timed out")),
         }
@@ -693,7 +693,7 @@ impl Compiled {
 
     async fn call_response(&self, request: McpResponse) -> Result<McpResponseResult, Status> {
         let client = self.connect()?;
-        match tokio::time::timeout(self.timeout, client.check_response(request)).await {
+        match rusty_tokio::time::timeout(self.timeout, client.check_response(request)).await {
             Ok(result) => result,
             Err(_) => Err(Status::deadline_exceeded("the processor timed out")),
         }

@@ -31,10 +31,17 @@ let response = app.call(rusty_axum::Request::new(rusty_axum::Method::Get, "/heal
 - `serve(listener, tls, options, router)` runs HTTP/1.1 on `rusty_tokio`, plain
   or over `rusty_tls`: keep-alive, `Expect: 100-continue`, bounded head, body,
   idle time and connections, and graceful shutdown that ends SSE streams cleanly.
+  With the `http2` feature and `ServeOptions.http2`, a TLS connection that
+  negotiates `h2` over ALPN is served as HTTP/2 (no h2c, no upgrades).
+- `serve_with(listener, accept, options, router)` hands each accepted socket to
+  an `Accept` first, which returns it plain, as a finished TLS stream, or as
+  taken over (`Accepted::Done`). That is where a gateway picks a certificate by
+  SNI or forwards a TLS passthrough port untouched. It runs on the connection's
+  own task, within `handshake_timeout`.
 
 - `Router::layer` wraps every request: `middleware::from_fn(|req, next| ..)` or
   `cors::Cors` (tower-http's `CorsLayer` behaviour). There is no `route_layer`
   or `nest`: guard one route by wrapping its handler, and route a mounted
   service with `any` or `fallback`.
 
-Status: `rk-app` (#948), `rp-server` and `remind_me_remote` have moved (#875).
+Status: `rk-app` (#948), `rp-server`, `remind_me_remote` (#875) and `agentgateway` (#885) have moved.

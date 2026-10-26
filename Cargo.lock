@@ -378,9 +378,8 @@ dependencies = [
  "clap",
  "fs4 0.13.1",
  "http",
+ "http-body",
  "http-body-util",
- "hyper",
- "hyper-util",
  "jsonwebtoken 11.0.0",
  "rand 0.8.8",
  "rcgen",
@@ -388,17 +387,18 @@ dependencies = [
  "rmcp",
  "rsa",
  "rusty-mcp",
+ "rusty_axum",
  "rusty_base64",
  "rusty_http",
  "rusty_log",
  "rusty_mcp_server",
  "rusty_prost",
  "rusty_serve",
+ "rusty_tokio",
  "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",
- "tower",
  "tower-layer",
  "tower-service",
 ]
@@ -448,10 +448,10 @@ dependencies = [
  "rusty_json",
  "rusty_log",
  "rusty_request",
+ "rusty_tokio",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -492,10 +492,9 @@ dependencies = [
  "regex",
  "rusty_log",
  "rusty_request",
+ "rusty_tokio",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
- "wiremock",
 ]
 
 [[package]]
@@ -516,6 +515,7 @@ dependencies = [
  "rusty_mcp_server",
  "rusty_prost",
  "rusty_serve",
+ "rusty_tokio",
  "rusty_tonic",
  "serde_json",
  "thiserror 2.0.20",
@@ -535,9 +535,9 @@ dependencies = [
  "http-body",
  "rusty_log",
  "rusty_request",
+ "rusty_tokio",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -553,7 +553,6 @@ dependencies = [
  "rusty_tls",
  "rusty_tokio",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -11570,6 +11569,7 @@ dependencies = [
  "rand 0.8.8",
  "reqwest 0.13.4",
  "rsa",
+ "rusty_axum",
  "rusty_base64",
  "rusty_http",
  "rusty_json",

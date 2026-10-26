@@ -34,14 +34,10 @@ http-body = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
 serde_json = { workspace = true }
-# Provider, moderation and webhook calls; `tokio` because the gateway still
-# runs on tokio.
-rusty_request = { workspace = true, features = ["tokio"] }
+# Provider, moderation and webhook calls.
+rusty_request = { workspace = true }
 async-stream = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+# Retry waits and the deadline on a streamed answer.
+rusty_tokio = { workspace = true }
 thiserror = "2"
 rusty_log = { workspace = true }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-wiremock = { workspace = true }

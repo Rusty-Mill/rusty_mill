@@ -1,25 +1,37 @@
-//! Socket accept loops and graceful shutdown.
+//! Listeners and graceful shutdown, on `rusty_axum`.
 //!
-//! One task per port, each accepting into a per-connection hyper service. The
-//! [`Gateway`] is shared behind an `Arc` rather than cloned, since the MCP
-//! session managers inside it must be the same objects across connections —
-//! a session id issued on one connection has to be recognised on the next.
+//! One server per port. The [`Gateway`] is shared behind an `Arc` rather than
+//! cloned, since the MCP session managers inside it must be the same objects
+//! across connections — a session id issued on one connection has to be
+//! recognised on the next.
+//!
+//! Each accepted socket goes through [`Acceptor`] first: a passthrough port
+//! forwards it untouched, a TLS port completes the handshake with the
+//! certificate its SNI name picks, and a cleartext port serves it as it is.
 
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder as ConnBuilder;
-use hyper_util::service::TowerToHyperService;
-use rusty_mcp::limits::LimitsLayer;
-use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
-use tower_layer::Layer as _;
+use std::time::Duration;
 
 use agentgateway_proxy::Scheme;
+use agentgateway_tls::{Passthrough, TlsTerminator};
+use rusty_axum::{Accept, Accepted, BoxFuture, Router, ServeOptions};
+use rusty_mcp::limits::LimitsLayer;
+use rusty_tokio::io::{TcpListener, TcpStream};
+use rusty_tokio::sync::CancellationToken;
 
+use crate::convert;
 use crate::gateway::Gateway;
+
+/// Connections served at once on one port; the next is closed unserved.
+/// High, since an MCP or SSE stream holds its connection for its whole life:
+/// this is a bound on descriptors, not a load limit (`limits` is that).
+const MAX_CONNECTIONS: usize = 16 * 1024;
+
+/// The largest request head. Bearer tokens make heads large, so this is well
+/// above the 8 KiB default.
+const MAX_HEAD_BYTES: usize = 64 * 1024;
 
 /// Bind every address and serve until SIGINT or SIGTERM.
 pub async fn run(
@@ -39,8 +51,9 @@ pub async fn run(
 /// Bind every address and serve until `shutdown` is cancelled.
 ///
 /// Returns once every socket is bound, so a caller knows the gateway is
-/// reachable before it starts making requests. The returned future completes
-/// when serving has finished.
+/// reachable before it starts making requests. Serving does not depend on the
+/// returned future being polled; it completes once serving has finished,
+/// after `shutdown` is cancelled and requests in flight have been answered.
 pub async fn run_with_shutdown(
     gateway: Gateway,
     addrs: Vec<SocketAddr>,
@@ -51,10 +64,10 @@ pub async fn run_with_shutdown(
 
 /// As [`run_with_shutdown`], with process-wide load shedding applied.
 ///
-/// The limits sit outside everything else, so a shed request costs a semaphore
-/// try-acquire rather than a route lookup, a token validation and a JWKS
-/// fetch. That ordering is the reason the layer is worth having: the requests
-/// it refuses are exactly the ones there is no capacity to pay for.
+/// The limits sit outside everything else, so a shed request costs an atomic
+/// increment rather than a route lookup, a token validation and a JWKS fetch.
+/// That ordering is the reason the layer is worth having: the requests it
+/// refuses are exactly the ones there is no capacity to pay for.
 pub async fn run_with_shutdown_and_limits(
     gateway: Gateway,
     addrs: Vec<SocketAddr>,
@@ -62,6 +75,7 @@ pub async fn run_with_shutdown_and_limits(
     limits: LimitsLayer,
 ) -> anyhow::Result<impl Future<Output = ()> + Send> {
     let gateway = Arc::new(gateway);
+    let options = options(&gateway);
 
     let mut listeners = Vec::with_capacity(addrs.len());
     for addr in &addrs {
@@ -72,130 +86,117 @@ pub async fn run_with_shutdown_and_limits(
         listeners.push((addr.port(), listener));
     }
 
-    let mut tasks = Vec::with_capacity(listeners.len());
+    let mut servers = Vec::with_capacity(listeners.len());
     for (port, listener) in listeners {
-        let gateway = Arc::clone(&gateway);
-        let shutdown = shutdown.clone();
-        // One layer, cloned per port: the permit pool is shared, which is the
-        // whole point -- a limit each port counted separately would bound
+        let tls = gateway.tls(port);
+        let scheme = if tls.is_some() {
+            Scheme::Https
+        } else {
+            Scheme::Http
+        };
+        let acceptor = Acceptor {
+            port,
+            tls,
+            passthrough: gateway.passthrough(port),
+        };
+        // One layer, cloned per port: the permit count is shared, which is
+        // the whole point -- a limit each port counted separately would bound
         // nothing in a multi-bind config.
-        let limits = limits.clone();
-        tasks.push(tokio::spawn(async move {
-            accept_loop(gateway, port, listener, shutdown, limits).await;
-        }));
+        let router = router(Arc::clone(&gateway), port, scheme).layer(limits.clone());
+        servers.push(rusty_axum::serve_with(
+            listener,
+            acceptor,
+            options.clone(),
+            router,
+        )?);
     }
 
+    // The servers run on their own tasks; this one holds them until told to
+    // stop, so serving goes on whether or not the caller polls what it gets.
+    let stopped = rusty_tokio::spawn(async move {
+        shutdown.cancelled().await;
+        // Let in-flight requests finish; MCP calls can be long.
+        for server in servers {
+            server.shutdown().await;
+        }
+    });
     Ok(async move {
-        for task in tasks {
-            let _ = task.await;
+        let _ = stopped.await;
+    })
+}
+
+/// How every port is served.
+fn options(gateway: &Gateway) -> ServeOptions {
+    ServeOptions {
+        max_connections: MAX_CONNECTIONS,
+        max_head_bytes: MAX_HEAD_BYTES,
+        // The server reads a body whole before routing, so its cap is the
+        // largest any route accepts. Routes with lower caps refuse past them
+        // with their own 413.
+        max_body_bytes: gateway.max_request_body() as u64,
+        // How long a keep-alive connection may sit between requests, and
+        // each read or blocked write may take. A client may well idle between
+        // MCP calls; five minutes still closes a dead peer. A response being
+        // produced is not bounded by it: the route's timeout is.
+        idle_timeout: Duration::from_secs(300),
+        handshake_timeout: Duration::from_secs(10),
+        // The TLS listeners advertise `h2` over ALPN, so they must speak it.
+        http2: true,
+    }
+}
+
+/// The router for one port: every request goes to the gateway.
+fn router(gateway: Arc<Gateway>, port: u16, scheme: Scheme) -> Router {
+    Router::new().fallback(move |request: rusty_axum::Request| {
+        let gateway = Arc::clone(&gateway);
+        async move {
+            // The client address, for the forwarded-for chain a proxied
+            // backend appends to.
+            let peer = request.peer_addr().map(|addr| addr.ip());
+            let request = match convert::request(request) {
+                Ok(request) => request,
+                Err(refused) => return refused,
+            };
+            let response = match gateway.handle(port, peer, scheme, request).await {
+                Ok(response) => response,
+                Err(never) => match never {},
+            };
+            convert::response(response).await
         }
     })
 }
 
-async fn accept_loop(
-    gateway: Arc<Gateway>,
+/// How a port treats an accepted socket.
+struct Acceptor {
     port: u16,
-    listener: TcpListener,
-    shutdown: CancellationToken,
-    limits: LimitsLayer,
-) {
-    loop {
-        let stream = tokio::select! {
-            _ = shutdown.cancelled() => break,
-            accepted = listener.accept() => match accepted {
-                Ok((stream, peer)) => (stream, peer),
-                Err(err) => {
-                    // A failed accept is usually per-connection (fd limits,
-                    // a client that vanished); tearing down the listener
-                    // would turn a transient problem into an outage.
-                    rusty_log::warn!(%port, %err, "accept failed");
-                    continue;
-                }
-            },
-        };
+    tls: Option<Arc<TlsTerminator>>,
+    passthrough: Option<Arc<Passthrough>>,
+}
 
-        let (stream, peer) = stream;
-        // The client address, for the forwarded-for chain a proxied backend
-        // appends to.
-        let peer = Some(peer.ip());
-
+impl Accept for Acceptor {
+    fn accept(&self, tcp: TcpStream, _peer: SocketAddr) -> BoxFuture<'static, Accepted> {
         // A passthrough port never terminates: it forwards the bytes as they
         // arrive, which is the whole point of `protocol: TLS` in the Gateway
         // API's passthrough mode.
-        if let Some(forwarder) = gateway.passthrough(port) {
-            tokio::spawn(async move { forwarder.forward(stream).await });
-            continue;
+        if let Some(forwarder) = self.passthrough.clone() {
+            rusty_tokio::spawn(async move { forwarder.forward(tcp).await });
+            return Box::pin(async { Accepted::Done });
         }
-
-        let terminator = gateway.tls(port);
-        let gateway = Arc::clone(&gateway);
-        let shutdown = shutdown.clone();
-        let limits = limits.clone();
-
-        tokio::spawn(async move {
-            match terminator {
-                Some(terminator) => {
-                    // The handshake happens on this connection's own task, so
-                    // a slow or hostile client stalls only itself rather than
-                    // holding up the accept loop for everyone.
-                    let tls = match terminator.accept(stream).await {
-                        Ok(tls) => tls,
-                        Err(err) => {
-                            rusty_log::debug!(%port, %err, "TLS handshake failed");
-                            return;
-                        }
-                    };
-                    serve_connection(tls, gateway, port, Scheme::Https, peer, limits, shutdown)
-                        .await;
-                }
-                None => {
-                    serve_connection(stream, gateway, port, Scheme::Http, peer, limits, shutdown)
-                        .await;
+        let Some(terminator) = self.tls.clone() else {
+            return Box::pin(async move { Accepted::Plain(tcp) });
+        };
+        let port = self.port;
+        // The handshake runs on the connection's own task, so a slow or
+        // hostile client stalls only itself.
+        Box::pin(async move {
+            match terminator.accept(tcp).await {
+                Ok(tls) => Accepted::Tls(Box::new(tls)),
+                Err(err) => {
+                    rusty_log::debug!(%port, %err, "TLS handshake failed");
+                    Accepted::Done
                 }
             }
-        });
-    }
-}
-
-/// Serve one connection, whether it arrived over TLS or in the clear.
-///
-/// Generic over the stream so the TLS and cleartext paths share every line
-/// after the handshake: a second copy of this would be a second place for the
-/// graceful-shutdown handling to drift.
-async fn serve_connection<S>(
-    stream: S,
-    gateway: Arc<Gateway>,
-    port: u16,
-    scheme: Scheme,
-    peer: Option<std::net::IpAddr>,
-    limits: LimitsLayer,
-    shutdown: CancellationToken,
-) where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
-    // `tower::service_fn`, not hyper's: the limits layer is a tower layer, so
-    // the stack is built in tower terms and bridged to hyper once at the
-    // outside.
-    let service = TowerToHyperService::new(limits.layer(tower::service_fn(move |request| {
-        let gateway = Arc::clone(&gateway);
-        async move { gateway.handle(port, peer, scheme, request).await }
-    })));
-
-    let builder = ConnBuilder::new(TokioExecutor::new());
-    let connection = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
-    tokio::pin!(connection);
-
-    tokio::select! {
-        result = connection.as_mut() => {
-            if let Err(err) = result {
-                rusty_log::debug!(%port, %err, "connection closed with error");
-            }
-        }
-        _ = shutdown.cancelled() => {
-            // Let in-flight requests finish; MCP calls can be long.
-            connection.as_mut().graceful_shutdown();
-            let _ = connection.await;
-        }
+        })
     }
 }
 
@@ -203,23 +204,23 @@ async fn serve_connection<S>(
 async fn signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{SignalKind, signal};
+        use rusty_tokio::signal::{SignalKind, signal};
         let mut term = match signal(SignalKind::terminate()) {
             Ok(term) => term,
             Err(err) => {
                 rusty_log::warn!(%err, "cannot listen for SIGTERM; only SIGINT will stop the gateway");
-                let _ = tokio::signal::ctrl_c().await;
+                let _ = rusty_tokio::signal::ctrl_c().await;
                 return;
             }
         };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
+        rusty_tokio::select! {
+            _ = rusty_tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
         }
     }
 
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        let _ = rusty_tokio::signal::ctrl_c().await;
     }
 }

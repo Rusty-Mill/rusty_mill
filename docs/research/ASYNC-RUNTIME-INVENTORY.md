@@ -156,12 +156,11 @@ They move when `adk-models` or `adk-mcp` moves.
 #911 tier A (2026-10-25): `skillopt-core`, `agentgateway-agui` and
 `rusty_mill_board` are on `rusty_tokio`, and `rk-mcp`'s tests are. `rk-mcp`
 keeps `tokio::sync::Mutex` for its connection lock, which is held across
-remote awaits, until #1064 makes `rusty_tokio`'s mutex cancellation-safe. Four tier A rows stay on tokio because
-of the runtime boundary: `rusty_tokio`'s timers, I/O and processes need a
+remote awaits, until #1064 makes `rusty_tokio`'s mutex cancellation-safe. Three tier A rows stay on tokio because
+of the runtime boundary (a fourth, `agentgateway-tls`, moved with the gateway in #885): `rusty_tokio`'s timers, I/O and processes need a
 `rusty_tokio` runtime, and these crates run on a tokio one. `rk-compose`'s
 checks (`tokio::process`, `time::timeout`) run inside `rk-app` (tier C);
-`skillopt-cli` drives `skillopt-model`'s `reqwest`; `agentgateway-tls` is the
-tokio-to-`rusty_tokio` I/O bridge for `agentgateway`; and
+`skillopt-cli` drives `skillopt-model`'s `reqwest`; and
 `rusty-hister-model`'s tests drive `sqlx` through `rusty-db`. Each moves with
 the tier C crate that holds it.
 `rusty_tonic` (tier B) builds its tonic-oracle test streams with
@@ -201,13 +200,13 @@ through `Cargo.lock`. The counts are not a vetted audit.
 
 | Crate | Path | Deps | Files | API used (top 6, count) | Tokio-bound deps | Uses (in-house, async) | Gaps | Tier |
 |---|---|---|---|---|---|---|---|---|
-| `agentgateway` | `apps/rusty_agent_gateway/crates/agentgateway` | t tu | 21 | t::test×292, t::spawn×27, t::net::TcpListener::bind×26, tu::sync::CancellationToken×16, t::time::sleep×8, t::select!×3, +11 | axum, hyper, hyper-util, tower | agentgateway-agui, agentgateway-auth, agentgateway-llm, agentgateway-mcp, agentgateway-proxy, agentgateway-tls, rusty-mcp, rusty_mcp_axum, rusty_mcp_server | G1 G4 G6 G8 G9 | C |
+| `agentgateway` | `apps/rusty_agent_gateway/crates/agentgateway` | t(dev) tu(dev) | — | — (server on `rusty_axum`, `#[rusty_tokio::main]`, #885; integration tests keep tokio for their axum/rmcp/reqwest clients and mocks) | tower-layer, tower-service (MCP handler, #886) | rusty-mcp | — | done |
 | `agentgateway-agui` | `apps/rusty_agent_gateway/crates/agentgateway-agui` | t(dev) | 1 | t::test×2 | — | — | — | A |
-| `agentgateway-auth` | `apps/rusty_agent_gateway/crates/agentgateway-auth` | t | 1 | t::test×16, t::time::timeout_at×1 | — (client on rusty_request) | rusty-mcp | — | A |
-| `agentgateway-llm` | `apps/rusty_agent_gateway/crates/agentgateway-llm` | as t | 2 | t::test×3, t::time::sleep×1, t::time::timeout_at×1, as::stream!×1 | — (clients on rusty_request) | — | G7 | B |
-| `agentgateway-mcp` | `apps/rusty_agent_gateway/crates/agentgateway-mcp` | t tu(dev) | 3 | t::test×28, t::task::spawn_blocking×2, t::time::timeout×2, t::runtime::Handle×1, t::net::TcpListener×1, tu::sync::CancellationToken×1, +2 | tonic, tonic-prost | rusty-mcp, rusty_mcp_client_native, rusty_mcp_server | G1 G8 G9 | C |
-| `agentgateway-proxy` | `apps/rusty_agent_gateway/crates/agentgateway-proxy` | t | 1 | t::time::sleep×1, t::time::timeout×1 | — (client on rusty_request, #885) | — | — | C |
-| `agentgateway-tls` | `apps/rusty_agent_gateway/crates/agentgateway-tls` | t | 3 | t::test×3, t::io::duplex×3, t::net::TcpStream×2, t::io::AsyncRead×2, t::io::AsyncWrite×2, t::time::timeout×1, +7 | — | — | G1 | A |
+| `agentgateway-auth` | `apps/rusty_agent_gateway/crates/agentgateway-auth` | — | 0 | — (moved to `rusty_tokio`, #885) | — | rusty-mcp | — | done |
+| `agentgateway-llm` | `apps/rusty_agent_gateway/crates/agentgateway-llm` | as | 1 | — (moved to `rusty_tokio`, #885; `async-stream` stays) | — | — | G7 | B |
+| `agentgateway-mcp` | `apps/rusty_agent_gateway/crates/agentgateway-mcp` | t(dev) tu(dev) | — | — (moved to `rusty_tokio`, #885; tests host the scripted gRPC processor on tokio for axum) | tonic, tonic-prost | rusty-mcp, rusty_mcp_client_native, rusty_mcp_server | — | done |
+| `agentgateway-proxy` | `apps/rusty_agent_gateway/crates/agentgateway-proxy` | — | 0 | — (moved to `rusty_tokio`, #885) | — | — | — | done |
+| `agentgateway-tls` | `apps/rusty_agent_gateway/crates/agentgateway-tls` | — | 0 | — (moved to `rusty_tokio`, the I/O bridge is gone, #885) | — | — | — | done |
 | `rusty-hister-model` | `apps/rusty_hister/crates/rusty-hister-model` | t(dev) | 7 | t::test×120 | — | rusty-db | — | A |
 | `rusty_homelab_mcp` | `apps/rusty_homelab_mcp` | t | 7 | t::test×23, t::runtime::Handle×5, t::runtime::Handle::current×2, t::main×1, t::task::spawn_blocking×1 | — | rusty_fedora, rusty_http, rusty_mcp_server, rusty_opnsense, rusty_proxmox | G1 G4 | B |
 | `rk-agui` | `apps/rusty_key/crates/agui` | t | 2 | t::runtime::Handle×1, t::sync::mpsc×1, t::sync::oneshot×1, t::task::JoinHandle×1, t::spawn×1, t::select!×1, +1 | aisdk | rk-app, rk-constrain | G1 G6 G9 | C |

@@ -15,11 +15,12 @@
 //! serves requests on. So this file holds exactly one test, and `cargo test`
 //! gives it a binary of its own.
 
+mod common;
+
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
 use agentgateway_mcp::{McpRequest, McpRequestResult, McpResponseResult, request_result};
 use rmcp::{ServiceExt, model::CallToolRequestParams, transport::StreamableHttpClientTransport};
@@ -220,12 +221,7 @@ async fn a_guardrails_metadata_reaches_the_collector_as_span_attributes() {
 
     let (processor_host, stop_processor) = processor().await;
 
-    let port = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("should bind");
-        listener.local_addr().expect("addr").port()
-    };
+    let port = common::free_port().await;
     let yaml = format!(
         r#"
 binds:
@@ -255,12 +251,12 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 

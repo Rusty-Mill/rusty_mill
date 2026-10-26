@@ -1,0 +1,12 @@
+---
+category: Changed
+changelog: agentgateway serves on rusty_axum and runs on rusty_tokio, so it no longer depends directly on hyper, hyper-util, tower, tokio or tokio-util; rusty_axum gains serve_with and Accept, and rusty-mcp's LimitsLayer a rusty-axum middleware (#885).
+---
+## 2026-10-26 - agentgateway: the server is rusty_axum on rusty_tokio
+
+- **Changed:** the gateway's listeners are `rusty_axum` servers and `main` is `#[rusty_tokio::main]` (#885). HTTP/1.1 and, over TLS, `h2` by ALPN are served on one port as before. TLS termination hands `rusty_tls`'s stream straight to the server, so `agentgateway-tls`'s tokio I/O bridge is gone. `agentgateway`, `-tls`, `-auth`, `-llm`, `-proxy` and `-mcp` no longer depend directly on `hyper`, `hyper-util`, `tower`, `tokio` or `tokio-util`, and `-a2a` drops `rusty_request`'s `tokio` feature. `tower-layer` and `tower-service` stay for the MCP handler until #886, and `tokio` stays in the build through `rusty-mcp`'s `tower` layers until then; nothing the gateway runs needs a tokio runtime.
+- **Added:** `rusty_axum::serve_with(listener, accept, options, router)` and the `Accept` trait, which take each accepted socket before HTTP and return it plain, as a TLS stream, or as taken over (`Accepted::Done`). `serve` is `serve_with` with a fixed acceptor. The gateway picks a certificate by SNI there, and forwards a passthrough port's bytes without terminating them.
+- **Added:** `rusty-mcp`'s `rusty-axum` feature makes `LimitsLayer` a `rusty_axum` middleware too, with the same `503` plus `Retry-After: 1` and `504` answers as the `tower` layer. The gateway mounts one layer on every port's router, so the permit count is shared across ports, as before.
+- **Changed:** every request body is read whole before routing, capped at the largest limit any route accepts. A route with a lower limit refuses past its own with its own `413`. A request head may be up to 64 KiB, a port serves at most 16384 connections at once, a keep-alive connection closes after 5 minutes idle, and a TLS handshake has 10 seconds.
+- **Changed:** a response of known size up to 1 MiB is sent whole with its `Content-Length`. A larger one, or one of unknown size, streams as it arrives.
+- **Known limitations:** response trailers are not sent, and a response header value that is not text is dropped (logged at debug). The integration tests keep tokio for their `reqwest`, `rmcp` and `axum` clients and mocks, and run the gateway on its own `rusty_tokio` thread. Moving them is a follow-up.

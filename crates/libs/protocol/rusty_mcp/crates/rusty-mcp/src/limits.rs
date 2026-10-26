@@ -19,7 +19,8 @@
 //!
 //! Apply it with `Router::layer` (or `ServiceBuilder::layer`) on the MCP
 //! route. Put it outside [`crate::auth::RequireAuthLayer`] so that shed
-//! requests never reach token validation.
+//! requests never reach token validation. With the `rusty-axum` feature it is
+//! also `rusty_axum` middleware, timed on `rusty_tokio`: `Router::layer(limits)`.
 //!
 //! # Shedding, not queueing
 //!
@@ -205,6 +206,53 @@ where
             // The permit drops here, after the response exists — so the count
             // tracks requests being handled, not requests being streamed.
         })
+    }
+}
+
+/// The same bounds around a `rusty_axum` router's requests.
+#[cfg(feature = "rusty-axum")]
+impl rusty_axum::middleware::Middleware for LimitsLayer {
+    fn call(
+        &self,
+        request: rusty_axum::Request,
+        next: rusty_axum::middleware::Next,
+    ) -> rusty_axum::BoxFuture<'static, rusty_axum::Response> {
+        let admission = self.admission.clone();
+        let timeout = self.timeout;
+        Box::pin(async move {
+            let _permit = match admission.as_ref().map(Admission::try_admit) {
+                Some(Ok(permit)) => Some(permit),
+                Some(Err(rejection)) => {
+                    rusty_log::warn!("shedding a request: the concurrency limit is reached");
+                    return axum_response(rejection);
+                }
+                None => None,
+            };
+            let call = next.run(request);
+            let Some(timeout) = timeout else {
+                return call.await;
+            };
+            match rusty_tokio::time::timeout(timeout, call).await {
+                Ok(response) => response,
+                Err(_) => {
+                    rusty_log::warn!(
+                        timeout_ms = timeout.as_millis() as u64,
+                        "a request produced no response within the timeout"
+                    );
+                    axum_response(Rejection::TIMED_OUT)
+                }
+            }
+        })
+    }
+}
+
+#[cfg(feature = "rusty-axum")]
+fn axum_response(rejection: Rejection) -> rusty_axum::Response {
+    let response = rusty_axum::Response::new(rejection.status, rejection.body)
+        .with_header("content-type", "text/plain; charset=utf-8");
+    match rejection.retry_after_secs {
+        Some(secs) => response.with_header("retry-after", &secs.to_string()),
+        None => response,
     }
 }
 
@@ -423,5 +471,91 @@ mod tests {
         assert_eq!(layer.max_concurrent(), None);
         assert_eq!(layer.timeout(), None);
         assert_eq!(layer.available(), None);
+    }
+}
+
+#[cfg(all(test, feature = "rusty-axum"))]
+mod axum_tests {
+    use super::*;
+
+    use rusty_axum::routing::get;
+    use rusty_axum::{Method, Router};
+
+    /// `/slow` answers after 200 ms, `/stall` after 30 s, `/fast` at once.
+    fn router(limits: LimitsLayer) -> Router {
+        Router::new()
+            .route(
+                "/slow",
+                get(|| async {
+                    rusty_tokio::time::sleep(Duration::from_millis(200)).await;
+                    "slow"
+                }),
+            )
+            .route(
+                "/stall",
+                get(|| async {
+                    rusty_tokio::time::sleep(Duration::from_secs(30)).await;
+                    "stall"
+                }),
+            )
+            .route("/fast", get(|| async { "fast" }))
+            .layer(limits)
+    }
+
+    async fn get_path(router: &Router, path: &str) -> rusty_axum::Response {
+        router
+            .call(rusty_axum::Request::new(Method::Get, path))
+            .await
+    }
+
+    #[rusty_tokio::test]
+    async fn no_limits_configured_changes_nothing() {
+        let router = router(LimitsLayer::new());
+        assert_eq!(get_path(&router, "/fast").await.status.as_u16(), 200);
+    }
+
+    #[rusty_tokio::test]
+    async fn over_the_limit_is_shed_with_retry_after_and_the_permit_comes_back() {
+        let layer = LimitsLayer::new().with_max_concurrent(1);
+        let app = router(layer.clone());
+        let held = {
+            let app = app.clone();
+            rusty_tokio::spawn(async move { get_path(&app, "/slow").await })
+        };
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let shed = get_path(&app, "/fast").await;
+        assert_eq!(shed.status.as_u16(), 503);
+        assert_eq!(shed.headers.get("retry-after"), Some("1"));
+        assert_eq!(
+            shed.headers.get("content-type"),
+            Some("text/plain; charset=utf-8")
+        );
+        assert_eq!(
+            shed.body.as_bytes(),
+            Some(Rejection::OVERLOADED.body.as_bytes())
+        );
+
+        let first = held.await.expect("join");
+        assert_eq!(first.status.as_u16(), 200);
+        assert_eq!(
+            layer.available(),
+            Some(1),
+            "the shed request took no permit"
+        );
+        assert_eq!(get_path(&app, "/fast").await.status.as_u16(), 200);
+    }
+
+    #[rusty_tokio::test]
+    async fn a_slow_request_times_out_and_a_quick_one_does_not() {
+        let app = router(LimitsLayer::new().with_timeout(Duration::from_millis(50)));
+        let late = get_path(&app, "/stall").await;
+        assert_eq!(late.status.as_u16(), 504);
+        assert!(late.headers.get("retry-after").is_none());
+        assert_eq!(
+            late.body.as_bytes(),
+            Some(Rejection::TIMED_OUT.body.as_bytes())
+        );
+        assert_eq!(get_path(&app, "/fast").await.status.as_u16(), 200);
     }
 }
