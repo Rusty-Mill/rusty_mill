@@ -27,6 +27,22 @@ pub enum Command {
     /// The events after `after` (or from now), then the cursor to resume
     /// from; with `follow`, every later event until the server goes away.
     Events { after: Option<Cursor>, follow: bool },
+    /// Runs a configured action with its arguments.
+    Do {
+        action: String,
+        args: Vec<(String, String)>,
+    },
+    /// Works with the config file.
+    Config(ConfigCommand),
+}
+
+/// What `config` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigCommand {
+    /// Checks a config, the given file or the usual one, without running it.
+    Check(Option<PathBuf>),
+    /// Lists the configured actions and bindings.
+    List,
 }
 
 /// What `api` prints.
@@ -121,6 +137,8 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "help" | "--help" | "-h" => help(rest),
         "api" => api(rest),
         "events" => events(rest),
+        "do" => run_action(rest),
+        "config" => config(rest),
         _ => args
             .split(|a| a == "+")
             .map(|args| call(args, defaults))
@@ -142,6 +160,31 @@ fn api(args: &[String]) -> Result<Command, String> {
         [verb] if verb == "list" => Ok(Command::Api(Api::List)),
         [verb, name] if verb == "describe" => known(name).map(|m| Command::Api(Api::Describe(m))),
         _ => Err("usage: api list | api describe METHOD".into()),
+    }
+}
+
+fn run_action(args: &[String]) -> Result<Command, String> {
+    let Some((action, rest)) = args.split_first() else {
+        return Err("usage: do ACTION [--ARG VALUE]...".into());
+    };
+    let args = flags(action, rest)?
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    Ok(Command::Do {
+        action: action.clone(),
+        args,
+    })
+}
+
+fn config(args: &[String]) -> Result<Command, String> {
+    match args {
+        [verb] if verb == "check" => Ok(Command::Config(ConfigCommand::Check(None))),
+        [verb, path] if verb == "check" => {
+            Ok(Command::Config(ConfigCommand::Check(Some(path.into()))))
+        }
+        [verb] if verb == "list" => Ok(Command::Config(ConfigCommand::List)),
+        _ => Err("usage: config check [PATH] | config list".into()),
     }
 }
 
@@ -175,24 +218,12 @@ fn known(name: &str) -> Result<&'static Method, String> {
 }
 
 fn call(args: &[String], defaults: &Defaults) -> Result<Call, String> {
-    let Some((name, mut rest)) = args.split_first() else {
+    let Some((name, rest)) = args.split_first() else {
         return Err("empty request between `+`".into());
     };
     let method = known(name)?;
     let mut values = Vec::new();
-    while let Some((flag, tail)) = rest.split_first() {
-        let flag = flag
-            .strip_prefix("--")
-            .ok_or_else(|| format!("{name}: expected a --flag, got `{flag}`"))?;
-        let (key, text, tail) = match flag.split_once('=') {
-            Some((key, text)) => (key, text, tail),
-            None => {
-                let (text, tail) = tail
-                    .split_first()
-                    .ok_or_else(|| format!("{name}: --{flag} needs a value"))?;
-                (flag, text.as_str(), tail)
-            }
-        };
+    for (key, text) in flags(name, rest)? {
         let param = method
             .params
             .iter()
@@ -202,7 +233,6 @@ fn call(args: &[String], defaults: &Defaults) -> Result<Call, String> {
             param.name,
             arg(param.ty, text).map_err(|e| reason(name, &e))?,
         ));
-        rest = tail;
     }
     for param in method.params {
         let given = values.iter().any(|(n, _)| *n == param.name);
@@ -228,6 +258,28 @@ fn call(args: &[String], defaults: &Defaults) -> Result<Call, String> {
     })
 }
 
+/// `--flag=value` or `--flag value` pairs after `command`, in order.
+fn flags<'a>(command: &str, mut rest: &'a [String]) -> Result<Vec<(&'a str, &'a str)>, String> {
+    let mut flags = Vec::new();
+    while let Some((flag, tail)) = rest.split_first() {
+        let flag = flag
+            .strip_prefix("--")
+            .ok_or_else(|| format!("{command}: expected a --flag, got `{flag}`"))?;
+        let (key, text, tail) = match flag.split_once('=') {
+            Some((key, text)) => (key, text, tail),
+            None => {
+                let (text, tail) = tail
+                    .split_first()
+                    .ok_or_else(|| format!("{command}: --{flag} needs a value"))?;
+                (flag, text.as_str(), tail)
+            }
+        };
+        flags.push((key, text));
+        rest = tail;
+    }
+    Ok(flags)
+}
+
 /// A flag's value: an id flag that is not a full id is a target.
 fn arg(ty: Ty, text: &str) -> Result<Arg, CallError> {
     match (ty, text.parse::<Uuid>()) {
@@ -251,13 +303,21 @@ pub fn usage(method: Option<&Method>) -> String {
                 "usage: rusty-mux-ctl [--socket PATH] [--json] COMMAND [--FLAG VALUE]... [+ COMMAND ...]\n\
                  The socket defaults to $RUSTY_MUX_SOCKET. An id flag also takes a name, a\n\
                  position or an id suffix, optionally as a path SESSION/WINDOW/BLOCK, and\n\
-                 defaults to $RUSTY_MUX_SESSION, $RUSTY_MUX_WINDOW or $RUSTY_MUX_BLOCK.\n\ncommands:\n",
+                 defaults to $RUSTY_MUX_SESSION, $RUSTY_MUX_WINDOW or $RUSTY_MUX_BLOCK.\n\
+                 Actions come from $RUSTY_MUX_CONFIG, or rusty_mux/config.json in the\n\
+                 config directory.\n\ncommands:\n",
             );
             for m in schema::CATALOG {
                 text.push_str(&format!("  {:<16} {}\n", m.name, m.doc));
             }
             text.push_str(
                 "  events           Print missed events: [--after EPOCH:SEQ] [--follow]\n",
+            );
+            text.push_str(
+                "  do               Run a configured action: do ACTION [--ARG VALUE]...\n",
+            );
+            text.push_str(
+                "  config           Check or list the config: config check [PATH] | config list\n",
             );
             text.push_str("  api              List methods, or describe one as JSON: api list | api describe METHOD\n");
             text.push_str("  help             Show a command's flags: help COMMAND\n");

@@ -118,7 +118,7 @@ fn start_full_server() -> (PathBuf, FullBacklog) {
 fn mcp(socket: &Path, timeout: Duration) -> Arc<Server> {
     let env = Env {
         socket: Some(socket.to_path_buf()),
-        here: Default::default(),
+        ..Env::default()
     };
     Arc::new(rusty_mux_mcp::server(env, timeout).expect("server"))
 }
