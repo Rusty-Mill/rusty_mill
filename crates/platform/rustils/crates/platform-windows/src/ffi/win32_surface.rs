@@ -255,3 +255,22 @@ pub use windows_sys::Win32::System::Threading::{
 // specifically so a genuinely different failure there isn't silently
 // papered over).
 pub use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+
+// Peer identity and owner-only socket files (rusty_mux on Windows):
+// `sys::security::UserSid`, `sys::security::restrict_to_owner` and
+// `sys::net::unix_peer_pid`, plus the DACL read-back the tests use.
+pub use windows_sys::Win32::Networking::WinSock::{WSAIoctl, SIO_AF_UNIX_GETPEERPID};
+pub use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
+pub use windows_sys::Win32::Security::{
+    AclSizeInformation, EqualSid, GetAce, GetAclInformation, GetKernelObjectSecurity,
+    GetSecurityDescriptorDacl, GetTokenInformation, SetKernelObjectSecurity, TokenUser,
+    ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    PSID, TOKEN_QUERY, TOKEN_USER,
+};
+pub use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL, WRITE_DAC,
+};
+pub use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+pub use windows_sys::Win32::System::Threading::OpenProcessToken;

@@ -12,8 +12,7 @@
 //! [`WindowsPtyMaster::output_handle`]).
 
 use std::ffi::{OsStr, OsString};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::process::{Child, Command, GroupSpec, Spawner};
@@ -29,8 +28,21 @@ use crate::sys::pty as syspty;
 /// [`crate::WindowsSpawner`].
 pub struct WindowsPty;
 
-impl Pty for WindowsPty {
-    fn spawn(&self, cmd: &Command, size: WinSize) -> Result<(Box<dyn PtyMaster>, Box<dyn Child>)> {
+/// Serializes `CreatePseudoConsole` + `CreateProcessW` across threads.
+/// This crate's own tests saw one console's output reach another when
+/// consoles were created concurrently; creating them one at a time costs
+/// nothing a caller would notice.
+static SPAWN: Mutex<()> = Mutex::new(());
+
+impl WindowsPty {
+    /// [`Pty::spawn`] with the concrete types, for callers that need
+    /// [`WindowsPtyMaster::hang_up`] or `WindowsChild`'s inherent methods.
+    /// Mirrors `platform-linux`'s `LinuxPty::spawn_concrete`.
+    pub fn spawn_concrete(
+        &self,
+        cmd: &Command,
+        size: WinSize,
+    ) -> Result<(WindowsPtyMaster, WindowsChild)> {
         // Same contract #82's Linux backend enforces
         // (`platform::pty::Pty::spawn`'s own doc): a pty-hosted child is
         // unconditionally a fresh session/group, so there is no way to
@@ -51,13 +63,14 @@ impl Pty for WindowsPty {
         // exactly like `WindowsSpawner::spawn` already does.
         let line = crate::winargv::build_command_line(&resolved, &args)?;
 
+        let _serial = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
         let (hpc, input, output) = syspty::create_pty(size)?;
         match syspty::spawn_attached(hpc, &line, &cmd.cwd, &cmd.env) {
             Ok((process, pid)) => {
                 // No Job Object — see `sys::pty::spawn_attached`'s own
                 // doc comment for why (a real, deliberate scope
                 // reduction, not a settled design choice).
-                let closed = Arc::new(AtomicBool::new(false));
+                let closed = Arc::new(Mutex::new(false));
                 // `Ok(0)` once the child exits is this trait's own
                 // documented contract (`platform::pty::PtyMaster::read`)
                 // — ConPTY doesn't provide that spontaneously (see
@@ -68,24 +81,31 @@ impl Pty for WindowsPty {
                 syspty::spawn_exit_watcher(&process, hpc, Arc::clone(&closed));
                 let child = WindowsChild::from_parts(process, None, pid);
                 Ok((
-                    Box::new(WindowsPtyMaster {
+                    WindowsPtyMaster {
                         hpc,
                         input,
                         output,
                         closed,
-                    }),
-                    Box::new(child),
+                    },
+                    child,
                 ))
             }
             Err(e) => {
                 // The pseudo console outlived a failed spawn attempt —
                 // tear it down here rather than leaking it. Nothing was
                 // ever shared with a watcher thread on this path, so a
-                // direct `close` (no compare-exchange) is correct.
+                // direct `close` (no guard) is correct.
                 syspty::close(hpc, &output);
                 Err(e)
             }
         }
+    }
+}
+
+impl Pty for WindowsPty {
+    fn spawn(&self, cmd: &Command, size: WinSize) -> Result<(Box<dyn PtyMaster>, Box<dyn Child>)> {
+        let (master, child) = self.spawn_concrete(cmd, size)?;
+        Ok((Box::new(master), Box::new(child)))
     }
 }
 
@@ -97,13 +117,13 @@ pub struct WindowsPtyMaster {
     hpc: w::HPCON,
     input: OwnedWinHandle,
     output: OwnedWinHandle,
-    /// Shared with the background exit-watcher thread
-    /// (`syspty::spawn_exit_watcher`): guards `ClosePseudoConsole`
-    /// running exactly once, whichever of "the child exits" or "the
-    /// caller drops this master" happens first. The watcher never
-    /// touches `output` (see its own doc comment for why), so this is
-    /// the only field that needs to be shared with it.
-    closed: Arc<AtomicBool>,
+    /// `true` once `ClosePseudoConsole` has run. Shared with the
+    /// background exit-watcher thread (`syspty::spawn_exit_watcher`);
+    /// every close holds it across the call and [`PtyMaster::resize`]
+    /// holds it across `ResizePseudoConsole`, so nothing reaches a
+    /// closed console. The watcher never touches `output` (see its own
+    /// doc comment for why), so this is the only field it shares.
+    closed: Arc<Mutex<bool>>,
 }
 
 impl WindowsPtyMaster {
@@ -122,6 +142,21 @@ impl WindowsPtyMaster {
     pub fn output_handle(&self) -> &OwnedWinHandle {
         &self.output
     }
+
+    /// Close the pseudo console without draining its output pipe — the
+    /// exit watcher's close, on demand. A concurrent [`PtyMaster::read`]
+    /// then returns `Ok(0)` once conhost has flushed, and the console's
+    /// program gets Windows' console-close notification. Later
+    /// [`PtyMaster::resize`] calls fail; [`PtyMaster::write`] fails once
+    /// conhost has gone.
+    ///
+    /// Blocks while conhost is stuck writing into a full, unread output
+    /// pipe, so a caller that is not also reading should run it on a
+    /// thread of its own. Idempotent: a second call, or one after the
+    /// program exited, returns at once.
+    pub fn hang_up(&self) {
+        syspty::hang_up(self.hpc, &self.closed);
+    }
 }
 
 impl PtyMaster for WindowsPtyMaster {
@@ -133,31 +168,58 @@ impl PtyMaster for WindowsPtyMaster {
         crate::sys::fileio::write(&self.input, buf)
     }
 
+    /// Fails with `BrokenPipe` once the console is closed, and with
+    /// `WouldBlock` while a close (or another resize) is running.
     fn resize(&self, size: WinSize) -> Result<()> {
+        let closed = match self.closed.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                return Err(PlatformError::new(
+                    ErrorKind::WouldBlock,
+                    OsCode::None,
+                    "ResizePseudoConsole: the pseudo console is busy closing",
+                ))
+            }
+        };
+        if *closed {
+            return Err(PlatformError::new(
+                ErrorKind::BrokenPipe,
+                OsCode::None,
+                "ResizePseudoConsole: the pseudo console is closed",
+            ));
+        }
         syspty::resize(self.hpc, size)
     }
 }
 
 impl Drop for WindowsPtyMaster {
     fn drop(&mut self) {
-        // The background exit-watcher thread may have already won this
-        // race (the child exited first) and already called bare
-        // `ClosePseudoConsole` itself (`syspty::spawn_exit_watcher`'s own
-        // doc comment) — the compare-exchange makes the real close run
-        // exactly once either way. If this `Drop` wins instead (the
-        // caller is giving up before the child exits), it uses the
-        // draining `syspty::close`, not the watcher's bare call: this is
-        // the one path where a concurrent reader can't exist to race
-        // (the caller just gave up its only handle to read with), so
-        // draining first — avoiding a `ClosePseudoConsole` deadlock
-        // against an un-drained pipe — is both safe and necessary here
-        // (`dropping_an_undrained_master_does_not_deadlock`).
-        if self
-            .closed
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            syspty::close(self.hpc, &self.output);
+        // `&mut self` rules out a concurrent `resize` or `hang_up` on this
+        // master, so a busy lock means the exit watcher is inside
+        // `ClosePseudoConsole`. That close may be blocked on a full,
+        // unread output pipe: waiting for it here could hang forever,
+        // whereas releasing our handles (which happens right after this
+        // body) breaks the pipe and lets it finish.
+        //
+        // A free lock with the console still open means the caller is
+        // giving up before the child exits. Then the draining
+        // `syspty::close` runs, not the watcher's bare call: nobody can
+        // be reading concurrently (the caller just gave up its only
+        // handle to read with), so draining first, which keeps
+        // `ClosePseudoConsole` from deadlocking against an un-drained
+        // pipe, is both safe and necessary
+        // (`dropping_an_undrained_master_does_not_deadlock`). Holding the
+        // lock across it keeps the watcher out until it is done.
+        let mut closed = match self.closed.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(TryLockError::WouldBlock) => return,
+        };
+        if *closed {
+            return;
         }
+        syspty::close(self.hpc, &self.output);
+        *closed = true;
     }
 }

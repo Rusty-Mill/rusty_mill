@@ -1,7 +1,7 @@
 [package]
 name = "platform-windows"
 description = "Windows backend: windows-sys floor (RFC v2 §2 D-1); typed handles and safe wrappers above it."
-version = "0.27.3"
+version = "0.28.0"
 edition = "2021"
 rust-version = "1.75"
 publish = false
@@ -15,7 +15,10 @@ platform.workspace = true
 winargv.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys.workspace = true
+# `Win32_Security_Authorization` (SDDL and SID strings) is not in the
+# workspace's windows-sys feature list; naming it here keeps
+# `-p platform-windows` building on its own.
+windows-sys = { workspace = true, features = ["Win32_Security_Authorization"] }
 # D-15: rusty_win32 is the Track W backend, feature-gated behind
 # `track-w`. Previously a pinned git dependency; now a sibling crate in
 # this same workspace (rusty_mill), plain path dependency, matching the

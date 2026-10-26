@@ -23,17 +23,18 @@
 #![cfg(windows)]
 
 use std::ffi::OsStr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use platform::process::{EnvSpec, ExitStatus, GroupSpec};
-use platform::pty::Pty;
+use platform::error::ErrorKind;
+use platform::process::{Child, Command, EnvSpec, ExitStatus, GroupSpec, Signal};
+use platform::pty::{Pty, PtyMaster};
 use platform::term::WinSize;
 use platform_windows::ffi::win32_surface as w;
 use platform_windows::sys::handle::OwnedWinHandle;
 use platform_windows::sys::{fileio, proc as sysproc, pty as syspty};
-use platform_windows::{winargv, WindowsPty};
+use platform_windows::{winargv, WindowsChild, WindowsPty, WindowsPtyMaster};
 
 const READ_BUDGET: Duration = Duration::from_secs(15);
 const WAIT_BUDGET: Duration = Duration::from_secs(15);
@@ -81,13 +82,13 @@ fn command_line(program: &str, args: &[&str]) -> Vec<u16> {
 /// that fix. `output` stays a bare handle — the watcher never touches it
 /// (deliberately, to avoid racing a caller's own concurrent reads; see
 /// `spawn_exit_watcher`'s own doc comment), so there's nothing to share.
-/// `Drop` races the same `closed` compare-exchange the watcher thread
-/// does, calling `syspty::close` at most once either way.
+/// `Drop` takes the same `closed` lock the watcher thread does, calling
+/// `syspty::close` only if no close has run.
 struct TestPty {
     hpc: w::HPCON,
     input: OwnedWinHandle,
     output: OwnedWinHandle,
-    closed: Arc<AtomicBool>,
+    closed: Arc<Mutex<bool>>,
 }
 
 impl TestPty {
@@ -97,7 +98,7 @@ impl TestPty {
             hpc,
             input,
             output,
-            closed: Arc::new(AtomicBool::new(false)),
+            closed: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -111,12 +112,10 @@ impl TestPty {
 
 impl Drop for TestPty {
     fn drop(&mut self) {
-        if self
-            .closed
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
+        let mut closed = self.closed.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*closed {
             syspty::close(self.hpc, &self.output);
+            *closed = true;
         }
     }
 }
@@ -360,4 +359,176 @@ fn dropping_an_undrained_master_does_not_deadlock() {
     // tears down; reap it with the same bounded poll every other test
     // uses rather than assuming it has already exited.
     wait_bounded(&process);
+}
+
+fn concrete(program: &str, args: &[&str]) -> (WindowsPtyMaster, WindowsChild) {
+    let cmd = Command::new(program, ".").args(args.iter().copied());
+    WindowsPty
+        .spawn_concrete(&cmd, size())
+        .expect("spawn_concrete")
+}
+
+/// Bounded wait on a `WindowsChild`, `wait_bounded`'s counterpart.
+fn reap(child: &mut WindowsChild) -> ExitStatus {
+    let deadline = Instant::now() + WAIT_BUDGET;
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child did not exit within {WAIT_BUDGET:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Runs `f` on its own thread and fails the test if it has not returned
+/// within `budget`, so a hang shows up as a named failure.
+fn within(budget: Duration, what: &str, f: impl FnOnce() + Send + 'static) {
+    let (done, finished) = mpsc::channel();
+    std::thread::spawn(move || {
+        f();
+        let _ = done.send(());
+    });
+    assert!(
+        finished.recv_timeout(budget).is_ok(),
+        "{what} did not return within {budget:?}"
+    );
+}
+
+/// The first thing the Windows mux port depends on: several pseudo
+/// consoles alive in one process at once each keep their own output.
+/// The serialization above was added because consoles *created*
+/// concurrently once leaked output; a mux creates them one at a time
+/// (`spawn_concrete`'s own lock, which three threads exercise here) but
+/// keeps them all alive together, which nothing tested before. Holds
+/// `lock_pty_tests` so the other tests' direct `create_pty` calls,
+/// which bypass that lock, cannot overlap with these creations.
+#[test]
+fn several_live_consoles_keep_their_output_apart() {
+    let _guard = lock_pty_tests();
+    let names = ["alpha", "bravo", "charlie"];
+    let spawners: Vec<_> = names
+        .iter()
+        .map(|_| {
+            std::thread::spawn(|| concrete("cmd", &["/v:on", "/c", "set /p R= & echo got-!R!"]))
+        })
+        .collect();
+    let mut consoles: Vec<(WindowsPtyMaster, WindowsChild)> = spawners
+        .into_iter()
+        .map(|h| h.join().expect("spawn thread"))
+        .collect();
+
+    // All three are alive before any of them is given its input.
+    for ((master, _), name) in consoles.iter().zip(names) {
+        master
+            .write(format!("{name}\r\n").as_bytes())
+            .expect("write");
+    }
+    for ((master, _), name) in consoles.iter().zip(names) {
+        let marker = format!("got-{name}");
+        let seen = read_until(master.output_handle(), &marker, 64);
+        assert!(
+            seen.contains(&marker),
+            "{marker} missing from its console: {seen:?}"
+        );
+        for other in names.iter().filter(|n| **n != name) {
+            assert!(
+                !seen.contains(&format!("got-{other}")),
+                "got-{other} leaked into {name}'s console: {seen:?}"
+            );
+        }
+    }
+    for (_, child) in consoles.iter_mut() {
+        assert!(reap(child).success());
+    }
+}
+
+#[test]
+fn spawn_concrete_round_trips() {
+    let _guard = lock_pty_tests();
+    let (master, mut child) = concrete("cmd", &["/v:on", "/c", "set /p R= & echo got:!R!"]);
+    master.write(b"concrete\r\n").expect("write");
+    let seen = read_until(master.output_handle(), "got:concrete", 32);
+    assert!(seen.contains("got:concrete"), "saw: {seen:?}");
+    assert!(reap(&mut child).success());
+}
+
+/// `hang_up` ends a read that is blocked in another thread, with `Ok(0)`,
+/// while the program is still running.
+#[test]
+fn hang_up_ends_a_blocked_read() {
+    let _guard = lock_pty_tests();
+    let (master, mut child) = concrete("ping", &["-n", "1000", "127.0.0.1"]);
+    let master = Arc::new(master);
+    let seen = read_until(master.output_handle(), "Pinging", 32);
+    assert!(seen.contains("Pinging"), "saw: {seen:?}");
+
+    let (tx, rx) = mpsc::channel();
+    let reader = Arc::clone(&master);
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(e) => {
+                    let _ = tx.send(Err(e.kind));
+                    return;
+                }
+            }
+        }
+        let _ = tx.send(Ok(()));
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    master.hang_up();
+    let ended = rx.recv_timeout(READ_BUDGET);
+    let _ = child.kill_single(Signal::Kill);
+    reap(&mut child);
+    assert_eq!(
+        ended,
+        Ok(Ok(())),
+        "the read did not end with Ok(0) within {READ_BUDGET:?}"
+    );
+}
+
+#[test]
+fn resize_after_hang_up_is_refused() {
+    let _guard = lock_pty_tests();
+    let (master, mut child) = concrete("ping", &["-n", "1000", "127.0.0.1"]);
+    master
+        .resize(WinSize {
+            rows: 30,
+            cols: 100,
+        })
+        .expect("resize while open");
+    master.hang_up();
+    // Idempotent: the second call finds the console closed.
+    master.hang_up();
+    let err = master
+        .resize(WinSize {
+            rows: 40,
+            cols: 120,
+        })
+        .expect_err("resize after hang_up");
+    assert_eq!(err.kind, ErrorKind::BrokenPipe);
+    let _ = child.kill_single(Signal::Kill);
+    reap(&mut child);
+}
+
+/// The program ends while its output pipe is full and unread, so the
+/// exit watcher's close can be stuck inside `ClosePseudoConsole`.
+/// Dropping the master must not wait for it: it finds the lock busy,
+/// releases its handles, and that breaks the pipe the close waits on.
+#[test]
+fn drop_after_exit_with_a_full_pipe_returns() {
+    let _guard = lock_pty_tests();
+    let (master, mut child) =
+        concrete("cmd", &["/c", "for /L %i in (1,1,200000) do @echo line %i"]);
+    std::thread::sleep(Duration::from_millis(500));
+    let _ = child.kill_single(Signal::Kill);
+    reap(&mut child);
+    std::thread::sleep(Duration::from_millis(100));
+    within(WAIT_BUDGET, "dropping the master", move || drop(master));
 }

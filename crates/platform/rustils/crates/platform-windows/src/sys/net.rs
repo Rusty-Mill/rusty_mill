@@ -1122,6 +1122,38 @@ pub fn unix_local_addr(sock: &OwnedSocket) -> Result<Option<PathBuf>> {
     raw_local_addr_unix(sock.raw())
 }
 
+/// The pid of the process at the other end of a connected `AF_UNIX`
+/// socket: `WSAIoctl(SIO_AF_UNIX_GETPEERPID)`, Windows' nearest
+/// counterpart to `SO_PEERCRED`. It names a process, not a user; pair it
+/// with `sys::security::UserSid::of_pid` for a user check, keeping in
+/// mind the pid may be reused if the peer has already exited. Stays on
+/// windows-sys under `track-w`: `rusty_win32` has no `WSAIoctl` binding.
+pub fn unix_peer_pid(sock: &OwnedSocket) -> Result<u32> {
+    let mut pid: u32 = 0;
+    let mut returned: u32 = 0;
+    // SAFETY: `sock` is a valid socket; the ioctl takes no input and
+    // writes one `u32` to `pid`, a valid out-buffer of exactly that size;
+    // `returned` is a valid out-pointer; null overlapped and completion
+    // routine make the call synchronous.
+    let r = unsafe {
+        w::WSAIoctl(
+            sock.raw(),
+            w::SIO_AF_UNIX_GETPEERPID,
+            std::ptr::null(),
+            0,
+            (&mut pid as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+            None,
+        )
+    };
+    if r != 0 {
+        return Err(wsa_err("WSAIoctl(SIO_AF_UNIX_GETPEERPID)"));
+    }
+    Ok(pid)
+}
+
 // --- UDP datagram sockets (D16 final slice) --------------------------
 //
 // Connectionless: one socket both sends and receives, addressed per

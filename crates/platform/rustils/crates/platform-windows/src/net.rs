@@ -32,12 +32,13 @@
 //! `Net`'s own trait methods are thin wrappers over these constructors
 //! now, not a second copy of the same logic.
 
+use std::io;
 use std::net::SocketAddr;
 use std::os::windows::io::{AsRawSocket, RawSocket};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use platform::error::Result;
+use platform::error::{OsCode, PlatformError, Result};
 use platform::net::{Net, TcpListener, TcpStream, UdpSocket, UnixListener, UnixStream};
 
 use crate::sys::net as sysnet;
@@ -197,6 +198,50 @@ impl WindowsUnixStream {
     /// opt in.
     pub fn set_nonblocking(&self, nonblocking: bool) -> Result<()> {
         sysnet::set_nonblocking(&self.sock, nonblocking)
+    }
+
+    /// The pid of the connected peer process
+    /// (`SIO_AF_UNIX_GETPEERPID`; see `sys::net::unix_peer_pid`).
+    pub fn peer_pid(&self) -> Result<u32> {
+        sysnet::unix_peer_pid(&self.sock)
+    }
+
+    /// `SO_RCVTIMEO`, as `std::os::unix::net::UnixStream::set_read_timeout`:
+    /// a read that waits longer fails with `TimedOut` (Winsock's
+    /// `WSAETIMEDOUT`). `None` waits forever.
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        sysnet::set_read_timeout(&self.sock, timeout).map_err(to_io)
+    }
+}
+
+/// `PlatformError` to `io::Error` through the OS code when there is one,
+/// as `rusty_tokio`'s `from_platform_err` does, so std's own kind mapping
+/// applies (`WSAETIMEDOUT` reads as `TimedOut`, `WSAEWOULDBLOCK` as
+/// `WouldBlock`).
+fn to_io(e: PlatformError) -> io::Error {
+    match e.os {
+        OsCode::Win32(code) => io::Error::from_raw_os_error(code as i32),
+        OsCode::Errno(errno) => io::Error::from_raw_os_error(errno),
+        OsCode::None => io::Error::other(e),
+    }
+}
+
+/// For callers written against `std::os::unix::net::UnixStream`.
+impl io::Read for WindowsUnixStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        sysnet::read(&self.sock, buf).map_err(to_io)
+    }
+}
+
+/// For callers written against `std::os::unix::net::UnixStream`.
+impl io::Write for WindowsUnixStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        sysnet::write(&self.sock, buf).map_err(to_io)
+    }
+
+    /// Sockets have no user-space buffer here; nothing to flush.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 

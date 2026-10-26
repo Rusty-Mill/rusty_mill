@@ -46,6 +46,16 @@ use crate::ffi::win32_surface as w;
 use crate::sys::handle::OwnedWinHandle;
 use crate::sys::{fileio, nt as ntsys};
 
+/// Make `path` accessible to the current user only: its DACL becomes one
+/// protected full-access entry for this process's user SID. The
+/// counterpart of `chmod 0600` for files that must not be opened by
+/// other accounts, such as a server's `AF_UNIX` socket. Works on socket
+/// files (reparse points) because it never follows the path's reparse
+/// point. See `sys::security::restrict_to_owner`.
+pub fn restrict_to_owner(path: &Path) -> Result<()> {
+    crate::sys::security::restrict_to_owner(path)
+}
+
 /// A directory capability backed by a directory HANDLE. All operations are
 /// handle-relative (`NtCreateFile` with `RootDirectory`) — the ambient
 /// process namespace is consulted only by [`WindowsDir::open_ambient`]

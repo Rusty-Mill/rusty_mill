@@ -90,7 +90,7 @@ pub use net::{
     WindowsUnixStream,
 };
 #[cfg(windows)]
-pub use process::{WindowsChild, WindowsSpawner};
+pub use process::{is_current_user, WindowsChild, WindowsSpawner};
 #[cfg(windows)]
 pub use pty::{WindowsPty, WindowsPtyMaster};
 #[cfg(windows)]
