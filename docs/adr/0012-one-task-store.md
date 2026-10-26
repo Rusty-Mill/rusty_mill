@@ -1,6 +1,6 @@
 # ADR-0012: One task store: rusty_tick holds tasks, Mill Board is the agent view
 
-Status: Proposed
+Status: Accepted
 Date: 2026-10-26
 
 ## Context
