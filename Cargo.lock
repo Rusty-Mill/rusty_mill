@@ -12143,6 +12143,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_crdt"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "rusty_crypto_key"
 version = "0.1.0"
 dependencies = [
