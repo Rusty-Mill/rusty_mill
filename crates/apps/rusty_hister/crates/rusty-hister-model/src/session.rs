@@ -200,7 +200,7 @@ mod tests {
     #[tokio::test]
     async fn create_assigns_an_id_and_is_retrievable_by_token_hash() {
         let engine = migrated_engine().await;
-        let expires_at: DateTime<Utc> = "2030-02-01T00:00:00Z".parse().unwrap();
+        let expires_at: DateTime<Utc> = "2099-02-01T00:00:00Z".parse().unwrap();
 
         let id = WebSession::create(&engine, "token-hash-1", b"session-data", expires_at)
             .await
@@ -260,7 +260,7 @@ mod tests {
             .await
             .unwrap();
 
-        let new_expires_at: DateTime<Utc> = "2030-01-01T00:00:00Z".parse().unwrap();
+        let new_expires_at: DateTime<Utc> = "2099-01-01T00:00:00Z".parse().unwrap();
         let updated = WebSession::refresh(&engine, "token-hash-1", b"new-data", new_expires_at)
             .await
             .unwrap();
