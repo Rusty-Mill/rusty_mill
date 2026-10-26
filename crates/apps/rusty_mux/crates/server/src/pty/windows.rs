@@ -248,6 +248,15 @@ impl Pty {
 
     /// Returns once `data` is written, or the write failed; `BrokenPipe`
     /// once the console is gone.
+    ///
+    /// Input is committed when the server accepts it under the lease
+    /// (`State::input`), not when this future completes: dropping the
+    /// future, as evicting its client does, leaves the queued write to
+    /// finish whole and in order. Linux instead stops at whatever prefix
+    /// the kernel had taken, which may split a key sequence. Each
+    /// connection awaits one write at a time, so an evicted client leaves at
+    /// most one message behind, and it reaches the program ahead of any
+    /// input a later lease holder sends.
     pub(crate) async fn write_all(&self, data: &[u8]) -> io::Result<()> {
         let broken = || io::Error::from(io::ErrorKind::BrokenPipe);
         let (done, result) = oneshot::channel();

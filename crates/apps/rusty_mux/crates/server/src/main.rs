@@ -1,9 +1,9 @@
 //! `rusty-mux-server <socket>`: serves rusty_mux on a Unix socket. Each new
 //! block runs `$SHELL` (or `/bin/sh`) in `$HOME` (or `/`).
 //!
-//! On Windows (10 1803 or later, for AF_UNIX) each block runs `%COMSPEC%`
-//! (or `cmd.exe`) in `%USERPROFILE%` (or `C:\`) on a pseudo console. Put
-//! the socket under `%LOCALAPPDATA%`, for example
+//! On Windows (10 1809 or later, for ConPTY; AF_UNIX alone needs 1803)
+//! each block runs `%COMSPEC%` (or `cmd.exe`) in `%USERPROFILE%` (or `C:\`)
+//! on a pseudo console. Put the socket under `%LOCALAPPDATA%`, for example
 //! `rusty-mux-server %LOCALAPPDATA%\rusty-mux.sock`; the server limits the
 //! file to the current user.
 
