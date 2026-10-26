@@ -4,7 +4,8 @@
 use std::path::PathBuf;
 
 use rusty_mux_proto::Cursor;
-use rusty_mux_proto::schema::{self, CallError, Method, Value};
+use rusty_mux_proto::schema::{self, CallError, Entity, Method, Ty, Value};
+use rusty_uuid::Uuid;
 
 /// A parsed command line.
 #[derive(Debug, PartialEq, Eq)]
@@ -30,11 +31,53 @@ pub enum Command {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Call {
     pub method: &'static Method,
-    pub args: Vec<(&'static str, Value)>,
+    pub args: Vec<(&'static str, Arg)>,
 }
 
-/// Parses `args` (without the program name). The error is a one-line reason.
-pub fn parse(args: &[String]) -> Result<Invocation, String> {
+impl Call {
+    /// Whether an argument still names its entity by something other than
+    /// a full id.
+    pub fn has_target(&self) -> bool {
+        self.args
+            .iter()
+            .any(|(_, a)| matches!(a, Arg::Target { .. }))
+    }
+}
+
+/// An argument: a value, or a target resolved against the server's listing
+/// before the request is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Arg {
+    Value(Value),
+    /// A name, position or id suffix; see [`crate::target`].
+    Target {
+        entity: Entity,
+        spec: String,
+    },
+}
+
+/// The session, window and block a command runs in, the defaults for id
+/// flags it leaves out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Defaults {
+    pub session: Option<Uuid>,
+    pub window: Option<Uuid>,
+    pub block: Option<Uuid>,
+}
+
+impl Defaults {
+    fn get(&self, entity: Entity) -> Option<Uuid> {
+        match entity {
+            Entity::Session => self.session,
+            Entity::Window => self.window,
+            Entity::Block => self.block,
+        }
+    }
+}
+
+/// Parses `args` (without the program name), filling id flags left out
+/// from `defaults`. The error is a one-line reason.
+pub fn parse(args: &[String], defaults: &Defaults) -> Result<Invocation, String> {
     let mut socket = None;
     let mut json = false;
     let mut rest = args;
@@ -51,7 +94,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
             _ => break,
         }
     }
-    let command = command(rest)?;
+    let command = command(rest, defaults)?;
     Ok(Invocation {
         socket,
         json,
@@ -59,7 +102,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
     })
 }
 
-fn command(args: &[String]) -> Result<Command, String> {
+fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
     let Some((name, rest)) = args.split_first() else {
         return Ok(Command::Help(None));
     };
@@ -68,7 +111,7 @@ fn command(args: &[String]) -> Result<Command, String> {
         "events" => events(rest),
         _ => args
             .split(|a| a == "+")
-            .map(call)
+            .map(|args| call(args, defaults))
             .collect::<Result<_, _>>()
             .map(Command::Calls),
     }
@@ -111,7 +154,7 @@ fn known(name: &str) -> Result<&'static Method, String> {
     schema::method(name).ok_or_else(|| format!("unknown command `{name}`; try `help`"))
 }
 
-fn call(args: &[String]) -> Result<Call, String> {
+fn call(args: &[String], defaults: &Defaults) -> Result<Call, String> {
     let Some((name, mut rest)) = args.split_first() else {
         return Err("empty request between `+`".into());
     };
@@ -135,16 +178,45 @@ fn call(args: &[String]) -> Result<Call, String> {
             .iter()
             .find(|p| p.name == key)
             .ok_or_else(|| reason(name, &CallError::UnknownParam(key.into())))?;
-        let value = param.ty.parse(text).map_err(|e| reason(name, &e))?;
-        values.push((param.name, value));
+        values.push((
+            param.name,
+            arg(param.ty, text).map_err(|e| reason(name, &e))?,
+        ));
         rest = tail;
     }
-    // Validates now, so a bad call fails before anything is sent.
-    method.request(0, &values).map_err(|e| reason(name, &e))?;
+    for param in method.params {
+        let given = values.iter().any(|(n, _)| *n == param.name);
+        if let (false, Ty::Id(entity)) = (given, param.ty)
+            && let Some(id) = defaults.get(entity)
+        {
+            values.push((param.name, Arg::Value(Value::Id(id))));
+        }
+    }
+    // Validates now, so a bad call fails before anything is sent; a target
+    // stands in as the nil id until it is resolved.
+    let checked: Vec<(&str, Value)> = values
+        .iter()
+        .map(|(n, a)| match a {
+            Arg::Value(v) => (*n, v.clone()),
+            Arg::Target { .. } => (*n, Value::Id(Uuid::nil())),
+        })
+        .collect();
+    method.request(0, &checked).map_err(|e| reason(name, &e))?;
     Ok(Call {
         method,
         args: values,
     })
+}
+
+/// A flag's value: an id flag that is not a full id is a target.
+fn arg(ty: Ty, text: &str) -> Result<Arg, CallError> {
+    match (ty, text.parse::<Uuid>()) {
+        (Ty::Id(entity), Err(_)) if !text.is_empty() => Ok(Arg::Target {
+            entity,
+            spec: text.to_owned(),
+        }),
+        _ => ty.parse(text).map(Arg::Value),
+    }
 }
 
 fn reason(method: &str, error: &CallError) -> String {
@@ -157,7 +229,9 @@ pub fn usage(method: Option<&Method>) -> String {
         None => {
             let mut text = String::from(
                 "usage: rusty-mux-ctl [--socket PATH] [--json] COMMAND [--FLAG VALUE]... [+ COMMAND ...]\n\
-                 The socket defaults to $RUSTY_MUX_SOCKET.\n\ncommands:\n",
+                 The socket defaults to $RUSTY_MUX_SOCKET. An id flag also takes a name, a\n\
+                 position or an id suffix, optionally as a path SESSION/WINDOW/BLOCK, and\n\
+                 defaults to $RUSTY_MUX_SESSION, $RUSTY_MUX_WINDOW or $RUSTY_MUX_BLOCK.\n\ncommands:\n",
             );
             for m in schema::CATALOG {
                 text.push_str(&format!("  {:<14} {}\n", m.name, m.doc));

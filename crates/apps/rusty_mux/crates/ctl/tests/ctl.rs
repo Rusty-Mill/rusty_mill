@@ -53,6 +53,9 @@ fn ctl_command(socket: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"));
     command
         .env_remove("RUSTY_MUX_SOCKET")
+        .env_remove("RUSTY_MUX_SESSION")
+        .env_remove("RUSTY_MUX_WINDOW")
+        .env_remove("RUSTY_MUX_BLOCK")
         .arg("--socket")
         .arg(socket)
         .args(args);
@@ -153,16 +156,11 @@ fn a_refused_request_exits_1() {
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("input:"));
 
-    let missing = "00000000-0000-0000-0000-000000000001";
+    // Resizing without the lease, with the refusal on stdout as JSON.
     let output = ctl(
         &socket,
         &[
-            "--json",
-            "create-window",
-            "--session",
-            missing,
-            "--name",
-            "w",
+            "--json", "resize", "--block", &block, "--cols", "80", "--rows", "24",
         ],
     );
     assert_eq!(output.status.code(), Some(1));
@@ -213,6 +211,73 @@ fn capture_prints_the_screen_and_list_the_tree() {
         .collect();
     assert_eq!(kinds, ["session", "window", "block", "done"]);
     assert!(listing.contains(&format!("\"block\":\"{block}\"")));
+}
+
+#[test]
+fn targets_resolve_by_name_position_and_suffix() {
+    let socket = start_server();
+    ok(&socket, &["create-session", "--name", "Build"]);
+    ok(
+        &socket,
+        &["create-window", "--session", "build", "--name", "logs"],
+    );
+    let block = ok(
+        &socket,
+        &[
+            "create-block",
+            "--window",
+            "build/logs",
+            "--cols",
+            "80",
+            "--rows",
+            "24",
+        ],
+    );
+    ok(
+        &socket,
+        &["capture", "--block", "build/logs/1", "--history", "0"],
+    );
+    ok(&socket, &["capture", "--block", "1/1/1", "--history", "0"]);
+    let suffix = &block[block.len() - 6..];
+    ok(&socket, &["close-block", "--block", suffix]);
+    assert!(!ok(&socket, &["list"]).contains(&block));
+}
+
+#[test]
+fn a_missing_or_ambiguous_target_exits_3() {
+    let socket = start_server();
+    let missing = "00000000-0000-0000-0000-000000000001";
+    let output = ctl(&socket, &["close-block", "--block", missing]);
+    assert_eq!(output.status.code(), Some(3), "a full id the server lacks");
+    let output = ctl(&socket, &["close-block", "--block", "nope"]);
+    assert_eq!(output.status.code(), Some(3), "a name nothing has");
+
+    ok(&socket, &["create-session", "--name", "dup"]);
+    ok(&socket, &["create-session", "--name", "dup"]);
+    let output = ctl(
+        &socket,
+        &["create-window", "--session", "dup", "--name", "w"],
+    );
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("session `dup` is ambiguous"), "{stderr}");
+}
+
+#[test]
+fn a_missing_id_defaults_to_where_ctl_runs() {
+    let socket = start_server();
+    let block = block(&socket);
+    let output = ctl_command(&socket, &["close-block"])
+        .env("RUSTY_MUX_BLOCK", &block)
+        .output()
+        .expect("run");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!ok(&socket, &["list"]).contains(&block));
 }
 
 /// Whether `block` still exists: only an existing block can be attached.
@@ -345,13 +410,13 @@ fn a_bad_command_line_exits_2() {
 }
 
 #[test]
-fn no_server_exits_3() {
+fn no_server_exits_4() {
     let output = ctl(&socket_path("none"), &["create-session", "--name", "x"]);
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(4));
 }
 
 #[test]
-fn garbage_from_the_server_exits_4() {
+fn garbage_from_the_server_exits_1() {
     let path = socket_path("junk");
     let listener = StdListener::bind(&path).expect("bind");
     std::thread::spawn(move || {
@@ -363,7 +428,7 @@ fn garbage_from_the_server_exits_4() {
         std::thread::sleep(PATIENCE);
     });
     let output = ctl(&path, &["create-session", "--name", "x"]);
-    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(output.status.code(), Some(1));
 }
 
 /// A server from before SYNC: it welcomes the client and then counts the
@@ -420,7 +485,7 @@ fn a_chain_the_server_cannot_run_sends_nothing() {
     ];
     for chain in chains {
         let (path, frames) = legacy_server();
-        assert_eq!(ctl(&path, chain).status.code(), Some(4), "{chain:?}");
+        assert_eq!(ctl(&path, chain).status.code(), Some(1), "{chain:?}");
         let sent = frames.recv_timeout(PATIENCE).expect("frame count");
         assert_eq!(sent, 0, "{chain:?} sent requests before refusing");
     }

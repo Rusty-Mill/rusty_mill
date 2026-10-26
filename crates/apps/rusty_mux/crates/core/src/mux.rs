@@ -13,6 +13,8 @@ use crate::{
 #[derive(Debug, Default)]
 pub struct Mux {
     sessions: BTreeMap<SessionId, Session>,
+    /// Session ids in creation order.
+    session_order: Vec<SessionId>,
     windows: BTreeMap<WindowId, Window>,
     blocks: BTreeMap<BlockId, Block>,
     clients: BTreeMap<ClientId, Client>,
@@ -45,8 +47,11 @@ impl Mux {
         self.clients.get(&id)
     }
 
+    /// Sessions in creation order.
     pub fn sessions(&self) -> impl Iterator<Item = &Session> {
-        self.sessions.values()
+        self.session_order
+            .iter()
+            .filter_map(|id| self.sessions.get(id))
     }
 
     pub fn create_session(&mut self, name: impl Into<String>) -> SessionId {
@@ -57,6 +62,7 @@ impl Mux {
             windows: Vec::new(),
         };
         self.sessions.insert(id, session);
+        self.session_order.push(id);
         self.events.push(Event::SessionCreated { session: id });
         id
     }
@@ -89,11 +95,21 @@ impl Mux {
     }
 
     pub fn create_block(&mut self, window: WindowId, size: Size) -> Result<BlockId, Error> {
+        let id = BlockId::random();
+        self.add_block(id, window, size)?;
+        Ok(id)
+    }
+
+    /// Adds a block whose id the caller chose, such as one already given to
+    /// the block's program before it started.
+    pub fn add_block(&mut self, id: BlockId, window: WindowId, size: Size) -> Result<(), Error> {
+        if self.blocks.contains_key(&id) {
+            return Err(Error::BlockExists(id));
+        }
         let parent = self
             .windows
             .get_mut(&window)
             .ok_or(Error::UnknownWindow(window))?;
-        let id = BlockId::random();
         parent.blocks.push(id);
         self.blocks.insert(
             id,
@@ -109,7 +125,7 @@ impl Mux {
             window,
             size,
         });
-        Ok(id)
+        Ok(())
     }
 
     /// Resizes the block's PTY. Resizing is input, so it needs the lease.
@@ -144,6 +160,7 @@ impl Mux {
             self.remove_window(window);
         }
         self.sessions.remove(&session);
+        self.session_order.retain(|id| *id != session);
         self.events.push(Event::SessionClosed { session });
         Ok(())
     }

@@ -1,11 +1,13 @@
 //! A block's PTY, driven by the reactor through a non-blocking master fd,
 //! and the program running on it.
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io;
 use std::time::{Duration, Instant};
 
 use platform::error::{ErrorKind, PlatformError};
-use platform::process::{Child, Command, Signal};
+use platform::process::{Child, Command, EnvSpec, Signal};
 use platform::pty::PtyMaster;
 use platform::term::WinSize;
 use platform_linux::{LinuxChild, LinuxPty, LinuxPtyMaster};
@@ -32,9 +34,17 @@ pub(crate) struct Process {
     child: Option<LinuxChild>,
 }
 
-/// Starts `config`'s program on a new PTY of `size`.
-pub(crate) fn spawn(config: &Config, size: Size) -> io::Result<(Pty, Process)> {
-    let mut cmd = Command::new(config.program.clone(), config.cwd.clone());
+/// Starts `config`'s program on a new PTY of `size`, with this process's
+/// environment plus `env`.
+pub(crate) fn spawn(
+    config: &Config,
+    size: Size,
+    env: &[(&str, OsString)],
+) -> io::Result<(Pty, Process)> {
+    let mut vars: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    vars.extend(env.iter().map(|(k, v)| (OsString::from(k), v.clone())));
+    let mut cmd =
+        Command::new(config.program.clone(), config.cwd.clone()).env(EnvSpec::Explicit(vars));
     for arg in &config.args {
         cmd = cmd.arg(arg.clone());
     }

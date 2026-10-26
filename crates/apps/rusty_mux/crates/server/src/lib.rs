@@ -58,7 +58,12 @@ pub async fn serve(listener: UnixListener, config: Config) -> io::Result<()> {
 
 #[cfg(target_os = "linux")]
 async fn serve_for(listener: UnixListener, config: Config, owner: u32) -> io::Result<()> {
-    let state = state::State::shared(config);
+    let socket = listener
+        .local_addr()
+        .ok()
+        .and_then(|addr| addr.as_pathname().map(std::path::absolute))
+        .and_then(Result::ok);
+    let state = state::State::shared(config, socket);
     loop {
         let (stream, _) = listener.accept().await?;
         match stream.peer_cred() {

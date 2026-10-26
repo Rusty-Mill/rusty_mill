@@ -68,6 +68,7 @@ fn scripted_server(lease: bool, end: End) -> (PathBuf, JoinHandle<()>) {
                     conn.send(&Message::Failed {
                         req,
                         reason: "held by another client".into(),
+                        code: None,
                     })
                     .expect("failed");
                     if finish(&mut conn, block, end) {

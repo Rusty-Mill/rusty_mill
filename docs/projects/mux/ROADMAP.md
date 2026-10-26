@@ -34,6 +34,8 @@ Started 2026-10-25 (owner go-ahead). One PR per step, in order:
 2. Resumable event stream: sequence numbers and replay (C05). Done (#1057).
 3. `rusty_mux_ctl`, generated from the catalog, with `--json` and exit codes (C04). Done (#1060).
 4. Block methods and screen capture (C06, C18). In progress: read-only `list` and `capture`, negotiated with `Features::INSPECT`. Without the design brief, C06 is read as methods addressed by block id without attaching; `input`, `resize` and `close-block` already were.
+4a. Rex parity, CLI: exit codes 3 (target) and 4 (unreachable), failure codes on the wire, targets by name, position, id suffix or path, ids from the block's environment (C04). In progress.
+4b. Rex parity, API: per-block-type methods (terminal format, pwd, title; capture moves under them) and `api list/describe` (C06, C17, C18).
 5. Program status OSC, `rusty_mux_status` (C20).
 6. `rusty_mux_mcp` on `rusty_mcp_server`, generated from the same catalog (C07).
 7. Scripting (C19), last.

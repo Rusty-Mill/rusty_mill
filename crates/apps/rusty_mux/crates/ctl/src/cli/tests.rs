@@ -2,6 +2,11 @@ use rusty_uuid::Uuid;
 
 use super::*;
 
+/// Parses with no defaults.
+fn parse(args: &[String]) -> Result<Invocation, String> {
+    super::parse(args, &Defaults::default())
+}
+
 fn args(line: &str) -> Vec<String> {
     line.split_whitespace().map(String::from).collect()
 }
@@ -32,9 +37,9 @@ fn flags_take_a_separate_or_attached_value() {
     assert_eq!(
         call.args,
         [
-            ("block", Value::Id(ID.parse().unwrap())),
-            ("cols", Value::Cells(80)),
-            ("rows", Value::Cells(24)),
+            ("block", Arg::Value(Value::Id(ID.parse().unwrap()))),
+            ("cols", Arg::Value(Value::Cells(80))),
+            ("rows", Arg::Value(Value::Cells(24))),
         ]
     );
 }
@@ -56,9 +61,10 @@ fn bad_calls_fail_before_sending() {
         ("create-session --name", "--name needs a value"),
         ("create-session name", "expected a --flag"),
         (
-            "resize --block x --cols 1 --rows 1",
-            "`x` is not a valid block id",
+            "resize --block x --cols 0 --rows 1",
+            "`0` is not a valid cell count",
         ),
+        ("close-block --block=", "`` is not a valid block id"),
         ("create-session --name a +", "empty request"),
         ("create-session --name a --name b", "given twice"),
     ] {
@@ -93,4 +99,64 @@ fn help_and_nothing_show_usage() {
     assert_eq!(parsed.command, Command::Help(schema::method("input")));
     assert!(usage(None).contains("create-block"));
     assert!(usage(schema::method("input")).contains("--data <bytes>"));
+}
+
+#[test]
+fn an_id_flag_takes_a_target() {
+    let [call] = calls("capture --block build/2 --history 0")
+        .try_into()
+        .expect("one call");
+    assert!(call.has_target());
+    assert_eq!(
+        call.args[0],
+        (
+            "block",
+            Arg::Target {
+                entity: Entity::Block,
+                spec: "build/2".into()
+            }
+        )
+    );
+    let [call] = calls(&format!("close-block --block {ID}"))
+        .try_into()
+        .expect("one call");
+    assert!(!call.has_target());
+}
+
+#[test]
+fn a_missing_id_flag_defaults_to_where_ctl_runs() {
+    let here = Defaults {
+        block: Some(ID.parse().unwrap()),
+        ..Defaults::default()
+    };
+    let parsed = super::parse(&args("close-block"), &here).unwrap();
+    let Command::Calls(calls) = parsed.command else {
+        panic!("calls")
+    };
+    assert_eq!(
+        calls[0].args,
+        [("block", Arg::Value(Value::Id(ID.parse().unwrap())))]
+    );
+    // A given flag wins, and without a default the flag is still required.
+    let Command::Calls(calls) = super::parse(&args("close-block --block 3"), &here)
+        .unwrap()
+        .command
+    else {
+        panic!("calls")
+    };
+    assert_eq!(
+        calls[0].args,
+        [(
+            "block",
+            Arg::Target {
+                entity: Entity::Block,
+                spec: "3".into()
+            }
+        )]
+    );
+    assert!(
+        parse(&args("close-block"))
+            .unwrap_err()
+            .contains("missing parameter `block`")
+    );
 }

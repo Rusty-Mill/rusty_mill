@@ -7,6 +7,10 @@
 //! the events after a cursor and the cursor to resume from; with `--follow`
 //! it keeps printing until the server goes away.
 //!
+//! An id flag also takes a name, a position or an id suffix (see
+//! [`target`]), and a missing one defaults to the block, window or session
+//! the command runs in, from `$RUSTY_MUX_BLOCK` and the like.
+//!
 //! Output is text, or one JSON object per line with `--json`. The exit code
 //! is an [`Exit`]; an interrupt ends the process with the signal, which a
 //! shell reports as 130.
@@ -17,30 +21,42 @@
 pub mod cli;
 mod conn;
 mod render;
+pub mod target;
 
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use rusty_mux_proto::schema::{CATALOG, Method, Returns};
-use rusty_mux_proto::{Cursor, Entry, Features, Message};
+use rusty_mux_proto::schema::{CATALOG, Method, Returns, Value};
+use rusty_mux_proto::{Code, Cursor, Entry, Features, Message};
 use rusty_uuid::Uuid;
 
-use crate::cli::{Call, Command, Invocation};
+use crate::cli::{Arg, Call, Command, Defaults, Invocation};
 use crate::conn::Conn;
+use crate::target::Miss;
 
 /// The process exit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Exit {
     Ok = 0,
-    /// The server refused a request, or a stream could not be resumed.
-    Refused = 1,
+    /// A request was refused, a stream could not be resumed, or the server
+    /// sent something this client cannot follow.
+    Failed = 1,
     /// The command line is wrong.
     Usage = 2,
+    /// A target names nothing, or more than one thing.
+    Target = 3,
     /// No server at the socket, or the connection broke.
-    Unreachable = 3,
-    /// The server sent something this client cannot follow.
-    Protocol = 4,
+    Unreachable = 4,
+}
+
+/// Where the command runs: the environment a block's program gets.
+#[derive(Debug, Clone, Default)]
+pub struct Env {
+    /// `$RUSTY_MUX_SOCKET`.
+    pub socket: Option<PathBuf>,
+    /// `$RUSTY_MUX_SESSION`, `$RUSTY_MUX_WINDOW` and `$RUSTY_MUX_BLOCK`.
+    pub here: Defaults,
 }
 
 /// What a request answered with.
@@ -55,51 +71,59 @@ enum Reply {
 
 /// Why a command stopped early.
 enum Failure {
-    Refused(String),
+    Failed(String),
+    /// A target names nothing, or more than one thing.
+    Missing(String),
     Unreachable(io::Error),
-    Protocol(String),
 }
 
 impl From<io::Error> for Failure {
     fn from(err: io::Error) -> Self {
         match err.kind() {
-            io::ErrorKind::InvalidData => Self::Protocol(err.to_string()),
+            io::ErrorKind::InvalidData => Self::Failed(err.to_string()),
             _ => Self::Unreachable(err),
         }
     }
 }
 
-/// Runs a command line (without the program name). `env_socket` is
-/// `$RUSTY_MUX_SOCKET`; output goes to `out`, diagnostics to `err`.
-pub fn run(
-    args: &[String],
-    env_socket: Option<PathBuf>,
-    out: &mut dyn Write,
-    err: &mut dyn Write,
-) -> Exit {
-    let invocation = match cli::parse(args) {
+impl From<Miss> for Failure {
+    fn from(miss: Miss) -> Self {
+        Self::Missing(match miss {
+            Miss::NotFound(why) => why,
+            Miss::Ambiguous(what, ids) => {
+                let ids: Vec<String> = ids.iter().map(Uuid::to_string).collect();
+                format!("{what} is ambiguous: {}", ids.join(", "))
+            }
+        })
+    }
+}
+
+/// Runs a command line (without the program name) in `env`; output goes to
+/// `out`, diagnostics to `err`.
+pub fn run(args: &[String], env: &Env, out: &mut dyn Write, err: &mut dyn Write) -> Exit {
+    let invocation = match cli::parse(args, &env.here) {
         Ok(invocation) => invocation,
         Err(reason) => return report(err, Exit::Usage, &reason),
     };
     if let Command::Help(method) = invocation.command {
         return write_line(out, cli::usage(method).trim_end());
     }
-    let Some(socket) = invocation.socket.clone().or(env_socket) else {
+    let Some(socket) = invocation.socket.clone().or_else(|| env.socket.clone()) else {
         return report(
             err,
             Exit::Usage,
             "no socket: pass --socket or set RUSTY_MUX_SOCKET",
         );
     };
-    match execute(&invocation, &socket, out) {
+    match execute(&invocation, &socket, env.here.session, out) {
         Ok(()) => Exit::Ok,
-        Err(Failure::Refused(reason)) => report(err, Exit::Refused, &reason),
+        Err(Failure::Failed(reason)) => report(err, Exit::Failed, &reason),
+        Err(Failure::Missing(reason)) => report(err, Exit::Target, &reason),
         Err(Failure::Unreachable(e)) => report(
             err,
             Exit::Unreachable,
             &format!("{}: {e}", socket.display()),
         ),
-        Err(Failure::Protocol(reason)) => report(err, Exit::Protocol, &reason),
     }
 }
 
@@ -112,17 +136,23 @@ fn report(err: &mut dyn Write, exit: Exit, reason: &str) -> Exit {
 fn write_line(out: &mut dyn Write, line: &str) -> Exit {
     match writeln!(out, "{line}") {
         Ok(()) => Exit::Ok,
-        Err(_) => Exit::Unreachable,
+        Err(_) => Exit::Failed,
     }
 }
 
 #[cfg(unix)]
-fn execute(invocation: &Invocation, socket: &PathBuf, out: &mut dyn Write) -> Result<(), Failure> {
+fn execute(
+    invocation: &Invocation,
+    socket: &PathBuf,
+    here: Option<Uuid>,
+    out: &mut dyn Write,
+) -> Result<(), Failure> {
     let mut conn = Conn::new(std::os::unix::net::UnixStream::connect(socket)?);
     let mut session = Session {
         conn: &mut conn,
         out,
         json: invocation.json,
+        here,
     };
     match &invocation.command {
         Command::Calls(calls) => session.calls(calls),
@@ -132,7 +162,7 @@ fn execute(invocation: &Invocation, socket: &PathBuf, out: &mut dyn Write) -> Re
 }
 
 #[cfg(not(unix))]
-fn execute(_: &Invocation, _: &PathBuf, _: &mut dyn Write) -> Result<(), Failure> {
+fn execute(_: &Invocation, _: &PathBuf, _: Option<Uuid>, _: &mut dyn Write) -> Result<(), Failure> {
     Err(Failure::Unreachable(io::Error::new(
         io::ErrorKind::Unsupported,
         "rusty-mux-ctl connects over a Unix socket",
@@ -143,11 +173,13 @@ struct Session<'a, S> {
     conn: &'a mut Conn<S>,
     out: &'a mut dyn Write,
     json: bool,
+    /// The session targets are looked up in when they name none.
+    here: Option<Uuid>,
 }
 
 impl<S: io::Read + Write> Session<'_, S> {
     fn line(&mut self, line: &str) -> Result<(), Failure> {
-        writeln!(self.out, "{line}").map_err(Failure::Unreachable)
+        writeln!(self.out, "{line}").map_err(|e| Failure::Failed(format!("writing output: {e}")))
     }
 
     /// Sends Hello and returns the Welcome's features and cursor.
@@ -161,9 +193,7 @@ impl<S: io::Read + Write> Session<'_, S> {
             Message::Welcome {
                 features, cursor, ..
             } => Ok((features, cursor)),
-            other => Err(Failure::Protocol(format!(
-                "expected Welcome, got {other:?}"
-            ))),
+            other => Err(Failure::Failed(format!("expected Welcome, got {other:?}"))),
         }
     }
 
@@ -185,12 +215,18 @@ impl<S: io::Read + Write> Session<'_, S> {
             require(features, call.method)?;
         }
         let mut reqs = 1..;
+        let entries = if calls.iter().any(Call::has_target) {
+            self.list(features, reqs.next().unwrap_or(u64::MAX))?
+        } else {
+            Vec::new()
+        };
         for call in calls {
+            let args = self.resolve(call, &entries)?;
             let req = reqs.next().unwrap_or(u64::MAX);
             let message = call
                 .method
-                .request(req, &call.args)
-                .map_err(|e| Failure::Protocol(e.to_string()))?;
+                .request(req, &args)
+                .map_err(|e| Failure::Failed(e.to_string()))?;
             self.conn.send(&message)?;
             let name = call.method.name;
             let reply = if call.method.returns == Returns::Unanswered {
@@ -207,6 +243,38 @@ impl<S: io::Read + Write> Session<'_, S> {
         Ok(())
     }
 
+    /// Every entity, for resolving targets.
+    fn list(&mut self, features: Features, req: u64) -> Result<Vec<Entry>, Failure> {
+        if !features.contains(Features::INSPECT) {
+            return Err(Failure::Failed(
+                "the server cannot list, needed to resolve a target; pass full ids".into(),
+            ));
+        }
+        self.conn.send(&Message::List { req })?;
+        match self.reply(req, req, "list")? {
+            Reply::Done { entries, .. } => Ok(entries),
+            Reply::Text(_) => Err(Failure::Failed("list answered with text".into())),
+        }
+    }
+
+    /// `call`'s arguments with each target replaced by the id it names.
+    fn resolve(
+        &self,
+        call: &Call,
+        entries: &[Entry],
+    ) -> Result<Vec<(&'static str, Value)>, Failure> {
+        call.args
+            .iter()
+            .map(|(name, arg)| match arg {
+                Arg::Value(value) => Ok((*name, value.clone())),
+                Arg::Target { entity, spec } => {
+                    let id = target::resolve(entries, *entity, spec, self.here)?;
+                    Ok((*name, Value::Id(id)))
+                }
+            })
+            .collect()
+    }
+
     /// Waits for the reply to `wait`, collecting its entries, and fails if
     /// it or request `call` (the method `name`) is refused.
     fn reply(&mut self, wait: u64, call: u64, name: &str) -> Result<Reply, Failure> {
@@ -218,11 +286,15 @@ impl<S: io::Read + Write> Session<'_, S> {
                     return Ok(Reply::Done { created, entries });
                 }
                 Message::Text { req, text } if req == wait => return Ok(Reply::Text(text)),
-                Message::Failed { req, reason } if req == wait || req == call => {
+                Message::Failed { req, reason, code } if req == wait || req == call => {
                     if self.json {
                         self.line(&render::failed_line(name, &reason))?;
                     }
-                    return Err(Failure::Refused(format!("{name}: {reason}")));
+                    let reason = format!("{name}: {reason}");
+                    return Err(match code {
+                        Some(Code::NotFound) => Failure::Missing(reason),
+                        None => Failure::Failed(reason),
+                    });
                 }
                 _ => {}
             }
@@ -248,10 +320,10 @@ impl<S: io::Read + Write> Session<'_, S> {
         let wanted = Features::EVENT_SEQ.union(Features::SYNC);
         let (features, start) = self.hello(wanted, after)?;
         let start =
-            start.ok_or_else(|| Failure::Protocol("the server does not number events".into()))?;
+            start.ok_or_else(|| Failure::Failed("the server does not number events".into()))?;
         self.line(&render::cursor_line(start, self.json))?;
         if let Some(after) = after.filter(|a| *a != start) {
-            return Err(Failure::Refused(format!(
+            return Err(Failure::Failed(format!(
                 "cannot resume from {}: events since were lost; start again from {}",
                 render::cursor_text(after),
                 render::cursor_text(start)
@@ -273,7 +345,7 @@ impl<S: io::Read + Write> Session<'_, S> {
                     last.seq = seq;
                 }
                 Message::Event { seq: None, .. } => {
-                    return Err(Failure::Protocol("an unnumbered event".into()));
+                    return Err(Failure::Failed("an unnumbered event".into()));
                 }
                 Message::Done { req: 1, .. } | Message::Failed { req: 1, .. } if !follow => {
                     return self.line(&render::cursor_line(last, self.json));
@@ -292,7 +364,7 @@ fn require(features: Features, method: &Method) -> Result<(), Failure> {
     if features.contains(method.needs) {
         return Ok(());
     }
-    Err(Failure::Protocol(format!(
+    Err(Failure::Failed(format!(
         "the server does not support {}",
         method.name
     )))
@@ -302,7 +374,7 @@ fn require_sync(features: Features) -> Result<(), Failure> {
     if features.contains(Features::SYNC) {
         return Ok(());
     }
-    Err(Failure::Protocol(
+    Err(Failure::Failed(
         "the server does not support sync, needed to confirm input".into(),
     ))
 }

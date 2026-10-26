@@ -4,7 +4,7 @@ use rusty_wire::Writer;
 
 use super::*;
 use crate::field::Out;
-use crate::{Cursor, Entry, Features};
+use crate::{Code, Cursor, Entry, Features};
 
 const REQ_ID: u32 = 1;
 
@@ -152,6 +152,12 @@ fn every_message_round_trips() {
         Message::Failed {
             req: 13,
             reason: "no lease".into(),
+            code: None,
+        },
+        Message::Failed {
+            req: 13,
+            reason: "unknown block".into(),
+            code: Some(Code::NotFound),
         },
         Message::Snapshot {
             block,
@@ -558,6 +564,21 @@ fn an_oversized_history_is_invalid() {
         Err(Error::InvalidField {
             message: 0x0d,
             field: 19
+        })
+    );
+}
+
+#[test]
+fn an_unknown_failure_code_decodes_as_none() {
+    let frame = raw_frame(0x83, |out| {
+        out.varint(REQ_ID, 1).bytes(12, b"why").varint(21, 999);
+    });
+    assert_eq!(
+        decode(&frame).expect("decode").map(|(m, _)| m),
+        Some(Message::Failed {
+            req: 1,
+            reason: "why".into(),
+            code: None
         })
     );
 }
