@@ -19,6 +19,7 @@ from check_msrv_compile import (
     describe,
     featured_members,
     format_version,
+    members_for_manifests,
     msrv_groups,
     parse_floors,
     parse_version,
@@ -37,6 +38,38 @@ def metadata(
     every = {**members, **(outsiders or {})}
     packages = [{"id": n, "name": n, "rust_version": v, "features": dict.fromkeys(feats.get(n, []), [])} for n, v in every.items()]
     return {"workspace_members": list(members), "packages": packages}
+
+
+class MembersForManifestsTests(unittest.TestCase):
+    ROOT = os.path.abspath("ws")
+    MD = {
+        "workspace_root": ROOT,
+        "workspace_members": ["a", "b"],
+        "packages": [
+            {"id": "a", "name": "a", "manifest_path": os.path.join(ROOT, "crates", "a", "Cargo.toml")},
+            {"id": "b", "name": "b", "manifest_path": os.path.join(ROOT, "crates", "b", "Cargo.toml")},
+            {"id": "dep", "name": "dep", "manifest_path": os.path.join(ROOT, "vendor", "dep", "Cargo.toml")},
+        ],
+    }
+
+    def test_a_changed_manifest_selects_only_its_own_member(self) -> None:
+        self.assertEqual(members_for_manifests(self.MD, ["crates/a/Cargo.toml"]), {"a"})
+
+    def test_deleted_non_member_and_root_manifests_select_nothing(self) -> None:
+        paths = ["crates/gone/Cargo.toml", "vendor/dep/Cargo.toml", "Cargo.toml"]
+        self.assertEqual(members_for_manifests(self.MD, paths), set())
+
+    def test_an_empty_scope_exits_before_installing_anything(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            md = Path(tmp, "metadata.json")
+            md.write_text(json.dumps({**self.MD, "packages": [{**p, "rust_version": "1.80", "features": {}} for p in self.MD["packages"]]}))
+            script = Path(__file__).with_name("check_msrv_compile.py")
+            out = subprocess.run(
+                [sys.executable, str(script), str(md), "--manifests", "crates/gone/Cargo.toml", "--target-base", tmp],
+                capture_output=True, text=True, check=True,
+            ).stdout
+            self.assertEqual(os.listdir(tmp), ["metadata.json"])  # no wrapper built, no toolchain fetched
+        self.assertIn("Members whose manifest changed: none", out)
 
 
 class ParseVersionTests(unittest.TestCase):
