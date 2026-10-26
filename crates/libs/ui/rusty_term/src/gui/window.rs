@@ -331,7 +331,7 @@ pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::er
     }
     #[cfg(not(windows))]
     let hotkey_pressed: Option<std::rc::Rc<std::cell::Cell<bool>>> = None;
-    let event_loop = event_loop_builder.build()?;
+    let event_loop = build_event_loop(&mut event_loop_builder)?;
     // Now that the loop's thread is established, actually register.
     #[cfg(windows)]
     let hotkey_registered = quake_hotkey.is_some_and(super::hotkey::register);
@@ -426,6 +426,33 @@ impl WakeFlag {
     fn lower(&self) {
         self.0.store(false, Ordering::Release);
     }
+}
+
+/// `builder.build()`, with a panic inside it turned into an error: on Linux
+/// winit panics when a system library it loads at runtime (libxkbcommon,
+/// libxkbcommon-x11) is missing, which used to abort with a backtrace.
+fn build_event_loop(
+    builder: &mut winit::event_loop::EventLoopBuilder<UserEvent>,
+) -> Result<EventLoop<UserEvent>, Box<dyn std::error::Error>> {
+    // Silence the default hook's report for this one call; the message
+    // goes into the returned error instead.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| builder.build()));
+    std::panic::set_hook(hook);
+    match built {
+        Ok(event_loop) => Ok(event_loop?),
+        Err(panic) => Err(format!("cannot open a window: {}", panic_text(panic.as_ref())).into()),
+    }
+}
+
+/// A panic payload's message, when it has one.
+fn panic_text(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("the windowing library panicked")
 }
 
 /// PTY reader loop (own thread, one per tab): parse output into the tab's
@@ -6367,6 +6394,27 @@ mod tests {
         let (held, next, released) = sync_step(&held, &open(&mut grids));
         assert_eq!((held.as_slice(), released), ([1].as_slice(), true));
         assert!(next.is_some(), "pane 1 still holds");
+    }
+
+    #[test]
+    fn panic_text_reads_str_and_string_payloads() {
+        use super::panic_text;
+        let caught = |f: fn()| std::panic::catch_unwind(f).expect_err("panics");
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let fixed = caught(|| panic!("Library libxkbcommon-x11.so could not be loaded."));
+        let formatted = caught(|| panic!("{} could not be loaded.", "libxkbcommon.so"));
+        let other = caught(|| std::panic::panic_any(7_u8));
+        std::panic::set_hook(hook);
+        assert_eq!(
+            panic_text(fixed.as_ref()),
+            "Library libxkbcommon-x11.so could not be loaded."
+        );
+        assert_eq!(
+            panic_text(formatted.as_ref()),
+            "libxkbcommon.so could not be loaded."
+        );
+        assert_eq!(panic_text(other.as_ref()), "the windowing library panicked");
     }
 
     #[test]
