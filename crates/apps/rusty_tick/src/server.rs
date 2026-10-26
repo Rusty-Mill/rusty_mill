@@ -32,6 +32,8 @@ impl Handler for Backend {
             target: request.target,
             authorization: request.authorization,
             if_match: request.if_match,
+            if_none_match: request.headers.get("if-none-match"),
+            if_task_match: request.headers.get("if-task-match"),
             body: request.body,
         };
         let path = request.target.split('?').next().unwrap_or("");

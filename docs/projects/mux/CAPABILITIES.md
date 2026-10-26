@@ -29,7 +29,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C04 | CLI automation (`--json`, stable exit codes) | 2 | `rusty_mux_ctl` | in-progress | `rusty-mux-ctl`, `ctl/tests/ctl.rs`; exit codes as Rex (0/1/2/3 target/4 unreachable/130); targets by id, name, position, id suffix or path (`ctl/src/target.rs`); ids default from `$RUSTY_MUX_SESSION`/`WINDOW`/`BLOCK` |
 | C05 | Resumable event stream | 2 | `rusty_mux_proto`, `rusty_mux_server` | in-progress | `Features::EVENT_SEQ`, `server/tests/events.rs` |
 | C06 | Per-resource (block) methods | 2 | `rusty_mux_server` | in-progress | methods of a block type (`terminal.format`, `terminal.pwd`, `terminal.title`) through one generic `BlockCall`, checked against the catalog; also `input`, `resize`, `close-block` by block id; discovery with `list`; `server/tests/inspect.rs` |
-| C07 | Agent / MCP integration | 2 | `rusty_mux_mcp` on `rusty_mcp_server` | not-started | |
+| C07 | Agent / MCP integration | 2 | `rusty_mux_mcp` on `rusty_mcp_server` | in-progress | `rusty-mux-mcp` (stdio): one tool per catalog method, same schema as `api describe`, each call run as ctl runs it; `mcp/src/tests.rs`, `mcp/tests/stdio.rs` |
 | C08 | Command palette + directory browse | 4 | `rusty_mux` clients | not-started | |
 | C09 | Self-hosted, no account, no telemetry | 1 | all | not-started | |
 | C10 | Native scrollback and selection | 1 | `rusty_term_core`, `rusty_mux_tui` | in-progress | engine rows above |

@@ -13,7 +13,7 @@
 //!
 //! Output is text, or one JSON object per line with `--json`. The exit code
 //! is an [`Exit`]; an interrupt ends the process with the signal, which a
-//! shell reports as 130.
+//! shell reports as 130. An embedder bounds a command with [`run_until`].
 
 // Off Unix the connection code compiles but `execute` never reaches it.
 #![cfg_attr(not(unix), allow(dead_code))]
@@ -22,17 +22,20 @@ mod api;
 pub mod cli;
 mod conn;
 mod render;
+mod stop;
 pub mod target;
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rusty_mux_proto::schema::{CATALOG, Method, Returns, Value};
 use rusty_mux_proto::{Code, Cursor, Entry, Features, Message};
 use rusty_uuid::Uuid;
 
+pub use crate::api::input_schema;
 use crate::cli::{Api, Arg, Call, Command, Defaults, Invocation};
 use crate::conn::Conn;
+pub use crate::stop::Stop;
 use crate::target::Miss;
 
 /// The process exit code.
@@ -58,6 +61,32 @@ pub struct Env {
     pub socket: Option<PathBuf>,
     /// `$RUSTY_MUX_SESSION`, `$RUSTY_MUX_WINDOW` and `$RUSTY_MUX_BLOCK`.
     pub here: Defaults,
+}
+
+impl Env {
+    /// This process's environment. A malformed id is ignored, with a warning
+    /// on stderr.
+    pub fn from_process() -> Self {
+        Self {
+            socket: std::env::var_os("RUSTY_MUX_SOCKET").map(Into::into),
+            here: Defaults {
+                session: id_var("RUSTY_MUX_SESSION"),
+                window: id_var("RUSTY_MUX_WINDOW"),
+                block: id_var("RUSTY_MUX_BLOCK"),
+            },
+        }
+    }
+}
+
+fn id_var(name: &str) -> Option<Uuid> {
+    let value = std::env::var(name).ok()?;
+    match value.parse() {
+        Ok(id) => Some(id),
+        Err(_) => {
+            eprintln!("rusty-mux: ignoring ${name}: `{value}` is not an id");
+            None
+        }
+    }
 }
 
 /// What a request answered with.
@@ -102,6 +131,18 @@ impl From<Miss> for Failure {
 /// Runs a command line (without the program name) in `env`; output goes to
 /// `out`, diagnostics to `err`.
 pub fn run(args: &[String], env: &Env, out: &mut dyn Write, err: &mut dyn Write) -> Exit {
+    run_until(args, env, &Stop::default(), out, err)
+}
+
+/// [`run`], giving up on the server once `stop` says so (past its deadline,
+/// or cancelled) with [`Exit::Unreachable`]. Requests already sent stand.
+pub fn run_until(
+    args: &[String],
+    env: &Env,
+    stop: &Stop,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Exit {
     let invocation = match cli::parse(args, &env.here) {
         Ok(invocation) => invocation,
         Err(reason) => return report(err, Exit::Usage, &reason),
@@ -119,7 +160,7 @@ pub fn run(args: &[String], env: &Env, out: &mut dyn Write, err: &mut dyn Write)
             "no socket: pass --socket or set RUSTY_MUX_SOCKET",
         );
     };
-    match execute(&invocation, &socket, env.here.session, out) {
+    match execute(&invocation, &socket, env.here.session, stop, out) {
         Ok(()) => Exit::Ok,
         Err(Failure::Failed(reason)) => report(err, Exit::Failed, &reason),
         Err(Failure::Missing(reason)) => report(err, Exit::Target, &reason),
@@ -147,11 +188,12 @@ fn write_line(out: &mut dyn Write, line: &str) -> Exit {
 #[cfg(unix)]
 fn execute(
     invocation: &Invocation,
-    socket: &PathBuf,
+    socket: &Path,
     here: Option<Uuid>,
+    stop: &Stop,
     out: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let mut conn = Conn::new(std::os::unix::net::UnixStream::connect(socket)?);
+    let mut conn = Conn::new(conn::connect(socket, stop)?, stop.clone());
     let mut session = Session {
         conn: &mut conn,
         out,
@@ -166,7 +208,13 @@ fn execute(
 }
 
 #[cfg(not(unix))]
-fn execute(_: &Invocation, _: &PathBuf, _: Option<Uuid>, _: &mut dyn Write) -> Result<(), Failure> {
+fn execute(
+    _: &Invocation,
+    _: &Path,
+    _: Option<Uuid>,
+    _: &Stop,
+    _: &mut dyn Write,
+) -> Result<(), Failure> {
     Err(Failure::Unreachable(io::Error::new(
         io::ErrorKind::Unsupported,
         "rusty-mux-ctl connects over a Unix socket",

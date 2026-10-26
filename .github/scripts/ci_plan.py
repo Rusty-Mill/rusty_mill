@@ -85,6 +85,7 @@ def full_plan_outputs() -> dict[str, str]:
         "packages": "",
         "ci_only": "false",
         **{job: "true" for job in SPECIALIZED_JOB_NAMES},
+        "msrv_manifests": "",
         "shards": "[1,2,3]",
         "components": '[{"component":"workspace","packages":""}]',
     }
@@ -97,6 +98,7 @@ def ci_smoke_plan_outputs(changed_paths: Iterable[str] = ()) -> dict[str, str]:
         "packages": "",
         "ci_only": "true",
         **{job: str(enabled).lower() for job, enabled in specialized_job_flags(changed_paths, ()).items()},
+        "msrv_manifests": "",
         "shards": "[1]",
         "components": '[]',
     }
@@ -253,16 +255,30 @@ def is_workspace_wide_change(changed_paths: Iterable[str]) -> bool:
     )
 
 
-def is_ci_only_change(changed_paths: Iterable[str]) -> bool:
-    """Whether every changed file is CI implementation/configuration itself."""
-    paths = tuple(changed_paths)
-    return bool(paths) and all(
+def is_ci_path(path: str) -> bool:
+    """Whether a path is CI implementation/configuration itself."""
+    return (
         path == ".config/nextest.toml"
         or path.startswith(".github/workflows/")
         or path.startswith(".github/actions/")
         or path.startswith(".github/scripts/")
-        for path in paths
     )
+
+
+def is_ci_only_change(changed_paths: Iterable[str]) -> bool:
+    """Whether every changed file is CI implementation/configuration itself."""
+    paths = tuple(changed_paths)
+    return bool(paths) and all(is_ci_path(path) for path in paths)
+
+
+def needs_ci_smoke(changed_paths: Iterable[str], packages: Iterable[str]) -> bool:
+    """Whether a CI edit would otherwise run on no Cargo job at all.
+
+    A change that also touches non-CI paths (every PR's change fragment, prose)
+    is not CI-only, yet with no affected crate it selects no build lane. An
+    affected crate's lanes already run the shared build setup, so they suffice.
+    """
+    return not any(packages) and any(is_ci_path(path) for path in changed_paths)
 
 
 def specialized_job_flags(
@@ -347,6 +363,16 @@ def specialized_job_flags(
     return flags
 
 
+def member_manifests(changed_paths: Iterable[str]) -> str:
+    """Space-separated changed crate manifests: the scope of msrv-compile on a scoped run.
+
+    A crate's floor moves with its own manifest (rust-version, a new or optional
+    dependency); the workspace root's manifest declares no crate. A code-only or
+    lockfile-only change is left to the scheduled full sweep.
+    """
+    return " ".join(sorted({path for path in changed_paths if path.endswith("/Cargo.toml")}))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -371,6 +397,11 @@ def main() -> None:
         help="Exit successfully only if stdin contains a workspace-wide path.",
     )
     parser.add_argument("--is-ci-only", action="store_true")
+    parser.add_argument(
+        "--needs-ci-smoke",
+        action="store_true",
+        help="Exit successfully only if stdin edits CI and --packages is empty.",
+    )
     parser.add_argument("--tested-record", action="store_true")
     parser.add_argument("--emit-platforms", metavar="EVENT")
     parser.add_argument("--repo", default="", help="owner/name, for the merge queue's reuse lookup.")
@@ -407,9 +438,12 @@ def main() -> None:
         raise SystemExit(0 if is_workspace_wide_change(paths) else 1)
     if args.is_ci_only:
         raise SystemExit(0 if is_ci_only_change(paths) else 1)
+    if args.needs_ci_smoke:
+        raise SystemExit(0 if needs_ci_smoke(paths, args.packages.split()) else 1)
     flags = specialized_job_flags(paths, args.packages.split())
     for job, enabled in flags.items():
         print(f"{job}={'true' if enabled else 'false'}")
+    print(f"msrv_manifests={member_manifests(paths)}")
 
 
 if __name__ == "__main__":
