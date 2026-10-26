@@ -29,7 +29,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 #[cfg(test)]
@@ -339,6 +338,12 @@ pub(crate) struct GpuCore {
     atlas_epoch: u64,
     /// Per pane, in paint order.
     row_cache: Vec<PaneRows>,
+    /// The last frame's lists, cleared and refilled by the next one so a
+    /// steady frame allocates no new `Vec`s.
+    spare: FrameLists,
+    base_buf: InstanceBuffer,
+    overlay_buf: InstanceBuffer,
+    img_buf: InstanceBuffer,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     img_bind_layout: wgpu::BindGroupLayout,
@@ -611,6 +616,10 @@ impl GpuCore {
             tiles: HashMap::new(),
             atlas_epoch: 0,
             row_cache: Vec::new(),
+            spare: FrameLists::default(),
+            base_buf: InstanceBuffer::new("base instances"),
+            overlay_buf: InstanceBuffer::new("overlay instances"),
+            img_buf: InstanceBuffer::new("image instances"),
             uniform_buf,
             bind_group,
             img_bind_layout,
@@ -1362,6 +1371,7 @@ impl GpuCore {
         self.write_uniforms(width, height, pad, !chrome.is_empty());
         let frame = self.frame_lists(width, panes, chrome, status, font, divider, bar_bg);
         self.draw_frame(view, &frame, bg);
+        self.spare = frame;
     }
 
     /// Every instance of one frame, as [`Self::render_panes`] draws it.
@@ -1376,7 +1386,8 @@ impl GpuCore {
         divider: u32,
         bar_bg: u32,
     ) -> FrameLists {
-        let mut frame = FrameLists::default();
+        let mut frame = std::mem::take(&mut self.spare);
+        frame.clear();
         // The strip-colored band above the chrome (see `render::bar_inset`):
         // a full-width quad at the window's top edge, exempt from the
         // bar-inset shift via deco bit 7. Drawn before the chrome cells, so
@@ -1461,29 +1472,18 @@ impl GpuCore {
 
     /// Submit the frame: base cells (opaque), overlay glyphs (blended), then
     /// image quads (blended, grouped by texture), clearing to `clear`.
-    fn draw_frame(&self, view: &wgpu::TextureView, frame: &FrameLists, clear: u32) {
-        let base_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("base instances"),
-                contents: bytemuck::cast_slice(&frame.base),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        let overlay_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("overlay instances"),
-                contents: bytemuck::cast_slice(&frame.overlay),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+    fn draw_frame(&mut self, view: &wgpu::TextureView, frame: &FrameLists, clear: u32) {
+        let (device, queue) = (&self.device, &self.queue);
+        let base = self
+            .base_buf
+            .upload(device, queue, bytemuck::cast_slice(&frame.base));
+        let overlay = self
+            .overlay_buf
+            .upload(device, queue, bytemuck::cast_slice(&frame.overlay));
         let img_insts: Vec<ImgInstance> = frame.images.iter().map(|(_, i)| *i).collect();
-        let img_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("image instances"),
-                contents: bytemuck::cast_slice(&img_insts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+        let images = self
+            .img_buf
+            .upload(device, queue, bytemuck::cast_slice(&img_insts));
         let c = wgpu::Color {
             r: ((clear >> 16) & 0xff) as f64 / 255.0,
             g: ((clear >> 8) & 0xff) as f64 / 255.0,
@@ -1510,18 +1510,20 @@ impl GpuCore {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_pipeline(&self.base_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, base_buf.slice(..));
-            pass.draw(0..6, 0..frame.base.len() as u32);
-            if !frame.overlay.is_empty() {
+            if let Some(base) = base {
+                pass.set_pipeline(&self.base_pipeline);
+                pass.set_vertex_buffer(0, base);
+                pass.draw(0..6, 0..frame.base.len() as u32);
+            }
+            if let Some(overlay) = overlay {
                 pass.set_pipeline(&self.overlay_pipeline);
-                pass.set_vertex_buffer(0, overlay_buf.slice(..));
+                pass.set_vertex_buffer(0, overlay);
                 pass.draw(0..6, 0..frame.overlay.len() as u32);
             }
-            if !frame.images.is_empty() {
+            if let Some(images) = images {
                 pass.set_pipeline(&self.img_pipeline);
-                pass.set_vertex_buffer(0, img_buf.slice(..));
+                pass.set_vertex_buffer(0, images);
                 for (i, (bind, _)) in frame.images.iter().enumerate() {
                     pass.set_bind_group(1, bind.as_ref(), &[]);
                     pass.draw(0..6, i as u32..i as u32 + 1);
@@ -1538,6 +1540,61 @@ struct FrameLists {
     base: Vec<Instance>,
     overlay: Vec<Instance>,
     images: Vec<(Rc<wgpu::BindGroup>, ImgInstance)>,
+}
+
+impl FrameLists {
+    /// Empty every list, keeping its capacity.
+    fn clear(&mut self) {
+        self.base.clear();
+        self.overlay.clear();
+        self.images.clear();
+    }
+}
+
+/// A vertex buffer kept across frames and rewritten in place; it is
+/// reallocated only when a frame needs more room than it has.
+struct InstanceBuffer {
+    label: &'static str,
+    buf: Option<wgpu::Buffer>,
+}
+
+impl InstanceBuffer {
+    fn new(label: &'static str) -> Self {
+        InstanceBuffer { label, buf: None }
+    }
+
+    /// Write `bytes` at the start and return the slice they fill, or `None`
+    /// when there is nothing to draw.
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bytes: &[u8],
+    ) -> Option<wgpu::BufferSlice<'_>> {
+        let len = bytes.len() as u64;
+        if len == 0 {
+            return None;
+        }
+        let have = self.buf.as_ref().map_or(0, wgpu::Buffer::size);
+        if let Some(size) = grown_size(have, len) {
+            self.buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(self.label),
+                size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let buf = self.buf.as_ref()?;
+        queue.write_buffer(buf, 0, bytes);
+        Some(buf.slice(..len))
+    }
+}
+
+/// The size to reallocate an instance buffer of `have` bytes to so it holds
+/// `need`, or `None` when it already does: the next power of two, at least
+/// 4 KiB, so a growing session reallocates a handful of times, not per frame.
+fn grown_size(have: u64, need: u64) -> Option<u64> {
+    (need > have).then(|| need.next_power_of_two().max(4096))
 }
 
 /// Pack a cell's underline/strikethrough state into the `Instance::deco` bits
@@ -1822,31 +1879,13 @@ mod tests {
         assert_eq!(core.opacity, 1.0);
     }
 
-    /// Full render-to-texture + readback: a blank blue cell should read back as
-    /// blue. Ignored by default because the software drivers in headless CI/WSL
-    /// (lavapipe, dzn) segfault during draw/submit; run with `--ignored` on a
-    /// machine with a working GPU/Vulkan adapter.
-    #[test]
-    #[ignore = "render+readback needs a working GPU adapter; lavapipe/dzn crash headless"]
-    fn gpu_renders_to_texture() {
-        let bytes = super::super::font::load_default_font(None).unwrap();
-        let mut font = FontCache::new(
-            super::super::font::FontSet {
-                regular: bytes,
-                ..Default::default()
-            },
-            16.0,
-            false,
-        )
-        .unwrap();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
-        let mut core = GpuCore::new(&instance, None, &mut font).expect("adapter");
-
-        let mut grid = Grid::new(1, 1);
-        let mut p = AnsiParser::new();
-        p.advance(&mut grid, b"\x1b[48;2;0;0;255m ");
-
-        let (w, h) = (core.cell_w, core.cell_h);
+    /// Render `grid` to an offscreen texture of exactly its size and read
+    /// the pixels back as tightly packed RGBA rows.
+    fn render_pixels(core: &mut GpuCore, font: &mut FontCache, grid: &Grid) -> Vec<u8> {
+        let (w, h) = (
+            core.cell_w * grid.cols as u32,
+            core.cell_h * grid.rows as u32,
+        );
         let target = core.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("target"),
             size: wgpu::Extent3d {
@@ -1862,7 +1901,7 @@ mod tests {
             view_formats: &[],
         });
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        core.render(&view, w, h, &grid, &[], &mut font, true);
+        core.render(&view, w, h, grid, &[], font, true);
 
         let bytes_per_row = (w * 4).next_multiple_of(256);
         let readback = core.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1899,7 +1938,82 @@ mod tests {
         readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         core.device.poll(wgpu::Maintain::Wait);
         let data = readback.slice(..).get_mapped_range();
+        data.chunks(bytes_per_row as usize)
+            .flat_map(|row| &row[..(w * 4) as usize])
+            .copied()
+            .collect()
+    }
+
+    /// A grid of `cols`x`rows` after `bytes`.
+    fn grid_after(cols: usize, rows: usize, bytes: &[u8]) -> Grid {
+        let mut grid = Grid::new(cols, rows);
+        AnsiParser::new().advance(&mut grid, bytes);
+        grid
+    }
+
+    /// Full render-to-texture + readback: a blank blue cell should read back as
+    /// blue. Ignored by default because the software drivers in headless CI/WSL
+    /// (lavapipe, dzn) segfault during draw/submit; run with `--ignored` on a
+    /// machine with a working GPU/Vulkan adapter.
+    #[test]
+    #[ignore = "render+readback needs a working GPU adapter; lavapipe/dzn crash headless"]
+    fn gpu_renders_to_texture() {
+        let (mut core, mut font) = headless_core().expect("adapter");
+        let grid = grid_after(1, 1, b"\x1b[48;2;0;0;255m ");
+        let data = render_pixels(&mut core, &mut font, &grid);
         assert_eq!([data[0], data[1], data[2]], [0, 0, 255]);
+    }
+
+    /// The instance buffers persist across frames: a bigger frame regrows
+    /// them, and a smaller one after it draws only its own instances, not
+    /// the bigger frame's left past its end. Each frame reads back the same
+    /// pixels a fresh core renders, and the base buffer's allocation, read
+    /// after each frame, is replaced once and then kept. Ignored like
+    /// `gpu_renders_to_texture`.
+    #[test]
+    #[ignore = "render+readback needs a working GPU adapter; lavapipe/dzn crash headless"]
+    fn reused_instance_buffers_render_what_fresh_ones_do() {
+        let (mut core, mut font) = headless_core().expect("adapter");
+        let small = grid_after(2, 1, b"\x1b[48;2;0;0;255m \x1b[4mx");
+        let big = grid_after(60, 40, &b"\x1b[41mlorem \x1b[4;32mipsum ".repeat(300));
+        let mut frames = Vec::new();
+        let mut bufs = Vec::new();
+        for grid in [&small, &big, &small] {
+            frames.push(render_pixels(&mut core, &mut font, grid));
+            bufs.push(buffer_identity(&core.base_buf).expect("base layer drawn"));
+        }
+        let [(small_id, small_size), (big_id, big_size), after] = [bufs[0], bufs[1], bufs[2]];
+        assert_eq!(small_size, 4096, "the small frame fits the minimum size");
+        assert!(
+            big_size > 4096 && big_id != small_id,
+            "the big frame regrew the buffer"
+        );
+        assert_eq!(
+            after,
+            (big_id, big_size),
+            "the small frame kept the big buffer"
+        );
+        for (n, grid) in [&small, &big, &small].into_iter().enumerate() {
+            let (mut fresh, mut font) = headless_core().expect("adapter");
+            let want = render_pixels(&mut fresh, &mut font, grid);
+            assert!(frames[n] == want, "frame {n} differs from a fresh render");
+        }
+    }
+
+    /// The live allocation behind an instance buffer and its size, if any.
+    fn buffer_identity(b: &InstanceBuffer) -> Option<(wgpu::Id<wgpu::Buffer>, u64)> {
+        b.buf.as_ref().map(|buf| (buf.global_id(), buf.size()))
+    }
+
+    /// A buffer regrows to the next power of two (at least 4 KiB) only when
+    /// a frame outgrows it.
+    #[test]
+    fn instance_buffers_grow_by_powers_of_two_only_when_outgrown() {
+        assert_eq!(grown_size(0, 48), Some(4096));
+        assert_eq!(grown_size(4096, 4096), None);
+        assert_eq!(grown_size(4096, 100), None);
+        assert_eq!(grown_size(4096, 4097), Some(8192));
+        assert_eq!(grown_size(8192, 70_000), Some(131_072));
     }
 
     /// A generated session (writes, cursor and view moves, selections, hover,
