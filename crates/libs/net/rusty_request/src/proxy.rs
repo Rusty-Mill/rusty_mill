@@ -23,28 +23,49 @@ use rusty_http::Url;
 /// URL as the absolute-form request-target (RFC 7230 §5.3.2) so the
 /// proxy knows where to forward it, with `Host` still naming the origin;
 /// an `https://` request instead tunnels through the proxy via `CONNECT`
-/// (see the module docs).
-#[derive(Debug, Clone)]
+/// (see the module docs). Credentials in the URL are sent as Basic
+/// `Proxy-Authorization`: on each forwarded request, and on the `CONNECT`.
+#[derive(Clone)]
 pub struct Proxy {
     pub(crate) host: String,
     pub(crate) port: u16,
+    /// The `Proxy-Authorization` value, when the URL carried credentials.
+    pub(crate) authorization: Option<String>,
+}
+
+impl std::fmt::Debug for Proxy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Proxy")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field(
+                "authorization",
+                &self.authorization.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl Proxy {
-    /// Parses `proxy_url` (`http://host[:port]`) as the proxy to route
-    /// requests through. Rejects an `https://` proxy URL: reaching the
-    /// proxy itself always happens over plain `http://`, whether the
-    /// request being routed through it is `http://` or `https://` (see
-    /// the module docs) -- a `CONNECT` tunnel changes how traffic to the
-    /// *origin* is protected, not how the client talks to the proxy.
+    /// Parses `proxy_url` (`http://[user:password@]host[:port]`) as the
+    /// proxy to route requests through. Percent-encoded credentials are
+    /// decoded. Rejects an `https://` proxy URL: reaching the proxy
+    /// itself always happens over plain `http://`, whether the request
+    /// being routed through it is `http://` or `https://` (see the module
+    /// docs) -- a `CONNECT` tunnel changes how traffic to the *origin* is
+    /// protected, not how the client talks to the proxy. An error never
+    /// carries the credentials.
     pub fn http(proxy_url: &str) -> Result<Proxy> {
-        let url = Url::parse(proxy_url)?;
+        let (credentials, proxy_url) = split_userinfo(proxy_url);
+        let url = Url::parse(&proxy_url)?;
         if url.scheme != "http" {
             return Err(Error::UnsupportedScheme(url.scheme));
         }
+        let authorization = credentials.map(basic_authorization).transpose()?;
         Ok(Proxy {
             host: url.host,
             port: url.port,
+            authorization,
         })
     }
 
@@ -81,6 +102,54 @@ impl Proxy {
             url.port,
         )
     }
+}
+
+/// Splits `user:password@` off the authority of `url`, returning it and
+/// the URL without it.
+fn split_userinfo(url: &str) -> (Option<&str>, String) {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return (None, url.to_string());
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..authority_end].rsplit_once('@') {
+        Some((userinfo, host)) => (
+            Some(userinfo),
+            format!("{scheme}://{host}{}", &rest[authority_end..]),
+        ),
+        None => (None, url.to_string()),
+    }
+}
+
+/// `Basic base64(user:password)` from a URL's raw, percent-encoded
+/// `user[:password]`.
+fn basic_authorization(userinfo: &str) -> Result<String> {
+    let (user, password) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+    let pair = format!("{}:{}", percent_decode(user)?, percent_decode(password)?);
+    Ok(format!(
+        "Basic {}",
+        rusty_base64::encode_standard(pair.as_bytes())
+    ))
+}
+
+/// Decodes `%XX` escapes. The error never echoes the input: it is a
+/// credential.
+fn percent_decode(encoded: &str) -> Result<String> {
+    let invalid =
+        || Error::InvalidUrl("malformed percent-encoding in proxy credentials".to_string());
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            decoded.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        let hex = encoded.get(i + 1..i + 3).ok_or_else(invalid)?;
+        decoded.push(u8::from_str_radix(hex, 16).map_err(|_| invalid())?);
+        i += 3;
+    }
+    String::from_utf8(decoded).map_err(|_| invalid())
 }
 
 /// Which [`Proxy`], if any, each request scheme routes through: an
@@ -294,12 +363,40 @@ mod tests {
         let secret = "s3cr3t-proxy-password";
         let err = from_env(env(&[(
             "HTTPS_PROXY",
-            &format!("http://user:{secret}@proxy.example"),
+            &format!("https://user:{secret}@proxy.example"),
         )]))
         .unwrap_err()
         .to_string();
         assert!(err.contains("HTTPS_PROXY"), "{err}");
         assert!(!err.contains(secret), "{err}");
+    }
+
+    #[test]
+    fn an_authenticated_env_proxy_carries_its_credentials() {
+        let read = from_env(env(&[(
+            "HTTP_PROXY",
+            "http://user:pass@plain.example:3128",
+        )]))
+        .unwrap();
+        let proxy = read.http.unwrap();
+        assert_eq!(proxy.host, "plain.example");
+        assert_eq!(proxy.authorization.as_deref(), Some("Basic dXNlcjpwYXNz"));
+    }
+
+    #[test]
+    fn one_unusable_scheme_fails_the_whole_reading() {
+        // Not a partial result: that would route one scheme and silently
+        // send the other direct.
+        let read = from_env(env(&[
+            ("HTTP_PROXY", "http://plain.example"),
+            ("HTTPS_PROXY", "https://tls.example"),
+        ]));
+        assert!(read.is_err());
+        let read = from_env(env(&[
+            ("HTTP_PROXY", "socks5://plain.example"),
+            ("HTTPS_PROXY", "http://tls.example"),
+        ]));
+        assert!(read.is_err());
     }
 
     #[test]
@@ -318,6 +415,38 @@ mod tests {
         );
         let both = Proxies::all(Proxy::http("http://one.example").unwrap());
         assert!(both.for_url(&plain).is_some() && both.for_url(&tls).is_some());
+    }
+
+    #[test]
+    fn proxy_credentials_become_basic_authorization() {
+        let p = Proxy::http("http://user%40corp:p%3Ass@proxy.example:3128").unwrap();
+        assert_eq!((p.host.as_str(), p.port), ("proxy.example", 3128));
+        // base64("user@corp:p:ss")
+        assert_eq!(
+            p.authorization.as_deref(),
+            Some("Basic dXNlckBjb3JwOnA6c3M=")
+        );
+        assert!(Proxy::http("http://proxy.example")
+            .unwrap()
+            .authorization
+            .is_none());
+    }
+
+    #[test]
+    fn proxy_credentials_stay_out_of_debug_and_errors() {
+        let secret = "s3cr3t-proxy-password";
+        let p = Proxy::http(&format!("http://user:{secret}@proxy.example")).unwrap();
+        let debug = format!("{p:?}");
+        let header = p.authorization.as_deref().unwrap_or_default();
+        assert!(!debug.contains(header), "{debug}");
+        let err = Proxy::http(&format!("http://user:{secret}%zz@proxy.example"))
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains(secret), "{err}");
+        let err = Proxy::http(&format!("https://user:{secret}@proxy.example"))
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains(secret), "{err}");
     }
 
     #[test]

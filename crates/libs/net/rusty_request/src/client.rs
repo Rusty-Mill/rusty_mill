@@ -1121,6 +1121,10 @@ struct HopTarget {
     tls_server_name: Option<String>,
     pool_key: PoolKey,
     request_target: String,
+    /// The proxy's `Proxy-Authorization`, when it has credentials: sent on
+    /// the `CONNECT` for a tunnel, and on the request itself when it is
+    /// forwarded.
+    proxy_authorization: Option<String>,
 }
 
 fn hop_target(url: &Url, proxy: Option<&Proxy>) -> HopTarget {
@@ -1133,6 +1137,7 @@ fn hop_target(url: &Url, proxy: Option<&Proxy>) -> HopTarget {
             tls_server_name: Some(url.host.clone()),
             pool_key: p.tunnel_pool_key(url),
             request_target: url.request_target(),
+            proxy_authorization: p.authorization.clone(),
         },
         Some(p) => HopTarget {
             connect_host: p.host.clone(),
@@ -1141,6 +1146,7 @@ fn hop_target(url: &Url, proxy: Option<&Proxy>) -> HopTarget {
             tls_server_name: None,
             pool_key: p.pool_key(),
             request_target: url.absolute_form(),
+            proxy_authorization: p.authorization.clone(),
         },
         None => HopTarget {
             connect_host: url.host.clone(),
@@ -1149,6 +1155,7 @@ fn hop_target(url: &Url, proxy: Option<&Proxy>) -> HopTarget {
             tls_server_name: is_https.then(|| url.host.clone()),
             pool_key: pool_key(url),
             request_target: url.request_target(),
+            proxy_authorization: None,
         },
     }
 }
@@ -1162,7 +1169,8 @@ fn hop_target(url: &Url, proxy: Option<&Proxy>) -> HopTarget {
 async fn establish(raw: RawStream, target: &HopTarget, trust_policy: &TrustPolicy) -> Result<Conn> {
     let raw = match &target.connect_tunnel {
         Some((host, port)) => {
-            let (raw, status) = connect_tunnel(raw, host, *port).await?;
+            let authorization = target.proxy_authorization.as_deref();
+            let (raw, status) = connect_tunnel(raw, host, *port, authorization).await?;
             if !status.is_success() {
                 return Err(Error::ProxyConnectFailed(status));
             }
@@ -1201,6 +1209,7 @@ async fn connect_tunnel(
     stream: RawStream,
     host: &str,
     port: u16,
+    authorization: Option<&str>,
 ) -> Result<(RawStream, StatusCode)> {
     let authority = format!("{host}:{port}");
     let mut t = AsyncTransport::new(stream);
@@ -1211,6 +1220,9 @@ async fn connect_tunnel(
         headers: {
             let mut h = HeaderMap::new();
             h.insert("Host", &authority)?;
+            if let Some(authorization) = authorization {
+                h.insert_sensitive("Proxy-Authorization", authorization)?;
+            }
             h
         },
     };
@@ -1237,16 +1249,21 @@ struct RawResponse<S> {
 /// Builds the `RequestHead` for one hop: `Host` first (matching every
 /// real client/server's convention), then `request.headers` (the wire
 /// headers `build_wire_headers` already assembled) in their original
-/// order.
-fn build_request_head(request: &Request, request_target: &str) -> Result<RequestHead> {
+/// order, plus the proxy's `Proxy-Authorization` when `target` forwards
+/// the request through one.
+fn build_request_head(request: &Request, target: &HopTarget) -> Result<RequestHead> {
     let mut headers = HeaderMap::new();
     headers.insert("Host", &request.url.host_header())?;
     for (name, value) in request.headers.iter() {
         headers.append(name, value)?;
     }
+    let forwarded = target.connect_tunnel.is_none();
+    if let Some(authorization) = target.proxy_authorization.as_deref().filter(|_| forwarded) {
+        headers.insert_sensitive("Proxy-Authorization", authorization)?;
+    }
     Ok(RequestHead {
         method: request.method.clone(),
-        target: request_target.to_string(),
+        target: target.request_target.clone(),
         version: Version::Http11,
         headers,
     })
@@ -1346,10 +1363,10 @@ async fn read_final_head<S: AsyncRead + AsyncWrite + Unpin + Send>(
 async fn attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: S,
     request: &Request,
-    request_target: &str,
+    target: &HopTarget,
 ) -> Result<RawResponse<S>> {
     let mut t = AsyncTransport::new(stream);
-    let head = build_request_head(request, request_target)?;
+    let head = build_request_head(request, target)?;
     t.write_request_head(&head).await?;
     write_request_body(&mut t, &request.body).await?;
 
@@ -1372,10 +1389,10 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
 async fn attempt_streaming<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: S,
     request: &Request,
-    request_target: &str,
+    target: &HopTarget,
 ) -> Result<StreamingHop<S>> {
     let mut t = AsyncTransport::new(stream);
-    let head = build_request_head(request, request_target)?;
+    let head = build_request_head(request, target)?;
     t.write_request_head(&head).await?;
     write_request_body(&mut t, &request.body).await?;
 
@@ -1435,7 +1452,7 @@ async fn send_one_hop(
 ) -> Result<Response> {
     let target = hop_target(&request.url, proxy);
     let stream = take_or_dial(pool, &target, trust_policy).await?;
-    let raw = attempt(stream, request, &target.request_target).await?;
+    let raw = attempt(stream, request, &target).await?;
     if raw.keep_alive {
         if let Some(pool) = pool {
             pool.put(target.pool_key, raw.stream);
@@ -1463,7 +1480,7 @@ async fn send_one_hop_streaming(
 ) -> Result<(StreamingHop<Conn>, Option<Reuse>)> {
     let target = hop_target(&request.url, proxy);
     let stream = take_or_dial(pool.map(Arc::as_ref), &target, trust_policy).await?;
-    let hop = attempt_streaming(stream, request, &target.request_target).await?;
+    let hop = attempt_streaming(stream, request, &target).await?;
     let reuse = pool.filter(|_| hop.keep_alive).map(|pool| Reuse {
         pool: pool.clone(),
         key: target.pool_key,
@@ -1688,7 +1705,7 @@ mod tests {
         run(async {
             let (request, opens) = counted_post();
             let io = Scripted::new(0, b"");
-            expect_io_error(attempt(io, &request, "/submit").await);
+            expect_io_error(attempt(io, &request, &hop_target(&request.url, None)).await);
             assert_eq!(opens.load(Ordering::SeqCst), 0);
         });
     }
@@ -1700,7 +1717,7 @@ mod tests {
             // Enough for `POST /submit HTTP/1.1\r\n` and a bit of `Host`,
             // not the whole head.
             let io = Scripted::new(24, b"");
-            expect_io_error(attempt(io, &request, "/submit").await);
+            expect_io_error(attempt(io, &request, &hop_target(&request.url, None)).await);
             assert_eq!(opens.load(Ordering::SeqCst), 0);
         });
     }
@@ -1710,7 +1727,7 @@ mod tests {
         run(async {
             let (request, opens) = counted_post();
             let io = Scripted::new(usize::MAX, b"");
-            expect_io_error(attempt(io, &request, "/submit").await);
+            expect_io_error(attempt(io, &request, &hop_target(&request.url, None)).await);
             assert_eq!(opens.load(Ordering::SeqCst), 1);
         });
     }
@@ -1720,7 +1737,9 @@ mod tests {
         run(async {
             let (request, opens) = counted_post();
             let io = Scripted::new(usize::MAX, b"HTTP/1.1 204 No Content\r\n\r\n");
-            let raw = attempt(io, &request, "/submit").await.unwrap();
+            let raw = attempt(io, &request, &hop_target(&request.url, None))
+                .await
+                .unwrap();
             assert_eq!(raw.status.as_u16(), 204);
             assert!(raw.stream.written.ends_with(b"\r\n\r\nhello"));
             assert_eq!(opens.load(Ordering::SeqCst), 1);
@@ -1732,7 +1751,7 @@ mod tests {
         run(async {
             let (request, opens) = counted_post();
             let io = Scripted::new(0, b"");
-            expect_io_error(attempt_streaming(io, &request, "/submit").await);
+            expect_io_error(attempt_streaming(io, &request, &hop_target(&request.url, None)).await);
             assert_eq!(opens.load(Ordering::SeqCst), 0);
         });
     }
@@ -1742,7 +1761,7 @@ mod tests {
         run(async {
             let (request, opens) = counted_post();
             let io = Scripted::new(24, b"");
-            expect_io_error(attempt_streaming(io, &request, "/submit").await);
+            expect_io_error(attempt_streaming(io, &request, &hop_target(&request.url, None)).await);
             assert_eq!(opens.load(Ordering::SeqCst), 0);
         });
     }
@@ -1752,7 +1771,7 @@ mod tests {
         run(async {
             let (request, opens) = counted_post();
             let io = Scripted::new(usize::MAX, b"");
-            expect_io_error(attempt_streaming(io, &request, "/submit").await);
+            expect_io_error(attempt_streaming(io, &request, &hop_target(&request.url, None)).await);
             assert_eq!(opens.load(Ordering::SeqCst), 1);
         });
     }
@@ -1770,7 +1789,9 @@ mod tests {
                 body: mut reader,
                 keep_alive,
                 ..
-            } = attempt_streaming(io, &request, "/submit").await.unwrap();
+            } = attempt_streaming(io, &request, &hop_target(&request.url, None))
+                .await
+                .unwrap();
             assert_eq!(status.as_u16(), 200);
             assert!(keep_alive);
             assert_eq!(

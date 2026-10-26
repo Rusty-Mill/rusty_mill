@@ -37,6 +37,11 @@ pub enum A2aBuildError {
     /// A method pattern did not compile.
     #[error(transparent)]
     Gate(#[from] GateError),
+    /// The environment's proxy settings name a proxy this gateway cannot
+    /// use. Failing here keeps traffic that must go through a proxy from
+    /// silently going direct.
+    #[error("the environment's proxy settings cannot be used: {0}")]
+    Proxy(#[from] rusty_request::Error),
 }
 
 /// How long the gateway waits for a backend agent's card at startup.
@@ -92,7 +97,7 @@ impl A2aGateway {
             });
         };
 
-        let client = client(CARD_TIMEOUT);
+        let client = client(CARD_TIMEOUT)?;
 
         let mut cards: Vec<(String, AgentCard)> = Vec::new();
         for agent in agents {
@@ -238,26 +243,60 @@ pub fn task_id(body: &[u8]) -> Option<String> {
 }
 
 /// A client bounded by `timeout`, with no cookie store. The environment's
-/// proxy (`HTTPS_PROXY` and kin, as reqwest read them) applies; an invalid
-/// proxy variable is logged and ignored rather than failing the gateway.
-fn client(timeout: Duration) -> rusty_request::Client {
-    let base = || {
-        rusty_request::Client::builder()
-            .timeout(timeout)
-            .no_cookie_store()
-    };
-    base()
-        .proxy_from_env()
-        .unwrap_or_else(|err| {
-            rusty_log::warn!(%err, "ignoring the environment's proxy settings");
-            base()
-        })
-        .build()
+/// proxy (`HTTPS_PROXY` and kin, as reqwest read them) applies, and one it
+/// cannot use is an error rather than a direct connection.
+fn client(timeout: Duration) -> rusty_request::Result<rusty_request::Client> {
+    Ok(rusty_request::Client::builder()
+        .timeout(timeout)
+        .no_cookie_store()
+        .proxy_from_env()?
+        .build())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The proxy environment is process-wide, so the check runs in a child
+    /// of this test binary, with the variables set only there: a usable
+    /// `HTTP_PROXY` beside an `HTTPS_PROXY` this gateway cannot use.
+    #[test]
+    fn a_proxy_setting_that_cannot_be_used_fails_the_client_closed() {
+        const CHILD: &str = "AGENTGATEWAY_PROXY_ENV_CHILD";
+        const NAME: &str = "tests::a_proxy_setting_that_cannot_be_used_fails_the_client_closed";
+        if std::env::var_os(CHILD).is_some() {
+            let Err(err) = client(Duration::from_secs(1)) else {
+                panic!("an unusable proxy must not leave a direct client");
+            };
+            assert!(!err.to_string().contains("s3cr3t"), "leaked: {err}");
+            return;
+        }
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("the test binary"));
+        child.args(["--exact", NAME]).env(CHILD, "1");
+        for name in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "REQUEST_METHOD",
+        ] {
+            child.env_remove(name);
+        }
+        child
+            .env("HTTP_PROXY", "http://plain.example:3128")
+            .env("HTTPS_PROXY", "https://user:s3cr3t@tls.example");
+        let output = child.output().expect("the child test runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}"
+        );
+    }
 
     fn gateway(deny: &[&str]) -> A2aGateway {
         A2aGateway {

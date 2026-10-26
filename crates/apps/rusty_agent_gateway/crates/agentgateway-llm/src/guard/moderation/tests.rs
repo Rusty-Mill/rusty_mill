@@ -28,7 +28,14 @@ fn compile(
     borrowable: Option<Borrowable<'_>>,
     provider: &'static str,
 ) -> Result<Moderation, CredentialError> {
-    Moderation::new(config, rejection(), borrowable, provider, "route[0]")
+    Moderation::new(
+        config,
+        rejection(),
+        borrowable,
+        provider,
+        "route[0]",
+        crate::client(TIMEOUT).expect("a usable proxy environment"),
+    )
 }
 
 #[test]
@@ -244,7 +251,7 @@ async fn a_key_that_cannot_be_sent_is_reported_without_its_value() {
         model: "omni-moderation-latest".to_string(),
         key: format!("{secret}\r\nx-injected: 1"),
         rejection: rejection(),
-        client: crate::client(std::time::Duration::from_secs(5)),
+        client: crate::client(TIMEOUT).expect("a usable proxy environment"),
     };
 
     let reason = moderation

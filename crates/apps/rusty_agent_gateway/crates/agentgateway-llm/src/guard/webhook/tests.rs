@@ -112,12 +112,15 @@ fn a_mask_this_build_cannot_read_refuses_rather_than_passing() {
 
 #[test]
 fn failing_closed_is_the_default() {
-    let webhook = Webhook::new(&GuardWebhook {
-        target: agentgateway_config::WebhookTarget {
-            host: "guard:9000".into(),
+    let webhook = Webhook::new(
+        &GuardWebhook {
+            target: agentgateway_config::WebhookTarget {
+                host: "guard:9000".into(),
+            },
+            ..Default::default()
         },
-        ..Default::default()
-    });
+        test_client(),
+    );
     assert!(!webhook.fail_open);
     match webhook.unreachable() {
         // 503, not 400: nothing decided this content was unacceptable, and
@@ -129,32 +132,41 @@ fn failing_closed_is_the_default() {
 
 #[test]
 fn failing_open_has_to_be_asked_for() {
-    let webhook = Webhook::new(&GuardWebhook {
-        target: agentgateway_config::WebhookTarget {
-            host: "guard:9000".into(),
+    let webhook = Webhook::new(
+        &GuardWebhook {
+            target: agentgateway_config::WebhookTarget {
+                host: "guard:9000".into(),
+            },
+            failure_mode: FailureMode::FailOpen,
+            ..Default::default()
         },
-        failure_mode: FailureMode::FailOpen,
-        ..Default::default()
-    });
+        test_client(),
+    );
     assert!(matches!(webhook.unreachable(), Verdict::Pass));
 }
 
 #[test]
 fn a_bare_host_port_gets_a_scheme_and_a_spelled_one_is_left_alone() {
-    let bare = Webhook::new(&GuardWebhook {
-        target: agentgateway_config::WebhookTarget {
-            host: "guard:9000".into(),
+    let bare = Webhook::new(
+        &GuardWebhook {
+            target: agentgateway_config::WebhookTarget {
+                host: "guard:9000".into(),
+            },
+            ..Default::default()
         },
-        ..Default::default()
-    });
+        test_client(),
+    );
     assert_eq!(bare.base, "http://guard:9000");
 
-    let spelled = Webhook::new(&GuardWebhook {
-        target: agentgateway_config::WebhookTarget {
-            host: "https://guard.example.com/".into(),
+    let spelled = Webhook::new(
+        &GuardWebhook {
+            target: agentgateway_config::WebhookTarget {
+                host: "https://guard.example.com/".into(),
+            },
+            ..Default::default()
         },
-        ..Default::default()
-    });
+        test_client(),
+    );
     assert_eq!(spelled.base, "https://guard.example.com");
 }
 
@@ -207,7 +219,7 @@ fn webhook_at(base: String) -> Webhook {
         headers: Vec::new(),
         forward: Vec::new(),
         fail_open: false,
-        client: crate::client(Duration::from_secs(5)),
+        client: test_client(),
     }
 }
 
@@ -269,4 +281,8 @@ async fn a_header_that_cannot_be_sent_is_reported_without_its_value() {
         .await
         .expect_err("a CR/LF value must not be sent");
     assert!(!reason.contains(secret), "leaked: {reason}");
+}
+
+fn test_client() -> rusty_request::Client {
+    crate::client(TIMEOUT).expect("a usable proxy environment")
 }

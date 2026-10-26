@@ -182,7 +182,11 @@ protection against an active man-in-the-middle). TLS 1.2/1.3, no ALPN
 - **Proxy support**: `.proxy("http://host:port")` on `ClientBuilder`/
   `RequestBuilder` routes requests through an HTTP forward proxy instead
   of connecting to the origin directly -- reached over plain `http://`
-  either way (an `https://` proxy URL is rejected). An `http://` request
+  either way (an `https://` proxy URL is rejected). Credentials in the
+  URL (`http://user:pass@host:port`, percent-encoded) are sent as Basic
+  `Proxy-Authorization` to the proxy only: on each forwarded request and
+  on the `CONNECT`, never inside a tunnel; they stay out of `Debug` and
+  error text. An `http://` request
   is forwarded in cleartext (absolute-form request-target, `Host` still
   naming the origin); an `https://` request instead opens a `CONNECT`
   tunnel to the origin and runs the TLS handshake and the real request

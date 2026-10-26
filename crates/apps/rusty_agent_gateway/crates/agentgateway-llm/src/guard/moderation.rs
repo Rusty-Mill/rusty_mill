@@ -70,7 +70,7 @@ const OPENAI: &str = "https://api.openai.com";
 /// slow gateway. The same five seconds a guard webhook gets, for the same
 /// reason: it is running a model rather than a lookup, and a hung one should
 /// be noticed rather than waited on.
-const TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A moderation rule that cannot be called.
 #[derive(Debug, thiserror::Error)]
@@ -126,13 +126,15 @@ pub struct Moderation {
 }
 
 impl Moderation {
-    /// Compile one rule, resolving the credential it will call with.
+    /// Compile one rule, resolving the credential it will call with, and
+    /// calling out with `client`.
     pub fn new(
         config: &agentgateway_config::Moderation,
         rejection: Rejection,
         borrowable: Option<Borrowable<'_>>,
         route_provider: &'static str,
         at: &str,
+        client: rusty_request::Client,
     ) -> Result<Self, CredentialError> {
         let own = config
             .policies
@@ -175,7 +177,7 @@ impl Moderation {
                 .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             key,
             rejection,
-            client: crate::client(TIMEOUT),
+            client,
         })
     }
 

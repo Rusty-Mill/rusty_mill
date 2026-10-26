@@ -124,6 +124,31 @@ fn https_end_to_end() {
 }
 
 #[test]
+fn proxy_credentials_stay_with_the_proxy_on_a_tunnelled_request() {
+    run(async {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let server = start_tls_test_server(move |req| {
+            let header = req.header("proxy-authorization").map(str::to_string);
+            record.lock().unwrap().push(header);
+            http_response(200, "OK", &[], b"tunnelled")
+        });
+        let url = format!("https://127.0.0.1:{}/hello", server.addr.port());
+        let proxy_url = format!("http://user:pass@{}", start_connect_proxy().addr);
+        let client = Client::builder()
+            .trust_policy(rusty_request::pinned_anchors([server.ca_cert_der.clone()]))
+            .proxy(&proxy_url)
+            .unwrap()
+            .build();
+
+        let resp = client.get(&url).unwrap().send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        // The origin, inside the tunnel, never sees the proxy's credentials.
+        assert_eq!(seen.lock().unwrap().clone(), [None]);
+    });
+}
+
+#[test]
 fn pinned_anchors_trusts_a_cert_signed_by_the_pinned_ca() {
     run(async {
         let server = start_tls_test_server(|_req| http_response(200, "OK", &[], b"pinned"));

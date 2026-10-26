@@ -55,7 +55,7 @@ use super::Rejection;
 /// This sits in front of every request on the route, so a slow webhook is a
 /// slow gateway. Longer than `extAuthz`'s 250ms because a guard may be running
 /// a model rather than a lookup, and short enough that a hung one is noticed.
-const TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A compiled `webhook` rule.
 #[derive(Debug)]
@@ -82,8 +82,8 @@ pub enum Verdict {
 }
 
 impl Webhook {
-    /// Compile one rule.
-    pub fn new(config: &GuardWebhook) -> Self {
+    /// Compile one rule, calling out with `client`.
+    pub fn new(config: &GuardWebhook, client: rusty_request::Client) -> Self {
         Webhook {
             // `http://` because a guard webhook is an internal service and
             // upstream's `target.host` is a bare `host:port`. A TLS one is
@@ -103,7 +103,7 @@ impl Webhook {
                 .map(|name| name.to_ascii_lowercase())
                 .collect::<Vec<String>>(),
             fail_open: config.failure_mode == FailureMode::FailOpen,
-            client: crate::client(TIMEOUT),
+            client,
         }
     }
 
