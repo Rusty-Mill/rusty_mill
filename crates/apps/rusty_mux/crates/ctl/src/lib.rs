@@ -31,6 +31,7 @@ use rusty_mux_proto::schema::{CATALOG, Method, Returns, Value};
 use rusty_mux_proto::{Code, Cursor, Entry, Features, Message};
 use rusty_uuid::Uuid;
 
+pub use crate::api::input_schema;
 use crate::cli::{Api, Arg, Call, Command, Defaults, Invocation};
 use crate::conn::Conn;
 use crate::target::Miss;
@@ -58,6 +59,32 @@ pub struct Env {
     pub socket: Option<PathBuf>,
     /// `$RUSTY_MUX_SESSION`, `$RUSTY_MUX_WINDOW` and `$RUSTY_MUX_BLOCK`.
     pub here: Defaults,
+}
+
+impl Env {
+    /// This process's environment. A malformed id is ignored, with a warning
+    /// on stderr.
+    pub fn from_process() -> Self {
+        Self {
+            socket: std::env::var_os("RUSTY_MUX_SOCKET").map(Into::into),
+            here: Defaults {
+                session: id_var("RUSTY_MUX_SESSION"),
+                window: id_var("RUSTY_MUX_WINDOW"),
+                block: id_var("RUSTY_MUX_BLOCK"),
+            },
+        }
+    }
+}
+
+fn id_var(name: &str) -> Option<Uuid> {
+    let value = std::env::var(name).ok()?;
+    match value.parse() {
+        Ok(id) => Some(id),
+        Err(_) => {
+            eprintln!("rusty-mux: ignoring ${name}: `{value}` is not an id");
+            None
+        }
+    }
 }
 
 /// What a request answered with.
