@@ -256,6 +256,33 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn('checksums.txt "$base/actionlint_${version}_checksums.txt"', self.workflow)
         self.assertIn("sha256sum --check --status", self.workflow)
 
+    def test_ci_change_with_no_affected_crate_still_runs_smoke(self) -> None:
+        # Every PR adds a change fragment, so a real CI PR is never CI-only.
+        # Without this fallback it selected no crate and so built nothing at
+        # all: no smoke, no test, no clippy (#928, #1010, #1073, #1081).
+        for extra in ("changes/2026-10-26-ci-fix.md", "docs/agents/review-router.md"):
+            with self.subTest(extra=extra):
+                changed = f".github/actions/setup-build-env/action.yml\n{extra}\n"
+                self.assertNotEqual(self._planner("--is-ci-only", input=changed).returncode, 0)
+                self.assertEqual(
+                    self._planner("--needs-ci-smoke", "--packages", "", input=changed).returncode, 0
+                )
+        # A crate lane already runs setup-build-env, and prose alone needs no smoke.
+        self.assertEqual(
+            self._planner(
+                "--needs-ci-smoke", "--packages", "rusty_tick",
+                input=".github/workflows/ci.yml\ncrates/apps/rusty_tick/src/lib.rs\n",
+            ).returncode,
+            1,
+        )
+        self.assertEqual(
+            self._planner("--needs-ci-smoke", "--packages", "", input="docs/README.md\n").returncode, 1
+        )
+        self.assertIn(
+            'printf \'%s\\n\' "$changed" | python3 .github/scripts/ci_plan.py --needs-ci-smoke --packages "$packages"',
+            self.workflow,
+        )
+
     def test_lockfile_is_not_an_unconditional_global_fallback(self) -> None:
         self.assertEqual(self._planner("--requires-full", input="Cargo.lock\n").returncode, 1)
         self.assertIn("lockfile_diff.py", self.workflow)
