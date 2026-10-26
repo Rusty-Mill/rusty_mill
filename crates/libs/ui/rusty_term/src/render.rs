@@ -230,6 +230,12 @@ pub(crate) struct RenderState {
     /// Timestamp of the last actual paint, so the frame budget spaces real
     /// repaints rather than no-op wakes.
     pub(crate) last_frame: Instant,
+    /// The open synchronized update's timeout that a wakeup is already set
+    /// for, so a burst of held frames sets one timer, not one each.
+    sync_until: Option<Instant>,
+    /// Set by [`resize_grid`]: the next frame clears the host screen and
+    /// repaints every row, even mid synchronized update.
+    clear_pending: bool,
 }
 
 impl RenderState {
@@ -239,16 +245,54 @@ impl RenderState {
             last_title: None,
             cursor_shown: true,
             last_frame: Instant::now(),
+            sync_until: None,
+            clear_pending: false,
         }
     }
+}
+
+/// Reflow `grid` to `cols`x`rows` when that changes its size, and have the
+/// next [`render_once`] clear the host screen and repaint it in full. A
+/// resize releases a held synchronized update for that one frame, as the
+/// window does, so the clear and the reflowed grid always land together and
+/// the screen is never left blank. `true` on a change.
+pub(crate) fn resize_grid(
+    grid: &Mutex<Grid>,
+    st: &mut RenderState,
+    cols: usize,
+    rows: usize,
+) -> bool {
+    let mut g = grid.lock();
+    if (g.cols, g.rows) == (cols, rows) {
+        return false;
+    }
+    g.resize(cols, rows);
+    st.clear_pending = true;
+    true
 }
 
 /// Snapshot the grid and paint one frame if warranted, forwarding any clipboard
 /// (OSC 52) bytes, title (OSC 0/2) changes, and cursor-visibility (DECTCEM)
 /// changes to the host terminal. Shared verbatim by both runtimes.
-pub(crate) fn render_once(grid: &Mutex<Grid>, st: &mut RenderState) {
+///
+/// While a synchronized update (DEC 2026) is open nothing is painted, so
+/// input, a resize or a scroll can't show a half-drawn frame. The first held
+/// frame returns the update's timeout, for the caller to wake and repaint
+/// then; later ones for the same update return `None`. A frame after
+/// [`resize_grid`] is the exception: it always paints.
+#[must_use]
+pub(crate) fn render_once(grid: &Mutex<Grid>, st: &mut RenderState) -> Option<Instant> {
     let (frame, title, viewing, dirty_any, host_out, app_cursor_visible) = {
         let mut g = grid.lock();
+        if !st.clear_pending
+            && let Some(until) = g.sync_output_until()
+        {
+            return (st.sync_until.replace(until) != Some(until)).then_some(until);
+        }
+        st.sync_until = None;
+        if st.clear_pending {
+            g.dirty.fill(true);
+        }
         let viewing = g.view_offset > 0;
         let dirty_any = g.dirty.iter().any(|&d| d);
         // While scrolled back, composite history over the live grid; that
@@ -299,6 +343,12 @@ pub(crate) fn render_once(grid: &Mutex<Grid>, st: &mut RenderState) {
         st.cursor_shown = want_cursor;
     }
 
+    if std::mem::take(&mut st.clear_pending) {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"\x1b[2J");
+        st.last_cursor = None;
+    }
+
     if viewing {
         // Repaint the whole viewport only when something changed (a scroll, or
         // new output arriving underneath).
@@ -315,11 +365,54 @@ pub(crate) fn render_once(grid: &Mutex<Grid>, st: &mut RenderState) {
         draw(&frame, true);
         st.last_frame = Instant::now();
     }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_synchronized_update_holds_paints_and_asks_for_one_wakeup() {
+        use crate::core::AnsiParser;
+        let grid = Mutex::new(Grid::new(20, 4));
+        let mut p = AnsiParser::new();
+        p.advance(&mut grid.lock(), b"\x1b[?2026hhalf a frame");
+        let mut st = RenderState::new();
+        let until = render_once(&grid, &mut st);
+        assert!(until.is_some(), "held, with its timeout");
+        assert!(grid.lock().dirty.iter().any(|&d| d), "nothing painted");
+        assert_eq!(render_once(&grid, &mut st), None, "one wakeup per update");
+        p.advance(&mut grid.lock(), b"\x1b[?2026l");
+        assert_eq!(render_once(&grid, &mut st), None);
+        assert!(!grid.lock().dirty.iter().any(|&d| d), "painted once closed");
+    }
+
+    #[test]
+    fn a_resize_during_a_synchronized_update_repaints_the_reflowed_grid() {
+        use crate::core::AnsiParser;
+        let grid = Mutex::new(Grid::new(20, 4));
+        let mut p = AnsiParser::new();
+        p.advance(&mut grid.lock(), b"\x1b[?2026hhalf a frame");
+        let mut st = RenderState::new();
+        assert!(render_once(&grid, &mut st).is_some(), "held");
+        assert!(!resize_grid(&grid, &mut st, 20, 4), "same size: no change");
+        assert!(resize_grid(&grid, &mut st, 30, 6));
+        assert_eq!(render_once(&grid, &mut st), None, "painted, not held");
+        let mut g = grid.lock();
+        assert_eq!((g.cols, g.rows), (30, 6));
+        assert!(
+            !g.dirty.iter().any(|&d| d),
+            "every row painted with the clear"
+        );
+        assert!(g.sync_output_active(), "the update itself stays open");
+        drop(g);
+        assert!(!st.clear_pending);
+        assert!(
+            render_once(&grid, &mut st).is_some(),
+            "later frames hold again"
+        );
+    }
 
     #[test]
     fn restore_host_modes_resets_kitty_modify_keys_and_cursor_shape() {

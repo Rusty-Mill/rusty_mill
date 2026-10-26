@@ -24,12 +24,13 @@
 //! | GET | `/search?q=` | whole-word match on title and notes |
 //! | GET | `/smart/{today,next7,overdue}?utcOffsetMin=` | |
 //! | GET | `/docs/{kind}` | client-owned JSON: habits, focus records, prefs |
-//! | PUT, DELETE | `/docs/{kind}/{id}` | |
+//! | GET, PUT, DELETE | `/docs/{kind}/{id}` | PUT also takes `If-None-Match: *` (only if absent); a `board` document's PUT requires `If-Task-Match: <task etag>` |
 //!
 //! Writes accept `If-Match: "<etag>"`; a stale one is refused with 412 and
 //! the current entity in `current`.
 
 use crate::auth::{Authenticator, Denied};
+use crate::docs::BOARD_KIND;
 use crate::dto::{
     CreateList, CreateTag, CreateTask, DocDto, Docs, ListDto, Lists, PatchList, PatchTag,
     PatchTask, Purged, RenameTag, SetOrder, SnapshotDto, TagDto, Tags, TaskDto, Tasks,
@@ -53,6 +54,10 @@ pub struct Request<'a> {
     pub target: &'a str,
     pub authorization: Option<&'a str>,
     pub if_match: Option<&'a str>,
+    /// `If-None-Match`; only `*` is understood, on a document write.
+    pub if_none_match: Option<&'a str>,
+    /// `If-Task-Match`: the version of the task a `board` document belongs to.
+    pub if_task_match: Option<&'a str>,
     pub body: &'a [u8],
 }
 
@@ -278,6 +283,8 @@ impl Api {
             query: &query,
             body: request.body,
             if_match: request.if_match,
+            if_none_match: request.if_none_match,
+            if_task_match: request.if_task_match,
         };
         match segments.as_slice() {
             ["api", "v1", rest @ ..] => route(service, &cx, rest),
@@ -309,6 +316,8 @@ struct Cx<'a> {
     query: &'a Query,
     body: &'a [u8],
     if_match: Option<&'a str>,
+    if_none_match: Option<&'a str>,
+    if_task_match: Option<&'a str>,
 }
 
 impl Cx<'_> {
@@ -319,35 +328,37 @@ impl Cx<'_> {
 
     /// `Some(response)` when `If-Match` is present and does not name `current`.
     fn stale<T: Serialize>(&self, current: &str, entity: impl FnOnce() -> T) -> Option<Response> {
-        let presented = self
-            .if_match?
-            .trim()
-            .trim_start_matches("W/")
-            .trim_matches('"');
-        if presented == current {
-            return None;
-        }
-        #[derive(Serialize)]
-        struct Stale<'a, T> {
-            error: StaleError<'a>,
-            current: T,
-        }
-        #[derive(Serialize)]
-        struct StaleError<'a> {
-            code: &'a str,
-            message: &'a str,
-        }
-        Some(Response::json(
-            StatusCode::PRECONDITION_FAILED,
-            &Stale {
-                error: StaleError {
-                    code: "precondition_failed",
-                    message: "the record changed since you read it",
-                },
-                current: entity(),
-            },
-        ))
+        stale_against(self.if_match?, current).then(|| precondition_failed(entity()))
     }
+}
+
+/// Whether an `If-Match`-style header names something other than `current`.
+fn stale_against(presented: &str, current: &str) -> bool {
+    presented.trim().trim_start_matches("W/").trim_matches('"') != current
+}
+
+/// 412, with what the caller should have read in `current`.
+fn precondition_failed<T: Serialize>(current: T) -> Response {
+    #[derive(Serialize)]
+    struct Stale<'a, T> {
+        error: StaleError<'a>,
+        current: T,
+    }
+    #[derive(Serialize)]
+    struct StaleError<'a> {
+        code: &'a str,
+        message: &'a str,
+    }
+    Response::json(
+        StatusCode::PRECONDITION_FAILED,
+        &Stale {
+            error: StaleError {
+                code: "precondition_failed",
+                message: "the record changed since you read it",
+            },
+            current,
+        },
+    )
 }
 
 fn split_target(target: &str) -> (&str, Query) {
@@ -634,10 +645,19 @@ fn route_docs(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Respo
                 .collect();
             Ok(Response::json(StatusCode::OK, &Docs { docs }))
         }
+        (Method::Get, [kind, id]) => {
+            let doc = service.doc(kind, parse_id(id)?)?;
+            let dto = DocDto::from_doc(doc).ok_or(ApiError::Internal)?;
+            Ok(Response::json(StatusCode::OK, &dto))
+        }
         (Method::Put, [kind, id]) => {
+            let id = parse_id(id)?;
+            if let Some(stale) = stale_doc(service, cx, kind, id)? {
+                return Ok(stale);
+            }
             let body = std::str::from_utf8(cx.body)
                 .map_err(|_| ApiError::BadRequest("body must be UTF-8 JSON".into()))?;
-            let doc = service.put_doc(kind, parse_id(id)?, body)?;
+            let doc = service.put_doc(kind, id, body)?;
             let dto = DocDto::from_doc(doc).ok_or(ApiError::Internal)?;
             Ok(Response::json(StatusCode::OK, &dto))
         }
@@ -647,6 +667,43 @@ fn route_docs(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Respo
         }
         _ => Err(not_found()),
     }
+}
+
+/// A 412 when a document write's preconditions fail, checked under the same
+/// lock as the write: `If-Task-Match` (required for a `board` document, whose
+/// id is its task's), then `If-None-Match: *` and `If-Match`.
+fn stale_doc(service: &Service, cx: &Cx<'_>, kind: &str, id: Uuid) -> Result<Option<Response>> {
+    if kind == BOARD_KIND {
+        let presented = cx.if_task_match.ok_or_else(|| {
+            ApiError::BadRequest("a board document is written with If-Task-Match".into())
+        })?;
+        let task = service.task(id)?;
+        if stale_against(presented, &task.version.to_string()) {
+            return Ok(Some(precondition_failed(TaskDto::from(task))));
+        }
+    }
+    let current = service.doc(kind, id).ok();
+    match cx.if_none_match.map(str::trim) {
+        None => {}
+        Some("*") => {
+            if let Some(doc) = current {
+                return Ok(Some(precondition_failed(DocDto::from_doc(doc))));
+            }
+        }
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "If-None-Match on a document must be *".into(),
+            ))
+        }
+    }
+    let Some(presented) = cx.if_match else {
+        return Ok(None);
+    };
+    Ok(match current {
+        None => Some(precondition_failed(rusty_json::Value::Null)),
+        Some(doc) => stale_against(presented, &doc.updated_ms.to_string())
+            .then(|| precondition_failed(DocDto::from_doc(doc))),
+    })
 }
 
 fn not_found() -> ApiError {

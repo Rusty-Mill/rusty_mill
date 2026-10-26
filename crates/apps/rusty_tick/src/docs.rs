@@ -13,7 +13,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 /// The document kinds the API accepts.
-pub const KINDS: [&str; 12] = [
+pub const KINDS: [&str; 13] = [
     "habit",
     "habit_checkin",
     "focus",
@@ -26,7 +26,11 @@ pub const KINDS: [&str; 12] = [
     "assignee",
     "subscription",
     "import_alias",
+    BOARD_KIND,
 ];
+/// Mill Board's per-task document (ADR-0012): its id is the task's id, and it
+/// goes when the task is purged.
+pub const BOARD_KIND: &str = "board";
 /// Largest accepted body, in bytes.
 pub const MAX_DOC_BYTES: usize = 64 * 1024;
 
@@ -124,6 +128,18 @@ impl DocStore {
             self.table.delete(*id)?;
         }
         Ok(gone.len())
+    }
+
+    /// Delete the `board` documents of `tasks` (a board document's id is its task's).
+    pub fn delete_board_of(&mut self, tasks: &[Uuid]) -> Result<usize, TickError> {
+        let mut gone = 0;
+        for id in tasks {
+            if self.get(*id).is_some_and(|d| d.kind == BOARD_KIND) {
+                self.table.delete(*id)?;
+                gone += 1;
+            }
+        }
+        Ok(gone)
     }
 
     /// Delete every comment that belongs to one of `tasks`.

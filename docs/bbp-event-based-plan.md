@@ -131,6 +131,11 @@ refused edit is logged as `rejected`, charges no bytes, and is the measurable ev
 replays as before. A build without `SpecEdit` fails loudly on a log that has one (an unknown variant),
 so no schema bump is needed to keep an old build from misreading it.
 
+**Gate binding (built, 2026-10-26).** A plan-gate request on a co-edited version is refused with
+`stale_subject` unless that version is the head of its spec, since approving an older version would
+drop every edit accepted after it. Specs are writable only in planning, so the head cannot move once
+the gate is open.
+
 **Harness (`rusty_bbp/tests/coedit_load.rs`).** Scripted editors drive the real `Driver`, engine and
 `MemStore` (one smoke run uses `FsStore`) in virtual time, so runs are deterministic and cost nothing.
 Each editor holds a planner role in an N-turn task. It reads the head through `get_artifact`, thinks,

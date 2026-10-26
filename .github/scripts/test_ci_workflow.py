@@ -44,10 +44,11 @@ PLAN_KEYS = {
     "rleval_image",
     "crypto_ct",
     "rand_platforms",
+    "msrv_manifests",
     "shards",
     "components",
 }
-SPECIALIZED_KEYS = PLAN_KEYS - {"full", "packages", "ci_only", "shards", "components"}
+SPECIALIZED_KEYS = PLAN_KEYS - {"full", "packages", "ci_only", "msrv_manifests", "shards", "components"}
 
 
 class CiWorkflowSchedulingTests(unittest.TestCase):
@@ -256,6 +257,33 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn('checksums.txt "$base/actionlint_${version}_checksums.txt"', self.workflow)
         self.assertIn("sha256sum --check --status", self.workflow)
 
+    def test_ci_change_with_no_affected_crate_still_runs_smoke(self) -> None:
+        # Every PR adds a change fragment, so a real CI PR is never CI-only.
+        # Without this fallback it selected no crate and so built nothing at
+        # all: no smoke, no test, no clippy (#928, #1010, #1073, #1081).
+        for extra in ("changes/2026-10-26-ci-fix.md", "docs/agents/review-router.md"):
+            with self.subTest(extra=extra):
+                changed = f".github/actions/setup-build-env/action.yml\n{extra}\n"
+                self.assertNotEqual(self._planner("--is-ci-only", input=changed).returncode, 0)
+                self.assertEqual(
+                    self._planner("--needs-ci-smoke", "--packages", "", input=changed).returncode, 0
+                )
+        # A crate lane already runs setup-build-env, and prose alone needs no smoke.
+        self.assertEqual(
+            self._planner(
+                "--needs-ci-smoke", "--packages", "rusty_tick",
+                input=".github/workflows/ci.yml\ncrates/apps/rusty_tick/src/lib.rs\n",
+            ).returncode,
+            1,
+        )
+        self.assertEqual(
+            self._planner("--needs-ci-smoke", "--packages", "", input="docs/README.md\n").returncode, 1
+        )
+        self.assertIn(
+            'printf \'%s\\n\' "$changed" | python3 .github/scripts/ci_plan.py --needs-ci-smoke --packages "$packages"',
+            self.workflow,
+        )
+
     def test_lockfile_is_not_an_unconditional_global_fallback(self) -> None:
         self.assertEqual(self._planner("--requires-full", input="Cargo.lock\n").returncode, 1)
         self.assertIn("lockfile_diff.py", self.workflow)
@@ -302,7 +330,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         outputs = self._planner_map(
             "--packages", "rk-app rusty_term rusty-meshed-core rusty_tick"
         )
-        self.assertEqual(set(outputs), SPECIALIZED_KEYS)
+        self.assertEqual(set(outputs), SPECIALIZED_KEYS | {"msrv_manifests"})
         self.assertEqual(outputs["key_desktop"], "true")
         self.assertEqual(outputs["term_web"], "true")
         self.assertEqual(outputs["dashboard"], "true")
@@ -592,11 +620,12 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         # Without this trigger the queue waits forever for required-gate.
         self.assertRegex(self.workflow, r"(?m)^  merge_group:\n    types: \[checks_requested\]\n")
         self.assertIn('--merge-base "${{ github.event.merge_group.base_sha }}"', self.workflow)
-        # ci.yml is the only workflow that feeds the required check.
+        # ci.yml is the only workflow the queue triggers, so the only one that
+        # feeds the required check (the reaper reads merge_group runs, it is not one).
         for path in sorted(REPO.glob(".github/workflows/*.yml")):
             if path != WORKFLOW:
                 with self.subTest(workflow=path.name):
-                    self.assertNotIn("merge_group", path.read_text(encoding="utf-8"))
+                    self.assertNotRegex(path.read_text(encoding="utf-8"), r"(?m)^  merge_group:")
 
     def test_merge_group_runs_never_share_a_concurrency_key_with_pull_requests(self) -> None:
         group = re.search(r"(?m)^concurrency:\n(?:  #.*\n)*  group: (.+)\n  cancel-in-progress: (.+)\n", self.workflow)
@@ -651,7 +680,9 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_msrv_compile_job_builds_at_declared_floors_and_gates(self) -> None:
         job = self.workflow.split("  msrv-compile:\n")[1].split("  rusty-config-no-std-check:\n")[0]
         self.assertIn("needs: plan", job)
-        self.assertIn("needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''", job)
+        self.assertIn("(needs.plan.outputs.full == 'true' || needs.plan.outputs.msrv_manifests != '')", job)
+        self.assertIn('scope=(--manifests "$PLAN_MANIFESTS")', job)
+        self.assertIn("msrv_manifests: ${{ steps.plan.outputs.msrv_manifests }}", self.workflow)
         self.assertIn("check_msrv_compile.py", job)
         # The pinned toolchain's own versions are covered elsewhere (compared as full versions); builds stay
         # out of the cached target dir; metadata is locked and Cargo.lock must come out unchanged.
@@ -673,6 +704,22 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("'rusty_journal rusty_fedora_agent'", job)
         self.assertIn("shell: bash", job)
         self.assertIn("      - msrv-compile\n", self.workflow.split("  required-gate:\n", 1)[1])
+
+    def test_msrv_scope_is_the_crates_whose_own_manifest_changed(self) -> None:
+        changed = (
+            "crates/libs/net/rusty_axum/Cargo.toml\n"
+            "crates/libs/net/rusty_axum/src/lib.rs\n"
+            "crates/libs/a/Cargo.toml\n"
+            "Cargo.toml\n"
+            "Cargo.lock\n"
+            "crates/libs/b/NotCargo.toml\n"
+        )
+        outputs = self._planner_map("--packages", "rusty_axum a dependent", input=changed)
+        self.assertEqual(outputs["msrv_manifests"], "crates/libs/a/Cargo.toml crates/libs/net/rusty_axum/Cargo.toml")
+        # Code-only, lockfile-only and root-manifest changes leave it to the scheduled sweep.
+        code_only = self._planner_map("--packages", "rusty_axum", input="Cargo.toml\nCargo.lock\nsrc/lib.rs\n")
+        self.assertEqual(code_only["msrv_manifests"], "")
+        self.assertEqual(self._planner_map("--emit-full")["msrv_manifests"], "")
 
     def test_rusty_axum_floors_match_the_manifests(self) -> None:
         # The default build is held to rusty_axum's own rust-version; the all-features floor is exactly
@@ -729,6 +776,68 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         # Run data reaches the script through env, never by interpolation.
         script = alert.split("        run: |\n", 1)[1]
         self.assertNotIn("${{", script)
+
+    def test_merge_queue_reaper_is_narrow(self) -> None:
+        reaper = (WORKFLOW.parent / "merge-queue-reaper.yml").read_text(encoding="utf-8")
+        # Main's copy runs on every CI request; no PR or queue check of its own.
+        self.assertIn("on:\n  workflow_run:\n    workflows: [CI]\n    types: [requested]\n", reaper)
+        self.assertNotRegex(reaper, r"(?m)^  (pull_request|pull_request_target|merge_group|push):")
+        self.assertIn("    if: github.event.workflow_run.event == 'merge_group'\n", reaper)
+        # A skipped (non-merge_group) run must not share, and so cancel, the sweep's group.
+        self.assertIn("  group: merge-queue-reaper-${{ github.event.workflow_run.event }}\n", reaper)
+        # Read-only by default; the sweep may only cancel runs.
+        self.assertRegex(reaper, r"(?m)^permissions:\n  contents: read$")
+        self.assertEqual(re.findall(r"(?m)^\s+[a-z-]+: write$", reaper), ["      actions: write"])
+        self.assertNotRegex(reaper, r"(?m)^\s*-?\s*uses:")
+        self.assertIn("timeout-minutes: 5", reaper)
+        script = reaper.split("        run: |\n", 1)[1]
+        self.assertNotIn("${{", script)
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("grep"), "bash is needed to run the sweep")
+    def test_merge_queue_reaper_cancels_only_runs_whose_ref_is_gone(self) -> None:
+        reaper = (WORKFLOW.parent / "merge-queue-reaper.yml").read_text(encoding="utf-8")
+        script = textwrap.dedent(reaper.split("        run: |\n", 1)[1])
+        fake_gh = textwrap.dedent("""\
+            #!/usr/bin/env bash
+            # Answers the three calls the sweep makes; --jq output is pre-shaped.
+            # Run listings have a second page that only --paginate returns.
+            args="$*"
+            case "$args" in
+              *"-X POST"*"/cancel"*) id="${args##*/runs/}"; echo "${id%%/*}" >> "$STATE/cancelled" ;;
+              *"/matching-refs/"*) [ -z "${FAIL_REFS:-}" ] || exit 1; cat "$STATE/refs" ;;
+              *"--paginate"*"status=in_progress"*) cat "$STATE/runs" "$STATE/runs2" ;;
+              *"status=in_progress"*) cat "$STATE/runs" ;;
+            esac
+            """)
+
+        def sweep(runs: str, refs: str, fail_refs: bool = False, runs2: str = "") -> tuple[int, list[str]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                state = Path(tmp)
+                (state / "gh").write_text(fake_gh)
+                (state / "gh").chmod(0o755)
+                (state / "runs").write_text(runs)
+                (state / "runs2").write_text(runs2)
+                (state / "refs").write_text(refs)
+                env = dict(os.environ, PATH=f"{state}:{os.environ['PATH']}", STATE=str(state), GH_REPO="o/r")
+                if fail_refs:
+                    env["FAIL_REFS"] = "1"
+                code = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True).returncode
+                cancelled = state / "cancelled"
+                return code, cancelled.read_text().split() if cancelled.exists() else []
+
+        live = "gh-readonly-queue/main/pr-7-aaa"
+        dead = "gh-readonly-queue/main/pr-8-bbb"
+        runs = f"101 {live}\n102 {dead}\n"
+        self.assertEqual(sweep(runs, f"refs/heads/{live}\n"), (0, ["102"]))
+        self.assertEqual(sweep(runs, f"refs/heads/{live}\nrefs/heads/{dead}\n"), (0, []))
+        # A prefix of a live ref is not that ref.
+        self.assertEqual(sweep("103 gh-readonly-queue/main/pr-7\n", f"refs/heads/{live}\n"), (0, ["103"]))
+        self.assertEqual(sweep("", f"refs/heads/{live}\n"), (0, []), "nothing in flight, nothing to do")
+        # A stale run past the first 100 of its status is still swept.
+        self.assertEqual(sweep(runs, f"refs/heads/{live}\n", runs2="104 gh-readonly-queue/main/pr-9-ccc\n"), (0, ["102", "104"]))
+        code, cancelled = sweep(runs, "", fail_refs=True)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(cancelled, [], "an unreadable queue must never cancel anything")
 
     def test_dependabot_tracks_github_actions(self) -> None:
         text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")

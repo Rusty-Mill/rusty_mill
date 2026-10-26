@@ -86,6 +86,8 @@ fn api_request<'a>(
         target,
         authorization,
         if_match: None,
+        if_none_match: None,
+        if_task_match: None,
         body,
     }
 }
