@@ -28,7 +28,7 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::api::Shared;
-use crate::domain::{Actor, BoardError, Card, Column, reserved_tag, text_hash};
+use crate::domain::{Actor, BoardError, Card, Column, import_id, reserved_tag, text_hash};
 
 /// Prefix of the label that mirrors a card's column.
 pub const BOARD_PREFIX: &str = "board:";
@@ -264,10 +264,13 @@ pub fn reconcile(board: &Shared, forge: &dyn Forge) -> Result<Report, SyncError>
     };
     let issues = forge.list_issues()?;
     let by_number: HashMap<u64, &Issue> = issues.iter().map(|i| (i.number, i)).collect();
-    let by_marker: HashMap<Uuid, (&Issue, Marker)> = issues
-        .iter()
-        .filter_map(|i| split_marker(&i.body).1.map(|m| (m.card, (i, m))))
-        .collect();
+    let origins = Origins {
+        by_marker: issues
+            .iter()
+            .filter_map(|i| split_marker(&i.body).1.map(|m| (m.card, (i, m))))
+            .collect(),
+        by_import: issues.iter().map(|i| (import_id(i.number), i)).collect(),
+    };
     let cards = board.list(None)?;
     let card_ids: HashSet<Uuid> = cards.iter().map(|c| c.id).collect();
     let mut linked: HashSet<u64> = cards.iter().filter_map(|c| c.issue).collect();
@@ -280,7 +283,7 @@ pub fn reconcile(board: &Shared, forge: &dyn Forge) -> Result<Report, SyncError>
                 forge,
                 &actor,
                 &card,
-                &by_marker,
+                &origins,
                 &mut linked,
                 &mut report,
             )?;
@@ -307,23 +310,50 @@ pub fn reconcile(board: &Shared, forge: &dyn Forge) -> Result<Report, SyncError>
             .filter(|l| !reserved_tag(l))
             .cloned()
             .collect();
-        board.import(&actor, &issue.title, &body, tags, issue.number)?;
-        report.cards_imported += 1;
+        // An import's card id is derived from the issue, so a conflict means it was imported
+        // before: its card was since relinked, or (rusty_tick) taken off the board by the owner.
+        match board.import(&actor, &issue.title, &body, tags, issue.number) {
+            Ok(_) => report.cards_imported += 1,
+            Err(BoardError::Conflict) => {}
+            Err(e) => return Err(e.into()),
+        }
     }
     Ok(report)
 }
 
-/// An unlinked card: adopt the issue an interrupted run made for it, else create one.
+/// Where an unlinked card's issue may already be: one made for it (its marker
+/// names the card), or the one it was imported from (its id names the issue).
+struct Origins<'a> {
+    by_marker: HashMap<Uuid, (&'a Issue, Marker)>,
+    by_import: HashMap<Uuid, &'a Issue>,
+}
+
+/// An unlinked card: adopt the issue an interrupted run made for it, or the one it
+/// was imported from, else create one.
 fn link_or_create(
     board: &Shared,
     forge: &dyn Forge,
     actor: &Actor,
     card: &Card,
-    by_marker: &HashMap<Uuid, (&Issue, Marker)>,
+    origins: &Origins<'_>,
     linked: &mut HashSet<u64>,
     report: &mut Report,
 ) -> Result<(), SyncError> {
-    if let Some((issue, marker)) = by_marker
+    // A card imported from an issue whose link was not committed with it (a store that
+    // writes the card and its link separately): its id names the issue. No baseline is
+    // known, so none is recorded and a difference stays unresolved.
+    if let Some(issue) = origins
+        .by_import
+        .get(&card.id)
+        .filter(|i| !linked.contains(&i.number))
+    {
+        board.link_issue(card.id, issue.number, None, actor)?;
+        linked.insert(issue.number);
+        report.issues_adopted += 1;
+        return Ok(());
+    }
+    if let Some((issue, marker)) = origins
+        .by_marker
         .get(&card.id)
         .filter(|(i, _)| !linked.contains(&i.number))
     {
@@ -535,11 +565,11 @@ mod tests {
         fn list(&self) -> Result<Vec<Card>, BoardError> {
             self.inner.list()
         }
-        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<(), BoardError> {
+        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
             self.tick()?;
             self.inner.insert(card, event)
         }
-        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<(), BoardError> {
+        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
             self.tick()?;
             self.inner.replace(card, event)
         }
@@ -645,6 +675,47 @@ mod tests {
         assert_eq!(r.issues_updated, 1);
         assert_eq!(forge.get(5).labels, ["bug", "board:backlog"]);
         assert!(reconcile(&b, &forge).expect("again").is_quiet());
+    }
+
+    #[test]
+    fn an_import_whose_link_was_lost_is_relinked_not_exported() {
+        let store = MemStore::default();
+        let mut card = Card::new("Open one", "details", vec![], 1).expect("card");
+        card.id = import_id(5);
+        store
+            .insert(
+                &card,
+                crate::domain::Event::of(&card, crate::domain::EventKind::Created, "x"),
+            )
+            .expect("insert");
+        let b: Shared = Board::new(Box::new(store), Roles::default());
+        let forge = Fake::default();
+        forge.put(5, "Open one", "details", &[], false);
+
+        let r = reconcile(&b, &forge).expect("sync");
+        assert_eq!(
+            (r.issues_created, r.issues_adopted, r.cards_imported),
+            (0, 1, 0)
+        );
+        assert_eq!(b.get(card.id).expect("card").issue, Some(5));
+        assert_eq!(b.list(None).expect("list").len(), 1);
+        assert_eq!(forge.issues.borrow().len(), 1, "no issue was created");
+    }
+
+    #[test]
+    fn an_issue_imported_before_is_not_imported_again() {
+        let b = board();
+        let forge = Fake::default();
+        forge.put(5, "Open one", "", &[], false);
+        reconcile(&b, &forge).expect("sync");
+        let card = b.list(None).expect("list")[0].id;
+        // Its card now tracks another issue, so issue 5 looks unimported; its derived card id says otherwise.
+        forge.put(7, "Other", "", &[], false);
+        b.link_issue(card, 7, None, &human(&b)).expect("relink");
+
+        let r = reconcile(&b, &forge).expect("sync");
+        assert_eq!(r.cards_imported, 0);
+        assert_eq!(b.list(None).expect("list").len(), 1);
     }
 
     // ---- the text merge (review: timestamps are moved by unrelated activity)
@@ -1065,10 +1136,10 @@ mod tests {
             }
             Ok(snapshot)
         }
-        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<(), BoardError> {
+        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
             self.inner.insert(card, event)
         }
-        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<(), BoardError> {
+        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
             self.inner.replace(card, event)
         }
         fn events_since(

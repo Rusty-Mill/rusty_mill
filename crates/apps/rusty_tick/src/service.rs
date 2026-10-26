@@ -812,7 +812,24 @@ impl Service {
     /// Insert or replace a document; `body` must be JSON. `updated_ms` is the
     /// document's ETag, so it moves forward on every write even within one
     /// millisecond. A `board` document's id must be a task not in the trash.
+    /// Write a document. A `board` document is fenced to its task, as by
+    /// [`Service::put_doc_for`] with the document's own id.
     pub fn put_doc(&mut self, kind: &str, id: Uuid, body: &str) -> Result<Doc> {
+        let task = (kind == BOARD_KIND).then_some(id);
+        self.put_doc_for(kind, id, body, task)
+    }
+
+    /// Write a document on behalf of `task`, which moves the task's version in
+    /// the same locked operation, so the version names the document's state too
+    /// (ADR-0012). The task is bumped first: a crash between the two leaves a
+    /// moved version and the old document, which is a consistent state.
+    pub fn put_doc_for(
+        &mut self,
+        kind: &str,
+        id: Uuid,
+        body: &str,
+        task: Option<Uuid>,
+    ) -> Result<Doc> {
         check_kind(kind)?;
         if body.len() > MAX_DOC_BYTES {
             return invalid(format!("document is larger than {MAX_DOC_BYTES} bytes"));
@@ -824,13 +841,15 @@ impl Service {
         if existing.as_ref().is_some_and(|e| e.kind != kind) {
             return Err(ServiceError::Conflict("id belongs to another kind".into()));
         }
-        if kind == BOARD_KIND {
-            // The write is authorized by the task's state (ADR-0012), so it must not be read
+        if let Some(task) = task {
+            // The write is authorized by the task's state, so it must not be read
             // from a task store that is serving its pre-failure view.
             self.tasks.require_writable()?;
-            if self.task(id)?.is_deleted() {
-                return invalid("a board document needs a task that is not in the trash");
+            let task = self.task(task)?;
+            if task.is_deleted() {
+                return invalid("a document written for a task needs one that is not in the trash");
             }
+            self.save_task(task)?;
         }
         let now = self.now();
         let doc = Doc {

@@ -4,6 +4,9 @@ use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{BoardError, Column, EventKind};
 use rusty_mill_board::mmdb::MmdbStore;
 use rusty_mill_board::store::{MemStore, Store};
+use rusty_mill_board::tick::TickStore;
+
+mod fake_tick;
 
 fn clock() -> i64 {
     42
@@ -64,6 +67,20 @@ fn mem_store() {
         Roles::default(),
         clock,
     ));
+}
+
+#[test]
+fn tick_store() {
+    let tick = fake_tick::FakeTick::default();
+    let board = Board::with_clock(TickStore::new(tick.clone()), Roles::default(), clock);
+    scenario(&board);
+    let card = &board.list(None).expect("list")[0];
+    assert_eq!(card.rev, 4);
+    let task = tick.task(card.id);
+    assert_eq!(
+        task["tags"],
+        serde_json::json!(["agent", "board:building", "claim:dev", "x"])
+    );
 }
 
 #[test]

@@ -138,6 +138,19 @@ pub fn actionable(column: Column, caps: &BTreeSet<Capability>) -> bool {
     })
 }
 
+/// The id of the card imported from forge issue `issue`: derived from the number,
+/// so an import interrupted between two writes (a store that cannot commit a card
+/// and its link together) is finished, not repeated, by the next run.
+///
+/// The id depends on the number only, not on the repository. A board pointed at a
+/// second repository treats that repository's issue `n` as already imported when
+/// it has imported `n` from the first, and skips it; give such a repository its
+/// own board.
+pub fn import_id(issue: u64) -> Uuid {
+    const NAMESPACE: Uuid = Uuid::from_u128(0x6d69_6c6c_2d62_6f61_7264_2d69_7373_7565);
+    Uuid::new_v5(&NAMESPACE, &issue.to_be_bytes())
+}
+
 /// The priorities a card may have, on rusty_tick's scale: none, low, medium, high.
 pub const PRIORITIES: [u8; 4] = [0, 1, 3, 5];
 
@@ -218,6 +231,10 @@ pub struct Card {
     /// Cards that must be Done before this one is taken.
     #[serde(default)]
     pub deps: Vec<Uuid>,
+    /// Manual order within a queue, lower first, after priority. Set by the store
+    /// (rusty_tick's drag order); `0` elsewhere.
+    #[serde(default)]
+    pub sort_order: i64,
     /// Linked forge issue number, if synced.
     #[serde(default)]
     pub issue: Option<u64>,
@@ -434,6 +451,7 @@ impl Card {
             comments: Vec::new(),
             priority: 0,
             deps: Vec::new(),
+            sort_order: 0,
             issue: None,
             synced_text: None,
             execution: None,

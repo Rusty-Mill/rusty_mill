@@ -22,10 +22,12 @@ pub trait Store: Send + Sync {
     /// All cards, oldest first.
     fn list(&self) -> Result<Vec<Card>, BoardError>;
     /// Commit a new card (rev 0) and its event. The event's `id` is ignored
-    /// and assigned here.
-    fn insert(&self, card: &Card, event: Event) -> Result<(), BoardError>;
+    /// and assigned here. Returns the revision committed, which a later `replace`
+    /// must follow: `card.rev`, or more when the adapter commits in several steps.
+    fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError>;
     /// Commit the next revision of a card and its event (id assigned here).
-    fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError>;
+    /// Returns the revision committed, as for `insert`.
+    fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError>;
     /// Events with id greater than `after`, in commit order, at most `limit`.
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError>;
     /// The id of the newest committed event: a cursor that has seen everything so far.
@@ -152,12 +154,12 @@ impl Store for MemStore {
         Ok(self.log.lock().map_err(poisoned)?.list())
     }
 
-    fn insert(&self, card: &Card, event: Event) -> Result<(), BoardError> {
-        self.commit(card, event, true)
+    fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
+        self.commit(card, event, true).map(|()| card.rev)
     }
 
-    fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError> {
-        self.commit(card, event, false)
+    fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
+        self.commit(card, event, false).map(|()| card.rev)
     }
 
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError> {
@@ -176,10 +178,10 @@ impl<T: Store + ?Sized> Store for Box<T> {
     fn list(&self) -> Result<Vec<Card>, BoardError> {
         (**self).list()
     }
-    fn insert(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+    fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         (**self).insert(card, event)
     }
-    fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+    fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         (**self).replace(card, event)
     }
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError> {

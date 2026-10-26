@@ -30,7 +30,7 @@
 //! the current entity in `current`.
 
 use crate::auth::{Authenticator, Denied};
-use crate::docs::BOARD_KIND;
+use crate::docs::{comment_owner, BOARD_KIND};
 use crate::dto::{
     CreateList, CreateTag, CreateTask, DocDto, Docs, ListDto, Lists, PatchList, PatchTag,
     PatchTask, Purged, RenameTag, SetOrder, SnapshotDto, TagDto, Tags, TaskDto, Tasks,
@@ -652,12 +652,13 @@ fn route_docs(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Respo
         }
         (Method::Put, [kind, id]) => {
             let id = parse_id(id)?;
-            if let Some(stale) = stale_doc(service, cx, kind, id)? {
-                return Ok(stale);
-            }
             let body = std::str::from_utf8(cx.body)
                 .map_err(|_| ApiError::BadRequest("body must be UTF-8 JSON".into()))?;
-            let doc = service.put_doc(kind, id, body)?;
+            let task = fenced_task(cx, kind, id, body)?;
+            if let Some(stale) = stale_doc(service, cx, kind, id, task)? {
+                return Ok(stale);
+            }
+            let doc = service.put_doc_for(kind, id, body, task)?;
             let dto = DocDto::from_doc(doc).ok_or(ApiError::Internal)?;
             Ok(Response::json(StatusCode::OK, &dto))
         }
@@ -669,15 +670,37 @@ fn route_docs(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Respo
     }
 }
 
+/// The task a document write is fenced to, which `If-Task-Match` names and the
+/// write moves: a `board` document's own id (the header is required), or the
+/// `taskId` of a comment written with the header.
+fn fenced_task(cx: &Cx<'_>, kind: &str, id: Uuid, body: &str) -> Result<Option<Uuid>> {
+    match (kind, cx.if_task_match) {
+        (BOARD_KIND, None) => Err(ApiError::BadRequest(
+            "a board document is written with If-Task-Match".into(),
+        )),
+        (BOARD_KIND, Some(_)) => Ok(Some(id)),
+        ("comment", Some(_)) => comment_owner(body).map(Some).ok_or_else(|| {
+            ApiError::BadRequest("a comment written with If-Task-Match names its taskId".into())
+        }),
+        (_, Some(_)) => Err(ApiError::BadRequest(
+            "If-Task-Match applies to board documents and comments".into(),
+        )),
+        (_, None) => Ok(None),
+    }
+}
+
 /// A 412 when a document write's preconditions fail, checked under the same
-/// lock as the write: `If-Task-Match` (required for a `board` document, whose
-/// id is its task's), then `If-None-Match: *` and `If-Match`.
-fn stale_doc(service: &Service, cx: &Cx<'_>, kind: &str, id: Uuid) -> Result<Option<Response>> {
-    if kind == BOARD_KIND {
-        let presented = cx.if_task_match.ok_or_else(|| {
-            ApiError::BadRequest("a board document is written with If-Task-Match".into())
-        })?;
-        let task = service.task(id)?;
+/// lock as the write: `If-Task-Match` against the fenced `task`, then
+/// `If-None-Match: *` and `If-Match`.
+fn stale_doc(
+    service: &Service,
+    cx: &Cx<'_>,
+    kind: &str,
+    id: Uuid,
+    task: Option<Uuid>,
+) -> Result<Option<Response>> {
+    if let (Some(task), Some(presented)) = (task, cx.if_task_match) {
+        let task = service.task(task)?;
         if stale_against(presented, &task.version.to_string()) {
             return Ok(Some(precondition_failed(TaskDto::from(task))));
         }
