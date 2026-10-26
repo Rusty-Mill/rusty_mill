@@ -60,6 +60,11 @@ pub enum GuardError {
     /// A moderation rule with no OpenAI key to call with.
     #[error(transparent)]
     Credential(#[from] moderation::CredentialError),
+    /// The environment's proxy settings name a proxy this gateway cannot
+    /// use. Failing here keeps traffic that must go through a proxy from
+    /// silently going direct.
+    #[error("the environment's proxy settings cannot be used: {0}")]
+    Proxy(#[from] rusty_request::Error),
 }
 
 /// The text a builtin matches, and the token it is replaced with.
@@ -368,7 +373,10 @@ fn compile(
             )?));
         }
         if let Some(config) = rule.webhook.as_ref() {
-            compiled.push(Rule::Webhook(webhook::Webhook::new(config)));
+            compiled.push(Rule::Webhook(webhook::Webhook::new(
+                config,
+                crate::client(webhook::TIMEOUT)?,
+            )));
         }
         if let Some(config) = rule.open_ai_moderation.as_ref()
             && let Some(moderating) = moderating
@@ -384,6 +392,7 @@ fn compile(
                 moderating.borrowable,
                 moderating.provider,
                 &format!("{at}[{i}].openAIModeration"),
+                crate::client(moderation::TIMEOUT)?,
             )?));
         }
         // Anything else is a rule kind `Config::lint` reports.

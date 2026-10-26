@@ -68,8 +68,9 @@
 //!   `send_streaming`); its connection is pooled once the body has been
 //!   read to its end.
 //! - Proxy support: `ClientBuilder::proxy(url)` (or
-//!   `.proxy_from_env()` for `HTTP_PROXY`/`http_proxy`, with an httpoxy-
-//!   style mitigation -- see `src/proxy.rs`) routes requests through an
+//!   `.proxy_from_env()` for the per-scheme `HTTP_PROXY`/`HTTPS_PROXY`/
+//!   `ALL_PROXY` variables, with an httpoxy-style mitigation -- see
+//!   `src/proxy.rs`) routes requests through an
 //!   HTTP forward proxy: `http://` requests are forwarded in
 //!   absolute-form (`Host` still naming the origin); `https://` requests
 //!   tunnel through the proxy via `CONNECT`, so the proxy never sees

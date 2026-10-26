@@ -1897,6 +1897,87 @@ fn proxy_routes_the_connection_and_sends_an_absolute_form_target() {
     });
 }
 
+/// Each request's method and `Proxy-Authorization`, as a proxy saw them.
+type Seen = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
+/// A proxy that records each request's `Proxy-Authorization` and answers
+/// `407`, so neither a forward nor a `CONNECT` goes any further.
+fn start_recording_proxy() -> (common::TestServer, Seen) {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let proxy = start_test_server(move |req| {
+        let authorization = req.header("proxy-authorization").map(str::to_string);
+        record
+            .lock()
+            .unwrap()
+            .push((req.method.clone(), authorization));
+        http_response(407, "Proxy Authentication Required", &[], b"")
+    });
+    (proxy, seen)
+}
+
+#[test]
+fn proxy_credentials_are_sent_on_a_forwarded_request() {
+    run(async {
+        let (proxy, seen) = start_recording_proxy();
+        let url = format!("http://user:pass@{}", proxy.addr);
+        let client = Client::builder().proxy(&url).unwrap().build();
+        let resp = client
+            .get("http://internal.example.test/")
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 407);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            [("GET".to_string(), Some("Basic dXNlcjpwYXNz".to_string()))]
+        );
+    });
+}
+
+#[test]
+fn proxy_credentials_are_sent_on_the_connect() {
+    run(async {
+        let (proxy, seen) = start_recording_proxy();
+        let url = format!("http://user:pass@{}", proxy.addr);
+        let client = Client::builder().proxy(&url).unwrap().build();
+        let err = client
+            .get("https://internal.example.test/")
+            .unwrap()
+            .send()
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::ProxyConnectFailed(_)), "{err:?}");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            [(
+                "CONNECT".to_string(),
+                Some("Basic dXNlcjpwYXNz".to_string())
+            )]
+        );
+    });
+}
+
+#[test]
+fn a_proxy_without_credentials_sends_no_proxy_authorization() {
+    run(async {
+        let (proxy, seen) = start_recording_proxy();
+        let client = Client::builder().proxy(&proxy.url("")).unwrap().build();
+        let _ = client
+            .get("http://internal.example.test/")
+            .unwrap()
+            .send()
+            .await;
+
+        assert_eq!(seen.lock().unwrap().clone(), [("GET".to_string(), None)]);
+    });
+}
+
 #[test]
 fn proxy_bypass_connects_directly_for_matching_hosts() {
     run(async {

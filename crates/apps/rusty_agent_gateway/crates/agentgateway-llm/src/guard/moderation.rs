@@ -70,7 +70,7 @@ const OPENAI: &str = "https://api.openai.com";
 /// slow gateway. The same five seconds a guard webhook gets, for the same
 /// reason: it is running a model rather than a lookup, and a hung one should
 /// be noticed rather than waited on.
-const TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A moderation rule that cannot be called.
 #[derive(Debug, thiserror::Error)]
@@ -122,17 +122,19 @@ pub struct Moderation {
     model: String,
     key: String,
     rejection: Rejection,
-    client: reqwest::Client,
+    client: rusty_request::Client,
 }
 
 impl Moderation {
-    /// Compile one rule, resolving the credential it will call with.
+    /// Compile one rule, resolving the credential it will call with, and
+    /// calling out with `client`.
     pub fn new(
         config: &agentgateway_config::Moderation,
         rejection: Rejection,
         borrowable: Option<Borrowable<'_>>,
         route_provider: &'static str,
         at: &str,
+        client: rusty_request::Client,
     ) -> Result<Self, CredentialError> {
         let own = config
             .policies
@@ -175,10 +177,7 @@ impl Moderation {
                 .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             key,
             rejection,
-            client: reqwest::Client::builder()
-                .timeout(TIMEOUT)
-                .build()
-                .unwrap_or_default(),
+            client,
         })
     }
 
@@ -207,11 +206,10 @@ impl Moderation {
     }
 
     async fn ask(&self, inputs: Vec<String>) -> Result<bool, String> {
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .bearer_auth(&self.key)
-            .json(&json!({"input": inputs, "model": self.model}))
+        let body = json!({"input": inputs, "model": self.model});
+        let response = crate::post_json(&self.client, &self.endpoint, &body)
+            .and_then(|request| request.bearer_auth(&self.key))
+            .map_err(|err| err.to_string())?
             .send()
             .await
             .map_err(|err| err.to_string())?;
@@ -219,10 +217,11 @@ impl Moderation {
         if !response.status().is_success() {
             // An endpoint that answers 401 or 500 has classified nothing, so
             // this is the unreachable case rather than a verdict it reached.
-            return Err(format!("it answered {}", response.status()));
+            return Err(format!("it answered {}", response.status().as_u16()));
         }
 
-        let answered: Value = response.json().await.map_err(|err| err.to_string())?;
+        let answered: Value =
+            serde_json::from_slice(response.bytes()).map_err(|err| err.to_string())?;
         read_flagged(&answered).ok_or_else(|| "it answered without any `results`".to_string())
     }
 }

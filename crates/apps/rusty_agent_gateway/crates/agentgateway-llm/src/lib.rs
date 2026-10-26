@@ -36,10 +36,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use agentgateway_config::{AiBackend, BackendAuth, Policies, RateLimitKind};
 use agentgateway_core::{Headers, RateLimiter, Retry, RetryAfter, Rewrite};
 use bytes::{Bytes, BytesMut};
-use futures_util::StreamExt as _;
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, Uri, header};
+use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
-use hyper::body::Frame;
 use serde_json::Value;
 
 use guard::{Decision, Guard, webhook::Context as GuardContext};
@@ -61,8 +60,7 @@ pub const MAX_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
 /// the request that produced it, and refusing an ordinary long completion the
 /// way an oversized inbound body is refused would be treating a normal
 /// response as abuse. It is still bounded for the same reason the request is
-/// -- see [`read_capped`], which enforces it by hand because
-/// `reqwest::Response` has no `http_body_util::Limited` of its own.
+/// -- see [`read_capped`], which enforces it chunk by chunk.
 pub const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Failure to build an LLM backend.
@@ -94,6 +92,11 @@ pub enum LlmError {
         /// The endpoint that would have been dialled.
         endpoint: String,
     },
+    /// The environment's proxy settings name a proxy this gateway cannot
+    /// use. Failing here keeps traffic that must go through a proxy from
+    /// silently going direct.
+    #[error("the environment's proxy settings cannot be used: {0}")]
+    Proxy(#[from] rusty_request::Error),
 }
 
 /// The body an LLM response carries.
@@ -146,7 +149,9 @@ pub struct LlmBackend {
     /// usage from inside a `'static` stream, long after `handle` has returned
     /// the body.
     tokens: Option<Arc<RateLimiter>>,
-    client: reqwest::Client,
+    /// How long one attempt may take, its body included.
+    timeout: Duration,
+    client: rusty_request::Client,
 }
 
 impl std::fmt::Debug for LlmBackend {
@@ -203,15 +208,10 @@ impl LlmBackend {
             .as_ref()
             .and_then(|t| t.backend_request_timeout)
             .map(Duration::from)
-            // LLM calls are slow by nature. `reqwest`'s no-timeout default
-            // would let a hung provider hold a connection forever, and 30s
-            // would cut off a long completion that was working fine.
+            // LLM calls are slow by nature. No timeout would let a hung
+            // provider hold a connection forever, and 30s would cut off a long
+            // completion that was working fine.
             .unwrap_or(Duration::from_secs(300));
-
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .unwrap_or_default();
 
         // Only `type: tokens` here. Request limits are charged before dispatch,
         // where they apply to every backend kind; these need a token count that
@@ -266,7 +266,8 @@ impl LlmBackend {
             caching,
             guard,
             tokens,
-            client,
+            timeout,
+            client: client(timeout)?,
         })
     }
 
@@ -309,7 +310,7 @@ impl LlmBackend {
         url: &str,
         headers: HeaderMap,
         payload: Bytes,
-    ) -> Result<reqwest::Response, Response<LlmBody>> {
+    ) -> Result<Upstream, Response<LlmBody>> {
         let attempts = self.retry.as_ref().map_or(1, Retry::max_attempts);
         let mut last = None;
 
@@ -321,15 +322,22 @@ impl LlmBackend {
                 tokio::time::sleep(wait).await;
             }
 
-            let sending = self
-                .client
-                .post(url)
-                .headers(headers.clone())
-                .body(payload.clone());
+            let sending = match with_headers(self.client.post(url), &headers) {
+                Ok(sending) => sending.body(payload.to_vec()),
+                Err(err) => {
+                    rusty_log::warn!(provider = self.provider.name(), %err, "provider request could not be built");
+                    return Err(error(
+                        StatusCode::BAD_GATEWAY,
+                        "the model provider could not be reached",
+                    ));
+                }
+            };
 
             let retryable_left = attempt + 1 < attempts;
-            match sending.send().await {
+            let deadline = tokio::time::Instant::now() + self.timeout;
+            match sending.send_streaming().await {
                 Ok(response) => {
+                    let response = Upstream { response, deadline };
                     let status = response.status().as_u16();
                     let retry_this = retryable_left
                         && self
@@ -578,7 +586,7 @@ impl LlmBackend {
 
     async fn buffered(
         &self,
-        response: reqwest::Response,
+        response: Upstream,
         status: StatusCode,
         model: &str,
         context: &GuardContext,
@@ -649,7 +657,7 @@ impl LlmBackend {
     /// nothing has been sent yet, so the client can still be told plainly.
     async fn guarded_stream(
         &self,
-        response: reqwest::Response,
+        response: Upstream,
         status: StatusCode,
         model: &str,
         context: &GuardContext,
@@ -743,12 +751,7 @@ impl LlmBackend {
             .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, ""))
     }
 
-    fn stream(
-        &self,
-        response: reqwest::Response,
-        status: StatusCode,
-        model: &str,
-    ) -> Response<LlmBody> {
+    fn stream(&self, mut response: Upstream, status: StatusCode, model: &str) -> Response<LlmBody> {
         let provider = self.provider.name();
         let model = model.to_string();
         // The stream outlives this call, and the usage it will report is what
@@ -759,13 +762,11 @@ impl LlmBackend {
         let mut translator = self.provider.stream_translator(now());
         let mut reported = false;
 
-        let upstream = response.bytes_stream();
         let stream = async_stream::stream! {
-            let mut upstream = std::pin::pin!(upstream);
-
-            while let Some(chunk) = upstream.next().await {
-                let chunk = match chunk {
-                    Ok(chunk) => chunk,
+            loop {
+                let chunk = match response.chunk().await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
                     Err(err) => {
                         rusty_log::warn!(provider, %err, "provider stream failed");
                         break;
@@ -1093,6 +1094,86 @@ fn full(bytes: Bytes) -> LlmBody {
     BodyExt::boxed(http_body_util::Full::new(bytes).map_err(|never| match never {}))
 }
 
+/// A client for the calls this crate makes, bounded by `timeout`.
+///
+/// No cookie store: a provider's cookies are no business of the next
+/// caller's request. The environment's proxy (`HTTPS_PROXY` and kin, as
+/// reqwest read them) applies, and one it cannot use is an error rather
+/// than a direct connection.
+pub(crate) fn client(timeout: Duration) -> rusty_request::Result<rusty_request::Client> {
+    Ok(rusty_request::Client::builder()
+        .timeout(timeout)
+        .no_cookie_store()
+        .proxy_from_env()?
+        .build())
+}
+
+/// A `POST` of `body` as JSON.
+pub(crate) fn post_json(
+    client: &rusty_request::Client,
+    url: &str,
+    body: &Value,
+) -> rusty_request::Result<rusty_request::RequestBuilder> {
+    Ok(client
+        .post(url)?
+        .header("content-type", "application/json")?
+        .body(body.to_string()))
+}
+
+/// `request` carrying `headers`: the first value of each field replaces any
+/// default the client would add, and later values of a repeated one follow
+/// it. A value that is not text cannot be sent and is left out.
+fn with_headers(
+    request: rusty_request::Result<rusty_request::RequestBuilder>,
+    headers: &HeaderMap,
+) -> rusty_request::Result<rusty_request::RequestBuilder> {
+    let mut request = request?;
+    for name in headers.keys() {
+        let mut replaced = false;
+        for value in headers.get_all(name) {
+            let Ok(value) = value.to_str() else {
+                rusty_log::debug!(header = %name, "not sending a header that is not text");
+                continue;
+            };
+            request = match replaced {
+                true => request.header_append(name.as_str(), value)?,
+                false => request.header(name.as_str(), value)?,
+            };
+            replaced = true;
+        }
+    }
+    Ok(request)
+}
+
+/// A provider response whose body is still to be read.
+///
+/// The deadline is the attempt's: `rusty_request` bounds only the wait for
+/// a streamed response's head, so the rest of the route's timeout is kept
+/// here and applies to every chunk after it.
+struct Upstream {
+    response: rusty_request::StreamingResponse,
+    deadline: tokio::time::Instant,
+}
+
+impl Upstream {
+    fn status(&self) -> rusty_request::StatusCode {
+        self.response.status()
+    }
+
+    /// The next chunk of the body, `None` at its end.
+    async fn chunk(&mut self) -> Result<Option<Bytes>, ResponseReadError> {
+        // `timeout_at` polls the read first, so a passed deadline alone
+        // would not stop a provider whose bytes keep arriving.
+        if tokio::time::Instant::now() >= self.deadline {
+            return Err(ResponseReadError::TimedOut);
+        }
+        match tokio::time::timeout_at(self.deadline, self.response.chunk()).await {
+            Ok(chunk) => Ok(chunk?.map(Bytes::from)),
+            Err(_) => Err(ResponseReadError::TimedOut),
+        }
+    }
+}
+
 /// Failure to read a provider response within [`MAX_RESPONSE_BYTES`].
 #[derive(Debug, thiserror::Error)]
 enum ResponseReadError {
@@ -1101,24 +1182,21 @@ enum ResponseReadError {
     TooLarge(u64),
     /// The connection failed while a response already in flight was read.
     #[error(transparent)]
-    Transport(#[from] reqwest::Error),
+    Transport(#[from] rusty_request::Error),
+    /// The route's timeout passed before the body finished arriving.
+    #[error("the provider response did not finish within the route's timeout")]
+    TimedOut,
 }
 
 /// Read a provider response's body, refusing to buffer past `cap` bytes.
 ///
-/// `handle`, `buffered` and `guarded_stream` all used to call
-/// `response.bytes().await` directly, which collects the whole body no
-/// matter how large the provider makes it -- asymmetric with the
-/// `http_body_util::Limited` wrap this file puts around an inbound request.
-/// `reqwest::Response` has no equivalent wrapper, so the cap is enforced by
-/// hand: `bytes_stream` is read chunk by chunk and abandoned the moment the
-/// running total would exceed it, rather than collecting everything and
-/// checking after the fact.
-async fn read_capped(response: reqwest::Response, cap: u64) -> Result<Bytes, ResponseReadError> {
-    let mut stream = response.bytes_stream();
+/// The body is read chunk by chunk and abandoned the moment the running
+/// total would exceed `cap`, rather than collected whole and checked after
+/// the fact -- the same bound the `http_body_util::Limited` wrap puts around
+/// an inbound request.
+async fn read_capped(mut response: Upstream, cap: u64) -> Result<Bytes, ResponseReadError> {
     let mut buf = BytesMut::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    while let Some(chunk) = response.chunk().await? {
         if buf.len() as u64 + chunk.len() as u64 > cap {
             return Err(ResponseReadError::TooLarge(cap));
         }
@@ -1129,6 +1207,47 @@ async fn read_capped(response: reqwest::Response, cap: u64) -> Result<Bytes, Res
 
 #[cfg(test)]
 mod tests {
+
+    /// The proxy environment is process-wide, so the check runs in a child
+    /// of this test binary, with the variables set only there: a usable
+    /// `HTTP_PROXY` beside an `HTTPS_PROXY` this gateway cannot use.
+    #[test]
+    fn a_proxy_setting_that_cannot_be_used_fails_the_client_closed() {
+        const CHILD: &str = "AGENTGATEWAY_PROXY_ENV_CHILD";
+        const NAME: &str = "tests::a_proxy_setting_that_cannot_be_used_fails_the_client_closed";
+        if std::env::var_os(CHILD).is_some() {
+            let Err(err) = client(Duration::from_secs(1)) else {
+                panic!("an unusable proxy must not leave a direct client");
+            };
+            assert!(!err.to_string().contains("s3cr3t"), "leaked: {err}");
+            return;
+        }
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("the test binary"));
+        child.args(["--exact", NAME]).env(CHILD, "1");
+        for name in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "REQUEST_METHOD",
+        ] {
+            child.env_remove(name);
+        }
+        child
+            .env("HTTP_PROXY", "http://plain.example:3128")
+            .env("HTTPS_PROXY", "https://user:s3cr3t@tls.example");
+        let output = child.output().expect("the child test runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}"
+        );
+    }
     use agentgateway_config::{AiProvider, AiProviderParams, PathRewrite, UrlRewrite};
 
     use super::*;
@@ -1299,6 +1418,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_provider_that_stalls_mid_body_is_cut_off_at_the_deadline() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        // The head and a first chunk arrive, then nothing: what reqwest's
+        // whole-request timeout used to end, and the deadline now does.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n")
+                .await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let timeout = Duration::from_millis(200);
+        let response = client(timeout)
+            .expect("a usable proxy environment")
+            .get(&format!("http://{addr}/"))
+            .expect("a valid URL")
+            .send_streaming()
+            .await
+            .expect("the head arrives");
+        let response = Upstream {
+            response,
+            deadline: tokio::time::Instant::now() + timeout,
+        };
+
+        let started = std::time::Instant::now();
+        let read = read_capped(response, MAX_RESPONSE_BYTES).await;
+        assert!(
+            matches!(read, Err(ResponseReadError::TimedOut)),
+            "got: {read:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn a_passed_deadline_ends_the_read_even_with_bytes_waiting() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc")
+                .await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let response = client(Duration::from_secs(5))
+            .expect("a usable proxy environment")
+            .get(&format!("http://{addr}/"))
+            .expect("a valid URL")
+            .send_streaming()
+            .await
+            .expect("the head arrives");
+        // Let the body land, so the read itself would be ready at once.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let response = Upstream {
+            response,
+            deadline: tokio::time::Instant::now(),
+        };
+
+        let read = read_capped(response, MAX_RESPONSE_BYTES).await;
+        assert!(
+            matches!(read, Err(ResponseReadError::TimedOut)),
+            "got: {read:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_response_larger_than_the_cap_is_rejected_rather_than_buffered_whole() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1313,11 +1517,18 @@ mod tests {
             .mount(&server)
             .await;
 
-        let response = reqwest::Client::new()
-            .get(server.uri())
-            .send()
+        let timeout = Duration::from_secs(60);
+        let response = client(timeout)
+            .expect("a usable proxy environment")
+            .get(&server.uri())
+            .expect("a valid URL")
+            .send_streaming()
             .await
             .expect("mock server should answer");
+        let response = Upstream {
+            response,
+            deadline: tokio::time::Instant::now() + timeout,
+        };
 
         let backend = LlmBackend {
             provider: provider("openai", None),
@@ -1330,7 +1541,8 @@ mod tests {
             caching: None,
             guard: None,
             tokens: None,
-            client: reqwest::Client::new(),
+            timeout,
+            client: client(timeout).expect("a usable proxy environment"),
         };
 
         let result = backend
