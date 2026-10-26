@@ -317,7 +317,7 @@ mod tests {
         ] {
             assert!(Url::parse(input).is_err(), "{input}");
         }
-        // An unbracketed IPv6 literal has colons but a host; it is left as it was.
+        // A bracketed IPv6 host still parses; this checks parsing only, not dialling.
         assert_eq!(Url::parse("http://[::1]:8080/").unwrap().port, 8080);
     }
 
