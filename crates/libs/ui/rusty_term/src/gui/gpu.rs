@@ -1967,7 +1967,9 @@ mod tests {
     /// The instance buffers persist across frames: a bigger frame regrows
     /// them, and a smaller one after it draws only its own instances, not
     /// the bigger frame's left past its end. Each frame reads back the same
-    /// pixels a fresh core renders. Ignored like `gpu_renders_to_texture`.
+    /// pixels a fresh core renders, and the base buffer's allocation, read
+    /// after each frame, is replaced once and then kept. Ignored like
+    /// `gpu_renders_to_texture`.
     #[test]
     #[ignore = "render+readback needs a working GPU adapter; lavapipe/dzn crash headless"]
     fn reused_instance_buffers_render_what_fresh_ones_do() {
@@ -1975,17 +1977,32 @@ mod tests {
         let small = grid_after(2, 1, b"\x1b[48;2;0;0;255m \x1b[4mx");
         let big = grid_after(60, 40, &b"\x1b[41mlorem \x1b[4;32mipsum ".repeat(300));
         let mut frames = Vec::new();
+        let mut bufs = Vec::new();
         for grid in [&small, &big, &small] {
             frames.push(render_pixels(&mut core, &mut font, grid));
+            bufs.push(buffer_identity(&core.base_buf).expect("base layer drawn"));
         }
-        let big_size = core.base_buf.buf.as_ref().map(wgpu::Buffer::size);
-        assert!(big_size > Some(4096), "the big frame regrew the buffer");
+        let [(small_id, small_size), (big_id, big_size), after] = [bufs[0], bufs[1], bufs[2]];
+        assert_eq!(small_size, 4096, "the small frame fits the minimum size");
+        assert!(
+            big_size > 4096 && big_id != small_id,
+            "the big frame regrew the buffer"
+        );
+        assert_eq!(
+            after,
+            (big_id, big_size),
+            "the small frame kept the big buffer"
+        );
         for (n, grid) in [&small, &big, &small].into_iter().enumerate() {
             let (mut fresh, mut font) = headless_core().expect("adapter");
             let want = render_pixels(&mut fresh, &mut font, grid);
             assert!(frames[n] == want, "frame {n} differs from a fresh render");
         }
-        assert_eq!(core.base_buf.buf.as_ref().map(wgpu::Buffer::size), big_size);
+    }
+
+    /// The live allocation behind an instance buffer and its size, if any.
+    fn buffer_identity(b: &InstanceBuffer) -> Option<(wgpu::Id<wgpu::Buffer>, u64)> {
+        b.buf.as_ref().map(|buf| (buf.global_id(), buf.size()))
     }
 
     /// A buffer regrows to the next power of two (at least 4 KiB) only when
