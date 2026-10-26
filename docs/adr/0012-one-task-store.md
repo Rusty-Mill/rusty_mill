@@ -72,34 +72,45 @@ tags are the board's state and are written by it.
 `recover_execution` are compare-and-sets today: the first refuses a second
 logical execution, the second refuses a stale generation, and both rely on the
 card's revision. They change only `execution`, never the column or claim, so
-under `TickStore` each one is a single write to the `board` document, made the
-same way a task write is:
+under `TickStore` each one is a single write to the `board` document. That
+write must be fenced by the task as well as the document: `Board::apply`
+authorizes it from the task's state (its project, for the actor's scope), so a
+task reassigned between the read and the write must refuse it, as the
+whole-card revision does today.
 
-1. `GET /docs/board/{task id}` returns the document and its ETag (absent:
-   none).
-2. The domain function runs on the card assembled from the task and that
-   document, exactly as now.
-3. `PUT /docs/board/{task id}` with `If-Match: <etag>`, or
-   `If-None-Match: *` when there was no document. A 412 is the board's
-   `Conflict`, and the caller retries from 1 as it does today.
+1. `GET /tasks/{task id}` (version `v`) and `GET /docs/board/{task id}` (ETag
+   `e`, or none).
+2. The board checks scope and runs the domain function on the card assembled
+   from both, exactly as now.
+3. `PUT /docs/board/{task id}` with `If-Match: <e>` (or `If-None-Match: *`)
+   **and** `If-Task-Match: <v>`. rusty_tick checks both under its request
+   lock, the same lock every task write takes, so neither the document nor
+   the task can change between the check and the write. Either mismatch is a
+   412, the board's `Conflict`, and the caller retries from 1 as it does
+   today.
 
 A document is one engine record, so a crash leaves the old document or the new
-one, never half of either, and two boards (or a board and a stray client)
-cannot both bind. `issue`, `synced_text` and `deps` are written the same way.
-No board write changes both the task and the document, so no write needs the
-two to commit together.
+one, never half of either. Two boards (or a board and a stray client) cannot
+both bind, and a write authorized against a task that has since moved project
+is refused. `issue`, `synced_text` and `deps` are written the same way. No
+board write changes both the task and the document, so no write needs the two
+to commit together; the task version only fences the document write.
 
 ### 3. rusty_tick changes: three, all small
 
 1. A `board` document kind (`docs.rs` `KINDS` and the web `DocKind`).
    Purging a task deletes its `board` document, as it already deletes its
    comments (`Service::purge_task`).
-2. Document writes take `If-Match`/`If-None-Match: *` and reads return an
-   ETag, as task writes already do. The ETag is the document's `updated_ms`,
-   kept strictly increasing per document, so `Doc` needs no new field.
+2. One new route, `GET /docs/{kind}/{id}` (today only the whole kind can be
+   read), returning the document with an ETag. Document writes take
+   `If-Match`/`If-None-Match: *`, as task writes already do. The ETag is the
+   document's `updated_ms`, kept strictly increasing per document, so `Doc`
+   needs no new field. A `board` document's id must be a live task's id, and
+   its writes also require `If-Task-Match: <task version>`, checked under the
+   same request lock.
 3. Comments render an optional `by` (`features/tasks/detail/Comments.tsx`).
 
-No new route, no `Task` field, no schema bump.
+One new route, no `Task` field, no schema bump.
 
 ### 4. Picking the next agent task
 
@@ -214,16 +225,18 @@ until the tick-backed board has run.
 - **Add board fields to `Task`** (column, claim, deps, prompt). One write for
   everything, but a `Task` schema bump and data migration in rusty_tick for
   fields only the board reads. Tags and one document kind cover them.
-- **Client-chosen task ids** (a UUIDv5 of the card number) would make the
-  migration idempotent by construction, but change rusty_tick's create API
-  for a one-shot import. The marker tag gives the same guarantee.
+- **Client-chosen task ids** (a UUIDv5 of the card number; `CreateTask`
+  already accepts an `id`) would also make the migration idempotent. The
+  marker tag is kept because it does a second job the ids cannot: it selects
+  every migrated task for rollback with one query, and shows in rusty_tick
+  where a task came from.
 - **Keep the board's store and sync it with rusty_tick.** Two copies and a
   reconcile loop: the drift this decision exists to remove.
 
 ## Implementation, in order, each its own PR
 
-1. rusty_tick: `board` doc kind (purged with its task), document
-   `If-Match`, comment `by`.
+1. rusty_tick: `board` doc kind (purged with its task), `GET
+   /docs/{kind}/{id}`, document `If-Match` and `If-Task-Match`, comment `by`.
 2. rusty_mill_board: `priority` and `deps` on the card, `card_take` order and
    dep skip, reserved tags (works on the memory store, tested there).
 3. rusty_mill_board: `TickStore` adapter, `--tick-url`, in-process events.
