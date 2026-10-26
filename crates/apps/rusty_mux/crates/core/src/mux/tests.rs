@@ -312,3 +312,14 @@ fn a_block_can_take_a_chosen_id_once() {
     );
     assert_eq!(mux.take_events().len(), 1, "the refused add emits nothing");
 }
+
+#[test]
+fn status_notes_need_a_live_block() {
+    let (mut mux, _, _, block) = fixture();
+    assert_eq!(mux.note_status(block), Ok(()));
+    assert_eq!(mux.take_events(), vec![Event::BlockStatus { block }]);
+    mux.close_block(block).expect("close");
+    mux.take_events();
+    assert_eq!(mux.note_status(block), Err(Error::UnknownBlock(block)));
+    assert!(mux.take_events().is_empty());
+}

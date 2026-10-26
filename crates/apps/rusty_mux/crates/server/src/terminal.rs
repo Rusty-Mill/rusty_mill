@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use rusty_term_core::Grid;
+use rusty_mux_status::Records;
+use rusty_term_core::{Grid, StatusSignal};
 
 /// The last `history` scrollback lines and the screen, one line per row
 /// without trailing blanks, joined by `\n`. Stops once the text passes
@@ -32,6 +33,28 @@ pub(crate) fn pwd(grid: &Grid, pid: Option<u32>) -> Option<String> {
         let link = std::fs::read_link(Path::new("/proc").join(pid?.to_string()).join("cwd"));
         link.ok()?.into_os_string().into_string().ok()
     })
+}
+
+/// Applies the status signals the grid collected since the last call: OSC
+/// 7501 reports, prompts and resets. Whether any record's state changed, the
+/// part worth announcing; progress and text alone are not.
+pub(crate) fn absorb_status(grid: &mut Grid, records: &mut Records) -> bool {
+    if grid.program_status.is_empty() {
+        return false;
+    }
+    let before = records.states();
+    for signal in grid.program_status.drain(..) {
+        match signal {
+            StatusSignal::Report(body) => {
+                if let Some(report) = rusty_mux_status::parse(&body) {
+                    records.apply(report);
+                }
+            }
+            StatusSignal::Prompt => records.prompt(),
+            StatusSignal::Reset => records.reset(),
+        }
+    }
+    records.states() != before
 }
 
 /// The path of an OSC 7 `file://HOST/PATH` URI, percent-decoded.
@@ -89,6 +112,51 @@ mod tests {
         ] {
             assert_eq!(reported_path(uri), None, "{uri}");
         }
+    }
+
+    fn status_grid() -> (Grid, rusty_term_core::AnsiParser, Records) {
+        let mut grid = Grid::new(20, 2);
+        grid.collect_program_status = true;
+        (grid, rusty_term_core::AnsiParser::new(), Records::default())
+    }
+
+    #[test]
+    fn status_changes_are_announced_once() {
+        let (mut grid, mut parser, mut records) = status_grid();
+        assert!(!absorb_status(&mut grid, &mut records), "nothing collected");
+        parser.advance(&mut grid, b"\x1b]7501;state=working:progress=10\x07");
+        assert!(absorb_status(&mut grid, &mut records));
+        parser.advance(&mut grid, b"\x1b]7501;state=working:progress=90\x07");
+        assert!(!absorb_status(&mut grid, &mut records), "progress only");
+        parser.advance(&mut grid, b"\x1b]7501;state=bogus\x07");
+        assert!(!absorb_status(&mut grid, &mut records), "ignored report");
+        assert!(grid.program_status.is_empty(), "drained");
+        assert_eq!(records.bodies(), ["state=working:progress=90"]);
+    }
+
+    #[test]
+    fn prompts_and_resets_end_records() {
+        let (mut grid, mut parser, mut records) = status_grid();
+        parser.advance(&mut grid, b"\x1b]7501;state=blocked:kind=question\x07");
+        parser.advance(&mut grid, b"\x1b]7501;state=done:id=build\x07");
+        assert!(absorb_status(&mut grid, &mut records));
+        parser.advance(&mut grid, b"\x1b]133;A\x07");
+        assert!(absorb_status(&mut grid, &mut records));
+        assert_eq!(records.bodies(), ["state=done:id=build"]);
+        parser.advance(&mut grid, b"\x1bc");
+        assert!(absorb_status(&mut grid, &mut records));
+        assert!(records.bodies().is_empty());
+    }
+
+    #[test]
+    fn a_report_after_an_overflowing_burst_still_lands() {
+        let (mut grid, mut parser, mut records) = status_grid();
+        let round = b"\x1b]7501;state=working:id=a\x07\x1b]133;A\x07";
+        let burst = round.repeat(rusty_term_core::PROGRAM_STATUS_MAX * 2);
+        parser.advance(&mut grid, &burst);
+        parser.advance(&mut grid, b"\x1b]7501;state=done\x07");
+        assert!(absorb_status(&mut grid, &mut records));
+        assert_eq!(records.bodies(), ["state=done"]);
     }
 
     #[test]

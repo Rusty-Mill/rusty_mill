@@ -335,14 +335,13 @@ struct WindowsHandle {
 unsafe impl Send for WindowsHandle {}
 
 impl BackendHandle for WindowsHandle {
-    fn read(&mut self) -> Result<Vec<u8>, std::io::Error> {
-        let mut buf = vec![0u8; 4096];
+    fn read_into(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
         let mut read: u32 = 0;
         let ok = unsafe {
             ReadFile(
                 self.output_read,
                 buf.as_mut_ptr() as *mut _,
-                buf.len() as u32,
+                buf.len().min(u32::MAX as usize) as u32,
                 &mut read,
                 std::ptr::null_mut(),
             )
@@ -350,14 +349,13 @@ impl BackendHandle for WindowsHandle {
         if ok == 0 {
             let err = std::io::Error::last_os_error();
             // The child closing its end surfaces as a broken pipe; treat it as a
-            // clean EOF (the contract's empty-slice signal).
+            // clean EOF (the contract's `Ok(0)`).
             if err.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
-                return Ok(Vec::new());
+                return Ok(0);
             }
             return Err(err);
         }
-        buf.truncate(read as usize);
-        Ok(buf)
+        Ok(read as usize)
     }
 
     fn write(&mut self, data: &[u8]) -> Result<(), std::io::Error> {

@@ -29,7 +29,25 @@ pub trait BackendHandle: Send {
     /// drives the raw [`pty_fd`](Self::pty_fd) through its reactor instead, so the
     /// method is unused on a Unix terminal-only build.
     #[cfg_attr(unix, allow(dead_code))]
-    fn read(&mut self) -> Result<Vec<u8>, std::io::Error>;
+    fn read(&mut self) -> Result<Vec<u8>, std::io::Error> {
+        let mut buf = vec![0u8; 4096];
+        let n = self.read_into(&mut buf)?;
+        buf.truncate(n);
+        Ok(buf)
+    }
+
+    /// [`read`](Self::read) into `buf`, returning the byte count; `Ok(0)` is
+    /// end-of-file. Blocks until at least one byte (or EOF) is available.
+    #[cfg_attr(unix, allow(dead_code))]
+    fn read_into(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
+
+    /// Whether a [`read_into`](Self::read_into) would return without
+    /// blocking. `false` when the platform can't tell cheaply, which only
+    /// costs batching (see [`read_batch`]).
+    #[cfg_attr(unix, allow(dead_code))]
+    fn output_ready(&self) -> bool {
+        false
+    }
 
     /// Write `data` to the child's input (blocking). Used by the windowed (gui)
     /// backend and the Windows runtime's bridge thread; the Unix runtime writes
@@ -102,6 +120,26 @@ pub trait BackendHandle: Send {
     }
 }
 
+/// Fill `buf` with child output: block for the first read, then keep
+/// reading while more is ready without blocking, until `buf` is full. One
+/// batch is parsed, locked and redrawn once instead of once per read (a PTY
+/// master returns at most about 4 KiB a read on Linux). `Ok(0)` is
+/// end-of-file. An EOF or error after some bytes ends the batch with those
+/// bytes, and that error is dropped, not kept. A closed PTY repeats its EOF
+/// or error, so there the next call meets it again; a handle that does not
+/// repeat errors loses that one.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub fn read_batch(handle: &mut dyn BackendHandle, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+    let mut n = handle.read_into(buf)?;
+    while n > 0 && n < buf.len() && handle.output_ready() {
+        match handle.read_into(&mut buf[n..]) {
+            Ok(0) | Err(_) => break,
+            Ok(more) => n += more,
+        }
+    }
+    Ok(n)
+}
+
 // Each backend only compiles on its own platform — the Unix one leans on
 // platform-specific libc (openpty, termios, …), the Windows one on ConPTY.
 #[cfg(unix)]
@@ -113,3 +151,115 @@ pub mod windows;
 pub use unix::UnixBackend;
 #[cfg(windows)]
 pub use windows::WindowsBackend;
+
+#[cfg(test)]
+pub(crate) mod mock {
+    use super::BackendHandle;
+    use std::collections::VecDeque;
+    use std::io::Error;
+
+    /// Reads hand out `parts` in order, then EOF. With `joined`, output is
+    /// ready while any part remains, so [`read_batch`](super::read_batch)
+    /// joins them; without, each part is its own batch. An error stays put,
+    /// as a closed PTY's does.
+    pub(crate) struct Chunks {
+        parts: VecDeque<Result<Vec<u8>, Error>>,
+        joined: bool,
+    }
+
+    /// Parts that arrive together.
+    pub(crate) fn joined(parts: Vec<Result<&[u8], Error>>) -> Chunks {
+        chunks(parts, true)
+    }
+
+    /// Parts that each arrive alone.
+    pub(crate) fn apart(parts: Vec<Result<&[u8], Error>>) -> Chunks {
+        chunks(parts, false)
+    }
+
+    fn chunks(parts: Vec<Result<&[u8], Error>>, joined: bool) -> Chunks {
+        let parts = parts.into_iter().map(|p| p.map(<[u8]>::to_vec)).collect();
+        Chunks { parts, joined }
+    }
+
+    impl BackendHandle for Chunks {
+        fn read_into(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+            if let Some(Err(e)) = self.parts.front() {
+                return Err(Error::new(e.kind(), e.to_string()));
+            }
+            let Some(Ok(mut chunk)) = self.parts.pop_front() else {
+                return Ok(0);
+            };
+            let n = chunk.len().min(buf.len());
+            buf[..n].copy_from_slice(&chunk[..n]);
+            if n < chunk.len() {
+                self.parts.push_front(Ok(chunk.split_off(n)));
+            }
+            Ok(n)
+        }
+        fn output_ready(&self) -> bool {
+            self.joined && !self.parts.is_empty()
+        }
+        fn write(&mut self, _data: &[u8]) -> Result<(), Error> {
+            Ok(())
+        }
+        fn try_clone(&self) -> Result<Box<dyn BackendHandle>, Error> {
+            Err(Error::other("not cloneable"))
+        }
+        fn set_winsize(&mut self, _cols: u16, _rows: u16) -> Result<(), Error> {
+            Ok(())
+        }
+        #[cfg(unix)]
+        fn pty_fd(&self) -> std::os::unix::io::RawFd {
+            -1
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mock::{apart, joined};
+    use super::read_batch;
+    use std::io::Error;
+
+    #[test]
+    fn ready_reads_join_one_batch() {
+        let mut h = joined(vec![Ok(b"ab"), Ok(b"cd"), Ok(b"e")]);
+        let mut buf = [0u8; 16];
+        assert_eq!(read_batch(&mut h, &mut buf).unwrap(), 5);
+        assert_eq!(&buf[..5], b"abcde");
+        assert_eq!(read_batch(&mut h, &mut buf).unwrap(), 0, "then EOF");
+    }
+
+    #[test]
+    fn a_batch_stops_when_the_buffer_is_full() {
+        let mut h = joined(vec![Ok(b"abc"), Ok(b"defg")]);
+        let mut buf = [0u8; 5];
+        assert_eq!(read_batch(&mut h, &mut buf).unwrap(), 5);
+        assert_eq!(&buf, b"abcde");
+        assert_eq!(read_batch(&mut h, &mut buf).unwrap(), 2);
+        assert_eq!(&buf[..2], b"fg");
+    }
+
+    #[test]
+    fn an_error_after_bytes_waits_for_the_next_batch() {
+        let mut h = joined(vec![Ok(b"ab"), Err(Error::other("gone"))]);
+        let mut buf = [0u8; 16];
+        assert_eq!(read_batch(&mut h, &mut buf).unwrap(), 2);
+        assert!(read_batch(&mut h, &mut buf).is_err());
+    }
+
+    #[test]
+    fn output_not_yet_ready_ends_the_batch() {
+        let mut h = apart(vec![Ok(b"ab"), Ok(b"cd")]);
+        let mut buf = [0u8; 16];
+        assert_eq!(read_batch(&mut h, &mut buf).unwrap(), 2);
+        assert_eq!(read_batch(&mut h, &mut buf).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_first_read_error_is_returned() {
+        let mut h = joined(vec![Err(Error::other("gone"))]);
+        assert!(read_batch(&mut h, &mut [0u8; 16]).is_err());
+    }
+}

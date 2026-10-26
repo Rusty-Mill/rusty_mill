@@ -9,7 +9,7 @@
 //! fg/bg changes are mirrored into the grid so cleared regions pick up a new
 //! background, and shell-integration command-lifecycle marks (133, and 633 —
 //! VS Code's superset of it). Other OSC codes are recognized as well-formed
-//! and ignored for now.
+//! and ignored for now. Program status (7501) is queued for the host.
 
 use super::cell::Pen;
 use super::color::{Palette, format_color_spec, parse_color_spec};
@@ -277,6 +277,14 @@ pub(crate) fn dispatch(
                 }
             }
         }
+        // 7501 (Program Status Protocol) reports a program's state. The grid
+        // only queues the body for a host that collects it; validation and the
+        // record store live with the host.
+        "7501" => {
+            if let Some(text) = text {
+                g.push_program_status(super::grid::StatusSignal::Report(text.to_string()));
+            }
+        }
         // 1337 (iTerm2) multiplexes several subcommands; we handle inline images
         // (`File=<args>:<base64>`) and ignore the rest.
         "1337" => {
@@ -308,6 +316,7 @@ fn mark_command_lifecycle(
     match sub {
         "A" => {
             g.mark_prompt();
+            g.push_program_status(super::grid::StatusSignal::Prompt);
             true
         }
         "C" => {
