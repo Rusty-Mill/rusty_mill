@@ -33,7 +33,7 @@ futures-core = { workspace = true }
 # Optional (feature `http2`): HTTP/2 on a TLS connection that negotiates
 # ALPN `h2`, served by rusty_hyper's per-connection loop (#885). It needs
 # rustc 1.88 (rusty_hyper and rusty_h2); the declared 1.87 covers the
-# default HTTP/1.1 build, so CI's MSRV check skips `--all-features` here.
+# default HTTP/1.1 build, so CI checks `--all-features` here at 1.88.
 rusty_hyper = { path = "../rusty_hyper", features = ["rusty-tokio"], optional = true }
 
 [features]

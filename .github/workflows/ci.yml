@@ -1286,9 +1286,13 @@ jobs:
     # (`native-crypto` -> rusty_aead/rusty_pk at the pinned toolchain),
     # rusty_rdp (its README: optional features raise the effective MSRV) and
     # rusty_tonic (`rusty-tokio` -> rusty_h2 1.88; its README keeps the
-    # library at 1.75) and rusty_axum (`http2` -> rusty_hyper/rusty_h2 1.88;
-    # its HTTP/1.1 build, and rusty_axum_tokio, stay at 1.87). Raising platform-linux, rusty_json or rusty_tls
+    # library at 1.75). Raising platform-linux, rusty_json or rusty_tls
     # would also break 7 to 36 dependents' declared floors.
+    #
+    # `--all-features-floor` checks a crate's `--all-features` build at a
+    # stated floor above its declared one rather than skipping it: rusty_axum
+    # (`http2` -> rusty_hyper/rusty_h2 1.88) is checked at 1.87 by default
+    # and at 1.88 with all features; rusty_axum_tokio stays at 1.87.
     name: compile at declared rust-version
     needs: plan
     if: (needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != '') && needs.plan.outputs.linux == 'true'
@@ -1313,7 +1317,8 @@ jobs:
             "${scope[@]}" \
             --skip-from "$RUST_TOOLCHAIN" \
             --exclude "$REMIND_ME_PACKAGES rusty_multimodal_db" \
-            --all-features-exclude "platform-linux rusty_json rusty_tls rusty_rdp rusty_tonic rusty_axum" \
+            --all-features-exclude "platform-linux rusty_json rusty_tls rusty_rdp rusty_tonic" \
+            --all-features-floor "rusty_axum=1.88" \
             --target-base "$RUNNER_TEMP/msrv"
           test "$(sha256sum Cargo.lock)" = "$lock_before"
 
