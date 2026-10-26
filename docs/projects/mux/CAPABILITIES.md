@@ -42,7 +42,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C17 | Self-describing API (schema-first) | 2 | `rusty_mux_proto` | in-progress | `schema::CATALOG`; `rusty-mux-ctl api list` and `api describe` (parameters as JSON Schema) |
 | C18 | Screen capture | 2 | `rusty_mux_server` | in-progress | `terminal.format`: plain text of the screen after N history lines; `server/tests/inspect.rs`, `ctl/tests/ctl.rs` |
 | C19 | Scripting and config | 2 | `rusty_mux_script` | not-started | |
-| C20 | Program status signalling | 2 | `rusty_mux_status` | not-started | spike 1 (OSC pass-through) |
+| C20 | Program status signalling | 2 | `rusty_mux_status` | in-progress | OSC 7501 (Program Status Protocol 0.4) reports, records per block, `BlockStatus` events with `Features::STATUS`, `terminal.status`; `status/src/*/tests.rs`, `server/tests/events.rs`, `server/tests/inspect.rs` |
 | C21 | Tab indicators | 4 | `rusty_mux` clients | not-started | depends on C20 |
 | C22 | Idle-pane scale (parking) | 5 | `rusty_mux_server` | not-started | spike 5 |
 | C23 | Production controls (limits, audit) | 5 | `rusty_mux_server` | not-started | |

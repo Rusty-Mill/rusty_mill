@@ -321,7 +321,9 @@ impl<S: io::Read + Write> Session<'_, S> {
     }
 
     fn events(&mut self, after: Option<Cursor>, follow: bool) -> Result<(), Failure> {
-        let wanted = Features::EVENT_SEQ.union(Features::SYNC);
+        let wanted = Features::EVENT_SEQ
+            .union(Features::SYNC)
+            .union(Features::STATUS);
         let (features, start) = self.hello(wanted, after)?;
         let start =
             start.ok_or_else(|| Failure::Failed("the server does not number events".into()))?;
