@@ -656,7 +656,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn('test "$(sha256sum Cargo.lock)" = "$lock_before"', job)
         self.assertIn('--target-base "$RUNNER_TEMP/msrv"', job)
         # Every crate with features is also checked with all of them; only documented exceptions opt out.
-        self.assertIn('--all-features-exclude "platform-linux rusty_json rusty_tls rusty_rdp rusty_tonic"', job)
+        self.assertIn('--all-features-exclude "platform-linux rusty_json rusty_tls rusty_rdp rusty_tonic rusty_axum"', job)
         self.assertIn("      - msrv-compile\n", self.workflow.split("  required-gate:\n", 1)[1])
 
     def test_every_workflow_pin_matches_rust_toolchain_file(self) -> None:
