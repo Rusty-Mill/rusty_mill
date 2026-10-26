@@ -39,7 +39,8 @@ const OFFERED: Features = Features::CHECKPOINT_V3
     .union(Features::SYNC)
     .union(Features::INSPECT)
     .union(Features::BLOCK_CALL)
-    .union(Features::STATUS);
+    .union(Features::STATUS)
+    .union(Features::TERMINAL_EVENTS);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -51,6 +52,8 @@ struct BlockRt {
     parser: AnsiParser,
     /// What the program reported with OSC 7501.
     status: Records,
+    /// The working directory and title last announced.
+    seen: terminal::Seen,
     reader: JoinHandle<()>,
 }
 
@@ -384,6 +387,7 @@ impl State {
                 grid,
                 parser: AnsiParser::new(),
                 status: Records::default(),
+                seen: terminal::Seen::default(),
                 reader,
             },
         );
@@ -459,6 +463,13 @@ impl State {
             && let Err(err) = self.mux.note_status(block)
         {
             eprintln!("rusty-mux-server: model out of step on status: {err}");
+        }
+        let (pwd, title) = rt.seen.changes(&rt.grid);
+        if pwd && let Err(err) = self.mux.note_pwd(block) {
+            eprintln!("rusty-mux-server: model out of step on pwd: {err}");
+        }
+        if title && let Err(err) = self.mux.note_title(block) {
+            eprintln!("rusty-mux-server: model out of step on title: {err}");
         }
         let frame = encode(&Message::Output {
             block,
@@ -569,10 +580,16 @@ impl State {
 }
 
 /// Whether a client with `features` is sent `event`: a status event only
-/// with [`Features::STATUS`], so older clients never see a kind they can't
-/// decode.
+/// with [`Features::STATUS`], a pwd or title event only with
+/// [`Features::TERMINAL_EVENTS`], so older clients never see a kind they
+/// can't decode.
 fn receives(features: Features, event: &Event) -> bool {
-    !matches!(event, Event::BlockStatus { .. }) || features.contains(Features::STATUS)
+    let needs = match event {
+        Event::BlockStatus { .. } => Features::STATUS,
+        Event::PwdChanged { .. } | Event::TitleChanged { .. } => Features::TERMINAL_EVENTS,
+        _ => Features::NONE,
+    };
+    features.contains(needs)
 }
 
 fn event_frame(seq: Option<u64>, event: &Event) -> Option<Vec<u8>> {

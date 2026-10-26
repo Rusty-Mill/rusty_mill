@@ -659,7 +659,10 @@ fn config_check_and_list_need_no_server() {
     let nowhere = Path::new("/nonexistent/rusty-mux.sock");
     let good = config_file("good", WORKSPACE);
     let checked = with_config(nowhere, &good, &["config", "check"]);
-    assert_eq!(stdout(&checked).trim(), "ok: 1 actions, 1 bindings");
+    assert_eq!(
+        stdout(&checked).trim(),
+        "ok: 1 actions, 1 bindings, 0 rules"
+    );
     let listed = stdout(&with_config(nowhere, &good, &["config", "list"]));
     assert!(listed.starts_with("action workspace"), "{listed}");
     assert!(listed.contains("bind   ctrl+b>w"), "{listed}");
@@ -684,4 +687,86 @@ fn config_check_and_list_need_no_server() {
     for path in [good, bad] {
         std::fs::remove_file(path).expect("cleanup");
     }
+}
+
+const RULES: &str = r#"{
+  "on": [
+    {"event": "session-created", "action": "terminal.title", "args": {"block": "nothing"}},
+    {"event": "pwd-changed", "action": "create-session", "args": {"name": "at ${pwd}"}}
+  ]
+}"#;
+
+#[test]
+fn watch_runs_rules_for_events_and_survives_a_failing_one() {
+    let socket = start_server();
+    let config = config_file("watch", RULES);
+    let mut child = ctl_command(&socket, &["watch"])
+        .env("RUSTY_MUX_CONFIG", &config)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut lines = BufReader::new(child.stdout.take().expect("stdout")).lines();
+    let first = lines.next().expect("a line").expect("read");
+    assert!(first.starts_with("cursor "), "{first}");
+
+    // Creating the block's session fails rule 0; the watch goes on.
+    let block = block(&socket);
+    let report = "printf '\\033]7;file://host/tmp\\007'\r";
+    ok(
+        &socket,
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+            "input",
+            "--block",
+            &block,
+            "--data",
+            report,
+        ],
+    );
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !ok(&socket, &["list"]).contains("at /tmp") {
+        assert!(std::time::Instant::now() < deadline, "rule 1 never ran");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    child.kill().expect("kill");
+    child.wait().expect("wait");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr")
+        .read_to_string(&mut stderr)
+        .expect("read");
+    assert!(stderr.contains("on[0] failed for event"), "{stderr}");
+    let printed: Vec<String> = lines.map(|l| l.expect("read")).collect();
+    assert!(
+        printed.iter().any(|l| l.contains("pwd-changed")),
+        "{printed:?}"
+    );
+    std::fs::remove_file(&config).expect("cleanup");
+}
+
+#[test]
+fn watch_needs_rules_and_takes_only_a_cursor() {
+    let socket = start_server();
+    let none = config_file("norules", WORKSPACE);
+    let refused = with_config(&socket, &none, &["watch"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("no `on` rules"));
+    assert_eq!(
+        with_config(&socket, &none, &["watch", "--follow"])
+            .status
+            .code(),
+        Some(2)
+    );
+    std::fs::remove_file(&none).expect("cleanup");
 }

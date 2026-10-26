@@ -321,5 +321,19 @@ fn status_notes_need_a_live_block() {
     mux.close_block(block).expect("close");
     mux.take_events();
     assert_eq!(mux.note_status(block), Err(Error::UnknownBlock(block)));
+    assert_eq!(mux.note_pwd(block), Err(Error::UnknownBlock(block)));
+    assert_eq!(mux.note_title(block), Err(Error::UnknownBlock(block)));
     assert!(mux.take_events().is_empty());
+}
+
+#[test]
+fn pwd_and_title_notes_emit_their_events() {
+    let (mut mux, _, _, block) = fixture();
+    mux.take_events();
+    assert_eq!(mux.note_pwd(block), Ok(()));
+    assert_eq!(mux.note_title(block), Ok(()));
+    assert_eq!(
+        mux.take_events(),
+        vec![Event::PwdChanged { block }, Event::TitleChanged { block }]
+    );
 }

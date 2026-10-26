@@ -3,10 +3,10 @@
 use rusty_json::{Map, Value};
 use rusty_mux_proto::schema::{self, Method, Param, Ty};
 
-use crate::{Action, Bind, Call, Config, Problem, is_arg_name, placeholders};
+use crate::{Action, Bind, Call, Config, EVENTS, Problem, Rule, Run, is_arg_name, placeholders};
 
 /// The config in `text`, or every problem in it. A config is an object
-/// with optional `actions` and `binds` arrays:
+/// with optional `actions`, `binds` and `on` arrays:
 ///
 /// - an action is `{"name", "title"?, "args"?, "run"}`: a name of lowercase
 ///   letters, digits, `.`, `_` or `-` that is not a catalog method, the
@@ -19,7 +19,10 @@ use crate::{Action, Bind, Call, Config, Problem, is_arg_name, placeholders};
 /// - a binding is `{"keys", "action", "args"?}`: chords joined by `>`, each
 ///   keys joined by `+` (`ctrl+b>c`), and an action given all its
 ///   arguments, which then make valid values, or a catalog method given its
-///   parameters as a request would be.
+///   parameters as a request would be;
+/// - a rule is `{"event", "action", "args"?}`: one of [`EVENTS`] and what
+///   it runs, as a binding, whose values may also hold the event's
+///   `${field}`s; a value with one is checked once the event fills it.
 ///
 /// Unknown keys are problems, so a typo is not silently ignored.
 pub fn parse(text: &str) -> Result<Config, Vec<Problem>> {
@@ -51,7 +54,7 @@ impl Check {
     }
 
     fn config(&mut self, root: &Value) -> Config {
-        let Some(map) = self.object("config", root, &["actions", "binds"]) else {
+        let Some(map) = self.object("config", root, &["actions", "binds", "on"]) else {
             return Config::default();
         };
         let mut actions: Vec<Action> = Vec::new();
@@ -76,7 +79,17 @@ impl Check {
             }
             binds.push(bind);
         }
-        Config { actions, binds }
+        let rules = self
+            .array("on", map.get("on"))
+            .iter()
+            .enumerate()
+            .filter_map(|(i, value)| self.rule(&format!("on[{i}]"), value, &actions))
+            .collect();
+        Config {
+            actions,
+            binds,
+            rules,
+        }
     }
 
     fn action(&mut self, at: &str, value: &Value) -> Option<Action> {
@@ -162,7 +175,7 @@ impl Check {
                 );
             }
             // A placeholder's value is checked once a binding or `do` gives it.
-            if placeholders(&value).next().is_none() {
+            if !has_placeholder(&value) {
                 self.value(&at, param, &value);
             }
             params.push((param.name, value));
@@ -185,37 +198,7 @@ impl Check {
         }
         let name = self.string(&format!("{at}.action"), map.get("action"))?;
         let args = self.params(&format!("{at}.args"), map.get("args"));
-        let names: Vec<&str> = args.iter().map(|(k, _)| k.as_str()).collect();
-        // A catalog method wins: an action may not take its name.
-        match (
-            schema::method(name),
-            actions.iter().find(|a| a.name == name),
-        ) {
-            (None, Some(action)) => {
-                for missing in action.args.iter().filter(|a| !names.contains(&a.as_str())) {
-                    self.problem(at, format!("`{name}` needs argument `{missing}`"));
-                }
-                for unknown in names
-                    .iter()
-                    .filter(|n| !action.args.iter().any(|a| a == *n))
-                {
-                    self.problem(at, format!("`{name}` has no argument `{unknown}`"));
-                }
-                if let Ok(calls) = action.expand(&args) {
-                    self.bound_values(at, action, &calls);
-                }
-            }
-            (Some(method), _) => {
-                for (key, value) in &args {
-                    match param(method, key) {
-                        Some(param) => self.value(at, param, value),
-                        None => self.problem(at, format!("`{name}` has no parameter `{key}`")),
-                    }
-                }
-                self.required(at, method, names.iter().copied());
-            }
-            (None, None) => self.problem(at, format!("unknown action `{name}`")),
-        }
+        self.target(at, name, &args, actions, false);
         Some(Bind {
             keys: keys.to_owned(),
             action: name.to_owned(),
@@ -252,21 +235,105 @@ impl Check {
         }
     }
 
-    /// Checks the values that `action`, expanded by a binding into
+    /// Checks the values that `action`, expanded by a binding or rule into
     /// `calls`, takes from its placeholders; the action checked the rest.
-    fn bound_values(&mut self, at: &str, action: &Action, calls: &[Call]) {
+    /// With `deferred`, a value still holding a placeholder is skipped.
+    fn bound_values(&mut self, at: &str, action: &Action, calls: &[Call], deferred: bool) {
         for (template, call) in action.run.iter().zip(calls) {
             let Some(method) = schema::method(call.method) else {
                 continue;
             };
             let filled = template.params.iter().zip(&call.params);
             for ((name, template), (_, value)) in filled {
-                if placeholders(template).next().is_none() {
+                if !has_placeholder(template) || (deferred && has_placeholder(value)) {
                     continue;
                 }
                 if let Some(param) = param(method, name) {
                     self.value(at, param, value);
                 }
+            }
+        }
+    }
+
+    fn rule(&mut self, at: &str, value: &Value, actions: &[Action]) -> Option<Rule> {
+        let map = self.object(at, value, &["event", "action", "args"])?;
+        let event = self.string(&format!("{at}.event"), map.get("event"));
+        let name = self.string(&format!("{at}.action"), map.get("action"));
+        let args = self.params(&format!("{at}.args"), map.get("args"));
+        let (event, name) = (event?, name?);
+        let Some(&(event, fields)) = EVENTS.iter().find(|(kind, _)| *kind == event) else {
+            self.problem(&format!("{at}.event"), format!("unknown event `{event}`"));
+            return None;
+        };
+        for (key, value) in &args {
+            for unknown in placeholders(value).filter(|p| !fields.contains(p)) {
+                self.problem(
+                    &format!("{at}.args.{key}"),
+                    format!("`${{{unknown}}}` is not a field of `{event}`"),
+                );
+            }
+        }
+        let run = self.target(at, name, &args, actions, true)?;
+        Some(Rule { event, run })
+    }
+
+    /// Checks what a binding or rule runs: a catalog method, which wins
+    /// since an action may not take its name, given its parameters as a
+    /// request would be; or an action given exactly its arguments, which
+    /// then make valid values. With `deferred`, a value that holds a
+    /// placeholder is checked once it is filled instead.
+    fn target(
+        &mut self,
+        at: &str,
+        name: &str,
+        args: &[(String, String)],
+        actions: &[Action],
+        deferred: bool,
+    ) -> Option<Run> {
+        let names: Vec<&str> = args.iter().map(|(k, _)| k.as_str()).collect();
+        match (
+            schema::method(name),
+            actions.iter().find(|a| a.name == name),
+        ) {
+            (Some(method), _) => {
+                let mut params = Vec::new();
+                for (key, value) in args {
+                    let Some(param) = param(method, key) else {
+                        self.problem(at, format!("`{name}` has no parameter `{key}`"));
+                        continue;
+                    };
+                    if !(deferred && has_placeholder(value)) {
+                        self.value(at, param, value);
+                    }
+                    params.push((param.name, value.clone()));
+                }
+                self.required(at, method, names.iter().copied());
+                Some(Run::Request(Call {
+                    method: method.name,
+                    params,
+                }))
+            }
+            (None, Some(action)) => {
+                for missing in action.args.iter().filter(|a| !names.contains(&a.as_str())) {
+                    self.problem(at, format!("`{name}` needs argument `{missing}`"));
+                }
+                for unknown in names
+                    .iter()
+                    .filter(|n| !action.args.iter().any(|a| a == *n))
+                {
+                    self.problem(at, format!("`{name}` has no argument `{unknown}`"));
+                }
+                if let Ok(calls) = action.expand(args) {
+                    self.bound_values(at, action, &calls, deferred);
+                }
+                Some(Run::Action {
+                    name: name.to_owned(),
+                    args: args.to_vec(),
+                })
+            }
+            (None, None) => {
+                self.problem(at, format!("unknown action `{name}`"));
+                None
             }
         }
     }
@@ -336,6 +403,10 @@ impl Check {
 
 fn param(method: &'static Method, name: &str) -> Option<&'static Param> {
     method.params.iter().find(|p| p.name == name)
+}
+
+fn has_placeholder(text: &str) -> bool {
+    placeholders(text).next().is_some()
 }
 
 /// A string as itself, a non-negative integer in decimal.

@@ -72,6 +72,26 @@ pub(crate) fn event_line(seq: u64, event: &Event, json: bool) -> String {
     with_fields(format!("{seq} {kind}"), fields)
 }
 
+/// An event's kind and its fields' values, as a rule's placeholders take
+/// them (see [`rusty_mux_script::EVENTS`]); a field with no value, such as
+/// a free lease's holder, is left out.
+pub(crate) fn event_fields(event: &Event) -> (&'static str, Vec<(String, String)>) {
+    let (kind, fields) = describe(event);
+    let values = fields
+        .into_iter()
+        .filter_map(|(name, field)| {
+            let value = match field {
+                Field::Id(id) => id.to_string(),
+                Field::Num(n) => n.to_string(),
+                Field::Text(text) => text,
+                Field::Absent => return None,
+            };
+            Some((name.to_owned(), value))
+        })
+        .collect();
+    (kind, values)
+}
+
 /// One entity of a listing: `KIND ID field=value…` in text.
 pub(crate) fn entry_line(entry: &Entry, json: bool) -> String {
     let (kind, id, fields) = describe_entry(entry);
@@ -220,6 +240,8 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
             ],
         ),
         E::BlockStatus { block } => ("block-status", vec![("block", Id(block.uuid()))]),
+        E::PwdChanged { block } => ("pwd-changed", vec![("block", Id(block.uuid()))]),
+        E::TitleChanged { block } => ("title-changed", vec![("block", Id(block.uuid()))]),
     }
 }
 
@@ -276,6 +298,63 @@ mod tests {
         assert_eq!(
             event_line(3, &event, false),
             format!("3 block-status block={}", id(1))
+        );
+    }
+
+    #[test]
+    fn rules_can_name_every_event_and_its_fields() {
+        let (session, window, block) = (
+            SessionId::from_uuid(id(1)),
+            WindowId::from_uuid(id(2)),
+            BlockId::from_uuid(id(3)),
+        );
+        let client = rusty_mux_core::ClientId::from_uuid(id(4));
+        let size = Size::new(80, 24).unwrap();
+        let events = [
+            Event::SessionCreated { session },
+            Event::SessionClosed { session },
+            Event::WindowCreated { window, session },
+            Event::WindowClosed { window },
+            Event::BlockCreated {
+                block,
+                window,
+                size,
+            },
+            Event::BlockResized { block, size },
+            Event::BlockClosed { block },
+            Event::ClientConnected { client },
+            Event::ClientDisconnected { client },
+            Event::Attached { client, block },
+            Event::Detached { client, block },
+            Event::LeaseChanged {
+                block,
+                holder: Some(client),
+            },
+            Event::BlockStatus { block },
+            Event::PwdChanged { block },
+            Event::TitleChanged { block },
+        ];
+        assert_eq!(events.len(), rusty_mux_script::EVENTS.len());
+        for (event, (kind, declared)) in events.iter().zip(rusty_mux_script::EVENTS) {
+            let (found, values) = event_fields(event);
+            assert_eq!(found, *kind);
+            let names: Vec<&str> = values.iter().map(|(n, _)| n.as_str()).collect();
+            // `watch` reads the new directory or title from the block.
+            let read = ["pwd", "title"];
+            let expected: Vec<&str> = declared
+                .iter()
+                .copied()
+                .filter(|f| !read.contains(f))
+                .collect();
+            assert_eq!(names, expected, "{kind}");
+        }
+        let free = Event::LeaseChanged {
+            block,
+            holder: None,
+        };
+        assert_eq!(
+            event_fields(&free).1,
+            [("block".to_owned(), id(3).to_string())]
         );
     }
 
