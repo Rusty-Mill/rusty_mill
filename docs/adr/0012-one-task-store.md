@@ -55,8 +55,8 @@ one `board` document per task, with its own compare-and-swap (below).
 | `body` | `notes` | |
 | `column` | tag `board:<column>` | `Done` also sets status `done`. Same label scheme the GitHub sync already uses |
 | `claim` | tag `claim:<actor>` | tags are case-insensitive, so actor names must be lowercase (validated at the identities boundary) |
-| `tags` | `tags` | `agent`, `board:` and `claim:` are reserved; `card_update` refuses them |
-| `project` | `listId` | one tick list per project, named like it. A task in any other list is in the repository's own project |
+| `tags` | `tags` | `agent`, `board:` and `claim:` are reserved; `card_update` refuses them. rusty_tick keeps tags lowercase, so they read back lowercase |
+| `project` | `listId` | the list's name is the project, and a project's list is created on first use. The Inbox is the `default` project |
 | `comments` | tick `comment` docs | existing shape `{v, taskId, text, createdMs}` plus `by`, so the tick UI shows who wrote it |
 | `issue`, `synced_text`, `execution` | tick `board` doc, id = task id | written with its own `If-Match` (below) |
 | `created_ms`, `updated_ms` | same | |
@@ -88,6 +88,15 @@ whole-card revision does today.
    the task can change between the check and the write. Either mismatch is a
    412, the board's `Conflict`, and the caller retries from 1 as it does
    today.
+
+**Commit order, as built.** Every board write starts with a `PATCH` of the task
+under `If-Match: <version the board read>`, carrying the task's changes, or an
+empty body when only the `board` document or a comment changes. An empty patch
+still moves the version, so the task version stays the card's revision
+(`rev = version - 1`) and every write is the same compare-and-swap. The
+document `PUT` then names the new version in `If-Task-Match`; a comment is
+written with `If-None-Match: *`. A crash between the two writes leaves at most a
+moved version and an operation its caller saw fail.
 
 A document is one engine record, so a crash leaves the old document or the new
 one, never half of either. Two boards (or a board and a stray client) cannot
@@ -123,6 +132,9 @@ projects, never a card someone else holds. Two changes:
   only. The card gains a `priority`; the memory store fills it from `0`.
 - **Dependencies:** a card whose `deps` are not all Done is skipped. The
   artifact board uses deps on 21 of 58 cards; the crate board has none.
+
+A card imported from a GitHub issue gets an id derived from the issue number,
+so an import retried after a crash finds its task instead of making a second.
 
 Taking a card claims it in the same write, as today: `board:building` and
 `claim:<actor>` land together under `If-Match`, so two agents cannot take the
