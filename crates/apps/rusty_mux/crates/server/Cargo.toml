@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
+rusty_mux_status = { workspace = true }
 # Headless engine only: no `gui` or `l13`, so no tokio reaches this binary.
 rusty_term_core = { workspace = true }
 rusty_tokio = { workspace = true }

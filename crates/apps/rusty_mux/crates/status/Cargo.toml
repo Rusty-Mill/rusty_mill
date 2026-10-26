@@ -1,0 +1,15 @@
+[package]
+name = "rusty_mux_status"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "rusty_mux program status: parses OSC 7501 (Program Status Protocol) reports and keeps a block's records. No I/O."
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+rusty_base64 = { workspace = true }

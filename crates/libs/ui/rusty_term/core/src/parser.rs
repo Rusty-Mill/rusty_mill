@@ -505,6 +505,7 @@ impl AnsiParser {
                         // its cells, so the blank screen lands in theme colors.
                         g.set_default_colors(self.palette.fg, self.palette.bg, self.palette.cursor);
                         g.reset();
+                        g.push_program_status(super::grid::StatusSignal::Reset);
                         self.charsets = [Charset::Ascii; 4];
                         self.gl = 0;
                         self.last_char = None;

@@ -219,6 +219,7 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
                 ("holder", holder.map_or(Field::Absent, |c| Id(c.uuid()))),
             ],
         ),
+        E::BlockStatus { block } => ("block-status", vec![("block", Id(block.uuid()))]),
     }
 }
 
@@ -265,6 +266,17 @@ mod tests {
         };
         assert!(event_line(1, &event, false).ends_with("holder=-"));
         assert!(event_line(1, &event, true).contains("\"holder\":null"));
+    }
+
+    #[test]
+    fn status_events_name_their_block() {
+        let event = Event::BlockStatus {
+            block: BlockId::from_uuid(id(1)),
+        };
+        assert_eq!(
+            event_line(3, &event, false),
+            format!("3 block-status block={}", id(1))
+        );
     }
 
     #[test]
