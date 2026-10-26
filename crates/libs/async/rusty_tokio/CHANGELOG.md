@@ -14,6 +14,7 @@ anything prior to v0.2.0.
 
 ### Added
 
+- `io::UnixStream::peer_pid` (Windows): the peer process's ID from `SIO_AF_UNIX_GETPEERPID`, Windows' counterpart to `peer_cred`, for servers that admit only their own user (rusty_mux on Windows).
 - `task::JoinSet::try_join_next`: removes and returns an already-finished member without waiting, or `None`. It lets a long-lived owner such as an accept loop drop finished tasks as it goes (design review 3.7).
 - Windows support for `process::Command`/`Child`, `signal`, and
   `io::UnixStream`/`UnixListener` -- previously `#[cfg(unix)]`-gated out

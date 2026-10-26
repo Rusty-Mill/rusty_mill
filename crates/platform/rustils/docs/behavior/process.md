@@ -196,6 +196,14 @@ assertions.
   `platform-mock`: same registry shape as `is_alive`
   (`MockSpawner::zombie_pids`).
 
+- `platform_windows::is_current_user(pid)` (Windows only, not a trait
+  method): `Ok(true)` when the process's token user SID equals this
+  process's (`OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`,
+  `OpenProcessToken`, `GetTokenInformation(TokenUser)`, `EqualSid`).
+  `Err` when the process does not exist or its token cannot be read
+  (System, protected processes); an access check treats that as a
+  refusal.
+
 ## Async path (rusty_foundation_akb §9)
 
 `Child::wait` is the potentially-blocking operation here (`try_wait` is

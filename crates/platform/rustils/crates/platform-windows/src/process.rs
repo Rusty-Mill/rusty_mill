@@ -13,6 +13,14 @@ use crate::sys::handle::OwnedWinHandle;
 use crate::sys::proc;
 use crate::winargv;
 
+/// Whether process `pid` runs as the same user as this one (token user
+/// SIDs compared). `Err` if the process is gone or its token cannot be
+/// read; an access decision should treat that as "no". Re-exported at
+/// the crate root as `platform_windows::is_current_user`.
+pub fn is_current_user(pid: u32) -> Result<bool> {
+    proc::is_current_user(pid)
+}
+
 /// The Windows process backend.
 #[derive(Debug, Default)]
 pub struct WindowsSpawner;
