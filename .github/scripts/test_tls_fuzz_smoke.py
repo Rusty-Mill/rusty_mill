@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import signal
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -16,6 +18,9 @@ FAKE = """#!/bin/sh
 case "$1" in
   list) [ -n "$FAKE_LIST_FAILS" ] && exit 2; printf '%s\\n' $FAKE_TARGETS ;;
   run)
+    echo "INFO: Seed: 42 for $2"
+    case " $FAKE_LONG " in *" $2 "*) i=0; while [ $i -lt 100 ]; do echo "line $i"; i=$((i+1)); done ;; esac
+    case " $FAKE_HANG " in *" $2 "*) echo "started $2"; sleep 30 ;; esac
     case " $FAKE_CRASH " in *" $2 "*) echo "SUMMARY: crash in $2"; exit 77 ;; esac
     case " $FAKE_SILENT " in *" $2 "*) echo "no runs here"; exit 0 ;; esac
     echo "args: $*"; echo "Done 1234 runs in 1 second(s)" ;;
@@ -70,6 +75,14 @@ def run_default_command(**env: str) -> list[str]:
         return log.read_text(encoding="utf-8").splitlines()
 
 
+def fake_dir(tmp: str) -> dict[str, str]:
+    """Write the fake cargo-fuzz into `tmp` and return the env that selects it."""
+    fake = Path(tmp) / "fake"
+    fake.write_text(FAKE, encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    return {**os.environ, "CARGO_FUZZ": str(fake), "FUZZ_ROOT": tmp}
+
+
 class TlsFuzzSmokeTests(unittest.TestCase):
     def test_all_targets_running_passes(self) -> None:
         r = run("a b c")
@@ -79,6 +92,65 @@ class TlsFuzzSmokeTests(unittest.TestCase):
     def test_the_target_triple_is_passed_only_when_set(self) -> None:
         self.assertIn("run a --target x86_64-unknown-linux-gnu", run("a b", FUZZ_TARGET_TRIPLE="x86_64-unknown-linux-gnu").stdout)
         self.assertNotIn("--target", run("a b").stdout)
+
+    def test_features_are_passed_to_run_only_when_set(self) -> None:
+        out = run("a b", FUZZ_FEATURES="--no-default-features --features native").stdout
+        self.assertIn("run --no-default-features --features native a", out)
+        self.assertIn("args: run a --", run("a b").stdout)
+
+    def test_a_target_filter_runs_only_the_named_targets(self) -> None:
+        r = run("a b c", FUZZ_TARGETS="b")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("fuzz target b: ok", r.stdout)
+        self.assertNotIn("fuzz target a", r.stdout)
+        self.assertIn("1 targets, 0 failed", r.stdout)
+
+    def test_a_filter_naming_an_unknown_target_fails(self) -> None:
+        r = run("a b", FUZZ_TARGETS="z")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no fuzz target named z", r.stdout)
+
+    def test_each_target_keeps_its_full_log_and_only_the_tail_is_echoed(self) -> None:
+        with tempfile.TemporaryDirectory() as logs:
+            r = run("a b", FAKE_LONG="a", FUZZ_LOG_DIR=logs)
+            self.assertEqual(r.returncode, 0, r.stdout)
+            full = (Path(logs) / "a.log").read_text(encoding="utf-8")
+            self.assertIn("INFO: Seed: 42 for a", full)
+            self.assertIn("line 0", full)
+            self.assertNotIn("Seed: 42 for a", r.stdout)
+            self.assertIn("line 99", r.stdout)
+            self.assertTrue((Path(logs) / "b.log").is_file())
+
+    def test_a_relative_log_directory_is_resolved_against_the_callers_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as cwd:
+            env = {**fake_dir(tmp), "FAKE_TARGETS": "a", "FUZZ_LOG_DIR": "fuzz-logs"}
+            r = subprocess.run(
+                ["bash", str(SCRIPT), "1", "1"], cwd=cwd, env=env, capture_output=True, text=True, check=False
+            )
+            self.assertEqual(r.returncode, 0, r.stdout)
+            self.assertTrue((Path(cwd) / "fuzz-logs" / "a.log").is_file())
+            self.assertFalse((Path(tmp) / "fuzz-logs").exists())
+
+    def test_a_crash_keeps_its_log(self) -> None:
+        with tempfile.TemporaryDirectory() as logs:
+            r = run("a b", FAKE_CRASH="a", FUZZ_LOG_DIR=logs)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("SUMMARY: crash in a", (Path(logs) / "a.log").read_text(encoding="utf-8"))
+
+    def test_an_interrupted_run_leaves_its_partial_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as logs:
+            env = {**fake_dir(tmp), "FAKE_TARGETS": "a", "FAKE_HANG": "a", "FUZZ_LOG_DIR": logs}
+            proc = subprocess.Popen(
+                ["bash", str(SCRIPT), "1", "1"], env=env, stdout=subprocess.DEVNULL, start_new_session=True
+            )
+            log = Path(logs) / "a.log"
+            deadline = time.monotonic() + 10
+            while "started a" not in (log.read_text(encoding="utf-8") if log.exists() else ""):
+                self.assertLess(time.monotonic(), deadline, "the fake never started")
+                time.sleep(0.05)
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=10)
+            self.assertIn("INFO: Seed: 42 for a", log.read_text(encoding="utf-8"))
 
     def test_the_default_command_uses_the_pinned_toolchain_and_never_floating_nightly(self) -> None:
         pinned = run_default_command(FUZZ_TOOLCHAIN="nightly-2026-10-07")

@@ -1,0 +1,117 @@
+name: TLS fuzz (long run)
+
+# The long fuzz run of the evidence bar (docs/research/TLS-EVIDENCE-BAR.md,
+# Tier 1 item 3): every rusty_tls fuzz target, one job each, for a fixed time.
+# The default is 3 hours of wall time on each of 8 targets, one fuzzing process
+# each: a configured budget of 24 job-hours, matching the bar's "24 CPU hours"
+# example. It is a budget, not measured CPU time. Manual only. The smoke job in
+# ci.yml runs the same targets for 30 s. A crash or a target that runs nothing
+# fails its job; the full log, crashing inputs and the grown corpus are
+# uploaded either way, including after a cancellation or timeout.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Wall-time seconds per target (one fuzzing process each)"
+        required: true
+        default: "10800"
+      backend:
+        description: "Crypto backend"
+        required: true
+        default: native
+        type: choice
+        options: [native, ring]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  # Same dated nightly as the smoke job in ci.yml.
+  FUZZ_TOOLCHAIN: nightly-2026-10-07
+
+jobs:
+  targets:
+    name: check inputs and list targets
+    runs-on: ubuntu-latest
+    outputs:
+      names: ${{ steps.list.outputs.names }}
+      seconds: ${{ steps.seconds.outputs.seconds }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Before any fuzz job starts: a whole number in 1..19800 (0 would mean
+      # no limit to libFuzzer). The input reaches the script only through env.
+      - id: seconds
+        env:
+          SECONDS_INPUT: ${{ inputs.seconds }}
+        # A refusal fails the step (bash -e); an accepted value is already canonical.
+        run: |
+          python3 .github/scripts/fuzz_seconds.py "$SECONDS_INPUT"
+          echo "seconds=$SECONDS_INPUT" >> "$GITHUB_OUTPUT"
+      - id: list
+        shell: python
+        run: |
+          import json, os, tomllib
+          with open("crates/libs/net/rusty_tls/fuzz/Cargo.toml", "rb") as f:
+              names = [b["name"] for b in tomllib.load(f)["bin"]]
+          if len(names) < 8:
+              raise SystemExit(f"found {len(names)} fuzz targets, expected at least 8")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"names={json.dumps(names)}\n")
+
+  fuzz:
+    name: fuzz ${{ matrix.target }} (${{ inputs.backend }})
+    needs: targets
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.names) }}
+    runs-on: ubuntu-latest
+    # Six hours is the hosted-runner limit; leave room for the build.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        with:
+          tool: cargo-fuzz@0.13.2
+      - name: fuzz
+        shell: bash
+        # Inputs reach the script through the environment, never interpolated.
+        env:
+          SECONDS_PER_TARGET: ${{ needs.targets.outputs.seconds }}
+          BACKEND: ${{ inputs.backend }}
+          FUZZ_TARGETS: ${{ matrix.target }}
+          FUZZ_LOG_DIR: fuzz-logs
+          # The installed cargo-fuzz is a musl binary; see the smoke job.
+          FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu
+        run: |
+          export RUSTFLAGS="--cfg rusty_tls_handrolled"
+          if [ "$BACKEND" = native ]; then
+            RUSTFLAGS="$RUSTFLAGS --cfg rusty_tls_native_crypto"
+            export FUZZ_FEATURES="--no-default-features --features native"
+          fi
+          echo "commit $GITHUB_SHA, backend $BACKEND, $SECONDS_PER_TARGET s wall time" >> "$GITHUB_STEP_SUMMARY"
+          # bash -e is on: capture the status, always write the outcome, then
+          # propagate it. The script streams the full log to $FUZZ_LOG_DIR.
+          status=0
+          bash .github/scripts/tls_fuzz_smoke.sh "$SECONDS_PER_TARGET" 8 || status=$?
+          {
+            echo "exit status $status"
+            echo '```'
+            grep -hE '^#[0-9]+ +DONE|Done [0-9]+ runs|SUMMARY:' "$FUZZ_LOG_DIR"/*.log || echo "no result line in the log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: tls-fuzz-${{ inputs.backend }}-${{ matrix.target }}
+          path: |
+            fuzz-logs
+            crates/libs/net/rusty_tls/fuzz/artifacts
+            crates/libs/net/rusty_tls/fuzz/corpus/${{ matrix.target }}
+          if-no-files-found: ignore
