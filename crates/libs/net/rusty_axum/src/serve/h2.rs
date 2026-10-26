@@ -225,12 +225,24 @@ async fn stream(
     let closed = respond.closed();
     let options = &shared.options;
     let work = async {
-        let (response, head_only) = match read(req, peer, options).await {
-            Ok(req) => {
-                let head_only = *req.method() == Method::Head;
-                (shared.router.call(req).await, head_only)
+        let (response, head_only) = match shared.admit() {
+            // Refused before the body is read; the stream ends with the
+            // answer, so the client sends no more of it.
+            Err(refused) => (refused, false),
+            Ok(ticket) => {
+                let served = ticket.within(async {
+                    match read(req, peer, options).await {
+                        Ok(req) => {
+                            let head_only = *req.method() == Method::Head;
+                            (shared.router.call(req).await, head_only)
+                        }
+                        Err(status) => (Response::new(status, Vec::new()), false),
+                    }
+                });
+                served
+                    .await
+                    .unwrap_or_else(|| (super::admission::timed_out(), false))
             }
-            Err(status) => (Response::new(status, Vec::new()), false),
         };
         answer(respond, response, head_only, options.idle_timeout, stop).await;
     };

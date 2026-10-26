@@ -38,6 +38,11 @@ let response = app.call(rusty_axum::Request::new(rusty_axum::Method::Get, "/heal
   taken over (`Accepted::Done`). That is where a gateway picks a certificate by
   SNI or forwards a TLS passthrough port untouched. It runs on the connection's
   own task, within `handshake_timeout`.
+- `Admission` (returned by `Accept::admission`) sheds load before a body is
+  read: at most `with_max_in_flight(n)` requests from head to response head,
+  the rest `503` with `Retry-After: 1`, and `with_timeout(d)` answers `504` to
+  one whose body and response are not done in time. Clones share the count.
+  Middleware cannot do this, since bodies are read whole before routing.
 
 - `Router::layer` wraps every request: `middleware::from_fn(|req, next| ..)` or
   `cors::Cors` (tower-http's `CorsLayer` behaviour). There is no `route_layer`

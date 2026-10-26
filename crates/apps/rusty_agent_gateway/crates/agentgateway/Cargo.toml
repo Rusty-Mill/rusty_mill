@@ -43,7 +43,7 @@ rusty_mcp_server = { workspace = true, features = ["http"] }
 # The MCP handler's request and reply types, for `mcp_service`.
 rusty_serve = { workspace = true }
 rusty_http = { workspace = true }
-rusty-mcp = { workspace = true, default-features = false, features = ["otel", "rusty-axum"] }
+rusty-mcp = { workspace = true, default-features = false, features = ["otel"] }
 # The server. `http2` is load-bearing and must not be "tidied away": the TLS
 # listener advertises `h2` over ALPN, and a server that negotiates a protocol
 # it cannot speak closes the connection after a successful handshake -- which
@@ -73,7 +73,7 @@ rmcp = { workspace = true, features = [
     "transport-streamable-http-client-reqwest",
     "transport-streamable-http-server",
 ] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "net", "io-util", "time"] }
 tokio-util = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "http2"] }

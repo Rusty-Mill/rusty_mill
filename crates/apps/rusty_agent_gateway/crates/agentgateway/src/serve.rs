@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use agentgateway_proxy::Scheme;
 use agentgateway_tls::{Passthrough, TlsTerminator};
-use rusty_axum::{Accept, Accepted, BoxFuture, Router, ServeOptions};
+use rusty_axum::{Accept, Accepted, Admission, BoxFuture, Router, ServeOptions};
 use rusty_mcp::limits::LimitsLayer;
 use rusty_tokio::io::{TcpListener, TcpStream};
 use rusty_tokio::sync::CancellationToken;
@@ -64,10 +64,12 @@ pub async fn run_with_shutdown(
 
 /// As [`run_with_shutdown`], with process-wide load shedding applied.
 ///
-/// The limits sit outside everything else, so a shed request costs an atomic
-/// increment rather than a route lookup, a token validation and a JWKS fetch.
-/// That ordering is the reason the layer is worth having: the requests it
-/// refuses are exactly the ones there is no capacity to pay for.
+/// The limits are checked by the server as soon as a request's head arrives,
+/// before its body is read, so a shed request costs neither an upload held in
+/// memory nor a route lookup, a token validation and a JWKS fetch. The
+/// timeout covers reading the body as well as producing the response. That
+/// ordering is the reason the limits are worth having: the requests they
+/// refuse are exactly the ones there is no capacity to pay for.
 pub async fn run_with_shutdown_and_limits(
     gateway: Gateway,
     addrs: Vec<SocketAddr>,
@@ -76,6 +78,10 @@ pub async fn run_with_shutdown_and_limits(
 ) -> anyhow::Result<impl Future<Output = ()> + Send> {
     let gateway = Arc::new(gateway);
     let options = options(&gateway);
+    // One admission, cloned per port: the count is shared, which is the
+    // whole point -- a limit each port counted separately would bound
+    // nothing in a multi-bind config.
+    let admission = admission(&limits);
 
     let mut listeners = Vec::with_capacity(addrs.len());
     for addr in &addrs {
@@ -98,11 +104,9 @@ pub async fn run_with_shutdown_and_limits(
             port,
             tls,
             passthrough: gateway.passthrough(port),
+            admission: admission.clone(),
         };
-        // One layer, cloned per port: the permit count is shared, which is
-        // the whole point -- a limit each port counted separately would bound
-        // nothing in a multi-bind config.
-        let router = router(Arc::clone(&gateway), port, scheme).layer(limits.clone());
+        let router = router(Arc::clone(&gateway), port, scheme);
         servers.push(rusty_axum::serve_with(
             listener,
             acceptor,
@@ -115,9 +119,15 @@ pub async fn run_with_shutdown_and_limits(
     // stop, so serving goes on whether or not the caller polls what it gets.
     let stopped = rusty_tokio::spawn(async move {
         shutdown.cancelled().await;
-        // Let in-flight requests finish; MCP calls can be long.
-        for server in servers {
-            server.shutdown().await;
+        // Every port stops accepting at once; then in-flight requests finish
+        // (MCP calls can be long). Draining one port before signalling the
+        // next would leave the rest accepting behind a slow request.
+        let draining: Vec<_> = servers
+            .into_iter()
+            .map(|server| rusty_tokio::spawn(server.shutdown()))
+            .collect();
+        for drained in draining {
+            let _ = drained.await;
         }
     });
     Ok(async move {
@@ -143,6 +153,18 @@ fn options(gateway: &Gateway) -> ServeOptions {
         // The TLS listeners advertise `h2` over ALPN, so they must speak it.
         http2: true,
     }
+}
+
+/// The server-side form of the configured limits.
+fn admission(limits: &LimitsLayer) -> Admission {
+    let mut admission = Admission::new();
+    if let Some(max) = limits.max_concurrent() {
+        admission = admission.with_max_in_flight(max);
+    }
+    if let Some(timeout) = limits.timeout() {
+        admission = admission.with_timeout(timeout);
+    }
+    admission
 }
 
 /// The router for one port: every request goes to the gateway.
@@ -171,6 +193,7 @@ struct Acceptor {
     port: u16,
     tls: Option<Arc<TlsTerminator>>,
     passthrough: Option<Arc<Passthrough>>,
+    admission: Admission,
 }
 
 impl Accept for Acceptor {
@@ -197,6 +220,10 @@ impl Accept for Acceptor {
                 }
             }
         })
+    }
+
+    fn admission(&self) -> Option<&Admission> {
+        Some(&self.admission)
     }
 }
 

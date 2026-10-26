@@ -11569,7 +11569,6 @@ dependencies = [
  "rand 0.8.8",
  "reqwest 0.13.4",
  "rsa",
- "rusty_axum",
  "rusty_base64",
  "rusty_http",
  "rusty_json",

@@ -6,7 +6,7 @@ crate. It no longer depends on `rmcp` (ADR-0002, Amendment 1).
 | Module | What it is |
 |---|---|
 | `auth` | OAuth 2.1 resource-server authorization: RFC 9728 Protected Resource Metadata, `WWW-Authenticate` challenges, audience-bound bearer tokens as a `tower` layer (`RequireAuthLayer`). JWT validation with the `jwt` feature. |
-| `limits` | `LimitsLayer`: bounded concurrency and a response timeout that shed load with `503` and `Retry-After` instead of queueing. A `tower` layer, and with the `rusty-axum` feature a `rusty_axum` middleware too (`Router::layer`). |
+| `limits` | `LimitsLayer`: bounded concurrency and a response timeout that shed load with `503` and `Retry-After` instead of queueing. |
 | `trace` | Strict W3C trace-context parsing over MCP `_meta` (SEP-414), a `tracing` span carrying the ids, and writing a context back onto an outbound request. |
 | `otel` (feature `otel`) | An OTLP trace and metrics pipeline, and `McpMetricsLayer` for per-request metrics. |
 

@@ -43,7 +43,7 @@ pub use request::Request;
 pub use response::{IntoResponse, Response};
 pub use routing::Router;
 pub use rusty_http::{HeaderMap, Method, StatusCode};
-pub use serve::{serve, serve_with, Accept, Accepted, ServeOptions, Server};
+pub use serve::{serve, serve_with, Accept, Accepted, Admission, ServeOptions, Server};
 
 use std::future::Future;
 use std::pin::Pin;

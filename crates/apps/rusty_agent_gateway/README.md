@@ -1856,7 +1856,9 @@ binds:
 Termination goes through [`rusty_tls`][rusty_tls], the ecosystem's one TLS
 implementation, so the gateway does not roll its own. ALPN advertises `h2` and
 `http/1.1`; over TLS that is how the HTTP version gets chosen, and a client
-capable of HTTP/2 gets it.
+capable of HTTP/2 gets it. A cleartext port speaks HTTP/1.1 only: there is no
+h2c, by prior knowledge or by upgrade (the hyper server this replaced accepted
+prior-knowledge h2c).
 
 Certificates are read at startup, so a missing or malformed one stops the
 gateway booting instead of failing every handshake later. `X-Forwarded-Proto`
@@ -2253,9 +2255,11 @@ duplicated risk, and this is the one place this repo carries any.
 and installs the subscriber; `OtelGuard` is held until after the accept loops
 stop, because spans are batched and whatever is still buffered dies with the
 process otherwise. `McpMetricsLayer` supplies the MCP request metrics described
-above. `LimitsLayer` supplies the concurrency bound, mounted outside routing and
-authentication so a shed request costs a semaphore try-acquire rather than a
-route lookup, a token validation and a JWKS fetch.
+above. `LimitsLayer` carries the concurrency bound and the request timeout from
+the config; the server applies them (as a `rusty_axum::Admission`) when a
+request's head arrives, before its body is read, so a shed request costs a
+semaphore try-acquire rather than an upload held in memory, a route lookup, a
+token validation and a JWKS fetch.
 
 One correction worth recording: `limits` is concurrency and timeout shedding,
 **not** a token bucket, so it does not cover `localRateLimit`

@@ -16,8 +16,11 @@
 //! certificate per connection (by SNI) or takes some connections over
 //! itself (TLS passthrough).
 
+mod admission;
 #[cfg(feature = "http2")]
 mod h2;
+
+pub use admission::Admission;
 
 use std::future::{poll_fn, Future};
 use std::io;
@@ -147,6 +150,12 @@ pub enum Accepted {
 pub trait Accept: Send + Sync + 'static {
     /// Turns `tcp`, accepted from `peer`, into a connection to serve.
     fn accept(&self, tcp: TcpStream, peer: SocketAddr) -> BoxFuture<'static, Accepted>;
+
+    /// The limits every request on this server is admitted under, checked
+    /// when its head arrives and before its body is read. None by default.
+    fn admission(&self) -> Option<&Admission> {
+        None
+    }
 }
 
 /// [`serve`]'s acceptor: plain, or one TLS acceptor for every connection.
@@ -218,6 +227,16 @@ struct Shared {
     router: Router,
     accept: Box<dyn Accept>,
     options: ServeOptions,
+}
+
+impl Shared {
+    /// Admits a request whose head just arrived, under the acceptor's limits.
+    fn admit(&self) -> Result<admission::Ticket, Response> {
+        match self.accept.admission() {
+            Some(admission) => admission.admit(),
+            None => Ok(admission::Ticket::unlimited()),
+        }
+    }
 }
 
 /// Waits for `work`, or for the stop signal: `None` once stopped. The
@@ -309,16 +328,36 @@ where
             // Stopped between requests, or idle too long.
             None | Some(Err(_)) => return,
         };
-        let reply = Reply {
+        let mut reply = Reply {
             head_only: head.method == Method::Head,
             keep_alive: wants_keep_alive(&head),
             chunked: head.version == Version::Http11,
         };
-        let req = match conn.read_request(head, options).await {
-            Ok(req) => req.with_peer_addr(peer),
-            Err(e) => return conn.refuse(&e).await,
+        let ticket = match shared.admit() {
+            Ok(ticket) => ticket,
+            // The body is never read, so the connection cannot be reused.
+            Err(refused) => {
+                reply.keep_alive = false;
+                conn.respond(refused, reply, stop).await;
+                return;
+            }
         };
-        let response = shared.router.call(req).await;
+        let work = async {
+            let req = conn.read_request(head, options).await?;
+            Ok(shared.router.call(req.with_peer_addr(peer)).await)
+        };
+        let response = match ticket.within(work).await {
+            Some(Ok(response)) => response,
+            Some(Err(e)) => return conn.refuse(&e).await,
+            // The body may be partly read: answer, then close.
+            None => {
+                reply.keep_alive = false;
+                admission::timed_out()
+            }
+        };
+        // The place is held until the response head is ready, not while a
+        // streamed body is sent.
+        drop(ticket);
         let reusable = conn.respond(response, reply, stop).await;
         if !reusable {
             return;

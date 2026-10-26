@@ -13,7 +13,10 @@ use futures_core::Stream;
 use rcgen::{CertificateParams, KeyPair};
 use rusty_axum::response::sse::{Event, Sse};
 use rusty_axum::routing::{get, post};
-use rusty_axum::{serve, ConnectInfo, IntoResponse, Router, ServeOptions, Server};
+use rusty_axum::{
+    serve, serve_with, Accept, Accepted, Admission, BoxFuture, ConnectInfo, IntoResponse, Router,
+    ServeOptions, Server,
+};
 use rusty_h2::frame::headers::HeadersFrame;
 use rusty_h2::frame::settings::{Setting, SettingId, SettingsFrame};
 use rusty_h2::frame::window_update::WindowUpdateFrame;
@@ -646,4 +649,84 @@ async fn host_must_agree_with_authority() {
     let (status, _, _) = call_with(&h, "GET", "/host", &twice, b"").await;
     assert_eq!(status, 400, "two Host fields");
     server.shutdown().await;
+}
+
+/// Terminates TLS with one acceptor, under `Admission`.
+struct Limited(TlsAcceptor, Admission);
+
+impl Accept for Limited {
+    fn accept(&self, tcp: TcpStream, _peer: std::net::SocketAddr) -> BoxFuture<'static, Accepted> {
+        let acceptor = self.0.clone();
+        Box::pin(async move {
+            let mut tls = acceptor.accept_async(tcp).unwrap();
+            match tls.complete_handshake().await {
+                Ok(()) => Accepted::Tls(Box::new(tls)),
+                Err(_) => Accepted::Done,
+            }
+        })
+    }
+
+    fn admission(&self) -> Option<&Admission> {
+        Some(&self.1)
+    }
+}
+
+fn start_limited(admission: Admission) -> (Server, TrustPolicy) {
+    let Tls { acceptor, trust } = tls();
+    let listener =
+        TcpListener::from_std(std::net::TcpListener::bind("127.0.0.1:0").unwrap()).unwrap();
+    let options = ServeOptions {
+        http2: true,
+        idle_timeout: Duration::from_secs(30),
+        ..ServeOptions::default()
+    };
+    let server = serve_with(listener, Limited(acceptor, admission), options, app()).unwrap();
+    (server, trust)
+}
+
+/// Opens a `POST /echo` stream and sends none of its body.
+async fn open_upload(h: &ClientHandle) -> (rusty_hyper::SendStream, rusty_hyper::ResponseFuture) {
+    let fields = vec![
+        HeaderField::new(":method", "POST"),
+        HeaderField::new(":scheme", "https"),
+        HeaderField::new(":path", "/echo"),
+        HeaderField::new(":authority", "localhost"),
+    ];
+    h.send_request(fields, false).await.unwrap()
+}
+
+#[rusty_tokio::test]
+async fn admission_sheds_a_stream_while_an_upload_holds_the_place() {
+    let (server, trust) = start_limited(Admission::new().with_max_in_flight(1));
+    let h = h2(&server, &trust).await;
+    let (mut upload, uploaded) = open_upload(&h).await;
+    rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, headers, body) = call(&h, "GET", "/health", b"").await;
+    assert_eq!(status, 503);
+    assert_eq!(header(&headers, "retry-after").as_deref(), Some("1"));
+    assert_eq!(body, b"Service Unavailable: too many requests in flight");
+
+    upload.send_data(b"abc".to_vec(), true).await.unwrap();
+    let resp = timeout(FIVE, uploaded).await.unwrap().unwrap();
+    assert_eq!(header(&resp.headers, ":status").as_deref(), Some("200"));
+    assert_eq!(call(&h, "GET", "/health", b"").await.0, 200);
+    server.shutdown().await;
+}
+
+#[rusty_tokio::test]
+async fn the_admission_deadline_covers_a_stream_body() {
+    let (server, trust) = start_limited(Admission::new().with_timeout(Duration::from_millis(200)));
+    let h = h2(&server, &trust).await;
+    let (_upload, uploaded) = open_upload(&h).await;
+    let resp = timeout(FIVE, uploaded)
+        .await
+        .expect("answered at the deadline, not after the idle timeout")
+        .unwrap();
+    assert_eq!(header(&resp.headers, ":status").as_deref(), Some("504"));
+    // The answered stream is reset, not left half open by the client's
+    // unfinished upload, so it cannot hold the shutdown.
+    timeout(FIVE, server.shutdown())
+        .await
+        .expect("shutdown is not held by the unfinished upload");
 }

@@ -14,7 +14,7 @@ use rcgen::{CertificateParams, KeyPair};
 use rusty_axum::response::sse::{Event, KeepAlive, Sse};
 use rusty_axum::routing::{get, post};
 use rusty_axum::{
-    serve, serve_with, Accept, Accepted, BoxFuture, ConnectInfo, IntoResponse, Router,
+    serve, serve_with, Accept, Accepted, Admission, BoxFuture, ConnectInfo, IntoResponse, Router,
     ServeOptions, Server,
 };
 use rusty_http::async_tokio::AsyncTransport;
@@ -539,6 +539,87 @@ async fn the_handshake_timeout_bounds_the_acceptor() {
     let server = start_with(options, Stall);
     let tcp = TcpStream::connect_addr(server.local_addr()).await.unwrap();
     assert!(closed(tcp).await, "the stalled connection is closed");
+}
+
+/// Serves plain connections under `Admission`.
+struct Limited(Admission);
+
+impl Accept for Limited {
+    fn accept(&self, tcp: TcpStream, _peer: SocketAddr) -> BoxFuture<'static, Accepted> {
+        Box::pin(async move { Accepted::Plain(tcp) })
+    }
+
+    fn admission(&self) -> Option<&Admission> {
+        Some(&self.0)
+    }
+}
+
+/// Sends the head of a `POST /echo` with a three-byte body, and no body yet.
+async fn post_head_only(server: &Server) -> AsyncTransport<TcpStream> {
+    let mut conn = connect(server).await;
+    let mut map = HeaderMap::new();
+    map.insert("host", "localhost").unwrap();
+    map.insert("content-length", "3").unwrap();
+    let head = RequestHead {
+        method: Method::Post,
+        target: "/echo".into(),
+        version: Version::Http11,
+        headers: map,
+    };
+    conn.write_request_head(&head).await.unwrap();
+    conn
+}
+
+#[rusty_tokio::test]
+async fn admission_counts_a_request_from_its_head_and_sheds_before_reading_a_body() {
+    let server = start_with(
+        ServeOptions::default(),
+        Limited(Admission::new().with_max_in_flight(1)),
+    );
+    // An upload in progress holds the one place.
+    let mut uploading = post_head_only(&server).await;
+    rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // The next request is shed at once, its body never waited for.
+    let mut shed = post_head_only(&server).await;
+    let (head, body) = timeout(Duration::from_secs(5), read(&mut shed, &Method::Post))
+        .await
+        .expect("shed without waiting for the body");
+    assert_eq!(head.status.as_u16(), 503);
+    assert_eq!(head.headers.get("retry-after"), Some("1"));
+    assert_eq!(head.headers.get("connection"), Some("close"));
+    assert_eq!(body, "Service Unavailable: too many requests in flight");
+    assert!(closed(shed.into_inner()).await);
+
+    // The upload finishes, and its place comes back.
+    uploading.write_body(b"abc").await.unwrap();
+    assert_eq!(read(&mut uploading, &Method::Post).await.1, "abc");
+    let mut next = connect(&server).await;
+    send(&mut next, Method::Get, "/health", &[], b"").await;
+    assert_eq!(read(&mut next, &Method::Get).await.0.status.as_u16(), 200);
+}
+
+#[rusty_tokio::test]
+async fn the_admission_deadline_covers_reading_the_body() {
+    let options = ServeOptions {
+        idle_timeout: Duration::from_secs(30),
+        ..ServeOptions::default()
+    };
+    let server = start_with(
+        options,
+        Limited(Admission::new().with_timeout(Duration::from_millis(200))),
+    );
+    let mut stalled = post_head_only(&server).await;
+    let (head, _) = timeout(Duration::from_secs(5), read(&mut stalled, &Method::Post))
+        .await
+        .expect("answered at the deadline, not after the idle timeout");
+    assert_eq!(head.status.as_u16(), 504);
+    assert_eq!(head.headers.get("connection"), Some("close"));
+    assert!(closed(stalled.into_inner()).await);
+
+    let mut quick = connect(&server).await;
+    send(&mut quick, Method::Post, "/echo", &[], b"abc").await;
+    assert_eq!(read(&mut quick, &Method::Post).await.1, "abc");
 }
 
 type Next = Pin<Box<dyn Future<Output = (Option<Result<Event, Infallible>>, Events)> + Send>>;
