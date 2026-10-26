@@ -574,6 +574,7 @@ fn check_edit(st: &TaskState, e: &SpecEdit) -> R<()> {
         return coedit::validate(&Doc::default(), &e.ops);
     };
     resolve_kind(st, base, ArtifactKind::Spec)?;
+    unapplied(st, base)?;
     let (Some(doc), Some((head, since))) = (st.doc(base), st.since(base)) else {
         return Err(rej(
             Code::WrongKind,
@@ -984,10 +985,41 @@ fn check_request(st: &TaskState, role: &Role, d: &Draft) -> R<Option<ArtId>> {
     let rec = resolve_kind(st, spec, ArtifactKind::Spec)?;
     match rec.payload {
         ArtifactPayload::Spec { brief } if Some(brief) == st.brief => Ok(Some(spec)),
-        ArtifactPayload::SpecEdit(ref e) if Some(e.brief) == st.brief => Ok(Some(spec)),
+        ArtifactPayload::SpecEdit(ref e) if Some(e.brief) == st.brief => {
+            check_head(st, spec)?;
+            Ok(Some(spec))
+        }
         _ => Err(rej(
             Code::RefUnresolved,
             "spec does not reference the brief",
+        )),
+    }
+}
+
+/// Refuse a logged version whose fold lacked a line or base, naming it.
+fn unapplied(st: &TaskState, version: ArtId) -> R<()> {
+    match st.unapplied.get(&version) {
+        Some(m) => Err(rej(
+            Code::RefUnresolved,
+            format!("{version} did not apply when the log was folded: {m} is missing"),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// A co-edited version binds the plan gate only as the head of its spec:
+/// approving an older one would drop every edit accepted after it (2b, d).
+fn check_head(st: &TaskState, version: ArtId) -> R<()> {
+    unapplied(st, version)?;
+    match st.head(version) {
+        Some(head) if head == version => Ok(()),
+        Some(head) => Err(rej(
+            Code::StaleSubject,
+            format!("{version} is not the head of its spec; the head is {head}"),
+        )),
+        None => Err(rej(
+            Code::RefUnresolved,
+            format!("{version} is not an indexed co-edited version"),
         )),
     }
 }

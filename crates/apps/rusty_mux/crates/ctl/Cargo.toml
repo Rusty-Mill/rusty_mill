@@ -21,6 +21,10 @@ rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
 rusty_uuid = { workspace = true }
 
+# A non-blocking connect, so a deadline or cancel bounds connecting too.
+[target.'cfg(target_os = "linux")'.dependencies]
+rusty_libc = { workspace = true, features = ["std"] }
+
 [dev-dependencies]
 rusty_mux_server = { workspace = true }
 rusty_tokio = { workspace = true }

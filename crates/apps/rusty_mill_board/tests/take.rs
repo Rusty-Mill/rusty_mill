@@ -304,3 +304,190 @@ fn a_rival_claim_landing_after_the_read_stops_the_move() {
 fn who_in<S: Store>(b: &Board<S>, name: &str, role: &str) -> Actor {
     b.roles().actor(name, role).expect("role")
 }
+
+#[test]
+fn take_prefers_higher_priority_within_a_queue() {
+    let b = board();
+    let old = ready(&b, "old, no priority");
+    let urgent = ready(&b, "new, high priority");
+    let h = who(&b, "nano", "human");
+    b.plan(urgent, &h, Some(5), None).expect("plan");
+    let dev = who(&b, "claude", "builder");
+    assert_eq!(
+        b.take(&dev, None).expect("take").map(|c| c.id),
+        Some(urgent)
+    );
+    let other = who(&b, "codex", "builder");
+    assert_eq!(b.take(&other, None).expect("take").map(|c| c.id), Some(old));
+}
+
+#[test]
+fn take_skips_a_card_until_its_dependencies_are_done() {
+    let b = board();
+    let first = ready(&b, "first");
+    let then = ready(&b, "then");
+    let h = who(&b, "nano", "human");
+    b.plan(then, &h, Some(5), Some(vec![first])).expect("plan");
+    let dev = who(&b, "claude", "builder");
+    assert!(
+        matches!(b.take(&dev, Some(then)), Err(BoardError::Refused(_))),
+        "named explicitly, it says why"
+    );
+    let taken = b.take(&dev, None).expect("take").expect("a card");
+    assert_eq!(
+        taken.id, first,
+        "the waiting card is skipped despite its priority"
+    );
+    let other = who(&b, "codex", "builder");
+    assert!(b.take(&other, None).expect("take").is_none());
+
+    for to in [Column::Qa, Column::Review, Column::Done] {
+        b.move_card(first, to, &h).expect("move first on");
+    }
+    assert_eq!(
+        b.take(&other, None).expect("take").map(|c| c.id),
+        Some(then)
+    );
+}
+
+#[test]
+fn planning_needs_triage_and_real_cards() {
+    let b = board();
+    let a = ready(&b, "a");
+    let dev = who(&b, "claude", "builder");
+    assert!(matches!(
+        b.plan(a, &dev, Some(5), None),
+        Err(BoardError::Forbidden(_))
+    ));
+    let h = who(&b, "nano", "human");
+    assert!(matches!(
+        b.plan(a, &h, None, Some(vec![uuid::Uuid::new_v4()])),
+        Err(BoardError::NotFound(_))
+    ));
+    assert!(matches!(
+        b.plan(a, &h, None, Some(vec![a])),
+        Err(BoardError::Invalid(_))
+    ));
+    assert!(matches!(
+        b.plan(a, &h, Some(2), None),
+        Err(BoardError::Invalid(_))
+    ));
+}
+
+#[test]
+fn the_board_keeps_its_own_tags() {
+    let b = board();
+    let h = who(&b, "nano", "human");
+    for tag in ["agent", "Board:ready", "claim:claude"] {
+        assert!(
+            matches!(
+                b.add(&h, "t", "", vec![tag.into()]),
+                Err(BoardError::Invalid(_))
+            ),
+            "{tag}"
+        );
+    }
+    let c = b
+        .add(&h, "t", "", vec!["agents".into()])
+        .expect("a near miss is fine");
+    assert!(matches!(
+        b.edit(c.id, &h, None, None, Some(vec!["agent".into()])),
+        Err(BoardError::Invalid(_))
+    ));
+}
+
+type Hook = Box<dyn FnOnce(&MemStore, &rusty_mill_board::domain::Card) + Send>;
+
+/// A store that runs `hook` once, right after the first `get` once armed: a rival write
+/// landing between `take`'s read of a card and its guarded commit.
+struct HookAfterGet {
+    inner: MemStore,
+    hook: Arc<std::sync::Mutex<Option<Hook>>>,
+}
+
+impl Store for HookAfterGet {
+    fn get(&self, id: uuid::Uuid) -> Result<Option<rusty_mill_board::domain::Card>, BoardError> {
+        let seen = self.inner.get(id)?;
+        let hook = self.hook.lock().expect("lock").take();
+        if let (Some(hook), Some(card)) = (hook, &seen) {
+            hook(&self.inner, card);
+        }
+        Ok(seen)
+    }
+    fn list(&self) -> Result<Vec<rusty_mill_board::domain::Card>, BoardError> {
+        self.inner.list()
+    }
+    fn insert(
+        &self,
+        c: &rusty_mill_board::domain::Card,
+        e: rusty_mill_board::domain::Event,
+    ) -> Result<(), BoardError> {
+        self.inner.insert(c, e)
+    }
+    fn replace(
+        &self,
+        c: &rusty_mill_board::domain::Card,
+        e: rusty_mill_board::domain::Event,
+    ) -> Result<(), BoardError> {
+        self.inner.replace(c, e)
+    }
+    fn events_since(
+        &self,
+        a: Option<uuid::Uuid>,
+        l: usize,
+    ) -> Result<Vec<rusty_mill_board::domain::Event>, BoardError> {
+        self.inner.events_since(a, l)
+    }
+    fn last_event_id(&self) -> Result<Option<uuid::Uuid>, BoardError> {
+        self.inner.last_event_id()
+    }
+}
+
+/// A Ready card, and an unfinished card that a rival `card_plan` makes it depend on
+/// right after `take` first reads it.
+fn planned_mid_take() -> (Board<HookAfterGet>, uuid::Uuid, uuid::Uuid) {
+    let slot: Arc<std::sync::Mutex<Option<Hook>>> = Arc::default();
+    let b = Board::new(
+        HookAfterGet {
+            inner: MemStore::default(),
+            hook: Arc::clone(&slot),
+        },
+        Roles::default(),
+    );
+    let h = who_in(&b, "nano", "human");
+    let blocker = b.add(&h, "blocker", "", vec![]).expect("add").id;
+    let card = b.add(&h, "card", "", vec![]).expect("add").id;
+    b.move_card(card, Column::Ready, &h).expect("ready");
+    let hook: Hook = Box::new(move |store, seen| {
+        let planned = seen.plan(None, Some(vec![blocker]), 2).expect("plan");
+        let event = rusty_mill_board::domain::Event::of(
+            &planned,
+            rusty_mill_board::domain::EventKind::Edited,
+            "nano",
+        );
+        store.replace(&planned, event).expect("rival plan");
+    });
+    *slot.lock().expect("lock") = Some(hook);
+    (b, card, blocker)
+}
+
+#[test]
+fn a_dependency_planned_during_a_named_take_refuses_it() {
+    let (b, card, _) = planned_mid_take();
+    let dev = who_in(&b, "claude", "builder");
+    assert!(matches!(
+        b.take(&dev, Some(card)),
+        Err(BoardError::Refused(_))
+    ));
+    let now = b.get(card).expect("card");
+    assert_eq!((now.column, now.claim), (Column::Ready, None), "not taken");
+}
+
+#[test]
+fn a_dependency_planned_during_an_automatic_take_skips_the_card() {
+    let (b, card, _) = planned_mid_take();
+    let dev = who_in(&b, "claude", "builder");
+    assert_eq!(b.take(&dev, None).expect("take"), None);
+    let now = b.get(card).expect("card");
+    assert_eq!((now.column, now.claim), (Column::Ready, None), "not taken");
+}

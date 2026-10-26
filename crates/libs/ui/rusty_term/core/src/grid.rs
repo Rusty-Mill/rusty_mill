@@ -555,7 +555,7 @@ pub struct Grid {
     sync_output: bool,
     /// When `sync_output` was last set, for the timeout in
     /// [`Grid::sync_output_active`]. `None` when `sync_output` is false.
-    sync_output_since: Option<std::time::Instant>,
+    pub(crate) sync_output_since: Option<std::time::Instant>,
     /// Whether bracketed paste (DEC `?2004`) is enabled by the child. In TUI
     /// mode it is also relayed to the host; the windowed front-end reads it to
     /// decide whether to wrap pasted text in `ESC[200~` / `ESC[201~`.
@@ -1787,13 +1787,24 @@ impl Grid {
         }
         if self
             .sync_output_since
-            .is_some_and(|t| t.elapsed() > SYNC_OUTPUT_TIMEOUT)
+            .is_some_and(|t| t.elapsed() >= SYNC_OUTPUT_TIMEOUT)
         {
             self.sync_output = false;
             self.sync_output_since = None;
             return false;
         }
         true
+    }
+
+    /// When the open synchronized-output window times out, for a render loop
+    /// to wake and repaint then even if no more output arrives. `None` when
+    /// no window is open; one already past its timeout is closed here, as by
+    /// [`Grid::sync_output_active`].
+    pub fn sync_output_until(&mut self) -> Option<std::time::Instant> {
+        if !self.sync_output_active() {
+            return None;
+        }
+        self.sync_output_since.map(|t| t + SYNC_OUTPUT_TIMEOUT)
     }
 
     /// Move the cursor to column 0 of the current row.

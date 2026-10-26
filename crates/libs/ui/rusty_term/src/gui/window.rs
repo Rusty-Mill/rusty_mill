@@ -222,6 +222,9 @@ struct Pane {
     /// Raised by the reader thread when it sends a wakeup, lowered when the
     /// window handles it (see `reader_loop`).
     wake: WakeFlag,
+    /// The frame last painted, shown again while a synchronized update
+    /// (DEC 2026) is open so no other repaint shows it half-drawn.
+    shown: std::cell::RefCell<Option<crate::core::FrameView>>,
 }
 
 /// A tab: one or more [`Pane`]s tiled by a [`Layout`], one of them focused.
@@ -237,6 +240,37 @@ struct Tab {
     /// Pane zoom: the focused pane temporarily takes the whole tab area
     /// (toggled by `zoom_pane`); cleared by any split/close/focus change.
     zoomed: bool,
+}
+
+impl Pane {
+    /// The pane's frame to paint (see [`frame_to_paint`]).
+    fn frame_view(&self) -> crate::core::FrameView {
+        frame_to_paint(&mut self.grid.lock(), self.shown.take())
+    }
+}
+
+/// `grid`'s frame now, or `shown` (the frame last painted) while a
+/// synchronized update is open and the view hasn't been resized or scrolled.
+fn frame_to_paint(
+    grid: &mut Grid,
+    shown: Option<crate::core::FrameView>,
+) -> crate::core::FrameView {
+    let held = shown.filter(|f| {
+        f.cols == grid.cols && f.rows == grid.rows && f.view_offset == grid.view_offset
+    });
+    match held {
+        Some(frame) if grid.sync_output_active() => frame,
+        _ => grid.frame_view(),
+    }
+}
+
+/// One synchronized-output tick: from the panes `before` held and the
+/// `(pane, timeout)` of each update `open` now, the panes now held, the
+/// earliest timeout to wake at, and whether any pane was released.
+fn sync_step(before: &[u64], open: &[(u64, Instant)]) -> (Vec<u64>, Option<Instant>, bool) {
+    let held: Vec<u64> = open.iter().map(|&(id, _)| id).collect();
+    let released = before.iter().any(|id| !held.contains(id));
+    (held, open.iter().map(|&(_, t)| t).min(), released)
 }
 
 impl Tab {
@@ -560,6 +594,10 @@ struct WindowState<'a> {
     cursor_blink_on: bool,
     /// When the blink phase last toggled, paced by the event loop.
     last_blink: Instant,
+    /// The active tab's panes the last [`tick_sync`](Self::tick_sync) found
+    /// holding a synchronized update, so a tick that finds one of them
+    /// released repaints.
+    sync_held: Vec<u64>,
     /// Active scrollback-search query (windowed front-end); `Some` means search
     /// mode is on, intercepting keys and showing the find bar in the chrome.
     searching: Option<String>,
@@ -677,6 +715,7 @@ impl WindowState<'_> {
             parser,
             writer: handle,
             wake,
+            shown: std::cell::RefCell::new(None),
         })
     }
 
@@ -1338,9 +1377,11 @@ impl WindowState<'_> {
         let blink = self.cursor_blink_on;
         let focus = tab.focus;
         let mut snaps = Vec::new();
+        let mut shown = Vec::new();
         for (id, r) in tab.rects(area) {
             if let Some(p) = tab.pane(id) {
-                snaps.push((p.grid.lock().frame_view(), r, id == focus));
+                snaps.push((p.frame_view(), r, id == focus));
+                shown.push(p);
             }
         }
         // Cursor trail (G36): when the focused pane's cursor jumped since the
@@ -1431,6 +1472,10 @@ impl WindowState<'_> {
             mix(self.theme.bg, self.theme.fg, 48),
             self.pad,
         );
+        drop(frames);
+        for ((view, _, _), p) in snaps.into_iter().zip(shown) {
+            p.shown.replace(Some(view));
+        }
     }
 
     /// The active tab's focused pane — the input, cursor, and search target.
@@ -4603,12 +4648,40 @@ fn apply_chrome(window: &Window, theme: &Theme) {
 }
 
 impl WindowState<'_> {
+    /// This window's timers ([`tick_cursor`](Self::tick_cursor) and
+    /// synchronized-update timeouts): the next wake deadline, or `None` when
+    /// it can sleep until a real event (the router picks the earliest across
+    /// windows).
+    fn tick(&mut self, now: Instant) -> Option<Instant> {
+        let cursor = self.tick_cursor(now);
+        let sync = self.tick_sync();
+        cursor.into_iter().chain(sync).min()
+    }
+
+    /// The next timeout of a synchronized update open on the active tab.
+    /// When any pane's update has ended since the last tick, repaint: it may
+    /// have timed out with no output to close it, while other panes still
+    /// hold theirs (an extra repaint after a normal close is harmless).
+    fn tick_sync(&mut self) -> Option<Instant> {
+        let open: Vec<(u64, Instant)> = self.tabs.get(self.active).map_or_else(Vec::new, |tab| {
+            tab.panes
+                .iter()
+                .filter_map(|p| Some((p.id, p.grid.lock().sync_output_until()?)))
+                .collect()
+        });
+        let (held, next, released) = sync_step(&self.sync_held, &open);
+        if released && let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        self.sync_held = held;
+        next
+    }
+
     /// Drive cursor blink + Kitty animations for this window: when the active
     /// tab's cursor blinks and is visible, toggle its phase on a fixed
     /// interval; while an animation plays, tick at the frame floor. Returns
-    /// the next wake deadline, or `None` when the window can sleep until a
-    /// real event (the router picks the earliest deadline across windows).
-    fn tick(&mut self, now: Instant) -> Option<Instant> {
+    /// the next wake deadline, or `None` when nothing needs one.
+    fn tick_cursor(&mut self, now: Instant) -> Option<Instant> {
         const BLINK: Duration = Duration::from_millis(530);
         /// Kitty animation tick — the floor gap is 40ms, so ticking at it
         /// hits every frame boundary within a frame's tolerance.
@@ -5505,6 +5578,7 @@ impl<'a> App<'a> {
             last_strip_click: None,
             cursor_blink_on: true,
             last_blink: Instant::now(),
+            sync_held: Vec::new(),
             searching: None,
             shells: self.shells.clone(),
             overlay: None,
@@ -6212,6 +6286,88 @@ mod tests {
         tab_widths, visible_tab_range, widget_text,
     };
     use crate::core::Cell;
+
+    #[test]
+    fn a_synchronized_update_repaints_the_last_frame_until_it_closes() {
+        use super::frame_to_paint;
+        use crate::core::{AnsiParser, Grid};
+        let mut g = Grid::new(20, 4);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, b"ab");
+        let shown = frame_to_paint(&mut g, None);
+        assert_eq!(shown.cursor, (2, 0));
+        p.advance(&mut g, b"\x1b[?2026hcd");
+        let held = frame_to_paint(&mut g, Some(shown));
+        assert_eq!(held.cursor, (2, 0), "open: the last frame again");
+        let fresh = frame_to_paint(&mut g, None);
+        assert_eq!(fresh.cursor, (4, 0), "nothing shown yet: the grid");
+        p.advance(&mut g, b"\x1b[?2026l");
+        assert_eq!(frame_to_paint(&mut g, Some(held)).cursor, (4, 0), "closed");
+    }
+
+    #[test]
+    fn a_resize_during_a_synchronized_update_paints_the_grid() {
+        use super::frame_to_paint;
+        use crate::core::{AnsiParser, Grid};
+        let mut g = Grid::new(20, 4);
+        let mut p = AnsiParser::new();
+        let shown = frame_to_paint(&mut g, None);
+        p.advance(&mut g, b"\x1b[?2026h");
+        g.resize(30, 4);
+        assert_eq!(frame_to_paint(&mut g, Some(shown)).cols, 30);
+    }
+
+    #[test]
+    fn a_pane_whose_update_ends_repaints_while_another_still_holds() {
+        use super::sync_step;
+        use std::time::{Duration, Instant};
+        // A opened at 0 ms, B at 400 ms: at 800 ms A has timed out and B
+        // holds until 1200 ms, with no input, blink or animation to help.
+        let t0 = Instant::now();
+        let (a, b) = (1, 2);
+        let (held, next, released) = sync_step(&[], &[(a, t0 + Duration::from_millis(800))]);
+        assert!(!released);
+        assert_eq!(next, Some(t0 + Duration::from_millis(800)));
+        let both = [
+            (a, t0 + Duration::from_millis(800)),
+            (b, t0 + Duration::from_millis(1200)),
+        ];
+        let (held, _, released) = sync_step(&held, &both);
+        assert_eq!((held.as_slice(), released), ([a, b].as_slice(), false));
+        let (held, next, released) = sync_step(&held, &[(b, t0 + Duration::from_millis(1200))]);
+        assert!(released, "A's end repaints now, not at B's");
+        assert_eq!(
+            next,
+            Some(t0 + Duration::from_millis(1200)),
+            "and B still wakes later"
+        );
+        let (held, next, released) = sync_step(&held, &[]);
+        assert!(released && held.is_empty() && next.is_none());
+        assert!(!sync_step(&held, &[]).2, "nothing held: no repaint");
+    }
+
+    #[test]
+    fn panes_report_their_open_updates_to_the_sync_tick() {
+        use super::sync_step;
+        use crate::core::{AnsiParser, Grid};
+        let mut grids = [Grid::new(10, 2), Grid::new(10, 2)];
+        let mut p = AnsiParser::new();
+        for g in &mut grids {
+            p.advance(g, b"\x1b[?2026h");
+        }
+        let open = |grids: &mut [Grid; 2]| -> Vec<_> {
+            (0u64..)
+                .zip(grids.iter_mut())
+                .filter_map(|(id, g)| Some((id, g.sync_output_until()?)))
+                .collect()
+        };
+        let (held, _, _) = sync_step(&[], &open(&mut grids));
+        assert_eq!(held, [0, 1]);
+        p.advance(&mut grids[0], b"\x1b[?2026l");
+        let (held, next, released) = sync_step(&held, &open(&mut grids));
+        assert_eq!((held.as_slice(), released), ([1].as_slice(), true));
+        assert!(next.is_some(), "pane 1 still holds");
+    }
 
     #[test]
     fn settings_visible_scales_with_the_window_and_never_underflows() {

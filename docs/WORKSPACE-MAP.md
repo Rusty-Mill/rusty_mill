@@ -243,6 +243,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends |
 | apps | rusty_mux | rusty_mux_core | rusty_mux's pure domain model: sessions, windows, blocks, clients, input leases and events. No I/O. |
 | apps | rusty_mux | rusty_mux_ctl | rusty-mux-ctl: scriptable rusty_mux client generated from the request catalog, with --json output and stable exit codes. |
+| apps | rusty_mux | rusty_mux_mcp | rusty-mux-mcp: the rusty_mux request catalog as MCP tools over stdio, each call run as rusty-mux-ctl would run it. |
 | apps | rusty_mux | rusty_mux_proto | rusty_mux's wire protocol: length-prefixed frames of tagged varint fields, with feature bits. No I/O. |
 | apps | rusty_mux | rusty_mux_server | rusty_mux's server: owns the PTYs, keeps one terminal per block, and tees raw output to attached clients over a Unix socket. |
 | apps | rusty_mux | rusty_mux_status | rusty_mux program status: parses OSC 7501 (Program Status Protocol) reports and keeps a block's records. No I/O. |

@@ -138,6 +138,29 @@ pub fn actionable(column: Column, caps: &BTreeSet<Capability>) -> bool {
     })
 }
 
+/// The priorities a card may have, on rusty_tick's scale: none, low, medium, high.
+pub const PRIORITIES: [u8; 4] = [0, 1, 3, 5];
+
+/// Most cards one card may wait on.
+pub const MAX_DEPS: usize = 32;
+
+/// Whether `tag` is one the board keeps for itself in rusty_tick (ADR-0012):
+/// `agent` puts a task on the board, `board:<column>` and `claim:<actor>` carry
+/// its state. Tags match case-insensitively there, so here too.
+pub fn reserved_tag(tag: &str) -> bool {
+    let tag = tag.trim().to_lowercase();
+    tag == "agent" || tag.starts_with("board:") || tag.starts_with("claim:")
+}
+
+fn check_tags(tags: &[String]) -> Result<(), BoardError> {
+    if tags.iter().any(|t| reserved_tag(t)) {
+        return Err(BoardError::Invalid(
+            "tags `agent`, `board:…` and `claim:…` are the board's own",
+        ));
+    }
+    Ok(())
+}
+
 /// A stable 64-bit hash (FNV-1a) of a title and body, for comparing text across
 /// sync runs. Stable by construction: it is stored on cards. Insensitive to what
 /// forges change in passing: surrounding whitespace and `\r\n` line endings.
@@ -189,6 +212,12 @@ pub struct Card {
     pub project: String,
     /// Discussion, oldest first.
     pub comments: Vec<Comment>,
+    /// Higher is taken first within a queue; one of [`PRIORITIES`].
+    #[serde(default)]
+    pub priority: u8,
+    /// Cards that must be Done before this one is taken.
+    #[serde(default)]
+    pub deps: Vec<Uuid>,
     /// Linked forge issue number, if synced.
     #[serde(default)]
     pub issue: Option<u64>,
@@ -381,7 +410,7 @@ impl Card {
     /// A new Backlog card.
     ///
     /// # Errors
-    /// If `title` is blank.
+    /// If `title` is blank or a tag is reserved ([`reserved_tag`]).
     pub fn new(
         title: &str,
         body: &str,
@@ -392,6 +421,7 @@ impl Card {
         if title.is_empty() {
             return Err(BoardError::Invalid("title is empty"));
         }
+        check_tags(&tags)?;
         Ok(Self {
             id: Uuid::new_v4(),
             rev: 0,
@@ -402,6 +432,8 @@ impl Card {
             tags,
             project: default_project(),
             comments: Vec::new(),
+            priority: 0,
+            deps: Vec::new(),
             issue: None,
             synced_text: None,
             execution: None,
@@ -495,7 +527,7 @@ impl Card {
     /// Replace title/body/tags (each optional).
     ///
     /// # Errors
-    /// If the new title is blank.
+    /// If the new title is blank or a tag is reserved.
     pub fn edit(
         &self,
         title: Option<&str>,
@@ -514,7 +546,41 @@ impl Card {
             next.body = b.to_owned();
         }
         if let Some(t) = tags {
+            check_tags(&t)?;
             next.tags = t;
+        }
+        Ok(next)
+    }
+
+    /// Set the priority and the cards this one waits on (each optional).
+    /// Repeated dependencies are dropped.
+    ///
+    /// # Errors
+    /// A priority outside [`PRIORITIES`], a card depending on itself, or more
+    /// than [`MAX_DEPS`] dependencies.
+    pub fn plan(
+        &self,
+        priority: Option<u8>,
+        deps: Option<Vec<Uuid>>,
+        now_ms: i64,
+    ) -> Result<Self, BoardError> {
+        let mut next = self.next(now_ms);
+        if let Some(p) = priority {
+            if !PRIORITIES.contains(&p) {
+                return Err(BoardError::Invalid("priority must be 0, 1, 3 or 5"));
+            }
+            next.priority = p;
+        }
+        if let Some(mut d) = deps {
+            if d.contains(&self.id) {
+                return Err(BoardError::Invalid("a card cannot depend on itself"));
+            }
+            d.sort_unstable();
+            d.dedup();
+            if d.len() > MAX_DEPS {
+                return Err(BoardError::Invalid("too many dependencies"));
+            }
+            next.deps = d;
         }
         Ok(next)
     }
