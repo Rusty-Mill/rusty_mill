@@ -148,6 +148,10 @@ the tier C crate that holds it.
 `rusty_tonic` (tier B) builds its tonic-oracle test streams with
 `rusty_stream` through `Compat` instead of `futures-util`. `tokio` stays a
 dev-dependency only to host the tonic oracle server.
+`rusty_lsp` (tier B, owner-approved public API change): the `runtime` and
+`tcp` features run on `rusty_tokio`, and their public signatures name
+`rusty_tokio` types. The swap needed `watch::Receiver::wait_for`,
+`AsyncBufRead for io::Take` and `Debug for Notify`, now in `rusty_tokio`.
 
 ## 4. Per-crate table
 

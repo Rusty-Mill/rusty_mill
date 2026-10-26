@@ -53,13 +53,15 @@ use crate::lsp::{InitializeParams, InitializeResult};
 use crate::server::Server;
 use crate::service::LanguageServer;
 use crate::transport;
+use rusty_tokio::io::{
+    BufReader, DuplexStream, SplitReadHalf as ReadHalf, SplitWriteHalf as WriteHalf,
+};
+use rusty_tokio::task::JoinHandle;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::time::Duration;
-use tokio::io::{BufReader, DuplexStream, ReadHalf, WriteHalf};
-use tokio::task::JoinHandle;
 
 /// How long [`TestClient`] waits for an expected message before failing the
 /// test with a descriptive error instead of hanging it.
@@ -111,14 +113,14 @@ impl TestClient {
             + Send
             + 'static,
     {
-        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-        let (server_read, server_write) = tokio::io::split(server_io);
-        let server = tokio::spawn(async move {
+        let (client_io, server_io) = rusty_tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = rusty_tokio::io::split(server_io);
+        let server = rusty_tokio::spawn(async move {
             configure(Server::new(server_read, server_write))
                 .serve(build)
                 .await
         });
-        let (client_read, client_write) = tokio::io::split(client_io);
+        let (client_read, client_write) = rusty_tokio::io::split(client_io);
         TestClient {
             writer: client_write,
             reader: transport::buffered(client_read),
@@ -283,7 +285,7 @@ impl TestClient {
     pub async fn shutdown_and_exit(mut self) -> Result<()> {
         let _: Value = self.request("shutdown", Value::Null).await?;
         self.notify("exit", serde_json::json!({})).await?;
-        match tokio::time::timeout(self.timeout, self.server).await {
+        match rusty_tokio::time::timeout(self.timeout, self.server).await {
             Ok(Ok(result)) => result,
             Ok(Err(join_err)) => Err(Error::internal(format!("server task failed: {join_err}"))),
             Err(_elapsed) => Err(Error::internal(format!(
@@ -296,7 +298,9 @@ impl TestClient {
     /// Read one message off the wire, failing with a descriptive error if
     /// nothing arrives within the configured timeout.
     async fn read(&mut self) -> Result<Message> {
-        match tokio::time::timeout(self.timeout, transport::read_message(&mut self.reader)).await {
+        match rusty_tokio::time::timeout(self.timeout, transport::read_message(&mut self.reader))
+            .await
+        {
             Ok(result) => result?.ok_or_else(|| Error::protocol("server closed the connection")),
             Err(_elapsed) => {
                 let seen: Vec<String> = self

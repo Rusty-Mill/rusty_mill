@@ -16,6 +16,7 @@ use crate::lsp::{
     WorkDoneProgressCreateParams, WorkDoneProgressEnd, WorkDoneProgressParams,
     WorkDoneProgressReport, WorkspaceEdit, WorkspaceFolder,
 };
+use rusty_tokio::sync::{mpsc, oneshot};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -24,7 +25,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
 
 /// Map of in-flight server-to-client requests awaiting their responses.
 type PendingResponses = Arc<Mutex<HashMap<RequestId, oneshot::Sender<Response>>>>;
@@ -149,7 +149,7 @@ impl Client {
         R: DeserializeOwned,
     {
         let (id, rx) = self.start_request(method, params)?;
-        match tokio::time::timeout(timeout, rx).await {
+        match rusty_tokio::time::timeout(timeout, rx).await {
             Ok(Ok(response)) => decode_response(response),
             Ok(Err(_)) => Err(Error::internal("server-to-client response channel dropped")),
             Err(_elapsed) => {

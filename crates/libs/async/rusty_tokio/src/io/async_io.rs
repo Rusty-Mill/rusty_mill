@@ -517,6 +517,26 @@ impl<R: AsyncRead + Unpin> AsyncRead for Take<R> {
     }
 }
 
+impl<R: AsyncBufRead + Unpin> AsyncBufRead for Take<R> {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+        let this = self.get_mut();
+        if this.limit == 0 {
+            return Poll::Ready(Ok(&[]));
+        }
+        let buf = std::task::ready!(Pin::new(&mut this.inner).poll_fill_buf(cx))?;
+        let n = usize::try_from(this.limit).map_or(buf.len(), |limit| buf.len().min(limit));
+        Poll::Ready(Ok(&buf[..n]))
+    }
+
+    fn consume(self: Pin<&mut Self>, amt: usize) {
+        let this = self.get_mut();
+        // `amt` is at most what `poll_fill_buf` returned, so within `limit`.
+        let amt = usize::try_from(this.limit).map_or(amt, |limit| amt.min(limit));
+        this.limit -= amt as u64;
+        Pin::new(&mut this.inner).consume(amt);
+    }
+}
+
 /// Write-side counterpart of [`read_int_method`] -- see that macro's
 /// docs.
 macro_rules! write_int_method {

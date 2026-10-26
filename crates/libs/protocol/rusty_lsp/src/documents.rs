@@ -18,9 +18,9 @@ use crate::lsp::{
     PositionEncodingKind, Uri,
 };
 use crate::text::{LineIndex, position_to_offset_with};
+use rusty_tokio::sync::RwLock;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use tokio::sync::RwLock;
 
 /// A single open document's current text and metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,7 +294,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn open_then_get_round_trips() {
         let documents = Documents::new();
         documents.did_open(&open("file:///a", "hello")).await;
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(doc.language_id, "plaintext");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn full_sync_replaces_whole_text() {
         let documents = Documents::new();
         documents.did_open(&open("file:///a", "hello")).await;
@@ -330,7 +330,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn incremental_edits_apply_in_order_using_utf16_positions() {
         let documents = Documents::new();
         documents.did_open(&open("file:///a", "héllo world")).await;
@@ -364,7 +364,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn close_removes_the_document() {
         let documents = Documents::new();
         documents.did_open(&open("file:///a", "hello")).await;
@@ -379,7 +379,7 @@ mod tests {
         assert!(documents.get("file:///a").await.is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn stale_version_change_is_ignored() {
         let documents = Documents::new();
         documents.did_open(&open("file:///a", "v1 text")).await;
@@ -418,7 +418,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn reopen_returns_the_previous_document() {
         let documents = Documents::new();
         assert!(
@@ -435,7 +435,7 @@ mod tests {
         assert_eq!(documents.text("file:///a").await.as_deref(), Some("second"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn with_borrows_instead_of_cloning() {
         let documents = Documents::new();
         documents
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(documents.with("file:///missing", |_| ()).await, None);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn with_encoding_patches_edits_in_that_encoding() {
         use crate::lsp::PositionEncodingKind;
 
@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(documents.text("file:///a").await.as_deref(), Some("é😀y"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn offset_and_position_helpers_use_the_negotiated_encoding() {
         let documents = Documents::new(); // UTF-16
         documents.did_open(&open("file:///a", "é😀x\nsecond")).await;
@@ -502,7 +502,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn cached_line_index_is_invalidated_by_edits() {
         let documents = Documents::new();
         documents.did_open(&open("file:///a", "one\ntwo")).await;
@@ -538,7 +538,7 @@ mod tests {
         assert_eq!(line_count, Some(2));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn change_to_unopened_document_is_ignored() {
         let documents = Documents::new();
         let applied = documents
@@ -559,7 +559,7 @@ mod tests {
         assert!(documents.get("file:///never-opened").await.is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn inverted_incremental_range_is_rejected_instead_of_panicking() {
         let documents = Documents::new();
         documents.did_open(&open("file:///a", "hello world")).await;
@@ -594,7 +594,7 @@ mod lookup_tests {
     use super::tests::open;
     use super::*;
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn raw_string_lookups_fall_back_to_the_normalized_spelling() {
         let documents = Documents::new();
         documents.did_open(&open("file:///a", "hello")).await;

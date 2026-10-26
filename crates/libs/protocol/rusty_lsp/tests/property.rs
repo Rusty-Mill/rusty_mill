@@ -132,13 +132,13 @@ fn apply_edits_matches_a_naive_reference_on_random_edit_batches() {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn transport_round_trips_random_payload_sizes() {
     use rusty_lsp::jsonrpc::{Message, Notification};
     use rusty_lsp::transport::{buffered, read_message, write_message};
 
     let mut rng = Rng(0x7A115);
-    let (mut client, server) = tokio::io::duplex(1 << 22);
+    let (mut client, server) = rusty_tokio::io::duplex(1 << 22);
     let mut reader = buffered(server);
     for round in 0..50 {
         let max_chars = 1 << rng.below(15);

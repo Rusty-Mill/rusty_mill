@@ -68,7 +68,7 @@ fn edit_application(c: &mut Criterion) {
 }
 
 fn framing(c: &mut Criterion) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = rusty_tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("runtime");
     let message = Message::Notification(Notification {
@@ -84,7 +84,7 @@ fn framing(c: &mut Criterion) {
     c.bench_function("frame_round_trip", |b| {
         b.iter(|| {
             runtime.block_on(async {
-                let (mut client, server) = tokio::io::duplex(64 * 1024);
+                let (mut client, server) = rusty_tokio::io::duplex(64 * 1024);
                 write_message(&mut client, black_box(&message))
                     .await
                     .unwrap();

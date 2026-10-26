@@ -12458,7 +12458,6 @@ dependencies = [
  "rusty_tokio",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
