@@ -1,6 +1,7 @@
 //! The service: resolves actors from roles, applies domain operations and
 //! commits them through a [`Store`], retrying on revision conflicts.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{RwLock, RwLockReadGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -381,16 +382,25 @@ impl<S: Store> Board<S> {
             }
         }
         let rank = |c: &Card| WORK_QUEUES.iter().position(|q| *q == c.column);
-        let mut candidates: Vec<Card> = self
-            .store
-            .list()?
+        let cards = self.store.list()?;
+        let waiting = waiting_on_deps(&cards);
+        if let Some(i) = id
+            && waiting.contains(&i)
+        {
+            return Err(BoardError::Refused(
+                "card waits on cards that are not done".into(),
+            ));
+        }
+        let mut candidates: Vec<Card> = cards
             .into_iter()
             .filter(|c| id.is_none_or(|i| c.id == i))
             .filter(|c| project.is_none_or(|p| c.project == p))
             .filter(|c| rank(c).is_some() && actionable(c.column, &by.caps))
             .filter(|c| id.is_some() || c.claim.as_deref().is_none_or(|h| h == by.name))
+            .filter(|c| !waiting.contains(&c.id))
             .collect();
-        candidates.sort_by_key(|c| (rank(c), c.created_ms));
+        // Nearest Done first; within a queue the highest priority, then the oldest.
+        candidates.sort_by_key(|c| (rank(c), Reverse(c.priority), c.created_ms));
         for card in candidates {
             match self.enter_and_claim(card, by) {
                 Ok(card) => return Ok(Some(card)),
@@ -561,6 +571,31 @@ impl<S: Store> Board<S> {
         })
     }
 
+    /// Set a card's priority and dependencies (each optional). Needs `Triage`:
+    /// what is taken first, and what waits, is a planning decision.
+    ///
+    /// # Errors
+    /// A missing capability, a dependency that is not a card, or see [`Card::plan`].
+    pub fn plan(
+        &self,
+        id: Uuid,
+        by: &Actor,
+        priority: Option<u8>,
+        deps: Option<Vec<Uuid>>,
+    ) -> Result<Card, BoardError> {
+        if !by.caps.contains(&Capability::Triage) {
+            return Err(BoardError::Forbidden(Capability::Triage));
+        }
+        for dep in deps.iter().flatten() {
+            if *dep != id && self.store.get(*dep)?.is_none() {
+                return Err(BoardError::NotFound(*dep));
+            }
+        }
+        self.apply(id, by, EventKind::Edited, |c, now| {
+            c.plan(priority, deps.clone(), now)
+        })
+    }
+
     /// Comment on a card.
     ///
     /// # Errors
@@ -570,4 +605,19 @@ impl<S: Store> Board<S> {
             c.comment(by, text, now)
         })
     }
+}
+
+/// Ids of the cards that wait on a dependency that is not Done. A dependency
+/// that is no longer on the board does not hold anything up.
+fn waiting_on_deps(cards: &[Card]) -> BTreeSet<Uuid> {
+    let open: BTreeSet<Uuid> = cards
+        .iter()
+        .filter(|c| c.column != Column::Done)
+        .map(|c| c.id)
+        .collect();
+    cards
+        .iter()
+        .filter(|c| c.deps.iter().any(|d| open.contains(d)))
+        .map(|c| c.id)
+        .collect()
 }

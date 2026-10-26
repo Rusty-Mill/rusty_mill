@@ -304,3 +304,94 @@ fn a_rival_claim_landing_after_the_read_stops_the_move() {
 fn who_in<S: Store>(b: &Board<S>, name: &str, role: &str) -> Actor {
     b.roles().actor(name, role).expect("role")
 }
+
+#[test]
+fn take_prefers_higher_priority_within_a_queue() {
+    let b = board();
+    let old = ready(&b, "old, no priority");
+    let urgent = ready(&b, "new, high priority");
+    let h = who(&b, "nano", "human");
+    b.plan(urgent, &h, Some(5), None).expect("plan");
+    let dev = who(&b, "claude", "builder");
+    assert_eq!(
+        b.take(&dev, None).expect("take").map(|c| c.id),
+        Some(urgent)
+    );
+    let other = who(&b, "codex", "builder");
+    assert_eq!(b.take(&other, None).expect("take").map(|c| c.id), Some(old));
+}
+
+#[test]
+fn take_skips_a_card_until_its_dependencies_are_done() {
+    let b = board();
+    let first = ready(&b, "first");
+    let then = ready(&b, "then");
+    let h = who(&b, "nano", "human");
+    b.plan(then, &h, Some(5), Some(vec![first])).expect("plan");
+    let dev = who(&b, "claude", "builder");
+    assert!(
+        matches!(b.take(&dev, Some(then)), Err(BoardError::Refused(_))),
+        "named explicitly, it says why"
+    );
+    let taken = b.take(&dev, None).expect("take").expect("a card");
+    assert_eq!(
+        taken.id, first,
+        "the waiting card is skipped despite its priority"
+    );
+    let other = who(&b, "codex", "builder");
+    assert!(b.take(&other, None).expect("take").is_none());
+
+    for to in [Column::Qa, Column::Review, Column::Done] {
+        b.move_card(first, to, &h).expect("move first on");
+    }
+    assert_eq!(
+        b.take(&other, None).expect("take").map(|c| c.id),
+        Some(then)
+    );
+}
+
+#[test]
+fn planning_needs_triage_and_real_cards() {
+    let b = board();
+    let a = ready(&b, "a");
+    let dev = who(&b, "claude", "builder");
+    assert!(matches!(
+        b.plan(a, &dev, Some(5), None),
+        Err(BoardError::Forbidden(_))
+    ));
+    let h = who(&b, "nano", "human");
+    assert!(matches!(
+        b.plan(a, &h, None, Some(vec![uuid::Uuid::new_v4()])),
+        Err(BoardError::NotFound(_))
+    ));
+    assert!(matches!(
+        b.plan(a, &h, None, Some(vec![a])),
+        Err(BoardError::Invalid(_))
+    ));
+    assert!(matches!(
+        b.plan(a, &h, Some(2), None),
+        Err(BoardError::Invalid(_))
+    ));
+}
+
+#[test]
+fn the_board_keeps_its_own_tags() {
+    let b = board();
+    let h = who(&b, "nano", "human");
+    for tag in ["agent", "Board:ready", "claim:claude"] {
+        assert!(
+            matches!(
+                b.add(&h, "t", "", vec![tag.into()]),
+                Err(BoardError::Invalid(_))
+            ),
+            "{tag}"
+        );
+    }
+    let c = b
+        .add(&h, "t", "", vec!["agents".into()])
+        .expect("a near miss is fine");
+    assert!(matches!(
+        b.edit(c.id, &h, None, None, Some(vec!["agent".into()])),
+        Err(BoardError::Invalid(_))
+    ));
+}
