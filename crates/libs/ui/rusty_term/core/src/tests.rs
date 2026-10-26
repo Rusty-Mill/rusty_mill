@@ -7093,3 +7093,99 @@ fn snapshot_decode_charges_empty_history_lines() {
         Some(SnapshotError::Invalid("too many lines"))
     );
 }
+
+/// Full terminal state after feeding `input` either as one chunk (so a plain
+/// CSI takes the whole-sequence fast path) or one byte per `advance` call
+/// (so every CSI goes through the byte-wise state machine).
+fn csi_paths_state(input: &[u8], bytewise: bool) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    if bytewise {
+        for b in input {
+            p.advance(&mut g, std::slice::from_ref(b));
+        }
+    } else {
+        p.advance(&mut g, input);
+    }
+    let responses = p.take_responses();
+    let host_out = g.take_host_out();
+    let state = super::checkpoint::encode(&g, &p).expect("checkpoint");
+    (state, responses, host_out)
+}
+
+#[test]
+fn plain_csi_fast_path_matches_bytewise_parse() {
+    let digits_256 = format!("\x1b[{}H", "1".repeat(256));
+    let digits_257 = format!("\x1b[{}H", "1".repeat(257));
+    let modes_17 = format!("\x1b[{}20h", "0;".repeat(17));
+    let cases: [&[u8]; 28] = [
+        b"ab\x1b[5;10Hcd",
+        b"\x1b[Hx\x1b[;5Hy\x1b[5;Hz\x1b[;Hw",
+        b"\x1b[0;0Hx\x1b[999;999Hy",
+        b"\x1b[99999999999999999999999999;3Hx",
+        b"\x1b[10;10H\x1b[3A\x1b[2B\x1b[4C\x1b[1D\x1b[E\x1b[F\x1b[7G\x1b[9dx",
+        b"\x1b[0A\x1b[0C\x1b[5;7;9Hx",
+        b"\x1b[1;31mred\x1b[0m\x1b[38;2;1;2;3mrgb\x1b[48;5;200mbg\x1b[m",
+        b"\x1b[4:3mcurly\x1b[38:2:0:10:20:30mt416\x1b[1;38:5:1mmix",
+        b"\x1b[1;2;3;4;5;7;8;9;21;22;23;24;25;27;28;29;53;55mx",
+        b"x\x1b[5b\x1b[2;3r\x1b[3;1H\x1b[S\x1b[T\x1b[L\x1b[M",
+        b"abcdef\x1b[1;3H\x1b[2@\x1b[P\x1b[3X\x1b[K\x1b[1K\x1b[2J",
+        b"\x1b[6n\x1b[5n\x1b[c\x1b[0c\x1b[18t\x1b[14t",
+        b"\x1b[3g\x1b[1;20H\x1bH\x1b[1;1H\t\x1b[2I\x1b[Z",
+        b"\x1b[4hab\x1b[1;1Hc\x1b[4l\x1b[20h\n\x1b[20l",
+        b"\x1b[?25l\x1b[?1049h\x1b[2;2Halt\x1b[?1049l\x1b[?25h",
+        b"\x1b[2 q\x1b[5 q\x1b[!p\x1b[s\x1b[u",
+        b"\x1b[5;\x01;3Hx\x1b[1\x1b[2Hy\x1b[3\x18z",
+        b"\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;18;19;20Hx",
+        b"\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16Hx",
+        b"\x1b[;;;;;;;;;;;;;;;;;;;;mx",
+        b"\x1b[",
+        b"\x1b[12;3",
+        b"\x1b[;",
+        b"\x1b[3;4\x1b[5;6Hx",
+        b"\x1b[3~\x1b[200~\x1b[1;5`x",
+        digits_256.as_bytes(),
+        digits_257.as_bytes(),
+        modes_17.as_bytes(),
+    ];
+    for input in cases {
+        assert_eq!(
+            csi_paths_state(input, false),
+            csi_paths_state(input, true),
+            "fast and byte-wise CSI paths differ on {:?}",
+            String::from_utf8_lossy(input)
+        );
+    }
+}
+
+#[test]
+fn plain_csi_split_at_every_offset_matches_one_chunk() {
+    let input = b"ab\x1b[12;34Hcd\x1b[1;38;2;10;20;30mef\x1b[;7Hgh\x1b[3Pij";
+    let whole = csi_paths_state(input, false);
+    for cut in 1..input.len() {
+        let mut g = Grid::new(80, 24);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, &input[..cut]);
+        p.advance(&mut g, &input[cut..]);
+        let responses = p.take_responses();
+        let host_out = g.take_host_out();
+        let state = super::checkpoint::encode(&g, &p).expect("checkpoint");
+        assert_eq!((state, responses, host_out), whole, "split at byte {cut}");
+    }
+}
+
+#[test]
+fn csi_params_past_inline_capacity_are_kept() {
+    // Seventeen leading fields push LNM (mode 20) past the inline array; the
+    // spill to the heap must keep it rather than truncate.
+    let input = format!("\x1b[{}20h", "0;".repeat(17));
+    let g = parse(input.as_bytes(), 80, 24);
+    assert!(g.line_feed_new_line);
+}
+
+#[test]
+fn csi_param_overflow_takes_the_default() {
+    // A field too large for usize parses as absent, so the row defaults to 1.
+    let g = parse(b"\x1b[99999999999999999999999999;3H", 80, 24);
+    assert_eq!(g.cursor, (2, 0));
+}
