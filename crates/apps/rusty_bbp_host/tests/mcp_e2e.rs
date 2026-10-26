@@ -818,5 +818,14 @@ fn a_co_edited_spec_is_written_and_read_by_line_id() {
     );
     assert!(err, "{bad}");
     assert!(bad.to_string().contains("art:N#M"), "{bad}");
+    let mixed = format!(
+        r##"{{"op":"e4","kind":"spec","brief":1,"edit":{{"base":{v2},"ops":[{{"delete":"{a}","insert":{{"lines":["replacement"]}}}}]}}}}"##
+    );
+    let (refused, err) = planner.call("put_artifact", &mixed);
+    assert!(err, "an op naming two variants is refused: {refused}");
+    let (after, err) = planner.call("get_artifact", &format!(r#"{{"op":"g4","id":{v2}}}"#));
+    assert!(!err, "{after}");
+    assert_eq!(after["head"].as_u64(), Some(v2), "nothing was stored");
+    assert_eq!(after["content"].as_str(), Some("a\nb"));
     let _ = std::fs::remove_dir_all(&dir);
 }

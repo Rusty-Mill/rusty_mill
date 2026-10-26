@@ -323,15 +323,23 @@ fn line_id(v: Option<&Value>) -> Result<LineId, String> {
     })
 }
 
+/// One op, naming exactly one variant: an op that also named another would
+/// lose it silently (a replace sent as one object).
 fn line_op(v: &Value) -> Result<LineOp, String> {
-    if let Some(d) = v.get("delete") {
-        return Ok(LineOp::Delete {
-            line: line_id(Some(d))?,
-        });
-    }
-    let ins = v
-        .get("insert")
-        .ok_or("an op is {insert: {after, lines}} or {delete: line id}")?;
+    const SHAPE: &str = "an op is exactly one of {insert: {after, lines}} or {delete: line id}";
+    let (key, body) = match v {
+        Value::Map(m) if m.len() == 1 => (m[0].0.as_str(), &m[0].1),
+        _ => return Err(SHAPE.into()),
+    };
+    let ins = match key {
+        "delete" => {
+            return Ok(LineOp::Delete {
+                line: line_id(Some(body))?,
+            })
+        }
+        "insert" => body,
+        _ => return Err(SHAPE.into()),
+    };
     let after = match ins.get("after") {
         None | Some(Value::Null) => None,
         a => Some(line_id(a)?),
