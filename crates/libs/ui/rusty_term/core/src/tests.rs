@@ -1627,16 +1627,6 @@ fn erase_with_a_new_background_repaints_blank_rows() {
 }
 
 #[test]
-fn row_mut_write_is_cleared() {
-    // `row_mut` bypasses the parser; the write must still drop the blank flag.
-    let mut g = parse(b"\x1b[2J", 3, 2);
-    g.row_mut(1)[2].ch = 'x';
-    let mut p = AnsiParser::new();
-    p.advance(&mut g, b"\x1b[2J");
-    assert_eq!(row_text(&g, 1), "   ");
-}
-
-#[test]
 fn partial_region_scroll_is_not_captured() {
     // A DECSTBM sub-region scroll (TUI behavior) must not feed scrollback.
     let mut g = Grid::new(4, 5);
@@ -1685,6 +1675,20 @@ fn viewport_composites_history_above_live_grid() {
         .map(|(_, cells)| cells.iter().map(|c| c.ch).collect())
         .collect();
     assert_eq!(text, vec!["AAAA".to_string(), "BBBB".to_string()]);
+}
+
+#[test]
+fn row_cells_reads_the_live_screen_while_scrolled_back() {
+    let mut g = Grid::new(4, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"AAAA\r\nBBBB\r\nCCCC");
+    assert!(g.scroll_view_up(1));
+    let live: Vec<String> = (0..g.rows)
+        .map(|y| g.row_cells(y).map(|c| c.ch).collect())
+        .collect();
+    assert_eq!(live, vec!["BBBB".to_string(), "CCCC".to_string()]);
+    assert_eq!(g.row_cells(1).collect::<Vec<_>>(), g.row(1));
+    assert_eq!(g.row_cells(g.rows).count(), 0, "past the last row");
 }
 
 #[test]

@@ -1414,26 +1414,33 @@ impl Grid {
         self.touch(y);
     }
 
-    /// The cells of live screen row `y` (`cols` of them); empty past the
-    /// last row.
-    pub fn row(&self, y: usize) -> &[Cell] {
-        self.screen.get(y).map_or(&[], |line| line.cells())
+    /// The cells of live screen row `y` (`cols` of them), collected; empty
+    /// past the last row. Per-frame readers use [`Grid::row_cells`].
+    pub fn row(&self, y: usize) -> Vec<Cell> {
+        self.row_cells(y).collect()
+    }
+
+    /// The cells of live screen row `y`, by value and without allocating;
+    /// empty past the last row. Always the live screen, never the scrolled
+    /// or folded viewport.
+    pub fn row_cells(&self, y: usize) -> impl Iterator<Item = Cell> + '_ {
+        self.screen
+            .get(y)
+            .into_iter()
+            .flat_map(move |line| (0..line.cells().len()).map(move |x| self.line_cell(line, x)))
+    }
+
+    /// The cell at `col` of `line`; a blank past the line's width. Every
+    /// by-value cell read goes through here, so the cell storage can change
+    /// behind it.
+    pub(crate) fn line_cell(&self, line: &Line, col: usize) -> Cell {
+        line.cells().get(col).copied().unwrap_or_else(Cell::blank)
     }
 
     /// Whether live screen row `y` soft-wraps into the next one.
     #[cfg(test)]
     pub(crate) fn row_wrapped(&self, y: usize) -> bool {
         self.screen.get(y).is_some_and(|line| line.wrapped)
-    }
-
-    /// Mutable access to the cells of live screen row `y`; empty past the
-    /// last row. Writes bypass [`Grid::set_cell`]'s wide-glyph repair and do
-    /// not mark the row dirty.
-    pub fn row_mut(&mut self, y: usize) -> &mut [Cell] {
-        match self.screen.get_mut(y) {
-            Some(line) => line.cells_mut(),
-            None => &mut [],
-        }
     }
 
     /// Move the cursor to `(x, y)`, clamping into the grid so a malformed or

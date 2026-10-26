@@ -3847,11 +3847,7 @@ impl WindowState<'_> {
         let (fg, bg) = (self.theme.fg, self.theme.bg);
         let dim = mix(self.theme.fg, self.theme.bg, 110);
         for y in 0..rows {
-            for cell in g.row_mut(y) {
-                *cell = Cell::blank();
-                cell.fg = fg;
-                cell.bg = bg;
-            }
+            fill_row(&mut g, y, 0, cols, fg, bg);
         }
         let bar = cols.min(56);
         let footer = rows.saturating_sub(2);
