@@ -757,7 +757,6 @@ rusty_axum_tokio = { path = "crates/libs/net/rusty_axum_tokio" }
 rusty_crypto_key = { path = "crates/foundation/rusty_crypto_key" }
 rusty_ansi = { path = "crates/libs/ui/rusty_ansi" }
 hyper = { version = "1", default-features = false }
-hyper-util = { version = "0.1", default-features = false }
 http-body-util = "0.1"
 bytes = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
