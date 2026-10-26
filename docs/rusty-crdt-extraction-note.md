@@ -89,7 +89,7 @@ and `sync.rs`.
    wins, wherever it arrives first. Nothing detects it.
 4. **`expect` in library code** (`text.rs:258`) is guarded by an earlier check,
    but it is still a panic site.
-5. **Tombstones keep the value**, and `len()` is O(n).
+5. **Tombstones keep the value**, which the port keeps too (§3), and `len()` is O(n).
 6. **`VersionVector::contains` means "max lamport seen"** (`id.rs:106`). It is
    sound only with in-order delivery per site, and so is the prune floor in
    `log.rs`.
@@ -134,7 +134,7 @@ Changes from Appendix A:
 - Fallible calls return `Result`.
 - Freshness is checked (finding 2).
 - Reusing an id with a different payload is an error, not silent divergence
-  (finding 3).
+  (finding 3). Tombstones therefore keep their value, and `T: Eq`.
 - No snapshot-hash hook in the crate. BBP binds a verdict to a version
   `ArtId`, and a version's text is a deterministic fold of the log prefix
   (`the_plan_gate_binds_one_co_edited_version`). That makes the id the snapshot.
@@ -179,7 +179,7 @@ pub enum Error<I> {
     IdReused { id: I },
 }
 
-impl<I: Clone + Ord, T: Clone + PartialEq> Rga<I, T> {
+impl<I: Clone + Ord, T: Clone + Eq> Rga<I, T> {
     pub fn new() -> Self;
     pub fn len(&self) -> usize;                 // visible, O(1)
     pub fn is_empty(&self) -> bool;
@@ -188,7 +188,8 @@ impl<I: Clone + Ord, T: Clone + PartialEq> Rga<I, T> {
     pub fn id_at(&self, pos: usize) -> Option<&I>;                          // O(n)
     pub fn insert_at(&self, pos: usize, id: I, value: T) -> Result<Op<I, T>, Error<I>>;
     pub fn delete_at(&self, pos: usize) -> Result<Op<I, T>, Error<I>>;
-    /// Idempotent; never panics. Tombstones drop the value and keep the node.
+    /// Idempotent; never panics. A tombstone keeps its value, so a replayed
+    /// insert is still told apart from a reused id after a delete.
     pub fn apply(&mut self, op: &Op<I, T>) -> Result<Applied<I>, Error<I>>;
 }
 ```
@@ -203,9 +204,29 @@ chain of `Insert`s, each parented on the one before.
 New workspace members are picked up by `affected_crates.py` for scoped CI; that
 gets verified in step 3, not assumed.
 
-**Law tests.** Appendix A's nine laws stand, with law 9 tightened: a reused id
-with a different payload returns `IdReused`, it is not just "documented".
-`tests/coedit.rs`'s array RGA can serve as a second oracle.
+**Payloads.** `T: Eq`, not `PartialEq`: replay idempotence needs equality to be
+reflexive, and a `PartialEq`-only payload such as an `f64` NaN would make an
+exact replay look like `IdReused`. Tombstones keep their value (Appendix A
+dropped it), because `Duplicate` versus `IdReused` must still be decidable after
+a delete: after `Insert(1, None, 'a')` and `Delete(1)`, replaying
+`Insert(1, None, 'a')` is `Duplicate` and `Insert(1, None, 'b')` is `IdReused`.
+The id and parent alone cannot tell them apart. The memory cost is what
+`nexus-crdt` already pays.
+
+**Law tests.** Appendix A's nine laws stand, with two changes. Law 9 is
+tightened: a reused id with a different payload returns `IdReused`; it is no
+longer just documented. A new law 10 covers replay after a delete: an identical
+insert returns `Duplicate`, and a different payload or parent returns
+`IdReused`, both leaving state unchanged.
+
+**Oracles.** The generic laws need a parent-aware oracle: a plain tree walk,
+or the single-site `Vec` model for law 6. `tests/coedit.rs`'s array RGA is
+**not** a general oracle. It scans siblings by id and assumes ids increase
+along causality, which holds for BBP's log-assigned `LineId`s but not for an
+arbitrary `Ord` id. For example, take `Insert(10, root)`, `Insert(1, child of
+10)` and `Insert(5, root)`. The tree renders `10, 1, 5`, while the array scan
+gives `10, 5, 1`. That oracle may be used only on histories generated under
+BBP's constraint.
 
 ## 4. Does extraction still have a forcing function?
 
