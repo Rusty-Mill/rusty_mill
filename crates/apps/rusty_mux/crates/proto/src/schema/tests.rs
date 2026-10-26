@@ -17,6 +17,7 @@ fn sample(ty: Ty) -> Value {
         Ty::Text => Value::Text("main".into()),
         Ty::Bytes => Value::Bytes(b"ls\r".to_vec()),
         Ty::Cells => Value::Cells(80),
+        Ty::Lines => Value::Lines(0),
     }
 }
 
@@ -67,7 +68,7 @@ fn catalog_covers_each_request_type_once() {
         .collect();
     let unique: BTreeSet<u8> = types.iter().copied().collect();
     assert_eq!(unique.len(), types.len(), "two methods build one type");
-    assert_eq!(unique, (0x02..=0x0c).collect());
+    assert_eq!(unique, (0x02..=0x0e).collect());
 }
 
 #[test]
@@ -94,6 +95,16 @@ fn only_input_goes_unanswered() {
 }
 
 #[test]
+fn methods_need_the_features_their_messages_are_gated_by() {
+    let needs = |name| method(name).expect(name).needs;
+    assert_eq!(needs("attach"), Features::CHECKPOINT_V3);
+    assert_eq!(needs("sync"), Features::SYNC);
+    assert_eq!(needs("capture"), Features::INSPECT);
+    assert_eq!(needs("list"), Features::INSPECT);
+    assert_eq!(needs("create-session"), Features::NONE);
+}
+
+#[test]
 fn arguments_land_in_their_fields() {
     let resize = method("resize").expect("resize");
     let args = [
@@ -117,12 +128,15 @@ fn parses_text_arguments() {
     assert_eq!(block.parse(&id(4).to_string()), Ok(Value::Id(id(4))));
     assert_eq!(Ty::Bytes.parse("é"), Ok(Value::Bytes("é".into())));
     assert_eq!(Ty::Cells.parse("65535"), Ok(Value::Cells(u16::MAX)));
+    assert_eq!(Ty::Lines.parse("0"), Ok(Value::Lines(0)));
     for (ty, text) in [
         (block, "not-a-uuid"),
         (Ty::Cells, "0"),
         (Ty::Cells, "65536"),
         (Ty::Cells, "-1"),
         (Ty::Cells, ""),
+        (Ty::Lines, "-1"),
+        (Ty::Lines, "4294967296"),
     ] {
         assert_eq!(
             ty.parse(text),
