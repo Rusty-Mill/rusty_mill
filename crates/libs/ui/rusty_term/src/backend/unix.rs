@@ -462,7 +462,9 @@ mod tests {
 
     /// `cat` of `bytes` through a real PTY, parsed into a grid the way the
     /// window's reader thread does: `(seconds, advance calls)`, with each
-    /// read parsed alone or reads batched by `read_batch`.
+    /// read parsed alone or reads batched by `read_batch`. Panics unless
+    /// every byte arrives and `cat` exits 0, so a measurement never counts
+    /// a run that lost output.
     fn pty_parse(bytes: &[u8], batched: bool) -> (f64, usize) {
         use crate::backend::{Backend as _, read_batch};
         let dir = std::env::temp_dir().join(format!("rt-pty-{}", std::process::id()));
@@ -473,7 +475,7 @@ mod tests {
         grid.set_scrollback_max(10_000);
         let mut parser = rusty_term_core::AnsiParser::new();
         let start = std::time::Instant::now();
-        let h = super::UnixBackend
+        let mut h = super::UnixBackend
             .spawn_shell(
                 120,
                 40,
@@ -485,6 +487,7 @@ mod tests {
         let mut reader = h.try_clone().expect("clone");
         let mut buf = vec![0u8; 64 * 1024];
         let mut calls = 0;
+        let mut received = Vec::with_capacity(bytes.len() * 2);
         loop {
             let n = if batched {
                 read_batch(reader.as_mut(), &mut buf).expect("read")
@@ -495,10 +498,34 @@ mod tests {
                 break;
             }
             parser.advance(&mut grid, &buf[..n]);
+            received.extend_from_slice(&buf[..n]);
             calls += 1;
         }
+        let secs = start.elapsed().as_secs_f64();
         let _ = std::fs::remove_file(&file);
-        (start.elapsed().as_secs_f64(), calls)
+        // The PTY's output processing (ONLCR) turns each `\n` into `\r\n`.
+        let sent: Vec<u8> = bytes.iter().copied().filter(|&b| b != b'\r').collect();
+        received.retain(|&b| b != b'\r');
+        assert!(
+            received == sent,
+            "{} of {} bytes",
+            received.len(),
+            sent.len()
+        );
+        assert_eq!(exit_code(h.as_mut()), 0, "cat failed");
+        (secs, calls)
+    }
+
+    /// The owned child's exit code, waiting at most 5 s for it.
+    fn exit_code(h: &mut dyn crate::backend::BackendHandle) -> i32 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(code) = h.reap_exit_status() {
+                return code;
+            }
+            assert!(std::time::Instant::now() < deadline, "child never exited");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     /// Scroll-heavy text: about `mb` megabytes of numbered lines.
@@ -516,8 +543,8 @@ mod tests {
 
     #[test]
     fn batched_reads_carry_every_byte_through_a_pty() {
-        let bytes = lines(1);
-        let (_, calls) = pty_parse(&bytes, true);
+        // `pty_parse` checks the bytes and the exit status.
+        let (_, calls) = pty_parse(&lines(1), true);
         assert!(calls > 0);
     }
 

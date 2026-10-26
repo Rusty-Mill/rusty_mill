@@ -219,9 +219,9 @@ struct Pane {
     /// Shared with the pane's reader thread; the loop takes it only on config reload.
     parser: Arc<Mutex<AnsiParser>>,
     writer: Box<dyn BackendHandle>,
-    /// Set by the reader thread when it sends a wakeup, cleared when the
+    /// Raised by the reader thread when it sends a wakeup, lowered when the
     /// window handles it (see `reader_loop`).
-    wake_pending: Arc<AtomicBool>,
+    wake: WakeFlag,
 }
 
 /// A tab: one or more [`Pane`]s tiled by a [`Layout`], one of them focused.
@@ -375,20 +375,41 @@ pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::er
 /// a flood still leaves the UI thread the lock between batches.
 const READ_BATCH: usize = 64 * 1024;
 
+/// A pane's one outstanding wakeup: the reader raises it when it sends a
+/// `Redraw`, the window lowers it when it handles one. Output parsed while
+/// it is raised needs no wakeup of its own, since the pending one repaints
+/// the grid it went into.
+#[derive(Clone, Default)]
+struct WakeFlag(Arc<AtomicBool>);
+
+impl WakeFlag {
+    /// Mark output pending; `true` when no wakeup was, so one must be sent.
+    fn raise(&self) -> bool {
+        !self.0.swap(true, Ordering::AcqRel)
+    }
+
+    /// The window is handling the output; output parsed later wakes it again.
+    fn lower(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// PTY reader loop (own thread, one per tab): parse output into the tab's
 /// grid, send replies (DA/DSR/structured-channel) back to the child, and wake
-/// the window with the tab's id. Reads are batched (see
-/// [`read_batch`](crate::backend::read_batch)), and a wakeup is sent only
-/// when the window has handled the last one (`wake_pending`), so a flood
-/// costs the UI thread one event per frame, not one per read.
+/// the window with the tab's id through `send` (`false` once the event loop
+/// is gone). Reads are batched (see [`read_batch`](crate::backend::read_batch)),
+/// and a wakeup is sent only when the window has handled the last one
+/// (`wake`), so a flood costs the UI thread one event per frame, not one per
+/// read. The loop ends on read EOF or error, or when a send fails, and then
+/// sends `Exit`.
 fn reader_loop(
     id: u64,
     mut reader: Box<dyn BackendHandle>,
     mut replies: Box<dyn BackendHandle>,
     grid: Arc<Mutex<Grid>>,
-    proxy: EventLoopProxy<UserEvent>,
     parser: Arc<Mutex<AnsiParser>>,
-    wake_pending: Arc<AtomicBool>,
+    wake: WakeFlag,
+    mut send: impl FnMut(UserEvent) -> bool,
 ) {
     let mut buf = vec![0u8; READ_BATCH];
     loop {
@@ -410,20 +431,19 @@ fn reader_loop(
                 }
                 // Signal even mid synchronized-output window: the `Redraw`
                 // handler checks `sync_output_active` and skips painting. A
-                // wakeup still unhandled already covers this output. A send
-                // failing means the loop is gone; while one is pending, a
-                // closed pane ends this loop by EOF instead (dropping it
-                // hangs up the child).
-                if !wake_pending.swap(true, Ordering::AcqRel)
-                    && proxy.send_event(UserEvent::Redraw(id)).is_err()
-                {
+                // wakeup still unhandled already covers this output. Closing
+                // the pane leaves its flag raised, so the loop then only
+                // parses until read EOF or error, as it did when every send
+                // succeeded: dropping the pane hangs up the direct child, but
+                // a descendant holding the PTY open keeps it reading.
+                if wake.raise() && !send(UserEvent::Redraw(id)) {
                     break; // loop gone
                 }
             }
             Err(_) => break,
         }
     }
-    let _ = proxy.send_event(UserEvent::Exit(id));
+    send(UserEvent::Exit(id));
 }
 
 /// An in-progress drag-to-reorder of chrome-bar tabs: pressing a tab arms
@@ -627,17 +647,17 @@ impl WindowState<'_> {
         let reader_grid = Arc::clone(&grid);
         let reader_parser = Arc::clone(&parser);
         let reader_proxy = self.proxy.clone();
-        let wake_pending = Arc::new(AtomicBool::new(false));
-        let reader_wake = Arc::clone(&wake_pending);
+        let wake = WakeFlag::default();
+        let reader_wake = wake.clone();
         std::thread::spawn(move || {
             reader_loop(
                 id,
                 read_handle,
                 reply_handle,
                 reader_grid,
-                reader_proxy,
                 reader_parser,
                 reader_wake,
+                |event| reader_proxy.send_event(event).is_ok(),
             )
         });
 
@@ -656,7 +676,7 @@ impl WindowState<'_> {
             grid,
             parser,
             writer: handle,
-            wake_pending,
+            wake,
         })
     }
 
@@ -5378,7 +5398,7 @@ impl WindowState<'_> {
     fn on_pane_output(&mut self, id: u64) {
         // Cleared first, so output parsed from here on sends a new wakeup.
         if let Some(p) = self.pane_by_id_mut(id) {
-            p.wake_pending.store(false, Ordering::Release);
+            p.wake.lower();
         }
         self.service_clipboard(id);
         self.service_notifications(id);
@@ -6855,5 +6875,98 @@ mod tests {
         // A path outside home passes through unchanged.
         let other = std::path::Path::new("/definitely/not/home");
         assert_eq!(display_path(other), other.display().to_string());
+    }
+
+    mod reader {
+        use super::super::{AnsiParser, Grid, Mutex, UserEvent, WakeFlag, reader_loop};
+        use crate::backend::BackendHandle;
+        use crate::backend::mock::apart;
+        use std::io::Error;
+        use std::sync::Arc;
+
+        /// What `reader_loop` sent for `parts` (each its own batch), with
+        /// `lower` standing in for the window handling each `Redraw` and
+        /// `deliver` for whether a send reaches the loop. Ends with the
+        /// grid's first line.
+        fn run(
+            parts: Vec<Result<&[u8], Error>>,
+            wake: &WakeFlag,
+            lower: bool,
+            deliver: bool,
+        ) -> (Vec<String>, String) {
+            let grid = Arc::new(Mutex::new(Grid::new(20, 2)));
+            let mut sent = Vec::new();
+            let handled = wake.clone();
+            reader_loop(
+                7,
+                Box::new(apart(parts)),
+                Box::new(apart(vec![])) as Box<dyn BackendHandle>,
+                Arc::clone(&grid),
+                Arc::new(Mutex::new(AnsiParser::new())),
+                wake.clone(),
+                |event| {
+                    let name = match event {
+                        UserEvent::Redraw(7) => "redraw",
+                        UserEvent::Exit(7) => "exit",
+                        _ => "other",
+                    };
+                    sent.push(name.to_string());
+                    if lower && name == "redraw" {
+                        handled.lower();
+                    }
+                    deliver
+                },
+            );
+            let line = grid.lock().line_text(0).unwrap_or_default();
+            (sent, line)
+        }
+
+        #[test]
+        fn output_while_a_wakeup_is_pending_sends_no_more() {
+            let wake = WakeFlag::default();
+            let (sent, line) = run(vec![Ok(b"a"), Ok(b"b"), Ok(b"c")], &wake, false, true);
+            assert_eq!(sent, ["redraw", "exit"]);
+            assert_eq!(line, "abc", "every batch is still parsed");
+        }
+
+        #[test]
+        fn output_after_the_window_handles_a_wakeup_sends_another() {
+            let wake = WakeFlag::default();
+            let (sent, _) = run(vec![Ok(b"a"), Ok(b"b")], &wake, true, true);
+            assert_eq!(sent, ["redraw", "redraw", "exit"]);
+        }
+
+        #[test]
+        fn output_before_the_flag_is_lowered_rides_the_pending_wakeup() {
+            let wake = WakeFlag::default();
+            assert!(wake.raise(), "a wakeup is in flight");
+            let (sent, _) = run(vec![Ok(b"a")], &wake, false, true);
+            assert_eq!(sent, ["exit"]);
+            wake.lower();
+            assert!(wake.raise(), "once lowered, the next output wakes again");
+        }
+
+        #[test]
+        fn a_failed_delivery_stops_reading() {
+            let wake = WakeFlag::default();
+            let (sent, line) = run(vec![Ok(b"a"), Ok(b"b")], &wake, false, false);
+            assert_eq!(sent, ["redraw", "exit"]);
+            assert_eq!(line, "a", "nothing is read after the failed send");
+        }
+
+        #[test]
+        fn a_closed_pane_with_a_pending_wakeup_reads_until_eof_or_error() {
+            // A closed pane never lowers its flag: the loop sends nothing
+            // more and stops only when the PTY reports EOF or an error.
+            for end in [None, Some(Error::other("gone"))] {
+                let wake = WakeFlag::default();
+                assert!(wake.raise());
+                let mut parts: Vec<Result<&[u8], Error>> = vec![Ok(b"a"), Ok(b"b")];
+                parts.extend(end.map(Err));
+                let (sent, line) = run(parts, &wake, false, true);
+                assert_eq!(sent, ["exit"]);
+                assert_eq!(line, "ab");
+            }
+        }
     }
 }
