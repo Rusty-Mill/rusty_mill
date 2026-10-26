@@ -236,6 +236,18 @@ convenience.
   all, so putting it on `Dir` would mean an always-unused `&self`
   receiver on every call — a separate, small trait instead, mirroring
   `platform::security::Csprng`'s own shape.
+- `platform_windows::fs::restrict_to_owner(path)` (Windows only, not a
+  trait method): replaces `path`'s DACL with one protected full-access
+  entry for the current user's SID (SDDL `D:P(A;;FA;;;<SID>)`), the
+  Windows counterpart of `chmod 0600`: the DACL grants no other account
+  any access. It is not isolation from administrators: the file's owner
+  keeps its implicit `READ_CONTROL` and `WRITE_DAC` whatever the DACL
+  says, an elevated process's files are owned by the Administrators
+  group, and an administrator can take ownership. The user's SID, not
+  the `OW` owner-rights alias, because `OW` would name that group.
+  Applied with `SetSecurityInfo(SE_FILE_OBJECT, DACL | PROTECTED_DACL)`
+  on a handle opened with `FILE_FLAG_OPEN_REPARSE_POINT`, so it works on
+  an `AF_UNIX` socket file, which is a reparse point.
 
 ## Async path (rusty_foundation_akb §9)
 

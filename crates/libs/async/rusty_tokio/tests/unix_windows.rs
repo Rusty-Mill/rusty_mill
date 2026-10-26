@@ -4,8 +4,8 @@
 // what's supported here versus the Unix arm (`tests/unix.rs`, which stays
 // `#![cfg(unix)]`-only): no `UnixStream::pair` (no anonymous `AF_UNIX`
 // pair primitive on Windows), no abstract-namespace addressing (Windows
-// `AF_UNIX` is pathname-only), no `peer_cred` (no Windows peer-credential
-// mechanism), no `FromRawSocket`/`IntoRawSocket` roundtrip (`platform_windows`
+// `AF_UNIX` is pathname-only), no `peer_cred` (Windows reports only the
+// peer's pid, via `peer_pid`), no `FromRawSocket`/`IntoRawSocket` roundtrip (`platform_windows`
 // has no owned-socket adoption yet). Everything else this file exercises
 // -- `bind`/`accept`/`connect`/`connect_addr`/`bind_addr`/`read`/`write`/
 // `local_addr`/`peer_addr`/`take_error`/`AsRawSocket` -- is real,
@@ -225,6 +225,20 @@ fn a_live_listener_rejects_a_second_bind_at_the_same_path() {
         let _listener = UnixListener::bind(&path).unwrap();
         let second = UnixListener::bind(&path);
         assert!(second.is_err());
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn peer_pid_over_a_real_accept_is_this_process() {
+    let rt = Runtime::new().unwrap();
+    let path = temp_socket_path("peer-pid");
+    rt.block_on(async {
+        let listener = UnixListener::bind(&path).unwrap();
+        let client = UnixStream::connect(&path).await.unwrap();
+        let (server, _peer) = listener.accept().await.unwrap();
+        assert_eq!(server.peer_pid().unwrap(), std::process::id());
+        assert_eq!(client.peer_pid().unwrap(), std::process::id());
     });
     let _ = std::fs::remove_file(&path);
 }

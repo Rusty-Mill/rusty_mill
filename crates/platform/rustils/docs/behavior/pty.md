@@ -144,10 +144,11 @@ just by inspection.
   `ClosePseudoConsole` has no such race (the watcher never touches the
   output pipe at all — a pending or future `ReadFile` unblocks
   naturally once conhost's own write-side duplicate closes). A shared
-  `closed` flag (compare-exchange) guards against a double-close race
-  with `WindowsPtyMaster::drop` — whichever of "the child exits" or
-  "the caller drops the master" happens first performs the real close;
-  the loser is a no-op. The trade-off moves rather than disappears:
+  `closed` lock guards against a double close with
+  `WindowsPtyMaster::drop` and `WindowsPtyMaster::hang_up` — whichever
+  runs first performs the real close, holding the lock across
+  `ClosePseudoConsole`, and the others find the flag set and do nothing.
+  The trade-off moves rather than disappears:
   `ClosePseudoConsole` can itself block if conhost's writer is stuck
   behind a full, unread pipe, so the watcher thread can stall in that
   case until the caller's own reads relieve the backpressure —
@@ -162,7 +163,30 @@ just by inspection.
   `docs/design-discussion-pty.md` and divergence 011 for the full
   reasoning, including why the master here is two named handles
   (`input_handle`/`output_handle`) rather than a single `AsHandle`/
-  `AsRawHandle` impl.
+  `AsRawHandle` impl. `Drop` takes the `closed` lock with `try_lock`
+  and never waits: if the lock is busy, the exit watcher is inside a
+  `ClosePseudoConsole` that may be blocked on the full pipe, so `Drop`
+  only releases its handles, which breaks the pipe and lets that close
+  finish.
+
+  `WindowsPty::spawn_concrete` is `spawn` with the concrete
+  `(WindowsPtyMaster, WindowsChild)`, as `LinuxPty::spawn_concrete` is
+  on Linux. On Windows it (and so `spawn`) takes a process-wide lock around
+  `CreatePseudoConsole` + `CreateProcessW`, because consoles created
+  concurrently from one process once leaked output in this crate's own
+  tests; consoles stay alive concurrently.
+  `WindowsPtyMaster::hang_up` is the exit watcher's bare close on
+  demand: a concurrent `read` then returns `Ok(0)` and the program gets
+  the console-close notification. It blocks while conhost is stuck on a
+  full, unread pipe, so a caller that is not also reading runs it on a
+  thread of its own; it is idempotent. The lock's rules live in
+  `platform_windows::close_guard::CloseGuard`, which has no OS calls, so
+  its ordering (including a close that blocks, as `ClosePseudoConsole`
+  does on older Windows builds) is unit-tested with injected blocking on
+  every host. `resize` holds the same lock
+  across `ResizePseudoConsole` (taken with `try_lock`): after a close it
+  fails with `BrokenPipe`, and while a close is running with
+  `WouldBlock`, so it never reaches a closed console.
 - `platform-mock`'s `MockPty`/`MockPtyMaster`: scriptable, not a real
   pty — `MockPtyMaster::queue_inbound` queues bytes for a future
   `read()` to hand back (standing in for "the child wrote this to the

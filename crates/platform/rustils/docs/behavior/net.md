@@ -145,7 +145,23 @@ from the other two slices (see below).
   leaves the bound file at the filesystem's own ACL defaults instead;
   `unix_listen` still succeeds there — a registered divergence
   (`../divergences.md` #007), the same shape as the existing `unix_mode`
-  divergence (#006).
+  divergence (#006). A Windows consumer that needs the narrowing calls
+  `platform_windows::fs::restrict_to_owner` on the path after binding
+  (see `fs.md`).
+- Peer identity: `WindowsUnixStream::peer_pid` returns the peer
+  process's pid (`SIO_AF_UNIX_GETPEERPID`), the Windows counterpart of
+  `SO_PEERCRED`, which reports no user. A consumer compares users with
+  `platform_windows::is_current_user(pid)` (see `process.md`). It is
+  concrete-type only, not on the `UnixStream` trait.
+- `WindowsUnixStream` implements `std::io::Read` and `std::io::Write`
+  and has `set_read_timeout(Option<Duration>) -> io::Result<()>`
+  (`SO_RCVTIMEO`), so code written against
+  `std::os::unix::net::UnixStream` compiles against it. Errors carry the
+  Winsock code into `io::Error::from_raw_os_error`, so a receive timeout
+  reads as `TimedOut`. As in std, `Some(Duration::ZERO)` is refused with
+  `InvalidInput`; a positive duration under 1 ms becomes 1 ms, because
+  Winsock reads 0 ms as "wait forever". The `TcpStream` trait's
+  `set_read_timeout` is unchanged.
 - Error mapping mirrors `tcp_connect`/`tcp_listen`'s kinds wherever the
   underlying condition is the same: a bind collision (live or stale
   path) maps to `AddrInUse`; connecting to a socket file that exists but
