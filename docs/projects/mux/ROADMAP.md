@@ -37,8 +37,8 @@ Started 2026-10-25 (owner go-ahead). One PR per step, in order:
 4a. Rex parity, CLI: exit codes 3 (target) and 4 (unreachable), failure codes on the wire, targets by name, position, id suffix or path, ids from the block's environment (C04). Done (#1089).
 4b. Rex parity, API: per-block-type methods `terminal.format`, `terminal.pwd` and `terminal.title` through one `BlockCall` (`Features::BLOCK_CALL`), replacing `capture`; `api list/describe` (C06, C17, C18). Done (#1091).
 5. Program status OSC, `rusty_mux_status` (C20): OSC 7501 reports kept per block, a `BlockStatus` event when a state changes, and `terminal.status`. Done (#1092).
-6. `rusty_mux_mcp` on `rusty_mcp_server`, generated from the same catalog (C07): `rusty-mux-mcp` over stdio, one tool per method that works on a connection of its own. In progress.
-7. Scripting (C19), last.
+6. `rusty_mux_mcp` on `rusty_mcp_server`, generated from the same catalog (C07): `rusty-mux-mcp` over stdio, one tool per method that works on a connection of its own. Done (#1100).
+7. Actions and key bindings from a JSON config, `rusty_mux_script` (C19): named chains of catalog requests with `${arg}` placeholders, run by `rusty-mux-ctl do`, checked by `config check`. No language: logic lives in programs driving ctl or MCP. In progress.
 
 ## Phase 3: identity and remote
 

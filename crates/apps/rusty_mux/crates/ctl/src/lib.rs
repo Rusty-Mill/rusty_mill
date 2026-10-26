@@ -11,6 +11,10 @@
 //! [`target`]), and a missing one defaults to the block, window or session
 //! the command runs in, from `$RUSTY_MUX_BLOCK` and the like.
 //!
+//! `do ACTION --ARG VALUE` runs an action from the config file, a named
+//! chain of requests (see [`rusty_mux_script`]); `config check` and
+//! `config list` check and list it.
+//!
 //! Output is text, or one JSON object per line with `--json`. The exit code
 //! is an [`Exit`]; an interrupt ends the process with the signal, which a
 //! shell reports as 130. An embedder bounds a command with [`run_until`].
@@ -20,6 +24,7 @@
 
 mod api;
 pub mod cli;
+mod config;
 mod conn;
 mod render;
 mod stop;
@@ -33,7 +38,7 @@ use rusty_mux_proto::{Code, Cursor, Entry, Features, Message};
 use rusty_uuid::Uuid;
 
 pub use crate::api::input_schema;
-use crate::cli::{Api, Arg, Call, Command, Defaults, Invocation};
+use crate::cli::{Api, Arg, Call, Command, ConfigCommand, Defaults, Invocation};
 use crate::conn::Conn;
 pub use crate::stop::Stop;
 use crate::target::Miss;
@@ -61,6 +66,9 @@ pub struct Env {
     pub socket: Option<PathBuf>,
     /// `$RUSTY_MUX_SESSION`, `$RUSTY_MUX_WINDOW` and `$RUSTY_MUX_BLOCK`.
     pub here: Defaults,
+    /// The config file `do` and `config` read: `$RUSTY_MUX_CONFIG`, else
+    /// `rusty_mux/config.json` in the config directory.
+    pub config: Option<PathBuf>,
 }
 
 impl Env {
@@ -74,6 +82,7 @@ impl Env {
                 window: id_var("RUSTY_MUX_WINDOW"),
                 block: id_var("RUSTY_MUX_BLOCK"),
             },
+            config: config::default_path(),
         }
     }
 }
@@ -143,7 +152,7 @@ pub fn run_until(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Exit {
-    let invocation = match cli::parse(args, &env.here) {
+    let mut invocation = match cli::parse(args, &env.here) {
         Ok(invocation) => invocation,
         Err(reason) => return report(err, Exit::Usage, &reason),
     };
@@ -151,6 +160,11 @@ pub fn run_until(
         Command::Help(method) => return write_line(out, cli::usage(method).trim_end()),
         Command::Api(Api::List) => return write_line(out, &api::list(invocation.json)),
         Command::Api(Api::Describe(method)) => return write_line(out, &api::describe(method)),
+        Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
+        Command::Do { action, args } => match action_calls(&action, &args, env) {
+            Ok(calls) => invocation.command = Command::Calls(calls),
+            Err((exit, reason)) => return report(err, exit, &reason),
+        },
         Command::Calls(_) | Command::Events { .. } => {}
     }
     let Some(socket) = invocation.socket.clone().or_else(|| env.socket.clone()) else {
@@ -169,6 +183,53 @@ pub fn run_until(
             Exit::Unreachable,
             &format!("{}: {e}", socket.display()),
         ),
+    }
+}
+
+/// The requests `do ACTION` sends: the action expanded with `args`, parsed
+/// like a typed chain so ids resolve and default the same way.
+fn action_calls(
+    action: &str,
+    args: &[(String, String)],
+    env: &Env,
+) -> Result<Vec<Call>, (Exit, String)> {
+    let config = config::load(env.config.as_deref()).map_err(|e| (Exit::Failed, e))?;
+    let action = config
+        .action(action)
+        .ok_or_else(|| (Exit::Usage, format!("no action `{action}` in the config")))?;
+    let calls = action.expand(args).map_err(|e| (Exit::Usage, e))?;
+    let chain = config::chain(&calls);
+    match cli::parse(&chain, &env.here) {
+        Ok(Invocation {
+            command: Command::Calls(calls),
+            ..
+        }) => Ok(calls),
+        Ok(_) => Err((
+            Exit::Failed,
+            format!("{}: not a chain of requests", action.name),
+        )),
+        Err(reason) => Err((Exit::Usage, format!("{}: {reason}", action.name))),
+    }
+}
+
+fn run_config(
+    command: &ConfigCommand,
+    env: &Env,
+    json: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Exit {
+    let path = match command {
+        ConfigCommand::Check(Some(path)) => Some(path.as_path()),
+        ConfigCommand::Check(None) | ConfigCommand::List => env.config.as_deref(),
+    };
+    let config = match config::load(path) {
+        Ok(config) => config,
+        Err(problems) => return report(err, Exit::Failed, &problems),
+    };
+    match command {
+        ConfigCommand::Check(_) => write_line(out, &config::summary(&config)),
+        ConfigCommand::List => write_line(out, &config::list(&config, json)),
     }
 }
 
@@ -203,7 +264,7 @@ fn execute(
     match &invocation.command {
         Command::Calls(calls) => session.calls(calls),
         Command::Events { after, follow } => session.events(*after, *follow),
-        Command::Help(_) | Command::Api(_) => Ok(()),
+        Command::Help(_) | Command::Api(_) | Command::Do { .. } | Command::Config(_) => Ok(()),
     }
 }
 
@@ -267,12 +328,13 @@ impl<S: io::Read + Write> Session<'_, S> {
             require(features, call.method)?;
         }
         let mut reqs = 1..;
-        let entries = if calls.iter().any(Call::has_target) {
-            self.list(features, reqs.next().unwrap_or(u64::MAX))?
-        } else {
-            Vec::new()
-        };
         for call in calls {
+            // Listed afresh for each call that names a target, so it can
+            // name what an earlier call in the chain created or renamed.
+            let entries = match call.has_target() {
+                true => self.list(features, reqs.next().unwrap_or(u64::MAX))?,
+                false => Vec::new(),
+            };
             let args = self.resolve(call, &entries)?;
             let req = reqs.next().unwrap_or(u64::MAX);
             let message = call

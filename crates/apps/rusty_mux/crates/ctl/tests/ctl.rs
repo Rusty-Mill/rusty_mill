@@ -56,6 +56,7 @@ fn ctl_command(socket: &Path, args: &[&str]) -> Command {
         .env_remove("RUSTY_MUX_SESSION")
         .env_remove("RUSTY_MUX_WINDOW")
         .env_remove("RUSTY_MUX_BLOCK")
+        .env_remove("RUSTY_MUX_CONFIG")
         .arg("--socket")
         .arg(socket)
         .args(args);
@@ -587,4 +588,100 @@ fn an_interrupted_follow_ends_with_sigint() {
     let status = child.wait().expect("wait");
     // A shell reports this as exit code 130.
     assert_eq!(status.signal(), Some(2));
+}
+
+/// Writes `text` as a config file for one test; returns its path.
+fn config_file(tag: &str, text: &str) -> PathBuf {
+    let path =
+        std::env::temp_dir().join(format!("rusty-mux-ctl-{}-{tag}.json", std::process::id()));
+    std::fs::write(&path, text).expect("write config");
+    path
+}
+
+fn with_config(socket: &Path, config: &Path, args: &[&str]) -> Output {
+    ctl_command(socket, args)
+        .env("RUSTY_MUX_CONFIG", config)
+        .output()
+        .expect("run rusty-mux-ctl")
+}
+
+const WORKSPACE: &str = r#"{
+  "actions": [{
+    "name": "workspace",
+    "title": "A session with one block",
+    "args": ["name"],
+    "run": [
+      {"call": "create-session", "args": {"name": "${name}"}},
+      {"call": "create-window", "args": {"session": "${name}", "name": "main"}},
+      {"call": "create-block", "args": {"window": "${name}/main", "cols": 80, "rows": 24}}
+    ]
+  }],
+  "binds": [{"keys": "ctrl+b>w", "action": "workspace", "args": {"name": "work"}}]
+}"#;
+
+#[test]
+fn do_runs_a_configured_action_as_one_chain() {
+    let socket = start_server();
+    let config = config_file("do", WORKSPACE);
+    let output = with_config(&socket, &config, &["do", "workspace", "--name", "agents"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(stdout(&output).lines().count(), 3, "three new ids");
+    let listing = ok(&socket, &["list"]);
+    assert!(
+        listing.contains("agents") && listing.contains("main"),
+        "{listing}"
+    );
+
+    let usage = |args: &[&str]| with_config(&socket, &config, args).status.code();
+    assert_eq!(usage(&["do", "workspace"]), Some(2), "missing argument");
+    assert_eq!(
+        usage(&["do", "workspace", "--name", "a", "--x", "1"]),
+        Some(2)
+    );
+    assert_eq!(usage(&["do", "nope"]), Some(2), "unknown action");
+    assert_eq!(usage(&["do"]), Some(2));
+    let refused = with_config(&socket, &config, &["do", "workspace", "--name", "agents"]);
+    assert_eq!(
+        refused.status.code(),
+        Some(3),
+        "the session name is taken, so its window target is ambiguous"
+    );
+    std::fs::remove_file(&config).expect("cleanup");
+}
+
+#[test]
+fn config_check_and_list_need_no_server() {
+    let nowhere = Path::new("/nonexistent/rusty-mux.sock");
+    let good = config_file("good", WORKSPACE);
+    let checked = with_config(nowhere, &good, &["config", "check"]);
+    assert_eq!(stdout(&checked).trim(), "ok: 1 actions, 1 bindings");
+    let listed = stdout(&with_config(nowhere, &good, &["config", "list"]));
+    assert!(listed.starts_with("action workspace"), "{listed}");
+    assert!(listed.contains("bind   ctrl+b>w"), "{listed}");
+
+    let bad = config_file(
+        "bad",
+        r#"{"actions": [{"name": "x", "run": [{"call": "nope"}]}]}"#,
+    );
+    let path = bad.to_str().expect("utf-8");
+    let refused = ctl(nowhere, &["config", "check", path]);
+    assert_eq!(refused.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        stderr.contains("actions[0].run[0]: unknown method `nope`"),
+        "{stderr}"
+    );
+    assert_eq!(
+        with_config(nowhere, &bad, &["do", "x"]).status.code(),
+        Some(1)
+    );
+    assert_eq!(ctl(nowhere, &["config", "frob"]).status.code(), Some(2));
+    for path in [good, bad] {
+        std::fs::remove_file(path).expect("cleanup");
+    }
 }

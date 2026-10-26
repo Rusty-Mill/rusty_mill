@@ -19,6 +19,7 @@ path = "src/main.rs"
 rusty_json = { workspace = true }
 rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
+rusty_mux_script = { workspace = true }
 rusty_uuid = { workspace = true }
 
 # A non-blocking connect, so a deadline or cancel bounds connecting too.
