@@ -7,7 +7,7 @@
 
 use adk_core::{Args, Content, InvocationContext};
 use adk_models::{LlmRequest, LlmResponse};
-use futures::future::BoxFuture;
+use rusty_stream::BoxFuture;
 use std::sync::Arc;
 
 /// What a callback sees: the invocation, plus the agent it wraps.

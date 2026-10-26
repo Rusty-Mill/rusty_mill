@@ -6,12 +6,12 @@
 //! until every predecessor has delivered.
 
 use adk_core::{AdkError, Event, InvocationContext, Result};
-use futures::stream::BoxStream;
+use rusty_stream::BoxStream;
+use rusty_tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 use crate::edge::Edge;
 use crate::node::{NodeContext, NodeOutcome, SharedNode, START};
@@ -240,7 +240,7 @@ impl Graph {
         invocation: InvocationContext,
         resume: Option<ResumeRequest>,
     ) -> BoxStream<'a, Result<Event>> {
-        Box::pin(async_stream::try_stream! {
+        Box::pin(rusty_stream::try_stream! {
             let mut step: u64 = 0;
             let mut pending_joins: HashMap<String, BTreeMap<String, Value>> = HashMap::new();
             let mut resume_payload: Option<Value> = None;
@@ -301,7 +301,7 @@ impl Graph {
                     running.push((item.clone(), Arc::clone(node), resume_payload.take()));
                 }
 
-                let attempts = futures::future::join_all(running.iter().map(
+                let attempts = rusty_stream::future::join_all(running.iter().map(
                     |(item, node, payload)| {
                         self.run_node(node, &invocation, item, step, payload.clone())
                     },
@@ -312,15 +312,11 @@ impl Graph {
                 let mut frontier_error: Option<AdkError> = None;
                 let mut interrupted = false;
 
-                for ((item, node, _), (outcome, ctx, mut rx)) in running.into_iter().zip(attempts) {
+                for ((item, node, _), (outcome, ctx, rx)) in running.into_iter().zip(attempts) {
                     // Collect whatever the node emitted while it ran. These are
                     // held rather than yielded immediately so that a suspension
                     // can attach its resume record to the outgoing event.
-                    rx.close();
-                    let mut emitted: Vec<Event> = Vec::new();
-                    while let Some(event) = rx.recv().await {
-                        emitted.push(event);
-                    }
+                    let mut emitted = drain(rx);
 
                     let outcome = match outcome {
                         Ok(outcome) => {
@@ -512,4 +508,15 @@ impl ResumeRequest {
             payload,
         }
     }
+}
+
+/// Takes everything a finished node emitted and closes its channel, so a
+/// context the node kept fails to emit instead of queueing events nobody reads.
+/// The node has returned, so the queue already holds all it emitted in time.
+fn drain(mut rx: mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
+    let mut emitted = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        emitted.push(event);
+    }
+    emitted
 }

@@ -7,12 +7,12 @@
 //! workflow graph.
 //!
 //! ```
-//! # tokio_test::block_on(async {
+//! # rusty_tokio::Runtime::new()?.block_on(async {
 //! use adk_agents::{Agent, LlmAgent};
 //! use adk_core::{Content, InvocationContext, RunConfig, Services, Session};
 //! use adk_models::MockModel;
 //! use adk_sessions::InMemorySessionService;
-//! use futures::StreamExt;
+//! use rusty_stream::StreamExt;
 //! use std::sync::Arc;
 //!
 //! let agent = LlmAgent::builder("greeter")
@@ -35,6 +35,7 @@
 //! // The response was staged under the configured output key.
 //! assert_eq!(last.actions.state_delta["last_greeting"], "Hello!");
 //! # });
+//! # Ok::<(), std::io::Error>(())
 //! ```
 
 #![deny(missing_docs)]
@@ -62,7 +63,7 @@ mod tests {
     use adk_models::{LlmResponse, MockModel};
     use adk_sessions::InMemorySessionService;
     use adk_tools::{FunctionTool, ToolSource};
-    use futures::StreamExt;
+    use rusty_stream::StreamExt;
     use serde_json::json;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
@@ -117,7 +118,7 @@ mod tests {
 
     // ---- basic turn ----
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_plain_answer_is_a_single_final_event() {
         let agent = LlmAgent::builder("a")
             .model(Arc::new(MockModel::new().push_text("Paris")))
@@ -130,7 +131,7 @@ mod tests {
         assert!(events[0].is_final_response());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn the_instruction_is_sent_as_a_system_instruction() {
         let model = Arc::new(MockModel::new().push_text("ok"));
         let agent = LlmAgent::builder("a")
@@ -149,7 +150,7 @@ mod tests {
         assert!(sent.contains("Answer the question."));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn instruction_placeholders_read_session_state() {
         let model = Arc::new(MockModel::new().push_text("ok"));
         let agent = LlmAgent::builder("a")
@@ -168,7 +169,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn output_key_stages_the_final_response_into_state() {
         let agent = LlmAgent::builder("a")
             .model(Arc::new(MockModel::new().push_text("Bonjour")))
@@ -182,7 +183,7 @@ mod tests {
 
     // ---- tool calling ----
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_tool_call_round_trips_and_then_answers() {
         let model = MockModel::new()
             .push_call_json("get_weather", json!({"city": "Paris"}))
@@ -209,7 +210,7 @@ mod tests {
         assert_eq!(events[2].text(), "It is sunny in Paris.");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn the_declared_tool_schema_reaches_the_model() {
         let model = Arc::new(MockModel::new().push_text("done"));
         let agent = LlmAgent::builder("a")
@@ -225,7 +226,7 @@ mod tests {
         assert!(declared[0].parameters.is_some());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn an_unknown_tool_is_reported_to_the_model_not_fatal() {
         let model = MockModel::new()
             .push_call_json("nonexistent", json!({}))
@@ -247,7 +248,7 @@ mod tests {
         assert_eq!(events.last().unwrap().text(), "I could not do that.");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_failing_tool_becomes_an_error_result_the_model_can_recover_from() {
         let failing =
             FunctionTool::new("boom", "Always fails.", Schema::object(), |_args, _ctx| {
@@ -271,7 +272,7 @@ mod tests {
         assert_eq!(events.last().unwrap().text(), "That tool failed.");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn skip_summarization_ends_the_turn_at_the_tool_result() {
         let tool = FunctionTool::new(
             "raw",
@@ -301,7 +302,7 @@ mod tests {
         assert!(events[1].is_final_response());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_long_running_tool_ends_the_turn_and_records_its_call_id() {
         let tool = FunctionTool::new(
             "start_job",
@@ -323,7 +324,7 @@ mod tests {
         assert!(events[1].is_final_response());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_tool_requiring_confirmation_pauses_instead_of_running() {
         let ran = Arc::new(AtomicU32::new(0));
         let counter = Arc::clone(&ran);
@@ -361,7 +362,7 @@ mod tests {
         assert_eq!(ran.load(Ordering::SeqCst), 0);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_runaway_tool_loop_is_capped() {
         // The mock keeps requesting the tool, so only the cap ends the turn.
         let mut model = MockModel::new();
@@ -385,7 +386,7 @@ mod tests {
 
     // ---- delegation ----
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_transfer_to_agent_call_actually_runs_the_target_sub_agent() {
         let transfer_tool = FunctionTool::new(
             "transfer",
@@ -431,7 +432,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_transfer_to_an_unknown_agent_yields_an_error_instead_of_ending_silently() {
         let transfer_tool = FunctionTool::new(
             "transfer",
@@ -481,7 +482,7 @@ mod tests {
         assert!(LlmAgent::builder("a").build().is_err());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_response_violating_the_output_schema_is_rejected() {
         let agent = LlmAgent::builder("a")
             .model(Arc::new(MockModel::new().push_text("not json")))
@@ -493,7 +494,7 @@ mod tests {
         assert!(err.to_string().contains("a.output"), "got: {err}");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_response_matching_the_output_schema_passes() {
         let agent = LlmAgent::builder("a")
             .model(Arc::new(
@@ -508,7 +509,7 @@ mod tests {
 
     // ---- callbacks ----
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_before_agent_callback_can_short_circuit_the_agent() {
         let model = Arc::new(MockModel::new().push_text("should not be called"));
         let agent = LlmAgent::builder("a")
@@ -524,7 +525,7 @@ mod tests {
         assert_eq!(model.call_count(), 0);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_before_model_callback_can_replace_the_model_call() {
         let model = Arc::new(MockModel::new().push_text("live answer"));
         let agent = LlmAgent::builder("a")
@@ -540,7 +541,7 @@ mod tests {
         assert_eq!(model.call_count(), 0);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_before_model_callback_can_mutate_the_request() {
         let model = Arc::new(MockModel::new().push_text("ok"));
         let agent = LlmAgent::builder("a")
@@ -562,7 +563,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn an_after_model_callback_can_replace_the_response() {
         let agent =
             LlmAgent::builder("a")
@@ -579,7 +580,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_before_tool_callback_can_replace_the_tool_result() {
         let model = MockModel::new()
             .push_call_json("get_weather", json!({"city": "Paris"}))
@@ -605,7 +606,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn an_after_tool_callback_can_transform_the_result() {
         let model = MockModel::new()
             .push_call_json("get_weather", json!({"city": "Paris"}))
@@ -630,7 +631,7 @@ mod tests {
 
     // ---- streaming ----
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn streaming_yields_partial_events_then_a_final_one() {
         let services = Services::new(Arc::new(InMemorySessionService::new()));
         let mut session = Session::new("s1", "app", "u1");
@@ -662,7 +663,7 @@ mod tests {
     /// Design review Tranche 4: the streaming path folded every chunk into
     /// the answer without checking for an error chunk, so a model error
     /// arriving mid-stream became an empty, apparently successful reply.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_streamed_model_error_is_reported_not_swallowed() {
         let session = Session::new("s", "app", "u");
         let services = Services::new(Arc::new(InMemorySessionService::new()));
@@ -698,7 +699,7 @@ mod tests {
             .shared()
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_sequential_agent_runs_sub_agents_in_order() {
         let agent = SequentialAgent::new(
             "pipeline",
@@ -709,7 +710,7 @@ mod tests {
         assert_eq!(authors, vec!["first", "second"]);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_parallel_agent_tags_each_branch() {
         let agent = ParallelAgent::new("fanout", vec![scripted("a", "1"), scripted("b", "2")]);
         let events = drain(&agent, &context_with("go")).await;
@@ -722,7 +723,7 @@ mod tests {
         assert_eq!(branches, vec!["fanout.a", "fanout.b"]);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_loop_agent_stops_when_a_sub_agent_escalates() {
         let escalating = FunctionTool::new(
             "finish",
@@ -759,7 +760,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_loop_agent_that_never_escalates_hits_its_cap() {
         let agent = LoopAgent::new("spin", vec![scripted("worker", "again")], 3);
         let err = drain_result(&agent, &context_with("go")).await.unwrap_err();
@@ -768,7 +769,7 @@ mod tests {
 
     // ---- graph integration ----
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn an_agent_runs_as_a_graph_node_and_its_answer_becomes_the_output() {
         use adk_graph::{chain, Graph};
 

@@ -19,7 +19,7 @@
 //! # Example
 //!
 //! ```
-//! # tokio_test::block_on(async {
+//! # rusty_tokio::Runtime::new()?.block_on(async {
 //! use adk_core::{Event, SessionService};
 //! use adk_sessions::InMemorySessionService;
 //!
@@ -35,6 +35,7 @@
 //! assert_eq!(session.state.get("user:login_count").unwrap(), 5);
 //! assert!(session.state.get("temp:scratch").is_none());
 //! # });
+//! # Ok::<(), std::io::Error>(())
 //! ```
 
 #![deny(missing_docs)]
@@ -57,7 +58,7 @@ mod tests {
     use adk_core::{ArtifactService, Blob, Content, Event, MemoryService, Part, SessionService};
     use serde_json::json;
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_and_get_round_trip() {
         let svc = InMemorySessionService::new();
         let created = svc
@@ -75,7 +76,7 @@ mod tests {
             .is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn append_event_commits_session_state_and_history() {
         let svc = InMemorySessionService::new();
         let mut session = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -96,7 +97,7 @@ mod tests {
         assert_eq!(reloaded.state.get("step").unwrap(), &json!("greeted"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn temp_keys_never_persist() {
         let svc = InMemorySessionService::new();
         let mut session = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -108,7 +109,7 @@ mod tests {
         assert!(session.state.get("temp:scratch").is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn user_state_is_shared_across_that_users_sessions() {
         let svc = InMemorySessionService::new();
         let mut first = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -126,7 +127,7 @@ mod tests {
         assert!(other.state.get("user:lang").is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn app_state_is_shared_across_users() {
         let svc = InMemorySessionService::new();
         let mut first = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -146,7 +147,7 @@ mod tests {
         assert!(other_app.state.get("app:discount").is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn partial_events_are_not_recorded() {
         let svc = InMemorySessionService::new();
         let mut session = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -159,7 +160,7 @@ mod tests {
         assert!(session.state.get("should_not").is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn list_sessions_omits_history_and_filters_by_user() {
         let svc = InMemorySessionService::new();
         let mut s1 = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -174,7 +175,7 @@ mod tests {
         assert!(listed.iter().all(|s| s.events.is_empty()));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn list_sessions_with_many_events_returns_empty_summary() {
         let svc = InMemorySessionService::new();
         let mut session = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -199,7 +200,7 @@ mod tests {
         assert_eq!(summary.last_update_time, session.last_update_time);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn delete_session_reports_a_missing_thread() {
         let svc = InMemorySessionService::new();
         let session = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -207,7 +208,7 @@ mod tests {
         assert!(svc.delete_session("app", "u1", &session.id).await.is_err());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn artifacts_are_versioned_per_filename() {
         let svc = InMemoryArtifactService::new();
         let blob = |d: &str| {
@@ -247,7 +248,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn user_scoped_artifacts_cross_sessions() {
         let svc = InMemoryArtifactService::new();
         let part = Part::text("profile");
@@ -272,7 +273,7 @@ mod tests {
             .is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn missing_artifact_loads_as_none() {
         let svc = InMemoryArtifactService::new();
         assert!(svc
@@ -286,7 +287,7 @@ mod tests {
             .is_err());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn memory_search_ranks_by_term_overlap() {
         let svc = InMemoryMemoryService::new();
         let mut session = adk_core::Session::new("s1", "app", "u1");

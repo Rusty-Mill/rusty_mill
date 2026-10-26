@@ -2,7 +2,7 @@
 
 use adk_core::{Args, FunctionDeclaration, Result, Schema};
 use async_trait::async_trait;
-use futures::future::BoxFuture;
+use rusty_stream::BoxFuture;
 use serde_json::Value;
 use std::sync::Arc;
 

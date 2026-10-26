@@ -25,7 +25,7 @@
 //! # Getting started
 //!
 //! ```
-//! # tokio_test::block_on(async {
+//! # rusty_tokio::Runtime::new()?.block_on(async {
 //! use rusty_adk::prelude::*;
 //! use std::sync::Arc;
 //!
@@ -61,7 +61,8 @@
 //!
 //! assert_eq!(answer.as_deref(), Some("It is sunny in Paris."));
 //! # Ok::<(), AdkError>(())
-//! # }).unwrap();
+//! # })?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! # Interoperating with other ADK SDKs
@@ -141,7 +142,7 @@ pub mod prelude {
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
-    use futures::StreamExt;
+    use rusty_stream::StreamExt;
     use serde_json::json;
     use std::sync::Arc;
 
@@ -154,7 +155,7 @@ mod tests {
         })))
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn an_agent_a_tool_and_the_runner_work_together() {
         let model = MockModel::new()
             .push_call_json("get_weather", json!({"city": "Paris"}))
@@ -192,7 +193,7 @@ mod tests {
 
     /// A conversation, and the files it produced, outlive the process.
     #[cfg(feature = "sqlite")]
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_sqlite_store_survives_a_restart() {
         let path =
             std::env::temp_dir().join(format!("{}.sqlite3", crate::core::new_id("rusty-adk-test")));
@@ -285,7 +286,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_graph_routes_between_agents() {
         let triage = RouterNode::new("triage", NodeConfig::default(), |_ctx| {
             Box::pin(async { Ok((json!("a refund request"), vec!["BILLING".to_string()])) })

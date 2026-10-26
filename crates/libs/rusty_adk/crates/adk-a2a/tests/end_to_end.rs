@@ -16,12 +16,12 @@ use adk_models::MockModel;
 use adk_runner::Runner;
 use adk_sessions::{InMemoryArtifactService, InMemorySessionService};
 use adk_tools::{FunctionTool, ToolSource};
-use futures::StreamExt;
 use rusty_a2a::client::A2aClient;
 use rusty_a2a::server::AgentServer;
 use rusty_a2a::types::{
     AgentInterface, Message, Part, SendMessageResult, StreamResponse, TaskState,
 };
+use rusty_stream::{Compat, StreamExt};
 use serde_json::json;
 use tokio::net::TcpListener;
 
@@ -149,10 +149,12 @@ async fn one_context_is_one_adk_session_across_turns() {
 async fn a_streaming_client_sees_working_then_completed() {
     let client = serve(echo_runner("done")).await;
 
-    let mut stream = client
-        .send_streaming_message(Message::user_text("go"), None)
-        .await
-        .unwrap();
+    let mut stream = Compat::new(
+        client
+            .send_streaming_message(Message::user_text("go"), None)
+            .await
+            .unwrap(),
+    );
 
     let mut states = Vec::new();
     while let Some(event) = stream.next().await {

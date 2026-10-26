@@ -11,8 +11,8 @@
 //! weather-agent` works with no API key. Set `GOOGLE_API_KEY` or
 //! `ANTHROPIC_API_KEY` to run scene 1 against a live model instead.
 
-use futures::StreamExt;
 use rusty_adk::prelude::*;
+use rusty_stream::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
 

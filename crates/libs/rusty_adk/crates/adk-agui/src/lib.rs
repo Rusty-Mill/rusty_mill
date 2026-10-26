@@ -74,10 +74,10 @@ pub mod convert;
 use adk_core::{AdkError, Content, Event as AdkEvent, RunConfig, Session};
 use adk_graph::{PendingInterrupt, ResumeRequest, PENDING_STATE_KEY};
 use adk_runner::Runner;
-use futures::StreamExt;
 use rusty_agui::serve::{Agent, Emitter};
 use rusty_agui::{Error, Message, RunAgentInput};
 use rusty_json::Value;
+use rusty_stream::StreamExt;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 

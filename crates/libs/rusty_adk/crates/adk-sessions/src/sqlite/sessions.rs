@@ -420,7 +420,7 @@ mod tests {
         std::env::temp_dir().join(format!("{}.sqlite3", adk_core::new_id("adk-test")))
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_and_get_round_trip() {
         let svc = service().await;
         let created = svc
@@ -440,7 +440,7 @@ mod tests {
         assert!(svc.get_session("app", "u2", "s1").await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn append_event_commits_session_state_and_history() {
         let svc = service().await;
         let mut session = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(reloaded.state.get("step").unwrap(), &json!("greeted"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn temp_keys_never_persist() {
         let svc = service().await;
         let mut session = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -479,7 +479,7 @@ mod tests {
         assert!(reloaded.state.get("temp:scratch").is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn user_state_is_shared_across_that_users_sessions() {
         let svc = service().await;
         let mut first = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -495,7 +495,7 @@ mod tests {
         assert!(other.state.get("user:lang").is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn app_state_is_shared_across_users() {
         let svc = service().await;
         let mut first = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -514,7 +514,7 @@ mod tests {
         assert!(other_app.state.get("app:discount").is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn initial_state_is_routed_by_prefix() {
         let svc = service().await;
         let mut state = State::new();
@@ -539,7 +539,7 @@ mod tests {
         assert_eq!(created.state.get("step").unwrap(), &json!("start"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn partial_events_are_not_recorded() {
         let svc = service().await;
         let mut session = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -558,7 +558,7 @@ mod tests {
         assert!(reloaded.events.is_empty());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn list_sessions_omits_history_and_filters_by_user() {
         let svc = service().await;
         let mut s1 = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -573,7 +573,7 @@ mod tests {
         assert!(listed.iter().all(|s| s.events.is_empty()));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn delete_session_reports_a_missing_thread() {
         let svc = service().await;
         let session = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -581,7 +581,7 @@ mod tests {
         assert!(svc.delete_session("app", "u1", &session.id).await.is_err());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn deleting_a_thread_takes_its_history_and_own_state() {
         let svc = service().await;
         let mut session = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -603,7 +603,7 @@ mod tests {
         assert_eq!(reborn.state.get("user:lang").unwrap(), &json!("fr"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn appending_to_an_unknown_thread_is_an_error() {
         let svc = service().await;
         let mut orphan = Session::new("ghost", "app", "u1");
@@ -613,7 +613,7 @@ mod tests {
             .is_err());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_stale_handle_is_refreshed_from_storage() {
         let svc = service().await;
         let mut session = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(stale.events[1].text(), "two");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn history_survives_reopening_the_file() {
         let path = temp_db();
         let session_id = {
@@ -666,7 +666,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn adk_2_0_event_fields_round_trip() {
         let svc = service().await;
         let mut session = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -700,7 +700,7 @@ mod tests {
     /// Storing events as JSON is only safe if JSON is lossless for them. The
     /// `timestamp` is the field that tests it: an `f64` needs exact float
     /// parsing to come back bit-for-bit.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_stored_event_comes_back_identical() {
         let svc = service().await;
         let mut session = svc.create_session("app", "u1", None, None).await.unwrap();
@@ -718,7 +718,7 @@ mod tests {
         assert_eq!(reloaded.events[0], original);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_reused_id_starts_the_thread_over() {
         let svc = service().await;
         let mut session = svc

@@ -44,7 +44,6 @@ adk-a2a = { workspace = true, optional = true }
 adk-agui = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
-tokio-test.workspace = true
 serde_json.workspace = true
-futures.workspace = true
+rusty_stream.workspace = true
+rusty_tokio.workspace = true

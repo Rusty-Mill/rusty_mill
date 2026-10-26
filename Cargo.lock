@@ -157,16 +157,15 @@ dependencies = [
  "adk-runner",
  "adk-sessions",
  "adk-tools",
- "async-stream",
  "async-trait",
  "axum",
- "futures",
  "rusty_a2a",
  "rusty_base64",
  "rusty_log",
+ "rusty_stream",
+ "rusty_tokio",
  "serde_json",
  "tokio",
- "tokio-test",
 ]
 
 [[package]]
@@ -178,12 +177,10 @@ dependencies = [
  "adk-models",
  "adk-sessions",
  "adk-tools",
- "async-stream",
  "async-trait",
- "futures",
+ "rusty_stream",
+ "rusty_tokio",
  "serde_json",
- "tokio",
- "tokio-test",
 ]
 
 [[package]]
@@ -197,10 +194,10 @@ dependencies = [
  "adk-runner",
  "adk-sessions",
  "adk-tools",
- "futures",
  "rusty_agui",
  "rusty_json",
  "rusty_serve",
+ "rusty_stream",
  "serde_json",
  "tokio",
 ]
@@ -222,14 +219,12 @@ version = "0.1.0"
 dependencies = [
  "adk-core",
  "adk-sessions",
- "async-stream",
  "async-trait",
- "futures",
  "rusty_log",
+ "rusty_stream",
+ "rusty_tokio",
  "serde",
  "serde_json",
- "tokio",
- "tokio-test",
 ]
 
 [[package]]
@@ -241,9 +236,9 @@ dependencies = [
  "adk-tools",
  "proc-macro2",
  "quote",
+ "rusty_tokio",
  "serde_json",
  "syn 2.0.119",
- "tokio",
 ]
 
 [[package]]
@@ -287,11 +282,9 @@ dependencies = [
  "adk-models",
  "adk-sessions",
  "adk-tools",
- "async-stream",
- "futures",
+ "rusty_stream",
+ "rusty_tokio",
  "serde_json",
- "tokio",
- "tokio-test",
 ]
 
 [[package]]
@@ -301,9 +294,8 @@ dependencies = [
  "adk-core",
  "async-trait",
  "rusty_sqlite",
+ "rusty_tokio",
  "serde_json",
- "tokio",
- "tokio-test",
 ]
 
 [[package]]
@@ -312,7 +304,7 @@ version = "0.1.0"
 dependencies = [
  "adk-core",
  "async-trait",
- "futures",
+ "rusty_stream",
  "serde",
  "serde_json",
 ]
@@ -11400,10 +11392,9 @@ dependencies = [
  "adk-runner",
  "adk-sessions",
  "adk-tools",
- "futures",
+ "rusty_stream",
+ "rusty_tokio",
  "serde_json",
- "tokio",
- "tokio-test",
 ]
 
 [[package]]
@@ -17060,8 +17051,8 @@ dependencies = [
 name = "weather-agent"
 version = "0.1.0"
 dependencies = [
- "futures",
  "rusty-adk",
+ "rusty_stream",
  "serde_json",
  "tokio",
 ]
