@@ -1,5 +1,7 @@
 # BBP concurrency: parallel posting and co-edited artifacts (design, no implementation)
 
+> **2026-10-26:** the `rusty_crdt` parts of this note (§f, Appendix A, Appendix B) are revisited in `docs/rusty-crdt-extraction-note.md`. Since #1052 a private RGA-ordered fold ships in `rusty_bbp` (`coedit.rs`), and Appendix A's id contract misses a freshness check.
+
 Step 6, design only. Waits for owner approval. Builds on `docs/bbp-role-audit.md` (the nine Role fields), `crates/libs/protocol/rusty_bbp/docs/spec/bbp-v0.5-implementation-spec.md` (branch `claude/stoic-pasteur-gg75fs`, `37542c4c`), and the event-driven note (branch `claude/bbp-event-driven-design`, `fc972cbe`, accepted as Phase 1 only).
 
 ## Decisions (owner, 2026-10-13)
