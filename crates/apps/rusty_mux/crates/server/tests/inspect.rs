@@ -160,6 +160,25 @@ fn terminal_methods_read_the_title_and_working_directory() {
 }
 
 #[test]
+fn terminal_status_reads_the_programs_reports() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, INSPECT, None);
+    let block = block_for(&mut client);
+    assert_eq!(text(&mut client, block, "terminal.status", &[]), "");
+
+    // `aGk=` is "hi"; the malformed report is dropped.
+    client.input(
+        block,
+        b"printf '\\033]7501;state=blocked:kind=question:app=sh:msg=aGk=\\007\\033]7501;id=x\\007\\033]7501;state=done:id=job\\007'; echo ST$((1+1))\r",
+    );
+    client.wait_for(block, "ST2");
+    assert_eq!(
+        text(&mut client, block, "terminal.status", &[]),
+        "state=blocked:kind=question:app=sh:msg=aGk=\nstate=done:id=job:app=sh"
+    );
+}
+
+#[test]
 fn block_calls_are_checked_against_the_catalog() {
     let path = start_server();
     let mut client = Client::connect_with(&path, INSPECT, None);

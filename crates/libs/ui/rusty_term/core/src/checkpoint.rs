@@ -654,6 +654,8 @@ mod tests {
             ("clipboard_query", "pending host clipboard query"),
             ("clipboard_query_primary", "pending host clipboard query"),
             ("notifications", "pending host notifications"),
+            ("collect_program_status", "host configuration"),
+            ("program_status", "pending host status signals"),
             ("ime_preedit", "GUI input composition"),
             ("total_scrolled", "GUI overlay image anchor"),
             (

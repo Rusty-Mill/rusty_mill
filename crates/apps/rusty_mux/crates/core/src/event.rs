@@ -52,4 +52,9 @@ pub enum Event {
         block: BlockId,
         holder: Option<ClientId>,
     },
+    /// What the block's program says it is doing changed state; the
+    /// `terminal.status` block method reads it.
+    BlockStatus {
+        block: BlockId,
+    },
 }

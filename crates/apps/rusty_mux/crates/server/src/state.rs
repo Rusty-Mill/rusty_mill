@@ -9,6 +9,7 @@ use std::rc::Rc;
 use rusty_mux_core::{BlockId, ClientId, Event, Mux, Size};
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::{Code, Cursor, Entry, Features, Message, encode};
+use rusty_mux_status::Records;
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::task::JoinHandle;
 use rusty_uuid::Uuid;
@@ -37,7 +38,8 @@ const OFFERED: Features = Features::CHECKPOINT_V3
     .union(Features::EVENT_SEQ)
     .union(Features::SYNC)
     .union(Features::INSPECT)
-    .union(Features::BLOCK_CALL);
+    .union(Features::BLOCK_CALL)
+    .union(Features::STATUS);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -47,6 +49,8 @@ struct BlockRt {
     process: Process,
     grid: Grid,
     parser: AnsiParser,
+    /// What the program reported with OSC 7501.
+    status: Records,
     reader: JoinHandle<()>,
 }
 
@@ -103,7 +107,7 @@ impl State {
         let features = theirs.intersection(OFFERED);
         self.features.insert(client, features);
         let (cursor, missed) = if features.contains(Features::EVENT_SEQ) {
-            let (cursor, missed) = self.missed(resume);
+            let (cursor, missed) = self.missed(resume, features);
             (Some(cursor), missed)
         } else {
             (None, Vec::new())
@@ -122,13 +126,15 @@ impl State {
     }
 
     /// Where a client's stream starts, and the events it missed: from
-    /// `resume` when possible, else from now with nothing to replay.
-    fn missed(&self, resume: Option<Cursor>) -> (Cursor, Vec<Message>) {
+    /// `resume` when possible, else from now with nothing to replay. Only
+    /// events its `features` let it receive are replayed.
+    fn missed(&self, resume: Option<Cursor>, features: Features) -> (Cursor, Vec<Message>) {
         let replay = resume.and_then(|from| Some((from, self.history.since(from)?)));
         let Some((from, events)) = replay else {
             return (self.history.cursor(), Vec::new());
         };
         let messages = events
+            .filter(|(_, event)| receives(features, event))
             .map(|(seq, event)| Message::Event {
                 seq: Some(*seq),
                 event: event.clone(),
@@ -304,6 +310,7 @@ impl State {
             "terminal.pwd" => terminal::pwd(&rt.grid, rt.process.pid())
                 .ok_or("the program's working directory is unknown")?,
             "terminal.title" => rt.grid.title.clone(),
+            "terminal.status" => rt.status.bodies().join("\n"),
             _ => return Err(unknown()),
         };
         reply(method, &[Message::Text { req, text }])
@@ -367,7 +374,8 @@ impl State {
         let pty = Rc::new(pty);
         self.mux.add_block(block, window, size)?;
         let reader = rusty_tokio::task::spawn_local(pump(shared.clone(), block, pty.clone()));
-        let grid = crate::checkpoint::grid(size);
+        let mut grid = crate::checkpoint::grid(size);
+        grid.collect_program_status = true;
         self.blocks.insert(
             block,
             BlockRt {
@@ -375,6 +383,7 @@ impl State {
                 process,
                 grid,
                 parser: AnsiParser::new(),
+                status: Records::default(),
                 reader,
             },
         );
@@ -446,6 +455,11 @@ impl State {
         };
         rt.parser.advance(&mut rt.grid, data);
         let replies = rt.parser.take_responses();
+        if terminal::absorb_status(&mut rt.grid, &mut rt.status)
+            && let Err(err) = self.mux.note_status(block)
+        {
+            eprintln!("rusty-mux-server: model out of step on status: {err}");
+        }
         let frame = encode(&Message::Output {
             block,
             data: data.to_vec(),
@@ -542,6 +556,7 @@ impl State {
                 let clients: Vec<(ClientId, bool)> = self
                     .features
                     .iter()
+                    .filter(|(_, f)| receives(**f, &event))
                     .map(|(c, f)| (*c, f.contains(Features::EVENT_SEQ)))
                     .collect();
                 for (client, numbers) in clients {
@@ -551,6 +566,13 @@ impl State {
             }
         }
     }
+}
+
+/// Whether a client with `features` is sent `event`: a status event only
+/// with [`Features::STATUS`], so older clients never see a kind they can't
+/// decode.
+fn receives(features: Features, event: &Event) -> bool {
+    !matches!(event, Event::BlockStatus { .. }) || features.contains(Features::STATUS)
 }
 
 fn event_frame(seq: Option<u64>, event: &Event) -> Option<Vec<u8>> {
