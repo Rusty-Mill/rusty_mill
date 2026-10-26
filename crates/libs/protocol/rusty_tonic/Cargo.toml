@@ -40,6 +40,10 @@ name = "tonic_codec"
 required-features = ["tonic-codec"]
 
 [[test]]
+name = "bridge"
+required-features = ["rusty-tokio"]
+
+[[test]]
 name = "client_calls"
 required-features = ["rusty-tokio"]
 
@@ -75,11 +79,14 @@ tonic = { workspace = true, features = ["router"] }
 # The oracle server's message type and codec, and its runtime (never shipped).
 tonic-prost = { workspace = true }
 prost = { workspace = true }
+# Hosts the tonic oracle server in `client_tonic` (tonic needs a tokio runtime).
 tokio = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 tower = { workspace = true }
-futures-util = { workspace = true }
+# The oracle's streams are `futures_core::Stream`s, built with `rusty_stream`.
+futures-core = { workspace = true }
+rusty_stream = { path = "../../async/rusty_stream", features = ["futures-core"] }
 # Throwaway certificates for the TLS tests; `CertificateDer` names the pinned anchors.
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }

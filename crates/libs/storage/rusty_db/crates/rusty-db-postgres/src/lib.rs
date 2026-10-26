@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
+use rusty_stream::{Compat, StreamExt};
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow};
 use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -764,13 +764,14 @@ impl Connection for PostgresConnection {
         params: Vec<Value>,
     ) -> rusty_db_core::BoxStream<'static, Result<Row>> {
         let PostgresConnection { mut conn } = *self;
-        Box::pin(async_stream::try_stream! {
+        rusty_stream::try_stream! {
             let query = bind_params!(sqlx::query(AssertSqlSafe(sql.as_str())), &params);
-            let mut rows = query.fetch(&mut *conn);
+            let mut rows = Compat::new(query.fetch(&mut *conn));
             while let Some(row) = rows.next().await {
                 yield row_from_postgres(&row.map_err(to_core_err)?)?;
             }
-        })
+        }
+        .boxed()
     }
 }
 

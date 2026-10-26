@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use futures_core::stream::BoxStream;
-use futures_util::StreamExt;
+use rusty_stream::{BoxStream, StreamExt};
 
 use crate::backup::{DatabaseDump, TableDump};
 use crate::connection::{Connection, Driver};

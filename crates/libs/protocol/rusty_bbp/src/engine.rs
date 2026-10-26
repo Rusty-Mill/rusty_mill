@@ -561,7 +561,7 @@ fn put_artifact(
 }
 
 /// A co-edited spec edit: it references the brief, is well formed against
-/// its base, and touches no section changed since that base. Its ops then
+/// its base, and is anchored on no line edited since that base. Its ops then
 /// apply to the head, which may be later than the base (step 4).
 fn check_edit(st: &TaskState, e: &SpecEdit) -> R<()> {
     if Some(e.brief) != st.brief {
@@ -581,19 +581,18 @@ fn check_edit(st: &TaskState, e: &SpecEdit) -> R<()> {
         ));
     };
     coedit::validate(doc, &e.ops)?;
-    let head_doc = st.doc(head).unwrap_or(doc);
-    let clash = coedit::overlap(head_doc, doc, &e.ops, &since);
+    let clash = coedit::overlap(&e.ops, &since);
     if clash.is_empty() {
         return Ok(());
     }
     let names: Vec<String> = clash
         .iter()
-        .map(|s| s.map_or("the preamble".into(), |l| format!("{}#{}", l.art, l.n)))
+        .map(|a| a.map_or("the start".into(), |l| format!("{}#{}", l.art, l.n)))
         .collect();
     Err(rej(
         Code::StaleBase,
         format!(
-            "sections changed between {base} and the head {head}: {}",
+            "lines edited between {base} and the head {head}: {}",
             names.join(", ")
         ),
     ))

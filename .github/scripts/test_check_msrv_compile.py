@@ -14,6 +14,8 @@ from pathlib import Path
 from check_msrv_compile import (
     STRIP_COMPILER_FLAGS,
     check_commands,
+    describe,
+    featured_members,
     format_version,
     msrv_groups,
     parse_version,
@@ -21,10 +23,15 @@ from check_msrv_compile import (
 )
 
 
-def metadata(members: dict[str, str | None], outsiders: dict[str, str | None] | None = None) -> dict:
-    """`name -> rust-version` for workspace members, and for packages outside the workspace."""
-    packages = [{"id": n, "name": n, "rust_version": v} for n, v in members.items()]
-    packages += [{"id": n, "name": n, "rust_version": v} for n, v in (outsiders or {}).items()]
+def metadata(
+    members: dict[str, str | None],
+    outsiders: dict[str, str | None] | None = None,
+    features: dict[str, list[str]] | None = None,
+) -> dict:
+    """`name -> rust-version` for workspace members and for packages outside it; `features` by name."""
+    feats = features or {}
+    every = {**members, **(outsiders or {})}
+    packages = [{"id": n, "name": n, "rust_version": v, "features": dict.fromkeys(feats.get(n, []), [])} for n, v in every.items()]
     return {"workspace_members": list(members), "packages": packages}
 
 
@@ -83,6 +90,22 @@ class CheckCommandsTests(unittest.TestCase):
             self.assertEqual(command[command.index("--target-dir") + 1], "target/msrv/1.75.0")
             self.assertEqual(command.count("-p"), 1)
             self.assertEqual(command[command.index("-p") + 1], name)
+            self.assertNotIn("--all-features", command)
+
+    def test_a_featured_member_gets_an_all_features_check_right_after_its_default_one(self) -> None:
+        commands = check_commands(["a", "b", "c"], "t", all_features=frozenset({"b", "z"}))
+        self.assertEqual([describe(c) for c in commands], ["a", "b", "b (--all-features)", "c"])
+        self.assertEqual(commands[2], [*commands[1], "--all-features"])
+
+
+class FeaturedMembersTests(unittest.TestCase):
+    def test_members_with_a_feature_beyond_default_are_featured(self) -> None:
+        md = metadata(
+            {"a": "1.75", "b": "1.75", "c": "1.75", "d": None},
+            {"dep": "1.60"},
+            features={"a": ["default"], "b": ["default", "std"], "c": ["serde"], "d": ["x"], "dep": ["x"]},
+        )
+        self.assertEqual(featured_members(md), frozenset({"b", "c", "d"}))
 
 
 @unittest.skipUnless(shutil.which("cargo"), "needs cargo")
@@ -123,6 +146,13 @@ class MemberFeatureIsolationTests(unittest.TestCase):
         per_member = check_commands(["a", "b"], target)
         self.assertNotEqual(self.returncode(per_member[0]), 0)
         self.assertEqual(self.returncode(per_member[1]), 0)
+
+    def test_the_all_features_check_exposes_what_the_default_one_hides(self) -> None:
+        # `a`'s `std` feature now breaks it; its default build is fine.
+        (self.root / "a/src/lib.rs").write_text('#[cfg(feature = "std")]\ncompile_error!("std needs a newer rustc");\n')
+        commands = check_commands(["a"], str(self.root / "target"), all_features=frozenset({"a"}))
+        self.assertEqual([self.returncode(c) for c in commands][0], 0)
+        self.assertNotEqual(self.returncode(commands[1]), 0)
 
 
 class RustcEnvTests(unittest.TestCase):

@@ -44,7 +44,7 @@ async fn call(body: Vec<u8>) -> http::Response<tonic::body::Body> {
         .await
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_message_is_read_and_answered_with_rusty_prost() {
     let ping = Ping {
         text: "hi".into(),
@@ -62,7 +62,7 @@ async fn a_message_is_read_and_answered_with_rusty_prost() {
     assert_eq!(trailers["grpc-status"], "0");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_body_that_is_not_the_message_is_an_internal_status() {
     // A valid frame around bytes that are not a `Ping` (a truncated length-delimited field).
     let response = call(encode_frame(&[0x0a, 0x09, b'x']).unwrap()).await;

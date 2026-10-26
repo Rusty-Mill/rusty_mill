@@ -13,8 +13,7 @@ layer = "libs"
 [dependencies]
 rusty-db-core.workspace = true
 async-trait.workspace = true
-futures-util.workspace = true
-async-stream.workspace = true
+rusty_stream = { workspace = true, features = ["futures-core"] }
 sqlx = { workspace = true, features = ["postgres", "chrono", "bigdecimal", "json", "uuid"] }
 
 [dev-dependencies]
