@@ -44,6 +44,7 @@ members = [
     "crates/foundation/rusty_regx",
     "crates/foundation/rusty_win32",
     "crates/foundation/rpath",
+    "crates/foundation/rusty_crdt",
     "crates/foundation/rusty_diff",
     "crates/foundation/rusty_compress",
     "crates/libs/rusty_git",
