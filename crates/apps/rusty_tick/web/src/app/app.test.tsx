@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { INBOX_ID } from '@/api/memory'
 import { applyImport, readImport } from '@/features/import'
 import { addDays, atTime, startOfDay } from '@/lib/date'
+import { newId } from '@/lib/id'
 import { renderApp } from '@/test/renderApp'
 
 const opts = { advanceTimers: undefined }
@@ -702,6 +703,18 @@ describe('large lists', () => {
     await waitFor(async () => expect(await api.listDocs('comment')).toHaveLength(1))
     await user.click(within(pane).getByRole('button', { name: 'Delete comment' }))
     await waitFor(async () => expect(await api.listDocs('comment')).toHaveLength(0))
+  })
+  it("names a comment's author when an agent wrote it", async () => {
+    const user = userEvent.setup()
+    await renderApp('/p/inbox/tasks', async (a) => {
+      const t = await a.createTask({ listId: INBOX_ID, title: 'worked by an agent' })
+      await a.putDoc('comment', newId(), { v: 1, taskId: t.id, text: 'tests pass', createdMs: 1, by: 'claude-1' })
+    })
+    await user.click(await screen.findByText('worked by an agent'))
+    const pane = await screen.findByRole('complementary', { name: 'Task details' })
+    await user.click(within(pane).getByRole('button', { name: 'Comments' }))
+    expect(await within(pane).findByText('tests pass')).toBeInTheDocument()
+    expect(within(pane).getByText(/claude-1/)).toBeInTheDocument()
   })
 })
 

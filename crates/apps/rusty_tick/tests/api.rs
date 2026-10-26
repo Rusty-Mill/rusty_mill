@@ -14,6 +14,14 @@ const NOW: i64 = 1_790_596_800_000;
 const HOUR: i64 = 3_600_000;
 const DAY: i64 = 24 * HOUR;
 
+/// A request's precondition headers.
+#[derive(Default)]
+struct Conditions<'a> {
+    if_match: Option<&'a str>,
+    if_none_match: Option<&'a str>,
+    if_task_match: Option<&'a str>,
+}
+
 struct Harness {
     backend: Backend,
     clock: Arc<AtomicI64>,
@@ -48,12 +56,34 @@ impl Harness {
         auth: Option<&str>,
         if_match: Option<&str>,
     ) -> (u16, Value) {
+        self.send_conditional(
+            method,
+            target,
+            body,
+            auth,
+            Conditions {
+                if_match,
+                ..Conditions::default()
+            },
+        )
+    }
+
+    fn send_conditional(
+        &mut self,
+        method: Method,
+        target: &str,
+        body: &str,
+        auth: Option<&str>,
+        when: Conditions<'_>,
+    ) -> (u16, Value) {
         let header = auth.map(|t| format!("Bearer {t}"));
         let request = Request {
             method: &method,
             target,
             authorization: header.as_deref(),
-            if_match,
+            if_match: when.if_match,
+            if_none_match: when.if_none_match,
+            if_task_match: when.if_task_match,
             body: body.as_bytes(),
         };
         let response = self.backend.handle(&request);
@@ -1137,4 +1167,190 @@ fn a_task_can_be_created_at_an_explicit_position() {
     h.task(&list, r#""title":"on top","sortOrder":-5000"#);
     let (_, v) = h.call(Method::Get, &format!("/api/v1/lists/{list}/tasks"), "");
     assert_eq!(titles(&v), ["on top", "appended"]);
+}
+
+#[test]
+fn a_board_document_is_fenced_by_its_task_and_by_itself() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let t = h.task(&list, r#""title":"card""#);
+    let id = t["id"].as_str().unwrap().to_string();
+    let v1 = t["etag"].as_str().unwrap().to_string();
+    let path = format!("/api/v1/docs/board/{id}");
+    let mut put = |h: &mut Harness, when: Conditions<'_>, gen: u32| {
+        let body = format!(r#"{{"v":1,"generation":{gen}}}"#);
+        h.send_conditional(Method::Put, &path, &body, Some(TOKEN), when)
+    };
+
+    let (s, _) = put(&mut h, Conditions::default(), 1);
+    assert_eq!(s, 400, "a board document needs If-Task-Match");
+
+    let create = Conditions {
+        if_none_match: Some("*"),
+        if_task_match: Some(&v1),
+        ..Conditions::default()
+    };
+    let (s, doc) = put(&mut h, create, 1);
+    assert_eq!(s, 200, "{doc:?}");
+    let e1 = doc["etag"].as_str().unwrap().to_string();
+    let create = Conditions {
+        if_none_match: Some("*"),
+        if_task_match: Some(&v1),
+        ..Conditions::default()
+    };
+    let (s, v) = put(&mut h, create, 9);
+    assert_eq!(s, 412, "If-None-Match: * refuses an existing document");
+    assert_eq!(v["current"]["body"]["generation"], 1);
+
+    let next = Conditions {
+        if_match: Some(&e1),
+        if_task_match: Some(&v1),
+        ..Conditions::default()
+    };
+    let (s, doc) = put(&mut h, next, 2);
+    assert_eq!(s, 200);
+    let e2 = doc["etag"].as_str().unwrap().to_string();
+    assert_ne!(e1, e2, "the etag moves even within one millisecond");
+    let stale = Conditions {
+        if_match: Some(&e1),
+        if_task_match: Some(&v1),
+        ..Conditions::default()
+    };
+    assert_eq!(
+        put(&mut h, stale, 3).0,
+        412,
+        "a stale document etag is refused"
+    );
+
+    h.call(
+        Method::Patch,
+        &format!("/api/v1/tasks/{id}"),
+        r#"{"title":"moved"}"#,
+    );
+    let fenced = Conditions {
+        if_match: Some(&e2),
+        if_task_match: Some(&v1),
+        ..Conditions::default()
+    };
+    let (s, v) = put(&mut h, fenced, 3);
+    assert_eq!(
+        s, 412,
+        "a write authorized against an older task is refused"
+    );
+    assert_eq!(
+        v["current"]["title"], "moved",
+        "and the response carries the task"
+    );
+
+    let (s, v) = h.call(Method::Get, &path, "");
+    assert_eq!((s, v["body"]["generation"].as_i64()), (200, Some(2)));
+    assert_eq!(v["etag"], e2.as_str());
+}
+
+#[test]
+fn a_board_document_needs_a_task_that_is_not_in_the_trash() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let when = Conditions {
+        if_task_match: Some("1"),
+        ..Conditions::default()
+    };
+    let nowhere = format!("/api/v1/docs/board/{}", uuid::Uuid::now_v7());
+    assert_eq!(
+        h.send_conditional(Method::Put, &nowhere, "{}", Some(TOKEN), when)
+            .0,
+        404
+    );
+
+    let t = h.task(&list, r#""title":"binned""#);
+    let id = t["id"].as_str().unwrap();
+    h.call(Method::Delete, &format!("/api/v1/tasks/{id}"), "");
+    let version = h.call(Method::Get, &format!("/api/v1/tasks/{id}"), "").1["etag"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let when = Conditions {
+        if_task_match: Some(&version),
+        ..Conditions::default()
+    };
+    let path = format!("/api/v1/docs/board/{id}");
+    assert_eq!(
+        h.send_conditional(Method::Put, &path, "{}", Some(TOKEN), when)
+            .0,
+        422
+    );
+}
+
+#[test]
+fn a_purge_takes_the_task_board_document_with_it() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let mut board_doc = |h: &mut Harness| {
+        let t = h.task(&list, r#""title":"card""#);
+        let id = t["id"].as_str().unwrap().to_string();
+        let when = Conditions {
+            if_task_match: t["etag"].as_str(),
+            ..Conditions::default()
+        };
+        let path = format!("/api/v1/docs/board/{id}");
+        let (s, _) = h.send_conditional(Method::Put, &path, "{}", Some(TOKEN), when);
+        assert_eq!(s, 200);
+        (id, path)
+    };
+    let (purged, purged_doc) = board_doc(&mut h);
+    let (binned, binned_doc) = board_doc(&mut h);
+
+    h.call(Method::Delete, &format!("/api/v1/tasks/{purged}"), "");
+    assert_eq!(
+        h.call(Method::Get, &purged_doc, "").0,
+        200,
+        "the trash keeps it"
+    );
+    h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{purged}?permanent=true"),
+        "",
+    );
+    assert_eq!(h.call(Method::Get, &purged_doc, "").0, 404);
+
+    h.call(Method::Delete, &format!("/api/v1/tasks/{binned}"), "");
+    h.call(Method::Delete, "/api/v1/trash", "");
+    assert_eq!(
+        h.call(Method::Get, &binned_doc, "").0,
+        404,
+        "emptying the trash does too"
+    );
+}
+
+#[test]
+fn document_preconditions_and_single_reads() {
+    let (_d, mut h) = harness();
+    let id = uuid::Uuid::now_v7();
+    let path = format!("/api/v1/docs/habit/{id}");
+    assert_eq!(h.call(Method::Get, &path, "").0, 404);
+
+    let when = Conditions {
+        if_match: Some("123"),
+        ..Conditions::default()
+    };
+    let (s, v) = h.send_conditional(Method::Put, &path, "{}", Some(TOKEN), when);
+    assert_eq!(s, 412, "If-Match on a missing document");
+    assert!(v["current"].is_null());
+
+    let when = Conditions {
+        if_none_match: Some("\"5\""),
+        ..Conditions::default()
+    };
+    let (s, _) = h.send_conditional(Method::Put, &path, "{}", Some(TOKEN), when);
+    assert_eq!(s, 400, "only If-None-Match: * is understood");
+
+    assert_eq!(h.call(Method::Put, &path, r#"{"name":"Read"}"#).0, 200);
+    let (s, v) = h.call(Method::Get, &path, "");
+    assert_eq!((s, v["body"]["name"].as_str()), (200, Some("Read")));
+    assert_eq!(
+        h.call(Method::Get, &format!("/api/v1/docs/focus/{id}"), "")
+            .0,
+        404,
+        "a document is read under its own kind"
+    );
 }

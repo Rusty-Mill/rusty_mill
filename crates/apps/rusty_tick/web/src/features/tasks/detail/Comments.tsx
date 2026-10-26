@@ -8,6 +8,8 @@ interface CommentBody {
   taskId: string
   text: string
   createdMs: number
+  /** Who wrote it, when not the owner: an agent's name, set by Mill Board. */
+  by?: string
 }
 interface Comment extends CommentBody {
   id: string
@@ -15,7 +17,9 @@ interface Comment extends CommentBody {
 
 const asBody = (b: unknown): CommentBody | null => {
   const o = b as Partial<CommentBody> | null
-  return o && typeof o.taskId === 'string' && typeof o.text === 'string' && typeof o.createdMs === 'number' ? { v: 1, taskId: o.taskId, text: o.text, createdMs: o.createdMs } : null
+  if (!o || typeof o.taskId !== 'string' || typeof o.text !== 'string' || typeof o.createdMs !== 'number') return null
+  const body: CommentBody = { v: 1, taskId: o.taskId, text: o.text, createdMs: o.createdMs }
+  return typeof o.by === 'string' && o.by ? { ...body, by: o.by } : body
 }
 
 /** A task's comments, oldest first. Each is a `comment` document naming its task. */
@@ -71,9 +75,12 @@ export function Comments({ taskId, disabled }: { taskId: string; disabled: boole
           <li key={c.id} className="group flex items-start gap-2 rounded-row bg-side px-3 py-2">
             <div className="min-w-0 flex-1">
               <p className="whitespace-pre-wrap break-words">{c.text}</p>
-              <time className="text-s text-grey" dateTime={new Date(c.createdMs).toISOString()}>
-                {new Date(c.createdMs).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
-              </time>
+              <p className="text-s text-grey">
+                {c.by && <span>{c.by} · </span>}
+                <time dateTime={new Date(c.createdMs).toISOString()}>
+                  {new Date(c.createdMs).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                </time>
+              </p>
             </div>
             {!disabled && (
               <button type="button" aria-label="Delete comment" onClick={() => remove(c)} className="hidden h-6 w-6 items-center justify-center rounded text-grey hover:bg-hover group-focus-within:flex group-hover:flex">

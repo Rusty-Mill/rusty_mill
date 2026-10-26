@@ -4,7 +4,7 @@
 //! No I/O beyond the stores, and no HTTP: the router in [`crate::api`]
 //! translates requests into calls on [`Service`].
 
-use crate::docs::{Doc, DocStore, KINDS, MAX_DOC_BYTES};
+use crate::docs::{Doc, DocStore, BOARD_KIND, KINDS, MAX_DOC_BYTES};
 use crate::lists::{ListStore, TaskList, ViewMode, INBOX_ID};
 use crate::store::{TaskStore, TickError, SORT_STEP};
 use crate::tags::{tag_name, Tag, TagStore};
@@ -498,8 +498,7 @@ impl Service {
             gone.push(child.id);
         }
         self.tasks.delete(id)?;
-        self.docs.delete_comments_of(&gone)?;
-        Ok(())
+        self.forget_docs_of(&gone)
     }
 
     /// Permanently delete everything in the trash; returns how many tasks went.
@@ -514,8 +513,15 @@ impl Service {
         for id in &trashed {
             self.tasks.delete(*id)?;
         }
-        self.docs.delete_comments_of(&trashed)?;
+        self.forget_docs_of(&trashed)?;
         Ok(trashed.len())
+    }
+
+    /// Delete the documents that belong to purged tasks: comments and board documents.
+    fn forget_docs_of(&mut self, gone: &[Uuid]) -> Result<()> {
+        self.docs.delete_comments_of(gone)?;
+        self.docs.delete_board_of(gone)?;
+        Ok(())
     }
 
     /// Set a task's manual position. Rewrites one durable slot.
@@ -785,7 +791,18 @@ impl Service {
         Ok(self.docs.of_kind(kind))
     }
 
-    /// Insert or replace a document; `body` must be JSON.
+    /// One document of `kind`.
+    pub fn doc(&self, kind: &str, id: Uuid) -> Result<Doc> {
+        check_kind(kind)?;
+        match self.docs.get(id) {
+            Some(doc) if doc.kind == kind => Ok(doc),
+            _ => Err(ServiceError::NotFound("document")),
+        }
+    }
+
+    /// Insert or replace a document; `body` must be JSON. `updated_ms` is the
+    /// document's ETag, so it moves forward on every write even within one
+    /// millisecond. A `board` document's id must be a task not in the trash.
     pub fn put_doc(&mut self, kind: &str, id: Uuid, body: &str) -> Result<Doc> {
         check_kind(kind)?;
         if body.len() > MAX_DOC_BYTES {
@@ -794,27 +811,27 @@ impl Service {
         if rusty_json::from_str::<rusty_json::Value>(body).is_err() {
             return invalid("document must be JSON");
         }
-        if let Some(existing) = self.docs.get(id) {
-            if existing.kind != kind {
-                return Err(ServiceError::Conflict("id belongs to another kind".into()));
-            }
+        let existing = self.docs.get(id);
+        if existing.as_ref().is_some_and(|e| e.kind != kind) {
+            return Err(ServiceError::Conflict("id belongs to another kind".into()));
         }
+        if kind == BOARD_KIND && self.task(id)?.is_deleted() {
+            return invalid("a board document needs a task that is not in the trash");
+        }
+        let now = self.now();
         let doc = Doc {
             id,
             kind: kind.to_string(),
             body: body.to_string(),
-            updated_ms: self.now(),
+            updated_ms: existing.map_or(now, |e| now.max(e.updated_ms.saturating_add(1))),
         };
         self.docs.put(doc.clone())?;
         Ok(doc)
     }
 
     pub fn delete_doc(&mut self, kind: &str, id: Uuid) -> Result<()> {
-        check_kind(kind)?;
-        match self.docs.get(id) {
-            Some(doc) if doc.kind == kind => Ok(self.docs.delete(id)?),
-            _ => Err(ServiceError::NotFound("document")),
-        }
+        self.doc(kind, id)?;
+        Ok(self.docs.delete(id)?)
     }
 
     // ---- shared helpers ----------------------------------------------
