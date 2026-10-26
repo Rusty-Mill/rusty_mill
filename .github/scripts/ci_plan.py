@@ -85,6 +85,7 @@ def full_plan_outputs() -> dict[str, str]:
         "packages": "",
         "ci_only": "false",
         **{job: "true" for job in SPECIALIZED_JOB_NAMES},
+        "msrv_manifests": "",
         "shards": "[1,2,3]",
         "components": '[{"component":"workspace","packages":""}]',
     }
@@ -97,6 +98,7 @@ def ci_smoke_plan_outputs(changed_paths: Iterable[str] = ()) -> dict[str, str]:
         "packages": "",
         "ci_only": "true",
         **{job: str(enabled).lower() for job, enabled in specialized_job_flags(changed_paths, ()).items()},
+        "msrv_manifests": "",
         "shards": "[1]",
         "components": '[]',
     }
@@ -361,6 +363,16 @@ def specialized_job_flags(
     return flags
 
 
+def member_manifests(changed_paths: Iterable[str]) -> str:
+    """Space-separated changed crate manifests: the scope of msrv-compile on a scoped run.
+
+    A crate's floor moves with its own manifest (rust-version, a new or optional
+    dependency); the workspace root's manifest declares no crate. A code-only or
+    lockfile-only change is left to the scheduled full sweep.
+    """
+    return " ".join(sorted({path for path in changed_paths if path.endswith("/Cargo.toml")}))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -431,6 +443,7 @@ def main() -> None:
     flags = specialized_job_flags(paths, args.packages.split())
     for job, enabled in flags.items():
         print(f"{job}={'true' if enabled else 'false'}")
+    print(f"msrv_manifests={member_manifests(paths)}")
 
 
 if __name__ == "__main__":

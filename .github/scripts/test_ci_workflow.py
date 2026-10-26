@@ -44,10 +44,11 @@ PLAN_KEYS = {
     "rleval_image",
     "crypto_ct",
     "rand_platforms",
+    "msrv_manifests",
     "shards",
     "components",
 }
-SPECIALIZED_KEYS = PLAN_KEYS - {"full", "packages", "ci_only", "shards", "components"}
+SPECIALIZED_KEYS = PLAN_KEYS - {"full", "packages", "ci_only", "msrv_manifests", "shards", "components"}
 
 
 class CiWorkflowSchedulingTests(unittest.TestCase):
@@ -329,7 +330,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         outputs = self._planner_map(
             "--packages", "rk-app rusty_term rusty-meshed-core rusty_tick"
         )
-        self.assertEqual(set(outputs), SPECIALIZED_KEYS)
+        self.assertEqual(set(outputs), SPECIALIZED_KEYS | {"msrv_manifests"})
         self.assertEqual(outputs["key_desktop"], "true")
         self.assertEqual(outputs["term_web"], "true")
         self.assertEqual(outputs["dashboard"], "true")
@@ -679,7 +680,9 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_msrv_compile_job_builds_at_declared_floors_and_gates(self) -> None:
         job = self.workflow.split("  msrv-compile:\n")[1].split("  rusty-config-no-std-check:\n")[0]
         self.assertIn("needs: plan", job)
-        self.assertIn("needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''", job)
+        self.assertIn("(needs.plan.outputs.full == 'true' || needs.plan.outputs.msrv_manifests != '')", job)
+        self.assertIn('scope=(--manifests "$PLAN_MANIFESTS")', job)
+        self.assertIn("msrv_manifests: ${{ steps.plan.outputs.msrv_manifests }}", self.workflow)
         self.assertIn("check_msrv_compile.py", job)
         # The pinned toolchain's own versions are covered elsewhere (compared as full versions); builds stay
         # out of the cached target dir; metadata is locked and Cargo.lock must come out unchanged.
@@ -701,6 +704,22 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("'rusty_journal rusty_fedora_agent'", job)
         self.assertIn("shell: bash", job)
         self.assertIn("      - msrv-compile\n", self.workflow.split("  required-gate:\n", 1)[1])
+
+    def test_msrv_scope_is_the_crates_whose_own_manifest_changed(self) -> None:
+        changed = (
+            "crates/libs/net/rusty_axum/Cargo.toml\n"
+            "crates/libs/net/rusty_axum/src/lib.rs\n"
+            "crates/libs/a/Cargo.toml\n"
+            "Cargo.toml\n"
+            "Cargo.lock\n"
+            "crates/libs/b/NotCargo.toml\n"
+        )
+        outputs = self._planner_map("--packages", "rusty_axum a dependent", input=changed)
+        self.assertEqual(outputs["msrv_manifests"], "crates/libs/a/Cargo.toml crates/libs/net/rusty_axum/Cargo.toml")
+        # Code-only, lockfile-only and root-manifest changes leave it to the scheduled sweep.
+        code_only = self._planner_map("--packages", "rusty_axum", input="Cargo.toml\nCargo.lock\nsrc/lib.rs\n")
+        self.assertEqual(code_only["msrv_manifests"], "")
+        self.assertEqual(self._planner_map("--emit-full")["msrv_manifests"], "")
 
     def test_rusty_axum_floors_match_the_manifests(self) -> None:
         # The default build is held to rusty_axum's own rust-version; the all-features floor is exactly
