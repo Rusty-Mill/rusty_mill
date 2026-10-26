@@ -1,15 +1,18 @@
 //! Helpers shared by the server's integration tests: a real server on a
-//! Unix socket and a blocking test client.
+//! Unix socket and a blocking test client, on Linux and Windows.
 
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+use platform_windows::WindowsUnixStream as UnixStream;
 use rusty_mux_core::{BlockId, ClientId, Event, SessionId, Size, WindowId};
 use rusty_mux_proto::{Cursor, Features, Message, decode, encode};
 use rusty_mux_server::{Config, serve};
@@ -19,13 +22,50 @@ use rusty_tokio::{Builder, LocalOptions};
 
 pub const PATIENCE: Duration = Duration::from_secs(20);
 
-/// Starts a server running `/bin/sh` in each block; returns its socket.
+#[cfg(unix)]
+pub fn connect(path: &Path) -> std::io::Result<UnixStream> {
+    UnixStream::connect(path)
+}
+
+#[cfg(windows)]
+pub fn connect(path: &Path) -> std::io::Result<UnixStream> {
+    UnixStream::connect(path).map_err(|e| std::io::Error::other(format!("{e:?}")))
+}
+
+/// The shell each test block runs: `/bin/sh` in `/`, or `cmd.exe /Q` (no
+/// command echo, so less re-rendered text crosses ConPTY) in the temp
+/// directory.
+pub fn shell() -> Config {
+    if cfg!(windows) {
+        Config {
+            program: "cmd.exe".into(),
+            args: vec!["/Q".into()],
+            cwd: std::env::temp_dir().into_os_string(),
+        }
+    } else {
+        Config {
+            program: "/bin/sh".into(),
+            args: Vec::new(),
+            cwd: "/".into(),
+        }
+    }
+}
+
+/// A command whose output differs from its echo, and the output: seeing it
+/// proves the shell ran the command. `cmd.exe` drops the `^` escape, while
+/// the echoed line keeps it.
+pub fn marker(n: u32) -> (String, String) {
+    let input = if cfg!(windows) {
+        format!("echo MARK^{}\r", n * 2)
+    } else {
+        format!("echo MARK$(({n}*2))\r")
+    };
+    (input, format!("MARK{}", n * 2))
+}
+
+/// Starts a server running [`shell`] in each block; returns its socket.
 pub fn start_server() -> PathBuf {
-    start_server_with(Config {
-        program: "/bin/sh".into(),
-        args: Vec::new(),
-        cwd: "/".into(),
-    })
+    start_server_with(shell())
 }
 
 /// Starts a server on a fresh socket and returns its path.
@@ -70,12 +110,12 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn connect(path: &PathBuf) -> Self {
+    pub fn connect(path: &Path) -> Self {
         Self::connect_with(path, Features::CHECKPOINT_V3, None)
     }
 
-    pub fn connect_with(path: &PathBuf, features: Features, resume: Option<Cursor>) -> Self {
-        let stream = UnixStream::connect(path).expect("connect");
+    pub fn connect_with(path: &Path, features: Features, resume: Option<Cursor>) -> Self {
+        let stream = connect(path).expect("connect");
         stream.set_read_timeout(Some(PATIENCE)).expect("timeout");
         let mut client = Self {
             stream,
@@ -273,6 +313,27 @@ impl Client {
         out.windows(needle.len()).any(|w| w == needle.as_bytes())
     }
 
+    /// Reads until `block`'s output has `key` followed by a whole number,
+    /// and returns the number.
+    pub fn wait_for_number(&mut self, block: BlockId, key: &str) -> u32 {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let out = self
+                .output
+                .get(&block)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            if let Some(n) = number_after(out, key) {
+                return n;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {key:?} and a number"
+            );
+            self.recv();
+        }
+    }
+
     pub fn snapshot(&self, block: BlockId) -> Vec<u8> {
         self.terms[&block].0.encode_snapshot()
     }
@@ -320,8 +381,25 @@ pub fn block_for(client: &mut Client) -> BlockId {
 
 /// Runs a command whose output differs from its echo, and waits for it.
 pub fn run_and_wait(writer: &mut Client, block: BlockId, n: u32) -> String {
-    let marker = format!("MARK{}", n * 2);
-    writer.input(block, format!("echo MARK$(({n}*2))\r").as_bytes());
-    writer.wait_for(block, &marker);
-    marker
+    let (input, expected) = marker(n);
+    writer.input(block, input.as_bytes());
+    writer.wait_for(block, &expected);
+    expected
+}
+
+/// The first `key` in `out` followed by digits and then something else, so
+/// the number is complete.
+fn number_after(out: &[u8], key: &str) -> Option<u32> {
+    let key = key.as_bytes();
+    out.windows(key.len())
+        .enumerate()
+        .filter(|(_, w)| *w == key)
+        .find_map(|(at, _)| {
+            let tail = &out[at + key.len()..];
+            let digits = tail.iter().take_while(|b| b.is_ascii_digit()).count();
+            if digits == 0 || digits == tail.len() {
+                return None;
+            }
+            std::str::from_utf8(&tail[..digits]).ok()?.parse().ok()
+        })
 }

@@ -12622,6 +12622,7 @@ version = "0.1.0"
 dependencies = [
  "platform",
  "platform-linux",
+ "platform-windows",
  "rusty_libc",
  "rusty_mux_core",
  "rusty_mux_proto",

@@ -15,26 +15,29 @@
 //! model, the grids and the client queues are plain `Rc<RefCell<_>>` state
 //! and every handler sees a consistent view between awaits.
 //!
-//! Phase 1 is Linux-only; [`serve`] reports `Unsupported` elsewhere.
+//! The server runs on Linux (PTYs) and Windows (ConPTY over AF_UNIX);
+//! [`serve`] reports `Unsupported` elsewhere.
 
 pub mod checkpoint;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod conn;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod history;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod outbox;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod pty;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod state;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod terminal;
 
 use std::ffi::OsString;
 use std::io;
 
 use rusty_tokio::io::UnixListener;
+#[cfg(any(target_os = "linux", windows))]
+use rusty_tokio::io::UnixStream;
 
 /// How the server starts each block's program.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,16 +53,57 @@ pub struct Config {
 /// `rusty_tokio` `LocalRuntime`, because connection and PTY tasks are
 /// spawned with `spawn_local`.
 ///
-/// Phase 1 has no authentication, so only peers running as this process's
-/// effective user are served; any other connection is closed at once. This
-/// holds whatever the socket file's permissions are.
-#[cfg(target_os = "linux")]
+/// The server has no authentication, so only peers running as this
+/// process's user are served (the effective uid on Linux, the token's user
+/// SID on Windows); any other connection is closed at once. This holds
+/// whatever the socket file's permissions are.
+#[cfg(any(target_os = "linux", windows))]
 pub async fn serve(listener: UnixListener, config: Config) -> io::Result<()> {
-    serve_for(listener, config, rusty_libc::process::geteuid()).await
+    serve_for(listener, config, peer_check).await
+}
+
+/// Whether a connection's peer may be served.
+#[cfg(any(target_os = "linux", windows))]
+pub(crate) enum Peer {
+    Allowed,
+    /// Who was refused, for the log.
+    Refused(String),
 }
 
 #[cfg(target_os = "linux")]
-async fn serve_for(listener: UnixListener, config: Config, owner: u32) -> io::Result<()> {
+fn peer_check(stream: &UnixStream) -> io::Result<Peer> {
+    owned_by(stream, rusty_libc::process::geteuid())
+}
+
+#[cfg(target_os = "linux")]
+fn owned_by(stream: &UnixStream, owner: u32) -> io::Result<Peer> {
+    let uid = stream.peer_cred()?.uid();
+    Ok(if uid == owner {
+        Peer::Allowed
+    } else {
+        Peer::Refused(format!("uid {uid}"))
+    })
+}
+
+/// The peer's process, then that process's token user, compared with ours.
+#[cfg(windows)]
+fn peer_check(stream: &UnixStream) -> io::Result<Peer> {
+    let pid = stream.peer_pid()?;
+    let mine = platform_windows::is_current_user(pid)
+        .map_err(|e| io::Error::other(format!("pid {pid}: {e:?}")))?;
+    Ok(if mine {
+        Peer::Allowed
+    } else {
+        Peer::Refused(format!("pid {pid}"))
+    })
+}
+
+#[cfg(any(target_os = "linux", windows))]
+async fn serve_for(
+    listener: UnixListener,
+    config: Config,
+    allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
+) -> io::Result<()> {
     let socket = listener
         .local_addr()
         .ok()
@@ -68,23 +112,23 @@ async fn serve_for(listener: UnixListener, config: Config, owner: u32) -> io::Re
     let state = state::State::shared(config, socket);
     loop {
         let (stream, _) = listener.accept().await?;
-        match stream.peer_cred() {
-            Ok(peer) if peer.uid() == owner => {
+        match allowed(&stream) {
+            Ok(Peer::Allowed) => {
                 rusty_tokio::task::spawn_local(conn::run(state.clone(), stream));
             }
-            Ok(peer) => eprintln!("rusty-mux-server: refusing a client of uid {}", peer.uid()),
+            Ok(Peer::Refused(who)) => eprintln!("rusty-mux-server: refusing a client of {who}"),
             Err(err) => eprintln!("rusty-mux-server: reading a client's credentials: {err}"),
         }
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 pub async fn serve(_listener: UnixListener, _config: Config) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "rusty_mux_server hosts PTYs on Linux only in Phase 1",
+        "rusty_mux_server hosts PTYs on Linux and Windows only",
     ))
 }

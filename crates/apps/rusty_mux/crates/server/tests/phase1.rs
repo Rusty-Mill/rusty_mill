@@ -1,7 +1,8 @@
 //! Phase 1 exit criteria (docs/projects/mux/ROADMAP.md), against a real
-//! server on a Unix socket with real PTYs running `/bin/sh`.
+//! server on a Unix socket with real PTYs running `/bin/sh`, or pseudo
+//! consoles running `cmd.exe` on Windows.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", windows))]
 
 mod common;
 
@@ -63,16 +64,27 @@ fn input_round_trips_while_the_pty_floods() {
 
     // A background job floods the PTY for the rest of the test; the shell in
     // the foreground must still read and answer a command.
-    a.input(
-        block,
-        b"(i=0; while [ $i -lt 1000000 ]; do echo flood-$i; i=$((i+1)); done) &\r",
-    );
+    if cfg!(windows) {
+        a.input(
+            block,
+            b"start /b cmd /q /c \"for /l %i in (0,1,999999) do @echo flood-%i\"\r",
+        );
+    } else {
+        a.input(
+            block,
+            b"(i=0; while [ $i -lt 1000000 ]; do echo flood-$i; i=$((i+1)); done) &\r",
+        );
+    }
     a.wait_for(block, "flood-1000");
     let started = Instant::now();
     let marker = run_and_wait(&mut a, block, 43);
     let elapsed = started.elapsed();
     eprintln!("round trip under flood: {elapsed:?}");
-    a.input(block, b"kill $!\r");
+    if cfg!(unix) {
+        a.input(block, b"kill $!\r");
+    }
+    // The server outlives the test, so the flood must not.
+    a.request(|req| Message::CloseBlock { req, block });
     // Measured at 5-70 ms in a debug build; the bound leaves room for a busy
     // CI runner. Without the pump's yield this took seconds.
     assert!(
@@ -105,6 +117,9 @@ fn input_without_the_lease_is_refused() {
     }
 }
 
+/// Linux only: it relies on the exact output volume, which ConPTY's
+/// re-rendering changes, and the budget it covers is the same on every OS.
+#[cfg(target_os = "linux")]
 #[test]
 fn reattach_after_more_than_four_mib_of_real_pty_output() {
     let path = start_server();

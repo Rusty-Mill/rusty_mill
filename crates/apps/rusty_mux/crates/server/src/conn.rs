@@ -113,7 +113,8 @@ impl Frames {
     }
 }
 
-#[cfg(test)]
+// Windows has no anonymous AF_UNIX pair.
+#[cfg(all(test, unix))]
 mod regression {
     use super::*;
     use crate::Config;

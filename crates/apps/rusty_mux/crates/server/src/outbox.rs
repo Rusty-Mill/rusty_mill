@@ -144,7 +144,7 @@ impl Drop for Outbox {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Outbox {
     pub(crate) fn test_queue(&self) -> Rc<Cell<usize>> {
         self.queued.clone()
