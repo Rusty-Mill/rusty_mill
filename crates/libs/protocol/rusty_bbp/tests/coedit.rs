@@ -96,7 +96,7 @@ fn edits_in_different_sections_all_land_on_one_base() {
 }
 
 #[test]
-fn a_stale_edit_of_a_changed_section_is_refused_and_costs_nothing() {
+fn a_stale_edit_of_a_changed_line_is_refused_and_costs_nothing() {
     let mut fx = fx();
     let v1 = seed(&mut fx);
     let a = line(&fx, v1, "a");
@@ -133,6 +133,29 @@ fn a_stale_edit_of_a_changed_section_is_refused_and_costs_nothing() {
     assert_eq!(
         fx.st().doc(rebased).unwrap().text(),
         "# A\nfirst\n# B\nb\n# C\nc\n# D\nd"
+    );
+}
+
+#[test]
+fn a_stale_edit_of_another_line_in_the_same_section_lands() {
+    let mut fx = fx();
+    let v1 = seed(&mut fx);
+    let (heading, a) = (line(&fx, v1, "# A"), line(&fx, v1, "a"));
+    stored(edit(
+        &mut fx,
+        "planner",
+        Some(v1),
+        vec![ins(Some(a), &["after a"])],
+    ));
+    let v3 = stored(edit(
+        &mut fx,
+        "planner2",
+        Some(v1),
+        vec![ins(Some(heading), &["intro to A"])],
+    ));
+    assert_eq!(
+        fx.st().doc(v3).unwrap().text(),
+        "# A\nintro to A\na\nafter a\n# B\nb\n# C\nc\n# D\nd"
     );
 }
 

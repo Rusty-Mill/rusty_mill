@@ -2,7 +2,7 @@
 name = "rusty_hyper"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 description = "HTTP/2-only client and server packaging over rusty_h2: connect(url) for plain h2c or TLS with ALPN h2, serve(listener, tls, handler), timeouts, keepalive and graceful shutdown. No HTTP/1.1."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rusty-Mill/rusty_mill"

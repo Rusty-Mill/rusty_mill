@@ -164,14 +164,14 @@ fn stop_on_signal(
     server: rusty_serve::ShutdownHandle,
     in_flight: Arc<InFlight>,
 ) -> Result<(), String> {
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let rt = rusty_tokio::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| format!("signal runtime: {e}"))?;
     #[cfg(unix)]
     let mut term = {
         let _enter = rt.enter();
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        rusty_tokio::signal::unix::signal(rusty_tokio::signal::unix::SignalKind::terminate())
             .map_err(|e| format!("SIGTERM handler: {e}"))?
     };
     std::thread::Builder::new()
@@ -179,12 +179,12 @@ fn stop_on_signal(
         .spawn(move || {
             rt.block_on(async {
                 #[cfg(unix)]
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
+                rusty_tokio::select! {
+                    _ = rusty_tokio::signal::ctrl_c() => {}
                     _ = term.recv() => {}
                 }
                 #[cfg(not(unix))]
-                let _ = tokio::signal::ctrl_c().await;
+                let _ = rusty_tokio::signal::ctrl_c().await;
             });
             rusty_log::info!("signal received, shutting down");
             begin_stop(&server, &in_flight);

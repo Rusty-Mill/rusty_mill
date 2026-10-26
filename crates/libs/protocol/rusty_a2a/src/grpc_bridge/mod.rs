@@ -4,7 +4,8 @@
 //! `rusty_tokio`, its own runtime. This crate's callers, its engine, `axum` and `reqwest` run on
 //! `tokio`. The two meet here and nowhere else, by message passing only: a task on the transport's
 //! runtime is awaited from `tokio` through its `JoinHandle`, and a stream crosses through a
-//! `tokio::sync::mpsc` channel. Neither side enters the other's runtime context.
+//! `tokio::sync::mpsc` channel. Neither side enters the other's runtime context. The runtime and
+//! the abort-on-drop task are `rusty_tonic::bridge`, shared with the other `tokio` callers.
 //!
 //! Dropping the future a caller was awaiting, or the stream it was reading, aborts the transport
 //! task, which drops the call and so resets its HTTP/2 stream: cancelling a call from `tokio`
