@@ -2,7 +2,7 @@
 
 use adk_core::Result;
 use async_trait::async_trait;
-use futures::future::BoxFuture;
+use rusty_stream::BoxFuture;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::sync::Arc;

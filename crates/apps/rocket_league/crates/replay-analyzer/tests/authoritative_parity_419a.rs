@@ -1,6 +1,6 @@
 //! Authoritative-parity regression test on `assets/replays/419a.replay`.
 //!
-//! Another product (Spire; see `docs/competitor/spire/ASSESSMENT.md`) reports
+//! Another product (Spire) reports
 //! headline numbers for this same replay. The score, shots, saves, demos, length
 //! and roster are the replay's own header counters and replicated events, so any
 //! correct decoder must reproduce them. Derived metrics (possession losses,

@@ -68,6 +68,12 @@ async fn agent() -> Agent {
 
 /// Boot a gateway with an `agui` route carrying `rules` in front of `agent`.
 async fn start(rules: &[&str], agent: u16) -> (String, CancellationToken) {
+    start_configured("", rules, agent).await
+}
+
+/// The same, with `head` spliced in ahead of `binds`, for gateway-wide
+/// settings such as `config.limits`.
+async fn start_configured(head: &str, rules: &[&str], agent: u16) -> (String, CancellationToken) {
     let port = free_port().await;
     let rules: String = rules
         .iter()
@@ -75,6 +81,7 @@ async fn start(rules: &[&str], agent: u16) -> (String, CancellationToken) {
         .collect();
     let yaml = format!(
         r#"
+{head}
 binds:
   - port: {port}
     listeners:
@@ -258,4 +265,46 @@ binds:
     .expect("config should parse");
     let err = config.validate().expect_err("should be refused");
     assert!(err.to_string().contains("either `a2a` or `agui`"), "{err}");
+}
+
+/// An allowed run input exactly `len` bytes long, padded in `state`.
+fn run_input_of_len(len: usize) -> String {
+    let with_pad = |pad: &str| {
+        let mut input = run_input(&[]);
+        input["state"] = json!({ "pad": pad });
+        input.to_string()
+    };
+    let pad = len - with_pad("").len();
+    with_pad(&"x".repeat(pad))
+}
+
+#[tokio::test]
+async fn max_request_body_bytes_caps_a_run_below_the_protocol_bound() {
+    let a = agent().await;
+    let (base, shutdown) = start_configured(
+        "config:\n  limits:\n    maxRequestBodyBytes: 1024",
+        &["- allow: 'agui.lastUserMessage.startsWith(\"add\")'"],
+        a.port,
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let send = |body: String| {
+        client
+            .post(format!("{base}/api/agent"))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+    };
+
+    let at_cap = send(run_input_of_len(1024)).await.expect("should answer");
+    assert_eq!(at_cap.status(), 200);
+    let over = send(run_input_of_len(1025)).await.expect("should answer");
+    assert_eq!(over.status(), 413);
+    assert_eq!(
+        a.hits.load(Ordering::Relaxed),
+        1,
+        "only the run within the cap reached the agent"
+    );
+
+    shutdown.cancel();
 }

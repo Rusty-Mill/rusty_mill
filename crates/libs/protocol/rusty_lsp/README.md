@@ -12,7 +12,7 @@ build one on top of.
 
 - **vs. hand-rolled JSON-RPC** — you get typed handlers and lifecycle correctness
   for free.
-- **vs. a `tower`-based stack** — the dependency footprint is just `tokio`,
+- **vs. a `tower`-based stack** — the dependency footprint is just `rusty_tokio`,
   `serde`, and `serde_json`. No `async-trait`, no `tower`.
 
 ## Design at a glance
@@ -47,8 +47,10 @@ tagged release:
 ```toml
 [dependencies]
 rusty_lsp = { git = "https://github.com/baileyrd/rusty_lsp", tag = "v0.6.2" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
+
+The runtime is `rusty_tokio`: depend on the same `rusty_tokio` for `#[rusty_tokio::main]`,
+and pass `rusty_tokio` I/O types to `Server::new`/`from_tcp`.
 
 (A path dependency works too during local development: `rusty_lsp = { path = "../rusty_lsp" }`.)
 
@@ -83,7 +85,7 @@ impl LanguageServer for Backend {
     }
 }
 
-#[tokio::main]
+#[rusty_tokio::main]
 async fn main() -> Result<()> {
     // `serve` hands you a `Client`; store it so handlers can talk back
     // (diagnostics, log/show-message, server → client requests).
@@ -142,7 +144,7 @@ request handler also runs inside a cooperative token scope:
 ```rust,ignore
 async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
     let token = rusty_lsp::cancel::current().unwrap_or_default();
-    let hits = tokio::task::spawn_blocking(move || {
+    let hits = rusty_tokio::spawn_blocking(move || {
         big_index.scan(|item| !token.is_cancelled() /* keep going? */)
     }).await?;
     Ok(Some(hits))

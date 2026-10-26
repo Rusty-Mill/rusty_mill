@@ -441,3 +441,33 @@ async fn dropping_the_server_stops_it_gracefully() {
     }
     assert!(refused, "a dropped server takes no new connections");
 }
+
+#[rusty_tokio::test]
+async fn serve_connection_serves_an_accepted_connection_until_told_to_stop() {
+    // A server with its own accept loop hands one connection over.
+    let listener = listener();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let served = rusty_tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let deadline = rusty_tokio::time::Instant::now() + FIVE;
+        let stop = async move {
+            let _ = stopped.await;
+        };
+        rusty_hyper::serve_connection(tcp, ServeOptions::default().h2, deadline, stop, echo).await;
+    });
+    let conn = connect(&format!("http://{addr}"), ConnectOptions::default())
+        .await
+        .unwrap();
+    let h = conn.client().clone();
+    let reply = call(&h, "http", &[], b"one".to_vec()).await.unwrap();
+    assert_eq!(reply.body, b"one");
+
+    // Told to stop, the connection goes away and the future returns.
+    stop.send(()).unwrap();
+    timeout(FIVE, served).await.unwrap().unwrap();
+    assert!(
+        call(&h, "http", &[], b"two".to_vec()).await.is_err(),
+        "no new call after a graceful shutdown"
+    );
+}

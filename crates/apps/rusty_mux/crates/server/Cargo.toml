@@ -1,0 +1,31 @@
+[package]
+name = "rusty_mux_server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "rusty_mux's server: owns the PTYs, keeps one terminal per block, and tees raw output to attached clients over a Unix socket."
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[[bin]]
+name = "rusty-mux-server"
+path = "src/main.rs"
+
+[dependencies]
+rusty_mux_core = { workspace = true }
+rusty_mux_proto = { workspace = true }
+rusty_mux_status = { workspace = true }
+# Headless engine only: no `gui` or `l13`, so no tokio reaches this binary.
+rusty_term_core = { workspace = true }
+rusty_tokio = { workspace = true }
+rusty_uuid = { workspace = true }
+platform = { workspace = true }
+
+# Phase 1 is Linux-only (ROADMAP); ConPTY follows spike 1.
+[target.'cfg(target_os = "linux")'.dependencies]
+platform-linux = { workspace = true }
+rusty_libc = { workspace = true }

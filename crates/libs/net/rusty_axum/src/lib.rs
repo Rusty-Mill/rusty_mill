@@ -11,12 +11,13 @@
 //!   before routing, so extraction is synchronous: a [`FromRequest`] reads
 //!   or takes what it needs from `&mut Request`. Response bodies may stream.
 //! - **One server.** [`serve`] runs HTTP/1.1 on `rusty_tokio`, plain or
-//!   over `rusty_tls`. There is no `tokio` dependency.
+//!   over `rusty_tls`, and with the `http2` feature HTTP/2 on a TLS
+//!   connection that negotiates ALPN `h2`. There is no `tokio` dependency.
 //! - **`rusty_http`'s types.** [`Method`], [`StatusCode`] and [`HeaderMap`]
 //!   are re-exported from it; there is no `http` crate.
 //!
 //! Not built (no consumer needs it, `RUSTY-AXUM-SCOPE.md` §6.1): WebSocket,
-//! multipart, cookies, typed headers, HTTP/2 for an app.
+//! multipart, cookies, typed headers, cleartext h2c.
 
 mod body;
 pub mod cors;
@@ -30,8 +31,11 @@ pub mod routing;
 pub mod serve;
 mod stop;
 
-pub use body::{Body, BoxError};
-pub use extract::{FromRequest, Json, Path, Query, Rejection, State};
+pub use body::{Body, BodyStream, BoxError};
+pub use extract::{ConnectInfo, Form, FromRequest, Json, Path, Query, Rejection, State};
+/// The trait [`Body::from_stream`] takes, so a consumer can implement it
+/// without depending on `futures-core` itself.
+pub use futures_core::Stream;
 pub use handler::Handler;
 pub use request::Request;
 pub use response::{IntoResponse, Response};

@@ -56,8 +56,9 @@ fn config(dir: &Path, task: &TaskId, cost_cap: Option<CostCap>) -> Config {
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(1),
         end_grace: Duration::ZERO,
+        deadline: None,
         cost_cap,
-        slots: None,
+        admission: None,
     }
 }
 

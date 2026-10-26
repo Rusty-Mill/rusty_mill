@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
+use rusty_tokio::sync::RwLock;
 
 use rusty_search_core::{
     BoxError, Document, FieldType as CoreFieldType, Hit, Result, Schema as CoreSchema,
@@ -447,7 +447,7 @@ mod tests {
         backend
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_rejects_duplicates() {
         let backend = TantivyBackend::in_memory();
         backend.create_index("a", articles_schema()).await.unwrap();
@@ -458,7 +458,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexAlreadyExists(name) if name == "a"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn operations_on_missing_index_error() {
         let backend = TantivyBackend::in_memory();
         let err = backend
@@ -468,7 +468,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexNotFound(name) if name == "missing"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn full_text_match_finds_relevant_documents() {
         let backend = seeded_backend().await;
         let results = backend
@@ -481,7 +481,7 @@ mod tests {
         assert!(ids.contains("2"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn term_and_bool_queries_filter_exactly() {
         let backend = seeded_backend().await;
         let results = backend
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(results.hits[0].id, "1");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn range_query_filters_numerically() {
         let backend = seeded_backend().await;
         let results = backend
@@ -511,7 +511,7 @@ mod tests {
         assert_eq!(results.hits[0].id, "1");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn native_fast_field_sort_orders_by_views() {
         let backend = seeded_backend().await;
         let results = backend
@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(ids, vec!["3", "1"]); // views: 50 then 100
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn fallback_sort_orders_by_non_fast_keyword_field() {
         let backend = seeded_backend().await;
         let results = backend
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(statuses, sorted);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn delete_removes_document_from_results() {
         let backend = seeded_backend().await;
         backend.delete("articles", "1").await.unwrap();
@@ -568,7 +568,7 @@ mod tests {
         assert!(results.hits.iter().all(|h| h.id != "1"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn reindexing_same_id_replaces_document() {
         let backend = seeded_backend().await;
         backend
@@ -591,7 +591,7 @@ mod tests {
         assert_eq!(results.hits[0].id, "1");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn on_disk_backend_persists_within_process() {
         let dir = tempfile::tempdir().unwrap();
         let backend = TantivyBackend::on_disk(dir.path());
@@ -615,7 +615,7 @@ mod tests {
         assert_eq!(results.total, 1);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn date_field_round_trips_through_rusty_time_parsing() {
         let backend = TantivyBackend::in_memory();
         backend
@@ -662,7 +662,7 @@ mod tests {
         assert_eq!(exact.hits[0].id, "1");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn match_query_is_literal_and_field_scoped() {
         // A `Query::Match` value containing Lucene-style query syntax that
         // names a *different* field must never be interpreted as a
@@ -713,7 +713,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn fallback_sort_with_adversarial_offset_does_not_panic() {
         // `Sort::field("status", ..)` forces the `fallback_sort` path
         // (`status` is a non-fast `Keyword` field). An `offset` of
@@ -740,7 +740,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn index_batch_with_schema_mismatched_field_errors_instead_of_panicking() {
         // `views` is `i64`-typed in `articles_schema()`. Handing it a
         // string value must surface as an ordinary `Err`, not panic inside
@@ -767,7 +767,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn index_batch_failure_does_not_poison_the_writer_mutex() {
         // A malformed document in one `index_batch` call must not wedge the
         // index for the rest of the process: a subsequent, well-formed

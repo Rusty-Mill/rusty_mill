@@ -17,7 +17,7 @@ toml.workspace = true
 thiserror = "2"
 anyhow.workspace = true
 rusty_log = { workspace = true }
-futures.workspace = true
+rusty_stream.workspace = true
 prometheus.workspace = true
 rusty_sqlite.workspace = true
 # Shared exponential-backoff delay math, also used by rusty_request's and

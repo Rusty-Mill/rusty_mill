@@ -1,21 +1,24 @@
-//! Runtime: a single tokio reactor drives the [`Grid`](crate::core::Grid) over
-//! the [`Backend`](crate::backend::Backend) on every platform, via [`tokio_rt`].
+//! Runtime: a single [`rusty_tokio`] reactor drives the [`Grid`](crate::core::Grid) over
+//! the [`Backend`](crate::backend::Backend) on every platform, via [`reactor`].
 //!
 //! On Unix the PTY master and a fresh `/dev/tty` open are registered with the
-//! reactor (tokio's `AsyncFd`) and `SIGWINCH` arrives as a signal stream. On
+//! reactor (`rusty_tokio::io::AsyncFd`) and `SIGWINCH` arrives as a signal stream. On
 //! Windows ConPTY's pipes are synchronous, so blocking reader/writer/stdin
-//! threads bridge into tokio channels and a timer polls the console size for
+//! threads bridge into async channels and a timer polls the console size for
 //! resizes. Both expose the same [`run`] entry point so `main` is agnostic.
 
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 
 use crate::backend::Backend;
 use crate::core::Grid;
 
-mod tokio_rt;
-pub use tokio_rt::run;
+mod fair;
+#[cfg(feature = "web-bridge")]
+pub(crate) use fair::fair_select;
+mod reactor;
+pub use reactor::run;
 
 /// The signature every runtime's `run` must satisfy: take ownership of the
 /// backend, the shared grid, the host's initial size, and the startup

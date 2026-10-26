@@ -347,7 +347,7 @@ async fn fetch_client_credentials_token(
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn api_key_inline_authorization_lands_on_authorization_slot() {
         let auth = McpAuth::ApiKey {
             header: "Authorization".to_string(),
@@ -360,7 +360,7 @@ mod tests {
         assert!(resolved.extra_headers.is_empty());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn api_key_custom_header_lands_on_extras() {
         let auth = McpAuth::ApiKey {
             header: "X-API-Key".to_string(),
@@ -379,7 +379,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn bearer_inline_prepends_scheme_when_missing() {
         let auth = McpAuth::Bearer {
             token: McpAuthSecret::Inline {
@@ -390,7 +390,7 @@ mod tests {
         assert_eq!(resolved.authorization.as_deref(), Some("Bearer xyz"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn bearer_inline_preserves_caller_supplied_scheme() {
         let auth = McpAuth::Bearer {
             token: McpAuthSecret::Inline {

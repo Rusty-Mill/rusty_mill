@@ -1,0 +1,15 @@
+[package]
+name = "rusty_mux_core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "rusty_mux's pure domain model: sessions, windows, blocks, clients, input leases and events. No I/O."
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+rusty_uuid = { workspace = true }

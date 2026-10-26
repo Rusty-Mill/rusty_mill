@@ -3,7 +3,7 @@ name = "ts-control"
 description = "ts2021 control-plane client: Noise IK channel, registration, netmap long-poll"
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_tailscale"
 
@@ -13,14 +13,13 @@ layer = "apps"
 [dependencies]
 ts-types.workspace = true
 ts-key.workspace = true
-tokio = { workspace = true, features = ["net", "io-util", "rt", "macros", "time"] }
-h2.workspace = true
-bytes.workspace = true
-http.workspace = true
+rusty_tokio.workspace = true
+# HTTP/2 over the Noise channel.
+rusty_h2 = { path = "../../../../libs/net/rusty_h2", features = ["rusty-tokio"] }
 chacha20poly1305.workspace = true
 blake2.workspace = true
 hkdf.workspace = true
-rusty_http = { workspace = true, features = ["tokio"] }
+rusty_http = { workspace = true, features = ["rusty-tokio"] }
 # Standard base64 for the `X-Tailscale-Handshake` header; replaced this
 # crate's own encode-only copy (see DESIGN.md's dependency table).
 rusty_base64.workspace = true
@@ -29,4 +28,3 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "time", "process"] }

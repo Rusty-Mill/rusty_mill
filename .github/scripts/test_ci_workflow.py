@@ -40,6 +40,8 @@ PLAN_KEYS = {
     "tls_engine",
     "rleval_viewer",
     "rleval_app",
+    "rleval_service",
+    "rleval_image",
     "crypto_ct",
     "rand_platforms",
     "shards",
@@ -129,37 +131,49 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", job)
         self.assertIn("      - rusty-tls-fuzz\n", self.workflow[self.workflow.index("required-gate:") :])
 
+    # Both engine jobs, `ring` and native (ADR-0002 Amendment 2), carry the same
+    # limbo and live steps; each is checked with the same rules.
+    ENGINE_JOBS = (("rusty-tls-engine", "ring"), ("rusty-tls-engine-native", "native"))
+
+    def engine_job(self, name: str) -> str:
+        start = self.workflow.index(f"  {name}:\n")
+        end = self.workflow.find("\n  # ", start + 1)
+        return self.workflow[start : end if end != -1 else None]
+
     def test_the_limbo_differential_step_runs_through_its_script_before_the_live_step(self) -> None:
-        start = self.workflow.index("  rusty-tls-engine:\n")
-        end = self.workflow.find("\n  # ----", start)
-        job = self.workflow[start : end if end != -1 else None]
-        marker = "      - name: x509-limbo certificate differential"
-        step = job[job.index(marker) :]
-        step = step[: step.index("\n      - name:", len(marker))]
-        self.assertIn("bash .github/scripts/limbo_differential.sh", step)
-        self.assertIn("--test handrolled_limbo -- --ignored", step)
-        # Blocking when the corpus matches (the script itself skips otherwise).
-        self.assertNotIn("continue-on-error", step)
-        # Before the live step, which must stay last in the job.
-        self.assertLess(job.index(marker), job.index("      - name: live internet (non-blocking)"))
+        for name, _ in self.ENGINE_JOBS:
+            with self.subTest(job=name):
+                job = self.engine_job(name)
+                marker = "      - name: x509-limbo certificate differential"
+                step = job[job.index(marker) :]
+                step = step[: step.index("\n      - name:", len(marker))]
+                self.assertIn("bash .github/scripts/limbo_differential.sh", step)
+                self.assertIn("--test handrolled_limbo -- --ignored", step)
+                # Blocking when the corpus matches (the script itself skips otherwise).
+                self.assertNotIn("continue-on-error", step)
+                # Before the live step, which must stay last in the job.
+                self.assertLess(
+                    job.index(marker), job.index("      - name: live internet (non-blocking)")
+                )
 
     def test_the_live_internet_step_can_inform_but_never_gate(self) -> None:
         # A third party's server must not decide whether a PR merges, so the
         # live step is continue-on-error. Its output and exit logic live in
         # live_internet_check.sh (tested offline, including a failing command),
         # so the step must go through that script and not inline its own.
-        start = self.workflow.index("  rusty-tls-engine:\n")
-        end = self.workflow.find("\n  # ----", start)
-        job = self.workflow[start : end if end != -1 else None]
-        marker = "      - name: live internet (non-blocking)"
-        step = job[job.index(marker) :]
-        self.assertIn("continue-on-error: true", step)
-        self.assertIn("bash .github/scripts/live_internet_check.sh", step)
-        self.assertIn("--test handrolled_live -- --ignored", step)
-        # No inline `out=$(cargo ...)`: under `set -e` that loses the output.
-        self.assertNotIn("out=$(", step)
-        # Last in the job, so nothing after it can be skipped by its failure.
-        self.assertNotIn("\n      - name:", step[len(marker) :])
+        for name, backend in self.ENGINE_JOBS:
+            with self.subTest(job=name):
+                job = self.engine_job(name)
+                marker = "      - name: live internet (non-blocking)"
+                step = job[job.index(marker) :]
+                self.assertIn("continue-on-error: true", step)
+                self.assertIn("bash .github/scripts/live_internet_check.sh", step)
+                self.assertIn("--test handrolled_live -- --ignored", step)
+                self.assertIn(f"LIVE_BACKEND: {backend}", step)
+                # No inline `out=$(cargo ...)`: under `set -e` that loses the output.
+                self.assertNotIn("out=$(", step)
+                # Last in the job, so nothing after it can be skipped by its failure.
+                self.assertNotIn("\n      - name:", step[len(marker) :])
 
     def test_every_handrolled_suite_is_gated_on_the_cfg_the_job_sets(self) -> None:
         # The guard above only works if each suite really is cfg-gated: an
@@ -248,6 +262,16 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("Cargo.lock changed with a manifest", self.workflow)
         self.assertIn("Unable to establish Cargo.lock impact", self.workflow)
 
+    def test_lanes_spanning_most_components_fall_back_to_the_full_sweep(self) -> None:
+        self.assertIn('--packages "$packages" --full-if-most)" || components_status=$?', self.workflow)
+        self.assertIn('emit_full "Affected crates span most of the workspace\'s components"', self.workflow)
+
+    def test_member_dependency_edits_keep_the_full_sweep(self) -> None:
+        # Feature unification can reach crates that never depend on the edited member.
+        self.assertIn("cargo_toml_diff.py --members /tmp/metadata.json \"$base\"", self.workflow)
+        self.assertIn('emit_full "Member dependency declarations changed ($dependency_edits)"', self.workflow)
+        self.assertIn('emit_full "Unable to compare member manifests with the event base"', self.workflow)
+
     def test_unrelated_base_falls_back_after_fetch_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -318,7 +342,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_rleval_jobs_follow_cargo_impact_and_the_viewer_fixture(self) -> None:
@@ -342,8 +366,41 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertFalse(flags["rleval_viewer"])
         self.assertFalse(flags["rleval_app"])
 
+    def test_rleval_service_jobs_follow_their_paths_only(self) -> None:
+        # A test-only change runs pytest but cannot change the image.
+        flags = specialized_job_flags(
+            ["crates/apps/rocket_league/rleval/service/tests/test_api.py"], []
+        )
+        self.assertTrue(flags["rleval_service"])
+        self.assertFalse(flags["rleval_image"])
+        # What the image installs runs both: pytest on the runner's Python with the dev extra
+        # is not the image's Python with the production extras.
+        for path in (
+            "crates/apps/rocket_league/rleval/service/app/models.py",
+            "crates/apps/rocket_league/rleval/service/migrations/env.py",
+            "crates/apps/rocket_league/rleval/service/pyproject.toml",
+            "crates/apps/rocket_league/rleval/service/alembic.ini",
+        ):
+            flags = specialized_job_flags([path], [])
+            self.assertTrue(flags["rleval_service"], path)
+            self.assertTrue(flags["rleval_image"], path)
+        for path in (
+            "crates/apps/rocket_league/rleval/Dockerfile",
+            "crates/apps/rocket_league/rleval/Dockerfile.dockerignore",
+            "crates/apps/rocket_league/rleval/docker-compose.yml",
+        ):
+            flags = specialized_job_flags([path], [])
+            self.assertTrue(flags["rleval_image"], path)
+            self.assertFalse(flags["rleval_service"], path)
+        # Docs and the Rust crates beside it select neither.
+        flags = specialized_job_flags(
+            ["crates/apps/rocket_league/rleval/docs/episodes-design.md"], ["rleval-app"]
+        )
+        self.assertFalse(flags["rleval_service"])
+        self.assertFalse(flags["rleval_image"])
+
     def test_rleval_jobs_are_planned_and_gated(self) -> None:
-        for key in ("rleval_viewer", "rleval_app"):
+        for key in ("rleval_viewer", "rleval_app", "rleval_service", "rleval_image"):
             self.assertIn(f"{key}: ${{{{ steps.plan.outputs.{key} }}}}", self.workflow)
             self.assertIn(f"if: needs.plan.outputs.{key} == 'true'", self.workflow)
 
@@ -422,11 +479,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_agui_package_change_selects_tick_web_too(self) -> None:
@@ -602,7 +659,32 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("cargo metadata --locked --format-version=1", job)
         self.assertIn('test "$(sha256sum Cargo.lock)" = "$lock_before"', job)
         self.assertIn('--target-base "$RUNNER_TEMP/msrv"', job)
+        # Every crate with features is also checked with all of them; only documented exceptions opt out.
+        self.assertIn('--all-features-exclude "platform-linux platform-windows rusty_json rusty_tls rusty_rdp rusty_tonic" \\\n', job)
+        # rusty_axum's default build stays at its declared 1.87; its http2 (all-features) build is held to 1.88.
+        self.assertIn('--all-features-floor "rusty_axum=1.88" \\\n', job)
+        # Windows joins on the scheduled and manual sweeps only, minus the crates no Windows leg builds (#845).
+        self.assertIn("runs-on: ${{ matrix.os }}", job)
+        self.assertIn(
+            "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') "
+            "&& needs.plan.outputs.windows == 'true' && '[\"ubuntu-latest\",\"windows-latest\"]' || '[\"ubuntu-latest\"]'",
+            job,
+        )
+        self.assertIn("'rusty_journal rusty_fedora_agent'", job)
+        self.assertIn("shell: bash", job)
         self.assertIn("      - msrv-compile\n", self.workflow.split("  required-gate:\n", 1)[1])
+
+    def test_rusty_axum_floors_match_the_manifests(self) -> None:
+        # The default build is held to rusty_axum's own rust-version; the all-features floor is exactly
+        # what its `http2` dependencies declare, so neither check can drift above or below its manifest.
+        def declared(crate: str) -> str:
+            return tomllib.loads((REPO / "crates/libs/net" / crate / "Cargo.toml").read_text())["package"]["rust-version"]
+
+        floor = re.search(r'--all-features-floor "rusty_axum=([0-9.]+)"', self.workflow)
+        self.assertIsNotNone(floor)
+        self.assertEqual(declared("rusty_axum"), "1.87")
+        self.assertEqual(declared("rusty_axum_tokio"), "1.87")
+        self.assertEqual({declared("rusty_hyper"), declared("rusty_h2")}, {floor.group(1)})
 
     def test_every_workflow_pin_matches_rust_toolchain_file(self) -> None:
         channel = tomllib.loads((REPO / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
@@ -636,6 +718,17 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("run: cargo shear", shear)
         root = tomllib.loads((REPO / "Cargo.toml").read_text(encoding="utf-8"))
         self.assertTrue(root["workspace"]["metadata"]["cargo-shear"]["ignored"])
+
+    def test_a_failed_nightly_sweep_files_an_issue(self) -> None:
+        alert = (WORKFLOW.parent / "nightly-alert.yml").read_text(encoding="utf-8")
+        self.assertIn("  workflow_run:\n    workflows: [CI]\n    types: [completed]\n", alert)
+        self.assertIn("github.event.workflow_run.event == 'schedule'", alert)
+        # Read-only by default; only the reporting job may write, and only issues.
+        self.assertRegex(alert, r"(?m)^permissions:\n  contents: read$")
+        self.assertEqual(re.findall(r"(?m)^\s+[a-z-]+: write$", alert), ["      issues: write"])
+        # Run data reaches the script through env, never by interpolation.
+        script = alert.split("        run: |\n", 1)[1]
+        self.assertNotIn("${{", script)
 
     def test_dependabot_tracks_github_actions(self) -> None:
         text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")
@@ -829,6 +922,21 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self._planner_map("--packages", "", input=f"{path}\n")["tls_engine"], "false")
 
+    def test_rleval_service_jobs_run_when_their_own_ci_changes(self) -> None:
+        for path in (".github/workflows/ci.yml", ".github/scripts/ci_plan.py"):
+            with self.subTest(path=path):
+                outputs = self._planner_map("--packages", "", input=f"{path}\n")
+                self.assertEqual(outputs["rleval_service"], "true")
+                self.assertEqual(outputs["rleval_image"], "true")
+                smoke = self._planner_map("--emit-ci-smoke", input=f"{path}\n")
+                self.assertEqual(smoke["rleval_service"], "true")
+                self.assertEqual(smoke["rleval_image"], "true")
+        for path in (".github/scripts/test_ci_workflow.py", "docs/README.md", ".github/workflows/unrelated.yml"):
+            with self.subTest(path=path):
+                outputs = self._planner_map("--packages", "", input=f"{path}\n")
+                self.assertEqual(outputs["rleval_service"], "false")
+                self.assertEqual(outputs["rleval_image"], "false")
+
     def test_rand_platforms_survive_ci_only_shortcut(self) -> None:
         for path in (
             ".github/workflows/ci.yml",
@@ -845,11 +953,16 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 self.assertEqual(outputs["ci_only"], "true")
                 self.assertEqual(outputs["full"], "false")
                 self.assertEqual(outputs["rand_platforms"], "false" if "unrelated" in path else "true")
-                # ci.yml and ci_plan.py also select the native TLS engine jobs.
-                tls = path in {".github/workflows/ci.yml", ".github/scripts/ci_plan.py"}
-                self.assertEqual(outputs["tls_engine"], "true" if tls else "false")
+                # ci.yml and ci_plan.py also select the native TLS engine and rleval service jobs.
+                own = path in {".github/workflows/ci.yml", ".github/scripts/ci_plan.py"}
+                for key in ("tls_engine", "rleval_service", "rleval_image"):
+                    self.assertEqual(outputs[key], "true" if own else "false", key)
                 self.assertTrue(
-                    all(outputs[key] == "false" for key in SPECIALIZED_KEYS - {"rand_platforms", "tls_engine"})
+                    all(
+                        outputs[key] == "false"
+                        for key in SPECIALIZED_KEYS
+                        - {"rand_platforms", "tls_engine", "rleval_service", "rleval_image"}
+                    )
                 )
         self.assertIn(
             "printf '%s\\n' \"$changed\" | python3 .github/scripts/ci_plan.py --emit-ci-smoke >> \"$GITHUB_OUTPUT\"",

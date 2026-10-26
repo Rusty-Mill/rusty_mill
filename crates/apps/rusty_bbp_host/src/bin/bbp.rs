@@ -11,6 +11,7 @@
 //!                                          reject, rerun, resume and cancel need --rev, the card revision you saw
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp mod-health --dir D --task T [--check yes | --reset yes --rev N]  replayed launch-loop health
+//! bbp quiesce --dir D --task T             for an ended task: `true` once no moderator, runner or harness group of it runs; kills groups a dead moderator left
 //! bbp profiles rust-lld --sysroot PATH     pre-task, bounded Rust/LLD test profile
 //! bbp metrics --dir D --task T                             concurrency metrics of the task's log, as JSON
 //! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
@@ -19,15 +20,15 @@
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
 //! bbp tokens  --dir D --task T [--criteria FILE] [--api-usage FILE]   model tokens per turn, from the harness output, as JSON; weighted by the criteria file; a mismatch with the API usage is an error
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
-//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N]
+//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
 //! bbp slot-hold                           holds the slot lock on stdout until stdin closes and no other process is in the group it leads; started by bbp mod
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
-    admin, args::Args, broker, grade, human, mcp, moderator, pairs, pins, profiles, report,
-    response_json, runner, shadow, slots, tokens, why,
+    admin, admission, args::Args, broker, grade, human, mcp, moderator, pairs, pins, profiles,
+    report, response_json, runner, shadow, slots, tokens, why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -46,7 +47,16 @@ fn run() -> Result<String, String> {
     }
     let a = Args::parse(argv.into_iter().skip(1));
     if sub == "slot-hold" {
-        slots::hold_while_alive();
+        let deadline = a
+            .flags
+            .get("deadline-ms")
+            .map(|ms| {
+                ms.parse::<u64>()
+                    .map_err(|_| "--deadline-ms must be a number")
+            })
+            .transpose()?
+            .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
+        slots::hold_while_alive(deadline);
         return Ok(String::new());
     }
     if sub == "profiles" {
@@ -119,6 +129,9 @@ fn run() -> Result<String, String> {
         ("why", Some(t)) => TaskId(t.clone()),
         _ => TaskId(a.flag_or_env("task", "BBP_TASK")?),
     };
+    if sub == "quiesce" {
+        return moderator::quiesce(&dir, &task).map(|quiet| quiet.to_string());
+    }
     if sub == "mod-health" {
         if a.flags.get("reset").is_some_and(|value| value == "yes") {
             let rev = a
@@ -190,6 +203,12 @@ fn run() -> Result<String, String> {
                 poll: std::time::Duration::from_millis(num("poll-ms", 500)?),
                 max_wall: std::time::Duration::from_secs(num("max-wall-secs", u64::MAX / 1000)?),
                 end_grace: std::time::Duration::from_secs(num("end-grace-secs", 60)?),
+                deadline: a
+                    .flags
+                    .get("deadline-unix")
+                    .map(|_| num("deadline-unix", 0))
+                    .transpose()?
+                    .map(|s| std::time::UNIX_EPOCH + std::time::Duration::from_secs(s)),
                 cost_cap: match (a.flags.get("max-usd"), a.flags.get("criteria")) {
                     (Some(usd), Some(file)) => Some(moderator::CostCap {
                         usd: usd
@@ -203,9 +222,12 @@ fn run() -> Result<String, String> {
                     (None, None) => None,
                     _ => return Err("--max-usd and --criteria go together".into()),
                 },
-                slots: match a.flags.get("slots") {
+                admission: match a.flags.get("slots") {
+                    None if a.flags.contains_key("claim") => {
+                        return Err("--claim needs --slots".into())
+                    }
                     None => None,
-                    Some(dir) => {
+                    Some(slot_dir) => {
                         let count = |k: &str| -> Result<u32, String> {
                             a.flag(k)?
                                 .parse()
@@ -215,7 +237,17 @@ fn run() -> Result<String, String> {
                             agents: count("agent-slots")?,
                             validators: count("validator-slots")?,
                         };
-                        Some(slots::Slots::open(&PathBuf::from(dir), capacity)?)
+                        let claim = match a.flags.get("claim") {
+                            Some(file) => admission::Claim::read_file(&PathBuf::from(file))?,
+                            None => admission::Claim::default(),
+                        };
+                        let slots = slots::Slots::open(&PathBuf::from(slot_dir), capacity)?;
+                        Some(admission::Admission::new(
+                            slots,
+                            &dir,
+                            task.0.clone(),
+                            claim,
+                        )?)
                     }
                 },
             };

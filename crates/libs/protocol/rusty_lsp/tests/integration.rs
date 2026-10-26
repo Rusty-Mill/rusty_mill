@@ -42,12 +42,12 @@ use rusty_lsp::lsp::{
     WorkspaceSymbolResponse, code_action_kind,
 };
 use rusty_lsp::{Client, Error, LanguageServer, Server};
+use rusty_tokio::io::{BufReader, DuplexStream};
+use rusty_tokio::sync::RwLock;
+use rusty_tokio::task::JoinHandle;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
-use tokio::io::{BufReader, DuplexStream};
-use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
 
 /// A backend with just enough real behaviour to observe the framework's
 /// dispatch and message paths over the wire.
@@ -115,7 +115,7 @@ impl LanguageServer for TestBackend {
         // A deliberately slow notification, used to prove the message loop
         // (and so cancellation) is not blocked behind notification handlers.
         if method == "test/slow_note" {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            rusty_tokio::time::sleep(Duration::from_secs(5)).await;
             let _ = self.client.log_message(MessageType::Info, "slow-note-done");
         }
     }
@@ -125,7 +125,7 @@ impl LanguageServer for TestBackend {
             // A deliberately slow method, used to test cancellation. If
             // cancellation works the sleep never completes.
             "test/sleep" => {
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                rusty_tokio::time::sleep(Duration::from_secs(30)).await;
                 Ok(json!("slept"))
             }
             // Deliberately has no `.await` inside it at all: its future
@@ -251,11 +251,11 @@ impl LanguageServer for TestBackend {
             "test/cancel_watch" => {
                 let token = rusty_lsp::cancel::current().expect("inside a request scope");
                 let client = self.client.clone();
-                tokio::spawn(async move {
+                rusty_tokio::spawn(async move {
                     token.cancelled().await;
                     let _ = client.log_message(MessageType::Info, "token-cancelled");
                 });
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                rusty_tokio::time::sleep(Duration::from_secs(30)).await;
                 Ok(json!("never"))
             }
             // Exercises `Client::send_progress` for partial-result streaming.
@@ -949,9 +949,9 @@ impl Harness {
         + Send
         + 'static,
     ) -> Self {
-        let (client_write, server_read) = tokio::io::duplex(1 << 16);
-        let (server_write, client_read) = tokio::io::duplex(1 << 16);
-        let serve = tokio::spawn(async move {
+        let (client_write, server_read) = rusty_tokio::io::duplex(1 << 16);
+        let (server_write, client_read) = rusty_tokio::io::duplex(1 << 16);
+        let serve = rusty_tokio::spawn(async move {
             configure(Server::new(server_read, server_write))
                 .serve(TestBackend::new)
                 .await
@@ -1071,7 +1071,7 @@ fn position_params(uri: &str, line: u32, character: u32) -> Value {
     })
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn initialize_advertises_capabilities() {
     let mut harness = Harness::start();
     let id = harness
@@ -1086,7 +1086,7 @@ async fn initialize_advertises_capabilities() {
     assert_eq!(result["serverInfo"]["name"], json!("test-server"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn requests_before_initialize_are_rejected() {
     let mut harness = Harness::start();
     let id = harness
@@ -1099,7 +1099,7 @@ async fn requests_before_initialize_are_rejected() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn second_initialize_is_rejected() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1110,7 +1110,7 @@ async fn second_initialize_is_rejected() {
     assert_eq!(response.error.expect("error").code, codes::INVALID_REQUEST);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn did_open_publishes_diagnostics() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1130,7 +1130,7 @@ async fn did_open_publishes_diagnostics() {
     assert_eq!(diagnostics[0]["severity"], json!(2));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn hover_dispatches_and_serializes_result() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1145,7 +1145,7 @@ async fn hover_dispatches_and_serializes_result() {
     assert_eq!(result["contents"]["value"], json!("hello x2"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn completion_returns_array_of_items() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1166,7 +1166,7 @@ async fn completion_returns_array_of_items() {
     assert_eq!(items[1]["label"], json!("beta"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn declaration_type_definition_implementation_route_to_distinct_handlers() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1185,7 +1185,7 @@ async fn declaration_type_definition_implementation_route_to_distinct_handlers()
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn references_returns_locations() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1198,7 +1198,7 @@ async fn references_returns_locations() {
     assert_eq!(locations[0]["uri"], json!("file:///a.txt"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn completion_item_resolve_enriches_the_item() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1212,7 +1212,7 @@ async fn completion_item_resolve_enriches_the_item() {
     assert_eq!(item["detail"], json!("resolved"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn document_symbol_returns_nested_symbols() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1229,7 +1229,7 @@ async fn document_symbol_returns_nested_symbols() {
     assert_eq!(symbols[0]["kind"], json!(12));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn workspace_symbol_search_echoes_the_query() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1242,7 +1242,7 @@ async fn workspace_symbol_search_echoes_the_query() {
     assert_eq!(symbols[0]["name"], json!("match:foo"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn signature_help_returns_active_signature() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1259,7 +1259,7 @@ async fn signature_help_returns_active_signature() {
     assert_eq!(help["activeParameter"], json!(0));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn code_action_and_resolve_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1287,7 +1287,7 @@ async fn code_action_and_resolve_round_trip() {
     assert_eq!(action["edit"]["changes"]["file:///a"], json!([]));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rename_and_prepare_rename_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1313,7 +1313,7 @@ async fn rename_and_prepare_rename_round_trip() {
     assert_eq!(prepared["start"]["line"], json!(0));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn call_hierarchy_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1346,7 +1346,7 @@ async fn call_hierarchy_round_trip() {
     assert_eq!(calls[0]["to"]["name"], json!("callee"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn type_hierarchy_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1378,7 +1378,7 @@ async fn type_hierarchy_round_trip() {
     assert_eq!(subtypes[0]["name"], json!("Sub"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn set_trace_notification_is_routed() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1395,7 +1395,7 @@ async fn set_trace_notification_is_routed() {
     assert!(message.contains("Verbose"), "message was: {message}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn notebook_document_sync_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1487,7 +1487,7 @@ async fn notebook_document_sync_round_trip() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn execute_command_runs_and_returns_a_result() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1502,7 +1502,7 @@ async fn execute_command_runs_and_returns_a_result() {
     assert_eq!(response.result.expect("result")["ran"], json!("my.command"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn did_change_configuration_notification_is_routed() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1521,7 +1521,7 @@ async fn did_change_configuration_notification_is_routed() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn did_change_watched_files_notification_is_routed() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1540,7 +1540,7 @@ async fn did_change_watched_files_notification_is_routed() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn formatting_family_returns_text_edits() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1586,7 +1586,7 @@ async fn formatting_family_returns_text_edits() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn folding_range_and_selection_range_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1617,7 +1617,7 @@ async fn folding_range_and_selection_range_round_trip() {
     assert_eq!(ranges.as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn code_lens_and_resolve_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1640,7 +1640,7 @@ async fn code_lens_and_resolve_round_trip() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn document_link_resolve_and_color_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1691,7 +1691,7 @@ async fn document_link_resolve_and_color_round_trip() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn semantic_tokens_full_delta_and_range_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1736,7 +1736,7 @@ async fn semantic_tokens_full_delta_and_range_round_trip() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn inlay_hint_and_resolve_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1763,7 +1763,7 @@ async fn inlay_hint_and_resolve_round_trip() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn unknown_method_yields_method_not_found() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1774,7 +1774,7 @@ async fn unknown_method_yields_method_not_found() {
     assert_eq!(response.error.expect("error").code, codes::METHOD_NOT_FOUND);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn invalid_params_yield_invalid_params_error() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1789,7 +1789,7 @@ async fn invalid_params_yield_invalid_params_error() {
     assert_eq!(response.error.expect("error").code, codes::INVALID_PARAMS);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn cancel_request_aborts_and_responds() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1804,7 +1804,7 @@ async fn cancel_request_aborts_and_responds() {
         .notify("$/cancelRequest", json!({ "id": numeric_id }))
         .await;
 
-    let response = tokio::time::timeout(Duration::from_secs(5), harness.recv_response(&id))
+    let response = rusty_tokio::time::timeout(Duration::from_secs(5), harness.recv_response(&id))
         .await
         .expect("cancellation response should arrive promptly");
     assert_eq!(
@@ -1813,7 +1813,7 @@ async fn cancel_request_aborts_and_responds() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn duplicate_request_id_is_rejected_without_disturbing_the_original() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1852,16 +1852,17 @@ async fn duplicate_request_id_is_rejected_without_disturbing_the_original() {
     harness
         .notify("$/cancelRequest", json!({ "id": numeric_id }))
         .await;
-    let cancel_response = tokio::time::timeout(Duration::from_secs(5), harness.recv_response(&id))
-        .await
-        .expect("cancellation response should arrive promptly");
+    let cancel_response =
+        rusty_tokio::time::timeout(Duration::from_secs(5), harness.recv_response(&id))
+            .await
+            .expect("cancellation response should arrive promptly");
     assert_eq!(
         cancel_response.error.expect("error").code,
         codes::REQUEST_CANCELLED
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn shutdown_rejects_further_requests_then_exit_stops_server() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1883,14 +1884,14 @@ async fn shutdown_rejects_further_requests_then_exit_stops_server() {
     // `exit` ends the loop; the server task returns cleanly.
     harness.notify("exit", Value::Null).await;
     let serve = harness.serve;
-    let outcome = tokio::time::timeout(Duration::from_secs(5), serve)
+    let outcome = rusty_tokio::time::timeout(Duration::from_secs(5), serve)
         .await
         .expect("server should stop after exit")
         .expect("server task did not panic");
     assert!(outcome.is_ok());
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn progress_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1920,7 +1921,7 @@ async fn progress_round_trip() {
     assert_eq!(response.result, Some(json!("done")));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn configuration_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1938,7 +1939,7 @@ async fn configuration_round_trip() {
     assert_eq!(response.result, Some(json!([4])));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn apply_edit_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1960,7 +1961,7 @@ async fn apply_edit_round_trip() {
     assert_eq!(response.result.unwrap()["applied"], json!(true));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn will_save_and_wait_until_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -1992,7 +1993,7 @@ async fn will_save_and_wait_until_round_trip() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn file_operation_hooks_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2061,7 +2062,7 @@ async fn file_operation_hooks_round_trip() {
     assert_eq!(note.params.unwrap()["message"], json!("deleted 1"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn diagnostic_pull_model_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2086,7 +2087,7 @@ async fn diagnostic_pull_model_round_trip() {
     assert_eq!(report["items"][0]["uri"], json!("file:///a.txt"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn refresh_helpers_send_paramless_requests() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2109,7 +2110,7 @@ async fn refresh_helpers_send_paramless_requests() {
     assert_eq!(response.result, Some(json!("refreshed")));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn partial_result_streaming_sends_progress_notification() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2125,7 +2126,7 @@ async fn partial_result_streaming_sends_progress_notification() {
     assert_eq!(response.result, Some(json!("done")));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn show_message_request_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2146,7 +2147,7 @@ async fn show_message_request_round_trip() {
     assert_eq!(response.result, Some(json!({"title": "Yes"})));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn show_document_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2163,7 +2164,7 @@ async fn show_document_round_trip() {
     assert_eq!(response.result, Some(json!({"success": true})));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn register_and_unregister_capability_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2193,7 +2194,7 @@ async fn register_and_unregister_capability_round_trip() {
     assert_eq!(response.result, Some(json!("unregistered")));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn client_capabilities_query_walks_dotted_paths() {
     let mut harness = Harness::start();
     let init_id = harness
@@ -2219,7 +2220,7 @@ async fn client_capabilities_query_walks_dotted_paths() {
     assert_eq!(result["applyEditValue"], json!(true));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn document_symbol_accepts_progress_token_fields() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2238,7 +2239,7 @@ async fn document_symbol_accepts_progress_token_fields() {
     assert_eq!(response.result.expect("result")[0]["name"], json!("main"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn workspace_folders_change_notification_is_routed() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2262,7 +2263,7 @@ async fn workspace_folders_change_notification_is_routed() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn work_done_progress_cancel_notification_is_routed() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2281,9 +2282,9 @@ async fn work_done_progress_cancel_notification_is_routed() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn malformed_json_body_gets_parse_error_and_connection_survives() {
-    use tokio::io::AsyncWriteExt;
+    use rusty_tokio::io::AsyncWriteExt;
 
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2326,19 +2327,19 @@ async fn malformed_json_body_gets_parse_error_and_connection_survives() {
     assert!(response.error.is_none());
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn panicking_handler_receives_internal_error_response() {
     let mut harness = Harness::start();
     harness.initialize().await;
 
     let id = harness.request("test/panic", json!({})).await;
-    let response = tokio::time::timeout(Duration::from_secs(5), harness.recv_response(&id))
+    let response = rusty_tokio::time::timeout(Duration::from_secs(5), harness.recv_response(&id))
         .await
         .expect("an INTERNAL_ERROR response should arrive instead of hanging forever");
     assert_eq!(response.error.expect("error").code, codes::INTERNAL_ERROR);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn eof_stops_the_server() {
     let harness = Harness::start();
     // Dropping the client write half closes the stream; the server should see
@@ -2347,14 +2348,14 @@ async fn eof_stops_the_server() {
         to_server, serve, ..
     } = harness;
     drop(to_server);
-    let outcome = tokio::time::timeout(Duration::from_secs(5), serve)
+    let outcome = rusty_tokio::time::timeout(Duration::from_secs(5), serve)
         .await
         .expect("server should stop on EOF")
         .expect("server task did not panic");
     assert!(outcome.is_ok());
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn moniker_and_linked_editing_range_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2383,7 +2384,7 @@ async fn moniker_and_linked_editing_range_round_trip() {
     assert_eq!(ranges["wordPattern"], json!("\\w+"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn inline_value_and_inline_completion_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2416,7 +2417,7 @@ async fn inline_value_and_inline_completion_round_trip() {
     assert_eq!(items[0]["insertText"], json!("ghost text"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn workspace_symbol_resolve_fills_in_the_location() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2438,7 +2439,7 @@ async fn workspace_symbol_resolve_fills_in_the_location() {
     assert_eq!(symbol["location"]["range"]["start"]["line"], json!(0));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn progress_guard_sends_end_even_when_dropped() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2465,7 +2466,7 @@ async fn progress_guard_sends_end_even_when_dropped() {
     assert_eq!(response.result.expect("result"), json!("guard-dropped"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn send_request_with_timeout_gives_up_and_cancels() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2478,7 +2479,7 @@ async fn send_request_with_timeout_gives_up_and_cancels() {
     // The timeout fires: the client is told the server no longer wants the
     // answer, and the handler's own response reports the timeout error. The
     // cancel notification is written first, so read in wire order.
-    let cancel = tokio::time::timeout(
+    let cancel = rusty_tokio::time::timeout(
         Duration::from_secs(5),
         harness.recv_notification("$/cancelRequest"),
     )
@@ -2489,7 +2490,7 @@ async fn send_request_with_timeout_gives_up_and_cancels() {
         serde_json::to_value(&config_request.id).unwrap()
     );
 
-    let response = tokio::time::timeout(Duration::from_secs(5), harness.recv_response(&id))
+    let response = rusty_tokio::time::timeout(Duration::from_secs(5), harness.recv_response(&id))
         .await
         .expect("handler response after timeout");
     let text = response.result.expect("result");
@@ -2497,7 +2498,7 @@ async fn send_request_with_timeout_gives_up_and_cancels() {
     assert!(text.contains("no response"), "was: {text}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn cancel_token_reaches_work_an_abort_cannot() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2507,7 +2508,7 @@ async fn cancel_token_reaches_work_an_abort_cannot() {
         unreachable!("ids are numeric in this harness");
     };
     // Give the handler a moment to install its token watcher.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    rusty_tokio::time::sleep(Duration::from_millis(50)).await;
     harness
         .notify("$/cancelRequest", json!({ "id": numeric_id }))
         .await;
@@ -2517,7 +2518,7 @@ async fn cancel_token_reaches_work_an_abort_cannot() {
     let mut saw_response = false;
     let mut saw_log = false;
     while !(saw_response && saw_log) {
-        let message = tokio::time::timeout(Duration::from_secs(5), harness.recv())
+        let message = rusty_tokio::time::timeout(Duration::from_secs(5), harness.recv())
             .await
             .expect("cancellation effects should arrive promptly");
         match message {
@@ -2540,7 +2541,7 @@ async fn cancel_token_reaches_work_an_abort_cannot() {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn requests_complete_under_a_concurrency_cap() {
     let mut harness = Harness::start_with(|server| server.with_max_concurrent_requests(1));
     harness.initialize().await;
@@ -2557,7 +2558,7 @@ async fn requests_complete_under_a_concurrency_cap() {
     // Responses may land in any order; gather until every id is answered.
     let mut remaining: Vec<RequestId> = ids;
     while !remaining.is_empty() {
-        let message = tokio::time::timeout(Duration::from_secs(5), harness.recv())
+        let message = rusty_tokio::time::timeout(Duration::from_secs(5), harness.recv())
             .await
             .expect("capped requests still complete");
         if let Message::Response(response) = message {
@@ -2568,7 +2569,7 @@ async fn requests_complete_under_a_concurrency_cap() {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn uris_are_normalized_across_spellings() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2583,7 +2584,7 @@ async fn uris_are_normalized_across_spellings() {
     assert_eq!(result["contents"]["value"], json!("hello x2"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn outbound_queue_limit_rejects_client_traffic_but_not_responses() {
     // A limit of 0 makes every Client-originated send fail immediately,
     // while protocol responses still flow.
@@ -2597,7 +2598,7 @@ async fn outbound_queue_limit_rejects_client_traffic_but_not_responses() {
     assert_eq!(response.result.expect("result"), json!(false));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn document_highlight_round_trip() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2614,7 +2615,7 @@ async fn document_highlight_round_trip() {
     assert_eq!(highlights[0]["range"]["start"]["line"], json!(0));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn exit_without_shutdown_is_an_error() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2622,14 +2623,14 @@ async fn exit_without_shutdown_is_an_error() {
     // Skip the shutdown request entirely; per spec the process should exit
     // with code 1, which `serve` signals by returning an error.
     harness.notify("exit", Value::Null).await;
-    let outcome = tokio::time::timeout(Duration::from_secs(5), harness.serve)
+    let outcome = rusty_tokio::time::timeout(Duration::from_secs(5), harness.serve)
         .await
         .expect("server should stop after exit")
         .expect("server task did not panic");
     assert!(outcome.is_err(), "exit without shutdown must be an error");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn cancellation_is_not_blocked_by_slow_notifications() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2645,7 +2646,7 @@ async fn cancellation_is_not_blocked_by_slow_notifications() {
         .notify("$/cancelRequest", json!({ "id": numeric_id }))
         .await;
 
-    let response = tokio::time::timeout(Duration::from_secs(3), harness.recv_response(&id))
+    let response = rusty_tokio::time::timeout(Duration::from_secs(3), harness.recv_response(&id))
         .await
         .expect("cancellation must not queue behind the slow notification");
     assert_eq!(
@@ -2654,7 +2655,7 @@ async fn cancellation_is_not_blocked_by_slow_notifications() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn requests_still_observe_notifications_received_before_them() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2675,7 +2676,7 @@ async fn requests_still_observe_notifications_received_before_them() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn teardown_grace_bounds_a_slow_queued_notification() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2684,10 +2685,10 @@ async fn teardown_grace_bounds_a_slow_queued_notification() {
     // Teardown must give up after the (2s) grace instead of draining fully.
     harness.notify("test/slow_note", json!({})).await;
     // Give the loop a beat to hand the notification to the worker.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    rusty_tokio::time::sleep(Duration::from_millis(100)).await;
     drop(harness.to_server);
 
-    let outcome = tokio::time::timeout(Duration::from_secs(4), harness.serve)
+    let outcome = rusty_tokio::time::timeout(Duration::from_secs(4), harness.serve)
         .await
         .expect("teardown must be bounded by the grace period")
         .expect("server task did not panic");
@@ -2695,13 +2696,13 @@ async fn teardown_grace_bounds_a_slow_queued_notification() {
 }
 
 #[cfg(feature = "tcp")]
-#[tokio::test]
+#[rusty_tokio::test]
 async fn serve_tcp_accepts_multiple_connections() {
-    use tokio::net::{TcpListener, TcpStream};
+    use rusty_tokio::net::{TcpListener, TcpStream};
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
-    tokio::spawn(rusty_lsp::server::serve_tcp(listener, TestBackend::new));
+    rusty_tokio::spawn(rusty_lsp::server::serve_tcp(listener, TestBackend::new));
 
     for _ in 0..2 {
         let stream = TcpStream::connect(addr).await.expect("connect");
@@ -2719,7 +2720,7 @@ async fn serve_tcp_accepts_multiple_connections() {
         .await
         .expect("send initialize");
 
-        let response = tokio::time::timeout(
+        let response = rusty_tokio::time::timeout(
             Duration::from_secs(5),
             rusty_lsp::transport::read_message(&mut reader),
         )
@@ -2737,7 +2738,7 @@ async fn serve_tcp_accepts_multiple_connections() {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn writer_failure_tears_the_connection_down() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2770,16 +2771,16 @@ async fn writer_failure_tears_the_connection_down() {
     .await
     .expect("client-to-server side is still open");
 
-    let outcome = tokio::time::timeout(Duration::from_secs(5), serve)
+    let outcome = rusty_tokio::time::timeout(Duration::from_secs(5), serve)
         .await
         .expect("writer failure must end the loop promptly")
         .expect("server task did not panic");
     assert!(outcome.is_err(), "a failed write side is not a clean stop");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn shutdown_signal_stops_the_server_cleanly() {
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (stop_tx, stop_rx) = rusty_tokio::sync::oneshot::channel::<()>();
     let mut harness = Harness::start_with(move |server| {
         server.with_shutdown_signal(async move {
             let _ = stop_rx.await;
@@ -2796,14 +2797,14 @@ async fn shutdown_signal_stops_the_server_cleanly() {
 
     // ... then winds down through the normal teardown with Ok(()).
     stop_tx.send(()).expect("server still running");
-    let outcome = tokio::time::timeout(Duration::from_secs(5), harness.serve)
+    let outcome = rusty_tokio::time::timeout(Duration::from_secs(5), harness.serve)
         .await
         .expect("signal must stop the server promptly")
         .expect("server task did not panic");
     assert!(outcome.is_ok(), "external shutdown is a clean stop");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn log_level_shortcuts_map_to_message_types() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2828,7 +2829,7 @@ async fn log_level_shortcuts_map_to_message_types() {
     assert!(response.error.is_none());
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn signature_help_accepts_a_work_done_token() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2845,7 +2846,7 @@ async fn signature_help_accepts_a_work_done_token() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[rusty_tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_trivial_requests_are_never_silently_dropped() {
     let mut harness = Harness::start();
     harness.initialize().await;
@@ -2871,7 +2872,7 @@ async fn concurrent_trivial_requests_are_never_silently_dropped() {
         let expected: std::collections::HashSet<_> = ids.into_iter().collect();
         let mut seen = std::collections::HashSet::new();
         while seen.len() < expected.len() {
-            let message = tokio::time::timeout(Duration::from_secs(5), harness.recv())
+            let message = rusty_tokio::time::timeout(Duration::from_secs(5), harness.recv())
                 .await
                 .unwrap_or_else(|_| {
                     panic!(
@@ -2899,14 +2900,14 @@ async fn concurrent_trivial_requests_are_never_silently_dropped() {
 /// pending work -- every request got a task. Past the pending cap a
 /// request is answered `RequestFailed` at once, and cancelling a pending
 /// one frees room again.
-#[tokio::test]
+#[rusty_tokio::test]
 async fn requests_past_the_pending_cap_are_refused_at_once() {
     let mut harness = Harness::start_with(|server| server.with_max_pending_requests(2));
     harness.initialize().await;
     let first = harness.request("test/sleep", json!({})).await;
     let _second = harness.request("test/sleep", json!({})).await;
     let third = harness.request("test/sleep", json!({})).await;
-    let refused = tokio::time::timeout(Duration::from_secs(2), harness.recv_response(&third))
+    let refused = rusty_tokio::time::timeout(Duration::from_secs(2), harness.recv_response(&third))
         .await
         .expect("the over-cap request is answered immediately");
     assert_eq!(refused.error.expect("error").code, codes::REQUEST_FAILED);
@@ -2928,14 +2929,14 @@ async fn requests_past_the_pending_cap_are_refused_at_once() {
 /// Design review 3.7 (N11): notifications queued without bound behind a
 /// slow handler. Past the pending cap the connection is torn down with an
 /// error instead.
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_notification_flood_past_the_cap_tears_the_connection_down() {
     let mut harness = Harness::start_with(|server| server.with_max_pending_notifications(3));
     harness.initialize().await;
     for _ in 0..6 {
         harness.notify("test/slow_note", json!({})).await;
     }
-    let result = tokio::time::timeout(Duration::from_secs(10), &mut harness.serve)
+    let result = rusty_tokio::time::timeout(Duration::from_secs(10), &mut harness.serve)
         .await
         .expect("serve ends promptly")
         .expect("serve task did not panic");

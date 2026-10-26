@@ -14,12 +14,12 @@
 //!     -- --ignored --nocapture
 //! ```
 
-// ring-only suite (ADR-0005): it needs the engine's server or a signing key,
-// and the native backend has neither.
 #![cfg(all(
-    feature = "handrolled-engine",
     rusty_tls_handrolled,
-    not(rusty_tls_native_crypto)
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
 ))]
 
 use std::io::{Read, Write};
@@ -59,7 +59,8 @@ fn options() -> PathOptions {
 
 fn dated(params: &mut CertificateParams) {
     params.not_before = OffsetDateTime::from_unix_timestamp(1_577_836_800).expect("not_before");
-    params.not_after = OffsetDateTime::from_unix_timestamp(1_893_456_000).expect("not_after");
+    // 2100-01-01: openssl verifies this chain against the real clock.
+    params.not_after = OffsetDateTime::from_unix_timestamp(4_102_444_800).expect("not_after");
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

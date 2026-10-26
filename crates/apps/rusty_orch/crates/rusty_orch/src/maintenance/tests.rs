@@ -76,6 +76,7 @@ fn fence() -> Fence {
         assignment: Text::new(MAINTENANCE).unwrap(),
         generation: 1,
         holder: Text::new("test").unwrap(),
+        lease: None,
     }
 }
 #[test]
@@ -234,6 +235,15 @@ impl TaskHost for Host {
         _: &Fence,
     ) -> std::result::Result<Relayed, ClassifiedError> {
         panic!("maintenance must never relay approval")
+    }
+    fn cancel(
+        &mut self,
+        _: &Task,
+        _: &Board,
+        _: &Text,
+        _: &Fence,
+    ) -> std::result::Result<Progress, ClassifiedError> {
+        panic!("maintenance must never cancel")
     }
 }
 #[test]

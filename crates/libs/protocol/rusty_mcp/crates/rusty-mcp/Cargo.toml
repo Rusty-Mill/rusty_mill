@@ -27,6 +27,8 @@ unwrap_used = "warn"
 [dependencies]
 # Pagination cursors are base64 so clients treat them as opaque.
 rusty_base64 = { workspace = true }
+# The `limits` middleware's timeout and retry sleep run on its consumers' tokio
+# runtimes (agentgateway); `rusty_tokio`'s timer needs a `rusty_tokio` runtime (#906).
 tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 http = { workspace = true }
 # The cores' status type; `http` stays in the tower adapters.
@@ -44,6 +46,7 @@ rusty_oauth = { workspace = true, optional = true }
 rusty_request = { workspace = true, features = ["tokio"], optional = true }
 rusty_percent = { workspace = true }
 # Optional (feature `otel`): the export thread runs `rusty_request` on a small `rusty_tokio` runtime.
+# (Feature `jwt`): the JWKS cache sits behind its `RwLock`, which needs no runtime.
 rusty_tokio = { workspace = true, optional = true }
 # Optional (feature `serve`): the blocking-server adapters for the auth and limits cores.
 rusty_serve = { workspace = true, optional = true }
@@ -54,20 +57,27 @@ rusty_rand = { workspace = true, optional = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 rand = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# The response body of the test adapter in `tests/support/mcp.rs`.
+http-body = { workspace = true }
 rusty_mcp_server = { workspace = true, features = ["http"] }
-rusty_mcp_axum = { workspace = true }
+# The test adapter hands requests to the handler's blocking `rusty_serve` API.
+rusty_serve = { workspace = true }
 rsa = "0.9"
 # Signs the RS256 test tokens: `rusty_oauth` only verifies RSA signatures.
 # `rust_crypto` keeps the build pure-Rust.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
+# The layers are tested behind axum, which runs on tokio, and `limits` needs a
+# tokio timer, so those tests stay on tokio (#906). `sync` is for the test
+# adapter's stream pump.
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time"] }
+rusty_tokio = { workspace = true }
 
 [features]
 default = []
 # Auth and load shedding for a blocking `rusty_serve` server, without tower.
 serve = ["dep:rusty_serve"]
 # A JWKS-backed JWT validator for the authorization layer.
-jwt = ["dep:rusty_oauth", "dep:rusty_request", "tokio/sync"]
+jwt = ["dep:rusty_oauth", "dep:rusty_request", "dep:rusty_tokio"]
 # Export spans to an OpenTelemetry collector over OTLP.
 otel = [
     "dep:rusty_request",

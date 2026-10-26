@@ -3,7 +3,7 @@ name = "rusty-search"
 description = "Async, pluggable search interface for Rust: swap search engines without changing application code"
 version.workspace = true
 edition.workspace = true
-rust-version = "1.85"
+rust-version = "1.90"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
@@ -36,7 +36,7 @@ rusty-search-algolia = { workspace = true, optional = true }
 rusty-search-azure-search = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+rusty_tokio.workspace = true
 
 [[example]]
 name = "pluggable_backends"

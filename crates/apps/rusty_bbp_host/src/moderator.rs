@@ -20,9 +20,10 @@
 //! is in its own process group and is killed, group and all, on every exit
 //! path, the error ones included.
 
+use crate::admission::Ticket;
 use crate::confine::{HarnessSandbox, Turn};
 use crate::runner::Confinement;
-use crate::slots::{Class, Slot};
+use crate::slots::{self, Class, Slot};
 use crate::{now, open_driver};
 use rusty_bbp::*;
 use rusty_serde::{Deserialize, Serialize};
@@ -49,6 +50,17 @@ pub struct Launcher {
     /// (Linux). See [`crate::confine`].
     #[rusty_serde(default)]
     pub sandbox: Option<HarnessSandbox>,
+    /// Keep one provider conversation for the role across its turns. Each
+    /// turn is still its own harness process with its own `bbp mcp`, killed
+    /// when the turn ends; every one gets the role's session id (`{session}`,
+    /// `BBP_SESSION_ID`) and `BBP_SESSION_RESUME` (`yes` once a turn of the
+    /// role was launched with it), so it can resume the conversation. The
+    /// next turn's harness starts only after the last one has exited. With a
+    /// `sandbox`, the session keeps one home across its turns; under a cost
+    /// cap, a resumed turn is priced from what its own process counted (see
+    /// [`crate::tokens`]). Its args cannot use `{turn}`.
+    #[rusty_serde(default)]
+    pub session: bool,
 }
 
 /// One launcher per role id, keyed by the ids of the task's roster. A role
@@ -113,12 +125,17 @@ pub struct Config {
     /// turn's cost unknown, which fails an evidence run. Cap and wall stops
     /// kill at once.
     pub end_grace: Duration,
+    /// When every harness of the task must be gone: the end of the hosting
+    /// lease. No grace runs past it, and each harness's group holder kills
+    /// the group at it, so it holds even if this moderator dies first.
+    pub deadline: Option<std::time::SystemTime>,
     /// Stop the run when its harnesses have cost more than this.
     pub cost_cap: Option<CostCap>,
-    /// Machine-wide admission. With slots, a granted turn's harness starts
-    /// only when an agent slot is free, and a selected run's runner only when
-    /// a validator slot is; until then the turn or run waits.
-    pub slots: Option<crate::slots::Slots>,
+    /// Machine-wide admission. With it, a granted turn's harness starts only
+    /// when admission gives it an agent slot, and a selected run's runner
+    /// only when it gives a validator slot; until then the turn or run waits
+    /// in the slot directory's queue.
+    pub admission: Option<crate::admission::Admission>,
 }
 
 /// A live dollar cap on one run. Checked each poll from the harness output the
@@ -250,9 +267,96 @@ pub fn log_path(dir: &Path, task: &TaskId, turn: TurnId) -> PathBuf {
     task_dir(dir, "agents", task).join(format!("turn-{}.log", turn.0))
 }
 
+/// The provider session id every turn of `role` shares: a UUID keyed by the
+/// store's master (see [`crate::master`]) and derived from task and role, so it
+/// is stable across moderator restarts of one store and distinct between
+/// stores that reuse the same task and role names.
+pub fn session_id(master: &[u8; 32], task: &TaskId, role: &RoleId) -> String {
+    let label = format!("|bbp-session|{}|{}", task.0, role.0);
+    let mut b = Sha256::of(&[master.as_slice(), label.as_bytes()].concat()).0;
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h = Sha256(b).hex();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
+}
+
+/// Present once a turn was launched with session id `id`.
+fn session_marker(dir: &Path, task: &TaskId, id: &str) -> PathBuf {
+    task_dir(dir, "agents", task).join(format!("session-{id}.started"))
+}
+
+/// Present when `turn`'s harness was launched to resume a provider session:
+/// its output's running totals then carry the session's earlier turns.
+pub fn resumed_path(dir: &Path, task: &TaskId, turn: TurnId) -> PathBuf {
+    task_dir(dir, "agents", task).join(format!("turn-{}.resumed", turn.0))
+}
+
 /// The file whose exclusive lock is the right to moderate `task`.
 pub fn lock_path(dir: &Path, task: &TaskId) -> PathBuf {
     task_dir(dir, "mod", task).with_extension("lock")
+}
+
+/// Whether nothing `task`'s moderators started still runs: no moderator,
+/// no runner, and no recorded harness group with a live member. While a
+/// group's holder lives its members are killed here; once it is gone they
+/// are left alone and the group is not quiet until none remains (see
+/// [`crate::groups`]). Only an ended task is quiesced: a live one is its
+/// moderator's to resume.
+///
+/// # Errors
+/// When the task is not closed or cancelled, its state cannot be read, or
+/// its harnesses ran before their groups were recorded.
+pub fn quiesce(dir: &Path, task: &TaskId) -> Result<bool, String> {
+    if !cfg!(target_os = "linux") {
+        return Err("quiesce is supported on Linux only".into());
+    }
+    if !open_driver(dir, task)?.state.state.terminal() {
+        return Err(format!("task {} has not ended", task.0));
+    }
+    // Held, so no moderator starts a group while the records are read.
+    let Some(_lock) = try_lock(&lock_path(dir, task))? else {
+        return Ok(false);
+    };
+    let mut quiet = try_lock(&crate::runner::lock_path(dir, task))?.is_some();
+    for record in crate::groups::records(dir, task)? {
+        quiet &= settle(&record)?;
+    }
+    Ok(quiet)
+}
+
+#[cfg(target_os = "linux")]
+fn settle(record: &crate::groups::Record) -> Result<bool, String> {
+    crate::groups::settle(record)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn settle(_record: &crate::groups::Record) -> Result<bool, String> {
+    Err("harness groups are only cleaned up on Linux".into())
+}
+
+/// The exclusive lock on `path` if no one else holds it, `None` if someone does.
+fn try_lock(path: &Path) -> Result<Option<File>, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
+    }
 }
 
 /// Take the moderator lock, or say who else would have to let go.
@@ -311,6 +415,8 @@ pub fn write_mcp_config(
 
 struct Harness {
     turn: TurnId,
+    /// The role whose provider session this harness resumes, if it does.
+    session: Option<RoleId>,
     child: Child,
     /// A confined harness's MCP broker, in the harness's process group.
     broker: Option<Child>,
@@ -325,6 +431,8 @@ struct Harness {
     /// and keeps the slot while the group has another member, should this
     /// moderator die first.
     hold: Option<Child>,
+    /// The group's record, removed once the group is reaped.
+    record: Option<PathBuf>,
 }
 
 /// Every process the loop started. Dropping it kills the harness and its
@@ -335,19 +443,35 @@ struct ActiveRun {
     _slot: Option<Slot>,
 }
 
-/// A free slot of `class` with the stdio that hands it to the child, or
-/// `None` when admission is configured and every slot is held. Without
-/// admission the child gets a null stdio in its place.
-fn admit(cfg: &Config, class: Class) -> Result<Option<(Option<Slot>, Stdio)>, String> {
-    let Some(slots) = &cfg.slots else {
+/// The moderator's place in each class's admission queue, while something
+/// of the task waits for a slot of it.
+#[derive(Debug, Default)]
+struct Tickets {
+    agent: Option<Ticket>,
+    validator: Option<Ticket>,
+}
+
+/// A slot of `class` with the stdio that hands it to the child, or `None`
+/// while admission keeps the task waiting, its place held by `ticket`.
+/// Without admission the child gets a null stdio in its place.
+fn admit(
+    cfg: &Config,
+    class: Class,
+    ticket: &mut Option<Ticket>,
+) -> Result<Option<(Option<Slot>, Stdio)>, String> {
+    let Some(admission) = &cfg.admission else {
         return Ok(Some((None, Stdio::null())));
     };
-    let Some(slot) = slots.try_acquire(class)? else {
+    let Some(slot) = admission.admit(class, ticket)? else {
         return Ok(None);
     };
     let stdio = slot.stdio()?;
     Ok(Some((Some(slot), stdio)))
 }
+
+/// How long a stopped harness's group may take to empty before its record
+/// is left for quiesce to settle.
+const DRAIN: Duration = Duration::from_secs(2);
 
 impl Harness {
     /// The harness's process group: its slot holder's, or its own.
@@ -361,11 +485,29 @@ impl Harness {
         let group = self.group();
         let harness = kill_tree(&mut self.child, group);
         let broker = self.broker.as_mut().map_or(Ok(()), |b| kill_tree(b, group));
+        // The holder stays unreaped, so the group's id stays this group's,
+        // until every member killed with it has exited too.
+        let drained = self.record.is_none() || crate::groups::drained(group, DRAIN);
         let hold = self.hold.as_mut().map_or(Ok(()), |h| kill_tree(h, group));
         // Nothing runs in the worktree any more; a leftover is replaced by
         // the next turn of the same number, so failing to remove it is not fatal.
         if let Some(Err(e)) = self.confined.as_ref().map(Turn::finish) {
             eprintln!("bbp mod: turn {} worktree not removed: {e}", self.turn.0);
+        }
+        // A record is kept while its group may have members; quiesce settles it.
+        match self.record.take() {
+            Some(record) if drained => {
+                if let Err(e) = crate::groups::forget(&record) {
+                    eprintln!("bbp mod: group record kept: {e}");
+                }
+            }
+            Some(record) => {
+                eprintln!(
+                    "bbp mod: group {group} not yet empty; {} kept",
+                    record.display()
+                );
+            }
+            None => {}
         }
         harness.and(broker).and(hold)
     }
@@ -498,6 +640,15 @@ fn kill_tree(child: &mut Child, group: u32) -> Result<(), String> {
     child.wait().map(|_| ()).map_err(|e| format!("wait: {e}"))
 }
 
+/// How long until `cfg.deadline`: zero once it has passed, unbounded without one.
+fn left(cfg: &Config) -> Duration {
+    cfg.deadline.map_or(Duration::MAX, |deadline| {
+        deadline
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or(Duration::ZERO)
+    })
+}
+
 /// [`run_to_stop`], with a stop as the error: the reason.
 pub fn run(cfg: &Config) -> Result<Outcome, String> {
     let out = run_to_stop(cfg)?;
@@ -511,15 +662,20 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
 /// A run the cap or the wall limit stops is an `Ok` outcome carrying the stop,
 /// so the caller can still print what happened; [`run`] turns it into an error.
 pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
+    check_sessions(cfg).map_err(|e| format!("moderator: refusing to start: {e}"))?;
     // An evidence run (one with a cost cap and its prices) starts only if every
     // role pins a priced model.
     if let Some(cap) = &cfg.cost_cap {
         crate::pins::check_run(&cfg.launchers, &cap.criteria)
             .map_err(|e| format!("moderator: refusing to start: {e}"))?;
     }
+    crate::confine::refuse_swappable(&cfg.launchers, &cfg.bbp, &cfg.work, &cfg.repo)
+        .map_err(|e| format!("moderator: refusing to start: {e}"))?;
     // The lock first: a startup refused for it must not leave a marker behind.
     let _lock = lock(&cfg.dir, &cfg.task)?;
     check_evidence_marker(cfg)?;
+    // Before any harness, so every group this task ever has is recorded.
+    let recording = crate::groups::enable(&cfg.dir, &cfg.task)?;
     let mut d = open_driver(&cfg.dir, &cfg.task)?;
     crate::moderator_health::inspect(&d, &cfg.dir, &cfg.task)?.check()?;
     let started = Instant::now();
@@ -530,6 +686,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
     };
     let mut launched: HashSet<TurnId> = HashSet::new();
     let mut waiting: HashSet<TurnId> = HashSet::new();
+    let mut tickets = Tickets::default();
     let mut ran: HashSet<RunId> = HashSet::new();
     let mut waker = crate::waker::Waker::new(&log_path_for(&cfg.dir, &cfg.task));
 
@@ -587,7 +744,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             started,
         };
         if matches!(state, State::Closed | State::Cancelled) {
-            sup.drain_harnesses(cfg.end_grace)?;
+            sup.drain_harnesses(cfg.end_grace.min(left(cfg)))?;
             sup.stop_runner()?;
             d.sync().map_err(|e| format!("{e:?}"))?;
             let stop = check_terminal(cfg, &d).err().map(|reason| Stop {
@@ -596,7 +753,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             });
             return outcome(cfg, &d, visits, seen, &tally(), stop);
         }
-        if started.elapsed() > cfg.max_wall {
+        if started.elapsed() > cfg.max_wall || left(cfg).is_zero() {
             sup.kill_harnesses()?;
             sup.stop_runner()?;
             d.sync().map_err(|e| format!("{e:?}"))?;
@@ -642,7 +799,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             .map(|r| r.id);
         if let Some(run) = pending {
             // Without a validator slot the run stays pending for a later poll.
-            if let Some((slot, stdout)) = admit(cfg, Class::Validator)? {
+            if let Some((slot, stdout)) = admit(cfg, Class::Validator, &mut tickets.validator)? {
                 ran.insert(run);
                 sup.runner = Some(ActiveRun {
                     run,
@@ -650,6 +807,9 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                     _slot: slot,
                 });
             }
+        } else {
+            // Nothing waits for a runner: leave the queue.
+            tickets.validator = None;
         }
 
         let live: Vec<(TurnId, RoleId)> = d
@@ -698,6 +858,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
         }
 
         // Launch: one harness per granted turn.
+        let mut wants_agent = false;
         for (turn, role) in live {
             if launched.contains(&turn) {
                 continue;
@@ -710,8 +871,25 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                 );
                 continue;
             };
+            // One process per session at a time: the next turn waits until
+            // the last one's harness has exited or been stopped.
+            if l.session
+                && sup
+                    .harnesses
+                    .iter()
+                    .any(|h| h.session.as_ref() == Some(&role))
+            {
+                if waiting.insert(turn) {
+                    eprintln!(
+                        "bbp mod: turn {} waits for {role}'s last harness to end",
+                        turn.0
+                    );
+                }
+                continue;
+            }
             // Without an agent slot the turn waits for a later poll, or its deadline.
-            let Some((slot, stdin)) = admit(cfg, Class::Agent)? else {
+            wants_agent = true;
+            let Some((slot, stdin)) = admit(cfg, Class::Agent, &mut tickets.agent)? else {
                 if waiting.insert(turn) {
                     eprintln!("bbp mod: turn {} waits for an agent slot", turn.0);
                 }
@@ -724,10 +902,28 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                 .get(&role)
                 .cloned()
                 .ok_or_else(|| format!("{role} has no principal"))?;
-            // The holder is up before the harness, so the slot never rests on
-            // this moderator alone.
-            let mut hold = slot.as_ref().map(|s| s.holder(&cfg.bbp)).transpose()?;
+            // The holder is up, and its group recorded, before the harness, so
+            // neither the slot nor the group's cleanup ever rests on this
+            // moderator alone.
+            // On Linux every harness has a holder, so its group is recorded
+            // with or without admission.
+            let mut hold = (slot.is_some() || cfg!(target_os = "linux"))
+                .then(|| slots::holder(&cfg.bbp, slot.as_ref(), cfg.deadline))
+                .transpose()?;
             let group = hold.as_ref().map(Child::id);
+            let record = match group
+                .filter(|_| recording)
+                .map(|g| crate::groups::record(&cfg.dir, &cfg.task, g))
+            {
+                Some(Err(e)) => {
+                    if let Some(Err(k)) = hold.as_mut().map(|h| kill_tree(h, h.id())) {
+                        eprintln!("bbp mod: slot holder for turn {} not stopped: {k}", turn.0);
+                    }
+                    return Err(e);
+                }
+                Some(Ok(record)) => Some(record),
+                None => None,
+            };
             let facts = crate::launchers::Facts::of(&d.state, &principal, turn);
             let launched = match spawn(cfg, l, &role, &principal, turn, stdin, group, &facts) {
                 Ok(launched) => launched,
@@ -744,13 +940,19 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             }
             sup.harnesses.push(Harness {
                 turn,
+                session: l.session.then(|| role.clone()),
                 child: launched.child,
                 broker: launched.broker,
                 confined: launched.confined,
                 ended: None,
                 _slot: slot,
                 hold,
+                record,
             });
+        }
+        // No turn waits for an agent slot: leave the queue.
+        if !wants_agent {
+            tickets.agent = None;
         }
         let children: Vec<u32> = sup
             .harnesses
@@ -763,10 +965,28 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             .iter()
             .filter_map(|h| h.ended)
             .map(|ended| cfg.end_grace.saturating_sub(ended.elapsed()));
-        let wall = cfg.max_wall.saturating_sub(started.elapsed());
+        let wall = cfg
+            .max_wall
+            .saturating_sub(started.elapsed())
+            .min(left(cfg));
         let timeout = next_wait(cfg.poll, now(), d.state.next_deadline(), wall, graces);
         waker.wait(&children, timeout)?;
     }
+}
+
+/// A session launcher's args name the session, not the turn.
+fn check_sessions(cfg: &Config) -> Result<(), String> {
+    for (role, l) in cfg.launchers.iter().filter(|(_, l)| l.session) {
+        if std::iter::once(&l.program)
+            .chain(&l.args)
+            .any(|a| a.contains("{turn}"))
+        {
+            return Err(format!(
+                "{role}: a session launcher names its session; drop {{turn}}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// How long a pass may wait for an event: until the nearest turn or request
@@ -992,10 +1212,18 @@ fn spawn(
     facts: &crate::launchers::Facts,
 ) -> Result<Launched, String> {
     let bbp = &cfg.bbp;
+    let session = match l.session {
+        true => Some(session_id(&crate::master::load(&cfg.dir)?, &cfg.task, role)),
+        false => None,
+    };
+    let marker = session
+        .as_deref()
+        .map(|id| session_marker(&cfg.dir, &cfg.task, id));
+    let resume = marker.as_ref().is_some_and(|m| m.exists());
     let confined = l
         .sandbox
         .as_ref()
-        .map(|sandbox| Turn::prepare(cfg, sandbox, turn, facts))
+        .map(|sandbox| Turn::prepare(cfg, sandbox, turn, session.as_deref(), facts))
         .transpose()?;
     let mcp = match &confined {
         Some(t) => t.mcp_config.clone(),
@@ -1010,12 +1238,19 @@ fn spawn(
             .replace("{role}", role_name)
             .replace("{bbp}", &bbp.to_string_lossy())
             .replace("{mcp_config}", &mcp.to_string_lossy())
+            .replace("{session}", session.as_deref().unwrap_or("{session}"))
     };
     let log_path = log_path(&cfg.dir, &cfg.task, turn);
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let log = File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
+    // Recorded before the harness runs, so its cost is never read as a
+    // fresh process's.
+    if resume {
+        let path = resumed_path(&cfg.dir, &cfg.task, turn);
+        File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
     let err = log.try_clone().map_err(|e| e.to_string())?;
     let broker_log = log.try_clone().map_err(|e| e.to_string())?;
     eprintln!("bbp mod: launching {role_name} for turn {}", turn.0);
@@ -1027,6 +1262,13 @@ fn spawn(
         ("BBP_BIN".into(), bbp.to_string_lossy().into_owned()),
         ("BBP_MCP_CONFIG".into(), mcp.to_string_lossy().into_owned()),
     ];
+    if let Some(id) = &session {
+        env.push(("BBP_SESSION_ID".into(), id.clone()));
+        env.push((
+            "BBP_SESSION_RESUME".into(),
+            if resume { "yes" } else { "no" }.into(),
+        ));
+    }
     // An evidence run pins the cache lifetime for the main agent and for
     // subagents: they default to different lifetimes, and the price file
     // prices cache writes at the 1-hour rate.
@@ -1075,6 +1317,13 @@ fn spawn(
         .spawn()
         .map_err(|e| format!("spawn {}: {e}", l.program))?;
     let group = group.unwrap_or(child.id());
+    // Later turns of the session resume what this one starts.
+    if let Some(marker) = &marker {
+        if let Err(e) = File::create(marker) {
+            kill_tree(&mut child, group)?;
+            return Err(format!("{}: {e}", marker.display()));
+        }
+    }
     let broker = match &confined {
         None => None,
         Some(t) => match t.broker(

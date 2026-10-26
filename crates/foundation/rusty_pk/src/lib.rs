@@ -1,13 +1,13 @@
-//! Public-key primitives: signature verification (RSA, ECDSA, Ed25519) and
-//! key agreement (X25519, ECDH on P-256 and P-384).
+//! Public-key primitives: signature verification (RSA, ECDSA, Ed25519), Ed25519
+//! signing, and key agreement (X25519, ECDH on P-256 and P-384).
 //!
 //! # Verification handles public data only
 //!
 //! Everything under [`rsa`], [`ecdsa`] and [`ed25519`] verification works on
 //! public keys, messages and signatures, so it uses variable-time algorithms
 //! where that is faster. Those routines are named `*_vartime`, and must never
-//! be called with a secret. Secret-scalar code (X25519) uses only the
-//! branch-free field routines in `mont`.
+//! be called with a secret. Secret-scalar code (X25519, ECDH, Ed25519 signing)
+//! uses only the branch-free field routines in `mont` and masked selects.
 //!
 //! No `unsafe`, no allocation outside RSA (variable-size moduli), no
 //! dependencies beyond `rusty_sha2` and `rusty_crypto_key`.
@@ -26,6 +26,7 @@ mod weierstrass;
 pub mod ecdh;
 pub mod ecdsa;
 pub mod ed25519;
+pub mod pkcs8;
 pub mod rsa;
 pub mod x25519;
 

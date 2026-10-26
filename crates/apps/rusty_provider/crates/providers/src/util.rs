@@ -1,3 +1,6 @@
+use rp_core::{ChatChunk, ChatStream, ProviderError};
+use rusty_stream::Compat;
+
 /// Picks a reasoning/thinking-token budget from `max_tokens` directly if
 /// set, else derives one from `effort` as a fraction of the request's own
 /// `max_tokens` (high ~80%, medium ~50%, low ~20%, mirroring the fractions
@@ -39,4 +42,13 @@ pub fn gen_id(prefix: &str) -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{prefix}-{nanos:x}")
+}
+
+/// Adapts a `futures` stream (reqwest's SSE body) into the `rusty_stream`
+/// [`ChatStream`] the router consumes -- the provider-side `futures-core` interop edge.
+pub fn chat_stream<S>(stream: S) -> ChatStream
+where
+    S: futures_util::Stream<Item = Result<ChatChunk, ProviderError>> + Send + 'static,
+{
+    Box::pin(Compat::new(Box::pin(stream)))
 }

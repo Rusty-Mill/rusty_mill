@@ -172,6 +172,7 @@ impl Supervisor for ScriptSupervisor {
         config: &Config,
         task: &str,
         _: &std::path::Path,
+        _: Option<u64>,
     ) -> Result<Supervised, String> {
         let mut child = self.0.borrow_mut();
         if let Some(m) = child.as_mut() {
@@ -398,7 +399,7 @@ RPC
     let first = std::fs::read_to_string(&pid_path).unwrap();
     assert_eq!(
         host.supervisor
-            .ensure(&frozen.config, &h.task, &agents)
+            .ensure(&frozen.config, &h.task, &agents, None)
             .unwrap(),
         Supervised::Running
     );
@@ -536,9 +537,8 @@ fn orch_binary_reopens_its_durable_goal_without_opening_or_charging_twice() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// Cancel the one task a report's hosted entry points at, so its harness
-/// stops before the test directory goes; returns how often it was opened.
-fn cancel_hosted(c: &Config, report: &rusty_serde::json::Value) -> usize {
+/// The task a report's hosted entry points at.
+fn report_handle(report: &rusty_serde::json::Value) -> Handle {
     let entry = report["entries"]
         .as_seq()
         .unwrap()
@@ -550,7 +550,13 @@ fn cancel_hosted(c: &Config, report: &rusty_serde::json::Value) -> usize {
         .unwrap()
         .strip_prefix("url:bbp:")
         .unwrap();
-    let h: Handle = rusty_serde::json::from_str(pointer).unwrap();
+    rusty_serde::json::from_str(pointer).unwrap()
+}
+
+/// Cancel the one task a report's hosted entry points at, so its harness
+/// stops before the test directory goes; returns how often it was opened.
+fn cancel_hosted(c: &Config, report: &rusty_serde::json::Value) -> usize {
+    let h = report_handle(report);
     let log = events(&h);
     let opened = log
         .iter()
@@ -649,6 +655,8 @@ fn orch_binary_admits_two_goals_through_one_agent_slot() {
         dir: slots.clone(),
         agents: 1,
         validators: 1,
+        ceiling: None,
+        priority_secs: 0,
     });
     // The writer records its lifetime, holds its slot a while, then plans to
     // the gate. Its record lies inside the slot hold.
@@ -730,6 +738,277 @@ echo end $(date +%s%N) >> {record}
     }
     std::fs::remove_dir_all(dir).unwrap();
     println!("BBP_ACCEPTANCE PASS slot-admission");
+}
+
+/// A goal whose one Implement card's writer never ends its turn: it adds
+/// its pid to `pids` at each launch, then writes a tick every 100 ms until
+/// it is killed. One agent slot admits it.
+struct Ticking {
+    dir: PathBuf,
+    c: Config,
+    cfg: PathBuf,
+    goal: PathBuf,
+    pids: PathBuf,
+    ticks: PathBuf,
+    slots: PathBuf,
+}
+
+const TICKING_GOAL: &str = r#"{"goal":"Implement flag","done_when":["tested"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":1,"stop":"checkpoint","tasks":[{"role":"implement","instruction":"Implement flag","acceptance":["tested"],"max_calls":1}]}"#;
+
+fn ticking(end_grace_secs: u64) -> Ticking {
+    let (dir, mut c) = setup();
+    let slots = dir.join("slots");
+    c.slots = Some(Slots {
+        dir: slots.clone(),
+        agents: 1,
+        validators: 1,
+        ceiling: None,
+        priority_secs: 0,
+    });
+    c.end_grace_secs = Some(end_grace_secs);
+    let (pids, ticks) = (dir.join("writer.pids"), dir.join("ticks"));
+    let script = dir.join("tick.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "echo $$ >> {}\nwhile :; do echo t >> {}; sleep 0.1; done\n",
+            pids.display(),
+            ticks.display()
+        ),
+    )
+    .unwrap();
+    c.pool.get_mut("writer").unwrap().program = "/bin/sh".into();
+    c.pool.get_mut("writer").unwrap().args = vec![script.to_string_lossy().into()];
+    let cfg = dir.join("bbp.json");
+    std::fs::write(&cfg, rusty_serde::json::to_string(&c).unwrap()).unwrap();
+    let goal = dir.join("goal.json");
+    std::fs::write(&goal, TICKING_GOAL).unwrap();
+    Ticking {
+        dir,
+        c,
+        cfg,
+        goal,
+        pids,
+        ticks,
+        slots,
+    }
+}
+
+impl Ticking {
+    fn command(&self, state: &str, extra: &[&str]) -> Command {
+        let mut command =
+            Command::new(std::env::var_os("ORCH_TEST_BIN").expect("set ORCH_TEST_BIN"));
+        command
+            .arg("run")
+            .arg(&self.goal)
+            .arg("--bbp")
+            .arg(&self.cfg)
+            .arg("--state")
+            .arg(self.dir.join(state))
+            .arg("--json")
+            .args(extra);
+        command
+    }
+    fn run(&self, extra: &[&str]) -> std::process::Output {
+        self.command("state", extra).output().unwrap()
+    }
+    fn report(out: &std::process::Output) -> rusty_serde::json::Value {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        rusty_serde::json::from_str(&String::from_utf8(out.stdout.clone()).unwrap()).unwrap()
+    }
+    /// The writer's pid once it has started ticking.
+    fn writer(&self) -> String {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !(self.ticks.exists() && self.pids.exists()) {
+            assert!(Instant::now() < deadline, "the writer never started");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let pids = std::fs::read_to_string(&self.pids).unwrap();
+        pids.lines().last().unwrap().to_owned()
+    }
+    fn launches(&self) -> usize {
+        std::fs::read_to_string(&self.pids).unwrap().lines().count()
+    }
+    /// Kill the task's detached moderator outright, as a crash would.
+    fn kill_moderator(&self, h: &Handle) {
+        let key = rusty_bbp::Sha256::of(h.task.as_bytes()).hex();
+        let pid =
+            std::fs::read_to_string(self.c.dir.join("mod").join(format!("{key}.pid"))).unwrap();
+        assert!(Command::new("kill")
+            .args(["-KILL", pid.trim()])
+            .status()
+            .unwrap()
+            .success());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running(pid.trim()) {
+            assert!(Instant::now() < deadline, "the moderator did not die");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    /// What a finished cancel must mean: the writer is gone, nothing writes
+    /// any more, and the agent slot is free.
+    fn assert_stopped(&self, writer: &str) {
+        assert!(!running(writer), "writer {writer} still runs");
+        let count = || {
+            std::fs::read_to_string(&self.ticks)
+                .unwrap()
+                .lines()
+                .count()
+        };
+        let before = count();
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(count(), before, "nothing writes after the cancel");
+        let slot = std::fs::OpenOptions::new()
+            .write(true)
+            .open(self.slots.join("agent-0.lock"))
+            .unwrap();
+        assert!(slot.try_lock().is_ok(), "the agent slot is free");
+    }
+}
+
+/// Whether `pid` runs: a zombie has exited and waits only to be reaped.
+fn running(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        !stat
+            .rsplit_once(") ")
+            .is_some_and(|(_, rest)| rest.starts_with('Z'))
+    })
+}
+
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; Linux moderator"]
+fn orch_binary_cancel_reaps_a_live_turn_frees_its_slot_and_retires_the_goal() {
+    let t = ticking(1);
+    let first = Ticking::report(&t.run(&[]));
+    assert_eq!(first["ended"]["kind"].as_str(), Some("waiting"));
+    let h = report_handle(&first);
+    let writer = t.writer();
+
+    let started = Instant::now();
+    let cancelled = Ticking::report(&t.run(&["--cancel", "owner withdrew the card"]));
+    assert_eq!(cancelled["ended"]["kind"].as_str(), Some("cancelled"));
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "cancel took {:?}",
+        started.elapsed()
+    );
+    t.assert_stopped(&writer);
+    let view = TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &events(&h));
+    assert_eq!(view.card.state, rusty_bbp::State::Cancelled);
+    assert_eq!(view.cancelled.as_deref(), Some("owner withdrew the card"));
+
+    // The goal's assignment is retired: a later run is refused before it
+    // hosts anything, and cancelling again changes nothing.
+    let resumed = t.run(&[]);
+    assert!(!resumed.status.success());
+    assert!(
+        String::from_utf8_lossy(&resumed.stderr).contains("Retired"),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let logged = events(&h).len();
+    let again = Ticking::report(&t.run(&["--cancel", "owner withdrew the card"]));
+    assert_eq!(again["ended"]["kind"].as_str(), Some("cancelled"));
+    assert_eq!(events(&h).len(), logged, "a second cancel records nothing");
+    assert_eq!(t.launches(), 1);
+    std::fs::remove_dir_all(&t.dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS orch-cancel");
+}
+
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; Linux moderator"]
+fn orch_binary_cancel_stops_the_writer_a_dead_moderator_left_behind() {
+    let t = ticking(1);
+    let h = report_handle(&Ticking::report(&t.run(&[])));
+    let writer = t.writer();
+    t.kill_moderator(&h);
+    assert!(
+        running(&writer),
+        "the orphaned writer outlives its moderator"
+    );
+
+    let cancelled = Ticking::report(&t.run(&["--cancel", "moderator lost"]));
+    assert_eq!(cancelled["ended"]["kind"].as_str(), Some("cancelled"));
+    t.assert_stopped(&writer);
+    assert_eq!(t.launches(), 1, "the cancel started nothing");
+    std::fs::remove_dir_all(&t.dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS orch-cancel-moderator-lost");
+}
+
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; Linux moderator"]
+fn orch_binary_cancel_completes_when_the_moderator_dies_while_it_waits() {
+    // A long end grace keeps the moderator draining while the cancel waits.
+    let t = ticking(30);
+    let h = report_handle(&Ticking::report(&t.run(&[])));
+    let writer = t.writer();
+    let started = Instant::now();
+    let cancel = t
+        .command("state", &["--cancel", "moderator lost mid-cancel"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &events(&h))
+        .card
+        .state
+        != rusty_bbp::State::Cancelled
+    {
+        assert!(Instant::now() < deadline, "the cancel was never recorded");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(running(&writer), "the writer is still in its end grace");
+    t.kill_moderator(&h);
+    let out = cancel.wait_with_output().unwrap();
+    assert_eq!(
+        Ticking::report(&out)["ended"]["kind"].as_str(),
+        Some("cancelled")
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the cancel waited out the grace: {:?}",
+        started.elapsed()
+    );
+    t.assert_stopped(&writer);
+    std::fs::remove_dir_all(&t.dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS orch-cancel-mid-cancel");
+}
+
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; Linux moderator"]
+fn orch_binary_cancel_finds_work_started_before_its_handle_was_checkpointed() {
+    let t = ticking(1);
+    // A run that crashed after its host opened the card, and so started its
+    // moderator, but before the handle reached the checkpointed board.
+    let (task, board) = task();
+    let namespace = rusty_bbp::Sha256::of(TICKING_GOAL.as_bytes()).hex();
+    let mut host = BbpHost::new(t.c.clone(), namespace, "crashed run".into()).unwrap();
+    let handle = host.open(&task, &board, &fence_at(0, "crashed")).unwrap();
+    let h = host.handle(&handle).unwrap();
+    let writer = t.writer();
+
+    // The cancel starts from a state with no handle at all.
+    let cancelled = Ticking::report(&t.run(&["--cancel", "crashed before checkpoint"]));
+    assert_eq!(cancelled["ended"]["kind"].as_str(), Some("cancelled"));
+    t.assert_stopped(&writer);
+    assert_eq!(t.launches(), 1, "the cancel launched nothing");
+    let log = events(&h);
+    assert_eq!(
+        log.iter()
+            .filter(|e| matches!(e, Event::TaskOpened { .. }))
+            .count(),
+        1,
+        "the cancel adopted the crashed run's task"
+    );
+    let view = TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &log);
+    assert_eq!(view.card.state, rusty_bbp::State::Cancelled);
+    std::fs::remove_dir_all(&t.dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS orch-cancel-unrecorded-open");
 }
 
 #[test]
@@ -819,6 +1098,248 @@ RPC
     assert_eq!(cancel_hosted(&c, &report), 1);
     std::fs::remove_dir_all(dir).unwrap();
     println!("BBP_ACCEPTANCE PASS harness-confined");
+}
+
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; enforced Linux sandbox"]
+fn orch_binary_confines_a_pool_member_to_the_goals_lease() {
+    let (dir, mut c) = setup();
+    let dir = dir.canonicalize().unwrap();
+    // The pool member may read `secret`; the goal's lease reaches only `bin`.
+    let (bin, secret) = (dir.join("bin"), dir.join("secret"));
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&secret).unwrap();
+    std::fs::write(secret.join("token"), "s3cret").unwrap();
+    let script = bin.join("plan.sh");
+    std::fs::write(&script, r##"if cat "$1/token" >/dev/null 2>&1; then echo "secret: read"; else echo "secret: denied"; fi
+"$BBP_BIN" mcp <<'RPC'
+{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"script","version":"0"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"p1","kind":"spec","brief":1,"body":"# Spec\nAC1."}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"post","arguments":{"op":"p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve?","gate":true}}}
+RPC
+"##).unwrap();
+    let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
+    for agent in c.pool.values_mut() {
+        agent.sandbox = Some(Sandbox {
+            read: vec![path(&bin), path(&secret)],
+            ..Sandbox::default()
+        });
+    }
+    let writer = c.pool.get_mut("writer").unwrap();
+    writer.program = "/bin/sh".into();
+    writer.args = vec![path(&script), path(&secret)];
+    let lease = format!(r#"{{"read":[{:?}],"ttl_secs":600}}"#, path(&bin));
+    let out = run_leased(&dir, &c, &lease);
+    assert!(
+        matches!(out.status.code(), Some(0 | 3)),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: rusty_serde::json::Value =
+        rusty_serde::json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let h = report_handle(&report);
+    let log = h
+        .dir
+        .join("agents")
+        .join(rusty_bbp::Sha256::of(h.task.as_bytes()).hex())
+        .join("turn-1.log");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let view = TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &events(&h));
+        if view.card.state == rusty_bbp::State::PlanGate {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no plan gate; writer said:\n{}",
+            std::fs::read_to_string(&log).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let said = std::fs::read_to_string(&log).unwrap();
+    println!("{said}");
+    assert!(said.contains("secret: denied"), "{said}");
+    // The pool member could read `secret`; what the moderator launched could not.
+    let agents: rusty_serde::json::Value = rusty_serde::json::from_str(
+        &std::fs::read_to_string(
+            BbpHost::<StdCommand, StdSupervisor>::manifest(&h).join("agents.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let read = agents["maker"]["sandbox"]["read"].as_seq().unwrap();
+    assert_eq!(read.len(), 1, "{read:?}");
+    assert_eq!(
+        read[0].as_str(),
+        Some(path(&bin.canonicalize().unwrap()).as_str())
+    );
+    assert_eq!(cancel_hosted(&c, &report), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS lease-confined");
+}
+
+/// `rusty_orch run` of a one-card goal hosted by `c` under `lease`, a JSON object.
+fn run_leased(dir: &std::path::Path, c: &Config, lease: &str) -> std::process::Output {
+    let mut hosting = rusty_serde::json::to_value(c).unwrap();
+    let lease: rusty_serde::json::Value = rusty_serde::json::from_str(lease).unwrap();
+    hosting.insert("lease", lease);
+    let cfg = dir.join("bbp.json");
+    std::fs::write(&cfg, rusty_serde::json::to_string(&hosting).unwrap()).unwrap();
+    let goal = dir.join("goal.json");
+    std::fs::write(&goal, r#"{"goal":"Implement flag","done_when":["tested"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":1,"stop":"checkpoint","tasks":[{"role":"implement","instruction":"Implement flag","acceptance":["tested"],"max_calls":1}]}"#).unwrap();
+    let orch = std::env::var_os("ORCH_TEST_BIN").expect("set ORCH_TEST_BIN");
+    Command::new(&orch)
+        .arg("run")
+        .arg(&goal)
+        .arg("--bbp")
+        .arg(&cfg)
+        .arg("--state")
+        .arg(dir.join("orch-state"))
+        .arg("--json")
+        .output()
+        .unwrap()
+}
+
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; enforced Linux sandbox"]
+fn a_member_that_could_swap_anothers_root_is_refused_by_orch_and_by_bbp() {
+    let (dir, mut c) = setup();
+    let dir = dir.canonicalize().unwrap();
+    // The writer may write `src`; the judge's rule names `src/sub`, which the
+    // writer could replace with a link to `secret` before the judge launches.
+    let (src, sub, secret) = (dir.join("src"), dir.join("src/sub"), dir.join("secret"));
+    for d in [&sub, &secret] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
+    c.pool.get_mut("writer").unwrap().sandbox = Some(Sandbox {
+        write: vec![path(&src)],
+        ..Sandbox::default()
+    });
+    c.pool.get_mut("judge").unwrap().sandbox = Some(Sandbox {
+        read: vec![path(&sub)],
+        ..Sandbox::default()
+    });
+    let out = run_leased(&dir, &c, &format!(r#"{{"write":[{:?}]}}"#, path(&src)));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("could swap")
+            || stderr.contains("could swap"),
+        "{stderr}"
+    );
+    // BBP refuses the same launchers when handed them directly.
+    let agents = dir.join("agents.json");
+    std::fs::write(
+        &agents,
+        format!(
+            r#"{{"maker":{{"program":"/bin/true","args":[],"sandbox":{{"write":[{:?}]}}}},"auditor":{{"program":"/bin/true","args":[],"sandbox":{{"read":[{:?}]}}}}}}"#,
+            path(&src),
+            path(&sub)
+        ),
+    )
+    .unwrap();
+    let bbp = Command::new(&c.binary)
+        .args(["mod", "--dir"])
+        .arg(dir.join("bbp-direct"))
+        .args(["--task", "swap", "--repo-path"])
+        .arg(&c.repo)
+        .arg("--work")
+        .arg(dir.join("direct-work"))
+        .arg("--agents")
+        .arg(&agents)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&bbp.stderr);
+    assert!(!bbp.status.success(), "{said}");
+    assert!(said.contains("beneath write root"), "{said}");
+    std::fs::remove_dir_all(dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS lease-unswappable");
+}
+
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; enforced Linux sandbox"]
+fn a_harness_stops_at_its_lease_end_even_after_its_moderator_dies() {
+    let (dir, mut c) = setup();
+    let dir = dir.canonicalize().unwrap();
+    let (bin, out) = (dir.join("bin"), dir.join("out"));
+    for d in [&bin, &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    // The writer never ends its turn: it writes a tick every 100 ms.
+    let script = bin.join("tick.sh");
+    std::fs::write(
+        &script,
+        "echo $$ > \"$1/pid\"; while :; do date +%s%N >> \"$1/ticks\"; sleep 0.1; done\n",
+    )
+    .unwrap();
+    let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
+    for agent in c.pool.values_mut() {
+        agent.sandbox = Some(Sandbox {
+            read: vec![path(&bin)],
+            write: vec![path(&out)],
+            ..Sandbox::default()
+        });
+    }
+    let writer = c.pool.get_mut("writer").unwrap();
+    writer.program = "/bin/sh".into();
+    writer.args = vec![path(&script), path(&out)];
+    let lease = format!(
+        r#"{{"read":[{:?}],"write":[{:?}],"ttl_secs":5}}"#,
+        path(&bin),
+        path(&out)
+    );
+    let started = std::time::SystemTime::now();
+    let run = run_leased(&dir, &c, &lease);
+    assert!(
+        matches!(run.status.code(), Some(0 | 3)),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let report: rusty_serde::json::Value =
+        rusty_serde::json::from_str(&String::from_utf8(run.stdout).unwrap()).unwrap();
+    let h = report_handle(&report);
+    let ticks = out.join("ticks");
+    let wait = Instant::now() + Duration::from_secs(4);
+    while !ticks.exists() {
+        assert!(Instant::now() < wait, "the writer never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Crash the moderator: nothing of Orch or BBP is left to stop the writer
+    // but its group's holder.
+    let key = rusty_bbp::Sha256::of(h.task.as_bytes()).hex();
+    let moderator = std::fs::read_to_string(c.dir.join("mod").join(format!("{key}.pid"))).unwrap();
+    assert!(Command::new("kill")
+        .args(["-KILL", moderator.trim()])
+        .status()
+        .unwrap()
+        .success());
+    let end = started + Duration::from_secs(7);
+    while std::time::SystemTime::now() < end {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let writer = std::fs::read_to_string(out.join("pid")).unwrap();
+    assert!(!running(writer.trim()), "the writer outlived its lease");
+    let last: u128 = std::fs::read_to_string(&ticks)
+        .unwrap()
+        .lines()
+        .last()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let lease_end = started.duration_since(std::time::UNIX_EPOCH).unwrap() + Duration::from_secs(6);
+    assert!(
+        last <= lease_end.as_nanos(),
+        "a tick landed after the lease ended"
+    );
+    let count = std::fs::read_to_string(&ticks).unwrap().lines().count();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        std::fs::read_to_string(&ticks).unwrap().lines().count(),
+        count
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS lease-deadline");
 }
 
 /// A real in-memory Millboard on a loopback port with a shared token and the

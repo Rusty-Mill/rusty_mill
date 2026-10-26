@@ -29,9 +29,24 @@ The configuration contains:
 - `assignments`: roster role id to `{agent: POOL_MEMBER, builtin_tools: BOOL}`.
 - `live_turns`: positive concurrent turn cap within the roster size.
 - `max_wall_secs`: positive lifetime bound for each moderator invocation.
-- `slots` (optional): `{dir, agents, validators}`, machine-wide admission
-  passed to `bbp mod --slots`. Every moderator naming the same `dir`, across
-  goals, runs at most `agents` harnesses and `validators` runners at once.
+- `slots` (optional): `{dir, agents, validators, ceiling, priority_secs}`,
+  machine-wide admission passed to `bbp mod --slots`. Every moderator naming
+  the same `dir`, across goals, runs at most `agents` harnesses and
+  `validators` runners at once. Waiting turns and runs queue fairly
+  ([ADR-0018](../../docs/adr/0018-fair-admission.md)). `ceiling` (optional)
+  caps how many agent slots this goal's tasks hold at once, all together.
+  `priority_secs` (default 0, at most a day) ranks this goal's waiters as if
+  they had arrived that many seconds earlier. With a lease, a task does not
+  start a harness while another task whose lease write path overlaps its own
+  holds a slot or waits ahead of it. Both values are frozen with the task.
+- `lease` (optional): `{read, write, ttl_secs}`, the permission lease Orch
+  grants the goal's assignment ([ADR-0017](../../docs/adr/0017-permission-leases.md)).
+  Lease paths must exist and be canonical. Every assigned pool member must
+  then be sandboxed; its sandbox paths are met with the lease's when the task
+  is first frozen, and a pool where one member's path lies beneath any
+  member's write root is refused. A later run under a lease that reaches
+  other paths is refused, so widening access needs a new task. Each run
+  renews the end, which BBP enforces as an absolute deadline on every harness.
 
 See the [two-role configuration](../../docs/examples/bbp.json) and BBP's
 [proving configuration](../../../rusty_bbp_host/docs/proving/agents.json).

@@ -159,6 +159,12 @@ impl Notify {
     }
 }
 
+impl std::fmt::Debug for Notify {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Notify").finish_non_exhaustive()
+    }
+}
+
 impl Default for Notify {
     fn default() -> Self {
         Self::new()

@@ -43,9 +43,19 @@ class PlatformOutputTests(unittest.TestCase):
                 "windows": "false",
                 "macos": "false",
                 "rust_os": '["ubuntu-latest"]',
+                "clippy_os": '["ubuntu-latest","windows-latest"]',
                 "rand_os": '["ubuntu-latest"]',
             },
         )
+
+    def test_windows_clippy_runs_for_every_event(self) -> None:
+        # Windows-only lints are caught on the PR, not by ejecting a queue entry.
+        for event in ("pull_request", "merge_group", "schedule"):
+            for tested in (False, True):
+                with self.subTest(event=event, tested=tested):
+                    self.assertIn("windows-latest", json.loads(platform_outputs(event, tested)["clippy_os"]))
+        tested = platform_outputs("merge_group", linux_tested=True)
+        self.assertEqual(tested["clippy_os"], '["windows-latest"]')
 
     def test_the_queue_runs_every_platform_unless_linux_was_tested(self) -> None:
         untested = platform_outputs("merge_group")
@@ -73,6 +83,7 @@ class PlatformOutputTests(unittest.TestCase):
             for tested in (False, True):
                 outputs = platform_outputs(event, tested)
                 self.assertTrue(json.loads(outputs["rust_os"]))
+                self.assertTrue(json.loads(outputs["clippy_os"]))
                 self.assertTrue(json.loads(outputs["rand_os"]))
 
 
@@ -203,14 +214,15 @@ class WorkflowPlatformTests(unittest.TestCase):
 
     def test_os_matrices_come_from_the_plan(self) -> None:
         self.assertNotRegex(self.workflow, r"(?m)^        os: \[")
-        for job in ("clippy", "ci-smoke", "test"):
+        for job in ("ci-smoke", "test"):
             with self.subTest(job=job):
                 self.assertIn("os: ${{ fromJSON(needs.plan.outputs.rust_os) }}", self.jobs[job])
+        self.assertIn("os: ${{ fromJSON(needs.plan.outputs.clippy_os) }}", self.jobs["clippy"])
         self.assertIn("os: ${{ fromJSON(needs.plan.outputs.rand_os) }}", self.jobs["rusty-rand-platforms"])
 
     def test_pull_requests_record_their_tree_and_the_queue_reads_it(self) -> None:
         plan = self.jobs["plan"]
-        for key in ("linux", "windows", "macos", "rust_os", "rand_os"):
+        for key in ("linux", "windows", "macos", "rust_os", "clippy_os", "rand_os"):
             self.assertIn(f"      {key}: ${{{{ steps.platforms.outputs.{key} }}}}\n", plan)
         self.assertIn("    permissions:\n      contents: read\n      actions: read\n", plan)
         self.assertEqual(plan.count("if: github.event_name == 'pull_request'"), 2)
@@ -227,15 +239,35 @@ class WorkflowPlatformTests(unittest.TestCase):
                     self.assertNotIn("actions: read", text)
 
 
-    def test_queue_runs_never_save_a_cache_nobody_can_restore(self) -> None:
-        # A merge_group cache is scoped to its temporary queue ref.
+    def test_only_main_saves_a_rust_cache(self) -> None:
+        # A cache is scoped to the ref that saved it; only main's is restorable
+        # by every run, and PR saves would evict it from the quota.
         action = WORKFLOW.parents[1] / "actions" / "setup-build-env" / "action.yml"
         for path in (WORKFLOW, action):
-            blocks = re.findall(r"uses: Swatinem/rust-cache@\S+.*\n\s+with:\n((?:\s+[a-z-]+: .*\n)+)", path.read_text(encoding="utf-8"))
+            blocks = re.findall(r"uses: Swatinem/rust-cache@\S+.*\n(?:\s+if: .*\n)?\s+with:\n((?:\s+[a-z-]+: .*\n)+)", path.read_text(encoding="utf-8"))
             self.assertTrue(blocks, path.name)
             for block in blocks:
                 with self.subTest(workflow=path.name):
-                    self.assertIn("save-if: ${{ github.event_name != 'merge_group' }}", block)
+                    self.assertIn("save-if: ${{ github.ref == 'refs/heads/main' }}", block)
+
+    def test_scoped_jobs_restore_the_sweeps_cache(self) -> None:
+        # The sweep saves under component `workspace`; a component in the key
+        # would leave every scoped run with nothing to restore.
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("cache-shared-key: clippy-${{ matrix.os }}\n", text)
+        self.assertIn("cache-shared-key: test-${{ matrix.os }}\n", text)
+        self.assertNotRegex(text, r"(?:cache-)?shared-key: .*matrix\.scope")
+
+    def test_main_saves_only_the_workspace_target_caches(self) -> None:
+        # The 10 GB quota holds the workspace clippy/test target caches only; a
+        # target cache per component job as well evicted them within hours.
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r"cache-shared-key: (\S+)", text), ["clippy-${{", "test-${{"])
+        steps = re.findall(r"uses: Swatinem/rust-cache@\S+.*\n(?:\s+[a-z-]+:.*\n)+", text)
+        self.assertEqual(len(steps), 2)
+        for step in steps:
+            with self.subTest(step=step):
+                self.assertIn("cache-targets: false", step)
 
 
 if __name__ == "__main__":

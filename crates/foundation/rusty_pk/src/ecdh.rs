@@ -59,7 +59,7 @@ impl Curve {
         false
     }
 
-    fn build(self) -> Option<Wc> {
+    pub(crate) fn build(self) -> Option<Wc> {
         match self {
             Curve::P256 => Wc::p256(),
             Curve::P384 => Wc::p384(),
@@ -143,6 +143,17 @@ impl core::fmt::Debug for PrivateKey {
 }
 
 impl PrivateKey {
+    /// The curve.
+    pub(crate) fn curve(&self) -> Curve {
+        self.curve
+    }
+
+    /// The big-endian scalar, exactly `curve.len()` bytes. Secret: callers must not branch on
+    /// it or copy it anywhere they do not wipe.
+    pub(crate) fn scalar(&self) -> &[u8] {
+        &self.bytes[..self.curve.len()]
+    }
+
     /// A key from exactly `curve.len()` big-endian bytes, which must encode
     /// `1 <= d < n`. The length is checked first (it is public); the range check does
     /// the same work whatever the scalar is, and only its final verdict is branched on.
@@ -256,9 +267,24 @@ fn encode(c: &Wc, p: &Proj) -> Option<Point> {
     Some(out)
 }
 
+/// The affine x coordinate of `k * G`, as plain limbs below `p`, for a secret big-endian `k`
+/// of exactly `curve.len()` bytes with `1 <= k < n` (the caller has checked that). The
+/// multiplication and the inversion do the same work for every `k`; the one branch is on the
+/// verdict that the result is not the point at infinity, which a valid `k` never gives.
+pub(crate) fn generator_x(curve: Curve, k: &[u8]) -> Result<E, InvalidKey> {
+    let c = curve.build().ok_or(InvalidKey)?;
+    if k.len() != curve.len() {
+        return Err(InvalidKey);
+    }
+    let g = to_proj(&c, &c.generator());
+    let p = mul(&c, k, &g);
+    ensure(is_nonzero(&p.z, curve.len() / 8))?;
+    Ok(c.fp.leave(&c.fp.mul(&p.x, &c.fp.invert(&p.z))))
+}
+
 /// Parses exactly `bytes.len() <= 48` big-endian bytes into limbs, with no branch on their
 /// values and no heap copy (so the caller can wipe the only copy).
-fn limbs_from_be(bytes: &[u8]) -> E {
+pub(crate) fn limbs_from_be(bytes: &[u8]) -> E {
     let mut out = E::ZERO;
     for (i, &b) in bytes.iter().rev().enumerate() {
         out.0[i / 8] |= u64::from(b) << (8 * (i % 8));
@@ -267,19 +293,19 @@ fn limbs_from_be(bytes: &[u8]) -> E {
 }
 
 /// 1 if `x != 0`, else 0, without a branch.
-fn nonzero(x: u64) -> u64 {
+pub(crate) fn nonzero(x: u64) -> u64 {
     let x = core::hint::black_box(x);
     (x | x.wrapping_neg()) >> 63
 }
 
 /// 1 if any of the first `k` limbs of `a` is non-zero, else 0. Always reads `k` limbs.
-fn is_nonzero(a: &E, k: usize) -> u64 {
+pub(crate) fn is_nonzero(a: &E, k: usize) -> u64 {
     nonzero(a.0[..k].iter().fold(0, |acc, &l| acc | l))
 }
 
 /// 1 iff `1 <= d < n` for `k`-limb values. The same `k` limb operations for every input:
 /// an OR-reduction for non-zero and a full-width borrow chain for `d < n`.
-fn scalar_valid(d: &E, n: &E, k: usize) -> u64 {
+pub(crate) fn scalar_valid(d: &E, n: &E, k: usize) -> u64 {
     let mut borrow = 0u64;
     for i in 0..k {
         let (t, b1) = d.0[i].overflowing_sub(n.0[i]);
@@ -293,7 +319,7 @@ fn scalar_valid(d: &E, n: &E, k: usize) -> u64 {
 /// one branch that depends on it; `scripts/verdict_sites.py` checks that every taint report
 /// is exactly that jump (a conditional jump right after a call to this function).
 #[inline(never)]
-fn ensure(ok: u64) -> Result<(), InvalidKey> {
+pub(crate) fn ensure(ok: u64) -> Result<(), InvalidKey> {
     if core::hint::black_box(ok) == 1 {
         Ok(())
     } else {

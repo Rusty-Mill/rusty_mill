@@ -4,14 +4,14 @@
 //! handler task at its next `.await` point and answers the request with
 //! `RequestCancelled` — that part needs nothing from the backend. What an
 //! abort **cannot** reach is work the handler moved elsewhere: a
-//! `tokio::task::spawn_blocking` computation, a helper task it spawned, or a
+//! `rusty_tokio::task::spawn_blocking` computation, a helper task it spawned, or a
 //! long CPU-bound stretch between `.await` points. For those, every request
 //! handler runs inside a task-local [`CancelToken`] scope:
 //!
 //! ```rust,ignore
 //! async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
 //!     let token = rusty_lsp::cancel::current().unwrap_or_default();
-//!     let hits = tokio::task::spawn_blocking(move || {
+//!     let hits = rusty_tokio::task::spawn_blocking(move || {
 //!         let mut hits = Vec::new();
 //!         for file in big_index {
 //!             if token.is_cancelled() {
@@ -30,11 +30,11 @@
 //! running. [`CancelToken::cancelled`] offers the `select!`-friendly async
 //! form of the same signal.
 
+use rusty_tokio::sync::Notify;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::Notify;
 
-tokio::task_local! {
+rusty_tokio::task_local! {
     static CURRENT: CancelToken;
 }
 
@@ -76,8 +76,7 @@ impl CancelToken {
             if self.is_cancelled() {
                 return;
             }
-            let notified = self.inner.notify.notified();
-            tokio::pin!(notified);
+            let mut notified = std::pin::pin!(self.inner.notify.notified());
             // Register interest before re-checking, so a `cancel` racing
             // with this call cannot slip between the check and the wait.
             notified.as_mut().enable();
@@ -107,38 +106,38 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn cancel_flips_flag_and_wakes_waiters() {
         let token = CancelToken::new();
         assert!(!token.is_cancelled());
 
         let waiter = {
             let token = token.clone();
-            tokio::spawn(async move { token.cancelled().await })
+            rusty_tokio::spawn(async move { token.cancelled().await })
         };
         token.cancel();
         assert!(token.is_cancelled());
-        tokio::time::timeout(Duration::from_secs(1), waiter)
+        rusty_tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
             .expect("waiter wakes")
             .expect("waiter task");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn cancelled_returns_immediately_when_already_tripped() {
         let token = CancelToken::new();
         token.cancel();
-        tokio::time::timeout(Duration::from_millis(50), token.cancelled())
+        rusty_tokio::time::timeout(Duration::from_millis(50), token.cancelled())
             .await
             .expect("no wait needed");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn current_is_none_outside_a_request_scope() {
         assert!(current().is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn scope_makes_the_token_visible() {
         let token = CancelToken::new();
         let seen = scope(token.clone(), async { current().expect("in scope") }).await;

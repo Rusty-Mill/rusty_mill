@@ -119,12 +119,19 @@ protection against an active man-in-the-middle). TLS 1.2/1.3, no ALPN
   response body was close-delimited) -- capped at 8 idle connections
   per origin and a 90-second idle timeout by default
   (`ClientBuilder::pool_max_idle_per_host`/`pool_idle_timeout`). A
-  pooled connection the server already closed (a race no client can
-  fully avoid) fails like any other I/O error and is never silently
-  replayed: the request may already have reached the server, and only
-  a configured `RetryPolicy` (idempotent methods by default) decides
-  whether it is sent again. Set `pool_idle_timeout` below the server's
-  keep-alive timeout to make the race rare. `ClientBuilder::no_pool()`
+  pooled connection the server closed while it sat idle is noticed
+  before reuse and dropped, so the request goes out on a fresh one. One
+  the server closes only once the request is on its way (a race no
+  client can fully avoid) fails like any other I/O error and is never
+  silently replayed: the request may already have reached the server,
+  and only a configured `RetryPolicy` (idempotent methods by default)
+  decides whether it is sent again. `Error::is_connect()` tells apart a
+  request that failed before it was sent (resolving, dialing, or the
+  I/O of a `CONNECT` tunnel, on the first hop), which is always safe to
+  send again; it is never true once a redirect was followed, or once an
+  earlier retry attempt may have delivered the request. Set
+  `pool_idle_timeout` below the server's keep-alive timeout to make the
+  race rare. `ClientBuilder::no_pool()`
   reverts to a fresh connection with `Connection: close` on every
   request.
 - **Response body limit**: a buffered response is read up to 1 MiB by
@@ -168,24 +175,33 @@ protection against an active man-in-the-middle). TLS 1.2/1.3, no ALPN
   returns as soon as the status/headers arrive, then pull the body
   incrementally via `StreamingResponse::chunk()` instead of buffering
   it all first -- redirects are still followed exactly like `.send()`.
-  Two first-pass scope boundaries (documented on `send_streaming`): any
-  configured `RetryPolicy` is ignored, and the connection used isn't
-  returned to the pool afterward.
+  Any configured `RetryPolicy` is ignored (documented on
+  `send_streaming`); the connection goes back to the pool once the body
+  has been read to its end, and is closed if the response is dropped
+  before then.
 - **Proxy support**: `.proxy("http://host:port")` on `ClientBuilder`/
   `RequestBuilder` routes requests through an HTTP forward proxy instead
   of connecting to the origin directly -- reached over plain `http://`
-  either way (an `https://` proxy URL is rejected). An `http://` request
+  either way (an `https://` proxy URL is rejected). Credentials in the
+  URL (`http://user:pass@host:port`, percent-encoded) are sent as Basic
+  `Proxy-Authorization` to the proxy only: on each forwarded request and
+  on the `CONNECT`, never inside a tunnel; they stay out of `Debug` and
+  error text. An `http://` request
   is forwarded in cleartext (absolute-form request-target, `Host` still
   naming the origin); an `https://` request instead opens a `CONNECT`
   tunnel to the origin and runs the TLS handshake and the real request
   through it, invisible to the proxy. `.proxy_from_env()` reads
-  `HTTP_PROXY`/`http_proxy` and `NO_PROXY`/`no_proxy`, matching
-  `requests`' convention -- with an ["httpoxy"](https://httpoxy.org)
+  `HTTP_PROXY`/`http_proxy` for `http://` requests,
+  `HTTPS_PROXY`/`https_proxy` for `https://` ones, `ALL_PROXY`/`all_proxy`
+  as the fallback for both, and `NO_PROXY`/`no_proxy`, matching curl's and
+  `requests`' convention (a value without a scheme is `http://`; an
+  invalid one is an error naming the variable, never its value) -- with an ["httpoxy"](https://httpoxy.org)
   mitigation: `HTTP_PROXY` is ignored whenever `REQUEST_METHOD` is also
   set (the standard CGI-context signal), since a CGI/FastCGI handler can
   map an inbound `Proxy:` header onto that variable. `.proxy_bypass(hosts)`
-  sets `NO_PROXY`-style bypass rules (exact host or subdomain match, or
-  `*` for "never proxy anything"). A plain `http://` proxy connection is
+  sets `NO_PROXY`-style bypass rules (exact host or subdomain match, an
+  IP address or CIDR network such as `10.0.0.0/8`, or `*` for "never
+  proxy anything"). A plain `http://` proxy connection is
   pooled under the proxy's own identity, so one persistent connection can
   carry requests for several different origins; a `CONNECT`-tunneled
   `https://` connection is pooled under a key specific to that (proxy,

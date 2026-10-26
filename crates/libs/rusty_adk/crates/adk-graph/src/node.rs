@@ -5,10 +5,10 @@
 
 use adk_core::{Event, InvocationContext, NodeInfo, RequestInput, Result};
 use async_trait::async_trait;
+use rusty_tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 /// The sentinel name of the graph's entry point.
 pub const START: &str = "__start__";

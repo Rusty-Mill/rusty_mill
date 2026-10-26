@@ -1,36 +1,101 @@
-//! `rusty_stream` — single-node durable log for RustyMill.
+//! `rusty_stream` — the workspace's async [`Stream`] trait, its combinators,
+//! and the [`stream!`]/[`try_stream!`] macros. The in-house replacement for
+//! `futures`, `futures-util`, `futures-core` and `async-stream` (#896;
+//! `docs/research/ASYNC-RUNTIME-INVENTORY.md`, gap G7).
 //!
-//! Phase 1 scope: append-only segment log + in-memory offset index
-//! (`segment`), rolled and retained by size/time (`retention`), on
-//! `rusty_tokio`'s `thread-per-core`/`io-uring-fs` runtime (ADR-0002 D3),
-//! with storage I/O built directly on its `OpDriver`/`SimDriver` seam rather
-//! than a parallel hand-rolled trait (D4), its own wire protocol
-//! (`protocol`) built on `rusty_wire` rather than Kafka compatibility (D1),
-//! a `server` exposing that protocol over a real socket, and a `client`
-//! driving it from the other end — the last item on `docs/phase1-scope.md`
-//! §2's scope list. See that doc for the full scope and `docs/adr/0002-*.md`
-//! for why each foundational decision landed where it did.
+//! Runtime-agnostic: nothing here needs a particular executor.
 //!
-//! Explicitly out of scope for Phase 1 (`docs/phase1-scope.md` §2):
-//! multi-broker replication, Kafka wire-protocol compatibility, WASM
-//! transforms, consumer-group rebalancing.
+//! **Unpin, not unsafe.** Adapters require `Unpin` streams and box the futures
+//! they hold, so the crate has no `unsafe` code. Pin a `!Unpin` stream first
+//! with [`StreamExt::boxed`] or `Box::pin`. Streams from [`stream!`],
+//! [`try_stream!`] and this crate's constructors are already `Unpin`.
+//!
+//! **Interop.** With the `futures-core` feature, [`Compat`] adapts this
+//! crate's [`Stream`] to `futures_core::Stream` and back, for the third-party
+//! crates (axum SSE, reqwest, tonic) that speak the latter.
 
-pub mod client;
-pub mod clock;
-pub mod consumer;
-pub mod manifest;
-pub mod offset;
-pub mod protocol;
-pub mod record;
-pub mod retention;
-pub mod segment;
-pub mod server;
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
-pub use client::{Client, ClientError};
-pub use clock::{Clock, SimClock, SystemClock};
-pub use consumer::ConsumerOffsets;
-pub use offset::{CommittedOffset, DurableOffset, Epoch, Offset};
-pub use protocol::{ProtocolError, Request, Response};
-pub use retention::{Log, RetentionPolicy};
-pub use segment::Segment;
-pub use server::serve;
+mod async_stream;
+pub mod channel;
+#[cfg(feature = "futures-core")]
+mod compat;
+mod ext;
+pub mod future;
+pub mod stream;
+mod try_ext;
+
+use std::ops::DerefMut;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+#[cfg(feature = "futures-core")]
+pub use compat::Compat;
+pub use ext::{Buffered, Collect, Filter, FilterMap, Map, Next, StreamExt, Take, Then};
+pub use future::BoxFuture;
+pub use rusty_stream_macros::{stream, try_stream};
+pub use try_ext::{MapErr, MapOk, TryCollect, TryNext, TryStream, TryStreamExt};
+
+/// Support code for the macros. Not public API.
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::async_stream::{stream, try_stream, Yielder};
+}
+
+/// An asynchronous sequence of values: the async counterpart of [`Iterator`].
+pub trait Stream {
+    /// The values the stream yields.
+    type Item;
+
+    /// Poll for the next value. `Ready(None)` means the stream has ended.
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>>;
+
+    /// Bounds on the remaining length, as [`Iterator::size_hint`].
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, None)
+    }
+}
+
+impl<S: Stream + Unpin + ?Sized> Stream for &mut S {
+    type Item = S::Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
+        Pin::new(&mut **self).poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (**self).size_hint()
+    }
+}
+
+impl<S: Stream + Unpin + ?Sized> Stream for Box<S> {
+    type Item = S::Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
+        Pin::new(&mut **self).poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (**self).size_hint()
+    }
+}
+
+impl<P> Stream for Pin<P>
+where
+    P: DerefMut + Unpin,
+    P::Target: Stream,
+{
+    type Item = <P::Target as Stream>::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().as_mut().poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (**self).size_hint()
+    }
+}
+
+/// A boxed, type-erased, `Send` stream.
+pub type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + 'a>>;

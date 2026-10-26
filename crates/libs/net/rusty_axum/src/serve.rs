@@ -6,12 +6,19 @@
 //! whole before routing. Shutdown is graceful: no new connections, idle
 //! connections close, a request in flight finishes, and a streamed body
 //! (SSE) is ended cleanly with its terminating chunk.
+//!
+//! With the `http2` feature and [`ServeOptions::http2`], a TLS connection
+//! that negotiates ALPN `h2` is served as HTTP/2 instead, with the same
+//! limits and the same shutdown (GOAWAY, then drain).
+
+#[cfg(feature = "http2")]
+mod h2;
 
 use std::future::{poll_fn, Future};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rusty_http::async_tokio::AsyncTransport;
 use rusty_http::body::{request_framing, Framing};
@@ -21,9 +28,9 @@ use rusty_tls::{AsyncTlsServerStream, TlsAcceptor};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, TcpListener, TcpStream};
 use rusty_tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use rusty_tokio::task::JoinHandle;
-use rusty_tokio::time::{sleep, timeout, timeout_at};
+use rusty_tokio::time::{sleep, timeout, timeout_at, Instant};
 
-use crate::body::{ChunkStream, Inner};
+use crate::body::{BodyStream, Inner};
 use crate::request::Request;
 use crate::response::Response;
 use crate::routing::Router;
@@ -42,13 +49,23 @@ pub struct ServeOptions {
     /// How long a connection may wait for its next request, and the limit
     /// on each read of a request and each write of a response.
     pub idle_timeout: Duration,
-    /// The limit on a TLS handshake.
+    /// The limit on a TLS handshake (and, for HTTP/2, the client's preface).
     pub handshake_timeout: Duration,
+    /// Serve HTTP/2 on a TLS connection that negotiates ALPN `h2`; others
+    /// stay HTTP/1.1. The acceptor must offer `h2`, usually with
+    /// `http/1.1`. There is no cleartext h2c. Off by default.
+    ///
+    /// The limits above apply per stream (`max_head_bytes` to the decoded
+    /// header list), `idle_timeout` also bounds each blocked write and a
+    /// connection with no open stream, and a connection has at most 100
+    /// streams open at once.
+    #[cfg(feature = "http2")]
+    pub http2: bool,
 }
 
 impl Default for ServeOptions {
     /// 1024 connections, an 8 KiB head, a 2 MiB body (axum's default body
-    /// limit), 60 s idle and a 10 s handshake.
+    /// limit), 60 s idle, a 10 s handshake and no HTTP/2.
     fn default() -> Self {
         ServeOptions {
             max_connections: 1024,
@@ -56,6 +73,8 @@ impl Default for ServeOptions {
             max_body_bytes: 2 << 20,
             idle_timeout: Duration::from_secs(60),
             handshake_timeout: Duration::from_secs(10),
+            #[cfg(feature = "http2")]
+            http2: false,
         }
     }
 }
@@ -138,13 +157,16 @@ struct Shared {
     options: ServeOptions,
 }
 
-/// Waits for `work`, or for the stop signal: `None` once stopped. The stop
-/// signal is polled first so that always-ready work cannot starve it.
+/// Waits for `work`, or for the stop signal: `None` once stopped. The
+/// `select!` is `biased;`, so the stop signal is polled first: always-ready
+/// work cannot starve it, and a stop that becomes ready together with the
+/// work always wins.
 async fn until_stopped<F: Future>(work: F, stop: &Arc<Stop>) -> Option<F::Output> {
     if stop.is_stopped() {
         return None;
     }
     rusty_tokio::select! {
+        biased;
         _ = stop.wait() => None,
         w = work => Some(w),
     }
@@ -157,7 +179,7 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<Stop>
         let Some(accepted) = until_stopped(listener.accept(), &stop).await else {
             break;
         };
-        let Ok((tcp, _)) = accepted else {
+        let Ok((tcp, peer)) = accepted else {
             // Out of descriptors, say: back off rather than spin.
             sleep(Duration::from_millis(10)).await;
             continue;
@@ -166,28 +188,35 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<Stop>
         let Ok(permit) = permits.clone().try_acquire_owned() else {
             continue;
         };
-        rusty_tokio::spawn(connection(tcp, shared.clone(), stop.clone(), permit));
+        rusty_tokio::spawn(connection(tcp, peer, shared.clone(), stop.clone(), permit));
     }
     drop(listener);
     // Every connection holds a permit until it ends.
     let _ = permits.acquire_many(max as u32).await;
 }
 
-/// One accepted connection: the TLS handshake if any, then HTTP/1.1.
+/// One accepted connection: the TLS handshake if any, then HTTP/1.1, or
+/// HTTP/2 when enabled and negotiated.
 async fn connection(
     tcp: TcpStream,
+    peer: SocketAddr,
     shared: Arc<Shared>,
     stop: Arc<Stop>,
     _permit: OwnedSemaphorePermit,
 ) {
     let _ = tcp.set_nodelay(true);
     let Some(acceptor) = shared.tls.clone() else {
-        return run(tcp, &shared, &stop).await;
+        return run(tcp, peer, &shared, &stop).await;
     };
     let deadline = Instant::now() + shared.options.handshake_timeout;
-    if let Ok(Ok(io)) = timeout_at(deadline, handshake(acceptor, tcp)).await {
-        run(io, &shared, &stop).await;
+    let Ok(Ok(io)) = timeout_at(deadline, handshake(acceptor, tcp)).await else {
+        return;
+    };
+    #[cfg(feature = "http2")]
+    if shared.options.http2 && io.negotiated_alpn_protocol() == Some(&b"h2"[..]) {
+        return h2::run(io, peer, shared, stop, deadline).await;
     }
+    run(io, peer, &shared, &stop).await;
 }
 
 async fn handshake(
@@ -199,9 +228,9 @@ async fn handshake(
     Ok(tls)
 }
 
-/// Serves requests on `io` in order until the client is done, a limit is
-/// hit, or the server stops.
-async fn run<T>(io: T, shared: &Shared, stop: &Arc<Stop>)
+/// Serves requests from `peer` on `io` in order until the client is done,
+/// a limit is hit, or the server stops.
+async fn run<T>(io: T, peer: SocketAddr, shared: &Shared, stop: &Arc<Stop>)
 where
     T: AsyncRead + AsyncWrite + Unpin + Send,
 {
@@ -224,7 +253,7 @@ where
             chunked: head.version == Version::Http11,
         };
         let req = match conn.read_request(head, options).await {
-            Ok(req) => req,
+            Ok(req) => req.with_peer_addr(peer),
             Err(e) => return conn.refuse(&e).await,
         };
         let response = shared.router.call(req).await;
@@ -392,7 +421,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Conn<T> {
     /// the server stops (`true`), or it fails or a write fails (`false`).
     async fn stream(
         &mut self,
-        mut stream: ChunkStream,
+        mut stream: BodyStream,
         stop: &Arc<Stop>,
         frame: fn(&[u8]) -> Vec<u8>,
     ) -> bool {
@@ -466,6 +495,62 @@ mod tests {
     use crate::response::sse::{Event, Sse};
     use crate::routing::get;
 
+    #[test]
+    fn stop_wins_when_both_become_ready_after_the_precheck() {
+        use std::cell::Cell;
+        use std::task::{Context, Poll, Waker};
+
+        for _ in 0..128 {
+            let stop = Arc::new(Stop::default());
+            let ready = Cell::new(false);
+            let work_polls = Cell::new(0);
+            let work = std::future::poll_fn(|_| {
+                work_polls.set(work_polls.get() + 1);
+                if ready.get() {
+                    Poll::Ready(7)
+                } else {
+                    Poll::Pending
+                }
+            });
+            let mut waiting = std::pin::pin!(until_stopped(work, &stop));
+            let mut cx = Context::from_waker(Waker::noop());
+            // Cross the initial level check with neither branch ready.
+            assert!(waiting.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(work_polls.get(), 1);
+            // Both branches are ready on the next poll of the selector.
+            ready.set(true);
+            stop.stop();
+            assert_eq!(waiting.as_mut().poll(&mut cx), Poll::Ready(None));
+            assert_eq!(work_polls.get(), 1, "shutdown must be polled before work");
+        }
+    }
+
+    #[test]
+    fn a_stop_that_becomes_ready_with_the_work_wins() {
+        // Past the precheck, both branches park; then the stop and the work
+        // become ready together. A current-thread runtime keeps the racing
+        // task from running between the two signals, so it next polls with
+        // both ready, and the stop must win every time, not whichever branch
+        // a fair `select!` polls first.
+        let rt = rusty_tokio::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            for _ in 0..200 {
+                let stop = Arc::new(Stop::default());
+                let (tx, rx) = rusty_tokio::sync::oneshot::channel::<u32>();
+                let racer = stop.clone();
+                let race = rusty_tokio::spawn(async move {
+                    until_stopped(async { rx.await.unwrap() }, &racer).await
+                });
+                while stop.waiters() == 0 {
+                    rusty_tokio::task::yield_now().await; // past the precheck, parked
+                }
+                tx.send(7).unwrap();
+                stop.stop();
+                assert_eq!(race.await.unwrap(), None);
+            }
+        });
+    }
+
     /// `n` events, each ready at once.
     struct Burst(u32);
 
@@ -503,7 +588,7 @@ mod tests {
         let router = Router::new()
             .route("/", get(|| async { "ok" }))
             .route("/burst", get(|| async { Sse::new(Burst(500)) }));
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server = serve(listener, None, ServeOptions::default(), router).unwrap();
         let connect = || TcpStream::connect_addr(server.local_addr());
 

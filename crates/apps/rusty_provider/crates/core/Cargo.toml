@@ -12,5 +12,5 @@ layer = "apps"
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
-futures.workspace = true
+rusty_stream.workspace = true
 thiserror = "2"

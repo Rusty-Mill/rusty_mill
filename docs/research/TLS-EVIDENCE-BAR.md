@@ -19,14 +19,14 @@ and still fall back to rustls with one switch. The risk differs, so the bar shou
 
 | Item | Status |
 | --- | --- |
-| CI runs the engine (clippy, tests, docs, OpenSSL interop, zero-tests guard) whenever the planner selects `tls_engine`: a change to `rusty_tls` or to a crate it depends on (the planner selects by reverse dependency of what changed), a change to the engine's own CI files, and full runs (manual dispatch, the weekly schedule, and pushes with no usable base). Pushes to main are scoped like PRs. Not on unrelated changes | Met |
+| CI runs the engine (clippy, tests, docs, OpenSSL interop, zero-tests guard) whenever the planner selects `tls_engine`: a change to `rusty_tls` or to a crate it depends on (the planner selects by reverse dependency of what changed), a change to the engine's own CI files, and full runs (manual dispatch, the daily schedule, and pushes with no usable base). Pushes to main are scoped like PRs. Not on unrelated changes | Met |
 | TLS 1.2 client and server | Met (stages 4b onward) |
 | BoGo through a shim | 861 pass, 0 fail, 455 disabled with reasons; CI floor 830 |
 | OpenSSL interop in both directions, hermetic, in CI | Met |
 | rustls differential, protocol side (suites, groups, HRR, resumption, ALPN, SNI, both roles) | Met by per-stage suites; not re-audited as a whole |
 | Certificate differential | **Partial, much improved 2026-10-11.** x509-limbo (9,802 cases, pinned by sha256) now runs against both engines: 9,777 compared. It found three real looser-than-webpki defects (fixed, see below). Remaining: the BetterTLS and limbo `pedantic` classes and CRLs are not enforced by either engine; the two name-constraint DoS cases are now bounded by a comparison budget (see below), but two other limbo cases where we accept and webpki refuses still need a named-owner decision. No generated-chain corpus at scale yet |
-| Fuzz targets | **Exist** (certificate, DER, TLS 1.2 record, schedule, client and server, version negotiation). **Smoke job added 2026-10-10** (30 s per target, on the same planner selection as the engine job; passed once on a runner, run 38094570843). No long run recorded. No target for TLS 1.3 handshake messages or the 1.3 machines beyond negotiation |
-| Live internet | **One runner run, three Google hosts, TLS 1.3, one network.** The step is non-blocking and runs wherever the engine job runs (same planner selection) |
+| Fuzz targets | **Exist** (certificate, DER, TLS 1.2 record, schedule, client and server, version negotiation). **Smoke job added 2026-10-10** (30 s per target, on the same planner selection as the engine job; passed once on a runner, run 38094570843). **Long-run workflow added 2026-10-25** (`tls-fuzz-long.yml`, manual: one job per target, 3 h of wall time each by default, a configured budget of 24 job-hours over 8 targets rather than measured CPU time, on the native backend unless `ring` is chosen). No long run recorded yet. No target for TLS 1.3 handshake messages or the 1.3 machines beyond negotiation |
+| Live internet | **One runner run, three Google hosts, TLS 1.3, one network.** The step is non-blocking and runs wherever the engine job runs (same planner selection). Since 2026-10-24 it also runs in the native job (`LIVE_BACKEND: native`), where item 1's runs are counted for the native backend (ADR-0002 Amendment 2) |
 | Independent review | **Scope approved and reviewer named (David Bailey) by the owner, 2026-10-16; review not started, nothing reviewed yet.** Item 4 stays unmet until findings are closed |
 | Soak in a real consumer | **None** |
 | Mutation testing as a CI number | **None** (mutants are checked by hand per change) |
@@ -78,13 +78,14 @@ proposed to start until Tier 1 has been in use.
 ## Questions for you (answers recorded 2026-10-10)
 
 1. Tier 1: **approved**, fuzz length left to the reviewer.
-2. Candidate: `rleval-app` OIDC transport (client only, TLS 1.3, named hosts) **chosen by the owner on 2026-10-14**, in the working session ("3 approved recommendation"). Naming it wires nothing.
+2. Candidate: `rleval-app` OIDC transport (client only, TLS 1.3, named hosts) **chosen by the owner on 2026-10-14**, in the working session ("3 approved recommendation"). Naming it wires nothing. **Chosen by the owner on 2026-10-24 for the native backend** (ADR-0002 Amendment 2). Accepted there by the owner the same day: before wiring on that backend, item 1's runs are counted in the native CI job, and item 4 also covers `handrolled/crypto/native.rs` (a widening of `TLS-REVIEW-SCOPE.md`).
 3. ADR: amendment before any wiring. **Amendment 1 accepted by the owner on 2026-10-14** (same session message).
 4. Reviewer: **David Bailey**, nominated by the owner on 2026-10-16 and **confirmed by the owner as independent on 2026-10-17** (session message: "1 yes"). **Time box set by the owner on 2026-10-17: three weeks, about 40 hours of review effort** (session message: "2: three weeks, 40 hours"), in the scope's priority order; findings must be closed for item 4 to be met, so running out of time with findings open leaves it unmet. Open: the review itself. Tier 1 item 4 stays unmet.
 5. `ring`: keep (my recommendation).
-6. **Leave it, confirmed by the owner on 2026-10-17** (session message: "3 confirmed"). Tier 1 item 1 counts *scheduled* runs and the only
-   scheduled CI run today is weekly (Mondays 03:17 UTC), so the criterion takes 10 weeks as
-   written. No schedule is added and the criterion is unchanged.
+6. **Leave it, confirmed by the owner on 2026-10-17** (session message: "3 confirmed"). Tier 1 item 1 counts *scheduled* runs. When this was confirmed the only scheduled CI run was weekly (Mondays
+   03:17 UTC), so the criterion would have taken 10 weeks. Since f34d63f7a (2026-10-21) the
+   scheduled run is daily (03:17 UTC), so it now takes about 10 days, still at least 7.
+   No schedule was added for this criterion and the criterion is unchanged.
 7. **Smaller review scope:** `TLS-REVIEW-SCOPE.md` **approved by the owner on 2026-10-16** (session message); it is the authoritative scope for item 4.
 8. **ADR amendment:** approach and text **accepted by the owner on 2026-10-14**; Amendment 1 in
    `crates/libs/net/rusty_tls/docs/adr/0002-handrolled-engine-behind-a-permanently-non-default-seam.md`

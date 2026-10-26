@@ -10,6 +10,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import timing_series as ts  # noqa: E402
@@ -95,6 +96,20 @@ def run(cargo, specs, reps):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_aead_timing_build_explicitly_enables_aes(self):
+        for package in ("rusty_aead", "rusty_pk"):
+            with patch.object(ts.subprocess, "run") as build:
+                build.return_value = type("Result", (), {
+                    "returncode": 1, "stdout": "", "stderr": ""
+                })()
+                with self.assertRaises(ts.Failure):
+                    ts.resolve(package)
+                command = build.call_args.args[0]
+                self.assertEqual("--features" in command, package == "rusty_aead")
+                if package == "rusty_aead":
+                    self.assertEqual(command[-2:], ["--features", "aes-gcm"])
+
+
     def test_each_crate_uses_its_own_executable_whatever_the_mtimes(self):
         fx = Fixture(self)
         # Same-named calibration function in all three; the newest file belongs to the wrong crate.

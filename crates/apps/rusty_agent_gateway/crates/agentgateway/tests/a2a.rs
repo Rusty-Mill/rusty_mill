@@ -164,6 +164,18 @@ async fn start_at(
     agents: &[u16],
     extra_policies: &str,
 ) -> (String, CancellationToken) {
+    start_configured("", prefix, policy, agents, extra_policies).await
+}
+
+/// The most general form: `head` is spliced in ahead of `binds`, for
+/// gateway-wide settings such as `config.limits`.
+async fn start_configured(
+    head: &str,
+    prefix: &str,
+    policy: &str,
+    agents: &[u16],
+    extra_policies: &str,
+) -> (String, CancellationToken) {
     let port = free_port().await;
     let backends: String = agents
         .iter()
@@ -178,6 +190,7 @@ async fn start_at(
 
     let yaml = format!(
         r#"
+{head}
 binds:
   - port: {port}
     listeners:
@@ -898,6 +911,48 @@ async fn a_refused_a2a_method_is_never_retried_because_it_is_never_sent() {
     let response = call(&url, "tasks/cancel").await;
     assert_eq!(response["error"]["code"], -32011);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+    shutdown.cancel();
+}
+
+/// A JSON-RPC call exactly `len` bytes long.
+fn call_of_len(len: usize) -> String {
+    let frame = |pad: &str| {
+        format!(r#"{{"jsonrpc":"2.0","id":1,"method":"message/send","params":{{"p":"{pad}"}}}}"#)
+    };
+    let pad = len - frame("").len();
+    frame(&"x".repeat(pad))
+}
+
+#[tokio::test]
+async fn max_request_body_bytes_caps_an_a2a_call_below_the_protocol_bound() {
+    let a = agent("Alpha", &["echo"], true, true).await;
+    let (base, shutdown) = start_configured(
+        "config:\n  limits:\n    maxRequestBodyBytes: 256",
+        "",
+        "                denyMethods: [\"^tasks/\"]",
+        &[a.port],
+        "",
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let send = |body: String| {
+        client
+            .post(&base)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+    };
+
+    let at_cap = send(call_of_len(256)).await.expect("should answer");
+    assert_eq!(at_cap.status(), 200);
+    let over = send(call_of_len(257)).await.expect("should answer");
+    assert_eq!(over.status(), 413);
+    assert_eq!(
+        a.hits.load(Ordering::Relaxed),
+        1,
+        "only the call within the cap reached the agent"
+    );
 
     shutdown.cancel();
 }

@@ -83,6 +83,69 @@ impl std::error::Error for Error {
     }
 }
 
+impl Error {
+    /// Whether the request failed before it was sent: resolving the host,
+    /// dialing it, or the I/O of a proxy's `CONNECT` tunnel, on the first
+    /// hop. Such a request never reached any server, so sending it again
+    /// cannot duplicate its effect. Never true once a redirect was
+    /// followed, or once an earlier retry attempt may have delivered the
+    /// request: one that got a response, or failed after connecting. A TLS
+    /// handshake failure is not counted, since the handshake runs with the
+    /// first write, alongside the request itself; nor is a proxy refusing
+    /// the tunnel, which is [`Error::ProxyConnectFailed`].
+    pub fn is_connect(&self) -> bool {
+        matches!(self, Error::Io(e) if marked(e))
+    }
+
+    /// Marks an I/O error from setting up a connection, for
+    /// [`Error::is_connect`]. Its kind and message are unchanged.
+    pub(crate) fn connecting(self) -> Self {
+        match self {
+            Error::Io(e) => Error::Io(std::io::Error::new(e.kind(), Connect(e))),
+            other => other,
+        }
+    }
+
+    /// This error once the request may already have been `delivered`, by an
+    /// earlier redirect hop or retry attempt: a connect failure is then no
+    /// longer marked as one.
+    pub(crate) fn once_delivered(self, delivered: bool) -> Self {
+        match self {
+            Error::Io(e) if delivered && marked(&e) => {
+                let kind = e.kind();
+                match e.into_inner().map(|inner| inner.downcast::<Connect>()) {
+                    Some(Ok(connect)) => Error::Io(connect.0),
+                    Some(Err(other)) => Error::Io(std::io::Error::new(kind, other)),
+                    None => Error::Io(kind.into()),
+                }
+            }
+            other => other,
+        }
+    }
+}
+
+/// Whether `e` carries the [`Connect`] mark.
+fn marked(e: &std::io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<Connect>())
+}
+
+/// The payload of an I/O error raised while connecting -- see
+/// [`Error::connecting`]. Displays as the error it wraps.
+#[derive(Debug)]
+struct Connect(std::io::Error);
+
+impl fmt::Display for Connect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for Connect {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::Io(e)

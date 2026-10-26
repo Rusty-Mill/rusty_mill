@@ -7,8 +7,7 @@ use adk_core::{
 use adk_models::{GenerateContentConfig, LlmRequest, LlmResponse, SharedModel, StreamAggregator};
 use adk_tools::{invoke_tool, resolve_tools, SharedTool, ToolContext, ToolSource};
 use async_trait::async_trait;
-use futures::stream::BoxStream;
-use futures::StreamExt;
+use rusty_stream::{BoxStream, Compat, StreamExt};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -30,7 +29,7 @@ pub enum IncludeContents {
 /// # Example
 ///
 /// ```
-/// # tokio_test::block_on(async {
+/// # rusty_tokio::Runtime::new()?.block_on(async {
 /// use adk_agents::{Agent, LlmAgent};
 /// use adk_models::MockModel;
 /// use std::sync::Arc;
@@ -45,6 +44,7 @@ pub enum IncludeContents {
 ///
 /// assert_eq!(agent.name(), "capital_agent");
 /// # });
+/// # Ok::<(), std::io::Error>(())
 /// ```
 pub struct LlmAgent {
     name: String,
@@ -301,7 +301,7 @@ impl Agent for LlmAgent {
     }
 
     fn run<'a>(&'a self, ctx: &'a InvocationContext) -> BoxStream<'a, Result<Event>> {
-        Box::pin(async_stream::try_stream! {
+        Box::pin(rusty_stream::try_stream! {
             let ctx = ctx.for_agent(&self.name);
             let callback_ctx = CallbackContext::new(ctx.clone(), &self.name);
 
@@ -356,7 +356,9 @@ impl Agent for LlmAgent {
                         // into the final response (the shared reducer, which
                         // also stops at an error chunk instead of folding it
                         // into a truncated answer).
-                        let mut stream = self.model.generate_content_stream(request.clone());
+                        // `adk-models` still speaks `futures` (tier C, #908).
+                        let mut stream =
+                            Compat::new(self.model.generate_content_stream(request.clone()));
                         let mut aggregator = StreamAggregator::new();
                         while let Some(chunk) = stream.next().await {
                             let chunk = chunk?;

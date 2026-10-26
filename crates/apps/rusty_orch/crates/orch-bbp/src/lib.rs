@@ -5,6 +5,7 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 mod config;
+mod lease;
 mod supervisor;
 pub use config::{Agent, Assignment, Config, Sandbox, Slots};
 pub use supervisor::{StdSupervisor, Supervised, Supervisor};
@@ -36,11 +37,28 @@ pub const SCRUB: &[&str] = &[
     "BBP_PRINCIPAL",
     "BBP_TURN",
 ];
+/// How often a cancel re-reads the task when another writer moved its
+/// revision in between.
+/// The claim file each task's manifest holds beside its agents file.
+pub(crate) const CLAIM: &str = "claim.json";
+const CANCEL_ATTEMPTS: usize = 5;
+/// BBP's end grace when the configuration leaves it unset.
+const BBP_END_GRACE_SECS: u64 = 60;
+/// How long a cancel waits, beyond the end grace BBP gives a harness to
+/// print its result, for everything the task started to be gone.
+const CANCEL_MARGIN: Duration = Duration::from_secs(30);
+
 fn transient(e: impl std::fmt::Display) -> ClassifiedError {
     ClassifiedError::Transient(AgentError(e.to_string()))
 }
 fn permanent(e: impl std::fmt::Display) -> ClassifiedError {
     ClassifiedError::Permanent(AgentError(e.to_string()))
+}
+fn unix_now() -> Result<u64, ClassifiedError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(transient)
 }
 fn text(s: &str) -> Result<Text, ClassifiedError> {
     Text::new(s).ok_or_else(|| permanent("empty host field"))
@@ -97,6 +115,37 @@ struct Frozen {
     config: Config,
     brief: String,
     profiles: String,
+    /// The lease paths the pool was confined to at the first admission;
+    /// absent for a task frozen unleased, or before leases existed.
+    #[rusty_serde(default)]
+    lease: Option<LeasePaths>,
+}
+/// The paths of a hosting lease, as granted. Its end is not frozen: a later
+/// generation may renew it, never change where it reaches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LeasePaths {
+    read: Vec<String>,
+    write: Vec<String>,
+}
+impl LeasePaths {
+    fn of(fence: &Fence) -> Option<Self> {
+        fence.lease.as_ref().map(|l| Self {
+            read: l.read.clone(),
+            write: l.write.clone(),
+        })
+    }
+}
+/// `bbp mod --claim`, written beside the agents file as [`CLAIM`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct Claim {
+    parent: Option<ClaimParent>,
+    priority_secs: u64,
+    write: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ClaimParent {
+    id: String,
+    agents: u32,
 }
 /// Who holds one admitted generation of a hosted task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,19 +269,32 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
             _ => Err(permanent("unexpected BBP response")),
         }
     }
-    fn freeze(&self, h: &Handle, task: &Task, board: &Board) -> Result<Frozen, ClassifiedError> {
+    /// Freeze the task's configuration once, its pool confined to the
+    /// lease of the fence that first freezes it.
+    fn freeze(
+        &self,
+        h: &Handle,
+        task: &Task,
+        board: &Board,
+        fence: &Fence,
+    ) -> Result<Frozen, ClassifiedError> {
         let dir = Self::manifest(h);
         std::fs::create_dir_all(&dir).map_err(transient)?;
         let path = dir.join("manifest.json");
         if path.exists() {
             return Self::load(h);
         }
+        let config = match &fence.lease {
+            Some(lease) => lease::confine(&self.config, lease).map_err(permanent)?,
+            None => self.config.clone(),
+        };
         let profiles = std::fs::read_to_string(&self.config.profiles).map_err(transient)?;
         let brief = format!("{}\n\n{}", self.context, orch_cli::render(task, board, ""));
         let frozen = Frozen {
-            config: self.config.clone(),
+            config,
             brief,
             profiles,
+            lease: LeasePaths::of(fence),
         };
         let bytes = rusty_serde::json::to_string(&frozen).map_err(permanent)?;
         publish_once(&dir, "manifest.json", bytes.as_bytes())?;
@@ -298,11 +360,54 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
             .map(|g| Ok((g, Self::holder(&dir.join(format!("{g:020}")))?)))
             .transpose()
     }
+    /// Refuse a fence whose lease has ended, so a lapsed holder stops
+    /// driving the task without failing it, and one whose lease reaches
+    /// other paths than the task's pool was confined to: changing access
+    /// needs a task started under the new lease.
+    fn leased(frozen: &Frozen, fence: &Fence) -> Result<(), ClassifiedError> {
+        if let Some(lease) = &fence.lease {
+            if !lease.live(unix_now()?) {
+                return Err(ClassifiedError::Unavailable(AgentError(
+                    "the hosting lease has ended".into(),
+                )));
+            }
+        }
+        if frozen.lease != LeasePaths::of(fence) {
+            return Err(permanent(
+                "the hosted task was confined under another lease; \
+                 changing access needs a task started under the new one",
+            ));
+        }
+        Ok(())
+    }
+    /// The absolute end, in unix seconds, every process the fence starts
+    /// must be gone by: its lease's.
+    fn deadline(fence: &Fence) -> Option<u64> {
+        fence.lease.as_ref().and_then(|l| l.expires)
+    }
     fn holder(path: &std::path::Path) -> Result<Holder, ClassifiedError> {
         let bytes = std::fs::read_to_string(path).map_err(transient)?;
         rusty_serde::json::from_str(&bytes).map_err(permanent)
     }
-    fn materialize(h: &Handle, frozen: &Frozen) -> Result<PathBuf, ClassifiedError> {
+    /// What this task asks of fair admission: its goal as the parent whose
+    /// ceiling it shares, the goal's priority, and the write paths of the
+    /// lease it was frozen under.
+    fn claim(&self, frozen: &Frozen) -> Claim {
+        let slots = frozen.config.slots.as_ref();
+        Claim {
+            parent: slots.and_then(|s| s.ceiling).map(|agents| ClaimParent {
+                id: self.namespace.clone(),
+                agents,
+            }),
+            priority_secs: slots.map_or(0, |s| s.priority_secs),
+            write: frozen
+                .lease
+                .as_ref()
+                .map(|l| l.write.clone())
+                .unwrap_or_default(),
+        }
+    }
+    fn materialize(&self, h: &Handle, frozen: &Frozen) -> Result<PathBuf, ClassifiedError> {
         let dir = Self::manifest(h);
         let config = &frozen.config;
         let mut launchers = BTreeMap::new();
@@ -336,18 +441,120 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
                 "agents.json",
                 rusty_serde::json::to_string(&launchers).map_err(permanent)?,
             ),
+            (
+                CLAIM,
+                rusty_serde::json::to_string(&self.claim(frozen)).map_err(permanent)?,
+            ),
         ] {
             rusty_atomic_file::write_private(&dir.join(name), bytes.as_bytes())
                 .map_err(transient)?;
         }
         Ok(dir.join("agents.json"))
     }
-    fn ensure(&mut self, h: &Handle, frozen: &Frozen) -> Result<(), ClassifiedError> {
-        let agents = Self::materialize(h, frozen)?;
+    fn ensure(
+        &mut self,
+        h: &Handle,
+        frozen: &Frozen,
+        fence: &Fence,
+    ) -> Result<(), ClassifiedError> {
+        let agents = self.materialize(h, frozen)?;
         self.supervisor
-            .ensure(&frozen.config, &h.task, &agents)
+            .ensure(&frozen.config, &h.task, &agents, Self::deadline(fence))
             .map_err(transient)?;
         Ok(())
+    }
+    /// Record the cancel in BBP, retrying when the revision moved under it.
+    /// The op is derived from the revision, so a retry after a lost reply
+    /// replays rather than cancels twice.
+    fn request_cancel(
+        &self,
+        h: &Handle,
+        config: &Config,
+        words: &[&str],
+        reason: &Text,
+    ) -> Result<(), ClassifiedError> {
+        for _ in 0..CANCEL_ATTEMPTS {
+            let view = self
+                .show(config, h)?
+                .ok_or_else(|| transient("hosted task missing"))?;
+            if view.card.state.terminal() {
+                return Ok(());
+            }
+            let rev = view.card.rev.0.to_string();
+            let op = Sha256::of(format!("{}:cancel:{rev}:{reason}", h.task).as_bytes()).hex();
+            let mut args = vec![
+                "--fence".into(),
+                rev.clone(),
+                "--rev".into(),
+                rev,
+                "--op".into(),
+                format!("orch-{op}"),
+                "cancel".into(),
+            ];
+            args.extend(words.iter().map(|w| (*w).to_owned()));
+            match self.response(config, h, "human", args)? {
+                Response::Rejected(r) if matches!(r.code, Code::StaleRev | Code::Terminal) => {}
+                response => return Self::accepted(response),
+            }
+        }
+        Err(transient("the task kept changing; cancel not recorded"))
+    }
+    /// Wait until `bbp quiesce` finds nothing of the ended task running: no
+    /// moderator, no runner, no harness group. It kills the groups of a
+    /// moderator that died, so this holds without one.
+    fn await_quiesced(&self, config: &Config, h: &Handle) -> Result<(), ClassifiedError> {
+        let grace = config.end_grace_secs.unwrap_or(BBP_END_GRACE_SECS);
+        let deadline = std::time::Instant::now() + Duration::from_secs(grace) + CANCEL_MARGIN;
+        loop {
+            match self.invoke(config, h, "quiesce", vec![])?.trim() {
+                "true" => return Ok(()),
+                "false" => {}
+                other => return Err(permanent(format!("bbp quiesce answered {other:?}"))),
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(transient("the task's processes still run after cancel"));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    /// Where `task`'s BBP task lives: derived from the goal's bytes, the
+    /// board's goal and the task id, so it is found again without a handle.
+    fn located(&self, task: &Task, board: &Board) -> Handle {
+        let id =
+            Sha256::of(format!("{}:{}:{}", self.namespace, board.goal(), task.id()).as_bytes())
+                .hex();
+        Handle {
+            dir: self.config.dir.clone(),
+            task: format!("orch-{id}"),
+        }
+    }
+    /// `bbp open` the frozen task unless it exists. Starts nothing.
+    fn open_once(&self, config: &Config, h: &Handle) -> Result<(), ClassifiedError> {
+        if self.show(config, h)?.is_some() {
+            return Ok(());
+        }
+        let dir = Self::manifest(h);
+        let response = self.response(
+            config,
+            h,
+            "open",
+            vec![
+                "--repo".into(),
+                config.repo.to_string_lossy().into_owned(),
+                "--brief".into(),
+                dir.join("brief.md").to_string_lossy().into_owned(),
+                "--roster".into(),
+                dir.join("roster.json").to_string_lossy().into_owned(),
+                "--profiles".into(),
+                dir.join("profiles.json").to_string_lossy().into_owned(),
+                "--live-turns".into(),
+                config.live_turns.to_string(),
+            ],
+        )?;
+        match response {
+            Response::Rejected(r) if r.code == Code::AlreadyOpen => Ok(()),
+            r => Self::accepted(r),
+        }
     }
     fn rejected_answer(
         &self,
@@ -467,41 +674,13 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
         board: &Board,
         fence: &Fence,
     ) -> Result<HostHandle, ClassifiedError> {
-        let id =
-            Sha256::of(format!("{}:{}:{}", self.namespace, board.goal(), task.id()).as_bytes())
-                .hex();
-        let h = Handle {
-            dir: self.config.dir.clone(),
-            task: format!("orch-{id}"),
-        };
+        let h = self.located(task, board);
         Self::admit(&h, fence)?;
-        let frozen = self.freeze(&h, task, board)?;
+        let frozen = self.freeze(&h, task, board, fence)?;
+        Self::leased(&frozen, fence)?;
         let config = &frozen.config;
-        let agents = Self::materialize(&h, &frozen)?;
-        let dir = Self::manifest(&h);
-        if self.show(config, &h)?.is_none() {
-            let response = self.response(
-                config,
-                &h,
-                "open",
-                vec![
-                    "--repo".into(),
-                    config.repo.to_string_lossy().into_owned(),
-                    "--brief".into(),
-                    dir.join("brief.md").to_string_lossy().into_owned(),
-                    "--roster".into(),
-                    dir.join("roster.json").to_string_lossy().into_owned(),
-                    "--profiles".into(),
-                    dir.join("profiles.json").to_string_lossy().into_owned(),
-                    "--live-turns".into(),
-                    config.live_turns.to_string(),
-                ],
-            )?;
-            match response {
-                Response::Rejected(r) if r.code == Code::AlreadyOpen => {}
-                r => Self::accepted(r)?,
-            }
-        }
+        let agents = self.materialize(&h, &frozen)?;
+        self.open_once(config, &h)?;
         let view = self
             .show(config, &h)?
             .ok_or_else(|| transient("opened task is missing"))?;
@@ -544,7 +723,7 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
                 )?)?;
             }
             self.supervisor
-                .ensure(config, &h.task, &agents)
+                .ensure(config, &h.task, &agents, Self::deadline(fence))
                 .map_err(transient)?;
         }
         Ok(HostHandle(text(&format!(
@@ -556,11 +735,12 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
         let h = self.handle(handle)?;
         Self::admit(&h, fence)?;
         let frozen = Self::load(&h)?;
+        Self::leased(&frozen, fence)?;
         let view = self
             .show(&frozen.config, &h)?
             .ok_or_else(|| transient("hosted task missing"))?;
         if !view.card.state.terminal() {
-            self.ensure(&h, &frozen)?;
+            self.ensure(&h, &frozen, fence)?;
         }
         Self::progress(view)
     }
@@ -574,6 +754,7 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
         let h = self.handle(handle)?;
         Self::admit(&h, fence)?;
         let frozen = Self::load(&h)?;
+        Self::leased(&frozen, fence)?;
         let refs: Vec<_> = gate
             .content()
             .refs
@@ -654,6 +835,39 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
                 Ok(Relayed::Applied)
             }
         }
+    }
+    /// Cancel the task's BBP task, found from its handle or derived as
+    /// `open` derives it. One never opened is opened now and cancelled at
+    /// once, with no principal assigned and no moderator started, so a
+    /// superseded holder's late `open` finds it ended and starts nothing.
+    /// A cancel only takes authority away, so it is not refused for an
+    /// ended or different lease.
+    fn cancel(
+        &mut self,
+        task: &Task,
+        board: &Board,
+        reason: &Text,
+        fence: &Fence,
+    ) -> Result<Progress, ClassifiedError> {
+        // No flags may enter BBP's flag parser from a reason.
+        let words: Vec<_> = reason.as_str().split_whitespace().collect();
+        if words.iter().any(|s| s.starts_with("--")) {
+            return Err(permanent("a cancel reason may not contain flags"));
+        }
+        let h = match orch_dispatch::hosted_handle(board, task.id()) {
+            Some(handle) => self.handle(&handle)?,
+            None => self.located(task, board),
+        };
+        Self::admit(&h, fence)?;
+        let frozen = self.freeze(&h, task, board, fence)?;
+        self.materialize(&h, &frozen)?;
+        self.open_once(&frozen.config, &h)?;
+        self.request_cancel(&h, &frozen.config, &words, reason)?;
+        self.await_quiesced(&frozen.config, &h)?;
+        let view = self
+            .show(&frozen.config, &h)?
+            .ok_or_else(|| transient("hosted task missing"))?;
+        Self::progress(view)
     }
 }
 

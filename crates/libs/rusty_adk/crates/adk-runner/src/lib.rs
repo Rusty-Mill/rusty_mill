@@ -11,13 +11,13 @@
 //! having landed.
 //!
 //! ```
-//! # tokio_test::block_on(async {
+//! # rusty_tokio::Runtime::new()?.block_on(async {
 //! use adk_agents::LlmAgent;
 //! use adk_core::{Content, Services};
 //! use adk_models::MockModel;
 //! use adk_runner::Runner;
 //! use adk_sessions::InMemorySessionService;
-//! use futures::StreamExt;
+//! use rusty_stream::StreamExt;
 //! use std::sync::Arc;
 //!
 //! let agent = LlmAgent::builder("greeter")
@@ -41,6 +41,7 @@
 //! let saved = runner.session("u1", &session.id).await.unwrap().unwrap();
 //! assert_eq!(saved.state.get("last_greeting").unwrap(), "Hello!");
 //! # });
+//! # Ok::<(), std::io::Error>(())
 //! ```
 
 #![deny(missing_docs)]
@@ -51,8 +52,7 @@ use adk_core::{
     AdkError, Content, Event, InvocationContext, Result, RunConfig, Services, Session, State,
 };
 use adk_graph::{Graph, ResumeRequest};
-use futures::stream::BoxStream;
-use futures::StreamExt;
+use rusty_stream::{BoxStream, StreamExt};
 use std::sync::Arc;
 
 /// What the runner drives.
@@ -158,7 +158,7 @@ impl Runner {
         run_config: Option<RunConfig>,
         resume: Option<ResumeRequest>,
     ) -> BoxStream<'a, Result<Event>> {
-        Box::pin(async_stream::try_stream! {
+        Box::pin(rusty_stream::try_stream! {
             let mut session = self
                 .services
                 .session
@@ -290,7 +290,7 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn the_user_message_is_committed_before_the_agent_runs() {
         let agent = LlmAgent::builder("a")
             .model(Arc::new(MockModel::new().push_text("hi back")))
@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(saved.events[0].text(), "hello");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn state_written_by_an_agent_is_persisted_by_the_runner() {
         let agent = LlmAgent::builder("a")
             .model(Arc::new(MockModel::new().push_text("Bonjour")))
@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(saved.state.get("greeting").unwrap(), &json!("Bonjour"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn temp_state_does_not_survive_the_invocation() {
         let tool = FunctionTool::new(
             "scratch",
@@ -359,7 +359,7 @@ mod tests {
         assert!(saved.state.get("temp:scratch").is_none());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn history_accumulates_across_turns() {
         let agent = LlmAgent::builder("a")
             .model(Arc::new(
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(saved.events[2].text(), "two");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn run_to_completion_returns_the_final_text() {
         let agent = LlmAgent::builder("a")
             .model(Arc::new(MockModel::new().push_text("the answer")))
@@ -397,7 +397,7 @@ mod tests {
         assert_eq!(answer.as_deref(), Some("the answer"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn an_unknown_session_is_reported() {
         let agent = LlmAgent::builder("a")
             .model(Arc::new(MockModel::new()))
@@ -415,7 +415,7 @@ mod tests {
         assert!(matches!(result.unwrap_err(), AdkError::SessionNotFound(_)));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_graph_root_runs_and_can_be_resumed() {
         use adk_graph::{chain, FunctionNode, NodeConfig, NodeOutcome};
 
@@ -454,7 +454,7 @@ mod tests {
         assert_eq!(resumed.last().unwrap().output, Some(json!("approved")));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn every_event_is_recorded_in_session_history() {
         let agent = LlmAgent::builder("a")
             .model(Arc::new(MockModel::new().push_text("done")))

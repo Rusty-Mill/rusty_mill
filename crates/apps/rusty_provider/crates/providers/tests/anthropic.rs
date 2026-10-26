@@ -1,9 +1,9 @@
 mod common;
 
-use futures_util::StreamExt;
 use rp_core::ProviderError;
 use rp_core::{ChatMessage, Provider, ReasoningConfig};
 use rp_providers::AnthropicProvider;
+use rusty_stream::StreamExt;
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

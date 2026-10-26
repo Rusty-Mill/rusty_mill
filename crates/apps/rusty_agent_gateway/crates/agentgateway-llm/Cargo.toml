@@ -32,11 +32,11 @@ cel = { workspace = true }
 http = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
-hyper = { workspace = true }
 bytes = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
-futures-util = { version = "0.3", default-features = false }
+# Provider, moderation and webhook calls; `tokio` because the gateway still
+# runs on tokio.
+rusty_request = { workspace = true, features = ["tokio"] }
 async-stream = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 thiserror = "2"

@@ -12,26 +12,23 @@
 //! selection) are testable without a socket.
 
 mod dynamic;
-mod retry;
 mod transform;
+mod upstream;
 
 use std::net::IpAddr;
 use std::time::Duration;
 
 use agentgateway_config::{BackendAuth, Policies};
 use agentgateway_core::Endpoint;
+use bytes::Bytes;
 use http::{HeaderValue, Request, Response, StatusCode, header};
-use http_body_util::BodyExt as _;
-use hyper::body::Incoming;
-use hyper_util::client::legacy::{Client, connect::HttpConnector};
-use hyper_util::rt::TokioExecutor;
+use rusty_request::Client;
 
 // Re-exported so the proxy's own callers need not learn where these moved.
 pub use agentgateway_core::{BalanceError, Endpoints};
 pub use dynamic::{Dynamic, TargetError};
 // Re-exported so the proxy's own callers need not learn where this moved.
 pub use agentgateway_core::Retry;
-pub use retry::{MAX_REPLAY_BYTES, RequestBody};
 pub use transform::{HeaderError, Headers, Rewrite, RewriteError, Scheme};
 
 /// Failure to build a proxy from configuration.
@@ -70,7 +67,7 @@ enum Destination {
 /// A proxying `host`, `service` or `dynamic` backend.
 pub struct HostProxy {
     destination: Destination,
-    client: Client<HttpConnector, RequestBody>,
+    client: Client,
     rewrite: Option<Rewrite>,
     request_headers: Option<Headers>,
     backend_auth: Option<BackendAuth>,
@@ -151,11 +148,20 @@ impl HostProxy {
             .and_then(|t| t.backend_request_timeout)
             .map(Duration::from);
 
-        let client = Client::builder(TokioExecutor::new())
+        // A proxy passes responses on as they are: no redirects followed,
+        // no cookies kept, no retries or timeout of its own (the route's
+        // policies are applied here, per attempt), and no forward proxy
+        // from the environment.
+        let client = Client::builder()
+            .no_redirects()
+            .no_cookie_store()
+            .no_retry()
+            .no_timeout()
+            .no_proxy()
             // Upstreams are long-lived; re-dialling per request would put a
             // TCP handshake in front of every call for no reason.
             .pool_idle_timeout(Duration::from_secs(30))
-            .build(HttpConnector::new());
+            .build();
 
         Ok(HostProxy {
             destination,
@@ -186,13 +192,14 @@ impl HostProxy {
 
     /// Forward a request upstream and return the response.
     ///
-    /// `matched_prefix` is the route prefix that matched, which a `prefix`
+    /// The body arrives whole, read by the gateway within its cap, so every
+    /// attempt a retry policy allows can be sent again. `matched_prefix` is the route prefix that matched, which a `prefix`
     /// rewrite replaces. `peer` is the client address, recorded in the
     /// forwarded-for chain, and `scheme` is the listener's, reported as
     /// `X-Forwarded-Proto`.
     pub async fn proxy(
         &self,
-        request: Request<RequestBody>,
+        request: Request<Bytes>,
         matched_prefix: Option<&str>,
         peer: Option<IpAddr>,
         scheme: Scheme,
@@ -217,26 +224,7 @@ impl HostProxy {
             .as_ref()
             .and_then(|rewrite| rewrite.path(parts.uri.path(), matched_prefix));
 
-        // Buffer only when the size is known up front and small enough.
-        // Reading to find out would leave a stream that can be neither
-        // replayed nor forwarded intact.
-        let mut body = match &self.retry {
-            Some(_) if retry::is_replayable(&body) => match body.collect().await {
-                Ok(collected) => RequestBody::Buffered(collected.to_bytes()),
-                Err(err) => {
-                    rusty_log::warn!(%err, "reading the request body failed");
-                    return error(StatusCode::BAD_REQUEST, "could not read the request body");
-                }
-            },
-            _ => body,
-        };
-
-        let attempts = match (&self.retry, &body) {
-            (Some(retry), RequestBody::Buffered(_)) => retry.max_attempts(),
-            // A streaming body cannot be replayed, so there is exactly one
-            // attempt however the policy is written.
-            _ => 1,
-        };
+        let attempts = self.retry.as_ref().map_or(1, Retry::max_attempts);
 
         let mut last_response = None;
 
@@ -296,12 +284,9 @@ impl HostProxy {
             }
             attempt_parts.uri = uri;
 
-            // Keep a replay for the next attempt before handing this one over.
-            let replay = body.replay();
-            let sending = std::mem::replace(&mut body, RequestBody::Buffered(bytes::Bytes::new()));
-            let upstream = Request::from_parts(attempt_parts, sending);
+            let upstream = Request::from_parts(attempt_parts, body.clone());
 
-            let call = self.client.request(upstream);
+            let call = upstream::send(&self.client, &upstream);
             let result = match self.timeout {
                 Some(budget) => match tokio::time::timeout(budget, call).await {
                     Ok(result) => result,
@@ -359,22 +344,13 @@ impl HostProxy {
                     }
                 }
             }
-
-            match replay {
-                Some(replay) => body = replay,
-                // Nothing left to send; stop rather than replay an empty body.
-                None => break,
-            }
         }
 
         let Some(response) = last_response else {
             return error(StatusCode::BAD_GATEWAY, "the upstream could not be reached");
         };
 
-        let (mut parts, body) = response.into_parts();
-        transform::strip_hop_by_hop(&mut parts.headers);
-
-        Response::from_parts(parts, ProxyBody::Upstream(body))
+        finish(response)
     }
 }
 
@@ -385,7 +361,7 @@ impl HostProxy {
 /// gateway, where every backend kind converges, so that one description of the
 /// policy is true of `ai` and `a2a` routes too rather than only of proxied
 /// ones.
-fn finish(response: Response<Incoming>) -> Response<ProxyBody> {
+fn finish(response: Response<upstream::Body>) -> Response<ProxyBody> {
     let (mut parts, body) = response.into_parts();
     transform::strip_hop_by_hop(&mut parts.headers);
     Response::from_parts(parts, ProxyBody::Upstream(body))
@@ -397,21 +373,21 @@ fn finish(response: Response<Incoming>) -> Response<ProxyBody> {
 /// buffers turns a download into a memory limit.
 pub enum ProxyBody {
     /// Streamed from the upstream.
-    Upstream(Incoming),
+    Upstream(upstream::Body),
     /// Generated here, for an error the upstream never saw.
-    Message(bytes::Bytes),
+    Message(Bytes),
 }
 
 impl http_body::Body for ProxyBody {
-    type Data = bytes::Bytes;
-    type Error = hyper::Error;
+    type Data = Bytes;
+    type Error = rusty_request::Error;
 
     fn poll_frame(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        // Safe because neither variant is structurally pinned: `Incoming` is
-        // `Unpin`, and `Bytes` holds no self-references.
+        // Safe because neither variant is structurally pinned: the upstream
+        // body boxes what it polls, and `Bytes` holds no self-references.
         match self.get_mut() {
             ProxyBody::Upstream(body) => std::pin::Pin::new(body).poll_frame(cx),
             ProxyBody::Message(bytes) => {
@@ -425,6 +401,15 @@ impl http_body::Body for ProxyBody {
         }
     }
 
+    fn is_end_stream(&self) -> bool {
+        match self {
+            ProxyBody::Upstream(body) => body.is_end_stream(),
+            ProxyBody::Message(bytes) => bytes.is_empty(),
+        }
+    }
+
+    // An upstream body's length is in the `Content-Length` it forwards,
+    // which the connection frames by.
     fn size_hint(&self) -> http_body::SizeHint {
         match self {
             ProxyBody::Upstream(body) => body.size_hint(),
@@ -434,7 +419,7 @@ impl http_body::Body for ProxyBody {
 }
 
 fn error(code: StatusCode, message: &str) -> Response<ProxyBody> {
-    let mut response = Response::new(ProxyBody::Message(bytes::Bytes::from(message.to_string())));
+    let mut response = Response::new(ProxyBody::Message(Bytes::from(message.to_string())));
     *response.status_mut() = code;
     response.headers_mut().insert(
         header::CONTENT_TYPE,

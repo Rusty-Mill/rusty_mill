@@ -9,10 +9,17 @@
 # script exits non-zero if the command failed, or if it exited 0 without the one
 # passing test (a zero-test run also exits 0).
 #
+# LIVE_BACKEND, if set, names the crypto backend in the summary heading, so the
+# `ring` and native jobs' summaries can be told apart.
+#
 # Deliberately no `set -e`: a failing command must not stop the report.
 set -uo pipefail
 
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
+heading='### rusty_tls native engine, live internet'
+if [ -n "${LIVE_BACKEND:-}" ]; then
+  heading="$heading (${LIVE_BACKEND} backend)"
+fi
 
 status=0
 out="$("$@" 2>&1)" || status=$?
@@ -20,7 +27,7 @@ out="$("$@" 2>&1)" || status=$?
 printf '%s\n' "$out"
 
 {
-  echo '### rusty_tls native engine, live internet'
+  echo "$heading"
   echo '```'
   printf '%s\n' "$out" | grep -E '^(accounts|oauth2|www)[a-z0-9.]*:|test result|error|panicked' || true
   echo '```'

@@ -13,7 +13,7 @@ fn client(base_url: String) -> OpnsenseClient {
     })
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn system_status_returns_the_body_as_is() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"product_version":"25.1","status":"ok"}"#,
@@ -24,7 +24,7 @@ async fn system_status_returns_the_body_as_is() {
     assert_eq!(status["status"], "ok");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_services_passes_through_the_search_envelope() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"rows":[{"id":"unbound","name":"Unbound DNS","running":1}],"rowCount":1}"#,
@@ -38,7 +38,7 @@ async fn list_services_passes_through_the_search_envelope() {
     assert_eq!(services["rows"][0]["id"], "unbound");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn service_control_posts_to_the_action_and_name_path() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"response":"OK"}"#)]);
 
@@ -50,7 +50,7 @@ async fn service_control_posts_to_the_action_and_name_path() {
     assert_eq!(result["response"], "OK");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_firewall_rules_passes_through_the_search_envelope() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"rows":[{"uuid":"abc-123","enabled":"1","action":"pass"}],"rowCount":1}"#,
@@ -64,7 +64,7 @@ async fn list_firewall_rules_passes_through_the_search_envelope() {
     assert_eq!(rules["rows"][0]["uuid"], "abc-123");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn get_firewall_rule_builds_the_uuid_path() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"rule":{"action":"pass","interface":"lan"}}"#,
@@ -78,7 +78,7 @@ async fn get_firewall_rule_builds_the_uuid_path() {
     assert_eq!(rule["rule"]["interface"], "lan");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn create_firewall_rule_wraps_the_fields_under_rule() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"result":"saved","uuid":"new-uuid"}"#,
@@ -96,7 +96,7 @@ async fn create_firewall_rule_wraps_the_fields_under_rule() {
     assert_eq!(result["result"], "saved");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn update_firewall_rule_builds_the_uuid_path() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"result":"saved"}"#)]);
 
@@ -108,7 +108,7 @@ async fn update_firewall_rule_builds_the_uuid_path() {
     assert_eq!(result["result"], "saved");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn delete_firewall_rule_builds_the_uuid_path() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"result":"deleted"}"#)]);
 
@@ -120,7 +120,7 @@ async fn delete_firewall_rule_builds_the_uuid_path() {
     assert_eq!(result["result"], "deleted");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn toggle_firewall_rule_with_no_explicit_state_flips_it() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"changed":true}"#)]);
 
@@ -132,7 +132,7 @@ async fn toggle_firewall_rule_with_no_explicit_state_flips_it() {
     assert_eq!(result["changed"], true);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn toggle_firewall_rule_with_an_explicit_state_sets_it() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"changed":true}"#)]);
 
@@ -144,7 +144,7 @@ async fn toggle_firewall_rule_with_an_explicit_state_sets_it() {
     assert_eq!(result["changed"], true);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn apply_firewall_changes_posts_to_the_apply_endpoint() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"status":"ok"}"#)]);
 
@@ -156,7 +156,7 @@ async fn apply_firewall_changes_posts_to_the_apply_endpoint() {
     assert_eq!(result["status"], "ok");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_dhcp_leases_uses_dnsmasq_when_it_answers() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"rows":[{"address":"10.0.0.42","hostname":"nas","mac":"aa:bb:cc:dd:ee:ff"}],"rowCount":1}"#,
@@ -170,7 +170,7 @@ async fn list_dhcp_leases_uses_dnsmasq_when_it_answers() {
     assert_eq!(leases["rows"][0]["hostname"], "nas");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_dhcp_leases_falls_back_to_kea_when_dnsmasq_is_a_404() {
     let base_url = support::spawn(vec![
         MockResponse::status(404, "Not Found", r#"{"errorMessage":"Endpoint not found"}"#),
@@ -185,7 +185,7 @@ async fn list_dhcp_leases_falls_back_to_kea_when_dnsmasq_is_a_404() {
     assert_eq!(leases["rows"][0]["hostname"], "nas");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_dhcp_leases_falls_back_to_legacy_isc_when_dnsmasq_and_kea_are_both_404() {
     let base_url = support::spawn(vec![
         MockResponse::status(404, "Not Found", r#"{"errorMessage":"Endpoint not found"}"#),
@@ -201,7 +201,7 @@ async fn list_dhcp_leases_falls_back_to_legacy_isc_when_dnsmasq_and_kea_are_both
     assert_eq!(leases["rows"][0]["hostname"], "nas");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_dhcp_leases_reports_a_clear_error_when_no_backend_is_present() {
     let base_url = support::spawn(vec![
         MockResponse::status(404, "Not Found", r#"{"errorMessage":"Endpoint not found"}"#),
@@ -226,7 +226,7 @@ async fn list_dhcp_leases_reports_a_clear_error_when_no_backend_is_present() {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_dhcp_leases_does_not_mask_a_real_failure_as_a_missing_backend() {
     // A 401 on the very first backend tried (dnsmasq) is a real problem
     // (bad credentials) -- it must surface immediately, not be treated
@@ -248,7 +248,7 @@ async fn list_dhcp_leases_does_not_mask_a_real_failure_as_a_missing_backend() {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_vlans_passes_through_the_search_envelope() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"rows":[{"uuid":"vlan-uuid","if":"igc0","tag":"10"}],"rowCount":1}"#,
@@ -259,7 +259,7 @@ async fn list_vlans_passes_through_the_search_envelope() {
     assert_eq!(vlans["rows"][0]["tag"], "10");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn get_vlan_builds_the_uuid_path() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"vlan":{"if":"igc0","tag":"10"}}"#,
@@ -273,7 +273,7 @@ async fn get_vlan_builds_the_uuid_path() {
     assert_eq!(vlan["vlan"]["tag"], "10");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn create_vlan_wraps_the_fields_under_vlan() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"result":"saved","uuid":"new-vlan-uuid"}"#,
@@ -291,7 +291,7 @@ async fn create_vlan_wraps_the_fields_under_vlan() {
     assert_eq!(result["result"], "saved");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn update_vlan_builds_the_uuid_path() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"result":"saved"}"#)]);
 
@@ -303,7 +303,7 @@ async fn update_vlan_builds_the_uuid_path() {
     assert_eq!(result["result"], "saved");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn delete_vlan_builds_the_uuid_path() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"result":"deleted"}"#)]);
 
@@ -315,7 +315,7 @@ async fn delete_vlan_builds_the_uuid_path() {
     assert_eq!(result["result"], "deleted");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn apply_vlan_changes_posts_to_the_reconfigure_endpoint() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"status":"ok"}"#)]);
 
@@ -327,7 +327,7 @@ async fn apply_vlan_changes_posts_to_the_reconfigure_endpoint() {
     assert_eq!(result["status"], "ok");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_arp_entries_passes_through_the_arp_table() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"[{"ip":"10.0.0.42","mac":"aa:bb:cc:dd:ee:ff","hostname":"nas","intf":"igc0"}]"#,
@@ -341,7 +341,7 @@ async fn list_arp_entries_passes_through_the_arp_table() {
     assert_eq!(entries[0]["hostname"], "nas");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_routes_passes_through_the_routing_table() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"[{"destination":"default","gateway":"10.0.0.1","interface-name":"igc0"}]"#,
@@ -352,7 +352,7 @@ async fn list_routes_passes_through_the_routing_table() {
     assert_eq!(routes[0]["gateway"], "10.0.0.1");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_backup_providers_returns_the_body_as_is() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"this":{"name":"This Device"}}"#)]);
 
@@ -364,7 +364,7 @@ async fn list_backup_providers_returns_the_body_as_is() {
     assert_eq!(providers["this"]["name"], "This Device");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn list_backups_builds_the_host_path() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"[{"filename":"config-1735689600.xml","time":1735689600}]"#,
@@ -378,7 +378,7 @@ async fn list_backups_builds_the_host_path() {
     assert_eq!(backups[0]["filename"], "config-1735689600.xml");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn download_backup_returns_raw_text_not_parsed_json() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"<?xml version="1.0"?><opnsense><version>25.7</version></opnsense>"#,
@@ -392,7 +392,7 @@ async fn download_backup_returns_raw_text_not_parsed_json() {
     assert!(xml.contains("<opnsense>"), "unexpected body: {xml}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn download_backup_with_a_specific_backup_builds_the_host_and_backup_path() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"<?xml version="1.0"?><opnsense><version>25.7</version></opnsense>"#,
@@ -406,7 +406,7 @@ async fn download_backup_with_a_specific_backup_builds_the_host_and_backup_path(
     assert!(xml.contains("<opnsense>"), "unexpected body: {xml}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn restore_backup_builds_the_backup_path() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"status":"ok"}"#)]);
 
@@ -418,7 +418,7 @@ async fn restore_backup_builds_the_backup_path() {
     assert_eq!(result["status"], "ok");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_4xx_status_becomes_an_api_error() {
     let base_url = support::spawn(vec![MockResponse::status(
         403,

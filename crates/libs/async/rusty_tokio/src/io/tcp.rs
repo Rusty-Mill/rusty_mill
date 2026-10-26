@@ -62,10 +62,25 @@ pub struct TcpListener {
 impl TcpListener {
     /// Binds and starts listening at `addr` (port `0` picks an
     /// ephemeral port -- read it back via [`TcpListener::local_addr`]).
+    /// `addr` is anything [`ToSocketAddrs`] covers, as in tokio: a
+    /// [`SocketAddr`], a `"host:port"` string, an `(&str, u16)` pair. An IP
+    /// literal binds without a DNS lookup; a hostname is resolved through
+    /// [`crate::io::lookup_host`] (a [`crate::spawn_blocking`] round trip),
+    /// which is why this is `async`. A form that resolves to more than
+    /// one address is tried in order and the first that binds wins, the
+    /// same way [`TcpStream::connect`] tries its candidates.
+    ///
+    /// To bind synchronously outside an async context, bind a
+    /// `std::net::TcpListener` and adopt it with [`from_std`](Self::from_std).
     ///
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
-    pub fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
+    pub async fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<TcpListener> {
+        super::addr::first_ok(addr, TcpListener::bind_addr).await
+    }
+
+    /// Binds one concrete address, synchronously.
+    fn bind_addr(addr: SocketAddr) -> io::Result<TcpListener> {
         let reactor = Handle::current().shared.reactor.clone();
         let inner = PlatformTcpListener::bind(addr).map_err(from_platform_err)?;
         // The listener is created blocking; flip it non-blocking before
@@ -73,38 +88,6 @@ impl TcpListener {
         inner.set_nonblocking(true).map_err(from_platform_err)?;
         let io = reactor.register(inner.as_raw_io())?;
         Ok(TcpListener { inner, io, reactor })
-    }
-
-    /// The [`ToSocketAddrs`]-based counterpart of [`bind`](Self::bind) --
-    /// a `"host:port"` string, an `(&str, u16)` pair, or anything else
-    /// [`ToSocketAddrs`] covers, not just a concrete [`SocketAddr`].
-    /// Resolving a hostname needs a [`crate::spawn_blocking`] round trip
-    /// (see [`crate::io::lookup_host`]), so this is `async fn` where
-    /// [`bind`](Self::bind) itself stays synchronous -- an additive
-    /// method alongside it rather than a replacement, so no existing
-    /// synchronous caller of `bind` breaks.
-    ///
-    /// A form that resolves to more than one address is tried in order,
-    /// the same way [`TcpStream::connect`] tries each of its own
-    /// resolved candidates.
-    ///
-    /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
-    pub async fn bind_addrs(addr: impl ToSocketAddrs) -> io::Result<TcpListener> {
-        let addrs = addr.to_socket_addrs().await?;
-        let mut last_err = None;
-        for addr in addrs {
-            match TcpListener::bind(addr) {
-                Ok(listener) => return Ok(listener),
-                Err(e) => last_err = Some(e),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "could not resolve to any address",
-            )
-        }))
     }
 
     pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
@@ -688,8 +671,13 @@ impl AsyncWrite for &TcpStream {
         self.poll_write_priv(cx, buf)
     }
 
+    /// As tokio's: `NotConnected` (the peer already reset the connection)
+    /// counts as shut down.
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(socket::shutdown_write(self.inner.as_raw_io()))
+        Poll::Ready(match socket::shutdown_write(self.inner.as_raw_io()) {
+            Err(e) if e.kind() == io::ErrorKind::NotConnected => Ok(()),
+            result => result,
+        })
     }
 }
 

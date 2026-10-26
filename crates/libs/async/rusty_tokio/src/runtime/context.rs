@@ -35,6 +35,15 @@ impl Handle {
         CURRENT.with(|c| c.borrow().clone())
     }
 
+    /// Like [`try_current`](Self::try_current), but `None` instead of a
+    /// panic once this thread's thread-locals are being torn down --
+    /// for `time::Instant::now`, which falls back to real time without
+    /// a runtime and so must not panic from a value's `Drop` during
+    /// thread exit just because it read the clock.
+    pub(crate) fn try_current_no_panic() -> Option<Handle> {
+        CURRENT.try_with(|c| c.borrow().clone()).ok().flatten()
+    }
+
     /// Like [`try_current`](Self::try_current), but reports *why* there
     /// isn't a usable ambient runtime instead of collapsing every
     /// failure into one bare `None` -- see [`TryCurrentError`]. Doesn't
@@ -107,9 +116,14 @@ impl Handle {
         #[allow(clippy::let_unit_value)]
         let span = crate::task::trace::blocking_span(None, blocking_id.as_u64());
         self.shared.blocking_pool.spawn(Box::new(move || {
-            #[allow(clippy::let_unit_value)]
-            let _guard = crate::task::trace::enter(&span);
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            // Exit the span before publishing the result, so a subscriber
+            // has seen the closure finish by the time its `JoinHandle`
+            // resolves.
+            let result = {
+                #[allow(clippy::let_unit_value)]
+                let _guard = crate::task::trace::enter(&span);
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+            };
             let _ = tx.send(result);
         }));
         self.spawn(async move {
@@ -190,6 +204,24 @@ impl Handle {
     /// of the call, not scheduled onto the worker pool.
     pub fn enter(&self) -> EnterGuard {
         enter(self.shared.clone())
+    }
+
+    /// As tokio's: runs `future` to completion on the calling thread with
+    /// this runtime as the ambient one, so it can spawn, sleep and do I/O
+    /// on it. For a blocking thread outside the runtime (a `spawn_blocking`
+    /// closure, a server's own thread) that needs an async result. Drives
+    /// a current-thread runtime's queue itself, as
+    /// [`Runtime::block_on`](super::Runtime::block_on) does.
+    ///
+    /// Never call this from an async task: it parks the worker thread
+    /// running it.
+    pub fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
+        let _guard = self.enter();
+        if self.shared.is_current_thread() {
+            super::current_thread::block_on(&self.shared, future)
+        } else {
+            super::block_on_inner(future)
+        }
     }
 
     /// Runs `f` inline on the calling thread, first handing its other

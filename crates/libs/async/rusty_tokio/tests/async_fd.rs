@@ -91,6 +91,7 @@ fn async_fd_get_ref_get_mut_into_inner_reach_the_wrapped_value() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
         let mut async_fd = AsyncFd::new(reader).unwrap();
+        assert_eq!(async_fd.as_raw_fd(), raw_fd);
         assert_eq!(async_fd.get_ref().as_raw_fd(), raw_fd);
         assert_eq!(async_fd.get_mut().as_raw_fd(), raw_fd);
         assert_eq!(async_fd.interest(), Interest::READABLE | Interest::WRITABLE);
@@ -110,5 +111,24 @@ fn async_fd_writable_panics_if_write_interest_was_not_declared() {
     rt.block_on(async {
         let async_fd = AsyncFd::with_interest(reader, Interest::READABLE).unwrap();
         let _ = async_fd.writable().await;
+    });
+}
+
+#[test]
+fn register_wraps_a_pipe_like_new() {
+    let (reader, writer) = std::io::pipe().unwrap();
+    set_nonblocking(reader.as_raw_fd());
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        // SAFETY: `reader` owns its fd and keeps it open while wrapped.
+        let async_fd = unsafe { AsyncFd::register(reader) }.unwrap();
+        raw_write(writer.as_raw_fd(), b"hi").unwrap();
+        let mut guard = async_fd.readable().await.unwrap();
+        let mut buf = [0u8; 2];
+        let n = guard
+            .try_io(|r| raw_read(r.get_ref().as_raw_fd(), &mut buf))
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf[..n], b"hi");
     });
 }

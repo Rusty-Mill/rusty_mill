@@ -601,9 +601,17 @@ them yet.
   advanced span. Only available on the current-thread flavor -- pausing
   wall-clock time shared by every task on a runtime would be incoherent
   if other worker threads could be concurrently relying on real timing,
-  matching tokio's own restriction.
+  matching tokio's own restriction. A paused runtime auto-advances, as
+  tokio's does: when nothing is runnable and no `spawn_blocking` job is
+  in flight, the clock jumps to the next pending timer, so a paused
+  `sleep(an_hour).await` completes at once. `time::Instant` (tokio's
+  type) reads this same clock, and every public deadline
+  (`sleep_until`, `timeout_at`, `interval_at`, `Sleep::deadline`,
+  `Interval::tick`) takes or returns it, so a test's own `Instant::now()`
+  moves by exactly what `advance` moved (#898).
 - **Sync primitives** (`sync`): `Notify` (an async condition variable),
-  an async-aware `Mutex`, a `oneshot` channel, a bounded `mpsc` channel,
+  `CancellationToken` (tokio-util's, with child tokens and `DropGuard`;
+  #901), an async-aware `Mutex` (`const_new` for statics), a `oneshot` channel, a bounded `mpsc` channel,
   and `mpsc::unbounded_channel` -- same one-lock-covers-queue-and-wakers
   design as the bounded channel (see `mpsc`'s module docs for the real
   lost-wakeup bug that shape avoids), just without a capacity check or
@@ -750,11 +758,13 @@ them yet.
   rewriting an `async fn` into the `Runtime::new().unwrap().block_on(
   async { .. })` boilerplate every example and test in this crate used
   to spell out by hand. `#[rusty_tokio::test]` also emits `#[test]`
-  itself. Both accept an optional `worker_threads = N` argument
-  (`#[rusty_tokio::main(worker_threads = 4)]`); no other arguments --
-  tokio's own `flavor`/`start_paused`/etc. don't apply here, since this
-  crate has exactly one runtime flavor and no pausable clock (issue
-  #56). Defined in a separate `rusty_tokio-macros` proc-macro crate
+  itself. Both accept tokio's `flavor = "multi_thread" | "current_thread"`,
+  `worker_threads = N` and `start_paused = bool`, with tokio's
+  compile-time rules (`worker_threads` needs `multi_thread`,
+  `start_paused = true` needs `current_thread`), plus this crate's own
+  `flavor = "thread_per_core"`. With no `flavor`, both build the
+  multi-threaded runtime -- unlike `#[tokio::test]`, whose default is
+  `current_thread`; see the macros crate's docs (#899). Defined in a separate `rusty_tokio-macros` proc-macro crate
   (this project's first `syn`/`quote`/`proc-macro2` dependency --
   `proc-macro = true` crates can't export anything but proc-macros, so
   it can't live inside `rusty_tokio` itself) and re-exported from the
@@ -769,7 +779,7 @@ use rusty_tokio::io::TcpListener;
 fn main() -> std::io::Result<()> {
     let rt = Runtime::new()?;
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:7878".parse().unwrap())?;
+        let listener = TcpListener::bind("127.0.0.1:7878").await?;
         loop {
             let (stream, _peer) = listener.accept().await?;
             rusty_tokio::spawn(async move {
@@ -808,7 +818,7 @@ With that in place, `io/tcp.rs` and `io/udp.rs` build directly on
 bind/listen/accept, addressing (`local_addr`/`peer_addr`), `set_nodelay`,
 and (for UDP) `send_to`/`recv_from` -- all of rustils' own sockaddr
 packing/unpacking, `SO_REUSEADDR`, and stale-socket handling, not
-reimplemented a second time here. `io/unix.rs` does the same for
+reimplemented a second time here. `io/unix_socket.rs` does the same for
 `platform_linux::{LinuxUnixListener, LinuxUnixStream}` -- including the
 mode-`0600` bind and stale-socket-file reclaim rustils' own
 `unix_listen` already does internally (a throwaway probe connect tells a
@@ -849,7 +859,7 @@ match `platform_linux` closely enough (same method names, same
 `platform::error::Result`, the rustils#41/#42 `AsFd`/`set_nonblocking`
 surface included from day one -- and, it turned out, `UnixStream`/
 `UnixListener` included from day one too, not just TCP/UDP) that
-`io/tcp.rs`/`io/udp.rs`/`io/unix.rs` need only a `#[cfg]`-gated type
+`io/tcp.rs`/`io/udp.rs`/`io/unix_socket.rs` need only a `#[cfg]`-gated type
 alias between `platform_linux`/`platform_bsd`, not their own branching.
 The same two hand-rolled exceptions above apply on macOS/BSD too, for the
 same reasons.
@@ -899,7 +909,7 @@ it *does* have the same raw-handle + non-blocking escape hatch
 (`AsRawSocket`, `set_nonblocking`, concrete non-boxed constructors)
 `platform_linux`/`platform_bsd` got via rustils#41/#42 -- forced by this
 very crate (`platform-windows/src/net.rs`'s own doc comment names this
-crate's issue #6 as the reason). `io/unix.rs`'s Windows arm
+crate's issue #6 as the reason). `io/unix_socket.rs`'s Windows arm
 (`UnixStream`/`UnixListener`) uses it directly, the same `#[cfg]`-gated
 type-alias pattern Linux/macOS/BSD already use -- see that module's own
 docs and `docs/decision-request-windows-process-signal-ipc.md` for the

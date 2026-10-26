@@ -5,7 +5,7 @@ use rusty_term::{backend, config, core, runtime, shells, term};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use rusty_term::sync::Mutex;
 
 use backend::Backend;
 #[cfg(unix)]
@@ -169,7 +169,7 @@ fn apply_cli_overrides(
     // top-level config, so both front-ends inherit its shell/cwd/theme.
     // `Config::apply_profile` is the single source of truth for this so a
     // live config reload can reapply the same override (see
-    // `runtime::tokio_rt::watch_config` / `gui::window::reload_config`)
+    // `runtime::reactor::watch_config` / `gui::window::reload_config`)
     // instead of silently reverting it to the file's top-level defaults.
     if let Some(name) = flag_value(args, "--profile")
         && let Some(w) = config.apply_profile(name)
@@ -322,7 +322,7 @@ fn main() -> Result<(), std::io::Error> {
         std::env::set_var("COLORTERM", "truecolor");
     }
 
-    // Hand off to the tokio runtime — a single async reactor driving the grid
+    // Hand off to the rusty_tokio runtime — a single async reactor driving the grid
     // and backend (Unix via AsyncFd, Windows by bridging ConPTY's blocking pipes).
     // `run` returns the child shell's own exit status; `main`'s `Result`
     // return only ever maps to 0 or 1, so mirror the child's code exactly via

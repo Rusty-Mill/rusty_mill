@@ -170,9 +170,10 @@ fn validate_value(value: &str) -> Result<()> {
     // Reject bare CR/LF -- allowing them would let a caller smuggle
     // extra headers or a second request into the stream.
     if value.bytes().any(|b| b == b'\r' || b == b'\n') {
-        return Err(Error::InvalidHeader(format!(
-            "header value must not contain CR/LF: `{value}`"
-        )));
+        // Never echo the value: it is often a credential.
+        return Err(Error::InvalidHeader(
+            "header value must not contain CR/LF".to_string(),
+        ));
     }
     Ok(())
 }
@@ -180,6 +181,16 @@ fn validate_value(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rejected_value_is_not_echoed_in_the_error() {
+        let secret = "Bearer s3cr3t-token";
+        let err = HeaderMap::new()
+            .insert("Authorization", &format!("{secret}\r\nX-Injected: 1"))
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("s3cr3t-token"), "{err}");
+    }
 
     #[test]
     fn insert_is_case_insensitive_and_replaces() {

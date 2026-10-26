@@ -14,6 +14,7 @@ pub mod keymap;
 pub mod render;
 pub mod runtime;
 pub mod shells;
+pub mod sync;
 pub mod term;
 #[cfg(feature = "web-bridge")]
 pub mod web_bridge;

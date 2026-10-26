@@ -302,7 +302,7 @@ fn a_collector_that_rejects_the_batch_does_not_break_anything() {
     assert_eq!(collector.spans().len(), 1, "it was sent, and refused");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn the_shutdown_hook_flushes() {
     let collector = Collector::start(200);
 

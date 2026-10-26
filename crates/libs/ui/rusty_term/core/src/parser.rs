@@ -154,6 +154,27 @@ pub(crate) fn printable_ascii_len(bytes: &[u8]) -> usize {
             .count()
 }
 
+/// The leading run of valid UTF-8 in the first [`UTF8_RUN_WINDOW`] bytes of
+/// `bytes`, made only of non-ASCII scalars (every byte at or above 0x80), or
+/// `None` when it is empty. It stops before the first ASCII byte and before a
+/// malformed or incomplete sequence, which the byte-wise decoder then
+/// handles; a sequence the window's edge cuts short starts the next call.
+///
+/// The window bounds the work per call, so a stream of rejected bytes costs
+/// linear time overall instead of a rescan of the rest of the input per byte.
+pub(crate) fn utf8_run(bytes: &[u8]) -> Option<&str> {
+    let window = &bytes[..bytes.len().min(UTF8_RUN_WINDOW)];
+    let high = window
+        .iter()
+        .position(|&b| b < 0x80)
+        .unwrap_or(window.len());
+    let text = window[..high].utf8_chunks().next()?.valid();
+    (!text.is_empty()).then_some(text)
+}
+
+/// The most bytes [`utf8_run`] examines per call.
+const UTF8_RUN_WINDOW: usize = 64;
+
 /// Upper bound on the bytes buffered for a single OSC string. Real titles and
 /// cwd URIs are far shorter; past this we keep consuming the string but stop
 /// storing it.
@@ -180,6 +201,123 @@ const DCS_MAX: usize = 4 * 1024 * 1024;
 /// we keep consuming the sequence but stop storing, matching the OSC/DCS caps —
 /// without it, `ESC [` followed by an endless digit stream grows unboundedly.
 const CSI_PARAM_MAX: usize = 256;
+
+/// Parameters a CSI holds inline before [`Params`] spills to the heap. Real
+/// sequences carry at most a handful; a long DEC mode list is the exception.
+const PARAMS_INLINE: usize = 16;
+
+/// A CSI's positional parameters, as a slice where an absent or empty field
+/// is `None`. Parsed without allocating up to [`PARAMS_INLINE`] fields.
+#[allow(clippy::large_enum_variant)] // the inline array is the point: no heap per CSI
+enum Params {
+    Inline([Option<usize>; PARAMS_INLINE], usize),
+    Heap(Vec<Option<usize>>),
+}
+
+impl Params {
+    /// Split `buf` on `;` and parse each field as `str::parse::<usize>` would:
+    /// empty, non-digit (such as a `:` sub-parameter) or overflowing is `None`.
+    /// Inlined so the array is built in the caller's frame, not copied out.
+    #[inline(always)]
+    fn parse(buf: &[u8]) -> Self {
+        let mut vals = [None; PARAMS_INLINE];
+        if buf.is_empty() {
+            return Self::Inline(vals, 0);
+        }
+        let mut len = 0;
+        for field in buf.split(|&b| b == b';') {
+            let Some(slot) = vals.get_mut(len) else {
+                return Self::Heap(buf.split(|&b| b == b';').map(parse_field).collect());
+            };
+            *slot = parse_field(field);
+            len += 1;
+        }
+        Self::Inline(vals, len)
+    }
+}
+
+impl std::ops::Deref for Params {
+    type Target = [Option<usize>];
+
+    fn deref(&self) -> &[Option<usize>] {
+        match self {
+            Self::Inline(vals, len) => &vals[..*len],
+            Self::Heap(vals) => vals,
+        }
+    }
+}
+
+/// One CSI parameter field as a decimal `usize`; `None` when it is empty,
+/// holds a non-digit or overflows.
+fn parse_field(field: &[u8]) -> Option<usize> {
+    if field.is_empty() {
+        return None;
+    }
+    field.iter().try_fold(0usize, |acc, &b| {
+        let digit = b.wrapping_sub(b'0');
+        if digit > 9 {
+            return None;
+        }
+        acc.checked_mul(10)?.checked_add(usize::from(digit))
+    })
+}
+
+/// Parse an SGR (`m`) sequence's parameter bytes into the flat parameter
+/// list [`AnsiParser::apply_sgr`] consumes. Semicolon (`;`) always separates
+/// independent SGR codes; colon (`:`) groups ECMA-48 sub-parameters within
+/// *one* code. The two are ambiguous only for SGR 4 — `4;3` means
+/// "underline, then italic" but `4:3` means "underline, curly style" — so
+/// a colon-grouped `4:N` is encoded as a synthetic `4000 + N` sentinel that
+/// `apply_sgr` decodes back into the style. Every other code's
+/// colon-grouped sub-parameters (e.g. the `38:2:r:g:b` truecolor form) are
+/// simply flattened, since `apply_sgr` already consumes the semicolon form
+/// of those the same way, positionally.
+fn parse_sgr_params(buf: &[u8]) -> Vec<usize> {
+    if buf.is_empty() {
+        return Vec::new();
+    }
+    let code = |field: &[u8]| parse_field(field).unwrap_or(0);
+    let mut out = Vec::new();
+    for field in buf.split(|&b| b == b';') {
+        if field.contains(&b':') {
+            let mut sub = field.split(|&b| b == b':').map(code);
+            let base = sub.next().unwrap_or(0);
+            if base == 4 {
+                let style = sub.next().unwrap_or(1).min(5);
+                out.push(4000 + style);
+            } else {
+                out.push(base);
+                let rest: Vec<usize> = sub.collect();
+                // T.416 direct color carries an optional colorspace id:
+                // `38:2:<id>:r:g:b`. Drop the id so the flattened form
+                // lines up with the semicolon layout `38;2;r;g;b`.
+                if matches!(base, 38 | 48 | 58) && rest.first() == Some(&2) && rest.len() >= 5 {
+                    out.push(2);
+                    out.extend(&rest[2..]);
+                } else {
+                    out.extend(rest);
+                }
+            }
+        } else {
+            out.push(code(field));
+        }
+    }
+    out
+}
+
+/// Length of a complete plain CSI body at the start of `rest` (the bytes
+/// after `ESC [`): parameter digits and `;` followed by a final byte, which
+/// the length includes. `None` when the sequence carries anything else (a
+/// private marker, `:`, an intermediate, a C0 control), is cut by the end of
+/// the chunk, or is longer than [`CSI_PARAM_MAX`]: the byte-wise state
+/// machine handles those.
+fn plain_csi_len(rest: &[u8]) -> Option<usize> {
+    let window = &rest[..rest.len().min(CSI_PARAM_MAX + 1)];
+    let end = window
+        .iter()
+        .position(|b| !matches!(b, b'0'..=b'9' | b';'))?;
+    (0x40..=0x7e).contains(&window[end]).then_some(end + 1)
+}
 
 impl Default for AnsiParser {
     fn default() -> Self {
@@ -271,6 +409,17 @@ impl AnsiParser {
             let b = bytes[i];
             i += 1;
             match self.state {
+                // Fast path: a run of well-formed non-ASCII text goes to the
+                // grid in one call. A malformed or chunk-split sequence goes
+                // through the byte-wise decoder instead.
+                ParserState::Ground if b >= 0xc2 => match utf8_run(&bytes[i - 1..]) {
+                    Some(text) => {
+                        g.put_text(text, self.write_pen());
+                        self.last_char = text.chars().next_back();
+                        i += text.len() - 1;
+                    }
+                    None => self.ground_byte(b, g),
+                },
                 ParserState::Ground => self.ground_byte(b, g),
                 ParserState::Utf8 => {
                     if (0x80..=0xbf).contains(&b) {
@@ -301,7 +450,17 @@ impl AnsiParser {
                         self.csi_private = false;
                         self.csi_marker = 0;
                         self.csi_intermediate = 0;
-                        self.state = ParserState::Csi;
+                        // Fast path: a plain CSI wholly inside this chunk is
+                        // parsed and dispatched in one step, with the same
+                        // effects as the byte-wise `Csi` state.
+                        match plain_csi_len(&bytes[i..]) {
+                            Some(n) => {
+                                self.state = ParserState::Ground;
+                                self.dispatch_csi(bytes[i + n - 1], g, &bytes[i..i + n - 1]);
+                                i += n;
+                            }
+                            None => self.state = ParserState::Csi,
+                        }
                     }
                     b']' => {
                         self.osc_buffer.clear();
@@ -346,6 +505,7 @@ impl AnsiParser {
                         // its cells, so the blank screen lands in theme colors.
                         g.set_default_colors(self.palette.fg, self.palette.bg, self.palette.cursor);
                         g.reset();
+                        g.push_program_status(super::grid::StatusSignal::Reset);
                         self.charsets = [Charset::Ascii; 4];
                         self.gl = 0;
                         self.last_char = None;
@@ -554,6 +714,8 @@ impl AnsiParser {
                 }
             }
         }
+        // Between batches nothing outside the grid's cells holds a style id.
+        g.sweep_styles();
     }
 
     /// Finalize a collected DCS string. If it's a Sixel (`<params> q <data>`),
@@ -1144,61 +1306,22 @@ impl AnsiParser {
     /// Parse `param_buffer` into positional parameters. An empty slot (e.g. the
     /// leading field of `CSI ;5H`) becomes `None` so callers can apply the
     /// per-command default in the correct position, per ECMA-48 §5.4.2.
-    fn parse_params(&self) -> Vec<Option<usize>> {
-        if self.param_buffer.is_empty() {
-            return Vec::new();
-        }
-        self.param_buffer
-            .split(';')
-            .map(|s| if s.is_empty() { None } else { s.parse().ok() })
-            .collect()
-    }
-
-    /// Parse `param_buffer` for an SGR (`m`) sequence into the flat parameter
-    /// list [`apply_sgr`] consumes. Semicolon (`;`) always separates
-    /// independent SGR codes; colon (`:`) groups ECMA-48 sub-parameters within
-    /// *one* code. The two are ambiguous only for SGR 4 — `4;3` means
-    /// "underline, then italic" but `4:3` means "underline, curly style" — so
-    /// a colon-grouped `4:N` is encoded as a synthetic `4000 + N` sentinel that
-    /// `apply_sgr` decodes back into the style. Every other code's
-    /// colon-grouped sub-parameters (e.g. the `38:2:r:g:b` truecolor form) are
-    /// simply flattened, since `apply_sgr` already consumes the semicolon form
-    /// of those the same way, positionally.
-    fn parse_sgr_params(&self) -> Vec<usize> {
-        if self.param_buffer.is_empty() {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        for field in self.param_buffer.split(';') {
-            if field.contains(':') {
-                let mut sub = field.split(':').map(|s| s.parse::<usize>().unwrap_or(0));
-                let base = sub.next().unwrap_or(0);
-                if base == 4 {
-                    let style = sub.next().unwrap_or(1).min(5);
-                    out.push(4000 + style);
-                } else {
-                    out.push(base);
-                    let rest: Vec<usize> = sub.collect();
-                    // T.416 direct color carries an optional colorspace id:
-                    // `38:2:<id>:r:g:b`. Drop the id so the flattened form
-                    // lines up with the semicolon layout `38;2;r;g;b`.
-                    if matches!(base, 38 | 48 | 58) && rest.first() == Some(&2) && rest.len() >= 5 {
-                        out.push(2);
-                        out.extend(&rest[2..]);
-                    } else {
-                        out.extend(rest);
-                    }
-                }
-            } else {
-                out.push(field.parse().unwrap_or(0));
-            }
-        }
-        out
+    fn parse_params(&self) -> Params {
+        Params::parse(self.param_buffer.as_bytes())
     }
 
     /// Dispatch a completed CSI sequence given its final command byte.
     fn handle_csi(&mut self, cmd: u8, g: &mut Grid) {
-        let params = self.parse_params();
+        // Lent out for the dispatch and handed back, so its capacity is kept.
+        let raw = std::mem::take(&mut self.param_buffer);
+        self.dispatch_csi(cmd, g, raw.as_bytes());
+        self.param_buffer = raw;
+    }
+
+    /// Act on a completed CSI given its final byte and its raw parameter
+    /// bytes (digits, `;` and `:`).
+    fn dispatch_csi(&mut self, cmd: u8, g: &mut Grid, raw: &[u8]) {
+        let params = Params::parse(raw);
         // Positional parameter `i` with `default` applied to an absent/empty slot.
         let p = |i: usize, default: usize| params.get(i).copied().flatten().unwrap_or(default);
         // Most cursor-motion commands take a single count that defaults to (and
@@ -1207,7 +1330,7 @@ impl AnsiParser {
 
         match cmd {
             b'm' => {
-                let sgr = self.parse_sgr_params();
+                let sgr = parse_sgr_params(raw);
                 self.apply_sgr(&sgr);
                 self.sync_erase_bg(g);
             }
@@ -1420,7 +1543,7 @@ impl AnsiParser {
                 // Relay to the host (TUI), which owns its own cursor; the windowed
                 // front-end reads the grid state and renders the shape directly.
                 g.host_out.extend_from_slice(b"\x1b[");
-                g.host_out.extend_from_slice(self.param_buffer.as_bytes());
+                g.host_out.extend_from_slice(raw);
                 g.host_out.extend_from_slice(b" q");
             }
             b'c' => {
@@ -1503,7 +1626,7 @@ impl AnsiParser {
     /// `59`), the 16-color palette (normal + bright), and the extended
     /// `38/48;5;n` (256-color) and `38/48;2;r;g;b` (truecolor) forms. An empty
     /// list means reset. `params[i]` in `4000..=4005` is the synthetic
-    /// underline-style sentinel [`Self::parse_sgr_params`] produces for the
+    /// underline-style sentinel [`parse_sgr_params`] produces for the
     /// colon sub-parameter form — not a real SGR code.
     fn apply_sgr(&mut self, params: &[usize]) {
         if params.is_empty() {
@@ -1643,4 +1766,53 @@ fn hex_decode(hex: &[u8]) -> Option<Vec<u8>> {
 /// Append `data` to `out` as lowercase ASCII hex (two digits per byte).
 fn push_hex(out: &mut Vec<u8>, data: &[u8]) {
     out.extend_from_slice(rusty_hex::encode(data).as_bytes());
+}
+
+crate::checkpoint::fields!(
+    AnsiParser,
+    [
+        state,
+        pen,
+        param_buffer,
+        csi_private,
+        csi_marker,
+        csi_intermediate,
+        utf8_acc,
+        utf8_remaining,
+        utf8_min,
+        responses,
+        protected,
+        osc_buffer,
+        dcs_buffer,
+        apc_buffer,
+        kitty,
+        last_char,
+        charsets,
+        gl,
+        charset_slot,
+        palette
+    ]
+);
+crate::checkpoint::variants!(
+    ParserState,
+    [
+        Ground, Esc, Csi, Utf8, Osc, OscEsc, EscCharset, EscHash, StrSink, StrSinkEsc, Dcs, DcsEsc,
+        Apc, ApcEsc
+    ]
+);
+impl AnsiParser {
+    pub(crate) fn validate_checkpoint(&self) -> crate::checkpoint::Result<()> {
+        if self.gl > 1
+            || self.charset_slot > 3
+            || self.utf8_remaining > 3
+            || (self.state == ParserState::Utf8 && self.utf8_remaining == 0)
+            || self.param_buffer.len() > CSI_PARAM_MAX
+            || self.osc_buffer.len() > OSC_IMAGE_MAX
+            || self.dcs_buffer.len() > DCS_MAX
+            || self.apc_buffer.len() > DCS_MAX
+        {
+            return Err(crate::checkpoint::Error("parser state bounds"));
+        }
+        self.kitty.validate_checkpoint()
+    }
 }

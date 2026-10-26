@@ -17,12 +17,12 @@
 //! MacosUnixListener, MacosUnixStream}` on macOS (see `socket/mod.rs`'s
 //! docs for the small remainder that's still hand-rolled on both), and
 //! `platform_windows::{WindowsUnixListener, WindowsUnixStream}` on
-//! Windows for `unix.rs` specifically (see that module's own docs, and
+//! Windows for `unix_socket.rs` specifically (see that module's own docs, and
 //! `docs/decision-request-windows-process-signal-ipc.md`, for why
 //! Windows leans on rustils there but not for `tcp.rs`/`udp.rs`, which
 //! stay on the hand-rolled `socket::windows` arm below) -- shaped
 //! identically enough between the backends that `tcp.rs`/`udp.rs`/
-//! `unix.rs` each need only a `#[cfg]`-gated type alias, not their own OS
+//! `unix_socket.rs` each need only a `#[cfg]`-gated type alias, not their own OS
 //! branching. `UnixDatagram` is the one exception -- rustils has no
 //! `AF_UNIX` datagram support at all, on *any* platform, so
 //! `unix_datagram.rs` wraps `std::os::unix::net::UnixDatagram` directly
@@ -30,7 +30,7 @@
 //! `#[cfg(unix)]`-only (no stable Windows equivalent to wrap the same
 //! way -- `std::os::windows::net` is nightly-only as of this writing).
 //!
-//! `unix.rs` (`UnixListener`/`UnixStream`) compiles on `unix`/`windows`
+//! `unix_socket.rs` (`UnixListener`/`UnixStream`) compiles on `unix`/`windows`
 //! both; its bare pre-bind `UnixSocket` builder and `UnixStream::pair`
 //! stay `#[cfg(unix)]`-only -- see that module's own docs for the
 //! specific rustils-side gap (no owned-socket adoption on Windows yet)
@@ -59,17 +59,17 @@ mod split;
 mod stdio;
 mod tcp;
 mod udp;
-#[cfg(any(unix, windows))]
-mod unix;
 #[cfg(unix)]
 mod unix_datagram;
+#[cfg(any(unix, windows))]
+mod unix_socket;
 #[cfg(all(target_os = "linux", feature = "io-uring-fs"))]
 mod uring_fs;
 mod util;
 
 pub use addr::ToSocketAddrs;
 #[cfg(unix)]
-pub use async_fd::{AsyncFd, AsyncFdReadyGuard, TryIoError};
+pub use async_fd::{AsyncFd, AsyncFdReadyGuard, AsyncFdRegisterError, TryIoError};
 pub use async_io::{
     copy, copy_bidirectional, copy_bidirectional_with_sizes, copy_buf, AsyncBufRead,
     AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt,
@@ -93,18 +93,18 @@ pub use tcp::{
 };
 pub use udp::{UdpSocket, MAX_UDP_DATAGRAM_SIZE};
 #[cfg(unix)]
-pub use unix::{gid_t, pid_t, uid_t, UnixSocket};
+pub use unix_socket::{gid_t, pid_t, uid_t, UnixSocket};
 #[cfg(any(unix, windows))]
-pub use unix::{
+pub use unix_socket::{
     OwnedUnixReadHalf, OwnedUnixWriteHalf, UnixListener, UnixReadHalf, UnixReuniteError,
     UnixSocketAddr, UnixStream, UnixWriteHalf,
 };
 // `UnixStream::peer_cred`'s return type -- not available on generic BSD
 // yet, see that method's own docs, so `UCred` doesn't exist there either.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use unix::UCred;
 #[cfg(unix)]
 pub use unix_datagram::UnixDatagram;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix_socket::UCred;
 #[cfg(all(target_os = "linux", feature = "io-uring-fs"))]
 pub use uring_fs::{
     global_driver as uring_global_driver, remove_file as uring_remove_file,
@@ -113,3 +113,10 @@ pub use uring_fs::{
     OpenOptions as UringOpenOptions, SimDriver, UringFile,
 };
 pub use util::{empty, repeat, sink, Empty, Repeat, Sink};
+
+/// tokio's `io::unix` path for the readiness types above, so
+/// `tokio::io::unix::AsyncFd` migrates with only the crate renamed (#897).
+#[cfg(unix)]
+pub mod unix {
+    pub use super::{AsyncFd, AsyncFdReadyGuard, AsyncFdRegisterError, TryIoError};
+}

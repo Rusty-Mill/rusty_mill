@@ -29,6 +29,7 @@ pub(super) fn fence_at(generation: u64, holder: &str) -> Fence {
         assignment: txt("goal-orchestrator"),
         generation,
         holder: txt(holder),
+        lease: None,
     }
 }
 pub(super) fn fence() -> Fence {
@@ -96,6 +97,7 @@ pub(super) fn config(dir: &std::path::Path) -> Config {
         ]),
         live_turns: 1,
         max_wall_secs: 60,
+        end_grace_secs: None,
         slots: None,
     }
 }
@@ -116,7 +118,13 @@ pub(super) fn task() -> (Task, Board) {
 #[derive(Debug, Default, Clone)]
 pub(super) struct FakeSupervisor(Rc<Cell<usize>>);
 impl Supervisor for FakeSupervisor {
-    fn ensure(&mut self, _: &Config, _: &str, _: &std::path::Path) -> Result<Supervised, String> {
+    fn ensure(
+        &mut self,
+        _: &Config,
+        _: &str,
+        _: &std::path::Path,
+        _: Option<u64>,
+    ) -> Result<Supervised, String> {
         self.0.set(self.0.get() + 1);
         Ok(Supervised::Running)
     }
@@ -221,9 +229,18 @@ fn slots_are_optional_must_admit_each_class_and_are_pinned_absolute() {
         dir: "slots".into(),
         agents: 2,
         validators: 0,
+        ceiling: None,
+        priority_secs: 0,
     });
     assert!(c.validate().unwrap_err().contains("slots"));
     c.slots.as_mut().unwrap().validators = 1;
+    c.validate().unwrap();
+    c.slots.as_mut().unwrap().ceiling = Some(0);
+    assert!(c.validate().unwrap_err().contains("ceiling"));
+    c.slots.as_mut().unwrap().ceiling = Some(1);
+    c.slots.as_mut().unwrap().priority_secs = 86_401;
+    assert!(c.validate().unwrap_err().contains("priority_secs"));
+    c.slots.as_mut().unwrap().priority_secs = 86_400;
     c.validate().unwrap();
     let pinned = c.absolute().unwrap();
     assert!(pinned.slots.unwrap().dir.is_absolute());
@@ -340,7 +357,7 @@ fn relay_uses_saved_fence_and_stable_op_and_rejects_subject_or_flag_injection() 
         dir: c.dir.clone(),
         task: "task".into(),
     };
-    host.freeze(&h, &task, &board).unwrap();
+    host.freeze(&h, &task, &board, &fence()).unwrap();
     let handle = HostHandle(txt(&format!("bbp:{}", json(&h))));
     let gate = question(&mut board, &handle);
     cmd.replies.borrow_mut().extend([
@@ -442,6 +459,7 @@ fn hosted_brief_reuses_the_existing_renderer_to_resolve_board_context() {
             },
             plan.get(id).unwrap(),
             &board,
+            &fence(),
         )
         .unwrap();
     assert!(frozen.brief.contains("required research context"));
@@ -473,4 +491,284 @@ fn the_fence_admits_later_generations_and_refuses_superseded_holders() {
     admit(fence_at(4, "third")).unwrap();
     assert!(unavailable(admit(fence_at(3, "second"))));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn cancel_retries_a_moved_revision_waits_until_quiesced_and_skips_an_ended_task() {
+    let dir = temp();
+    let c = config(&dir);
+    let (task, board) = task();
+    let command = Contract::default();
+    command.replies.borrow_mut().extend([
+        "null".into(),
+        json(&Response::Ok),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Ok),
+        json(&Response::Ok),
+    ]);
+    let sup = FakeSupervisor::default();
+    let mut host = BbpHost::with_seams(
+        c.clone(),
+        "goal".into(),
+        "contract".into(),
+        command.clone(),
+        sup,
+    )
+    .unwrap();
+    host.open(&task, &board, &fence()).unwrap();
+    command.calls.borrow_mut().clear();
+    let mut ended = view(&c, State::Cancelled);
+    ended.cancelled = Some("owner withdrew".into());
+    // The board never got the handle: the host finds the task anyway.
+    command.replies.borrow_mut().extend([
+        json(&Some(view(&c, State::Planning))),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Rejected(Rejection::new(Code::StaleRev, "moved"))),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Ok),
+        "false".into(),
+        "true".into(),
+        json(&Some(ended.clone())),
+    ]);
+    let reason = txt("owner withdrew");
+    let progress = host.cancel(&task, &board, &reason, &fence()).unwrap();
+    assert_eq!(
+        progress,
+        Progress::Cancelled {
+            reason: reason.clone()
+        }
+    );
+    let calls = command.calls.borrow().clone();
+    assert_eq!(
+        calls.iter().map(|a| a[1].as_str()).collect::<Vec<_>>(),
+        ["show", "show", "human", "show", "human", "quiesce", "quiesce", "show"]
+    );
+    assert!(calls[2].windows(2).any(|a| a == ["--rev", "12"]));
+    assert!(calls[4].ends_with(&["cancel".into(), "owner".into(), "withdrew".into()]));
+
+    // An ended task is reported as it stands; nothing is sent.
+    command.calls.borrow_mut().clear();
+    command.replies.borrow_mut().extend([
+        json(&Some(ended.clone())),
+        json(&Some(ended.clone())),
+        "true".into(),
+        json(&Some(ended)),
+    ]);
+    assert_eq!(
+        host.cancel(&task, &board, &reason, &fence()).unwrap(),
+        Progress::Cancelled { reason }
+    );
+    assert!(command.calls.borrow().iter().all(|a| a[1] != "human"));
+    // A reason cannot smuggle a flag into BBP's parser.
+    command.calls.borrow_mut().clear();
+    assert!(host
+        .cancel(&task, &board, &txt("x --rev 1"), &fence())
+        .is_err());
+    assert!(command.calls.borrow().is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn cancel_opens_a_never_opened_task_straight_into_cancelled_and_starts_nothing() {
+    let dir = temp();
+    let c = config(&dir);
+    let (task, board) = task();
+    let command = Contract::default();
+    let mut ended = view(&c, State::Cancelled);
+    ended.cancelled = Some("withdrawn".into());
+    command.replies.borrow_mut().extend([
+        "null".into(),
+        json(&Response::Ok),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Ok),
+        "true".into(),
+        json(&Some(ended)),
+    ]);
+    let sup = FakeSupervisor::default();
+    let mut host = BbpHost::with_seams(
+        c,
+        "goal".into(),
+        "contract".into(),
+        command.clone(),
+        sup.clone(),
+    )
+    .unwrap();
+    let progress = host
+        .cancel(&task, &board, &txt("withdrawn"), &fence())
+        .unwrap();
+    assert!(matches!(progress, Progress::Cancelled { .. }));
+    assert_eq!(
+        command
+            .calls
+            .borrow()
+            .iter()
+            .map(|a| a[1].as_str())
+            .collect::<Vec<_>>(),
+        ["show", "open", "show", "human", "quiesce", "show"],
+        "no principal is assigned"
+    );
+    assert_eq!(sup.0.get(), 0, "no moderator is started");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Records the moderator lifetime and deadline each `ensure` was asked for.
+#[cfg(unix)]
+#[derive(Debug, Clone, Default)]
+struct WallSupervisor(Rc<Cell<(u64, Option<u64>)>>);
+#[cfg(unix)]
+impl Supervisor for WallSupervisor {
+    fn ensure(
+        &mut self,
+        c: &Config,
+        _: &str,
+        _: &std::path::Path,
+        deadline: Option<u64>,
+    ) -> Result<Supervised, String> {
+        self.0.set((c.max_wall_secs, deadline));
+        Ok(Supervised::Running)
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
+    let dir = temp().canonicalize().unwrap();
+    let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
+    for made in ["tools", "src/a"] {
+        std::fs::create_dir_all(dir.join(made)).unwrap();
+    }
+    let mut c = config(&dir);
+    for agent in c.pool.values_mut() {
+        agent.sandbox = Some(Sandbox {
+            read: vec![path("tools")],
+            write: vec![path("src")],
+            ..Sandbox::default()
+        });
+    }
+    c.slots = Some(crate::Slots {
+        dir: dir.join("slots"),
+        agents: 4,
+        validators: 1,
+        ceiling: Some(2),
+        priority_secs: 30,
+    });
+    let now = unix_now().unwrap();
+    let leased = |write: &str, expires: u64| {
+        let mut f = fence();
+        f.lease = Some(orch_core::factory::Lease {
+            read: vec![path("tools")],
+            write: vec![path(write)],
+            expires: Some(expires),
+        });
+        f
+    };
+    let (task, board) = task();
+    let command = Contract::default();
+    command.replies.borrow_mut().extend([
+        "null".into(),
+        json(&Response::Ok),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Ok),
+        json(&Response::Ok),
+    ]);
+    let wall = WallSupervisor::default();
+    let mut host = BbpHost::with_seams(
+        c.clone(),
+        "goal".into(),
+        "lease".into(),
+        command.clone(),
+        wall.clone(),
+    )
+    .unwrap();
+    let handle = host
+        .open(&task, &board, &leased("src/a", now + 30))
+        .unwrap();
+    // The moderator is told the lease's absolute end; its wall is unchanged.
+    assert_eq!(wall.0.get(), (60, Some(now + 30)));
+    let h = host.handle(&handle).unwrap();
+    let frozen = BbpHost::<Contract, WallSupervisor>::load(&h).unwrap();
+    for agent in frozen.config.pool.values() {
+        let sandbox = agent.sandbox.as_ref().unwrap();
+        assert_eq!(
+            (sandbox.read.clone(), sandbox.write.clone()),
+            (vec![path("tools")], vec![path("src/a")])
+        );
+    }
+    let agents = std::fs::read_to_string(
+        BbpHost::<Contract, WallSupervisor>::manifest(&h).join("agents.json"),
+    )
+    .unwrap();
+    assert!(!agents.contains(&format!("{}\"", path("src"))), "{agents}");
+    // Fair admission is asked for the goal's ceiling and priority, and
+    // knows the paths the task was confined to write.
+    let claim = std::fs::read_to_string(
+        BbpHost::<Contract, WallSupervisor>::manifest(&h).join(crate::CLAIM),
+    )
+    .unwrap();
+    let expected = format!(
+        r#"{{"parent":{{"id":"goal","agents":2}},"priority_secs":30,"write":[{}]}}"#,
+        json(&path("src/a"))
+    );
+    let parse = |t: &str| rusty_serde::json::from_str::<rusty_serde::json::Value>(t).unwrap();
+    assert_eq!(parse(&claim), parse(&expected));
+
+    // Wider, absent, or ended leases are refused before BBP is asked.
+    assert!(matches!(
+        host.poll(&handle, &leased("src", now + 30)),
+        Err(ClassifiedError::Permanent(_))
+    ));
+    assert!(matches!(
+        host.poll(&handle, &fence()),
+        Err(ClassifiedError::Permanent(_))
+    ));
+    assert!(matches!(
+        host.poll(&handle, &leased("src/a", now.saturating_sub(1))),
+        Err(ClassifiedError::Unavailable(_))
+    ));
+    // A renewal at the same paths is admitted and moves the deadline.
+    command
+        .replies
+        .borrow_mut()
+        .push_back(json(&Some(view(&c, State::Planning))));
+    assert_eq!(
+        host.poll(&handle, &leased("src/a", now + 3_600)).unwrap(),
+        Progress::Working
+    );
+    assert_eq!(wall.0.get(), (60, Some(now + 3_600)));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn an_unleased_task_refuses_a_leased_holder() {
+    let dir = temp();
+    let c = config(&dir);
+    let (task, board) = task();
+    let command = Contract::default();
+    command.replies.borrow_mut().extend([
+        "null".into(),
+        json(&Response::Ok),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Ok),
+        json(&Response::Ok),
+    ]);
+    let mut host = BbpHost::with_seams(
+        c,
+        "goal".into(),
+        "unleased".into(),
+        command,
+        FakeSupervisor::default(),
+    )
+    .unwrap();
+    let handle = host.open(&task, &board, &fence()).unwrap();
+    let mut leased = fence();
+    leased.lease = Some(orch_core::factory::Lease {
+        read: vec!["/".into()],
+        write: vec!["/".into()],
+        expires: None,
+    });
+    assert!(matches!(
+        host.poll(&handle, &leased),
+        Err(ClassifiedError::Permanent(_))
+    ));
+    std::fs::remove_dir_all(dir).unwrap();
 }

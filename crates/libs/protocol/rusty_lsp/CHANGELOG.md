@@ -8,6 +8,10 @@ each release.
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- The `runtime` feature runs on `rusty_tokio` instead of crates.io `tokio` (#911). Public signatures now name `rusty_tokio` types: `Server::stdio`, `Server::from_tcp(rusty_tokio::io::TcpStream)`, `serve_tcp(rusty_tokio::io::TcpListener, …)`, `transport::buffered` (returns `rusty_tokio::io::BufReader`), and the `testing` harness. Drive them from a `rusty_tokio` runtime (`#[rusty_tokio::main]`). `transport::{read_message, write_message}` and `Server::new` now need `Send` readers and writers. The `rusty-tokio` feature is kept as an alias of `runtime`.
+
 ### Added
 
 - `Server::with_max_pending_requests` (default `DEFAULT_MAX_PENDING_REQUESTS`, 1024): a request past the cap is answered `RequestFailed` immediately instead of being spawned to wait for a permit (design review 3.7).

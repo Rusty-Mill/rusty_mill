@@ -60,6 +60,17 @@ fn newline_and_carriage_return() {
 }
 
 #[test]
+fn line_text_spans_scrollback_then_screen() {
+    // Two rows: "a" scrolls off, leaving the wide glyph and "c" on screen.
+    let g = parse("a\r\n\u{4e2d} x  \r\nc".as_bytes(), 8, 2);
+    assert_eq!(g.scrollback_len(), 1);
+    assert_eq!(g.line_text(0).as_deref(), Some("a"));
+    assert_eq!(g.line_text(1).as_deref(), Some("\u{4e2d} x"));
+    assert_eq!(g.line_text(2).as_deref(), Some("c"));
+    assert_eq!(g.line_text(3), None);
+}
+
+#[test]
 fn put_char_wraps_at_right_margin() {
     let g = parse(b"abc", 2, 24);
     assert_eq!(row_text(&g, 0), "ab");
@@ -1422,7 +1433,7 @@ fn full_screen_scroll_captures_into_scrollback() {
     assert_eq!(g.scrollback.len(), 0);
     p.advance(&mut g, b"\r\nCCCC"); // scrolls AAAA off the top
     assert_eq!(g.scrollback.len(), 1);
-    let line: String = g.scrollback[0].cells.iter().map(|c| c.ch).collect();
+    let line: String = g.scrollback[0].cells().iter().map(|c| c.ch()).collect();
     assert_eq!(line, "AAAA");
     // Live grid now shows BBBB / CCCC.
     assert_eq!(row_text(&g, 0), "BBBB");
@@ -1431,7 +1442,7 @@ fn full_screen_scroll_captures_into_scrollback() {
 
 /// Text of scrollback line `i`.
 fn hist_text(g: &Grid, i: usize) -> String {
-    g.scrollback[i].cells.iter().map(|c| c.ch).collect()
+    g.scrollback[i].cells().iter().map(|c| c.ch()).collect()
 }
 
 /// Every live row holds exactly `cols` cells (rows rotate and are recycled,
@@ -1581,6 +1592,41 @@ fn alternate_screen_rows_are_reused_blank() {
 }
 
 #[test]
+fn alt_screen_write_survives_the_blank_row_skip() {
+    // Rows are flagged blank by a clear and skipped by the next one; text
+    // written in between must still be erased on every later entry and ED 2.
+    // Words start past column 0 so a first-cell check alone can't catch them.
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"main");
+    for word in [&b"one"[..], b"two", b"three"] {
+        p.advance(&mut g, b"\x1b[?1049h");
+        assert_eq!(row_text(&g, 0), " ".repeat(10));
+        p.advance(&mut g, b"\x1b[2J\x1b[1;4H");
+        p.advance(&mut g, word);
+        p.advance(&mut g, b"\x1b[2J");
+        assert_eq!(row_text(&g, 0), " ".repeat(10));
+        p.advance(&mut g, b"\x1b[1;4H");
+        p.advance(&mut g, word);
+        p.advance(&mut g, b"\x1b[?1049l");
+        assert_eq!(row_text(&g, 0), "main      ");
+    }
+}
+
+#[test]
+fn erase_with_a_new_background_repaints_blank_rows() {
+    // A row already blank in the default background is not blank in red: BCE
+    // must repaint it.
+    let mut g = parse(b"\x1b[2J\x1b[41m\x1b[2J", 3, 2);
+    let red = cells(&g)[0].bg;
+    assert_ne!(red, Cell::blank().bg);
+    assert!(cells(&g).iter().all(|c| c.bg == red && c.ch == ' '));
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[0m\x1b[2J");
+    assert!(cells(&g).iter().all(|c| c.bg == Cell::blank().bg));
+}
+
+#[test]
 fn partial_region_scroll_is_not_captured() {
     // A DECSTBM sub-region scroll (TUI behavior) must not feed scrollback.
     let mut g = Grid::new(4, 5);
@@ -1629,6 +1675,20 @@ fn viewport_composites_history_above_live_grid() {
         .map(|(_, cells)| cells.iter().map(|c| c.ch).collect())
         .collect();
     assert_eq!(text, vec!["AAAA".to_string(), "BBBB".to_string()]);
+}
+
+#[test]
+fn row_cells_reads_the_live_screen_while_scrolled_back() {
+    let mut g = Grid::new(4, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"AAAA\r\nBBBB\r\nCCCC");
+    assert!(g.scroll_view_up(1));
+    let live: Vec<String> = (0..g.rows)
+        .map(|y| g.row_cells(y).map(|c| c.ch).collect())
+        .collect();
+    assert_eq!(live, vec!["BBBB".to_string(), "CCCC".to_string()]);
+    assert_eq!(g.row_cells(1).collect::<Vec<_>>(), g.row(1));
+    assert_eq!(g.row_cells(g.rows).count(), 0, "past the last row");
 }
 
 #[test]
@@ -1788,7 +1848,7 @@ fn links_arc_and_clusters_arc_stay_in_sync_with_the_backing_vecs() {
     // track the source of truth or the renderer silently sees stale data.
     let mut g = Grid::new(20, 3);
     assert_eq!(g.links_arc.len(), g.links.len());
-    assert_eq!(g.clusters_arc.len(), g.clusters.len());
+    assert_eq!(g.clusters_arc().len(), g.clusters.len());
 
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"\x1b]8;;http://example.com\x1b\\hi\x1b]8;;\x1b\\");
@@ -1804,8 +1864,67 @@ fn links_arc_and_clusters_arc_stay_in_sync_with_the_backing_vecs() {
         1,
         "the combining accent should be interned"
     );
-    assert_eq!(g.clusters_arc.len(), g.clusters.len());
-    assert_eq!(&*g.clusters_arc, &g.clusters[..]);
+    assert_eq!(&*g.clusters_arc(), &g.clusters[..]);
+    let frame = g.snapshot_dirty().clusters;
+    assert!(
+        std::sync::Arc::ptr_eq(&frame, &g.snapshot_viewport().clusters),
+        "frames share the table until it grows"
+    );
+    p.advance(&mut g, "a\u{0308}".as_bytes());
+    assert_eq!(&*g.snapshot_dirty().clusters, &g.clusters[..]);
+    assert_eq!(frame.len(), 1, "a frame already handed out keeps its table");
+}
+
+#[test]
+fn combining_marks_reuse_interned_continuations() {
+    let mut g = Grid::new(20, 3);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        "e\u{301}a\u{301}o\u{301}\u{323}u\u{301}\u{323}".as_bytes(),
+    );
+    assert_eq!(g.clusters, ["\u{301}", "\u{301}\u{323}"]);
+    let ids: Vec<u16> = g.row(0)[..4].iter().map(|c| c.cluster).collect();
+    assert_eq!(ids, [1, 1, 2, 2], "equal continuations share one id");
+    assert_eq!(glyph(&g, 3, 0), "u\u{301}\u{323}");
+}
+
+#[test]
+fn a_full_rtsn_cluster_table_restores_and_interns() {
+    // RTSN accepts up to u16::MAX entries, every id a cell can name. Restoring
+    // one must index them all without overflowing the id counter.
+    let mut g = Grid::new(4, 2);
+    g.clusters = (1..u16::MAX).map(|i| i.to_string()).collect();
+    g.clusters.push("\u{302}".into());
+    let mut back = Grid::decode_snapshot(&g.encode_snapshot()).expect("decode");
+    AnsiParser::new().advance(&mut back, "a\u{302}".as_bytes());
+    assert_eq!(
+        back.row(0)[0].cluster,
+        u16::MAX,
+        "the last entry keeps its id"
+    );
+    assert_eq!(back.clusters.len(), usize::from(u16::MAX));
+}
+
+#[test]
+fn restored_grids_reuse_interned_continuations() {
+    // Both restore paths rebuild the id index: interning a continuation the
+    // restored table already holds must return its id, not append a copy.
+    let mut g = Grid::new(20, 3);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, "e\u{301}\u{323}a\u{308}".as_bytes());
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut a, mut pa) = crate::checkpoint::decode(&bytes).expect("decode");
+    let mut b = Grid::decode_snapshot(&g.encode_snapshot()).expect("decode snapshot");
+    let mut pb = AnsiParser::new();
+    pa.advance(&mut a, "\r\no\u{308}i\u{301}\u{323}".as_bytes());
+    pb.advance(&mut b, "\x1b[2;1Ho\u{308}i\u{301}\u{323}".as_bytes());
+    for r in [&a, &b] {
+        assert_eq!(r.clusters, g.clusters, "no duplicate entries");
+        let ids: Vec<u16> = r.row(1)[..2].iter().map(|c| c.cluster).collect();
+        assert_eq!(ids, [3, 2]);
+        assert_eq!(&*r.snapshot_viewport().clusters, &r.clusters[..]);
+    }
 }
 
 #[test]
@@ -2412,7 +2531,7 @@ fn ind_at_bottom_scrolls_and_captures_scrollback() {
     assert_eq!(row_text(&g, 0), "BBBB");
     assert_eq!(row_text(&g, 1), "    ");
     assert_eq!(g.scrollback.len(), 1);
-    let line: String = g.scrollback[0].cells.iter().map(|c| c.ch).collect();
+    let line: String = g.scrollback[0].cells().iter().map(|c| c.ch()).collect();
     assert_eq!(line, "AAAA");
 }
 
@@ -4822,8 +4941,12 @@ fn retheme_recolors_scrollback() {
     let old = p.retheme(new);
     g.retheme(&old, &new);
     for line in &g.scrollback {
-        for cell in &line.cells {
-            assert_ne!(cell.fg, 0xd8d8d8, "old themed fg gone from history");
+        for &cell in line.cells() {
+            assert_ne!(
+                g.resolve(cell).fg,
+                0xd8d8d8,
+                "old themed fg gone from history"
+            );
         }
     }
 }
@@ -5856,6 +5979,55 @@ fn iterm2_inline_animated_gif_plays_in_overlay() {
 }
 
 #[test]
+fn frame_view_shares_image_pixels_and_resolves_animation() {
+    let mut g = Grid::new(20, 8);
+    let mut p = AnsiParser::new();
+    let mut input = b"\x1b]1337;File=inline=1:".to_vec();
+    input.extend_from_slice(ANIM_GIF_B64.as_bytes());
+    input.push(0x07);
+    p.advance(&mut g, &input);
+    let t0 = std::time::Instant::now();
+    assert!(!g.advance_animations(t0));
+    assert!(g.advance_animations(t0 + std::time::Duration::from_millis(120)));
+    let im = g.images().last().expect("overlay image stored");
+    let id = im.anim.expect("animated");
+    let f = g.frame_view();
+    let fi = f.images().last().expect("image in the frame");
+    assert_eq!(fi.anim, Some((id, 1)), "the current animation frame");
+    assert_eq!(fi.pixels[0], Some(0x00FF00), "second frame green");
+    assert_eq!(fi.top, g.image_top_row(im));
+    // Dropping the animation falls back to the image's own pixels, shared;
+    // the earlier snapshot keeps the frame it captured.
+    g.kitty_delete(Some(id));
+    let later = g.frame_view();
+    assert_eq!(f.images().last().map(|i| i.pixels[0]), Some(Some(0x00FF00)));
+    let (fi, im) = (&later.images()[0], &g.images()[0]);
+    assert_eq!(fi.anim, None);
+    assert!(std::sync::Arc::ptr_eq(&fi.pixels, &im.pixels), "not copied");
+}
+
+#[test]
+fn frame_view_resolves_placeholder_images() {
+    let mut g = Grid::new(20, 6);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b_Gf=32,s=1,v=1,a=T,U=1,i=42,c=2,r=2;/wAA/w==\x1b\\",
+    );
+    p.advance(&mut g, b"\x1b[38;2;0;0;42m");
+    p.advance(
+        &mut g,
+        "\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\u{0305}\u{030D}".as_bytes(),
+    );
+    let f = g.frame_view();
+    assert_eq!(f.placeholder_map(), g.placeholder_map().as_deref());
+    assert_eq!(f.kitty_frame(42), g.kitty_frame(42));
+    assert_eq!(f.kitty_current(42), Some(0));
+    assert_eq!(f.placeholder_grid(42, 8, 16), g.placeholder_grid(42, 8, 16));
+    assert_eq!(f.kitty_frame(7), None, "unreferenced images stay out");
+}
+
+#[test]
 fn iterm2_inline_webp_renders_cells() {
     let mut g = Grid::new(20, 10);
     let mut p = AnsiParser::new();
@@ -6338,6 +6510,56 @@ fn bce_keeps_attributes_and_foreground_out_of_erased_cells() {
 }
 
 #[test]
+fn scrolled_in_rows_follow_erase_colour_and_width_changes() {
+    // Line::clear copies from a cached blank row; it must be rebuilt when the
+    // erase colour or the width changes, not keep handing out the old one.
+    let mut g = Grid::new(10, 3);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[3;1H\x1b[42m\n");
+    assert_bce(&g, 2, 0..10, "first BCE scroll");
+    p.advance(&mut g, b"\x1b[49m\n");
+    assert!(g.row(2).iter().all(|c| c.bg == DEFAULT_BG), "after SGR 49");
+    p.advance(&mut g, b"\x1b[42m\n");
+    assert_bce(&g, 2, 0..10, "BCE again");
+    g.resize(14, 3);
+    p.advance(&mut g, b"\x1b[3;1H\n");
+    assert_eq!(g.row(2).len(), 14, "row width after resize");
+    assert_bce(&g, 2, 0..14, "BCE after resize");
+}
+
+#[test]
+fn decaln_rows_are_blanked_by_later_clears() {
+    // DECALN leaves rows uniform in 'E'; a scroll, IL or ED must still blank
+    // them, and repeated clears of an already-blank row must stay blank.
+    let mut g = Grid::new(6, 3);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b#8\x1b[3;1H\n");
+    assert_eq!(row_text(&g, 2), " ".repeat(6), "LF scroll after DECALN");
+    assert_eq!(row_text(&g, 0), "E".repeat(6), "untouched row keeps E");
+    p.advance(&mut g, b"\x1b[1;1H\x1b[L\x1b[L");
+    assert_eq!(row_text(&g, 0), " ".repeat(6), "IL twice");
+    p.advance(&mut g, b"\x1b[1;5Hx\x1b[1;1H\x1b[L");
+    assert_eq!(row_text(&g, 0), " ".repeat(6), "IL after a mid-row write");
+    p.advance(&mut g, b"\x1b#8\x1b[2J");
+    assert!(cells(&g).iter().all(|c| c.ch == ' '), "ED 2 after DECALN");
+}
+
+#[test]
+fn restored_rows_are_blanked_after_a_write() {
+    // A checkpoint restore starts rows unflagged and the blank-row template
+    // empty; a write then a clear must still produce blank rows.
+    let mut g = Grid::new(6, 3);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[42m\x1b[2J\x1b[0m");
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b[3;3Hab\x1b[42m\n");
+    assert_bce(&g, 2, 0..6, "restored grid scroll");
+    p.advance(&mut g, b"\x1b[1;4Hz\x1b[1;1H\x1b[L");
+    assert_bce(&g, 0, 0..6, "restored grid IL after write");
+}
+
+#[test]
 fn bce_does_not_apply_to_resize_fill() {
     // Growing the grid is not an erase: new cells use the default background.
     let mut g = parse(b"\x1b[42m", 4, 1);
@@ -6573,6 +6795,119 @@ fn ascii_fast_path_matches_put_char_one_byte_at_a_time() {
     }
 }
 
+#[test]
+fn text_fast_path_matches_put_char_one_scalar_at_a_time() {
+    // As the ASCII test above, for runs of non-ASCII text: narrow and wide
+    // glyphs, a combining mark and a C1 control (both zero width), under each
+    // mode the fast path must defer to put_char for.
+    let setups: [&str; 6] = [
+        "",
+        "\x1b[?7l",           // DECAWM off
+        "\x1b[4h",            // insert mode
+        "\x1b[?69h\x1b[3;7s", // DECSLRM margins, columns 3..=7
+        "\x1b[2;3r",          // scroll region
+        "\x1b[?2027h",        // grapheme clustering
+    ];
+    let run: Vec<char> = "é世ñ界\u{301}ü日Ω😀\u{85}ç字µ".chars().collect();
+    let style = "\x1b[1;31;44;4:3;58;2;1;2;3m";
+    let link = "\x1b]8;;https://x.test\x07";
+    let probe = cells(&parse(format!("{style}X").as_bytes(), 2, 1))[0];
+    let pen = Pen {
+        fg: probe.fg,
+        bg: probe.bg,
+        attrs: probe.flags,
+        underline_color: probe.underline_color,
+    };
+    for setup in setups {
+        for x in 1..=9 {
+            for len in 1..=run.len() {
+                let text: String = run[..len].iter().collect();
+                let prefix = format!("世界世界世\r\n日本日本日{setup}{link}\x1b[2;{x}H");
+                let setup_bytes = format!("{prefix}{style}");
+                let mut fast = Grid::new(9, 3);
+                let mut p = AnsiParser::new();
+                p.advance(&mut fast, setup_bytes.as_bytes());
+                p.advance(&mut fast, text.as_bytes());
+                let mut slow = parse(setup_bytes.as_bytes(), 9, 3);
+                for &ch in &run[..len] {
+                    slow.put_char(ch, pen);
+                }
+                assert_eq!(
+                    grid_state(&fast),
+                    grid_state(&slow),
+                    "setup {setup:?}, column {x}, {len} scalars"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn utf8_fast_path_matches_the_bytewise_decoder() {
+    // Fed one byte per call, the parser never sees a whole sequence, so every
+    // byte goes through the byte-wise decoder: the reference. Whole input and
+    // every two-chunk split must match it, malformed sequences included.
+    // 31 two-byte scalars, then a three-byte one across the 64-byte window.
+    let window_edge = format!("{}日本", "é".repeat(31));
+    let inputs: [&[u8]; 10] = [
+        "日本語 é😀 x".as_bytes(),
+        window_edge.as_bytes(),
+        b"\xc3\xa9\x80\xc3\xa9",              // stray continuation mid-run
+        b"\xe6\x97\xa5\xe6\x97A\xe6\x97\xa5", // truncated, then ASCII
+        b"\xe0\x80\x9b\xc3\xa9",              // overlong ESC
+        b"\xed\xa0\x80\xc3\xa9",              // UTF-16 surrogate
+        b"\xf4\x90\x80\x80\xc3\xa9",          // above U+10FFFF
+        b"\xc2\x85\xc3\xa9\xcc\x81",          // C1 NEL, then e + combining acute
+        b"\xc3\xa9\x1b[31m\xc3\xa9",          // run broken by a CSI
+        b"\xff\xfe\xc3",                      // invalid leads, truncated tail
+    ];
+    for input in inputs {
+        let mut reference = Grid::new(6, 3);
+        let mut p = AnsiParser::new();
+        for b in input {
+            p.advance(&mut reference, std::slice::from_ref(b));
+        }
+        for split in 0..=input.len() {
+            let mut g = Grid::new(6, 3);
+            let mut p = AnsiParser::new();
+            p.advance(&mut g, &input[..split]);
+            p.advance(&mut g, &input[split..]);
+            assert_eq!(
+                grid_state(&g),
+                grid_state(&reference),
+                "{input:x?} split at {split}"
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_high_bytes_parse_in_linear_time() {
+    // Each byte below is rejected by the text fast path and taken by the
+    // byte-wise decoder. If finding that out scanned the rest of the input,
+    // one advance over 256 KiB would do ~10^10 steps and this test would hang.
+    for unit in [&[0xff][..], &[0xc3, 0xa9, 0x80]] {
+        let input = unit.repeat(256 * 1024 / unit.len());
+        let mut g = Grid::new(80, 24);
+        AnsiParser::new().advance(&mut g, &input);
+        let (x, y) = g.cursor;
+        assert_eq!(g.row(y)[x - 1].ch, '\u{FFFD}', "{unit:x?}");
+    }
+}
+
+#[test]
+fn utf8_run_stops_at_ascii_and_malformed_bytes() {
+    assert_eq!(utf8_run("é世x".as_bytes()), Some("é世"));
+    assert_eq!(utf8_run(b"\xc3\xa9\xc3"), Some("é")); // incomplete tail
+    assert_eq!(utf8_run(b"\xc3\xa9\x80"), Some("é")); // stray continuation
+    assert_eq!(utf8_run(b"\xc3"), None);
+    assert_eq!(utf8_run(b"\x80"), None);
+    assert_eq!(utf8_run(b""), None);
+    // At most one window per call; a sequence the edge cuts starts the next.
+    let long = format!("{}日", "é".repeat(31));
+    assert_eq!(utf8_run(long.as_bytes()), Some("é".repeat(31).as_str()));
+}
+
 /// A grid exercising every part of a snapshot: styles, wide glyphs, a
 /// grapheme cluster, a hyperlink, a soft wrap, a double-width line, history,
 /// a title, a moved cursor and, when `alt`, the alternate screen.
@@ -6613,7 +6948,13 @@ fn assert_same_snapshot_state(a: &Grid, b: &Grid) {
         (&a.title, &a.clusters, &a.links),
         (&b.title, &b.clusters, &b.links)
     );
-    assert_eq!(a.scrollback, b.scrollback);
+    let history = |g: &Grid| -> Vec<_> {
+        let lines = g.scrollback.iter();
+        lines
+            .map(|l| (g.resolved(l.cells()), l.wrapped, l.attr))
+            .collect()
+    };
+    assert_eq!(history(a), history(b));
     assert_eq!(a.in_alt_screen(), b.in_alt_screen());
     for y in 0..a.rows {
         assert_eq!(a.row(y), b.row(y), "row {y}");
@@ -6764,5 +7105,258 @@ fn snapshot_decode_charges_empty_history_lines() {
     assert_eq!(
         Grid::decode_snapshot(&w).err(),
         Some(SnapshotError::Invalid("too many lines"))
+    );
+}
+
+/// Full terminal state after feeding `input` either as one chunk (so a plain
+/// CSI takes the whole-sequence fast path) or one byte per `advance` call
+/// (so every CSI goes through the byte-wise state machine).
+fn csi_paths_state(input: &[u8], bytewise: bool) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    if bytewise {
+        for b in input {
+            p.advance(&mut g, std::slice::from_ref(b));
+        }
+    } else {
+        p.advance(&mut g, input);
+    }
+    let responses = p.take_responses();
+    let host_out = g.take_host_out();
+    let state = super::checkpoint::encode(&g, &p).expect("checkpoint");
+    (state, responses, host_out)
+}
+
+#[test]
+fn plain_csi_fast_path_matches_bytewise_parse() {
+    let digits_256 = format!("\x1b[{}H", "1".repeat(256));
+    let digits_257 = format!("\x1b[{}H", "1".repeat(257));
+    let modes_17 = format!("\x1b[{}20h", "0;".repeat(17));
+    let cases: [&[u8]; 28] = [
+        b"ab\x1b[5;10Hcd",
+        b"\x1b[Hx\x1b[;5Hy\x1b[5;Hz\x1b[;Hw",
+        b"\x1b[0;0Hx\x1b[999;999Hy",
+        b"\x1b[99999999999999999999999999;3Hx",
+        b"\x1b[10;10H\x1b[3A\x1b[2B\x1b[4C\x1b[1D\x1b[E\x1b[F\x1b[7G\x1b[9dx",
+        b"\x1b[0A\x1b[0C\x1b[5;7;9Hx",
+        b"\x1b[1;31mred\x1b[0m\x1b[38;2;1;2;3mrgb\x1b[48;5;200mbg\x1b[m",
+        b"\x1b[4:3mcurly\x1b[38:2:0:10:20:30mt416\x1b[1;38:5:1mmix",
+        b"\x1b[1;2;3;4;5;7;8;9;21;22;23;24;25;27;28;29;53;55mx",
+        b"x\x1b[5b\x1b[2;3r\x1b[3;1H\x1b[S\x1b[T\x1b[L\x1b[M",
+        b"abcdef\x1b[1;3H\x1b[2@\x1b[P\x1b[3X\x1b[K\x1b[1K\x1b[2J",
+        b"\x1b[6n\x1b[5n\x1b[c\x1b[0c\x1b[18t\x1b[14t",
+        b"\x1b[3g\x1b[1;20H\x1bH\x1b[1;1H\t\x1b[2I\x1b[Z",
+        b"\x1b[4hab\x1b[1;1Hc\x1b[4l\x1b[20h\n\x1b[20l",
+        b"\x1b[?25l\x1b[?1049h\x1b[2;2Halt\x1b[?1049l\x1b[?25h",
+        b"\x1b[2 q\x1b[5 q\x1b[!p\x1b[s\x1b[u",
+        b"\x1b[5;\x01;3Hx\x1b[1\x1b[2Hy\x1b[3\x18z",
+        b"\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;18;19;20Hx",
+        b"\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16Hx",
+        b"\x1b[;;;;;;;;;;;;;;;;;;;;mx",
+        b"\x1b[",
+        b"\x1b[12;3",
+        b"\x1b[;",
+        b"\x1b[3;4\x1b[5;6Hx",
+        b"\x1b[3~\x1b[200~\x1b[1;5`x",
+        digits_256.as_bytes(),
+        digits_257.as_bytes(),
+        modes_17.as_bytes(),
+    ];
+    for input in cases {
+        assert_eq!(
+            csi_paths_state(input, false),
+            csi_paths_state(input, true),
+            "fast and byte-wise CSI paths differ on {:?}",
+            String::from_utf8_lossy(input)
+        );
+    }
+}
+
+/// `lines` rows of `cols` glyphs, glyph `x` of row `k` in its own truecolour
+/// `first + k * cols + x`.
+fn rainbow(first: u32, lines: usize, cols: usize) -> Vec<u8> {
+    let mut out = String::new();
+    for i in 0..(lines * cols) as u32 {
+        let c = first + i;
+        let (r, g, b) = (c >> 16 & 0xff, c >> 8 & 0xff, c & 0xff);
+        out.push_str(&format!("\x1b[38;2;{r};{g};{b}mx"));
+        if (i as usize + 1).is_multiple_of(cols) {
+            out.push_str("\r\n");
+        }
+    }
+    out.into_bytes()
+}
+
+/// Every retained rainbow row still counts up by one per cell, and rows
+/// count up in order: a wrong id after a sweep or compaction breaks a run.
+fn assert_rainbow(g: &Grid) {
+    let history = g.scrollback.iter().map(|l| g.resolved(l.cells()));
+    let rows: Vec<Vec<Cell>> = history.chain((0..g.rows).map(|y| g.row(y))).collect();
+    let mut last = 0;
+    for row in rows.iter().filter(|r| r[0].ch == 'x') {
+        assert!(row[0].fg > last, "rows out of order");
+        for (x, cell) in row.iter().enumerate() {
+            assert_eq!(cell.fg, row[0].fg + x as u32, "column {x}");
+        }
+        last = row[0].fg;
+    }
+}
+
+#[test]
+fn plain_csi_split_at_every_offset_matches_one_chunk() {
+    let input = b"ab\x1b[12;34Hcd\x1b[1;38;2;10;20;30mef\x1b[;7Hgh\x1b[3Pij";
+    let whole = csi_paths_state(input, false);
+    for cut in 1..input.len() {
+        let mut g = Grid::new(80, 24);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, &input[..cut]);
+        p.advance(&mut g, &input[cut..]);
+        let responses = p.take_responses();
+        let host_out = g.take_host_out();
+        let state = super::checkpoint::encode(&g, &p).expect("checkpoint");
+        assert_eq!((state, responses, host_out), whole, "split at byte {cut}");
+    }
+}
+
+#[test]
+fn csi_params_past_inline_capacity_are_kept() {
+    // Seventeen leading fields push LNM (mode 20) past the inline array; the
+    // spill to the heap must keep it rather than truncate.
+    let input = format!("\x1b[{}20h", "0;".repeat(17));
+    let g = parse(input.as_bytes(), 80, 24);
+    assert!(g.line_feed_new_line);
+}
+
+#[test]
+fn csi_param_overflow_takes_the_default() {
+    // A field too large for usize parses as absent, so the row defaults to 1.
+    let g = parse(b"\x1b[99999999999999999999999999;3H", 80, 24);
+    assert_eq!(g.cursor, (2, 0));
+}
+
+#[test]
+fn style_sweeps_and_compaction_keep_every_cell() {
+    let (cols, rows) = (20, 5);
+    let mut g = Grid::new(cols, rows);
+    g.set_scrollback_max(100);
+    let mut p = AnsiParser::new();
+    // One batch of 72,000 styles, nearly all evicted by its end: the sweep
+    // after it frees them and compacts the table.
+    p.advance(&mut g, &rainbow(1, 3600, cols));
+    let stats = g.style_stats();
+    let (live, len) = (stats.live, stats.entries);
+    assert!(len < 65_536, "compacted: {len} entries");
+    assert!(live <= (100 + rows) * cols + 2, "{live} live");
+    assert_rainbow(&g);
+    // Many small batches: sweeps free and reuse slots between them.
+    for k in 0..300 {
+        p.advance(&mut g, &rainbow(100_000 + k * 400, 20, cols));
+        assert_rainbow(&g);
+    }
+    let (live, len) = (g.style_stats().live, g.style_stats().entries);
+    assert!(live < 3 * 4096 && len < 3 * 4096, "{live} live of {len}");
+}
+
+#[test]
+fn clearing_history_releases_its_styles() {
+    let mut g = Grid::new(20, 5);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, &rainbow(1, 400, 20));
+    assert!(g.style_stats().live > 8000);
+    p.advance(&mut g, b"\x1b[0m\x1b[3J");
+    // The screen keeps its styles; history's are freed.
+    assert!(g.style_stats().live <= 5 * 20 + 2, "{:?}", g.style_stats());
+    assert_rainbow(&g);
+}
+
+#[test]
+fn program_status_is_collected_only_when_asked() {
+    let input = b"\x1b]7501;state=working\x07\x1b]133;A\x07\x1bc";
+    assert!(parse(input, 80, 24).program_status.is_empty());
+
+    let mut g = Grid::new(80, 24);
+    g.collect_program_status = true;
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, input);
+    p.advance(&mut g, b"\x1b]7501;state=done:app=x\x1b\\\x1b]633;A\x07");
+    assert_eq!(
+        g.program_status,
+        [
+            StatusSignal::Reset,
+            StatusSignal::Report("state=done:app=x".into()),
+            StatusSignal::Prompt,
+        ],
+        "a reset supersedes what came before it"
+    );
+    assert!(g.collect_program_status, "a full reset keeps collecting");
+}
+
+#[test]
+fn program_status_queue_is_bounded() {
+    let mut g = Grid::new(80, 24);
+    g.collect_program_status = true;
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        &b"\x1b]7501;state=idle\x07".repeat(PROGRAM_STATUS_MAX + 10),
+    );
+    assert_eq!(g.program_status.len(), PROGRAM_STATUS_MAX);
+}
+
+#[test]
+fn program_status_queue_merges_boundaries_and_admits_reports() {
+    let mut g = Grid::new(80, 24);
+    g.collect_program_status = true;
+    let mut p = AnsiParser::new();
+    // Each round is a report then a prompt; far more than the queue holds.
+    let round = b"\x1b]7501;state=working\x07\x1b]133;A\x07";
+    p.advance(&mut g, &round.repeat(PROGRAM_STATUS_MAX * 2));
+    p.advance(&mut g, b"\x1b]7501;state=done\x07");
+    let q = &g.program_status;
+    assert!(q.len() <= PROGRAM_STATUS_MAX);
+    assert_eq!(q.last(), Some(&StatusSignal::Report("state=done".into())));
+    assert_eq!(
+        q[q.len() - 2],
+        StatusSignal::Prompt,
+        "the last boundary kept"
+    );
+    assert!(
+        q.windows(2)
+            .all(|w| matches!(w[0], StatusSignal::Report(_))
+                || matches!(w[1], StatusSignal::Report(_))),
+        "no two boundaries adjacent"
+    );
+}
+
+#[test]
+fn program_status_queue_keeps_boundaries_when_full() {
+    let mut g = Grid::new(80, 24);
+    g.collect_program_status = true;
+    let mut p = AnsiParser::new();
+    let flood = b"\x1b]7501;state=working\x07".repeat(PROGRAM_STATUS_MAX);
+    p.advance(&mut g, &flood);
+    p.advance(
+        &mut g,
+        b"\x1b]133;A\x07\x1b]133;A\x07\x1b]7501;state=done\x07",
+    );
+    let q = &g.program_status;
+    assert_eq!(q.len(), PROGRAM_STATUS_MAX);
+    assert_eq!(
+        q[PROGRAM_STATUS_MAX - 2..],
+        [
+            StatusSignal::Prompt,
+            StatusSignal::Report("state=done".into())
+        ],
+        "the prompt survives once, in order, and the oldest reports made room"
+    );
+
+    p.advance(&mut g, &flood);
+    p.advance(&mut g, b"\x1bc\x1b]7501;state=idle\x07");
+    assert_eq!(
+        g.program_status,
+        [
+            StatusSignal::Reset,
+            StatusSignal::Report("state=idle".into())
+        ]
     );
 }

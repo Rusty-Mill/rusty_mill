@@ -27,6 +27,7 @@ stream targeting a different part of the terminal pipeline:
 - **`ascii_throughput`** — plain-text scroll (the `cat a-log-file` case).
 - **`unicode_heavy`** — wide CJK, combining marks, emoji: width/grapheme handling.
 - **`sgr_churn`** — every line changes fg/bg/bold/italic/underline: style-run pressure.
+- **`sgr_alternate`** — three pens alternate word by word within each row, as in syntax-highlighted code: style-lookup pressure. Not in the CI instruction gate.
 - **`cursor_thrash`** — scattered absolute cursor positioning, like a redraw-storm TUI app (vim, htop, tmux).
 - **`scroll_heavy`** — many short lines: continuous line-at-a-time scroll.
 - **`alt_screen_flicker`** — repeated alt-screen enter/clear/exit: full-screen apps flipping in and out (less, fzf, editors).
@@ -93,16 +94,40 @@ Ceilings are the measured count plus 10% for toolchain codegen drift.
 +10% of the new value in the same PR. The baseline and the libghostty-vt
 reference throughput are in `docs/research/RUSTY-TERM-PERF-BACKLOG.md` §2.1.
 
+### Throughput floors (`floors.py`, manual)
+
+The wall-clock floors from #889 are libghostty-vt's speed with 10,000 lines
+of scrollback: ascii_throughput at least 58 MB/s and scroll_heavy at least
+16 MB/s. [`floors.py`](floors.py) generates the 4 MB workloads (about 30k
+lines, so the scrollback is full for most of each run), runs
+`bench_vt_throughput` on each 3 times, judges the slowest run, and prints peak
+RSS:
+
+```sh
+cargo build --release -p rusty_term --bin bench_vt_throughput
+python3 bench/floors.py --bin ../../../../target/release/bench_vt_throughput
+```
+
+It exits 1 below a floor. CI does not run it, because wall-clock time on a
+shared runner is noise; the instruction-count gate above is the CI check. The
+`quick` workloads in CI's informational MB/s line are 200 KB: quick
+ascii_throughput (about 3.5k lines) never fills the scrollback, and quick
+scroll_heavy (about 13.8k) fills it only near the end. Both mostly measure a
+fresh grid's allocation (scroll_heavy spends more time in kernel page faults
+than in user code there), so they read lower and are not judged against the
+floors.
+
 ## `bench_frame_time` (Rust, windowed front-end's CPU frame path)
 
-Paints the window's real CPU frame path (`gui::render::composite`) into an offscreen buffer, without a window or present. It has two modes.
+Paints the window's real CPU frame path (`gui::render::composite`) into an offscreen buffer, without a window or present. Like the window on a backend that keeps its buffer, it repaints only the rows that changed since the last frame; the `full repaint` figures repaint every row. It has three modes.
 
-- **Streaming.** A parser thread feeds a workload into a shared `Mutex<Grid>` in 4 KiB chunks, locking per chunk like the PTY reader. It loops the file for at least `--secs` (default 2). A render thread paints at `--hz` (default 60) and holds the grid lock for the whole frame, as the window does today. Reported per workload:
+- **Streaming.** A parser thread feeds a workload into a shared `Mutex<Grid>` in 4 KiB chunks, locking per chunk like the PTY reader. It loops the file for at least `--secs` (default 2). A render thread paints at `--hz` (default 60) as the window does: it locks the grid, copies the frame (`Grid::frame_view`), unlocks, then paints from the copy. Reported per workload:
   - frame ms;
-  - lock hold ms, during which the parser is blocked;
+  - lock hold ms (the copy), during which the parser is blocked;
   - the render thread's wait for the lock;
   - parser MB/s with rendering, against parsing alone.
-- **Static folds.** Frame ms for the same text with 0 and with 1,024 OSC 133 command fold blocks, at the live view and scrolled back half a screen into history.
+- **Static folds.** Frame ms for the same text with 0 and with 1,024 OSC 133 command fold blocks, at the live view and scrolled back half a screen into history, against a full repaint.
+- **Typing.** Frame ms when each frame adds one character at the prompt of a full screen, with changed rows only and with a full repaint.
 
 Percentiles are nearest rank. A run that cannot measure (no font, a renderer that fails to start or panics, no samples) exits non-zero.
 

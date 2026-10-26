@@ -1,0 +1,16 @@
+[package]
+name = "rusty_stream-macros"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "The stream!/try_stream! proc macros for rusty_stream -- not meant to be depended on directly, use rusty_stream's re-exports."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[lib]
+proc-macro = true
+
+[dependencies]

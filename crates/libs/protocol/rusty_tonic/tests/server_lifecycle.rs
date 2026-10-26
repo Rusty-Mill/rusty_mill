@@ -113,17 +113,17 @@ async fn a_call_without_a_deadline_is_not_cut_off() {
 // ---- cancellation ---------------------------------------------------------------------------
 
 #[rusty_tokio::test]
-async fn a_client_that_cancels_makes_the_handlers_next_send_fail_cancelled() {
-    let (tx, mut rx) = mpsc::channel(4);
+async fn a_client_that_cancels_a_stream_that_is_being_sent_drops_the_handler() {
+    // The handler is sending all the time; it is dropped, not left to find out on a send.
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = dropped.clone();
     let router =
         Router::new().server_streaming(PATH, move |_r: Request<Blob>, mut out: Sink<Blob>| {
-            let tx = tx.clone();
+            let guard = Dropped(flag.clone());
             async move {
+                let _guard = guard;
                 loop {
-                    if let Err(e) = out.send(&blob(1, 1000)).await {
-                        tx.send(e.code()).await.unwrap();
-                        return Err(e);
-                    }
+                    out.send(&blob(1, 1000)).await?;
                     sleep(Duration::from_millis(10)).await;
                 }
             }
@@ -135,22 +135,71 @@ async fn a_client_that_cancels_makes_the_handlers_next_send_fail_cancelled() {
         .unwrap();
     assert!(stream.message().await.unwrap().is_some());
     drop(stream);
-    assert_eq!(next(&mut rx).await, Code::Cancelled);
+    assert!(
+        set_soon(&dropped).await,
+        "the handler kept running after its client left"
+    );
     server.shutdown().await;
+}
+
+/// Armed around one await: set `0` if the future is dropped there, and only then. Disarmed
+/// after the await completes, so a normal return, an EOF or an error never sets it.
+struct DroppedMidAwait(Option<Arc<AtomicBool>>);
+
+impl DroppedMidAwait {
+    fn arm(flag: &Arc<AtomicBool>) -> Self {
+        Self(Some(flag.clone()))
+    }
+
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for DroppedMidAwait {
+    fn drop(&mut self) {
+        if let Some(flag) = self.0.take().filter(|_| !std::thread::panicking()) {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+#[test]
+fn a_mid_await_guard_marks_a_drop_and_nothing_else() {
+    let flag = Arc::new(AtomicBool::new(false));
+    DroppedMidAwait::arm(&flag).disarm();
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "a completed await is not a drop"
+    );
+    drop(DroppedMidAwait::arm(&flag));
+    assert!(flag.load(Ordering::SeqCst), "a drop mid-await is");
 }
 
 #[rusty_tokio::test]
 async fn a_client_that_cancels_makes_the_handlers_read_fail_cancelled() {
+    // A cancel races the handler's read against its drop (see the `server` docs): the handler
+    // either reads `CANCELLED` or is dropped while awaiting that read. Every other end of the
+    // read is reported as its one terminal outcome (`OK` for an EOF) and fails the assertion.
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = dropped.clone();
     let (tx, mut rx) = mpsc::channel(4);
     let router =
         Router::new().bidirectional(PATH, move |r: Request<Incoming<Blob>>, _out: Sink<Blob>| {
             let tx = tx.clone();
+            let flag = flag.clone();
             async move {
                 let mut incoming = r.message;
                 loop {
-                    match incoming.message().await {
+                    let pending = DroppedMidAwait::arm(&flag);
+                    let read = incoming.message().await;
+                    pending.disarm();
+                    match read {
                         Ok(Some(_)) => tx.send(None).await.unwrap(),
-                        Ok(None) => return Ok(()),
+                        Ok(None) => {
+                            tx.send(Some(Code::Ok)).await.unwrap();
+                            return Ok(());
+                        }
                         Err(e) => {
                             tx.send(Some(e.code())).await.unwrap();
                             return Err(e);
@@ -168,11 +217,124 @@ async fn a_client_that_cancels_makes_the_handlers_read_fail_cancelled() {
     assert_eq!(next(&mut rx).await, None, "the handler read the message");
     drop(stream);
     drop(sender);
-    assert_eq!(next(&mut rx).await, Some(Code::Cancelled));
+    // `None`: dropped mid-read, so no outcome follows. An outcome that arrives is the only one.
+    let outcome = rusty_tokio::select! {
+        code = next(&mut rx) => Some(code),
+        true = set_soon(&dropped) => None,
+    };
+    if let Some(code) = outcome {
+        assert_eq!(
+            code,
+            Some(Code::Cancelled),
+            "the read ended other than CANCELLED"
+        );
+    }
     server.shutdown().await;
 }
 
 // ---- shutdown, load, panics -----------------------------------------------------------------
+
+/// Waits (briefly) for `flag` to be set.
+async fn set_soon(flag: &AtomicBool) -> bool {
+    for _ in 0..100 {
+        if flag.load(Ordering::SeqCst) {
+            return true;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+#[rusty_tokio::test]
+async fn a_client_that_cancels_a_handler_that_is_only_waiting_drops_it() {
+    // Nothing is sent or read, so the handler has no way to notice the client leave except by
+    // being told.
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = dropped.clone();
+    let (tx, mut started) = mpsc::channel(1);
+    let router = Router::new().unary(PATH, move |r: Request<Blob>| {
+        let guard = Dropped(flag.clone());
+        let tx = tx.clone();
+        async move {
+            let _guard = guard;
+            tx.send(()).await.unwrap();
+            sleep(FIVE * 2).await;
+            Ok(Response::new(r.message))
+        }
+    });
+    let server = serve(router);
+    let channel = channel(&server);
+    // Cancel the call (by dropping it) only once the handler is running.
+    let returned = rusty_tokio::select! {
+        _ = channel.unary::<Blob, Blob>(PATH, Request::new(blob(1, 1))) => true,
+        () = next(&mut started) => false,
+    };
+    assert!(!returned, "the call should still be waiting");
+    assert!(
+        set_soon(&dropped).await,
+        "the handler kept running after its client left"
+    );
+    server.shutdown().await;
+}
+
+#[rusty_tokio::test]
+async fn a_client_that_cancels_a_stream_waiting_between_replies_drops_the_handler() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = dropped.clone();
+    let router =
+        Router::new().server_streaming(PATH, move |_r: Request<Blob>, mut out: Sink<Blob>| {
+            let guard = Dropped(flag.clone());
+            async move {
+                let _guard = guard;
+                out.send(&blob(1, 1)).await?;
+                sleep(FIVE * 2).await;
+                Ok(())
+            }
+        });
+    let server = serve(router);
+    let mut stream = channel(&server)
+        .server_streaming::<Blob, Blob>(PATH, Request::new(blob(0, 0)))
+        .await
+        .unwrap();
+    assert!(stream.message().await.unwrap().is_some());
+    drop(stream);
+    assert!(
+        set_soon(&dropped).await,
+        "the handler kept running after its client left"
+    );
+    server.shutdown().await;
+}
+
+#[rusty_tokio::test]
+async fn a_cancelled_call_gives_its_stream_slot_to_the_next() {
+    let mut h2 = rusty_h2::server::builder::Builder::new();
+    h2.max_concurrent_streams(1);
+    let options = rusty_hyper::ServeOptions {
+        h2,
+        ..rusty_hyper::ServeOptions::default()
+    };
+    let router = Router::new()
+        .unary("/pkg.Svc/Silent", |r: Request<Blob>| async move {
+            sleep(FIVE * 2).await;
+            Ok(Response::new(r.message))
+        })
+        .unary("/pkg.Svc/Echo", |r: Request<Blob>| async move {
+            Ok(Response::new(r.message))
+        });
+    let server = router.serve(listener(), None, options).unwrap();
+    let channel = channel(&server);
+    let silent = channel.unary::<Blob, Blob>("/pkg.Svc/Silent", Request::new(blob(1, 1)));
+    assert!(timeout(SHORT, silent).await.is_err());
+    let echoed = timeout(
+        FIVE,
+        channel.unary::<Blob, Blob>("/pkg.Svc/Echo", Request::new(blob(2, 2))),
+    )
+    .await
+    .expect("the cancelled call still held the stream slot")
+    .unwrap();
+    assert_eq!(echoed.message.n, 2);
+    server.shutdown().await;
+}
 
 #[rusty_tokio::test]
 async fn shutdown_lets_the_call_in_flight_finish() {

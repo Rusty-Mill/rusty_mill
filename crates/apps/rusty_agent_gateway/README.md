@@ -2001,12 +2001,13 @@ the least likely way to succeed.
 
 ### Why a body has to be buffered
 
-A retry replays the request, and a streaming body can only be read once. A body
-is buffered only when its size is **known in advance** and fits in 64 KiB — so
-the body is never partially consumed to find out how big it is, which would
-leave a stream that can be neither replayed nor forwarded. Requests with a
-`Content-Length` inside the limit get retries; chunked or oversized ones are
-streamed straight through and simply do not.
+A retry replays the request, and a streaming body can only be read once. So a
+proxied backend (`host`, `service`, `dynamic`) is sent every request whole: the
+gateway reads the body first, chunked or not, within
+`config.limits.maxRequestBodyBytes` (10 MiB unless set). A larger body is
+refused with `413` rather than forwarded in part, and every body that is
+forwarded can be retried. Responses are not buffered: they stream back to the
+client as they arrive.
 
 ### Which backends retry
 
@@ -2180,6 +2181,7 @@ config:
   limits:
     maxConcurrentRequests: 256
     requestTimeout: 30s
+    maxRequestBodyBytes: 10485760
 ```
 
 With `tracing` set, spans and metrics go to an OTLP collector. Sampling is
@@ -2204,6 +2206,13 @@ an unauthenticated flood costs a token validation each.
 Both limits are off unless configured. There is no concurrency number right for
 everyone, and a default would be a silent regression for a gateway already
 serving more than it.
+
+`maxRequestBodyBytes` bounds the body of a request to a proxied backend, which
+the gateway reads whole before forwarding (see
+[Why a body has to be buffered](#why-a-body-has-to-be-buffered)). It defaults
+to 10 MiB: room for any API call, and a bound on what a burst of uploads can
+hold in memory. An `a2a` or `agui` route reads a call whole to gate it, within
+the lower of this limit and the 4 MiB an LLM request is allowed.
 
 ## On `rusty_mcp`
 
@@ -2296,8 +2305,9 @@ That also settles what looked like the main integration cost. `rusty_a2a` pins
 `axum` 0.7, `tonic` and `reqwest` 0.12 against this workspace's 0.8 and 0.13,
 which would mean two copies of `reqwest` with separate TLS stacks. All of it is
 behind the `client`, `server`, `grpc` and `signing` features, so
-`default-features = false` pulls **45 crates with no `axum`, no `tonic` and a
-single `reqwest` 0.13**. `build.rs` is gated on `grpc`, so no `protoc` either.
+`default-features = false` pulls **45 crates with no `axum` and no `tonic`**.
+Agent cards are fetched with `rusty_request`, so there is no `reqwest` either.
+`build.rs` is gated on `grpc`, so no `protoc` either.
 
 The one real friction is strictness, described under
 [Agent-to-agent](#agent-to-agent): the types enforce required fields exactly as

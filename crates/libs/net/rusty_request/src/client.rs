@@ -2,12 +2,12 @@ use crate::body::Body;
 use crate::error::{Error, Result};
 use crate::multipart::Multipart;
 use crate::pool::{ConnectionPool, PoolKey};
-use crate::proxy::{NoProxyRules, Proxy};
+use crate::proxy::{self, NoProxyRules, Proxies, Proxy};
 use crate::request::Request;
 use crate::response::Response;
 use crate::retry::RetryPolicy;
 use crate::stream::{Conn, RawStream};
-use crate::streaming::StreamingResponse;
+use crate::streaming::{Reuse, StreamingResponse};
 use rusty_http::async_tokio::{AsyncTransport, BodyReader};
 use rusty_http::body::{self, Framing};
 use rusty_http::cookie::CookieJar;
@@ -73,7 +73,7 @@ pub struct Client {
     cookie_jar: Option<Arc<Mutex<CookieJar>>>,
     pool: Option<Arc<ConnectionPool>>,
     retry_policy: Option<RetryPolicy>,
-    proxy: Option<Proxy>,
+    proxy: Proxies,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
     max_body_len: u64,
@@ -147,7 +147,7 @@ pub struct ClientBuilder {
     pool_idle_timeout: Duration,
     pool_enabled: bool,
     retry_policy: Option<RetryPolicy>,
-    proxy: Option<Proxy>,
+    proxy: Proxies,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
     max_body_len: u64,
@@ -168,7 +168,7 @@ impl ClientBuilder {
             pool_idle_timeout: DEFAULT_POOL_IDLE_TIMEOUT,
             pool_enabled: true,
             retry_policy: None,
-            proxy: None,
+            proxy: Proxies::default(),
             proxy_bypass: NoProxyRules::default(),
             trust_policy: TrustPolicy::default(),
             max_body_len: body::DEFAULT_MAX_BODY_LEN,
@@ -300,41 +300,49 @@ impl ClientBuilder {
         self
     }
 
-    /// Routes every plain `http://` request built from the resulting
-    /// [`Client`] through the given HTTP forward proxy instead of
-    /// connecting to the origin directly, unless a
-    /// [`ClientBuilder::proxy_bypass`] rule matches the origin host.
-    /// Disabled by default. See [`Proxy::http`] for the URL format and
-    /// scope (no `https://` proxy, no `CONNECT` tunnel).
+    /// Routes every request built from the resulting [`Client`] through
+    /// the given HTTP forward proxy instead of connecting to the origin
+    /// directly, unless a [`ClientBuilder::proxy_bypass`] rule matches
+    /// the origin host: `http://` requests are forwarded, `https://` ones
+    /// tunnel through a `CONNECT`. Disabled by default. See
+    /// [`Proxy::http`] for the URL format (the proxy itself is reached
+    /// over plain `http://`).
     pub fn proxy(mut self, proxy_url: &str) -> Result<Self> {
-        self.proxy = Some(Proxy::http(proxy_url)?);
+        self.proxy = Proxies::all(Proxy::http(proxy_url)?);
         Ok(self)
     }
 
-    /// Reads a proxy configuration from the environment, matching
-    /// `requests`' `HTTP_PROXY`/`NO_PROXY` convention: `HTTP_PROXY` (or
-    /// lowercase `http_proxy`) sets the proxy exactly like
-    /// [`ClientBuilder::proxy`], and `NO_PROXY`/`no_proxy` sets the
-    /// bypass rules exactly like [`ClientBuilder::proxy_bypass`]. Either
-    /// left unset simply leaves that part of the configuration alone.
+    /// Reads a proxy configuration from the environment, matching curl's
+    /// and `requests`' convention: `HTTP_PROXY`/`http_proxy` sets the
+    /// proxy for `http://` requests, `HTTPS_PROXY`/`https_proxy` the one
+    /// for `https://` requests, `ALL_PROXY`/`all_proxy` is the fallback
+    /// for both, and `NO_PROXY`/`no_proxy` sets the bypass rules exactly
+    /// like [`ClientBuilder::proxy_bypass`]. A part whose variables are
+    /// unset is left alone. A value without a scheme is taken as
+    /// `http://`; an invalid one is an error that names the variable but
+    /// not its value.
     ///
-    /// `HTTPS_PROXY` isn't read -- this crate is `http://`-only, so it
-    /// could never apply to anything today. As a mitigation for
-    /// ["httpoxy"](https://httpoxy.org) (CVE-2016-5385 and siblings) --
-    /// a CGI/FastCGI handler that maps an inbound `Proxy:` request
-    /// header onto the `HTTP_PROXY` environment variable, letting a
-    /// remote client redirect this process's own outbound requests --
-    /// the uppercase `HTTP_PROXY` is ignored whenever `REQUEST_METHOD`
-    /// is also set (the standard signal that the process is running in
-    /// a CGI context, the same check curl uses); the lowercase
-    /// `http_proxy` is never attacker-reachable via a header and is
-    /// always trusted.
+    /// As a mitigation for ["httpoxy"](https://httpoxy.org)
+    /// (CVE-2016-5385 and siblings) -- a CGI/FastCGI handler that maps an
+    /// inbound `Proxy:` request header onto the `HTTP_PROXY` environment
+    /// variable, letting a remote client redirect this process's own
+    /// outbound requests -- the uppercase `HTTP_PROXY` is ignored whenever
+    /// `REQUEST_METHOD` is also set (the standard signal that the process
+    /// is running in a CGI context, the same check curl uses); the
+    /// lowercase `http_proxy` is never attacker-reachable via a header and
+    /// is always trusted.
     pub fn proxy_from_env(mut self) -> Result<Self> {
-        if let Some(url) = env_http_proxy() {
-            self.proxy = Some(Proxy::http(&url)?);
+        let read = proxy::from_env(|name| {
+            std::env::var_os(name).map(|v| v.to_string_lossy().into_owned())
+        })?;
+        if let Some(http) = read.http {
+            self.proxy.http = Some(http);
         }
-        if let Some(spec) = env_no_proxy() {
-            self.proxy_bypass = NoProxyRules::parse(&spec);
+        if let Some(https) = read.https {
+            self.proxy.https = Some(https);
+        }
+        if let Some(bypass) = read.bypass {
+            self.proxy_bypass = bypass;
         }
         Ok(self)
     }
@@ -358,7 +366,7 @@ impl ClientBuilder {
     /// override a previously-set proxy earlier in the same builder
     /// chain.
     pub fn no_proxy(mut self) -> Self {
-        self.proxy = None;
+        self.proxy = Proxies::default();
         self
     }
 
@@ -396,28 +404,6 @@ impl ClientBuilder {
     }
 }
 
-/// httpoxy mitigation (see [`ClientBuilder::proxy_from_env`]'s docs):
-/// `HTTP_PROXY` is only trusted outside a CGI context; `http_proxy`
-/// always is.
-fn env_http_proxy() -> Option<String> {
-    let in_cgi_context = std::env::var_os("REQUEST_METHOD").is_some();
-    if !in_cgi_context {
-        if let Ok(v) = std::env::var("HTTP_PROXY") {
-            if !v.is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    std::env::var("http_proxy").ok().filter(|v| !v.is_empty())
-}
-
-fn env_no_proxy() -> Option<String> {
-    std::env::var("NO_PROXY")
-        .ok()
-        .or_else(|| std::env::var("no_proxy").ok())
-        .filter(|v| !v.is_empty())
-}
-
 impl Default for ClientBuilder {
     fn default() -> Self {
         ClientBuilder::new()
@@ -434,7 +420,7 @@ pub struct RequestBuilder {
     cookie_jar: Option<Arc<Mutex<CookieJar>>>,
     pool: Option<Arc<ConnectionPool>>,
     retry_policy: Option<RetryPolicy>,
-    proxy: Option<Proxy>,
+    proxy: Proxies,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
     max_body_len: u64,
@@ -443,6 +429,14 @@ pub struct RequestBuilder {
 impl RequestBuilder {
     pub fn header(mut self, name: &str, value: &str) -> Result<Self> {
         self.headers.insert(name, value)?;
+        Ok(self)
+    }
+
+    /// Adds a header field without replacing earlier ones of the same
+    /// name, as [`RequestBuilder::header`] does: for a field that may
+    /// repeat, such as one a proxy forwards as it arrived.
+    pub fn header_append(mut self, name: &str, value: &str) -> Result<Self> {
+        self.headers.append(name, value)?;
         Ok(self)
     }
 
@@ -562,7 +556,7 @@ impl RequestBuilder {
     /// Routes this request through the given HTTP forward proxy,
     /// overriding the `Client`'s default. See [`ClientBuilder::proxy`].
     pub fn proxy(mut self, proxy_url: &str) -> Result<Self> {
-        self.proxy = Some(Proxy::http(proxy_url)?);
+        self.proxy = Proxies::all(Proxy::http(proxy_url)?);
         Ok(self)
     }
 
@@ -580,7 +574,7 @@ impl RequestBuilder {
     /// Disables proxying for this request, overriding the `Client`'s
     /// default.
     pub fn no_proxy(mut self) -> Self {
-        self.proxy = None;
+        self.proxy = Proxies::default();
         self
     }
 
@@ -639,16 +633,16 @@ impl RequestBuilder {
     /// hop's own body is still read and discarded eagerly, same as
     /// before; only the final, returned response is left unread).
     ///
-    /// Two differences from `.send()`, both deliberate first-pass
-    /// scope boundaries (see the streaming-bodies issue): any
-    /// configured [`RetryPolicy`] is ignored -- retrying a request whose
-    /// body may itself be a single-use stream isn't supported yet -- and
-    /// the connection used for the final hop is never returned to the
-    /// pool afterward, since whether it's still safe to reuse isn't
-    /// known until the body has been fully drained, which this first
-    /// pass doesn't track. A pooled connection is still tried first
+    /// One difference from `.send()`, a deliberate scope boundary (see
+    /// the streaming-bodies issue): any configured [`RetryPolicy`] is
+    /// ignored -- retrying a request whose body may itself be a
+    /// single-use stream isn't supported yet. The final hop's connection
+    /// goes back to the pool once [`StreamingResponse::chunk`] has
+    /// returned `None`, when the server left it open; dropping the
+    /// response before then closes it. A pooled connection is tried first
     /// for the request itself, same as `.send()` -- and, with no retry
-    /// loop here, a stale one surfaces as an I/O error.
+    /// loop here, a stale one the pool could not detect surfaces as an
+    /// I/O error.
     ///
     /// The configured timeout, if any, only bounds getting to the
     /// `StreamingResponse` (through any redirects) -- not each
@@ -708,7 +702,7 @@ async fn send_with_retries(
     cookie_jar: Option<Arc<Mutex<CookieJar>>>,
     pool: Option<Arc<ConnectionPool>>,
     retry_policy: Option<RetryPolicy>,
-    proxy: Option<Proxy>,
+    proxy: Proxies,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
     max_body_len: u64,
@@ -731,6 +725,8 @@ async fn send_with_retries(
     };
 
     let mut attempt = 0usize;
+    // Whether an earlier attempt may have reached a server.
+    let mut delivered = false;
     loop {
         let result = send_with_redirects(
             method.clone(),
@@ -756,8 +752,9 @@ async fn send_with_retries(
         };
 
         if !should_retry || !policy.allows_method(&method) || attempt >= policy.max_retries() {
-            return result;
+            return result.map_err(|e| e.once_delivered(delivered));
         }
+        delivered |= !matches!(&result, Err(e) if e.is_connect());
 
         rt::sleep(policy.delay_for(attempt, retry_after)).await;
         attempt += 1;
@@ -776,7 +773,7 @@ async fn send_with_redirects(
     policy: RedirectPolicy,
     cookie_jar: Option<Arc<Mutex<CookieJar>>>,
     pool: Option<Arc<ConnectionPool>>,
-    proxy: Option<Proxy>,
+    proxy: Proxies,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
     max_body_len: u64,
@@ -801,8 +798,9 @@ async fn send_with_redirects(
             timeout: None,
             max_body_len,
         };
-        let response =
-            send_one_hop(pool.as_deref(), &request, proxy_for_hop, &trust_policy).await?;
+        let response = send_one_hop(pool.as_deref(), &request, proxy_for_hop, &trust_policy)
+            .await
+            .map_err(|e| e.once_delivered(hop > 0))?;
 
         // Store cookies from every hop's response, not just the final
         // one -- an intermediate redirect can set cookies too, and they
@@ -857,15 +855,11 @@ async fn send_with_redirects(
     }
 }
 
-/// Whether `proxy` applies to a request to `url`, re-evaluated fresh
-/// for every hop (a redirect can land on a host `bypass` matches even
-/// if the original one didn't, or vice versa).
-fn active_proxy<'a>(
-    proxy: &'a Option<Proxy>,
-    bypass: &NoProxyRules,
-    url: &Url,
-) -> Option<&'a Proxy> {
-    proxy.as_ref().filter(|_| !bypass.bypasses(&url.host))
+/// The proxy, if any, a request to `url` goes through, re-evaluated
+/// fresh for every hop (a redirect can change scheme, or land on a host
+/// `bypass` matches even if the original one didn't, or vice versa).
+fn active_proxy<'a>(proxy: &'a Proxies, bypass: &NoProxyRules, url: &Url) -> Option<&'a Proxy> {
+    proxy.for_url(url).filter(|_| !bypass.bypasses(&url.host))
 }
 
 /// Builds the headers actually sent on the wire for one hop: a default
@@ -938,7 +932,7 @@ async fn send_with_redirects_streaming(
     policy: RedirectPolicy,
     cookie_jar: Option<Arc<Mutex<CookieJar>>>,
     pool: Option<Arc<ConnectionPool>>,
-    proxy: Option<Proxy>,
+    proxy: Proxies,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
 ) -> Result<StreamingResponse> {
@@ -962,8 +956,17 @@ async fn send_with_redirects_streaming(
             timeout: None,
             max_body_len: body::DEFAULT_MAX_BODY_LEN,
         };
-        let (status, resp_headers, mut streaming_body) =
-            send_one_hop_streaming(pool.as_deref(), &request, proxy_for_hop, &trust_policy).await?;
+        let (answer, reuse) =
+            send_one_hop_streaming(pool.as_ref(), &request, proxy_for_hop, &trust_policy)
+                .await
+                .map_err(|e| e.once_delivered(hop > 0))?;
+        let StreamingHop {
+            status,
+            headers: resp_headers,
+            body: mut streaming_body,
+            remaining,
+            ..
+        } = answer;
 
         if let Some(jar) = &cookie_jar {
             let set_cookie_values: Vec<&str> = resp_headers
@@ -978,24 +981,21 @@ async fn send_with_redirects_streaming(
             }
         }
 
-        if !is_redirect_status(status.as_u16()) {
-            return Ok(StreamingResponse::new(
-                status,
-                resp_headers,
-                url,
-                streaming_body,
-            ));
-        }
-        let RedirectPolicy::Follow(max) = policy else {
-            return Ok(StreamingResponse::new(
-                status,
-                resp_headers,
-                url,
-                streaming_body,
-            ));
+        let follow = match policy {
+            RedirectPolicy::Follow(max) if is_redirect_status(status.as_u16()) => max,
+            _ => {
+                return Ok(StreamingResponse::new(
+                    status,
+                    resp_headers,
+                    url,
+                    streaming_body,
+                    reuse,
+                    remaining,
+                ));
+            }
         };
-        if hop >= max {
-            return Err(Error::TooManyRedirects(max));
+        if hop >= follow {
+            return Err(Error::TooManyRedirects(follow));
         }
 
         // This hop won't be returned to the caller -- drain and discard
@@ -1121,6 +1121,10 @@ struct HopTarget {
     tls_server_name: Option<String>,
     pool_key: PoolKey,
     request_target: String,
+    /// The proxy's `Proxy-Authorization`, when it has credentials: sent on
+    /// the `CONNECT` for a tunnel, and on the request itself when it is
+    /// forwarded.
+    proxy_authorization: Option<String>,
 }
 
 fn hop_target(url: &Url, proxy: Option<&Proxy>) -> HopTarget {
@@ -1133,6 +1137,7 @@ fn hop_target(url: &Url, proxy: Option<&Proxy>) -> HopTarget {
             tls_server_name: Some(url.host.clone()),
             pool_key: p.tunnel_pool_key(url),
             request_target: url.request_target(),
+            proxy_authorization: p.authorization.clone(),
         },
         Some(p) => HopTarget {
             connect_host: p.host.clone(),
@@ -1141,6 +1146,7 @@ fn hop_target(url: &Url, proxy: Option<&Proxy>) -> HopTarget {
             tls_server_name: None,
             pool_key: p.pool_key(),
             request_target: url.absolute_form(),
+            proxy_authorization: p.authorization.clone(),
         },
         None => HopTarget {
             connect_host: url.host.clone(),
@@ -1149,6 +1155,7 @@ fn hop_target(url: &Url, proxy: Option<&Proxy>) -> HopTarget {
             tls_server_name: is_https.then(|| url.host.clone()),
             pool_key: pool_key(url),
             request_target: url.request_target(),
+            proxy_authorization: None,
         },
     }
 }
@@ -1162,7 +1169,8 @@ fn hop_target(url: &Url, proxy: Option<&Proxy>) -> HopTarget {
 async fn establish(raw: RawStream, target: &HopTarget, trust_policy: &TrustPolicy) -> Result<Conn> {
     let raw = match &target.connect_tunnel {
         Some((host, port)) => {
-            let (raw, status) = connect_tunnel(raw, host, *port).await?;
+            let authorization = target.proxy_authorization.as_deref();
+            let (raw, status) = connect_tunnel(raw, host, *port, authorization).await?;
             if !status.is_success() {
                 return Err(Error::ProxyConnectFailed(status));
             }
@@ -1201,6 +1209,7 @@ async fn connect_tunnel(
     stream: RawStream,
     host: &str,
     port: u16,
+    authorization: Option<&str>,
 ) -> Result<(RawStream, StatusCode)> {
     let authority = format!("{host}:{port}");
     let mut t = AsyncTransport::new(stream);
@@ -1211,6 +1220,9 @@ async fn connect_tunnel(
         headers: {
             let mut h = HeaderMap::new();
             h.insert("Host", &authority)?;
+            if let Some(authorization) = authorization {
+                h.insert_sensitive("Proxy-Authorization", authorization)?;
+            }
             h
         },
     };
@@ -1237,16 +1249,21 @@ struct RawResponse<S> {
 /// Builds the `RequestHead` for one hop: `Host` first (matching every
 /// real client/server's convention), then `request.headers` (the wire
 /// headers `build_wire_headers` already assembled) in their original
-/// order.
-fn build_request_head(request: &Request, request_target: &str) -> Result<RequestHead> {
+/// order, plus the proxy's `Proxy-Authorization` when `target` forwards
+/// the request through one.
+fn build_request_head(request: &Request, target: &HopTarget) -> Result<RequestHead> {
     let mut headers = HeaderMap::new();
     headers.insert("Host", &request.url.host_header())?;
     for (name, value) in request.headers.iter() {
         headers.append(name, value)?;
     }
+    let forwarded = target.connect_tunnel.is_none();
+    if let Some(authorization) = target.proxy_authorization.as_deref().filter(|_| forwarded) {
+        headers.insert_sensitive("Proxy-Authorization", authorization)?;
+    }
     Ok(RequestHead {
         method: request.method.clone(),
-        target: request_target.to_string(),
+        target: target.request_target.clone(),
         version: Version::Http11,
         headers,
     })
@@ -1346,17 +1363,16 @@ async fn read_final_head<S: AsyncRead + AsyncWrite + Unpin + Send>(
 async fn attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: S,
     request: &Request,
-    request_target: &str,
+    target: &HopTarget,
 ) -> Result<RawResponse<S>> {
     let mut t = AsyncTransport::new(stream);
-    let head = build_request_head(request, request_target)?;
+    let head = build_request_head(request, target)?;
     t.write_request_head(&head).await?;
     write_request_body(&mut t, &request.body).await?;
 
     let resp_head = read_final_head(&mut t).await?;
     let framing = body::response_framing(&resp_head.headers, &request.method, resp_head.status)?;
-    let header_says_close = connection_says_close(&resp_head.headers);
-    let keep_alive = !matches!(framing, Framing::Close) && !header_says_close;
+    let keep_alive = keeps_alive(resp_head.status, &resp_head.headers, framing);
     let body_bytes = t
         .read_body_with_limit(framing, request.max_body_len)
         .await?;
@@ -1373,17 +1389,48 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
 async fn attempt_streaming<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: S,
     request: &Request,
-    request_target: &str,
-) -> Result<(StatusCode, HeaderMap, BodyReader<S>)> {
+    target: &HopTarget,
+) -> Result<StreamingHop<S>> {
     let mut t = AsyncTransport::new(stream);
-    let head = build_request_head(request, request_target)?;
+    let head = build_request_head(request, target)?;
     t.write_request_head(&head).await?;
     write_request_body(&mut t, &request.body).await?;
 
     let resp_head = read_final_head(&mut t).await?;
     let framing = body::response_framing(&resp_head.headers, &request.method, resp_head.status)?;
-    let reader = t.into_body_reader(framing);
-    Ok((resp_head.status, resp_head.headers, reader))
+    let keep_alive = keeps_alive(resp_head.status, &resp_head.headers, framing);
+    let remaining = match framing {
+        Framing::None => Some(0),
+        Framing::ContentLength(n) => Some(n),
+        Framing::Chunked | Framing::Close => None,
+    };
+    Ok(StreamingHop {
+        status: resp_head.status,
+        headers: resp_head.headers,
+        body: t.into_body_reader(framing),
+        keep_alive,
+        remaining,
+    })
+}
+
+/// One hop's response with its body still unread -- see
+/// [`attempt_streaming`].
+struct StreamingHop<S> {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: BodyReader<S>,
+    /// Whether the connection may be reused once `body` has been read.
+    keep_alive: bool,
+    /// Body bytes to come, when the framing says how many.
+    remaining: Option<u64>,
+}
+
+/// Whether the connection can carry another request once this response's
+/// body is read: not when the body runs to the close, nor when the server
+/// said it will close, nor after `101 Switching Protocols`, past which the
+/// connection no longer speaks HTTP.
+fn keeps_alive(status: StatusCode, headers: &HeaderMap, framing: Framing) -> bool {
+    status.as_u16() != 101 && !matches!(framing, Framing::Close) && !connection_says_close(headers)
 }
 
 /// Sends one request, reusing a pooled connection for this origin (or,
@@ -1405,7 +1452,7 @@ async fn send_one_hop(
 ) -> Result<Response> {
     let target = hop_target(&request.url, proxy);
     let stream = take_or_dial(pool, &target, trust_policy).await?;
-    let raw = attempt(stream, request, &target.request_target).await?;
+    let raw = attempt(stream, request, &target).await?;
     if raw.keep_alive {
         if let Some(pool) = pool {
             pool.put(target.pool_key, raw.stream);
@@ -1420,24 +1467,30 @@ async fn send_one_hop(
 }
 
 /// Like [`send_one_hop`], but leaves the body unread -- see
-/// [`attempt_streaming`]. The connection is never returned to the pool
-/// afterward (deliberate; see [`RequestBuilder::send_streaming`]'s
-/// docs). Same single-attempt rule as the buffered path, and since the
-/// streaming path has no retry loop above it at all, a stale pooled
-/// connection surfaces straight to the caller.
+/// [`attempt_streaming`]. The connection goes back to the pool once the
+/// caller has read the body to its end, when the server left it open
+/// (the [`Reuse`] returned alongside). Same single-attempt rule as the
+/// buffered path, and since the streaming path has no retry loop above
+/// it at all, a stale pooled connection surfaces straight to the caller.
 async fn send_one_hop_streaming(
-    pool: Option<&ConnectionPool>,
+    pool: Option<&Arc<ConnectionPool>>,
     request: &Request,
     proxy: Option<&Proxy>,
     trust_policy: &TrustPolicy,
-) -> Result<(StatusCode, HeaderMap, BodyReader<Conn>)> {
+) -> Result<(StreamingHop<Conn>, Option<Reuse>)> {
     let target = hop_target(&request.url, proxy);
-    let stream = take_or_dial(pool, &target, trust_policy).await?;
-    attempt_streaming(stream, request, &target.request_target).await
+    let stream = take_or_dial(pool.map(Arc::as_ref), &target, trust_policy).await?;
+    let hop = attempt_streaming(stream, request, &target).await?;
+    let reuse = pool.filter(|_| hop.keep_alive).map(|pool| Reuse {
+        pool: pool.clone(),
+        key: target.pool_key,
+    });
+    Ok((hop, reuse))
 }
 
 /// A pooled idle connection for `target` when there is one, else a
-/// freshly dialed and established one.
+/// freshly dialed and established one. A failure on the way to a fresh
+/// connection is marked as one, for [`Error::is_connect`].
 async fn take_or_dial(
     pool: Option<&ConnectionPool>,
     target: &HopTarget,
@@ -1446,9 +1499,13 @@ async fn take_or_dial(
     if let Some(stream) = pool.and_then(|p| p.take(&target.pool_key)) {
         return Ok(stream);
     }
-    let addrs = resolve(target.connect_host.clone(), target.connect_port).await?;
-    let raw = connect(&addrs).await?;
-    establish(raw, target, trust_policy).await
+    let addrs = resolve(target.connect_host.clone(), target.connect_port)
+        .await
+        .map_err(Error::connecting)?;
+    let raw = connect(&addrs).await.map_err(Error::connecting)?;
+    establish(raw, target, trust_policy)
+        .await
+        .map_err(Error::connecting)
 }
 
 /// DNS resolution is a blocking OS call (`getaddrinfo` under the hood);
@@ -1648,7 +1705,7 @@ mod tests {
         run(async {
             let (request, opens) = counted_post();
             let io = Scripted::new(0, b"");
-            expect_io_error(attempt(io, &request, "/submit").await);
+            expect_io_error(attempt(io, &request, &hop_target(&request.url, None)).await);
             assert_eq!(opens.load(Ordering::SeqCst), 0);
         });
     }
@@ -1660,7 +1717,7 @@ mod tests {
             // Enough for `POST /submit HTTP/1.1\r\n` and a bit of `Host`,
             // not the whole head.
             let io = Scripted::new(24, b"");
-            expect_io_error(attempt(io, &request, "/submit").await);
+            expect_io_error(attempt(io, &request, &hop_target(&request.url, None)).await);
             assert_eq!(opens.load(Ordering::SeqCst), 0);
         });
     }
@@ -1670,7 +1727,7 @@ mod tests {
         run(async {
             let (request, opens) = counted_post();
             let io = Scripted::new(usize::MAX, b"");
-            expect_io_error(attempt(io, &request, "/submit").await);
+            expect_io_error(attempt(io, &request, &hop_target(&request.url, None)).await);
             assert_eq!(opens.load(Ordering::SeqCst), 1);
         });
     }
@@ -1680,7 +1737,9 @@ mod tests {
         run(async {
             let (request, opens) = counted_post();
             let io = Scripted::new(usize::MAX, b"HTTP/1.1 204 No Content\r\n\r\n");
-            let raw = attempt(io, &request, "/submit").await.unwrap();
+            let raw = attempt(io, &request, &hop_target(&request.url, None))
+                .await
+                .unwrap();
             assert_eq!(raw.status.as_u16(), 204);
             assert!(raw.stream.written.ends_with(b"\r\n\r\nhello"));
             assert_eq!(opens.load(Ordering::SeqCst), 1);
@@ -1692,7 +1751,7 @@ mod tests {
         run(async {
             let (request, opens) = counted_post();
             let io = Scripted::new(0, b"");
-            expect_io_error(attempt_streaming(io, &request, "/submit").await);
+            expect_io_error(attempt_streaming(io, &request, &hop_target(&request.url, None)).await);
             assert_eq!(opens.load(Ordering::SeqCst), 0);
         });
     }
@@ -1702,7 +1761,7 @@ mod tests {
         run(async {
             let (request, opens) = counted_post();
             let io = Scripted::new(24, b"");
-            expect_io_error(attempt_streaming(io, &request, "/submit").await);
+            expect_io_error(attempt_streaming(io, &request, &hop_target(&request.url, None)).await);
             assert_eq!(opens.load(Ordering::SeqCst), 0);
         });
     }
@@ -1712,7 +1771,7 @@ mod tests {
         run(async {
             let (request, opens) = counted_post();
             let io = Scripted::new(usize::MAX, b"");
-            expect_io_error(attempt_streaming(io, &request, "/submit").await);
+            expect_io_error(attempt_streaming(io, &request, &hop_target(&request.url, None)).await);
             assert_eq!(opens.load(Ordering::SeqCst), 1);
         });
     }
@@ -1725,9 +1784,16 @@ mod tests {
                 usize::MAX,
                 b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
             );
-            let (status, _headers, mut reader) =
-                attempt_streaming(io, &request, "/submit").await.unwrap();
+            let StreamingHop {
+                status,
+                body: mut reader,
+                keep_alive,
+                ..
+            } = attempt_streaming(io, &request, &hop_target(&request.url, None))
+                .await
+                .unwrap();
             assert_eq!(status.as_u16(), 200);
+            assert!(keep_alive);
             assert_eq!(
                 reader.next_chunk().await.unwrap().as_deref(),
                 Some(&b"ok"[..])

@@ -18,3 +18,25 @@ rusty_pk::ecdh::select 0
 rusty_pk::ecdh::add 1
 rusty_pk::ecdh::double 1
 rusty_pk::ecdh::mul 2
+# Ed25519 signing (gap 5, ADR-0006). mul_base is the fixed 256-iteration loop (bit -> mask -> select, which is
+# inlined); add/double/encode/reduce_digest are straight-line field code plus public bounds checks; sign and
+# from_seed branch only on public lengths and the `?` on an internal parameter. Taint mode ed25519-sign: 0 reports.
+ed25519::Edwards>::mul_base 2
+ed25519::Edwards>::add 1
+ed25519::Edwards>::double 1
+ed25519::Edwards>::encode 2
+rusty_pk::ed25519::reduce_digest 2
+ed25519::SigningKey>::sign 11
+ed25519::SigningKey>::from_seed 4
+# ECDSA signing (gap 5, ADR-0006). sign_seeded inlines the RFC 6979 DRBG set-up and steps, the bounded
+# nonce loop, the inversion and s = k^-1(z + r d); its jumps are public bounds checks, loop back-edges and the
+# ensure verdicts (taint modes ecdsa-sign256/384 allow only those, plus ecdsa::output on the published r, s).
+# generator_x is the constant-time k*G plus the verdict that it is not at infinity. Rfc6979::mac dispatches on
+# the (public) curve.
+ecdsa::SigningKey>::sign_seeded 41
+ecdsa::Rfc6979>::mac 5
+# generator_x 9 -> 16 (2026-10-24, PKCS#8 PR): the same calls as before (Curve::build twice, mul,
+# ensure, pow_vartime on the public exponent, Modulus::mul twice), but LLVM now inlines the
+# Curve drop glue: the 7 extra jumps are its per-buffer capacity checks and cleanup flow, all on
+# public sizes. Compared against main's disassembly of the same function, not inferred.
+rusty_pk::ecdh::generator_x 16

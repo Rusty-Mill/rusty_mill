@@ -561,7 +561,9 @@ fn error_for_status_passes_through_2xx() {
 #[test]
 fn request_times_out_when_the_server_never_responds() {
     run(async {
-        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         rusty_tokio::spawn(async move {
             // Accept and then simply never write a response. Keeping
@@ -1086,6 +1088,249 @@ fn connection_is_not_reused_when_response_says_close() {
     });
 }
 
+/// Makes two streaming GETs, reading the first one's body to its end
+/// when `drain`, and returns how many connections the server accepted.
+async fn two_streaming_gets(server: &common::TestServer, drain: bool) -> usize {
+    let client = Client::new();
+    let mut first = client
+        .get(&server.url("/a"))
+        .unwrap()
+        .send_streaming()
+        .await
+        .unwrap();
+    if drain {
+        while first.chunk().await.unwrap().is_some() {}
+    }
+    drop(first);
+    let mut second = client
+        .get(&server.url("/b"))
+        .unwrap()
+        .send_streaming()
+        .await
+        .unwrap();
+    while second.chunk().await.unwrap().is_some() {}
+    server.connections_accepted()
+}
+
+#[test]
+fn a_streamed_response_read_to_its_end_returns_its_connection_to_the_pool() {
+    run(async {
+        let server = start_test_server(|_req| http_response(200, "OK", &[], b"ok"));
+        assert_eq!(two_streaming_gets(&server, true).await, 1);
+        let server = start_test_server(|_req| http_chunked_response(200, "OK", &[], &[b"o", b"k"]));
+        assert_eq!(two_streaming_gets(&server, true).await, 1, "chunked");
+    });
+}
+
+#[test]
+fn a_streamed_response_is_pooled_as_its_last_byte_arrives() {
+    // A caller framing by `Content-Length` stops once it has every byte,
+    // without asking for the end; and a bodiless answer has no bytes.
+    run(async {
+        let client = Client::new();
+        let server = start_test_server(|req| match req.target.as_str() {
+            "/empty" => http_response(204, "No Content", &[], b""),
+            _ => http_response(200, "OK", &[], b"ok"),
+        });
+        let mut first = client
+            .get(&server.url("/a"))
+            .unwrap()
+            .send_streaming()
+            .await
+            .unwrap();
+        assert_eq!(first.chunk().await.unwrap().as_deref(), Some(&b"ok"[..]));
+        drop(first);
+        let empty = client
+            .get(&server.url("/empty"))
+            .unwrap()
+            .send_streaming()
+            .await
+            .unwrap();
+        drop(empty);
+        client.get(&server.url("/b")).unwrap().send().await.unwrap();
+        assert_eq!(server.connections_accepted(), 1);
+    });
+}
+
+#[test]
+fn a_streamed_response_dropped_early_or_closing_is_not_pooled() {
+    run(async {
+        let server = start_test_server(|_req| http_response(200, "OK", &[], b"ok"));
+        assert_eq!(
+            two_streaming_gets(&server, false).await,
+            2,
+            "dropped unread"
+        );
+        let server =
+            start_test_server(|_req| http_response(200, "OK", &[("Connection", "close")], b"ok"));
+        assert_eq!(two_streaming_gets(&server, true).await, 2, "server closes");
+    });
+}
+
+#[test]
+fn a_connection_switched_to_another_protocol_is_never_pooled() {
+    run(async {
+        // The server keeps each connection open after a 101 and would answer
+        // a GET on it, so only the client's own rule keeps it out of the pool.
+        let (addr, accepted) = start_upgrading_server();
+        let url = |path: &str| format!("http://{addr}{path}");
+        let client = Client::new();
+        for streaming in [false, true] {
+            let request = client.get(&url("/up")).unwrap();
+            let status = if streaming {
+                request.send_streaming().await.unwrap().status()
+            } else {
+                request.send().await.unwrap().status()
+            };
+            assert_eq!(status.as_u16(), 101);
+            client.get(&url("/b")).unwrap().send().await.unwrap();
+        }
+        // Each upgrade on its own connection; each GET on a fresh one, the
+        // second reusing the first GET's.
+        assert_eq!(accepted.load(Ordering::SeqCst), 3);
+    });
+}
+
+/// Answers `/up` with a bare 101 and anything else with 200, serving every
+/// request on a connection until the client hangs up -- after a 101 too.
+fn start_upgrading_server() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = rusty_tokio::io::TcpListener::from_std(std_listener).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let accepted_in_task = accepted.clone();
+    rusty_tokio::spawn(async move {
+        while let Ok((stream, _peer)) = listener.accept().await {
+            accepted_in_task.fetch_add(1, Ordering::SeqCst);
+            rusty_tokio::spawn(async move {
+                while let Ok(req) = common::read_request(&stream).await {
+                    let response = if req.target == "/up" {
+                        b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n\
+                          Upgrade: websocket\r\n\r\n"
+                            .to_vec()
+                    } else {
+                        http_response(200, "OK", &[], b"ok")
+                    };
+                    if stream.write_all(&response).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (addr, accepted)
+}
+
+#[test]
+fn header_append_keeps_every_value() {
+    run(async {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_in_handler = seen.clone();
+        let server = start_test_server(move |req| {
+            let values = req
+                .headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("x-hop"))
+                .map(|(_, v)| v.clone());
+            seen_in_handler.lock().unwrap().extend(values);
+            http_response(200, "OK", &[], b"ok")
+        });
+        Client::new()
+            .get(&server.url("/"))
+            .unwrap()
+            .header_append("x-hop", "a")
+            .unwrap()
+            .header_append("x-hop", "b")
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["a", "b"]);
+    });
+}
+
+#[test]
+fn a_refused_connection_is_a_connect_error() {
+    run(async {
+        // Bound and closed at once: nothing listens there now.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let err = Client::new()
+            .get(&format!("http://{addr}/"))
+            .unwrap()
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_connect(), "{err:?}");
+        assert!(matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::ConnectionRefused));
+    });
+}
+
+#[test]
+fn a_connection_refused_on_every_retry_is_a_connect_error() {
+    run(async {
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let err = Client::new()
+            .post(&format!("http://{addr}/"))
+            .unwrap()
+            .retry(retry_posts_once())
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_connect(), "{err:?}");
+    });
+}
+
+#[test]
+fn a_refusal_after_a_delivered_attempt_is_not_a_connect_error() {
+    run(async {
+        // Answers one POST with 503, then stops listening, so the retry is
+        // refused after the first attempt reached the server.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = rusty_tokio::io::TcpListener::from_std(std_listener).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let posts = Arc::new(AtomicUsize::new(0));
+        let posts_in_task = posts.clone();
+        rusty_tokio::spawn(async move {
+            let Ok((stream, _peer)) = listener.accept().await else {
+                return;
+            };
+            drop(listener);
+            if common::read_request(&stream).await.is_ok() {
+                posts_in_task.fetch_add(1, Ordering::SeqCst);
+                let close = [("Connection", "close")];
+                let _ = stream
+                    .write_all(&http_response(503, "Service Unavailable", &close, b""))
+                    .await;
+            }
+        });
+        let err = Client::new()
+            .post(&format!("http://{addr}/"))
+            .unwrap()
+            .retry(retry_posts_once())
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
+        assert!(matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::ConnectionRefused));
+        assert!(!err.is_connect(), "{err:?}");
+    });
+}
+
+/// Retries a POST once, on a 503 or an I/O error, after a pause long
+/// enough for a test server to stop listening.
+fn retry_posts_once() -> RetryPolicy {
+    RetryPolicy::new(1)
+        .backoff(Backoff::fixed(Duration::from_millis(50)))
+        .retry_statuses([503])
+        .retry_non_idempotent()
+}
+
 #[test]
 fn no_pool_never_reuses_a_connection() {
     run(async {
@@ -1100,11 +1345,21 @@ fn no_pool_never_reuses_a_connection() {
 }
 
 /// A server that serves exactly one request per accepted connection,
-/// then drops the connection: from the client's point of view, every
-/// pooled connection is stale by the time it is reused. Returns the
+/// then hangs up on the next one as it arrives: the connection looks open
+/// while it sits in the client's pool, and fails only once a request has
+/// gone out on it -- the stale race no pool check can catch. Returns the
 /// address and a count of accepted connections.
 fn start_one_request_per_connection_server() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
-    let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    start_one_request_server(true)
+}
+
+/// A server that serves one request per connection and then closes it
+/// at once, as after a short keep-alive timeout, while the client still
+/// holds it idle (`wait_for_next == false`); or only when the next
+/// request arrives (`true`).
+fn start_one_request_server(wait_for_next: bool) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = rusty_tokio::io::TcpListener::from_std(std_listener).unwrap();
     let addr = listener.local_addr().unwrap();
     let accepted = Arc::new(AtomicUsize::new(0));
     let accepted_in_task = accepted.clone();
@@ -1121,8 +1376,10 @@ fn start_one_request_per_connection_server() -> (std::net::SocketAddr, Arc<Atomi
                         .write_all(&http_response(200, "OK", &[], b"ok"))
                         .await;
                 }
-                // `stream` drops here: the server hangs up right after
-                // its one response, as after its own keep-alive timeout.
+                if wait_for_next {
+                    let _ = common::read_request(&stream).await;
+                }
+                // `stream` drops here: the server hangs up.
             });
         }
     });
@@ -1143,6 +1400,67 @@ async fn pool_a_stale_connection(client: &Client, addr: std::net::SocketAddr) {
 }
 
 #[test]
+fn a_pooled_connection_the_server_closed_while_idle_is_not_reused() {
+    for streaming in [false, true] {
+        run(async {
+            let (addr, accepted) = start_one_request_server(false);
+            let client = Client::new();
+            pool_a_stale_connection(&client, addr).await;
+
+            let request = client.get(&format!("http://{addr}/b")).unwrap();
+            let status = if streaming {
+                request.send_streaming().await.unwrap().status()
+            } else {
+                request.send().await.unwrap().status()
+            };
+            assert_eq!(status.as_u16(), 200, "streaming: {streaming}");
+            assert_eq!(accepted.load(Ordering::SeqCst), 2, "a fresh connection");
+        });
+    }
+}
+
+#[test]
+fn a_refused_redirect_target_is_not_a_connect_error() {
+    // The first hop delivered the POST, so the request is not safe to send
+    // again, however the next hop fails.
+    for status in [303u16, 307] {
+        for streaming in [false, true] {
+            run(async {
+                let refused = std::net::TcpListener::bind("127.0.0.1:0")
+                    .unwrap()
+                    .local_addr()
+                    .unwrap();
+                let posts = Arc::new(AtomicUsize::new(0));
+                let counter = posts.clone();
+                let location = format!("http://{refused}/next");
+                let server = start_test_server(move |_req| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    http_response(status, "Redirect", &[("Location", &location)], b"")
+                });
+                let request = Client::new()
+                    .post(&server.url("/mutate"))
+                    .unwrap()
+                    .body("effect");
+                let err = if streaming {
+                    request.send_streaming().await.err().unwrap()
+                } else {
+                    request.send().await.unwrap_err()
+                };
+                assert!(
+                    matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::ConnectionRefused),
+                    "{err:?}"
+                );
+                assert!(
+                    !err.is_connect(),
+                    "{status}, streaming {streaming}: {err:?}"
+                );
+                assert_eq!(posts.load(Ordering::SeqCst), 1);
+            });
+        }
+    }
+}
+
+#[test]
 fn stale_pooled_connection_is_an_error_without_a_retry_policy() {
     // The intentional behavior change: a request that lands on a pooled
     // connection the server already closed is not silently replayed on
@@ -1160,6 +1478,7 @@ fn stale_pooled_connection_is_an_error_without_a_retry_policy() {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Io(_)), "{err:?}");
+        assert!(!err.is_connect(), "the request went out: {err:?}");
         assert_eq!(
             accepted.load(Ordering::SeqCst),
             1,
@@ -1252,7 +1571,8 @@ fn stale_pooled_connection_stays_an_error_when_the_policy_forbids_it() {
 fn start_drop_second_request_server() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
     let requests = Arc::new(AtomicUsize::new(0));
     let requests_in_task = requests.clone();
-    let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = rusty_tokio::io::TcpListener::from_std(std_listener).unwrap();
     let addr = listener.local_addr().unwrap();
     rusty_tokio::spawn(async move {
         loop {
@@ -1489,13 +1809,15 @@ fn connection_refused_is_retried_on_a_fresh_connection() {
         // with "connection refused". A delayed task rebinds the exact
         // same port a little later and serves one request, so the
         // retry (not the original attempt) is what actually succeeds.
-        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
 
         rusty_tokio::spawn(async move {
             rusty_tokio::time::sleep(Duration::from_millis(20)).await;
-            let listener = rusty_tokio::io::TcpListener::bind(addr).unwrap();
+            let listener = rusty_tokio::io::TcpListener::bind(addr).await.unwrap();
             if let Ok((stream, _peer)) = listener.accept().await {
                 if let Ok(_req) = common::read_request(&stream).await {
                     let _ = stream
@@ -1572,6 +1894,87 @@ fn proxy_routes_the_connection_and_sends_an_absolute_form_target() {
 
         assert_eq!(resp.status().as_u16(), 200);
         assert_eq!(resp.text().unwrap(), "via proxy");
+    });
+}
+
+/// Each request's method and `Proxy-Authorization`, as a proxy saw them.
+type Seen = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
+/// A proxy that records each request's `Proxy-Authorization` and answers
+/// `407`, so neither a forward nor a `CONNECT` goes any further.
+fn start_recording_proxy() -> (common::TestServer, Seen) {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let proxy = start_test_server(move |req| {
+        let authorization = req.header("proxy-authorization").map(str::to_string);
+        record
+            .lock()
+            .unwrap()
+            .push((req.method.clone(), authorization));
+        http_response(407, "Proxy Authentication Required", &[], b"")
+    });
+    (proxy, seen)
+}
+
+#[test]
+fn proxy_credentials_are_sent_on_a_forwarded_request() {
+    run(async {
+        let (proxy, seen) = start_recording_proxy();
+        let url = format!("http://user:pass@{}", proxy.addr);
+        let client = Client::builder().proxy(&url).unwrap().build();
+        let resp = client
+            .get("http://internal.example.test/")
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 407);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            [("GET".to_string(), Some("Basic dXNlcjpwYXNz".to_string()))]
+        );
+    });
+}
+
+#[test]
+fn proxy_credentials_are_sent_on_the_connect() {
+    run(async {
+        let (proxy, seen) = start_recording_proxy();
+        let url = format!("http://user:pass@{}", proxy.addr);
+        let client = Client::builder().proxy(&url).unwrap().build();
+        let err = client
+            .get("https://internal.example.test/")
+            .unwrap()
+            .send()
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::ProxyConnectFailed(_)), "{err:?}");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            [(
+                "CONNECT".to_string(),
+                Some("Basic dXNlcjpwYXNz".to_string())
+            )]
+        );
+    });
+}
+
+#[test]
+fn a_proxy_without_credentials_sends_no_proxy_authorization() {
+    run(async {
+        let (proxy, seen) = start_recording_proxy();
+        let client = Client::builder().proxy(&proxy.url("")).unwrap().build();
+        let _ = client
+            .get("http://internal.example.test/")
+            .unwrap()
+            .send()
+            .await;
+
+        assert_eq!(seen.lock().unwrap().clone(), [("GET".to_string(), None)]);
     });
 }
 

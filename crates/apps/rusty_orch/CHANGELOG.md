@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Permission leases (ADR-0017): `Grant.lease` holds read/write paths and an end; delegation never widens it. The hosting configuration's `lease` is granted on each run's fence, and the BBP host confines every assigned pool member's sandbox to it, requires canonical lease paths, refuses swappable roots, a changed or ended lease, and passes the end to `bbp mod --deadline-unix`, enforced by each harness group's holder. Assignment records move to schema v2; v1 records still load as unleased.
+- `run --cancel <reason>` cancels a hosted goal under a fresh generation through the new `TaskHost::cancel`, which finds each Implement card's BBP task without a checkpointed handle and waits until `bbp quiesce` finds nothing of it running, then reconciles the card's execution as cancelled and retires the assignment so the state cannot be resumed. BBP configuration gains `end_grace_secs`.
 - Pool members can declare `sandbox: {read, write, env}`: BBP then runs their harness under `rusty_sandbox`, out of reach of the BBP directory, with MCP relayed to a broker outside the sandbox.
 - A pool member's `sandbox` may set `checkout`: its harness then works in a git worktree of the BBP repository, sharing the object store read-only and writing only its own worktree.
 - BBP configuration `slots` admits hosted work machine-wide: every moderator sharing the slot directory runs at most the configured agent harnesses and validator runners at once, and a slot is freed only when its process tree is gone.

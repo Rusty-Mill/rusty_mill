@@ -9,7 +9,7 @@ inputs:
     required: false
     default: ''
   cache-shared-key:
-    description: 'Cache namespace shared across jobs/matrix legs that should reuse the same target-dir cache'
+    description: 'Cache namespace shared across jobs/matrix legs that should reuse the same target-dir cache; empty means no cache (see the budget note in ci.yml)'
     required: false
     default: ''
 runs:
@@ -151,9 +151,12 @@ runs:
         & "$dest\bin\protoc.exe" --version
         if ($LASTEXITCODE -ne 0) { throw "protoc did not run" }
 
-    # A merge-queue run's cache is scoped to its temporary queue ref, which no
-    # other run can restore, so saving it only delays the merge.
+    # Only `main` (the daily sweep and manual runs) saves. A cache is scoped to
+    # the ref that saved it: a queue entry's temporary ref is never restored,
+    # and a PR's ref only by that PR, while every run can restore `main`'s.
+    # PR saves would fill the repository's cache quota and evict `main`'s.
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      if: inputs.cache-shared-key != ''
       with:
-        save-if: ${{ github.event_name != 'merge_group' }}
+        save-if: ${{ github.ref == 'refs/heads/main' }}
         shared-key: ${{ inputs.cache-shared-key }}

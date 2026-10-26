@@ -98,7 +98,7 @@ fn the_injected_tool_context_is_hidden_from_the_model() {
     assert_eq!(schema.required, vec!["key".to_string()]);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_generated_tool_runs() {
     let ctx = tool_context();
     let result = invoke_tool(&GetWeatherTool, args(json!({"city": "Paris"})), &ctx)
@@ -109,7 +109,7 @@ async fn the_generated_tool_runs() {
     assert_eq!(result["unit"], "Celsius");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_optional_argument_may_be_supplied() {
     let ctx = tool_context();
     let result = invoke_tool(
@@ -122,7 +122,7 @@ async fn an_optional_argument_may_be_supplied() {
     assert_eq!(result["unit"], "Fahrenheit");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_scalar_return_is_wrapped_under_result() {
     let ctx = tool_context();
     let result = invoke_tool(&AddTool, args(json!({"a": 2, "b": 3})), &ctx)
@@ -131,7 +131,7 @@ async fn a_scalar_return_is_wrapped_under_result() {
     assert_eq!(result, json!({"result": 5}));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_missing_required_argument_is_rejected_before_the_body_runs() {
     let ctx = tool_context();
     let err = invoke_tool(&GetWeatherTool, args(json!({})), &ctx)
@@ -140,7 +140,7 @@ async fn a_missing_required_argument_is_rejected_before_the_body_runs() {
     assert!(err.to_string().contains("city"), "got: {err}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_wrong_argument_type_is_rejected() {
     let ctx = tool_context();
     let err = invoke_tool(&GetWeatherTool, args(json!({"city": 42})), &ctx)
@@ -149,7 +149,7 @@ async fn a_wrong_argument_type_is_rejected() {
     assert!(err.to_string().contains("expected string"), "got: {err}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_tool_context_is_injected_and_usable() {
     let ctx = tool_context();
     invoke_tool(&RememberTool, args(json!({"key": "blue"})), &ctx)
@@ -164,7 +164,7 @@ fn the_generated_constructor_returns_a_shared_tool() {
     assert_eq!(tool.name(), "get_weather");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_original_function_is_still_callable_directly() {
     let value = add(2, 40).await.unwrap();
     assert_eq!(value, 42);

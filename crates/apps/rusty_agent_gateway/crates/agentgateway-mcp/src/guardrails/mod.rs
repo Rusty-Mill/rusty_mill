@@ -44,12 +44,14 @@ use agentgateway_config::{FailureMode, McpGuardrails, Processor, resolve};
 use agentgateway_core::{Endpoints, Registry};
 use cel::{Context, Program};
 use http::{HeaderMap, HeaderName, HeaderValue};
+use rusty_tonic::Status;
+use rusty_tonic::client::{Channel, ChannelOptions};
 
 use crate::rules::Subject;
 
 pub use wire::{
     AuthorizationError, HeaderMutation, McpHeader, McpRequest, McpRequestResult, McpResponse,
-    McpResponseResult, authorization_error, request_result, response_result, to_proto_value,
+    McpResponseResult, Pass, authorization_error, request_result, response_result, to_proto_value,
 };
 
 /// Budget for one processor call when the config names none.
@@ -253,15 +255,9 @@ impl Annotations {
     /// Later processors win on a key collision, which is upstream's rule and
     /// the one that makes a chain read as a pipeline: the last thing to say
     /// something about a call is the most informed.
-    fn merge(&mut self, metadata: prost_types::Struct) {
+    fn merge(&mut self, metadata: rusty_prost::wkt::Struct) {
         for (key, value) in metadata.fields {
-            let Some(value) = wire::proto_to_json(value) else {
-                rusty_log::debug!(
-                    key,
-                    "a processor sent an annotation with no JSON form; skipping"
-                );
-                continue;
-            };
+            let value = wire::proto_to_json(value);
 
             let value = match &value {
                 serde_json::Value::String(text) if text.len() > MAX_ANNOTATION_BYTES => {
@@ -634,7 +630,7 @@ impl Compiled {
     /// guardrail offline. The processor sees the key absent and decides. That
     /// is also what makes `mcp.prompt.name` harmless on a `prompts/list`,
     /// which fans out and has no single subject.
-    fn metadata_context(&self, call: CallContext<'_>) -> Option<prost_types::Struct> {
+    fn metadata_context(&self, call: CallContext<'_>) -> Option<rusty_prost::wkt::Struct> {
         if self.metadata.is_empty() {
             return None;
         }
@@ -684,40 +680,33 @@ impl Compiled {
             })
             .collect();
 
-        Some(prost_types::Struct { fields })
+        Some(rusty_prost::wkt::Struct { fields })
     }
 
-    async fn call_request(&self, request: McpRequest) -> Result<McpRequestResult, tonic::Status> {
-        let mut client = self.connect().await?;
+    async fn call_request(&self, request: McpRequest) -> Result<McpRequestResult, Status> {
+        let client = self.connect()?;
         match tokio::time::timeout(self.timeout, client.check_request(request)).await {
             Ok(result) => result,
-            Err(_) => Err(tonic::Status::deadline_exceeded("the processor timed out")),
+            Err(_) => Err(Status::deadline_exceeded("the processor timed out")),
         }
     }
 
-    async fn call_response(
-        &self,
-        request: McpResponse,
-    ) -> Result<McpResponseResult, tonic::Status> {
-        let mut client = self.connect().await?;
+    async fn call_response(&self, request: McpResponse) -> Result<McpResponseResult, Status> {
+        let client = self.connect()?;
         match tokio::time::timeout(self.timeout, client.check_response(request)).await {
             Ok(result) => result,
-            Err(_) => Err(tonic::Status::deadline_exceeded("the processor timed out")),
+            Err(_) => Err(Status::deadline_exceeded("the processor timed out")),
         }
     }
 
-    async fn connect(
-        &self,
-    ) -> Result<wire::client::ExtMcpClient<tonic::transport::Channel>, tonic::Status> {
-        let endpoint = format!("{}://{}", self.scheme, self.endpoints.next());
-        let channel = tonic::transport::Endpoint::from_shared(endpoint)
-            .map_err(|err| tonic::Status::internal(format!("bad processor endpoint: {err}")))?
-            .connect_timeout(self.timeout)
-            .connect()
-            .await
-            .map_err(|err| {
-                tonic::Status::unavailable(format!("could not reach the processor: {err}"))
-            })?;
+    /// A client for the next processor in the ring. The channel connects on its first call.
+    fn connect(&self) -> Result<wire::client::ExtMcpClient, Status> {
+        let url = format!("{}://{}", self.scheme, self.endpoints.next());
+        let mut options = ChannelOptions::default();
+        options.connect.connect_timeout = self.timeout;
+        let channel = Channel::new(&url, options).map_err(|err| {
+            Status::internal(format!("bad processor endpoint: {}", err.message()))
+        })?;
         Ok(wire::client::ExtMcpClient::new(channel))
     }
 
@@ -725,7 +714,7 @@ impl Compiled {
     ///
     /// `Some(reject)` refuses the call; `None` carries on to the next
     /// processor, which is what `failOpen` means.
-    fn on_failure(&self, rpc: &str, status: &tonic::Status) -> Option<Outcome> {
+    fn on_failure(&self, rpc: &str, status: &Status) -> Option<Outcome> {
         rusty_log::warn!(
             endpoints = self.endpoints.len(),
             rpc,

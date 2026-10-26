@@ -12,6 +12,7 @@ members = [
     "crates/apps/rocket_league/crates/rleval-app",
     "crates/apps/rocket_league/crates/rb_capture_ingest",
     "crates/apps/rocket_league/crates/rb_domain",
+    "crates/apps/rocket_league/crates/rl_replay",
     "crates/apps/rocket_league/crates/rb_env",
     "crates/apps/rocket_league/crates/rb_physics_bullet",
     "crates/apps/rocket_league/crates/rb_replay_ingest",
@@ -64,12 +65,13 @@ members = [
     "crates/libs/protocol/rusty_mcp_proto",
     "crates/libs/protocol/rusty_mcp_server",
     "crates/libs/protocol/rusty_mcp_client_native",
-    "crates/libs/protocol/rusty_mcp_axum",
     "crates/libs/protocol/rusty_a2a",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo",
+    "crates/libs/async/rusty_journal",
     "crates/libs/async/rusty_stream",
+    "crates/libs/async/rusty_stream/rusty_stream-macros",
     "crates/foundation/rusty_url",
     "crates/libs/net/rusty_http",
     "crates/libs/net/rusty_serve",
@@ -100,6 +102,12 @@ members = [
     "crates/apps/rusty_fair_play",
     "crates/libs/storage/rusty_fair_play_domain",
     "crates/libs/storage/rusty_multimodal_db_engine",
+    "crates/apps/rusty_mux/crates/core",
+    "crates/apps/rusty_mux/crates/ctl",
+    "crates/apps/rusty_mux/crates/proto",
+    "crates/apps/rusty_mux/crates/server",
+    "crates/apps/rusty_mux/crates/status",
+    "crates/apps/rusty_mux/crates/tui",
     "crates/apps/rusty_remind_me/crates/remind_me_core",
     "crates/apps/rusty_remind_me/crates/remind_me_mcp",
     "crates/apps/rusty_remind_me/crates/remind_me_api",
@@ -163,6 +171,7 @@ members = [
     "crates/libs/net/rusty_h2",
     "crates/libs/net/rusty_hyper",
     "crates/libs/net/rusty_axum",
+    "crates/libs/net/rusty_axum_tokio",
     "crates/libs/ui/rusty_audio",
     "crates/foundation/rusty_crypto_key",
     "crates/libs/storage/rusty_db/crates/rusty-db-core",
@@ -294,6 +303,9 @@ members = [
 # comparing rusty_libc against the `libc` crate, deliberately outside the
 # library's own zero-dependency build.
 exclude = [
+    # Temporary, pinned upstream crypto patches; not first-party members.
+    "vendor/aws-sigv4",
+    "vendor/jsonwebtoken",
     "crates/libs/ui/rusty_term/fuzz",
     "crates/apps/rush/fuzz",
     "crates/libs/ui/rusty_lines/bench",
@@ -469,7 +481,9 @@ rusty_jinja = { path = "crates/foundation/rusty_jinja" }
 rusty_kafka = { path = "crates/libs/net/rusty_kafka" }
 rusty_libc = { path = "crates/foundation/rusty_libc", version = "0.0.1" }
 rusty_lines = { path = "crates/libs/ui/rusty_lines" }
-rusty_lsp = { path = "crates/libs/protocol/rusty_lsp" }
+# Default features off: the runtime (tokio) is opt-in per consumer via
+# `features = ["runtime"]`; rusty_term_l13 needs only the data types (#850).
+rusty_lsp = { path = "crates/libs/protocol/rusty_lsp", default-features = false }
 rusty_opnsense = { path = "crates/libs/homelab/rusty_opnsense" }
 rusty_proxmox = { path = "crates/libs/homelab/rusty_proxmox" }
 rusty_rand = { path = "crates/foundation/rusty_rand" }
@@ -543,6 +557,7 @@ rusty-db-mysql = { path = "crates/libs/storage/rusty_db/crates/rusty-db-mysql", 
 # Already-merged siblings rusty_db depends on -- plain path dependencies,
 # same pin-retirement pattern as everywhere else in this series.
 rusty_tokio = { path = "crates/libs/async/rusty_tokio" }
+rusty_stream = { path = "crates/libs/async/rusty_stream" }
 rusty_wire = { path = "crates/foundation/rusty_wire" }
 rusty_json = { path = "crates/foundation/rusty_json" }
 rusty_json_patch = { path = "crates/foundation/rusty_json_patch" }
@@ -550,13 +565,13 @@ rusty_agui = { path = "crates/libs/protocol/rusty_agui" }
 rusty_mcp_proto = { path = "crates/libs/protocol/rusty_mcp_proto" }
 rusty_mcp_server = { path = "crates/libs/protocol/rusty_mcp_server" }
 rusty_mcp_client_native = { path = "crates/libs/protocol/rusty_mcp_client_native" }
-rusty_mcp_axum = { path = "crates/libs/protocol/rusty_mcp_axum" }
 rusty_channel = { path = "crates/libs/protocol/rusty_channel" }
 rusty_routine = { path = "crates/libs/protocol/rusty_routine" }
 rusty_bbp = { path = "crates/libs/protocol/rusty_bbp" }
 rusty_flatbuffers = { path = "crates/libs/protocol/rusty_flatbuffers" }
 rusty_protobuf = { path = "crates/libs/protocol/rusty_protobuf" }
 rusty_prost = { path = "crates/libs/protocol/rusty_prost" }
+rusty_tonic = { path = "crates/libs/protocol/rusty_tonic" }
 rusty_sandbox = { path = "crates/libs/rusty_sandbox" }
 rusty_worktree = { path = "crates/libs/rusty_worktree" }
 rusty_bot = { path = "crates/libs/rusty_bot" }
@@ -736,6 +751,8 @@ ts-localapi = { path = "crates/apps/rusty_tailscale/crates/ts-localapi" }
 ts-net = { path = "crates/apps/rusty_tailscale/crates/ts-net" }
 rusty_http = { path = "crates/libs/net/rusty_http" }
 rusty_serve = { path = "crates/libs/net/rusty_serve" }
+rusty_axum = { path = "crates/libs/net/rusty_axum" }
+rusty_axum_tokio = { path = "crates/libs/net/rusty_axum_tokio" }
 rusty_crypto_key = { path = "crates/foundation/rusty_crypto_key" }
 rusty_ansi = { path = "crates/libs/ui/rusty_ansi" }
 hyper = { version = "1", default-features = false }
@@ -805,7 +822,6 @@ rusty-mcp-client = { path = "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-cli
 rmcp = { version = "3.1", default-features = false }
 axum = { version = "0.8", features = ["json"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
 prometheus = { version = "0.13", default-features = false }
 wiremock = "0.6"
 tokio-postgres = "0.7"
@@ -930,6 +946,14 @@ remind_me_mcp = { path = "crates/apps/rusty_remind_me/crates/remind_me_mcp" }
 remind_me_api = { path = "crates/apps/rusty_remind_me/crates/remind_me_api" }
 remind_me_remote = { path = "crates/apps/rusty_remind_me/crates/remind_me_remote" }
 remind_me_hub = { path = "crates/apps/rusty_remind_me/crates/remind_me_hub" }
+
+# rusty_mux family (docs/projects/mux/).
+rusty_mux_core = { path = "crates/apps/rusty_mux/crates/core" }
+rusty_mux_proto = { path = "crates/apps/rusty_mux/crates/proto" }
+rusty_mux_server = { path = "crates/apps/rusty_mux/crates/server" }
+rusty_mux_status = { path = "crates/apps/rusty_mux/crates/status" }
+# rusty_term's headless engine, for consumers that must not link its tokio front end.
+rusty_term_core = { path = "crates/libs/ui/rusty_term/core" }
 tracing-appender = "0.2"
 # Markdown parsing
 comrak = { version = "0.52", default-features = false, features = [] }
@@ -1019,3 +1043,8 @@ unsafe_code = "warn"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
+
+# RUSTSEC-2026-0387: pinned source patches, provenance/removal in vendor/README.md.
+[patch.crates-io]
+aws-sigv4 = { path = "vendor/aws-sigv4" }
+jsonwebtoken = { path = "vendor/jsonwebtoken" }

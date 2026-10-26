@@ -175,7 +175,13 @@ fn task(root: &Path, name: &str, probe: &Path, gate: Option<&Path>, prelude: &st
 
 /// `bbp mod` for `t`, admitted through `slots`.
 fn moderator(t: &Task, slots: &Path, agents: u32) -> Child {
-    Proc::new(env!("CARGO_BIN_EXE_bbp"))
+    claimed(t, slots, agents, None)
+}
+
+/// `bbp mod` for `t`, admitted through `slots` under the claim in `claim`.
+fn claimed(t: &Task, slots: &Path, agents: u32, claim: Option<&Path>) -> Child {
+    let mut command = Proc::new(env!("CARGO_BIN_EXE_bbp"));
+    command
         .arg("mod")
         .arg("--dir")
         .arg(&t.dir)
@@ -201,7 +207,11 @@ fn moderator(t: &Task, slots: &Path, agents: u32) -> Child {
             &agents.to_string(),
             "--validator-slots",
             "1",
-        ])
+        ]);
+    if let Some(claim) = claim {
+        command.arg("--claim").arg(claim);
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -294,6 +304,61 @@ fn wait_until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+fn a_parent_ceiling_bounds_its_tasks_together_and_no_other_parent() {
+    let root = tempdir("ceiling");
+    let (probe, slots) = (root.join("probe"), root.join("slots"));
+    std::fs::create_dir_all(&probe).expect("mkdir");
+    let claim = |name: &str, parent: &str| {
+        let path = root.join(format!("{name}.claim.json"));
+        let json = format!(r#"{{"parent":{{"id":"{parent}","agents":2}}}}"#);
+        std::fs::write(&path, json).expect("claim");
+        path
+    };
+    let (goal, other) = (claim("goal", "goal"), claim("other", "other"));
+    let tasks: Vec<(Task, &PathBuf)> = (1..=4)
+        .map(|i| {
+            let t = task(&root, &format!("T{i}"), &probe, None, "");
+            (t, if i == 4 { &other } else { &goal })
+        })
+        .collect();
+    let mut mods: Vec<Child> = tasks
+        .iter()
+        .map(|(t, c)| claimed(t, &slots, 3, Some(c)))
+        .collect();
+
+    let mut closed = vec![false; tasks.len()];
+    wait_until("every task to close", Duration::from_secs(120), || {
+        for ((t, _), done) in tasks.iter().zip(&mut closed) {
+            *done = *done || play_human(t);
+        }
+        closed.iter().all(|c| *c)
+    });
+    for m in &mut mods {
+        assert!(m.wait().expect("wait").success(), "moderator failed");
+    }
+
+    let goal_agents: Vec<(u128, u128)> = (1..=3)
+        .flat_map(|i| intervals(&probe, &format!("agent-T{i}-")))
+        .collect();
+    assert_eq!(
+        goal_agents.len(),
+        12,
+        "four turns in each of the goal's tasks"
+    );
+    assert_eq!(
+        peak(&goal_agents),
+        2,
+        "the goal's three tasks shared two slots"
+    );
+    assert_eq!(
+        peak(&intervals(&probe, "agent-")),
+        3,
+        "the other parent's task took the third"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -438,4 +503,173 @@ fn a_slot_holder_covers_its_harness_from_the_start() {
     hold.wait().expect("holder exits");
     wait_until("the released slot", Duration::from_secs(5), free);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// What `bbp quiesce` says for `t`: `Ok(true)` once nothing of it runs.
+fn quiesce(t: &Task) -> Result<bool, String> {
+    let out = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .arg("quiesce")
+        .arg("--dir")
+        .arg(&t.dir)
+        .args(["--task", &t.task.0])
+        .output()
+        .expect("bbp quiesce");
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    Ok(text == "true")
+}
+
+/// Whether `pid` runs: a zombie has exited, and waits only for whoever
+/// adopted it to reap it.
+fn alive(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        !stat
+            .rsplit_once(") ")
+            .is_some_and(|(_, r)| r.starts_with('Z'))
+    })
+}
+
+fn kill9(pid: &str) {
+    let status = Proc::new("kill").args(["-9", pid]).status().expect("kill");
+    assert!(status.success(), "kill -9 {pid}");
+}
+
+/// The group records of `t`'s moderators.
+fn records(t: &Task) -> Vec<PathBuf> {
+    std::fs::read_dir(t.dir.join("mod"))
+        .expect("mod dir")
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "groups"))
+        .flat_map(|e| std::fs::read_dir(e.path()).expect("groups").flatten())
+        .map(|e| e.path())
+        .collect()
+}
+
+/// A task whose moderator was killed while its harness runs (held at the
+/// gate until the release drops), with the harness's pid.
+struct Orphan {
+    root: PathBuf,
+    slots: PathBuf,
+    t: Task,
+    harness: String,
+    _release: Release,
+}
+
+fn orphan(tag: &str) -> Orphan {
+    let root = tempdir(tag);
+    let (probe, slots, go) = (root.join("probe"), root.join("slots"), root.join("go"));
+    std::fs::create_dir_all(&probe).expect("mkdir");
+    let t = task(
+        &root,
+        "T1",
+        &probe,
+        Some(&go),
+        "echo $$ > \"$BBP_DIR/harness.pid\"\n",
+    );
+    let release = Release(go);
+    let mut first = moderator(&t, &slots, 1);
+    let pid = t.dir.join("harness.pid");
+    wait_until("the harness", Duration::from_secs(20), || pid.exists());
+    first.kill().expect("kill");
+    first.wait().expect("reap");
+    let harness = std::fs::read_to_string(&pid)
+        .expect("pid")
+        .trim()
+        .to_owned();
+    assert!(alive(&harness), "the orphan outlives its moderator");
+    Orphan {
+        root,
+        slots,
+        t,
+        harness,
+        _release: release,
+    }
+}
+
+fn cancel(t: &Task) {
+    let rev = admin::card(&t.dir, &t.task).expect("card").rev;
+    human::perform(&t.dir, &t.task, "cancel", &["withdrawn"], Some(rev)).expect("cancel");
+}
+
+/// A moderator that dies leaves its harness running, holding its slot. Once
+/// the task has ended, `bbp quiesce` kills that orphan, so its answer `true`
+/// means the harness is gone and the slot is free, with no moderator left
+/// to say so.
+#[test]
+fn quiesce_kills_the_groups_a_dead_moderator_left_and_only_then_says_true() {
+    use rusty_bbp_host::slots::{Capacity, Class, Slots};
+    let o = orphan("quiesce");
+    assert!(quiesce(&o.t).unwrap_err().contains("has not ended"));
+    cancel(&o.t);
+    assert_eq!(quiesce(&o.t), Ok(false), "the orphan is still running");
+    wait_until("quiesced", Duration::from_secs(10), || {
+        quiesce(&o.t) == Ok(true)
+    });
+    assert!(!alive(&o.harness), "the orphan was killed");
+    let one = Capacity {
+        agents: 1,
+        validators: 1,
+    };
+    let held = Slots::open(&o.slots, one).expect("slots");
+    assert!(
+        held.try_acquire(Class::Agent).expect("acquire").is_some(),
+        "the slot is free"
+    );
+    assert_eq!(records(&o.t).len(), 0, "no record outlives its group");
+    let _ = std::fs::remove_dir_all(&o.root);
+}
+
+/// With its holder dead too, a group's members can no longer be told from a
+/// later group with the same id: quiesce signals none of them and keeps the
+/// record, answering `false` until the last member has exited by itself.
+#[test]
+fn a_group_whose_holder_died_is_not_quiet_until_its_last_member_exits() {
+    let o = orphan("holder_lost");
+    let [record] = records(&o.t).try_into().expect("one group");
+    let holder = record
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("holder")
+        .to_owned();
+    kill9(&holder);
+    wait_until("the holder's death", Duration::from_secs(5), || {
+        !alive(&holder)
+    });
+    cancel(&o.t);
+    for _ in 0..3 {
+        assert_eq!(quiesce(&o.t), Ok(false), "a member still runs");
+    }
+    assert!(alive(&o.harness), "no unowned member is signalled");
+    assert!(record.exists(), "the record outlives no member");
+    // The member exits late, and what it forked a little later still.
+    kill9(&o.harness);
+    wait_until("quiesced", Duration::from_secs(10), || {
+        quiesce(&o.t) == Ok(true)
+    });
+    assert!(!record.exists(), "the record goes once the group is empty");
+    let _ = std::fs::remove_dir_all(&o.root);
+}
+
+/// A task whose harnesses ran under a `bbp` that recorded no groups has no
+/// record to prove them gone: quiesce refuses it instead of saying `true`.
+#[test]
+fn a_task_whose_harnesses_ran_unrecorded_is_never_called_quiet() {
+    let o = orphan("legacy");
+    let groups = records(&o.t)
+        .first()
+        .and_then(|r| r.parent())
+        .expect("groups dir")
+        .to_owned();
+    std::fs::remove_dir_all(&groups).expect("as an older bbp left it");
+    cancel(&o.t);
+    let refused = quiesce(&o.t).unwrap_err();
+    assert!(
+        refused.contains("before their groups were recorded"),
+        "{refused}"
+    );
+    assert!(alive(&o.harness), "nothing unrecorded is signalled");
+    kill9(&o.harness);
+    let _ = std::fs::remove_dir_all(&o.root);
 }

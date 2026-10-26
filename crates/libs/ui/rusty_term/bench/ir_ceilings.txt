@@ -18,9 +18,27 @@
 # 166.8. alt and cursor keep their ceilings.
 # Printable-ASCII fast path, measured: alt 735.0, ascii 47.9, cursor 84.7,
 # scroll 136.7, sgr 116.7, unicode 167.8 (unicode keeps its ceiling).
-alt_screen_flicker   809
-ascii_throughput      53
-cursor_thrash         93
-scroll_heavy         150
-sgr_churn            128
-unicode_heavy        184
+# Blank-row flag (a clear skips rows already blank in the same fill),
+# measured: alt 73.4, ascii 44.4, cursor 84.3, scroll 123.8, sgr 112.6,
+# unicode 164.5. cursor and unicode keep their ceilings.
+# Cached blank row on top of the blank-row flag (a clear that misses copies
+# one prebuilt row), measured: alt 74.9, ascii 41.3, cursor 85.0, scroll
+# 111.8, sgr 109.0, unicode 167.5. alt, cursor and unicode keep their ceilings.
+# Non-ASCII run writer (Grid::put_text), measured: alt 75.8, ascii 41.6,
+# cursor 87.5, scroll 112.7, sgr 110.4, unicode 115.5 (main on the same
+# machine: cursor 85.0, scroll 111.9, sgr 109.0, unicode 167.5). Only
+# unicode moves.
+# Grapheme id index (hash lookup, reused buffer, frame table built lazily),
+# measured: alt 75.8, ascii 41.6, cursor 87.5, scroll 112.7, sgr 110.5,
+# unicode 102.2. Only unicode moves.
+# Plain-CSI fast path (whole `[0-9;]* final` sequences parsed in place; up
+# to 16 positional parameters without allocating), measured: alt 69.9, ascii 41.8, cursor 54.6, scroll
+# 112.3, sgr 80.4, unicode 101.9. alt, cursor and sgr move.
+# 8-byte cells over an interned style table, measured: alt 49.7, ascii
+# 34.5, cursor 57.5, scroll 100.4, sgr 85.9, unicode 106.0. alt, ascii and scroll ratchet down.
+alt_screen_flicker    55
+ascii_throughput      38
+cursor_thrash         60
+scroll_heavy         111
+sgr_churn             88
+unicode_heavy        112

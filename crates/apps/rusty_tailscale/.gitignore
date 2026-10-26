@@ -4,3 +4,4 @@
 *.pcapng
 /interop/state/
 /interop/noise-server-go/noise-server-go
+/interop/h2c-server-go/h2c-server-go

@@ -9,6 +9,8 @@
 //! the only encoding.
 
 #[cfg(feature = "rusty-tokio")]
+pub mod bridge;
+#[cfg(feature = "rusty-tokio")]
 pub mod client;
 mod code;
 mod frame;
@@ -18,6 +20,8 @@ mod metadata;
 pub mod server;
 mod status;
 mod timeout;
+#[cfg(feature = "tonic-codec")]
+pub mod tonic_codec;
 
 pub use code::Code;
 pub use frame::{

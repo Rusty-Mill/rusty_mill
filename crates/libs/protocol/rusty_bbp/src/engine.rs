@@ -1,6 +1,7 @@
 //! The processing model: validation in rule order, effects, transitions, entry
 //! actions and generated events. `handle` is the only entry point and is pure.
 
+use crate::coedit::{self, Doc, SpecEdit};
 use crate::command::*;
 use crate::event::*;
 use crate::ids::*;
@@ -508,6 +509,7 @@ fn put_artifact(
                 ));
             }
         }
+        ArtifactPayload::SpecEdit(e) => check_edit(&w.st, e)?,
         ArtifactPayload::Candidate(c) => {
             spec = Some(
                 w.st.approved_spec
@@ -556,6 +558,44 @@ fn put_artifact(
         transition(w, State::Test, now);
     }
     Ok(Response::Stored(id))
+}
+
+/// A co-edited spec edit: it references the brief, is well formed against
+/// its base, and is anchored on no line edited since that base. Its ops then
+/// apply to the head, which may be later than the base (step 4).
+fn check_edit(st: &TaskState, e: &SpecEdit) -> R<()> {
+    if Some(e.brief) != st.brief {
+        return Err(rej(
+            Code::RefUnresolved,
+            "spec must reference the task brief",
+        ));
+    }
+    let Some(base) = e.base else {
+        return coedit::validate(&Doc::default(), &e.ops);
+    };
+    resolve_kind(st, base, ArtifactKind::Spec)?;
+    let (Some(doc), Some((head, since))) = (st.doc(base), st.since(base)) else {
+        return Err(rej(
+            Code::WrongKind,
+            format!("{base} is a snapshot spec, not a co-edited one"),
+        ));
+    };
+    coedit::validate(doc, &e.ops)?;
+    let clash = coedit::overlap(&e.ops, &since);
+    if clash.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<String> = clash
+        .iter()
+        .map(|a| a.map_or("the start".into(), |l| format!("{}#{}", l.art, l.n)))
+        .collect();
+    Err(rej(
+        Code::StaleBase,
+        format!(
+            "lines edited between {base} and the head {head}: {}",
+            names.join(", ")
+        ),
+    ))
 }
 
 fn resolve_kind(st: &TaskState, id: ArtId, kind: ArtifactKind) -> R<&ArtifactRecord> {
@@ -944,6 +984,7 @@ fn check_request(st: &TaskState, role: &Role, d: &Draft) -> R<Option<ArtId>> {
     let rec = resolve_kind(st, spec, ArtifactKind::Spec)?;
     match rec.payload {
         ArtifactPayload::Spec { brief } if Some(brief) == st.brief => Ok(Some(spec)),
+        ArtifactPayload::SpecEdit(ref e) if Some(e.brief) == st.brief => Ok(Some(spec)),
         _ => Err(rej(
             Code::RefUnresolved,
             "spec does not reference the brief",

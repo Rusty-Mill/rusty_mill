@@ -15,14 +15,11 @@ adk-agents.workspace = true
 adk-core.workspace = true
 adk-graph.workspace = true
 adk-runner.workspace = true
-async-stream.workspace = true
 async-trait.workspace = true
 # Inline-data parts cross the ADK/A2A boundary as standard base64; the
 # workspace's own dependency-free implementation replaced the external crate.
 rusty_base64.workspace = true
-futures.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros"] }
 rusty_log = { workspace = true }
 # A merged sibling in this workspace (was a git dependency on
 # baileyrd/rusty_a2a before the monorepo merge). `server` is the only
@@ -32,13 +29,16 @@ rusty_a2a = { workspace = true, default-features = false, features = [
   "server",
   "client",
 ] }
+rusty_stream = { workspace = true, features = ["futures-core"] }
+rusty_tokio.workspace = true
 
 [dev-dependencies]
 adk-models.workspace = true
 adk-sessions.workspace = true
 adk-tools.workspace = true
+# Oracle exception (#686): the tests serve `rusty_a2a` over axum and call it with
+# reqwest, both of which need a tokio runtime.
 tokio = { workspace = true, features = ["full"] }
-tokio-test.workspace = true
 axum.workspace = true
 rusty_a2a = { workspace = true, default-features = false, features = [
   "server",

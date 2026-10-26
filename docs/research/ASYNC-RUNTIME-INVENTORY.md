@@ -73,13 +73,13 @@ come from the Gaps column of section 4.
 | # | Gap | Evidence | Crates | Close |
 |---|---|---|---|---|
 | G1 | Same items, different modules: `tokio::net::*` and `net::tcp::*` are `rusty_tokio::io::*`; `tokio::runtime::*` is at the crate root; `signal::unix::*` is `signal::*`; `io::unix::AsyncFd` is `io::AsyncFd`; `task::spawn_blocking` is `rusty_tokio::spawn_blocking` | probe (method); `rusty_tokio/src/lib.rs:324`, `src/io/mod.rs:72-107` | 39 | yes: add `net` and `runtime` re-export modules plus `task::spawn_blocking`, so a migration renames the crate and nothing else |
-| G2 | `sync::Mutex::const_new` missing (static mutexes) | probe: E0599 | 1 | yes |
-| G3 | `time::Instant` is private; `rusty_tokio` uses `std::time::Instant`, so `pause`/`advance` cannot move a caller's `Instant::now()` | probe: E0603; `src/time/mod.rs:21` | 1 | yes: a public `Instant` read from the runtime clock |
-| G4 | `#[rusty_tokio::main/test]` rejects `flavor = "multi_thread"` and `"current_thread"` (185 attributes); it accepts only `worker_threads` and `flavor = "thread_per_core"`. Both runtimes exist (`Builder::new_multi_thread`, `new_current_thread`) | `rusty_tokio-macros/src/args.rs:30-49` | 16 | yes: map each flavor to its `Builder` |
-| G5 | `start_paused = true` rejected (20 attributes). `time::pause` exists. The macro docs still say "no pausable clock (issue #56)", which is out of date | `rusty_tokio-macros/src/lib.rs:34-38`; `src/time/mod.rs:300` | 1 | yes |
+| G2 | `sync::Mutex::const_new` missing (static mutexes) | probe: E0599 | 1 | yes: closed in #997 (#898) |
+| G3 | `time::Instant` is private; `rusty_tokio` uses `std::time::Instant`, so `pause`/`advance` cannot move a caller's `Instant::now()` | probe: E0603; `src/time/mod.rs:21` | 1 | yes: a public `Instant` read from the runtime clock; closed in #997 (#898) |
+| G4 | `#[rusty_tokio::main/test]` rejects `flavor = "multi_thread"` and `"current_thread"` (185 attributes); it accepts only `worker_threads` and `flavor = "thread_per_core"`. Both runtimes exist (`Builder::new_multi_thread`, `new_current_thread`) | `rusty_tokio-macros/src/args.rs:30-49` | 16 | yes: map each flavor to its `Builder`; closed in #997 (#899) |
+| G5 | `start_paused = true` rejected (20 attributes). `time::pause` exists. The macro docs still say "no pausable clock (issue #56)", which is out of date | `rusty_tokio-macros/src/lib.rs:34-38`; `src/time/mod.rs:300` | 1 | yes: closed in #997 (#899) |
 | G6 | `select!` supports 2-5 arms, irrefutable patterns only, no `else`, no `, if` guard, no `biased;`. 9 of 25 sites exceed it: refutable pattern 6, `biased` 4, guard 2, `else` 1, more than 5 arms 1 | `src/macros.rs:8-29` | 8 | yes: rewrite as a proc macro in `rusty_tokio-macros`, which already depends on `syn`, so the module's "new dependency" reason no longer applies |
 | G7 | No in-house `Stream` trait, combinators (`StreamExt::next/map/filter/then/boxed/buffered`, `TryStreamExt`), `BoxStream`/`BoxFuture`, `stream::iter/once/unfold/select_all`, `future::join_all/ready`, `channel::mpsc::unbounded` or `stream!`/`try_stream!` | `rusty_stream/Cargo.toml:5`, `src/lib.rs:18-36` | 24 | yes: a new `rusty_stream` with its own `Stream` trait, combinators and macros (#896). An optional `futures-core` interop feature adapts in both directions, the way `rusty_tokio` keeps `futures-io` and `bytes` (`rusty_tokio/Cargo.toml:30-48`), because axum SSE, reqwest `bytes_stream` and tonic all speak `futures_core::Stream` |
-| G8 | `tokio_util::sync::CancellationToken` (20 uses) | per-crate table | 4 | yes: small, on `sync::Notify` |
+| G8 | `tokio_util::sync::CancellationToken` (20 uses) | per-crate table | 4 | yes: small, on `sync::Notify`; closed in #997 (#901) |
 | G9 | Third-party dependencies that need a tokio runtime: `reqwest` 10, `axum` 9, `aisdk` 4, `sqlx` 4, `hyper` 3, `tower`/`tower-http`/`hyper-util`/`tonic` 2 each, `tokio-postgres`, `h2`, `redis`, `aws-sdk-s3`, `meilisearch-sdk` | `Cargo.lock`, direct normal dependencies only | 27 | no: these crates keep `tokio` until the framework is replaced (#687), following the precedent of D4 in `RUSTY-MCP-SOVEREIGNTY.md`. Two of them are softer, see below |
 | G10 | `tokio_test::block_on` appears only in doctests (7 `rusty_adk` crates) | `adk-*/src/lib.rs` doc comments | 7 | yes: `rusty_tokio::Runtime::new()?.block_on` |
 | G11 | Public API exposes `tokio` or `futures` types, so dependents migrate together: `rusty_lsp`, `rusty_request`, `rusty-db-core`, `rusty_term`, `rusty_homelab_mcp`, `rk-app` | single-line `pub` signatures | 6 | no gap: ordering only, see section 3. `rusty_http`, `rusty_request`, `rusty_tls` and `rusty_h2` already ship a `rusty-tokio` feature beside `tokio` |
@@ -111,7 +111,15 @@ edge but does not by itself move either `remind_me` crate out of tier C:
    #898 (G2, G3), #899 (G4, G5), #900 (G6), #901 (G8). #895 renames the log
    server to `rusty_journal`, then #896 builds `rusty_stream` (G7).
 3. Providers: #903 moves `rusty_http`, `rusty_request`, `rusty_h2` and
-   `rusty_hyper`.
+   `rusty_hyper` (done). Their shipped builds already used `rusty_tokio` or
+   no runtime, with `tokio` an opt-in feature. What remained were the
+   `h2`-oracle interop tests in `rusty_h2` and `rusty_hyper`, which now run
+   the oracle on `rusty_tokio` too, keeping `tokio` only for the `tokio::io`
+   traits `h2` names. `tokio` stays a dev-dependency in two cases: those
+   trait definitions, and the tests of `rusty_http`'s and `rusty_request`'s
+   own opt-in `tokio` feature. Running the oracle on `rusty_tokio` found a
+   parity bug: `TcpStream::poll_shutdown` failed with `NotConnected` where
+   tokio succeeds.
 4. Families, each blocked as its ticket says:
 
 | Ticket | Family | Crates | After |
@@ -121,10 +129,56 @@ edge but does not by itself move either `remind_me` crate out of tier C:
 | #906 | rusty_mcp | 5 | #903, #897, #899 |
 | #907 | rusty_tailscale | 9 | #903, #897, #899, #900 |
 | #908 | rusty_adk (includes G10) | 12 | #896, #897, #900 |
-| #909 | rusty_db | 2 | #896 |
+| #909 | rusty_db (streams done; runtime held by sqlx, G9) | 2 | #896 |
 | #910 | rusty_provider | 2 | #896, #897, #899 |
 | #911 | small crates (rusty_key, skillopt, lsp, tonic, misc) | 10 | #903, #897, #899, #896 |
 | #912 | tier C tracking | 27 | #687, #688 |
+
+**#908 status (2026-10-25).** `adk-tools`, `adk-graph`, `adk-agents`,
+`adk-runner`, `adk-macros`, `adk-sessions` and `rusty-adk` have no `tokio`,
+`tokio-test`, `futures` or `async-stream` dependency left. G10 is closed.
+The library half of `adk-a2a` moved too. Its tests keep `tokio` as a
+dev-dependency because they serve `rusty_a2a` over axum and call it with
+reqwest. These libraries need no runtime of their own: the SQLite sessions
+run each query on a thread and return the result on a `rusty_tokio`
+oneshot. Streams cross into tier C at two places, both through
+`rusty_stream::Compat`: the model stream from `adk-models` (in
+`adk-agents`) and the streaming client of `rusty_a2a` (in `adk-a2a`).
+Four crates still run on tokio because they drive a tier C crate:
+- `adk-agui` and `agui-agent-server`: `AdkAgent` drives runs on the runtime
+  it is given, and the live models in `adk-models` use reqwest. A loopback
+  test covers this.
+- `weather-agent`: it uses the same live models.
+- `mcp-tool-server`: it uses the stdio transport of `adk-mcp`.
+
+They move when `adk-models` or `adk-mcp` moves.
+
+#911 tier A (2026-10-25): `skillopt-core`, `agentgateway-agui` and
+`rusty_mill_board` are on `rusty_tokio`, and `rk-mcp`'s tests are. `rk-mcp`
+keeps `tokio::sync::Mutex` for its connection lock, which is held across
+remote awaits, until #1064 makes `rusty_tokio`'s mutex cancellation-safe. Four tier A rows stay on tokio because
+of the runtime boundary: `rusty_tokio`'s timers, I/O and processes need a
+`rusty_tokio` runtime, and these crates run on a tokio one. `rk-compose`'s
+checks (`tokio::process`, `time::timeout`) run inside `rk-app` (tier C);
+`skillopt-cli` drives `skillopt-model`'s `reqwest`; `agentgateway-tls` is the
+tokio-to-`rusty_tokio` I/O bridge for `agentgateway`; and
+`rusty-hister-model`'s tests drive `sqlx` through `rusty-db`. Each moves with
+the tier C crate that holds it.
+`rusty_tonic` (tier B) builds its tonic-oracle test streams with
+`rusty_stream` through `Compat` instead of `futures-util`. `tokio` stays a
+dev-dependency only to host the tonic oracle server.
+`rusty_lsp` (tier B, owner-approved public API change): the `runtime` and
+`tcp` features run on `rusty_tokio`, and their public signatures name
+`rusty_tokio` types. The swap needed `watch::Receiver::wait_for`,
+`AsyncBufRead for io::Take` and `Debug for Notify`, now in `rusty_tokio`.
+
+#910 (in part): `rp-core`'s `ChatStream` is a `rusty_stream::BoxStream`, so
+`rp-core` has no async dependency and `rp-router` drops `futures`. The
+`futures-core` edges are `rp-providers` (reqwest's SSE body) and `rp-server`
+(`rusty_axum`'s `Sse`), each through `rusty_stream::Compat`. `rp-mcp` is tier
+C: its tools block on `rp-router` (reqwest) and its gateway drives
+`rusty-mcp-client`'s tokio transport, both on the tokio runtime `build` runs
+in. Only its `RwLock` moved; the rest moves with #906 (T7).
 
 ## 4. Per-crate table
 
@@ -149,10 +203,10 @@ through `Cargo.lock`. The counts are not a vetted audit.
 |---|---|---|---|---|---|---|---|---|
 | `agentgateway` | `apps/rusty_agent_gateway/crates/agentgateway` | t tu | 21 | t::test×292, t::spawn×27, t::net::TcpListener::bind×26, tu::sync::CancellationToken×16, t::time::sleep×8, t::select!×3, +11 | axum, hyper, hyper-util, tower | agentgateway-agui, agentgateway-auth, agentgateway-llm, agentgateway-mcp, agentgateway-proxy, agentgateway-tls, rusty-mcp, rusty_mcp_axum, rusty_mcp_server | G1 G4 G6 G8 G9 | C |
 | `agentgateway-agui` | `apps/rusty_agent_gateway/crates/agentgateway-agui` | t(dev) | 1 | t::test×2 | — | — | — | A |
-| `agentgateway-auth` | `apps/rusty_agent_gateway/crates/agentgateway-auth` | t(dev) | 1 | t::test×12 | reqwest | rusty-mcp | G9 | C |
-| `agentgateway-llm` | `apps/rusty_agent_gateway/crates/agentgateway-llm` | as fu t | 2 | t::test×2, fu::StreamExt×1, t::time::sleep×1, as::stream!×1 | hyper, reqwest | — | G7 G9 | C |
+| `agentgateway-auth` | `apps/rusty_agent_gateway/crates/agentgateway-auth` | t | 1 | t::test×16, t::time::timeout_at×1 | — (client on rusty_request) | rusty-mcp | — | A |
+| `agentgateway-llm` | `apps/rusty_agent_gateway/crates/agentgateway-llm` | as t | 2 | t::test×3, t::time::sleep×1, t::time::timeout_at×1, as::stream!×1 | — (clients on rusty_request) | — | G7 | B |
 | `agentgateway-mcp` | `apps/rusty_agent_gateway/crates/agentgateway-mcp` | t tu(dev) | 3 | t::test×28, t::task::spawn_blocking×2, t::time::timeout×2, t::runtime::Handle×1, t::net::TcpListener×1, tu::sync::CancellationToken×1, +2 | tonic, tonic-prost | rusty-mcp, rusty_mcp_client_native, rusty_mcp_server | G1 G8 G9 | C |
-| `agentgateway-proxy` | `apps/rusty_agent_gateway/crates/agentgateway-proxy` | t | 1 | t::time::sleep×1, t::time::timeout×1 | hyper, hyper-util | — | G9 | C |
+| `agentgateway-proxy` | `apps/rusty_agent_gateway/crates/agentgateway-proxy` | t | 1 | t::time::sleep×1, t::time::timeout×1 | — (client on rusty_request, #885) | — | — | C |
 | `agentgateway-tls` | `apps/rusty_agent_gateway/crates/agentgateway-tls` | t | 3 | t::test×3, t::io::duplex×3, t::net::TcpStream×2, t::io::AsyncRead×2, t::io::AsyncWrite×2, t::time::timeout×1, +7 | — | — | G1 | A |
 | `rusty-hister-model` | `apps/rusty_hister/crates/rusty-hister-model` | t(dev) | 7 | t::test×120 | — | rusty-db | — | A |
 | `rusty_homelab_mcp` | `apps/rusty_homelab_mcp` | t | 7 | t::test×23, t::runtime::Handle×5, t::runtime::Handle::current×2, t::main×1, t::task::spawn_blocking×1 | — | rusty_fedora, rusty_http, rusty_mcp_server, rusty_opnsense, rusty_proxmox | G1 G4 | B |
@@ -164,8 +218,8 @@ through `Cargo.lock`. The counts are not a vetted audit.
 | `rk-kernel` | `apps/rusty_key/crates/kernel` | f t | 3 | t::test×6, f::StreamExt×1, t::task::block_in_place×1, t::runtime::Handle::current×1, f::Stream×1, f::stream::once×1 | aisdk | rk-constrain | G1 G4 G7 G9 | C |
 | `rk-mcp` | `apps/rusty_key/crates/mcp` | t | 3 | t::test×4, t::sync::Mutex×1 | — | rk-constrain, rk-feed, rusty-mcp-client | — | A |
 | `rusty_mill_board` | `apps/rusty_mill_board` | t | 2 | t::signal::ctrl_c×2, t::runtime::Builder::new_current_thread×1, t::signal::unix::signal×1, t::signal::unix::SignalKind::terminate×1, t::select!×1, t::runtime::Builder×1, +1 | — | rusty_http, rusty_mcp_server, rusty_request | G1 | A |
-| `rp-core` | `apps/rusty_provider/crates/core` | f | 1 | f::stream::BoxStream×1 | — | — | G7 | B |
-| `rp-mcp` | `apps/rusty_provider/crates/mcp` | t | 4 | t::test×9, t::time::sleep×4, t::spawn×3, t::runtime::Handle×2, t::time::timeout×2, t::sync::RwLock×1, +1 | — | rp-core, rp-router, rusty-mcp-client, rusty_mcp_server | G1 G4 | B |
+| `rp-core` | `apps/rusty_provider/crates/core` | — | 0 | — (moved to `rusty_stream`, #910) | — | — | — | done |
+| `rp-mcp` | `apps/rusty_provider/crates/mcp` | t | 4 | t::test×9, t::time::sleep×4, t::spawn×3, t::runtime::Handle×2, t::time::timeout×2, +1 | reqwest (via rp-router) | rp-core, rp-router, rusty-mcp-client, rusty_mcp_server | G1 G4 G9 | C |
 | `rp-providers` | `apps/rusty_provider/crates/providers` | fu t(dev) | 7 | t::test×110, fu::StreamExt×6 | reqwest | rp-core | G7 G9 | C |
 | `rp-router` | `apps/rusty_provider/crates/router` | f t | 5 | t::test×156, t::time::sleep×33, t::spawn×7, t::task::spawn_blocking×4, f::stream::StreamExt×1, f::stream×1, +2 | reqwest, tokio-postgres, tokio-postgres-rustls | rp-core, rp-providers | G1 G5 G7 G9 | C |
 | `rp-server` | `apps/rusty_provider/crates/server` | fu t | 6 | t::test×133, t::time::timeout×3, fu::StreamExt×2, t::sync::Semaphore::new×2, t::net::TcpListener::bind×2, t::spawn×2, +5 | axum, reqwest, tower-http | rp-core, rp-mcp, rp-router, rusty_mcp_axum, rusty_mcp_server | G1 G4 G7 G9 | C |
@@ -197,7 +251,7 @@ through `Cargo.lock`. The counts are not a vetted audit.
 | `rusty-mcp` | `libs/protocol/rusty_mcp/crates/rusty-mcp` | t | 11 | t::test×84, t::spawn×14, t::time::sleep×9, t::net::TcpListener::bind×6, t::time::timeout×4, t::io::AsyncReadExt×2, +2 | — | rusty_http, rusty_request | G1 G4 | B |
 | `rusty-mcp-client` | `libs/protocol/rusty_mcp/crates/rusty-mcp-client` | t(dev) | 5 | t::test×27, t::time::timeout×10, t::spawn×4, t::time::sleep×3, t::io::AsyncReadExt×2, t::io::AsyncWriteExt×2, +4 | — | rusty_mcp_client_native, rusty_request | G1 G4 | B |
 | `rusty-mcp-demo` | `libs/protocol/rusty_mcp/crates/rusty-mcp-demo` | t(dev) | 1 | t::test×43, t::time::timeout×4, t::time::sleep×1 | — | rusty_mcp_server | — | A |
-| `rusty_mcp_axum` | `libs/protocol/rusty_mcp_axum` | f t | 2 | t::task::spawn_blocking×7, t::test×6, t::net::TcpListener::bind×3, t::spawn×3, t::sync::mpsc×1, t::sync::oneshot×1, +1 | axum | rusty_http, rusty_mcp_server | G1 G4 G7 G9 | C |
+| `rusty_mcp_axum` | `libs/protocol/rusty_mcp_axum` | f t | 2 | t::task::spawn_blocking×7, t::test×6, t::net::TcpListener::bind×3, t::spawn×3, t::sync::mpsc×1, t::sync::oneshot×1, +1 | axum | rusty_http, rusty_mcp_server | G1 G4 G7 G9 | removed (#875) |
 | `rusty_mcp_client_native` | `libs/protocol/rusty_mcp_client_native` | t(dev) | 2 | t::test×8, t::time::timeout×2, t::runtime::Runtime::new×1, t::net::TcpListener::bind×1, t::spawn×1, t::time::sleep×1, +1 | — | rusty_request | G1 G4 | B |
 | `rusty_mcp_server` | `libs/protocol/rusty_mcp_server` | t(dev) | 3 | t::test×4, t::time::sleep×2, t::time::timeout×2, t::process::Command×1 | — | rusty_http | G4 | B |
 | `rusty_tonic` | `libs/protocol/rusty_tonic` | fu(dev) t(dev) | 2 | fu::stream::iter×3, t::runtime::Runtime×3, fu::StreamExt×2, t::runtime::Builder::new_multi_thread×2, fu::Stream×1, t::net::TcpListener::bind×1, +3 | — | rusty_h2, rusty_http, rusty_hyper | G1 G7 | B |
@@ -216,11 +270,11 @@ through `Cargo.lock`. The counts are not a vetted audit.
 | `agui-agent-server` | `libs/rusty_adk/examples/agui-agent-server` | t | 1 | t::runtime::Runtime::new×1 | — | rusty-adk | G1 | A |
 | `mcp-tool-server` | `libs/rusty_adk/examples/mcp-tool-server` | t | 1 | t::main×1 | — | rusty-adk | — | A |
 | `weather-agent` | `libs/rusty_adk/examples/weather-agent` | f t | 1 | f::StreamExt×1, t::main×1 | — | rusty-adk | G7 | B |
-| `rusty-db-core` | `libs/storage/rusty_db/crates/rusty-db-core` | fc fu t | 4 | fc::stream::BoxStream×3, fu::StreamExt×3, fu::stream::iter×2, fu::stream::once×1, t::time::timeout×1 | — | — | G7 | B |
-| `rusty-db-mysql` | `libs/storage/rusty_db/crates/rusty-db-mysql` | as fu | 1 | fu::StreamExt×1, as::try_stream!×1 | sqlx | rusty-db-core | G7 G9 | C |
-| `rusty-db-postgres` | `libs/storage/rusty_db/crates/rusty-db-postgres` | as fu | 1 | fu::StreamExt×1, as::try_stream!×1 | sqlx | rusty-db-core | G7 G9 | C |
-| `rusty-db-sqlite` | `libs/storage/rusty_db/crates/rusty-db-sqlite` | as fu | 1 | fu::StreamExt×1, as::try_stream!×1 | sqlx | rusty-db-core | G7 G9 | C |
-| `rusty-db` | `libs/storage/rusty_db/rusty_db` | t(dev) | 97 | t::test×391, t::time::sleep×13, t::task::spawn_local×7, t::task::LocalSet×7, t::time::timeout×3, t::sync::oneshot×3, +2 | — | rusty-db-core, rusty-db-mysql, rusty-db-postgres, rusty-db-sqlite | — | A |
+| `rusty-db-core` | `libs/storage/rusty_db/crates/rusty-db-core` | t | 1 | t::time::timeout×1 (`with_timeout`; every caller runs sqlx on tokio) | — | — | G9 (via drivers) | C; streams on `rusty_stream` (#909) |
+| `rusty-db-mysql` | `libs/storage/rusty_db/crates/rusty-db-mysql` | — | 0 | — (streams on `rusty_stream`, sqlx bridged by `Compat`, #909) | sqlx | rusty-db-core | G9 | C |
+| `rusty-db-postgres` | `libs/storage/rusty_db/crates/rusty-db-postgres` | — | 0 | — (streams on `rusty_stream`, sqlx bridged by `Compat`, #909) | sqlx | rusty-db-core | G9 | C |
+| `rusty-db-sqlite` | `libs/storage/rusty_db/crates/rusty-db-sqlite` | — | 0 | — (streams on `rusty_stream`, sqlx bridged by `Compat`, #909) | sqlx | rusty-db-core | G9 | C |
+| `rusty-db` | `libs/storage/rusty_db/rusty_db` | t(dev) | 97 | t::test×391, t::time::sleep×13, t::task::spawn_local×7, t::task::LocalSet×7, t::time::timeout×3, t::sync::oneshot×3, +2 | sqlx (via drivers) | rusty-db-core, rusty-db-mysql, rusty-db-postgres, rusty-db-sqlite | G9 | C: every test drives sqlx, which panics without a tokio runtime (#909) |
 | `rusty-search` | `libs/storage/rusty_search/crates/rusty-search` | t(dev) | 1 | t::main×1 | — | rusty-search-algolia, rusty-search-azure-search, rusty-search-elasticsearch, rusty-search-meilisearch, rusty-search-memory, rusty-search-opensearch, rusty-search-solr, rusty-search-sqlite-fts5, rusty-search-tantivy | — | A |
 | `rusty-search-algolia` | `libs/storage/rusty_search/crates/rusty-search-algolia` | t | 1 | t::test×13, t::sync::RwLock×1, t::time::sleep×1 | — | rusty_request | — | A |
 | `rusty-search-azure-search` | `libs/storage/rusty_search/crates/rusty-search-azure-search` | t | 1 | t::test×14, t::sync::RwLock×1 | — | rusty_request | — | A |

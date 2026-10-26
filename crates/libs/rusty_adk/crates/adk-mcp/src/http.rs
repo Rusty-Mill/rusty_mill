@@ -2,35 +2,40 @@
 //!
 //! This is what an ADK agent's `StreamableHTTPConnectionParams` connects to:
 //! JSON-RPC requests are POSTed to a single endpoint, and the response comes
-//! back as JSON. Served by `rusty_mcp_server`'s HTTP handler (mounted in axum
-//! by `rusty_mcp_axum`), stateless (no `Mcp-Session-Id`), so it scales behind
+//! back as JSON. Served by `rusty_mcp_server`'s HTTP handler, mounted in a
+//! `rusty_axum` router, stateless (no `Mcp-Session-Id`), so it scales behind
 //! a plain load balancer.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use adk_core::{AdkError, Result};
-use axum::Router;
-use rusty_mcp_server::{HttpConfig, HttpHandler};
+use rusty_axum::routing::any;
+use rusty_axum::{BoxFuture, Request, Response, Router, ServeOptions, StatusCode};
+use rusty_mcp_server::{HttpConfig, HttpHandler, Mount};
+use tokio::sync::oneshot;
 
 use crate::server::McpServer;
 
-/// The largest request body accepted.
-const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// The largest request body accepted, by the router itself: an app that
+/// mounts it may allow larger bodies on its other routes.
+const MAX_BODY_BYTES: u64 = 2 * 1024 * 1024;
 
 /// A reply is always plain JSON: this is far past any tool's runtime.
 const JSON_ONLY: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Builds an Axum router serving `server` at `path`.
+/// Builds a `rusty_axum` router serving `server` at `path`.
 ///
 /// Mounting a router rather than owning the listener lets the MCP endpoint sit
-/// alongside an application's own routes.
+/// alongside an application's own routes. An empty path or `/` serves every
+/// path; any other path is matched exactly.
 ///
 /// Any `Host` header is accepted, as before this crate moved onto
 /// `rusty_mcp_server`: the router cannot tell whether it is mounted on a
 /// loopback-only listener, and a loopback-only default would reject every
 /// remote client of a server bound to a public address. Call it from inside a
-/// tokio runtime: tool calls run on the runtime that was current here.
+/// tokio runtime: tool calls run on the runtime that was current here. Serve
+/// the router on a `rusty_tokio` runtime, as [`serve_http`] does.
 pub fn router(server: Arc<McpServer>, path: &str) -> Router {
     server.bind_runtime();
     let path = if path.is_empty() { "/" } else { path };
@@ -41,10 +46,7 @@ pub fn router(server: Arc<McpServer>, path: &str) -> Router {
         Err(e) => {
             rusty_log::error!(error = %e, "MCP server description is invalid");
             return Router::new().fallback(|| async {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "MCP server unavailable",
-                )
+                (StatusCode::INTERNAL_SERVER_ERROR, "MCP server unavailable")
             });
         }
     };
@@ -58,23 +60,153 @@ pub fn router(server: Arc<McpServer>, path: &str) -> Router {
             ..HttpConfig::default()
         },
     ));
-    let mounted = rusty_mcp_axum::router(handler, MAX_BODY_BYTES);
+    let mcp = Mount::new(handler).at(path);
     if path == "/" {
-        Router::new().fallback_service(mounted)
+        Router::new().fallback(move |req| bounded(&mcp, req))
     } else {
-        Router::new().nest_service(path, mounted)
+        Router::new().route(path, any(move |req| bounded(&mcp, req)))
     }
 }
 
-/// Serves `server` over HTTP on `addr` at `path`, until the process ends.
+/// Answers `req` with `mcp`, or 413 when its body is over [`MAX_BODY_BYTES`].
+fn bounded(mcp: &Mount, req: Request) -> BoxFuture<'static, Response> {
+    if req.body().len() as u64 > MAX_BODY_BYTES {
+        return Box::pin(async {
+            Response::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+        });
+    }
+    mcp.call(req)
+}
+
+/// Serves `server` over HTTP on `addr` at `path`, until the returned future
+/// is dropped.
+///
+/// Call it from inside a tokio runtime, which tool calls run on. The server
+/// itself runs on a `rusty_tokio` runtime on a thread of its own, so the
+/// caller's runtime never waits for it. Dropping the future (aborting its
+/// task, or shutting its runtime down) shuts the server down gracefully and
+/// releases the listener.
 pub async fn serve_http(server: Arc<McpServer>, addr: &str, path: &str) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
+    let listener = std::net::TcpListener::bind(addr)
+        .and_then(|listener| listener.set_nonblocking(true).map(|()| listener))
         .map_err(|e| AdkError::Config(format!("cannot bind {addr}: {e}")))?;
+    let app = router(server, path);
+    // Held by this future: dropping it is the server's signal to stop.
+    let (_stop, stopped) = oneshot::channel::<()>();
+    let (done, finished) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("adk-mcp-http".to_owned())
+        .spawn(move || {
+            let _ = done.send(serve_until(listener, app, stopped));
+        })
+        .map_err(|e| AdkError::Other(format!("cannot start the HTTP server: {e}")))?;
 
     rusty_log::info!(%addr, %path, "MCP server listening");
 
-    axum::serve(listener, router(server, path))
+    finished
         .await
+        .map_err(|_| AdkError::Other("HTTP server thread panicked".to_owned()))?
         .map_err(|e| AdkError::Other(format!("HTTP server failed: {e}")))
+}
+
+/// Runs `app` on `listener` on a new `rusty_tokio` runtime until `stop`
+/// resolves, which its sender's drop does.
+fn serve_until(
+    listener: std::net::TcpListener,
+    app: Router,
+    stop: oneshot::Receiver<()>,
+) -> std::io::Result<()> {
+    let runtime = rusty_tokio::Builder::new_multi_thread()
+        .thread_name("adk-mcp-http")
+        .build()?;
+    runtime.block_on(async move {
+        let listener = rusty_tokio::io::TcpListener::from_std(listener)?;
+        let options = ServeOptions {
+            max_body_bytes: MAX_BODY_BYTES,
+            ..ServeOptions::default()
+        };
+        rusty_axum::serve(listener, None, options, app)?
+            .shutdown_on(async {
+                let _ = stop.await;
+            })
+            .await;
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adk_core::Services;
+    use adk_sessions::InMemorySessionService;
+    use rusty_axum::Method;
+
+    /// The status `router` answers a POST of `len` bytes to `/mcp` with, the
+    /// way a host app that allows larger bodies would hand it over.
+    fn status_for(len: usize) -> StatusCode {
+        let tokio = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let services = Services::new(Arc::new(InMemorySessionService::new()));
+        let server = Arc::new(McpServer::new("test", Vec::new(), services));
+        let app = tokio.block_on(async { router(server, "/mcp") });
+        let request = Request::new(Method::Post, "/mcp")
+            .with_header("content-type", "application/json")
+            .unwrap()
+            .with_body(vec![b' '; len]);
+        let runtime = rusty_tokio::Builder::new_current_thread().build().unwrap();
+        runtime.block_on(app.call(request)).status
+    }
+
+    #[test]
+    fn a_body_over_the_limit_is_refused_whatever_the_host_allows() {
+        let over = usize::try_from(MAX_BODY_BYTES).unwrap() + 1;
+        assert_eq!(status_for(over), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// Dropping `serve_http`'s future stops the server: its runtime shuts
+    /// down without waiting on it, and the listener is released.
+    #[test]
+    fn cancelling_serve_http_releases_the_listener_and_the_runtime() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let addr = std::net::TcpListener::bind("127.0.0.1:0")
+                .and_then(|probe| probe.local_addr())
+                .unwrap();
+            let tokio = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let services = Services::new(Arc::new(InMemorySessionService::new()));
+            let server = Arc::new(McpServer::new("test", Vec::new(), services));
+            let task =
+                tokio.spawn(async move { serve_http(server, &addr.to_string(), "/mcp").await });
+            let up = (0..200).any(|_| {
+                std::thread::sleep(Duration::from_millis(10));
+                std::net::TcpStream::connect(addr).is_ok()
+            });
+            task.abort();
+            drop(tokio);
+            let released = (0..200).any(|_| {
+                std::thread::sleep(Duration::from_millis(10));
+                std::net::TcpListener::bind(addr).is_ok()
+            });
+            let _ = tx.send((up, released));
+        });
+        let (up, released) = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the caller's runtime did not shut down");
+        assert!(up, "the server never accepted a connection");
+        assert!(released, "the listener was not released");
+    }
+
+    #[test]
+    fn a_body_at_the_limit_reaches_the_handler() {
+        let at = usize::try_from(MAX_BODY_BYTES).unwrap();
+        let status = status_for(at);
+        assert_ne!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_ne!(status, StatusCode::NOT_FOUND);
+    }
 }

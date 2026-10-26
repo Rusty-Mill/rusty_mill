@@ -14,8 +14,7 @@
 use adk_core::{Content, Event, InvocationContext, Result};
 use adk_graph::{Node, NodeConfig, NodeContext, NodeOutcome};
 use async_trait::async_trait;
-use futures::stream::BoxStream;
-use futures::StreamExt;
+use rusty_stream::{BoxStream, StreamExt};
 use serde_json::Value;
 use std::sync::Arc;
 

@@ -10,15 +10,17 @@ crate. It no longer depends on `rmcp` (ADR-0002, Amendment 1).
 | `trace` | Strict W3C trace-context parsing over MCP `_meta` (SEP-414), a `tracing` span carrying the ids, and writing a context back onto an outbound request. |
 | `otel` (feature `otel`) | An OTLP trace and metrics pipeline, and `McpMetricsLayer` for per-request metrics. |
 
-The MCP server and client are separate crates: `rusty_mcp_server` (with
-`rusty_mcp_axum` to mount it in an axum app) and `rusty-mcp-client`. The layers
-here go in front of that mount; the tests in `crates/rusty-mcp/tests` run them
-against a real `rusty_mcp_server` that way.
+The MCP server and client are separate crates: `rusty_mcp_server` and
+`rusty-mcp-client`. The layers here are `tower` layers that go in front of a
+`tower` service wrapping the server's HTTP handler, as `agentgateway`'s
+`McpService` does; the tests in `crates/rusty-mcp/tests` run them against a
+real `rusty_mcp_server` through a test-only adapter of the same shape.
 
 ```rust,ignore
-let mcp = rusty_mcp_axum::router(handler, 1 << 20)
-    .layer(RequireAuthLayer::new(auth))      // inner: authorization
-    .layer(LimitsLayer::new().with_max_concurrent(256)); // outer: shed first
+let mcp = ServiceBuilder::new()
+    .layer(LimitsLayer::new().with_max_concurrent(256)) // outer: shed first
+    .layer(RequireAuthLayer::new(auth))                 // inner: authorization
+    .service(mcp_service);
 ```
 
 ## History

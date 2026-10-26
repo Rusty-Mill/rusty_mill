@@ -8,11 +8,13 @@
 //! It is **not** a server for any particular language; it is the reusable engine
 //! you build one on top of. Compared to writing JSON-RPC by hand you get typed
 //! handlers and lifecycle correctness; compared to a `tower`-based stack you get
-//! a dependency footprint of just `tokio`, `serde`, and `serde_json`.
+//! a dependency footprint of just `rusty_tokio`, `serde`, and `serde_json`.
 //!
 //! ## Quick start
 //!
-//! ```no_run
+// The example needs the `runtime` feature; without it, keep it as docs only.
+#![cfg_attr(feature = "runtime", doc = "```no_run")]
+#![cfg_attr(not(feature = "runtime"), doc = "```ignore")]
 //! use rusty_lsp::{Client, LanguageServer, Server};
 //! use rusty_lsp::error::Result;
 //! use rusty_lsp::lsp::{
@@ -38,7 +40,7 @@
 //!     }
 //! }
 //!
-//! #[tokio::main]
+//! #[rusty_tokio::main]
 //! async fn main() -> Result<()> {
 //!     Server::stdio().serve(|client| Backend { client }).await
 //! }
@@ -64,28 +66,43 @@
 //!
 //! ## Cargo features
 //!
-//! - `tcp` — [`Server::from_tcp`], serving an accepted `tokio` TCP stream.
+//! - `runtime` (default) — the async server/client modules and their `rusty_tokio`
+//!   dependency. Disable default features for the protocol data types alone
+//!   (`error`, `jsonrpc`, `lsp`, `text`).
+//! - `tcp` — [`Server::from_tcp`], serving an accepted `rusty_tokio` TCP stream.
 //! - `tracing` — wire-level instrumentation via the `tracing` crate.
 //!
 //! [lsp]: https://microsoft.github.io/language-server-protocol/
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[cfg(feature = "runtime")]
 pub mod cancel;
+#[cfg(feature = "runtime")]
 pub mod client;
+#[cfg(feature = "runtime")]
 pub mod documents;
 pub mod error;
 pub mod jsonrpc;
 pub mod lsp;
+#[cfg(feature = "runtime")]
 pub mod server;
+#[cfg(feature = "runtime")]
 pub mod service;
+#[cfg(feature = "runtime")]
 pub mod testing;
 pub mod text;
+#[cfg(feature = "runtime")]
 pub mod transport;
 
+#[cfg(feature = "runtime")]
 pub use cancel::CancelToken;
+#[cfg(feature = "runtime")]
 pub use client::{Client, ProgressGuard};
+#[cfg(feature = "runtime")]
 pub use documents::{Document, Documents};
 pub use error::{Error, Result};
+#[cfg(feature = "runtime")]
 pub use server::Server;
+#[cfg(feature = "runtime")]
 pub use service::LanguageServer;

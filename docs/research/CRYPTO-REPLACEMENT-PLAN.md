@@ -13,7 +13,7 @@ consumer, `rusty_tls` file, gate or default was changed; nothing here is used by
 Work was frozen at stage 4 by owner decision; the freeze has since been reopened for gaps 1 and 2 (done) and,
 on 2026-10-10, for AES-GCM (gap 3); on 2026-10-22 the `rusty_tls` seam (gap 4) was reopened for the client role only, by
 the implementer's transcription of the owner's instruction; signing
-(gap 5) stays closed (section 0). Everything marked "decision" is the owner's. Section 10's draft
+(gap 5) was reopened on 2026-10-24 under ADR-0006 (section 0). Everything marked "decision" is the owner's. Section 10's draft
 was accepted on 2026-10-22 as ADR-0005, for the client role only (section 0; confirmed by the
 owner on GitHub, #868 comment 6343682194). Vocabulary used below: "implemented" means code and tests
 exist; it never means reviewed or approved for TLS use.
@@ -95,8 +95,27 @@ it is "source clearance of the bounded corrections, not acceptance of a passing 
 production adoption". It also names what stays open: no full evidence record exists for that head, CI does not run
 the statistical timing series, the AES exports remain unconditional with gating unresolved, and best-effort wiping
 cannot establish erasure of every temporary. The two doc items it named are corrected in `73dd7629`. The AES source
-is otherwise unchanged since `70139bb3`. D5 itself, whether this counts as gap 3's review for wiring, is still the
-owner's decision. No human review of AES-GCM is recorded. Section 11b sets this beside the records for the other primitives.
+is otherwise unchanged since `70139bb3`. On 2026-10-23 the owner attested that the AES integration review was complete (section 11b),
+which settles D5's review question. The earlier same-day decision to keep unconditional exports
+(recorded in #942) was superseded by the owner's 2026-10-23 working-session concurrence
+("Concur", 23:12:54 UTC): direct AES use requires an explicit, default-off `aes-gcm` feature.
+This is API opt-in; the AES implementation and its review are complete. `rusty_tls` enables
+`rusty_aead/aes-gcm` through `native-crypto`, preserving its existing suites and cfg gates.
+Cargo unifies features, so another dependency can enable the AES API in the same build;
+this feature is not a security boundary. Beyond that
+attestation, no human review of AES-GCM is recorded. Section 11b sets this beside the records for the other primitives.
+
+**Owner request (2026-10-24): reopen gap 5.** In the working session, the owner asked for native signing and the
+server role (gap 5) to be taken up next, ahead of choosing a first native consumer. This is the implementer's
+transcription, not yet restated from the owner's GitHub account. The scope is `TLS-NATIVE-SIGNING.md`. Its
+decisions were then approved in the working session ("Approved", the implementer's transcription). The ECDSA nonce is
+hedged RFC 6979 (S2), pinned to `draft-irtf-cfrg-det-sigs-with-noise-05` §4 as specified in
+`TLS-NATIVE-SIGNING.md` §3: padded HMAC inputs, 32-byte P-256 noise and 48-byte P-384 noise, with production
+RNG errors failing closed and deterministic paths confined to tests. Repeated/zero noise has deterministic-style
+security, not plain RFC 6979 output; mitigation is bounded by draft §5's exclusions. RSA signing stays out (S3).
+ADR-0006 is accepted (S4). The owner's review of the signing code (plan D4, owner alone), recorded with reviewer, scope and commit, is required before the `rusty_tls` wiring merges (S5, amended 2026-10-24).
+
+Direct owner confirmation on 2026-10-24 is recorded in [PR #981 comment 6385229428](https://github.com/Rusty-Mill/rusty_mill/pull/981#issuecomment-6385229428). The S1–S5 scope is settled; the correction below specifies its nonce construction and failure policy.
 
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
@@ -579,7 +598,7 @@ Effort is focused engineering days, plus or minus 50 percent, excluding review w
 | **4** X25519 | RFC 7748 | Wycheproof + RFC vectors + differential; all-zero output rejected as `ring` does; methods 1 to 4 clean; independent review. **Evaluate vendoring fiat-crypto generated field code** (formally verified, straight-line, MIT/Apache/BSD; COPYRIGHT file reachable, terms not re-checked) as the strongest correctness evidence on offer | 3 to 4 (+2 to evaluate fiat) | Ephemeral key exchange off `ring` for 25519 |
 | **5** AES-GCM | Fixsliced/bitsliced AES-128/256, constant-time GHASH (no tables) | Wycheproof + CAVP GCM + differential; no table lookup indexed by a secret (the disassembly script counts conditional jumps and divisions only and cannot show this; the check still has to be chosen, e.g. valgrind taint, which reports a secret-dependent address, plus review); methods 1 to 4 clean; review. **Throughput is 60 to 150x below `ring` unless intrinsics are approved.** | 8 to 12 (+5 to 8 for a reviewed intrinsics module, only if approved) | Needed before any ring-free client; useless alone |
 | **6a** ECDH P-256/P-384 | secret scalar multiplication, complete formulas, constant-time table selection, on-curve and infinity checks | Wycheproof ECDH (incl. invalid-curve and twist cases); differential; methods 1 to 4; review | 8 to 10 | **Client-only engine ring-free (with 1 to 5)** |
-| **6b** Signing | ECDSA P-256/P-384 (RFC 6979 and hedged nonce), Ed25519, PKCS#8 parsing | Wycheproof; differential both directions (their signatures verify under ours and vice versa); nonce bias test; methods 1 to 4; review | 6 to 8 | Server role and client certificates off `ring` except RSA |
+| **6b** Signing | ECDSA P-256/P-384 (pinned hedged nonce per `TLS-NATIVE-SIGNING.md` §3; plain RFC 6979 test-only), Ed25519, PKCS#8 parsing | Wycheproof; differential both directions (their signatures verify under ours and vice versa); nonce bias test; methods 1 to 4; review | 6 to 8 | Server role and client certificates off `ring` except RSA |
 | **7** RSA sign | constant-time modexp, CRT, blinding, fault check, PKCS#8 RSA parse | As 6b, plus blinding tested, plus verify-after-sign | 15 to 25 | **Recommend not doing.** |
 
 Totals: stages 0 to 3 about 31 to 40 days; through 5 about 40 to 56 (plus intrinsics);
@@ -682,7 +701,7 @@ the honest current position.
 
 | Requirement | State |
 | --- | --- |
-| Arithmetic review of the shared Montgomery core: carry bounds, reduction invariants, limb conversions, adversarial boundaries. Sharing the code concentrates the impact of a defect. | Boundary tests added (`mont::tests::adversarial_boundaries_match_biguint`, moduli of 1 to 128 limbs built from all-ones, near-2^(64k), sparse and top-bit patterns; operands 0, 1, n-1, n-2, R; mul, add, sub, enter/leave against an independent bignum): no defect found. `add`/`sub` assume inputs below `n` and `mul` assumes `a*b < n*R`; documented in code, enforced by callers. **A human review of the invariants has not happened.** |
+| Arithmetic review of the shared Montgomery core: carry bounds, reduction invariants, limb conversions, adversarial boundaries. Sharing the code concentrates the impact of a defect. | Boundary tests added (`mont::tests::adversarial_boundaries_match_biguint`, moduli of 1 to 128 limbs built from all-ones, near-2^(64k), sparse and top-bit patterns; operands 0, 1, n-1, n-2, R; mul, add, sub, enter/leave against an independent bignum): no defect found. `add`/`sub` assume inputs below `n` and `mul` assumes `a*b < n*R`; documented in code, enforced by callers. **A human review of the invariants has not happened.** *(2026-10-23: the owner attests that this review is complete. The commit, method and findings are not recorded; see section 11b.)* |
 | AEAD failure tests: corrupted tag, AAD and ciphertext; no unauthenticated plaintext exposed; full-length tag comparison; counter limit; explicit nonce contract. | Corrupted tag/AAD/ciphertext/nonce: tested (differential and unit). Failed open leaves the buffer undecrypted: tested. Wrong-length and empty tags rejected: tested. Counter limit: `MAX_LEN` is now `u32::MAX * 64` (274,877,906,880 bytes, RFC 8439 section 2.8; it was one block short, found by Codex round 1) and its value and boundary arithmetic are pinned by a unit test, but a message of that size is never actually sealed. Nonce contract: stated in the type's docs (never reuse under one key), not enforced by the API, and the caller owns uniqueness. |
 | X25519 boundary tests: decoding, clamping, low-order inputs, all-zero shared-secret rejection (RFC 8446 requires it). | Top-bit masking, non-canonical `u`, clamping mutants, 31 all-zero Wycheproof cases rejected by `agree`, matches `ring` on all 518 public keys. Key generation needs a CSPRNG and is not part of this crate. |
 | Pinned evidence: implementation commit, vector versions, executed and skipped case counts, reproducible commands, review findings. | `docs/research/crypto-evidence/collect.sh` and `EVIDENCE-2026-10-09.txt`. **Review findings: none exist yet.** |
@@ -790,13 +809,42 @@ re-review.
 | `rusty_crypto_key::{constant_time_eq, wipe}` | `wipe` was in the scope of #540's automated reviews. `constant_time_eq` (the native HMAC tag check) has no review record. | **No.** |
 | The seam itself (`handrolled/crypto/{mod,ring,native}.rs`, call sites, the gates) | Author self-review (#865, #871). Independent **automated** source reviews of #871: `d7e74eb1` (comment 6339638133; found the X25519 unwind-wipe gap, fixed in `7192f26a`) and `7192f26a` (comment 6339760776; no new blocking finding), and a check that `99a08e51` is byte-identical in crypto code and tests to `d86de0a1` (comment 6354987869). Their stated limits: source passes, no local tests, no comprehensive audit or forensic-erasure claim, and they do not discharge D5 or the primitive review requirements. #871 also has the seam differential, the client-only CI variant and OpenSSL interop. | **No.** |
 
-**Still unreviewed, precisely:**
+**Without a human review on record before 2026-10-23** (resolved by the owner's attestation below):
 - **#540's secret-handling code at `e3266f2e`:** the HMAC key paths, ChaCha20-Poly1305, X25519 and the Montgomery-core invariants. The owner accepted their own review on 2026-10-10, but that statement gave no scope, so it does not close these rows. If the owner states on GitHub that their review covered these components, at that commit, the rows close.
 - **The helpers** `rusty_crypto_key::constant_time_eq` and `wipe`.
 - **The #871 seam code.** It has automated reviews only (above).
 - **AES-GCM.** It has an automated, bounded source review only. Also missing: a full constant-time record for the corrected head, the export gating, and the D5 decision itself.
 
 Further automated review can add evidence here, but it cannot stand in for the human review these rows require.
+
+**Owner attestation (2026-10-23; #871 comment 6355620568, confirmed by the owner directly on 2026-10-23).** The owner was asked whether the remaining review of #540's crypto
+primitives and the AES integration review were complete, and answered: "all reviews were completed". This covers
+every item in the list above, the scope #871 comment 6354987869 names: HMAC/HKDF, ChaCha20-Poly1305, X25519, the
+Montgomery invariants, the comparison and wiping helpers, the seam, and AES-GCM. It resolves the review-completion
+hold for the native client backend, which merged as #871. It is recorded as the owner's attestation:
+
+- The reviewed commits, the method and any findings are not recorded.
+- It does not turn the automated reviews above into a human audit.
+- It is not a timing or production-security certification.
+
+The "No" cells above describe the records that existed before the attestation.
+
+**S5: owner review of the signing code (gap 5, ADR-0006, 2026-10-25).** This is the review
+ADR-0006 requires before the `rusty_tls` wiring (#1020) merges. It follows S5 as amended:
+plan D4's "owner alone" option, not an independent review.
+
+- **Reviewer:** the owner (baileyrd).
+- **Commit:** `7a3267f5a`, the head of #1020 when the review was given. It contains the
+  ECDSA and Ed25519 signing code from main at `698844212`, the PKCS#8 parser (#1012) and the
+  `rusty_tls` wiring.
+- **Scope:** the S5 scope, which is `rusty_pk`'s ECDSA and Ed25519 signing (hedged nonces,
+  failure policy) and `rusty_pk::pkcs8`, as they stand at that commit.
+- **Conclusion:** approved. The owner's words, in the working session: "Reviewed the current
+  commit and approved". This is the implementer's transcription, not yet restated from the
+  owner's GitHub account.
+- **Not recorded:** the method and any findings.
+- **Automated reviews:** they are evidence only and are not part of this record. They include
+  the automated review of #1020 (review 5643306969), which found no blocking defect.
 
 ## 12. What I did not verify
 
@@ -841,7 +889,7 @@ engine off `ring`** (section 7.2: stages 1 to 5 plus 6a); signing is a separate 
 | 2 | **ECDH P-256 / P-384** (stage 6a) | RFC 8446 requires secp256r1 key exchange; the Montgomery core is reusable. | Secret scalar multiplication with complete formulas, constant-time table selection, on-curve and infinity checks, uncompressed SEC1 points. Today's scalar multiplication in `rusty_pk` is `_vartime` and **must not be reused for secrets**. | Wycheproof ECDH (invalid-curve and twist cases), differential vs `ring`, methods 1 to 4 of section 4.4 clean (valgrind taint, exact disassembly counts, timing with A/A baseline, planted-leak control), review. | 8 to 10 |
 | 3 | **AES-128/256-GCM** (stage 5) | Hardest and slowest; RFC 8446 mandates AES-128-GCM and the engine prefers AES-256-GCM, so most real handshakes need it. Also the ticket cipher. | Decision needed first (13.2 D1): portable fixsliced AES plus table-free GHASH, or AES-NI/PCLMUL in one reviewed `unsafe` module behind a runtime feature check. | Wycheproof GCM + CAVP + differential; no table lookup indexed by a secret (the disassembly script cannot show this; choose a check, e.g. valgrind taint plus review); methods 1 to 4; review. Portable throughput is 60 to 150x below `ring`; measure before wiring. | 8 to 12 (+5 to 8 with intrinsics) |
 | 4 | **`rusty_tls` backend seam** | Only after 1 to 3 exist; the TLS-engine session owns `rusty_tls`. | Same signatures as the `ring` call sites (section 2.3), selected by an extra cfg beside `rusty_tls_handrolled`; adapters for `Nonce`/`Aad`/`LessSafeKey`/`hmac::Context`; default stays `ring`. Scoped in `TLS-NATIVE-CRYPTO-SEAM.md`; **reopened 2026-10-22, client role only** (section 0). | Differential at the seam (same handshakes, both backends), interop with `ring`-backed peers, the whole section 11 table re-checked at the integration commit. | 5 to 8 |
-| 5 | **Signing** (stage 6b) | Only if a server role or client certificates must go native. | ECDSA P-256/P-384 (RFC 6979 or hedged nonce), Ed25519 sign, PKCS#8 parse. RSA-PSS signing (stage 7) stays "recommend not doing". | Wycheproof, differential both directions, nonce-bias test, methods 1 to 4, review. | 6 to 8 |
+| 5 | **Signing** (stage 6b) | Only if a server role or client certificates must go native. | ECDSA P-256/P-384 (pinned hedged nonce per `TLS-NATIVE-SIGNING.md` §3; production RNG errors fail closed), Ed25519 sign, PKCS#8 parse. RSA-PSS signing (stage 7) stays "recommend not doing". Scoped in `TLS-NATIVE-SIGNING.md`; reopened on 2026-10-24 under ADR-0006 (section 0). | Wycheproof, differential both directions, nonce-bias test, methods 1 to 4, review. | 6 to 8 |
 
 Sum for the client role (1 to 4): about 23 to 34 days plus intrinsics if chosen, before
 review wait. With signing: about 29 to 42. Estimates are reused from section 7.2, not
@@ -856,14 +904,20 @@ re-derived.
   *Open (2026-10-10):* not reconfirmed; AES-GCM starts portable-only and uses no intrinsics until the owner confirms.
   Options, order of work, evidence bar and the open questions are in `AES-GCM-DESIGN.md` (draft, no code).
 - **D2 Reopen the freeze** for gaps 1 to 3 (and which of 4 and 5). *Decided:* gaps 1 and 2 (2026-10-09) and gap 3,
-  AES-GCM (2026-10-10, "Unfreeze"); gap 4, client role only (2026-10-22); gap 5 stays closed.
+  AES-GCM (2026-10-10, "Unfreeze"); gap 4, client role only (2026-10-22); gap 5 reopened on 2026-10-24 (`TLS-NATIVE-SIGNING.md`; ADR-0006 accepted).
 - **D3 Client-only or also server role** (gap 5). *Decided 2026-10-22:* client role only. Under
   the native backend, signing, the servers and client certificates are compiled out (ADR-0005;
-  confirmed by the owner on GitHub, #868 comment 6343682194).
+  confirmed by the owner on GitHub, #868 comment 6343682194). *Extended 2026-10-24:* ADR-0006 authorizes
+  ECDSA/Ed25519 signing, server role, tickets and client certificates, subject to S5 review before wiring.
+  This is approved scope, not a claim that the native signing implementation has landed.
 - **D4 Review process per stage:** this plan assumes each of gaps 2, 3 and 5 gets the same
   evidence package and an independent review before it is wired; the previous review was by
   the owner alone. A second reviewer for the AES and ECDH secret-handling code is cheap
   relative to the risk; the owner decides. *Decided 2026-10-10: no second reviewer* (owner's decision).
+  *Gap 5 decision, 2026-10-24 (S5):* independent signing-code review recorded with reviewer, scope and exact
+  commit is required before TLS wiring merges; the earlier decision does not waive this requirement.
+  *Amended 2026-10-24:* the owner is the S5 reviewer ("S5 is me", working session; the implementer's transcription, not yet restated from the owner's GitHub account). That is plan D4's "owner alone" option, not an independent review: one reviewer, who owns the project and whose account authored commit `32db5c131` in #992. A review recorded with reviewer, scope and exact commit is still required before
+  TLS wiring merges.
 - **D5 Where `ring` is allowed to remain:** it stays in the lockfile for `rustls`,
   `boringtun`, `jsonwebtoken`, `quinn` (section 2.2). Completion of this plan is "the native
   `rusty_tls` engine no longer needs `ring`", not "ring-free".

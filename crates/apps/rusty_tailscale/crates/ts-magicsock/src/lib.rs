@@ -142,17 +142,21 @@ impl MagicSock {
     /// before the receive loop owns the socket. `None` if the server doesn't
     /// answer.
     pub async fn discover_reflexive(&self, stun_server: &str) -> Option<SocketAddr> {
-        let stun_addr = tokio::net::lookup_host(stun_server).await.ok()?.next()?;
+        let stun_addr = rusty_tokio::net::lookup_host(stun_server)
+            .await
+            .ok()?
+            .next()?;
         let tx = ts_stun::TxId::random();
         self.udp
             .send_to(&ts_stun::binding_request(tx), stun_addr)
             .await
             .ok()?;
         let mut buf = [0u8; 512];
-        let (n, _) = tokio::time::timeout(Duration::from_secs(3), self.udp.recv_from(&mut buf))
-            .await
-            .ok()?
-            .ok()?;
+        let (n, _) =
+            rusty_tokio::time::timeout(Duration::from_secs(3), self.udp.recv_from(&mut buf))
+                .await
+                .ok()?
+                .ok()?;
         let reflexive = ts_stun::parse_response(&buf[..n], tx).ok()?;
         rusty_log::info!(%reflexive, "magicsock: learned reflexive endpoint via STUN");
         Some(reflexive)
@@ -525,10 +529,10 @@ use platform_linux::LinuxUdpSocket;
 #[cfg(target_os = "linux")]
 use platform::net::UdpSocket as _;
 #[cfg(target_os = "linux")]
-use tokio::io::unix::AsyncFd;
+use rusty_tokio::io::unix::AsyncFd;
 
 /// The magic socket's UDP transport: a `platform_linux::LinuxUdpSocket`
-/// on Linux or a `tokio::net::UdpSocket` on non-Linux targets.
+/// on Linux or a `rusty_tokio::net::UdpSocket` on non-Linux targets.
 #[cfg(target_os = "linux")]
 pub struct MagicUdp {
     fd: AsyncFd<LinuxUdpSocket>,
@@ -539,9 +543,10 @@ impl MagicUdp {
     fn bind(addr: SocketAddr) -> io::Result<Self> {
         let sock = LinuxUdpSocket::bind(addr).map_err(from_platform_err)?;
         sock.set_nonblocking(true).map_err(from_platform_err)?;
-        Ok(Self {
-            fd: AsyncFd::new(sock)?,
-        })
+        // SAFETY: `sock` owns its `OwnedFd` and always returns it from
+        // `as_raw_fd`; moving it in keeps it open for the `AsyncFd`'s lifetime.
+        let fd = unsafe { AsyncFd::register(sock) }?;
+        Ok(Self { fd })
     }
 
     /// The address this socket is bound to.
@@ -579,7 +584,7 @@ impl MagicUdp {
 
 #[cfg(not(target_os = "linux"))]
 pub struct MagicUdp {
-    inner: tokio::net::UdpSocket,
+    inner: rusty_tokio::net::UdpSocket,
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -587,7 +592,7 @@ impl MagicUdp {
     fn bind(addr: SocketAddr) -> io::Result<Self> {
         let std_sock = std::net::UdpSocket::bind(addr)?;
         std_sock.set_nonblocking(true)?;
-        let inner = tokio::net::UdpSocket::from_std(std_sock)?;
+        let inner = rusty_tokio::net::UdpSocket::from_std(std_sock)?;
         Ok(Self { inner })
     }
 
@@ -753,7 +758,7 @@ mod tests {
     /// End-to-end check that `MagicUdp` (the `LinuxUdpSocket` + `AsyncFd`
     /// wrapper) actually moves bytes: two sockets bound to loopback, one
     /// sends, the other receives via the `AsyncFd::readable`/`try_io` loop.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn magic_udp_round_trips_a_datagram() {
         let loopback = |port| SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
         let a = MagicUdp::bind(loopback(0)).unwrap();

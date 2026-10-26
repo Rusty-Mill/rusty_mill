@@ -139,7 +139,7 @@ fn bench_interval_drift(rt: &Runtime) {
     let deviations = rt.block_on(async {
         let mut ticker = interval(PERIOD);
         let mut deviations = Vec::with_capacity(TICKS);
-        let mut next_ideal: Option<Instant> = None;
+        let mut next_ideal: Option<rusty_tokio::time::Instant> = None;
         for _ in 0..TICKS {
             let fired_at = ticker.tick().await;
             let ideal = *next_ideal.get_or_insert(fired_at);

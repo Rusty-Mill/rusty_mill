@@ -64,12 +64,13 @@
 //!   `Transfer-Encoding` if not); `RequestBuilder::send_streaming()` for
 //!   a [`StreamingResponse`] whose body is pulled incrementally via
 //!   `.chunk()` instead of requiring the whole thing in memory first.
-//!   Two first-pass scope boundaries, both documented on
-//!   `send_streaming`: it ignores any configured `RetryPolicy`, and its
-//!   connection is never pooled afterward.
+//!   It ignores any configured `RetryPolicy` (documented on
+//!   `send_streaming`); its connection is pooled once the body has been
+//!   read to its end.
 //! - Proxy support: `ClientBuilder::proxy(url)` (or
-//!   `.proxy_from_env()` for `HTTP_PROXY`/`http_proxy`, with an httpoxy-
-//!   style mitigation -- see `src/proxy.rs`) routes requests through an
+//!   `.proxy_from_env()` for the per-scheme `HTTP_PROXY`/`HTTPS_PROXY`/
+//!   `ALL_PROXY` variables, with an httpoxy-style mitigation -- see
+//!   `src/proxy.rs`) routes requests through an
 //!   HTTP forward proxy: `http://` requests are forwarded in
 //!   absolute-form (`Host` still naming the origin); `https://` requests
 //!   tunnel through the proxy via `CONNECT`, so the proxy never sees

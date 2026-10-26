@@ -1,18 +1,111 @@
 //! An async-aware mutex: `lock().await` suspends the task (freeing the
 //! worker thread to run other work) instead of blocking it, unlike
 //! `std::sync::Mutex`.
+//!
+//! Each waiting `lock()` holds a place in a FIFO queue until it acquires
+//! or its future is dropped. Release wakes the front waiter and leaves it
+//! queued; a dropped front waiter passes that wake to the next one, so
+//! cancellation (a `timeout`, a losing `select!` branch) never strands
+//! the waiters behind it.
+//!
+//! A waker's clone or drop may run executor code that re-enters this
+//! mutex, so neither ever happens with `state` held. Queued wakers sit
+//! behind an `Arc` that a handoff copies by refcount alone, a waiter's
+//! own clone is made before it locks, and wakers removed from or
+//! replaced in the queue are dropped after unlocking.
 
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex as StdMutex};
-use std::task::Waker;
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdGuard, PoisonError};
+use std::task::{Poll, Waker};
 
 struct State {
     locked: bool,
-    waiters: VecDeque<Waker>,
+    waiters: VecDeque<(u64, Arc<Waker>)>,
+    next_id: u64,
+}
+
+impl State {
+    const fn new() -> Self {
+        State {
+            locked: false,
+            waiters: VecDeque::new(),
+            next_id: 0,
+        }
+    }
+
+    fn enqueue(&mut self, waker: Arc<Waker>) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.waiters.push_back((id, waker));
+        id
+    }
+
+    /// Whether waiter `id`'s stored waker already wakes `waker`'s task.
+    fn wakes(&self, id: u64, waker: &Waker) -> bool {
+        self.waiters
+            .iter()
+            .any(|(i, w)| *i == id && w.will_wake(waker))
+    }
+
+    /// Stores `waker` for waiter `id`, so a re-poll never queues twice.
+    /// Returns the waker it displaces (or `waker`, if `id` is gone), for
+    /// the caller to drop once unlocked.
+    fn rewait(&mut self, id: u64, waker: Arc<Waker>) -> Arc<Waker> {
+        match self.waiters.iter_mut().find(|(i, _)| *i == id) {
+            Some((_, w)) => std::mem::replace(w, waker),
+            None => waker,
+        }
+    }
+
+    /// Removes waiter `id`, returning its waker (to drop once unlocked)
+    /// and whether it was at the front.
+    fn dequeue(&mut self, id: u64) -> Option<(Arc<Waker>, bool)> {
+        let pos = self.waiters.iter().position(|(i, _)| *i == id)?;
+        let (_, waker) = self.waiters.remove(pos)?;
+        Some((waker, pos == 0))
+    }
+
+    /// The front waiter's waker, if the lock is free for it to take.
+    fn next_waker(&self) -> Option<Arc<Waker>> {
+        if self.locked {
+            return None;
+        }
+        self.waiters.front().map(|(_, w)| w.clone())
+    }
+}
+
+/// No code that can panic runs while `state` is held, so a poisoned
+/// lock still guards consistent state.
+fn lock(state: &StdMutex<State>) -> StdGuard<'_, State> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A waiter's place in the queue, left on drop (a cancelled `lock()`).
+/// Leaving from the front of a free lock passes the wake on.
+struct Place<'a> {
+    state: &'a StdMutex<State>,
+    id: Option<u64>,
+}
+
+impl Drop for Place<'_> {
+    fn drop(&mut self) {
+        let Some(id) = self.id else { return };
+        let mut state = lock(self.state);
+        let removed = state.dequeue(id);
+        let next = match removed {
+            Some((_, true)) => state.next_waker(),
+            _ => None,
+        };
+        drop(state);
+        drop(removed);
+        if let Some(waker) = next {
+            waker.wake_by_ref();
+        }
+    }
 }
 
 pub struct Mutex<T> {
@@ -30,29 +123,70 @@ unsafe impl<T: Send> Sync for Mutex<T> {}
 impl<T> Mutex<T> {
     pub fn new(value: T) -> Self {
         Mutex {
-            state: StdMutex::new(State {
-                locked: false,
-                waiters: VecDeque::new(),
-            }),
+            state: StdMutex::new(State::new()),
+            data: UnsafeCell::new(value),
+        }
+    }
+
+    /// Identical to [`new`](Self::new), but usable in a `const` context
+    /// -- `static LOCK: Mutex<Vec<u8>> = Mutex::const_new(Vec::new());`
+    /// -- the same way [`Notify::const_new`](super::Notify::const_new)
+    /// is. Every field's constructor (`std::sync::Mutex::new`,
+    /// `VecDeque::new`, `UnsafeCell::new`) is already a `const fn`, so
+    /// there's no lazy initialization to hide; `new` stays a plain `fn`
+    /// only to match tokio's signatures exactly.
+    pub const fn const_new(value: T) -> Self {
+        Mutex {
+            state: StdMutex::new(State::new()),
             data: UnsafeCell::new(value),
         }
     }
 
     async fn acquire(&self) {
+        let mut place = Place {
+            state: &self.state,
+            id: None,
+        };
         std::future::poll_fn(|cx| {
-            let mut guard = self.state.lock().unwrap();
-            if !guard.locked {
-                guard.locked = true;
-                return std::task::Poll::Ready(());
+            // A clone made on a pass through the loop that found the
+            // stored waker stale; see the module docs.
+            let mut fresh: Option<Arc<Waker>> = None;
+            loop {
+                let mut state = lock(&self.state);
+                if !state.locked {
+                    state.locked = true;
+                    let removed = place.id.take().and_then(|id| state.dequeue(id));
+                    drop(state);
+                    drop((removed, fresh));
+                    return Poll::Ready(());
+                }
+                if place.id.is_some_and(|id| state.wakes(id, cx.waker())) {
+                    drop(state);
+                    drop(fresh);
+                    return Poll::Pending;
+                }
+                let Some(waker) = fresh.take() else {
+                    drop(state);
+                    fresh = Some(Arc::new(cx.waker().clone()));
+                    continue;
+                };
+                let displaced = match place.id {
+                    Some(id) => Some(state.rewait(id, waker)),
+                    None => {
+                        place.id = Some(state.enqueue(waker));
+                        None
+                    }
+                };
+                drop(state);
+                drop(displaced);
+                return Poll::Pending;
             }
-            guard.waiters.push_back(cx.waker().clone());
-            std::task::Poll::Pending
         })
         .await;
     }
 
     fn try_acquire(&self) -> bool {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = lock(&self.state);
         if guard.locked {
             false
         } else {
@@ -61,24 +195,26 @@ impl<T> Mutex<T> {
         }
     }
 
-    /// Releases the lock and wakes the next waiter, if any. Shared by
+    /// Releases the lock and wakes the front waiter, if any, which stays
+    /// queued until its re-poll acquires (see the module docs). Shared by
     /// every guard flavor's `Drop` impl (`MutexGuard`, `OwnedMutexGuard`,
     /// and the mapped guards, which forward to whichever of those two
     /// they were created from).
     fn release(&self) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = lock(&self.state);
         guard.locked = false;
-        let next = guard.waiters.pop_front();
+        let next = guard.next_waker();
         drop(guard);
         if let Some(waker) = next {
-            waker.wake();
+            waker.wake_by_ref();
         }
         // Note: a brand-new `lock()` call racing in right after we drop
         // `guard` above could grab the mutex before the woken waiter
-        // above gets re-polled. Exclusion is still fully guaranteed
-        // (only one caller's `locked = true` check-and-set can ever
-        // win), just not strict FIFO fairness -- an acceptable
-        // simplification for a hand-rolled mutex.
+        // above gets re-polled; the woken waiter then stays at the
+        // front, and that caller's release wakes it again. Exclusion is
+        // still fully guaranteed (only one caller's `locked = true`
+        // check-and-set can ever win), just not strict FIFO fairness --
+        // an acceptable simplification for a hand-rolled mutex.
     }
 
     pub async fn lock(&self) -> MutexGuard<'_, T> {
@@ -124,6 +260,20 @@ impl<T> Mutex<T> {
 
 pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
+}
+
+/// As tokio's: a `Mutex` around `value`.
+impl<T> From<T> for Mutex<T> {
+    fn from(value: T) -> Self {
+        Mutex::new(value)
+    }
+}
+
+/// As tokio's: a `Mutex` around `T::default()`.
+impl<T: Default> Default for Mutex<T> {
+    fn default() -> Self {
+        Mutex::new(T::default())
+    }
 }
 
 impl<T> Deref for MutexGuard<'_, T> {

@@ -11,12 +11,12 @@
 //! Noise bytes bundled with the upgrade response) is `rusty_http`'s job, not
 //! hand-rolled here anymore -- see `DESIGN.md`'s dependency table.
 
+use rusty_tokio::net::TcpStream;
 use std::time::Duration;
-use tokio::net::TcpStream;
 use ts_key::MachinePrivate;
 
+use rusty_http::async_tokio::{AsyncTransport, Replay};
 use rusty_http::head::RequestHead;
-use rusty_http::tokio_native::{AsyncTransport, Replay};
 use rusty_http::{HeaderMap, Method, Version};
 
 use crate::controlbase::{self, Conn, ConnectError, client_initiation};
@@ -116,7 +116,7 @@ async fn fetch_control_key_with_timeout(
     protocol_version: u16,
     timeout: Duration,
 ) -> Result<ts_types::MachinePublic, ControlHttpError> {
-    match tokio::time::timeout(timeout, async {
+    match rusty_tokio::time::timeout(timeout, async {
         let stream = TcpStream::connect(url.socket_addr()).await?;
         let mut transport = AsyncTransport::new(stream);
 
@@ -192,7 +192,7 @@ async fn dial_with_timeout(
     protocol_version: u16,
     timeout: Duration,
 ) -> Result<Conn<Replay<TcpStream>>, ControlHttpError> {
-    match tokio::time::timeout(timeout, async {
+    match rusty_tokio::time::timeout(timeout, async {
         let (init, handshake) = client_initiation(machine_key, control_key, protocol_version);
 
         let stream = TcpStream::connect(url.socket_addr()).await?;
@@ -276,9 +276,11 @@ mod tests {
     /// A control server that accepts the TCP connection but never writes a
     /// byte back must not hang `fetch_control_key` forever -- it should
     /// give up within the caller-supplied bound.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn fetch_control_key_times_out_on_unresponsive_server() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = rusty_tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         // Deliberately never `accept`/write anything back: the kernel
         // completes the TCP handshake from its listen backlog, so `connect`
@@ -304,9 +306,11 @@ mod tests {
     /// A control server that accepts the TCP connection but never writes a
     /// byte back must not hang `dial` forever -- it should give up within
     /// the caller-supplied bound.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn dial_times_out_on_unresponsive_server() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = rusty_tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
 
         let url = ControlUrl::parse(&format!("http://{addr}")).unwrap();

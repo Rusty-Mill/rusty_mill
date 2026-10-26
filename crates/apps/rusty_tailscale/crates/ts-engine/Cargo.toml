@@ -20,9 +20,8 @@ ts-tun.workspace = true
 ts-magicsock.workspace = true
 ts-disco.workspace = true
 ts-filter.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+rusty_tokio.workspace = true
 thiserror.workspace = true
 rusty_log = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

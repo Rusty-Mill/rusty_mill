@@ -1,6 +1,6 @@
 //! Async I/O drivers for the sans-I/O handshake in `handshake.rs`.
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use rusty_tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use ts_key::MachinePrivate;
 
 use super::conn::Conn;
@@ -37,7 +37,7 @@ pub async fn connect<T>(
     protocol_version: u16,
 ) -> Result<Conn<T>, ConnectError>
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let (init, hs) = client_initiation(machine_key, control_key, protocol_version);
     io.write_all(&init).await?;
@@ -49,7 +49,7 @@ where
 /// of band (the controlhttp `X-Tailscale-Handshake` header).
 pub async fn connect_deferred<T>(mut io: T, hs: ClientHandshake) -> Result<Conn<T>, ConnectError>
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let mut header = [0u8; 3];
     io.read_exact(&mut header).await?;

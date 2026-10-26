@@ -10,11 +10,11 @@
 //! NOTE: run and verified on Windows 11 (build 26200) — shell spawn, child
 //! `TERM`/`COLORTERM`, bidirectional relay, and OSC title capture all work.
 //! Host resize propagation also works: there is no `SIGWINCH` equivalent to
-//! wire, so `resize_poll` in `src/runtime/tokio_rt.rs` polls the console size
+//! wire, so `resize_poll` in `src/runtime/reactor.rs` polls the console size
 //! on a timer and calls [`BackendHandle::set_winsize`] on change.
 
 use crate::backend::{Backend, BackendHandle};
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE, HANDLE,

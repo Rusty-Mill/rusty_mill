@@ -20,9 +20,9 @@ name: CI
 # rusty_hister bootstrap, eight new crates, zero existing lines changed) --
 # that has no blast radius on any existing crate, so `.github/scripts/
 # cargo_toml_diff.py` classifies the change first and only forces the full
-# sweep when it's more than a pure `[workspace.members]` addition (a
-# dependency version bump, a removed/renamed member, a `[profile]` edit,
-# ...). Toolchain inputs are global. Cargo.lock changes are selected using the
+# sweep when it's more than pure additions to `[workspace.members]` and
+# `[workspace.dependencies]` (a dependency version bump, a removed/renamed
+# member, a `[profile]` edit, ...). Toolchain inputs are global. Cargo.lock changes are selected using the
 # full Cargo resolve graph below, with a conservative full fallback whenever
 # the old/new lockfile impact cannot be established reliably.
 on:
@@ -31,9 +31,16 @@ on:
   # post-merge run would repeat it (ADR-0009). The daily sweep below replaces
   # it as the full check of `main` and the writer of `main`'s caches.
   #
-  # Platforms (ci_plan.py `platform_outputs`): a PR runs Linux only; the queue
-  # runs Windows and macOS, and Linux too unless a green PR run already tested
-  # the identical tree on the same parent. Each tree is tested once per OS.
+  # Caches (10 GB per repository, least recently used evicted first): `main`
+  # saves only the workspace `clippy-<os>`/`test-<os>` target caches
+  # (setup-build-env) and the registry-only `plan`/`dependency-policy` ones.
+  # With a target cache per component job as well (22 more), a queue run two
+  # hours after the sweep found its `clippy-<os>` cache gone. Component jobs
+  # build cold.
+  #
+  # Platforms (ci_plan.py `platform_outputs`): a PR runs Linux only, plus
+  # Windows clippy; the queue runs Windows and macOS, and Linux too unless a
+  # green PR run already tested the identical tree on the same parent.
   pull_request:
   # The merge queue (ADR-0009) validates each queued entry on a temporary
   # branch; `required-gate` must run here or the queue waits forever for a
@@ -46,6 +53,7 @@ on:
   workflow_dispatch:
   # Daily full-workspace sweep: catches drift that scoped runs cannot see
   # (ADR-0009) and refreshes the `main` caches that PR runs restore.
+  # nightly-alert.yml files an issue when it fails.
   # `ci_plan.py` treats any event other than push, PR and merge_group as full.
   schedule:
     - cron: "17 3 * * *"
@@ -228,9 +236,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: dependency-policy
           cache-targets: false
       - run: cargo metadata --format-version=1 --all-features > /tmp/metadata.json
@@ -254,7 +262,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-deny
       - run: cargo deny --workspace check
@@ -272,7 +280,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-shear
       - run: cargo shear
@@ -299,6 +307,8 @@ jobs:
       tls_engine: ${{ steps.plan.outputs.tls_engine }}
       rleval_viewer: ${{ steps.plan.outputs.rleval_viewer }}
       rleval_app: ${{ steps.plan.outputs.rleval_app }}
+      rleval_service: ${{ steps.plan.outputs.rleval_service }}
+      rleval_image: ${{ steps.plan.outputs.rleval_image }}
       crypto_ct: ${{ steps.plan.outputs.crypto_ct }}
       rand_platforms: ${{ steps.plan.outputs.rand_platforms }}
       shards: ${{ steps.plan.outputs.shards }}
@@ -307,6 +317,7 @@ jobs:
       windows: ${{ steps.platforms.outputs.windows }}
       macos: ${{ steps.platforms.outputs.macos }}
       rust_os: ${{ steps.platforms.outputs.rust_os }}
+      clippy_os: ${{ steps.platforms.outputs.clippy_os }}
       rand_os: ${{ steps.platforms.outputs.rand_os }}
     # `actions: read` lets a merge-queue run find the PR run's tested-tree record.
     permissions:
@@ -322,9 +333,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          save-if: ${{ github.event_name != 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: plan
           cache-targets: false
 
@@ -379,14 +390,27 @@ jobs:
             git show "$base:Cargo.toml" > /tmp/old-Cargo.toml
             classification="$(python3 .github/scripts/cargo_toml_diff.py /tmp/old-Cargo.toml Cargo.toml)"
             if [ "$classification" != "safe" ]; then
-              emit_full "Root Cargo.toml changed beyond a pure [workspace.members] addition"
+              emit_full "Root Cargo.toml changed beyond pure [workspace.members]/[workspace.dependencies] additions"
               exit 0
             fi
-            echo "Root Cargo.toml changed, but only added new [workspace.members] entries -- narrowing normally instead of a full sweep."
+            echo "Root Cargo.toml changed, but only added [workspace.members]/[workspace.dependencies] entries -- narrowing normally instead of a full sweep."
           fi
 
           cargo metadata --format-version=1 --all-features > /tmp/metadata.json
           packages="$(echo "$changed" | python3 .github/scripts/affected_crates.py /tmp/metadata.json)"
+
+          # A member's dependency declarations (dependency tables, per-target
+          # ones, [features]) can change the features Cargo unifies for crates
+          # that never depend on it; neither the path selection above nor the
+          # lock shows that. Such edits keep the full sweep.
+          if ! dependency_edits="$(echo "$changed" | python3 .github/scripts/cargo_toml_diff.py --members /tmp/metadata.json "$base")"; then
+            emit_full "Unable to compare member manifests with the event base"
+            exit 0
+          fi
+          if [ -n "$dependency_edits" ]; then
+            emit_full "Member dependency declarations changed ($dependency_edits)"
+            exit 0
+          fi
 
           # Cargo.lock has no owning crate. For a lock-only update, select
           # every workspace consumer of an added, removed, version-changed,
@@ -426,7 +450,16 @@ jobs:
           else
             echo "Affected crates: $packages"
           fi
-          components="$(python3 .github/scripts/ci_components.py /tmp/metadata.json --packages "$packages")"
+          # Lanes spanning most of the workspace each rebuild the shared
+          # dependencies; the full sweep runs fewer jobs and tests every crate.
+          components_status=0
+          components="$(python3 .github/scripts/ci_components.py /tmp/metadata.json --packages "$packages" --full-if-most)" || components_status=$?
+          if [ "$components_status" -eq 3 ]; then
+            emit_full "Affected crates span most of the workspace's components"
+            exit 0
+          elif [ "$components_status" -ne 0 ]; then
+            exit "$components_status"
+          fi
           {
             echo "full=false"
             echo "packages=$packages"
@@ -481,7 +514,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(needs.plan.outputs.rust_os) }}
+        os: ${{ fromJSON(needs.plan.outputs.clippy_os) }}
         scope: ${{ fromJson(needs.plan.outputs.components) }}
     runs-on: ${{ matrix.os }}
     steps:
@@ -490,9 +523,9 @@ jobs:
         timeout-minutes: 15
         with:
           components: clippy
-          cache-shared-key: clippy-${{ matrix.scope.component }}-${{ matrix.os }}
+          cache-shared-key: clippy-${{ matrix.os }}
 
-      # rusty_stream is built on io_uring, a Linux-only kernel interface --
+      # rusty_journal is built on io_uring, a Linux-only kernel interface --
       # excluded on windows-latest rather than making its internals
       # cfg-gated portable shims like rusty_win32 does the other way.
       # rusty_fedora_agent gets the same treatment: it shells out to
@@ -514,7 +547,7 @@ jobs:
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ matrix.scope.packages }}
-          windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
+          windows-exclude: rusty_journal rusty_fedora_agent rusty_multimodal_db
           exclude: ${{ env.REMIND_ME_PACKAGES }}
 
       - name: Clippy
@@ -540,8 +573,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
         timeout-minutes: 15
-        with:
-          cache-shared-key: ci-smoke-${{ matrix.os }}
       - run: cargo test --locked -p rusty_baseline
 
   test:
@@ -564,14 +595,14 @@ jobs:
       - uses: ./.github/actions/setup-build-env
         timeout-minutes: 15
         with:
-          cache-shared-key: test-${{ matrix.scope.component }}-${{ matrix.os }}
+          cache-shared-key: test-${{ matrix.os }}
 
       - uses: ./.github/actions/select-packages
         id: scope
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ matrix.scope.packages }}
-          windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
+          windows-exclude: rusty_journal rusty_fedora_agent rusty_multimodal_db
           exclude: ${{ env.REMIND_ME_PACKAGES }}
 
       # mill-term's own tests locate sibling binaries (rush/rgit/rsed/rawk)
@@ -598,7 +629,7 @@ jobs:
 
       - name: Install cargo-nextest
         if: steps.scope.outputs.args != ''
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: nextest
 
@@ -704,7 +735,7 @@ jobs:
       # from the plan job's raw list: only the former has the per-OS
       # exclusions applied. Re-deriving the scope here from
       # `needs.plan.outputs.packages` (or a bare `--doc --workspace`) is
-      # exactly how rusty_stream -- Linux-only, and correctly excluded on
+      # exactly how rusty_journal -- Linux-only, and correctly excluded on
       # windows-latest by every other step in this job -- was still getting
       # compiled by this one step and failing the whole job on Windows.
       # Runs once per OS, not once per shard -- doctests are cheap and
@@ -815,10 +846,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: rusty-term-bench
       - name: Install valgrind
         run: |
           sudo apt-get update
@@ -897,10 +924,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: rusty-tick-e2e
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -947,10 +970,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: rusty-agui-conformance
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -1052,10 +1071,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: rusty-fair-play-e2e
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -1121,10 +1136,6 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: x86_64-pc-windows-gnu
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: win32-cross
       - name: Install mingw-w64
         run: sudo apt-get update && sudo apt-get install -y mingw-w64
       - name: cargo check --target x86_64-pc-windows-gnu (std feature)
@@ -1158,10 +1169,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.os == 'ubuntu-latest' && 'aarch64-unknown-linux-gnu,riscv64gc-unknown-linux-gnu' || '' }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: rand-platforms-${{ matrix.os }}
       - name: cargo test -p rusty_rand (macOS)
         if: matrix.os == 'macos-latest'
         run: cargo test -p rusty_rand
@@ -1213,10 +1220,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: multimodal-db-feature-sets
       - name: cargo clippy -p rusty_multimodal_db (default features)
         run: cargo clippy -p rusty_multimodal_db --all-targets -- -D warnings
       - name: cargo clippy -p rusty_multimodal_db --features client
@@ -1248,8 +1251,7 @@ jobs:
   # `Cargo.toml`'s `rust-version` is only a promise if something builds at
   # it (ADR-0100, from the crate's standalone workflow). Keep the version
   # below equal to `rust-version` in crates/apps/rusty_multimodal_db/Cargo.toml.
-  # `--all-features` pulls DuckDB's amalgamation, so a cold run is long; the
-  # cache is keyed on the rustc version, so this job warms its own.
+  # `--all-features` pulls DuckDB's amalgamation, so a cold run is long.
   multimodal-db-msrv:
     concurrency:
       group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-multimodal-db-msrv
@@ -1270,38 +1272,62 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # 1.89.0
         with:
           toolchain: "1.89.0"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: multimodal-db-msrv
       - name: cargo check on the declared rust-version
         run: cargo check -p rusty_multimodal_db --all-features --all-targets
 
   msrv-compile:
     concurrency:
-      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-msrv-compile
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-msrv-compile-${{ matrix.os }}
       queue: max
       cancel-in-progress: false
     # `check_rust_versions.py` (dependency policy) compares declared
     # rust-versions; this builds. Each workspace crate that declares one is
-    # `cargo check`ed with a rustc of exactly that version (default features),
-    # grouped by floor. Only the affected crates on a PR; every crate on a full
-    # sweep. Floors at the pinned toolchain are covered by the ordinary jobs.
-    # The build output stays under RUNNER_TEMP so it does not bloat the cache.
-    name: compile at declared rust-version
+    # `cargo check`ed with a rustc of exactly that version, grouped by floor:
+    # default features, then `--all-features` for a crate that has any (#844).
+    # Only the affected crates on a PR; every crate on a full sweep. Floors at
+    # the pinned toolchain are covered by the ordinary jobs. The build output
+    # stays under RUNNER_TEMP.
+    #
+    # `--all-features-exclude` lists crates whose declared floor is
+    # deliberately the default build's, with an opt-in feature above it:
+    # platform-linux (`track-p` -> rusty_libc 1.88) and platform-windows
+    # (`track-w` -> rusty_win32 1.88, found by the Windows leg), see their
+    # Cargo.tomls; rusty_json (the optional rusty_json-derive, 1.85), rusty_tls
+    # (`native-crypto` -> rusty_aead/rusty_pk at the pinned toolchain),
+    # rusty_rdp (its README: optional features raise the effective MSRV) and
+    # rusty_tonic (`rusty-tokio` -> rusty_h2 1.88; its README keeps the
+    # library at 1.75). Raising platform-linux, rusty_json or rusty_tls
+    # would also break 7 to 36 dependents' declared floors.
+    #
+    # `--all-features-floor` checks a crate's `--all-features` build at a
+    # stated floor above its declared one rather than skipping it: rusty_axum
+    # (`http2` -> rusty_hyper/rusty_h2 1.88) is checked at 1.87 by default
+    # and at 1.88 with all features; rusty_axum_tokio stays at 1.87.
+    #
+    # Windows (#845) runs on the scheduled and manual sweeps only: a
+    # target-specific dependency can raise a floor there, but that drifts
+    # slowly, and 14 toolchain installs per run would slow every PR. It
+    # leaves out the crates the Windows clippy/test legs leave out. macOS
+    # waits until CI builds the workspace there at all.
+    name: compile at declared rust-version${{ matrix.os != 'ubuntu-latest' && format(' ({0})', matrix.os) || '' }}
     needs: plan
     if: (needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != '') && needs.plan.outputs.linux == 'true'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.plan.outputs.windows == 'true' && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
         timeout-minutes: 15
-        with:
-          cache-shared-key: msrv-compile
       - name: cargo check each crate at its declared rust-version
+        shell: bash
         env:
           PLAN_FULL: ${{ needs.plan.outputs.full }}
           PLAN_PACKAGES: ${{ needs.plan.outputs.packages }}
+          PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
+          OS_EXCLUDE: ${{ runner.os == 'Windows' && 'rusty_journal rusty_fedora_agent' || '' }}
         run: |
           set -euo pipefail
           # Locked: a metadata call that rewrote Cargo.lock would validate a lock nobody committed.
@@ -1310,10 +1336,12 @@ jobs:
           scope=()
           if [ "$PLAN_FULL" != "true" ]; then scope=(--packages "$PLAN_PACKAGES"); fi
           # rusty_multimodal_db has its own msrv job; the remind_me crates have their own jobs.
-          python3 .github/scripts/check_msrv_compile.py "$RUNNER_TEMP/metadata-default.json" \
+          "$PYTHON" .github/scripts/check_msrv_compile.py "$RUNNER_TEMP/metadata-default.json" \
             "${scope[@]}" \
             --skip-from "$RUST_TOOLCHAIN" \
-            --exclude "$REMIND_ME_PACKAGES rusty_multimodal_db" \
+            --exclude "$REMIND_ME_PACKAGES rusty_multimodal_db $OS_EXCLUDE" \
+            --all-features-exclude "platform-linux platform-windows rusty_json rusty_tls rusty_rdp rusty_tonic" \
+            --all-features-floor "rusty_axum=1.88" \
             --target-base "$RUNNER_TEMP/msrv"
           test "$(sha256sum Cargo.lock)" = "$lock_before"
 
@@ -1331,21 +1359,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: rusty-config-no-std
       - name: cargo check -p rusty_config --no-default-features
         run: cargo check -p rusty_config --no-default-features --all-targets
 
-  # The same engine on its first-party backend (ADR-0005): `native-crypto`
-  # with `--cfg rusty_tls_native_crypto`, no `handrolled-engine`. That build
-  # has no direct `ring` dependency, so compiling it is itself the check that
-  # the engine makes no `ring` call. It is client-only coverage, not a second
-  # copy of the job above: the native backend has no server role or signing,
-  # so the suites that need them are `ring`-only (their inner `cfg` says so)
-  # and stay covered there. BoGo runs here client-side only: on this backend
-  # the shim reports server and client-certificate scenarios as unimplemented.
+  # The same engine on its first-party backend (ADR-0005, ADR-0006):
+  # `native-crypto` with `--cfg rusty_tls_native_crypto`, no
+  # `handrolled-engine`. That build has no direct `ring` dependency, so
+  # compiling it is itself the check that the engine makes no `ring` call. It
+  # has the client and server roles, tickets and client certificates, with
+  # ECDSA and Ed25519 signing only: the tests that need an RSA signing key are
+  # skipped on this backend by name (see each suite), and stay covered above.
   rusty-tls-engine-native:
     concurrency:
       group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-tls-engine-native
@@ -1364,10 +1387,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: rusty-tls-engine-native
       # `ring` must not be a direct dependency of this build. If a later change
       # makes `native-crypto` imply `handrolled-engine` (or adds `ring` some
       # other way), the compile-time proof above silently stops being one.
@@ -1393,18 +1412,23 @@ jobs:
       # the same inputs through both backends, byte-identical outputs.
       - name: cargo test -p rusty_tls --features native-crypto
         run: cargo test -p rusty_tls --features native-crypto
-      - name: socket interop against OpenSSL (client direction)
+      # Both directions, as in the ring job: the TLS 1.3 server, the TLS 1.2
+      # client and server, and version negotiation, each against OpenSSL.
+      - name: socket interop against OpenSSL (both directions)
         shell: bash
         run: |
           set -euo pipefail
           openssl version
-          out=$(cargo test -p rusty_tls --features native-crypto \
-            --test handrolled_client12_socket_interop -- --ignored --nocapture --color never)
-          echo "$out"
-          echo "$out" | grep -qE 'test result: ok\. [1-9][0-9]* passed' || {
-            echo "::error::the OpenSSL client interop suite ran no tests"
-            exit 1
-          }
+          for suite in handrolled_socket_interop handrolled_client12_socket_interop \
+            handrolled_server12_socket_interop handrolled_negotiate_socket_interop; do
+            out=$(cargo test -p rusty_tls --features native-crypto \
+              --test "$suite" -- --ignored --nocapture --color never)
+            echo "$out"
+            echo "$out" | grep -qE 'test result: ok\. [1-9][0-9]* passed' || {
+              echo "::error::the $suite suite ran no tests"
+              exit 1
+            }
+          done
       # The zero-tests trap again, with an explicit split: a suite marked
       # `// ring-only suite (ADR-0005)` (its inner cfg excludes the native
       # backend) must compile to zero tests here, and
@@ -1437,8 +1461,8 @@ jobs:
             fi
           done
           echo "native suites: $native, ring-only suites: $ring_only"
-          if [ "$native" -lt 25 ]; then
-            echo "::error::only $native handrolled suites ran on the native backend; expected 25 or more"
+          if [ "$native" -lt 36 ]; then
+            echo "::error::only $native handrolled suites ran on the native backend; expected 36 or more"
             exit 1
           fi
           d=$(cargo test -p rusty_tls --features native-crypto --doc -- --list | grep -c ': test$' || true)
@@ -1447,21 +1471,22 @@ jobs:
             echo "::error::the handrolled doctests did not run -- is RUSTDOCFLAGS set?"
             exit 1
           fi
-      # BoGo against the client role on the first-party backend (ADR-0005
-      # decision 4). The engine has no server or signing here, so the shim
-      # reports those scenarios as unimplemented (exit 89). The floor is set
-      # from the first full run (445 passed at the pinned commit). A shim that
+      # BoGo on the first-party backend, both roles (ADR-0005 decision 4,
+      # ADR-0006). The engine has no RSA signing here, so scenarios whose key is
+      # RSA (BoGo's default server certificate) are refused at load and reported
+      # as unimplemented (exit 89). The floor is set from the first full run
+      # with server scenarios (494 passed at the pinned commit). A shim that
       # skipped everything would also exit 0, which is what the floor catches.
-      # The ring job's BoGo run keeps covering the server role.
-      - name: BoGo, client role (BoringSSL protocol suite)
+      # The ring job's BoGo run keeps covering RSA signing.
+      - name: BoGo, both roles (BoringSSL protocol suite)
         shell: bash
         run: |
           set -euo pipefail
           go version
           NATIVE=1 crates/libs/net/rusty_tls/bogo/run.sh | tee bogo-native.out
           passed=$(sed -nE 's/^BoGo: ([0-9]+) passed.*/\1/p' bogo-native.out)
-          if [ "${passed:-0}" -lt 430 ]; then
-            echo "::error::native BoGo passed only ${passed:-0} tests (expected 430+) -- is the shim skipping everything?"
+          if [ "${passed:-0}" -lt 480 ]; then
+            echo "::error::native BoGo passed only ${passed:-0} tests (expected 480+) -- is the shim skipping everything?"
             exit 1
           fi
       - name: x509-limbo certificate differential
@@ -1470,6 +1495,19 @@ jobs:
           bash .github/scripts/limbo_differential.sh
           cargo test -p rusty_tls --features native-crypto
           --test handrolled_limbo -- --ignored --nocapture --color never
+      # Tier 1 item 1 on the native backend (ADR-0002 Amendment 2): the same live
+      # check as the ring job, against the named consumer's hosts, with the
+      # rustls differential. The 10 consecutive scheduled runs are counted here.
+      - name: live internet (non-blocking)
+        continue-on-error: true
+        shell: bash
+        env:
+          LIVE_BACKEND: native
+        # Through the same tested script as the ring job; see its comment.
+        run: >-
+          bash .github/scripts/live_internet_check.sh
+          cargo test -p rusty_tls --features native-crypto
+          --test handrolled_live -- --ignored --nocapture --color never
 
   # The hand-rolled TLS engine (rusty_tls#25) compiles only with the cargo
   # feature `handrolled-engine` AND `--cfg rusty_tls_handrolled`
@@ -1499,10 +1537,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: rusty-tls-engine
       - name: cargo clippy -p rusty_tls --features handrolled-engine
         run: cargo clippy -p rusty_tls --all-targets --features handrolled-engine -- -D warnings
       - name: cargo test -p rusty_tls --features handrolled-engine
@@ -1616,6 +1650,8 @@ jobs:
       - name: live internet (non-blocking)
         continue-on-error: true
         shell: bash
+        env:
+          LIVE_BACKEND: ring
         # The script always prints and summarises the output, even when cargo
         # fails (a bare command substitution under `set -e` would lose it), and
         # fails the step on a failure or a zero-test run. It is tested offline
@@ -1660,14 +1696,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.FUZZ_TOOLCHAIN }}
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-fuzz@0.13.2
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: rusty-tls-fuzz
-          workspaces: crates/libs/net/rusty_tls/fuzz
       - name: fuzz smoke (30 s per target)
         env:
           # The installed cargo-fuzz is a musl binary and would otherwise build
@@ -1702,10 +1733,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: rleval-viewer-gl-smoke
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -1713,11 +1740,22 @@ jobs:
           cache-dependency-path: crates/apps/rocket_league/crates/replay-viewer/tests/package-lock.json
       - name: Generate offline viewer
         run: cargo run -q -p replay-viewer -- crates/apps/rocket_league/rleval/assets/replays/42f2.replay --offline --hz 15 --html "$RUNNER_TEMP/viewer.html"
+      - name: Input strip helpers
+        run: node crates/apps/rocket_league/crates/replay-viewer/tests/input_strip.mjs
       - name: Install puppeteer
         working-directory: crates/apps/rocket_league/crates/replay-viewer/tests
         run: npm ci --no-audit --no-fund
       - name: Headless-GL smoke test
         run: node crates/apps/rocket_league/crates/replay-viewer/tests/gl_smoke.mjs "$RUNNER_TEMP/viewer.html"
+      # ADR-0085: the same page built from a capture, with the port's run as ghosts.
+      - name: Generate capture viewer with a sim run
+        env:
+          CAPTURE: crates/apps/rocket_league/crates/rb_capture_ingest/fixtures/human/clean-dodge.capture.jsonl
+        run: |
+          cargo run -q -p rb_verify_cli --bin rb-verify -- --self "$CAPTURE" --write-candidate "$RUNNER_TEMP/candidate.jsonl"
+          cargo run -q -p replay-viewer -- "$CAPTURE" --sim "$RUNNER_TEMP/candidate.jsonl" --offline --html "$RUNNER_TEMP/capture.html"
+      - name: Headless-GL smoke test (capture)
+        run: node crates/apps/rocket_league/crates/replay-viewer/tests/gl_smoke.mjs "$RUNNER_TEMP/capture.html"
 
   # Every other Rust job passes --all-features, which hides a broken default or
   # single-feature build of rleval-app: its default build is the token-only
@@ -1738,10 +1776,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: rleval-app-feature-sets
       - name: cargo clippy -p rleval-app (default features)
         run: cargo clippy -p rleval-app --all-targets -- -D warnings
       - name: cargo clippy -p rleval-app --features mmdb
@@ -1750,6 +1784,46 @@ jobs:
         run: cargo clippy -p rleval-app --all-targets --features oidc -- -D warnings
       - name: cargo test -p rleval-app (default features)
         run: cargo test -p rleval-app
+
+  # The rleval Python service (crates/apps/rocket_league/rleval/service): its pytest suite with
+  # the dev extra, which pulls in the queue, S3 (moto), migration and crypto backends.
+  rleval-service:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rleval-service
+      queue: max
+      cancel-in-progress: false
+    name: rleval service (pytest)
+    needs: plan
+    if: needs.plan.outputs.rleval_service == 'true' && needs.plan.outputs.linux == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/apps/rocket_league/rleval/service
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install into a venv
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet -e ".[dev]"
+      - name: pytest
+        run: '"$RUNNER_TEMP/venv/bin/python" -m pytest -q'
+
+  # The rleval service image, built from the monorepo root as compose builds it.
+  rleval-image:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rleval-image
+      queue: max
+      cancel-in-progress: false
+    name: rleval service image (docker build)
+    needs: plan
+    if: needs.plan.outputs.rleval_image == 'true' && needs.plan.outputs.linux == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: docker build
+        run: docker build -f crates/apps/rocket_league/rleval/Dockerfile -t rleval-ci .
+      - name: The image bundles the scorer and imports the API
+        run: docker run --rm rleval-ci sh -c 'test -x "$RLS_WORKER_BIN" && python -c "import app.main"'
 
   # ---------------------------------------------------------------------------
   # rusty_remind_me (crates/apps/rusty_remind_me). Ported from that product's
@@ -1777,10 +1851,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: remind-me
       - name: cargo build
         run: cargo build --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub
       - name: cargo test
@@ -1828,10 +1898,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: remind-me-feature-${{ matrix.feature }}
       - name: Install system packages this feature needs
         if: matrix.apt
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
@@ -1861,10 +1927,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: remind-me-combined
       - name: cargo build --features ann,ocr,rerank,local-embed,pdf
         run: cargo build --locked -p remind_me_core --features ann,ocr,rerank,local-embed,pdf
       - name: cargo test --features ann,ocr,rerank,local-embed,pdf
@@ -1908,10 +1970,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: remind-me-hub
       - name: cargo clippy -p remind_me_hub --no-default-features
         run: cargo clippy --locked -p remind_me_hub --no-default-features --all-targets -- -D warnings
       - name: cargo test -p remind_me_hub --no-default-features
@@ -1948,10 +2006,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: remind-me-legacy-import
       - name: Lint the recovery feature and binaries
         run: cargo clippy --locked -p remind_me_hub --no-default-features --features postgres-import --all-targets -- -D warnings
       - name: Test legacy Postgres recovery against a disposable server
@@ -1980,10 +2034,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: remind-me-windows
       - name: cargo build
         run: cargo build --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub
       - name: cargo test
@@ -2019,10 +2069,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: crypto-constant-time
       - name: Install valgrind
         run: |
           sudo apt-get update
@@ -2072,10 +2118,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-          shared-key: orch-bbp-acceptance
       - name: Build real host and Orch binaries and acceptance tests
         run: |
           cargo build --locked -p rusty_orch -p rusty_bbp_host -p rusty_mill_board
@@ -2150,6 +2192,8 @@ jobs:
       - rusty-rand-platforms
       - rleval-viewer-gl-smoke
       - rleval-app-feature-sets
+      - rleval-service
+      - rleval-image
       - remind-me
       - remind-me-features
       - remind-me-combined-features

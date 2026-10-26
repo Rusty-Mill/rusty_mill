@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::http::map_reqwest_error;
-use crate::util::{effort_thinking_budget, gen_id, now};
+use crate::util::{chat_stream, effort_thinking_budget, gen_id, now};
 
 pub struct GeminiProvider {
     base_url: String,
@@ -685,7 +685,7 @@ impl Provider for GeminiProvider {
             }
         });
 
-        Ok(Box::pin(stream))
+        Ok(chat_stream(stream))
     }
 
     /// Uses `batchEmbedContents` unconditionally, even for a single input

@@ -19,6 +19,10 @@ default = []
 # `http`: the Streamable HTTP transport on `rusty_serve`. Off by default so a
 # stdio-only server pulls in no HTTP stack.
 http = ["dep:rusty_serve", "dep:rusty_http"]
+# `rusty-axum`: `mount::Mount`, the Streamable HTTP handler inside a
+# `rusty_axum` app (replacing `rusty_mcp_axum`, #875). Off by default: it
+# brings the async server stack (`rusty_axum`, `rusty_tokio`, `rusty_tls`).
+rusty-axum = ["http", "dep:rusty_axum", "dep:rusty_tokio"]
 # `request-state`: seal the `requestState` of multi-round-trip input with an
 # HMAC, so a client cannot forge or alter what it echoes back.
 request-state = ["dep:rusty_oauth", "dep:rusty_crypto_key"]
@@ -34,14 +38,20 @@ rusty_serve = { workspace = true, optional = true }
 rusty_http = { workspace = true, optional = true }
 rusty_oauth = { workspace = true, optional = true }
 rusty_crypto_key = { workspace = true, optional = true }
+rusty_axum = { workspace = true, optional = true }
+rusty_tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Interop oracle only (never shipped): the `rmcp` client, which the MCP crates
 # use today, drives this server over real stdio in `tests/interop.rs`.
 rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "reqwest"] }
+# Only the `rmcp` interop tests (`interop`, `http_interop`): `rmcp` and its child-process
+# transport run on tokio. The library itself is on `rusty_tokio` (#906).
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "process", "time"] }
 serde = "1"
 serde_json = "1"
+# The first-party client, for the `rusty-axum` mount's socket tests.
+rusty_mcp_client_native = { workspace = true, features = ["http"] }
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -57,3 +67,7 @@ required-features = ["http"]
 [[test]]
 name = "http_interop"
 required-features = ["http"]
+
+[[test]]
+name = "mount"
+required-features = ["rusty-axum"]

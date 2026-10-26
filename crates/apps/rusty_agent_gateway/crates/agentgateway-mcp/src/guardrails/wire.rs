@@ -1,235 +1,215 @@
 //! The `agentgateway.dev.ext_mcp` protocol.
 //!
-//! These messages are written by hand rather than generated. `tonic-build`
-//! wants `protoc` on the machine doing the build, and making everyone who
-//! compiles this gateway install a protobuf compiler to get eight small
-//! messages is a poor trade. The schema is in `proto/ext_mcp.proto` next to
-//! this crate, copied from upstream unchanged, and every field number below is
-//! written next to the field it belongs to.
+//! These messages are written as tables on `rusty_prost` rather than generated:
+//! `tonic-build` wants `protoc` on the machine doing the build, and making
+//! everyone who compiles this gateway install a protobuf compiler to get eight
+//! small messages is a poor trade. The schema is in `proto/ext_mcp.proto` next
+//! to this crate, copied from upstream unchanged, and every field number below
+//! is written next to the field it belongs to.
 //!
 //! Field numbers are the wire contract: renaming a field here is free, but
 //! changing a number silently talks to a different field on the other end.
-//! [`tests`] pins the encoding against bytes rather than against these
-//! declarations, so a typo fails a test rather than a deployment.
+//! `tests/wire_vectors.rs` pins the encoding against bytes produced by Google's
+//! protobuf runtime from the `.proto`, so a typo fails a test rather than a
+//! deployment.
 
-use prost::Message;
+use rusty_prost::wkt::{Struct, Value};
+use rusty_prost::{message, oneof, open_enum};
 
-/// The gateway asking whether a call may proceed.
-#[derive(Clone, PartialEq, Message)]
-pub struct McpRequest {
-    /// Backends this call targets, in their own namespace.
-    #[prost(string, repeated, tag = "1")]
-    pub service_names: Vec<String>,
-    /// The JSON-RPC method.
-    #[prost(string, tag = "2")]
-    pub method: String,
-    /// CEL-evaluated context from the gateway's config.
-    #[prost(message, optional, tag = "3")]
-    pub metadata_context: Option<prost_types::Struct>,
-    /// JSON-RPC `params` as raw JSON, absent when the method has none.
-    #[prost(bytes = "vec", optional, tag = "4")]
-    pub mcp_request: Option<Vec<u8>>,
-    /// Request headers, after filtering. One entry per value.
-    #[prost(message, repeated, tag = "5")]
-    pub headers: Vec<McpHeader>,
+message! {
+    /// The gateway asking whether a call may proceed.
+    McpRequest {
+        // Backends this call targets, in their own namespace.
+        1 service_names: Vec<String> = rep_string,
+        // The JSON-RPC method.
+        2 method: String = string,
+        // CEL-evaluated context from the gateway's config.
+        3 metadata_context: Option<Struct> = msg,
+        // JSON-RPC `params` as raw JSON, absent when the method has none.
+        4 mcp_request: Option<Vec<u8>> = opt_bytes,
+        // Request headers, after filtering. One entry per value.
+        5 headers: Vec<McpHeader> = rep_msg,
+    }
 }
 
-/// The gateway asking whether a result may be returned.
-#[derive(Clone, PartialEq, Message)]
-pub struct McpResponse {
-    /// Backends this call targeted.
-    #[prost(string, repeated, tag = "1")]
-    pub service_names: Vec<String>,
-    /// The JSON-RPC method.
-    #[prost(string, tag = "2")]
-    pub method: String,
-    /// CEL-evaluated context from the gateway's config.
-    #[prost(message, optional, tag = "3")]
-    pub metadata_context: Option<prost_types::Struct>,
-    /// The upstream's JSON-RPC `result` as raw JSON. Errors skip this hook.
-    #[prost(bytes = "vec", tag = "4")]
-    pub mcp_response: Vec<u8>,
+message! {
+    /// The gateway asking whether a result may be returned.
+    McpResponse {
+        // Backends this call targeted.
+        1 service_names: Vec<String> = rep_string,
+        // The JSON-RPC method.
+        2 method: String = string,
+        // CEL-evaluated context from the gateway's config.
+        3 metadata_context: Option<Struct> = msg,
+        // The upstream's JSON-RPC `result` as raw JSON. Errors skip this hook.
+        4 mcp_response: Vec<u8> = bytes,
+    }
 }
 
-/// What the processor decided about a request.
-#[derive(Clone, PartialEq, Message)]
-pub struct McpRequestResult {
-    /// Pass, a replacement body, or a refusal.
-    #[prost(oneof = "request_result::Result", tags = "1, 2, 3")]
-    pub result: Option<request_result::Result>,
-    /// Changes to the HTTP request carrying this call. Ignored on a refusal.
-    #[prost(message, optional, tag = "4")]
-    pub header_mutation: Option<HeaderMutation>,
-    /// Values stashed for later filters. Ignored on a refusal.
-    #[prost(message, optional, tag = "5")]
-    pub metadata: Option<prost_types::Struct>,
+message! {
+    /// What the processor decided about a request.
+    McpRequestResult {
+        // Pass, a replacement body, or a refusal.
+        oneof result: request_result::Result;
+        // Changes to the HTTP request carrying this call. Ignored on a refusal.
+        4 header_mutation: Option<HeaderMutation> = msg,
+        // Values stashed for later filters. Ignored on a refusal.
+        5 metadata: Option<Struct> = msg,
+    }
 }
 
 /// The `McpRequestResult.result` oneof.
 pub mod request_result {
-    /// Which of the three answers the processor gave.
-    #[derive(Clone, PartialEq, prost::Oneof)]
-    pub enum Result {
-        /// Proceed unchanged.
-        #[prost(message, tag = "1")]
-        Pass(super::Pass),
-        /// Proceed with these JSON-RPC `params` instead.
-        #[prost(bytes = "vec", tag = "2")]
-        Mutated(Vec<u8>),
-        /// Refuse.
-        #[prost(message, tag = "3")]
-        Error(super::AuthorizationError),
+    use super::*;
+
+    oneof! {
+        /// Which of the three answers the processor gave.
+        Result {
+            // Proceed unchanged.
+            1 Pass(Pass) = msg,
+            // Proceed with these JSON-RPC `params` instead.
+            2 Mutated(Vec<u8>) = bytes,
+            // Refuse.
+            3 Error(AuthorizationError) = msg,
+        }
     }
 }
 
-/// What the processor decided about a result.
-#[derive(Clone, PartialEq, Message)]
-pub struct McpResponseResult {
-    /// Pass, a replacement result, or a refusal.
-    #[prost(oneof = "response_result::Result", tags = "1, 2, 3")]
-    pub result: Option<response_result::Result>,
+message! {
+    /// What the processor decided about a result.
+    McpResponseResult {
+        // Pass, a replacement result, or a refusal.
+        oneof result: response_result::Result;
+    }
 }
 
 /// The `McpResponseResult.result` oneof.
 pub mod response_result {
-    /// Which of the three answers the processor gave.
-    #[derive(Clone, PartialEq, prost::Oneof)]
-    pub enum Result {
-        /// Return the result unchanged.
-        #[prost(message, tag = "1")]
-        Pass(super::Pass),
-        /// Return this JSON-RPC `result` instead.
-        #[prost(bytes = "vec", tag = "2")]
-        Mutated(Vec<u8>),
-        /// Refuse.
-        #[prost(message, tag = "3")]
-        Error(super::AuthorizationError),
+    use super::*;
+
+    oneof! {
+        /// Which of the three answers the processor gave.
+        Result {
+            // Return the result unchanged.
+            1 Pass(Pass) = msg,
+            // Return this JSON-RPC `result` instead.
+            2 Mutated(Vec<u8>) = bytes,
+            // Refuse.
+            3 Error(AuthorizationError) = msg,
+        }
     }
 }
 
-/// Changes to the HTTP request carrying an MCP call.
-#[derive(Clone, PartialEq, Message)]
-pub struct HeaderMutation {
-    /// Headers to overwrite, inserting when absent.
-    #[prost(message, repeated, tag = "1")]
-    pub set: Vec<McpHeader>,
-    /// Header names to remove, matched case-insensitively.
-    #[prost(string, repeated, tag = "2")]
-    pub remove: Vec<String>,
+message! {
+    /// Changes to the HTTP request carrying an MCP call.
+    HeaderMutation {
+        // Headers to overwrite, inserting when absent.
+        1 set: Vec<McpHeader> = rep_msg,
+        // Header names to remove, matched case-insensitively.
+        2 remove: Vec<String> = rep_string,
+    }
 }
 
-/// One header. The value is bytes: HTTP header values need not be UTF-8.
-#[derive(Clone, PartialEq, Message)]
-pub struct McpHeader {
-    /// Header name.
-    #[prost(string, tag = "1")]
-    pub key: String,
-    /// Raw value bytes.
-    #[prost(bytes = "vec", tag = "2")]
-    pub value: Vec<u8>,
+message! {
+    /// One header. The value is bytes: HTTP header values need not be UTF-8.
+    McpHeader {
+        // Header name.
+        1 key: String = string,
+        // Raw value bytes.
+        2 value: Vec<u8> = bytes,
+    }
 }
 
-/// "Proceed." Empty by design; the variant carries the meaning.
-#[derive(Clone, Copy, PartialEq, Eq, Message)]
-pub struct Pass {}
+message! {
+    /// "Proceed." Empty by design; the variant carries the meaning.
+    Pass {}
+}
 
-/// A refusal.
-#[derive(Clone, PartialEq, Message)]
-pub struct AuthorizationError {
-    /// One of [`authorization_error::Code`].
-    #[prost(enumeration = "authorization_error::Code", tag = "1")]
-    pub code: i32,
-    /// Human-readable reason, returned to the caller.
-    #[prost(string, tag = "2")]
-    pub reason: String,
-    /// An explicit JSON-RPC error payload, overriding the code's default.
-    #[prost(bytes = "vec", optional, tag = "3")]
-    pub mcp_error: Option<Vec<u8>>,
+message! {
+    /// A refusal.
+    AuthorizationError {
+        // One of [`authorization_error::Code`].
+        1 code: i32 = enumv,
+        // Human-readable reason, returned to the caller.
+        2 reason: String = string,
+        // An explicit JSON-RPC error payload, overriding the code's default.
+        3 mcp_error: Option<Vec<u8>> = opt_bytes,
+    }
 }
 
 /// The `AuthorizationError` enums.
 pub mod authorization_error {
-    /// Why the processor refused.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, prost::Enumeration)]
-    #[repr(i32)]
-    pub enum Code {
-        /// Unspecified.
-        Unknown = 0,
-        /// The caller may not do this.
-        PermissionDenied = 1,
-        /// A quota is spent.
-        ResourceExhausted = 2,
-        /// The call itself is malformed.
-        Invalid = 3,
+    use super::*;
+
+    open_enum! {
+        /// Why the processor refused.
+        Code {
+            // Unspecified.
+            Unknown = 0: "UNKNOWN",
+            // The caller may not do this.
+            PermissionDenied = 1: "PERMISSION_DENIED",
+            // A quota is spent.
+            ResourceExhausted = 2: "RESOURCE_EXHAUSTED",
+            // The call itself is malformed.
+            Invalid = 3: "INVALID",
+        }
     }
 }
 
-/// The `ExtMcp` service, as a `tonic` client.
+/// The `ExtMcp` service, as a `rusty_tonic` client.
 ///
 /// Written out rather than generated for the same reason as the messages. Both
-/// methods are unary, so the whole client is two calls over one codec.
+/// methods are unary, so the whole client is two calls over one channel.
 pub mod client {
-    use tonic::client::GrpcService;
-    use tonic::codegen::{Body, Bytes, StdError};
+    use rusty_prost::Message;
+    use rusty_tonic::Status;
+    use rusty_tonic::bridge::spawn;
+    use rusty_tonic::client::{Channel, Request};
 
     use super::{McpRequest, McpRequestResult, McpResponse, McpResponseResult};
 
     /// A client for `agentgateway.dev.ext_mcp.ExtMcp`.
-    #[derive(Debug, Clone)]
-    pub struct ExtMcpClient<T> {
-        inner: tonic::client::Grpc<T>,
+    #[derive(Clone)]
+    pub struct ExtMcpClient {
+        channel: Channel,
     }
 
-    impl<T> ExtMcpClient<T>
-    where
-        T: GrpcService<tonic::body::Body>,
-        T::Error: Into<StdError>,
-        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
-        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
-    {
-        /// Wrap a transport.
-        pub fn new(inner: T) -> Self {
-            ExtMcpClient {
-                inner: tonic::client::Grpc::new(inner),
-            }
+    impl ExtMcpClient {
+        /// Wrap a channel.
+        pub fn new(channel: Channel) -> Self {
+            ExtMcpClient { channel }
         }
 
         /// `ExtMcp/CheckRequest`.
-        pub async fn check_request(
-            &mut self,
-            request: McpRequest,
-        ) -> Result<McpRequestResult, tonic::Status> {
+        pub async fn check_request(&self, request: McpRequest) -> Result<McpRequestResult, Status> {
             self.unary(request, "/agentgateway.dev.ext_mcp.ExtMcp/CheckRequest")
                 .await
         }
 
         /// `ExtMcp/CheckResponse`.
         pub async fn check_response(
-            &mut self,
+            &self,
             request: McpResponse,
-        ) -> Result<McpResponseResult, tonic::Status> {
+        ) -> Result<McpResponseResult, Status> {
             self.unary(request, "/agentgateway.dev.ext_mcp.ExtMcp/CheckResponse")
                 .await
         }
 
-        async fn unary<Req, Res>(
-            &mut self,
-            request: Req,
-            path: &'static str,
-        ) -> Result<Res, tonic::Status>
+        /// One call, made on the transport's runtime (this one is `tokio`) and cancelled on the
+        /// wire if the caller drops it.
+        async fn unary<Req, Res>(&self, request: Req, path: &'static str) -> Result<Res, Status>
         where
-            Req: prost::Message + 'static,
-            Res: prost::Message + Default + 'static,
+            Req: Message + Send + 'static,
+            Res: Message + Send + 'static,
         {
-            self.inner.ready().await.map_err(|err| {
-                tonic::Status::unavailable(format!("the processor is not ready: {}", err.into()))
-            })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(path);
-            self.inner
-                .unary(tonic::Request::new(request), path, codec)
-                .await
-                .map(|response| response.into_inner())
+            let channel = self.channel.clone();
+            spawn(async move {
+                channel
+                    .unary::<Req, Res>(path, Request::new(request))
+                    .await
+                    .map(|reply| reply.message)
+            })?
+            .await?
         }
     }
 }
@@ -277,89 +257,63 @@ pub fn cel_to_json(value: cel::Value) -> Option<serde_json::Value> {
 /// Convert a protobuf `Struct` field value back into JSON.
 ///
 /// The inverse of [`to_proto_value`], for reading what a processor sent.
-/// `None` when the value carries no kind at all, which a well-formed encoder
-/// never produces but a hand-rolled one might.
-pub fn proto_to_json(value: prost_types::Value) -> Option<serde_json::Value> {
-    use prost_types::value::Kind;
-    Some(match value.kind? {
-        Kind::NullValue(_) => serde_json::Value::Null,
-        Kind::BoolValue(b) => serde_json::Value::Bool(b),
-        Kind::NumberValue(n) => serde_json::Number::from_f64(n)
+pub fn proto_to_json(value: Value) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(b),
+        Value::Number(n) => serde_json::Number::from_f64(n)
             .map(serde_json::Value::Number)
             // NaN and the infinities have no JSON form. Rendering them as text
             // keeps the key rather than dropping the processor's answer.
             .unwrap_or_else(|| serde_json::Value::String(n.to_string())),
-        Kind::StringValue(s) => serde_json::Value::String(s),
-        Kind::ListValue(list) => {
-            serde_json::Value::Array(list.values.into_iter().filter_map(proto_to_json).collect())
+        Value::String(s) => serde_json::Value::String(s),
+        Value::List(values) => {
+            serde_json::Value::Array(values.into_iter().map(proto_to_json).collect())
         }
-        Kind::StructValue(structure) => serde_json::Value::Object(
+        Value::Struct(structure) => serde_json::Value::Object(
             structure
                 .fields
                 .into_iter()
-                .filter_map(|(k, v)| proto_to_json(v).map(|v| (k, v)))
+                .map(|(k, v)| (k, proto_to_json(v)))
                 .collect(),
         ),
-    })
+    }
 }
 
 /// Convert a JSON value into the protobuf `Struct` field type.
 ///
-/// `prost_types::Value` has no `From<serde_json::Value>`, and the mapping is
-/// the obvious one — but numbers are worth a note: protobuf's `number_value`
-/// is a `double`, so a `u64` beyond 2^53 loses precision here. JSON says the
-/// same thing about its own numbers, so nothing is lost that survived being
-/// JSON in the first place.
-pub fn to_proto_value(value: serde_json::Value) -> prost_types::Value {
-    use prost_types::value::Kind;
-    let kind = match value {
-        serde_json::Value::Null => Kind::NullValue(0),
-        serde_json::Value::Bool(b) => Kind::BoolValue(b),
-        serde_json::Value::Number(n) => Kind::NumberValue(n.as_f64().unwrap_or(f64::NAN)),
-        serde_json::Value::String(s) => Kind::StringValue(s),
-        serde_json::Value::Array(values) => Kind::ListValue(prost_types::ListValue {
-            values: values.into_iter().map(to_proto_value).collect(),
-        }),
-        serde_json::Value::Object(map) => Kind::StructValue(prost_types::Struct {
+/// Numbers are worth a note: protobuf's `number_value` is a `double`, so a
+/// `u64` beyond 2^53 loses precision here. JSON says the same thing about its
+/// own numbers, so nothing is lost that survived being JSON in the first place.
+pub fn to_proto_value(value: serde_json::Value) -> Value {
+    match value {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(b),
+        serde_json::Value::Number(n) => Value::Number(n.as_f64().unwrap_or(f64::NAN)),
+        serde_json::Value::String(s) => Value::String(s),
+        serde_json::Value::Array(values) => {
+            Value::List(values.into_iter().map(to_proto_value).collect())
+        }
+        serde_json::Value::Object(map) => Value::Struct(Struct {
             fields: map
                 .into_iter()
                 .map(|(k, v)| (k, to_proto_value(v)))
                 .collect(),
         }),
-    };
-    prost_types::Value { kind: Some(kind) }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Field numbers pinned against bytes rather than against the declarations
-    /// above, so a mistyped tag fails here instead of on the wire.
-    ///
-    /// A protobuf field is `(number << 3) | wire_type`. Length-delimited is
-    /// wire type 2, so `McpRequest.method` at field 2 is byte `0x12`.
-    #[test]
-    fn field_numbers_match_the_schema() {
-        let encoded = McpRequest {
-            service_names: vec!["alpha".into()],
-            method: "tools/call".into(),
-            ..Default::default()
-        }
-        .encode_to_vec();
-
-        assert_eq!(encoded[0], 0x0a, "service_names is field 1");
-        assert_eq!(&encoded[2..7], b"alpha");
-        assert_eq!(encoded[7], 0x12, "method is field 2");
-        assert_eq!(&encoded[9..19], b"tools/call");
-    }
+    use rusty_prost::Message;
 
     #[test]
     fn a_request_round_trips() {
         let request = McpRequest {
             service_names: vec!["alpha".into(), "beta".into()],
             method: "tools/call".into(),
-            metadata_context: Some(prost_types::Struct {
+            metadata_context: Some(Struct {
                 fields: [("tenant".to_string(), to_proto_value("acme".into()))].into(),
             }),
             mcp_request: Some(br#"{"name":"echo"}"#.to_vec()),
@@ -369,8 +323,8 @@ mod tests {
             }],
         };
 
-        let decoded =
-            McpRequest::decode(request.encode_to_vec().as_slice()).expect("should decode");
+        let decoded = McpRequest::decode(&request.encode_to_vec().expect("should encode"))
+            .expect("should decode");
         assert_eq!(decoded, request);
     }
 
@@ -378,27 +332,17 @@ mod tests {
     fn an_absent_body_is_distinguishable_from_an_empty_one() {
         // `mcp_request` is `optional`, and the difference carries meaning: a
         // method with no params is not a method whose params are `{}`.
-        let absent = McpRequest::decode(
-            McpRequest {
-                mcp_request: None,
+        let round = |mcp_request| {
+            let request = McpRequest {
+                mcp_request,
                 ..Default::default()
-            }
-            .encode_to_vec()
-            .as_slice(),
-        )
-        .expect("should decode");
-        assert_eq!(absent.mcp_request, None);
-
-        let empty = McpRequest::decode(
-            McpRequest {
-                mcp_request: Some(Vec::new()),
-                ..Default::default()
-            }
-            .encode_to_vec()
-            .as_slice(),
-        )
-        .expect("should decode");
-        assert_eq!(empty.mcp_request, Some(Vec::new()));
+            };
+            McpRequest::decode(&request.encode_to_vec().expect("should encode"))
+                .expect("should decode")
+                .mcp_request
+        };
+        assert_eq!(round(None), None);
+        assert_eq!(round(Some(Vec::new())), Some(Vec::new()));
     }
 
     #[test]
@@ -416,40 +360,31 @@ mod tests {
                 result: Some(result.clone()),
                 ..Default::default()
             };
-            let decoded = McpRequestResult::decode(message.encode_to_vec().as_slice())
-                .expect("should decode");
+            let decoded =
+                McpRequestResult::decode(&message.encode_to_vec().expect("should encode"))
+                    .expect("should decode");
             assert_eq!(decoded.result, Some(result));
         }
     }
 
     #[test]
     fn json_maps_onto_the_struct_type() {
-        use prost_types::value::Kind;
         let value = to_proto_value(serde_json::json!({
             "s": "text", "n": 1.5, "b": true, "z": null, "l": [1, 2],
         }));
-        let Some(Kind::StructValue(structure)) = value.kind else {
+        let Value::Struct(structure) = value else {
             panic!("an object should map to a struct");
         };
-        assert!(matches!(
-            structure.fields["s"].kind,
-            Some(Kind::StringValue(_))
-        ));
-        assert!(matches!(
-            structure.fields["n"].kind,
-            Some(Kind::NumberValue(_))
-        ));
-        assert!(matches!(
-            structure.fields["b"].kind,
-            Some(Kind::BoolValue(true))
-        ));
-        assert!(matches!(
-            structure.fields["z"].kind,
-            Some(Kind::NullValue(_))
-        ));
-        assert!(matches!(
-            structure.fields["l"].kind,
-            Some(Kind::ListValue(_))
-        ));
+        assert!(matches!(structure.fields["s"], Value::String(_)));
+        assert!(matches!(structure.fields["n"], Value::Number(_)));
+        assert!(matches!(structure.fields["b"], Value::Bool(true)));
+        assert!(matches!(structure.fields["z"], Value::Null));
+        assert!(matches!(structure.fields["l"], Value::List(_)));
+    }
+
+    #[test]
+    fn json_survives_a_trip_through_the_struct_type() {
+        let json = serde_json::json!({"a": [1.5, "x", null, {"b": true}], "c": "d"});
+        assert_eq!(proto_to_json(to_proto_value(json.clone())), json);
     }
 }

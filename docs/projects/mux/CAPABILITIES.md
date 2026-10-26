@@ -23,26 +23,26 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 
 | Id | Capability | Phase | Owning crate | Status | Evidence |
 |---|---|---|---|---|---|
-| C01 | Persistent sessions (outlive clients) | 1 | `rusty_mux_server` | not-started | |
-| C02 | Multi-client attach, independent viewports | 1 | `rusty_mux_server` | not-started | |
-| C03 | Snapshot + ready + background history | 1 | `rusty_mux_server`, `rusty_term_core` | not-started | needs the snapshot serializer |
-| C04 | CLI automation (`--json`, stable exit codes) | 2 | `rusty_mux_ctl` | not-started | |
-| C05 | Resumable event stream | 2 | `rusty_mux_proto`, `rusty_mux_server` | not-started | |
-| C06 | Per-resource (block) methods | 2 | `rusty_mux_server` | not-started | |
+| C01 | Persistent sessions (outlive clients) | 1 | `rusty_mux_server` | in-progress | blocks and their PTYs outlive client connections; the server is not yet a daemon |
+| C02 | Multi-client attach, independent viewports | 1 | `rusty_mux_server` | in-progress | `server/tests/phase1.rs`: two clients converge on one PTY; viewports are client-side |
+| C03 | Snapshot + ready + background history | 1 | `rusty_mux_server`, `rusty_term_core` | in-progress | negotiated RTCP v3 (run-encoded, 0.64 MB at 200x50 + 10k history) checkpoint chunks then ready then raw output; normal 10,000-row history, no lifetime-output cutoff (see [REPLAY.md](REPLAY.md)); reattach test in `server/tests/phase1.rs`; newest-first history streaming not started |
+| C04 | CLI automation (`--json`, stable exit codes) | 2 | `rusty_mux_ctl` | in-progress | `rusty-mux-ctl`, `ctl/tests/ctl.rs`; exit codes as Rex (0/1/2/3 target/4 unreachable/130); targets by id, name, position, id suffix or path (`ctl/src/target.rs`); ids default from `$RUSTY_MUX_SESSION`/`WINDOW`/`BLOCK` |
+| C05 | Resumable event stream | 2 | `rusty_mux_proto`, `rusty_mux_server` | in-progress | `Features::EVENT_SEQ`, `server/tests/events.rs` |
+| C06 | Per-resource (block) methods | 2 | `rusty_mux_server` | in-progress | methods of a block type (`terminal.format`, `terminal.pwd`, `terminal.title`) through one generic `BlockCall`, checked against the catalog; also `input`, `resize`, `close-block` by block id; discovery with `list`; `server/tests/inspect.rs` |
 | C07 | Agent / MCP integration | 2 | `rusty_mux_mcp` on `rusty_mcp_server` | not-started | |
 | C08 | Command palette + directory browse | 4 | `rusty_mux` clients | not-started | |
 | C09 | Self-hosted, no account, no telemetry | 1 | all | not-started | |
 | C10 | Native scrollback and selection | 1 | `rusty_term_core`, `rusty_mux_tui` | in-progress | engine rows above |
-| C11 | Session model (session/window/block/client) | 1 | `rusty_mux_core` | not-started | |
+| C11 | Session model (session/window/block/client) | 1 | `rusty_mux_core` | in-progress | model, single-writer input lease and event queue in `crates/apps/rusty_mux/crates/core`; the server wires it to PTYs |
 | C12 | Tabs and splits, client-native | 4 | `rusty_mux` clients | not-started | |
 | C13 | Mosh-like feel (roaming, predictive echo) | 3 | `rusty_mux_transport` | not-started | spike 4 |
 | C14 | Live sharing | 3 | `rusty_mux_auth`, `rusty_mux_server` | not-started | |
 | C15 | Web client | 4 | `rusty_mux` web client | not-started | |
 | C16 | Client matrix (TUI, web, native) | 4 | `rusty_mux` clients | not-started | |
-| C17 | Self-describing API (schema-first) | 2 | `rusty_mux_proto` | not-started | |
-| C18 | Screen capture | 2 | `rusty_mux_server` | not-started | |
+| C17 | Self-describing API (schema-first) | 2 | `rusty_mux_proto` | in-progress | `schema::CATALOG`; `rusty-mux-ctl api list` and `api describe` (parameters as JSON Schema) |
+| C18 | Screen capture | 2 | `rusty_mux_server` | in-progress | `terminal.format`: plain text of the screen after N history lines; `server/tests/inspect.rs`, `ctl/tests/ctl.rs` |
 | C19 | Scripting and config | 2 | `rusty_mux_script` | not-started | |
-| C20 | Program status signalling | 2 | `rusty_mux_status` | not-started | spike 1 (OSC pass-through) |
+| C20 | Program status signalling | 2 | `rusty_mux_status` | in-progress | OSC 7501 (Program Status Protocol 0.4) reports, records per block, `BlockStatus` events with `Features::STATUS`, `terminal.status`; `status/src/*/tests.rs`, `server/tests/events.rs`, `server/tests/inspect.rs` |
 | C21 | Tab indicators | 4 | `rusty_mux` clients | not-started | depends on C20 |
 | C22 | Idle-pane scale (parking) | 5 | `rusty_mux_server` | not-started | spike 5 |
 | C23 | Production controls (limits, audit) | 5 | `rusty_mux_server` | not-started | |

@@ -41,6 +41,7 @@ mod osc;
 mod parser;
 mod png;
 mod sixel;
+mod style;
 mod webp;
 
 #[cfg(feature = "gui")]
@@ -58,7 +59,16 @@ pub use color::ensure_contrast;
 pub use grid::BidiRow;
 #[cfg(any(test, feature = "gui"))]
 pub use grid::BlockMark;
-pub use grid::{CursorShape, DirtyFrame, Grid, LineAttr, SCROLLBACK_MAX, SnapshotError};
+#[doc(hidden)]
+pub use grid::StyleStats;
+#[cfg(any(test, feature = "gui"))]
+pub use grid::View;
+pub use grid::{
+    CursorShape, DirtyFrame, Grid, LineAttr, PROGRAM_STATUS_MAX, SCROLLBACK_MAX, SnapshotError,
+    StatusSignal,
+};
+#[cfg(any(test, feature = "gui"))]
+pub use grid::{FrameImage, FrameView, RowKey};
 #[cfg(feature = "gui")]
 pub use grid::{MouseModes, Selection};
 pub use parser::AnsiParser;
@@ -69,3 +79,5 @@ pub use rusty_base64::encode_standard as base64_encode;
 
 #[cfg(test)]
 mod tests;
+
+pub mod checkpoint;

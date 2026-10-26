@@ -255,7 +255,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn passes_bytes_through_and_reports_a_finished_run() {
         let chunks = frames(&[
             r#"{"type":"RUN_STARTED","threadId":"t","runId":"r"}"#,
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(report.error, None);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn reports_errors_invalid_sequences_and_disconnects() {
         let (_, report) = drain(
             frames(&[

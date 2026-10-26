@@ -90,23 +90,23 @@ impl Shape {
 /// comment), and no kinematic/deactivation-disabled body concept exists to
 /// exempt (this crate has no kinematic bodies at all).
 ///
-/// All three constants are this project's own uncalibrated placeholders —
-/// no public reference states what threshold, if any, real Rocket League's
-/// own physics engine uses internally for this (a purely
-/// implementation-internal stabilization detail, not something a replay or
-/// capture could ever directly reveal even if `RB-VERIFY-002` had real
-/// data). Chosen only to sit clearly above the single-frame velocity noise
-/// this crate's own resting/bouncing tests produce (gravity's default
-/// -650 uu/s² accumulates roughly 10.8 uu/s over one 1/60s frame, and a
-/// restitution-driven bounce off that is the same order of magnitude) and
-/// clearly below any deliberate motion this crate models (`drive::MAX_CAR_SPEED`
-/// 2300, `drive::JUMP_SPEED` ~292, `drive::THROTTLE_ACCELERATION` 1600
-/// uu/s² alone adding ~27 uu/s in a single 1/60s frame).
-pub const LINEAR_SLEEP_VELOCITY_THRESHOLD: f32 = 20.0;
+/// The three values are Bullet's defaults at 50 uu per metre (0.8 m/s,
+/// 1.0 rad/s, `gDeactivationTime` 2.0 s), fitted to the game's
+/// `probe_ball_rest_*` captures (`fixture_checks.py ball-rest`): a ball
+/// rolling without sliding at 10, 20 or 40 uu/s (spin up to 0.44 rad/s) is
+/// frozen 2.017 s in, every one on the same tick, so the game times it
+/// rather than cutting off at a speed, and the thresholds lie above
+/// 39.98 uu/s and 0.438 rad/s. One at 80 uu/s is never frozen: its slowest
+/// 2 s window peaks at 72.95 uu/s and 0.80 rad/s, so the linear threshold is
+/// at most 72.95 or the angular one at most 0.80, not a linear bound alone.
+/// `probe_ball_rest_50`/`_60` (spin 0.55 and 0.66 rad/s) test the linear
+/// one further. The game's cars are assumed to share them, as
+/// Bullet's bodies do by default; no car capture measures it yet.
+pub const LINEAR_SLEEP_VELOCITY_THRESHOLD: f32 = 40.0;
 /// See `LINEAR_SLEEP_VELOCITY_THRESHOLD`'s own doc comment.
-pub const ANGULAR_SLEEP_VELOCITY_THRESHOLD: f32 = 0.5;
+pub const ANGULAR_SLEEP_VELOCITY_THRESHOLD: f32 = 1.0;
 /// See `LINEAR_SLEEP_VELOCITY_THRESHOLD`'s own doc comment.
-pub const SLEEP_TIME_THRESHOLD: f32 = 0.5;
+pub const SLEEP_TIME_THRESHOLD: f32 = 2.0;
 
 /// Real Rocket League's own ball radius, as already confirmed by
 /// `RB-PHYSICS-001-FR-036` (reused here, not re-derived) — see

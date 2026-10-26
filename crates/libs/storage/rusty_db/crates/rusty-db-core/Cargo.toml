@@ -18,6 +18,8 @@ uuid.workspace = true
 bigdecimal.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-futures-core.workspace = true
-futures-util.workspace = true
+rusty_stream.workspace = true
 heck.workspace = true
+
+[dev-dependencies]
+rusty_tokio.workspace = true

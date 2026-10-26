@@ -62,7 +62,7 @@ function Start-RlSession([string]$Dir, [string]$Stamp, [string[]]$Players, $Owne
     Start-Sleep -Milliseconds 500
   }
   if (-not $line) { throw 'no new Init line from the Epic launch' }
-  $bootstrap = Add-RlOwnedProcess $Owned (Get-RlOwnedBootstrap $launcher (Join-Path $script:GameDir 'RocketLeague.exe'))
+  $bootstrap = Add-RlOwnedProcess $Owned (Get-RlOwnedBootstrap $launcher (Join-Path $script:GameDir 'RocketLeague.exe') $line)
   $bootstrap.Kill()
   if (-not $bootstrap.WaitForExit(10000)) { throw 'owned bootstrap game did not exit' }
   $raw = $line -replace '^.*Init: Command line:\s*', ''

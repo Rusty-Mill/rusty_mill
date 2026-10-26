@@ -39,7 +39,7 @@ pub enum Class {
 }
 
 impl Class {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Agent => "agent",
             Self::Validator => "validator",
@@ -112,6 +112,48 @@ impl Slots {
         })
     }
 
+    /// The slot directory.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// How many slots of `class` exist.
+    pub(crate) fn capacity(&self, class: Class) -> u32 {
+        self.capacity.of(class)
+    }
+
+    /// The indices of the slots of `class` some process holds now.
+    ///
+    /// # Errors
+    /// When a slot file cannot be opened or probed.
+    pub(crate) fn held(&self, class: Class) -> Result<Vec<u32>, String> {
+        let mut held = Vec::new();
+        for index in 0..self.capacity.of(class) {
+            let path = self.lock_path(class, index);
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(TryLockError::WouldBlock) => held.push(index),
+                Err(TryLockError::Error(e)) => return Err(format!("{}: {e}", path.display())),
+            }
+        }
+        Ok(held)
+    }
+
+    /// Where fair admission records who holds slot `index` of `class`.
+    pub(crate) fn owner_path(&self, class: Class, index: u32) -> PathBuf {
+        self.dir.join(format!("{}-{index}.owner", class.name()))
+    }
+
+    fn lock_path(&self, class: Class, index: u32) -> PathBuf {
+        self.dir.join(format!("{}-{index}.lock", class.name()))
+    }
+
     /// Take a free slot of `class`, or `None` when every one is held.
     ///
     /// # Errors
@@ -119,7 +161,7 @@ impl Slots {
     /// being held.
     pub fn try_acquire(&self, class: Class) -> Result<Option<Slot>, String> {
         for index in 0..self.capacity.of(class) {
-            let path = self.dir.join(format!("{}-{index}.lock", class.name()));
+            let path = self.lock_path(class, index);
             let file = OpenOptions::new()
                 .create(true)
                 .truncate(false)
@@ -133,6 +175,15 @@ impl Slots {
                     // opened for append: Windows refuses to truncate such a handle.
                     file.set_len(0)
                         .map_err(|e| format!("{}: {e}", path.display()))?;
+                    // An earlier holder's owner record is no one's either:
+                    // a holder taken here counts as capacity alone until
+                    // admission records it.
+                    let owner = self.owner_path(class, index);
+                    match std::fs::remove_file(&owner) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(format!("{}: {e}", owner.display())),
+                    }
                     return Ok(Some(Slot { file, class, index }));
                 }
                 Err(TryLockError::WouldBlock) => continue,
@@ -156,26 +207,17 @@ impl Slot {
             .map_err(|e| format!("slot: {e}"))
     }
 
-    /// Hold this slot in a `bbp slot-hold` process that leads a new process
-    /// group, whose id is the holder's pid. Start the slot's user in that
-    /// group, then drop the holder's stdin. The holder keeps the slot until
-    /// its stdin is closed and it is the group's last member: however the
-    /// group's processes treat their stdio, and whether or not the caller
-    /// outlives them. Should the caller die before starting anyone, the
-    /// slot is freed.
+    /// Hold this slot in a `bbp slot-hold` process: [`holder`] with it.
     ///
     /// # Errors
     /// When the holder cannot be started.
     pub fn holder(&self, bbp: &Path) -> Result<Child, String> {
-        let mut command = Command::new(bbp);
-        command
-            .arg("slot-hold")
-            .stdin(Stdio::piped())
-            .stdout(self.stdio()?)
-            .stderr(Stdio::inherit());
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        command.spawn().map_err(|e| format!("slot holder: {e}"))
+        holder(bbp, Some(self), None)
+    }
+
+    /// Its index within its class.
+    pub(crate) fn index(&self) -> u32 {
+        self.index
     }
 
     /// `agent-0`, `validator-0`, ...
@@ -184,11 +226,80 @@ impl Slot {
     }
 }
 
+/// Start a `bbp slot-hold` process that leads a new process group, whose id
+/// is the holder's pid, holding `slot` if there is one. Start the group's
+/// members in it, then drop the holder's stdin. The holder keeps the slot,
+/// and stays alive, until its stdin is closed and it is the group's last
+/// member: however the group's processes treat their stdio, and whether or
+/// not the caller outlives them. So while the holder lives its pid names
+/// exactly this group, and once it is gone the group is empty. Should the
+/// caller die before starting anyone, the slot is freed. With a `deadline`,
+/// the holder kills its whole group, itself included, when it comes.
+///
+/// # Errors
+/// When the holder cannot be started, or the deadline predates the epoch.
+pub fn holder(
+    bbp: &Path,
+    slot: Option<&Slot>,
+    deadline: Option<std::time::SystemTime>,
+) -> Result<Child, String> {
+    let stdout = match slot {
+        Some(slot) => slot.stdio()?,
+        None => Stdio::null(),
+    };
+    let mut command = Command::new(bbp);
+    command
+        .arg("slot-hold")
+        .stdin(Stdio::piped())
+        .stdout(stdout)
+        .stderr(Stdio::inherit());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    if let Some(deadline) = deadline {
+        let millis = deadline
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| format!("deadline: {e}"))?
+            .as_millis();
+        command.args(["--deadline-ms", &millis.to_string()]);
+    }
+    command.spawn().map_err(|e| format!("slot holder: {e}"))
+}
+
+/// When process `pid` started, in clock ticks since boot: with the pid, an
+/// identity no later process shares. `None` when it is gone or a zombie.
+#[cfg(target_os = "linux")]
+pub fn process_start(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    let mut fields = rest.split_whitespace();
+    if fields.next()? == "Z" {
+        return None;
+    }
+    // starttime is field 22 of stat(5); after the state (field 3) it is
+    // the 19th field on.
+    fields.nth(18)?.parse().ok()
+}
+
+/// Elsewhere a process cannot be told apart from its pid's later reuse.
+#[cfg(not(target_os = "linux"))]
+pub fn process_start(_pid: u32) -> Option<u64> {
+    None
+}
+
 /// `bbp slot-hold`: return once stdin is closed and this process is the
 /// last member of the process group it leads. The slot lock, its stdout,
 /// stays open until then. The group's id is this process's pid, which is
-/// not reused while the process or its group lives.
-pub fn hold_while_alive() {
+/// not reused while the process or its group lives. At `deadline`, the
+/// whole group, this process included, is killed.
+pub fn hold_while_alive(deadline: Option<std::time::SystemTime>) {
+    if let Some(deadline) = deadline {
+        std::thread::spawn(move || {
+            if let Ok(wait) = deadline.duration_since(std::time::SystemTime::now()) {
+                std::thread::sleep(wait);
+            }
+            kill_own_group();
+        });
+    }
     // Nothing is written; end of file means the caller is done starting the
     // group's members, or is gone.
     let _ = std::io::stdin().lock().read_to_end(&mut Vec::new());
@@ -199,6 +310,22 @@ pub fn hold_while_alive() {
         empty = if others_in_group() { 0 } else { empty + 1 };
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// SIGKILL the group this process leads, which ends this process too.
+#[cfg(target_os = "linux")]
+fn kill_own_group() {
+    let Ok(me) = i32::try_from(std::process::id()) else {
+        std::process::abort();
+    };
+    let _ = rusty_libc::process::killpg(me, rusty_libc::signal::SIGKILL);
+    // Unreachable once the signal lands; never outlive the deadline.
+    std::process::abort();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_own_group() {
+    std::process::abort();
 }
 
 /// Whether a process other than this one is in the group this one leads.
@@ -229,7 +356,7 @@ fn others_in_group() -> bool {
 /// The process group in a `/proc/PID/stat` line: the third field after the
 /// parenthesised command name, which may itself hold spaces or parentheses.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn stat_pgrp(stat: &str) -> Option<u32> {
+pub(crate) fn stat_pgrp(stat: &str) -> Option<u32> {
     let (_, rest) = stat.rsplit_once(')')?;
     rest.split_whitespace().nth(2)?.parse().ok()
 }

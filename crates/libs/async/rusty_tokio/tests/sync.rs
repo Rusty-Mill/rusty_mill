@@ -31,6 +31,30 @@ fn mutex_serializes_increments() {
     });
 }
 
+/// #898 (gap G2): a `static` async mutex, built by `const_new`.
+static STATIC_COUNTER: Mutex<Vec<u32>> = Mutex::const_new(Vec::new());
+
+#[test]
+fn mutex_const_new_works_in_a_static_and_serializes_access() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    rt.block_on(async {
+        let mut handles = Vec::new();
+        for i in 0..100 {
+            handles.push(rusty_tokio::spawn(async move {
+                let mut guard = STATIC_COUNTER.lock().await;
+                rusty_tokio::time::sleep(Duration::from_micros(1)).await;
+                guard.push(i);
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        let guard = STATIC_COUNTER.lock().await;
+        assert_eq!(guard.len(), 100);
+        assert!(STATIC_COUNTER.try_lock().is_none());
+    });
+}
+
 #[test]
 fn mutex_lock_owned_serializes_increments_across_spawned_tasks() {
     let rt = Runtime::builder().worker_threads(4).build().unwrap();
@@ -1898,4 +1922,312 @@ fn dropping_a_receiver_drops_undelivered_values() {
         1,
         "unbounded: value outlived its receiver"
     );
+}
+
+/// A plain OS thread feeds a bounded channel with `blocking_send`; the async
+/// side drains it. Capacity 1 forces the sender to park on a full channel.
+#[test]
+fn mpsc_blocking_send_from_os_thread_waits_for_capacity() {
+    let rt = Runtime::builder().worker_threads(2).build().unwrap();
+    let (tx, mut rx) = mpsc::channel::<u32>(1);
+    let producer = std::thread::spawn(move || {
+        for i in 0..100 {
+            tx.blocking_send(i).unwrap();
+        }
+    });
+    let got = rt.block_on(async move {
+        let mut got = Vec::new();
+        while let Some(v) = rx.recv().await {
+            got.push(v);
+        }
+        got
+    });
+    producer.join().unwrap();
+    assert_eq!(got, (0..100).collect::<Vec<_>>());
+}
+
+#[test]
+fn mpsc_blocking_send_fails_once_receiver_is_dropped() {
+    let (tx, rx) = mpsc::channel::<u32>(1);
+    drop(rx);
+    assert_eq!(tx.blocking_send(7).unwrap_err().0, 7);
+}
+
+/// The async side sends; a plain OS thread drains with `blocking_recv`,
+/// which returns `None` once every sender is gone.
+#[test]
+fn mpsc_blocking_recv_on_os_thread_drains_then_ends() {
+    let rt = Runtime::builder().worker_threads(2).build().unwrap();
+    let (tx, mut rx) = mpsc::channel::<u32>(2);
+    let (utx, mut urx) = mpsc::unbounded_channel::<u32>();
+    let consumer = std::thread::spawn(move || {
+        let mut bounded = Vec::new();
+        while let Some(v) = rx.blocking_recv() {
+            bounded.push(v);
+        }
+        let mut unbounded = Vec::new();
+        while let Some(v) = urx.blocking_recv() {
+            unbounded.push(v);
+        }
+        (bounded, unbounded)
+    });
+    rt.block_on(async move {
+        for i in 0..50 {
+            tx.send(i).await.unwrap();
+            utx.send(i).unwrap();
+            rusty_tokio::time::sleep(Duration::from_micros(50)).await;
+        }
+    });
+    let (bounded, unbounded) = consumer.join().unwrap();
+    assert_eq!(bounded, (0..50).collect::<Vec<_>>());
+    assert_eq!(unbounded, (0..50).collect::<Vec<_>>());
+}
+
+#[test]
+fn mpsc_try_recv_reports_empty_then_disconnected_and_frees_capacity() {
+    use mpsc::error::{TryRecvError, TrySendError};
+    let (tx, mut rx) = mpsc::channel(1);
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    tx.try_send(1).unwrap();
+    assert!(matches!(tx.try_send(2), Err(TrySendError::Full(2))));
+    assert_eq!(rx.try_recv(), Ok(1));
+    // Taking a value frees its slot.
+    tx.try_send(3).unwrap();
+    drop(tx);
+    assert_eq!(rx.try_recv(), Ok(3));
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
+
+    let (utx, mut urx) = mpsc::unbounded_channel();
+    assert_eq!(urx.try_recv(), Err(TryRecvError::Empty));
+    utx.send(7).unwrap();
+    drop(utx);
+    assert_eq!(urx.try_recv(), Ok(7));
+    assert_eq!(urx.try_recv(), Err(TryRecvError::Disconnected));
+}
+
+#[test]
+fn mpsc_poll_recv_drives_a_hand_written_future() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::channel(2);
+        let (utx, mut urx) = mpsc::unbounded_channel();
+        rusty_tokio::spawn(async move {
+            tx.send(1).await.unwrap();
+            utx.send(2).unwrap();
+        });
+        let a = std::future::poll_fn(|cx| rx.poll_recv(cx)).await;
+        let b = std::future::poll_fn(|cx| urx.poll_recv(cx)).await;
+        assert_eq!((a, b), (Some(1), Some(2)));
+        assert_eq!(std::future::poll_fn(|cx| rx.poll_recv(cx)).await, None);
+    });
+}
+
+#[test]
+fn rwlock_and_mutex_build_from_default_and_from_a_value() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let lock: RwLock<Vec<u8>> = RwLock::default();
+        assert!(lock.read().await.is_empty());
+        let lock = RwLock::from(7);
+        assert_eq!(*lock.read().await, 7);
+        let mutex: Mutex<String> = Mutex::default();
+        assert!(mutex.lock().await.is_empty());
+        let mutex = Mutex::from(9);
+        assert_eq!(*mutex.lock().await, 9);
+    });
+}
+
+/// A waker that records whether it was woken, so a test can poll futures
+/// by hand in an exact order.
+struct WakeFlag(std::sync::atomic::AtomicBool);
+
+impl std::task::Wake for WakeFlag {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn wake_flag() -> (Arc<WakeFlag>, std::task::Waker) {
+    let flag = Arc::new(WakeFlag(std::sync::atomic::AtomicBool::new(false)));
+    (flag.clone(), std::task::Waker::from(flag))
+}
+
+fn poll_once<F: std::future::Future>(
+    fut: std::pin::Pin<&mut F>,
+    waker: &std::task::Waker,
+) -> std::task::Poll<F::Output> {
+    fut.poll(&mut std::task::Context::from_waker(waker))
+}
+
+/// Write held, then a reader queues, then a writer queues. Dropping the
+/// first writer must let the reader through (it is ahead of the queued
+/// writer), and dropping the reader must then let the writer through.
+#[test]
+fn rwlock_reader_queued_before_a_writer_runs_once_the_holding_writer_drops() {
+    let lock = RwLock::new(0);
+    let held = lock.try_write().expect("free lock");
+    let (r_flag, r_waker) = wake_flag();
+    let (w_flag, w_waker) = wake_flag();
+    let mut read = std::pin::pin!(lock.read());
+    let mut write = std::pin::pin!(lock.write());
+    assert!(poll_once(read.as_mut(), &r_waker).is_pending());
+    assert!(poll_once(write.as_mut(), &w_waker).is_pending());
+
+    drop(held);
+    assert!(
+        r_flag.0.load(std::sync::atomic::Ordering::SeqCst),
+        "reader woken"
+    );
+    let std::task::Poll::Ready(read_guard) = poll_once(read.as_mut(), &r_waker) else {
+        panic!("the woken reader must acquire, not requeue behind the writer");
+    };
+    assert!(poll_once(write.as_mut(), &w_waker).is_pending());
+
+    drop(read_guard);
+    assert!(
+        w_flag.0.load(std::sync::atomic::Ordering::SeqCst),
+        "writer woken"
+    );
+    assert!(poll_once(write.as_mut(), &w_waker).is_ready());
+}
+
+/// A queued writer whose future is dropped must stop holding back readers:
+/// the reader queued behind it is woken and acquires.
+#[test]
+fn rwlock_cancelled_queued_writer_releases_the_readers_behind_it() {
+    let lock = RwLock::new(0);
+    let reading = lock.try_read().expect("free lock");
+    let (_, w_waker) = wake_flag();
+    let (r_flag, r_waker) = wake_flag();
+    let mut write = Box::pin(lock.write());
+    assert!(poll_once(write.as_mut(), &w_waker).is_pending());
+    let mut read = std::pin::pin!(lock.read());
+    assert!(
+        poll_once(read.as_mut(), &r_waker).is_pending(),
+        "behind the writer"
+    );
+
+    drop(write);
+    assert!(
+        r_flag.0.load(std::sync::atomic::Ordering::SeqCst),
+        "reader woken"
+    );
+    assert!(poll_once(read.as_mut(), &r_waker).is_ready());
+    assert!(lock.try_read().is_some(), "no stale writer left queued");
+    drop(reading);
+}
+
+/// A writer cancelled while queued behind a reader and a writer must not
+/// strand the writer behind it once the lock is released.
+#[test]
+fn rwlock_cancelled_waiter_leaves_the_rest_of_the_queue_moving() {
+    let lock = RwLock::new(0);
+    let held = lock.try_write().expect("free lock");
+    let (_, a_waker) = wake_flag();
+    let (b_flag, b_waker) = wake_flag();
+    let mut first = Box::pin(lock.write());
+    let mut second = std::pin::pin!(lock.write());
+    assert!(poll_once(first.as_mut(), &a_waker).is_pending());
+    assert!(poll_once(second.as_mut(), &b_waker).is_pending());
+
+    drop(first);
+    drop(held);
+    assert!(
+        b_flag.0.load(std::sync::atomic::Ordering::SeqCst),
+        "second writer woken"
+    );
+    assert!(poll_once(second.as_mut(), &b_waker).is_ready());
+}
+
+#[test]
+fn rwlock_debug_shows_the_value_or_locked_as_tokio_does() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let lock = RwLock::new(7);
+        assert_eq!(format!("{lock:?}"), "RwLock { data: 7 }");
+        let _held = lock.write().await;
+        assert_eq!(format!("{lock:?}"), "RwLock { data: <locked> }");
+    });
+}
+
+#[test]
+fn watch_wait_for_returns_immediately_when_the_current_value_matches() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (_tx, mut rx) = rusty_tokio::sync::watch::channel(5);
+        assert_eq!(*rx.wait_for(|&v| v >= 5).await.unwrap(), 5);
+    });
+}
+
+#[test]
+fn watch_wait_for_skips_values_until_one_matches() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(0);
+        let waiter = rusty_tokio::spawn(async move { *rx.wait_for(|&v| v >= 3).await.unwrap() });
+        for v in 1..=3 {
+            rusty_tokio::time::sleep(Duration::from_millis(10)).await;
+            tx.send(v).unwrap();
+        }
+        assert_eq!(waiter.await.unwrap(), 3);
+    });
+}
+
+#[test]
+fn watch_wait_for_fails_once_the_sender_drops_without_a_match() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(0);
+        tx.send(1).unwrap();
+        drop(tx);
+        assert!(rx.wait_for(|&v| v >= 2).await.is_err());
+    });
+}
+
+#[test]
+fn notify_is_debug() {
+    assert_eq!(
+        format!("{:?}", rusty_tokio::sync::Notify::new()),
+        "Notify { .. }"
+    );
+}
+
+#[test]
+fn watch_wait_for_predicate_panic_does_not_poison_the_channel() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(0);
+        let rx2 = rx.clone();
+        let waiter = rusty_tokio::spawn(async move {
+            let _ = rx.wait_for(|_| panic!("predicate")).await;
+        });
+        assert!(
+            waiter.await.is_err(),
+            "the predicate's panic reaches the task"
+        );
+
+        tx.send(1).unwrap();
+        assert_eq!(*rx2.borrow(), 1);
+        drop(rx2);
+        drop(tx);
+    });
+}
+
+#[test]
+fn watch_wait_for_inspects_each_version_once() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(0);
+        tx.send(1).unwrap();
+        drop(tx);
+        let mut calls = 0;
+        assert!(rx
+            .wait_for(|_| {
+                calls += 1;
+                false
+            })
+            .await
+            .is_err());
+        assert_eq!(calls, 1, "the pre-sent version is inspected once");
+    });
 }

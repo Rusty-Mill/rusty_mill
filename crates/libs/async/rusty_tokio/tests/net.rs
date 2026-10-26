@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 fn tcp_echo_roundtrip() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -30,7 +30,7 @@ fn tcp_echo_roundtrip() {
 fn many_concurrent_tcp_connections() {
     let rt = Runtime::builder().worker_threads(4).build().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -70,7 +70,7 @@ fn into_split_moves_owned_halves_into_separate_tasks() {
     // different spawned tasks with no `Arc` wrapping at the call site.
     let rt = Runtime::builder().worker_threads(2).build().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -98,7 +98,7 @@ fn into_split_moves_owned_halves_into_separate_tasks() {
 fn reunite_succeeds_for_halves_from_the_same_stream_and_it_still_works() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -129,8 +129,8 @@ fn reunite_fails_for_halves_from_different_streams_and_hands_them_back() {
         // both connections) so which accepted stream corresponds to
         // which client connection is deterministic by construction, not
         // by accept-ordering.
-        let listener_a = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let listener_b = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr_a = listener_a.local_addr().unwrap();
         let addr_b = listener_b.local_addr().unwrap();
 
@@ -176,7 +176,7 @@ fn reunite_fails_for_halves_from_different_streams_and_hands_them_back() {
 fn owned_halves_as_ref_exposes_the_underlying_stream() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let client = TcpStream::connect(addr).await.unwrap();
         let (read_half, write_half) = client.into_split();
@@ -193,7 +193,7 @@ fn owned_halves_as_ref_exposes_the_underlying_stream() {
 fn split_borrows_read_and_write_halves_from_one_task() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {
@@ -219,8 +219,8 @@ fn split_borrows_read_and_write_halves_from_one_task() {
 fn udp_send_and_recv() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let b_addr: SocketAddr = b.local_addr().unwrap();
 
         let responder = rusty_tokio::spawn(async move {
@@ -243,13 +243,13 @@ fn udp_send_and_recv() {
 fn udp_connect_allows_send_and_recv_without_addressing() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let a_addr = a.local_addr().unwrap();
         let b_addr = b.local_addr().unwrap();
 
-        a.connect(b_addr).unwrap();
-        b.connect(a_addr).unwrap();
+        a.connect(b_addr).await.unwrap();
+        b.connect(a_addr).await.unwrap();
 
         let responder = rusty_tokio::spawn(async move {
             let mut buf = [0u8; 32];
@@ -273,7 +273,7 @@ fn tcp_stream_raw_fd_roundtrip_preserves_functionality() {
 
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = rusty_tokio::spawn(async move {
             let (stream, _peer) = listener.accept().await.unwrap();
@@ -303,7 +303,7 @@ fn tcp_listener_raw_fd_roundtrip_can_still_accept() {
 
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let fd = listener.into_raw_fd();
         let listener = unsafe { TcpListener::from_raw_fd(fd) };
@@ -328,8 +328,8 @@ fn udp_socket_raw_fd_roundtrip_preserves_functionality() {
 
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let a_addr = a.local_addr().unwrap();
 
         let fd = b.into_raw_fd();
@@ -381,7 +381,7 @@ fn tcp_socket_raw_fd_roundtrip_still_binds_and_listens() {
 fn udp_socket_bind_device_set_and_read_back_then_cleared() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         assert_eq!(socket.device().unwrap(), None);
 
         socket.bind_device(Some(b"lo")).unwrap();
@@ -415,7 +415,7 @@ fn udp_socket_bind_device_set_and_read_back_then_cleared() {
 fn udp_multicast_v4_join_and_leave_succeed() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
         let multiaddr: std::net::Ipv4Addr = "224.0.0.113".parse().unwrap();
         let interface = std::net::Ipv4Addr::UNSPECIFIED;
 
@@ -432,7 +432,7 @@ fn udp_multicast_v6_join_and_leave_succeed() {
         // Some sandboxed/CI environments have no IPv6 stack at all --
         // skip rather than fail on an environment limitation this test
         // isn't meant to exercise.
-        let Ok(socket) = UdpSocket::bind("[::]:0".parse().unwrap()) else {
+        let Ok(socket) = UdpSocket::bind("[::]:0").await else {
             eprintln!("skipping: no IPv6 support in this environment");
             return;
         };
@@ -448,7 +448,7 @@ fn udp_multicast_v6_join_and_leave_succeed() {
 fn udp_multicast_loop_v4_set_and_read_back() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
         socket.set_multicast_loop_v4(false).unwrap();
         assert!(!socket.multicast_loop_v4().unwrap());
         socket.set_multicast_loop_v4(true).unwrap();
@@ -461,7 +461,7 @@ fn udp_multicast_loop_v4_set_and_read_back() {
 fn udp_multicast_loop_v6_set_and_read_back() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let Ok(socket) = UdpSocket::bind("[::]:0".parse().unwrap()) else {
+        let Ok(socket) = UdpSocket::bind("[::]:0").await else {
             eprintln!("skipping: no IPv6 support in this environment");
             return;
         };
@@ -477,7 +477,7 @@ fn udp_multicast_loop_v6_set_and_read_back() {
 fn udp_multicast_ttl_v4_set_and_read_back() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
         socket.set_multicast_ttl_v4(5).unwrap();
         assert_eq!(socket.multicast_ttl_v4().unwrap(), 5);
     });
@@ -487,7 +487,7 @@ fn udp_multicast_ttl_v4_set_and_read_back() {
 fn udp_broadcast_set_and_read_back() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
         assert!(!socket.broadcast().unwrap());
         socket.set_broadcast(true).unwrap();
         assert!(socket.broadcast().unwrap());
@@ -500,7 +500,7 @@ fn udp_broadcast_set_and_read_back() {
 fn udp_ttl_set_and_read_back() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
         socket.set_ttl(48).unwrap();
         assert_eq!(socket.ttl().unwrap(), 48);
     });
@@ -510,7 +510,7 @@ fn udp_ttl_set_and_read_back() {
 fn udp_take_error_is_none_on_a_fresh_socket() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
         assert!(socket.take_error().unwrap().is_none());
     });
 }
@@ -519,7 +519,7 @@ fn udp_take_error_is_none_on_a_fresh_socket() {
 fn udp_tos_v4_set_and_read_back() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
         socket.set_tos_v4(0x10).unwrap();
         assert_eq!(socket.tos_v4().unwrap(), 0x10);
     });
@@ -532,7 +532,7 @@ fn udp_tclass_v6_set_and_read_back() {
         // Some sandboxed/CI environments have no IPv6 stack at all --
         // skip rather than fail on an environment limitation this test
         // isn't meant to exercise.
-        let Ok(socket) = UdpSocket::bind("[::]:0".parse().unwrap()) else {
+        let Ok(socket) = UdpSocket::bind("[::]:0").await else {
             eprintln!("skipping: no IPv6 support in this environment");
             return;
         };
@@ -561,11 +561,11 @@ fn udp_multicast_v4_round_trip_over_loopback() {
         let multiaddr: std::net::Ipv4Addr = "224.0.0.114".parse().unwrap();
         let interface = std::net::Ipv4Addr::UNSPECIFIED;
 
-        let receiver = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        let receiver = UdpSocket::bind("0.0.0.0:0").await.unwrap();
         let port = receiver.local_addr().unwrap().port();
         receiver.join_multicast_v4(multiaddr, interface).unwrap();
 
-        let sender = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        let sender = UdpSocket::bind("0.0.0.0:0").await.unwrap();
         sender.set_multicast_loop_v4(true).unwrap();
         sender
             .send_to(b"multicast hello", SocketAddr::new(multiaddr.into(), port))
@@ -583,5 +583,29 @@ fn udp_multicast_v4_round_trip_over_loopback() {
         assert_eq!(&buf[..n], b"multicast hello");
 
         receiver.leave_multicast_v4(multiaddr, interface).unwrap();
+    });
+}
+
+/// tokio's `TcpStream::poll_shutdown` treats `NotConnected` as done, so
+/// shutting down a stream the peer already reset succeeds. `h2` relies on
+/// this: an error here makes its closed connection report the same error
+/// from every later `accept`.
+#[test]
+fn shutting_down_a_reset_stream_succeeds() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        // Already queued by the connect, so this blocking accept returns at once.
+        let (server, _) = listener.accept().unwrap();
+        let server = rusty_tokio::io::TcpSocket::from_std_stream(server).unwrap();
+        server.set_zero_linger().unwrap();
+        drop(server);
+        let mut buf = [0u8; 1];
+        // The reset arrives as an error or as EOF, depending on timing.
+        let _ = client.read(&mut buf).await;
+        client.shutdown().await.unwrap();
     });
 }

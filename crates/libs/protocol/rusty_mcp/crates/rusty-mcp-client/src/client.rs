@@ -482,8 +482,8 @@ impl McpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::{TcpListener, TcpStream};
+    use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use rusty_tokio::net::{TcpListener, TcpStream};
 
     const TEST_API_KEY: &str = "synthetic-api-key";
     const TEST_BEARER_TOKEN: &str = "synthetic-bearer";
@@ -492,7 +492,7 @@ mod tests {
         let mut request = Vec::new();
         let header_end = loop {
             let mut chunk = [0_u8; 1024];
-            let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+            let read = rusty_tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
                 .await
                 .expect("request read timed out")
                 .expect("request read failed");
@@ -552,7 +552,7 @@ mod tests {
     /// spawn-failure path, because connecting to a real MCP server requires
     /// a whole other binary. A "server binary does not exist on PATH" check
     /// exercises the spawn surface end-to-end without needing one.
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn connect_fails_for_nonexistent_command() {
         let spec = McpServerSpec {
             command: "this-binary-definitely-does-not-exist-12345".to_string(),
@@ -575,12 +575,12 @@ mod tests {
     /// Skipped on platforms where `yes` is not available; this is a
     /// best-effort smoke test rather than a portability guarantee.
     #[cfg(target_os = "linux")]
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn connect_times_out_when_server_never_speaks_mcp() {
         // `sleep 60` is portable and quieter than `yes`: it writes nothing,
         // so the transport's framed reader blocks forever. Our 15 s
         // CONNECT_TIMEOUT would be too long for CI, so we override by
-        // shortening via direct tokio timeout around the future. But the
+        // shortening via direct `rusty_tokio` timeout around the future. But the
         // public API caps at CONNECT_TIMEOUT, so we simply skip this test
         // if the binary is missing and otherwise tolerate the wait.
         if std::process::Command::new("sleep")
@@ -601,7 +601,7 @@ mod tests {
         // usage; here we only want to prove the spawn + transport path
         // doesn't panic when the child refuses to speak MCP.
         let connect = McpClient::connect("test", &spec);
-        let short = tokio::time::timeout(Duration::from_millis(500), connect).await;
+        let short = rusty_tokio::time::timeout(Duration::from_millis(500), connect).await;
         // Expect either the local short timeout fired (Err) OR the rmcp
         // side errored out fast. Either way, we must not get `Ok`.
         match short {
@@ -613,7 +613,7 @@ mod tests {
 
     // ── BL-023 — transport dispatch ──────────────────────────────────────
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn websocket_transport_returns_unsupported() {
         // The transport variant is reserved (see McpTransport doc); the
         // connect-time dispatch must surface a clear error pointing at
@@ -641,7 +641,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn http_transport_rejects_missing_url_with_config_error() {
         let spec = McpServerSpec {
             transport: McpTransport::Http,
@@ -657,7 +657,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn http_transport_rejects_invalid_header_name() {
         // Headers are validated up-front so malformed entries don't reach
         // the wire (the rmcp transport would otherwise lazily error on
@@ -679,7 +679,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn http_transport_delivers_custom_and_bearer_headers_directly() {
         for auth_header in [TEST_BEARER_TOKEN, "bEaReR synthetic-bearer"] {
             let listener = TcpListener::bind("127.0.0.1:0")
@@ -689,7 +689,7 @@ mod tests {
                 "http://{}/mcp",
                 listener.local_addr().expect("bound server address")
             );
-            let server = tokio::spawn(async move {
+            let server = rusty_tokio::spawn(async move {
                 // The client asks `server/discover` first; this classic
                 // server does not know it, which sends the client on to
                 // `initialize`. Every request must carry the headers.
@@ -766,14 +766,14 @@ mod tests {
                 .await
                 .expect("synthetic MCP handshake should succeed");
             client.shutdown().await.expect("shutdown should succeed");
-            tokio::time::timeout(Duration::from_secs(2), server)
+            rusty_tokio::time::timeout(Duration::from_secs(2), server)
                 .await
                 .expect("synthetic server did not finish")
                 .expect("synthetic server panicked");
         }
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn http_transport_does_not_forward_custom_headers_across_redirects() {
         for status in ["307 Temporary Redirect", "308 Permanent Redirect"] {
             let target = TcpListener::bind("127.0.0.1:0")
@@ -791,7 +791,7 @@ mod tests {
                 redirect.local_addr().expect("bound server address")
             );
 
-            let redirect_server = tokio::spawn(async move {
+            let redirect_server = rusty_tokio::spawn(async move {
                 let (mut stream, _) = redirect.accept().await.expect("accept client request");
                 let request = read_http_request(&mut stream).await;
                 assert!(
@@ -817,12 +817,12 @@ mod tests {
                 matches!(result, Err(McpClientError::Handshake { .. })),
                 "redirect must fail closed instead of completing a handshake: {result:?}"
             );
-            tokio::time::timeout(Duration::from_secs(2), redirect_server)
+            rusty_tokio::time::timeout(Duration::from_secs(2), redirect_server)
                 .await
                 .expect("redirect origin was not contacted")
                 .expect("redirect origin panicked");
             assert!(
-                tokio::time::timeout(Duration::from_millis(300), target.accept())
+                rusty_tokio::time::timeout(Duration::from_millis(300), target.accept())
                     .await
                     .is_err(),
                 "{status} target was contacted; synthetic credentials may have leaked"
@@ -830,7 +830,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn http_transport_handshake_times_out_against_dead_endpoint() {
         // 127.0.0.1 with a deliberately-unused port. We don't wait for
         // the production CONNECT_TIMEOUT (15s) — bound the test future
@@ -843,7 +843,7 @@ mod tests {
             ..McpServerSpec::default()
         };
         let connect = McpClient::connect("dead", &spec);
-        let short = tokio::time::timeout(Duration::from_millis(2_000), connect).await;
+        let short = rusty_tokio::time::timeout(Duration::from_millis(2_000), connect).await;
         match short {
             Err(_elapsed) => {}
             Ok(Err(_)) => {} // surfaced as Handshake / transport error

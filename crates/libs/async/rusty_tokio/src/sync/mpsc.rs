@@ -19,12 +19,20 @@
 //! recheck-after-register dance. `unbounded_channel`'s own `Inner`
 //! reuses this same one-lock shape for the queue/`recv_waker` pair, just
 //! without a `send_waiters` list at all -- nothing ever waits to send.
+//!
+//! Each waiting `send`/`reserve` holds a [`SendWait`]: one keyed entry in
+//! `send_waiters`, refreshed rather than duplicated on re-poll, and removed
+//! when the future is dropped. A future dropped after its wake was already
+//! delivered hands that wake to the next waiter, since the capacity it was
+//! woken for is still free. Without this, a cancelled sender's stale entry
+//! could absorb the one wake a freed slot sends, leaving a live sender
+//! parked while the channel has room.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::{Arc, Mutex, Weak};
-use std::task::{Poll, Waker};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::task::{Context, Poll, Waker};
 
 struct Inner<T> {
     queue: VecDeque<T>,
@@ -37,14 +45,92 @@ struct Inner<T> {
     /// < capacity`), without needing a placeholder value in `queue`
     /// itself.
     reserved: usize,
-    send_waiters: VecDeque<Waker>,
+    /// Waiting senders, oldest first, keyed by their [`SendWait`].
+    send_waiters: VecDeque<(u64, Waker)>,
+    next_waiter: u64,
     recv_waker: Option<Waker>,
     senders_alive: usize,
     receiver_alive: bool,
 }
 
+impl<T> Inner<T> {
+    /// Wake the oldest waiting sender, if any. Returns the waker so the
+    /// caller can wake it after unlocking.
+    fn pop_send_waiter(&mut self) -> Option<Waker> {
+        self.send_waiters.pop_front().map(|(_, waker)| waker)
+    }
+
+    /// Queue `wait` with `waker`, or refresh its waker if still queued.
+    /// Returns the waker it replaced, for the caller to drop after
+    /// unlocking (see [`Self::stop_waiting`]).
+    #[must_use = "drop the replaced waker after unlocking"]
+    fn wait_to_send(&mut self, wait: &mut Option<u64>, waker: &Waker) -> Option<Waker> {
+        if let Some(key) = *wait {
+            if let Some((_, queued)) = self.send_waiters.iter_mut().find(|(k, _)| *k == key) {
+                return Some(std::mem::replace(queued, waker.clone()));
+            }
+        }
+        let key = self.next_waiter;
+        self.next_waiter = self.next_waiter.wrapping_add(1);
+        self.send_waiters.push_back((key, waker.clone()));
+        *wait = Some(key);
+        None
+    }
+
+    /// `wait` finished (capacity taken, or the channel closed): leave the
+    /// queue without consuming anyone else's wake. Returns the removed
+    /// waker for the caller to drop after unlocking: a waker may own a
+    /// `Sender` of this very channel, whose `Drop` takes this lock.
+    #[must_use = "drop the removed waker after unlocking"]
+    fn stop_waiting(&mut self, wait: &mut Option<u64>) -> Option<Waker> {
+        let key = wait.take()?;
+        let i = self.send_waiters.iter().position(|(k, _)| *k == key)?;
+        self.send_waiters.remove(i).map(|(_, waker)| waker)
+    }
+}
+
 struct Shared<T> {
     inner: Mutex<Inner<T>>,
+}
+
+/// One `send`/`reserve` call's place in `send_waiters` (see the module
+/// docs). `key` is `None` until it first waits and again once it finishes.
+struct SendWait<'a, T> {
+    shared: &'a Shared<T>,
+    key: Option<u64>,
+}
+
+impl<'a, T> SendWait<'a, T> {
+    fn new(shared: &'a Shared<T>) -> Self {
+        SendWait { shared, key: None }
+    }
+}
+
+impl<T> Drop for SendWait<'_, T> {
+    fn drop(&mut self) {
+        let Some(key) = self.key.take() else {
+            return;
+        };
+        // Never panic in drop: a poisoned lock still guards a consistent
+        // waiter list (every critical section here leaves it whole).
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(i) = guard.send_waiters.iter().position(|(k, _)| *k == key) {
+            let removed = guard.send_waiters.remove(i);
+            drop(guard); // before `removed`: its waker may own a `Sender`
+            drop(removed);
+            return;
+        }
+        // Woken but cancelled before using the wake: pass it on.
+        let next = guard.pop_send_waiter();
+        drop(guard);
+        if let Some(waker) = next {
+            waker.wake();
+        }
+    }
 }
 
 impl<T> Shared<T> {
@@ -58,7 +144,7 @@ impl<T> Shared<T> {
         guard.reserved -= n;
         let mut woken = Vec::new();
         for _ in 0..n {
-            match guard.send_waiters.pop_front() {
+            match guard.pop_send_waiter() {
                 Some(waker) => woken.push(waker),
                 None => break,
             }
@@ -113,6 +199,7 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
             capacity,
             reserved: 0,
             send_waiters: VecDeque::new(),
+            next_waiter: 0,
             recv_waker: None,
             senders_alive: 1,
             receiver_alive: true,
@@ -127,25 +214,41 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 }
 
 impl<T> Sender<T> {
+    /// Blocking form of [`send`](Self::send), for synchronous code -- a
+    /// plain OS thread bridging blocking I/O into async tasks. Parks the
+    /// calling thread until it completes; no runtime is needed.
+    ///
+    /// Never call this from an async task: it parks the worker thread
+    /// running it, stalling every other task queued there.
+    pub fn blocking_send(&self, value: T) -> Result<(), SendError<T>> {
+        crate::runtime::block_on_inner(self.send(value))
+    }
+
     pub async fn send(&self, value: T) -> Result<(), SendError<T>> {
         let mut value = Some(value);
+        let mut wait = SendWait::new(&self.shared);
         let sent = std::future::poll_fn(|cx| {
             let mut guard = self.shared.inner.lock().unwrap();
             if !guard.receiver_alive {
+                wait.key = None;
                 return Poll::Ready(false);
             }
             if guard.queue.len() + guard.reserved < guard.capacity {
+                let stale = guard.stop_waiting(&mut wait.key);
                 guard
                     .queue
                     .push_back(value.take().expect("polled after completion"));
                 let waker = guard.recv_waker.take();
                 drop(guard);
+                drop(stale);
                 if let Some(waker) = waker {
                     waker.wake();
                 }
                 return Poll::Ready(true);
             }
-            guard.send_waiters.push_back(cx.waker().clone());
+            let stale = guard.wait_to_send(&mut wait.key, cx.waker());
+            drop(guard);
+            drop(stale);
             Poll::Pending
         })
         .await;
@@ -209,7 +312,8 @@ impl<T> Sender<T> {
     /// Fill it (synchronously, since the slot's already reserved) via
     /// [`Permit::send`].
     pub async fn reserve(&self) -> Result<Permit<'_, T>, SendError<()>> {
-        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, 1)).await;
+        let mut wait = SendWait::new(&self.shared);
+        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, 1, &mut wait)).await;
         if reserved {
             Ok(Permit {
                 sender: self,
@@ -223,7 +327,8 @@ impl<T> Sender<T> {
     /// Like [`reserve`](Self::reserve), but reserves `n` slots at once,
     /// handed back one at a time via the returned [`PermitIterator`].
     pub async fn reserve_many(&self, n: usize) -> Result<PermitIterator<'_, T>, SendError<()>> {
-        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, n)).await;
+        let mut wait = SendWait::new(&self.shared);
+        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, n, &mut wait)).await;
         if reserved {
             Ok(PermitIterator {
                 sender: self,
@@ -239,7 +344,9 @@ impl<T> Sender<T> {
     /// this particular `Sender`'s own lifetime (e.g. moved into a
     /// spawned task), at the cost of consuming this one to make it.
     pub async fn reserve_owned(self) -> Result<OwnedPermit<T>, SendError<()>> {
-        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, 1)).await;
+        let mut wait = SendWait::new(&self.shared);
+        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, 1, &mut wait)).await;
+        drop(wait);
         if reserved {
             Ok(OwnedPermit { sender: Some(self) })
         } else {
@@ -289,17 +396,31 @@ impl<T> Sender<T> {
     /// -- `Ready(true)` once `n` slots are reserved, `Ready(false)` if
     /// the receiver's gone (no reservation made), `Pending` (queued
     /// behind any other waiting sender) otherwise.
-    fn poll_reserve(&self, cx: &mut std::task::Context<'_>, n: usize) -> Poll<bool> {
+    fn poll_reserve(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        n: usize,
+        wait: &mut SendWait<'_, T>,
+    ) -> Poll<bool> {
         let mut guard = self.shared.inner.lock().unwrap();
         if !guard.receiver_alive {
+            wait.key = None;
             return Poll::Ready(false);
         }
-        if guard.queue.len() + guard.reserved + n <= guard.capacity {
+        let ready = guard.queue.len() + guard.reserved + n <= guard.capacity;
+        let stale = if ready {
             guard.reserved += n;
-            return Poll::Ready(true);
+            guard.stop_waiting(&mut wait.key)
+        } else {
+            guard.wait_to_send(&mut wait.key, cx.waker())
+        };
+        drop(guard);
+        drop(stale);
+        if ready {
+            Poll::Ready(true)
+        } else {
+            Poll::Pending
         }
-        guard.send_waiters.push_back(cx.waker().clone());
-        Poll::Pending
     }
 }
 
@@ -584,27 +705,62 @@ impl<T> fmt::Display for SendTimeoutError<T> {
 impl<T> std::error::Error for SendTimeoutError<T> {}
 
 impl<T> Receiver<T> {
+    /// Takes a queued value without waiting, as tokio's: `Empty` while
+    /// senders remain, `Disconnected` once they are all gone and the queue
+    /// is drained.
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        let mut guard = self.shared.inner.lock().unwrap();
+        if let Some(v) = guard.queue.pop_front() {
+            let waker = guard.pop_send_waiter();
+            drop(guard);
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+            return Ok(v);
+        }
+        if guard.senders_alive == 0 {
+            return Err(TryRecvError::Disconnected);
+        }
+        Err(TryRecvError::Empty)
+    }
+
+    /// Blocking form of [`recv`](Self::recv), for synchronous code -- a
+    /// plain OS thread bridging blocking I/O into async tasks. Parks the
+    /// calling thread until it completes; no runtime is needed.
+    ///
+    /// Never call this from an async task: it parks the worker thread
+    /// running it, stalling every other task queued there.
+    pub fn blocking_recv(&mut self) -> Option<T> {
+        crate::runtime::block_on_inner(self.recv())
+    }
+
     pub async fn recv(&mut self) -> Option<T> {
-        std::future::poll_fn(|cx| {
-            if crate::coop::poll_proceed(cx).is_pending() {
-                return Poll::Pending;
+        std::future::poll_fn(|cx| self.poll_recv(cx)).await
+    }
+
+    /// Poll form of [`recv`](Self::recv), for a hand-written `Future` or
+    /// `Stream`: `Ready(None)` once every sender is gone and the queue is
+    /// drained.
+    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        if crate::coop::poll_proceed(cx).is_pending() {
+            return Poll::Pending;
+        }
+        let mut guard = self.shared.inner.lock().unwrap();
+        if let Some(v) = guard.queue.pop_front() {
+            let waker = guard.pop_send_waiter();
+            drop(guard);
+            if let Some(waker) = waker {
+                waker.wake();
             }
-            let mut guard = self.shared.inner.lock().unwrap();
-            if let Some(v) = guard.queue.pop_front() {
-                let waker = guard.send_waiters.pop_front();
-                drop(guard);
-                if let Some(waker) = waker {
-                    waker.wake();
-                }
-                return Poll::Ready(Some(v));
-            }
-            if guard.senders_alive == 0 {
-                return Poll::Ready(None);
-            }
-            guard.recv_waker = Some(cx.waker().clone());
-            Poll::Pending
-        })
-        .await
+            return Poll::Ready(Some(v));
+        }
+        if guard.senders_alive == 0 {
+            return Poll::Ready(None);
+        }
+        let stale = guard.recv_waker.replace(cx.waker().clone());
+        drop(guard);
+        drop(stale); // after unlocking: a waker may own a `Sender`
+        Poll::Pending
     }
 }
 
@@ -619,7 +775,7 @@ impl<T> Drop for Receiver<T> {
         let undelivered = std::mem::take(&mut guard.queue);
         drop(guard);
         drop(undelivered);
-        for waker in waiters {
+        for (_, waker) in waiters {
             waker.wake();
         }
     }
@@ -762,22 +918,48 @@ impl<T> fmt::Debug for WeakUnboundedSender<T> {
 }
 
 impl<T> UnboundedReceiver<T> {
+    /// As [`Receiver::try_recv`].
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        let mut guard = self.shared.inner.lock().unwrap();
+        if let Some(v) = guard.queue.pop_front() {
+            return Ok(v);
+        }
+        if guard.senders_alive == 0 {
+            return Err(TryRecvError::Disconnected);
+        }
+        Err(TryRecvError::Empty)
+    }
+
+    /// Blocking form of [`recv`](Self::recv), for synchronous code -- a
+    /// plain OS thread bridging blocking I/O into async tasks. Parks the
+    /// calling thread until it completes; no runtime is needed.
+    ///
+    /// Never call this from an async task: it parks the worker thread
+    /// running it, stalling every other task queued there.
+    pub fn blocking_recv(&mut self) -> Option<T> {
+        crate::runtime::block_on_inner(self.recv())
+    }
+
     pub async fn recv(&mut self) -> Option<T> {
-        std::future::poll_fn(|cx| {
-            if crate::coop::poll_proceed(cx).is_pending() {
-                return Poll::Pending;
-            }
-            let mut guard = self.shared.inner.lock().unwrap();
-            if let Some(v) = guard.queue.pop_front() {
-                return Poll::Ready(Some(v));
-            }
-            if guard.senders_alive == 0 {
-                return Poll::Ready(None);
-            }
-            guard.recv_waker = Some(cx.waker().clone());
-            Poll::Pending
-        })
-        .await
+        std::future::poll_fn(|cx| self.poll_recv(cx)).await
+    }
+
+    /// As [`Receiver::poll_recv`].
+    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        if crate::coop::poll_proceed(cx).is_pending() {
+            return Poll::Pending;
+        }
+        let mut guard = self.shared.inner.lock().unwrap();
+        if let Some(v) = guard.queue.pop_front() {
+            return Poll::Ready(Some(v));
+        }
+        if guard.senders_alive == 0 {
+            return Poll::Ready(None);
+        }
+        let stale = guard.recv_waker.replace(cx.waker().clone());
+        drop(guard);
+        drop(stale); // after unlocking: a waker may own a `Sender`
+        Poll::Pending
     }
 }
 
@@ -796,6 +978,31 @@ impl<T> Drop for UnboundedReceiver<T> {
         drop(undelivered);
     }
 }
+
+/// tokio's `mpsc::error` path for this module's error types.
+pub mod error {
+    pub use super::{SendError, SendTimeoutError, TryRecvError, TrySendError};
+}
+
+/// Why [`Receiver::try_recv`] returned no value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryRecvError {
+    /// Nothing is queued, but a sender remains.
+    Empty,
+    /// Nothing is queued, and every sender is gone.
+    Disconnected,
+}
+
+impl fmt::Display for TryRecvError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TryRecvError::Empty => write!(f, "receiving on an empty channel"),
+            TryRecvError::Disconnected => write!(f, "receiving on a closed channel"),
+        }
+    }
+}
+
+impl std::error::Error for TryRecvError {}
 
 /// The receiver was dropped, so the value in this error could not be
 /// delivered.

@@ -15,7 +15,7 @@ use rp_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::http::{map_error_response, map_reqwest_error};
-use crate::util::{gen_id, now};
+use crate::util::{chat_stream, gen_id, now};
 
 pub struct OpenAiCompatibleProvider {
     name: String,
@@ -443,7 +443,7 @@ impl Provider for OpenAiCompatibleProvider {
             }
         });
 
-        Ok(Box::pin(stream))
+        Ok(chat_stream(stream))
     }
 
     async fn embeddings(

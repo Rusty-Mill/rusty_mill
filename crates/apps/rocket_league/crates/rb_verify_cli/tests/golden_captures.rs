@@ -66,17 +66,19 @@ const CASES: &[Case] = &[
     // A level car dropped on a ball at rest (RB-RESEARCH-O014, FR-150): the wheels
     // hold the car up on the ball. The bounds are today's errors, not parity: the
     // off-centre drops are far from the game (ball 92 uu mean at 100 uu off centre).
+    // The game's 2.0 s sleep timer (FR-037) lets the centred drops drift where the old
+    // 0.5 s one froze them early, so wob_0_200's ball and wob_0_500's car bounds rose.
     Case {
         scenario: "experiments/wob_0_200.json",
         fixture: "wob_0_200.jsonl",
         car: (1.3, 7.0),
-        ball: Some((17.5, 64.0)),
+        ball: Some((23.0, 87.7)),
         other: None,
     },
     Case {
         scenario: "experiments/wob_0_500.json",
         fixture: "wob_0_500.jsonl",
-        car: (4.4, 30.0),
+        car: (9.0, 41.7),
         ball: Some((26.5, 92.0)),
         other: None,
     },
@@ -119,7 +121,7 @@ const CASES: &[Case] = &[
         scenario: "scenarios/late_dodge.json",
         fixture: "late_dodge.jsonl",
         car: (1.8, 3.7),
-        ball: None,
+        ball: Some((0.2, 3.1)),
         other: None,
     },
     Case {
@@ -169,6 +171,53 @@ const CASES: &[Case] = &[
         fixture: "probe_ball_wall.jsonl",
         car: (0.5, 1.5),
         ball: Some((2.8, 10.4)),
+        other: None,
+    },
+    // A ball rolling without sliding below the sleep thresholds is frozen 2.0 s in
+    // (FR-037, board b19); 80 uu/s rolls on. rest_40 and rest_80 keep a rolling-decay
+    // error (the port's rolling ball slows 2.1%/s, the game's 3.0%/s). A ball set at
+    // 6500 uu/s is capped before its first tick moves it; fast_6500's max is the
+    // rebound off the side wall's top seam, not the cap.
+    Case {
+        scenario: "experiments/probe_ball_rest_10.json",
+        fixture: "probe_ball_rest_10.jsonl",
+        car: (0.5, 1.5),
+        ball: Some((1.0, 1.4)),
+        other: None,
+    },
+    Case {
+        scenario: "experiments/probe_ball_rest_20.json",
+        fixture: "probe_ball_rest_20.jsonl",
+        car: (0.5, 1.5),
+        ball: Some((1.3, 1.8)),
+        other: None,
+    },
+    Case {
+        scenario: "experiments/probe_ball_rest_40.json",
+        fixture: "probe_ball_rest_40.jsonl",
+        car: (0.5, 1.5),
+        ball: Some((8.1, 13.8)),
+        other: None,
+    },
+    Case {
+        scenario: "experiments/probe_ball_rest_80.json",
+        fixture: "probe_ball_rest_80.jsonl",
+        car: (0.5, 1.5),
+        ball: Some((3.6, 10.8)),
+        other: None,
+    },
+    Case {
+        scenario: "experiments/probe_ball_fast_4500.json",
+        fixture: "probe_ball_fast_4500.jsonl",
+        car: (0.5, 1.5),
+        ball: Some((0.5, 1.5)),
+        other: None,
+    },
+    Case {
+        scenario: "experiments/probe_ball_fast_6500.json",
+        fixture: "probe_ball_fast_6500.jsonl",
+        car: (0.5, 1.5),
+        ball: Some((7.1, 71.1)),
         other: None,
     },
     Case {

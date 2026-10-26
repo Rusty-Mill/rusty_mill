@@ -303,6 +303,14 @@ pub struct LimitsConfig {
     /// Default budget for producing a response, when a route sets none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout: Option<DurationString>,
+
+    /// Largest request body, in bytes, forwarded to a `host`, `service` or
+    /// `dynamic` backend; a larger one is refused with `413`. The proxy reads
+    /// a body whole before sending it, so that a retry can send it again.
+    /// An `a2a` or `agui` route is held to the lower of this and the LLM
+    /// request bound. 10 MiB when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_body_bytes: Option<u64>,
 }
 
 /// Logging configuration.

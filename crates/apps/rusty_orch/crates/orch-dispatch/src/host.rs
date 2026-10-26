@@ -47,6 +47,10 @@ pub struct Fence {
     /// Unique per holding process, so two holders that reached the same
     /// generation from diverged records cannot both act.
     pub holder: Text,
+    /// The assignment's permission lease at this generation. A host confines
+    /// what it starts to it and refuses commands once it has ended; `None`
+    /// leaves the host's own configuration as the only bound.
+    pub lease: Option<orch_core::factory::Lease>,
 }
 /// Idempotent, crash-recoverable task boundary. Poll and relay are unmetered.
 /// Every command carries the caller's [`Fence`].
@@ -65,6 +69,19 @@ pub trait TaskHost: std::fmt::Debug {
         answer: &Text,
         fence: &Fence,
     ) -> Result<Relayed, ClassifiedError>;
+    /// Cancel the hosted execution of `task`, and return only once nothing
+    /// it started still runs, so its capacity is free. The host finds the
+    /// execution itself, without a recorded [`HostHandle`]: an open may have
+    /// started work before its handle reached the board. An execution never
+    /// opened is left unable to start. Idempotent: an execution that already
+    /// ended returns its terminal progress unchanged, which may be `Closed`.
+    fn cancel(
+        &mut self,
+        task: &Task,
+        board: &Board,
+        reason: &Text,
+        fence: &Fence,
+    ) -> Result<Progress, ClassifiedError>;
 }
 /// Find the host pointer saved by the dispatcher, without adapter memory.
 pub fn hosted_handle(board: &Board, task: TaskId) -> Option<HostHandle> {

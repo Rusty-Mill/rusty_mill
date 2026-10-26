@@ -95,6 +95,7 @@ fn ended_json(e: &Ended) -> Value {
         Ended::Blocked(_) => "blocked",
         Ended::Failed(_) => "failed",
         Ended::WallClock(_) => "wall_clock",
+        Ended::Cancelled => "cancelled",
     };
     m.insert("kind".into(), kind.into());
     match e {
@@ -113,7 +114,7 @@ fn ended_json(e: &Ended) -> Value {
         Ended::WallClock(d) => {
             m.insert("limit_secs".into(), Value::from(d.as_secs()));
         }
-        Ended::Finished => {}
+        Ended::Finished | Ended::Cancelled => {}
     }
     m.into()
 }

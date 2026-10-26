@@ -1,3 +1,7 @@
+//! The runtime types, also re-exported at the crate root. This module is
+//! public so tokio's `runtime::{Builder, Handle, Runtime}` paths resolve
+//! unchanged (#897).
+//!
 //! Two runtime flavors sharing one `Shared`/scheduling core:
 //!
 //! - **Multi-threaded** (the default, [`Builder::new`]/
@@ -612,6 +616,25 @@ impl Builder {
         self
     }
 
+    /// Accepted for tokio compatibility and has no effect: every runtime
+    /// this crate builds always starts its I/O reactor and timer driver,
+    /// so there is nothing to opt into. tokio code that calls
+    /// `Builder::new_multi_thread().enable_all().build()` compiles
+    /// unchanged.
+    pub fn enable_all(self) -> Self {
+        self
+    }
+
+    /// See [`enable_all`](Self::enable_all): the reactor always runs.
+    pub fn enable_io(self) -> Self {
+        self
+    }
+
+    /// See [`enable_all`](Self::enable_all): the timer driver always runs.
+    pub fn enable_time(self) -> Self {
+        self
+    }
+
     pub fn build(self) -> std::io::Result<Runtime> {
         #[cfg(feature = "thread-per-core")]
         if self.flavor == Flavor::ThreadPerCore {
@@ -984,10 +1007,10 @@ impl Wake for LocalRuntimeWaker {
 }
 
 /// A running instance of the hand-rolled runtime: either one scheduler
-/// pool sharing a single reactor/timer ([`RuntimeKind::Single`] --
+/// pool sharing a single reactor/timer (`RuntimeKind::Single` --
 /// [`Builder::new_multi_thread`]/[`Builder::new_current_thread`]), or one
 /// independent reactor/timer/scheduler queue per CPU core
-/// ([`RuntimeKind::PerCore`] -- [`Builder::new_thread_per_core`]).
+/// (`RuntimeKind::PerCore` -- [`Builder::new_thread_per_core`]).
 /// Dropping it shuts everything down and joins every background thread.
 pub struct Runtime {
     kind: RuntimeKind,
@@ -1021,8 +1044,8 @@ impl Runtime {
 
     /// The `Shared` every "pick one representative core" operation
     /// (`handle`/`metrics`/`enter`/`block_on`'s own ambient context) uses
-    /// -- the runtime's only `Shared` for [`RuntimeKind::Single`], or
-    /// core 0 for [`RuntimeKind::PerCore`] (see [`Runtime::spawn`]'s docs
+    /// -- the runtime's only `Shared` for `RuntimeKind::Single`, or
+    /// core 0 for `RuntimeKind::PerCore` (see [`Runtime::spawn`]'s docs
     /// for why core 0 specifically, and [`Runtime::core_handle`] for
     /// reaching any other core directly).
     fn primary_shared(&self) -> &Arc<Shared> {
@@ -1033,8 +1056,8 @@ impl Runtime {
         }
     }
 
-    /// Every `Shared` this runtime owns -- one for [`RuntimeKind::Single`],
-    /// one per core for [`RuntimeKind::PerCore`] -- in the order shutdown
+    /// Every `Shared` this runtime owns -- one for `RuntimeKind::Single`,
+    /// one per core for `RuntimeKind::PerCore` -- in the order shutdown
     /// should tear them down (order doesn't actually matter here; each
     /// core is fully independent).
     fn all_shared(&self) -> Vec<&Arc<Shared>> {
@@ -1048,7 +1071,7 @@ impl Runtime {
     /// Takes every worker `JoinHandle` this runtime owns, leaving none
     /// behind -- idempotent (a second call returns an empty `Vec`), same
     /// as the plain `Option::take` every shutdown path already relied on
-    /// for [`RuntimeKind::Single`].
+    /// for `RuntimeKind::Single`.
     fn take_workers(&mut self) -> Vec<std::thread::JoinHandle<()>> {
         match &mut self.kind {
             RuntimeKind::Single { workers, .. } => workers.take().unwrap_or_default(),
@@ -1058,7 +1081,7 @@ impl Runtime {
     }
 
     /// How many CPU cores this runtime is pinned across -- `1` for every
-    /// flavor except [`RuntimeKind::PerCore`]. See
+    /// flavor except `RuntimeKind::PerCore`. See
     /// [`Builder::new_thread_per_core`].
     #[cfg(feature = "thread-per-core")]
     pub fn num_cores(&self) -> usize {
@@ -1098,7 +1121,7 @@ impl Runtime {
 
     /// A live view into this runtime's scheduler and blocking pool --
     /// see [`RuntimeMetrics`] for what's on it. Equivalent to
-    /// `self.handle().metrics()`. For [`RuntimeKind::PerCore`], this is
+    /// `self.handle().metrics()`. For `RuntimeKind::PerCore`, this is
     /// core 0's own view specifically -- see [`Runtime::core_handle`]`(i)
     /// .metrics()` for any other core.
     pub fn metrics(&self) -> RuntimeMetrics {
@@ -1119,7 +1142,7 @@ impl Runtime {
     /// worker picks it up, independent of whether anything ever awaits
     /// the returned handle.
     ///
-    /// For [`RuntimeKind::PerCore`], this round-robins across every
+    /// For `RuntimeKind::PerCore`, this round-robins across every
     /// core's own `Shared` to choose the task's home core -- once picked,
     /// it never migrates: every re-wake reschedules onto that same core's
     /// queue (see `thread_per_core`'s module docs). A task spawned from
@@ -1236,7 +1259,7 @@ impl Runtime {
     /// a `spawn_blocking` closure in a blocking syscall this crate has
     /// no way to preempt) will still be here when `timeout` elapses, at
     /// which point this stops waiting and tears down anyway, the same
-    /// as `shutdown_background` would. For [`RuntimeKind::PerCore`],
+    /// as `shutdown_background` would. For `RuntimeKind::PerCore`,
     /// every core is drained (each against the same overall `deadline`)
     /// before any of them is actually torn down.
     pub fn shutdown_timeout(mut self, timeout: Duration) {
@@ -1315,7 +1338,7 @@ impl std::task::Wake for BlockOnWaker {
     }
 }
 
-fn block_on_inner<F: Future>(future: F) -> F::Output {
+pub(crate) fn block_on_inner<F: Future>(future: F) -> F::Output {
     let mut future = std::pin::pin!(future);
     let parker = Arc::new(BlockOnWaker::new());
     let waker = std::task::Waker::from(parker.clone());

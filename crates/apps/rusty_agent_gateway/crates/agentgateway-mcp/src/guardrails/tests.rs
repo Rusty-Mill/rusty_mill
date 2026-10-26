@@ -29,6 +29,8 @@ enum Script {
     Refuse(authorization_error::Code, &'static str),
     /// Never answer, so the caller's budget has to end the call.
     Hang,
+    /// Fail the call with this gRPC status code and message, answering no message at all.
+    Fail(u8, &'static str),
     /// Pass, but ask for these header changes on the upstream call.
     Headers(Vec<(&'static str, &'static str)>, Vec<&'static str>),
     /// Pass, attaching this metadata bag.
@@ -38,15 +40,17 @@ enum Script {
 /// What the processor was asked, recorded for assertions.
 #[derive(Default, Clone)]
 struct Seen {
+    /// The gRPC path of each call.
+    paths: Vec<String>,
     methods: Vec<String>,
     bodies: Vec<Option<Vec<u8>>>,
     backends: Vec<Vec<String>>,
     headers: Vec<Vec<(String, String)>>,
-    metadata: Vec<Option<prost_types::Struct>>,
+    metadata: Vec<Option<rusty_prost::wkt::Struct>>,
     calls: usize,
 }
 
-/// A gRPC `ExtMcp` server, hand-rolled over `tonic`'s unary plumbing.
+/// A gRPC `ExtMcp` server, hand-rolled over `axum` so that it shares nothing with the client.
 ///
 /// Serving this by hand rather than through generated server code keeps
 /// `protoc` out of the build for tests too, and it is 30 lines of dispatch.
@@ -76,6 +80,16 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
                     .await
                     .map(|b| b.to_bytes())
                     .unwrap_or_default();
+
+                if let Script::Fail(code, message) = &script {
+                    return http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/grpc")
+                        .header("grpc-status", code.to_string())
+                        .header("grpc-message", *message)
+                        .body(Body::empty())
+                        .expect("response should build");
+                }
 
                 if matches!(script, Script::Hang) {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -119,6 +133,7 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
 
                 if let Ok(mut seen) = recorder.lock() {
                     seen.calls += 1;
+                    seen.paths.push(path.clone());
                     seen.methods.push(method);
                     seen.bodies.push(params);
                     seen.backends.push(backends);
@@ -142,12 +157,10 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
                             _ => request_result::Result::Pass(Pass {}),
                         }),
                         metadata: match &script {
-                            Script::Annotate(value) => {
-                                match wire::to_proto_value(value.clone()).kind {
-                                    Some(prost_types::value::Kind::StructValue(s)) => Some(s),
-                                    _ => None,
-                                }
-                            }
+                            Script::Annotate(value) => match wire::to_proto_value(value.clone()) {
+                                Value::Struct(s) => Some(s),
+                                _ => None,
+                            },
                             _ => None,
                         },
                         header_mutation: match &script {
@@ -165,6 +178,7 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
                         },
                     }
                     .encode_to_vec()
+                    .expect("should encode")
                 } else {
                     McpResponseResult {
                         result: Some(match &script {
@@ -182,6 +196,7 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
                         }),
                     }
                     .encode_to_vec()
+                    .expect("should encode")
                 };
 
                 let mut framed = Vec::with_capacity(payload.len() + 5);
@@ -189,11 +204,18 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
                 framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
                 framed.extend_from_slice(&payload);
 
+                // The status is a trailer, after the message: that is what gRPC says, and a
+                // client that reads it from the headers of a reply with a body is lenient.
+                let mut trailers = HeaderMap::new();
+                trailers.insert("grpc-status", "0".parse().expect("valid"));
+                let body = http_body_util::Full::new(axum::body::Bytes::from(framed))
+                    .with_trailers(
+                        async move { Some(Ok::<_, std::convert::Infallible>(trailers)) },
+                    );
                 http::Response::builder()
                     .status(200)
                     .header("content-type", "application/grpc")
-                    .header("grpc-status", "0")
-                    .body(Body::from(framed))
+                    .body(Body::new(body))
                     .expect("response should build")
             }
         },
@@ -248,7 +270,8 @@ fn chain(processors: Vec<Processor>) -> Guardrails {
         .expect("should compile")
 }
 
-use prost::Message as _;
+use rusty_prost::Message as _;
+use rusty_prost::wkt::Value;
 
 #[tokio::test]
 async fn a_passing_processor_leaves_the_call_alone() {
@@ -682,8 +705,8 @@ async fn metadata_expressions_reach_the_processor() {
         .expect("metadata should be sent")
         .fields
         .clone();
-    let text = |key: &str| match fields.get(key).and_then(|v| v.kind.clone()) {
-        Some(prost_types::value::Kind::StringValue(s)) => s,
+    let text = |key: &str| match fields.get(key).cloned() {
+        Some(Value::String(s)) => s,
         other => panic!("{key} should be a string, got {other:?}"),
     };
     assert_eq!(text("tenant"), "acme");
@@ -939,8 +962,8 @@ async fn header_changes_from_several_processors_accumulate() {
 
 /// The string value of a metadata key the processor was sent, if any.
 fn metadata_text(seen: &Seen, key: &str) -> Option<String> {
-    match seen.metadata[0].as_ref()?.fields.get(key)?.kind.clone()? {
-        prost_types::value::Kind::StringValue(s) => Some(s),
+    match seen.metadata[0].as_ref()?.fields.get(key)?.clone() {
+        Value::String(s) => Some(s),
         other => panic!("{key} should be a string, got {other:?}"),
     }
 }
@@ -1116,8 +1139,7 @@ async fn the_response_phase_gets_the_subject_too() {
 /// One processor's metadata bag, folded into a running set.
 fn annotations(value: serde_json::Value) -> Annotations {
     let mut annotations = Annotations::default();
-    let Some(prost_types::value::Kind::StructValue(structure)) = wire::to_proto_value(value).kind
-    else {
+    let Value::Struct(structure) = wire::to_proto_value(value) else {
         panic!("a metadata bag must be an object");
     };
     annotations.merge(structure);
@@ -1178,8 +1200,7 @@ fn a_later_processor_wins_a_key_collision() {
     // A chain reads as a pipeline: the last thing to say something about a
     // call is the most informed.
     let mut annotations = annotations(serde_json::json!({"verdict": "unknown"}));
-    let Some(prost_types::value::Kind::StructValue(second)) =
-        wire::to_proto_value(serde_json::json!({"verdict": "clean"})).kind
+    let Value::Struct(second) = wire::to_proto_value(serde_json::json!({"verdict": "clean"}))
     else {
         unreachable!()
     };
@@ -1302,4 +1323,88 @@ async fn annotations_accumulate_across_the_chain() {
     );
     stop_a.cancel();
     stop_b.cancel();
+}
+
+#[tokio::test]
+async fn an_https_processor_is_not_spoken_to_in_plaintext() {
+    // The server here speaks cleartext HTTP/2. A processor named with `https://` has to be
+    // reached over TLS, so the handshake fails and the call is refused: the request must never
+    // arrive on the plaintext socket, or the scheme would be decoration.
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let mut config = processor_config(
+        &format!("https://{host}"),
+        &[("tools/call", Phase::Request)],
+    );
+    config.timeout = Some("2s".parse().expect("should parse"));
+
+    let outcome = chain(vec![config])
+        .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
+        .await
+        .outcome;
+
+    match outcome {
+        Outcome::Reject { code, .. } => assert_eq!(code, INTERNAL_ERROR),
+        other => panic!("a failed TLS handshake must not pass: {other:?}"),
+    }
+    assert_eq!(
+        seen.lock().expect("lock").calls,
+        0,
+        "no request should reach a plaintext server through an https URL"
+    );
+    stop.cancel();
+}
+
+#[tokio::test]
+async fn a_status_from_the_processor_is_a_failure_that_names_its_message() {
+    // gRPC `UNAVAILABLE` (14): the processor is up and says it cannot decide.
+    let (host, _, stop) = processor(Script::Fail(14, "policy store down")).await;
+
+    let closed = chain(vec![processor_config(
+        &host,
+        &[("tools/call", Phase::Request)],
+    )])
+    .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
+    .await
+    .outcome;
+    match closed {
+        Outcome::Reject { code, message, .. } => {
+            assert_eq!(code, INTERNAL_ERROR);
+            assert!(message.contains("policy store down"), "{message}");
+        }
+        other => panic!("a failing processor must not pass: {other:?}"),
+    }
+
+    let mut open = processor_config(&host, &[("tools/call", Phase::Request)]);
+    open.failure_mode = Some(FailureMode::FailOpen);
+    let opened = chain(vec![open])
+        .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
+        .await
+        .outcome;
+    assert_eq!(opened, Outcome::Pass);
+    stop.cancel();
+}
+
+#[tokio::test]
+async fn each_phase_calls_its_own_rpc() {
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let chain = chain(vec![processor_config(
+        &host,
+        &[("tools/call", Phase::Full)],
+    )]);
+
+    chain
+        .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
+        .await;
+    chain
+        .check_response(call("tools/call"), &["alpha".into()], b"{}")
+        .await;
+
+    assert_eq!(
+        seen.lock().expect("lock").paths,
+        vec![
+            "/agentgateway.dev.ext_mcp.ExtMcp/CheckRequest",
+            "/agentgateway.dev.ext_mcp.ExtMcp/CheckResponse",
+        ]
+    );
+    stop.cancel();
 }

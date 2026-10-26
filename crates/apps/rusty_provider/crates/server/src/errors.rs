@@ -1,8 +1,5 @@
-use axum::http::header::RETRY_AFTER;
-use axum::http::{HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::Json;
 use rp_router::RouterError;
+use rusty_axum::{IntoResponse, Json, Response, StatusCode};
 use serde_json::json;
 
 pub fn router_error_response(err: RouterError) -> Response {
@@ -20,18 +17,22 @@ pub fn json_error_with_retry_after(
     message: &str,
     retry_after_secs: Option<u64>,
 ) -> Response {
-    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let mut resp = (
+    // The range `http::StatusCode::from_u16` accepted; `rusty_http`'s
+    // wraps any value, so the fallback is checked here.
+    let status = if (100..1000).contains(&status) {
+        StatusCode::from_u16(status)
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    let resp = (
         status,
         Json(json!({ "error": { "message": message, "code": status.as_u16() } })),
     )
         .into_response();
-    if let Some(secs) = retry_after_secs {
-        if let Ok(value) = HeaderValue::from_str(&secs.to_string()) {
-            resp.headers_mut().insert(RETRY_AFTER, value);
-        }
+    match retry_after_secs {
+        Some(secs) => resp.with_header("retry-after", &secs.to_string()),
+        None => resp,
     }
-    resp
 }
 
 #[cfg(test)]
@@ -40,17 +41,15 @@ mod tests {
     use rp_core::ProviderError;
 
     async fn body_json(resp: Response) -> serde_json::Value {
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
+        let bytes = resp.body.collect().await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
     #[test]
     fn json_error_sets_status_and_omits_retry_after() {
         let resp = json_error(401, "missing or invalid API key");
-        assert_eq!(resp.status(), 401);
-        assert!(resp.headers().get(RETRY_AFTER).is_none());
+        assert_eq!(resp.status.as_u16(), 401);
+        assert!(resp.headers.get("retry-after").is_none());
     }
 
     #[tokio::test]
@@ -64,20 +63,20 @@ mod tests {
     #[test]
     fn json_error_with_retry_after_sets_the_header() {
         let resp = json_error_with_retry_after(429, "rate limited", Some(5));
-        assert_eq!(resp.status(), 429);
-        assert_eq!(resp.headers().get(RETRY_AFTER).unwrap(), "5");
+        assert_eq!(resp.status.as_u16(), 429);
+        assert_eq!(resp.headers.get("retry-after"), Some("5"));
     }
 
     #[test]
     fn json_error_with_retry_after_none_omits_the_header() {
         let resp = json_error_with_retry_after(500, "oops", None);
-        assert!(resp.headers().get(RETRY_AFTER).is_none());
+        assert!(resp.headers.get("retry-after").is_none());
     }
 
     #[test]
     fn json_error_with_retry_after_falls_back_to_500_for_an_invalid_status_code() {
         let resp = json_error_with_retry_after(9999, "unmappable", None);
-        assert_eq!(resp.status(), 500);
+        assert_eq!(resp.status.as_u16(), 500);
     }
 
     #[tokio::test]
@@ -93,15 +92,15 @@ mod tests {
             retry_after_secs: Some(7),
         });
         let resp = router_error_response(err);
-        assert_eq!(resp.status(), 429);
-        assert_eq!(resp.headers().get(RETRY_AFTER).unwrap(), "7");
+        assert_eq!(resp.status.as_u16(), 429);
+        assert_eq!(resp.headers.get("retry-after"), Some("7"));
     }
 
     #[test]
     fn router_error_response_has_no_retry_after_for_a_non_rate_limited_error() {
         let resp = router_error_response(RouterError::InvalidModel("bogus".to_string()));
-        assert_eq!(resp.status(), 400);
-        assert!(resp.headers().get(RETRY_AFTER).is_none());
+        assert_eq!(resp.status.as_u16(), 400);
+        assert!(resp.headers.get("retry-after").is_none());
     }
 
     #[tokio::test]
@@ -109,7 +108,7 @@ mod tests {
         let err = RouterError::ProviderNotConfigured("openai".to_string());
         let expected_message = err.to_string();
         let resp = router_error_response(err);
-        assert_eq!(resp.status(), 424);
+        assert_eq!(resp.status.as_u16(), 424);
         let body = body_json(resp).await;
         assert_eq!(body["error"]["message"], expected_message);
     }

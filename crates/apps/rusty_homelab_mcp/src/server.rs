@@ -6,7 +6,7 @@ use rusty_fedora::FedoraAgentClient;
 use rusty_mcp_server::{BuildError, Server};
 use rusty_opnsense::OpnsenseClient;
 use rusty_proxmox::ProxmoxClient;
-use tokio::runtime::Handle;
+use rusty_tokio::runtime::Handle;
 
 use crate::hosts::FedoraHosts;
 use crate::tool_support::{ErrorData, ToolError};

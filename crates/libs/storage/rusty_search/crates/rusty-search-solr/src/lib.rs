@@ -46,8 +46,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use rusty_request::{Client, Method, RequestBuilder, Response};
+use rusty_tokio::sync::RwLock;
 use serde_json::{json, Value};
-use tokio::sync::RwLock;
 
 use rusty_search_core::{
     BoxError, Document, Hit, Result, Schema as CoreSchema, SearchBackend, SearchError,
@@ -427,7 +427,7 @@ mod tests {
         json!({ "responseHeader": { "status": 0, "QTime": 1 } })
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_creates_core_and_schema_then_registers_locally() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(query.get("name").map(|v| v.as_ref()), Some("articles"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_percent_encodes_a_traversal_shaped_name_in_the_schema_update_path() {
         // A core name shaped like a path traversal ("../admin/cores") must
         // not be able to splice extra path segments into the schema-update
@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(schema_update.url.path(), "/solr/..%2Fadmin%2Fcores/schema");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_rejects_duplicates_without_a_second_request() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -517,7 +517,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexAlreadyExists(name) if name == "articles"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn create_index_maps_an_embedded_error_object_to_already_exists() {
         // Solr sometimes embeds a failure as an "error" object in an
         // HTTP 200 body rather than a real non-2xx status.
@@ -539,7 +539,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexAlreadyExists(name) if name == "articles"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn operations_on_unknown_index_error_without_any_http_call() {
         let server = MockServer::start().await;
         let backend = SolrBackend::new(server.uri());
@@ -582,7 +582,7 @@ mod tests {
         backend
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn index_batch_sends_add_commands() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -613,7 +613,7 @@ mod tests {
         assert_eq!(body[0]["add"]["doc"]["title"], "Rust async search");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn delete_sends_a_delete_command() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -635,7 +635,7 @@ mod tests {
         assert_eq!(body["delete"]["id"], "1");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn commit_sends_a_commit_command() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -657,7 +657,7 @@ mod tests {
         assert!(body.get("commit").is_some());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn search_sends_translated_query_and_parses_hits() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -703,7 +703,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn search_maps_an_embedded_not_found_error_to_index_not_found() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -724,7 +724,7 @@ mod tests {
         assert!(matches!(err, SearchError::IndexNotFound(name) if name == "articles"));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn with_basic_auth_sends_the_credentials() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))

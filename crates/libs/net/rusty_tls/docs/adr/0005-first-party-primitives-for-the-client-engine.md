@@ -86,8 +86,9 @@ lockfile. Replacing it under the hand-rolled engine does not remove it from the 
    methods on this toolchain", never proof.
 5. **Unchanged:** RSA signing is not built (plan stage 7). `ring` stays a dev-dependency
    oracle for the first-party crates. Nothing here becomes a default, and no consumer is
-   wired. ADR-0002 §3 (never the default) and Amendment 1 (`rleval-app` stays on `ring`
-   unless separately approved) still hold.
+   wired. ADR-0002 §3 (never the default) and Amendment 1 still hold. *(2026-10-24: ADR-0002
+   Amendment 2 approves the native backend for `rleval-app`'s OIDC transport, the same scope,
+   wiring still gated on Tier 1.)*
 
 ## Alternatives considered
 
