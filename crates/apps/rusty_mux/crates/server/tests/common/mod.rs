@@ -188,7 +188,7 @@ impl Client {
         loop {
             match self.recv() {
                 Message::Done { req: r, created } if r == req => return created,
-                Message::Failed { req: r, reason } if r == req => {
+                Message::Failed { req: r, reason, .. } if r == req => {
                     panic!("request {req} failed: {reason}")
                 }
                 _ => {}

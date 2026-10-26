@@ -95,7 +95,10 @@ fn input_without_the_lease_is_refused() {
         data: b"echo nope\r".to_vec(),
     });
     loop {
-        if let Message::Failed { req: 99, reason } = b.recv() {
+        if let Message::Failed {
+            req: 99, reason, ..
+        } = b.recv()
+        {
             assert!(reason.contains("does not hold the input lease"), "{reason}");
             break;
         }

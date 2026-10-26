@@ -7,7 +7,7 @@ mod common;
 
 use common::{Client, block_for, new_block, start_server, window_for};
 use rusty_mux_core::BlockId;
-use rusty_mux_proto::{Entry, Features, Message};
+use rusty_mux_proto::{Code, Entry, Features, Message};
 
 const INSPECT: Features = Features::CHECKPOINT_V3.union(Features::INSPECT);
 
@@ -146,4 +146,69 @@ fn an_oversized_listing_is_refused_and_the_connection_kept() {
         client.answer(|req| Message::Sync { req }).as_slice(),
         [Message::Done { .. }]
     ));
+}
+
+#[test]
+fn a_missing_entity_is_refused_as_not_found() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, INSPECT, None);
+    let missing = rusty_uuid::Uuid::new_v4();
+    let block = BlockId::from_uuid(missing);
+    let session = rusty_mux_core::SessionId::from_uuid(missing);
+    let requests: [Box<dyn Fn(u64) -> Message>; 3] = [
+        Box::new(move |req| Message::CloseBlock { req, block }),
+        Box::new(move |req| Message::Capture {
+            req,
+            block,
+            history: 0,
+        }),
+        Box::new(move |req| Message::CreateWindow {
+            req,
+            session,
+            name: "w".into(),
+        }),
+    ];
+    for make in requests {
+        let answer = client.answer(make);
+        assert!(
+            matches!(
+                answer.as_slice(),
+                [Message::Failed {
+                    code: Some(Code::NotFound),
+                    ..
+                }]
+            ),
+            "{answer:?}"
+        );
+    }
+    // A refusal for another reason carries no code.
+    let block = block_for(&mut client);
+    let mut other = Client::connect_with(&path, INSPECT, None);
+    other.request(|req| Message::Attach { req, block });
+    let answer = other.answer(|req| Message::AcquireLease { req, block });
+    assert!(
+        matches!(answer.as_slice(), [Message::Failed { code: None, .. }]),
+        "{answer:?}"
+    );
+}
+
+#[test]
+fn a_block_program_knows_where_it_is() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, INSPECT, None);
+    let block = block_for(&mut client);
+    client.input(
+        block,
+        b"echo \"B=$RUSTY_MUX_BLOCK S=$RUSTY_MUX_SOCKET\" | tr a-z A-Z\r",
+    );
+    let expected = format!(
+        "B={} S={}",
+        block.to_string().to_uppercase(),
+        std::path::absolute(&path)
+            .expect("absolute")
+            .display()
+            .to_string()
+            .to_uppercase()
+    );
+    client.wait_for(block, &expected);
 }

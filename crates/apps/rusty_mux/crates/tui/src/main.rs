@@ -173,7 +173,7 @@ mod client {
             loop {
                 match self.conn.recv().map_err(|e| e.to_string())? {
                     Message::Done { req: r, created } if r == req => return Ok(created),
-                    Message::Failed { req: r, reason } if r == req => return Err(reason),
+                    Message::Failed { req: r, reason, .. } if r == req => return Err(reason),
                     other => self.held.push(other),
                 }
             }

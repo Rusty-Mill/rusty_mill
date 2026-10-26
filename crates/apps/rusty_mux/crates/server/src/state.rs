@@ -2,10 +2,12 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use rusty_mux_core::{BlockId, ClientId, Event, Mux, Size};
-use rusty_mux_proto::{Cursor, Entry, Features, Message, encode};
+use rusty_mux_proto::{Code, Cursor, Entry, Features, Message, encode};
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::task::JoinHandle;
 use rusty_uuid::Uuid;
@@ -59,6 +61,8 @@ impl BlockRt {
 
 pub(crate) struct State {
     config: Config,
+    /// The listening socket's path, given to each block's program.
+    socket: Option<PathBuf>,
     mux: Mux,
     blocks: HashMap<BlockId, BlockRt>,
     clients: HashMap<ClientId, Outbox>,
@@ -67,9 +71,10 @@ pub(crate) struct State {
 }
 
 impl State {
-    pub(crate) fn shared(config: Config) -> Shared {
+    pub(crate) fn shared(config: Config, socket: Option<PathBuf>) -> Shared {
         Rc::new(RefCell::new(Self {
             config,
+            socket,
             mux: Mux::new(),
             blocks: HashMap::new(),
             clients: HashMap::new(),
@@ -166,8 +171,8 @@ impl State {
                 None
             }
             Ok(Outcome::Write(write)) => Some(write),
-            Err(reason) => {
-                this.send(client, &Message::Failed { req, reason });
+            Err(Refusal { reason, code }) => {
+                this.send(client, &Message::Failed { req, reason, code });
                 None
             }
         };
@@ -180,10 +185,10 @@ impl State {
         shared: &Shared,
         client: ClientId,
         message: Message,
-    ) -> (u64, Result<Outcome, String>) {
+    ) -> (u64, Result<Outcome, Refusal>) {
         use Message as M;
         let done = |r: Result<(), rusty_mux_core::Error>| {
-            r.map(|()| Outcome::Done(None)).map_err(|e| e.to_string())
+            r.map(|()| Outcome::Done(None)).map_err(Refusal::from)
         };
         match message {
             M::CreateSession { req, name } => {
@@ -196,13 +201,13 @@ impl State {
                     req,
                     result
                         .map(|w| Outcome::Done(Some(w.uuid())))
-                        .map_err(|e| e.to_string()),
+                        .map_err(Refusal::from),
                 )
             }
             M::CreateBlock { req, window, size } => (req, self.create_block(shared, window, size)),
             M::Attach { req, block } => {
-                if let Err(reason) = self.require(client, Features::CHECKPOINT_V3, "attach") {
-                    return (req, Err(reason));
+                if let Err(refusal) = self.require(client, Features::CHECKPOINT_V3, "attach") {
+                    return (req, Err(refusal));
                 }
                 if self.clients.get(&client).is_some_and(|out| out.attaching()) {
                     return (req, Err("checkpoint transfer already in progress".into()));
@@ -212,7 +217,7 @@ impl State {
                     req,
                     result
                         .map(|()| Outcome::Attached(block))
-                        .map_err(|e| e.to_string()),
+                        .map_err(Refusal::from),
                 )
             }
             M::Detach { req } => (req, done(self.mux.detach(client))),
@@ -236,12 +241,12 @@ impl State {
                 self.require(client, Features::INSPECT, "list")
                     .and_then(|()| self.list(req)),
             ),
-            other => (0, Err(format!("not a client request: {other:?}"))),
+            other => (0, Err(format!("not a client request: {other:?}").into())),
         }
     }
 
     /// Fails unless `client` negotiated `feature`, which `what` needs.
-    fn require(&self, client: ClientId, feature: Features, what: &str) -> Result<(), String> {
+    fn require(&self, client: ClientId, feature: Features, what: &str) -> Result<(), Refusal> {
         if self
             .features
             .get(&client)
@@ -249,18 +254,15 @@ impl State {
         {
             return Ok(());
         }
-        Err(format!(
-            "{what} requires feature bits {:#x}",
-            feature.bits()
-        ))
+        Err(format!("{what} requires feature bits {:#x}", feature.bits()).into())
     }
 
     /// The last `history` scrollback lines and the screen, as one Text.
-    fn capture(&self, req: u64, block: BlockId, history: u32) -> Result<Outcome, String> {
+    fn capture(&self, req: u64, block: BlockId, history: u32) -> Result<Outcome, Refusal> {
         let rt = self
             .blocks
             .get(&block)
-            .ok_or_else(|| rusty_mux_core::Error::UnknownBlock(block).to_string())?;
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
         let scrollback = rt.grid.scrollback_len();
         let from = scrollback.saturating_sub(usize::try_from(history).unwrap_or(usize::MAX));
         let mut text = String::new();
@@ -277,9 +279,9 @@ impl State {
         reply("capture", &[Message::Text { req, text }])
     }
 
-    /// Every session, window and block, each parent before its children:
-    /// sessions in id order, windows and blocks in creation order.
-    fn list(&self, req: u64) -> Result<Outcome, String> {
+    /// Every session, window and block, in creation order, each parent
+    /// before its children.
+    fn list(&self, req: u64) -> Result<Outcome, Refusal> {
         let mut entries = Vec::new();
         for session in self.mux.sessions() {
             entries.push(Entry::Session {
@@ -320,18 +322,20 @@ impl State {
         shared: &Shared,
         window: rusty_mux_core::WindowId,
         size: Size,
-    ) -> Result<Outcome, String> {
+    ) -> Result<Outcome, Refusal> {
         validate_size(size)?;
-        if self.mux.window(window).is_none() {
-            return Err(rusty_mux_core::Error::UnknownWindow(window).to_string());
-        }
-        let (pty, process) = pty::spawn(&self.config, size)
+        let session = self
+            .mux
+            .window(window)
+            .ok_or(rusty_mux_core::Error::UnknownWindow(window))?
+            .session();
+        // The id is chosen first so the program starts knowing it.
+        let block = BlockId::from_uuid(Uuid::new_v4());
+        let env = self.block_env(session, window, block);
+        let (pty, process) = pty::spawn(&self.config, size, &env)
             .map_err(|e| format!("spawning the block's program: {e}"))?;
         let pty = Rc::new(pty);
-        let block = self
-            .mux
-            .create_block(window, size)
-            .map_err(|e| e.to_string())?;
+        self.mux.add_block(block, window, size)?;
         let reader = rusty_tokio::task::spawn_local(pump(shared.clone(), block, pty.clone()));
         let grid = crate::checkpoint::grid(size);
         self.blocks.insert(
@@ -347,15 +351,33 @@ impl State {
         Ok(Outcome::Done(Some(block.uuid())))
     }
 
+    /// Where a block's program is, for `rusty-mux-ctl` run inside it.
+    fn block_env(
+        &self,
+        session: rusty_mux_core::SessionId,
+        window: rusty_mux_core::WindowId,
+        block: BlockId,
+    ) -> Vec<(&'static str, OsString)> {
+        let mut env = vec![
+            ("RUSTY_MUX_SESSION", session.to_string().into()),
+            ("RUSTY_MUX_WINDOW", window.to_string().into()),
+            ("RUSTY_MUX_BLOCK", block.to_string().into()),
+        ];
+        if let Some(socket) = &self.socket {
+            env.push(("RUSTY_MUX_SOCKET", socket.clone().into_os_string()));
+        }
+        env
+    }
+
     fn input(
         &mut self,
         client: ClientId,
         block: BlockId,
         data: Vec<u8>,
-    ) -> Result<Outcome, String> {
+    ) -> Result<Outcome, Refusal> {
         self.mux
             .authorize_input(client, block)
-            .map_err(|e| e.to_string())?;
+            .map_err(Refusal::from)?;
         let rt = self
             .blocks
             .get(&block)
@@ -363,11 +385,11 @@ impl State {
         Ok(Outcome::Write((rt.pty.clone(), data)))
     }
 
-    fn resize(&mut self, client: ClientId, block: BlockId, size: Size) -> Result<Outcome, String> {
+    fn resize(&mut self, client: ClientId, block: BlockId, size: Size) -> Result<Outcome, Refusal> {
         validate_size(size)?;
         self.mux
             .authorize_input(client, block)
-            .map_err(|e| e.to_string())?;
+            .map_err(Refusal::from)?;
         let rt = self
             .blocks
             .get(&block)
@@ -377,7 +399,7 @@ impl State {
             .map_err(|e| format!("resizing the PTY: {e}"))?;
         self.mux
             .resize_block(client, block, size)
-            .map_err(|e| e.to_string())?;
+            .map_err(Refusal::from)?;
         let rt = self
             .blocks
             .get_mut(&block)
@@ -511,6 +533,39 @@ fn event_frame(seq: Option<u64>, event: &Event) -> Option<Vec<u8>> {
         .ok()
 }
 
+/// Why a request was refused, sent back as [`Message::Failed`].
+#[derive(Debug)]
+struct Refusal {
+    reason: String,
+    code: Option<Code>,
+}
+
+impl From<rusty_mux_core::Error> for Refusal {
+    fn from(err: rusty_mux_core::Error) -> Self {
+        use rusty_mux_core::Error as E;
+        let code = match err {
+            E::UnknownSession(_) | E::UnknownWindow(_) | E::UnknownBlock(_) => Some(Code::NotFound),
+            _ => None,
+        };
+        Self {
+            reason: err.to_string(),
+            code,
+        }
+    }
+}
+
+impl From<String> for Refusal {
+    fn from(reason: String) -> Self {
+        Self { reason, code: None }
+    }
+}
+
+impl From<&str> for Refusal {
+    fn from(reason: &str) -> Self {
+        reason.to_owned().into()
+    }
+}
+
 enum Outcome {
     Done(Option<Uuid>),
     Attached(BlockId),
@@ -521,14 +576,14 @@ enum Outcome {
 
 /// Encodes the messages answering a `what` request, all or nothing: a reply
 /// over [`REPLY_MAX`] is refused before any of it is sent.
-fn reply(what: &str, messages: &[Message]) -> Result<Outcome, String> {
+fn reply(what: &str, messages: &[Message]) -> Result<Outcome, Refusal> {
     let mut size = 0;
     let mut frames = Vec::with_capacity(messages.len());
     for message in messages {
         let frame = encode(message).map_err(|e| format!("{what}: {e}"))?;
         size += frame.len();
         if size > REPLY_MAX {
-            return Err(format!("{what} reply exceeds {REPLY_MAX} bytes"));
+            return Err(format!("{what} reply exceeds {REPLY_MAX} bytes").into());
         }
         frames.push(frame);
     }
@@ -591,11 +646,14 @@ mod regression {
     }
 
     fn fixture() -> (Shared, ClientId, BlockId, Inbox) {
-        let shared = State::shared(Config {
-            program: "/bin/sh".into(),
-            args: vec![],
-            cwd: "/".into(),
-        });
+        let shared = State::shared(
+            Config {
+                program: "/bin/sh".into(),
+                args: vec![],
+                cwd: "/".into(),
+            },
+            None,
+        );
         let (out, inbox, _) = outbox();
         let mut state = shared.borrow_mut();
         let client = state.connect(out, Features::CHECKPOINT_V3, None);
@@ -836,6 +894,6 @@ mod regression {
             Ok(Outcome::Reply(frames)) if frames.len() == 2
         ));
         let refused = reply("t", &[text(1, half), text(2, half)]);
-        assert!(matches!(refused, Err(why) if why.contains("exceeds")));
+        assert!(matches!(refused, Err(why) if why.reason.contains("exceeds")));
     }
 }

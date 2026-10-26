@@ -69,6 +69,14 @@ pub struct Cursor {
     pub seq: u64,
 }
 
+/// What kind of failure a [`Message::Failed`] reports, for callers that act
+/// on it. A code this peer does not know decodes as no code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Code {
+    /// A session, window or block the request names does not exist.
+    NotFound,
+}
+
 /// One entity in the reply to [`Message::List`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
@@ -186,6 +194,7 @@ pub enum Message {
     Failed {
         req: u64,
         reason: String,
+        code: Option<Code>,
     },
     /// The reply to [`Message::Capture`]: one line per row, each without
     /// trailing blanks, joined by `\n`.
@@ -249,8 +258,9 @@ const EPOCH: u32 = 17;
 const SEQ: u32 = 18;
 const HISTORY: u32 = 19;
 const TITLE: u32 = 20;
-// IDs 1..=TITLE are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = TITLE as usize;
+const CODE: u32 = 21;
+// IDs 1..=CODE are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = CODE as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -355,8 +365,11 @@ impl Message {
                 }
                 ty::DONE
             }
-            M::Failed { req, reason } => {
+            M::Failed { req, reason, code } => {
                 out.varint(REQ, *req).bytes(REASON, reason.as_bytes());
+                if let Some(code) = code {
+                    out.varint(CODE, code.wire());
+                }
                 ty::FAILED
             }
             M::Text { req, text } => {
@@ -475,6 +488,7 @@ impl Message {
             ty::FAILED => M::Failed {
                 req: f.varint(REQ)?,
                 reason: f.string(REASON)?,
+                code: f.opt(CODE, In::varint)?.and_then(Code::from_wire),
             },
             ty::TEXT => M::Text {
                 req: f.varint(REQ)?,
@@ -755,4 +769,19 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
         },
         _ => return Err(f.invalid(KIND)),
     })
+}
+
+impl Code {
+    const fn wire(self) -> u64 {
+        match self {
+            Self::NotFound => 1,
+        }
+    }
+
+    const fn from_wire(value: u64) -> Option<Self> {
+        match value {
+            1 => Some(Self::NotFound),
+            _ => None,
+        }
+    }
 }

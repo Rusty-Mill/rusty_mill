@@ -127,11 +127,14 @@ mod regression {
             .build_local(&LocalOptions::default())
             .unwrap();
         rt.block_on(async {
-            let state = State::shared(Config {
-                program: "/bin/sh".into(),
-                args: vec![],
-                cwd: "/".into(),
-            });
+            let state = State::shared(
+                Config {
+                    program: "/bin/sh".into(),
+                    args: vec![],
+                    cwd: "/".into(),
+                },
+                None,
+            );
             let (peer, server) = UnixStream::pair().unwrap();
             peer.write_all(
                 &encode(&Message::Hello {

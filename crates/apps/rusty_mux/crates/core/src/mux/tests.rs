@@ -288,3 +288,27 @@ fn errors_display_their_ids() {
     let text = Error::UnknownBlock(block).to_string();
     assert!(text.contains(&block.to_string()), "{text}");
 }
+
+#[test]
+fn sessions_list_in_creation_order() {
+    let mut mux = Mux::new();
+    let ids: Vec<SessionId> = (0..8).map(|n| mux.create_session(n.to_string())).collect();
+    mux.close_session(ids[3]).unwrap();
+    let listed: Vec<SessionId> = mux.sessions().map(Session::id).collect();
+    let expected: Vec<SessionId> = ids.iter().copied().filter(|id| *id != ids[3]).collect();
+    assert_eq!(listed, expected);
+}
+
+#[test]
+fn a_block_can_take_a_chosen_id_once() {
+    let (mut mux, _, window, _) = fixture();
+    mux.take_events();
+    let id = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    mux.add_block(id, window, size(80, 24)).unwrap();
+    assert_eq!(mux.block(id).map(Block::window), Some(window));
+    assert_eq!(
+        mux.add_block(id, window, size(80, 24)),
+        Err(Error::BlockExists(id))
+    );
+    assert_eq!(mux.take_events().len(), 1, "the refused add emits nothing");
+}

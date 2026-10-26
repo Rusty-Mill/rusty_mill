@@ -10,6 +10,8 @@ pub enum Error {
     UnknownWindow(WindowId),
     UnknownBlock(BlockId),
     UnknownClient(ClientId),
+    /// A block with this id already exists.
+    BlockExists(BlockId),
     ZeroSize {
         cols: u16,
         rows: u16,
@@ -38,6 +40,7 @@ impl fmt::Display for Error {
             Self::UnknownWindow(id) => write!(f, "unknown window {id}"),
             Self::UnknownBlock(id) => write!(f, "unknown block {id}"),
             Self::UnknownClient(id) => write!(f, "unknown client {id}"),
+            Self::BlockExists(id) => write!(f, "block {id} already exists"),
             Self::ZeroSize { cols, rows } => write!(f, "size {cols}x{rows} has a zero dimension"),
             Self::NotAttached { client, block } => {
                 write!(f, "client {client} is not attached to block {block}")
