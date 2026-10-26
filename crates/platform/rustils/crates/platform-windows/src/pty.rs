@@ -12,13 +12,14 @@
 //! [`WindowsPtyMaster::output_handle`]).
 
 use std::ffi::{OsStr, OsString};
-use std::sync::{Arc, Mutex, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::process::{Child, Command, GroupSpec, Spawner};
 use platform::pty::{Pty, PtyMaster};
 use platform::term::WinSize;
 
+use crate::close_guard::{CloseGuard, Refused};
 use crate::ffi::win32_surface as w;
 use crate::process::WindowsChild;
 use crate::sys::handle::OwnedWinHandle;
@@ -70,7 +71,7 @@ impl WindowsPty {
                 // No Job Object — see `sys::pty::spawn_attached`'s own
                 // doc comment for why (a real, deliberate scope
                 // reduction, not a settled design choice).
-                let closed = Arc::new(Mutex::new(false));
+                let closed = Arc::new(CloseGuard::new());
                 // `Ok(0)` once the child exits is this trait's own
                 // documented contract (`platform::pty::PtyMaster::read`)
                 // — ConPTY doesn't provide that spontaneously (see
@@ -123,7 +124,7 @@ pub struct WindowsPtyMaster {
     /// holds it across `ResizePseudoConsole`, so nothing reaches a
     /// closed console. The watcher never touches `output` (see its own
     /// doc comment for why), so this is the only field it shares.
-    closed: Arc<Mutex<bool>>,
+    closed: Arc<CloseGuard>,
 }
 
 impl WindowsPtyMaster {
@@ -171,25 +172,19 @@ impl PtyMaster for WindowsPtyMaster {
     /// Fails with `BrokenPipe` once the console is closed, and with
     /// `WouldBlock` while a close (or another resize) is running.
     fn resize(&self, size: WinSize) -> Result<()> {
-        let closed = match self.closed.try_lock() {
-            Ok(guard) => guard,
-            Err(TryLockError::Poisoned(p)) => p.into_inner(),
-            Err(TryLockError::WouldBlock) => {
-                return Err(PlatformError::new(
-                    ErrorKind::WouldBlock,
-                    OsCode::None,
-                    "ResizePseudoConsole: the pseudo console is busy closing",
-                ))
-            }
-        };
-        if *closed {
-            return Err(PlatformError::new(
+        match self.closed.while_open(|| syspty::resize(self.hpc, size)) {
+            Ok(result) => result,
+            Err(Refused::Closed) => Err(PlatformError::new(
                 ErrorKind::BrokenPipe,
                 OsCode::None,
                 "ResizePseudoConsole: the pseudo console is closed",
-            ));
+            )),
+            Err(Refused::Busy) => Err(PlatformError::new(
+                ErrorKind::WouldBlock,
+                OsCode::None,
+                "ResizePseudoConsole: the pseudo console is closing or being resized",
+            )),
         }
-        syspty::resize(self.hpc, size)
     }
 }
 
@@ -211,15 +206,7 @@ impl Drop for WindowsPtyMaster {
         // pipe, is both safe and necessary
         // (`dropping_an_undrained_master_does_not_deadlock`). Holding the
         // lock across it keeps the watcher out until it is done.
-        let mut closed = match self.closed.try_lock() {
-            Ok(guard) => guard,
-            Err(TryLockError::Poisoned(p)) => p.into_inner(),
-            Err(TryLockError::WouldBlock) => return,
-        };
-        if *closed {
-            return;
-        }
-        syspty::close(self.hpc, &self.output);
-        *closed = true;
+        let (hpc, output) = (self.hpc, &self.output);
+        self.closed.close_unless_busy(|| syspty::close(hpc, output));
     }
 }

@@ -24,13 +24,14 @@
 
 use std::ffi::OsStr;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use platform::error::ErrorKind;
 use platform::process::{Child, Command, EnvSpec, ExitStatus, GroupSpec, Signal};
 use platform::pty::{Pty, PtyMaster};
 use platform::term::WinSize;
+use platform_windows::close_guard::CloseGuard;
 use platform_windows::ffi::win32_surface as w;
 use platform_windows::sys::handle::OwnedWinHandle;
 use platform_windows::sys::{fileio, proc as sysproc, pty as syspty};
@@ -82,13 +83,13 @@ fn command_line(program: &str, args: &[&str]) -> Vec<u16> {
 /// that fix. `output` stays a bare handle — the watcher never touches it
 /// (deliberately, to avoid racing a caller's own concurrent reads; see
 /// `spawn_exit_watcher`'s own doc comment), so there's nothing to share.
-/// `Drop` takes the same `closed` lock the watcher thread does, calling
-/// `syspty::close` only if no close has run.
+/// `Drop` mirrors `WindowsPtyMaster::drop`: it calls `syspty::close` only
+/// if no close has run, and never waits on a close the watcher is in.
 struct TestPty {
     hpc: w::HPCON,
     input: OwnedWinHandle,
     output: OwnedWinHandle,
-    closed: Arc<Mutex<bool>>,
+    closed: Arc<CloseGuard>,
 }
 
 impl TestPty {
@@ -98,7 +99,7 @@ impl TestPty {
             hpc,
             input,
             output,
-            closed: Arc::new(Mutex::new(false)),
+            closed: Arc::new(CloseGuard::new()),
         }
     }
 
@@ -112,11 +113,8 @@ impl TestPty {
 
 impl Drop for TestPty {
     fn drop(&mut self) {
-        let mut closed = self.closed.lock().unwrap_or_else(PoisonError::into_inner);
-        if !*closed {
-            syspty::close(self.hpc, &self.output);
-            *closed = true;
-        }
+        let (hpc, output) = (self.hpc, &self.output);
+        self.closed.close_unless_busy(|| syspty::close(hpc, output));
     }
 }
 
@@ -383,6 +381,15 @@ fn reap(child: &mut WindowsChild) -> ExitStatus {
     }
 }
 
+/// Reads and discards `master`'s output on a thread of its own until end
+/// of stream or an error.
+fn drain(master: Arc<WindowsPtyMaster>) {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while matches!(master.read(&mut buf), Ok(n) if n > 0) {}
+    });
+}
+
 /// Runs `f` on its own thread and fails the test if it has not returned
 /// within `budget`, so a hang shows up as a named failure.
 fn within(budget: Duration, what: &str, f: impl FnOnce() + Send + 'static) {
@@ -482,7 +489,8 @@ fn hang_up_ends_a_blocked_read() {
         let _ = tx.send(Ok(()));
     });
     std::thread::sleep(Duration::from_millis(200));
-    master.hang_up();
+    let closer = Arc::clone(&master);
+    within(WAIT_BUDGET, "hang_up", move || closer.hang_up());
     let ended = rx.recv_timeout(READ_BUDGET);
     let _ = child.kill_single(Signal::Kill);
     reap(&mut child);
@@ -497,15 +505,21 @@ fn hang_up_ends_a_blocked_read() {
 fn resize_after_hang_up_is_refused() {
     let _guard = lock_pty_tests();
     let (master, mut child) = concrete("ping", &["-n", "1000", "127.0.0.1"]);
+    let master = Arc::new(master);
+    // Keep the output pipe drained, so a build whose `ClosePseudoConsole`
+    // blocks on a full pipe cannot stall the hang-up below.
+    drain(Arc::clone(&master));
     master
         .resize(WinSize {
             rows: 30,
             cols: 100,
         })
         .expect("resize while open");
-    master.hang_up();
+    let closer = Arc::clone(&master);
+    within(WAIT_BUDGET, "hang_up", move || closer.hang_up());
     // Idempotent: the second call finds the console closed.
-    master.hang_up();
+    let closer = Arc::clone(&master);
+    within(WAIT_BUDGET, "a second hang_up", move || closer.hang_up());
     let err = master
         .resize(WinSize {
             rows: 40,

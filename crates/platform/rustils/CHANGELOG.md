@@ -28,9 +28,11 @@ and **`coreutils`**.
   and `Write` for `WindowsUnixStream`, `is_current_user`,
   `fs::restrict_to_owner`, `sys::net::unix_peer_pid`,
   `sys::pty::hang_up`, `sys::security::{UserSid, restrict_to_owner}`,
-  `sys::proc::is_current_user`, and the windows-sys items they use in
-  `ffi::win32_surface`. `sys::pty::spawn_exit_watcher` now takes
-  `Arc<Mutex<bool>>` instead of `Arc<AtomicBool>`.
+  `sys::proc::is_current_user`, `close_guard::CloseGuard`, and the
+  windows-sys items they use in `ffi::win32_surface`.
+  `sys::pty::spawn_exit_watcher` now takes `Arc<CloseGuard>` instead of
+  `Arc<AtomicBool>`. `WindowsUnixStream::set_read_timeout` follows std:
+  zero is `InvalidInput`, sub-millisecond rounds up to 1 ms.
 - **Behaviour change: the pseudo console's close guard is a lock.**
   Every close holds it across `ClosePseudoConsole` and
   `PtyMaster::resize` holds it across `ResizePseudoConsole`, so a resize

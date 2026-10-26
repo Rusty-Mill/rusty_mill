@@ -179,7 +179,11 @@ just by inspection.
   demand: a concurrent `read` then returns `Ok(0)` and the program gets
   the console-close notification. It blocks while conhost is stuck on a
   full, unread pipe, so a caller that is not also reading runs it on a
-  thread of its own; it is idempotent. `resize` holds the same lock
+  thread of its own; it is idempotent. The lock's rules live in
+  `platform_windows::close_guard::CloseGuard`, which has no OS calls, so
+  its ordering (including a close that blocks, as `ClosePseudoConsole`
+  does on older Windows builds) is unit-tested with injected blocking on
+  every host. `resize` holds the same lock
   across `ResizePseudoConsole` (taken with `try_lock`): after a close it
   fails with `BrokenPipe`, and while a close is running with
   `WouldBlock`, so it never reaches a closed console.

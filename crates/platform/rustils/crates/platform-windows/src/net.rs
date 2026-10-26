@@ -206,10 +206,20 @@ impl WindowsUnixStream {
         sysnet::unix_peer_pid(&self.sock)
     }
 
-    /// `SO_RCVTIMEO`, as `std::os::unix::net::UnixStream::set_read_timeout`:
-    /// a read that waits longer fails with `TimedOut` (Winsock's
-    /// `WSAETIMEDOUT`). `None` waits forever.
+    /// `SO_RCVTIMEO`, with the contract of
+    /// `std::os::unix::net::UnixStream::set_read_timeout`: a read that
+    /// waits longer fails with `TimedOut` (Winsock's `WSAETIMEDOUT`), and
+    /// `None` waits forever. `Some(Duration::ZERO)` is refused with
+    /// `InvalidInput`, and a positive duration under 1 ms becomes 1 ms,
+    /// because Winsock reads a 0 ms timeout as "wait forever".
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        if timeout == Some(Duration::ZERO) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot set a 0 duration timeout",
+            ));
+        }
+        let timeout = timeout.map(|d| d.max(Duration::from_millis(1)));
         sysnet::set_read_timeout(&self.sock, timeout).map_err(to_io)
     }
 }

@@ -58,6 +58,7 @@
 
 #![deny(unsafe_code)] // opted back in, narrowly, inside sys/ modules only
 
+pub mod close_guard;
 #[cfg(windows)]
 pub mod ffi;
 #[cfg(windows)]

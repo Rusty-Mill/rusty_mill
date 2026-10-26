@@ -42,12 +42,13 @@
 #![allow(unsafe_code)]
 
 use std::ffi::OsStr;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::process::EnvSpec;
 use platform::term::WinSize;
 
+use crate::close_guard::CloseGuard;
 use crate::ffi::win32_surface as w;
 use crate::sys::errmap;
 use crate::sys::handle::{self, OwnedWinHandle};
@@ -620,7 +621,7 @@ pub fn wait_readable(output: &OwnedWinHandle, budget: std::time::Duration) -> bo
 /// then only surfaces once the caller drops the master, the pre-fix
 /// behavior), rather than failing the whole spawn over a best-effort
 /// convenience.
-pub fn spawn_exit_watcher(process: &OwnedWinHandle, hpc: w::HPCON, closed: Arc<Mutex<bool>>) {
+pub fn spawn_exit_watcher(process: &OwnedWinHandle, hpc: w::HPCON, closed: Arc<CloseGuard>) {
     let Ok(dup) = handle::duplicate(process, false) else {
         return;
     };
@@ -641,27 +642,24 @@ pub fn spawn_exit_watcher(process: &OwnedWinHandle, hpc: w::HPCON, closed: Arc<M
     });
 }
 
-/// Bare (non-draining) `ClosePseudoConsole`, at most once per console.
+/// Bare (non-draining) `ClosePseudoConsole`, at most once per console
+/// ([`CloseGuard::close_once`]).
 ///
-/// `closed` is held across the call, so a [`resize`] guarded by the same
-/// lock can never reach a console that is closing or closed, and a
+/// The guard is held across the call, so a [`resize`] run under the same
+/// guard can never reach a console that is closing or closed, and a
 /// `WindowsPtyMaster::drop` that finds it busy knows a close is already
-/// running. Blocks while conhost's writer is stuck behind a full, unread
-/// output pipe, until a reader drains it or the master's handles are
-/// released. A poisoned lock is treated as its inner value: the flag is
-/// only ever set after a close completes, so it is never torn.
-pub fn hang_up(hpc: w::HPCON, closed: &Mutex<bool>) {
-    let mut done = closed.lock().unwrap_or_else(PoisonError::into_inner);
-    if *done {
-        return;
-    }
-    // SAFETY: `hpc` is a valid pseudo console handle that has not been
-    // closed: every close in this crate runs with `closed` held and sets
-    // it afterwards, and it is still `false` here under the lock.
-    unsafe {
-        close_pseudo_console(hpc);
-    }
-    *done = true;
+/// running. On Windows builds where `ClosePseudoConsole` blocks, this
+/// blocks while conhost's writer is stuck behind a full, unread output
+/// pipe, until a reader drains it or the master's handles are released.
+pub fn hang_up(hpc: w::HPCON, closed: &CloseGuard) {
+    closed.close_once(|| {
+        // SAFETY: `hpc` is a valid pseudo console handle that has not been
+        // closed: every close in this crate runs under `closed`, which
+        // runs this closure only while no close has completed.
+        unsafe {
+            close_pseudo_console(hpc);
+        }
+    });
 }
 
 /// Drain `output` (bounded, non-blocking via `PeekNamedPipe`) then call

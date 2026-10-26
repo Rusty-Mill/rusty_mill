@@ -472,12 +472,17 @@ impl Drop for LocalSecurityDescriptor {
 }
 
 /// Replace `path`'s DACL with one protected entry granting full access
-/// to the current user's SID, so no other account (an administrator
-/// included, short of taking ownership) can open it.
+/// to the current user's SID, so the DACL grants no other account any
+/// access.
 ///
-/// The SID is the user's, not the `OW` owner-rights alias, because an
-/// elevated administrator's new files are owned by the Administrators
-/// group. The DACL is applied through a handle opened with
+/// This is not full isolation from administrators: the file's owner keeps
+/// its implicit `READ_CONTROL` and `WRITE_DAC` whatever the DACL says, so
+/// an owner other than the current user (an elevated process's files are
+/// owned by the Administrators group) can rewrite the DACL, and an
+/// administrator can take ownership. The SID is the user's, not the `OW`
+/// owner-rights alias, for the same reason: `OW` would name that group.
+///
+/// Applied with `SetSecurityInfo(SE_FILE_OBJECT)` on a handle opened with
 /// `FILE_FLAG_OPEN_REPARSE_POINT`: an `AF_UNIX` socket file is a reparse
 /// point, and path-based calls that follow it fail.
 pub fn restrict_to_owner(path: &Path) -> Result<()> {
@@ -502,13 +507,28 @@ pub fn restrict_to_owner(path: &Path) -> Result<()> {
     }
     let descriptor = LocalSecurityDescriptor(raw);
 
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut dacl: *mut w::ACL = std::ptr::null_mut();
+    // SAFETY: `descriptor` holds a valid descriptor; the out-pointers are
+    // valid. `dacl` points into `descriptor`, which outlives its use below.
+    let ok = unsafe {
+        w::GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted)
+    };
+    if ok == 0 || present == 0 || dacl.is_null() {
+        return Err(errmap::last_win32_err(
+            "GetSecurityDescriptorDacl",
+            OsStr::new(""),
+        ));
+    }
+
     let wide = to_wide_nul(path.as_os_str());
     // SAFETY: `wide` is NUL-terminated and outlives the call; the
     // security attributes and template are optional and null.
     let raw = unsafe {
         w::CreateFileW(
             wide.as_ptr(),
-            w::WRITE_DAC,
+            w::WRITE_DAC | w::READ_CONTROL,
             w::FILE_SHARE_READ | w::FILE_SHARE_WRITE | w::FILE_SHARE_DELETE,
             std::ptr::null(),
             w::OPEN_EXISTING,
@@ -520,16 +540,27 @@ pub fn restrict_to_owner(path: &Path) -> Result<()> {
     // else owns.
     let file = unsafe { OwnedWinHandle::from_raw(raw) }
         .ok_or_else(|| errmap::last_win32_err("CreateFileW", path.as_os_str()))?;
-    // SAFETY: `file` is open with `WRITE_DAC`; `descriptor` holds a valid
-    // self-relative descriptor that outlives the call.
-    if unsafe {
-        w::SetKernelObjectSecurity(file.as_raw(), w::DACL_SECURITY_INFORMATION, descriptor.0)
-    } == 0
-    {
-        return Err(errmap::last_win32_err(
-            "SetKernelObjectSecurity",
-            path.as_os_str(),
-        ));
+    // SAFETY: `file` is open with `WRITE_DAC | READ_CONTROL`; `dacl` is a
+    // valid ACL inside `descriptor`, which outlives the call; the owner,
+    // group and SACL are not being set, so their pointers are null.
+    let code = unsafe {
+        w::SetSecurityInfo(
+            file.as_raw(),
+            w::SE_FILE_OBJECT,
+            w::DACL_SECURITY_INFORMATION | w::PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            dacl,
+            std::ptr::null(),
+        )
+    };
+    if code != 0 {
+        return Err(PlatformError::new(
+            errmap::kind_of_win32(code),
+            OsCode::Win32(code),
+            "SetSecurityInfo",
+        )
+        .with_path(path.as_os_str()));
     }
     Ok(())
 }

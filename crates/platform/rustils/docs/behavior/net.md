@@ -158,7 +158,10 @@ from the other two slices (see below).
   (`SO_RCVTIMEO`), so code written against
   `std::os::unix::net::UnixStream` compiles against it. Errors carry the
   Winsock code into `io::Error::from_raw_os_error`, so a receive timeout
-  reads as `TimedOut`.
+  reads as `TimedOut`. As in std, `Some(Duration::ZERO)` is refused with
+  `InvalidInput`; a positive duration under 1 ms becomes 1 ms, because
+  Winsock reads 0 ms as "wait forever". The `TcpStream` trait's
+  `set_read_timeout` is unchanged.
 - Error mapping mirrors `tcp_connect`/`tcp_listen`'s kinds wherever the
   underlying condition is the same: a bind collision (live or stale
   path) maps to `AddrInUse`; connecting to a socket file that exists but

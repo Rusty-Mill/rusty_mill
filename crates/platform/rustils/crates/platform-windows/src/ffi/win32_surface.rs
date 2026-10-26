@@ -261,16 +261,17 @@ pub use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 // `sys::net::unix_peer_pid`, plus the DACL read-back the tests use.
 pub use windows_sys::Win32::Networking::WinSock::{WSAIoctl, SIO_AF_UNIX_GETPEERPID};
 pub use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
+    SetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 pub use windows_sys::Win32::Security::{
-    AclSizeInformation, EqualSid, GetAce, GetAclInformation, GetKernelObjectSecurity,
-    GetSecurityDescriptorDacl, GetTokenInformation, SetKernelObjectSecurity, TokenUser,
-    ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-    PSID, TOKEN_QUERY, TOKEN_USER,
+    AclSizeInformation, EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl,
+    GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACL,
+    ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
 };
 pub use windows_sys::Win32::Storage::FileSystem::{
-    FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL, WRITE_DAC,
+    FILE_ALL_ACCESS, FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL, WRITE_DAC,
 };
 pub use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 pub use windows_sys::Win32::System::Threading::OpenProcessToken;
