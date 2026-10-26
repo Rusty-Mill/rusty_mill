@@ -74,7 +74,7 @@ PACKAGE_JOB_NAMES = {
 }
 
 SPECIALIZED_JOB_NAMES = tuple(
-    dict.fromkeys((*PATH_JOB_PREFIXES, *PACKAGE_JOB_NAMES, "remind_me", "remind_me_legacy_import"))
+    dict.fromkeys((*PATH_JOB_PREFIXES, *PACKAGE_JOB_NAMES, "remind_me", "remind_me_legacy_import", "msrv"))
 )
 
 
@@ -344,6 +344,10 @@ def specialized_job_flags(
         or path == "Cargo.lock"
         for path in paths
     )
+    # A crate's floor moves with its manifest (rust-version, a new or optional
+    # dependency) or the lockfile (a dependency bump); a code-only change rarely
+    # moves it, and the scheduled full sweep still checks every crate.
+    flags["msrv"] = any(path == "Cargo.lock" or path.rsplit("/", 1)[-1] == "Cargo.toml" for path in paths)
     return flags
 
 

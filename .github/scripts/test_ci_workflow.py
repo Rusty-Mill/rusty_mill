@@ -44,6 +44,7 @@ PLAN_KEYS = {
     "rleval_image",
     "crypto_ct",
     "rand_platforms",
+    "msrv",
     "shards",
     "components",
 }
@@ -342,7 +343,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False, "msrv": False},
         )
 
     def test_rleval_jobs_follow_cargo_impact_and_the_viewer_fixture(self) -> None:
@@ -479,11 +480,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False, "msrv": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False, "msrv": False},
         )
 
     def test_agui_package_change_selects_tick_web_too(self) -> None:
@@ -651,7 +652,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_msrv_compile_job_builds_at_declared_floors_and_gates(self) -> None:
         job = self.workflow.split("  msrv-compile:\n")[1].split("  rusty-config-no-std-check:\n")[0]
         self.assertIn("needs: plan", job)
-        self.assertIn("needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''", job)
+        self.assertIn(
+            "(needs.plan.outputs.full == 'true' || (needs.plan.outputs.packages != '' && needs.plan.outputs.msrv == 'true'))",
+            job,
+        )
+        self.assertIn("msrv: ${{ steps.plan.outputs.msrv }}", self.workflow)
         self.assertIn("check_msrv_compile.py", job)
         # The pinned toolchain's own versions are covered elsewhere (compared as full versions); builds stay
         # out of the cached target dir; metadata is locked and Cargo.lock must come out unchanged.
@@ -673,6 +678,15 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("'rusty_journal rusty_fedora_agent'", job)
         self.assertIn("shell: bash", job)
         self.assertIn("      - msrv-compile\n", self.workflow.split("  required-gate:\n", 1)[1])
+
+    def test_msrv_runs_only_when_a_manifest_or_the_lockfile_changes(self) -> None:
+        for path in ("Cargo.lock", "Cargo.toml", "crates/libs/net/rusty_axum/Cargo.toml"):
+            with self.subTest(path=path):
+                self.assertTrue(specialized_job_flags([path], ["rusty_axum"])["msrv"])
+        for path in ("crates/libs/net/rusty_axum/src/lib.rs", "crates/libs/net/rusty_axum/NotCargo.toml"):
+            with self.subTest(path=path):
+                self.assertFalse(specialized_job_flags([path], ["rusty_axum"])["msrv"])
+        self.assertEqual(self._planner_map("--emit-full")["msrv"], "true")
 
     def test_rusty_axum_floors_match_the_manifests(self) -> None:
         # The default build is held to rusty_axum's own rust-version; the all-features floor is exactly

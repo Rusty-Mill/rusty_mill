@@ -311,6 +311,7 @@ jobs:
       rleval_image: ${{ steps.plan.outputs.rleval_image }}
       crypto_ct: ${{ steps.plan.outputs.crypto_ct }}
       rand_platforms: ${{ steps.plan.outputs.rand_platforms }}
+      msrv: ${{ steps.plan.outputs.msrv }}
       shards: ${{ steps.plan.outputs.shards }}
       components: ${{ steps.plan.outputs.components }}
       linux: ${{ steps.platforms.outputs.linux }}
@@ -1284,7 +1285,10 @@ jobs:
     # rust-versions; this builds. Each workspace crate that declares one is
     # `cargo check`ed with a rustc of exactly that version, grouped by floor:
     # default features, then `--all-features` for a crate that has any (#844).
-    # Only the affected crates on a PR; every crate on a full sweep. Floors at
+    # Every crate on a full sweep. A PR or queue entry runs it only when a
+    # Cargo.toml or Cargo.lock changed (ci_plan.py `msrv`), then for the affected
+    # crates: a code-only change that needs a newer rustc surfaces on the next
+    # scheduled sweep instead of costing every run. Floors at
     # the pinned toolchain are covered by the ordinary jobs. The build output
     # stays under RUNNER_TEMP.
     #
@@ -1311,7 +1315,7 @@ jobs:
     # waits until CI builds the workspace there at all.
     name: compile at declared rust-version${{ matrix.os != 'ubuntu-latest' && format(' ({0})', matrix.os) || '' }}
     needs: plan
-    if: (needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != '') && needs.plan.outputs.linux == 'true'
+    if: (needs.plan.outputs.full == 'true' || (needs.plan.outputs.packages != '' && needs.plan.outputs.msrv == 'true')) && needs.plan.outputs.linux == 'true'
     strategy:
       fail-fast: false
       matrix:
