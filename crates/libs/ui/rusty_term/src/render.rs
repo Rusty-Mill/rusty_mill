@@ -230,6 +230,9 @@ pub(crate) struct RenderState {
     /// Timestamp of the last actual paint, so the frame budget spaces real
     /// repaints rather than no-op wakes.
     pub(crate) last_frame: Instant,
+    /// The open synchronized update's timeout that a wakeup is already set
+    /// for, so a burst of held frames sets one timer, not one each.
+    sync_until: Option<Instant>,
 }
 
 impl RenderState {
@@ -239,6 +242,7 @@ impl RenderState {
             last_title: None,
             cursor_shown: true,
             last_frame: Instant::now(),
+            sync_until: None,
         }
     }
 }
@@ -246,9 +250,19 @@ impl RenderState {
 /// Snapshot the grid and paint one frame if warranted, forwarding any clipboard
 /// (OSC 52) bytes, title (OSC 0/2) changes, and cursor-visibility (DECTCEM)
 /// changes to the host terminal. Shared verbatim by both runtimes.
-pub(crate) fn render_once(grid: &Mutex<Grid>, st: &mut RenderState) {
+///
+/// While a synchronized update (DEC 2026) is open nothing is painted, so
+/// input, a resize or a scroll can't show a half-drawn frame. The first held
+/// frame returns the update's timeout, for the caller to wake and repaint
+/// then; later ones for the same update return `None`.
+#[must_use]
+pub(crate) fn render_once(grid: &Mutex<Grid>, st: &mut RenderState) -> Option<Instant> {
     let (frame, title, viewing, dirty_any, host_out, app_cursor_visible) = {
         let mut g = grid.lock();
+        if let Some(until) = g.sync_output_until() {
+            return (st.sync_until.replace(until) != Some(until)).then_some(until);
+        }
+        st.sync_until = None;
         let viewing = g.view_offset > 0;
         let dirty_any = g.dirty.iter().any(|&d| d);
         // While scrolled back, composite history over the live grid; that
@@ -315,11 +329,28 @@ pub(crate) fn render_once(grid: &Mutex<Grid>, st: &mut RenderState) {
         draw(&frame, true);
         st.last_frame = Instant::now();
     }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_synchronized_update_holds_paints_and_asks_for_one_wakeup() {
+        use crate::core::AnsiParser;
+        let grid = Mutex::new(Grid::new(20, 4));
+        let mut p = AnsiParser::new();
+        p.advance(&mut grid.lock(), b"\x1b[?2026hhalf a frame");
+        let mut st = RenderState::new();
+        let until = render_once(&grid, &mut st);
+        assert!(until.is_some(), "held, with its timeout");
+        assert!(grid.lock().dirty.iter().any(|&d| d), "nothing painted");
+        assert_eq!(render_once(&grid, &mut st), None, "one wakeup per update");
+        p.advance(&mut grid.lock(), b"\x1b[?2026l");
+        assert_eq!(render_once(&grid, &mut st), None);
+        assert!(!grid.lock().dirty.iter().any(|&d| d), "painted once closed");
+    }
 
     #[test]
     fn restore_host_modes_resets_kitty_modify_keys_and_cursor_shape() {

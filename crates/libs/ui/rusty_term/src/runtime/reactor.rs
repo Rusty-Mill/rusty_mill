@@ -69,6 +69,16 @@ enum Wake {
     Output(Option<Vec<u8>>),
 }
 
+/// Notify `frame` at `until`: a synchronized update that times out with no
+/// more output still gets its repaint.
+fn notify_at(frame: &Arc<Notify>, until: std::time::Instant) {
+    let frame = Arc::clone(frame);
+    rusty_tokio::spawn(async move {
+        rusty_tokio::time::sleep(until.saturating_duration_since(std::time::Instant::now())).await;
+        frame.notify_one();
+    });
+}
+
 /// Duplicate `fd` into a descriptor this runtime owns (close-on-exec), for
 /// registering with the reactor.
 ///
@@ -383,19 +393,18 @@ async fn run_async(
                 };
                 match guard.try_io(|inner| read_nonblocking(inner.as_raw_fd())) {
                     Ok(Ok(data)) if !data.is_empty() => {
-                        let (responses, should_notify) = {
+                        let responses = {
                             // Bulk: step aside for the render loop between chunks.
                             let mut g = grid.lock_bulk();
                             let mut parser = parser.lock();
                             parser.advance(&mut g, &data);
                             g.epoch += 1;
-                            (parser.take_responses(), !g.sync_output_active())
+                            parser.take_responses()
                         };
-                        // New output landed in the grid — ask for a repaint,
-                        // unless a synchronized-output window is suppressing it.
-                        if should_notify {
-                            frame.notify_one();
-                        }
+                        // New output landed in the grid: ask for a repaint.
+                        // During a synchronized update `render_once` holds it
+                        // and sets a wakeup for the update's timeout.
+                        frame.notify_one();
                         if !responses.is_empty() && write_all(&master, &responses).await.is_err() {
                             break;
                         }
@@ -511,7 +520,9 @@ async fn run_async(
                 if since < FRAME_BUDGET {
                     rusty_tokio::time::sleep(FRAME_BUDGET - since).await;
                 }
-                render_once(&grid, &mut render_state);
+                if let Some(until) = render_once(&grid, &mut render_state) {
+                    notify_at(&frame, until);
+                }
             }
             Wake::Resize => {
                 // Reflow the grid, tell the child its new size, and clear the
@@ -738,16 +749,14 @@ async fn run_async(
             Wake::Output(data) => {
                 match data {
                     Some(data) => {
-                        let (responses, should_notify) = {
+                        let responses = {
                             let mut g = grid.lock();
                             let mut parser = parser.lock();
                             parser.advance(&mut g, &data);
                             g.epoch += 1;
-                            (parser.take_responses(), !g.sync_output_active())
+                            parser.take_responses()
                         };
-                        if should_notify {
-                            frame.notify_one();
-                        }
+                        frame.notify_one();
                         if !responses.is_empty() {
                             let _ = in_tx.send(responses);
                         }
@@ -764,7 +773,9 @@ async fn run_async(
                 if since < FRAME_BUDGET {
                     rusty_tokio::time::sleep(FRAME_BUDGET - since).await;
                 }
-                render_once(&grid, &mut render_state);
+                if let Some(until) = render_once(&grid, &mut render_state) {
+                    notify_at(&frame, until);
+                }
             }
             Wake::Resize => {
                 if !running.load(Ordering::Relaxed) {

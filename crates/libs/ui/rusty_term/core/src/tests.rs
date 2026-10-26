@@ -1119,13 +1119,31 @@ fn synchronized_output_mode_toggles_on_set_reset() {
     assert!(!g.sync_output_active());
 }
 
-// The timeout safety valve (SYNC_OUTPUT_TIMEOUT, ~800ms) that auto-closes a
-// window a misbehaving client never resets isn't exercised here: faking it
-// would need either a real sleep (slows the suite for one test) or injecting
-// a fake clock this crate doesn't otherwise need. Covered by inspection of
-// `Grid::sync_output_active` instead — the logic is a two-line elapsed()
-// check with nothing else that could plausibly break independently of the
-// toggle behavior the tests above already cover.
+#[test]
+fn an_open_synchronized_update_reports_its_timeout() {
+    use std::time::{Duration, Instant};
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    assert_eq!(g.sync_output_until(), None, "none open");
+    let before = Instant::now();
+    p.advance(&mut g, b"\x1b[?2026h");
+    let until = g.sync_output_until().expect("open");
+    assert!(until >= before + Duration::from_millis(800));
+    assert!(until <= Instant::now() + Duration::from_millis(800));
+    p.advance(&mut g, b"\x1b[?2026l");
+    assert_eq!(g.sync_output_until(), None, "closed normally");
+}
+
+#[test]
+fn a_synchronized_update_past_its_timeout_closes() {
+    use std::time::{Duration, Instant};
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[?2026h");
+    g.sync_output_since = Instant::now().checked_sub(Duration::from_millis(800));
+    assert_eq!(g.sync_output_until(), None, "expired");
+    assert!(!g.sync_output_active(), "and stays closed");
+}
 
 #[test]
 fn xtwinops_18t_reports_text_area_in_cells() {
