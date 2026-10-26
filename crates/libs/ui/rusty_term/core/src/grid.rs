@@ -1002,8 +1002,8 @@ struct Reflowed {
 /// physical-row → logical-line → new-physical-row mapping.
 #[allow(clippy::too_many_arguments)]
 fn reflow_history(
-    scrollback: &VecDeque<Line>,
-    screen: &[Line],
+    scrollback: VecDeque<Line>,
+    screen: Vec<Line>,
     old_cols: usize,
     cursor: (usize, usize),
     prompt_marks: &[usize],
@@ -1016,7 +1016,19 @@ fn reflow_history(
     scrollback_max: usize,
     styles: &StyleTable,
 ) -> Reflowed {
-    let is_padding = |c: &PackedCell| is_padding_packed(*c, styles);
+    // Whether a cell pads is resolved once per run of equal cells, not per
+    // cell: trimming walks every trailing blank of every line.
+    let last = std::cell::Cell::new(None::<(PackedCell, bool)>);
+    let is_padding = |c: &PackedCell| {
+        if let Some((cell, pads)) = last.get()
+            && cell == *c
+        {
+            return pads;
+        }
+        let pads = is_padding_packed(*c, styles);
+        last.set(Some((*c, pads)));
+        pads
+    };
     let hist = scrollback.len();
     let old_total = hist + screen.len();
     let cursor_phys = hist + cursor.1.min(screen.len().saturating_sub(1));
@@ -1037,25 +1049,40 @@ fn reflow_history(
     };
 
     // --- Phase 1: flatten physical rows into logical lines. ---
-    let mut logical: Vec<Vec<PackedCell>> = Vec::new();
+    // Every logical line's cells go into one buffer, `flat`; `logical` holds
+    // each line's range in it.
+    let cells_total = (0..old_total).map(|i| phys(i).0.len()).sum();
+    let mut flat: Vec<PackedCell> = Vec::with_capacity(cells_total);
+    let mut logical: Vec<std::ops::Range<usize>> = Vec::new();
     let mut logical_attr: Vec<LineAttr> = Vec::new();
     let mut phys_to_logical: Vec<usize> = Vec::with_capacity(old_total);
-    let mut cur: Vec<PackedCell> = Vec::new();
+    let mut cur_start = 0usize;
     let mut cur_attr = LineAttr::Single;
     let mut cur_started = false;
     let mut cursor_logical = 0usize;
     let mut cursor_off = 0usize;
+    // Close the open logical line, trimming trailing padding but never past
+    // the cursor's column on the cursor's own line.
+    let close = |flat: &mut Vec<PackedCell>, start: usize, min_keep: usize| {
+        let mut end = flat.len();
+        while end > start + min_keep && is_padding(&flat[end - 1]) {
+            end -= 1;
+        }
+        flat.truncate(end);
+        start..end
+    };
     for i in 0..old_total {
         let (cells, wrapped, attr) = phys(i);
         let li = logical.len(); // index this physical row's logical line will get
         phys_to_logical.push(li);
         if !cur_started {
             cur_attr = attr;
+            cur_start = flat.len();
             cur_started = true;
         }
         if i == cursor_phys {
             cursor_logical = li;
-            cursor_off = cur.len() + cursor.0.min(old_cols);
+            cursor_off = flat.len() - cur_start + cursor.0.min(old_cols);
         }
         // Append this row's content. A wrapped row that ends in one padding cell
         // because a wide glyph didn't fit drops that filler — detected precisely
@@ -1070,19 +1097,12 @@ fn reflow_history(
                 take -= 1;
             }
         }
-        cur.extend_from_slice(&cells[..take]);
+        flat.extend_from_slice(&cells[..take]);
         if wrapped {
             continue; // logical line continues on the next physical row
         }
-        // Hard break: close the logical line, trimming trailing padding but never
-        // past the cursor's column on the cursor's own line.
         let min_keep = if li == cursor_logical { cursor_off } else { 0 };
-        let mut end = cur.len();
-        while end > min_keep && is_padding(&cur[end - 1]) {
-            end -= 1;
-        }
-        cur.truncate(end);
-        logical.push(std::mem::take(&mut cur));
+        logical.push(close(&mut flat, cur_start, min_keep));
         logical_attr.push(cur_attr);
         cur_started = false;
     }
@@ -1094,14 +1114,15 @@ fn reflow_history(
         } else {
             0
         };
-        let mut end = cur.len();
-        while end > min_keep && is_padding(&cur[end - 1]) {
-            end -= 1;
-        }
-        cur.truncate(end);
-        logical.push(cur);
+        logical.push(close(&mut flat, cur_start, min_keep));
         logical_attr.push(cur_attr);
     }
+    // The old rows' cell buffers, reused for the new rows below.
+    let mut spare: Vec<Vec<PackedCell>> = scrollback
+        .into_iter()
+        .chain(screen)
+        .map(Line::into_cells)
+        .collect();
 
     // Drop blank logical lines trailing *below* the cursor: those are the screen's
     // empty tail (padding under the last output), not history. Lines at or above
@@ -1112,14 +1133,17 @@ fn reflow_history(
         logical_attr.pop();
     }
 
-    // --- Phase 2: re-wrap each logical line to the new width. ---
-    let mut out_cells: Vec<Vec<PackedCell>> = Vec::new();
+    // --- Phase 2: split each logical line into rows of the new width. ---
+    // Only the split is computed here: a row is its cell range in `flat`
+    // (empty for a blank row). Phase 3 builds just the rows it keeps.
+    let mut out_cells: Vec<std::ops::Range<usize>> = Vec::new();
     let mut out_wrapped: Vec<bool> = Vec::new();
     let mut out_attr: Vec<LineAttr> = Vec::new();
     let mut logical_first_row: Vec<usize> = vec![0; logical.len()];
     let mut ncur = (0usize, 0usize);
     let mut cursor_set = false;
-    for (li, line) in logical.iter().enumerate() {
+    for (li, span) in logical.iter().enumerate() {
+        let line = &flat[span.clone()];
         logical_first_row[li] = out_cells.len();
         let attr = logical_attr[li];
         if line.is_empty() {
@@ -1127,7 +1151,7 @@ fn reflow_history(
                 ncur = (out_cells.len(), 0);
                 cursor_set = true;
             }
-            out_cells.push(vec![blank; new_cols]);
+            out_cells.push(span.start..span.start);
             out_wrapped.push(false);
             out_attr.push(attr);
             continue;
@@ -1144,16 +1168,14 @@ fn reflow_history(
             if take == 0 {
                 take = 1; // degenerate new_cols == 1 vs a wide glyph: force progress
             }
-            let mut row = vec![blank; new_cols];
             let n = take.min(new_cols);
-            row[..n].copy_from_slice(&line[i..i + n]);
             seg_start = i;
             if li == cursor_logical && !cursor_set && cursor_off >= i && cursor_off < i + take {
                 ncur = (out_cells.len(), (cursor_off - i).min(new_cols - 1));
                 cursor_set = true;
             }
             let more = i + take < line.len();
-            out_cells.push(row);
+            out_cells.push(span.start + i..span.start + i + n);
             out_wrapped.push(more);
             out_attr.push(attr);
             i += take;
@@ -1176,19 +1198,22 @@ fn reflow_history(
         screen_top = ncur.0; // cursor would be above the window: pull the window up
     }
     let dropped = screen_top.saturating_sub(scrollback_max);
-    let mut new_scrollback: VecDeque<Line> = VecDeque::new();
+    // Rows past the scrollback cap and below the cursor's window are never built.
+    let mut row = |r: usize| -> Vec<PackedCell> {
+        let mut cells = spare.pop().unwrap_or_default();
+        cells.clear();
+        cells.extend_from_slice(&flat[out_cells[r].clone()]);
+        cells.resize(new_cols, blank);
+        cells
+    };
+    let new_scrollback: VecDeque<Line> = (dropped..screen_top)
+        .map(|r| Line::new(row(r), out_wrapped[r], LineAttr::Single))
+        .collect();
     let mut new_screen: Vec<Line> = Vec::with_capacity(new_rows);
-    for (r, row) in out_cells.into_iter().enumerate() {
-        if r < dropped {
-            continue; // oldest history beyond the scrollback cap
-        }
-        if r < screen_top {
-            new_scrollback.push_back(Line::new(row, out_wrapped[r], LineAttr::Single));
-        } else if r < screen_top + new_rows {
-            new_screen.push(Line::new(row, out_wrapped[r], out_attr[r]));
-        }
-        // r >= screen_top + new_rows: below the cursor's window, dropped.
-    }
+    new_screen.extend(
+        (screen_top..total.min(screen_top + new_rows))
+            .map(|r| Line::new(row(r), out_wrapped[r], out_attr[r])),
+    );
     new_screen.resize_with(new_rows, || Line::blank(new_cols, blank));
     let cy = ncur.0.saturating_sub(screen_top).min(new_rows - 1);
     let cx = ncur.1.min(new_cols - 1);
@@ -3493,8 +3518,8 @@ impl Grid {
         let (fold_start, fold_blocks): (Option<usize>, Vec<CommandBlock>) = (None, Vec::new());
         if let Some(primary) = self.primary.take() {
             let r = reflow_history(
-                &self.scrollback,
-                &primary.screen,
+                std::mem::take(&mut self.scrollback),
+                primary.screen,
                 old_cols,
                 primary.cursor,
                 &self.prompt_marks,
@@ -3530,8 +3555,8 @@ impl Grid {
             self.saved_cursor = clamp(self.saved_cursor);
         } else {
             let r = reflow_history(
-                &self.scrollback,
-                &self.screen,
+                std::mem::take(&mut self.scrollback),
+                std::mem::take(&mut self.screen),
                 old_cols,
                 self.cursor,
                 &self.prompt_marks,
