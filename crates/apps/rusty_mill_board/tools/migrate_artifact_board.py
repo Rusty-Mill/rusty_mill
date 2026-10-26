@@ -4,19 +4,25 @@
     migrate_artifact_board.py EXPORT_DIR                          # dry run, offline
     RUSTY_TICK_TOKEN=... migrate_artifact_board.py EXPORT_DIR --tick-url URL          # dry run against rusty_tick
     RUSTY_TICK_TOKEN=... migrate_artifact_board.py EXPORT_DIR --tick-url URL --run    # write
-    RUSTY_TICK_TOKEN=... migrate_artifact_board.py --tick-url URL --rollback --yes    # purge what it wrote
+    RUSTY_TICK_TOKEN=... migrate_artifact_board.py --tick-url URL --rollback --yes    # trash what it wrote
 
 EXPORT_DIR holds the artifact's `tasks` collection, one JSON document per card
 (`n`, `title`, `summary`, `prompt`, `notes`, `status`, `kind`, `track`, `order`,
 `deps`, optional `tags`). The artifact is only read, never written.
 
-Every task it creates carries the tag `migrated:mill-board` and, as the last
-line of its notes, `Migrated from Mill Board card #n`, in the create request
-itself. Each run rebuilds the card-to-task map from those markers (trash
-included), creates only the cards missing from it, then writes every task's
-`board` document (its dependencies) and closes the done ones; both are the same
-write however often they run. So a crash anywhere is finished by running again.
-Rollback purges every marked task, with its documents and comments.
+Every card is checked against rusty_tick's limits before anything is written.
+Every task it creates carries the tag `migrated:mill-board` and a notes line
+`Migrated from Mill Board card #n`, in the create request itself. Each run
+rebuilds the card-to-task map from those markers (trash included; a tagged task
+without exactly one marker stops it), creates only the cards missing from it,
+then writes every task's `board` document (its dependencies) and closes the done
+ones; both are the same write however often they run. So a crash anywhere is
+finished by running again.
+
+Rollback moves every marked task to the trash, where rusty_tick's restore brings
+it back; emptying the trash deletes it for good. It refuses, writing nothing,
+while a marked task has a subtask that is not marked. Trashing takes a task's
+subtasks with it, so one added after that check is trashed too, and restored too.
 
 Standard library only.
 """
@@ -26,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -43,7 +50,15 @@ COLUMNS = {
     "waiting": "blocked",
     "done": "done",
 }
-RESERVED = ("agent", "board:", "claim:", "migrated:")
+MARKER = re.compile(rf"^{re.escape(MARKER_LINE)}(\d+)$", re.MULTILINE)
+# The board's own tags (ADR-0012): `agent` exactly, and these prefixes.
+RESERVED_PREFIXES = ("board:", "claim:", "migrated:")
+# rusty_tick's limits (crates/apps/rusty_tick/src/service.rs).
+MAX_TITLE_CHARS = 500
+MAX_NOTES_CHARS = 100_000
+MAX_TAGS = 20
+MAX_TAG_CHARS = 64
+I64 = range(-(2**63), 2**63)
 
 Send = Callable[[str, str, Optional[dict], dict], "tuple[int, Any]"]
 
@@ -72,26 +87,47 @@ def notes_of(doc: dict) -> str:
     return "\n\n".join(sections + [f"{MARKER_LINE}{doc['n']}"])
 
 
+def is_reserved(tag: str) -> bool:
+    return tag == "agent" or tag.startswith(RESERVED_PREFIXES)
+
+
 def card_of(doc: dict) -> Card:
+    """The task a card becomes, refused if rusty_tick would refuse any part of it."""
     status = doc.get("status")
     if status not in COLUMNS:
         raise MigrationError(f"card #{doc.get('n')}: unknown status {status!r}")
     own = [t.strip().lower() for t in doc.get("tags") or [] if t.strip()]
-    own = [t for t in own if not t.startswith(RESERVED)]
+    own = [t for t in own if not is_reserved(t)]
     tags = ["agent", f"board:{COLUMNS[status]}", MARKER_TAG]
     tags += [f"kind:{doc['kind']}", f"track:{doc['track']}"] + own
-    tags = list(dict.fromkeys(tags))
-    if len(tags) > 20:
-        raise MigrationError(f"card #{doc['n']}: {len(tags)} tags, rusty_tick keeps 20")
-    return Card(
+    card = Card(
         n=int(doc["n"]),
         title=doc["title"].strip(),
         notes=notes_of(doc),
-        tags=tuple(tags),
+        tags=tuple(dict.fromkeys(tags)),
         sort_order=int(doc.get("order") or 0),
         deps=tuple(int(d) for d in doc.get("deps") or []),
         done=status == "done",
     )
+    problem = limit_problem(card)
+    if problem:
+        raise MigrationError(f"card #{card.n}: {problem}")
+    return card
+
+
+def limit_problem(card: Card) -> Optional[str]:
+    if not card.title or len(card.title) > MAX_TITLE_CHARS:
+        return f"title must be 1 to {MAX_TITLE_CHARS} characters"
+    if len(card.notes) > MAX_NOTES_CHARS:
+        return f"notes are longer than {MAX_NOTES_CHARS} characters"
+    if len(card.tags) > MAX_TAGS:
+        return f"{len(card.tags)} tags, rusty_tick keeps {MAX_TAGS}"
+    long_tags = [t for t in card.tags if len(t) > MAX_TAG_CHARS]
+    if long_tags:
+        return f"tags longer than {MAX_TAG_CHARS} characters: {long_tags}"
+    if card.sort_order not in I64:
+        return f"order {card.sort_order} is out of range"
+    return None
 
 
 def load_cards(export: Path) -> list[Card]:
@@ -118,18 +154,21 @@ class Tick:
             raise MigrationError(f"rusty_tick answered {status} to {method} {path}: {reply}")
         return reply
 
-    def migrated(self) -> dict[int, dict]:
+    def migrated(self, tasks: Optional[list[dict]] = None) -> dict[int, dict]:
         """Card number to task, from the markers, trash included."""
         by_number: dict[int, dict] = {}
-        for task in self.call("GET", f"/tags/{MARKER_TAG}/tasks")["tasks"]:
-            last = task["notes"].rstrip().rsplit("\n", 1)[-1]
-            if not last.startswith(MARKER_LINE):
+        for task in tasks if tasks is not None else self.snapshot_tasks():
+            if MARKER_TAG not in task["tags"]:
                 continue
-            n = int(last[len(MARKER_LINE):])
+            n = card_number(task)
             if n in by_number:
                 raise MigrationError(f"two migrated tasks for card #{n}: stop and resolve by hand")
             by_number[n] = task
         return by_number
+
+    def snapshot_tasks(self) -> list[dict]:
+        """Every task, trash and completed included."""
+        return self.call("GET", "/snapshot")["tasks"]
 
     def list_id(self) -> str:
         for row in self.call("GET", "/lists")["lists"]:
@@ -166,6 +205,17 @@ class Tick:
             self.call("PATCH", f"/tasks/{task['id']}", {"status": "done"}, **{"If-Match": task["etag"]})
             changed.append("closed")
         return changed
+
+
+def card_number(task: dict) -> int:
+    """The card a marked task came from: its one marker line, wherever the notes put it."""
+    numbers = {int(n) for n in MARKER.findall(task.get("notes") or "")}
+    if len(numbers) != 1:
+        raise MigrationError(
+            f"task {task['id']} is tagged {MARKER_TAG} but names {len(numbers)} cards in its notes: "
+            "stop and resolve by hand"
+        )
+    return numbers.pop()
 
 
 def http_send(base: str, token: str) -> Send:
@@ -214,10 +264,28 @@ def run(cards: list[Card], tick: Tick, out: Callable[[str], None]) -> None:
             out(f"#{card.n} {' and '.join(changed)}")
 
 
+def foreign_subtasks(migrated: dict[int, dict], tasks: list[dict]) -> list[str]:
+    """Subtasks of migrated tasks that the migration did not create."""
+    ours = {t["id"] for t in migrated.values()}
+    return sorted(
+        f"{t['id']} ({t['title']!r})"
+        for t in tasks
+        if t.get("parentId") in ours and t["id"] not in ours
+    )
+
+
 def rollback(tick: Tick, out: Callable[[str], None]) -> None:
-    for n, task in sorted(tick.migrated().items()):
-        tick.call("DELETE", f"/tasks/{task['id']}?permanent=true", ok=204)
-        out(f"#{n} purged {task['id']}")
+    tasks = tick.snapshot_tasks()
+    migrated = tick.migrated(tasks)
+    foreign = foreign_subtasks(migrated, tasks)
+    if foreign:
+        raise MigrationError(f"migrated tasks have subtasks it did not create, nothing trashed: {foreign}")
+    for n, task in sorted(migrated.items()):
+        if task.get("deletedMs") is not None:
+            continue
+        # Fenced, so a task changed since it was read is reported, not trashed.
+        tick.call("DELETE", f"/tasks/{task['id']}", ok=204, **{"If-Match": task["etag"]})
+        out(f"#{n} trashed {task['id']}")
 
 
 def main(argv: list[str]) -> int:
@@ -225,7 +293,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("export", nargs="?", type=Path, help="directory of the artifact's card documents")
     parser.add_argument("--tick-url", help="rusty_tick root, e.g. http://127.0.0.1:8788")
     parser.add_argument("--run", action="store_true", help="write (default: dry run)")
-    parser.add_argument("--rollback", action="store_true", help="purge every migrated task")
+    parser.add_argument("--rollback", action="store_true", help="move every migrated task to the trash")
     parser.add_argument("--yes", action="store_true", help="confirm --rollback")
     args = parser.parse_args(argv)
 
