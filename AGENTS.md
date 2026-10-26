@@ -15,6 +15,8 @@ Keep changes focused, preserve unrelated work, and add or update the PR's
 - Merge through the merge queue using "Merge when ready" and wait for
   `required-gate` on the queued entry. Use a **merge commit**, never squash or
   rebase merge. Do not bypass red or stuck checks.
+- Merge the default branch into a PR branch only for a conflict or a fix the PR needs
+  to go green, never just to update it; the merge queue tests against current `main`.
 - Never force push or rebase shared history. Never read `.env` or commit/log secrets.
 - Validate the affected scope using repository checks; a local `cargo check` alone
   does not establish green CI or merge readiness.
