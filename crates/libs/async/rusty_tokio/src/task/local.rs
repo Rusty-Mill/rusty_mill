@@ -263,13 +263,16 @@ where
     // docs for why call sites don't need to `#[cfg]` around this.
     #[allow(clippy::let_unit_value)]
     let span = super::trace::spawn_span("task", None, id.as_u64());
-    let wrapped: LocalBoxFuture = Box::pin(super::trace::instrument(
-        async move {
-            let output = future.await;
-            join_inner.complete(output);
-        },
-        span,
-    ));
+    // Only `future` runs inside the span: completing the join after it
+    // exits means a subscriber has seen the last poll end by the time the
+    // `JoinHandle` resolves. It is instrumented out here, not inside the
+    // block, so a task aborted before its first poll still drops `future`
+    // inside its span.
+    let instrumented = super::trace::instrument(future, span);
+    let wrapped: LocalBoxFuture = Box::pin(async move {
+        let output = instrumented.await;
+        join_inner.complete(output);
+    });
 
     let task = Arc::new(LocalTask {
         id,
