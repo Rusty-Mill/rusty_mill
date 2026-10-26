@@ -15,6 +15,11 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   defined by the caller, `Roles::default()` is a starting set. `actor`/`role` are
   trusted as given: this is a workflow guard between cooperating agents, and the
   bearer token is the authentication.
+- **Order:** `card_take` looks in Review, QA, Building, then Ready; within one, the highest `priority` (0, 1, 3, 5)
+  first, then the oldest. A card waits until every card in its `deps` is Done (a dependency no longer on the board
+  holds nothing up); naming it explicitly says why. `card_plan` sets both and needs Triage. The tags `agent`,
+  `board:…` and `claim:…` are the board's own ([ADR-0012](../../../docs/adr/0012-one-task-store.md)): a card cannot
+  carry them, and the GitHub sync drops such labels when it imports an issue.
 - **Projects:** one board serves several applications of a monorepo, and several repositories.
   `--projects FILE` names the projects and the repository paths each may change
   (`{"rocket_league": ["crates/apps/rocket_league"]}`, or `{"repos": {"rusty_mill": {...}, "other": {...}}}`
@@ -31,7 +36,7 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   enforces the paths too: see its README. GitHub sync is project-blind (imported issues land in `default`);
   `board_events` carries no card text but does not hide other projects' event metadata.
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
-  `card_get`, `card_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_comment`. The web API
+  `card_get`, `card_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_plan`, `card_comment`. The web API
   exposes the same table, so the two cannot drift.
 - **Settings.** The ⚙ button opens a view to add and remove agents (credentials: name, role, project limit; a
   token is shown once; "New token" replaces it), edit repositories and their projects, edit roles, and configure

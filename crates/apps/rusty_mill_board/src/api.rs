@@ -181,6 +181,18 @@ struct AssignArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct PlanArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// Card id.
+    id: String,
+    /// 0 (none), 1 (low), 3 (medium) or 5 (high); higher is taken first.
+    priority: Option<u8>,
+    /// Ids of the cards that must be Done before this one is taken; replaces the list.
+    deps: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct GetArgs {
     /// Card id.
     id: String,
@@ -517,6 +529,23 @@ pub fn ops() -> Vec<Op> {
                     a.body.as_deref(),
                     a.tags,
                 )?)
+            },
+        ),
+        op(
+            "card_plan",
+            "Set a card's priority and the cards it waits on (needs Triage). `card_take` takes higher priority first and skips a card until its dependencies are Done.",
+            |b, i, a: PlanArgs| {
+                let who = acting(b, i, &a.who)?;
+                let deps = a
+                    .deps
+                    .map(|d| {
+                        d.iter()
+                            .map(String::as_str)
+                            .map(id)
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .transpose()?;
+                card(b.plan(id(&a.id)?, &who, a.priority, deps)?)
             },
         ),
         op(

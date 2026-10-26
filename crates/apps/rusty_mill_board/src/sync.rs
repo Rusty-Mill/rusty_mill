@@ -28,7 +28,7 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::api::Shared;
-use crate::domain::{Actor, BoardError, Card, Column, text_hash};
+use crate::domain::{Actor, BoardError, Card, Column, reserved_tag, text_hash};
 
 /// Prefix of the label that mirrors a card's column.
 pub const BOARD_PREFIX: &str = "board:";
@@ -304,7 +304,7 @@ pub fn reconcile(board: &Shared, forge: &dyn Forge) -> Result<Report, SyncError>
         let tags = issue
             .labels
             .iter()
-            .filter(|l| !l.starts_with(BOARD_PREFIX))
+            .filter(|l| !reserved_tag(l))
             .cloned()
             .collect();
         board.import(&actor, &issue.title, &body, tags, issue.number)?;

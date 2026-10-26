@@ -175,6 +175,8 @@ pub struct DocDto {
     pub kind: String,
     pub body: rusty_json::Value,
     pub updated_ms: i64,
+    /// `updated_ms` as text: what `If-Match` names on a document write.
+    pub etag: String,
 }
 
 impl DocDto {
@@ -185,6 +187,7 @@ impl DocDto {
             kind: doc.kind,
             body: rusty_json::from_str(&doc.body).ok()?,
             updated_ms: doc.updated_ms,
+            etag: doc.updated_ms.to_string(),
         })
     }
 }
