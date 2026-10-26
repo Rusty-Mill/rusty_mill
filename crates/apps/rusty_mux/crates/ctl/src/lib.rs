@@ -26,7 +26,7 @@ mod stop;
 pub mod target;
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rusty_mux_proto::schema::{CATALOG, Method, Returns, Value};
 use rusty_mux_proto::{Code, Cursor, Entry, Features, Message};
@@ -188,17 +188,12 @@ fn write_line(out: &mut dyn Write, line: &str) -> Exit {
 #[cfg(unix)]
 fn execute(
     invocation: &Invocation,
-    socket: &PathBuf,
+    socket: &Path,
     here: Option<Uuid>,
     stop: &Stop,
     out: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let stream = std::os::unix::net::UnixStream::connect(socket)?;
-    if stop.is_bounded() {
-        stream.set_read_timeout(Some(stop::POLL))?;
-        stream.set_write_timeout(Some(stop::POLL))?;
-    }
-    let mut conn = Conn::new(stream, stop.clone());
+    let mut conn = Conn::new(conn::connect(socket, stop)?, stop.clone());
     let mut session = Session {
         conn: &mut conn,
         out,
@@ -215,7 +210,7 @@ fn execute(
 #[cfg(not(unix))]
 fn execute(
     _: &Invocation,
-    _: &PathBuf,
+    _: &Path,
     _: Option<Uuid>,
     _: &Stop,
     _: &mut dyn Write,

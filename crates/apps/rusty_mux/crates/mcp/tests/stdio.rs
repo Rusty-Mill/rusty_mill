@@ -3,7 +3,7 @@
 #![cfg(target_os = "linux")]
 
 use std::io::{Cursor, Read, Write};
-use std::os::unix::net::UnixListener as StdListener;
+use std::os::unix::net::{UnixListener as StdListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -81,6 +81,38 @@ fn start_stalled_server() -> (PathBuf, Receiver<&'static str>) {
         let _ = tx.send("closed");
     });
     (path, rx)
+}
+
+/// A listening socket nobody accepts on, its one-slot backlog already
+/// taken, so the next connect waits for room. Dropping it closes both.
+struct FullBacklog {
+    listener: i32,
+    _queued: UnixStream,
+}
+
+impl Drop for FullBacklog {
+    fn drop(&mut self) {
+        let _ = rusty_libc::fd::close(self.listener);
+    }
+}
+
+fn start_full_server() -> (PathBuf, FullBacklog) {
+    use rusty_libc::socket::{
+        AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM, SockAddrUn, bind_un, listen, socket,
+    };
+    let path = socket_path();
+    let addr = SockAddrUn::new(path.as_os_str().as_encoded_bytes()).expect("path fits");
+    let listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0).expect("socket");
+    bind_un(listener, &addr).expect("bind");
+    listen(listener, 0).expect("listen");
+    let queued = UnixStream::connect(&path).expect("the one queued connection");
+    (
+        path,
+        FullBacklog {
+            listener,
+            _queued: queued,
+        },
+    )
 }
 
 fn mcp(socket: &Path, timeout: Duration) -> Arc<Server> {
@@ -286,34 +318,72 @@ impl Read for Feed {
     }
 }
 
-#[test]
-fn cancelling_a_call_to_a_silent_server_releases_its_connection() {
-    let (socket, events) = start_stalled_server();
-    let (feed, lines): (Sender<String>, Receiver<String>) = channel();
-    let server = mcp(&socket, Duration::from_secs(3600));
-    let serving = std::thread::spawn(move || {
+const CANCEL_1: &str =
+    r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#;
+
+/// Serves an MCP session fed line by line, already initialized and with a
+/// `list` call (id 1) under way, that waits an hour for running calls once
+/// its input ends. The receiver gets the session's end.
+fn serve_list_call(socket: &Path) -> (Sender<String>, Receiver<std::io::Result<()>>) {
+    let (feed, lines) = channel();
+    let (done_tx, done) = channel();
+    let server = mcp(socket, Duration::from_secs(3600));
+    let config = StdioConfig {
+        drain_timeout: Duration::from_secs(3600),
+        ..StdioConfig::default()
+    };
+    std::thread::spawn(move || {
         let input = std::io::BufReader::new(Feed {
             lines,
             pending: Vec::new(),
         });
-        serve_lines(server, input, Out::default(), StdioConfig::default())
+        let _ = done_tx.send(serve_lines(server, input, Out::default(), config));
     });
     for line in opening() {
         feed.send(line).expect("feed");
     }
     feed.send(tool_call(1, "list", "{}")).expect("feed");
+    (feed, done)
+}
+
+#[test]
+fn cancelling_a_call_to_a_silent_server_releases_its_connection() {
+    let (socket, events) = start_stalled_server();
+    let (feed, done) = serve_list_call(&socket);
     assert_eq!(events.recv_timeout(PATIENCE), Ok("accepted"));
 
-    feed.send(
-        r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#
-            .to_owned(),
-    )
-    .expect("feed");
+    feed.send(CANCEL_1.to_owned()).expect("feed");
     assert_eq!(
         events.recv_timeout(Duration::from_secs(5)),
         Ok("closed"),
         "the call kept its connection after the cancel"
     );
     drop(feed);
-    serving.join().expect("join").expect("serve");
+    let ended = done
+        .recv_timeout(Duration::from_secs(5))
+        .expect("session ended");
+    ended.expect("serve");
+}
+
+#[test]
+fn a_full_backlog_fails_the_call_at_its_deadline() {
+    let (socket, _full) = start_full_server();
+    let started = Instant::now();
+    let (text, failed) = call_within(&socket, Duration::from_millis(300), "list", "{}");
+    assert!(failed && text.contains("deadline"), "{text}");
+    assert!(started.elapsed() < PATIENCE, "{:?}", started.elapsed());
+}
+
+#[test]
+fn cancelling_a_call_stuck_connecting_ends_it() {
+    let (socket, _full) = start_full_server();
+    let (feed, done) = serve_list_call(&socket);
+    // Nothing reports a connect in progress; give the call time to start.
+    std::thread::sleep(Duration::from_millis(300));
+    feed.send(CANCEL_1.to_owned()).expect("feed");
+    drop(feed);
+    let ended = done
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the cancelled call still held the session open");
+    ended.expect("serve");
 }
