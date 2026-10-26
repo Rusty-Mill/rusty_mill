@@ -153,6 +153,14 @@ dev-dependency only to host the tonic oracle server.
 `rusty_tokio` types. The swap needed `watch::Receiver::wait_for`,
 `AsyncBufRead for io::Take` and `Debug for Notify`, now in `rusty_tokio`.
 
+#910 (in part): `rp-core`'s `ChatStream` is a `rusty_stream::BoxStream`, so
+`rp-core` has no async dependency and `rp-router` drops `futures`. The
+`futures-core` edges are `rp-providers` (reqwest's SSE body) and `rp-server`
+(`rusty_axum`'s `Sse`), each through `rusty_stream::Compat`. `rp-mcp` is tier
+C: its tools block on `rp-router` (reqwest) and its gateway drives
+`rusty-mcp-client`'s tokio transport, both on the tokio runtime `build` runs
+in. Only its `RwLock` moved; the rest moves with #906 (T7).
+
 ## 4. Per-crate table
 
 Deps: `t` tokio, `f` futures, `fu` futures-util, `as` async-stream, `tu`
@@ -191,8 +199,8 @@ through `Cargo.lock`. The counts are not a vetted audit.
 | `rk-kernel` | `apps/rusty_key/crates/kernel` | f t | 3 | t::test×6, f::StreamExt×1, t::task::block_in_place×1, t::runtime::Handle::current×1, f::Stream×1, f::stream::once×1 | aisdk | rk-constrain | G1 G4 G7 G9 | C |
 | `rk-mcp` | `apps/rusty_key/crates/mcp` | t | 3 | t::test×4, t::sync::Mutex×1 | — | rk-constrain, rk-feed, rusty-mcp-client | — | A |
 | `rusty_mill_board` | `apps/rusty_mill_board` | t | 2 | t::signal::ctrl_c×2, t::runtime::Builder::new_current_thread×1, t::signal::unix::signal×1, t::signal::unix::SignalKind::terminate×1, t::select!×1, t::runtime::Builder×1, +1 | — | rusty_http, rusty_mcp_server, rusty_request | G1 | A |
-| `rp-core` | `apps/rusty_provider/crates/core` | f | 1 | f::stream::BoxStream×1 | — | — | G7 | B |
-| `rp-mcp` | `apps/rusty_provider/crates/mcp` | t | 4 | t::test×9, t::time::sleep×4, t::spawn×3, t::runtime::Handle×2, t::time::timeout×2, t::sync::RwLock×1, +1 | — | rp-core, rp-router, rusty-mcp-client, rusty_mcp_server | G1 G4 | B |
+| `rp-core` | `apps/rusty_provider/crates/core` | — | 0 | — (moved to `rusty_stream`, #910) | — | — | — | done |
+| `rp-mcp` | `apps/rusty_provider/crates/mcp` | t | 4 | t::test×9, t::time::sleep×4, t::spawn×3, t::runtime::Handle×2, t::time::timeout×2, +1 | reqwest (via rp-router) | rp-core, rp-router, rusty-mcp-client, rusty_mcp_server | G1 G4 G9 | C |
 | `rp-providers` | `apps/rusty_provider/crates/providers` | fu t(dev) | 7 | t::test×110, fu::StreamExt×6 | reqwest | rp-core | G7 G9 | C |
 | `rp-router` | `apps/rusty_provider/crates/router` | f t | 5 | t::test×156, t::time::sleep×33, t::spawn×7, t::task::spawn_blocking×4, f::stream::StreamExt×1, f::stream×1, +2 | reqwest, tokio-postgres, tokio-postgres-rustls | rp-core, rp-providers | G1 G5 G7 G9 | C |
 | `rp-server` | `apps/rusty_provider/crates/server` | fu t | 6 | t::test×133, t::time::timeout×3, fu::StreamExt×2, t::sync::Semaphore::new×2, t::net::TcpListener::bind×2, t::spawn×2, +5 | axum, reqwest, tower-http | rp-core, rp-mcp, rp-router, rusty_mcp_axum, rusty_mcp_server | G1 G4 G7 G9 | C |

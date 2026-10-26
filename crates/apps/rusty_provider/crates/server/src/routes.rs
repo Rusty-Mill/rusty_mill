@@ -13,6 +13,7 @@ use rusty_axum::response::sse::{Event, KeepAlive, Sse};
 use rusty_axum::{
     ConnectInfo, HeaderMap, IntoResponse, Json, Path, Query, Request, Response, State, StatusCode,
 };
+use rusty_stream::Compat;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -1671,7 +1672,8 @@ async fn chat_completions_dispatch(
         match state.router.dispatch_stream_traced(&req).await {
             Ok((chunk_stream, trace)) => {
                 let router = state.router.clone();
-                let events = chunk_stream
+                // `ChatStream` is a `rusty_stream`; SSE takes a `futures_core::Stream`.
+                let events = Compat::new(chunk_stream)
                     .map(move |item| {
                         let event = match item {
                             Ok(chunk) => {
