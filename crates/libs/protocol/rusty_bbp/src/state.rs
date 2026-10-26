@@ -523,10 +523,15 @@ impl TaskState {
         self.versions.get(&id).map(|v| &*v.doc)
     }
 
+    /// The latest version of the co-edited spec `version` belongs to.
+    pub fn head(&self, version: ArtId) -> Option<ArtId> {
+        self.heads.get(&self.versions.get(&version)?.root).copied()
+    }
+
     /// The latest version of the co-edited spec `base` belongs to, and the
     /// anchors of every version accepted after `base`, oldest first.
     pub fn since(&self, base: ArtId) -> Option<(ArtId, Vec<Option<LineId>>)> {
-        let head = *self.heads.get(&self.versions.get(&base)?.root)?;
+        let head = self.head(base)?;
         let mut chain = Vec::new();
         let mut at = head;
         while at != base {
