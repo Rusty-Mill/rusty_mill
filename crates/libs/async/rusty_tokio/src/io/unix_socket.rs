@@ -841,11 +841,21 @@ impl UnixStream {
     /// and no verified implementation exists for any of them yet -- see
     /// #116. `socket/mod.rs`'s docs cover the general pattern this crate
     /// follows: don't guess at an OS-specific API without a way to
-    /// verify it. Windows has no peer-credential mechanism this crate
-    /// could verify either -- same absence, not extended here.
+    /// verify it. Windows reports no user or group for an `AF_UNIX`
+    /// peer, only its process ID: see [`peer_pid`](Self::peer_pid).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn peer_cred(&self) -> io::Result<UCred> {
         ucred::get_peer_cred(self.inner.as_raw_fd())
+    }
+
+    /// The process ID of whichever process created the other end of this
+    /// socket (`SIO_AF_UNIX_GETPEERPID`), Windows' nearest counterpart to
+    /// `peer_cred`. To compare users, pass it to
+    /// `platform_windows::is_current_user`; the pid can name a different
+    /// process if the peer has already exited.
+    #[cfg(windows)]
+    pub fn peer_pid(&self) -> io::Result<u32> {
+        self.inner.peer_pid().map_err(from_platform_err)
     }
 
     /// Waits for this stream to become readable -- see

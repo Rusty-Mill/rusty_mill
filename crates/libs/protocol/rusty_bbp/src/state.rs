@@ -577,6 +577,7 @@ impl TaskState {
             Version {
                 root,
                 prev,
+                snapshot: Sha256::of(doc.text().as_bytes()),
                 doc: Arc::new(doc),
                 anchors: e.ops.iter().map(|op| op.anchor()).collect(),
             },

@@ -173,13 +173,14 @@ pub fn tools(session: bool) -> Value {
         ),
         tool(
             "put_artifact",
-            "Store an artifact. kind spec: {brief, body=markdown}; diff: {body}; candidate: {base, diffs[]}. Storing a candidate submits it.",
+            "Store an artifact. kind spec: {brief, body=markdown}, or a co-edited version {brief, edit}; diff: {body}; candidate: {base, diffs[]}. Storing a candidate submits it. edit is {base: version id you read (omit to start a co-edited spec), ops: [{insert: {after: line id (omit for the start), lines: [text]}} or {delete: line id}]}; line ids are \"art:N#M\" as get_artifact lists them. An edit on a line someone changed since your base is refused stale_base: read the head and redo it.",
             schema(
                 vec![
                     ("op", "string", "Operation id"),
                     ("kind", "string", "spec, diff or candidate"),
                     ("body", "string", "Markdown for spec, unified diff text for diff"),
                     ("brief", "integer", "spec: the brief artifact id"),
+                    ("edit", "object", "spec: a co-edited version instead of body"),
                     ("base", "string", "candidate: full base commit id"),
                     ("diffs", "array", "candidate: diff artifact ids in apply order"),
                 ],
@@ -308,6 +309,64 @@ fn verdict_body(v: &Value) -> Result<Body, String> {
     }))
 }
 
+/// A line id as get_artifact lists it: `art:N#M`.
+fn line_id(v: Option<&Value>) -> Result<LineId, String> {
+    let bad = || "a line id is a string \"art:N#M\"".to_owned();
+    let s = v.and_then(Value::as_str).ok_or_else(bad)?;
+    let (art, n) = s
+        .strip_prefix("art:")
+        .and_then(|r| r.split_once('#'))
+        .ok_or_else(bad)?;
+    Ok(LineId {
+        art: ArtId(art.parse().map_err(|_| bad())?),
+        n: n.parse().map_err(|_| bad())?,
+    })
+}
+
+/// One op, naming exactly one variant: an op that also named another would
+/// lose it silently (a replace sent as one object).
+fn line_op(v: &Value) -> Result<LineOp, String> {
+    const SHAPE: &str = "an op is exactly one of {insert: {after, lines}} or {delete: line id}";
+    let (key, body) = match v {
+        Value::Map(m) if m.len() == 1 => (m[0].0.as_str(), &m[0].1),
+        _ => return Err(SHAPE.into()),
+    };
+    let ins = match key {
+        "delete" => {
+            return Ok(LineOp::Delete {
+                line: line_id(Some(body))?,
+            })
+        }
+        "insert" => body,
+        _ => return Err(SHAPE.into()),
+    };
+    let after = match ins.get("after") {
+        None | Some(Value::Null) => None,
+        a => Some(line_id(a)?),
+    };
+    let Some(Value::Seq(lines)) = ins.get("lines") else {
+        return Err("insert needs lines, an array of strings".into());
+    };
+    let lines = lines
+        .iter()
+        .map(|l| l.as_str().map(str::to_owned).ok_or("lines must be strings"))
+        .collect::<Result<_, _>>()?;
+    Ok(LineOp::Insert { after, lines })
+}
+
+/// The `edit` of a co-edited spec version; the core validates it.
+fn spec_edit(brief: ArtId, e: &Value) -> Result<SpecEdit, String> {
+    let base = match e.get("base") {
+        None | Some(Value::Null) => None,
+        b => Some(ArtId(u64_of(b, "edit.base")?)),
+    };
+    let Some(Value::Seq(ops)) = e.get("ops") else {
+        return Err("edit needs ops, an array".into());
+    };
+    let ops = ops.iter().map(line_op).collect::<Result<_, _>>()?;
+    Ok(SpecEdit { brief, base, ops })
+}
+
 fn op_of(a: &Value) -> OpId {
     a.get("op")
         .and_then(Value::as_str)
@@ -386,9 +445,13 @@ pub fn action(name: &str, a: &Value) -> Result<Translated, String> {
                 .as_bytes()
                 .to_vec();
             let payload = match a.get("kind").and_then(Value::as_str) {
-                Some("spec") => ArtifactPayload::Spec {
-                    brief: ArtId(u64_of(a.get("brief"), "brief")?),
-                },
+                Some("spec") => {
+                    let brief = ArtId(u64_of(a.get("brief"), "brief")?);
+                    match a.get("edit") {
+                        Some(e) => ArtifactPayload::SpecEdit(spec_edit(brief, e)?),
+                        None => ArtifactPayload::Spec { brief },
+                    }
+                }
                 Some("diff") => ArtifactPayload::Diff,
                 Some("candidate") => {
                     let diffs = match a.get("diffs") {
@@ -557,10 +620,45 @@ impl Server {
         if rec.kind != ArtifactKind::Spec {
             return Ok(String::from_utf8_lossy(&bytes).into_owned());
         }
+        if let ArtifactPayload::SpecEdit(_) = rec.payload {
+            return self
+                .version(rec.id)
+                .map(|(_, v)| v.doc.text())
+                .ok_or_else(|| format!("{} did not apply", rec.id));
+        }
         let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
         rusty_serde::json::from_str::<SpecFile>(text)
             .map(|f| f.markdown)
             .map_err(|e| e.to_string())
+    }
+
+    /// A co-edited version and its spec's head.
+    fn version(&self, id: ArtId) -> Option<(ArtId, &Version)> {
+        let st = &self.driver.state;
+        Some((st.head(id)?, st.versions.get(&id)?))
+    }
+
+    /// What a co-edited version adds to `get_artifact`: its spec's head, its
+    /// snapshot and its visible lines with their ids, which edits name.
+    fn version_fields(&self, id: ArtId) -> Vec<(String, Value)> {
+        let Some((head, v)) = self.version(id) else {
+            return vec![];
+        };
+        let lines = v
+            .doc
+            .lines()
+            .map(|(l, text)| {
+                Value::Map(vec![
+                    ("id".to_owned(), format!("{}#{}", l.art, l.n).into()),
+                    ("text".to_owned(), text.into()),
+                ])
+            })
+            .collect();
+        vec![
+            ("head".to_owned(), Value::UInt(head.0)),
+            ("snapshot".to_owned(), v.snapshot.hex().into()),
+            ("lines".to_owned(), Value::Seq(lines)),
+        ]
     }
 
     /// Render a response for the model, attaching the artifact content a
@@ -578,6 +676,7 @@ impl Server {
         match rusty_serde::json::from_str::<Value>(&text) {
             Ok(Value::Map(mut m)) => {
                 m.push(("content".to_owned(), content.into()));
+                m.extend(self.version_fields(rec.id));
                 text_result(Value::Map(m).to_string(), false)
             }
             Ok(other) => text_result(other.to_string(), true),
