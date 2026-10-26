@@ -1,9 +1,14 @@
 """Coverage and lane stability for independent and shared application changes."""
 
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 from affected_crates import affected_packages
-from ci_components import component_scopes
+from ci_components import component_scopes, covers_most_of_workspace
 from test_affected_crates import metadata
 
 
@@ -71,6 +76,49 @@ class ComponentScopeTests(unittest.TestCase):
         self.assertEqual(len(scopes), 1)
         self.assertEqual(scopes[0]["component"], "scoped-workspace")
         self.assertEqual(set(scopes[0]["packages"].split()), set(md["workspace_members"]))
+
+
+class CoversMostOfWorkspaceTests(unittest.TestCase):
+    # Same workspace, four components: libs--net, apps--a, apps--b, apps--unrelated.
+    setUp = ComponentScopeTests.setUp
+    scope = ComponentScopeTests.scope
+
+    def test_one_app_is_scoped(self) -> None:
+        self.assertFalse(covers_most_of_workspace(self.metadata, self.scope("crates/apps/a/src/lib.rs")))
+
+    def test_exactly_half_stays_scoped(self) -> None:
+        scopes = self.scope("crates/apps/a/src/lib.rs", "crates/apps/b/src/lib.rs")
+        self.assertEqual(len(scopes), 2)
+        self.assertFalse(covers_most_of_workspace(self.metadata, scopes))
+
+    def test_a_shared_library_reaching_most_components_prefers_the_full_sweep(self) -> None:
+        scopes = self.scope("crates/libs/net/shared/src/lib.rs")
+        self.assertEqual(len(scopes), 3)
+        self.assertTrue(covers_most_of_workspace(self.metadata, scopes))
+
+    def test_denominator_counts_components_past_the_matrix_limit(self) -> None:
+        # component_scopes collapses >128 lanes into one; the denominator must not.
+        md = metadata({f"app{i}": (f"crates/apps/app{i}", []) for i in range(130)})
+        self.assertFalse(covers_most_of_workspace(md, component_scopes(md, ["app0"])))
+
+    def test_cli_exits_3_only_with_the_flag_and_most_components(self) -> None:
+        script = Path(__file__).with_name("ci_components.py")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "metadata.json"
+            path.write_text(json.dumps(self.metadata), encoding="utf-8")
+
+            def run(packages: str, *flags: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, str(script), str(path), "--packages", packages, *flags],
+                    capture_output=True, text=True, check=False,
+                )
+
+            most = "shared a-core a b"
+            self.assertEqual(run(most, "--full-if-most").returncode, 3)
+            self.assertEqual(run(most).returncode, 0)
+            scoped = run("a", "--full-if-most")
+            self.assertEqual(scoped.returncode, 0)
+            self.assertEqual(json.loads(scoped.stdout), [{"component": "apps--a", "packages": "a"}])
 
 
 if __name__ == "__main__":
