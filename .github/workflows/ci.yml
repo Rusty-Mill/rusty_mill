@@ -36,7 +36,7 @@ on:
   # (setup-build-env) and the registry-only `plan`/`dependency-policy` ones.
   # With a target cache per component job as well (22 more), a queue run two
   # hours after the sweep found its `clippy-<os>` cache gone. Component jobs
-  # build cold.
+  # build cold. `prune-caches` then deletes the entries each sweep supersedes.
   #
   # Platforms (ci_plan.py `platform_outputs`): a PR runs Linux only, plus
   # Windows clippy; the queue runs Windows and macOS, and Linux too unless a
@@ -2149,6 +2149,39 @@ jobs:
           path: acceptance-results/
           if-no-files-found: warn
 
+  prune-caches:
+    # `main`'s rust-cache keys end in a Cargo.lock/manifest hash, so each sweep
+    # saves a new entry beside yesterday's and the 10 GB budget evicts by least
+    # recent use -- which has taken the live clippy cache. After this run's
+    # savers finish, delete every `v0-rust-*` entry on `main` older than the
+    # newest in its family (stale_caches.py). Never runs for PRs or the queue.
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-prune-caches
+      queue: max
+      cancel-in-progress: false
+    name: prune superseded caches
+    needs: [plan, dependency-policy, clippy, test]
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Delete superseded rust-cache entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key v0-rust- \
+            --limit 100 --json id,key,createdAt > /tmp/caches.json
+          python3 .github/scripts/stale_caches.py < /tmp/caches.json > /tmp/stale.txt
+          echo "$(wc -l < /tmp/stale.txt) superseded of $(python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' < /tmp/caches.json) rust caches on main"
+          while read -r id; do
+            # Already evicted by GitHub is fine; anything else is worth a look.
+            gh cache delete "$id" --repo "$GITHUB_REPOSITORY" || echo "::warning::could not delete cache $id"
+          done < /tmp/stale.txt
+
   # ---------------------------------------------------------------------------
   required-gate:
     # The one check branch protection requires (ADR-0009). Planned-out jobs
@@ -2201,6 +2234,7 @@ jobs:
       - remind-me-hub
       - remind-me-legacy-import
       - remind-me-windows
+      - prune-caches
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any job failed or was cancelled
