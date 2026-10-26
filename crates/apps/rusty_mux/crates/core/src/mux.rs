@@ -148,6 +148,16 @@ impl Mux {
         Ok(())
     }
 
+    /// Announces that the block's program status changed. The model holds no
+    /// status itself; the host that tracks it calls this.
+    pub fn note_status(&mut self, block: BlockId) -> Result<(), Error> {
+        if !self.blocks.contains_key(&block) {
+            return Err(Error::UnknownBlock(block));
+        }
+        self.events.push(Event::BlockStatus { block });
+        Ok(())
+    }
+
     /// Closes the session and everything in it.
     pub fn close_session(&mut self, session: SessionId) -> Result<(), Error> {
         let windows = self

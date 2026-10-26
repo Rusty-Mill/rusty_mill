@@ -106,6 +106,7 @@ members = [
     "crates/apps/rusty_mux/crates/ctl",
     "crates/apps/rusty_mux/crates/proto",
     "crates/apps/rusty_mux/crates/server",
+    "crates/apps/rusty_mux/crates/status",
     "crates/apps/rusty_mux/crates/tui",
     "crates/apps/rusty_remind_me/crates/remind_me_core",
     "crates/apps/rusty_remind_me/crates/remind_me_mcp",
@@ -950,6 +951,7 @@ remind_me_hub = { path = "crates/apps/rusty_remind_me/crates/remind_me_hub" }
 rusty_mux_core = { path = "crates/apps/rusty_mux/crates/core" }
 rusty_mux_proto = { path = "crates/apps/rusty_mux/crates/proto" }
 rusty_mux_server = { path = "crates/apps/rusty_mux/crates/server" }
+rusty_mux_status = { path = "crates/apps/rusty_mux/crates/status" }
 # rusty_term's headless engine, for consumers that must not link its tokio front end.
 rusty_term_core = { path = "crates/libs/ui/rusty_term/core" }
 tracing-appender = "0.2"
