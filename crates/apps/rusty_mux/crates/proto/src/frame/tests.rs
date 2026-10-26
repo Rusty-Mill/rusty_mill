@@ -622,3 +622,32 @@ fn malformed_block_call_args_are_invalid() {
         );
     }
 }
+
+#[test]
+fn block_call_args_are_bounded_in_count() {
+    use crate::args::MAX_ARGS;
+    // The smallest argument: an empty name and a zero line count.
+    let minimal: &[u8] = b"\x00\x05\x00";
+    let frame = |count: usize| {
+        raw_frame(0x0f, |out| {
+            out.varint(REQ_ID, 1)
+                .bytes(4, &[9; 16])
+                .bytes(22, b"terminal.format")
+                .bytes(23, &minimal.repeat(count));
+        })
+    };
+    let Ok(Some((Message::BlockCall { args, .. }, _))) = decode(&frame(MAX_ARGS)) else {
+        panic!("{MAX_ARGS} arguments decode");
+    };
+    assert_eq!(args.len(), MAX_ARGS);
+    // One more, or a frame's worth, is refused rather than materialized.
+    for count in [MAX_ARGS + 1, 1 << 20] {
+        assert!(
+            matches!(
+                decode(&frame(count)),
+                Err(Error::InvalidField { field: 23, .. })
+            ),
+            "{count}"
+        );
+    }
+}

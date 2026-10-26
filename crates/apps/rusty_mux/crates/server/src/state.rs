@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use rusty_mux_core::{BlockId, ClientId, Event, Mux, Size};
-use rusty_mux_proto::schema::{self, Value};
+use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::{Code, Cursor, Entry, Features, Message, encode};
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::task::JoinHandle;
@@ -279,11 +279,17 @@ impl State {
             code: Some(Code::MethodNotFound),
         };
         let found = schema::block_method(method).ok_or_else(unknown)?;
+        // Moves each value under its parameter's name, so nothing is copied
+        // before the catalog has checked it; an unknown name stops here.
         let mut named = vec![("block", Value::Id(block.uuid()))];
-        named.extend(
-            args.iter()
-                .map(|(name, value)| (name.as_str(), value.clone())),
-        );
+        for (name, value) in args {
+            let param = found
+                .params
+                .iter()
+                .find(|p| p.name == name)
+                .ok_or_else(|| format!("{method}: {}", CallError::UnknownParam(name)))?;
+            named.push((param.name, value));
+        }
         found
             .request(req, &named)
             .map_err(|e| format!("{method}: {e}"))?;

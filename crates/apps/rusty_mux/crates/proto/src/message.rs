@@ -178,6 +178,7 @@ pub enum Message {
     /// [`Message::Text`], or [`Message::Failed`] with
     /// [`Code::MethodNotFound`] if the type has no such method. Negotiated
     /// with [`Features::BLOCK_CALL`]; [`crate::schema`] lists the methods.
+    /// At most [`crate::args::MAX_ARGS`] arguments decode.
     BlockCall {
         req: u64,
         block: BlockId,

@@ -109,6 +109,11 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             args: vec![("history".into(), Value::Lines(3))],
         })
     );
+    assert!(
+        CATALOG
+            .iter()
+            .all(|m| m.params.len() <= crate::args::MAX_ARGS)
+    );
     assert!(block_method("list").is_none());
     assert!(block_method("terminal.nope").is_none());
 }

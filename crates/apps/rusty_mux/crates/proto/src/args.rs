@@ -1,12 +1,19 @@
 //! The named, typed arguments of a [`Message::BlockCall`](crate::Message),
 //! packed into one field: per argument, a length-prefixed UTF-8 name, a
 //! one-byte type tag, then the value.
+//!
+//! Decoding stops at [`MAX_ARGS`] arguments, so what a frame decodes into is
+//! bounded by the frame's size plus that many entries, whatever the input.
 
 use rusty_uuid::Uuid;
 use rusty_wire::{Reader, Writer};
 
 use crate::schema::Value;
 use crate::varint;
+
+/// The most arguments a block call carries; a list with more does not
+/// decode. Every catalog method has far fewer parameters.
+pub const MAX_ARGS: usize = 16;
 
 mod tag {
     pub const ID: u8 = 1;
@@ -46,11 +53,15 @@ pub(crate) fn encode(args: &[(String, Value)]) -> Vec<u8> {
     w.into_vec()
 }
 
-/// `None` if the bytes are not a well-formed argument list.
+/// `None` if the bytes are not a well-formed argument list of at most
+/// [`MAX_ARGS`] arguments; an extra argument is refused before it is read.
 pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<(String, Value)>> {
     let mut r = Reader::new(bytes);
     let mut args = Vec::new();
     while !r.is_empty() {
+        if args.len() == MAX_ARGS {
+            return None;
+        }
         let name = String::from_utf8(get_bytes(&mut r)?.to_vec()).ok()?;
         let value = match r.read_u8().ok()? {
             tag::ID => Value::Id(Uuid::from_bytes(r.read_array().ok()?)),
