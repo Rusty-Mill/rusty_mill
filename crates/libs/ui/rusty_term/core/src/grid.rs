@@ -8,7 +8,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
-use super::cell::{Cell, DEFAULT_BG, DEFAULT_FG, Pen, WIDE_TRAILER, char_width};
+use super::cell::{Cell, DEFAULT_BG, DEFAULT_FG, PackedCell, Pen, WIDE_TRAILER, char_width};
+use super::style::{CellStyle, StyleId, StyleTable};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::sixel::SixelImage;
@@ -425,8 +426,11 @@ pub struct Grid {
     /// One row of blank cells that [`Line::clear`] copies from, so blanking a
     /// row is a single `memcpy` instead of a per-cell store loop (the bulk of
     /// a line feed's cost). Uniform by construction; refreshed by
-    /// [`Grid::prime_blank_row`] when the width or the fill cell changes.
-    blank_row: Vec<Cell>,
+    /// [`Grid::prime_blank_row`] when the width or the fill cell changes, and
+    /// emptied by every style sweep (it holds a style id).
+    blank_row: Vec<PackedCell>,
+    /// The distinct styles behind every [`PackedCell`] of this grid.
+    styles: StyleTable,
     /// Monotonic counter bumped on every parsed batch; lets the renderer
     /// reason about frame freshness.
     pub epoch: u64,
@@ -854,14 +858,14 @@ struct SavedScreen {
     mode: AltMode,
 }
 
-/// A `rows`-high screen of [`Line::blank`] rows.
 /// A process-unique [`Grid`] id.
 fn next_grid_id() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-fn blank_screen(cols: usize, rows: usize, fill: Cell) -> Vec<Line> {
+/// A `rows`-high screen of [`Line::blank`] rows.
+fn blank_screen(cols: usize, rows: usize, fill: PackedCell) -> Vec<Line> {
     (0..rows).map(|_| Line::blank(cols, fill)).collect()
 }
 
@@ -869,8 +873,8 @@ fn blank_screen(cols: usize, rows: usize, fill: Cell) -> Vec<Line> {
 /// the top-left overlap and blank-filling any new area. Used for the
 /// *alternate* screen, whose full-screen apps repaint on resize — there is no
 /// logical-line history there to rejoin, so a plain clip is correct.
-fn reflow_clip(old: &[Line], cols: usize, rows: usize) -> Vec<Line> {
-    let mut new = blank_screen(cols, rows, Cell::blank());
+fn reflow_clip(old: &[Line], cols: usize, rows: usize, blank: PackedCell) -> Vec<Line> {
+    let mut new = blank_screen(cols, rows, blank);
     for (dst, src) in new.iter_mut().zip(old) {
         let n = cols.min(src.cells().len());
         dst.cells_mut()[..n].copy_from_slice(&src.cells()[..n]);
@@ -885,6 +889,11 @@ fn reflow_clip(old: &[Line], cols: usize, rows: usize) -> Vec<Line> {
 /// so a colored/attributed blank is *kept* (its background is content).
 fn is_padding(c: &Cell) -> bool {
     c.ch == ' ' && c.cluster == 0 && c.link == 0 && c.flags == 0
+}
+
+/// [`is_padding`] for a stored cell, through its style.
+fn is_padding_packed(c: PackedCell, styles: &StyleTable) -> bool {
+    c.ch() == ' ' && is_padding(&c.resolve(&styles.get(c.style())))
 }
 
 /// A pixel image (Sixel/Kitty) placed on the grid: source pixels plus the cell
@@ -962,16 +971,18 @@ fn reflow_history(
     fold_blocks: &[CommandBlock],
     new_cols: usize,
     new_rows: usize,
-    blank: Cell,
+    blank: PackedCell,
     scrollback_max: usize,
+    styles: &StyleTable,
 ) -> Reflowed {
+    let is_padding = |c: &PackedCell| is_padding_packed(*c, styles);
     let hist = scrollback.len();
     let old_total = hist + screen.len();
     let cursor_phys = hist + cursor.1.min(screen.len().saturating_sub(1));
     // Borrow physical row `i` as (cells, wrapped, line attr). Scrollback lines
     // have no size attribute (a double-width line is meaningless once scrolled
     // off) and may be narrower than `old_cols`; both are handled by the joiner.
-    let phys = |i: usize| -> (&[Cell], bool, LineAttr) {
+    let phys = |i: usize| -> (&[PackedCell], bool, LineAttr) {
         if i < hist {
             (
                 scrollback[i].cells(),
@@ -985,10 +996,10 @@ fn reflow_history(
     };
 
     // --- Phase 1: flatten physical rows into logical lines. ---
-    let mut logical: Vec<Vec<Cell>> = Vec::new();
+    let mut logical: Vec<Vec<PackedCell>> = Vec::new();
     let mut logical_attr: Vec<LineAttr> = Vec::new();
     let mut phys_to_logical: Vec<usize> = Vec::with_capacity(old_total);
-    let mut cur: Vec<Cell> = Vec::new();
+    let mut cur: Vec<PackedCell> = Vec::new();
     let mut cur_attr = LineAttr::Single;
     let mut cur_started = false;
     let mut cursor_logical = 0usize;
@@ -1012,7 +1023,7 @@ fn reflow_history(
         if wrapped && take > 0 && is_padding(&cells[take - 1]) {
             let next_wide = i + 1 < old_total && {
                 let (nc, _, _) = phys(i + 1);
-                !nc.is_empty() && char_width(nc[0].ch) == 2
+                !nc.is_empty() && char_width(nc[0].ch()) == 2
             };
             if next_wide {
                 take -= 1;
@@ -1061,7 +1072,7 @@ fn reflow_history(
     }
 
     // --- Phase 2: re-wrap each logical line to the new width. ---
-    let mut out_cells: Vec<Vec<Cell>> = Vec::new();
+    let mut out_cells: Vec<Vec<PackedCell>> = Vec::new();
     let mut out_wrapped: Vec<bool> = Vec::new();
     let mut out_attr: Vec<LineAttr> = Vec::new();
     let mut logical_first_row: Vec<usize> = vec![0; logical.len()];
@@ -1086,7 +1097,7 @@ fn reflow_history(
             let mut take = new_cols.min(line.len() - i);
             // Don't cut a double-width glyph from its trailer: if the cell just
             // past the segment is a trailer, push its head to the next row.
-            if i + take < line.len() && line[i + take].flags & WIDE_TRAILER != 0 && take > 1 {
+            if i + take < line.len() && line[i + take].is_wide_trailer() && take > 1 {
                 take -= 1;
             }
             if take == 0 {
@@ -1272,16 +1283,37 @@ impl StatusLine {
     }
 }
 
+/// What [`Grid::style_stats`] reports.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct StyleStats {
+    /// Bytes per stored cell.
+    pub cell_bytes: usize,
+    /// Styles not freed, dead-but-unswept ones included.
+    pub live: usize,
+    /// Style slots allocated, freed ones included.
+    pub entries: usize,
+    /// Bytes the style table holds, by capacity.
+    pub bytes: usize,
+}
+
 impl Grid {
     /// Create a `cols`×`rows` grid filled with blank cells.
     pub fn new(cols: usize, rows: usize) -> Self {
-        Self::with_screen(cols, rows, blank_screen(cols, rows, Cell::blank()))
+        let screen = blank_screen(cols, rows, PackedCell::blank());
+        Self::with_screen(cols, rows, screen, StyleTable::default())
     }
 
     /// A `cols`×`rows` grid in its initial state around an already-built
-    /// `screen` (`rows` lines of `cols` cells), so a decoder can build the
-    /// rows first and allocate no blank screen to throw away.
-    pub(crate) fn with_screen(cols: usize, rows: usize, screen: Vec<Line>) -> Self {
+    /// `screen` (`rows` lines of `cols` cells) whose ids are in `styles`, so a
+    /// decoder can build the rows first and allocate no blank screen to
+    /// throw away.
+    pub(crate) fn with_screen(
+        cols: usize,
+        rows: usize,
+        screen: Vec<Line>,
+        styles: StyleTable,
+    ) -> Self {
         Self {
             cols,
             rows,
@@ -1298,6 +1330,7 @@ impl Grid {
             primary: None,
             spare_screen: Vec::new(),
             blank_row: Vec::new(),
+            styles,
             epoch: 0,
             title: String::new(),
             title_stack: Vec::new(),
@@ -1400,15 +1433,17 @@ impl Grid {
         if x >= self.cols || y >= self.rows {
             return;
         }
+        let cell = self.pack(cell);
+        let blank = self.pack(Cell::blank());
         let row = self.screen[y].cells_mut();
-        if row[x].flags & WIDE_TRAILER != 0 {
+        if row[x].is_wide_trailer() {
             // Overwriting the trailing half: blank the head to its left.
             if x >= 1 {
-                row[x - 1] = Cell::blank();
+                row[x - 1] = blank;
             }
-        } else if x + 1 < row.len() && row[x + 1].flags & WIDE_TRAILER != 0 {
+        } else if x + 1 < row.len() && row[x + 1].is_wide_trailer() {
             // Overwriting the leading half: blank the orphaned trailer to its right.
-            row[x + 1] = Cell::blank();
+            row[x + 1] = blank;
         }
         row[x] = cell;
         self.touch(y);
@@ -1434,7 +1469,123 @@ impl Grid {
     /// by-value cell read goes through here, so the cell storage can change
     /// behind it.
     pub(crate) fn line_cell(&self, line: &Line, col: usize) -> Cell {
-        line.cells().get(col).copied().unwrap_or_else(Cell::blank)
+        line.cells()
+            .get(col)
+            .map_or_else(Cell::blank, |&cell| self.resolve(cell))
+    }
+
+    /// The full cell behind a stored one.
+    pub(crate) fn resolve(&self, cell: PackedCell) -> Cell {
+        cell.resolve(&self.styles.get(cell.style()))
+    }
+
+    /// The first `cols` cells of `line` resolved and appended to `out`,
+    /// blanks past its width. A run of one style looks the table up once.
+    #[cfg(any(test, feature = "gui"))]
+    pub(crate) fn push_resolved(&self, line: &Line, cols: usize, out: &mut Vec<Cell>) {
+        let cells = &line.cells()[..line.cells().len().min(cols)];
+        let mut memo: Option<(StyleId, CellStyle)> = None;
+        for &cell in cells {
+            let style = match memo {
+                Some((id, style)) if id == cell.style() => style,
+                _ => {
+                    let style = self.styles.get(cell.style());
+                    memo = Some((cell.style(), style));
+                    style
+                }
+            };
+            out.push(cell.resolve(&style));
+        }
+        out.resize(out.len() + (cols - cells.len()), Cell::blank());
+    }
+
+    /// `cells` resolved, for readers that want a whole row by value.
+    pub(crate) fn resolved(&self, cells: &[PackedCell]) -> Vec<Cell> {
+        cells.iter().map(|&cell| self.resolve(cell)).collect()
+    }
+
+    /// The text of `line` (see [`row_text`]).
+    fn text_of(&self, line: &Line) -> String {
+        row_text(
+            line.cells().iter().map(|&c| self.resolve(c)),
+            &self.clusters,
+        )
+    }
+
+    /// Store `cell`, interning its style.
+    pub(crate) fn pack(&mut self, cell: Cell) -> PackedCell {
+        PackedCell::new(&cell, self.styles.intern(CellStyle::of(&cell)))
+    }
+
+    /// The grid's style table.
+    pub(crate) fn styles(&self) -> &StyleTable {
+        &self.styles
+    }
+
+    /// Cell and style table sizes, for memory tests.
+    #[doc(hidden)]
+    pub fn style_stats(&self) -> StyleStats {
+        StyleStats {
+            cell_bytes: size_of::<PackedCell>(),
+            live: self.styles.live(),
+            entries: self.styles.len(),
+            bytes: self.styles.bytes(),
+        }
+    }
+
+    /// The style id of a glyph written in `pen` under `link`. `pen`'s DECSCA
+    /// bit is a layout bit and does not reach the style.
+    fn pen_id(&mut self, pen: Pen, link: u16) -> StyleId {
+        self.styles.intern_pen(CellStyle {
+            fg: pen.fg,
+            bg: pen.bg,
+            underline_color: pen.underline_color,
+            attrs: pen.attrs & !super::cell::ATTR_PROTECTED,
+            link,
+            cluster: 0,
+        })
+    }
+
+    /// Run a style sweep if one is due, and a compaction if the sweep left
+    /// the table mostly dead. Called between parser batches and at the end
+    /// of operations that rebuild the screen, when no caller holds a style
+    /// id outside the grid's cells.
+    pub(crate) fn sweep_styles(&mut self) {
+        if self.styles.sweep_due() {
+            self.collect_styles();
+        }
+    }
+
+    /// [`Grid::sweep_styles`] without the trigger.
+    fn collect_styles(&mut self) {
+        self.blank_row.clear();
+        let stashed = self.primary.iter().flat_map(|p| p.screen.iter());
+        let lines = self
+            .screen
+            .iter()
+            .chain(&self.spare_screen)
+            .chain(stashed)
+            .chain(&self.scrollback)
+            .map(Line::cells);
+        self.styles.sweep(lines);
+        if let Some(remap) = self.styles.compact() {
+            self.apply_remap(&remap);
+        }
+    }
+
+    /// Rewrite every stored cell through `remap`. Row stamps do not change:
+    /// every cache keyed on them holds resolved cells, which are the same.
+    fn apply_remap(&mut self, remap: &super::style::Remap) {
+        let stashed = self.primary.iter_mut().flat_map(|p| p.screen.iter_mut());
+        for line in self
+            .screen
+            .iter_mut()
+            .chain(&mut self.spare_screen)
+            .chain(&mut self.scrollback)
+            .chain(stashed)
+        {
+            remap.apply(line.cells_mut());
+        }
     }
 
     /// Whether live screen row `y` soft-wraps into the next one.
@@ -1629,7 +1780,7 @@ impl Grid {
     fn scroll_band_up(&mut self) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom.min(self.rows - 1));
         let (l, r) = (self.left_margin, self.right_margin.min(self.cols - 1));
-        let blank = self.erase_cell();
+        let blank = self.erase_packed();
         for y in top..bottom {
             self.copy_band(y + 1, y, l, r);
         }
@@ -1656,7 +1807,7 @@ impl Grid {
     fn scroll_band_down(&mut self) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom.min(self.rows - 1));
         let (l, r) = (self.left_margin, self.right_margin.min(self.cols - 1));
-        let blank = self.erase_cell();
+        let blank = self.erase_packed();
         for y in (top..bottom).rev() {
             self.copy_band(y, y + 1, l, r);
         }
@@ -1974,7 +2125,7 @@ impl Grid {
         if bottom <= top || bottom >= self.rows {
             return;
         }
-        let blank = self.erase_cell();
+        let blank = self.erase_packed();
         self.screen[top..=bottom].rotate_left(1);
         // The line that left the top now sits at `bottom`.
         // Capture it into scrollback, but only for a full-screen scroll on the
@@ -1987,6 +2138,7 @@ impl Grid {
             self.touch_hist();
             if self.scrollback.len() > self.scrollback_max {
                 if let Some(evicted) = self.scrollback.pop_front() {
+                    self.styles.note_evicted(evicted.cells().len());
                     self.screen[bottom] = evicted;
                 }
                 self.evict_prompt_mark();
@@ -2200,35 +2352,42 @@ impl Grid {
     fn fill_text(&mut self, text: &str, pen: Pen) -> usize {
         let (x0, y) = self.cursor;
         let (cols, link) = (self.cols, self.current_link);
-        let Some(line) = self.screen.get_mut(y) else {
+        if y >= self.screen.len() {
             return 0;
+        }
+        let head_id = self.pen_id(pen, link);
+        // A trailer carries the pen's colours but only the layout bit. It and
+        // the blank are interned only when a wide glyph needs them.
+        let trailer = CellStyle {
+            fg: pen.fg,
+            bg: pen.bg,
+            underline_color: pen.underline_color,
+            attrs: 0,
+            link,
+            cluster: 0,
         };
-        let row = line.cells_mut();
+        let protected = pen.attrs & super::cell::ATTR_PROTECTED != 0;
+        let styles = &mut self.styles;
+        let blank = |styles: &mut StyleTable| {
+            PackedCell::new(&Cell::blank(), styles.intern(CellStyle::of(&Cell::blank())))
+        };
+        // With no attributes the trailer's style is the head's.
+        let plain = pen.attrs & !super::cell::ATTR_PROTECTED == 0;
+        let mut trailer_id = plain.then_some(head_id);
+        let row = self.screen[y].cells_mut();
         let (mut x, mut used) = (x0, 0);
         for ch in text.chars() {
             let w = char_width(ch);
             if w == 0 || x + w > cols {
                 break;
             }
-            if x == x0 && x >= 1 && row[x].flags & WIDE_TRAILER != 0 {
-                row[x - 1] = Cell::blank();
+            if x == x0 && x >= 1 && row[x].is_wide_trailer() {
+                row[x - 1] = blank(styles);
             }
-            let head = Cell {
-                ch,
-                cluster: 0,
-                fg: pen.fg,
-                bg: pen.bg,
-                flags: pen.attrs,
-                link,
-                underline_color: pen.underline_color,
-            };
-            row[x] = head;
+            row[x] = PackedCell::glyph(ch, protected, head_id);
             if w == 2 {
-                row[x + 1] = Cell {
-                    ch: ' ',
-                    flags: WIDE_TRAILER,
-                    ..head
-                };
+                let id = *trailer_id.get_or_insert_with(|| styles.intern(trailer));
+                row[x + 1] = PackedCell::trailer(id);
             }
             x += w;
             used += ch.len_utf8();
@@ -2236,8 +2395,8 @@ impl Grid {
         if used == 0 {
             return 0;
         }
-        if x < cols && row[x].flags & WIDE_TRAILER != 0 {
-            row[x] = Cell::blank();
+        if x < cols && row[x].is_wide_trailer() {
+            row[x] = blank(styles);
         }
         self.touch(y);
         self.cursor.0 = x;
@@ -2248,28 +2407,28 @@ impl Grid {
     /// keeps them on the row) with ASCII glyphs. A wide glyph cut by either
     /// end of the run loses its other half, as [`Grid::set_cell`] does.
     fn fill_ascii(&mut self, x: usize, y: usize, bytes: &[u8], pen: Pen) {
-        let link = self.current_link;
-        let Some(line) = self.screen.get_mut(y) else {
+        if y >= self.screen.len() {
             return;
-        };
-        let row = line.cells_mut();
+        }
+        let id = self.pen_id(pen, self.current_link);
+        let protected = pen.attrs & super::cell::ATTR_PROTECTED != 0;
+        let row = self.screen[y].cells_mut();
         let end = x + bytes.len();
-        if x >= 1 && row[x].flags & WIDE_TRAILER != 0 {
-            row[x - 1] = Cell::blank();
+        let blank_needed =
+            (x >= 1 && row[x].is_wide_trailer()) || (end < row.len() && row[end].is_wide_trailer());
+        if blank_needed {
+            let blank = self.pack(Cell::blank());
+            let row = self.screen[y].cells_mut();
+            if x >= 1 && row[x].is_wide_trailer() {
+                row[x - 1] = blank;
+            }
+            if end < row.len() && row[end].is_wide_trailer() {
+                row[end] = blank;
+            }
         }
-        if end < row.len() && row[end].flags & WIDE_TRAILER != 0 {
-            row[end] = Cell::blank();
-        }
+        let row = self.screen[y].cells_mut();
         for (cell, &b) in row[x..end].iter_mut().zip(bytes) {
-            *cell = Cell {
-                ch: char::from(b),
-                cluster: 0,
-                fg: pen.fg,
-                bg: pen.bg,
-                flags: pen.attrs,
-                link,
-                underline_color: pen.underline_color,
-            };
+            *cell = PackedCell::glyph(char::from(b), protected, id);
         }
         self.touch(y);
     }
@@ -2282,7 +2441,7 @@ impl Grid {
             return None;
         }
         let left = cx - 1;
-        if self.screen[cy].cells()[left].flags & WIDE_TRAILER != 0 && left >= 1 {
+        if self.screen[cy].cells()[left].is_wide_trailer() && left >= 1 {
             Some((left - 1, cy)) // land on the wide glyph's head, not its trailer
         } else {
             Some((left, cy))
@@ -2301,7 +2460,7 @@ impl Grid {
     /// The full glyph text at `(x, y)` of the live grid: the base scalar plus
     /// any interned grapheme continuation.
     fn glyph_text(&self, x: usize, y: usize) -> String {
-        self.cell_text(self.screen[y].cells()[x])
+        self.cell_text(self.resolve(self.screen[y].cells()[x]))
     }
 
     /// The full glyph text of `cell` (live or scrollback — the cluster table is
@@ -2639,10 +2798,10 @@ impl Grid {
         let (mut start, mut end) = (abs, abs);
         // Follow the soft-wrap bits across scrollback + screen (bounded like
         // logical_line_of, so a degenerate fully-wrapped history stays cheap).
-        while start > 0 && abs - start < 128 && self.phys_row(start - 1).1 {
+        while start > 0 && abs - start < 128 && self.phys_line(start - 1).wrapped {
             start -= 1;
         }
-        while end + 1 < total && end - abs < 128 && self.phys_row(end).1 {
+        while end + 1 < total && end - abs < 128 && self.phys_line(end).wrapped {
             end += 1;
         }
         (start, end)
@@ -2815,17 +2974,19 @@ impl Grid {
     fn append_to_glyph(&mut self, x: usize, y: usize, ch: char) {
         let mut suffix = std::mem::take(&mut self.cluster_scratch);
         suffix.clear();
-        let old = self.screen[y].cells()[x].cluster;
-        if let Some(prev) = old
+        let cell = self.screen[y].cells()[x];
+        let mut style = self.styles.get(cell.style());
+        if let Some(prev) = style
+            .cluster
             .checked_sub(1)
             .and_then(|i| self.clusters.get(usize::from(i)))
         {
             suffix.push_str(prev);
         }
         suffix.push(ch);
-        let id = self.intern_cluster(&suffix);
+        style.cluster = self.intern_cluster(&suffix);
         self.cluster_scratch = suffix;
-        self.screen[y].cells_mut()[x].cluster = id;
+        self.screen[y].cells_mut()[x] = cell.with_style(self.styles.intern(style));
         self.touch(y);
     }
 
@@ -2923,12 +3084,12 @@ impl Grid {
     /// Erase every unprotected cell in rows `y0..=y1` (columns limited to
     /// `cols` when given, inclusive).
     fn selective_clear(&mut self, y0: usize, y1: usize, cols: Option<(usize, usize)>) {
-        let erase = self.erase_cell();
+        let erase = self.erase_packed();
         let (c0, c1) = cols.unwrap_or((0, self.cols.saturating_sub(1)));
         for y in y0..=y1.min(self.rows.saturating_sub(1)) {
             for x in c0..=c1.min(self.cols.saturating_sub(1)) {
                 let cell = &mut self.screen[y].cells_mut()[x];
-                if cell.flags & super::cell::ATTR_PROTECTED == 0 {
+                if !cell.is_protected() {
                     *cell = erase;
                 }
             }
@@ -2944,7 +3105,7 @@ impl Grid {
         if from >= to {
             return;
         }
-        let blank = self.erase_cell();
+        let blank = self.erase_packed();
         let line = &mut self.screen[y];
         line.cells_mut()[from..to].fill(blank);
         // Erasing through the right margin ends the line here: it no longer
@@ -2966,7 +3127,7 @@ impl Grid {
         if top > bottom || left > right || top >= self.rows || left >= self.cols {
             return;
         }
-        let blank = self.erase_cell();
+        let blank = self.erase_packed();
         for y in top..=bottom {
             self.screen[y].cells_mut()[left..=right].fill(blank);
             self.touch(y);
@@ -2999,6 +3160,7 @@ impl Grid {
             link: 0,
             underline_color: pen.underline_color,
         };
+        let cell = self.pack(cell);
         for y in top..=bottom {
             self.screen[y].cells_mut()[left..=right].fill(cell);
             self.touch(y);
@@ -3056,7 +3218,7 @@ impl Grid {
 
     /// Blank every cell and home the cursor (used by `CSI 2 J`).
     pub(crate) fn clear_all(&mut self) {
-        let blank = self.erase_cell();
+        let blank = self.erase_packed();
         for line in &mut self.screen {
             line.fill(blank);
         }
@@ -3072,6 +3234,7 @@ impl Grid {
     /// [`Grid::clear_all`].
     pub(crate) fn clear_scrollback(&mut self) {
         self.scrollback.clear();
+        self.styles.request_sweep();
         self.touch_hist();
         self.prompt_marks.clear();
         self.view_offset = 0;
@@ -3088,10 +3251,29 @@ impl Grid {
         c
     }
 
+    /// [`Grid::erase_cell`], stored. Every scroll and erase takes one, so it
+    /// goes through the pen cache rather than the table's hash index.
+    fn erase_packed(&mut self) -> PackedCell {
+        let cell = self.erase_cell();
+        let pen = Pen {
+            fg: cell.fg,
+            bg: cell.bg,
+            attrs: cell.flags,
+            underline_color: cell.underline_color,
+        };
+        PackedCell::glyph(cell.ch, false, self.pen_id(pen, cell.link))
+    }
+
+    /// [`Grid::default_cell`], stored.
+    fn default_packed(&mut self) -> PackedCell {
+        let cell = self.default_cell();
+        self.pack(cell)
+    }
+
     /// Make [`Grid::blank_row`] `cols` copies of `fill`, rebuilding it only
     /// when the width or the fill differs. The row is uniform, so its first
     /// cell stands for all of them.
-    fn prime_blank_row(&mut self, fill: Cell) {
+    fn prime_blank_row(&mut self, fill: PackedCell) {
         let stale =
             self.blank_row.len() != self.cols || self.blank_row.first().is_some_and(|c| *c != fill);
         if stale {
@@ -3159,7 +3341,9 @@ impl Grid {
     pub fn set_scrollback_max(&mut self, max: usize) {
         self.scrollback_max = max;
         while self.scrollback.len() > max {
-            self.scrollback.pop_front();
+            if let Some(evicted) = self.scrollback.pop_front() {
+                self.styles.note_evicted(evicted.cells().len());
+            }
             self.touch_hist();
             self.evict_prompt_mark();
             #[cfg(feature = "l13")]
@@ -3183,7 +3367,7 @@ impl Grid {
     /// refilling is exact, not lossy.
     pub fn apply_theme(&mut self, theme: &super::Theme) {
         self.set_default_colors(theme.fg, theme.bg, theme.cursor);
-        self.screen = blank_screen(self.cols, self.rows, self.default_cell());
+        self.screen = blank_screen(self.cols, self.rows, self.default_packed());
         self.reset_damage();
     }
 
@@ -3194,17 +3378,11 @@ impl Grid {
     /// can't know they meant "the theme's red"). Full repaint requested.
     pub fn retheme(&mut self, old: &super::Theme, new: &super::Theme) {
         let map = |c: &mut u32| *c = super::color::remap(*c, old, new);
-        let stashed = self.primary.iter_mut().flat_map(|p| p.screen.iter_mut());
-        for line in self
-            .screen
-            .iter_mut()
-            .chain(&mut self.scrollback)
-            .chain(stashed)
-        {
-            for cell in line.cells_mut() {
-                map(&mut cell.fg);
-                map(&mut cell.bg);
-            }
+        // Cells hold style ids, so only the table changes; styles that become
+        // equal merge, and only then are the cells rewritten.
+        self.blank_row.clear();
+        if let Some(remap) = self.styles.retheme(|c| super::color::remap(c, old, new)) {
+            self.apply_remap(&remap);
         }
         map(&mut self.default_fg);
         map(&mut self.default_bg);
@@ -3242,7 +3420,7 @@ impl Grid {
         self.images.clear(); // serials/reflow change; drop placed images
         let old_cols = self.cols;
         let clamp = |(x, y): (usize, usize)| (x.min(cols - 1), y.min(rows - 1));
-        let blank = self.default_cell(); // a resize is not an erase: no BCE
+        let blank = self.default_packed(); // a resize is not an erase: no BCE
         // Preserve tab stops within the surviving width; default the new columns.
         let mut stops = default_tab_stops(cols);
         let keep = cols.min(old_cols);
@@ -3273,6 +3451,7 @@ impl Grid {
                 rows,
                 blank,
                 self.scrollback_max,
+                &self.styles,
             );
             self.scrollback = r.scrollback;
             self.touch_hist();
@@ -3292,7 +3471,7 @@ impl Grid {
                 saved_cursor: clamp(primary.saved_cursor),
                 mode: primary.mode,
             });
-            self.screen = reflow_clip(&self.screen, cols, rows);
+            self.screen = reflow_clip(&self.screen, cols, rows, blank);
             self.cursor = clamp(self.cursor);
             self.saved_cursor = clamp(self.saved_cursor);
         } else {
@@ -3309,6 +3488,7 @@ impl Grid {
                 rows,
                 blank,
                 self.scrollback_max,
+                &self.styles,
             );
             self.scrollback = r.scrollback;
             self.touch_hist();
@@ -3335,6 +3515,8 @@ impl Grid {
             s.relayout(cols);
         }
         self.reset_scroll_region();
+        self.styles.request_sweep();
+        self.sweep_styles();
     }
 
     /// Switch to the alternate screen, stashing the primary buffer. Only
@@ -3346,7 +3528,8 @@ impl Grid {
         }
         #[cfg(any(test, feature = "gui"))]
         self.images.clear();
-        let alt = self.take_spare_screen(self.erase_cell());
+        let fill = self.erase_packed();
+        let alt = self.take_spare_screen(fill);
         self.primary = Some(SavedScreen {
             screen: std::mem::replace(&mut self.screen, alt),
             cursor: self.cursor,
@@ -3364,7 +3547,7 @@ impl Grid {
 
     /// The spare rows (see [`Grid::spare_screen`]) sized to the grid and filled
     /// with `fill`.
-    fn take_spare_screen(&mut self, fill: Cell) -> Vec<Line> {
+    fn take_spare_screen(&mut self, fill: PackedCell) -> Vec<Line> {
         let mut screen = std::mem::take(&mut self.spare_screen);
         screen.resize_with(self.rows, Line::default);
         self.prime_blank_row(fill);
@@ -3420,7 +3603,7 @@ impl Grid {
             return;
         }
         let n = n.min(self.cols - x);
-        let blank = self.erase_cell();
+        let blank = self.erase_packed();
         let row = self.screen[y].cells_mut();
         row[x..].rotate_left(n);
         let end = row.len();
@@ -3436,7 +3619,7 @@ impl Grid {
             return;
         }
         let n = n.min(self.cols - x);
-        let blank = self.erase_cell();
+        let blank = self.erase_packed();
         let row = self.screen[y].cells_mut();
         row[x..].rotate_right(n);
         row[x..x + n].fill(blank);
@@ -3466,7 +3649,7 @@ impl Grid {
             }
             let n = n.min(self.scroll_bottom + 1 - cy);
             let (l, r) = (self.left_margin, self.right_margin.min(self.cols - 1));
-            let blank = self.erase_cell();
+            let blank = self.erase_packed();
             for y in ((cy + n)..=self.scroll_bottom).rev() {
                 self.copy_band(y - n, y, l, r);
             }
@@ -3479,7 +3662,7 @@ impl Grid {
         let n = n.min(self.scroll_bottom + 1 - cy);
         // Rotate rows [cy, scroll_bottom] down by n; the n rows that fall off
         // the region bottom come round to the cursor row and are blanked.
-        let blank = self.erase_cell();
+        let blank = self.erase_packed();
         self.screen[cy..=self.scroll_bottom].rotate_right(n);
         self.prime_blank_row(blank);
         for line in &mut self.screen[cy..cy + n] {
@@ -3502,7 +3685,7 @@ impl Grid {
             }
             let n = n.min(self.scroll_bottom + 1 - cy);
             let (l, r) = (self.left_margin, self.right_margin.min(self.cols - 1));
-            let blank = self.erase_cell();
+            let blank = self.erase_packed();
             // `n` can reach `scroll_bottom + 1 - cy` (deleting the whole
             // region), at which point `scroll_bottom - n` underflows when
             // `cy == 0` — e.g. `CSI 9999 M` with DECSLRM margins active and
@@ -3522,7 +3705,7 @@ impl Grid {
         let n = n.min(self.scroll_bottom + 1 - cy);
         // Rotate rows [cy, scroll_bottom] up by n; the n deleted rows come
         // round to the region bottom and are blanked.
-        let blank = self.erase_cell();
+        let blank = self.erase_packed();
         self.screen[cy..=self.scroll_bottom].rotate_left(n);
         self.prime_blank_row(blank);
         for line in &mut self.screen[self.scroll_bottom + 1 - n..=self.scroll_bottom] {
@@ -3568,7 +3751,7 @@ impl Grid {
         }
         let n = n.min(bottom + 1 - top);
         // Rotate the region down by n and blank the n rows freed at its top.
-        let blank = self.erase_cell();
+        let blank = self.erase_packed();
         self.screen[top..=bottom].rotate_right(n);
         self.prime_blank_row(blank);
         for line in &mut self.screen[top..top + n] {
@@ -3676,7 +3859,7 @@ impl Grid {
         self.grapheme_clustering = false; // and every mode (DECSTR keeps 2027)
         self.allow_deccolm = false;
         self.column_mode_132 = false;
-        self.screen = blank_screen(self.cols, self.rows, self.default_cell());
+        self.screen = blank_screen(self.cols, self.rows, self.default_packed());
         #[cfg(any(test, feature = "gui"))]
         self.images.clear();
         self.reset_damage();
@@ -3685,6 +3868,7 @@ impl Grid {
         self.scroll_top = 0;
         self.scroll_bottom = self.rows.saturating_sub(1);
         self.scrollback.clear();
+        self.styles.request_sweep();
         self.touch_hist();
         self.prompt_marks.clear();
         #[cfg(any(test, feature = "gui"))]
@@ -3764,6 +3948,7 @@ impl Grid {
     pub(crate) fn fill_alignment(&mut self) {
         let mut e = Cell::blank();
         e.ch = 'E';
+        let e = self.pack(e);
         self.prime_blank_row(e);
         for line in &mut self.screen {
             line.clear(&self.blank_row);
@@ -4149,32 +4334,39 @@ impl Grid {
     /// renderers so inference can't drift between them.
     #[cfg(any(test, feature = "gui"))]
     pub fn placeholder_map(&self) -> Option<Vec<Option<(u32, u32, u32)>>> {
-        self.placeholders_of(&self.view())
+        let view = self.view();
+        let mut cells = Vec::with_capacity(self.cols * self.rows);
+        for row in 0..self.rows {
+            view.push_row(row, &mut cells);
+        }
+        self.placeholders_of(&cells)
     }
 
-    /// [`Grid::placeholder_map`] over an already-resolved view.
+    /// [`Grid::placeholder_map`] over the viewport's cells, row-major.
     #[cfg(any(test, feature = "gui"))]
-    fn placeholders_of(&self, view: &View<'_>) -> Option<Vec<Option<(u32, u32, u32)>>> {
+    fn placeholders_of(&self, cells: &[Cell]) -> Option<Vec<Option<(u32, u32, u32)>>> {
         let mut ph: Vec<Option<(u32, u32, u32)>> = Vec::new();
         let mut any = false;
         for row in 0..self.rows {
             for col in 0..self.cols {
-                let entry = self.placeholder_of(view.cell(col, row)).map(|(id, r, c)| {
-                    let left = (col > 0)
-                        .then(|| ph.get(row * self.cols + col - 1).copied().flatten())
-                        .flatten()
-                        .filter(|&(lid, _, _)| lid == id);
-                    let above = (row > 0)
-                        .then(|| ph.get((row - 1) * self.cols + col).copied().flatten())
-                        .flatten()
-                        .filter(|&(aid, _, _)| aid == id);
-                    let cc = c.or_else(|| left.map(|(_, _, lc)| lc + 1)).unwrap_or(0);
-                    let rr = r
-                        .or_else(|| left.map(|(_, lr, _)| lr))
-                        .or_else(|| above.map(|(_, ar, _)| ar + 1))
-                        .unwrap_or(0);
-                    (id, rr, cc)
-                });
+                let entry = self
+                    .placeholder_of(cells[row * self.cols + col])
+                    .map(|(id, r, c)| {
+                        let left = (col > 0)
+                            .then(|| ph.get(row * self.cols + col - 1).copied().flatten())
+                            .flatten()
+                            .filter(|&(lid, _, _)| lid == id);
+                        let above = (row > 0)
+                            .then(|| ph.get((row - 1) * self.cols + col).copied().flatten())
+                            .flatten()
+                            .filter(|&(aid, _, _)| aid == id);
+                        let cc = c.or_else(|| left.map(|(_, _, lc)| lc + 1)).unwrap_or(0);
+                        let rr = r
+                            .or_else(|| left.map(|(_, lr, _)| lr))
+                            .or_else(|| above.map(|(_, ar, _)| ar + 1))
+                            .unwrap_or(0);
+                        (id, rr, cc)
+                    });
                 any |= entry.is_some();
                 ph.push(entry);
             }
@@ -4423,7 +4615,7 @@ impl Grid {
             None => self.scrollback.get(abs)?,
             Some(row) => self.screen.get(row)?,
         };
-        Some(row_text(line.cells(), &self.clusters))
+        Some(self.text_of(line))
     }
 
     /// Join the cell rows in the absolute line range `[start, cursor line)` into
@@ -4438,12 +4630,12 @@ impl Grid {
             if i != start {
                 out.push('\n');
             }
-            let cells = if i < history {
-                &self.scrollback[i].cells()
+            let line = if i < history {
+                &self.scrollback[i]
             } else {
-                &self.screen[i - history].cells()
+                &self.screen[i - history]
             };
-            out.push_str(&row_text(cells, &self.clusters));
+            out.push_str(&self.text_of(line));
         }
         out
     }
@@ -4485,7 +4677,7 @@ impl Grid {
             .map(|(y, _)| {
                 let cells = match (y + 1 == self.rows).then(|| self.status_row()).flatten() {
                     Some(s) => s.to_vec(),
-                    None => self.screen[y].cells().to_vec(),
+                    None => self.resolved(self.screen[y].cells()),
                 };
                 (y, cells)
             })
@@ -4522,16 +4714,22 @@ impl Grid {
         self.set_view_offset(0)
     }
 
-    /// Borrow physical row `abs` (0 = oldest scrollback line) as `(cells, wrapped)`.
+    /// Physical row `abs` (0 = oldest scrollback line).
     #[cfg(any(test, feature = "gui"))]
-    fn phys_row(&self, abs: usize) -> (&[Cell], bool) {
+    fn phys_line(&self, abs: usize) -> &Line {
         let h = self.scrollback.len();
-        let line = if abs < h {
+        if abs < h {
             &self.scrollback[abs]
         } else {
             &self.screen[abs - h]
-        };
-        (line.cells(), line.wrapped)
+        }
+    }
+
+    /// Physical row `abs` as `(cells, wrapped)`, its cells resolved.
+    #[cfg(any(test, feature = "gui"))]
+    fn phys_row(&self, abs: usize) -> (Vec<Cell>, bool) {
+        let line = self.phys_line(abs);
+        (self.resolved(line.cells()), line.wrapped)
     }
 
     /// Scroll the viewport so absolute row `abs` is visible, about a third
@@ -4972,7 +5170,7 @@ impl Grid {
         let total = self.scrollback.len() + self.rows;
         let mut start = abs.min(total.saturating_sub(1));
         let mut back = 0;
-        while start > 0 && back < 64 && self.phys_row(start - 1).1 {
+        while start > 0 && back < 64 && self.phys_line(start - 1).wrapped {
             start -= 1;
             back += 1;
         }
@@ -5069,14 +5267,11 @@ impl Grid {
                 s.to_vec()
             } else if y < off {
                 // Top `off` viewport rows show the tail of history.
-                let line = &self.scrollback[history - off + y].cells();
-                let mut row = vec![Cell::blank(); self.cols];
-                let n = line.len().min(self.cols);
-                row[..n].copy_from_slice(&line[..n]);
-                row
+                let line = &self.scrollback[history - off + y];
+                (0..self.cols).map(|x| self.line_cell(line, x)).collect()
             } else {
                 // The rest shows the live grid, shifted down by `off`.
-                self.screen[y - off].cells().to_vec()
+                self.resolved(self.screen[y - off].cells())
             };
             rows.push((y, cells));
             attrs.push(if status.is_some() || y < off {
@@ -5143,11 +5338,7 @@ impl Grid {
 #[cfg(feature = "l13")]
 impl rusty_term_l13::TerminalState for Grid {
     fn screen_text(&self) -> String {
-        let mut lines: Vec<String> = self
-            .screen
-            .iter()
-            .map(|line| row_text(line.cells(), &self.clusters))
-            .collect();
+        let mut lines: Vec<String> = self.screen.iter().map(|line| self.text_of(line)).collect();
         while lines.last().is_some_and(String::is_empty) {
             lines.pop();
         }
@@ -5159,7 +5350,7 @@ impl rusty_term_l13::TerminalState for Grid {
         self.scrollback
             .iter()
             .skip(skip)
-            .map(|line| row_text(line.cells(), &self.clusters))
+            .map(|line| self.text_of(line))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -5234,7 +5425,7 @@ pub struct DirtyFrame {
 /// continuation, skipping wide-glyph trailers, with trailing blanks trimmed.
 /// Shared by the MCP screen/scrollback/command readers and the windowed
 /// front-end's command dock labels, and by [`Grid::line_text`].
-pub(crate) fn row_text(cells: &[Cell], clusters: &[String]) -> String {
+pub(crate) fn row_text(cells: impl IntoIterator<Item = Cell>, clusters: &[String]) -> String {
     let mut s = String::new();
     for cell in cells {
         if cell.flags & WIDE_TRAILER != 0 {
@@ -5385,6 +5576,7 @@ impl crate::checkpoint::Wire for Grid {
             return Err(crate::checkpoint::Error("grid bounds"));
         }
         r.charge(grid.table_cache_cost())?;
+        grid.styles = r.take_styles();
         grid.links_arc = grid.links.clone().into();
         grid.rebuild_cluster_caches();
         r.charge(grid.rows)?;
@@ -5442,13 +5634,23 @@ impl Grid {
         {
             return Err(Error("primary screen bounds"));
         }
+        // Styles are checked once each; cells only for naming a live one.
+        let free = self.styles.free_mask();
+        let style_ok = |i: usize| {
+            let style = self.styles.get(StyleId(i as u32));
+            usize::from(style.cluster) <= self.clusters.len()
+                && usize::from(style.link) <= self.links.len()
+        };
+        if (0..free.len()).any(|i| !free[i] && !style_ok(i)) {
+            return Err(Error("style bounds"));
+        }
         let primary = self.primary.iter().flat_map(|p| p.screen.iter());
         for line in self.screen.iter().chain(primary).chain(&self.scrollback) {
             if line.cells().len() > 4096
-                || line.cells().iter().any(|c| {
-                    usize::from(c.cluster) > self.clusters.len()
-                        || usize::from(c.link) > self.links.len()
-                })
+                || line
+                    .cells()
+                    .iter()
+                    .any(|c| free.get(c.style().0 as usize) != Some(&false))
             {
                 return Err(Error("cell bounds"));
             }

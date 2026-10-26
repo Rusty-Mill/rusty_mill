@@ -1433,7 +1433,7 @@ fn full_screen_scroll_captures_into_scrollback() {
     assert_eq!(g.scrollback.len(), 0);
     p.advance(&mut g, b"\r\nCCCC"); // scrolls AAAA off the top
     assert_eq!(g.scrollback.len(), 1);
-    let line: String = g.scrollback[0].cells().iter().map(|c| c.ch).collect();
+    let line: String = g.scrollback[0].cells().iter().map(|c| c.ch()).collect();
     assert_eq!(line, "AAAA");
     // Live grid now shows BBBB / CCCC.
     assert_eq!(row_text(&g, 0), "BBBB");
@@ -1442,7 +1442,7 @@ fn full_screen_scroll_captures_into_scrollback() {
 
 /// Text of scrollback line `i`.
 fn hist_text(g: &Grid, i: usize) -> String {
-    g.scrollback[i].cells().iter().map(|c| c.ch).collect()
+    g.scrollback[i].cells().iter().map(|c| c.ch()).collect()
 }
 
 /// Every live row holds exactly `cols` cells (rows rotate and are recycled,
@@ -2531,7 +2531,7 @@ fn ind_at_bottom_scrolls_and_captures_scrollback() {
     assert_eq!(row_text(&g, 0), "BBBB");
     assert_eq!(row_text(&g, 1), "    ");
     assert_eq!(g.scrollback.len(), 1);
-    let line: String = g.scrollback[0].cells().iter().map(|c| c.ch).collect();
+    let line: String = g.scrollback[0].cells().iter().map(|c| c.ch()).collect();
     assert_eq!(line, "AAAA");
 }
 
@@ -4941,8 +4941,12 @@ fn retheme_recolors_scrollback() {
     let old = p.retheme(new);
     g.retheme(&old, &new);
     for line in &g.scrollback {
-        for cell in line.cells() {
-            assert_ne!(cell.fg, 0xd8d8d8, "old themed fg gone from history");
+        for &cell in line.cells() {
+            assert_ne!(
+                g.resolve(cell).fg,
+                0xd8d8d8,
+                "old themed fg gone from history"
+            );
         }
     }
 }
@@ -6944,7 +6948,13 @@ fn assert_same_snapshot_state(a: &Grid, b: &Grid) {
         (&a.title, &a.clusters, &a.links),
         (&b.title, &b.clusters, &b.links)
     );
-    assert_eq!(a.scrollback, b.scrollback);
+    let history = |g: &Grid| -> Vec<_> {
+        let lines = g.scrollback.iter();
+        lines
+            .map(|l| (g.resolved(l.cells()), l.wrapped, l.attr))
+            .collect()
+    };
+    assert_eq!(history(a), history(b));
     assert_eq!(a.in_alt_screen(), b.in_alt_screen());
     for y in 0..a.rows {
         assert_eq!(a.row(y), b.row(y), "row {y}");
@@ -7162,6 +7172,36 @@ fn plain_csi_fast_path_matches_bytewise_parse() {
     }
 }
 
+/// `lines` rows of `cols` glyphs, glyph `x` of row `k` in its own truecolour
+/// `first + k * cols + x`.
+fn rainbow(first: u32, lines: usize, cols: usize) -> Vec<u8> {
+    let mut out = String::new();
+    for i in 0..(lines * cols) as u32 {
+        let c = first + i;
+        let (r, g, b) = (c >> 16 & 0xff, c >> 8 & 0xff, c & 0xff);
+        out.push_str(&format!("\x1b[38;2;{r};{g};{b}mx"));
+        if (i as usize + 1).is_multiple_of(cols) {
+            out.push_str("\r\n");
+        }
+    }
+    out.into_bytes()
+}
+
+/// Every retained rainbow row still counts up by one per cell, and rows
+/// count up in order: a wrong id after a sweep or compaction breaks a run.
+fn assert_rainbow(g: &Grid) {
+    let history = g.scrollback.iter().map(|l| g.resolved(l.cells()));
+    let rows: Vec<Vec<Cell>> = history.chain((0..g.rows).map(|y| g.row(y))).collect();
+    let mut last = 0;
+    for row in rows.iter().filter(|r| r[0].ch == 'x') {
+        assert!(row[0].fg > last, "rows out of order");
+        for (x, cell) in row.iter().enumerate() {
+            assert_eq!(cell.fg, row[0].fg + x as u32, "column {x}");
+        }
+        last = row[0].fg;
+    }
+}
+
 #[test]
 fn plain_csi_split_at_every_offset_matches_one_chunk() {
     let input = b"ab\x1b[12;34Hcd\x1b[1;38;2;10;20;30mef\x1b[;7Hgh\x1b[3Pij";
@@ -7192,4 +7232,39 @@ fn csi_param_overflow_takes_the_default() {
     // A field too large for usize parses as absent, so the row defaults to 1.
     let g = parse(b"\x1b[99999999999999999999999999;3H", 80, 24);
     assert_eq!(g.cursor, (2, 0));
+}
+
+#[test]
+fn style_sweeps_and_compaction_keep_every_cell() {
+    let (cols, rows) = (20, 5);
+    let mut g = Grid::new(cols, rows);
+    g.set_scrollback_max(100);
+    let mut p = AnsiParser::new();
+    // One batch of 72,000 styles, nearly all evicted by its end: the sweep
+    // after it frees them and compacts the table.
+    p.advance(&mut g, &rainbow(1, 3600, cols));
+    let stats = g.style_stats();
+    let (live, len) = (stats.live, stats.entries);
+    assert!(len < 65_536, "compacted: {len} entries");
+    assert!(live <= (100 + rows) * cols + 2, "{live} live");
+    assert_rainbow(&g);
+    // Many small batches: sweeps free and reuse slots between them.
+    for k in 0..300 {
+        p.advance(&mut g, &rainbow(100_000 + k * 400, 20, cols));
+        assert_rainbow(&g);
+    }
+    let (live, len) = (g.style_stats().live, g.style_stats().entries);
+    assert!(live < 3 * 4096 && len < 3 * 4096, "{live} live of {len}");
+}
+
+#[test]
+fn clearing_history_releases_its_styles() {
+    let mut g = Grid::new(20, 5);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, &rainbow(1, 400, 20));
+    assert!(g.style_stats().live > 8000);
+    p.advance(&mut g, b"\x1b[0m\x1b[3J");
+    // The screen keeps its styles; history's are freed.
+    assert!(g.style_stats().live <= 5 * 20 + 2, "{:?}", g.style_stats());
+    assert_rainbow(&g);
 }

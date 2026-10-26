@@ -41,6 +41,7 @@ mod osc;
 mod parser;
 mod png;
 mod sixel;
+mod style;
 mod webp;
 
 #[cfg(feature = "gui")]
@@ -58,6 +59,8 @@ pub use color::ensure_contrast;
 pub use grid::BidiRow;
 #[cfg(any(test, feature = "gui"))]
 pub use grid::BlockMark;
+#[doc(hidden)]
+pub use grid::StyleStats;
 #[cfg(any(test, feature = "gui"))]
 pub use grid::View;
 pub use grid::{CursorShape, DirtyFrame, Grid, LineAttr, SCROLLBACK_MAX, SnapshotError};

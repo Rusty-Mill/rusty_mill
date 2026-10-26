@@ -82,6 +82,19 @@ def gen_sgr_churn(target_bytes, seed):
     return bytes(out)
 
 
+def gen_sgr_alternate(target_bytes, seed):
+    """Three pens alternating word by word within each row: the pen changes
+    every few cells, as in syntax-highlighted code."""
+    rng = random.Random(seed)
+    out = bytearray(CSI + b"2J" + CSI + b"H")
+    pens = [sgr(0, 33), sgr(0, 1, 36), sgr(0, 32, 44)]
+    while len(out) < target_bytes:
+        for i in range(rng.randint(4, 10)):
+            out += pens[i % 3] + rng.choice(WORDS).encode() + b" "
+        out += sgr(0) + b"\r\n"
+    return bytes(out)
+
+
 def gen_cursor_thrash(target_bytes, seed):
     """Scattered absolute cursor positioning: redraw-storm TUI apps (vim,
     htop, tmux) do this constantly."""
@@ -122,6 +135,7 @@ WORKLOADS = {
     "ascii_throughput": gen_ascii_throughput,
     "unicode_heavy": gen_unicode_heavy,
     "sgr_churn": gen_sgr_churn,
+    "sgr_alternate": gen_sgr_alternate,
     "cursor_thrash": gen_cursor_thrash,
     "scroll_heavy": gen_scroll_heavy,
     "alt_screen_flicker": gen_alt_screen_flicker,
@@ -138,6 +152,7 @@ SIZES = {
     "xlarge": 150_000_000,
 }
 SEED_BASE = 1337
+ADDED_LATER = ("sgr_alternate",)
 
 
 def main():
@@ -158,7 +173,9 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     target = SIZES[args.size]
-    names = args.only or sorted(WORKLOADS)
+    # Seeds follow position, so a workload added later goes last and leaves
+    # the bytes (and the IR ceilings) of the others unchanged.
+    names = args.only or sorted(WORKLOADS, key=lambda n: (n in ADDED_LATER, n))
     for i, name in enumerate(names):
         data = WORKLOADS[name](target, SEED_BASE + i)
         path = os.path.join(args.out_dir, f"{name}.vt")

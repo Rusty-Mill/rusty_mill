@@ -42,7 +42,8 @@ use std::sync::Arc;
 use rusty_wire::Reader;
 
 use super::{AltMode, CursorShape, Grid, Line, LineAttr, SavedScreen};
-use crate::cell::{Cell, WIDE_TRAILER};
+use crate::cell::{Cell, PackedCell, WIDE_TRAILER};
+use crate::style::{CellStyle, StyleId, StyleTable};
 
 const MAGIC: &[u8; 4] = b"RTSN";
 const VERSION: u8 = 1;
@@ -54,6 +55,10 @@ const MAX_CELLS: usize = 1 << 25;
 /// Most lines a snapshot may decode to (history and screens together). Each
 /// line costs a header even when empty, so lines have a budget of their own.
 const MAX_LINES: usize = 1 << 20;
+/// Most distinct grid styles a snapshot may decode to. A grid style adds the
+/// cluster to a snapshot style, so a hostile input could otherwise multiply
+/// the two tables into one far larger than either.
+const MAX_STYLES: usize = 1 << 22;
 /// Identical cells in a row from which a repeat run beats a literal one.
 const MIN_REPEAT: usize = 4;
 
@@ -127,6 +132,8 @@ impl Grid {
         let mut enc = Encoder {
             out: Vec::with_capacity(history_cells + screen_cells + 1024),
             styles: HashMap::new(),
+            table: &self.styles,
+            row: Vec::with_capacity(self.cols),
         };
         enc.out.extend_from_slice(MAGIC);
         enc.out.push(VERSION);
@@ -188,14 +195,7 @@ impl Grid {
     /// validated as untrusted: every count, index and dimension is checked,
     /// and the total decoded size is capped.
     pub fn decode_snapshot(bytes: &[u8]) -> Result<Grid> {
-        let mut d = Decoder {
-            r: Reader::new(bytes),
-            styles: Vec::new(),
-            cells_left: MAX_CELLS,
-            lines_left: MAX_LINES,
-            clusters: 0,
-            links: 0,
-        };
+        let mut d = Decoder::new(bytes);
         if d.r.read_array::<4>().map_err(|_| SnapshotError::BadMagic)? != *MAGIC {
             return Err(SnapshotError::BadMagic);
         }
@@ -247,7 +247,7 @@ impl Grid {
         if !d.r.is_empty() {
             return Err(SnapshotError::Invalid("trailing bytes"));
         }
-        let mut g = Grid::with_screen(cols, rows, screen);
+        let mut g = Grid::with_screen(cols, rows, screen, d.table);
         (g.cursor, g.saved_cursor) = (cursor, saved_cursor);
         (g.scroll_top, g.scroll_bottom) = (top, bottom);
         g.cursor_visible = flags & FLAG_CURSOR_VISIBLE != 0;
@@ -267,12 +267,16 @@ impl Grid {
     }
 }
 
-struct Encoder {
+struct Encoder<'a> {
     out: Vec<u8>,
     styles: HashMap<Style, u32>,
+    /// The grid's style table, to resolve stored cells.
+    table: &'a StyleTable,
+    /// The line being written, resolved; reused across lines.
+    row: Vec<Cell>,
 }
 
-impl Encoder {
+impl Encoder<'_> {
     fn varint(&mut self, mut v: u64) {
         while v >= 0x80 {
             self.out.push(v as u8 | 0x80);
@@ -289,7 +293,15 @@ impl Encoder {
     /// A line as runs: [`MIN_REPEAT`] or more identical cells become a
     /// repeat run; other cells group into literal runs of one style.
     fn line(&mut self, line: &Line) {
-        let cells = &line.cells();
+        let mut row = std::mem::take(&mut self.row);
+        row.clear();
+        let table = self.table;
+        row.extend(
+            line.cells()
+                .iter()
+                .map(|c| c.resolve(&table.get(c.style()))),
+        );
+        let cells = &row[..];
         self.varint(cells.len() as u64);
         let wrapped = if line.wrapped { META_WRAPPED } else { 0 };
         self.out.push(wrapped | attr_code(line.attr) << 1);
@@ -311,6 +323,7 @@ impl Encoder {
             self.run(&cells[i..j], j - i, false, rich);
             i = j;
         }
+        self.row = row;
     }
 
     /// One run of `len` cells: `glyphs` holds the one repeated cell, or all
@@ -376,13 +389,33 @@ fn starts_repeat(cells: &[Cell]) -> bool {
 struct Decoder<'a> {
     r: Reader<'a>,
     styles: Vec<Style>,
+    /// The decoded grid's styles.
+    table: StyleTable,
+    /// The last style interned and its id: runs repeat one style.
+    last: Option<(CellStyle, StyleId)>,
+    /// [`MAX_STYLES`]; lowered by tests.
+    max_styles: usize,
     cells_left: usize,
     lines_left: usize,
     clusters: usize,
     links: usize,
 }
 
-impl Decoder<'_> {
+impl<'a> Decoder<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Decoder {
+            r: Reader::new(bytes),
+            styles: Vec::new(),
+            table: StyleTable::default(),
+            last: None,
+            max_styles: MAX_STYLES,
+            cells_left: MAX_CELLS,
+            lines_left: MAX_LINES,
+            clusters: 0,
+            links: 0,
+        }
+    }
+
     fn varint(&mut self) -> Result<u64> {
         let mut v = 0u64;
         for shift in (0..64).step_by(7) {
@@ -475,10 +508,12 @@ impl Decoder<'_> {
             let style = self.style()?;
             if repeat {
                 let cell = self.glyph(style, rich)?;
+                let cell = self.pack(&cell)?;
                 cells.resize(cells.len() + len, cell);
             } else {
                 for _ in 0..len {
-                    cells.push(self.glyph(style, rich)?);
+                    let cell = self.glyph(style, rich)?;
+                    cells.push(self.pack(&cell)?);
                 }
             }
         }
@@ -509,6 +544,22 @@ impl Decoder<'_> {
         }
         self.styles.push(style);
         Ok(style)
+    }
+
+    /// Store `cell`, interning its style into the decoded grid's table.
+    fn pack(&mut self, cell: &Cell) -> Result<PackedCell> {
+        let style = CellStyle::of(cell);
+        if let Some((last, id)) = self.last
+            && last == style
+        {
+            return Ok(PackedCell::new(cell, id));
+        }
+        let id = self.table.intern(style);
+        if self.table.len() > self.max_styles {
+            return Err(SnapshotError::Invalid("too many styles"));
+        }
+        self.last = Some((style, id));
+        Ok(PackedCell::new(cell, id))
     }
 
     fn glyph(&mut self, style: Style, rich: bool) -> Result<Cell> {
@@ -597,14 +648,7 @@ mod tests {
     use super::*;
 
     fn varint(bytes: &[u8]) -> Result<u64> {
-        let mut d = Decoder {
-            r: Reader::new(bytes),
-            styles: Vec::new(),
-            cells_left: MAX_CELLS,
-            lines_left: MAX_LINES,
-            clusters: 0,
-            links: 0,
-        };
+        let mut d = Decoder::new(bytes);
         d.varint()
     }
 
@@ -628,5 +672,22 @@ mod tests {
             assert_eq!(varint(&v), overflow, "tenth byte {tenth:#04x}");
         }
         assert_eq!(varint(&nine), Err(SnapshotError::Truncated));
+    }
+    #[test]
+    fn decoding_past_the_style_cap_fails() {
+        // One line of three cells, each a new style (fg 1, 2, 3): with the
+        // blank style the table reaches four entries.
+        let mut line = vec![3, 0];
+        for (id, fg) in [(0u8, 1u8), (1, 2), (2, 3)] {
+            line.extend([1 << 2, id, fg, 0, 0, 0, 0, b'a']);
+        }
+        for (cap, want) in [
+            (4, Ok(())),
+            (3, Err(SnapshotError::Invalid("too many styles"))),
+        ] {
+            let mut d = Decoder::new(&line);
+            d.max_styles = cap;
+            assert_eq!(d.line(3, true).map(|_| ()), want, "cap {cap}");
+        }
     }
 }

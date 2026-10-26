@@ -713,6 +713,8 @@ impl AnsiParser {
                 }
             }
         }
+        // Between batches nothing outside the grid's cells holds a style id.
+        g.sweep_styles();
     }
 
     /// Finalize a collected DCS string. If it's a Sixel (`<params> q <data>`),

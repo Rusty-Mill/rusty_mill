@@ -65,6 +65,18 @@ impl<'g> View<'g> {
         self.grid.bidi_row_of(row, |col| self.cell(col, row))
     }
 
+    /// Viewport `row`'s cells appended to `out`: the bulk form of
+    /// [`View::cell`], resolving each run of one style once.
+    pub(super) fn push_row(&self, row: usize, out: &mut Vec<Cell>) {
+        let cols = self.grid.cols;
+        let line = match self.lines[row] {
+            ViewLine::Hist(l) => &self.grid.scrollback[l],
+            ViewLine::Live(r) => &self.grid.screen[r],
+            ViewLine::Summary(_) => return out.extend((0..cols).map(|col| self.cell(col, row))),
+        };
+        self.grid.push_resolved(line, cols, out);
+    }
+
     /// The resolved rows, top to bottom.
     pub(super) fn lines(&self) -> &[ViewLine] {
         &self.lines
