@@ -260,10 +260,9 @@ async fn a_connect_failure_is_retried_onto_a_live_endpoint() {
     shutdown.cancel();
 }
 
-#[tokio::test]
-async fn a_post_body_survives_a_retry() {
-    // The whole reason bodies are buffered: a replayed attempt has to send the
-    // same payload, not an empty one.
+/// An upstream that records each body it receives and answers `503` to
+/// the first, `200` after; and a gateway retrying `503` once in front of it.
+async fn recorded_retry() -> (String, CancellationToken, Arc<Mutex<Vec<String>>>) {
     let port = free_port().await;
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let recorder = Arc::clone(&seen);
@@ -297,6 +296,14 @@ async fn a_post_body_survives_a_retry() {
               - host: "127.0.0.1:{port}""#
     ))
     .await;
+    (base, shutdown, seen)
+}
+
+#[tokio::test]
+async fn a_post_body_survives_a_retry() {
+    // The whole reason bodies are buffered: a replayed attempt has to send the
+    // same payload, not an empty one.
+    let (base, shutdown, seen) = recorded_retry().await;
 
     let response = reqwest::Client::new()
         .post(format!("{base}/"))
@@ -313,6 +320,35 @@ async fn a_post_body_survives_a_retry() {
         "the replayed attempt must carry the same body"
     );
 
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_chunked_body_is_retried_too() {
+    // A body without a length is read whole like any other, so it is
+    // replayed rather than sent once.
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (base, shutdown, seen) = recorded_retry().await;
+
+    let gateway = base.trim_start_matches("http://");
+    let mut client = tokio::net::TcpStream::connect(gateway)
+        .await
+        .expect("connect");
+    client
+        .write_all(
+            b"POST / HTTP/1.1\r\nHost: gateway\r\nTransfer-Encoding: chunked\r\n\
+              Connection: close\r\n\r\n3\r\nthe\r\n8\r\n payload\r\n0\r\n\r\n",
+        )
+        .await
+        .expect("write");
+    let mut answer = String::new();
+    client.read_to_string(&mut answer).await.expect("read");
+
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    assert_eq!(
+        *seen.lock().expect("lock"),
+        vec!["the payload".to_string(), "the payload".to_string()]
+    );
     shutdown.cancel();
 }
 

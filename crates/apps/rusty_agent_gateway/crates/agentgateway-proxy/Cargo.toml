@@ -31,9 +31,9 @@ serde_json = { workspace = true }
 agentgateway-core = { workspace = true }
 http = { workspace = true }
 http-body = { workspace = true }
-http-body-util = { workspace = true }
-hyper = { workspace = true, features = ["http1", "client"] }
-hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
+# `tokio`: the gateway still runs on tokio (#885), and the feature lets
+# rusty_request run on whichever runtime is driving the request.
+rusty_request = { workspace = true, features = ["tokio"] }
 bytes = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 thiserror = "2"

@@ -282,11 +282,9 @@ impl LlmBackend {
 
     /// Send the translated request, retrying if the route asked for it.
     ///
-    /// An `ai` request is replayable by construction. The proxy has to decide
-    /// whether a body can be buffered, and refuses to retry when it cannot;
-    /// here the body was already read and translated before anything could be
-    /// sent, so the question never arises and `attempts` always means what it
-    /// says.
+    /// An `ai` request is replayable by construction: the body was already
+    /// read and translated before anything could be sent, so `attempts`
+    /// always means what it says.
     ///
     /// What is retried is the same on both paths, from the same policy: a
     /// listed status, or a connect failure. Not a timeout and not any other
