@@ -321,8 +321,8 @@ mod tests {
 
     #[test]
     fn captured_text_is_printed_as_is_or_wrapped() {
-        assert_eq!(text_line("capture", "a\n b".into(), false), "a\n b");
-        let json = text_line("capture", "a\n b".into(), true);
+        assert_eq!(text_line("terminal.format", "a\n b".into(), false), "a\n b");
+        let json = text_line("terminal.format", "a\n b".into(), true);
         assert!(json.contains("\"text\":\"a\\n b\""), "{json}");
     }
 

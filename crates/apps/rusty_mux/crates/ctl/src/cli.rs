@@ -19,12 +19,23 @@ pub struct Invocation {
 pub enum Command {
     /// Usage, for one method or all of them.
     Help(Option<&'static Method>),
+    /// The catalog, for discovery at run time.
+    Api(Api),
     /// Requests sent in order on one connection, stopping at the first
     /// failure; `+` separates them on the command line.
     Calls(Vec<Call>),
     /// The events after `after` (or from now), then the cursor to resume
     /// from; with `follow`, every later event until the server goes away.
     Events { after: Option<Cursor>, follow: bool },
+}
+
+/// What `api` prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Api {
+    /// Every method's name and summary.
+    List,
+    /// One method, with its parameters as a JSON Schema.
+    Describe(&'static Method),
 }
 
 /// One request with its checked arguments.
@@ -108,6 +119,7 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
     };
     match name.as_str() {
         "help" | "--help" | "-h" => help(rest),
+        "api" => api(rest),
         "events" => events(rest),
         _ => args
             .split(|a| a == "+")
@@ -122,6 +134,14 @@ fn help(args: &[String]) -> Result<Command, String> {
         [] => Ok(Command::Help(None)),
         [name] => known(name).map(|m| Command::Help(Some(m))),
         _ => Err("help takes at most one method".into()),
+    }
+}
+
+fn api(args: &[String]) -> Result<Command, String> {
+    match args {
+        [verb] if verb == "list" => Ok(Command::Api(Api::List)),
+        [verb, name] if verb == "describe" => known(name).map(|m| Command::Api(Api::Describe(m))),
+        _ => Err("usage: api list | api describe METHOD".into()),
     }
 }
 
@@ -234,10 +254,13 @@ pub fn usage(method: Option<&Method>) -> String {
                  defaults to $RUSTY_MUX_SESSION, $RUSTY_MUX_WINDOW or $RUSTY_MUX_BLOCK.\n\ncommands:\n",
             );
             for m in schema::CATALOG {
-                text.push_str(&format!("  {:<14} {}\n", m.name, m.doc));
+                text.push_str(&format!("  {:<16} {}\n", m.name, m.doc));
             }
-            text.push_str("  events         Print missed events: [--after EPOCH:SEQ] [--follow]\n");
-            text.push_str("  help           Show a command's flags: help COMMAND\n");
+            text.push_str(
+                "  events           Print missed events: [--after EPOCH:SEQ] [--follow]\n",
+            );
+            text.push_str("  api              List methods, or describe one as JSON: api list | api describe METHOD\n");
+            text.push_str("  help             Show a command's flags: help COMMAND\n");
             text
         }
         Some(m) => {

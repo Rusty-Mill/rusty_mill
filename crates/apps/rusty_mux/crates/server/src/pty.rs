@@ -61,6 +61,11 @@ pub(crate) fn spawn(
 }
 
 impl Process {
+    /// The program's process id, until it is reaped.
+    pub(crate) fn pid(&self) -> Option<u32> {
+        self.child.as_ref().map(|child| child.id())
+    }
+
     /// Hangs up the program's process group and waits for it to exit,
     /// escalating to `SIGKILL` after [`GRACE`]; a program that ignores
     /// `SIGHUP` is still reaped. Runs as its own task so the server keeps

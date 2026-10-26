@@ -4,6 +4,7 @@ use rusty_wire::Writer;
 
 use super::*;
 use crate::field::Out;
+use crate::schema::Value;
 use crate::{Code, Cursor, Entry, Features};
 
 const REQ_ID: u32 = 1;
@@ -83,10 +84,23 @@ fn every_message_round_trips() {
         },
         Message::CloseBlock { req: 10, block },
         Message::Sync { req: 14 },
-        Message::Capture {
+        Message::BlockCall {
             req: 15,
             block,
-            history: u32::MAX,
+            method: "terminal.format".into(),
+            args: vec![
+                ("history".into(), Value::Lines(u32::MAX)),
+                ("id".into(), Value::Id(Uuid::from_bytes([7; 16]))),
+                ("text".into(), Value::Text("\u{4e2d}".into())),
+                ("data".into(), Value::Bytes(vec![0, 0xff])),
+                ("cols".into(), Value::Cells(u16::MAX)),
+            ],
+        },
+        Message::BlockCall {
+            req: 15,
+            block,
+            method: String::new(),
+            args: Vec::new(),
         },
         Message::List { req: 16 },
         Message::Text {
@@ -158,6 +172,11 @@ fn every_message_round_trips() {
             req: 13,
             reason: "unknown block".into(),
             code: Some(Code::NotFound),
+        },
+        Message::Failed {
+            req: 13,
+            reason: "no such method".into(),
+            code: Some(Code::MethodNotFound),
         },
         Message::Snapshot {
             block,
@@ -263,7 +282,7 @@ const FEATURES_ID: u32 = 10;
 fn decode_state_is_bounded_by_ids_not_by_field_count() {
     // `In` owns nothing to free, so it cannot grow with the frame.
     assert!(!std::mem::needs_drop::<crate::field::In<'static>>());
-    assert!(std::mem::size_of::<crate::field::In<'static>>() <= 512);
+    assert!(std::mem::size_of::<crate::field::In<'static>>() <= 1024);
     // Unknown ids, both below and above the kept range.
     let unknown = raw_frame(0x01, |o| {
         for i in 0..REPEATS {
@@ -543,6 +562,7 @@ fn feature_bits_are_distinct() {
         Features::EVENT_SEQ,
         Features::SYNC,
         Features::INSPECT,
+        Features::BLOCK_CALL,
     ];
     let mut seen = 0u64;
     for feature in all {
@@ -553,19 +573,11 @@ fn feature_bits_are_distinct() {
 }
 
 #[test]
-fn an_oversized_history_is_invalid() {
+fn the_retired_capture_type_is_unknown() {
     let frame = raw_frame(0x0d, |out| {
-        out.varint(REQ_ID, 1)
-            .uuid(4, Uuid::new_v4())
-            .varint(19, u64::from(u32::MAX) + 1);
+        out.varint(REQ_ID, 1).uuid(4, Uuid::new_v4()).varint(19, 5);
     });
-    assert_eq!(
-        decode(&frame),
-        Err(Error::InvalidField {
-            message: 0x0d,
-            field: 19
-        })
-    );
+    assert_eq!(decode(&frame), Err(Error::UnknownType(0x0d)));
 }
 
 #[test]
@@ -581,4 +593,32 @@ fn an_unknown_failure_code_decodes_as_none() {
             code: None
         })
     );
+}
+
+#[test]
+fn malformed_block_call_args_are_invalid() {
+    let block = [9u8; 16];
+    // A name, then: an unknown tag; a truncated id; text that is not UTF-8;
+    // a cell count over u16; a line count over u32; a name that runs past
+    // the end.
+    let cases: [&[u8]; 6] = [
+        b"\x01a\x09",
+        b"\x01a\x01\x00\x00",
+        b"\x01a\x02\x01\xff",
+        b"\x01a\x04\x80\x80\x04",
+        b"\x01a\x05\x80\x80\x80\x80\x10",
+        b"\x05ab",
+    ];
+    for args in cases {
+        let frame = raw_frame(0x0f, |out| {
+            out.varint(REQ_ID, 1)
+                .bytes(4, &block)
+                .bytes(22, b"terminal.format")
+                .bytes(23, args);
+        });
+        assert!(
+            matches!(decode(&frame), Err(Error::InvalidField { field: 23, .. })),
+            "{args:?}"
+        );
+    }
 }

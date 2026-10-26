@@ -1,5 +1,5 @@
-//! Reading the server's state without attaching: `list` (C06) and
-//! `capture` (C18).
+//! Reading the server's state without attaching: `list` (C06) and the
+//! terminal block methods (C06, C18).
 
 #![cfg(target_os = "linux")]
 
@@ -7,22 +7,37 @@ mod common;
 
 use common::{Client, block_for, new_block, start_server, window_for};
 use rusty_mux_core::BlockId;
+use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Code, Entry, Features, Message};
 
-const INSPECT: Features = Features::CHECKPOINT_V3.union(Features::INSPECT);
+const INSPECT: Features = Features::CHECKPOINT_V3
+    .union(Features::INSPECT)
+    .union(Features::BLOCK_CALL);
 
-fn capture(client: &mut Client, block: BlockId, history: u32) -> String {
-    match client
-        .answer(|req| Message::Capture {
-            req,
-            block,
-            history,
-        })
-        .as_slice()
-    {
+fn block_call(block: BlockId, method: &str, args: &[(&str, Value)]) -> impl FnOnce(u64) -> Message {
+    let method = method.to_owned();
+    let args = args
+        .iter()
+        .map(|(n, v)| ((*n).to_owned(), v.clone()))
+        .collect();
+    move |req| Message::BlockCall {
+        req,
+        block,
+        method,
+        args,
+    }
+}
+
+fn text(client: &mut Client, block: BlockId, method: &str, args: &[(&str, Value)]) -> String {
+    match client.answer(block_call(block, method, args)).as_slice() {
         [Message::Text { text, .. }] => text.clone(),
         other => panic!("expected Text, got {other:?}"),
     }
+}
+
+fn capture(client: &mut Client, block: BlockId, history: u32) -> String {
+    let args = [("history", Value::Lines(history))];
+    text(client, block, "terminal.format", &args)
 }
 
 fn refusal(answer: Vec<Message>) -> String {
@@ -112,21 +127,68 @@ fn inspecting_needs_the_feature_and_a_real_block() {
     let block = block_for(&mut plain);
     let reason = refusal(plain.answer(|req| Message::List { req }));
     assert!(reason.contains("list requires"), "{reason}");
-    let reason = refusal(plain.answer(|req| Message::Capture {
-        req,
-        block,
-        history: 0,
-    }));
-    assert!(reason.contains("capture requires"), "{reason}");
+    let reason = refusal(plain.answer(block_call(block, "terminal.title", &[])));
+    assert!(reason.contains("a block call requires"), "{reason}");
 
     let mut client = Client::connect_with(&path, INSPECT, None);
     let missing = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
-    let reason = refusal(client.answer(|req| Message::Capture {
-        req,
-        block: missing,
-        history: 0,
-    }));
+    let reason = refusal(client.answer(block_call(missing, "terminal.title", &[])));
     assert!(reason.contains("unknown block"), "{reason}");
+}
+
+#[test]
+fn terminal_methods_read_the_title_and_working_directory() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, INSPECT, None);
+    let block = block_for(&mut client);
+    // The shell starts in `/` and reports nothing, so pwd reads its process.
+    assert_eq!(text(&mut client, block, "terminal.pwd", &[]), "/");
+    assert_eq!(text(&mut client, block, "terminal.title", &[]), "");
+
+    client.input(block, b"cd /tmp; echo CD$((1+1))\r");
+    client.wait_for(block, "CD2");
+    assert_eq!(text(&mut client, block, "terminal.pwd", &[]), "/tmp");
+
+    // A report over OSC 7 wins, percent-decoded.
+    client.input(
+        block,
+        b"printf '\\033]2;my title\\007\\033]7;file://host/a%%20b\\007'; echo OSC$((1+1))\r",
+    );
+    client.wait_for(block, "OSC2");
+    assert_eq!(text(&mut client, block, "terminal.title", &[]), "my title");
+    assert_eq!(text(&mut client, block, "terminal.pwd", &[]), "/a b");
+}
+
+#[test]
+fn block_calls_are_checked_against_the_catalog() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, INSPECT, None);
+    let block = block_for(&mut client);
+    for method in ["terminal.nope", "list", ""] {
+        let answer = client.answer(block_call(block, method, &[]));
+        assert!(
+            matches!(
+                answer.as_slice(),
+                [Message::Failed {
+                    code: Some(Code::MethodNotFound),
+                    ..
+                }]
+            ),
+            "{method}: {answer:?}"
+        );
+    }
+    let cases: [&[(&str, Value)]; 3] = [
+        &[],
+        &[("history", Value::Text("1".into()))],
+        &[("history", Value::Lines(1)), ("extra", Value::Lines(1))],
+    ];
+    for args in cases {
+        let answer = client.answer(block_call(block, "terminal.format", args));
+        assert!(
+            matches!(answer.as_slice(), [Message::Failed { code: None, .. }]),
+            "{args:?}: {answer:?}"
+        );
+    }
 }
 
 #[test]
@@ -157,11 +219,7 @@ fn a_missing_entity_is_refused_as_not_found() {
     let session = rusty_mux_core::SessionId::from_uuid(missing);
     let requests: [Box<dyn Fn(u64) -> Message>; 3] = [
         Box::new(move |req| Message::CloseBlock { req, block }),
-        Box::new(move |req| Message::Capture {
-            req,
-            block,
-            history: 0,
-        }),
+        Box::new(move |req| block_call(block, "terminal.title", &[])(req)),
         Box::new(move |req| Message::CreateWindow {
             req,
             session,

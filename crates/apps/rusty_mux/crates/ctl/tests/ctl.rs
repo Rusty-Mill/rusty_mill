@@ -168,7 +168,7 @@ fn a_refused_request_exits_1() {
 }
 
 #[test]
-fn capture_prints_the_screen_and_list_the_tree() {
+fn format_prints_the_screen_and_list_the_tree() {
     let socket = start_server();
     let block = block(&socket);
     let chain = [
@@ -187,7 +187,7 @@ fn capture_prints_the_screen_and_list_the_tree() {
         "echo HI$((6*7))\r",
     ];
     ok(&socket, &chain);
-    let capture = ["capture", "--block", &block, "--history", "0"];
+    let capture = ["terminal.format", "--block", &block, "--history", "0"];
     let deadline = std::time::Instant::now() + PATIENCE;
     while !ok(&socket, &capture).lines().any(|l| l == "HI42") {
         assert!(std::time::Instant::now() < deadline, "no HI42 on screen");
@@ -214,6 +214,33 @@ fn capture_prints_the_screen_and_list_the_tree() {
 }
 
 #[test]
+fn terminal_methods_read_the_block() {
+    let socket = start_server();
+    let block = block(&socket);
+    assert_eq!(ok(&socket, &["terminal.pwd", "--block", &block]), "/");
+    assert_eq!(ok(&socket, &["terminal.title", "--block", &block]), "");
+    let json = ok(&socket, &["--json", "terminal.pwd", "--block", &block]);
+    assert!(json.contains("\"text\":\"/\""), "{json}");
+}
+
+#[test]
+fn api_lists_and_describes_methods_without_a_server() {
+    let nowhere = Path::new("/nonexistent/rusty-mux.sock");
+    let listing = ok(nowhere, &["api", "list"]);
+    assert!(listing.lines().any(|l| l.starts_with("terminal.format ")));
+    let described = ok(nowhere, &["api", "describe", "resize"]);
+    let rusty_json::Value::Object(map) =
+        rusty_json::Value::from_json_str(&described).expect("json")
+    else {
+        panic!("{described}");
+    };
+    assert_eq!(map.get("name"), Some(&"resize".into()));
+    for args in [&["api", "describe", "nope"][..], &["api"], &["api", "call"]] {
+        assert_eq!(ctl(nowhere, args).status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
 fn targets_resolve_by_name_position_and_suffix() {
     let socket = start_server();
     ok(&socket, &["create-session", "--name", "Build"]);
@@ -235,9 +262,18 @@ fn targets_resolve_by_name_position_and_suffix() {
     );
     ok(
         &socket,
-        &["capture", "--block", "build/logs/1", "--history", "0"],
+        &[
+            "terminal.format",
+            "--block",
+            "build/logs/1",
+            "--history",
+            "0",
+        ],
     );
-    ok(&socket, &["capture", "--block", "1/1/1", "--history", "0"]);
+    ok(
+        &socket,
+        &["terminal.format", "--block", "1/1/1", "--history", "0"],
+    );
     let suffix = &block[block.len() - 6..];
     ok(&socket, &["close-block", "--block", suffix]);
     assert!(!ok(&socket, &["list"]).contains(&block));
@@ -481,7 +517,7 @@ fn a_chain_the_server_cannot_run_sends_nothing() {
         ],
         &["sync"],
         &["create-session", "--name", "s", "+", "list"],
-        &["capture", "--block", block, "--history", "0"],
+        &["terminal.format", "--block", block, "--history", "0"],
     ];
     for chain in chains {
         let (path, frames) = legacy_server();

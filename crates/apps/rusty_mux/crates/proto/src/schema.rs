@@ -7,6 +7,11 @@
 //! [`Ty::parse`] and build the wire message with [`Method::request`], so a
 //! request added to [`Message`] needs one entry here and nothing else.
 //!
+//! Methods of a block type are named `TYPE.verb`, such as `terminal.format`,
+//! and travel as one generic [`Message::BlockCall`] that the server
+//! dispatches on the block's type, so a new block method needs no new
+//! message. Their first parameter is the `block`.
+//!
 //! ```
 //! use rusty_mux_proto::schema::{self, Value};
 //!
@@ -174,6 +179,11 @@ impl PartialEq for Method {
 impl Eq for Method {}
 
 impl Method {
+    /// Whether this is a method of a block type, named `TYPE.verb`.
+    pub fn is_block_method(&self) -> bool {
+        self.name.contains('.')
+    }
+
     /// Builds the request message, numbered `req`, from named arguments.
     /// Each parameter must appear exactly once, with a value of its type.
     pub fn request(&self, req: u64, args: &[(&str, Value)]) -> Result<Message, CallError> {
@@ -245,6 +255,27 @@ pub fn method(name: &str) -> Option<&'static Method> {
     CATALOG.iter().find(|m| m.name == name)
 }
 
+/// The block method named `name`: one namespaced by its block type, such
+/// as `terminal.format`, sent as a [`Message::BlockCall`].
+pub fn block_method(name: &str) -> Option<&'static Method> {
+    method(name).filter(|m| m.is_block_method())
+}
+
+/// A [`Message::BlockCall`] of `method` with every argument but the block.
+fn block_call(req: u64, a: &Args<'_>, method: &'static str) -> Result<Message, CallError> {
+    Ok(Message::BlockCall {
+        req,
+        block: a.block()?,
+        method: method.to_owned(),
+        args: a
+            .0
+            .iter()
+            .filter(|(name, _)| *name != BLOCK.name)
+            .map(|(name, value)| ((*name).to_owned(), value.clone()))
+            .collect(),
+    })
+}
+
 /// Arguments already checked against their method's parameters, so lookups
 /// of a declared parameter find a value of its type.
 struct Args<'a>(&'a [(&'a str, Value)]);
@@ -276,13 +307,6 @@ impl Args<'_> {
         match self.get(name)? {
             Value::Bytes(bytes) => Ok(bytes.clone()),
             _ => Err(self.wrong(name, Ty::Bytes)),
-        }
-    }
-
-    fn lines(&self, name: &'static str) -> Result<u32, CallError> {
-        match self.get(name)? {
-            Value::Lines(n) => Ok(*n),
-            _ => Err(self.wrong(name, Ty::Lines)),
         }
     }
 
@@ -480,8 +504,16 @@ pub static CATALOG: &[Method] = &[
         build: |req, _| Ok(Message::Sync { req }),
     },
     Method {
-        name: "capture",
-        doc: "Read the block's screen as text, after some lines of its history.",
+        name: "list",
+        doc: "List every session, window and block.",
+        params: &[],
+        needs: Features::INSPECT,
+        returns: Returns::Entries,
+        build: |req, _| Ok(Message::List { req }),
+    },
+    Method {
+        name: "terminal.format",
+        doc: "Read the terminal's screen as text, after some lines of its history.",
         params: &[
             BLOCK,
             Param {
@@ -490,23 +522,25 @@ pub static CATALOG: &[Method] = &[
                 doc: "How many scrollback lines above the screen to include.",
             },
         ],
-        needs: Features::INSPECT,
+        needs: Features::BLOCK_CALL,
         returns: Returns::Text,
-        build: |req, a| {
-            Ok(Message::Capture {
-                req,
-                block: a.block()?,
-                history: a.lines("history")?,
-            })
-        },
+        build: |req, a| block_call(req, a, "terminal.format"),
     },
     Method {
-        name: "list",
-        doc: "List every session, window and block.",
-        params: &[],
-        needs: Features::INSPECT,
-        returns: Returns::Entries,
-        build: |req, _| Ok(Message::List { req }),
+        name: "terminal.pwd",
+        doc: "Read the working directory of the terminal's program.",
+        params: &[BLOCK],
+        needs: Features::BLOCK_CALL,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.pwd"),
+    },
+    Method {
+        name: "terminal.title",
+        doc: "Read the title the terminal's program last set.",
+        params: &[BLOCK],
+        needs: Features::BLOCK_CALL,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.title"),
     },
     Method {
         name: "close-block",

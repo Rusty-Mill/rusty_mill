@@ -28,6 +28,8 @@ mod outbox;
 mod pty;
 #[cfg(target_os = "linux")]
 mod state;
+#[cfg(target_os = "linux")]
+mod terminal;
 
 use std::ffi::OsString;
 use std::io;
