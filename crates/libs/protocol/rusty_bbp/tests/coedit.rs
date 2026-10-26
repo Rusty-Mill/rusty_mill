@@ -300,6 +300,41 @@ fn a_version_that_does_not_apply_is_recorded_not_skipped() {
 }
 
 #[test]
+fn a_version_s_snapshot_is_the_hash_of_its_text() {
+    let mut fx = fx();
+    let v1 = seed(&mut fx);
+    let a = line(&fx, v1, "a");
+    let v2 = stored(edit(
+        &mut fx,
+        "planner2",
+        Some(v1),
+        vec![ins(Some(a), &["more"])],
+    ));
+    let text = |fx: &Fx, v: ArtId| fx.st().doc(v).unwrap().text();
+    let snap = |fx: &Fx, v: ArtId| fx.st().versions[&v].snapshot;
+    assert_eq!(snap(&fx, v2), Sha256::of(text(&fx, v2).as_bytes()));
+    assert_ne!(snap(&fx, v1), snap(&fx, v2));
+    let more = line(&fx, v2, "more");
+    let v3 = stored(edit(
+        &mut fx,
+        "planner3",
+        Some(v2),
+        vec![LineOp::Delete { line: more }],
+    ));
+    assert_eq!(snap(&fx, v3), snap(&fx, v1), "same text, same snapshot");
+
+    let mut d = Draft::new(MessageKind::RequestDecision, "Please approve.")
+        .to(Recipient::Human)
+        .refs(vec![Ref::art(v3)]);
+    d.gate = true;
+    posted(fx.post("planner", d));
+    let task = fx.st().task.clone();
+    let view = TaskView::from_events(task.clone(), &fx.d.store.events(&task, 0).unwrap());
+    assert_eq!(view.proposal, Some(v3));
+    assert_eq!(view.proposal_snapshot, Some(snap(&fx, v3)));
+}
+
+#[test]
 fn a_replayed_log_rebuilds_every_version() {
     let mut fx = fx();
     let v1 = seed(&mut fx);
