@@ -35,12 +35,16 @@ fn a_full_report_parses() {
 
 #[test]
 fn pairs_are_trimmed_skipped_or_overridden() {
-    // Spaces trimmed; a pair without `=`, an empty key and an uppercase key
-    // are skipped; unknown keys are ignored; the last `app` wins.
-    let (id, record) = set(" state = working :junk:=x:APP=y:app=a!b:future=1:app=first:app=last");
+    // Spaces trimmed; a pair without `=`, an empty key, an uppercase key
+    // and a value outside the value set are skipped; unknown keys are
+    // ignored; the last well-formed `app` wins.
+    let (id, record) = set(" state = working :junk:=x:APP=y:future=1:app=first:app=last:app=b!d");
     assert!(id.is_root());
     assert_eq!(record.state, State::Working);
     assert_eq!(record.app.as_deref(), Some("last"));
+    // Text outside the value set is malformed, not bad base64: skipped.
+    let (_, record) = set(&format!("state=done:msg={}:msg=!!!!", b64("kept")));
+    assert_eq!(record.msg.as_deref(), Some("kept"));
 }
 
 #[test]
@@ -68,7 +72,7 @@ fn reports_without_a_known_state_or_with_a_bad_id_are_ignored() {
         "state=idle:id=",
         "state=idle:id=a//b",
         "state=idle:id=/a",
-        "state=idle:id=a b",
+        "state=idle:id=a,b",
         "state=idle:id=1/2/3/4/5/6/7/8/9",
     ] {
         assert_eq!(parse(body), None, "{body}");
@@ -82,7 +86,7 @@ fn reports_without_a_known_state_or_with_a_bad_id_are_ignored() {
 #[test]
 fn bad_text_or_size_discards_the_whole_report() {
     let cases = [
-        "state=done:msg=!!!!".to_owned(),
+        "state=done:msg=A".to_owned(),
         format!("state=done:msg={}", b64("two\nlines")),
         format!("state=done:title={}", b64("tab\there")),
         format!(
@@ -92,6 +96,8 @@ fn bad_text_or_size_discards_the_whole_report() {
         format!("state=done:title={}", b64(&"t".repeat(193))),
         format!("state=done:msg={}", b64(&"m".repeat(2049))),
         format!("state=done:app=x:future={}", "z".repeat(4096)),
+        format!("state=done:{}=1", "k".repeat(17)),
+        format!("state=done:app={}", "a".repeat(33)),
     ];
     for body in cases {
         assert_eq!(parse(&body), None, "{body:.60}");
@@ -111,4 +117,35 @@ fn soft_fields_fall_back_to_absent() {
     let (_, r) = set(&format!("state=working:progress=0:app={}", "a".repeat(32)));
     assert_eq!(r.progress, Some(0));
     assert!(r.app.is_some());
+}
+
+#[test]
+fn every_occurrence_is_checked_before_the_last_wins() {
+    let bad_then_good = [
+        format!("state=done:title=A:title={}", b64("ok")),
+        format!(
+            "state=done:msg={}:msg={}",
+            b64(&"m".repeat(2049)),
+            b64("ok")
+        ),
+        format!("state=done:app={}:app=ok", "a".repeat(33)),
+        format!("state=idle:id={}:id=ok", "a".repeat(33)),
+        format!("state=idle:id={}:id=ok", ["a"; 9].join("/")),
+    ];
+    for body in bad_then_good {
+        assert_eq!(parse(&body), None, "{body:.60}");
+    }
+    let (_, sixteen) = set(&format!("state=done:{}=1", "k".repeat(16)));
+    assert_eq!(sixteen.state, State::Done, "a 16-byte unknown key is fine");
+}
+
+#[test]
+fn an_invalid_clear_clears_nothing() {
+    for body in [
+        "state=clear:msg=A".to_owned(),
+        format!("state=clear:id=a:title={}", b64("tab\there")),
+        format!("state=clear:app={}", "a".repeat(33)),
+    ] {
+        assert_eq!(parse(&body), None, "{body}");
+    }
 }

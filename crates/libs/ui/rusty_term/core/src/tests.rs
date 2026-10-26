@@ -7282,12 +7282,11 @@ fn program_status_is_collected_only_when_asked() {
     assert_eq!(
         g.program_status,
         [
-            StatusSignal::Report("state=working".into()),
-            StatusSignal::Prompt,
             StatusSignal::Reset,
             StatusSignal::Report("state=done:app=x".into()),
             StatusSignal::Prompt,
-        ]
+        ],
+        "a reset supersedes what came before it"
     );
     assert!(g.collect_program_status, "a full reset keeps collecting");
 }
@@ -7302,4 +7301,37 @@ fn program_status_queue_is_bounded() {
         &b"\x1b]7501;state=idle\x07".repeat(PROGRAM_STATUS_MAX + 10),
     );
     assert_eq!(g.program_status.len(), PROGRAM_STATUS_MAX);
+}
+
+#[test]
+fn program_status_queue_keeps_boundaries_when_full() {
+    let mut g = Grid::new(80, 24);
+    g.collect_program_status = true;
+    let mut p = AnsiParser::new();
+    let flood = b"\x1b]7501;state=working\x07".repeat(PROGRAM_STATUS_MAX);
+    p.advance(&mut g, &flood);
+    p.advance(
+        &mut g,
+        b"\x1b]133;A\x07\x1b]133;A\x07\x1b]7501;state=done\x07",
+    );
+    let q = &g.program_status;
+    assert_eq!(q.len(), PROGRAM_STATUS_MAX);
+    assert_eq!(
+        q[PROGRAM_STATUS_MAX - 2..],
+        [
+            StatusSignal::Prompt,
+            StatusSignal::Report("state=done".into())
+        ],
+        "the prompt survives once, in order, and the oldest reports made room"
+    );
+
+    p.advance(&mut g, &flood);
+    p.advance(&mut g, b"\x1bc\x1b]7501;state=idle\x07");
+    assert_eq!(
+        g.program_status,
+        [
+            StatusSignal::Reset,
+            StatusSignal::Report("state=idle".into())
+        ]
+    );
 }

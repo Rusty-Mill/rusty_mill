@@ -381,8 +381,6 @@ pub struct KittyFrame {
     pub gap_ms: u32,
 }
 
-/// The authoritative screen buffer: a grid of [`Cell`]s held as one [`Line`]
-/// per row, plus a per-row damage (`dirty`) tracker and a cursor position.
 /// The most program-status signals [`Grid::program_status`] holds between
 /// drains.
 pub const PROGRAM_STATUS_MAX: usize = 256;
@@ -400,6 +398,8 @@ pub enum StatusSignal {
     Reset,
 }
 
+/// The authoritative screen buffer: a grid of [`Cell`]s held as one [`Line`]
+/// per row, plus a per-row damage (`dirty`) tracker and a cursor position.
 pub struct Grid {
     /// Number of columns.
     pub cols: usize,
@@ -5341,13 +5341,37 @@ impl Grid {
         }
     }
 
-    /// Queue `signal` when [`Grid::collect_program_status`] is set. Past
-    /// [`PROGRAM_STATUS_MAX`] pending signals new ones are dropped, so a flood
-    /// between drains can't grow the queue without limit.
+    /// Queue `signal` when [`Grid::collect_program_status`] is set, holding
+    /// at most [`PROGRAM_STATUS_MAX`] without losing a lifecycle boundary: a
+    /// reset supersedes everything queued before it, a prompt right after a
+    /// prompt adds nothing, and when full the oldest report makes room. So
+    /// at most two non-reports are ever queued, every prompt and reset
+    /// survives, and what is kept stays in order.
     pub(crate) fn push_program_status(&mut self, signal: StatusSignal) {
-        if self.collect_program_status && self.program_status.len() < PROGRAM_STATUS_MAX {
-            self.program_status.push(signal);
+        if !self.collect_program_status {
+            return;
         }
+        match signal {
+            StatusSignal::Reset => self.program_status.clear(),
+            StatusSignal::Prompt if self.program_status.last() == Some(&StatusSignal::Prompt) => {
+                return;
+            }
+            _ => {}
+        }
+        if self.program_status.len() >= PROGRAM_STATUS_MAX {
+            let oldest = self
+                .program_status
+                .iter()
+                .position(|s| matches!(s, StatusSignal::Report(_)));
+            match oldest {
+                Some(i) => {
+                    self.program_status.remove(i);
+                }
+                // Unreachable: a full queue holds at most two non-reports.
+                None => return,
+            }
+        }
+        self.program_status.push(signal);
     }
 
     /// Return the id for `uri`, interning it on first use. Ids are `index + 1`

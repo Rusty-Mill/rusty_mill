@@ -132,3 +132,38 @@ fn status_changes_reach_only_clients_that_asked() {
         .count();
     assert_eq!(gaps, 1, "its numbers skip the status event");
 }
+
+#[test]
+fn replay_sends_status_events_only_to_clients_that_asked() {
+    let path = start_server();
+    let status = SEQ.union(Features::STATUS);
+    let mut away = Vec::new();
+    for features in [SEQ, status] {
+        let mut client = Client::connect_with(&path, features, None);
+        let session = create_session(&mut client, "before");
+        wait_for_session(&mut client, session);
+        away.push((features, last_seen(&client)));
+    }
+
+    // While both are away: a status change, then a later event.
+    let mut writer = Client::connect_with(&path, status.union(Features::CHECKPOINT_V3), None);
+    let block = block_for(&mut writer);
+    writer.input(block, b"printf '\\033]7501;state=working\\007'\r");
+    let changed = Event::BlockStatus { block };
+    while !writer.events.iter().any(|(_, e)| *e == changed) {
+        writer.recv();
+    }
+    let after = create_session(&mut writer, "after");
+
+    for (features, seen) in away {
+        let mut client = Client::connect_with(&path, features, Some(seen));
+        assert_eq!(client.cursor, Some(seen), "resumed");
+        wait_for_session(&mut client, after);
+        let replayed = client.events.iter().any(|(_, e)| *e == changed);
+        assert_eq!(
+            replayed,
+            features.contains(Features::STATUS),
+            "{features:?}"
+        );
+    }
+}

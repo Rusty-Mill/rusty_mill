@@ -16,16 +16,18 @@ const MSG_LIMITS: (usize, usize) = (2732, 2048);
 
 /// The report in `body` (the text after `7501;`), or `None` when the
 /// protocol says to ignore it (no or unknown `state`, a bad `id`) or discard
-/// it (over a size limit, bad base64, control characters in text).
-/// Malformed pairs and unknown keys are skipped, and a repeated key keeps its
-/// last value.
+/// it. A report is discarded whole when any pair, repeated, unknown or
+/// final, breaks a size limit, or its text is bad base64 or holds control
+/// characters; that holds for a clear too, so nothing invalid touches a
+/// record. Malformed pairs are skipped before a repeated key keeps its last
+/// value, and unknown keys are ignored.
 pub fn parse(body: &str) -> Option<Report> {
     if body.len() > MAX_BODY {
         return None;
     }
     let mut fields = Fields::default();
     for (key, value) in body.split(':').filter_map(pair) {
-        fields.set(key, value);
+        fields.set(key, value)?;
     }
     let id = match fields.id {
         Some(id) => valid_id(id)?,
@@ -49,13 +51,13 @@ pub fn parse(body: &str) -> Option<Report> {
             .app
             .filter(|a| is_segment(a, MAX_APP))
             .map(str::to_owned),
-        title: optional_text(fields.title, TITLE_LIMITS)?,
-        msg: optional_text(fields.msg, MSG_LIMITS)?,
+        title: fields.title,
+        msg: fields.msg,
     };
     Some(Report::Set(id, record))
 }
 
-/// The last value of each key this crate knows.
+/// The last value of each key this crate knows, text already decoded.
 #[derive(Default)]
 struct Fields<'a> {
     state: Option<&'a str>,
@@ -63,34 +65,51 @@ struct Fields<'a> {
     kind: Option<&'a str>,
     progress: Option<&'a str>,
     app: Option<&'a str>,
-    title: Option<&'a str>,
-    msg: Option<&'a str>,
+    title: Option<String>,
+    msg: Option<String>,
 }
 
 impl<'a> Fields<'a> {
-    fn set(&mut self, key: &str, value: &'a str) {
-        let slot = match key {
-            "state" => &mut self.state,
-            "id" => &mut self.id,
-            "kind" => &mut self.kind,
-            "progress" => &mut self.progress,
-            "app" => &mut self.app,
-            "title" => &mut self.title,
-            "msg" => &mut self.msg,
-            _ => return,
-        };
-        *slot = Some(value);
+    /// Checks one well-formed pair against the limits and keeps its value;
+    /// `None` discards the report.
+    fn set(&mut self, key: &str, value: &'a str) -> Option<()> {
+        if key.len() > MAX_KEY {
+            return None;
+        }
+        match key {
+            "state" => self.state = Some(value),
+            "id" if !within_id_limits(value) => return None,
+            "id" => self.id = Some(value),
+            "kind" => self.kind = Some(value),
+            "progress" => self.progress = Some(value),
+            "app" if value.len() > MAX_APP => return None,
+            "app" => self.app = Some(value),
+            "title" => self.title = Some(text(value, TITLE_LIMITS)?),
+            "msg" => self.msg = Some(text(value, MSG_LIMITS)?),
+            _ => {}
+        }
+        Some(())
     }
 }
 
-/// A `key=value` with a well-formed key, trimmed; `None` skips it. Each
-/// field checks its own value.
+/// A well-formed `key=value`, trimmed: a key of lowercase letters and a
+/// value from the protocol's value set. `None` skips it.
 fn pair(text: &str) -> Option<(&str, &str)> {
     let (key, value) = text.split_once('=')?;
     let (key, value) = (key.trim(), value.trim());
-    let key_ok =
-        !key.is_empty() && key.len() <= MAX_KEY && key.bytes().all(|b| b.is_ascii_lowercase());
-    key_ok.then_some((key, value))
+    let key_ok = !key.is_empty() && key.bytes().all(|b| b.is_ascii_lowercase());
+    let value_ok = value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"_.,+/=-".contains(&b));
+    (key_ok && value_ok).then_some((key, value))
+}
+
+/// The id size limits, which discard a report; the rest of the id grammar
+/// is [`valid_id`]'s, which ignores one.
+fn within_id_limits(text: &str) -> bool {
+    text.len() <= MAX_ID
+        && text.split('/').count() <= MAX_DEPTH
+        && text.split('/').all(|s| s.len() <= MAX_SEGMENT)
 }
 
 fn state(text: &str) -> Option<State> {
@@ -117,10 +136,10 @@ fn progress(text: &str) -> Option<u8> {
     text.parse::<u8>().ok().filter(|p| *p <= 100)
 }
 
+/// An id within the limits that matches the grammar: non-empty segments of
+/// the id characters.
 fn valid_id(text: &str) -> Option<Id> {
-    let ok = text.len() <= MAX_ID
-        && text.split('/').count() <= MAX_DEPTH
-        && text.split('/').all(|s| is_segment(s, MAX_SEGMENT));
+    let ok = text.split('/').all(|s| is_segment(s, MAX_SEGMENT));
     ok.then(|| Id(text.to_owned()))
 }
 
@@ -130,14 +149,6 @@ fn is_segment(text: &str, max: usize) -> bool {
         && text
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"_.+-".contains(&b))
-}
-
-/// `Some(None)` when absent, `None` when present but invalid.
-fn optional_text(encoded: Option<&str>, limits: (usize, usize)) -> Option<Option<String>> {
-    match encoded {
-        Some(encoded) => text(encoded, limits).map(Some),
-        None => Some(None),
-    }
 }
 
 /// Base64 UTF-8 within `(encoded, decoded)` limits, single line and free of
