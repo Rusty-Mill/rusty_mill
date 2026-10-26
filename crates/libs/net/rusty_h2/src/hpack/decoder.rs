@@ -45,21 +45,45 @@ impl Decoder {
         }
     }
 
-    pub fn decode(&mut self, mut block: &[u8]) -> Result<Vec<HeaderField>> {
+    pub fn decode(&mut self, block: &[u8]) -> Result<Vec<HeaderField>> {
+        Ok(self.decode_bounded(block, usize::MAX)?.unwrap_or_default())
+    }
+
+    /// Decodes `block`, keeping its fields only while their decoded size
+    /// (RFC 9113 §6.5.2: name + value + 32 each) stays within `max`, and
+    /// `None` once it does not. The whole block is still processed, so the
+    /// dynamic table stays in step with the peer's encoder, but no field is
+    /// copied out once over budget: a small block that repeats one large
+    /// table entry cannot expand into memory.
+    pub fn decode_bounded(
+        &mut self,
+        mut block: &[u8],
+        max: usize,
+    ) -> Result<Option<Vec<HeaderField>>> {
         let mut headers = Vec::new();
+        let mut size = 0usize;
+        let mut over = false;
         while !block.is_empty() {
             let first = block[0];
             if first & 0x80 != 0 {
                 let (index, consumed) = decode_integer(block, 7)?;
+                block = &block[consumed..];
+                let len = self.entry_len(index as usize)?;
+                if over || !within(&mut size, len, max) {
+                    over = true;
+                    continue;
+                }
                 let (name, value) = self.lookup(index as usize)?;
                 headers.push(HeaderField::new(name, value));
-                block = &block[consumed..];
             } else if first & 0x40 != 0 {
                 let (consumed, header) = self.decode_literal(block, 6)?;
                 self.dynamic_table
                     .insert(header.name.clone(), header.value.clone());
-                headers.push(header);
                 block = &block[consumed..];
+                over = over || !within(&mut size, header.name.len() + header.value.len(), max);
+                if !over {
+                    headers.push(header);
+                }
             } else if first & 0x20 != 0 {
                 let (max_size, consumed) = decode_integer(block, 5)?;
                 let max_size = max_size as usize;
@@ -77,11 +101,35 @@ impl Decoder {
                 let sensitive = first & 0x10 != 0;
                 let (consumed, mut header) = self.decode_literal(block, 4)?;
                 header.sensitive = sensitive;
-                headers.push(header);
                 block = &block[consumed..];
+                over = over || !within(&mut size, header.name.len() + header.value.len(), max);
+                if !over {
+                    headers.push(header);
+                }
+            }
+            if over {
+                // Free what was kept: none of it will be returned.
+                headers = Vec::new();
             }
         }
-        Ok(headers)
+        Ok((!over).then_some(headers))
+    }
+
+    /// The name and value length of table entry `index`, without copying it.
+    fn entry_len(&self, index: usize) -> Result<usize> {
+        let static_len = static_table::STATIC_TABLE.len();
+        let len = match index {
+            0 => None,
+            i if i <= static_len => static_table::get(i).map(|(n, v)| n.len() + v.len()),
+            i => self
+                .dynamic_table
+                .get(i - static_len)
+                .map(|(n, v)| n.len() + v.len()),
+        };
+        len.ok_or(H2Error::Connection(
+            ErrorCode::CompressionError,
+            "HPACK index out of range or zero",
+        ))
     }
 
     fn decode_literal(&self, block: &[u8], prefix_bits: u8) -> Result<(usize, HeaderField)> {
@@ -120,9 +168,58 @@ impl Decoder {
     }
 }
 
+/// Adds a field of `len` name and value bytes to `size`; whether the list
+/// is still within `max`.
+fn within(size: &mut usize, len: usize, max: usize) -> bool {
+    *size = size.saturating_add(len + 32);
+    *size <= max
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 3000-byte field added to the dynamic table, then `refs` one-byte
+    /// references to it (index 62, the newest dynamic entry).
+    fn expanding_block(refs: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut enc = crate::hpack::encoder::Encoder::new(DEFAULT_HEADER_TABLE_SIZE);
+        enc.encode(&[HeaderField::new("x-big", vec![b'v'; 3000])], &mut out);
+        out.extend(std::iter::repeat_n(0x80 | 62, refs));
+        out
+    }
+
+    #[test]
+    fn a_block_over_budget_is_refused_without_its_fields() {
+        let mut dec = Decoder::default();
+        // 1000 references expand to about 3 MiB; the budget is 8 KiB.
+        assert_eq!(
+            dec.decode_bounded(&expanding_block(1000), 8192).unwrap(),
+            None
+        );
+        // The table still holds the entry, so the next block, which refers
+        // to it, decodes as the peer's encoder expects.
+        let next = dec.decode_bounded(&[0x80 | 62], 8192).unwrap().unwrap();
+        assert_eq!(next[0].name, b"x-big");
+        assert_eq!(next[0].value.len(), 3000);
+    }
+
+    #[test]
+    fn a_block_within_budget_keeps_every_field() {
+        let mut dec = Decoder::default();
+        let fields = dec
+            .decode_bounded(&expanding_block(1), 2 * (3000 + 5 + 32))
+            .unwrap()
+            .unwrap();
+        assert_eq!(fields.len(), 2);
+        // Exactly two fields' size is within; one byte less is not.
+        let mut dec = Decoder::default();
+        assert_eq!(
+            dec.decode_bounded(&expanding_block(1), 2 * (3000 + 5 + 32) - 1)
+                .unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn rejects_index_zero() {

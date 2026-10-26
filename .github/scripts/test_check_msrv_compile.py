@@ -20,7 +20,9 @@ from check_msrv_compile import (
     featured_members,
     format_version,
     msrv_groups,
+    parse_floors,
     parse_version,
+    raised_floor_groups,
     rustc_env,
 )
 
@@ -98,6 +100,41 @@ class CheckCommandsTests(unittest.TestCase):
         commands = check_commands(["a", "b", "c"], "t", all_features=frozenset({"b", "z"}))
         self.assertEqual([describe(c) for c in commands], ["a", "b", "b (--all-features)", "c"])
         self.assertEqual(commands[2], [*commands[1], "--all-features"])
+
+
+class RaisedFloorTests(unittest.TestCase):
+    MD = metadata({"axum": "1.87", "plain": "1.87", "tokio": "1.87"}, features={"axum": ["http2"], "tokio": ["rt"]})
+
+    def test_pairs_parse_to_full_versions(self) -> None:
+        self.assertEqual(parse_floors("a=1.88 b=1.90.1"), {"a": (1, 88, 0), "b": (1, 90, 1)})
+        self.assertEqual(parse_floors(""), {})
+        for bad in ("a", "a=", "=1.88", "a=x"):
+            with self.assertRaises(ValueError):
+                parse_floors(bad)
+
+    def test_default_build_stays_at_the_declared_floor_and_all_features_moves_to_the_raised_one(self) -> None:
+        groups = msrv_groups(self.MD)
+        raised = raised_floor_groups(self.MD, groups, {"axum": (1, 88, 0)})
+        self.assertEqual(groups, {(1, 87, 0): ["axum", "plain", "tokio"]})
+        self.assertEqual(raised, {(1, 88, 0): ["axum"]})
+        # As main() builds them: axum's default check at 1.87, its --all-features check only at 1.88.
+        all_features = featured_members(self.MD) - frozenset({"axum"})
+        at_187 = [describe(c) for c in check_commands(groups[(1, 87, 0)], "t", all_features)]
+        at_188 = [describe(c) for c in check_commands([], "t", all_features, raised[(1, 88, 0)])]
+        self.assertEqual(at_187, ["axum", "plain", "tokio", "tokio (--all-features)"])
+        self.assertEqual(at_188, ["axum (--all-features)"])
+
+    def test_a_member_out_of_scope_or_at_the_pinned_toolchain_is_not_scheduled(self) -> None:
+        scoped = msrv_groups(self.MD, only={"plain"})
+        self.assertEqual(raised_floor_groups(self.MD, scoped, {"axum": (1, 88, 0)}), {})
+        groups = msrv_groups(self.MD)
+        self.assertEqual(raised_floor_groups(self.MD, groups, {"axum": (1, 88, 0)}, skip_from=(1, 88, 0)), {})
+
+    def test_a_stale_override_fails_instead_of_checking_nothing(self) -> None:
+        groups = msrv_groups(self.MD)
+        for floors in ({"plain": (1, 88, 0)}, {"gone": (1, 88, 0)}, {"axum": (1, 87, 0)}, {"axum": (1, 86, 0)}):
+            with self.assertRaises(ValueError):
+                raised_floor_groups(self.MD, groups, floors)
 
 
 class MainTests(unittest.TestCase):

@@ -893,7 +893,19 @@ impl Connection {
         // stream we otherwise reject needs its header block consumed to
         // keep the dynamic table in sync with the peer) before any
         // stream-state bookkeeping.
-        let fields = self.decoder.decode(header_block_fragment)?;
+        // Bounded as it decodes, so a block that repeats a large table
+        // entry is refused before it expands, and the stream is reset; the
+        // table is kept in step either way.
+        let Some(fields) = self
+            .decoder
+            .decode_bounded(header_block_fragment, self.header_list_cap())?
+        else {
+            return Err(H2Error::Stream(
+                stream_id,
+                ErrorCode::EnhanceYourCalm,
+                "decoded header list exceeded the size limit",
+            ));
+        };
 
         self.reject_if_over_max_concurrent_streams(stream_id)?;
 
@@ -1028,29 +1040,35 @@ impl Connection {
         // real state machine. Actually delivering the pushed response
         // itself isn't implemented -- a documented gap, not a silent
         // no-op: the stream is genuinely reserved, just never fulfilled.
-        let _fields = self.decoder.decode(header_block_fragment)?;
+        // Bounded only to cap memory; the fields are not used.
+        let _fields = self
+            .decoder
+            .decode_bounded(header_block_fragment, self.header_list_cap())?;
         self.reject_if_over_max_concurrent_streams(promised_stream_id)?;
         let entry = self.stream_entry(promised_stream_id);
         entry.stream.apply(Event::RecvPushPromise)?;
         Ok(vec![])
     }
 
-    /// The header block size this endpoint accepts: its advertised
-    /// `SETTINGS_MAX_HEADER_LIST_SIZE`, else [`DEFAULT_MAX_HEADER_BLOCK`],
-    /// never above an internal hard ceiling.
+    /// Refuses a compressed header block over [`Self::header_list_cap`].
     fn check_header_block_len(&self, len: usize) -> Result<()> {
-        let cap = self
-            .local_settings
-            .max_header_list_size
-            .map_or(DEFAULT_MAX_HEADER_BLOCK, |v| v as usize)
-            .min(HARD_MAX_HEADER_BLOCK);
-        if len > cap {
+        if len > self.header_list_cap() {
             return Err(H2Error::Connection(
                 ErrorCode::EnhanceYourCalm,
                 "header block exceeded the size limit",
             ));
         }
         Ok(())
+    }
+
+    /// The header list size this endpoint accepts, compressed or decoded:
+    /// its advertised `SETTINGS_MAX_HEADER_LIST_SIZE`, else
+    /// [`DEFAULT_MAX_HEADER_BLOCK`], never above an internal hard ceiling.
+    fn header_list_cap(&self) -> usize {
+        self.local_settings
+            .max_header_list_size
+            .map_or(DEFAULT_MAX_HEADER_BLOCK, |v| v as usize)
+            .min(HARD_MAX_HEADER_BLOCK)
     }
 
     /// Merges a CONTINUATION frame's fragment into the pending
@@ -1318,6 +1336,46 @@ mod tests {
         // already-open stream must remain the only tracked entry.
         assert!(!conn.streams.contains_key(&3));
         assert_eq!(conn.streams.len(), 1);
+    }
+
+    #[test]
+    fn a_header_list_that_decodes_over_the_cap_resets_only_its_stream() {
+        let settings = ServerSettings {
+            max_header_list_size: Some(1024),
+            ..ServerSettings::default()
+        };
+        let mut conn = Connection::new(settings, PeerType::Server);
+        let mut encoder = Encoder::new(4096);
+        let field = HeaderField::new("x-r", "v".repeat(60));
+        let mut block = Vec::new();
+        // Small on the wire (repeats are table indexes), large decoded.
+        encoder.encode(&vec![field.clone(); 30], &mut block);
+        assert!(block.len() < 1024);
+        let err = conn
+            .apply_frame(Frame::Headers(HeadersFrame {
+                stream_id: 1,
+                end_stream: true,
+                end_headers: true,
+                priority: None,
+                header_block_fragment: block,
+            }))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            H2Error::Stream(1, ErrorCode::EnhanceYourCalm, _)
+        ));
+
+        // The table stayed in step: the next block's index still resolves.
+        let mut next = Vec::new();
+        encoder.encode(&[HeaderField::new(":method", "GET"), field], &mut next);
+        conn.apply_frame(Frame::Headers(HeadersFrame {
+            stream_id: 3,
+            end_stream: true,
+            end_headers: true,
+            priority: None,
+            header_block_fragment: next,
+        }))
+        .unwrap();
     }
 
     #[test]

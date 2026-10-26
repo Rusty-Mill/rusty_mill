@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -202,6 +203,33 @@ async fn run<T, F, Fut>(
     F: Fn(Request, Respond) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    let stop = async move {
+        // `None` once stopped, including when the server itself is gone.
+        until_stopped(std::future::pending::<()>(), &mut stopped).await;
+    };
+    serve_connection(io, h2, deadline, stop, handler).await;
+}
+
+/// Serves HTTP/2 on one connection that is already accepted (and, for TLS,
+/// already negotiated ALPN `h2`), for a server that runs its own accept loop.
+/// Each request runs `handler(request, respond)` on its own task.
+///
+/// The client must have sent its preface and SETTINGS by `deadline`, or the
+/// connection is dropped. When `stop` completes the connection shuts down
+/// gracefully: GOAWAY, no new calls, and the calls in flight finish. The
+/// future returns once the connection has ended. Must be called inside a
+/// `rusty_tokio` runtime.
+pub async fn serve_connection<T, F, Fut>(
+    io: T,
+    h2: Builder,
+    deadline: Instant,
+    stop: impl Future<Output = ()> + Send,
+    handler: F,
+) where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    F: Fn(Request, Respond) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     let (mut acceptor, connection) = driver::server(io, h2);
     let driver = rusty_tokio::spawn(connection);
     if !matches!(timeout_at(deadline, acceptor.ready()).await, Ok(Ok(()))) {
@@ -209,23 +237,28 @@ async fn run<T, F, Fut>(
         driver.abort();
         return;
     }
+    let mut stop = pin!(stop);
     let mut stopping = false;
     loop {
         let next = if stopping {
-            Some(acceptor.accept().await)
+            acceptor.accept().await
         } else {
-            until_stopped(acceptor.accept(), &mut stopped).await
+            // `biased;`: a steady stream of calls cannot starve the stop.
+            rusty_tokio::select! {
+                biased;
+                _ = stop.as_mut() => {
+                    acceptor.graceful_shutdown();
+                    stopping = true;
+                    continue;
+                }
+                next = acceptor.accept() => next,
+            }
         };
         match next {
-            // Told to stop (or the server is gone): no new calls, finish those queued.
-            None => {
-                acceptor.graceful_shutdown();
-                stopping = true;
-            }
-            Some(Some(Ok((request, respond)))) => {
+            Some(Ok((request, respond))) => {
                 rusty_tokio::spawn(handler.clone()(request, respond));
             }
-            Some(_) => break,
+            _ => break,
         }
     }
     // The connection ends once the calls in flight have.

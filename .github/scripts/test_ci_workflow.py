@@ -660,7 +660,9 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn('test "$(sha256sum Cargo.lock)" = "$lock_before"', job)
         self.assertIn('--target-base "$RUNNER_TEMP/msrv"', job)
         # Every crate with features is also checked with all of them; only documented exceptions opt out.
-        self.assertIn('--all-features-exclude "platform-linux platform-windows rusty_json rusty_tls rusty_rdp rusty_tonic"', job)
+        self.assertIn('--all-features-exclude "platform-linux platform-windows rusty_json rusty_tls rusty_rdp rusty_tonic" \\\n', job)
+        # rusty_axum's default build stays at its declared 1.87; its http2 (all-features) build is held to 1.88.
+        self.assertIn('--all-features-floor "rusty_axum=1.88" \\\n', job)
         # Windows joins on the scheduled and manual sweeps only, minus the crates no Windows leg builds (#845).
         self.assertIn("runs-on: ${{ matrix.os }}", job)
         self.assertIn(
@@ -671,6 +673,18 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("'rusty_journal rusty_fedora_agent'", job)
         self.assertIn("shell: bash", job)
         self.assertIn("      - msrv-compile\n", self.workflow.split("  required-gate:\n", 1)[1])
+
+    def test_rusty_axum_floors_match_the_manifests(self) -> None:
+        # The default build is held to rusty_axum's own rust-version; the all-features floor is exactly
+        # what its `http2` dependencies declare, so neither check can drift above or below its manifest.
+        def declared(crate: str) -> str:
+            return tomllib.loads((REPO / "crates/libs/net" / crate / "Cargo.toml").read_text())["package"]["rust-version"]
+
+        floor = re.search(r'--all-features-floor "rusty_axum=([0-9.]+)"', self.workflow)
+        self.assertIsNotNone(floor)
+        self.assertEqual(declared("rusty_axum"), "1.87")
+        self.assertEqual(declared("rusty_axum_tokio"), "1.87")
+        self.assertEqual({declared("rusty_hyper"), declared("rusty_h2")}, {floor.group(1)})
 
     def test_every_workflow_pin_matches_rust_toolchain_file(self) -> None:
         channel = tomllib.loads((REPO / "rust-toolchain.toml").read_text())["toolchain"]["channel"]

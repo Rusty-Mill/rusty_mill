@@ -1299,6 +1299,11 @@ jobs:
     # library at 1.75). Raising platform-linux, rusty_json or rusty_tls
     # would also break 7 to 36 dependents' declared floors.
     #
+    # `--all-features-floor` checks a crate's `--all-features` build at a
+    # stated floor above its declared one rather than skipping it: rusty_axum
+    # (`http2` -> rusty_hyper/rusty_h2 1.88) is checked at 1.87 by default
+    # and at 1.88 with all features; rusty_axum_tokio stays at 1.87.
+    #
     # Windows (#845) runs on the scheduled and manual sweeps only: a
     # target-specific dependency can raise a floor there, but that drifts
     # slowly, and 14 toolchain installs per run would slow every PR. It
@@ -1336,6 +1341,7 @@ jobs:
             --skip-from "$RUST_TOOLCHAIN" \
             --exclude "$REMIND_ME_PACKAGES rusty_multimodal_db $OS_EXCLUDE" \
             --all-features-exclude "platform-linux platform-windows rusty_json rusty_tls rusty_rdp rusty_tonic" \
+            --all-features-floor "rusty_axum=1.88" \
             --target-base "$RUNNER_TEMP/msrv"
           test "$(sha256sum Cargo.lock)" = "$lock_before"
 
