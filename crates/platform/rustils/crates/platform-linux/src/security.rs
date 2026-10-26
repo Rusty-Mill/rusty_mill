@@ -60,8 +60,9 @@ impl CredentialStore for LinuxCredentialStore {
 }
 
 /// The Linux backend's [`Sandbox`] capability: Landlock for
-/// [`Sandbox::confine_filesystem`], seccomp-BPF for
-/// [`Sandbox::block_inet_sockets`]. Stateless — every call is a fresh
+/// [`Sandbox::confine_filesystem`] and
+/// [`Sandbox::confine_filesystem_and_signals`],
+/// seccomp-BPF for [`Sandbox::block_inet_sockets`]. Stateless — every call is a fresh
 /// set of syscalls against the calling thread, mirroring
 /// [`crate::LinuxNet`]/[`LinuxCsprng`].
 pub struct LinuxSandbox;
@@ -77,5 +78,13 @@ impl Sandbox for LinuxSandbox {
 
     fn block_inet_sockets(&self) -> Result<SandboxStatus> {
         syssec::block_inet_sockets()
+    }
+
+    fn confine_filesystem_and_signals(
+        &self,
+        readable_roots: &[&Path],
+        writable_roots: &[&Path],
+    ) -> Result<(SandboxStatus, SandboxStatus)> {
+        syssec::confine(readable_roots, writable_roots, true)
     }
 }

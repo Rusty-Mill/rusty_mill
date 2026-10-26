@@ -24,5 +24,7 @@ pub use error::Error;
 pub use executor::{Job, JobHandle, ProcessExecutor, DEFAULT_CAPTURE_BYTES};
 #[cfg(target_os = "linux")]
 pub use helper::require_enforced;
+#[cfg(target_os = "linux")]
+pub use helper::signals_scoped;
 pub use helper::{run_helper, HelperRequest, Sockets, SETUP_FAILED};
 pub use spec::{ExecOutcome, Executor, Limits, SandboxSpec, Termination};
