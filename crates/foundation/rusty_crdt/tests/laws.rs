@@ -96,6 +96,17 @@ fn replayed(ops: &[Edit]) -> Seq {
     r
 }
 
+/// Deliver `first`, then `second`, carrying over ops of `first` that wait
+/// on `second`. Every op must apply in the end.
+fn grouped(first: &[Edit], second: &[Edit]) -> Seq {
+    let mut r = Seq::new();
+    let mut rest = deliver(&mut r, first);
+    rest.extend_from_slice(second);
+    let stuck = deliver(&mut r, &rest);
+    assert!(stuck.is_empty(), "ops never became ready: {stuck:?}");
+    r
+}
+
 fn seq(r: &Seq) -> Vec<(Id, u8)> {
     let out: Vec<(Id, u8)> = r.iter().map(|(id, v)| (*id, *v)).collect();
     assert_eq!(out.len(), r.len(), "len agrees with the walk");
@@ -153,8 +164,9 @@ proptest! {
         prop_assert_eq!(seq(&ab), seq(&ba));
     }
 
-    /// Associativity: split into three batches, every grouping and order of
-    /// the batches reaches the same sequence.
+    /// Associativity: split into three batches; for every order of the
+    /// batches, both groupings, (x then y) then z and x then (y then z), reach
+    /// the same sequence.
     #[test]
     fn batch_grouping_does_not_matter(seed in any::<u64>(), steps in 1usize..80) {
         let mut g = gen(seed);
@@ -164,15 +176,12 @@ proptest! {
         for op in &log {
             batches[g.below(3)].push(op.clone());
         }
-        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
-            let mut r = Seq::new();
-            // (x then y) then z, as two deliveries.
-            let first: Vec<Edit> = batches[order[0]].iter().chain(&batches[order[1]]).cloned().collect();
-            // Ops of one batch may wait on a later one: carry them over.
-            let mut rest = deliver(&mut r, &first);
-            rest.extend(batches[order[2]].iter().cloned());
-            prop_assert!(deliver(&mut r, &rest).is_empty());
-            prop_assert_eq!(seq(&r), want.clone());
+        for [x, y, z] in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            let (x, y, z) = (&batches[x], &batches[y], &batches[z]);
+            let left = grouped(&[x.as_slice(), y].concat(), z);
+            let right = grouped(x, &[y.as_slice(), z].concat());
+            prop_assert_eq!(seq(&left), want.clone());
+            prop_assert_eq!(seq(&right), want.clone());
         }
     }
 

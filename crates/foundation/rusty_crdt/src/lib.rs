@@ -9,8 +9,10 @@
 //!
 //! # Caller contract
 //!
-//! - Ids are unique across replicas and totally ordered by `Ord`. Reusing an
-//!   id with a different parent or value is refused with [`Error::IdReused`].
+//! - Ids are unique across replicas and totally ordered by `Ord`. Convergence
+//!   rests on this. A replica refuses an id it already holds with a different
+//!   parent or value ([`Error::IdReused`]), which detects the conflict but
+//!   cannot reconcile two replicas that each accepted a different first op.
 //! - For a local insert to land where it was meant, its id must be greater
 //!   than every existing child of its parent. [`Rga::insert_at`] checks this
 //!   ([`Error::NotFresh`]). Lamport-style ids (`(clock, site)`, the clock past
@@ -224,7 +226,9 @@ impl<I: Clone + Ord, T: Clone + Eq> Rga<I, T> {
         }
     }
 
-    /// Apply an op, local or remote. Idempotent, and never panics.
+    /// Apply an op, local or remote. Idempotent. It does not panic on any op;
+    /// only a panic in `I`'s or `T`'s own `Clone`, `Ord` or `Eq` can unwind
+    /// out of it, and that leaves the state consistent.
     ///
     /// # Errors
     ///
@@ -256,19 +260,24 @@ impl<I: Clone + Ord, T: Clone + Eq> Rga<I, T> {
         let at = self
             .children(parent_ix)
             .partition_point(|&s| self.nodes[s].id > *id);
-        let ix = self.nodes.len();
-        match parent_ix {
-            None => self.roots.insert(at, ix),
-            Some(p) => self.nodes[p].children.insert(at, ix),
-        }
-        self.nodes.push(Node {
+        // Every caller trait call (`Clone`, `Ord`) happens before the first
+        // write, or in the index insert that comes first, so a panic in one
+        // leaves no index pointing at a node that does not exist.
+        let node = Node {
             id: id.clone(),
             parent: parent_ix,
             value: value.clone(),
             live: true,
             children: Vec::new(),
-        });
-        self.index.insert(id.clone(), ix);
+        };
+        let key = id.clone();
+        let ix = self.nodes.len();
+        self.index.insert(key, ix);
+        self.nodes.push(node);
+        match parent_ix {
+            None => self.roots.insert(at, ix),
+            Some(p) => self.nodes[p].children.insert(at, ix),
+        }
         self.visible += 1;
         Ok(Applied::Changed)
     }
