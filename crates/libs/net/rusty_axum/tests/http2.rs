@@ -730,3 +730,46 @@ async fn the_admission_deadline_covers_a_stream_body() {
         .await
         .expect("shutdown is not held by the unfinished upload");
 }
+
+/// Opens a stream with `method` on `path`, its request side left open when
+/// `open` is set, and reads the whole answer: (status, data frames' bytes).
+async fn answer_to(h: &ClientHandle, method: &str, path: &str, open: bool) -> (u16, Vec<u8>) {
+    let fields = vec![
+        HeaderField::new(":method", method),
+        HeaderField::new(":scheme", "https"),
+        HeaderField::new(":path", path),
+        HeaderField::new(":authority", "localhost"),
+    ];
+    let (_send, resp) = h.send_request(fields, !open).await.unwrap();
+    let mut resp = timeout(FIVE, resp).await.unwrap().unwrap();
+    let mut bytes = Vec::new();
+    while let Some(piece) = timeout(FIVE, resp.body.next()).await.unwrap() {
+        if let Ok(Body::Data(d)) = piece {
+            bytes.extend(d);
+        }
+    }
+    let status = header(&resp.headers, ":status").unwrap().parse().unwrap();
+    (status, bytes)
+}
+
+#[rusty_tokio::test]
+async fn a_shed_head_request_gets_no_body() {
+    let (server, trust) = start_limited(Admission::new().with_max_in_flight(1));
+    let h = h2(&server, &trust).await;
+    let (_upload, _uploaded) = open_upload(&h).await;
+    rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, body) = answer_to(&h, "HEAD", "/health", false).await;
+    assert_eq!(status, 503);
+    assert!(body.is_empty(), "a HEAD answer carries no body");
+}
+
+#[rusty_tokio::test]
+async fn a_timed_out_head_request_gets_no_body() {
+    let (server, trust) = start_limited(Admission::new().with_timeout(Duration::from_millis(200)));
+    let h = h2(&server, &trust).await;
+
+    let (status, body) = answer_to(&h, "HEAD", "/health", true).await;
+    assert_eq!(status, 504);
+    assert!(body.is_empty(), "a HEAD answer carries no body");
+}

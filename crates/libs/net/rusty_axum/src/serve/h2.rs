@@ -224,24 +224,25 @@ async fn stream(
 ) {
     let closed = respond.closed();
     let options = &shared.options;
+    // Known from the header block, so every answer to a HEAD, an early
+    // refusal included, goes without a body.
+    let head_only = req
+        .headers
+        .iter()
+        .any(|f| f.name == b":method" && f.value == b"HEAD");
     let work = async {
-        let (response, head_only) = match shared.admit() {
+        let response = match shared.admit() {
             // Refused before the body is read; the stream ends with the
             // answer, so the client sends no more of it.
-            Err(refused) => (refused, false),
+            Err(refused) => refused,
             Ok(ticket) => {
                 let served = ticket.within(async {
                     match read(req, peer, options).await {
-                        Ok(req) => {
-                            let head_only = *req.method() == Method::Head;
-                            (shared.router.call(req).await, head_only)
-                        }
-                        Err(status) => (Response::new(status, Vec::new()), false),
+                        Ok(req) => shared.router.call(req).await,
+                        Err(status) => Response::new(status, Vec::new()),
                     }
                 });
-                served
-                    .await
-                    .unwrap_or_else(|| (super::admission::timed_out(), false))
+                served.await.unwrap_or_else(super::admission::timed_out)
             }
         };
         answer(respond, response, head_only, options.idle_timeout, stop).await;
