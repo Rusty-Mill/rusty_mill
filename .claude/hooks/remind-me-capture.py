@@ -27,7 +27,7 @@ import time
 import urllib.parse
 import urllib.request
 
-# remind_me_core::transcript::MAX_TRANSCRIPT_BYTES: fits the server's 4 MiB body.
+# remind_me_core::transcript::MAX_TRANSCRIPT_BYTES, counted once JSON-escaped.
 MAX_TRANSCRIPT_BYTES = 3 * 1024 * 1024
 THROTTLE_SECONDS = 60
 TIMEOUT_SECONDS = 20
@@ -39,13 +39,22 @@ def enabled(env):
             and bool(env.get('REMIND_ME_URL')) and bool(env.get('REMIND_ME_TOKEN')))
 
 
+def escaped_len(raw):
+    """Bytes `raw` costs in the request body, as transcript::encoded_len counts them."""
+    return len(json.dumps(raw.decode('utf-8', 'replace'), ensure_ascii=False).encode()) - 2
+
+
 def tail(raw, limit=MAX_TRANSCRIPT_BYTES):
-    """The newest whole lines of `raw` that fit in `limit` bytes."""
-    if len(raw) <= limit:
+    """The newest whole lines of `raw` whose JSON-escaped size fits in `limit`."""
+    if escaped_len(raw) <= limit:
         return raw
-    cut = raw[-limit:]
-    newline = cut.find(b'\n')
-    return cut[newline + 1:] if newline >= 0 else b''
+    kept, used = [], 0
+    for line in reversed(raw.splitlines(keepends=True)):
+        used += escaped_len(line)
+        if used > limit:
+            break
+        kept.append(line)
+    return b''.join(reversed(kept))
 
 
 def throttled(session_id, now, state_dir):
@@ -107,7 +116,7 @@ class Mcp:
                    'MCP-Protocol-Version': PROTOCOL_VERSION}
         if self.session:
             headers['Mcp-Session-Id'] = self.session
-        request = urllib.request.Request(self.url, json.dumps(message).encode(), headers)
+        request = urllib.request.Request(self.url, json.dumps(message, ensure_ascii=False).encode(), headers)
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             self.session = response.headers.get('Mcp-Session-Id') or self.session
             body = response.read().decode('utf-8', 'replace')

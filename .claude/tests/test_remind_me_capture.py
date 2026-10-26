@@ -113,6 +113,13 @@ class Helpers(unittest.TestCase):
         raw = b'aaaa\nbbbb\ncccc\n'
         self.assertEqual(hook.tail(raw, 100), raw)
         self.assertEqual(hook.tail(raw, 8), b'cccc\n')
+
+    def test_tail_counts_escaped_bytes_not_raw_ones(self):
+        quotes = b'"' * 10 + b'\n'
+        self.assertEqual(hook.escaped_len(quotes), 22)
+        self.assertEqual(hook.tail(b'ok\n' + quotes, 21), b'')
+        self.assertEqual(hook.tail(quotes + b'ok\n', 21), b'ok\n')
+        self.assertEqual(hook.escaped_len('é'.encode()), 2, 'UTF-8 is sent as is')
         self.assertEqual(hook.tail(b'x' * 10, 4), b'')
 
     def test_remote_credentials_are_stripped(self):
