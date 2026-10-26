@@ -152,6 +152,19 @@ class Migration(unittest.TestCase):
         self.assertEqual(fake.writes, before, "nothing trashed")
         self.assertIsNone(fake.tasks["t1"]["deletedMs"])
 
+    def test_a_subtask_added_after_the_rollback_check_goes_to_the_trash_not_away(self):
+        fake = FakeTick()
+        m.run([m.card_of(doc(1))], m.Tick(fake.send), lambda _: None)
+
+        def owner_adds_a_subtask_after_the_check(method, path, body, headers):
+            if method == "DELETE" and "t1" not in fake.tasks:
+                fake.send("POST", "/tasks", {"title": "mine", "notes": "", "tags": [], "parentId": "t0"}, {})
+            return fake.send(method, path, body, headers)
+
+        m.rollback(m.Tick(owner_adds_a_subtask_after_the_check), lambda _: None)
+        self.assertIsNotNone(fake.tasks["t1"]["deletedMs"], "trashed with its parent")
+        self.assertIn("t1", fake.tasks, "and still there, so restoring the parent brings it back")
+
     def test_two_tasks_for_one_card_stop_it(self):
         fake = FakeTick()
         card = m.card_of(doc(1))
