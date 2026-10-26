@@ -21,7 +21,7 @@ removes what a newer cargo adds that an older rustc rejects and that cannot chan
 the code compiles: `--check-cfg` (unstable before rustc 1.80) and the lint-level flags
 cargo derives from a dependency's `[lints]` table. It is Rust so that it runs on Windows.
 
-Usage: check_msrv_compile.py METADATA.json [--packages "a b"] [--exclude "c d"]
+Usage: check_msrv_compile.py METADATA.json [--packages "a b" | --manifests "x/Cargo.toml"] [--exclude "c d"]
        [--all-features-exclude "e f"] [--all-features-floor "g=1.88"] [--skip-from 1.98.1]
        [--print-plan]
 """
@@ -74,6 +74,21 @@ def msrv_groups(
             continue
         groups.setdefault(version, []).append(pkg["name"])
     return {version: sorted(names) for version, names in sorted(groups.items())}
+
+
+def members_for_manifests(metadata: dict, manifests: list[str]) -> set[str]:
+    """Names of the workspace members whose manifest is one of `manifests` (relative to the workspace root).
+
+    A path that is no member's manifest (a deleted crate, a non-member) selects nothing.
+    """
+    root = Path(metadata["workspace_root"])
+    wanted = {os.path.normcase(os.path.normpath(root / path)) for path in manifests}
+    members = set(metadata["workspace_members"])
+    return {
+        pkg["name"]
+        for pkg in metadata["packages"]
+        if pkg["id"] in members and os.path.normcase(os.path.normpath(pkg["manifest_path"])) in wanted
+    }
 
 
 def featured_members(metadata: dict) -> frozenset[str]:
@@ -206,7 +221,9 @@ def check_version(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("metadata", type=Path)
-    parser.add_argument("--packages", help="space-separated package names to consider (default: all)")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--packages", help="space-separated package names to consider (default: all)")
+    scope.add_argument("--manifests", help="space-separated member manifest paths: consider only those members")
     parser.add_argument("--exclude", default="", help="space-separated package names to leave out")
     parser.add_argument(
         "--all-features-exclude", default="", help="space-separated package names to check with default features only"
@@ -223,9 +240,15 @@ def main() -> None:
 
     metadata = json.loads(args.metadata.read_text(encoding="utf-8"))
     skip_from = parse_version(args.skip_from) if args.skip_from else None
+    only = None
+    if args.packages is not None:
+        only = set(args.packages.split())
+    elif args.manifests is not None:
+        only = members_for_manifests(metadata, args.manifests.split())
+        print(f"Members whose manifest changed: {' '.join(sorted(only)) or 'none'}")
     groups = msrv_groups(
         metadata,
-        only=set(args.packages.split()) if args.packages is not None else None,
+        only=only,
         exclude=frozenset(args.exclude.split()),
         skip_from=skip_from,
     )
@@ -242,7 +265,7 @@ def main() -> None:
         if version in raised:
             line += f", --all-features only: {' '.join(raised[version])}"
         print(line)
-    if args.print_plan:
+    if args.print_plan or not (groups or raised):
         return
     wrapper = build_wrapper(Path(args.target_base))
     failed = {

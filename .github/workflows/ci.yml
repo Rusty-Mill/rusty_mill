@@ -311,6 +311,7 @@ jobs:
       rleval_image: ${{ steps.plan.outputs.rleval_image }}
       crypto_ct: ${{ steps.plan.outputs.crypto_ct }}
       rand_platforms: ${{ steps.plan.outputs.rand_platforms }}
+      msrv_manifests: ${{ steps.plan.outputs.msrv_manifests }}
       shards: ${{ steps.plan.outputs.shards }}
       components: ${{ steps.plan.outputs.components }}
       linux: ${{ steps.platforms.outputs.linux }}
@@ -350,7 +351,7 @@ jobs:
             python3 .github/scripts/ci_plan.py --emit-full >> "$GITHUB_OUTPUT"
           }
           emit_ci_smoke() {
-            echo "CI-only change -- running planner, workflow lint, and representative smoke tests. Full workspace coverage is not implied."
+            echo "$1 -- running planner, workflow lint, and representative smoke tests. Full workspace coverage is not implied."
             printf '%s\n' "$changed" | python3 .github/scripts/ci_plan.py --emit-ci-smoke >> "$GITHUB_OUTPUT"
           }
           mapfile -t event_plan < <(python3 .github/scripts/ci_plan.py \
@@ -377,7 +378,7 @@ jobs:
           echo "$changed"
 
           if printf '%s\n' "$changed" | python3 .github/scripts/ci_plan.py --is-ci-only; then
-            emit_ci_smoke
+            emit_ci_smoke "CI-only change"
             exit 0
           fi
 
@@ -438,6 +439,13 @@ jobs:
             fi
             echo "Cargo.lock-affected crates: $lockfile_packages"
             packages="$(printf '%s\n' "$packages" "$lockfile_packages" | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//')"
+          fi
+
+          # A CI edit beside a change fragment or prose is not CI-only, but with
+          # no affected crate no Cargo lane would run the edited CI at all.
+          if printf '%s\n' "$changed" | python3 .github/scripts/ci_plan.py --needs-ci-smoke --packages "$packages"; then
+            emit_ci_smoke "CI change with no affected crate"
+            exit 0
           fi
 
           # Centralize all non-generic job gates here. Path-only front ends
@@ -1284,7 +1292,10 @@ jobs:
     # rust-versions; this builds. Each workspace crate that declares one is
     # `cargo check`ed with a rustc of exactly that version, grouped by floor:
     # default features, then `--all-features` for a crate that has any (#844).
-    # Only the affected crates on a PR; every crate on a full sweep. Floors at
+    # Every crate on a full sweep. A PR or queue entry checks only the crates
+    # whose own Cargo.toml changed (ci_plan.py `msrv_manifests`): a code-only or
+    # lockfile-only change that needs a newer rustc surfaces on the next
+    # scheduled sweep instead of costing every run. Floors at
     # the pinned toolchain are covered by the ordinary jobs. The build output
     # stays under RUNNER_TEMP.
     #
@@ -1311,7 +1322,7 @@ jobs:
     # waits until CI builds the workspace there at all.
     name: compile at declared rust-version${{ matrix.os != 'ubuntu-latest' && format(' ({0})', matrix.os) || '' }}
     needs: plan
-    if: (needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != '') && needs.plan.outputs.linux == 'true'
+    if: (needs.plan.outputs.full == 'true' || needs.plan.outputs.msrv_manifests != '') && needs.plan.outputs.linux == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -1325,7 +1336,7 @@ jobs:
         shell: bash
         env:
           PLAN_FULL: ${{ needs.plan.outputs.full }}
-          PLAN_PACKAGES: ${{ needs.plan.outputs.packages }}
+          PLAN_MANIFESTS: ${{ needs.plan.outputs.msrv_manifests }}
           PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
           OS_EXCLUDE: ${{ runner.os == 'Windows' && 'rusty_journal rusty_fedora_agent' || '' }}
         run: |
@@ -1334,7 +1345,7 @@ jobs:
           lock_before="$(sha256sum Cargo.lock)"
           cargo metadata --locked --format-version=1 > "$RUNNER_TEMP/metadata-default.json"
           scope=()
-          if [ "$PLAN_FULL" != "true" ]; then scope=(--packages "$PLAN_PACKAGES"); fi
+          if [ "$PLAN_FULL" != "true" ]; then scope=(--manifests "$PLAN_MANIFESTS"); fi
           # rusty_multimodal_db has its own msrv job; the remind_me crates have their own jobs.
           "$PYTHON" .github/scripts/check_msrv_compile.py "$RUNNER_TEMP/metadata-default.json" \
             "${scope[@]}" \

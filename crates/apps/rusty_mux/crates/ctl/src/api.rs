@@ -25,13 +25,17 @@ pub(crate) fn describe(method: &Method) -> String {
     object([
         ("name", method.name.into()),
         ("description", method.doc.into()),
-        ("params", params(method.params)),
+        ("params", input_schema(method)),
         ("returns", returns(method.returns).into()),
     ])
     .to_json_string()
 }
 
-fn params(params: &[Param]) -> Value {
+/// `method`'s arguments as the JSON Schema of one object, as `api describe`
+/// prints it. An id parameter also takes what an id flag does: a name, a
+/// position or an id suffix.
+pub fn input_schema(method: &Method) -> Value {
+    let params = method.params;
     let properties: Map = params
         .iter()
         .map(|p| (p.name.to_owned(), property(p)))

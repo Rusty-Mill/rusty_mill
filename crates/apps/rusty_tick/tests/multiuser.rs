@@ -75,6 +75,8 @@ fn send(
         target,
         authorization: header.as_deref(),
         if_match: None,
+        if_none_match: None,
+        if_task_match: None,
         body: body.as_bytes(),
     };
     let response = backend.handle(&request);
@@ -174,6 +176,8 @@ fn a_scheme_other_than_bearer_is_refused() {
         target: "/api/v1/lists",
         authorization: Some(&format!("Basic {}", f.alice)),
         if_match: None,
+        if_none_match: None,
+        if_task_match: None,
         body: b"",
     };
     assert_eq!(backend.handle(&request).status.as_u16(), 401);
