@@ -35,7 +35,7 @@ impl Store for Held {
     fn list(&self) -> Result<Vec<Card>, BoardError> {
         self.inner.list()
     }
-    fn insert(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+    fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         self.inserts.fetch_add(1, Ordering::SeqCst);
         self.entered.store(true, Ordering::SeqCst);
         let (open, opened) = &*self.gate;
@@ -47,11 +47,11 @@ impl Store for Held {
             )
             .expect("gate");
         assert!(!timeout.timed_out(), "the test never opened the gate");
-        self.inner.insert(card, event)?;
+        let rev = self.inner.insert(card, event)?;
         self.done.store(true, Ordering::SeqCst);
-        Ok(())
+        Ok(rev)
     }
-    fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+    fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         self.inner.replace(card, event)
     }
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError> {

@@ -249,14 +249,14 @@ impl Store for RivalAfterGet {
         &self,
         c: &rusty_mill_board::domain::Card,
         e: rusty_mill_board::domain::Event,
-    ) -> Result<(), BoardError> {
+    ) -> Result<u64, BoardError> {
         self.inner.insert(c, e)
     }
     fn replace(
         &self,
         c: &rusty_mill_board::domain::Card,
         e: rusty_mill_board::domain::Event,
-    ) -> Result<(), BoardError> {
+    ) -> Result<u64, BoardError> {
         self.inner.replace(c, e)
     }
     fn events_since(
@@ -421,14 +421,14 @@ impl Store for HookAfterGet {
         &self,
         c: &rusty_mill_board::domain::Card,
         e: rusty_mill_board::domain::Event,
-    ) -> Result<(), BoardError> {
+    ) -> Result<u64, BoardError> {
         self.inner.insert(c, e)
     }
     fn replace(
         &self,
         c: &rusty_mill_board::domain::Card,
         e: rusty_mill_board::domain::Event,
-    ) -> Result<(), BoardError> {
+    ) -> Result<u64, BoardError> {
         self.inner.replace(c, e)
     }
     fn events_since(

@@ -262,7 +262,8 @@ impl<S: Store> Board<S> {
         }
         let mut card = Card::new(title, body, tags, (self.clock)())?;
         project.clone_into(&mut card.project);
-        self.store
+        card.rev = self
+            .store
             .insert(&card, Event::of(&card, EventKind::Created, &by.name))?;
         drop(registry);
         Ok(card)
@@ -284,7 +285,8 @@ impl<S: Store> Board<S> {
         card.id = import_id(issue);
         card.issue = Some(issue);
         card.synced_text = Some(text_hash(&card.title, &card.body));
-        self.store
+        card.rev = self
+            .store
             .insert(&card, Event::of(&card, EventKind::Created, &by.name))?;
         Ok(card)
     }
@@ -503,7 +505,9 @@ impl<S: Store> Board<S> {
             }
             match self.store.replace(&next, Event::of(&next, kind, &by.name)) {
                 Err(BoardError::Conflict) => continue,
-                result => return result.map(|()| next),
+                // The store's revision, not ours: an adapter that commits in two
+                // steps moves it twice, and the caller's next edit names it.
+                result => return result.map(|rev| Card { rev, ..next }),
             }
         }
         Err(BoardError::Conflict)

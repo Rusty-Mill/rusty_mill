@@ -310,3 +310,38 @@ fn an_import_interrupted_before_its_link_keeps_the_id_that_names_its_issue() {
         "and the import is not repeated"
     );
 }
+
+#[test]
+fn a_write_in_two_steps_returns_the_revision_a_read_sees_and_the_next_edit_names() {
+    let (board, _tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let sync = board.roles().actor("github-sync", "human").expect("role");
+
+    // An import is a task and then its board document: two version moves.
+    let imported = board
+        .import(&sync, "from issue", "", vec![], 7)
+        .expect("import");
+    assert_eq!(imported.rev, board.get(imported.id).expect("get").rev);
+    board
+        .edit_at(
+            imported.id,
+            &human,
+            Some(imported.rev),
+            Some("t"),
+            None,
+            None,
+        )
+        .expect("edit at the returned revision");
+
+    // So is a plan with a priority and dependencies.
+    let dep = board.add(&human, "dep", "", vec![]).expect("add");
+    let card = board.add(&human, "card", "", vec![]).expect("add");
+    let planned = board
+        .plan(card.id, &human, Some(5), Some(vec![dep.id]))
+        .expect("plan");
+    assert_eq!(planned.rev, board.get(card.id).expect("get").rev);
+    let edited = board
+        .edit_at(card.id, &human, Some(planned.rev), Some("t"), None, None)
+        .expect("edit at the returned revision");
+    assert_eq!(edited.rev, board.get(card.id).expect("get").rev);
+}

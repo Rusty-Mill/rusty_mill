@@ -565,11 +565,11 @@ mod tests {
         fn list(&self) -> Result<Vec<Card>, BoardError> {
             self.inner.list()
         }
-        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<(), BoardError> {
+        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
             self.tick()?;
             self.inner.insert(card, event)
         }
-        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<(), BoardError> {
+        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
             self.tick()?;
             self.inner.replace(card, event)
         }
@@ -1136,10 +1136,10 @@ mod tests {
             }
             Ok(snapshot)
         }
-        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<(), BoardError> {
+        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
             self.inner.insert(card, event)
         }
-        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<(), BoardError> {
+        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<u64, BoardError> {
             self.inner.replace(card, event)
         }
         fn events_since(

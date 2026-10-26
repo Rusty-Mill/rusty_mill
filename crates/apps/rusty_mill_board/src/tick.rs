@@ -552,11 +552,15 @@ impl<T: TickApi> TickStore<T> {
         Ok(version + 1)
     }
 
-    fn record(&self, event: Event, version: u64) -> Result<(), BoardError> {
+    /// Note the board's own write, which left the task at `version`; returns the
+    /// card revision committed (`version - 1`).
+    fn record(&self, mut event: Event, version: u64) -> Result<u64, BoardError> {
+        let rev = version.saturating_sub(1);
+        event.rev = rev;
         let mut events = self.events.lock().map_err(poisoned)?;
         events.seen.insert(event.card, version);
         events.push(event);
-        Ok(())
+        Ok(rev)
     }
 
     /// Note tasks changed or newly tagged in rusty_tick since they were last seen.
@@ -625,7 +629,7 @@ impl<T: TickApi> Store for TickStore<T> {
         Ok(cards)
     }
 
-    fn insert(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+    fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         check_claim(card)?;
         let body = json!({
             "id": card.id,
@@ -657,7 +661,7 @@ impl<T: TickApi> Store for TickStore<T> {
         self.record(event, version)
     }
 
-    fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+    fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         check_claim(card)?;
         // The task version the board read the card at (`rev = version - 1`, and the
         // next revision is one more).
