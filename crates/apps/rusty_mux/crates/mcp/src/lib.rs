@@ -13,13 +13,17 @@
 //! sense within one (attaching, taking or giving back the lease, `sync`) are
 //! not tools. `input` and `resize`, which need the lease, attach and take it
 //! first in the same call, so they fail while someone else holds it.
+//!
+//! A call gives up on a silent server at its deadline, or as soon as the
+//! client cancels it, so a stalled server never holds a call slot.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rusty_mcp_server::json::{Map, Value};
 use rusty_mcp_server::proto::{CallToolResult, ContentBlock, Tool};
 use rusty_mcp_server::{BuildError, Server};
-use rusty_mux_ctl::{Env, Exit};
+use rusty_mux_ctl::{Env, Exit, Stop};
 use rusty_mux_proto::schema::{CATALOG, Method, Returns};
 
 /// How a catalog method is offered, given one connection per call.
@@ -41,9 +45,13 @@ fn shape(method: &Method) -> Shape {
     }
 }
 
+/// How long a call waits on the server by default.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The MCP server: one tool per catalog method that works on a connection
-/// of its own, each run against the server `env` names.
-pub fn server(env: Env) -> Result<Server, BuildError> {
+/// of its own, each run against the server `env` names and given up after
+/// `timeout` or when the client cancels it.
+pub fn server(env: Env, timeout: Duration) -> Result<Server, BuildError> {
     let env = Arc::new(env);
     let builder = Server::builder("rusty-mux", env!("CARGO_PKG_VERSION")).instructions(
         "Drives a rusty_mux terminal multiplexer: create sessions, windows and blocks, \
@@ -55,8 +63,10 @@ pub fn server(env: Env) -> Result<Server, BuildError> {
         .filter(|m| shape(m) != Shape::Connection)
         .fold(builder, |builder, method| {
             let env = Arc::clone(&env);
-            builder.tool(tool(method), move |_ctx, call| {
-                Ok(run(method, &env, call.arguments.as_ref()))
+            builder.tool(tool(method), move |ctx, call| {
+                let token = ctx.cancel_token();
+                let stop = Stop::after(timeout).or_when(move || token.is_cancelled());
+                Ok(run(method, &env, &stop, call.arguments.as_ref()))
             })
         })
         .build()
@@ -70,15 +80,17 @@ fn tool(method: &Method) -> Tool {
     }
 }
 
-/// Behaviour hints: reads are read-only, closing is destructive, and
-/// nothing reaches beyond the local server.
+/// Behaviour hints: reads are read-only and closing is destructive.
+/// `input` types into a shell, which can delete data and reach any system,
+/// so it is destructive and open-world; the rest stays on the local server.
 fn annotations(method: &Method) -> Value {
     let read_only = matches!(method.returns, Returns::Text | Returns::Entries);
-    let destructive = method.name.starts_with("close-");
+    let input = method.name == "input";
+    let destructive = input || method.name.starts_with("close-");
     let hints: Map = [
         ("readOnlyHint", read_only),
         ("destructiveHint", destructive),
-        ("openWorldHint", false),
+        ("openWorldHint", input),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), Value::Bool(v)))
@@ -86,18 +98,25 @@ fn annotations(method: &Method) -> Value {
     Value::Object(hints)
 }
 
-fn run(method: &Method, env: &Env, arguments: Option<&Value>) -> CallToolResult {
+fn run(method: &Method, env: &Env, stop: &Stop, arguments: Option<&Value>) -> CallToolResult {
     let args = match argv(method, arguments) {
         Ok(args) => args,
         Err(reason) => return result(reason, true),
     };
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let exit = rusty_mux_ctl::run(&args, env, &mut out, &mut err);
+    let exit = rusty_mux_ctl::run_until(&args, env, stop, &mut out, &mut err);
     match exit {
         Exit::Ok if out.is_empty() => result("ok".to_owned(), false),
-        Exit::Ok => result(String::from_utf8_lossy(&out).trim_end().to_owned(), false),
-        _ => result(String::from_utf8_lossy(&err).trim_end().to_owned(), true),
+        Exit::Ok => result(printed(&out), false),
+        _ => result(printed(&err), true),
     }
+}
+
+/// What ctl printed, less the newline ending its last line: trailing
+/// spaces and blank lines are part of a screen, title or path.
+fn printed(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    text.strip_suffix('\n').unwrap_or(&text).to_owned()
 }
 
 fn result(text: String, is_error: bool) -> CallToolResult {

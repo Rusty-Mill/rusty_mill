@@ -2,15 +2,19 @@
 
 #![cfg(target_os = "linux")]
 
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
+use std::os::unix::net::UnixListener as StdListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use rusty_mcp_server::Server;
 use rusty_mcp_server::json::Value;
 use rusty_mcp_server::{StdioConfig, serve_lines};
 use rusty_mux_ctl::Env;
+use rusty_mux_mcp::DEFAULT_TIMEOUT;
 use rusty_mux_proto::schema::CATALOG;
 use rusty_mux_server::{Config, serve};
 use rusty_tokio::io::UnixListener;
@@ -19,10 +23,14 @@ use rusty_tokio::{Builder, LocalOptions};
 const PATIENCE: Duration = Duration::from_secs(20);
 const INIT: &str = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
 
-fn start_server() -> PathBuf {
+fn socket_path() -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("rusty-mux-mcp-{}-{n}.sock", std::process::id()));
+    std::env::temp_dir().join(format!("rusty-mux-mcp-{}-{n}.sock", std::process::id()))
+}
+
+fn start_server() -> PathBuf {
+    let path = socket_path();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let bind_path = path.clone();
     std::thread::spawn(move || {
@@ -59,19 +67,53 @@ impl Write for Out {
     }
 }
 
-/// Runs one MCP session of `requests` (after initializing) and returns the
-/// reply to each, by id. Requests in a session run concurrently, so a test
-/// that needs an order runs one session per step.
-fn session(socket: &Path, requests: &[String]) -> Vec<Value> {
+/// A server that accepts one connection and never answers. It reports
+/// the accept, then the connection's end, on the returned channel.
+fn start_stalled_server() -> (PathBuf, Receiver<&'static str>) {
+    let path = socket_path();
+    let listener = StdListener::bind(&path).expect("bind");
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let _ = tx.send("accepted");
+        let mut sink = [0u8; 4096];
+        while matches!(stream.read(&mut sink), Ok(n) if n > 0) {}
+        let _ = tx.send("closed");
+    });
+    (path, rx)
+}
+
+fn mcp(socket: &Path, timeout: Duration) -> Arc<Server> {
     let env = Env {
         socket: Some(socket.to_path_buf()),
         here: Default::default(),
     };
-    let server = Arc::new(rusty_mux_mcp::server(env).expect("server"));
-    let mut lines = vec![
+    Arc::new(rusty_mux_mcp::server(env, timeout).expect("server"))
+}
+
+fn opening() -> Vec<String> {
+    vec![
         INIT.to_owned(),
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.to_owned(),
-    ];
+    ]
+}
+
+fn tool_call(id: u32, tool: &str, args: &str) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{tool}","arguments":{args}}}}}"#
+    )
+}
+
+/// Runs one MCP session of `requests` (after initializing) and returns the
+/// reply to each, by id. Requests in a session run concurrently, so a test
+/// that needs an order runs one session per step.
+fn session(socket: &Path, requests: &[String]) -> Vec<Value> {
+    session_within(socket, DEFAULT_TIMEOUT, requests)
+}
+
+fn session_within(socket: &Path, timeout: Duration, requests: &[String]) -> Vec<Value> {
+    let server = mcp(socket, timeout);
+    let mut lines = opening();
     lines.extend(requests.iter().cloned());
     let out = Out::default();
     serve_lines(
@@ -100,10 +142,11 @@ fn session(socket: &Path, requests: &[String]) -> Vec<Value> {
 
 /// Calls one tool; returns its text and whether it failed.
 fn call(socket: &Path, tool: &str, args: &str) -> (String, bool) {
-    let request = format!(
-        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{tool}","arguments":{args}}}}}"#
-    );
-    let reply = session(socket, &[request]).remove(0);
+    call_within(socket, DEFAULT_TIMEOUT, tool, args)
+}
+
+fn call_within(socket: &Path, timeout: Duration, tool: &str, args: &str) -> (String, bool) {
+    let reply = session_within(socket, timeout, &[tool_call(1, tool, args)]).remove(0);
     let result = reply.get("result").unwrap_or_else(|| panic!("{reply:?}"));
     let text = result
         .get("content")
@@ -211,4 +254,66 @@ fn refusals_and_bad_arguments_are_tool_errors() {
     let unreachable = std::env::temp_dir().join("rusty-mux-mcp-nothing-here.sock");
     let (text, failed) = call(&unreachable, "list", "{}");
     assert!(failed && text.contains("nothing-here"), "{text}");
+}
+
+#[test]
+fn a_silent_server_fails_the_call_at_its_deadline() {
+    let (socket, _events) = start_stalled_server();
+    let started = Instant::now();
+    let (text, failed) = call_within(&socket, Duration::from_millis(300), "list", "{}");
+    assert!(failed && text.contains("deadline"), "{text}");
+    assert!(started.elapsed() < PATIENCE, "{:?}", started.elapsed());
+}
+
+/// MCP input fed a line at a time, ending when the sender is dropped.
+struct Feed {
+    lines: Receiver<String>,
+    pending: Vec<u8>,
+}
+
+impl Read for Feed {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pending.is_empty() {
+            match self.lines.recv() {
+                Ok(line) => self.pending = format!("{line}\n").into_bytes(),
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = buf.len().min(self.pending.len());
+        buf[..n].copy_from_slice(&self.pending[..n]);
+        self.pending.drain(..n);
+        Ok(n)
+    }
+}
+
+#[test]
+fn cancelling_a_call_to_a_silent_server_releases_its_connection() {
+    let (socket, events) = start_stalled_server();
+    let (feed, lines): (Sender<String>, Receiver<String>) = channel();
+    let server = mcp(&socket, Duration::from_secs(3600));
+    let serving = std::thread::spawn(move || {
+        let input = std::io::BufReader::new(Feed {
+            lines,
+            pending: Vec::new(),
+        });
+        serve_lines(server, input, Out::default(), StdioConfig::default())
+    });
+    for line in opening() {
+        feed.send(line).expect("feed");
+    }
+    feed.send(tool_call(1, "list", "{}")).expect("feed");
+    assert_eq!(events.recv_timeout(PATIENCE), Ok("accepted"));
+
+    feed.send(
+        r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#
+            .to_owned(),
+    )
+    .expect("feed");
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(5)),
+        Ok("closed"),
+        "the call kept its connection after the cancel"
+    );
+    drop(feed);
+    serving.join().expect("join").expect("serve");
 }

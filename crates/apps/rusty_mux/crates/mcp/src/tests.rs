@@ -108,4 +108,17 @@ fn tools_carry_the_catalog_schema_and_hints() {
     let close = tool(known("close-block"));
     assert_eq!(hint(&close, "destructiveHint"), Some(Value::Bool(true)));
     assert_eq!(hint(&close, "readOnlyHint"), Some(Value::Bool(false)));
+    assert_eq!(hint(&close, "openWorldHint"), Some(Value::Bool(false)));
+    let input = tool(known("input"));
+    assert_eq!(hint(&input, "destructiveHint"), Some(Value::Bool(true)));
+    assert_eq!(hint(&input, "openWorldHint"), Some(Value::Bool(true)));
+    assert_eq!(hint(&input, "readOnlyHint"), Some(Value::Bool(false)));
+}
+
+#[test]
+fn output_keeps_trailing_whitespace_and_drops_only_the_last_newline() {
+    assert_eq!(printed(b"/tmp/dir \n"), "/tmp/dir ");
+    assert_eq!(printed(b"row 1\n\n  \n"), "row 1\n\n  ");
+    assert_eq!(printed(b"no newline"), "no newline");
+    assert_eq!(printed(b"\n"), "");
 }

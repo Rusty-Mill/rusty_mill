@@ -13,7 +13,7 @@
 //!
 //! Output is text, or one JSON object per line with `--json`. The exit code
 //! is an [`Exit`]; an interrupt ends the process with the signal, which a
-//! shell reports as 130.
+//! shell reports as 130. An embedder bounds a command with [`run_until`].
 
 // Off Unix the connection code compiles but `execute` never reaches it.
 #![cfg_attr(not(unix), allow(dead_code))]
@@ -22,6 +22,7 @@ mod api;
 pub mod cli;
 mod conn;
 mod render;
+mod stop;
 pub mod target;
 
 use std::io::{self, Write};
@@ -34,6 +35,7 @@ use rusty_uuid::Uuid;
 pub use crate::api::input_schema;
 use crate::cli::{Api, Arg, Call, Command, Defaults, Invocation};
 use crate::conn::Conn;
+pub use crate::stop::Stop;
 use crate::target::Miss;
 
 /// The process exit code.
@@ -129,6 +131,18 @@ impl From<Miss> for Failure {
 /// Runs a command line (without the program name) in `env`; output goes to
 /// `out`, diagnostics to `err`.
 pub fn run(args: &[String], env: &Env, out: &mut dyn Write, err: &mut dyn Write) -> Exit {
+    run_until(args, env, &Stop::default(), out, err)
+}
+
+/// [`run`], giving up on the server once `stop` says so (past its deadline,
+/// or cancelled) with [`Exit::Unreachable`]. Requests already sent stand.
+pub fn run_until(
+    args: &[String],
+    env: &Env,
+    stop: &Stop,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Exit {
     let invocation = match cli::parse(args, &env.here) {
         Ok(invocation) => invocation,
         Err(reason) => return report(err, Exit::Usage, &reason),
@@ -146,7 +160,7 @@ pub fn run(args: &[String], env: &Env, out: &mut dyn Write, err: &mut dyn Write)
             "no socket: pass --socket or set RUSTY_MUX_SOCKET",
         );
     };
-    match execute(&invocation, &socket, env.here.session, out) {
+    match execute(&invocation, &socket, env.here.session, stop, out) {
         Ok(()) => Exit::Ok,
         Err(Failure::Failed(reason)) => report(err, Exit::Failed, &reason),
         Err(Failure::Missing(reason)) => report(err, Exit::Target, &reason),
@@ -176,9 +190,15 @@ fn execute(
     invocation: &Invocation,
     socket: &PathBuf,
     here: Option<Uuid>,
+    stop: &Stop,
     out: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let mut conn = Conn::new(std::os::unix::net::UnixStream::connect(socket)?);
+    let stream = std::os::unix::net::UnixStream::connect(socket)?;
+    if stop.is_bounded() {
+        stream.set_read_timeout(Some(stop::POLL))?;
+        stream.set_write_timeout(Some(stop::POLL))?;
+    }
+    let mut conn = Conn::new(stream, stop.clone());
     let mut session = Session {
         conn: &mut conn,
         out,
@@ -193,7 +213,13 @@ fn execute(
 }
 
 #[cfg(not(unix))]
-fn execute(_: &Invocation, _: &PathBuf, _: Option<Uuid>, _: &mut dyn Write) -> Result<(), Failure> {
+fn execute(
+    _: &Invocation,
+    _: &PathBuf,
+    _: Option<Uuid>,
+    _: &Stop,
+    _: &mut dyn Write,
+) -> Result<(), Failure> {
     Err(Failure::Unreachable(io::Error::new(
         io::ErrorKind::Unsupported,
         "rusty-mux-ctl connects over a Unix socket",
