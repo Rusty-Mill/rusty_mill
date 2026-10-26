@@ -1,8 +1,12 @@
 # `rusty_crdt`: nexus-crdt reading, ADR check and API sketch
 
-Steps 1 and 2 of the `rusty_crdt` extraction. Docs only; nothing is built.
-Waits for owner approval. Starts from `docs/bbp-concurrency-design.md` (§f,
+Steps 1 and 2 of the `rusty_crdt` extraction. Starts from `docs/bbp-concurrency-design.md` (§f,
 Appendix A, Appendix B) on `main` at `d30f3681`.
+
+> **Decision (owner, 2026-10-26):** build, not park. The crate follows §3 with
+> the review fixes and lands in #1122. §4's recommendation to park is kept as
+> the record of the alternative. Re-pointing `rusty_bbp` is a separate change,
+> and the Nexus adapter stays blocked while `FROZEN.md` stands.
 
 ## 0. What changed since the 2026-10-13 design
 
