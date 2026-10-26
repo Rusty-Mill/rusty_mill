@@ -1,6 +1,6 @@
 //! `TaskState`: the indexed fold over events that rules consult. `Card` is its projection.
 
-use crate::coedit::{Doc, LineId, Version};
+use crate::coedit::{Doc, LineId, Missing, Version};
 use crate::command::Response;
 use crate::event::{EscalateReason, Event};
 use crate::ids::*;
@@ -232,6 +232,9 @@ pub struct TaskState {
     pub versions: BTreeMap<ArtId, Version>,
     /// Each co-edited spec's latest version, keyed by its first.
     pub heads: HashMap<ArtId, ArtId>,
+    /// Logged co-edited versions that did not apply, with what they lacked.
+    /// The engine never writes one; a foreign or damaged log can.
+    pub unapplied: BTreeMap<ArtId, Missing>,
     pub messages: Vec<Message>,
     /// Live turns in grant order, at most one per role and `max_live_turns` in all.
     pub turns: Vec<Turn>,
@@ -300,6 +303,7 @@ impl TaskState {
             artifacts: BTreeMap::new(),
             versions: BTreeMap::new(),
             heads: HashMap::new(),
+            unapplied: BTreeMap::new(),
             messages: Vec::new(),
             turns: Vec::new(),
             next_turn: 1,
@@ -544,18 +548,29 @@ impl TaskState {
     }
 
     /// Index a co-edited version: applied on its spec's head, or on nothing
-    /// when it starts a spec. The engine admits only edits whose anchors
-    /// exist, so a log it wrote always applies; one that does not is left
-    /// unindexed rather than guessed at, and any edit on it is then refused.
+    /// when it starts a spec. The engine admits only edits whose base and
+    /// anchors exist, so a log it wrote always applies. One that does not is
+    /// recorded in `unapplied` with what it lacked, never guessed at, so an
+    /// edit or gate on it is refused by name (decision 3, `ref_unresolved`).
     fn add_version(&mut self, id: ArtId, e: &crate::coedit::SpecEdit) {
-        let (root, prev) = match e.base.and_then(|b| self.versions.get(&b)) {
-            Some(b) => (b.root, self.heads.get(&b.root).copied()),
+        let (root, prev) = match e.base {
             None => (id, None),
+            Some(b) => match self.versions.get(&b) {
+                Some(v) => (v.root, self.heads.get(&v.root).copied()),
+                None => {
+                    self.unapplied.insert(id, Missing::Base(b));
+                    return;
+                }
+            },
         };
         let empty = Doc::default();
         let on = prev.and_then(|p| self.doc(p)).unwrap_or(&empty);
-        let Ok(doc) = on.apply(id, &e.ops) else {
-            return;
+        let doc = match on.apply(id, &e.ops) {
+            Ok(doc) => doc,
+            Err(line) => {
+                self.unapplied.insert(id, Missing::Line(line));
+                return;
+            }
         };
         self.versions.insert(
             id,

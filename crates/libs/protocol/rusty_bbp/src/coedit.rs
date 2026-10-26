@@ -168,6 +168,24 @@ pub fn overlap(ops: &[LineOp], since: &[Option<LineId>]) -> Vec<Option<LineId>> 
     out
 }
 
+/// What a logged co-edited version needed and its fold did not find.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Missing {
+    /// An op's anchor is in no earlier version.
+    Line(LineId),
+    /// Its base is not an indexed version.
+    Base(ArtId),
+}
+
+impl std::fmt::Display for Missing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Missing::Line(l) => write!(f, "line {}#{}", l.art, l.n),
+            Missing::Base(b) => write!(f, "base {b}"),
+        }
+    }
+}
+
 /// One accepted version of a co-edited spec, as the task state indexes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Version {
