@@ -1177,7 +1177,7 @@ fn a_board_document_is_fenced_by_its_task_and_by_itself() {
     let id = t["id"].as_str().unwrap().to_string();
     let v1 = t["etag"].as_str().unwrap().to_string();
     let path = format!("/api/v1/docs/board/{id}");
-    let mut put = |h: &mut Harness, when: Conditions<'_>, gen: u32| {
+    let put = |h: &mut Harness, when: Conditions<'_>, gen: u32| {
         let body = format!(r#"{{"v":1,"generation":{gen}}}"#);
         h.send_conditional(Method::Put, &path, &body, Some(TOKEN), when)
     };
@@ -1285,7 +1285,7 @@ fn a_board_document_needs_a_task_that_is_not_in_the_trash() {
 fn a_purge_takes_the_task_board_document_with_it() {
     let (_d, mut h) = harness();
     let list = h.list("L");
-    let mut board_doc = |h: &mut Harness| {
+    let board_doc = |h: &mut Harness| {
         let t = h.task(&list, r#""title":"card""#);
         let id = t["id"].as_str().unwrap().to_string();
         let when = Conditions {
