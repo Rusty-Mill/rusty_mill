@@ -15,10 +15,10 @@ toolchain is used on purpose: a cargo older than 1.85 cannot read this workspace
 edition-2024 manifests. Versions at or above `--skip-from` (the pinned toolchain) are
 covered by the ordinary jobs and skipped.
 
-A wrapper around rustc removes what a newer cargo adds that an older rustc rejects and
-that cannot change whether the code compiles: `--check-cfg` (unstable before rustc 1.80)
-and the `--warn=`/`--allow=`/`--deny=`/`--forbid=` flags cargo derives from a dependency's
-`[lints]` table (an unknown lint name on the command line is a hard error in old rustc).
+A wrapper around rustc (`msrv_rustc_wrapper.rs`, compiled once with the pinned rustc)
+removes what a newer cargo adds that an older rustc rejects and that cannot change whether
+the code compiles: `--check-cfg` (unstable before rustc 1.80) and the lint-level flags
+cargo derives from a dependency's `[lints]` table. It is Rust so that it runs on Windows.
 
 Usage: check_msrv_compile.py METADATA.json [--packages "a b"] [--exclude "c d"]
        [--all-features-exclude "e f"] [--skip-from 1.98.1] [--print-plan]
@@ -27,27 +27,13 @@ import argparse
 import json
 import os
 import shutil
-import stat
 import subprocess
 import sys
 from pathlib import Path
 
 Version = tuple[int, int, int]
 
-STRIP_COMPILER_FLAGS = """#!/bin/sh
-real="$1"; shift
-n=$#; skip=0
-while [ "$n" -gt 0 ]; do
-  a="$1"; shift; n=$((n - 1))
-  if [ "$skip" = 1 ]; then skip=0; continue; fi
-  case "$a" in
-    --check-cfg) skip=1; continue ;;
-    --check-cfg=*|--warn=*|--allow=*|--deny=*|--forbid=*) continue ;;
-  esac
-  set -- "$@" "$a"
-done
-exec "$real" "$@"
-"""
+WRAPPER_SOURCE = Path(__file__).with_name("msrv_rustc_wrapper.rs")
 
 
 def parse_version(text: str) -> Version:
@@ -123,18 +109,22 @@ def run(argv: list[str], env: dict[str, str] | None = None) -> int:
     return subprocess.run(argv, env=env, check=False).returncode
 
 
-def rustc_env(rustc: str, work_dir: Path) -> dict[str, str]:
-    """Environment that makes cargo run `rustc` through the flag-stripping wrapper."""
+def build_wrapper(work_dir: Path) -> Path:
+    """Compile the flag-stripping wrapper into `work_dir` with the `rustc` on PATH."""
     work_dir.mkdir(parents=True, exist_ok=True)
-    wrapper = work_dir / "rustc-wrapper.sh"
-    wrapper.write_text(STRIP_COMPILER_FLAGS)
-    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    wrapper = (work_dir / f"msrv_rustc_wrapper{'.exe' if os.name == 'nt' else ''}").resolve()
+    subprocess.run(["rustc", "--edition", "2021", "-O", "-o", str(wrapper), str(WRAPPER_SOURCE)], check=True)
+    return wrapper
+
+
+def rustc_env(rustc: str, wrapper: Path) -> dict[str, str]:
+    """Environment that makes cargo run `rustc` through the flag-stripping wrapper."""
     # cargo runs `$RUSTC_WRAPPER $RUSTC <args>`; the wrapper takes the real rustc as its first argument.
-    return {"RUSTC": rustc, "RUSTC_WRAPPER": str(wrapper.resolve())}
+    return {"RUSTC": rustc, "RUSTC_WRAPPER": str(wrapper)}
 
 
 def check_version(
-    version: Version, names: list[str], target_base: str, all_features: frozenset[str] = frozenset()
+    version: Version, names: list[str], target_base: str, wrapper: Path, all_features: frozenset[str] = frozenset()
 ) -> list[str]:
     """Install exactly `version`'s rustc and check each member; return the checks that fail."""
     text = format_version(version)
@@ -143,7 +133,7 @@ def check_version(
     rustc = subprocess.run(
         ["rustup", "which", "rustc", "--toolchain", text], capture_output=True, text=True, check=True
     ).stdout.strip()
-    env = {**os.environ, **rustc_env(rustc, Path(target_base))}
+    env = {**os.environ, **rustc_env(rustc, wrapper)}
     target_dir = f"{target_base}/{text}"
     try:
         commands = check_commands(names, target_dir, all_features)
@@ -166,7 +156,7 @@ def main() -> None:
     parser.add_argument("--print-plan", action="store_true", help="print the groups and exit")
     args = parser.parse_args()
 
-    metadata = json.loads(args.metadata.read_text())
+    metadata = json.loads(args.metadata.read_text(encoding="utf-8"))
     groups = msrv_groups(
         metadata,
         only=set(args.packages.split()) if args.packages is not None else None,
@@ -178,8 +168,11 @@ def main() -> None:
         print(f"{format_version(version)}: {len(names)} crates, {len(all_features.intersection(names))} also with --all-features")
     if args.print_plan:
         return
+    wrapper = build_wrapper(Path(args.target_base))
     failed = {
-        v: bad for v, names in groups.items() if (bad := check_version(v, names, args.target_base, all_features))
+        v: bad
+        for v, names in groups.items()
+        if (bad := check_version(v, names, args.target_base, wrapper, all_features))
     }
     if failed:
         print("Did not build at the declared rust-version:", file=sys.stderr)

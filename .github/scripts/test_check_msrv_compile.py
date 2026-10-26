@@ -3,16 +3,18 @@
 Run from the repo root:
     python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 """
+import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from check_msrv_compile import (
-    STRIP_COMPILER_FLAGS,
+    build_wrapper,
     check_commands,
     describe,
     featured_members,
@@ -98,6 +100,21 @@ class CheckCommandsTests(unittest.TestCase):
         self.assertEqual(commands[2], [*commands[1], "--all-features"])
 
 
+class MainTests(unittest.TestCase):
+    def test_metadata_is_read_as_utf8_whatever_the_locale(self) -> None:
+        # Windows runners default to cp1252; cargo metadata is UTF-8 (a description with a curly quote broke #1081).
+        md = metadata({"a": "1.75"})
+        md["packages"][0]["description"] = "caf\u00e9 \u201cquoted\u201d"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "m.json")
+            path.write_text(json.dumps(md, ensure_ascii=False), encoding="utf-8")
+            env = {**os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0"}
+            script = Path(__file__).with_name("check_msrv_compile.py")
+            out = subprocess.run([sys.executable, str(script), str(path), "--print-plan"], env=env, capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("1.75.0: 1 crates", out.stdout)
+
+
 class FeaturedMembersTests(unittest.TestCase):
     def test_members_with_a_feature_beyond_default_are_featured(self) -> None:
         md = metadata(
@@ -156,28 +173,35 @@ class MemberFeatureIsolationTests(unittest.TestCase):
 
 
 class RustcEnvTests(unittest.TestCase):
-    def test_cargo_runs_the_real_rustc_through_an_executable_wrapper(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            env = rustc_env("/x/rustc", Path(tmp))
-            self.assertEqual(env["RUSTC"], "/x/rustc")
-            wrapper = Path(env["RUSTC_WRAPPER"])
-            self.assertEqual(wrapper.read_text(), STRIP_COMPILER_FLAGS)
-            self.assertTrue(wrapper.stat().st_mode & stat.S_IXUSR)
+    def test_cargo_runs_the_real_rustc_through_the_wrapper(self) -> None:
+        env = rustc_env("/x/rustc", Path("/w/msrv_rustc_wrapper"))
+        self.assertEqual(env, {"RUSTC": "/x/rustc", "RUSTC_WRAPPER": "/w/msrv_rustc_wrapper"})
 
 
-class StripCompilerFlagsWrapperTests(unittest.TestCase):
-    """Run the real wrapper against a fake rustc that prints its arguments, one per line."""
+@unittest.skipUnless(shutil.which("rustc"), "needs rustc")
+class WrapperTests(unittest.TestCase):
+    """Run the compiled wrapper against a fake rustc that prints its arguments, one per line."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.dir = Path(cls.tmp.name)
+        cls.wrapper = build_wrapper(cls.dir)
+        cls.fake = cls.dir / "rustc"
+        cls.fake.write_text('#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n')
+        cls.fake.chmod(0o755)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.tmp.cleanup()
 
     def run_wrapper(self, *args: str) -> list[str]:
-        with tempfile.TemporaryDirectory() as tmp:
-            fake = Path(tmp, "rustc")
-            fake.write_text('#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n')
-            fake.chmod(0o755)
-            wrapper = Path(tmp, "wrap.sh")
-            wrapper.write_text(STRIP_COMPILER_FLAGS)
-            wrapper.chmod(0o755)
-            out = subprocess.run([str(wrapper), str(fake), *args], capture_output=True, text=True, check=True)
+        out = subprocess.run([str(self.wrapper), str(self.fake), *args], capture_output=True, text=True, check=True)
         return out.stdout.splitlines()
+
+    def test_the_wrapper_is_an_executable_beside_the_build_output(self) -> None:
+        self.assertEqual(self.wrapper.parent, self.dir.resolve())
+        self.assertTrue(self.wrapper.stat().st_mode & stat.S_IXUSR)
 
     def test_check_cfg_flag_and_its_value_are_dropped_and_the_rest_kept_in_order(self) -> None:
         got = self.run_wrapper("--crate-name", "a b", "--check-cfg", 'cfg(feature, values("x"))', "--edition=2021", "src/lib.rs")
@@ -199,6 +223,22 @@ class StripCompilerFlagsWrapperTests(unittest.TestCase):
 
     def test_a_trailing_check_cfg_with_no_value_does_not_break_the_command(self) -> None:
         self.assertEqual(self.run_wrapper("-C", "x y", "--check-cfg"), ["-C", "x y"])
+
+    def test_an_argfile_is_filtered_into_a_copy_and_the_original_left_alone(self) -> None:
+        argfile = self.dir / "args"
+        original = "--crate-name\nx\n--check-cfg\ncfg(docsrs)\n--warn=unused\nsrc/lib.rs\n"
+        argfile.write_text(original)
+        got = self.run_wrapper("--edition=2021", f"@{argfile}")
+        self.assertEqual(got, ["--edition=2021", f"@{argfile}.msrv"])
+        self.assertEqual(Path(f"{argfile}.msrv").read_text().splitlines(), ["--crate-name", "x", "src/lib.rs"])
+        self.assertEqual(argfile.read_text(), original)
+
+    def test_the_real_rustcs_exit_code_is_returned(self) -> None:
+        failing = self.dir / "failing-rustc"
+        failing.write_text("#!/bin/sh\nexit 3\n")
+        failing.chmod(0o755)
+        self.assertEqual(subprocess.run([str(self.wrapper), str(failing)]).returncode, 3)
+        self.assertNotEqual(subprocess.run([str(self.wrapper)], capture_output=True).returncode, 0)
 
 
 if __name__ == "__main__":

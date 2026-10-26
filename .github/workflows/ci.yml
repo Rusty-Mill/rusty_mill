@@ -1277,7 +1277,7 @@ jobs:
 
   msrv-compile:
     concurrency:
-      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-msrv-compile
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-msrv-compile-${{ matrix.os }}
       queue: max
       cancel-in-progress: false
     # `check_rust_versions.py` (dependency policy) compares declared
@@ -1290,25 +1290,39 @@ jobs:
     #
     # `--all-features-exclude` lists crates whose declared floor is
     # deliberately the default build's, with an opt-in feature above it:
-    # platform-linux (`track-p` -> rusty_libc 1.88, see its Cargo.toml),
-    # rusty_json (the optional rusty_json-derive, 1.85), rusty_tls
+    # platform-linux (`track-p` -> rusty_libc 1.88) and platform-windows
+    # (`track-w` -> rusty_win32 1.88, found by the Windows leg), see their
+    # Cargo.tomls; rusty_json (the optional rusty_json-derive, 1.85), rusty_tls
     # (`native-crypto` -> rusty_aead/rusty_pk at the pinned toolchain),
     # rusty_rdp (its README: optional features raise the effective MSRV) and
     # rusty_tonic (`rusty-tokio` -> rusty_h2 1.88; its README keeps the
     # library at 1.75). Raising platform-linux, rusty_json or rusty_tls
     # would also break 7 to 36 dependents' declared floors.
-    name: compile at declared rust-version
+    #
+    # Windows (#845) runs on the scheduled and manual sweeps only: a
+    # target-specific dependency can raise a floor there, but that drifts
+    # slowly, and 14 toolchain installs per run would slow every PR. It
+    # leaves out the crates the Windows clippy/test legs leave out. macOS
+    # waits until CI builds the workspace there at all.
+    name: compile at declared rust-version${{ matrix.os != 'ubuntu-latest' && format(' ({0})', matrix.os) || '' }}
     needs: plan
     if: (needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != '') && needs.plan.outputs.linux == 'true'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.plan.outputs.windows == 'true' && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
         timeout-minutes: 15
       - name: cargo check each crate at its declared rust-version
+        shell: bash
         env:
           PLAN_FULL: ${{ needs.plan.outputs.full }}
           PLAN_PACKAGES: ${{ needs.plan.outputs.packages }}
+          PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
+          OS_EXCLUDE: ${{ runner.os == 'Windows' && 'rusty_journal rusty_fedora_agent' || '' }}
         run: |
           set -euo pipefail
           # Locked: a metadata call that rewrote Cargo.lock would validate a lock nobody committed.
@@ -1317,11 +1331,11 @@ jobs:
           scope=()
           if [ "$PLAN_FULL" != "true" ]; then scope=(--packages "$PLAN_PACKAGES"); fi
           # rusty_multimodal_db has its own msrv job; the remind_me crates have their own jobs.
-          python3 .github/scripts/check_msrv_compile.py "$RUNNER_TEMP/metadata-default.json" \
+          "$PYTHON" .github/scripts/check_msrv_compile.py "$RUNNER_TEMP/metadata-default.json" \
             "${scope[@]}" \
             --skip-from "$RUST_TOOLCHAIN" \
-            --exclude "$REMIND_ME_PACKAGES rusty_multimodal_db" \
-            --all-features-exclude "platform-linux rusty_json rusty_tls rusty_rdp rusty_tonic" \
+            --exclude "$REMIND_ME_PACKAGES rusty_multimodal_db $OS_EXCLUDE" \
+            --all-features-exclude "platform-linux platform-windows rusty_json rusty_tls rusty_rdp rusty_tonic" \
             --target-base "$RUNNER_TEMP/msrv"
           test "$(sha256sum Cargo.lock)" = "$lock_before"
 
