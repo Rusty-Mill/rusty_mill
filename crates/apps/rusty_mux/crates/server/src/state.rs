@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use rusty_mux_core::{BlockId, ClientId, Event, Mux, Size};
+use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::{Code, Cursor, Entry, Features, Message, encode};
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::task::JoinHandle;
@@ -17,13 +18,14 @@ use crate::checkpoint::validate_size;
 use crate::history::History;
 use crate::outbox::Outbox;
 use crate::pty::{self, Process, Pty};
+use crate::terminal;
 
 pub(crate) type Shared = Rc<RefCell<State>>;
 
 /// Bytes read from a PTY per output frame.
 const CHUNK: usize = 16 << 10;
 
-/// The largest reply to `capture` or `list`, in encoded bytes: half a
+/// The largest reply to a block call or `list`, in encoded bytes: half a
 /// client's output budget, so a reply alone never gets a client dropped.
 const REPLY_MAX: usize = crate::outbox::BUDGET / 2;
 
@@ -34,7 +36,8 @@ const HISTORY: usize = 4096;
 const OFFERED: Features = Features::CHECKPOINT_V3
     .union(Features::EVENT_SEQ)
     .union(Features::SYNC)
-    .union(Features::INSPECT);
+    .union(Features::INSPECT)
+    .union(Features::BLOCK_CALL);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -227,14 +230,15 @@ impl State {
             M::Resize { req, block, size } => (req, self.resize(client, block, size)),
             M::CloseBlock { req, block } => (req, done(self.mux.close_block(block))),
             M::Sync { req } => (req, Ok(Outcome::Done(None))),
-            M::Capture {
+            M::BlockCall {
                 req,
                 block,
-                history,
+                method,
+                args,
             } => (
                 req,
-                self.require(client, Features::INSPECT, "capture")
-                    .and_then(|()| self.capture(req, block, history)),
+                self.require(client, Features::BLOCK_CALL, "a block call")
+                    .and_then(|()| self.block_call(req, block, &method, args)),
             ),
             M::List { req } => (
                 req,
@@ -257,26 +261,52 @@ impl State {
         Err(format!("{what} requires feature bits {:#x}", feature.bits()).into())
     }
 
-    /// The last `history` scrollback lines and the screen, as one Text.
-    fn capture(&self, req: u64, block: BlockId, history: u32) -> Result<Outcome, Refusal> {
+    /// Runs block method `method` on `block`, after checking its arguments
+    /// against the catalog.
+    fn block_call(
+        &self,
+        req: u64,
+        block: BlockId,
+        method: &str,
+        args: Vec<(String, Value)>,
+    ) -> Result<Outcome, Refusal> {
         let rt = self
             .blocks
             .get(&block)
             .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
-        let scrollback = rt.grid.scrollback_len();
-        let from = scrollback.saturating_sub(usize::try_from(history).unwrap_or(usize::MAX));
-        let mut text = String::new();
-        for abs in from..scrollback + rt.grid.rows {
-            if abs > from {
-                text.push('\n');
-            }
-            text.push_str(&rt.grid.line_text(abs).unwrap_or_default());
-            // Stop building early; `reply` checks the exact size.
-            if text.len() > REPLY_MAX {
-                break;
-            }
+        let unknown = || Refusal {
+            reason: format!("terminal blocks have no method `{method}`"),
+            code: Some(Code::MethodNotFound),
+        };
+        let found = schema::block_method(method).ok_or_else(unknown)?;
+        // Moves each value under its parameter's name, so nothing is copied
+        // before the catalog has checked it; an unknown name stops here.
+        let mut named = vec![("block", Value::Id(block.uuid()))];
+        for (name, value) in args {
+            let param = found
+                .params
+                .iter()
+                .find(|p| p.name == name)
+                .ok_or_else(|| format!("{method}: {}", CallError::UnknownParam(name)))?;
+            named.push((param.name, value));
         }
-        reply("capture", &[Message::Text { req, text }])
+        found
+            .request(req, &named)
+            .map_err(|e| format!("{method}: {e}"))?;
+        let text = match found.name {
+            "terminal.format" => {
+                let history = match named.iter().find(|(name, _)| *name == "history") {
+                    Some((_, Value::Lines(n))) => *n,
+                    _ => return Err(format!("{method}: missing history").into()),
+                };
+                terminal::format(&rt.grid, history, REPLY_MAX)
+            }
+            "terminal.pwd" => terminal::pwd(&rt.grid, rt.process.pid())
+                .ok_or("the program's working directory is unknown")?,
+            "terminal.title" => rt.grid.title.clone(),
+            _ => return Err(unknown()),
+        };
+        reply(method, &[Message::Text { req, text }])
     }
 
     /// Every session, window and block, in creation order, each parent

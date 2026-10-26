@@ -18,6 +18,7 @@
 // Off Unix the connection code compiles but `execute` never reaches it.
 #![cfg_attr(not(unix), allow(dead_code))]
 
+mod api;
 pub mod cli;
 mod conn;
 mod render;
@@ -30,7 +31,7 @@ use rusty_mux_proto::schema::{CATALOG, Method, Returns, Value};
 use rusty_mux_proto::{Code, Cursor, Entry, Features, Message};
 use rusty_uuid::Uuid;
 
-use crate::cli::{Arg, Call, Command, Defaults, Invocation};
+use crate::cli::{Api, Arg, Call, Command, Defaults, Invocation};
 use crate::conn::Conn;
 use crate::target::Miss;
 
@@ -105,8 +106,11 @@ pub fn run(args: &[String], env: &Env, out: &mut dyn Write, err: &mut dyn Write)
         Ok(invocation) => invocation,
         Err(reason) => return report(err, Exit::Usage, &reason),
     };
-    if let Command::Help(method) = invocation.command {
-        return write_line(out, cli::usage(method).trim_end());
+    match invocation.command {
+        Command::Help(method) => return write_line(out, cli::usage(method).trim_end()),
+        Command::Api(Api::List) => return write_line(out, &api::list(invocation.json)),
+        Command::Api(Api::Describe(method)) => return write_line(out, &api::describe(method)),
+        Command::Calls(_) | Command::Events { .. } => {}
     }
     let Some(socket) = invocation.socket.clone().or_else(|| env.socket.clone()) else {
         return report(
@@ -157,7 +161,7 @@ fn execute(
     match &invocation.command {
         Command::Calls(calls) => session.calls(calls),
         Command::Events { after, follow } => session.events(*after, *follow),
-        Command::Help(_) => Ok(()),
+        Command::Help(_) | Command::Api(_) => Ok(()),
     }
 }
 
@@ -293,7 +297,7 @@ impl<S: io::Read + Write> Session<'_, S> {
                     let reason = format!("{name}: {reason}");
                     return Err(match code {
                         Some(Code::NotFound) => Failure::Missing(reason),
-                        None => Failure::Failed(reason),
+                        Some(Code::MethodNotFound) | None => Failure::Failed(reason),
                     });
                 }
                 _ => {}

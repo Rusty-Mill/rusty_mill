@@ -3,8 +3,9 @@
 use rusty_mux_core::{BlockId, ClientId, Event, SessionId, Size, WindowId};
 use rusty_uuid::Uuid;
 
-use crate::Error;
 use crate::field::{In, Out};
+use crate::schema::Value;
+use crate::{Error, args};
 
 /// Optional protocol capabilities. Each peer sends its own; the session uses
 /// the intersection. Continuation checkpoints require explicit opt-in.
@@ -34,9 +35,11 @@ impl Features {
     /// [`Message::Sync`], a request that changes nothing.
     pub const SYNC: Self = Self(1 << 5);
 
-    /// [`Message::Capture`] and [`Message::List`], which read the server's
-    /// state without changing it.
+    /// [`Message::List`], which reads the server's state without changing
+    /// it.
     pub const INSPECT: Self = Self(1 << 6);
+    /// [`Message::BlockCall`], answered with [`Message::Text`].
+    pub const BLOCK_CALL: Self = Self(1 << 7);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -75,6 +78,8 @@ pub struct Cursor {
 pub enum Code {
     /// A session, window or block the request names does not exist.
     NotFound,
+    /// The block's type has no method of the requested name.
+    MethodNotFound,
 }
 
 /// One entity in the reply to [`Message::List`].
@@ -162,19 +167,23 @@ pub enum Message {
     Sync {
         req: u64,
     },
-    /// The block's text: the last `history` scrollback lines, then the
-    /// screen. Answered with [`Message::Text`]. Negotiated with
-    /// [`Features::INSPECT`].
-    Capture {
-        req: u64,
-        block: BlockId,
-        history: u32,
-    },
     /// Every session, window and block. Answered with one
     /// [`Message::Entry`] per entity, each parent before its children, then
     /// [`Message::Done`]. Negotiated with [`Features::INSPECT`].
     List {
         req: u64,
+    },
+    /// Runs `method`, one of the methods of the block's type such as
+    /// `terminal.format`, with named arguments. Answered with
+    /// [`Message::Text`], or [`Message::Failed`] with
+    /// [`Code::MethodNotFound`] if the type has no such method. Negotiated
+    /// with [`Features::BLOCK_CALL`]; [`crate::schema`] lists the methods.
+    /// At most [`crate::args::MAX_ARGS`] arguments decode.
+    BlockCall {
+        req: u64,
+        block: BlockId,
+        method: String,
+        args: Vec<(String, Value)>,
     },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
@@ -196,8 +205,7 @@ pub enum Message {
         reason: String,
         code: Option<Code>,
     },
-    /// The reply to [`Message::Capture`]: one line per row, each without
-    /// trailing blanks, joined by `\n`.
+    /// The reply to [`Message::BlockCall`].
     Text {
         req: u64,
         text: String,
@@ -256,11 +264,13 @@ const TOTAL: u32 = 16;
 const HOLDER: u32 = 14;
 const EPOCH: u32 = 17;
 const SEQ: u32 = 18;
-const HISTORY: u32 = 19;
+// 19 was Capture's history, retired with it.
 const TITLE: u32 = 20;
 const CODE: u32 = 21;
-// IDs 1..=CODE are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = CODE as usize;
+const METHOD: u32 = 22;
+const ARGS: u32 = 23;
+// IDs 1..=ARGS are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = ARGS as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -275,8 +285,9 @@ mod ty {
     pub const RESIZE: u8 = 0x0a;
     pub const CLOSE_BLOCK: u8 = 0x0b;
     pub const SYNC: u8 = 0x0c;
-    pub const CAPTURE: u8 = 0x0d;
+    // 0x0d was Capture, replaced by BlockCall's `terminal.format`.
     pub const LIST: u8 = 0x0e;
+    pub const BLOCK_CALL: u8 = 0x0f;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -333,19 +344,21 @@ impl Message {
                 out.varint(REQ, *req);
                 ty::SYNC
             }
-            M::Capture {
-                req,
-                block,
-                history,
-            } => {
-                out.varint(REQ, *req)
-                    .uuid(BLOCK, block.uuid())
-                    .varint(HISTORY, (*history).into());
-                ty::CAPTURE
-            }
             M::List { req } => {
                 out.varint(REQ, *req);
                 ty::LIST
+            }
+            M::BlockCall {
+                req,
+                block,
+                method,
+                args,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .bytes(METHOD, method.as_bytes())
+                    .bytes(ARGS, &args::encode(args));
+                ty::BLOCK_CALL
             }
             M::Welcome {
                 features,
@@ -468,13 +481,14 @@ impl Message {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
             },
-            ty::CAPTURE => M::Capture {
-                req: f.varint(REQ)?,
-                block: block(&f, BLOCK)?,
-                history: f.u32(HISTORY)?,
-            },
             ty::LIST => M::List {
                 req: f.varint(REQ)?,
+            },
+            ty::BLOCK_CALL => M::BlockCall {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                method: f.string(METHOD)?,
+                args: args::decode(f.bytes(ARGS)?).ok_or_else(|| f.invalid(ARGS))?,
             },
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
@@ -775,12 +789,14 @@ impl Code {
     const fn wire(self) -> u64 {
         match self {
             Self::NotFound => 1,
+            Self::MethodNotFound => 2,
         }
     }
 
     const fn from_wire(value: u64) -> Option<Self> {
         match value {
             1 => Some(Self::NotFound),
+            2 => Some(Self::MethodNotFound),
             _ => None,
         }
     }

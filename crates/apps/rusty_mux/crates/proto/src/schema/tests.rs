@@ -29,6 +29,14 @@ fn samples(method: &Method) -> Vec<(&'static str, Value)> {
         .collect()
 }
 
+/// Kebab case, optionally after a block type and a dot.
+fn is_method_name(name: &str) -> bool {
+    match name.split_once('.') {
+        Some((ty, verb)) => is_kebab(ty) && is_kebab(verb),
+        None => is_kebab(name),
+    }
+}
+
 fn is_kebab(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
@@ -41,7 +49,7 @@ fn names_are_unique_kebab_case() {
     let names: BTreeSet<_> = CATALOG.iter().map(|m| m.name).collect();
     assert_eq!(names.len(), CATALOG.len());
     for method in CATALOG {
-        assert!(is_kebab(method.name), "{}", method.name);
+        assert!(is_method_name(method.name), "{}", method.name);
         let params: BTreeSet<_> = method.params.iter().map(|p| p.name).collect();
         assert_eq!(params.len(), method.params.len(), "{}", method.name);
         assert!(params.iter().all(|p| is_kebab(p)), "{}", method.name);
@@ -62,13 +70,52 @@ fn every_method_builds_a_message_that_round_trips() {
 
 #[test]
 fn catalog_covers_each_request_type_once() {
-    let types: Vec<u8> = CATALOG
-        .iter()
-        .map(|m| encode(&m.request(1, &samples(m)).expect(m.name)).expect("encode")[4])
-        .collect();
+    let ty = |m: &Method| encode(&m.request(1, &samples(m)).expect(m.name)).expect("encode")[4];
+    let (block, other): (Vec<&Method>, Vec<&Method>) =
+        CATALOG.iter().partition(|m| m.is_block_method());
+    let types: Vec<u8> = other.iter().map(|m| ty(m)).collect();
     let unique: BTreeSet<u8> = types.iter().copied().collect();
     assert_eq!(unique.len(), types.len(), "two methods build one type");
-    assert_eq!(unique, (0x02..=0x0e).collect());
+    // 0x0d was Capture; 0x0f is BlockCall.
+    assert_eq!(unique, (0x02..=0x0e).filter(|t| *t != 0x0d).collect());
+    assert!(block.iter().all(|m| ty(m) == 0x0f));
+}
+
+#[test]
+fn block_methods_take_the_block_first_and_send_the_rest() {
+    let block_methods: Vec<&str> = CATALOG
+        .iter()
+        .filter(|m| m.is_block_method())
+        .map(|m| m.name)
+        .collect();
+    assert_eq!(
+        block_methods,
+        ["terminal.format", "terminal.pwd", "terminal.title"]
+    );
+    for name in block_methods {
+        let method = block_method(name).expect(name);
+        assert_eq!(method.params[0].ty, Ty::Id(Entity::Block), "{name}");
+        assert_eq!(method.needs, Features::BLOCK_CALL, "{name}");
+        assert_eq!(method.returns, Returns::Text, "{name}");
+    }
+    let format = method("terminal.format").expect("format");
+    let args = [("history", Value::Lines(3)), ("block", Value::Id(id(1)))];
+    assert_eq!(
+        format.request(2, &args),
+        Ok(Message::BlockCall {
+            req: 2,
+            block: BlockId::from_uuid(id(1)),
+            method: "terminal.format".into(),
+            args: vec![("history".into(), Value::Lines(3))],
+        })
+    );
+    assert!(
+        CATALOG
+            .iter()
+            .all(|m| m.params.len() <= crate::args::MAX_ARGS)
+    );
+    assert!(block_method("list").is_none());
+    assert!(block_method("terminal.nope").is_none());
 }
 
 #[test]
@@ -99,7 +146,7 @@ fn methods_need_the_features_their_messages_are_gated_by() {
     let needs = |name| method(name).expect(name).needs;
     assert_eq!(needs("attach"), Features::CHECKPOINT_V3);
     assert_eq!(needs("sync"), Features::SYNC);
-    assert_eq!(needs("capture"), Features::INSPECT);
+    assert_eq!(needs("terminal.format"), Features::BLOCK_CALL);
     assert_eq!(needs("list"), Features::INSPECT);
     assert_eq!(needs("create-session"), Features::NONE);
 }

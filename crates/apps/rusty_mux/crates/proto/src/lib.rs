@@ -19,6 +19,7 @@
 //! # Ok::<(), rusty_mux_proto::Error>(())
 //! ```
 
+pub mod args;
 mod error;
 mod field;
 mod frame;

@@ -103,7 +103,7 @@ fn help_and_nothing_show_usage() {
 
 #[test]
 fn an_id_flag_takes_a_target() {
-    let [call] = calls("capture --block build/2 --history 0")
+    let [call] = calls("terminal.format --block build/2 --history 0")
         .try_into()
         .expect("one call");
     assert!(call.has_target());
@@ -159,4 +159,16 @@ fn a_missing_id_flag_defaults_to_where_ctl_runs() {
             .unwrap_err()
             .contains("missing parameter `block`")
     );
+}
+
+#[test]
+fn uuid_shaped_text_is_an_id_never_a_name() {
+    // A session named with a UUID is still reached only by that id.
+    let line = format!("create-window --session {ID} --name w");
+    let [call] = calls(&line).try_into().expect("one call");
+    assert_eq!(
+        call.args[0],
+        ("session", Arg::Value(Value::Id(ID.parse().unwrap())))
+    );
+    assert!(!call.has_target());
 }
