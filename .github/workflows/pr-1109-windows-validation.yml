@@ -1,0 +1,108 @@
+name: PR 1109 bounded Windows runtime validation
+
+on:
+  push:
+    branches: [validation/pr-1109-windows-d930676-20261026]
+    paths: [.github/workflows/pr-1109-windows-validation.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-runtime:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: d930676054930136daf394c694ade0cf1ab5e8ad
+          persist-credentials: false
+      - name: Record exact source and Windows build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          $sha = git rev-parse HEAD
+          if ($sha -ne 'd930676054930136daf394c694ade0cf1ab5e8ad') { throw "Wrong source: $sha" }
+          $os = Get-CimInstance Win32_OperatingSystem
+          @("Source SHA: $sha", "Windows: $($os.Caption)", "Version: $($os.Version)", "Build: $($os.BuildNumber)", "Architecture: $($os.OSArchitecture)", "Runner image: $env:ImageOS $env:ImageVersion", "Run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID") | Tee-Object evidence/provenance.txt
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: "1.98.1"
+      - name: Compile only the selected test targets
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          rustc -Vv | Tee-Object evidence/toolchain.txt
+          cargo -V | Tee-Object -Append evidence/toolchain.txt
+          cargo test --locked -p platform-windows --lib --test unix_peer --test pty --no-run 2>&1 | Tee-Object evidence/compile-platform-windows.log
+          if ($LASTEXITCODE -ne 0) { throw "platform-windows compilation failed" }
+          cargo test --locked -p rusty_tokio --test unix_windows --no-run 2>&1 | Tee-Object evidence/compile-rusty-tokio.log
+          if ($LASTEXITCODE -ne 0) { throw "rusty_tokio compilation failed" }
+      - name: Run bounded selected tests and verify counts
+        timeout-minutes: 8
+        shell: python
+        run: |
+          import json, os, pathlib, re, subprocess, sys, time
+          root = pathlib.Path("evidence")
+          commands = [
+              ("unix-peer", ["cargo", "test", "--locked", "-p", "platform-windows", "--test", "unix_peer", "--", "--nocapture", "--test-threads=1"], 14),
+              ("close-guard", ["cargo", "test", "--locked", "-p", "platform-windows", "--lib", "close_guard::tests::", "--", "--nocapture", "--test-threads=1"], 6),
+          ]
+          for name in [
+              "several_live_consoles_keep_their_output_apart",
+              "spawn_concrete_round_trips",
+              "hang_up_ends_a_blocked_read",
+              "resize_after_hang_up_is_refused",
+              "drop_after_exit_with_a_full_pipe_returns",
+          ]:
+              commands.append((name, ["cargo", "test", "--locked", "-p", "platform-windows", "--test", "pty", name, "--", "--exact", "--nocapture", "--test-threads=1"], 1))
+          commands.append(("tokio-peer-pid", ["cargo", "test", "--locked", "-p", "rusty_tokio", "--test", "unix_windows", "peer_pid_over_a_real_accept_is_this_process", "--", "--exact", "--nocapture", "--test-threads=1"], 1))
+          results = []
+          for name, command, expected in commands:
+              print("COMMAND:", subprocess.list2cmdline(command), flush=True)
+              start = time.monotonic()
+              timed_out = False
+              log_path = root / (name + ".log")
+              with log_path.open("w", encoding="utf-8") as log:
+                  proc = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+                  try:
+                      code = proc.wait(timeout=90)
+                  except subprocess.TimeoutExpired:
+                      timed_out = True
+                      # Terminate only this test invocation and its disposable descendants.
+                      subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], timeout=15, check=False)
+                      code = proc.wait(timeout=15)
+              output = log_path.read_text(encoding="utf-8", errors="replace")
+              print(output, flush=True)
+              matches = re.findall(r"test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;", output)
+              counts = matches[-1] if matches else None
+              passed = not timed_out and code == 0 and counts == ("ok", str(expected), "0", "0")
+              results.append(dict(name=name, command=command, expected=expected, counts=counts, exit_code=code, timed_out=timed_out, seconds=round(time.monotonic()-start, 3), passed=passed))
+              (root / "results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+              if timed_out:
+                  # Do not continue after a hung native test.
+                  break
+          note = ("The unix-peer count includes cross_process_peer_helper, a no-op in the outer run; "
+                  "peer_pid_names_a_separate_client_process re-executes it as the live client. "
+                  "services.exe Err proves fail-closed behavior only; Ok(false) proves a successful different-user comparison. "
+                  "A different interactive account remains a manual case and is not exercised. "
+                  "Unselected test cases and optional track-w are not run.")
+          (root / "scope.txt").write_text(note, encoding="utf-8")
+          print(note)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("| Test selection | Passed | Counts (state/pass/fail/ignored) |\n|---|---|---|\n")
+              for result in results:
+                  summary.write(f"| {result['name']} | {result['passed']} | {result['counts']} |\n")
+              summary.write("\n" + note + "\n")
+          sys.exit(0 if len(results) == len(commands) and all(r["passed"] for r in results) else 1)
+      - name: Preserve runtime evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: pr-1109-windows-d930676-runtime
+          path: evidence/
+          retention-days: 14
