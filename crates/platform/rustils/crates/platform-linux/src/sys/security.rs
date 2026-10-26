@@ -190,7 +190,7 @@ fn set_no_new_privs() -> Result<()> {
 /// `SandboxStatus::NotEnforced` rather than erroring, matching nexus's
 /// own degrade-not-fail design.
 /// The kernel's highest Landlock ABI, or `None` when Landlock is absent.
-fn landlock_abi() -> Result<Option<u32>> {
+pub fn landlock_abi() -> Result<Option<u32>> {
     // SAFETY: a NULL attr with size 0 and the VERSION flag is the documented
     // query form; the kernel touches no memory.
     let r = unsafe {
@@ -211,28 +211,67 @@ fn landlock_abi() -> Result<Option<u32>> {
     Ok(Some(r as u32))
 }
 
-/// The ruleset and the access set it handles: every ABI v1 right, plus
-/// `REFER` on an ABI v2+ kernel so that a writable root can be granted it
-/// (an ABI v1 kernel rejects the bit with `EINVAL`).
-fn create_ruleset() -> Result<Option<(i32, u64)>> {
-    let handled = match landlock_abi()? {
+/// ABI v6 `struct landlock_ruleset_attr`: v1's field, v4's network field
+/// and v6's `scoped`. Its 24-byte size asks for ABI v6 semantics.
+#[repr(C)]
+struct LandlockScopedRulesetAttr {
+    handled_access_fs: u64,
+    handled_access_net: u64,
+    scoped: u64,
+}
+
+/// ABI v6: refuse signals to processes outside the Landlock domain.
+const LANDLOCK_SCOPE_SIGNAL: u64 = 1 << 1;
+
+/// A new ruleset: its fd, the access set it handles, and whether it scopes
+/// signals. It handles every ABI v1 right, plus `REFER` on an ABI v2+
+/// kernel so that a writable root can be granted it (an ABI v1 kernel
+/// rejects the bit with `EINVAL`), and with `scope_signals` on an ABI v6+
+/// kernel it also scopes signals. The scope must live in this same ruleset:
+/// a layer of its own handles no filesystem right, and a layer that does not
+/// handle `REFER` makes every cross-directory rename fail with `EXDEV`.
+fn create_ruleset(scope_signals: bool) -> Result<Option<(i32, u64, bool)>> {
+    let abi = match landlock_abi()? {
         None => return Ok(None),
-        Some(abi) if abi >= 2 => ABI_V1_ALL_ACCESS | ACCESS_FS_REFER,
-        Some(_) => ABI_V1_ALL_ACCESS,
+        Some(abi) => abi,
     };
-    let attr = LandlockRulesetAttr {
-        handled_access_fs: handled,
+    let handled = if abi >= 2 {
+        ABI_V1_ALL_ACCESS | ACCESS_FS_REFER
+    } else {
+        ABI_V1_ALL_ACCESS
     };
-    // SAFETY: `attr` is a valid, correctly-sized struct for the ABI v1
-    // request its size encodes; `landlock_create_ruleset` reads it once
-    // and takes no other pointer argument.
-    let fd = unsafe {
-        c::syscall(
-            c::SYS_landlock_create_ruleset,
-            &attr as *const LandlockRulesetAttr,
-            std::mem::size_of::<LandlockRulesetAttr>(),
-            0u32,
-        )
+    let scoped = scope_signals && abi >= 6;
+    let fd = if scoped {
+        let attr = LandlockScopedRulesetAttr {
+            handled_access_fs: handled,
+            handled_access_net: 0,
+            scoped: LANDLOCK_SCOPE_SIGNAL,
+        };
+        // SAFETY: `attr` is a valid, correctly-sized struct for the ABI v6
+        // request its size encodes; the kernel reads it once.
+        unsafe {
+            c::syscall(
+                c::SYS_landlock_create_ruleset,
+                &attr as *const LandlockScopedRulesetAttr,
+                std::mem::size_of::<LandlockScopedRulesetAttr>(),
+                0u32,
+            )
+        }
+    } else {
+        let attr = LandlockRulesetAttr {
+            handled_access_fs: handled,
+        };
+        // SAFETY: `attr` is a valid, correctly-sized struct for the ABI v1
+        // request its size encodes; `landlock_create_ruleset` reads it once
+        // and takes no other pointer argument.
+        unsafe {
+            c::syscall(
+                c::SYS_landlock_create_ruleset,
+                &attr as *const LandlockRulesetAttr,
+                std::mem::size_of::<LandlockRulesetAttr>(),
+                0u32,
+            )
+        }
     };
     if fd < 0 {
         let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
@@ -241,7 +280,7 @@ fn create_ruleset() -> Result<Option<(i32, u64)>> {
         }
         return Err(errno_err("landlock_create_ruleset", code));
     }
-    Ok(Some((fd as i32, handled)))
+    Ok(Some((fd as i32, handled, scoped)))
 }
 
 fn add_rule(ruleset_fd: i32, path: &Path, allowed_access: u64) -> Result<()> {
@@ -285,9 +324,21 @@ pub fn confine_filesystem(
     readable_roots: &[&Path],
     writable_roots: &[&Path],
 ) -> Result<SandboxStatus> {
-    let (ruleset_fd, handled) = match create_ruleset()? {
+    confine(readable_roots, writable_roots, false).map(|(fs, _)| fs)
+}
+
+/// [`confine_filesystem`], and with `scope_signals` also refuse signals to
+/// processes outside the new domain (Landlock ABI v6, Linux 6.12). Returns
+/// the filesystem status and the signal status; the latter is `NotEnforced`
+/// on an older kernel, or when not asked for.
+pub fn confine(
+    readable_roots: &[&Path],
+    writable_roots: &[&Path],
+    scope_signals: bool,
+) -> Result<(SandboxStatus, SandboxStatus)> {
+    let (ruleset_fd, handled, scoped) = match create_ruleset(scope_signals)? {
         Some(ruleset) => ruleset,
-        None => return Ok(SandboxStatus::NotEnforced),
+        None => return Ok((SandboxStatus::NotEnforced, SandboxStatus::NotEnforced)),
     };
 
     let result = (|| -> Result<()> {
@@ -316,7 +367,12 @@ pub fn confine_filesystem(
     // is safe and matches nexus's own cleanup.
     unsafe { c::close(ruleset_fd) };
     result?;
-    Ok(SandboxStatus::Enforced)
+    let signals = if scoped {
+        SandboxStatus::Enforced
+    } else {
+        SandboxStatus::NotEnforced
+    };
+    Ok((SandboxStatus::Enforced, signals))
 }
 
 // --- seccomp-BPF network-socket confinement -------------------------------
