@@ -13,7 +13,7 @@ const SCRATCH: &str = r#"{
         {"call": "input", "args": {"data": "cd ${HOME} && echo ${name}\r"}}
       ]
     },
-    {"name": "new-session", "run": [{"call": "create-session"}]}
+    {"name": "new-session", "args": ["name"], "run": [{"call": "create-session", "args": {"name": "${name}"}}]}
   ],
   "binds": [
     {"keys": "ctrl+b>c", "action": "scratch", "args": {"name": "new"}},
@@ -134,6 +134,7 @@ fn every_problem_is_reported_with_where_it_is() {
         "actions[2].run[0].args.history: expected a string or a non-negative integer",
         "actions[2].run[0].args.block: `${y}` is not an argument of this action",
         "actions[2].run[0].args.lines: `terminal.format` has no parameter `lines`",
+        "actions[2].run[0]: `terminal.format` needs parameter `history`",
         "actions[3].run[0]: unknown key `extra`",
         "actions[3]: action `ok` is defined twice",
         "actions[4]: missing `run`",
@@ -185,4 +186,42 @@ fn key_sequences_and_names_have_a_grammar() {
         assert!(!parse::is_key_sequence_for_tests(bad), "{bad:?}");
     }
     assert!(is_arg_name("block-id") && is_arg_name("n2") && !is_arg_name("2n") && !is_arg_name(""));
+}
+
+#[test]
+fn values_must_suit_the_catalog_as_ctl_would_check_them() {
+    let text = r#"{
+      "actions": [
+        {"name": "bad", "run": [
+          {"call": "create-session"},
+          {"call": "input"},
+          {"call": "resize", "args": {"cols": 0, "rows": "wide"}},
+          {"call": "resize", "args": {"cols": 65536, "rows": 24}}
+        ]},
+        {"name": "size", "args": ["cols"], "run": [
+          {"call": "resize", "args": {"block": "1/2/3", "cols": "${cols}", "rows": 24}},
+          {"call": "create-window", "args": {"name": "${HOME}"}}
+        ]}
+      ],
+      "binds": [
+        {"keys": "a", "action": "size", "args": {"cols": "0"}},
+        {"keys": "b", "action": "size", "args": {"cols": "120"}},
+        {"keys": "c", "action": "resize", "args": {"cols": "80", "rows": "x"}},
+        {"keys": "d", "action": "create-session"},
+        {"keys": "e", "action": "create-window", "args": {"name": "w"}}
+      ]
+    }"#;
+    assert_eq!(
+        problems(text),
+        [
+            "actions[0].run[0]: `create-session` needs parameter `name`",
+            "actions[0].run[1]: `input` needs parameter `data`",
+            "actions[0].run[2].args.cols: `cols`: `0` is not a valid cell count",
+            "actions[0].run[2].args.rows: `rows`: `wide` is not a valid cell count",
+            "actions[0].run[3].args.cols: `cols`: `65536` is not a valid cell count",
+            "binds[0]: `cols`: `0` is not a valid cell count",
+            "binds[2]: `rows`: `x` is not a valid cell count",
+            "binds[3]: `create-session` needs parameter `name`",
+        ]
+    );
 }

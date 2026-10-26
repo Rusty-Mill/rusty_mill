@@ -1,7 +1,7 @@
 //! Reading a config's JSON and checking it against the catalog.
 
 use rusty_json::{Map, Value};
-use rusty_mux_proto::schema::{self, Method};
+use rusty_mux_proto::schema::{self, Method, Param, Ty};
 
 use crate::{Action, Bind, Call, Config, Problem, is_arg_name, placeholders};
 
@@ -14,9 +14,12 @@ use crate::{Action, Bind, Call, Config, Problem, is_arg_name, placeholders};
 /// - a request is `{"call": METHOD, "args"?: {PARAM: VALUE}}`, each value a
 ///   string or a non-negative integer; a string's `${arg}` must name a
 ///   declared argument (other `${...}`, such as `${HOME}`, is left alone);
+///   every parameter but an id is required, since an id can come from the
+///   environment, and a value without a placeholder must suit its type;
 /// - a binding is `{"keys", "action", "args"?}`: chords joined by `>`, each
 ///   keys joined by `+` (`ctrl+b>c`), and an action given all its
-///   arguments, or a catalog method given known parameters.
+///   arguments, which then make valid values, or a catalog method given its
+///   parameters as a request would be.
 ///
 /// Unknown keys are problems, so a typo is not silently ignored.
 pub fn parse(text: &str) -> Result<Config, Vec<Problem>> {
@@ -149,14 +152,22 @@ impl Check {
                 self.problem(&at, format!("`{}` has no parameter `{key}`", method.name));
                 continue;
             };
-            for unknown in placeholders(&value).filter(|p| !args.iter().any(|a| a == p)) {
+            let unknown: Vec<&str> = placeholders(&value)
+                .filter(|p| !args.iter().any(|a| a == p))
+                .collect();
+            for name in &unknown {
                 self.problem(
                     &at,
-                    format!("`${{{unknown}}}` is not an argument of this action"),
+                    format!("`${{{name}}}` is not an argument of this action"),
                 );
             }
-            params.push((param, value));
+            // A placeholder's value is checked once a binding or `do` gives it.
+            if placeholders(&value).next().is_none() {
+                self.value(&at, param, &value);
+            }
+            params.push((param.name, value));
         }
+        self.required(at, method, params.iter().map(|(name, _)| *name));
         Some(Call {
             method: method.name,
             params,
@@ -190,11 +201,18 @@ impl Check {
                 {
                     self.problem(at, format!("`{name}` has no argument `{unknown}`"));
                 }
+                if let Ok(calls) = action.expand(&args) {
+                    self.bound_values(at, action, &calls);
+                }
             }
             (Some(method), _) => {
-                for unknown in names.iter().filter(|n| param(method, n).is_none()) {
-                    self.problem(at, format!("`{name}` has no parameter `{unknown}`"));
+                for (key, value) in &args {
+                    match param(method, key) {
+                        Some(param) => self.value(at, param, value),
+                        None => self.problem(at, format!("`{name}` has no parameter `{key}`")),
+                    }
                 }
+                self.required(at, method, names.iter().copied());
             }
             (None, None) => self.problem(at, format!("unknown action `{name}`")),
         }
@@ -203,6 +221,54 @@ impl Check {
             action: name.to_owned(),
             args,
         })
+    }
+
+    /// A problem if `text` cannot be a value of `param`, as `rusty-mux-ctl`
+    /// would refuse it. An id may be a name or other target, which only
+    /// the server resolves.
+    fn value(&mut self, at: &str, param: &Param, text: &str) {
+        let refused = match param.ty {
+            Ty::Id(_) if !text.is_empty() => None,
+            ty => ty.parse(text).err(),
+        };
+        if let Some(error) = refused {
+            self.problem(at, format!("`{}`: {error}", param.name));
+        }
+    }
+
+    /// A problem for each parameter of `method` that is not `given`, but
+    /// for ids, which may come from the environment.
+    fn required<'n>(&mut self, at: &str, method: &Method, given: impl Iterator<Item = &'n str>) {
+        let given: Vec<&str> = given.collect();
+        for missing in method
+            .params
+            .iter()
+            .filter(|p| !matches!(p.ty, Ty::Id(_)) && !given.contains(&p.name))
+        {
+            self.problem(
+                at,
+                format!("`{}` needs parameter `{}`", method.name, missing.name),
+            );
+        }
+    }
+
+    /// Checks the values that `action`, expanded by a binding into
+    /// `calls`, takes from its placeholders; the action checked the rest.
+    fn bound_values(&mut self, at: &str, action: &Action, calls: &[Call]) {
+        for (template, call) in action.run.iter().zip(calls) {
+            let Some(method) = schema::method(call.method) else {
+                continue;
+            };
+            let filled = template.params.iter().zip(&call.params);
+            for ((name, template), (_, value)) in filled {
+                if placeholders(template).next().is_none() {
+                    continue;
+                }
+                if let Some(param) = param(method, name) {
+                    self.value(at, param, value);
+                }
+            }
+        }
     }
 
     /// An `args` object's entries as text; a missing object is empty.
@@ -268,12 +334,8 @@ impl Check {
     }
 }
 
-fn param(method: &Method, name: &str) -> Option<&'static str> {
-    method
-        .params
-        .iter()
-        .find(|p| p.name == name)
-        .map(|p| p.name)
+fn param(method: &'static Method, name: &str) -> Option<&'static Param> {
+    method.params.iter().find(|p| p.name == name)
 }
 
 /// A string as itself, a non-negative integer in decimal.
