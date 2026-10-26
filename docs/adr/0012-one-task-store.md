@@ -44,7 +44,8 @@ the in-memory adapter stays for tests.
 No field is added to rusty_tick's `Task`, so rusty_tick needs no data
 migration. Everything the transition rules read (column, claim, project) is
 on the task itself, so one `If-Match` write covers it, the same
-compare-and-swap the board has today.
+compare-and-swap the board has today. What does not fit on the task lives in
+one `board` document per task, with its own compare-and-swap (below).
 
 | Mill Board `Card` | rusty_tick | Notes |
 | --- | --- | --- |
@@ -57,7 +58,7 @@ compare-and-swap the board has today.
 | `tags` | `tags` | `agent`, `board:` and `claim:` are reserved; `card_update` refuses them |
 | `project` | `listId` | one tick list per project, named like it. A task in any other list is in the repository's own project |
 | `comments` | tick `comment` docs | existing shape `{v, taskId, text, createdMs}` plus `by`, so the tick UI shows who wrote it |
-| `issue`, `synced_text`, `execution` | tick `board` doc, one per task | written only by the board |
+| `issue`, `synced_text`, `execution` | tick `board` doc, id = task id | written with its own `If-Match` (below) |
 | `created_ms`, `updated_ms` | same | |
 | *(new)* order | `priority`, then `sortOrder` | see 4 |
 | *(new)* `deps` | `board` doc | see 4 |
@@ -67,10 +68,36 @@ owner's switch: tag a task `agent` in rusty_tick (phone, web, MCP) and it
 appears in Backlog; untag it and it leaves the board. `board:` and `claim:`
 tags are the board's state and are written by it.
 
-### 3. rusty_tick changes: two, both small
+**The `board` document's compare-and-swap.** `bind_execution` and
+`recover_execution` are compare-and-sets today: the first refuses a second
+logical execution, the second refuses a stale generation, and both rely on the
+card's revision. They change only `execution`, never the column or claim, so
+under `TickStore` each one is a single write to the `board` document, made the
+same way a task write is:
+
+1. `GET /docs/board/{task id}` returns the document and its ETag (absent:
+   none).
+2. The domain function runs on the card assembled from the task and that
+   document, exactly as now.
+3. `PUT /docs/board/{task id}` with `If-Match: <etag>`, or
+   `If-None-Match: *` when there was no document. A 412 is the board's
+   `Conflict`, and the caller retries from 1 as it does today.
+
+A document is one engine record, so a crash leaves the old document or the new
+one, never half of either, and two boards (or a board and a stray client)
+cannot both bind. `issue`, `synced_text` and `deps` are written the same way.
+No board write changes both the task and the document, so no write needs the
+two to commit together.
+
+### 3. rusty_tick changes: three, all small
 
 1. A `board` document kind (`docs.rs` `KINDS` and the web `DocKind`).
-2. Comments render an optional `by` (`features/tasks/detail/Comments.tsx`).
+   Purging a task deletes its `board` document, as it already deletes its
+   comments (`Service::purge_task`).
+2. Document writes take `If-Match`/`If-None-Match: *` and reads return an
+   ETag, as task writes already do. The ETag is the document's `updated_ms`,
+   kept strictly increasing per document, so `Doc` needs no new field.
+3. Comments render an optional `by` (`features/tasks/detail/Comments.tsx`).
 
 No new route, no `Task` field, no schema bump.
 
@@ -127,8 +154,11 @@ and writes rusty_tick through its API:
 | `tags` | tags |
 | `order` | `sortOrder` |
 | `deps` (card numbers) | `board` doc `deps` (task UUIDs), in a second pass once every card has an id |
-| `n` | `board` doc `legacyN`, and a last line in the notes: `Migrated from Mill Board card #n` |
-| *(all)* | tag `agent`, list `rusty_mill` |
+| `n` | last line of the notes: `Migrated from Mill Board card #n` |
+| *(all)* | tags `agent` and `migrated:mill-board`, list `rusty_mill` |
+
+The marker (the tag plus the notes line) travels in the same create request as
+the task, so a task never exists without it.
 
 Steps:
 
@@ -136,15 +166,23 @@ Steps:
    changed).
 2. Dry run: print the 58 tasks the script would create and the deps it
    resolved. The owner checks it.
-3. Run it. It is idempotent: a card whose `legacyN` already has a `board` doc
-   is skipped, so a run interrupted halfway is finished by running it again.
+3. Run it. Each run first rebuilds the map from card number to task id from
+   rusty_tick itself: every task tagged `migrated:mill-board`, trash
+   included, keyed by its notes line. Pass one creates only the cards missing
+   from that map. Pass two writes each task's `board` document with its full
+   `deps`, which is the same write however often it runs. A crash at any point
+   leaves either a marked task or none, so running again finishes the job
+   without a duplicate. Two marked tasks for one card number stop the script
+   before it writes anything.
 4. Mark the artifact read-only (a banner pointing at rusty_tick). From here,
    rusty_tick is the only place to edit.
 
 **Rollback:** the artifact is never written by the migration, so it is still
-whole. Delete the migrated tasks (every task with a `board` doc carrying
-`legacyN`, `DELETE /tasks/{id}?purge=true`), remove the banner, and the
-artifact is the board again. A deployed crate board `--store`, if any, is
+whole. Purge every task tagged `migrated:mill-board`, trash included
+(`DELETE /tasks/{id}?permanent=true`; with change 3.1 that also removes its
+`board` document and comments), remove the banner, and the artifact is the
+board again. Nothing marks a card as migrated outside its task, so a later
+migration starts clean. A deployed crate board `--store`, if any, is
 exported with `board_list` and imported the same way; its store file is kept
 until the tick-backed board has run.
 
@@ -163,9 +201,9 @@ until the tick-backed board has run.
   through the board, which still checks.
 - **The board needs rusty_tick up.** If it is down, the board's `/health`
   reports 503 and writes fail; nothing is lost.
-- **Comment author** is shown in rusty_tick only after change 3.2.
+- **Comment author** is shown in rusty_tick only after change 3.3.
 - rusty_tick's tag budget (20) holds: `agent`, `board:`, `claim:`, `kind:`,
-  `track:` leave 15.
+  `track:` and, on migrated tasks, `migrated:mill-board` leave 14.
 
 ## Alternatives considered
 
@@ -176,12 +214,16 @@ until the tick-backed board has run.
 - **Add board fields to `Task`** (column, claim, deps, prompt). One write for
   everything, but a `Task` schema bump and data migration in rusty_tick for
   fields only the board reads. Tags and one document kind cover them.
+- **Client-chosen task ids** (a UUIDv5 of the card number) would make the
+  migration idempotent by construction, but change rusty_tick's create API
+  for a one-shot import. The marker tag gives the same guarantee.
 - **Keep the board's store and sync it with rusty_tick.** Two copies and a
   reconcile loop: the drift this decision exists to remove.
 
 ## Implementation, in order, each its own PR
 
-1. rusty_tick: `board` doc kind; comment `by`.
+1. rusty_tick: `board` doc kind (purged with its task), document
+   `If-Match`, comment `by`.
 2. rusty_mill_board: `priority` and `deps` on the card, `card_take` order and
    dep skip, reserved tags (works on the memory store, tested there).
 3. rusty_mill_board: `TickStore` adapter, `--tick-url`, in-process events.
