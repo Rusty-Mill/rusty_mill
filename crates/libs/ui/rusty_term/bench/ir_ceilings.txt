@@ -35,10 +35,10 @@
 # to 16 positional parameters without allocating), measured: alt 69.9, ascii 41.8, cursor 54.6, scroll
 # 112.3, sgr 80.4, unicode 101.9. alt, cursor and sgr move.
 # 8-byte cells over an interned style table, measured: alt 49.7, ascii
-# 34.5, cursor 57.5, scroll 100.4, sgr 85.9, unicode 106.0. Ceilings unchanged.
-alt_screen_flicker    77
-ascii_throughput      45
+# 34.5, cursor 57.5, scroll 100.4, sgr 85.9, unicode 106.0. alt, ascii and scroll ratchet down.
+alt_screen_flicker    55
+ascii_throughput      38
 cursor_thrash         60
-scroll_heavy         123
+scroll_heavy         111
 sgr_churn             88
 unicode_heavy        112
