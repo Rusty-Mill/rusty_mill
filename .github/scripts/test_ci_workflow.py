@@ -262,6 +262,10 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("Cargo.lock changed with a manifest", self.workflow)
         self.assertIn("Unable to establish Cargo.lock impact", self.workflow)
 
+    def test_lanes_spanning_most_components_fall_back_to_the_full_sweep(self) -> None:
+        self.assertIn('--packages "$packages" --full-if-most)" || components_status=$?', self.workflow)
+        self.assertIn('emit_full "Affected crates span most of the workspace\'s components"', self.workflow)
+
     def test_member_dependency_edits_keep_the_full_sweep(self) -> None:
         # Feature unification can reach crates that never depend on the edited member.
         self.assertIn("cargo_toml_diff.py --members /tmp/metadata.json \"$base\"", self.workflow)
