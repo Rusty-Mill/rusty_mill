@@ -6,7 +6,10 @@ full version they declare (`1.74` is `1.74.0`), each version's rustc is installe
 every member is `cargo check`ed on its own (default features, `--locked`) with cargo from
 the pinned toolchain and `RUSTC` set to that rustc. One invocation per member keeps one
 member's features from being unified into another's: a no_std default is checked as
-declared, not with a sibling's `std`. Cargo itself refuses a package whose `rust-version`
+declared, not with a sibling's `std`. A member with features beyond `default` is checked a
+second time with `--all-features`, since an optional feature can need a newer rustc than its
+defaults do; `--all-features-exclude` leaves out members whose declared floor deliberately
+covers only their default build. Cargo itself refuses a package whose `rust-version`
 exceeds that rustc, so a dependency above the floor fails too. Cargo from the pinned
 toolchain is used on purpose: a cargo older than 1.85 cannot read this workspace's
 edition-2024 manifests. Versions at or above `--skip-from` (the pinned toolchain) are
@@ -18,7 +21,7 @@ and the `--warn=`/`--allow=`/`--deny=`/`--forbid=` flags cargo derives from a de
 `[lints]` table (an unknown lint name on the command line is a hard error in old rustc).
 
 Usage: check_msrv_compile.py METADATA.json [--packages "a b"] [--exclude "c d"]
-       [--skip-from 1.98.1] [--print-plan]
+       [--all-features-exclude "e f"] [--skip-from 1.98.1] [--print-plan]
 """
 import argparse
 import json
@@ -85,9 +88,34 @@ def msrv_groups(
     return {version: sorted(names) for version, names in sorted(groups.items())}
 
 
-def check_commands(names: list[str], target_dir: str) -> list[list[str]]:
-    """One `cargo check` argv per member, all sharing `target_dir`, so features never unify across members."""
-    return [["cargo", "check", "--locked", "--keep-going", "--target-dir", target_dir, "-p", name] for name in names]
+def featured_members(metadata: dict) -> frozenset[str]:
+    """Workspace members that declare a feature other than `default` (optional dependencies count)."""
+    members = set(metadata["workspace_members"])
+    return frozenset(
+        pkg["name"]
+        for pkg in metadata["packages"]
+        if pkg["id"] in members and any(f != "default" for f in pkg.get("features", {}))
+    )
+
+
+def check_commands(names: list[str], target_dir: str, all_features: frozenset[str] = frozenset()) -> list[list[str]]:
+    """One `cargo check` argv per member, all sharing `target_dir`, so features never unify across members.
+
+    A member in `all_features` gets a second argv, with `--all-features`, right after its first.
+    """
+    commands = []
+    for name in names:
+        argv = ["cargo", "check", "--locked", "--keep-going", "--target-dir", target_dir, "-p", name]
+        commands.append(argv)
+        if name in all_features:
+            commands.append([*argv, "--all-features"])
+    return commands
+
+
+def describe(argv: list[str]) -> str:
+    """The member an argv checks, marked when it checks all features."""
+    name = argv[argv.index("-p") + 1]
+    return f"{name} (--all-features)" if "--all-features" in argv else name
 
 
 def run(argv: list[str], env: dict[str, str] | None = None) -> int:
@@ -105,8 +133,10 @@ def rustc_env(rustc: str, work_dir: Path) -> dict[str, str]:
     return {"RUSTC": rustc, "RUSTC_WRAPPER": str(wrapper.resolve())}
 
 
-def check_version(version: Version, names: list[str], target_base: str) -> list[str]:
-    """Install exactly `version`'s rustc and check each member; return the members that fail."""
+def check_version(
+    version: Version, names: list[str], target_base: str, all_features: frozenset[str] = frozenset()
+) -> list[str]:
+    """Install exactly `version`'s rustc and check each member; return the checks that fail."""
     text = format_version(version)
     if run(["rustup", "toolchain", "install", text, "--profile", "minimal", "--no-self-update"]) != 0:
         return list(names)
@@ -116,7 +146,8 @@ def check_version(version: Version, names: list[str], target_base: str) -> list[
     env = {**os.environ, **rustc_env(rustc, Path(target_base))}
     target_dir = f"{target_base}/{text}"
     try:
-        return [name for name, argv in zip(names, check_commands(names, target_dir)) if run(argv, env) != 0]
+        commands = check_commands(names, target_dir, all_features)
+        return [describe(argv) for argv in commands if run(argv, env) != 0]
     finally:
         # One version's build output is useless to the next and a runner's disk is finite.
         shutil.rmtree(target_dir, ignore_errors=True)
@@ -127,22 +158,29 @@ def main() -> None:
     parser.add_argument("metadata", type=Path)
     parser.add_argument("--packages", help="space-separated package names to consider (default: all)")
     parser.add_argument("--exclude", default="", help="space-separated package names to leave out")
+    parser.add_argument(
+        "--all-features-exclude", default="", help="space-separated package names to check with default features only"
+    )
     parser.add_argument("--skip-from", default=None, help="skip versions at or above this one (e.g. 1.98.1)")
     parser.add_argument("--target-base", default="target/msrv")
     parser.add_argument("--print-plan", action="store_true", help="print the groups and exit")
     args = parser.parse_args()
 
+    metadata = json.loads(args.metadata.read_text())
     groups = msrv_groups(
-        json.loads(args.metadata.read_text()),
+        metadata,
         only=set(args.packages.split()) if args.packages is not None else None,
         exclude=frozenset(args.exclude.split()),
         skip_from=parse_version(args.skip_from) if args.skip_from else None,
     )
+    all_features = featured_members(metadata) - frozenset(args.all_features_exclude.split())
     for version, names in groups.items():
-        print(f"{format_version(version)}: {len(names)} crates")
+        print(f"{format_version(version)}: {len(names)} crates, {len(all_features.intersection(names))} also with --all-features")
     if args.print_plan:
         return
-    failed = {v: bad for v, names in groups.items() if (bad := check_version(v, names, args.target_base))}
+    failed = {
+        v: bad for v, names in groups.items() if (bad := check_version(v, names, args.target_base, all_features))
+    }
     if failed:
         print("Did not build at the declared rust-version:", file=sys.stderr)
         for version, names in failed.items():

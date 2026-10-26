@@ -3,8 +3,8 @@
 //!
 //! These drive the wire contract a client actually depends on: the challenge
 //! headers, the discovery document, and which tokens get in. The MCP server
-//! behind the layer is the real one (`rusty_mcp_server` through
-//! `rusty_mcp_axum`), mounted the way a gateway mounts it.
+//! behind the layer is the real one (`rusty_mcp_server` through the adapter in
+//! `support::mcp`), mounted the way a gateway mounts it.
 
 mod support;
 

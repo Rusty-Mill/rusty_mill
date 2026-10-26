@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use client_common::*;
-use futures_util::StreamExt;
+use rusty_stream::{Compat, StreamExt};
 use rusty_tonic::client::{Channel, ChannelOptions, Request};
 use rusty_tonic::Code;
 use tonic::body::Body;
@@ -36,7 +36,7 @@ impl NamedService for Svc {
 }
 
 type Reply<T> = Pin<Box<dyn Future<Output = Result<tonic::Response<T>, tonic::Status>> + Send>>;
-type Out = Pin<Box<dyn futures_util::Stream<Item = Result<PBlob, tonic::Status>> + Send>>;
+type Out = Pin<Box<dyn futures_core::Stream<Item = Result<PBlob, tonic::Status>> + Send>>;
 
 struct UnaryM;
 impl UnaryService<PBlob> for UnaryM {
@@ -73,7 +73,7 @@ impl ServerStreamingService<PBlob> for ServerStreamM {
                     n: i,
                 })
             });
-            let out: Out = Box::pin(futures_util::stream::iter(items));
+            let out: Out = Box::pin(Compat::new(rusty_stream::stream::iter(items)));
             Ok(tonic::Response::new(out))
         })
     }
@@ -105,12 +105,12 @@ impl StreamingService<PBlob> for BidiM {
     type Future = Reply<Out>;
     fn call(&mut self, r: tonic::Request<tonic::Streaming<PBlob>>) -> Self::Future {
         Box::pin(async move {
-            let out: Out = Box::pin(r.into_inner().map(|b| {
+            let out: Out = Box::pin(Compat::new(Compat::new(r.into_inner()).map(|b| {
                 b.map(|mut b| {
                     b.n += 100;
                     b
                 })
-            }));
+            })));
             Ok(tonic::Response::new(out))
         })
     }

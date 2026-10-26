@@ -75,13 +75,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn non_mcp_tools_pass() {
         let p = McpPolicy::allow_servers(vec![]);
         assert!(p.before_tool("read_file", &json!({})).await.is_ok());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn server_allowlist_gates() {
         let p = McpPolicy::allow_servers(vec!["filesystem".into()]);
         assert!(p
@@ -91,7 +91,7 @@ mod tests {
         assert!(p.before_tool("mcp__other__do", &json!({})).await.is_err());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn tool_blocklist_gates() {
         let p = McpPolicy::allow_all().block_tools(vec!["mcp__fs__rm".into()]);
         assert!(p.before_tool("mcp__fs__rm", &json!({})).await.is_err());

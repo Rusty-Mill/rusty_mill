@@ -23,6 +23,11 @@ struct RecordedSpan {
     exits: u32,
 }
 
+thread_local! {
+    /// The spans this thread is inside, innermost last.
+    static ENTERED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 #[derive(Default)]
 struct Recorder {
     next_id: AtomicU64,
@@ -39,6 +44,18 @@ impl Recorder {
                 s.target == target && s.fields.get("kind").map(String::as_str) == Some(kind)
             })
             .count()
+    }
+
+    /// The `kind` field of the span a [`DropProbe`] was dropped in.
+    fn kind_of(&self, dropped_in: &Mutex<Option<Option<u64>>>) -> Option<String> {
+        let id = dropped_in.lock().unwrap().expect("probe dropped")?;
+        self.spans
+            .lock()
+            .unwrap()
+            .get(&id)?
+            .fields
+            .get("kind")
+            .cloned()
     }
 
     fn only_matching(&self, target: &str, kind: &str) -> RecordedSpan {
@@ -104,12 +121,14 @@ impl Subscriber for Recorder {
     fn event(&self, _event: &Event<'_>) {}
 
     fn enter(&self, span: &Id) {
+        ENTERED.with(|stack| stack.borrow_mut().push(span.into_u64()));
         if let Some(recorded) = self.spans.lock().unwrap().get_mut(&span.into_u64()) {
             recorded.enters += 1;
         }
     }
 
     fn exit(&self, span: &Id) {
+        ENTERED.with(|stack| stack.borrow_mut().pop());
         if let Some(recorded) = self.spans.lock().unwrap().get_mut(&span.into_u64()) {
             recorded.exits += 1;
         }
@@ -201,4 +220,53 @@ fn console_subscriber_shaped_instrumentation() {
     assert_eq!(blocking.name, "runtime.spawn");
     assert!(blocking.enters >= 1);
     assert_eq!(blocking.enters, blocking.exits);
+
+    // A task aborted before its first poll still drops its future inside
+    // its own task span, on a current-thread runtime and in a `LocalSet`.
+    let current = rusty_tokio::Builder::new_current_thread().build().unwrap();
+    let dropped_in = DropProbe::slot();
+    let probe = DropProbe(dropped_in.clone());
+    current.block_on(async move {
+        let handle = rusty_tokio::spawn(probe);
+        handle.abort();
+        assert!(handle.await.unwrap_err().is_cancelled());
+    });
+    drop(current);
+    assert_eq!(recorder.kind_of(&dropped_in).as_deref(), Some("task"));
+
+    let dropped_in = DropProbe::slot();
+    let probe = DropProbe(dropped_in.clone());
+    let local = LocalSet::new();
+    local.run_until(async move {
+        let handle = task::spawn_local(probe);
+        handle.abort();
+        assert!(handle.await.unwrap_err().is_cancelled());
+    });
+    drop(local);
+    assert_eq!(recorder.kind_of(&dropped_in).as_deref(), Some("task"));
+}
+
+/// A future that must never be polled, recording the span current when it
+/// is dropped.
+struct DropProbe(Arc<Mutex<Option<Option<u64>>>>);
+
+impl DropProbe {
+    fn slot() -> Arc<Mutex<Option<Option<u64>>>> {
+        Arc::default()
+    }
+}
+
+impl std::future::Future for DropProbe {
+    type Output = ();
+
+    fn poll(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        panic!("aborted before its first poll");
+    }
+}
+
+impl Drop for DropProbe {
+    fn drop(&mut self) {
+        let current = ENTERED.with(|stack| stack.borrow().last().copied());
+        *self.0.lock().unwrap() = Some(current);
+    }
 }
