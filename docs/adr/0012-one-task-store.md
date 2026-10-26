@@ -101,7 +101,10 @@ what the board reads next. There is no sync loop and no second copy.
 - **Format:** `tick:<task uuid>`, written in a memory's content. remind-me's
   reference detector (`remind_me_core/src/extract.rs`) learns one rule that
   stores it as a `memory_references` row of a new kind `task` with the UUID as
-  value. `remind_me_references` then answers "everything about this task".
+  value. The rule matches only a whole token that is `tick:` followed by a
+  UUID, so a list reference (`tick:list:<list uuid>`, defined by remind-me's
+  ADR-0027) is never filed as a task link. `remind_me_references` then
+  answers "everything about this task".
 - **When:** a decision or rationale about a task is saved with
   `remind_me_add`, and a session that worked a card ends with an
   `auto_capture` naming the card's `tick:` id. The task never stores memory
