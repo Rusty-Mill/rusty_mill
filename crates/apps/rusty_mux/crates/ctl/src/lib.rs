@@ -212,19 +212,22 @@ fn run_watch(
         json,
         stop,
     };
-    let result = follow(
-        socket,
+    let needs: Vec<(&str, Features)> = config
+        .rules
+        .iter()
+        .map(|rule| (rule.event, watch::needs(rule.event)))
+        .collect();
+    let how = Follow {
         after,
+        needs: &needs,
         json,
-        env.here.session,
-        stop,
-        out,
-        &mut |seq, event, out| {
-            watcher
-                .event(seq, event, out, &mut *err)
-                .map_err(Failure::from)
-        },
-    );
+        here: env.here.session,
+    };
+    let result = follow(socket, &how, stop, out, &mut |seq, event, out| {
+        watcher
+            .event(seq, event, out, &mut *err)
+            .map_err(Failure::from)
+    });
     finish(result, socket, err)
 }
 
@@ -321,7 +324,7 @@ fn execute(
     match &invocation.command {
         Command::Calls(calls) => session.calls(calls),
         Command::Events { after, follow } => {
-            session.events(*after, *follow, &mut |seq, event, out| {
+            session.events(*after, *follow, &[], &mut |seq, event, out| {
                 writeln!(out, "{}", render::event_line(seq, event, json)).map_err(Failure::from)
             })
         }
@@ -333,14 +336,22 @@ fn execute(
     }
 }
 
-/// Follows the events from `after` on a connection of its own, passing
-/// each to `on_event`.
+/// What [`follow`] follows, and how it prints.
+struct Follow<'a> {
+    after: Option<Cursor>,
+    /// Event kinds the follower needs, each with the feature it takes.
+    needs: &'a [(&'a str, Features)],
+    json: bool,
+    here: Option<Uuid>,
+}
+
+/// Follows the events after `how.after` on a connection of its own,
+/// passing each to `on_event`; fails first unless the server sends every
+/// event kind `how.needs`.
 #[cfg(unix)]
 fn follow(
     socket: &Path,
-    after: Option<Cursor>,
-    json: bool,
-    here: Option<Uuid>,
+    how: &Follow<'_>,
     stop: &Stop,
     out: &mut dyn Write,
     on_event: &mut OnEvent<'_>,
@@ -349,18 +360,16 @@ fn follow(
     let mut session = Session {
         conn: &mut conn,
         out,
-        json,
-        here,
+        json: how.json,
+        here: how.here,
     };
-    session.events(after, true, on_event)
+    session.events(how.after, true, how.needs, on_event)
 }
 
 #[cfg(not(unix))]
 fn follow(
     _: &Path,
-    _: Option<Cursor>,
-    _: bool,
-    _: Option<Uuid>,
+    _: &Follow<'_>,
     _: &Stop,
     _: &mut dyn Write,
     _: &mut OnEvent<'_>,
@@ -542,6 +551,7 @@ impl<S: io::Read + Write> Session<'_, S> {
         &mut self,
         after: Option<Cursor>,
         follow: bool,
+        needs: &[(&str, Features)],
         on_event: &mut OnEvent<'_>,
     ) -> Result<(), Failure> {
         let wanted = Features::EVENT_SEQ
@@ -549,6 +559,11 @@ impl<S: io::Read + Write> Session<'_, S> {
             .union(Features::STATUS)
             .union(Features::TERMINAL_EVENTS);
         let (features, start) = self.hello(wanted, after)?;
+        if let Some((kind, _)) = needs.iter().find(|(_, need)| !features.contains(*need)) {
+            return Err(Failure::Failed(format!(
+                "the server does not send `{kind}` events, which a rule needs"
+            )));
+        }
         let start =
             start.ok_or_else(|| Failure::Failed("the server does not number events".into()))?;
         self.line(&render::cursor_line(start, self.json))?;

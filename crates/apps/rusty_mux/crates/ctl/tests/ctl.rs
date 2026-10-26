@@ -770,3 +770,73 @@ fn watch_needs_rules_and_takes_only_a_cursor() {
     );
     std::fs::remove_file(&none).expect("cleanup");
 }
+
+/// A server that numbers events but offers only `features`: it welcomes
+/// the client with a cursor, then stays silent until it hangs up.
+fn events_server(features: rusty_mux_proto::Features) -> PathBuf {
+    use rusty_mux_core::ClientId;
+    use rusty_mux_proto::{Cursor, Message, decode, encode};
+
+    let path = socket_path("old-events");
+    let listener = StdListener::bind(&path).expect("bind");
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !matches!(decode(&buf), Ok(Some((Message::Hello { .. }, _)))) {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        let welcome = Message::Welcome {
+            features,
+            client: ClientId::from_uuid(rusty_uuid::Uuid::nil()),
+            cursor: Some(Cursor {
+                epoch: rusty_uuid::Uuid::nil(),
+                seq: 0,
+            }),
+        };
+        stream
+            .write_all(&encode(&welcome).expect("encode"))
+            .expect("write");
+        std::thread::sleep(PATIENCE);
+    });
+    path
+}
+
+#[test]
+fn watch_refuses_rules_for_events_the_server_never_sends() {
+    use rusty_mux_proto::Features;
+
+    let old = Features::EVENT_SEQ
+        .union(Features::SYNC)
+        .union(Features::STATUS);
+    let pwd = config_file("needs-pwd", RULES);
+    let refused = with_config(&events_server(old), &pwd, &["watch"]);
+    assert_eq!(refused.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        stderr.contains("does not send `pwd-changed` events"),
+        "{stderr}"
+    );
+
+    // Rules for events every numbering server sends still run.
+    let generic = config_file(
+        "generic",
+        r#"{"on": [{"event": "session-created", "action": "list"}]}"#,
+    );
+    let mut child = ctl_command(&events_server(old), &["watch"])
+        .env("RUSTY_MUX_CONFIG", &generic)
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut lines = BufReader::new(child.stdout.take().expect("stdout")).lines();
+    let first = lines.next().expect("a line").expect("read");
+    assert!(first.starts_with("cursor "), "{first}");
+    child.kill().expect("kill");
+    child.wait().expect("wait");
+    for path in [pwd, generic] {
+        std::fs::remove_file(path).expect("cleanup");
+    }
+}

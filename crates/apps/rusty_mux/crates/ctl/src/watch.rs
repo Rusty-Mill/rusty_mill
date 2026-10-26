@@ -8,6 +8,7 @@
 use std::io::{self, Write};
 
 use rusty_mux_core::Event;
+use rusty_mux_proto::Features;
 use rusty_mux_script::Config;
 
 use crate::{Env, Exit, Stop, config, render, run_until};
@@ -94,6 +95,15 @@ impl Watcher<'_> {
             .chain(chain.iter().cloned())
             .collect();
         run_until(&args, self.env, self.stop, out, err)
+    }
+}
+
+/// The feature a server must have negotiated to send events of `kind`.
+pub(crate) fn needs(kind: &str) -> Features {
+    match kind {
+        "block-status" => Features::STATUS,
+        "pwd-changed" | "title-changed" => Features::TERMINAL_EVENTS,
+        _ => Features::NONE,
     }
 }
 
