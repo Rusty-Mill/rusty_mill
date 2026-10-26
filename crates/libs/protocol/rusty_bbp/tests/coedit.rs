@@ -218,6 +218,34 @@ fn the_plan_gate_binds_one_co_edited_version() {
 }
 
 #[test]
+fn the_plan_gate_refuses_a_version_that_is_not_the_head() {
+    let mut fx = fx();
+    let v1 = seed(&mut fx);
+    let a = line(&fx, v1, "a");
+    let v2 = stored(edit(
+        &mut fx,
+        "planner2",
+        Some(v1),
+        vec![ins(Some(a), &["more"])],
+    ));
+    let gate_on = |v: ArtId| {
+        let mut d = Draft::new(MessageKind::RequestDecision, "Please approve.")
+            .to(Recipient::Human)
+            .refs(vec![Ref::art(v)]);
+        d.gate = true;
+        d
+    };
+    assert_eq!(
+        rejected(fx.post("planner", gate_on(v1))),
+        Code::StaleSubject,
+        "approving v1 would drop v2's line"
+    );
+    assert_eq!(fx.st().state, State::Planning);
+    posted(fx.post("planner", gate_on(v2)));
+    assert_eq!(fx.st().state, State::PlanGate);
+}
+
+#[test]
 fn a_replayed_log_rebuilds_every_version() {
     let mut fx = fx();
     let v1 = seed(&mut fx);
