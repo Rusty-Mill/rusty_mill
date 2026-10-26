@@ -262,6 +262,10 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("Cargo.lock changed with a manifest", self.workflow)
         self.assertIn("Unable to establish Cargo.lock impact", self.workflow)
 
+    def test_lanes_spanning_most_components_fall_back_to_the_full_sweep(self) -> None:
+        self.assertIn('--packages "$packages" --full-if-most)" || components_status=$?', self.workflow)
+        self.assertIn('emit_full "Affected crates span most of the workspace\'s components"', self.workflow)
+
     def test_member_dependency_edits_keep_the_full_sweep(self) -> None:
         # Feature unification can reach crates that never depend on the edited member.
         self.assertIn("cargo_toml_diff.py --members /tmp/metadata.json \"$base\"", self.workflow)
@@ -656,9 +660,18 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn('test "$(sha256sum Cargo.lock)" = "$lock_before"', job)
         self.assertIn('--target-base "$RUNNER_TEMP/msrv"', job)
         # Every crate with features is also checked with all of them; only documented exceptions opt out.
-        self.assertIn('--all-features-exclude "platform-linux rusty_json rusty_tls rusty_rdp rusty_tonic" \\\n', job)
+        self.assertIn('--all-features-exclude "platform-linux platform-windows rusty_json rusty_tls rusty_rdp rusty_tonic" \\\n', job)
         # rusty_axum's default build stays at its declared 1.87; its http2 (all-features) build is held to 1.88.
         self.assertIn('--all-features-floor "rusty_axum=1.88" \\\n', job)
+        # Windows joins on the scheduled and manual sweeps only, minus the crates no Windows leg builds (#845).
+        self.assertIn("runs-on: ${{ matrix.os }}", job)
+        self.assertIn(
+            "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') "
+            "&& needs.plan.outputs.windows == 'true' && '[\"ubuntu-latest\",\"windows-latest\"]' || '[\"ubuntu-latest\"]'",
+            job,
+        )
+        self.assertIn("'rusty_journal rusty_fedora_agent'", job)
+        self.assertIn("shell: bash", job)
         self.assertIn("      - msrv-compile\n", self.workflow.split("  required-gate:\n", 1)[1])
 
     def test_rusty_axum_floors_match_the_manifests(self) -> None:

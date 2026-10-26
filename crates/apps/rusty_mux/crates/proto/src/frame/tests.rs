@@ -4,7 +4,7 @@ use rusty_wire::Writer;
 
 use super::*;
 use crate::field::Out;
-use crate::{Cursor, Features};
+use crate::{Cursor, Entry, Features};
 
 const REQ_ID: u32 = 1;
 
@@ -83,6 +83,51 @@ fn every_message_round_trips() {
         },
         Message::CloseBlock { req: 10, block },
         Message::Sync { req: 14 },
+        Message::Capture {
+            req: 15,
+            block,
+            history: u32::MAX,
+        },
+        Message::List { req: 16 },
+        Message::Text {
+            req: 17,
+            text: "$ ls\n\u{4e2d}".into(),
+        },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Session {
+                session,
+                name: "main".into(),
+            },
+        },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Window {
+                window,
+                session,
+                name: String::new(),
+            },
+        },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Block {
+                block,
+                window,
+                size: size(80, 24),
+                holder: Some(client),
+                title: "vim".into(),
+            },
+        },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Block {
+                block,
+                window,
+                size: size(1, 1),
+                holder: None,
+                title: String::new(),
+            },
+        },
         Message::Welcome {
             features: Features::NONE,
             client,
@@ -491,6 +536,7 @@ fn feature_bits_are_distinct() {
         Features::CHECKPOINT_V3,
         Features::EVENT_SEQ,
         Features::SYNC,
+        Features::INSPECT,
     ];
     let mut seen = 0u64;
     for feature in all {
@@ -498,4 +544,20 @@ fn feature_bits_are_distinct() {
         assert_eq!(seen & feature.bits(), 0, "{feature:?} reuses a bit");
         seen |= feature.bits();
     }
+}
+
+#[test]
+fn an_oversized_history_is_invalid() {
+    let frame = raw_frame(0x0d, |out| {
+        out.varint(REQ_ID, 1)
+            .uuid(4, Uuid::new_v4())
+            .varint(19, u64::from(u32::MAX) + 1);
+    });
+    assert_eq!(
+        decode(&frame),
+        Err(Error::InvalidField {
+            message: 0x0d,
+            field: 19
+        })
+    );
 }

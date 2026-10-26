@@ -1414,26 +1414,33 @@ impl Grid {
         self.touch(y);
     }
 
-    /// The cells of live screen row `y` (`cols` of them); empty past the
-    /// last row.
-    pub fn row(&self, y: usize) -> &[Cell] {
-        self.screen.get(y).map_or(&[], |line| line.cells())
+    /// The cells of live screen row `y` (`cols` of them), collected; empty
+    /// past the last row. Per-frame readers use [`Grid::row_cells`].
+    pub fn row(&self, y: usize) -> Vec<Cell> {
+        self.row_cells(y).collect()
+    }
+
+    /// The cells of live screen row `y`, by value and without allocating;
+    /// empty past the last row. Always the live screen, never the scrolled
+    /// or folded viewport.
+    pub fn row_cells(&self, y: usize) -> impl Iterator<Item = Cell> + '_ {
+        self.screen
+            .get(y)
+            .into_iter()
+            .flat_map(move |line| (0..line.cells().len()).map(move |x| self.line_cell(line, x)))
+    }
+
+    /// The cell at `col` of `line`; a blank past the line's width. Every
+    /// by-value cell read goes through here, so the cell storage can change
+    /// behind it.
+    pub(crate) fn line_cell(&self, line: &Line, col: usize) -> Cell {
+        line.cells().get(col).copied().unwrap_or_else(Cell::blank)
     }
 
     /// Whether live screen row `y` soft-wraps into the next one.
     #[cfg(test)]
     pub(crate) fn row_wrapped(&self, y: usize) -> bool {
         self.screen.get(y).is_some_and(|line| line.wrapped)
-    }
-
-    /// Mutable access to the cells of live screen row `y`; empty past the
-    /// last row. Writes bypass [`Grid::set_cell`]'s wide-glyph repair and do
-    /// not mark the row dirty.
-    pub fn row_mut(&mut self, y: usize) -> &mut [Cell] {
-        match self.screen.get_mut(y) {
-            Some(line) => line.cells_mut(),
-            None => &mut [],
-        }
     }
 
     /// Move the cursor to `(x, y)`, clamping into the grid so a malformed or
@@ -4402,16 +4409,21 @@ impl Grid {
     /// just above a block's output start (the prompt line) as its label.
     #[cfg(any(test, feature = "gui"))]
     pub fn abs_line_text(&self, abs: usize) -> String {
+        self.line_text(abs)
+            .map(|text| text.trim_start().to_string())
+            .unwrap_or_default()
+    }
+
+    /// The text of absolute logical line `abs`, counting from the oldest
+    /// scrollback row through the live screen, with trailing blanks trimmed.
+    /// `None` past the last screen row.
+    pub fn line_text(&self, abs: usize) -> Option<String> {
         let history = self.scrollback.len();
-        let cells = if abs < history {
-            &self.scrollback[abs].cells()
-        } else {
-            match self.screen.get(abs - history) {
-                Some(line) => &line.cells(),
-                None => return String::new(),
-            }
+        let line = match abs.checked_sub(history) {
+            None => self.scrollback.get(abs)?,
+            Some(row) => self.screen.get(row)?,
         };
-        row_text(cells, &self.clusters).trim().to_string()
+        Some(row_text(line.cells(), &self.clusters))
     }
 
     /// Join the cell rows in the absolute line range `[start, cursor line)` into
@@ -5221,8 +5233,7 @@ pub struct DirtyFrame {
 /// Reconstruct a row of cells as text: base glyph plus any interned grapheme
 /// continuation, skipping wide-glyph trailers, with trailing blanks trimmed.
 /// Shared by the MCP screen/scrollback/command readers and the windowed
-/// front-end's command dock labels.
-#[cfg(any(test, feature = "gui", feature = "l13"))]
+/// front-end's command dock labels, and by [`Grid::line_text`].
 pub(crate) fn row_text(cells: &[Cell], clusters: &[String]) -> String {
     let mut s = String::new();
     for cell in cells {

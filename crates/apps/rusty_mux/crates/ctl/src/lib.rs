@@ -21,8 +21,8 @@ mod render;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use rusty_mux_proto::schema::Returns;
-use rusty_mux_proto::{Cursor, Features, Message};
+use rusty_mux_proto::schema::{CATALOG, Method, Returns};
+use rusty_mux_proto::{Cursor, Entry, Features, Message};
 use rusty_uuid::Uuid;
 
 use crate::cli::{Call, Command, Invocation};
@@ -41,6 +41,16 @@ pub enum Exit {
     Unreachable = 3,
     /// The server sent something this client cannot follow.
     Protocol = 4,
+}
+
+/// What a request answered with.
+enum Reply {
+    /// Done, with its new id if any, after the entries of a listing.
+    Done {
+        created: Option<Uuid>,
+        entries: Vec<Entry>,
+    },
+    Text(String),
 }
 
 /// Why a command stopped early.
@@ -164,15 +174,15 @@ impl<S: io::Read + Write> Session<'_, S> {
     }
 
     fn calls(&mut self, calls: &[Call]) -> Result<(), Failure> {
-        // Attach needs a checkpoint format; the screen it sends is ignored.
-        let wanted = Features::CHECKPOINT_V3.union(Features::SYNC);
-        let (features, _) = self.hello(wanted, None)?;
-        // Refuse a chain the server cannot confirm before any of it runs.
-        let needs_sync = calls
+        // Everything any method needs, and sync to confirm unanswered ones.
+        // The screen an attach sends is ignored.
+        let wanted = CATALOG
             .iter()
-            .any(|c| c.method.returns == Returns::Unanswered || c.method.name == "sync");
-        if needs_sync {
-            require_sync(features)?;
+            .fold(Features::SYNC, |all, m| all.union(m.needs));
+        let (features, _) = self.hello(wanted, None)?;
+        // Refuse a chain the server cannot run before any of it runs.
+        for call in calls {
+            require(features, call.method)?;
         }
         let mut reqs = 1..;
         for call in calls {
@@ -183,27 +193,31 @@ impl<S: io::Read + Write> Session<'_, S> {
                 .map_err(|e| Failure::Protocol(e.to_string()))?;
             self.conn.send(&message)?;
             let name = call.method.name;
-            let created = if call.method.returns == Returns::Unanswered {
+            let reply = if call.method.returns == Returns::Unanswered {
                 // Learn the outcome before anything else is sent, so a
                 // refusal stops the chain. Sync's reply follows any Failed.
                 let barrier = reqs.next().unwrap_or(u64::MAX);
                 self.sync(features, barrier)?;
-                self.reply(barrier, req, name)?;
-                None
+                self.reply(barrier, req, name)?
             } else {
                 self.reply(req, req, name)?
             };
-            self.done(name, created)?;
+            self.print(name, reply)?;
         }
         Ok(())
     }
 
-    /// Waits for the reply to `wait`, failing if it or request `call` (the
-    /// method `name`) is refused.
-    fn reply(&mut self, wait: u64, call: u64, name: &str) -> Result<Option<Uuid>, Failure> {
+    /// Waits for the reply to `wait`, collecting its entries, and fails if
+    /// it or request `call` (the method `name`) is refused.
+    fn reply(&mut self, wait: u64, call: u64, name: &str) -> Result<Reply, Failure> {
+        let mut entries = Vec::new();
         loop {
             match self.conn.recv()? {
-                Message::Done { req, created } if req == wait => return Ok(created),
+                Message::Entry { req, entry } if req == wait => entries.push(entry),
+                Message::Done { req, created } if req == wait => {
+                    return Ok(Reply::Done { created, entries });
+                }
+                Message::Text { req, text } if req == wait => return Ok(Reply::Text(text)),
                 Message::Failed { req, reason } if req == wait || req == call => {
                     if self.json {
                         self.line(&render::failed_line(name, &reason))?;
@@ -215,11 +229,19 @@ impl<S: io::Read + Write> Session<'_, S> {
         }
     }
 
-    fn done(&mut self, method: &str, created: Option<Uuid>) -> Result<(), Failure> {
-        match render::done_line(method, created, self.json) {
-            Some(line) => self.line(&line),
-            None => Ok(()),
-        }
+    fn print(&mut self, method: &str, reply: Reply) -> Result<(), Failure> {
+        let lines = match reply {
+            Reply::Text(text) => vec![render::text_line(method, text, self.json)],
+            Reply::Done { created, entries } => {
+                let mut lines: Vec<String> = entries
+                    .iter()
+                    .map(|e| render::entry_line(e, self.json))
+                    .collect();
+                lines.extend(render::done_line(method, created, self.json));
+                lines
+            }
+        };
+        lines.iter().try_for_each(|line| self.line(line))
     }
 
     fn events(&mut self, after: Option<Cursor>, follow: bool) -> Result<(), Failure> {
@@ -260,6 +282,20 @@ impl<S: io::Read + Write> Session<'_, S> {
             }
         }
     }
+}
+
+/// Fails unless the server can run `method` as ctl sends it.
+fn require(features: Features, method: &Method) -> Result<(), Failure> {
+    if method.returns == Returns::Unanswered {
+        require_sync(features)?;
+    }
+    if features.contains(method.needs) {
+        return Ok(());
+    }
+    Err(Failure::Protocol(format!(
+        "the server does not support {}",
+        method.name
+    )))
 }
 
 fn require_sync(features: Features) -> Result<(), Failure> {

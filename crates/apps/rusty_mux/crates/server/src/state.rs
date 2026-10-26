@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use rusty_mux_core::{BlockId, ClientId, Event, Mux, Size};
-use rusty_mux_proto::{Cursor, Features, Message, encode};
+use rusty_mux_proto::{Cursor, Entry, Features, Message, encode};
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::task::JoinHandle;
 use rusty_uuid::Uuid;
@@ -21,13 +21,18 @@ pub(crate) type Shared = Rc<RefCell<State>>;
 /// Bytes read from a PTY per output frame.
 const CHUNK: usize = 16 << 10;
 
+/// The largest reply to `capture` or `list`, in encoded bytes: half a
+/// client's output budget, so a reply alone never gets a client dropped.
+const REPLY_MAX: usize = crate::outbox::BUDGET / 2;
+
 /// Events kept for clients that reconnect.
 const HISTORY: usize = 4096;
 
 /// What the server offers; a client gets the intersection with its own.
 const OFFERED: Features = Features::CHECKPOINT_V3
     .union(Features::EVENT_SEQ)
-    .union(Features::SYNC);
+    .union(Features::SYNC)
+    .union(Features::INSPECT);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -156,6 +161,10 @@ impl State {
                 this.send_snapshot(client, block);
                 None
             }
+            Ok(Outcome::Reply(frames)) => {
+                frames.into_iter().for_each(|f| this.send_frame(client, f));
+                None
+            }
             Ok(Outcome::Write(write)) => Some(write),
             Err(reason) => {
                 this.send(client, &Message::Failed { req, reason });
@@ -192,12 +201,8 @@ impl State {
             }
             M::CreateBlock { req, window, size } => (req, self.create_block(shared, window, size)),
             M::Attach { req, block } => {
-                if !self
-                    .features
-                    .get(&client)
-                    .is_some_and(|f| f.contains(Features::CHECKPOINT_V3))
-                {
-                    return (req, Err("attach requires CHECKPOINT_V3 support".into()));
+                if let Err(reason) = self.require(client, Features::CHECKPOINT_V3, "attach") {
+                    return (req, Err(reason));
                 }
                 if self.clients.get(&client).is_some_and(|out| out.attaching()) {
                     return (req, Err("checkpoint transfer already in progress".into()));
@@ -217,8 +222,97 @@ impl State {
             M::Resize { req, block, size } => (req, self.resize(client, block, size)),
             M::CloseBlock { req, block } => (req, done(self.mux.close_block(block))),
             M::Sync { req } => (req, Ok(Outcome::Done(None))),
+            M::Capture {
+                req,
+                block,
+                history,
+            } => (
+                req,
+                self.require(client, Features::INSPECT, "capture")
+                    .and_then(|()| self.capture(req, block, history)),
+            ),
+            M::List { req } => (
+                req,
+                self.require(client, Features::INSPECT, "list")
+                    .and_then(|()| self.list(req)),
+            ),
             other => (0, Err(format!("not a client request: {other:?}"))),
         }
+    }
+
+    /// Fails unless `client` negotiated `feature`, which `what` needs.
+    fn require(&self, client: ClientId, feature: Features, what: &str) -> Result<(), String> {
+        if self
+            .features
+            .get(&client)
+            .is_some_and(|f| f.contains(feature))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "{what} requires feature bits {:#x}",
+            feature.bits()
+        ))
+    }
+
+    /// The last `history` scrollback lines and the screen, as one Text.
+    fn capture(&self, req: u64, block: BlockId, history: u32) -> Result<Outcome, String> {
+        let rt = self
+            .blocks
+            .get(&block)
+            .ok_or_else(|| rusty_mux_core::Error::UnknownBlock(block).to_string())?;
+        let scrollback = rt.grid.scrollback_len();
+        let from = scrollback.saturating_sub(usize::try_from(history).unwrap_or(usize::MAX));
+        let mut text = String::new();
+        for abs in from..scrollback + rt.grid.rows {
+            if abs > from {
+                text.push('\n');
+            }
+            text.push_str(&rt.grid.line_text(abs).unwrap_or_default());
+            // Stop building early; `reply` checks the exact size.
+            if text.len() > REPLY_MAX {
+                break;
+            }
+        }
+        reply("capture", &[Message::Text { req, text }])
+    }
+
+    /// Every session, window and block, each parent before its children:
+    /// sessions in id order, windows and blocks in creation order.
+    fn list(&self, req: u64) -> Result<Outcome, String> {
+        let mut entries = Vec::new();
+        for session in self.mux.sessions() {
+            entries.push(Entry::Session {
+                session: session.id(),
+                name: session.name().to_owned(),
+            });
+            for window in session.windows().iter().filter_map(|w| self.mux.window(*w)) {
+                entries.push(Entry::Window {
+                    window: window.id(),
+                    session: session.id(),
+                    name: window.name().to_owned(),
+                });
+                for block in window.blocks().iter().filter_map(|b| self.mux.block(*b)) {
+                    entries.push(Entry::Block {
+                        block: block.id(),
+                        window: window.id(),
+                        size: block.size(),
+                        holder: block.lease(),
+                        title: self
+                            .blocks
+                            .get(&block.id())
+                            .map(|rt| rt.grid.title.clone())
+                            .unwrap_or_default(),
+                    });
+                }
+            }
+        }
+        let mut messages: Vec<Message> = entries
+            .into_iter()
+            .map(|entry| Message::Entry { req, entry })
+            .collect();
+        messages.push(Message::Done { req, created: None });
+        reply("list", &messages)
     }
 
     fn create_block(
@@ -420,7 +514,25 @@ fn event_frame(seq: Option<u64>, event: &Event) -> Option<Vec<u8>> {
 enum Outcome {
     Done(Option<Uuid>),
     Attached(BlockId),
+    /// Encoded messages answering the request, in order.
+    Reply(Vec<Vec<u8>>),
     Write(PtyWrite),
+}
+
+/// Encodes the messages answering a `what` request, all or nothing: a reply
+/// over [`REPLY_MAX`] is refused before any of it is sent.
+fn reply(what: &str, messages: &[Message]) -> Result<Outcome, String> {
+    let mut size = 0;
+    let mut frames = Vec::with_capacity(messages.len());
+    for message in messages {
+        let frame = encode(message).map_err(|e| format!("{what}: {e}"))?;
+        size += frame.len();
+        if size > REPLY_MAX {
+            return Err(format!("{what} reply exceeds {REPLY_MAX} bytes"));
+        }
+        frames.push(frame);
+    }
+    Ok(Outcome::Reply(frames))
 }
 
 /// Reads a block's PTY until its program exits.
@@ -710,5 +822,20 @@ mod regression {
             shared.borrow_mut().mux.detach(client).unwrap();
             State::request(&shared, client, Message::CloseBlock { req: 99, block });
         });
+    }
+
+    #[test]
+    fn a_reply_over_the_limit_is_refused_whole() {
+        let text = |req, len| Message::Text {
+            req,
+            text: "x".repeat(len),
+        };
+        let half = REPLY_MAX / 2;
+        assert!(matches!(
+            reply("t", &[text(1, half - 64), text(2, half - 64)]),
+            Ok(Outcome::Reply(frames)) if frames.len() == 2
+        ));
+        let refused = reply("t", &[text(1, half), text(2, half)]);
+        assert!(matches!(refused, Err(why) if why.contains("exceeds")));
     }
 }

@@ -116,9 +116,14 @@ impl Handle {
         #[allow(clippy::let_unit_value)]
         let span = crate::task::trace::blocking_span(None, blocking_id.as_u64());
         self.shared.blocking_pool.spawn(Box::new(move || {
-            #[allow(clippy::let_unit_value)]
-            let _guard = crate::task::trace::enter(&span);
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            // Exit the span before publishing the result, so a subscriber
+            // has seen the closure finish by the time its `JoinHandle`
+            // resolves.
+            let result = {
+                #[allow(clippy::let_unit_value)]
+                let _guard = crate::task::trace::enter(&span);
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+            };
             let _ = tx.send(result);
         }));
         self.spawn(async move {

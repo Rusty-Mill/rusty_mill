@@ -12464,19 +12464,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusty_mcp_axum"
-version = "0.1.0"
-dependencies = [
- "axum",
- "futures",
- "rusty_http",
- "rusty_mcp_client_native",
- "rusty_mcp_server",
- "rusty_serve",
- "tokio",
-]
-
-[[package]]
 name = "rusty_mcp_client_native"
 version = "0.1.0"
 dependencies = [

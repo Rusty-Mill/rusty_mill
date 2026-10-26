@@ -97,6 +97,10 @@ impl<'a> In<'a> {
         u16::try_from(self.varint(id)?).map_err(|_| self.invalid(id))
     }
 
+    pub(crate) fn u32(&self, id: u32) -> Result<u32, Error> {
+        u32::try_from(self.varint(id)?).map_err(|_| self.invalid(id))
+    }
+
     pub(crate) fn bytes(&self, id: u32) -> Result<&'a [u8], Error> {
         match self.find(id)? {
             Value::Bytes(b) => Ok(b),
