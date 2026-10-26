@@ -13,7 +13,7 @@
 //! ([`overlap`]); a CRDT accepts it.
 
 use crate::command::{Code, Rejection};
-use crate::ids::ArtId;
+use crate::ids::{ArtId, Sha256};
 use rusty_serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -195,6 +195,9 @@ pub struct Version {
     /// which is its author's base or a later version.
     pub prev: Option<ArtId>,
     pub doc: Arc<Doc>,
+    /// SHA-256 of `doc`'s visible text: the bytes an approval of this
+    /// version judged (2b, d). Equal text gives an equal snapshot.
+    pub snapshot: Sha256,
     /// The anchors of this version's ops.
     pub anchors: Arc<[Option<LineId>]>,
 }

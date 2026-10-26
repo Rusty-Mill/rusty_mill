@@ -772,3 +772,60 @@ fn a_server_is_bound_to_one_turn_or_to_a_session_never_both() {
     drop(mcp);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_co_edited_spec_is_written_and_read_by_line_id() {
+    let dir = tempdir("coedit");
+    let task = setup(&dir);
+    let mut planner = Mcp::spawn(&dir, "T1", "planner", turn_of(&dir, &task));
+    let (v1, err) = planner.call(
+        "put_artifact",
+        r##"{"op":"e1","kind":"spec","brief":1,"edit":{"ops":[{"insert":{"lines":["# A","a"]}}]}}"##,
+    );
+    assert!(!err, "{v1}");
+    let v1 = stored(&v1);
+    let (got, err) = planner.call("get_artifact", &format!(r#"{{"op":"g1","id":{v1}}}"#));
+    assert!(!err, "{got}");
+    assert_eq!(got["content"].as_str(), Some("# A\na"));
+    assert_eq!(got["head"].as_u64(), Some(v1));
+    let a = format!("art:{v1}#1");
+    assert_eq!(got["lines"][1]["id"].as_str(), Some(a.as_str()));
+    assert_eq!(got["lines"][1]["text"].as_str(), Some("a"));
+    let snap1 = got["snapshot"].as_str().map(str::to_owned);
+    assert_eq!(snap1.as_deref().map(str::len), Some(64));
+
+    let edit = format!(
+        r##"{{"op":"e2","kind":"spec","brief":1,"edit":{{"base":{v1},"ops":[{{"insert":{{"after":"{a}","lines":["b"]}}}},{{"delete":"art:{v1}#0"}}]}}}}"##
+    );
+    let (v2, err) = planner.call("put_artifact", &edit);
+    assert!(!err, "{v2}");
+    let v2 = stored(&v2);
+    let (got, err) = planner.call("get_artifact", &format!(r#"{{"op":"g2","id":{v2}}}"#));
+    assert!(!err, "{got}");
+    assert_eq!(got["content"].as_str(), Some("a\nb"));
+    assert_ne!(got["snapshot"].as_str().map(str::to_owned), snap1);
+    let (old, err) = planner.call("get_artifact", &format!(r#"{{"op":"g3","id":{v1}}}"#));
+    assert!(!err, "{old}");
+    assert_eq!(
+        old["head"].as_u64(),
+        Some(v2),
+        "an old version names its head"
+    );
+
+    let (bad, err) = planner.call(
+        "put_artifact",
+        r##"{"op":"e3","kind":"spec","brief":1,"edit":{"ops":[{"delete":"line 3"}]}}"##,
+    );
+    assert!(err, "{bad}");
+    assert!(bad.to_string().contains("art:N#M"), "{bad}");
+    let mixed = format!(
+        r##"{{"op":"e4","kind":"spec","brief":1,"edit":{{"base":{v2},"ops":[{{"delete":"{a}","insert":{{"lines":["replacement"]}}}}]}}}}"##
+    );
+    let (refused, err) = planner.call("put_artifact", &mixed);
+    assert!(err, "an op naming two variants is refused: {refused}");
+    let (after, err) = planner.call("get_artifact", &format!(r#"{{"op":"g4","id":{v2}}}"#));
+    assert!(!err, "{after}");
+    assert_eq!(after["head"].as_u64(), Some(v2), "nothing was stored");
+    assert_eq!(after["content"].as_str(), Some("a\nb"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,4 +1,4 @@
-# BBP concurrency: parallel posting and co-edited artifacts (design, no implementation)
+# BBP concurrency: parallel posting and co-edited artifacts (design; implemented, see Status 2026-10-26)
 
 Step 6, design only. Waits for owner approval. Builds on `docs/bbp-role-audit.md` (the nine Role fields), `crates/libs/protocol/rusty_bbp/docs/spec/bbp-v0.5-implementation-spec.md` (branch `claude/stoic-pasteur-gg75fs`, `37542c4c`), and the event-driven note (branch `claude/bbp-event-driven-design`, `fc972cbe`, accepted as Phase 1 only).
 
@@ -16,6 +16,16 @@ Direction accepted. Recorded decisions, each applied below:
 **Amended 2026-10-13 (storage):** the CRDT is no longer a private in-tree type. It is a shared first-party crate `rusty_crdt`, seeded from the `nexus-crdt` algorithm (read in full), with a sync zero-dependency core. See f, Appendix A (API sketch) and Appendix B (ADR draft).
 
 **Status (2026-10-13):** Phase 2a is implemented in `rusty_bbp` and the host (several live turns, one per role, `max_live_turns` in `task_opened`, slices reserved at grant, per-turn abort, one harness per live turn, `bbp open --live-turns N`), with `max_live_turns = 1` as the default and the behavior of v0.5. Differences from the text below: the log schema is 3 when `max_live_turns > 1` (2 otherwise, byte-identical to before); the slice is released implicitly (reserved space is derived from live turns, so no `turn_ended` payload was added); slices are enforced only above one live turn so that `max_live_turns = 1` keeps the accepted crossing write of R11 (the overshoot invariant is mode-dependent); finalizers are serialized and `turns` is checked in the grant that charges it. Known gap: a verdict is not bound to the revision the judge read (spec, Known gaps). Finalizer serialization is not an all-finalizers verdict barrier. The host steps and metrics tooling were integrated into the Phase 2a branch (#657), not `main`. The instrumentation tests show the measurements work; they do not establish a Phase 2b benefit and are not owner adoption approval. Phase 2b stays gated on evidence from 2a and on the owner's approval of the gate criteria.
+
+**Status (2026-10-26): 2b delivered by BBP step 4, without `rusty_crdt`.** The co-edited `spec` landed through `docs/bbp-event-based-plan.md` step 4, not through this note's crate plan. Against sections b, d, f and Appendix A:
+
+- **Co-edited artifact.** A spec is co-edited when its first version is a `SpecEdit` with no base; snapshot specs are unchanged (#1052). There is no task flag.
+- **Ops in the log (f).** Each edit is one `artifact_stored` whose payload carries line ops with stable `LineId { art, n }` ids and tombstones. Ids come from the log, not from `(lamport, site)`. A proptest checks that the fold equals RGA order. The fold is in `rusty_bbp::coedit` and does not use `rusty_crdt`. The owner approved building that crate separately on 2026-10-26 (#1113, #1122). Moving `rusty_bbp` onto it is a later, separate step.
+- **Admission differs on purpose.** An edit anchored on a line edited since its base is refused `stale_base`, not merged (#1067, the owner's rule 2 of 2026-10-25).
+- **`Pending { missing }` (decision 3).** An anchor not visible in the base is refused `ref_unresolved`. A logged version that does not apply on replay is recorded in `TaskState::unapplied`, and edits or gates on it are refused by name.
+- **Binding (d).** Specs are writable only in planning, so opening the plan gate seals the spec (the d.6 option, de facto). The gate binds a co-edited version only when it is the head of its spec, otherwise `stale_subject`. Each version carries `snapshot`, the SHA-256 of its text, and the human view shows the proposal's snapshot. The approval itself binds by version id.
+- **Agent surface.** `bbp mcp` writes edits by line id and reads versions with their lines, head and snapshot.
+- **Not done.** A live run with several co-editing agents, which needs the owner's spend approval.
 
 **Line references** are to `rusty_bbp/src` at `37542c4c` (v0.4.1 engine; the v0.5 engine does not exist yet). Claims I did not verify in source are labelled **[unverified]**.
 
