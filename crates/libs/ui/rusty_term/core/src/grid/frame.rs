@@ -191,8 +191,8 @@ impl Grid {
         let mut cells = Vec::with_capacity(n);
         let mut highlight = Vec::with_capacity(n);
         for row in 0..self.rows {
+            view.push_row(row, &mut cells);
             for col in 0..self.cols {
-                cells.push(view.cell(col, row));
                 highlight.push(highlight_bits(&view, col, row));
             }
         }
@@ -207,7 +207,7 @@ impl Grid {
             })
             .collect();
         let keys = view.lines().iter().map(|&l| self.row_key_of(l)).collect();
-        let placeholders = self.placeholders_of(&view);
+        let placeholders = self.placeholders_of(&cells);
         let kitty = self.frame_kitty(placeholders.as_deref().unwrap_or(&[]));
         FrameView {
             cols: self.cols,

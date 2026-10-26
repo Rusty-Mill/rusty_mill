@@ -190,6 +190,14 @@ Each change comes with the benchmark that proves it. All core changes run `cargo
 
 **Deferred.** Compact cell (#5) is the largest memory win (≈3x) but the riskiest change, because it touches every Cell consumer. Do it after #2 and #16 settle the row and serialization shape, so the cell format changes only once.
 
+**Compact cell (#5): done (2026-10-25).** Cells are 8 bytes (character, wide and DECSCA bits, style id) over a per-grid style table, with no change to RTCP or RTSN bytes. Measured against its base (`17a4391f`) on a shared 4 vCPU host:
+- heap at 200x50 + 10k lines: 15.9 MB, was 47.7; `floors.py` peak RSS 17 MiB, was 35;
+- `floors.py` slowest of 3: ascii_throughput 186 MB/s (was 73), scroll_heavy 79 (was 25); `sgr_alternate` 58-70 MB/s (was 43-48);
+- CI instruction counts inside every ceiling; static frame 0.07 ms (was 0.09), typing 0.11 ms (was 0.12-0.13);
+- RTCP encode at 200x50 + 10k: 7.9 ms (was 19.7).
+
+Styles are reclaimed by a sweep over every retained cell, run when the table doubles or history turns over. The worst case, a distinct truecolour style per cell, costs up to about 170 B/cell and pauses of 120-490 ms while the style index grows; the owner accepted both on 2026-10-25.
+
 ## 5. Where the headless split and the snapshot serializer fit
 
 - **Headless split first, as a pure move.** `src/core/` already depends only on `std`, `unicode-width` and `unicode-segmentation`. A grep for `tokio`, `crate::gui`, `crate::runtime`, `crate::config` and `parking_lot` under `src/core/` finds nothing.

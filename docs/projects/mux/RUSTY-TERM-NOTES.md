@@ -40,11 +40,12 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 - The `rusty_term` front-end crate no longer depends on tokio: #955 moved it to `rusty_tokio` (`cargo tree -p rusty_term --all-features -i tokio` finds none). #956 replaced its direct `parking_lot` dependency with `rusty_term::sync::Mutex`, a wrapper over `std::sync::Mutex`. With default features `cargo tree -p rusty_term -i parking_lot` finds none; it still arrives transitively with `gui` (through `arboard`) and `gui-gpu` (through `wgpu`). A mux crate should still link `rusty_term_core`, the headless engine, not the front-end crate. `l13` is safe to enable on the core since #949.
 
 **Grid API**
-- Rows: `Grid::row(y)` and `Grid::row_mut(y)`. `Grid::cells` is no longer public.
+- Rows: `Grid::row(y)` returns the live row's cells by value, and `Grid::row_cells(y)` iterates them without allocating. `Grid::row_mut` is gone (#1079). `Grid::cells` is no longer public.
 - `Line` holds the cells, a soft-wrap bit and the line size (DECDWL/DECDHL).
 - Scrollback is `SCROLLBACK_MAX = 10_000` lines, still one heap allocation per line.
 - The alternate screen keeps its rows after first use, which costs one extra screen of memory.
-- The cell is 24 bytes (24.4 B/cell measured, against 8.3 for libghostty).
+- A stored cell is 8 bytes: the character, two layout bits and a style id into a per-grid style table (backlog row 5). Readers still get the 24-byte `Cell` by value. 200x50 plus 10k lines takes 15.9 MB of heap, against 47.7 MB before; RTCP encode there is 7.9 ms, against 19.7.
+- Worst case, accepted by the owner (Q1 and G6, 2026-10-25): output with a distinct truecolour style in every cell costs up to about 170 B/cell, and the style index's growth can stall the grid for 120 ms (200x50+10k) to 490 ms (4.19M cells). Ordinary output keeps a few dozen styles and never pauses. Wire formats are unchanged.
 
 **Snapshot (`core/src/grid/snapshot.rs`): what a mux attach can use today**
 - API: `Grid::encode_snapshot` and `Grid::decode_snapshot`.
@@ -102,7 +103,7 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 1. The speed floors for #2 (scroll_heavy ≥ 16 and ascii ≥ 58 MB/s) are **not met** in wall-clock. Should they be re-measured with a long-lived grid, the way `bench_frame_time` does? Unconfirmed.
 2. Is snapshot encode speed against libghostty a hard target? It is not reliably met on the second host.
 3. Incremental snapshot design: per-row seqno, stable row index, and how parser state and modes travel on attach. Undecided.
-4. When does the compact cell (backlog row 5) land, and how does it bump the snapshot version? Deferred by D10.
+4. ~~When does the compact cell (backlog row 5) land, and how does it bump the snapshot version?~~ Landed in PR 2 of the compact cell plan with no version bump: RTCP and RTSN bytes are unchanged and pinned by hash.
 5. The rest of #3 (GUI frame path) is row 7, dirty rows; it needs the owner's go-ahead. Rows 9 and 8 landed in #952 and #974.
 6. ConPTY spike 1 results and a Windows fidelity corpus: pending on the owner's side.
 7. A config key to make mode 2027 clustering the default: none exists. Is one wanted? Unconfirmed.
@@ -115,7 +116,8 @@ Owner confirmed = the owner stated it or accepted it in this session, or it is r
 | PR #940: frame-time benchmark (`bench_frame_time`, `render::composite`) | `rusty_term` (gui) | Merged (`5c24bf8c`) |
 | Backlog #3 = rows 8 + 9 + 7 (short lock, row map once per frame, dirty rows) | `rusty_term` gui, `rusty_term_core` | Rows 9 (#952) and 8 (#974) done; row 7 not started, needs the owner's go-ahead |
 | Incremental snapshot: per-row seqno plus stable row index | `rusty_term_core`, `rusty_mux_proto` | Not started. `rusty_mux_proto` (#982) has `Snapshot` (opaque bytes) and `Ready` messages, but no incremental update yet; its fragment defers a resumable event stream to Phase 2 |
-| Compact cell (row 5) and contiguous scrollback (row 6) | `rusty_term_core`, snapshot version | Deferred (D10) |
+| Compact cell (row 5) | `rusty_term_core` | Done: #1079 (accessors, pinned wire bytes) and PR 2 (8-byte cells) |
+| Contiguous scrollback (row 6) | `rusty_term_core` | Deferred (D10) |
 | PTY read batching (row 10) | `rusty_term` backends; relevant to `rusty_mux_server` (open, #994) | Not started (P2) |
 | ConPTY spike 1 | the mux PTY layer on Windows | Owner pending |
 

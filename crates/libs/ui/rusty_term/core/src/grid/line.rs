@@ -7,6 +7,7 @@
 //! which drops the flag: a missed write site is a compile error, not stale text.
 
 use super::{Cell, LineAttr};
+use crate::cell::PackedCell;
 use crate::checkpoint::{Error, Reader, Result, Wire, Writer};
 
 /// One row of cells, on the live screen or in scrollback. The same value moves
@@ -15,8 +16,9 @@ use crate::checkpoint::{Error, Reader, Result, Wire, Writer};
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Line {
     /// The row's cells: exactly `cols` on the live screen; a history line keeps
-    /// the width it had when it left the screen until the next reflow.
-    cells: Vec<Cell>,
+    /// the width it had when it left the screen until the next reflow. Their
+    /// style ids belong to the owning grid's table.
+    cells: Vec<PackedCell>,
     /// Every cell equals `cells[0]`, as the last clear or fill left it. Set
     /// only here, dropped by any mutable access.
     blank: bool,
@@ -30,16 +32,9 @@ pub(crate) struct Line {
     pub attr: LineAttr,
 }
 
-/// Content equality: the `blank` flag is a cache and never makes two rows differ.
-impl PartialEq for Line {
-    fn eq(&self, other: &Self) -> bool {
-        self.cells == other.cells && self.wrapped == other.wrapped && self.attr == other.attr
-    }
-}
-
 impl Line {
     /// A row holding `cells`, not known to be blank.
-    pub(crate) fn new(cells: Vec<Cell>, wrapped: bool, attr: LineAttr) -> Self {
+    pub(crate) fn new(cells: Vec<PackedCell>, wrapped: bool, attr: LineAttr) -> Self {
         Line {
             cells,
             blank: false,
@@ -49,7 +44,7 @@ impl Line {
     }
 
     /// A row of `cols` copies of `fill`, unwrapped and single-width.
-    pub(crate) fn blank(cols: usize, fill: Cell) -> Self {
+    pub(crate) fn blank(cols: usize, fill: PackedCell) -> Self {
         Line {
             cells: vec![fill; cols],
             blank: true,
@@ -59,13 +54,13 @@ impl Line {
     }
 
     /// The row's cells.
-    pub(crate) fn cells(&self) -> &[Cell] {
+    pub(crate) fn cells(&self) -> &[PackedCell] {
         &self.cells
     }
 
     /// The row's cells for writing. Drops the blank flag, so the next clear
     /// rewrites the row.
-    pub(crate) fn cells_mut(&mut self) -> &mut [Cell] {
+    pub(crate) fn cells_mut(&mut self) -> &mut [PackedCell] {
         self.blank = false;
         &mut self.cells
     }
@@ -73,7 +68,7 @@ impl Line {
     /// Reset in place to a copy of `blank`, a uniform row (see
     /// `Grid::blank_row`), reusing the cell allocation. A row already blank
     /// in that fill and width is left as it is.
-    pub(crate) fn clear(&mut self, blank: &[Cell]) {
+    pub(crate) fn clear(&mut self, blank: &[PackedCell]) {
         let hit = match blank.first() {
             Some(&fill) => self.is_blank_with(blank.len(), fill),
             None => self.cells.is_empty(),
@@ -93,7 +88,7 @@ impl Line {
 
     /// Set every cell to `fill` and drop the soft wrap, keeping the width and
     /// the line size (`ED 2` semantics).
-    pub(crate) fn fill(&mut self, fill: Cell) {
+    pub(crate) fn fill(&mut self, fill: PackedCell) {
         if !self.is_blank_with(self.cells.len(), fill) {
             self.cells.fill(fill);
             self.blank = true;
@@ -102,7 +97,7 @@ impl Line {
     }
 
     /// Whether the row is already `len` copies of `fill`, so a clear can skip it.
-    fn is_blank_with(&self, len: usize, fill: Cell) -> bool {
+    fn is_blank_with(&self, len: usize, fill: PackedCell) -> bool {
         let skip =
             self.blank && self.cells.len() == len && self.cells.first().is_none_or(|c| *c == fill);
         debug_assert!(
@@ -122,7 +117,9 @@ const MIN_REPEAT: usize = 4;
 /// many cells, then wrap and attr. A run is a style reference
 /// ([`Writer::style`]), `len << 1 | repeat`, then one char repeated `len`
 /// times or `len` literal chars. The blank flag is a cache and is not
-/// written; a restored row starts unflagged, which is always safe.
+/// written; a restored row starts unflagged, which is always safe. Writing
+/// resolves each run's style through the table the writer borrowed;
+/// reading interns each wire style once into the reader's table.
 impl Wire for Line {
     fn write(&self, w: &mut Writer) -> Result<()> {
         w.charge(self.cells.len().saturating_mul(size_of::<Cell>()))?;
@@ -160,7 +157,7 @@ impl Wire for Line {
 /// run if the first cell repeats at least [`MIN_REPEAT`] times, else a
 /// literal run up to the next style change or repeat. One pass; the length is
 /// never zero for non-empty `cells`.
-fn run_len(cells: &[Cell]) -> (usize, bool) {
+fn run_len(cells: &[PackedCell]) -> (usize, bool) {
     let repeat = repeat_len(cells);
     if repeat >= MIN_REPEAT {
         return (repeat, true);
@@ -169,10 +166,10 @@ fn run_len(cells: &[Cell]) -> (usize, bool) {
     let (mut len, mut streak) = (repeat, repeat);
     while let Some(c) = cells.get(len) {
         let prev = &cells[len - 1];
-        if !same_style(prev, c) {
+        if !prev.same_run(*c) {
             break;
         }
-        streak = if c.ch == prev.ch { streak + 1 } else { 1 };
+        streak = if c.ch() == prev.ch() { streak + 1 } else { 1 };
         if streak == MIN_REPEAT {
             return (len + 1 - MIN_REPEAT, false);
         }
@@ -182,32 +179,23 @@ fn run_len(cells: &[Cell]) -> (usize, bool) {
 }
 
 /// How many leading cells equal `cells[0]`.
-fn repeat_len(cells: &[Cell]) -> usize {
+fn repeat_len(cells: &[PackedCell]) -> usize {
     cells.iter().take_while(|c| **c == cells[0]).count()
 }
 
-/// Equal in every field but `ch`.
-fn same_style(a: &Cell, b: &Cell) -> bool {
-    a.fg == b.fg
-        && a.bg == b.bg
-        && a.flags == b.flags
-        && a.link == b.link
-        && a.cluster == b.cluster
-        && a.underline_color == b.underline_color
-}
-
-fn write_run(w: &mut Writer, run: &[Cell], repeat: bool) -> Result<()> {
-    w.style(run[0])?;
+fn write_run(w: &mut Writer, run: &[PackedCell], repeat: bool) -> Result<()> {
+    let style = w.resolve(run[0])?;
+    w.style(style)?;
     w.varint((run.len() as u64) << 1 | u64::from(repeat))?;
     if repeat {
-        return w.utf8(run[0].ch);
+        return w.utf8(run[0].ch());
     }
-    w.text(run.iter().map(|c| c.ch))
+    w.text(run.iter().map(|c| c.ch()))
 }
 
 /// Append one run to `cells`, which must end up no longer than `n`.
-fn read_run(r: &mut Reader<'_>, cells: &mut Vec<Cell>, n: usize) -> Result<()> {
-    let style = r.style()?;
+fn read_run(r: &mut Reader<'_>, cells: &mut Vec<PackedCell>, n: usize) -> Result<()> {
+    let (style, id) = r.style()?;
     let head = r.varint()?;
     let len = usize::try_from(head >> 1)
         .ok()
@@ -215,14 +203,15 @@ fn read_run(r: &mut Reader<'_>, cells: &mut Vec<Cell>, n: usize) -> Result<()> {
         .ok_or(Error("line run length"))?;
     if head & 1 == 1 {
         let ch = r.utf8()?;
-        cells.resize(cells.len() + len, Cell { ch, ..style });
+        cells.resize(
+            cells.len() + len,
+            PackedCell::new(&Cell { ch, ..style }, id),
+        );
         return Ok(());
     }
     for _ in 0..len {
-        cells.push(Cell {
-            ch: r.utf8()?,
-            ..style
-        });
+        let ch = r.utf8()?;
+        cells.push(PackedCell::new(&Cell { ch, ..style }, id));
     }
     Ok(())
 }

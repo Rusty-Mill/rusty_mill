@@ -7,6 +7,8 @@
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::style::{CellStyle, StyleId};
+
 /// Default foreground color (white) used on reset and for blank cells.
 pub const DEFAULT_FG: u32 = 0xFFFFFF;
 /// Default background color (black) used on reset and for blank cells.
@@ -196,6 +198,115 @@ impl Cell {
             flags: 0,
             link: 0,
             underline_color: DEFAULT_FG,
+        }
+    }
+}
+
+/// [`PackedCell`] text bit: the cell is a wide glyph's trailer.
+const TEXT_WIDE: u32 = 1 << 21;
+/// [`PackedCell`] text bit: the cell is DECSCA-protected.
+pub(crate) const TEXT_PROTECTED: u32 = 1 << 22;
+/// The Unicode scalar bits of [`PackedCell`]'s text word.
+const CHAR_BITS: u32 = 0x001F_FFFF;
+
+/// A cell as the grid stores it: 8 bytes, the character and two layout bits
+/// inline, everything else behind a [`StyleId`] into the grid's style table.
+/// [`Cell`] is the resolved value readers see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PackedCell {
+    /// Bits 0..=20 the scalar, then [`TEXT_WIDE`] and [`TEXT_PROTECTED`];
+    /// the rest always zero.
+    text: u32,
+    style: StyleId,
+}
+
+impl PackedCell {
+    /// A blank cell under the default style id: valid only in a fresh table,
+    /// whose id 0 is still the blank style.
+    pub(crate) fn blank() -> Self {
+        PackedCell {
+            text: u32::from(' '),
+            style: StyleId::DEFAULT,
+        }
+    }
+
+    /// A glyph `ch` under `style`, DECSCA-protected or not.
+    pub(crate) fn glyph(ch: char, protected: bool, style: StyleId) -> Self {
+        let text = u32::from(ch) | if protected { TEXT_PROTECTED } else { 0 };
+        PackedCell { text, style }
+    }
+
+    /// A wide glyph's trailer (a space) under `style`.
+    pub(crate) fn trailer(style: StyleId) -> Self {
+        PackedCell {
+            text: u32::from(' ') | TEXT_WIDE,
+            style,
+        }
+    }
+
+    /// Whether this cell is DECSCA-protected.
+    pub(crate) fn is_protected(self) -> bool {
+        self.text & TEXT_PROTECTED != 0
+    }
+
+    /// `cell` stored under `style`, which must be `cell`'s interned style.
+    pub(crate) fn new(cell: &Cell, style: StyleId) -> Self {
+        let mut text = u32::from(cell.ch);
+        if cell.flags & WIDE_TRAILER != 0 {
+            text |= TEXT_WIDE;
+        }
+        if cell.flags & ATTR_PROTECTED != 0 {
+            text |= TEXT_PROTECTED;
+        }
+        PackedCell { text, style }
+    }
+
+    /// The base character.
+    pub(crate) fn ch(self) -> char {
+        char::from_u32(self.text & CHAR_BITS).unwrap_or(' ')
+    }
+
+    /// Whether this is a wide glyph's trailer.
+    pub(crate) fn is_wide_trailer(self) -> bool {
+        self.text & TEXT_WIDE != 0
+    }
+
+    /// The layout bits ([`TEXT_WIDE`], [`TEXT_PROTECTED`]).
+    pub(crate) fn layout(self) -> u32 {
+        self.text & !CHAR_BITS
+    }
+
+    pub(crate) fn style(self) -> StyleId {
+        self.style
+    }
+
+    /// This cell with another style id (a remap).
+    pub(crate) fn with_style(self, style: StyleId) -> Self {
+        PackedCell { style, ..self }
+    }
+
+    /// Same in everything but the character: one run style on the RTCP wire.
+    pub(crate) fn same_run(self, other: PackedCell) -> bool {
+        self.style == other.style && self.layout() == other.layout()
+    }
+
+    /// The full cell, given this cell's style.
+    pub(crate) fn resolve(self, style: &CellStyle) -> Cell {
+        let mut flags = style.attrs;
+        if self.text & TEXT_WIDE != 0 {
+            flags |= WIDE_TRAILER;
+        }
+        if self.text & TEXT_PROTECTED != 0 {
+            flags |= ATTR_PROTECTED;
+        }
+        Cell {
+            ch: self.ch(),
+            cluster: style.cluster,
+            fg: style.fg,
+            bg: style.bg,
+            flags,
+            link: style.link,
+            underline_color: style.underline_color,
         }
     }
 }

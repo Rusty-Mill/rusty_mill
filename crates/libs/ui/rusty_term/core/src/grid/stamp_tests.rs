@@ -14,12 +14,12 @@ fn rows(g: &Grid) -> Vec<RowState> {
     g.screen
         .iter()
         .zip(&g.row_stamp)
-        .map(|(l, &s)| (s, l.cells().to_vec(), l.attr, l.wrapped))
+        .map(|(l, &s)| (s, g.resolved(l.cells()), l.attr, l.wrapped))
         .collect()
 }
 
 fn history(g: &Grid) -> (u64, Vec<Vec<Cell>>) {
-    let lines = g.scrollback.iter().map(|l| l.cells().to_vec()).collect();
+    let lines = g.scrollback.iter().map(|l| g.resolved(l.cells())).collect();
     (g.hist_stamp, lines)
 }
 
@@ -200,7 +200,7 @@ fn text_run_on_a_cleared_row_survives_erase_and_reuse() {
     // would leave its glyphs on screen.
     let mut g = Grid::new(10, 2);
     let mut p = AnsiParser::new();
-    let chars = |g: &Grid| -> String { g.screen[1].cells().iter().map(|c| c.ch).collect() };
+    let chars = |g: &Grid| -> String { g.screen[1].cells().iter().map(|c| c.ch()).collect() };
     for (col, text) in [("4", "日本é"), ("6", "ñü世")] {
         p.advance(&mut g, b"\x1b[2J");
         assert_eq!(chars(&g), " ".repeat(10), "the clear blanks the row");

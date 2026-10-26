@@ -3,7 +3,11 @@
 //! host side effects are excluded. L13 channels are outside this profile.
 //! Lines are run-encoded (see `grid/line.rs`); v3 differs from v2 only there.
 
-use crate::{AnsiParser, Grid, cell::Cell};
+use crate::{
+    AnsiParser, Grid,
+    cell::{Cell, PackedCell},
+    style::{CellStyle, GRID_STYLE_BYTES, StyleId, StyleTable},
+};
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -32,7 +36,7 @@ const HEADER: &[u8; 5] = b"RTCP\x03";
 pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
     grid.validate_checkpoint()?;
     parser.validate_checkpoint()?;
-    let mut w = Writer::new(MAX_DECODED);
+    let mut w = Writer::new(MAX_DECODED, Some(grid.styles()));
     w.put(HEADER)?;
     grid.write(&mut w)?;
     parser.write(&mut w)?;
@@ -57,21 +61,25 @@ pub fn decode(data: &[u8]) -> Result<(Grid, AnsiParser)> {
     Ok((grid, parser))
 }
 
-pub(crate) struct Writer {
+pub(crate) struct Writer<'a> {
     bytes: Vec<u8>,
     now: Instant,
     budget: usize,
+    /// The encoded grid's style table, which `Line` runs resolve through.
+    /// `None` only for writers that never see a `Line`.
+    table: Option<&'a StyleTable>,
     /// Line run styles already defined, by index (see [`Writer::style`]).
     styles: HashMap<Cell, usize>,
     /// The last style referenced and its index, checked before hashing.
     last: Option<(Cell, usize)>,
 }
-impl Writer {
-    fn new(budget: usize) -> Self {
+impl<'a> Writer<'a> {
+    pub(crate) fn new(budget: usize, table: Option<&'a StyleTable>) -> Self {
         Writer {
             bytes: Vec::new(),
             now: Instant::now(),
             budget,
+            table,
             styles: HashMap::new(),
             last: None,
         }
@@ -108,8 +116,16 @@ impl Writer {
         }
         Ok(())
     }
+    /// The full cell behind `cell`, through the borrowed style table.
+    pub(crate) fn resolve(&self, cell: PackedCell) -> Result<Cell> {
+        let table = self.table.ok_or(Error("line without style table"))?;
+        Ok(cell.resolve(&table.get(cell.style())))
+    }
     /// Reference a run style (a cell whose `ch` is ignored): `0` followed by
     /// its definition the first time, then `1 + index` of that definition.
+    /// A new definition is charged for both the decoder's wire table and the
+    /// grid style it may intern (every grid style arrives with a new wire
+    /// style, so the grid table never outgrows the wire table plus id 0).
     pub(crate) fn style(&mut self, cell: Cell) -> Result<()> {
         let key = Cell { ch: '\0', ..cell };
         let hit = match self.last {
@@ -120,7 +136,7 @@ impl Writer {
             self.last = Some((key, i));
             return self.varint(i as u64 + 1);
         }
-        self.charge(style_growth(self.styles.len()) * size_of::<Cell>())?;
+        self.charge(style_growth(self.styles.len()) * STYLE_COST)?;
         self.varint(0)?;
         write_style(&key, self)?;
         self.last = Some((key, self.styles.len()));
@@ -160,8 +176,11 @@ pub(crate) struct Reader<'a> {
     bytes: &'a [u8],
     budget: usize,
     now: Instant,
-    /// Line run styles defined so far, in definition order.
-    styles: Vec<Cell>,
+    /// Line run styles defined so far, in definition order, each with the
+    /// grid style id it interned as.
+    styles: Vec<(Cell, StyleId)>,
+    /// The decoded grid's style table, taken by `Grid::read`.
+    table: StyleTable,
 }
 impl<'a> Reader<'a> {
     fn new(bytes: &'a [u8], budget: usize) -> Self {
@@ -170,7 +189,12 @@ impl<'a> Reader<'a> {
             budget,
             now: Instant::now(),
             styles: Vec::new(),
+            table: StyleTable::default(),
         }
+    }
+    /// The style table built while decoding lines.
+    pub(crate) fn take_styles(&mut self) -> StyleTable {
+        std::mem::take(&mut self.table)
     }
     /// See [`Writer::varint`]. More than 64 bits fails.
     pub(crate) fn varint(&mut self) -> Result<u64> {
@@ -206,20 +230,26 @@ impl<'a> Reader<'a> {
             .and_then(|s| s.chars().next())
             .ok_or(Error("UTF8 scalar"))
     }
-    /// See [`Writer::style`]: the referenced style, `ch` set to NUL.
-    pub(crate) fn style(&mut self) -> Result<Cell> {
+    /// See [`Writer::style`]: the referenced style, `ch` set to NUL, and its
+    /// grid style id. A new definition is interned once, here; the grid
+    /// table is reserved in step with the wire table, inside the charge.
+    pub(crate) fn style(&mut self) -> Result<(Cell, StyleId)> {
         let i = self.varint()?;
         if i == 0 {
             let grow = style_growth(self.styles.len());
             if grow > 0 {
-                self.charge(grow * size_of::<Cell>())?;
+                self.charge(grow * STYLE_COST)?;
                 self.styles
                     .try_reserve_exact(grow)
                     .map_err(|_| Error("allocation failed"))?;
+                self.table
+                    .try_reserve(grow)
+                    .map_err(|_| Error("allocation failed"))?;
             }
             let style = read_style(self)?;
-            self.styles.push(style);
-            return Ok(style);
+            let id = self.table.intern(CellStyle::of(&style));
+            self.styles.push((style, id));
+            return Ok((style, id));
         }
         usize::try_from(i - 1)
             .ok()
@@ -439,6 +469,9 @@ impl Wire for Instant {
             .ok_or(Error("time origin"))
     }
 }
+/// Budget bytes per reserved style: the decoder's wire entry plus the grid
+/// style it may intern.
+const STYLE_COST: usize = size_of::<Cell>() + GRID_STYLE_BYTES;
 /// Style-table cells to reserve before defining entry `len`: 16, then
 /// doubling. The reader charges and reserves exactly this capacity and the
 /// writer charges the same, so the table's spare capacity is inside the
@@ -601,6 +634,7 @@ mod tests {
             ("id", "fresh per-grid renderer cache key"),
             ("spare_screen", "recycled blank allocation"),
             ("blank_row", "rebuilt blank-row template"),
+            ("styles", "rebuilt from the line run styles"),
             ("epoch", "renderer freshness counter"),
             ("view_offset", "client viewport"),
             ("selection", "client selection"),
@@ -717,13 +751,65 @@ mod tests {
         parser.advance(&mut grid, "e\u{301}".as_bytes());
         grid.clusters.push("\u{301}".repeat(1 << 19));
         grid.rebuild_cluster_caches();
-        let mut w = Writer::new(MAX_DECODED);
+        let mut w = Writer::new(MAX_DECODED, Some(grid.styles()));
         grid.write(&mut w).unwrap();
         let bytes = w.bytes;
-        let write_need = least_budget(|b| grid.write(&mut Writer::new(b)).is_ok());
+        let write_need =
+            least_budget(|b| grid.write(&mut Writer::new(b, Some(grid.styles()))).is_ok());
         let read_need = least_budget(|b| Grid::read(&mut Reader::new(&bytes, b)).is_ok());
         assert!(write_need > 1 << 20, "the continuation is charged");
         assert_eq!(read_need, write_need);
+    }
+
+    #[test]
+    fn random_grids_charge_the_writer_and_reader_alike() {
+        // Styles, clusters, wide glyphs, links, DECSCA and history, some
+        // rethemed so styles merge: the reader's charge must equal the
+        // writer's, or one side stops before the other.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for case in 0..9 {
+            let mut grid = Grid::new(12, 4);
+            let mut parser = AnsiParser::new();
+            let mut input = Vec::new();
+            for _ in 0..400 {
+                match next() % 8 {
+                    0 => {
+                        let (r, b) = (next() % 4 * 64, next() % 4 * 64);
+                        input.extend(format!("\x1b[38;2;{r};0;{b}m").bytes());
+                    }
+                    1 => input.extend(b"\x1b[0m\x1b[1;4m"),
+                    2 => input.extend("e\u{301}".bytes()),
+                    3 => input.extend("\u{4e2d}".bytes()),
+                    4 => input.extend(b"\x1b]8;;http://x/\x07L\x1b]8;;\x07"),
+                    5 => input.extend(b"\r\n"),
+                    6 => input.extend(b"\x1b[1\"qP\x1b[0\"q"),
+                    _ => input.push(b'a' + (next() % 26) as u8),
+                }
+            }
+            parser.advance(&mut grid, &input);
+            if case % 3 == 0 {
+                let new = crate::color::Theme {
+                    fg: 0,
+                    bg: 0x40_00_40,
+                    ..Default::default()
+                };
+                let old = parser.retheme(new);
+                grid.retheme(&old, &new);
+            }
+            let mut w = Writer::new(MAX_DECODED, Some(grid.styles()));
+            grid.write(&mut w).unwrap();
+            let bytes = w.bytes;
+            let write_need =
+                least_budget(|b| grid.write(&mut Writer::new(b, Some(grid.styles()))).is_ok());
+            let read_need = least_budget(|b| Grid::read(&mut Reader::new(&bytes, b)).is_ok());
+            assert_eq!(read_need, write_need, "case {case}");
+        }
     }
 
     #[test]
@@ -733,7 +819,7 @@ mod tests {
         for n in [8193, usize::from(u16::MAX) + 1] {
             let mut grid = Grid::new(2, 1);
             grid.clusters = (0..n).map(|i| i.to_string()).collect();
-            let mut w = Writer::new(MAX_DECODED);
+            let mut w = Writer::new(MAX_DECODED, Some(grid.styles()));
             w.put(HEADER).unwrap();
             grid.write(&mut w).unwrap();
             AnsiParser::new().write(&mut w).unwrap();
@@ -759,7 +845,7 @@ mod tests {
             encode(&back, &other).unwrap()
         );
         let data = encode(&grid, &parser).unwrap();
-        let mut writer = Writer::new(1);
+        let mut writer = Writer::new(1, Some(grid.styles()));
         assert_eq!(
             grid.write(&mut writer),
             Err(Error("decoded checkpoint budget"))
@@ -789,7 +875,7 @@ mod tests {
         let mut bad = good.clone();
         bad[21..29].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(decode(&bad).is_err());
-        let mut grid_bytes = Writer::new(MAX_DECODED);
+        let mut grid_bytes = Writer::new(MAX_DECODED, Some(grid.styles()));
         grid.write(&mut grid_bytes).unwrap();
         let mut bad = good.clone();
         bad[5 + grid_bytes.bytes.len()] = 3; // Utf8, but zero remaining bytes
@@ -805,19 +891,39 @@ mod tests {
 
     use crate::grid::{Line, LineAttr};
 
-    fn line_bytes(lines: &[Line]) -> Vec<u8> {
-        let mut w = Writer::new(MAX_DECODED);
+    /// A line of `cells`, its styles interned in `table`.
+    fn line_in(table: &mut StyleTable, cells: &[Cell], wrapped: bool, attr: LineAttr) -> Line {
+        let cells = cells
+            .iter()
+            .map(|c| PackedCell::new(c, table.intern(CellStyle::of(c))))
+            .collect();
+        Line::new(cells, wrapped, attr)
+    }
+
+    /// `lines` resolved through `table`, to compare lines across tables.
+    fn resolved(table: &StyleTable, lines: &[Line]) -> Vec<(Vec<Cell>, bool, LineAttr)> {
+        lines
+            .iter()
+            .map(|l| {
+                let cells = l.cells().iter().map(|c| c.resolve(&table.get(c.style())));
+                (cells.collect(), l.wrapped, l.attr)
+            })
+            .collect()
+    }
+
+    fn line_bytes(table: &StyleTable, lines: &[Line]) -> Vec<u8> {
+        let mut w = Writer::new(MAX_DECODED, Some(table));
         lines.iter().for_each(|l| l.write(&mut w).unwrap());
         w.bytes
     }
 
-    fn read_lines(bytes: &[u8], n: usize) -> Result<Vec<Line>> {
+    fn read_lines(bytes: &[u8], n: usize) -> Result<(Vec<Line>, StyleTable)> {
         let mut r = Reader::new(bytes, MAX_DECODED);
-        let lines = (0..n).map(|_| Line::read(&mut r)).collect();
+        let lines = (0..n).map(|_| Line::read(&mut r)).collect::<Result<_>>()?;
         if !r.bytes.is_empty() {
             return Err(Error("trailing"));
         }
-        lines
+        Ok((lines, r.take_styles()))
     }
 
     #[test]
@@ -840,22 +946,27 @@ mod tests {
         mixed.extend(row("x\u{1f600}\u{e9}\0\u{10ffff}", Cell::blank()));
         mixed.extend(row("     ", Cell::blank()));
         mixed.extend(row("abca", red));
+        let t = &mut StyleTable::default();
+        let single = LineAttr::Single;
         let lines = [
-            Line::new(Vec::new(), false, LineAttr::Single),
-            Line::blank(80, Cell::blank()),
-            Line::new(mixed, true, LineAttr::DoubleWidth),
-            Line::new(row("aaab", red), false, LineAttr::Single),
-            Line::new(row("abbbb", red), false, LineAttr::Single),
-            Line::new(row(&"ab".repeat(2048), link), false, LineAttr::Single),
-            Line::blank(4096, red), // the widest row a checkpoint accepts
+            line_in(t, &[], false, single),
+            line_in(t, &[Cell::blank(); 80], false, single),
+            line_in(t, &mixed, true, LineAttr::DoubleWidth),
+            line_in(t, &row("aaab", red), false, single),
+            line_in(t, &row("abbbb", red), false, single),
+            line_in(t, &row(&"ab".repeat(2048), link), false, single),
+            line_in(t, &[red; 4096], false, single), // the widest row a checkpoint accepts
         ];
-        let bytes = line_bytes(&lines);
-        assert_eq!(read_lines(&bytes, lines.len()).unwrap(), lines);
+        let bytes = line_bytes(t, &lines);
+        let (back, table) = read_lines(&bytes, lines.len()).unwrap();
+        assert_eq!(resolved(&table, &back), resolved(t, &lines));
         // A blank row is one style, one repeat run and two attribute bytes,
         // and a reused style costs one byte.
-        assert!(line_bytes(&[Line::blank(200, Cell::blank())]).len() <= 32);
-        let two = line_bytes(&[Line::blank(200, red), Line::blank(200, red)]);
-        assert!(two.len() <= line_bytes(&[Line::blank(200, red)]).len() + 8);
+        let blank = line_in(t, &[Cell::blank(); 200], false, single);
+        assert!(line_bytes(t, &[blank]).len() <= 32);
+        let red_row = line_in(t, &[red; 200], false, single);
+        let two = line_bytes(t, &[red_row.clone(), red_row.clone()]);
+        assert!(two.len() <= line_bytes(t, &[red_row]).len() + 8);
     }
 
     #[test]
@@ -863,7 +974,7 @@ mod tests {
         type Build<'a> = &'a dyn Fn(&mut Writer);
         let define = |w: &mut Writer| w.style(Cell::blank()).unwrap();
         let case = |build: Build| {
-            let mut w = Writer::new(MAX_DECODED);
+            let mut w = Writer::new(MAX_DECODED, None);
             build(&mut w);
             read_lines(&w.bytes, 1)
         };
@@ -902,17 +1013,16 @@ mod tests {
         }
         // Every prefix and every single-byte flip of a valid row fails or
         // decodes without panicking.
-        let good = line_bytes(&[Line::new(
-            "ab\u{e9}cccc"
-                .chars()
-                .map(|ch| Cell {
-                    ch,
-                    ..Cell::blank()
-                })
-                .collect(),
-            true,
-            LineAttr::Single,
-        )]);
+        let t = &mut StyleTable::default();
+        let cells: Vec<Cell> = "ab\u{e9}cccc"
+            .chars()
+            .map(|ch| Cell {
+                ch,
+                ..Cell::blank()
+            })
+            .collect();
+        let line = line_in(t, &cells, true, LineAttr::Single);
+        let good = line_bytes(t, &[line]);
         for len in 0..good.len() {
             assert!(read_lines(&good[..len], 1).is_err(), "prefix {len}");
         }
@@ -929,20 +1039,22 @@ mod tests {
     fn style_table_capacity_is_charged_symmetrically() {
         let cell = size_of::<Cell>();
         for n in [1usize, 16, 17, 32, 33, 64, 65] {
-            // One row of `n` distinct styles: the row's cells plus the table's
-            // reserved capacity, 16 then doubling.
-            let cells = (0..n)
+            // One row of `n` distinct styles: the row's cells plus the
+            // tables' reserved capacity, 16 then doubling, each entry
+            // charged for the wire table and the grid table.
+            let cells: Vec<Cell> = (0..n)
                 .map(|i| Cell {
                     fg: i as u32,
                     ..Cell::blank()
                 })
                 .collect();
-            let line = Line::new(cells, false, LineAttr::Single);
+            let t = &mut StyleTable::default();
+            let line = line_in(t, &cells, false, LineAttr::Single);
             let capacity = n.next_power_of_two().max(16);
-            let need = (n + capacity) * cell;
-            let bytes = line_bytes(std::slice::from_ref(&line));
+            let need = n * cell + capacity * STYLE_COST;
+            let bytes = line_bytes(t, std::slice::from_ref(&line));
             for (budget, ok) in [(need, true), (need - 1, false)] {
-                let mut w = Writer::new(budget);
+                let mut w = Writer::new(budget, Some(t));
                 assert_eq!(line.write(&mut w).is_ok(), ok, "write {n} at {budget}");
                 let mut r = Reader::new(&bytes, budget);
                 assert_eq!(Line::read(&mut r).is_ok(), ok, "read {n} at {budget}");
