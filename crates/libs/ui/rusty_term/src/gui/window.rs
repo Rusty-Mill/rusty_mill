@@ -28,6 +28,7 @@
 //! blink, and a Windows child-exit watcher.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::sync::Mutex;
@@ -218,6 +219,9 @@ struct Pane {
     /// Shared with the pane's reader thread; the loop takes it only on config reload.
     parser: Arc<Mutex<AnsiParser>>,
     writer: Box<dyn BackendHandle>,
+    /// Set by the reader thread when it sends a wakeup, cleared when the
+    /// window handles it (see `reader_loop`).
+    wake_pending: Arc<AtomicBool>,
 }
 
 /// A tab: one or more [`Pane`]s tiled by a [`Layout`], one of them focused.
@@ -367,9 +371,16 @@ pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+/// Most PTY output parsed under one grid lock: about 1 ms of parsing, so
+/// a flood still leaves the UI thread the lock between batches.
+const READ_BATCH: usize = 64 * 1024;
+
 /// PTY reader loop (own thread, one per tab): parse output into the tab's
 /// grid, send replies (DA/DSR/structured-channel) back to the child, and wake
-/// the window with the tab's id.
+/// the window with the tab's id. Reads are batched (see
+/// [`read_batch`](crate::backend::read_batch)), and a wakeup is sent only
+/// when the window has handled the last one (`wake_pending`), so a flood
+/// costs the UI thread one event per frame, not one per read.
 fn reader_loop(
     id: u64,
     mut reader: Box<dyn BackendHandle>,
@@ -377,16 +388,19 @@ fn reader_loop(
     grid: Arc<Mutex<Grid>>,
     proxy: EventLoopProxy<UserEvent>,
     parser: Arc<Mutex<AnsiParser>>,
+    wake_pending: Arc<AtomicBool>,
 ) {
+    let mut buf = vec![0u8; READ_BATCH];
     loop {
-        match reader.read() {
-            Ok(data) if data.is_empty() => break, // EOF: child exited
-            Ok(data) => {
+        match crate::backend::read_batch(reader.as_mut(), &mut buf) {
+            Ok(0) => break, // EOF: child exited
+            Ok(n) => {
+                let data = &buf[..n];
                 let response = {
                     // Bulk: step aside for the UI thread between chunks.
                     let mut g = grid.lock_bulk();
                     let mut parser = parser.lock();
-                    parser.advance(&mut g, &data);
+                    parser.advance(&mut g, data);
                     // host_out (clipboard/title relay) has no host here; dropped.
                     let _ = g.take_host_out();
                     parser.take_responses()
@@ -394,11 +408,15 @@ fn reader_loop(
                 if !response.is_empty() {
                     let _ = replies.write(&response);
                 }
-                // Always signal, even mid synchronized-output window: the
-                // `Redraw` handler itself checks `sync_output_active` and
-                // skips painting, so the proxy's liveness (this send failing
-                // signals the window closed) is still checked every chunk.
-                if proxy.send_event(UserEvent::Redraw(id)).is_err() {
+                // Signal even mid synchronized-output window: the `Redraw`
+                // handler checks `sync_output_active` and skips painting. A
+                // wakeup still unhandled already covers this output. A send
+                // failing means the loop is gone; while one is pending, a
+                // closed pane ends this loop by EOF instead (dropping it
+                // hangs up the child).
+                if !wake_pending.swap(true, Ordering::AcqRel)
+                    && proxy.send_event(UserEvent::Redraw(id)).is_err()
+                {
                     break; // loop gone
                 }
             }
@@ -609,6 +627,8 @@ impl WindowState<'_> {
         let reader_grid = Arc::clone(&grid);
         let reader_parser = Arc::clone(&parser);
         let reader_proxy = self.proxy.clone();
+        let wake_pending = Arc::new(AtomicBool::new(false));
+        let reader_wake = Arc::clone(&wake_pending);
         std::thread::spawn(move || {
             reader_loop(
                 id,
@@ -617,6 +637,7 @@ impl WindowState<'_> {
                 reader_grid,
                 reader_proxy,
                 reader_parser,
+                reader_wake,
             )
         });
 
@@ -635,6 +656,7 @@ impl WindowState<'_> {
             grid,
             parser,
             writer: handle,
+            wake_pending,
         })
     }
 
@@ -5354,6 +5376,10 @@ impl WindowState<'_> {
     /// New PTY output arrived on pane `id`: service its host-side requests
     /// (clipboard, notifications, alerts) and repaint if it's visible.
     fn on_pane_output(&mut self, id: u64) {
+        // Cleared first, so output parsed from here on sends a new wakeup.
+        if let Some(p) = self.pane_by_id_mut(id) {
+            p.wake_pending.store(false, Ordering::Release);
+        }
         self.service_clipboard(id);
         self.service_notifications(id);
         self.service_alerts(id);
