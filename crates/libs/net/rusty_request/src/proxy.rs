@@ -17,6 +17,8 @@
 use crate::error::{Error, Result};
 use crate::pool::PoolKey;
 use rusty_http::Url;
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// An HTTP forward proxy: requests go to `host:port` instead of the
 /// request's own origin. An `http://` request uses the origin's full
@@ -31,7 +33,14 @@ pub struct Proxy {
     pub(crate) port: u16,
     /// The `Proxy-Authorization` value, when the URL carried credentials.
     pub(crate) authorization: Option<String>,
+    /// Which parse of a credentialed URL this is, so a tunnel opened with
+    /// one identity is never pooled for a request made with another. A
+    /// counter, not the credentials, so pool keys carry nothing secret.
+    credential_id: Option<u64>,
 }
+
+/// Hands out [`Proxy::credential_id`]s.
+static NEXT_CREDENTIAL_ID: AtomicU64 = AtomicU64::new(1);
 
 impl std::fmt::Debug for Proxy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -62,10 +71,14 @@ impl Proxy {
             return Err(Error::UnsupportedScheme(url.scheme));
         }
         let authorization = credentials.map(basic_authorization).transpose()?;
+        let credential_id = authorization
+            .as_ref()
+            .map(|_| NEXT_CREDENTIAL_ID.fetch_add(1, Ordering::Relaxed));
         Ok(Proxy {
             host: url.host,
             port: url.port,
             authorization,
+            credential_id,
         })
     }
 
@@ -89,12 +102,18 @@ impl Proxy {
     /// proxy, but not shareable across origins the way plain forwarding
     /// is -- so reusing a pooled tunneled connection for a *different*
     /// origin than the one it was tunneled to would silently send that
-    /// request to the wrong place.
+    /// request to the wrong place. The key also names the credentials the
+    /// tunnel was authenticated with (by [`Proxy::credential_id`]), since
+    /// the proxy checked them only once, on the `CONNECT`.
     pub(crate) fn tunnel_pool_key(&self, url: &Url) -> PoolKey {
+        let identity = match self.credential_id {
+            Some(id) => format!("#{id}"),
+            None => String::new(),
+        };
         (
             "connect-tunnel".to_string(),
             format!(
-                "{}:{}->{}",
+                "{}:{}{identity}->{}",
                 self.host.to_ascii_lowercase(),
                 self.port,
                 url.host.to_ascii_lowercase()
@@ -233,14 +252,94 @@ fn env_proxy((name, value): (String, String)) -> Result<Proxy> {
 }
 
 /// `NO_PROXY`-style bypass rules: a request to a matching host skips
-/// the configured [`Proxy`] and connects directly. Each entry matches
+/// the configured [`Proxy`] and connects directly. A name entry matches
 /// either exactly or as a dot-boundary suffix (`example.com` also
 /// matches `www.example.com`, the same convention `crate::cookie`'s
-/// `Domain` matching already uses) -- except the single entry `*`,
-/// which bypasses the proxy for every host.
+/// `Domain` matching already uses); an IP entry matches that address,
+/// and `addr/len` the addresses in that network (`10.0.0.0/8`,
+/// `fd00::/8`), as curl and reqwest read them -- except the single entry
+/// `*`, which bypasses the proxy for every host.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NoProxyRules {
-    entries: Vec<String>,
+    entries: Vec<NoProxyEntry>,
+}
+
+#[derive(Debug, Clone)]
+enum NoProxyEntry {
+    Everything,
+    Name(String),
+    Network(IpAddr, u8),
+}
+
+impl NoProxyEntry {
+    fn parse(entry: &str) -> Option<Self> {
+        let entry = entry.trim().trim_start_matches('.').to_ascii_lowercase();
+        if entry.is_empty() {
+            return None;
+        }
+        if entry == "*" {
+            return Some(NoProxyEntry::Everything);
+        }
+        if let Some(network) = parse_network(&entry) {
+            return Some(network);
+        }
+        Some(NoProxyEntry::Name(entry))
+    }
+
+    fn matches(&self, host: &str, ip: Option<IpAddr>) -> bool {
+        match self {
+            NoProxyEntry::Everything => true,
+            NoProxyEntry::Name(name) => host == name || host.ends_with(&format!(".{name}")),
+            NoProxyEntry::Network(network, len) => {
+                ip.is_some_and(|ip| in_network(ip, *network, *len))
+            }
+        }
+    }
+}
+
+/// `addr` or `addr/len` (IPv6 optionally bracketed) as a network; `None`
+/// for anything that is not an address, which is then a name.
+fn parse_network(entry: &str) -> Option<NoProxyEntry> {
+    let (addr, len) = match entry.split_once('/') {
+        Some((addr, len)) => (addr, Some(len)),
+        None => (entry, None),
+    };
+    let addr: IpAddr = addr
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse()
+        .ok()?;
+    let max = if addr.is_ipv4() { 32 } else { 128 };
+    let len = match len {
+        Some(len) => len.parse::<u8>().ok().filter(|len| *len <= max)?,
+        None => max,
+    };
+    Some(NoProxyEntry::Network(addr, len))
+}
+
+fn in_network(ip: IpAddr, network: IpAddr, len: u8) -> bool {
+    match (ip, network) {
+        (IpAddr::V4(ip), IpAddr::V4(network)) => {
+            prefix_matches(&ip.octets(), &network.octets(), len)
+        }
+        (IpAddr::V6(ip), IpAddr::V6(network)) => {
+            prefix_matches(&ip.octets(), &network.octets(), len)
+        }
+        _ => false,
+    }
+}
+
+/// Whether the first `len` bits of `a` and `b` agree.
+fn prefix_matches(a: &[u8], b: &[u8], len: u8) -> bool {
+    let (whole, rest) = (usize::from(len / 8), len % 8);
+    if a[..whole] != b[..whole] {
+        return false;
+    }
+    if rest == 0 {
+        return true;
+    }
+    let mask = 0xff_u8 << (8 - rest);
+    a[whole] & mask == b[whole] & mask
 }
 
 impl NoProxyRules {
@@ -252,13 +351,7 @@ impl NoProxyRules {
         NoProxyRules {
             entries: hosts
                 .into_iter()
-                .map(|h| {
-                    h.as_ref()
-                        .trim()
-                        .trim_start_matches('.')
-                        .to_ascii_lowercase()
-                })
-                .filter(|h| !h.is_empty())
+                .filter_map(|h| NoProxyEntry::parse(h.as_ref()))
                 .collect(),
         }
     }
@@ -271,9 +364,12 @@ impl NoProxyRules {
 
     pub(crate) fn bypasses(&self, host: &str) -> bool {
         let host = host.to_ascii_lowercase();
-        self.entries
-            .iter()
-            .any(|e| e == "*" || host == *e || host.ends_with(&format!(".{e}")))
+        let ip = host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+            .ok();
+        self.entries.iter().any(|entry| entry.matches(&host, ip))
     }
 }
 
@@ -487,6 +583,40 @@ mod tests {
         assert_ne!(proxy.tunnel_pool_key(&a), proxy.tunnel_pool_key(&b));
         // ...nor with this proxy's own plain-forwarding key.
         assert_ne!(proxy.tunnel_pool_key(&a), proxy.pool_key());
+    }
+
+    #[test]
+    fn no_proxy_networks_match_addresses_in_them() {
+        let rules = NoProxyRules::parse("10.0.0.0/8, 192.168.1.7, fd00::/8, 172.16.0.0/12");
+        assert!(rules.bypasses("10.20.30.40"));
+        assert!(rules.bypasses("192.168.1.7"));
+        assert!(!rules.bypasses("192.168.1.8"));
+        assert!(rules.bypasses("[fd12::1]"));
+        assert!(rules.bypasses("172.31.255.255"));
+        assert!(!rules.bypasses("172.32.0.1"));
+        assert!(!rules.bypasses("11.0.0.1"));
+        // A name is never an address in a network, however it reads.
+        assert!(!rules.bypasses("10.example"));
+    }
+
+    #[test]
+    fn a_bad_prefix_length_is_a_name_that_matches_no_address() {
+        let rules = NoProxyRules::parse("10.0.0.0/33");
+        assert!(!rules.bypasses("10.0.0.1"));
+    }
+
+    #[test]
+    fn tunnels_are_pooled_per_credential_identity() {
+        let origin = Url::parse("https://origin.example/").unwrap();
+        let anonymous = Proxy::http("http://proxy.example:3128").unwrap();
+        let alice = Proxy::http("http://alice:a@proxy.example:3128").unwrap();
+        let alice_again = Proxy::http("http://alice:a@proxy.example:3128").unwrap();
+        let key = |proxy: &Proxy| proxy.tunnel_pool_key(&origin);
+
+        assert_ne!(key(&alice), key(&anonymous));
+        assert_ne!(key(&alice), key(&alice_again));
+        assert_eq!(key(&alice), key(&alice.clone()));
+        assert!(!format!("{:?}", key(&alice)).contains("alice"));
     }
 
     #[test]

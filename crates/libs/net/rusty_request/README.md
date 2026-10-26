@@ -199,8 +199,9 @@ protection against an active man-in-the-middle). TLS 1.2/1.3, no ALPN
   mitigation: `HTTP_PROXY` is ignored whenever `REQUEST_METHOD` is also
   set (the standard CGI-context signal), since a CGI/FastCGI handler can
   map an inbound `Proxy:` header onto that variable. `.proxy_bypass(hosts)`
-  sets `NO_PROXY`-style bypass rules (exact host or subdomain match, or
-  `*` for "never proxy anything"). A plain `http://` proxy connection is
+  sets `NO_PROXY`-style bypass rules (exact host or subdomain match, an
+  IP address or CIDR network such as `10.0.0.0/8`, or `*` for "never
+  proxy anything"). A plain `http://` proxy connection is
   pooled under the proxy's own identity, so one persistent connection can
   carry requests for several different origins; a `CONNECT`-tunneled
   `https://` connection is pooled under a key specific to that (proxy,

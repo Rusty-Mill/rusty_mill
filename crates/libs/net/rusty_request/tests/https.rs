@@ -149,6 +149,45 @@ fn proxy_credentials_stay_with_the_proxy_on_a_tunnelled_request() {
 }
 
 #[test]
+fn a_tunnel_is_reused_only_by_the_identity_that_opened_it() {
+    run(async {
+        let server = start_tls_test_server(|_req| http_response(200, "OK", &[], b"tunnelled"));
+        let url = format!("https://127.0.0.1:{}/hello", server.addr.port());
+        let proxy = start_connect_proxy();
+        let anonymous = format!("http://{}", proxy.addr);
+        let authenticated = format!("http://user:pass@{}", proxy.addr);
+        let client = Client::builder()
+            .trust_policy(rusty_request::pinned_anchors([server.ca_cert_der.clone()]))
+            .proxy(&authenticated)
+            .unwrap()
+            .build();
+        let tunnels = || proxy.connections_accepted();
+
+        let first = client.get(&url).unwrap().send().await.unwrap();
+        assert_eq!(first.status().as_u16(), 200);
+        assert_eq!(tunnels(), 1);
+
+        // Anonymous after authenticated: a CONNECT of its own, never the
+        // pooled tunnel the proxy let through on the credentials.
+        let second = client
+            .get(&url)
+            .unwrap()
+            .proxy(&anonymous)
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(second.status().as_u16(), 200);
+        assert_eq!(tunnels(), 2);
+
+        // The client's own identity again: its tunnel is still pooled.
+        let third = client.get(&url).unwrap().send().await.unwrap();
+        assert_eq!(third.status().as_u16(), 200);
+        assert_eq!(tunnels(), 2);
+    });
+}
+
+#[test]
 fn pinned_anchors_trusts_a_cert_signed_by_the_pinned_ca() {
     run(async {
         let server = start_tls_test_server(|_req| http_response(200, "OK", &[], b"pinned"));
