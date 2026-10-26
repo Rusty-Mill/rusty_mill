@@ -25,7 +25,9 @@ use super::fair::fair_select;
 use crate::backend::Backend;
 use crate::core::{AnsiParser, Grid};
 use crate::input::{Scroll, split_input};
-use crate::render::{FRAME_BUDGET, RawModeGuard, RenderState, render_once, restore_host_modes};
+use crate::render::{
+    FRAME_BUDGET, RawModeGuard, RenderState, render_once, resize_grid, restore_host_modes,
+};
 
 #[cfg(unix)]
 use rusty_tokio::io::AsyncFd;
@@ -529,14 +531,8 @@ async fn run_async(
                 // screen for a clean full repaint. Only act on a real change so a
                 // spurious SIGWINCH doesn't blank the screen.
                 if let Some((cols, rows)) = backend.terminal_size() {
-                    let changed = {
-                        let mut g = grid.lock();
-                        let changed = g.cols != cols as usize || g.rows != rows as usize;
-                        if changed {
-                            g.resize(cols as usize, rows as usize);
-                        }
-                        changed
-                    };
+                    let changed =
+                        resize_grid(&grid, &mut render_state, cols as usize, rows as usize);
                     if changed {
                         let _ = resizer.set_winsize(cols, rows);
                         // Tell a subscribed structured client the size changed
@@ -550,10 +546,7 @@ async fn run_async(
                                 let _ = resizer.write(&bytes);
                             }
                         }
-                        let mut out = std::io::stdout();
-                        let _ = out.write_all(b"\x1b[2J");
-                        let _ = out.flush();
-                        // Repaint the reflowed grid on the next render wake.
+                        // The next frame clears and repaints (see `resize_grid`).
                         frame.notify_one();
                     }
                 }
@@ -783,14 +776,8 @@ async fn run_async(
                 }
                 // No SIGWINCH on Windows: poll the console size and act on change.
                 if let Some((cols, rows)) = backend.terminal_size() {
-                    let changed = {
-                        let mut g = grid.lock();
-                        let changed = g.cols != cols as usize || g.rows != rows as usize;
-                        if changed {
-                            g.resize(cols as usize, rows as usize);
-                        }
-                        changed
-                    };
+                    let changed =
+                        resize_grid(&grid, &mut render_state, cols as usize, rows as usize);
                     if changed {
                         let _ = resizer.set_winsize(cols, rows);
                         // Notify a subscribed structured client; routed through the
@@ -802,9 +789,7 @@ async fn run_async(
                                 let _ = in_tx.send(bytes);
                             }
                         }
-                        let mut out = std::io::stdout();
-                        let _ = out.write_all(b"\x1b[2J");
-                        let _ = out.flush();
+                        // The next frame clears and repaints (see `resize_grid`).
                         frame.notify_one();
                     }
                 }
