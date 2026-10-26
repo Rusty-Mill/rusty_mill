@@ -8,7 +8,9 @@ use std::path::Path;
 
 use rusty_mux_proto::{Message, decode, encode};
 
-use crate::stop::{POLL, Stop, is_wait};
+#[cfg(unix)]
+use crate::stop::POLL;
+use crate::stop::{Stop, is_wait};
 
 /// A stream to the server at `path`. When `stop` is bounded, connecting
 /// gives up with it too (on Linux; elsewhere only once connected), and the
