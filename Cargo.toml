@@ -546,7 +546,7 @@ tokio = { version = "1", features = [
     # hidden in one member manifest.
     "full",
 ] }
-tantivy = "0.26"
+tantivy = "0.27"
 
 # rusty_db's own five crates (path deps, mirroring rusty-search-* above).
 rusty-db-core = { path = "crates/libs/storage/rusty_db/crates/rusty-db-core", version = "0.1.0" }
