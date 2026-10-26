@@ -387,9 +387,7 @@ impl<S: Store> Board<S> {
         if let Some(i) = id
             && waiting.contains(&i)
         {
-            return Err(BoardError::Refused(
-                "card waits on cards that are not done".into(),
-            ));
+            return Err(waits_on_deps());
         }
         let mut candidates: Vec<Card> = cards
             .into_iter()
@@ -414,7 +412,8 @@ impl<S: Store> Board<S> {
                     | BoardError::NotClaimant
                     | BoardError::Terminal
                     | BoardError::OutOfScope(_)
-                    | BoardError::NotFound(_),
+                    | BoardError::NotFound(_)
+                    | BoardError::Refused(_),
                 ) if id.is_none() => {}
                 Err(e) => return Err(e),
             }
@@ -436,6 +435,7 @@ impl<S: Store> Board<S> {
         if !workable(&current) {
             return Err(BoardError::Conflict);
         }
+        self.check_deps_done(&current)?;
         // Refuse before moving anything: a claimed card must not be half-taken.
         if let Some(holder) = current.claim.as_ref().filter(|h| **h != by.name) {
             return Err(BoardError::Claimed(holder.clone()));
@@ -445,6 +445,7 @@ impl<S: Store> Board<S> {
                 if entry_column(c.column) != Some(enter) {
                     return Err(BoardError::Conflict);
                 }
+                self.check_deps_done(c)?;
                 // Checked on the card being committed, not the earlier read.
                 if let Some(holder) = c.claim.as_ref().filter(|h| **h != by.name) {
                     return Err(BoardError::Claimed(holder.clone()));
@@ -456,8 +457,25 @@ impl<S: Store> Board<S> {
             if !workable(c) {
                 return Err(BoardError::Conflict);
             }
+            self.check_deps_done(c)?;
             c.claim(by, now)
         })
+    }
+
+    /// Refuse `card` while any of its dependencies is not Done. Checked on the card being
+    /// committed, so dependencies planned after `take` listed it still count; a Done
+    /// dependency stays Done (it is terminal), so the check cannot go stale.
+    fn check_deps_done(&self, card: &Card) -> Result<(), BoardError> {
+        for dep in &card.deps {
+            if self
+                .store
+                .get(*dep)?
+                .is_some_and(|d| d.column != Column::Done)
+            {
+                return Err(waits_on_deps());
+            }
+        }
+        Ok(())
     }
 
     /// Apply `op` to the card and commit, re-reading on conflict.
@@ -609,6 +627,10 @@ impl<S: Store> Board<S> {
 
 /// Ids of the cards that wait on a dependency that is not Done. A dependency
 /// that is no longer on the board does not hold anything up.
+fn waits_on_deps() -> BoardError {
+    BoardError::Refused("card waits on cards that are not done".into())
+}
+
 fn waiting_on_deps(cards: &[Card]) -> BTreeSet<Uuid> {
     let open: BTreeSet<Uuid> = cards
         .iter()

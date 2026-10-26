@@ -395,3 +395,99 @@ fn the_board_keeps_its_own_tags() {
         Err(BoardError::Invalid(_))
     ));
 }
+
+type Hook = Box<dyn FnOnce(&MemStore, &rusty_mill_board::domain::Card) + Send>;
+
+/// A store that runs `hook` once, right after the first `get` once armed: a rival write
+/// landing between `take`'s read of a card and its guarded commit.
+struct HookAfterGet {
+    inner: MemStore,
+    hook: Arc<std::sync::Mutex<Option<Hook>>>,
+}
+
+impl Store for HookAfterGet {
+    fn get(&self, id: uuid::Uuid) -> Result<Option<rusty_mill_board::domain::Card>, BoardError> {
+        let seen = self.inner.get(id)?;
+        let hook = self.hook.lock().expect("lock").take();
+        if let (Some(hook), Some(card)) = (hook, &seen) {
+            hook(&self.inner, card);
+        }
+        Ok(seen)
+    }
+    fn list(&self) -> Result<Vec<rusty_mill_board::domain::Card>, BoardError> {
+        self.inner.list()
+    }
+    fn insert(
+        &self,
+        c: &rusty_mill_board::domain::Card,
+        e: rusty_mill_board::domain::Event,
+    ) -> Result<(), BoardError> {
+        self.inner.insert(c, e)
+    }
+    fn replace(
+        &self,
+        c: &rusty_mill_board::domain::Card,
+        e: rusty_mill_board::domain::Event,
+    ) -> Result<(), BoardError> {
+        self.inner.replace(c, e)
+    }
+    fn events_since(
+        &self,
+        a: Option<uuid::Uuid>,
+        l: usize,
+    ) -> Result<Vec<rusty_mill_board::domain::Event>, BoardError> {
+        self.inner.events_since(a, l)
+    }
+    fn last_event_id(&self) -> Result<Option<uuid::Uuid>, BoardError> {
+        self.inner.last_event_id()
+    }
+}
+
+/// A Ready card, and an unfinished card that a rival `card_plan` makes it depend on
+/// right after `take` first reads it.
+fn planned_mid_take() -> (Board<HookAfterGet>, uuid::Uuid, uuid::Uuid) {
+    let slot: Arc<std::sync::Mutex<Option<Hook>>> = Arc::default();
+    let b = Board::new(
+        HookAfterGet {
+            inner: MemStore::default(),
+            hook: Arc::clone(&slot),
+        },
+        Roles::default(),
+    );
+    let h = who_in(&b, "nano", "human");
+    let blocker = b.add(&h, "blocker", "", vec![]).expect("add").id;
+    let card = b.add(&h, "card", "", vec![]).expect("add").id;
+    b.move_card(card, Column::Ready, &h).expect("ready");
+    let hook: Hook = Box::new(move |store, seen| {
+        let planned = seen.plan(None, Some(vec![blocker]), 2).expect("plan");
+        let event = rusty_mill_board::domain::Event::of(
+            &planned,
+            rusty_mill_board::domain::EventKind::Edited,
+            "nano",
+        );
+        store.replace(&planned, event).expect("rival plan");
+    });
+    *slot.lock().expect("lock") = Some(hook);
+    (b, card, blocker)
+}
+
+#[test]
+fn a_dependency_planned_during_a_named_take_refuses_it() {
+    let (b, card, _) = planned_mid_take();
+    let dev = who_in(&b, "claude", "builder");
+    assert!(matches!(
+        b.take(&dev, Some(card)),
+        Err(BoardError::Refused(_))
+    ));
+    let now = b.get(card).expect("card");
+    assert_eq!((now.column, now.claim), (Column::Ready, None), "not taken");
+}
+
+#[test]
+fn a_dependency_planned_during_an_automatic_take_skips_the_card() {
+    let (b, card, _) = planned_mid_take();
+    let dev = who_in(&b, "claude", "builder");
+    assert_eq!(b.take(&dev, None).expect("take"), None);
+    let now = b.get(card).expect("card");
+    assert_eq!((now.column, now.claim), (Column::Ready, None), "not taken");
+}

@@ -165,7 +165,7 @@ impl Service {
         };
         service.ensure_inbox()?;
         service.realign_subtasks()?;
-        service.sweep_orphan_comments()?;
+        service.sweep_orphan_docs()?;
         Ok(service)
     }
 
@@ -194,15 +194,24 @@ impl Service {
         Ok(())
     }
 
-    /// Drop comments whose task is gone for good (a trashed task still counts:
-    /// it can come back). Purging cleans up after itself; this catches comments
-    /// left by versions that did not, and is a no-op otherwise.
-    fn sweep_orphan_comments(&mut self) -> Result<usize> {
+    /// Drop comments and board documents whose task is gone for good (a trashed
+    /// task still counts: it can come back). Purging deletes tasks before their
+    /// documents, so this finishes a purge that was interrupted in between, and
+    /// catches comments left by versions that did not clean up; a no-op otherwise.
+    fn sweep_orphan_docs(&mut self) -> Result<usize> {
         let live: std::collections::HashSet<Uuid> =
             self.tasks.all().into_iter().map(|t| t.id).collect();
-        Ok(self
+        let comments = self
             .docs
-            .delete_comments_where(|owner| !owner.is_some_and(|id| live.contains(&id)))?)
+            .delete_comments_where(|owner| !owner.is_some_and(|id| live.contains(&id)))?;
+        let orphans: Vec<Uuid> = self
+            .docs
+            .of_kind(BOARD_KIND)
+            .into_iter()
+            .map(|d| d.id)
+            .filter(|id| !live.contains(id))
+            .collect();
+        Ok(comments + self.docs.delete_board_of(&orphans)?)
     }
 
     fn now(&self) -> i64 {
@@ -815,8 +824,13 @@ impl Service {
         if existing.as_ref().is_some_and(|e| e.kind != kind) {
             return Err(ServiceError::Conflict("id belongs to another kind".into()));
         }
-        if kind == BOARD_KIND && self.task(id)?.is_deleted() {
-            return invalid("a board document needs a task that is not in the trash");
+        if kind == BOARD_KIND {
+            // The write is authorized by the task's state (ADR-0012), so it must not be read
+            // from a task store that is serving its pre-failure view.
+            self.tasks.require_writable()?;
+            if self.task(id)?.is_deleted() {
+                return invalid("a board document needs a task that is not in the trash");
+            }
         }
         let now = self.now();
         let doc = Doc {
@@ -1078,6 +1092,80 @@ mod tests {
         let left = service.docs("comment").unwrap();
         assert_eq!(left.len(), 1, "only the live task's comment survives");
         assert!(left[0].body.contains(&task.id.to_string()));
+    }
+
+    fn board_doc(service: &mut Service, task: Uuid, deps: &str) {
+        let body = format!(r#"{{"v":1,"deps":[{deps}]}}"#);
+        service.put_doc(BOARD_KIND, task, &body).unwrap();
+    }
+
+    fn task_named(service: &mut Service, title: &str, parent: Option<Uuid>) -> Task {
+        service
+            .create_task(NewTask {
+                list_id: INBOX_ID,
+                parent_id: parent,
+                title: title.into(),
+                ..NewTask::default()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_board_document_is_not_written_while_the_task_store_needs_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = Service::open(dir.path(), Box::new(|| 1_000)).unwrap();
+        let task = task_named(&mut service, "card", None);
+        board_doc(&mut service, task.id, "");
+        let before = service.doc(BOARD_KIND, task.id).unwrap();
+
+        // The trash reaches its checkpoint and fails there: the task store now serves
+        // its pre-failure view, in which the task is still live.
+        std::fs::create_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        assert!(service.trash_task(task.id).is_err());
+        let body = format!(r#"{{"v":1,"deps":["{}"]}}"#, Uuid::now_v7());
+        is_recovery_required(service.put_doc(BOARD_KIND, task.id, &body));
+        assert_eq!(service.doc(BOARD_KIND, task.id).unwrap(), before);
+
+        drop(service);
+        std::fs::remove_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        let reopened = Service::open(dir.path(), Box::new(|| 2_000)).unwrap();
+        assert!(reopened.task(task.id).unwrap().is_deleted());
+        assert_eq!(reopened.doc(BOARD_KIND, task.id).unwrap(), before);
+    }
+
+    #[test]
+    fn opening_finishes_a_purge_interrupted_before_its_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = || Box::new(|| 1_000_i64) as Clock;
+        let mut service = Service::open(dir.path(), clock()).unwrap();
+        let parent = task_named(&mut service, "parent", None);
+        let child = task_named(&mut service, "child", Some(parent.id));
+        let emptied = task_named(&mut service, "emptied from the trash", None);
+        let trashed = task_named(&mut service, "trashed, can come back", None);
+        let live = task_named(&mut service, "live", None);
+        for task in [&parent, &child, &emptied, &trashed, &live] {
+            board_doc(&mut service, task.id, "");
+        }
+        service.trash_task(emptied.id).unwrap();
+        service.trash_task(trashed.id).unwrap();
+        // What `purge_task(parent)` and `empty_trash` leave if they stop after the tasks go.
+        for id in [child.id, parent.id, emptied.id] {
+            service.tasks.delete(id).unwrap();
+        }
+        assert_eq!(service.docs(BOARD_KIND).unwrap().len(), 5);
+        drop(service);
+
+        let service = Service::open(dir.path(), clock()).unwrap();
+        let mut left: Vec<Uuid> = service
+            .docs(BOARD_KIND)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.id)
+            .collect();
+        left.sort_unstable();
+        let mut kept = vec![trashed.id, live.id];
+        kept.sort_unstable();
+        assert_eq!(left, kept, "orphans go; a trashed task keeps its document");
     }
 
     #[test]
