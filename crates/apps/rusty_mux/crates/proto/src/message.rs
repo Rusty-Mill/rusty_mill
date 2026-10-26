@@ -40,6 +40,9 @@ impl Features {
     pub const INSPECT: Self = Self(1 << 6);
     /// [`Message::BlockCall`], answered with [`Message::Text`].
     pub const BLOCK_CALL: Self = Self(1 << 7);
+    /// [`Event::BlockStatus`] events. A client without it never receives
+    /// one, so its event numbers skip them.
+    pub const STATUS: Self = Self(1 << 8);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -598,6 +601,7 @@ mod kind {
     pub const ATTACHED: u64 = 10;
     pub const DETACHED: u64 = 11;
     pub const LEASE_CHANGED: u64 = 12;
+    pub const BLOCK_STATUS: u64 = 13;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -667,6 +671,10 @@ fn put_event(out: &mut Out, event: &Event) {
                 out.uuid(HOLDER, holder.uuid());
             }
         }
+        E::BlockStatus { block } => {
+            out.varint(KIND, kind::BLOCK_STATUS)
+                .uuid(BLOCK, block.uuid());
+        }
     }
 }
 
@@ -715,6 +723,9 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         kind::LEASE_CHANGED => E::LeaseChanged {
             block: block(f, BLOCK)?,
             holder: f.opt(HOLDER, client)?,
+        },
+        kind::BLOCK_STATUS => E::BlockStatus {
+            block: block(f, BLOCK)?,
         },
         _ => return Err(f.invalid(KIND)),
     })

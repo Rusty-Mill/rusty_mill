@@ -90,7 +90,12 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
         .collect();
     assert_eq!(
         block_methods,
-        ["terminal.format", "terminal.pwd", "terminal.title"]
+        [
+            "terminal.format",
+            "terminal.pwd",
+            "terminal.title",
+            "terminal.status"
+        ]
     );
     for name in block_methods {
         let method = block_method(name).expect(name);

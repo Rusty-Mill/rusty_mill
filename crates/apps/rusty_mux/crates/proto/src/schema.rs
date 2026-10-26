@@ -543,6 +543,15 @@ pub static CATALOG: &[Method] = &[
         build: |req, a| block_call(req, a, "terminal.title"),
     },
     Method {
+        name: "terminal.status",
+        doc: "Read what the terminal's programs report doing with OSC 7501: one \
+              report body per line, the root record first.",
+        params: &[BLOCK],
+        needs: Features::BLOCK_CALL,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.status"),
+    },
+    Method {
         name: "close-block",
         doc: "Stop the block's program and remove the block.",
         params: &[BLOCK],
