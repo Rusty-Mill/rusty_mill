@@ -592,11 +592,12 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         # Without this trigger the queue waits forever for required-gate.
         self.assertRegex(self.workflow, r"(?m)^  merge_group:\n    types: \[checks_requested\]\n")
         self.assertIn('--merge-base "${{ github.event.merge_group.base_sha }}"', self.workflow)
-        # ci.yml is the only workflow that feeds the required check.
+        # ci.yml is the only workflow the queue triggers, so the only one that
+        # feeds the required check (the reaper reads merge_group runs, it is not one).
         for path in sorted(REPO.glob(".github/workflows/*.yml")):
             if path != WORKFLOW:
                 with self.subTest(workflow=path.name):
-                    self.assertNotIn("merge_group", path.read_text(encoding="utf-8"))
+                    self.assertNotRegex(path.read_text(encoding="utf-8"), r"(?m)^  merge_group:")
 
     def test_merge_group_runs_never_share_a_concurrency_key_with_pull_requests(self) -> None:
         group = re.search(r"(?m)^concurrency:\n(?:  #.*\n)*  group: (.+)\n  cancel-in-progress: (.+)\n", self.workflow)
@@ -729,6 +730,61 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         # Run data reaches the script through env, never by interpolation.
         script = alert.split("        run: |\n", 1)[1]
         self.assertNotIn("${{", script)
+
+    def test_merge_queue_reaper_is_narrow(self) -> None:
+        reaper = (WORKFLOW.parent / "merge-queue-reaper.yml").read_text(encoding="utf-8")
+        # Main's copy runs on every CI request; no PR or queue check of its own.
+        self.assertIn("on:\n  workflow_run:\n    workflows: [CI]\n    types: [requested]\n", reaper)
+        self.assertNotRegex(reaper, r"(?m)^  (pull_request|pull_request_target|merge_group|push):")
+        self.assertIn("    if: github.event.workflow_run.event == 'merge_group'\n", reaper)
+        # Read-only by default; the sweep may only cancel runs.
+        self.assertRegex(reaper, r"(?m)^permissions:\n  contents: read$")
+        self.assertEqual(re.findall(r"(?m)^\s+[a-z-]+: write$", reaper), ["      actions: write"])
+        self.assertNotRegex(reaper, r"(?m)^\s*-?\s*uses:")
+        self.assertIn("timeout-minutes: 5", reaper)
+        script = reaper.split("        run: |\n", 1)[1]
+        self.assertNotIn("${{", script)
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("grep"), "bash is needed to run the sweep")
+    def test_merge_queue_reaper_cancels_only_runs_whose_ref_is_gone(self) -> None:
+        reaper = (WORKFLOW.parent / "merge-queue-reaper.yml").read_text(encoding="utf-8")
+        script = textwrap.dedent(reaper.split("        run: |\n", 1)[1])
+        fake_gh = textwrap.dedent("""\
+            #!/usr/bin/env bash
+            # Answers the three calls the sweep makes; --jq output is pre-shaped.
+            args="$*"
+            case "$args" in
+              *"-X POST"*"/cancel"*) id="${args##*/runs/}"; echo "${id%%/*}" >> "$STATE/cancelled" ;;
+              *"/matching-refs/"*) [ -z "${FAIL_REFS:-}" ] || exit 1; cat "$STATE/refs" ;;
+              *"status=in_progress"*) cat "$STATE/runs" ;;
+            esac
+            """)
+
+        def sweep(runs: str, refs: str, fail_refs: bool = False) -> tuple[int, list[str]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                state = Path(tmp)
+                (state / "gh").write_text(fake_gh)
+                (state / "gh").chmod(0o755)
+                (state / "runs").write_text(runs)
+                (state / "refs").write_text(refs)
+                env = dict(os.environ, PATH=f"{state}:{os.environ['PATH']}", STATE=str(state), GH_REPO="o/r")
+                if fail_refs:
+                    env["FAIL_REFS"] = "1"
+                code = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True).returncode
+                cancelled = state / "cancelled"
+                return code, cancelled.read_text().split() if cancelled.exists() else []
+
+        live = "gh-readonly-queue/main/pr-7-aaa"
+        dead = "gh-readonly-queue/main/pr-8-bbb"
+        runs = f"101 {live}\n102 {dead}\n"
+        self.assertEqual(sweep(runs, f"refs/heads/{live}\n"), (0, ["102"]))
+        self.assertEqual(sweep(runs, f"refs/heads/{live}\nrefs/heads/{dead}\n"), (0, []))
+        # A prefix of a live ref is not that ref.
+        self.assertEqual(sweep("103 gh-readonly-queue/main/pr-7\n", f"refs/heads/{live}\n"), (0, ["103"]))
+        self.assertEqual(sweep("", f"refs/heads/{live}\n"), (0, []), "nothing in flight, nothing to do")
+        code, cancelled = sweep(runs, "", fail_refs=True)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(cancelled, [], "an unreadable queue must never cancel anything")
 
     def test_dependabot_tracks_github_actions(self) -> None:
         text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")

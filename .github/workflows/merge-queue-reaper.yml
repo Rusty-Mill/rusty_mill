@@ -1,0 +1,59 @@
+name: Merge-queue reaper
+
+# A merge-queue rebuild deletes the discarded entries' gh-readonly-queue refs
+# but leaves their CI runs going: from 2026-10-23 to 2026-10-26, 34 such runs
+# spent at least 1,450 runner-minutes after they could no longer merge,
+# holding runners that live entries waited for. Every rebuild requests new CI
+# runs, so each request sweeps: cancel any in-flight merge_group CI run whose
+# ref is gone. Concurrency groups cannot do this (the PR number is not
+# derivable from the ref in an expression, and a dequeued PR never starts a
+# superseding run). A separate workflow keeps ci.yml read-only, and
+# workflow_run always runs main's copy, never a queued PR's.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  # The newest sweep sees the newest queue; an older one adds nothing.
+  group: merge-queue-reaper
+  cancel-in-progress: true
+
+jobs:
+  reap:
+    if: github.event.workflow_run.event == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Cancel CI runs whose merge-queue ref is gone
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Runs first, then refs: a ref always exists before its run, so a
+          # run listed here whose ref is missing from the later snapshot is dead.
+          runs="$(for status in requested pending queued waiting in_progress; do
+            gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?event=merge_group&status=$status&per_page=100" \
+              --jq '.workflow_runs[] | "\(.id) \(.head_branch)"'
+          done)"
+          if [ -z "$runs" ]; then
+            echo "No merge-queue CI runs in flight."
+            exit 0
+          fi
+          # A failed listing aborts the sweep (set -e): never cancel on an unknown queue.
+          refs="$(gh api --paginate "repos/$GH_REPO/git/matching-refs/heads/gh-readonly-queue/" --jq '.[].ref')"
+          while read -r id branch; do
+            if grep -qxF "refs/heads/$branch" <<<"$refs"; then
+              continue
+            fi
+            echo "Cancelling run $id: refs/heads/$branch no longer exists."
+            gh api -X POST "repos/$GH_REPO/actions/runs/$id/cancel" --silent \
+              || echo "::warning::Could not cancel run $id."
+          done <<<"$runs"
