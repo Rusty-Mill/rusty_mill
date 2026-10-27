@@ -30,7 +30,7 @@ See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) for what shipped and when.
 > (build 26200): shell spawn, child `TERM`/`COLORTERM` env, bidirectional relay,
 > and OSC window-title capture all work; host resize is handled by polling the
 > console size (there is no `SIGWINCH` equivalent — see `resize_poll` in
-> `src/runtime/tokio_rt.rs`). The optional window
+> `src/runtime/reactor.rs`). The optional window
 > backend has likewise been run on Windows (CPU and GPU), including a maximized
 > window past the 2048px GPU texture limit; it can't be exercised in a headless
 > CI environment, so there its font, compositor, input, and GPU-pipeline layers
@@ -67,13 +67,14 @@ The VT engine (parser, grid, scrollback, OSC, image decoders) is its own crate,
 dependencies are `rusty_base64`, `rusty_hex`, `unicode-width` and
 `unicode-segmentation`. A headless consumer such as a mux server depends on it
 directly; this crate re-exports it as `rusty_term::core`. The `gui`, `l13` and
-`web-bridge` features above forward to the core features of the same names. Only
-`l13` brings tokio into the core's tree, through `rusty_lsp`.
+`web-bridge` features above forward to the core features of the same names. No
+feature brings tokio into the tree.
 
-The runtime is always **tokio** — a single async reactor. On Unix it registers
-the PTY master + `/dev/tty` with the reactor (`AsyncFd` → mio → epoll) and takes
+The runtime is always **rusty_tokio**, the workspace's own async runtime: a
+single reactor. On Unix it registers the PTY master + `/dev/tty` with the
+reactor (`rusty_tokio::io::AsyncFd`) and takes
 `SIGWINCH` from a signal stream; on Windows, where ConPTY's pipes aren't
-pollable, blocking reader/writer/stdin threads bridge into tokio channels and a
+pollable, blocking reader/writer/stdin threads bridge into async channels and a
 timer polls the console size for resizes.
 
 ```sh
@@ -89,6 +90,12 @@ cargo run --features l13
 # WebSocket PTY bridge for the web frontend prototype (see web/README.md).
 cargo run --features web-bridge --bin rusty_term_web_bridge
 ```
+
+On Linux the window (`--gui`) loads `libxkbcommon` at runtime, and on X11 also
+`libxkbcommon-x11` (Debian/Ubuntu: `libxkbcommon0`, `libxkbcommon-x11-0`;
+Fedora: `libxkbcommon`, `libxkbcommon-x11`). Neither is needed to build, and
+the TUI mode never loads them. If one is missing, `--gui` exits with
+`cannot open a window: …` naming the library.
 
 ### Command-line flags & environment
 
@@ -369,8 +376,9 @@ src/
   backend/           OS interface: PTY spawn, raw mode, resize
     unix.rs            openpty + fork/exec (libc)
     windows.rs         ConPTY (windows-sys)
-  runtime/           the tokio I/O loop
-    tokio_rt.rs        async reactor: Unix AsyncFd / Windows ConPTY bridge
+  runtime/           the rusty_tokio I/O loop
+    reactor.rs         async reactor: Unix AsyncFd / Windows ConPTY bridge
+    fair.rs            fair_select (rusty_tokio's select! is not fair)
   render.rs          TUI-mode ANSI re-emission
   input.rs           TUI-mode input handling + scrollback keys
   term.rs            TERM probe-and-fallback selection
@@ -387,7 +395,7 @@ src/
   bin/bench_metrics.rs   grid-handoff microbenchmark
   bin/bench_vt_throughput.rs  parser+grid throughput bench (see bench/)
 core/                the `rusty_term_core` crate: the headless VT engine, no
-                     tokio/PTY/renderer; re-exported as `rusty_term::core`
+                     async runtime/PTY/renderer; re-exported as `rusty_term::core`
   src/
     parser.rs          VT/ANSI state machine
     grid.rs            cells, scrollback, reflow, image + ligature plumbing
