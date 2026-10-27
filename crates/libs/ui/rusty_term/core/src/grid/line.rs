@@ -53,6 +53,11 @@ impl Line {
         }
     }
 
+    /// The row's cell buffer, for reuse.
+    pub(crate) fn into_cells(self) -> Vec<PackedCell> {
+        self.cells
+    }
+
     /// The row's cells.
     pub(crate) fn cells(&self) -> &[PackedCell] {
         &self.cells
