@@ -86,7 +86,14 @@ class Install(unittest.TestCase):
                        '{"hooks": {"Stop": [{"hooks": [{"type": "command"}]}]}}',
                        '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": 7}]}]}}',
                        '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x", "timeout": "30"}]}]}}',
-                       '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x", "timeout": true}]}]}}'):
+                       '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x", "timeout": true}]}]}}',
+                       '{"hooks": {"Stop": [{"hooks": [{"type": "bogus"}]}]}}',
+                       '{"hooks": {"Stop": [{"hooks": [{"type": "prompt"}]}]}}',
+                       '{"hooks": {"Stop": [{"hooks": [{"type": "agent", "prompt": ""}]}]}}',
+                       '{"hooks": {"Stop": [{"hooks": [{"type": "http"}]}]}}',
+                       '{"hooks": {"Stop": [{"hooks": [{"type": "http", "url": "u", "headers": {"a": 1}}]}]}}',
+                       '{"hooks": {"Stop": [{"hooks": [{"type": "mcp_tool", "server": "s"}]}]}}',
+                       '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x", "args": [1]}]}]}}'):
             self.settings.write_text(broken)
             code, _, err = run('--home', self.home)
             self.assertEqual(code, 2, broken)
@@ -198,11 +205,35 @@ class Install(unittest.TestCase):
 
     def test_other_valid_handler_types_are_kept(self):
         self.settings.parent.mkdir()
-        prompt = {'type': 'prompt', 'prompt': 'summarise'}
-        self.settings.write_text(json.dumps({'hooks': {'Stop': [{'hooks': [prompt]}]}}))
+        others = [
+            {'type': 'prompt', 'prompt': 'summarise', 'model': 'm'},
+            {'type': 'agent', 'prompt': 'check', 'timeout': 60},
+            {'type': 'http', 'url': 'https://example.test/h', 'headers': {'X': '$V'},
+             'allowedEnvVars': ['V'], 'onFailure': 'continue'},
+            {'type': 'mcp_tool', 'server': 's', 'tool': 't', 'input': {'a': 1}},
+            {'type': 'command', 'command': 'node', 'args': ['x.js'], 'async': True, 'shell': 'bash'},
+        ]
+        self.settings.write_text(json.dumps({'hooks': {'Stop': [{'hooks': others}]}}))
         self.assertEqual(run('--home', self.home)[0], 0)
         stop = json.loads(self.settings.read_text())['hooks']['Stop']
-        self.assertEqual(stop, [{'hooks': [prompt]}, installer.CANONICAL_GROUP])
+        self.assertEqual(stop, [{'hooks': others}, installer.CANONICAL_GROUP])
+
+    def test_a_refusal_never_echoes_a_handler_value(self):
+        self.settings.parent.mkdir()
+        secret = 'sk-SENTINEL-' + 'x' * 24
+        for broken in (
+            {'type': 'command', 'command': f'curl -H "Authorization: {secret}"', 'timeout': 'soon'},
+            {'type': 'http', 'url': f'https://u/?k={secret}', 'headers': {'Authorization': 7}},
+            {'type': f'{secret}'},
+        ):
+            text = json.dumps({'hooks': {'Stop': [{'hooks': [broken]}]}})
+            self.settings.write_text(text)
+            for args in (('--home', self.home), ('--check', '--home', self.home)):
+                code, out, err = run(*args)
+                self.assertEqual(code, 2)
+                self.assertNotIn('SENTINEL', out + err)
+                self.assertIn('hooks.Stop[0].hooks[0]', err)
+                self.assertEqual(self.settings.read_text(), text)
 
     def old_copy_and_settings(self):
         self.hook.parent.mkdir(parents=True)
