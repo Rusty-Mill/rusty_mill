@@ -164,9 +164,7 @@ impl Web {
                 })
             }
         };
-        let store = StateStore::new(state_file);
-        store
-            .bind_issuer(issuer.as_str())
+        let store = StateStore::bound(state_file, issuer.as_str())
             .map_err(|e| format!("OAuth state: {e}"))?;
         let provider = Provider::new(verify, store);
         self.oauth = Some(Endpoints::new(Arc::new(provider), issuer, BRANDING));

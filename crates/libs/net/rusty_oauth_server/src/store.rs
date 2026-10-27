@@ -5,8 +5,8 @@
 //! process (an admin tool revoking a client, say) is visible at once, with
 //! no cache to invalidate.
 
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -50,7 +50,7 @@ pub struct RevokeSummary {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct State {
     /// The issuer this file's grants were made under; see
-    /// [`StateStore::bind_issuer`]. Absent in files written before it existed.
+    /// [`StateStore::bound`]. Absent in files written before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     issuer: Option<String>,
     #[serde(default)]
@@ -109,6 +109,15 @@ fn subject_of(meta: &Value) -> Option<&str> {
     meta.get("subject").and_then(Value::as_str)
 }
 
+fn invalid(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn encode(state: &State) -> io::Result<String> {
+    let body = rusty_json::to_string_pretty(state).map_err(|e| invalid(e.to_string()))?;
+    Ok(format!("{body}\n"))
+}
+
 /// SHA-256 hex digest of a token — what the state file stores instead of
 /// the raw secret.
 fn hash_token(token: &str) -> String {
@@ -126,19 +135,49 @@ fn hash_token(token: &str) -> String {
 /// [`Mutex`] only serializes this process's own read-modify-write cycles;
 /// cross-process locking is out of scope for a single-owner store.
 ///
+/// A store made with [`Self::bound`] belongs to one issuer, and one made
+/// with [`Self::new`] to none (remind-me's and rusty_tick's files). Every
+/// access checks the file's issuer against the store's: a file that names
+/// another (replaced, or claimed by a second server racing this one) reads
+/// as empty and refuses writes, so no store ever uses another's grants.
+///
 /// Records are raw [`Value`]s, not structs, so an admin tool can list and
 /// revoke clients through this type alone, without a [`crate::Provider`].
 pub struct StateStore {
     path: PathBuf,
+    issuer: Option<String>,
     lock: Mutex<()>,
 }
 
 impl StateStore {
+    /// A store for a file that names no issuer.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
+            issuer: None,
             lock: Mutex::new(()),
         }
+    }
+
+    /// A store for `issuer`'s grants, so grants made by one server are never
+    /// honoured by another that was pointed at the same file. A missing file
+    /// is created for `issuer` exclusively (of two servers creating it at
+    /// once, one fails). A file that names no issuer is claimed only while it
+    /// holds nothing: grants in an unbound file are no evidence of which
+    /// server made them.
+    ///
+    /// # Errors
+    /// If the file names a different issuer, names none but holds clients or
+    /// tokens, exists but does not parse (it is never silently replaced), was
+    /// claimed by another server meanwhile, or cannot be written.
+    pub fn bound(path: impl Into<PathBuf>, issuer: &str) -> io::Result<Self> {
+        let store = Self {
+            path: path.into(),
+            issuer: Some(issuer.to_string()),
+            lock: Mutex::new(()),
+        };
+        store.claim()?;
+        Ok(store)
     }
 
     pub fn path(&self) -> &Path {
@@ -163,7 +202,33 @@ impl StateStore {
     /// new one — so the retries have nothing left to paper over and are
     /// gone with the cause (issue #160).
     fn read(&self) -> State {
-        self.read_once().unwrap_or_default()
+        self.load().unwrap_or_else(|e| {
+            eprintln!("oauth: {e}");
+            State::default()
+        })
+    }
+
+    /// [`Self::read`] for a read-modify-write: a file that belongs to
+    /// another issuer is an error, so it is never overwritten.
+    fn load(&self) -> io::Result<State> {
+        let state = self.read_once().unwrap_or_default();
+        if state.issuer == self.issuer {
+            return Ok(state);
+        }
+        Err(invalid(match (&state.issuer, &self.issuer) {
+            (Some(found), Some(ours)) => format!(
+                "{} holds the grants of issuer {found}, not {ours}: give each server its own state file",
+                self.path.display()
+            ),
+            (Some(found), None) => format!(
+                "{} is bound to issuer {found}, and this store to none",
+                self.path.display()
+            ),
+            (None, _) => format!(
+                "{} no longer names this store's issuer: it was replaced or removed while in use",
+                self.path.display()
+            ),
+        }))
     }
 
     /// Persist `state` atomically, creating the parent directory if needed
@@ -190,58 +255,63 @@ impl StateStore {
     /// no indication why, on either side. A refused issuance is a worse
     /// user experience and a far better failure.
     fn write(&self, state: &State) -> io::Result<()> {
-        let body = rusty_json::to_string_pretty(state)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let body = format!("{body}\n");
-
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
+        let body = encode(state)?;
+        self.create_parent()?;
         rusty_atomic_file::write_private(&self.path, body.as_bytes())
     }
 
-    /// Tie this file to `issuer`, so grants made by one server are never
-    /// honoured by another that was pointed at the same file. A file that
-    /// names no issuer is claimed for `issuer` only while it holds nothing:
-    /// grants in an unbound file are no evidence of which server made them.
-    ///
-    /// # Errors
-    /// If the file names a different issuer, names none but holds clients or
-    /// tokens, exists but does not parse (it is never silently replaced), or
-    /// cannot be written.
-    pub fn bind_issuer(&self, issuer: &str) -> io::Result<()> {
-        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut state = match self.read_once() {
-            Some(state) => state,
-            None if self.path.exists() => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{} is not a readable OAuth state file", self.path.display()),
-                ));
-            }
-            None => State::default(),
+    /// Write `state` to a file that must not exist yet (`0600` on unix):
+    /// `AlreadyExists` if another store created it first.
+    fn create_new(&self, state: &State) -> io::Result<()> {
+        let body = encode(state)?;
+        self.create_parent()?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&self.path)?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()
+    }
+
+    fn create_parent(&self) -> io::Result<()> {
+        match self.path.parent() {
+            Some(parent) => fs::create_dir_all(parent),
+            None => Ok(()),
+        }
+    }
+
+    /// Make the file this store's, as [`Self::bound`] describes.
+    fn claim(&self) -> io::Result<()> {
+        let bound = State {
+            issuer: self.issuer.clone(),
+            ..State::default()
         };
-        match state.issuer.as_deref() {
-            Some(bound) if bound == issuer => Ok(()),
-            Some(bound) => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{} holds the grants of issuer {bound}, not {issuer}: give each server its own state file",
-                    self.path.display()
-                ),
-            )),
-            None if state.is_empty() => {
-                state.issuer = Some(issuer.to_string());
-                self.write(&state)
+        match self.create_new(&bound) {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            created => return created,
+        }
+        let found = self.read_once().ok_or_else(|| {
+            invalid(format!(
+                "{} is not a readable OAuth state file",
+                self.path.display()
+            ))
+        })?;
+        match (&found.issuer, found.is_empty()) {
+            // Ours, or another's (refused).
+            (Some(_), _) => self.load().map(drop),
+            (None, false) => Err(invalid(format!(
+                "{} holds grants of no known issuer: give this server a new state file, or delete this one with its server stopped",
+                self.path.display()
+            ))),
+            (None, true) => {
+                self.write(&bound)?;
+                // A server claiming the same empty file at once may have won.
+                self.load().map(drop)
             }
-            None => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{} holds grants of no known issuer: give this server a new state file, or delete this one with its server stopped",
-                    self.path.display()
-                ),
-            )),
         }
     }
 
@@ -260,7 +330,7 @@ impl StateStore {
     /// after the next restart (issue #160).
     pub fn put_client(&self, client_id: &str, record: Value) -> io::Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut state = self.read();
+        let mut state = self.load()?;
         state.clients.insert(client_id.to_string(), record);
         self.write(&state)
     }
@@ -313,7 +383,7 @@ impl StateStore {
     /// (issue #160).
     pub fn revoke_client(&self, client_id: &str) -> io::Result<Option<RevokeSummary>> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut state = self.read();
+        let mut state = self.load()?;
         let Some(record) = state.clients.remove(client_id) else {
             return Ok(None);
         };
@@ -339,7 +409,7 @@ impl StateStore {
     /// nothing on either side explaining why.
     pub fn put_token(&self, kind: TokenKind, token: &str, meta: Value) -> io::Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut state = self.read();
+        let mut state = self.load()?;
         state.tokens_mut(kind).insert(hash_token(token), meta);
         self.write(&state)
     }
@@ -355,7 +425,7 @@ impl StateStore {
     /// this reports rather than swallows (issue #160).
     pub fn delete_token(&self, kind: TokenKind, token: &str) -> io::Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut state = self.read();
+        let mut state = self.load()?;
         let hash = hash_token(token);
         if state.tokens_mut(kind).remove(&hash).is_some() {
             return self.write(&state);
@@ -376,7 +446,7 @@ impl StateStore {
         with: impl FnOnce(&Value) -> Option<Vec<(TokenKind, String, Value)>>,
     ) -> io::Result<bool> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut state = self.read();
+        let mut state = self.load()?;
         let hash = hash_token(old);
         let Some(meta) = state.tokens(kind).get(&hash) else {
             return Ok(false);
@@ -399,7 +469,7 @@ impl StateStore {
     /// several users, so a client id alone does not name one user's grants.
     pub fn delete_grant(&self, client_id: &str, subject: Option<&str>) -> io::Result<TokenCounts> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut state = self.read();
+        let mut state = self.load()?;
         let counts = state
             .drop_tokens(|meta| client_of(meta) == Some(client_id) && subject_of(meta) == subject);
         if counts.access_tokens > 0 || counts.refresh_tokens > 0 {
@@ -803,39 +873,36 @@ mod compat {
         assert_eq!(meta["client_id"], "c1");
     }
 
+    fn access(store: &StateStore, token: &str) -> io::Result<()> {
+        store.put_token(
+            TokenKind::Access,
+            token,
+            rusty_json::json!({ "client_id": "c", "subject": "claude" }),
+        )
+    }
+
     #[test]
     fn a_new_or_empty_state_file_is_bound_to_the_first_issuer_and_refuses_another() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("oauth.json");
-        let store = StateStore::new(&path);
         // A new file is claimed; restarting with the same issuer is fine.
-        store.bind_issuer("https://a.example").unwrap();
-        store
-            .put_token(
-                TokenKind::Access,
-                "a",
-                rusty_json::json!({ "client_id": "c" }),
-            )
-            .unwrap();
-        store.bind_issuer("https://a.example").unwrap();
-        assert!(store.get_token(TokenKind::Access, "a").is_some());
+        let store = StateStore::bound(&path, "https://a.example").unwrap();
+        access(&store, "a").unwrap();
+        let again = StateStore::bound(&path, "https://a.example").unwrap();
+        assert!(again.get_token(TokenKind::Access, "a").is_some());
         // Another server pointed at it is refused, and changes nothing.
-        let other = StateStore::new(&path);
-        let refused = other.bind_issuer("https://b.example").unwrap_err();
+        let before = fs::read_to_string(&path).unwrap();
+        let refused = StateStore::bound(&path, "https://b.example").err().unwrap();
         assert!(
             refused.to_string().contains("https://a.example"),
             "{refused}"
         );
-        assert!(fs::read_to_string(&path)
-            .unwrap()
-            .contains("https://a.example"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
 
         // An existing but empty, unbound file is claimed too.
         let empty = dir.path().join("empty.json");
         fs::write(&empty, "{}").unwrap();
-        StateStore::new(&empty)
-            .bind_issuer("https://a.example")
-            .unwrap();
+        StateStore::bound(&empty, "https://a.example").unwrap();
         assert!(fs::read_to_string(&empty)
             .unwrap()
             .contains("https://a.example"));
@@ -851,9 +918,7 @@ mod compat {
         ] {
             let path = dir.path().join("legacy.json");
             fs::write(&path, seed).unwrap();
-            let refused = StateStore::new(&path)
-                .bind_issuer("https://a.example")
-                .unwrap_err();
+            let refused = StateStore::bound(&path, "https://a.example").err().unwrap();
             assert!(refused.to_string().contains("no known issuer"), "{refused}");
             assert_eq!(fs::read_to_string(&path).unwrap(), seed, "untouched");
         }
@@ -864,9 +929,104 @@ mod compat {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("oauth.json");
         fs::write(&path, "not json").unwrap();
-        assert!(StateStore::new(&path)
-            .bind_issuer("https://a.example")
-            .is_err());
+        assert!(StateStore::bound(&path, "https://a.example").is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "not json");
+    }
+
+    /// Independent stores stand in for separate processes: each has its own
+    /// lock, so only the file itself can settle who owns it.
+    fn race(path: &Path, servers: usize) -> Vec<StateStore> {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(servers));
+        let handles: Vec<_> = (0..servers)
+            .map(|i| {
+                let (path, barrier) = (path.to_path_buf(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    StateStore::bound(path, &format!("https://{i}.example")).ok()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn of_servers_creating_one_new_state_file_at_once_exactly_one_owns_it() {
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("oauth.json");
+            let started = race(&path, 8);
+            assert_eq!(started.len(), 1, "exactly one creates the file");
+            access(&started[0], "t").unwrap();
+        }
+    }
+
+    #[test]
+    fn of_servers_claiming_one_empty_state_file_at_once_only_the_owner_can_use_it() {
+        for round in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("oauth.json");
+            fs::write(&path, "{}").unwrap();
+            let started = race(&path, 8);
+            // Several may have passed their startup check; the file names one.
+            let usable: Vec<_> = started
+                .iter()
+                .enumerate()
+                .filter(|(i, s)| access(s, &format!("t{round}-{i}")).is_ok())
+                .collect();
+            assert!(usable.len() <= 1, "at most one uses the file");
+            for s in &started {
+                let own = usable.iter().any(|(_, u)| std::ptr::eq(*u, s));
+                let seen = (0..8).any(|i| {
+                    s.get_token(TokenKind::Access, &format!("t{round}-{i}"))
+                        .is_some()
+                });
+                assert_eq!(seen, own, "no store sees another's grant");
+            }
+        }
+    }
+
+    #[test]
+    fn a_bound_store_refuses_a_file_replaced_or_rebound_after_it_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oauth.json");
+        let store = StateStore::bound(&path, "https://a.example").unwrap();
+        access(&store, "mine").unwrap();
+        for foreign in [
+            r#"{"issuer":"https://b.example","access_tokens":{"x":{"client_id":"c"}}}"#,
+            r#"{"access_tokens":{"x":{"client_id":"c"}}}"#,
+        ] {
+            fs::write(&path, foreign).unwrap();
+            assert!(store.get_client("c").is_none());
+            assert!(store.list_clients().is_empty());
+            assert!(access(&store, "more").is_err(), "writes are refused");
+            assert!(store.delete_grant("c", None).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), foreign, "untouched");
+        }
+        fs::remove_file(&path).unwrap();
+        assert!(
+            access(&store, "more").is_err(),
+            "a removed file is not re-made"
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn an_unbound_store_does_not_use_a_bound_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oauth.json");
+        let bound = StateStore::bound(&path, "https://a.example").unwrap();
+        access(&bound, "mine").unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+        let legacy = StateStore::new(&path);
+        assert!(legacy.get_token(TokenKind::Access, "mine").is_none());
+        assert!(access(&legacy, "theirs").is_err());
+        assert!(legacy
+            .replace_token(TokenKind::Access, "mine", |_| Some(Vec::new()))
+            .is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), before, "untouched");
+        assert!(bound.get_token(TokenKind::Access, "mine").is_some());
     }
 }
