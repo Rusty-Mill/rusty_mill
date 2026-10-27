@@ -38,36 +38,25 @@ fn certificate() -> Certificate {
 
 /// An upstream that echoes the headers it saw.
 async fn upstream() -> (u16, Arc<AtomicUsize>) {
-    use axum::{Router, extract::Request, routing::any};
+    use rusty_axum::{Request, Router};
 
     let port = free_port().await;
     let hits = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&hits);
 
-    let app = Router::new().fallback(any(move |request: Request| {
+    let app = Router::new().fallback(move |request: Request| {
         let counter = Arc::clone(&counter);
         async move {
             counter.fetch_add(1, Ordering::Relaxed);
-            let headers: serde_json::Map<String, Value> = request
-                .headers()
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.as_str().to_string(),
-                        Value::String(v.to_str().unwrap_or_default().to_string()),
-                    )
-                })
+            let headers: serde_json::Map<String, Value> = common::header_pairs(request.headers())
+                .into_iter()
+                .map(|(k, v)| (k, Value::String(v)))
                 .collect();
-            axum::Json(json!({"path": request.uri().path(), "headers": headers}))
+            rusty_axum::Json(json!({"path": request.path(), "headers": headers}))
         }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("upstream should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
     });
+
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     (port, hits)
 }
@@ -709,18 +698,12 @@ binds:
 
 /// A plain HTTP echo reporting `label`, behind the TLS upstream above.
 async fn upstream_for(label: &'static str) -> u16 {
-    use axum::{Router, routing::any};
+    use rusty_axum::Router;
 
     let port = free_port().await;
-    let app = Router::new().fallback(any(
-        move || async move { axum::Json(json!({"who": label})) },
-    ));
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("echo should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
+    let app =
+        Router::new().fallback(move || async move { rusty_axum::Json(json!({"who": label})) });
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
     port
 }
 

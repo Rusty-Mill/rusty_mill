@@ -60,7 +60,6 @@ rusty_log = { workspace = true, features = ["subscriber"] }
 
 [dev-dependencies]
 rusty_prost = { workspace = true }
-http-body-util = { workspace = true }
 rmcp = { workspace = true, features = [
     "client",
     "server",
@@ -86,6 +85,8 @@ rcgen = "0.13"
 # tests also run on windows-latest in this workspace's CI, where `fs4` maps the
 # same call onto `LockFileEx`.
 fs4 = "0.13"
-# `http2` is dev-only: the scripted gRPC processor in `mcp_guardrails.rs`
-# is the only thing here that serves h2. The gateway is a gRPC *client*.
-axum = { workspace = true, features = ["json", "tokio", "http1", "http2"] }
+# Serves h2c for the scripted gRPC processors in `tests/common`; dev-only, as
+# the gateway is a gRPC *client*.
+rusty_hyper = { workspace = true, features = ["rusty-tokio"] }
+# The Streamable HTTP MCP target in `mcp_guardrails.rs`, mounted on `rusty_axum`.
+rusty_mcp_server = { workspace = true, features = ["http", "rusty-axum"] }

@@ -83,147 +83,90 @@ fn mock_server() -> String {
 
 /// A scripted `ExtMcp` gRPC server.
 async fn processor(script: Script) -> (String, Arc<Seen>, CancellationToken) {
-    use axum::body::Body;
-    use http_body_util::BodyExt;
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("processor should bind");
-    let addr: SocketAddr = listener.local_addr().expect("should have an address");
     let seen = Arc::new(Seen::default());
-    let shutdown = CancellationToken::new();
-
     let recorder = Arc::clone(&seen);
-    let stopping = shutdown.clone();
-
-    let app = axum::Router::new().fallback(axum::routing::any(
-        move |request: axum::extract::Request| {
-            let script = script.clone();
-            let recorder = Arc::clone(&recorder);
-            async move {
-                let is_request = request.uri().path().ends_with("CheckRequest");
-                let body = request
-                    .into_body()
-                    .collect()
-                    .await
-                    .map(|b| b.to_bytes())
-                    .unwrap_or_default();
-                // gRPC frames a message as a compression flag and a 4-byte
-                // big-endian length, then the protobuf.
-                let message = &body[5..];
-
-                recorder.calls.fetch_add(1, Ordering::Relaxed);
-
-                let payload = if is_request {
-                    let decoded = McpRequest::decode(message).expect("should decode");
-                    if let Ok(mut seen) = recorder.metadata.lock() {
-                        seen.push(flatten(decoded.metadata_context));
-                    }
-                    if let Ok(mut seen) = recorder.requests.lock() {
-                        seen.push((
-                            decoded.method,
-                            decoded
-                                .mcp_request
-                                .map(|b| String::from_utf8_lossy(&b).into_owned()),
-                        ));
-                    }
-                    McpRequestResult {
-                        result: Some(match &script {
-                            Script::Rewrite(body) => {
-                                request_result::Result::Mutated(body.as_bytes().to_vec())
-                            }
-                            Script::Refuse(reason) => {
-                                request_result::Result::Error(AuthorizationError {
-                                    code: authorization_error::Code::PermissionDenied as i32,
-                                    reason: (*reason).to_string(),
-                                    mcp_error: None,
-                                })
-                            }
-                            Script::Pass | Script::SetHeaders | Script::Annotate => {
-                                request_result::Result::Pass(Default::default())
-                            }
-                        }),
-                        header_mutation: matches!(script, Script::SetHeaders).then(|| {
-                            agentgateway_mcp::HeaderMutation {
-                                set: vec![agentgateway_mcp::McpHeader {
-                                    key: "x-user-id".into(),
-                                    value: b"u-42".to_vec(),
-                                }],
-                                remove: Vec::new(),
-                            }
-                        }),
-                        metadata: matches!(script, Script::Annotate)
-                            .then(|| {
-                                match agentgateway_mcp::to_proto_value(serde_json::json!({
-                                    "classification": "phishing",
-                                })) {
-                                    Value::Struct(s) => Some(s),
-                                    _ => None,
-                                }
-                            })
-                            .flatten(),
-                    }
-                    .encode_to_vec()
-                    .expect("should encode")
-                } else {
-                    let decoded = McpResponse::decode(message).expect("should decode");
-                    if let Ok(mut seen) = recorder.metadata.lock() {
-                        seen.push(flatten(decoded.metadata_context));
-                    }
-                    if let Ok(mut seen) = recorder.responses.lock() {
-                        seen.push((
-                            decoded.method,
-                            String::from_utf8_lossy(&decoded.mcp_response).into_owned(),
-                        ));
-                    }
-                    McpResponseResult {
-                        result: Some(match &script {
-                            Script::Rewrite(body) => {
-                                response_result::Result::Mutated(body.as_bytes().to_vec())
-                            }
-                            Script::Refuse(reason) => {
-                                response_result::Result::Error(AuthorizationError {
-                                    code: authorization_error::Code::PermissionDenied as i32,
-                                    reason: (*reason).to_string(),
-                                    mcp_error: None,
-                                })
-                            }
-                            Script::Pass | Script::SetHeaders | Script::Annotate => {
-                                response_result::Result::Pass(Default::default())
-                            }
-                        }),
-                    }
-                    .encode_to_vec()
-                    .expect("should encode")
-                };
-
-                let mut framed = Vec::with_capacity(payload.len() + 5);
-                framed.push(0);
-                framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-                framed.extend_from_slice(&payload);
-
-                // gRPC sends the status as a trailer, after the message.
-                let mut trailers = http::HeaderMap::new();
-                trailers.insert("grpc-status", "0".parse().expect("valid"));
-                let body = http_body_util::BodyExt::with_trailers(
-                    http_body_util::Full::new(bytes::Bytes::from(framed)),
-                    async move { Some(Ok::<_, std::convert::Infallible>(trailers)) },
-                );
-                http::Response::builder()
-                    .status(200)
-                    .header("content-type", "application/grpc")
-                    .body(Body::new(body))
-                    .expect("response should build")
+    let (addr, shutdown) = common::grpc_upstream(move |path, message| {
+        recorder.calls.fetch_add(1, Ordering::Relaxed);
+        if path.ends_with("CheckRequest") {
+            let decoded = McpRequest::decode(message).expect("should decode");
+            if let Ok(mut seen) = recorder.metadata.lock() {
+                seen.push(flatten(decoded.metadata_context));
             }
-        },
-    ));
-
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async move { stopping.cancelled().await })
-            .await;
-    });
-
+            if let Ok(mut seen) = recorder.requests.lock() {
+                seen.push((
+                    decoded.method,
+                    decoded
+                        .mcp_request
+                        .map(|b| String::from_utf8_lossy(&b).into_owned()),
+                ));
+            }
+            McpRequestResult {
+                result: Some(match &script {
+                    Script::Rewrite(body) => {
+                        request_result::Result::Mutated(body.as_bytes().to_vec())
+                    }
+                    Script::Refuse(reason) => request_result::Result::Error(AuthorizationError {
+                        code: authorization_error::Code::PermissionDenied as i32,
+                        reason: (*reason).to_string(),
+                        mcp_error: None,
+                    }),
+                    Script::Pass | Script::SetHeaders | Script::Annotate => {
+                        request_result::Result::Pass(Default::default())
+                    }
+                }),
+                header_mutation: matches!(script, Script::SetHeaders).then(|| {
+                    agentgateway_mcp::HeaderMutation {
+                        set: vec![agentgateway_mcp::McpHeader {
+                            key: "x-user-id".into(),
+                            value: b"u-42".to_vec(),
+                        }],
+                        remove: Vec::new(),
+                    }
+                }),
+                metadata: matches!(script, Script::Annotate)
+                    .then(|| {
+                        match agentgateway_mcp::to_proto_value(serde_json::json!({
+                            "classification": "phishing",
+                        })) {
+                            Value::Struct(s) => Some(s),
+                            _ => None,
+                        }
+                    })
+                    .flatten(),
+            }
+            .encode_to_vec()
+            .expect("should encode")
+        } else {
+            let decoded = McpResponse::decode(message).expect("should decode");
+            if let Ok(mut seen) = recorder.metadata.lock() {
+                seen.push(flatten(decoded.metadata_context));
+            }
+            if let Ok(mut seen) = recorder.responses.lock() {
+                seen.push((
+                    decoded.method,
+                    String::from_utf8_lossy(&decoded.mcp_response).into_owned(),
+                ));
+            }
+            McpResponseResult {
+                result: Some(match &script {
+                    Script::Rewrite(body) => {
+                        response_result::Result::Mutated(body.as_bytes().to_vec())
+                    }
+                    Script::Refuse(reason) => response_result::Result::Error(AuthorizationError {
+                        code: authorization_error::Code::PermissionDenied as i32,
+                        reason: (*reason).to_string(),
+                        mcp_error: None,
+                    }),
+                    Script::Pass | Script::SetHeaders | Script::Annotate => {
+                        response_result::Result::Pass(Default::default())
+                    }
+                }),
+            }
+            .encode_to_vec()
+            .expect("should encode")
+        }
+    })
+    .await;
     (addr.to_string(), seen, shutdown)
 }
 
@@ -595,100 +538,64 @@ async fn http_target_at(
     SeenPaths,
     CancellationToken,
 ) {
-    use rmcp::{
-        ErrorData as McpError, ServerHandler,
-        model::{
-            CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
-            PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
-        },
-        service::{RequestContext, RoleServer},
-        transport::streamable_http_server::{
-            StreamableHttpService, session::local::LocalSessionManager,
-        },
-    };
+    use rusty_mcp_server::json::Value as Json;
+    use rusty_mcp_server::proto::{CallToolResult, ContentBlock, Tool};
+    use rusty_mcp_server::{HttpConfig, HttpHandler, Mount, Server};
 
-    #[derive(Clone)]
-    struct Echo;
-
-    impl ServerHandler for Echo {
-        fn get_info(&self) -> ServerInfo {
-            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-        }
-
-        async fn list_tools(
-            &self,
-            _request: Option<PaginatedRequestParams>,
-            _context: RequestContext<RoleServer>,
-        ) -> Result<ListToolsResult, McpError> {
-            let mut schema = serde_json::Map::new();
-            schema.insert("type".into(), serde_json::Value::String("object".into()));
-            Ok(ListToolsResult {
-                tools: vec![Tool::new("echo", "echo", Arc::new(schema))],
-                ..Default::default()
+    let mut schema = Json::object();
+    schema.insert("type", "object");
+    let server = Server::builder("echo", "1")
+        .tool(Tool::new("echo", schema), |_call, _params| {
+            Ok(CallToolResult {
+                content: vec![ContentBlock::text("served")],
+                ..CallToolResult::default()
             })
-        }
-
-        async fn call_tool(
-            &self,
-            _request: CallToolRequestParams,
-            _context: RequestContext<RoleServer>,
-        ) -> Result<CallToolResponse, McpError> {
-            Ok(CallToolResponse::Complete(CallToolResult::success(vec![
-                ContentBlock::text("served"),
-            ])))
-        }
-    }
+        })
+        .build()
+        .expect("the target's tools should register");
+    let mcp = Mount::new(Arc::new(HttpHandler::new(
+        Arc::new(server),
+        HttpConfig {
+            path: mount.to_owned(),
+            ..HttpConfig::default()
+        },
+    )))
+    .at(mount);
 
     let port = free_port().await;
     let seen: SeenHeaders = Arc::new(Mutex::new(Vec::new()));
-    let shutdown = CancellationToken::new();
-
-    let service = StreamableHttpService::new(
-        || Ok(Echo),
-        LocalSessionManager::default().into(),
-        Default::default(),
-    );
-
     let paths: SeenPaths = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&seen);
     let path_recorder = Arc::clone(&paths);
-    let app = axum::Router::new()
-        .nest_service(mount, service)
-        .layer(axum::middleware::from_fn(
-            move |request: axum::extract::Request, next: axum::middleware::Next| {
-                let recorder = Arc::clone(&recorder);
-                let path_recorder = Arc::clone(&path_recorder);
-                async move {
-                    if let Ok(mut seen) = path_recorder.lock() {
-                        seen.push(request.uri().path().to_string());
-                    }
-                    if let Ok(mut seen) = recorder.lock() {
-                        seen.push(
-                            request
-                                .headers()
-                                .iter()
-                                .map(|(k, v)| {
-                                    (
-                                        k.as_str().to_string(),
-                                        v.to_str().unwrap_or_default().to_string(),
-                                    )
-                                })
-                                .collect(),
-                        );
-                    }
-                    next.run(request).await
-                }
-            },
-        ));
+    // Every request is recorded, served or not; only the mount (and below it,
+    // as `nest_service` did) reaches the MCP endpoint.
+    let app = rusty_axum::Router::new().fallback(move |request: rusty_axum::Request| {
+        if let Ok(mut seen) = path_recorder.lock() {
+            seen.push(request.path().to_string());
+        }
+        if let Ok(mut seen) = recorder.lock() {
+            seen.push(common::header_pairs(request.headers()));
+        }
+        let mounted = request.path() == mount
+            || request
+                .path()
+                .strip_prefix(mount)
+                .is_some_and(|rest| rest.starts_with('/'));
+        let reply = mounted.then(|| mcp.call(request));
+        async move {
+            match reply {
+                Some(reply) => reply.await,
+                None => rusty_axum::Response::new(rusty_axum::StatusCode::NOT_FOUND, ""),
+            }
+        }
+    });
+    let upstream = common::upstream(format!("127.0.0.1:{port}"), app).await;
 
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("target should bind");
+    let shutdown = CancellationToken::new();
     let stopping = shutdown.clone();
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async move { stopping.cancelled().await })
-            .await;
+        stopping.cancelled().await;
+        upstream.stop().await;
     });
 
     (port, seen, paths, shutdown)

@@ -27,14 +27,14 @@ struct Upstream {
 /// Once the script runs out it answers `200`, so "fail twice then recover" is
 /// written as `[503, 503]`.
 async fn upstream(script: Vec<u16>) -> Upstream {
-    use axum::{Router, routing::any};
+    use rusty_axum::{Router, StatusCode};
 
     let port = free_port().await;
     let hits = Arc::new(AtomicUsize::new(0));
     let queue = Arc::new(Mutex::new(script.into_iter().collect::<Vec<_>>()));
 
     let counter = Arc::clone(&hits);
-    let app = Router::new().fallback(any(move || {
+    let app = Router::new().fallback(move || {
         let counter = Arc::clone(&counter);
         let queue = Arc::clone(&queue);
         async move {
@@ -43,16 +43,10 @@ async fn upstream(script: Vec<u16>) -> Upstream {
                 .lock()
                 .map(|q| q.get(index).copied().unwrap_or(200))
                 .unwrap_or(200);
-            axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK)
+            StatusCode::from_u16(status)
         }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("upstream should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
     });
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     Upstream { port, hits }
 }
@@ -266,24 +260,19 @@ async fn recorded_retry() -> (String, CancellationToken, Arc<Mutex<Vec<String>>>
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let recorder = Arc::clone(&seen);
 
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("should bind");
-    tokio::spawn(async move {
-        let app = axum::Router::new().fallback(axum::routing::any(move |body: String| {
-            let recorder = Arc::clone(&recorder);
-            async move {
-                let mut seen = recorder.lock().expect("lock");
-                seen.push(body);
-                if seen.len() < 2 {
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE
-                } else {
-                    axum::http::StatusCode::OK
-                }
+    let app = rusty_axum::Router::new().fallback(move |body: String| {
+        let recorder = Arc::clone(&recorder);
+        async move {
+            let mut seen = recorder.lock().expect("lock");
+            seen.push(body);
+            if seen.len() < 2 {
+                rusty_axum::StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                rusty_axum::StatusCode::OK
             }
-        }));
-        let _ = axum::serve(listener, app).await;
+        }
     });
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     let (base, shutdown) = start(&format!(
         r#"          - name: proxy

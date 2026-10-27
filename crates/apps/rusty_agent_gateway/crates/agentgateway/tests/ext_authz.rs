@@ -37,7 +37,7 @@ enum Verdict {
 }
 
 async fn authorizer(verdict: Verdict) -> (u16, Arc<Mutex<Option<Asked>>>, Arc<AtomicUsize>) {
-    use axum::{Router, extract::Request, routing::any};
+    use rusty_axum::{Request, Router};
 
     let port = free_port().await;
     let asked = Arc::new(Mutex::new(None));
@@ -46,60 +46,38 @@ async fn authorizer(verdict: Verdict) -> (u16, Arc<Mutex<Option<Asked>>>, Arc<At
     let recorder = Arc::clone(&asked);
     let counter = Arc::clone(&hits);
 
-    let app = Router::new().fallback(any(move |request: Request| {
+    let app = Router::new().fallback(move |request: Request| {
         let recorder = Arc::clone(&recorder);
         let counter = Arc::clone(&counter);
         async move {
             counter.fetch_add(1, Ordering::Relaxed);
             let method = request.method().as_str().to_string();
-            let path = request.uri().path().to_string();
-            let headers: Vec<(String, String)> = request
-                .headers()
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.as_str().to_string(),
-                        v.to_str().unwrap_or_default().to_string(),
-                    )
-                })
-                .collect();
-            let body = axum::body::to_bytes(request.into_body(), 1 << 20)
-                .await
-                .unwrap_or_default();
+            let path = request.path().to_string();
+            let headers: Vec<(String, String)> = common::header_pairs(request.headers());
+            let body = request.body();
             if let Ok(mut asked) = recorder.lock() {
                 *asked = Some(Asked {
                     method,
                     path,
                     headers,
-                    body: String::from_utf8_lossy(&body).into_owned(),
+                    body: String::from_utf8_lossy(body).into_owned(),
                 });
             }
 
             match verdict {
-                Verdict::Allow => axum::response::Response::builder()
-                    .status(200)
-                    .header("x-user-id", "u-42")
-                    .header("x-is-admin", "true")
-                    .body(axum::body::Body::empty())
-                    .expect("response should build"),
-                Verdict::Deny(status) => axum::response::Response::builder()
-                    .status(status)
-                    .header("content-type", "application/json")
-                    .header("www-authenticate", "Bearer realm=\"agents\"")
-                    .body(axum::body::Body::from(
-                        json!({"reason": "not in group"}).to_string(),
-                    ))
-                    .expect("response should build"),
+                Verdict::Allow => rusty_axum::Response::new(rusty_axum::StatusCode::OK, "")
+                    .with_header("x-user-id", "u-42")
+                    .with_header("x-is-admin", "true"),
+                Verdict::Deny(status) => rusty_axum::Response::new(
+                    rusty_axum::StatusCode::from_u16(status),
+                    json!({"reason": "not in group"}).to_string(),
+                )
+                .with_header("content-type", "application/json")
+                .with_header("www-authenticate", "Bearer realm=\"agents\""),
             }
         }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("authorizer should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
     });
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     (port, asked, hits)
 }
@@ -124,7 +102,7 @@ async fn upstream_with_body() -> (
 async fn upstream_recording(
     body_recorder: Arc<Mutex<String>>,
 ) -> (u16, Arc<AtomicUsize>, Arc<Mutex<Vec<(String, String)>>>) {
-    use axum::{Router, extract::Request, routing::any};
+    use rusty_axum::{Request, Router};
 
     let port = free_port().await;
     let hits = Arc::new(AtomicUsize::new(0));
@@ -133,40 +111,22 @@ async fn upstream_recording(
     let counter = Arc::clone(&hits);
     let recorder = Arc::clone(&seen);
 
-    let app = Router::new().fallback(any(move |request: Request| {
+    let app = Router::new().fallback(move |request: Request| {
         let counter = Arc::clone(&counter);
         let recorder = Arc::clone(&recorder);
         let body_recorder = Arc::clone(&body_recorder);
         async move {
             counter.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut seen) = recorder.lock() {
-                *seen = request
-                    .headers()
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.as_str().to_string(),
-                            v.to_str().unwrap_or_default().to_string(),
-                        )
-                    })
-                    .collect();
+                *seen = common::header_pairs(request.headers());
             }
-            let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
-                .await
-                .unwrap_or_default();
             if let Ok(mut recorded) = body_recorder.lock() {
-                *recorded = String::from_utf8_lossy(&bytes).into_owned();
+                *recorded = String::from_utf8_lossy(request.body()).into_owned();
             }
-            axum::Json(json!({"served": true}))
+            rusty_axum::Json(json!({"served": true}))
         }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("upstream should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
     });
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     (port, hits, seen)
 }
@@ -444,16 +404,11 @@ async fn failing_open_has_to_be_asked_for() {
 #[tokio::test]
 async fn a_slow_authorizer_hits_its_budget_and_denies() {
     let port = free_port().await;
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("should bind");
-    tokio::spawn(async move {
-        let app = axum::Router::new().fallback(axum::routing::any(|| async {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            "too late"
-        }));
-        let _ = axum::serve(listener, app).await;
+    let app = rusty_axum::Router::new().fallback(|| async {
+        rusty_tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        "too late"
     });
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     let (up_port, up_hits, _) = upstream().await;
     let (base, shutdown) = start(

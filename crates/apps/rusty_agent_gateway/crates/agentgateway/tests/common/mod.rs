@@ -129,10 +129,11 @@ pub fn claim_band(directory: &Path) -> Option<(File, u32)> {
     None
 }
 
-/// The `rusty_tokio` runtime the gateway under test runs on.
+/// The `rusty_tokio` runtime the gateway under test and its mock upstreams
+/// run on.
 ///
-/// The suites drive the gateway with tokio clients (`reqwest`, `rmcp`) and
-/// tokio mock upstreams (`axum`), while the gateway's own timers and sockets
+/// The suites drive the gateway with tokio clients (`reqwest`, `rmcp`), while
+/// the gateway's own timers and sockets, and the `rusty_axum` mock upstreams,
 /// are `rusty_tokio`'s and need a runtime of their own. So the gateway is
 /// built and served here, and a test reaches it over sockets as any client
 /// would.
@@ -198,4 +199,150 @@ pub async fn serve_with_limits(
         stop.cancel();
     });
     Ok(serving)
+}
+
+/// A mock upstream: `router` served on `rusty_axum`, on the gateway's runtime.
+///
+/// It keeps serving until [`Upstream::stop`] or the end of the test binary:
+/// dropping the handle does not stop it, as a spawned `axum::serve` did not.
+#[allow(dead_code, reason = "only the suites with an HTTP upstream serve one")]
+pub struct Upstream {
+    server: Option<rusty_axum::Server>,
+}
+
+#[allow(dead_code, reason = "only the suites with an HTTP upstream serve one")]
+impl Upstream {
+    /// The address the upstream listens on.
+    pub fn addr(&self) -> std::net::SocketAddr {
+        self.server
+            .as_ref()
+            .map(rusty_axum::Server::local_addr)
+            .expect("a running upstream has an address")
+    }
+
+    /// Stops accepting and waits for the requests in flight to be answered,
+    /// as axum's graceful shutdown did.
+    pub async fn stop(mut self) {
+        if let Some(server) = self.server.take() {
+            gateway_runtime()
+                .spawn(server.shutdown())
+                .await
+                .expect("stopping an upstream should not panic");
+        }
+    }
+}
+
+impl Drop for Upstream {
+    fn drop(&mut self) {
+        // A dropped `rusty_axum::Server` shuts down; an unstopped upstream
+        // keeps serving instead.
+        std::mem::forget(self.server.take());
+    }
+}
+
+/// Serves `router` on `addr` (`127.0.0.1:0` for any free port).
+#[allow(dead_code, reason = "only the suites with an HTTP upstream serve one")]
+pub async fn upstream(addr: impl Into<String>, router: rusty_axum::Router) -> Upstream {
+    let addr = addr.into();
+    let server = gateway_runtime()
+        .spawn(async move {
+            let listener = rusty_tokio::io::TcpListener::bind(addr.as_str())
+                .await
+                .expect("upstream should bind");
+            rusty_axum::serve(listener, None, rusty_axum::ServeOptions::default(), router)
+                .expect("upstream should serve")
+        })
+        .await
+        .expect("starting an upstream should not panic");
+    Upstream {
+        server: Some(server),
+    }
+}
+
+/// `headers` as `(name, value)` pairs, names lowercased as `axum` handed
+/// them over.
+#[allow(dead_code, reason = "only the suites that record headers call this")]
+pub fn header_pairs(headers: &rusty_axum::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.to_string()))
+        .collect()
+}
+
+/// A scripted unary gRPC server (the `ExtMcp` processor mocks): HTTP/2
+/// without TLS on `rusty_hyper`, on the gateway's runtime. Each call's
+/// message goes to `reply` with the call's path, and the message `reply`
+/// returns is sent back with `grpc-status: 0` as a trailer. The framing is
+/// written out here, so the mock shares no gRPC code with the gateway's
+/// `rusty_tonic` client. Cancelling the token stops it.
+#[allow(dead_code, reason = "only the guardrail suites run a processor")]
+pub async fn grpc_upstream<F>(
+    reply: F,
+) -> (std::net::SocketAddr, tokio_util::sync::CancellationToken)
+where
+    F: Fn(&str, &[u8]) -> Vec<u8> + Clone + Send + Sync + 'static,
+{
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let stopping = shutdown.clone();
+    let addr = gateway_runtime()
+        .spawn(async move {
+            let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("processor should bind");
+            let server = rusty_hyper::serve(
+                listener,
+                None,
+                rusty_hyper::ServeOptions::default(),
+                move |request, respond| grpc_answer(reply.clone(), request, respond),
+            )
+            .expect("processor should serve");
+            let addr = server.local_addr();
+            rusty_tokio::spawn(async move {
+                stopping.cancelled().await;
+                server.shutdown().await;
+            });
+            addr
+        })
+        .await
+        .expect("starting a processor should not panic");
+    (addr, shutdown)
+}
+
+/// One call to a [`grpc_upstream`].
+async fn grpc_answer<F>(reply: F, mut request: rusty_hyper::Request, respond: rusty_hyper::Respond)
+where
+    F: Fn(&str, &[u8]) -> Vec<u8>,
+{
+    let field = |name: &str, value: &str| rusty_hyper::HeaderField::new(name, value);
+    let path = request
+        .headers
+        .iter()
+        .find(|h| h.name == b":path")
+        .map(|h| String::from_utf8_lossy(&h.value).into_owned())
+        .unwrap_or_default();
+    let mut body = Vec::new();
+    while let Some(Ok(piece)) = request.body.next().await {
+        if let rusty_hyper::Body::Data(data) = piece {
+            body.extend(data);
+        }
+    }
+    // gRPC frames a message as a 1-byte compression flag and a 4-byte
+    // big-endian length, then the protobuf.
+    let payload = reply(&path, body.get(5..).unwrap_or_default());
+    let mut framed = Vec::with_capacity(payload.len() + 5);
+    framed.push(0);
+    framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&payload);
+
+    let head = vec![
+        field(":status", "200"),
+        field("content-type", "application/grpc"),
+    ];
+    let Ok(mut send) = respond.send_response(head, false).await else {
+        return;
+    };
+    // The status is a trailer, after the message.
+    if send.send_data(framed, false).await.is_ok() {
+        let _ = send.send_trailers(vec![field("grpc-status", "0")]).await;
+    }
 }
