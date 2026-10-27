@@ -95,7 +95,8 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.format",
             "terminal.pwd",
             "terminal.title",
-            "terminal.status"
+            "terminal.status",
+            "terminal.process"
         ]
     );
     for name in block_methods {

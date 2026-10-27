@@ -252,6 +252,63 @@ fn terminal_methods_read_the_block() {
     assert!(json.contains("\"text\":\"/\""), "{json}");
 }
 
+/// An agent's view of a job: wait until it has the terminal, then read
+/// what runs. Linux only: Windows reports no foreground process.
+#[cfg(target_os = "linux")]
+#[test]
+fn wait_for_a_job_then_read_the_process() {
+    let socket = start_server();
+    let block = block(&socket);
+    let waiter = ctl_command(
+        &socket,
+        &[
+            "wait",
+            "--event",
+            "process-changed",
+            "--block",
+            &block,
+            "--name",
+            "sleep",
+            "--timeout",
+            "20",
+        ],
+    )
+    .stdout(Stdio::piped())
+    .spawn()
+    .expect("spawn");
+    ok(
+        &socket,
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+            "input",
+            "--block",
+            &block,
+            "--data",
+            "sleep 30\r",
+        ],
+    );
+    let output = waiter.wait_with_output().expect("wait");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        stdout(&output).contains(" name=\"sleep\""),
+        "{}",
+        stdout(&output)
+    );
+    let process = ok(&socket, &["terminal.process", "--block", &block]);
+    let names: Vec<&str> = process
+        .lines()
+        .filter_map(|l| l.split('\t').nth(1))
+        .collect();
+    assert_eq!(names, ["sleep", "sh"], "{process}");
+}
+
 #[test]
 fn api_lists_and_describes_methods_without_a_server() {
     let nowhere = Path::new("/nonexistent/rusty-mux.sock");

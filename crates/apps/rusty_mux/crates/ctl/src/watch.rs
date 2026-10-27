@@ -104,6 +104,7 @@ pub(crate) fn needs(kind: &str) -> Features {
         "block-status" => Features::STATUS,
         "pwd-changed" | "title-changed" => Features::TERMINAL_EVENTS,
         "program-exited" | "bell" | "progress-changed" | "notification" => Features::PROGRAM_EVENTS,
+        "process-changed" => Features::PROCESS,
         _ => Features::NONE,
     }
 }

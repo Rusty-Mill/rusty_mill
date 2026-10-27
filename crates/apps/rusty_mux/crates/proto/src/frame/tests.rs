@@ -288,6 +288,16 @@ fn every_event_round_trips() {
             title: String::new(),
             body: "done; ok".into(),
         },
+        Event::ProcessChanged {
+            block,
+            pid: u32::MAX,
+            name: "vim".into(),
+        },
+        Event::ProcessChanged {
+            block,
+            pid: 1,
+            name: String::new(),
+        },
     ];
     for event in events {
         round_trip(Message::Event {
@@ -558,6 +568,13 @@ fn program_event_values_are_checked() {
         }),
         "neither a code nor a signal"
     );
+    assert_eq!(
+        event(20, &|o| {
+            o.varint(32, 1 << 32).bytes(6, b"vim");
+        }),
+        invalid(32),
+        "a pid wider than 32 bits"
+    );
 }
 
 #[test]
@@ -685,6 +702,7 @@ fn feature_bits_are_distinct() {
         Features::TERMINAL_EVENTS,
         Features::PROGRAM_EVENTS,
         Features::LAUNCH,
+        Features::PROCESS,
     ];
     let mut seen = 0u64;
     for feature in all {

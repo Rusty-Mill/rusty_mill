@@ -331,6 +331,7 @@ fn status_notes_need_a_live_block() {
         mux.note_notification(block, String::new(), "b".into()),
         gone
     );
+    assert_eq!(mux.note_process(block, 7, "vim".into()), gone);
     assert!(mux.take_events().is_empty());
 }
 
@@ -372,5 +373,20 @@ fn program_notes_emit_their_events_in_order() {
                 status: ExitStatus::Signal(9)
             },
         ]
+    );
+}
+
+#[test]
+fn process_notes_emit_their_event() {
+    let (mut mux, _, _, block) = fixture();
+    mux.take_events();
+    assert_eq!(mux.note_process(block, 42, "vim".into()), Ok(()));
+    assert_eq!(
+        mux.take_events(),
+        vec![Event::ProcessChanged {
+            block,
+            pid: 42,
+            name: "vim".into()
+        }]
     );
 }

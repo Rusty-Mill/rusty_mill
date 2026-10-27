@@ -630,6 +630,18 @@ pub static CATALOG: &[Method] = &[
         build: |req, a| block_call(req, a, "terminal.status"),
     },
     Method {
+        name: "terminal.process",
+        doc: "Read what runs in the terminal: one process per line as `PID<TAB>NAME<TAB>COMMAND \
+              LINE`, the foreground process first, then its ancestors, the block's own program \
+              last. A backslash, tab, newline or carriage return in a field is written `\\\\`, \
+              `\\t`, `\\n` or `\\r`, any other control character `\\u{HEX}`. A name or command \
+              line the platform does not tell is empty.",
+        params: &[BLOCK],
+        needs: Features::BLOCK_CALL,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.process"),
+    },
+    Method {
         name: "close-block",
         doc: "Stop the block's program and remove the block.",
         params: &[BLOCK],

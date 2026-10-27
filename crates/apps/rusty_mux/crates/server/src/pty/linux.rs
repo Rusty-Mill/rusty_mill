@@ -3,6 +3,7 @@
 
 use std::ffi::OsString;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::time::Instant;
 
 use platform::process::{Child, Signal};
@@ -137,6 +138,14 @@ impl Pty {
 
     pub(crate) fn resize(&self, size: Size) -> io::Result<()> {
         self.master.get_ref().resize(win_size(size)).map_err(to_io)
+    }
+
+    /// The terminal's foreground process group, `None` once the program
+    /// side is gone.
+    pub(crate) fn foreground(&self) -> Option<u32> {
+        let fd = self.master.get_ref().as_raw_fd();
+        let pgrp = rusty_libc::termios::tcgetpgrp(fd).ok()?;
+        u32::try_from(pgrp).ok().filter(|&p| p > 0)
     }
 
     /// Nothing to do on Linux: the fd closes with the last handle, and an
