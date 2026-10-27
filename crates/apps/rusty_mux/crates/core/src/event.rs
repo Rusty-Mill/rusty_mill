@@ -96,6 +96,23 @@ pub enum Event {
         pid: u32,
         name: String,
     },
+    /// The session's name changed to `name`.
+    SessionRenamed {
+        session: SessionId,
+        name: String,
+    },
+    WindowRenamed {
+        window: WindowId,
+        name: String,
+    },
+    BlockRenamed {
+        block: BlockId,
+        name: String,
+    },
+    ClientRenamed {
+        client: ClientId,
+        name: String,
+    },
 }
 
 /// How a block's program ended.

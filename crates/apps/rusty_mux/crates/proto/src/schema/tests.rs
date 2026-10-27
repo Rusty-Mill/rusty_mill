@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use rusty_mux_core::{BlockId, Size};
+use rusty_mux_core::{BlockId, ClientId, EntityId, SessionId, Size, WindowId};
 use rusty_uuid::Uuid;
 
 use super::*;
@@ -75,12 +75,18 @@ fn catalog_covers_each_request_type_once() {
     let ty = |m: &Method| encode(&m.request(1, &samples(m)).expect(m.name)).expect("encode")[4];
     let (block, other): (Vec<&Method>, Vec<&Method>) =
         CATALOG.iter().partition(|m| m.is_block_method());
+    let (renames, other): (Vec<&Method>, Vec<&Method>) = other
+        .into_iter()
+        .partition(|m| m.name.starts_with("rename-"));
     let types: Vec<u8> = other.iter().map(|m| ty(m)).collect();
     let unique: BTreeSet<u8> = types.iter().copied().collect();
     assert_eq!(unique.len(), types.len(), "two methods build one type");
-    // 0x0d was Capture; 0x0f is BlockCall.
-    assert_eq!(unique, (0x02..=0x0e).filter(|t| *t != 0x0d).collect());
+    // 0x0d was Capture; 0x0f is BlockCall, 0x10 Rename.
+    let expected = (0x02..=0x11).filter(|t| ![0x0d, 0x0f, 0x10].contains(t));
+    assert_eq!(unique, expected.collect());
     assert!(block.iter().all(|m| ty(m) == 0x0f));
+    assert_eq!(renames.len(), 4);
+    assert!(renames.iter().all(|m| ty(m) == 0x10));
 }
 
 #[test]
@@ -165,6 +171,51 @@ fn methods_need_the_features_their_messages_are_gated_by() {
     assert_eq!(needs("list"), Features::INSPECT);
     assert_eq!(needs("create-session"), Features::NONE);
     assert_eq!(needs("create-block"), Features::NONE);
+    for name in [
+        "rename-session",
+        "rename-window",
+        "rename-block",
+        "rename-client",
+        "disconnect-client",
+    ] {
+        assert_eq!(needs(name), Features::LABELS, "{name}");
+    }
+}
+
+#[test]
+fn each_rename_names_its_own_kind() {
+    let cases = [
+        (
+            "rename-session",
+            EntityId::Session(SessionId::from_uuid(id(1))),
+        ),
+        (
+            "rename-window",
+            EntityId::Window(WindowId::from_uuid(id(1))),
+        ),
+        ("rename-block", EntityId::Block(BlockId::from_uuid(id(1)))),
+        (
+            "rename-client",
+            EntityId::Client(ClientId::from_uuid(id(1))),
+        ),
+    ];
+    for (name, target) in cases {
+        let method = method(name).expect(name);
+        let entity = method.params[0].name;
+        let args = [
+            ("name", Value::Text("x".into())),
+            (entity, Value::Id(id(1))),
+        ];
+        assert_eq!(
+            method.request(4, &args),
+            Ok(Message::Rename {
+                req: 4,
+                target,
+                name: "x".into()
+            }),
+            "{name}"
+        );
+    }
 }
 
 #[test]

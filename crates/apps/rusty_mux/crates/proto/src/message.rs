@@ -1,6 +1,8 @@
 //! The messages and their field layouts.
 
-use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Progress, SessionId, Size, WindowId};
+use rusty_mux_core::{
+    BlockId, ClientId, EntityId, Event, ExitStatus, Progress, SessionId, Size, WindowId,
+};
 use rusty_uuid::Uuid;
 use rusty_wire::{Reader, Writer};
 
@@ -62,6 +64,10 @@ impl Features {
     /// `terminal.format`'s `trim`, `unwrap` and `vt` options. A server
     /// without it refuses them as unknown parameters.
     pub const CAPTURE: Self = Self(1 << 13);
+    /// Names for every kind: [`Message::Rename`] and the `*Renamed`
+    /// events (skipped for a client without it); clients in the reply to
+    /// [`Message::List`]; and [`Message::Disconnect`].
+    pub const LABELS: Self = Self(1 << 14);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -142,6 +148,15 @@ pub enum Entry {
         holder: Option<ClientId>,
         /// The title the program last set; empty if it never set one.
         title: String,
+        /// Empty until a client names the block.
+        name: String,
+    },
+    /// Sent only with [`Features::LABELS`].
+    Client {
+        client: ClientId,
+        name: String,
+        /// The block whose output it receives, if any.
+        attached: Option<BlockId>,
     },
 }
 
@@ -208,9 +223,9 @@ pub enum Message {
     Sync {
         req: u64,
     },
-    /// Every session, window and block. Answered with one
-    /// [`Message::Entry`] per entity, each parent before its children, then
-    /// [`Message::Done`]. Negotiated with [`Features::INSPECT`].
+    /// Every session, window and block, then, with [`Features::LABELS`],
+    /// every client. Answered with one [`Message::Entry`] per entity, each
+    /// parent before its children, then [`Message::Done`]. Negotiated with [`Features::INSPECT`].
     List {
         req: u64,
     },
@@ -226,6 +241,20 @@ pub enum Message {
         block: BlockId,
         method: String,
         args: Vec<(String, Value)>,
+    },
+    /// Names any entity, replacing its old name. Negotiated with
+    /// [`Features::LABELS`].
+    Rename {
+        req: u64,
+        target: EntityId,
+        name: String,
+    },
+    /// Ends another client's connection, as if it had closed it: it is
+    /// detached and loses its leases. It may connect again. Negotiated
+    /// with [`Features::LABELS`].
+    Disconnect {
+        req: u64,
+        client: ClientId,
     },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
@@ -343,6 +372,8 @@ mod ty {
     // 0x0d was Capture, replaced by BlockCall's `terminal.format`.
     pub const LIST: u8 = 0x0e;
     pub const BLOCK_CALL: u8 = 0x0f;
+    pub const RENAME: u8 = 0x10;
+    pub const DISCONNECT: u8 = 0x11;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -421,6 +452,14 @@ impl Message {
                     .bytes(METHOD, method.as_bytes())
                     .bytes(ARGS, &args::encode(args));
                 ty::BLOCK_CALL
+            }
+            M::Rename { req, target, name } => {
+                put_target(out.varint(REQ, *req), *target).bytes(NAME, name.as_bytes());
+                ty::RENAME
+            }
+            M::Disconnect { req, client } => {
+                out.varint(REQ, *req).uuid(CLIENT, client.uuid());
+                ty::DISCONNECT
             }
             M::Welcome {
                 features,
@@ -552,6 +591,15 @@ impl Message {
                 block: block(&f, BLOCK)?,
                 method: f.string(METHOD)?,
                 args: args::decode(f.bytes(ARGS)?).ok_or_else(|| f.invalid(ARGS))?,
+            },
+            ty::RENAME => M::Rename {
+                req: f.varint(REQ)?,
+                target: get_target(&f)?,
+                name: f.string(NAME)?,
+            },
+            ty::DISCONNECT => M::Disconnect {
+                req: f.varint(REQ)?,
+                client: client(&f, CLIENT)?,
             },
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
@@ -691,6 +739,31 @@ fn client(f: &In<'_>, id: u32) -> Result<ClientId, Error> {
     f.uuid(id).map(ClientId::from_uuid)
 }
 
+/// An entity of any kind, by the field its id travels in.
+fn put_target(out: &mut Out, target: EntityId) -> &mut Out {
+    match target {
+        EntityId::Session(id) => out.uuid(SESSION, id.uuid()),
+        EntityId::Window(id) => out.uuid(WINDOW, id.uuid()),
+        EntityId::Block(id) => out.uuid(BLOCK, id.uuid()),
+        EntityId::Client(id) => out.uuid(CLIENT, id.uuid()),
+    }
+}
+
+/// Exactly one of the four id fields.
+fn get_target(f: &In<'_>) -> Result<EntityId, Error> {
+    let found = [
+        f.opt(SESSION, session)?.map(EntityId::Session),
+        f.opt(WINDOW, window)?.map(EntityId::Window),
+        f.opt(BLOCK, block)?.map(EntityId::Block),
+        f.opt(CLIENT, client)?.map(EntityId::Client),
+    ];
+    let mut present = found.into_iter().flatten();
+    match (present.next(), present.next()) {
+        (Some(target), None) => Ok(target),
+        _ => Err(f.invalid(SESSION)),
+    }
+}
+
 mod kind {
     pub const SESSION_CREATED: u64 = 1;
     pub const SESSION_CLOSED: u64 = 2;
@@ -712,6 +785,10 @@ mod kind {
     pub const PROGRESS_CHANGED: u64 = 18;
     pub const NOTIFICATION: u64 = 19;
     pub const PROCESS_CHANGED: u64 = 20;
+    pub const SESSION_RENAMED: u64 = 21;
+    pub const WINDOW_RENAMED: u64 = 22;
+    pub const BLOCK_RENAMED: u64 = 23;
+    pub const CLIENT_RENAMED: u64 = 24;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -832,7 +909,23 @@ fn put_event(out: &mut Out, event: &Event) {
                 .varint(PID, pid.into())
                 .bytes(NAME, name.as_bytes());
         }
+        E::SessionRenamed { session, ref name } => {
+            renamed(out, kind::SESSION_RENAMED, EntityId::Session(session), name);
+        }
+        E::WindowRenamed { window, ref name } => {
+            renamed(out, kind::WINDOW_RENAMED, EntityId::Window(window), name);
+        }
+        E::BlockRenamed { block, ref name } => {
+            renamed(out, kind::BLOCK_RENAMED, EntityId::Block(block), name);
+        }
+        E::ClientRenamed { client, ref name } => {
+            renamed(out, kind::CLIENT_RENAMED, EntityId::Client(client), name);
+        }
     }
+}
+
+fn renamed(out: &mut Out, kind: u64, target: EntityId, name: &str) {
+    put_target(out.varint(KIND, kind), target).bytes(NAME, name.as_bytes());
 }
 
 fn put_progress(out: &mut Out, progress: Progress) {
@@ -956,6 +1049,22 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
             pid: u32::try_from(f.varint(PID)?).map_err(|_| f.invalid(PID))?,
             name: f.string(NAME)?,
         },
+        kind::SESSION_RENAMED => E::SessionRenamed {
+            session: session(f, SESSION)?,
+            name: f.string(NAME)?,
+        },
+        kind::WINDOW_RENAMED => E::WindowRenamed {
+            window: window(f, WINDOW)?,
+            name: f.string(NAME)?,
+        },
+        kind::BLOCK_RENAMED => E::BlockRenamed {
+            block: block(f, BLOCK)?,
+            name: f.string(NAME)?,
+        },
+        kind::CLIENT_RENAMED => E::ClientRenamed {
+            client: client(f, CLIENT)?,
+            name: f.string(NAME)?,
+        },
         _ => return Err(f.invalid(KIND)),
     })
 }
@@ -964,6 +1073,7 @@ mod entry {
     pub const SESSION: u64 = 1;
     pub const WINDOW: u64 = 2;
     pub const BLOCK: u64 = 3;
+    pub const CLIENT: u64 = 4;
 }
 
 fn put_entry(out: &mut Out, entry: &Entry) {
@@ -989,16 +1099,31 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             size,
             holder,
             title,
+            name,
         } => {
             let o = out
                 .varint(KIND, entry::BLOCK)
                 .uuid(BLOCK, block.uuid())
                 .uuid(WINDOW, window.uuid())
-                .bytes(TITLE, title.as_bytes());
+                .bytes(TITLE, title.as_bytes())
+                .bytes(NAME, name.as_bytes());
             if let Some(holder) = holder {
                 o.uuid(HOLDER, holder.uuid());
             }
             put_size(o, *size);
+        }
+        Entry::Client {
+            client,
+            name,
+            attached,
+        } => {
+            let o = out
+                .varint(KIND, entry::CLIENT)
+                .uuid(CLIENT, client.uuid())
+                .bytes(NAME, name.as_bytes());
+            if let Some(block) = attached {
+                o.uuid(BLOCK, block.uuid());
+            }
         }
     }
 }
@@ -1020,6 +1145,13 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             size: get_size(f)?,
             holder: f.opt(HOLDER, client)?,
             title: f.string(TITLE)?,
+            // An older server sends no name.
+            name: f.opt(NAME, In::string)?.unwrap_or_default(),
+        },
+        entry::CLIENT => Entry::Client {
+            client: client(f, CLIENT)?,
+            name: f.string(NAME)?,
+            attached: f.opt(BLOCK, block)?,
         },
         _ => return Err(f.invalid(KIND)),
     })

@@ -82,6 +82,7 @@ fn list_gives_each_parent_before_its_children() {
             holder: Some(holder),
             size,
             title,
+            name: bname,
         },
         Entry::Block {
             block: b2,
@@ -97,6 +98,9 @@ fn list_gives_each_parent_before_its_children() {
     assert_eq!((ws, *w, *bw1, *bw2), (session, window, window, window));
     assert_eq!((*b1, *holder, *b2), (leased, client.id(), idle));
     assert_eq!((size.cols(), size.rows(), title.as_str()), (80, 24, ""));
+    assert_eq!(bname, "");
+    // Clients are listed only with the labels feature.
+    assert_eq!(entries.len(), 4);
 }
 
 #[test]

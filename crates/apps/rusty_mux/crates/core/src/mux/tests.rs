@@ -390,3 +390,69 @@ fn process_notes_emit_their_event() {
         }]
     );
 }
+
+#[test]
+fn rename_names_every_kind_and_emits_once() {
+    let (mut mux, session, window, block) = fixture();
+    let client = mux.connect();
+    mux.take_events();
+    mux.rename(EntityId::Session(session), "work").unwrap();
+    mux.rename(EntityId::Window(window), "logs").unwrap();
+    mux.rename(EntityId::Block(block), "build").unwrap();
+    mux.rename(EntityId::Client(client), "laptop").unwrap();
+    // The same name again changes nothing.
+    mux.rename(EntityId::Block(block), "build").unwrap();
+
+    assert_eq!(mux.session(session).unwrap().name(), "work");
+    assert_eq!(mux.window(window).unwrap().name(), "logs");
+    assert_eq!(mux.block(block).unwrap().name(), "build");
+    assert_eq!(mux.client(client).unwrap().name(), "laptop");
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::SessionRenamed {
+                session,
+                name: "work".into()
+            },
+            Event::WindowRenamed {
+                window,
+                name: "logs".into()
+            },
+            Event::BlockRenamed {
+                block,
+                name: "build".into()
+            },
+            Event::ClientRenamed {
+                client,
+                name: "laptop".into()
+            },
+        ]
+    );
+}
+
+#[test]
+fn new_blocks_and_clients_have_empty_names() {
+    let (mut mux, _, _, block) = fixture();
+    let client = mux.connect();
+    assert_eq!(mux.block(block).unwrap().name(), "");
+    assert_eq!(mux.client(client).unwrap().name(), "");
+    assert_eq!(mux.clients().map(Client::id).collect::<Vec<_>>(), [client]);
+}
+
+#[test]
+fn renaming_an_unknown_entity_changes_nothing() {
+    let (mut mux, _, window, block) = fixture();
+    let client = mux.connect();
+    mux.close_window(window).unwrap();
+    mux.disconnect(client).unwrap();
+    mux.take_events();
+    assert_eq!(
+        mux.rename(EntityId::Block(block), "x"),
+        Err(Error::UnknownBlock(block))
+    );
+    assert_eq!(
+        mux.rename(EntityId::Client(client), "x"),
+        Err(Error::UnknownClient(client))
+    );
+    assert!(mux.take_events().is_empty());
+}

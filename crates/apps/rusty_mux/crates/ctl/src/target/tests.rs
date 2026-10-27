@@ -1,4 +1,4 @@
-use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
+use rusty_mux_core::{BlockId, ClientId, SessionId, Size, WindowId};
 
 use super::*;
 
@@ -13,9 +13,12 @@ const W2: &str = "00000000-0000-0000-0000-00000000dd04";
 const B1: &str = "00000000-0000-0000-0000-00000000ee05";
 const B2: &str = "00000000-0000-0000-0000-00000000ff06";
 const B3: &str = "00000000-0000-0000-0000-00000000ff07";
+const C1: &str = "00000000-0000-0000-0000-00000000c108";
+const C2: &str = "00000000-0000-0000-0000-00000000c209";
 
-/// Session "build" holds window "logs" with blocks B1 and B2; session "Main"
-/// holds a window also named "logs" with block B3.
+/// Session "build" holds window "logs" with blocks B1 and B2, named
+/// "tests"; session "Main" holds a window also named "logs" with block B3.
+/// Client C1 is unnamed, C2 is "Laptop".
 fn listing() -> Vec<Entry> {
     let session = |s: &str, name: &str| Entry::Session {
         session: SessionId::from_uuid(id(s)),
@@ -26,21 +29,29 @@ fn listing() -> Vec<Entry> {
         session: SessionId::from_uuid(id(s)),
         name: "logs".into(),
     };
-    let block = |b: &str, w: &str| Entry::Block {
+    let block = |b: &str, w: &str, name: &str| Entry::Block {
         block: BlockId::from_uuid(id(b)),
         window: WindowId::from_uuid(id(w)),
         size: Size::new(80, 24).expect("size"),
         holder: None,
         title: String::new(),
+        name: name.into(),
+    };
+    let client = |c: &str, name: &str| Entry::Client {
+        client: ClientId::from_uuid(id(c)),
+        name: name.into(),
+        attached: None,
     };
     vec![
         session(S1, "build"),
         window(W1, S1),
-        block(B1, W1),
-        block(B2, W1),
+        block(B1, W1, ""),
+        block(B2, W1, "tests"),
         session(S2, "Main"),
         window(W2, S2),
-        block(B3, W2),
+        block(B3, W2, ""),
+        client(C1, ""),
+        client(C2, "Laptop"),
     ]
 }
 
@@ -97,6 +108,21 @@ fn misses_name_what_was_looked_for() {
     ] {
         assert!(
             matches!(find(entity, spec, None), Err(Miss::NotFound(_))),
+            "{spec}"
+        );
+    }
+}
+
+#[test]
+fn blocks_and_clients_are_named_like_the_rest() {
+    assert_eq!(find(Entity::Block, "TESTS", None), Ok(id(B2)));
+    assert_eq!(find(Entity::Block, "build/logs/tests", None), Ok(id(B2)));
+    assert_eq!(find(Entity::Client, "laptop", None), Ok(id(C2)));
+    assert_eq!(find(Entity::Client, "1", Some(S1)), Ok(id(C1)));
+    assert_eq!(find(Entity::Client, "c108", None), Ok(id(C1)));
+    for spec in ["", "x/laptop", "logs"] {
+        assert!(
+            matches!(find(Entity::Client, spec, None), Err(Miss::NotFound(_))),
             "{spec}"
         );
     }

@@ -1,9 +1,10 @@
 //! Resolving a target to an id against a listing, the way `--block 2` or
 //! `--window main/logs` names an entity without its full id.
 //!
-//! A target is a full id, a case-insensitive name, a position counting from
-//! 1, or the last four or more characters of an id, tried in that order. A
-//! path `SESSION/WINDOW/BLOCK` names the parents too; a shorter path drops
+//! A target is a full id, a case-insensitive name (an empty one names
+//! nothing), a position counting from 1, or the last four or more
+//! characters of an id, tried in that order. Clients are named only by
+//! themselves, never by a path. A path `SESSION/WINDOW/BLOCK` names the parents too; a shorter path drops
 //! leading parts. Without a session part, windows and blocks are looked up
 //! in the default session when there is one.
 
@@ -57,6 +58,7 @@ fn chain(entity: Entity) -> &'static [Entity] {
         Entity::Session => &[Entity::Session],
         Entity::Window => &[Entity::Session, Entity::Window],
         Entity::Block => &[Entity::Session, Entity::Window, Entity::Block],
+        Entity::Client => &[Entity::Client],
     }
 }
 
@@ -78,11 +80,22 @@ fn node(entry: &Entry) -> Node<'_> {
             parent: Some(session.uuid()),
             name: Some(name),
         },
-        Entry::Block { block, window, .. } => Node {
+        Entry::Block {
+            block,
+            window,
+            name,
+            ..
+        } => Node {
             entity: Entity::Block,
             id: block.uuid(),
             parent: Some(window.uuid()),
-            name: None,
+            name: Some(name),
+        },
+        Entry::Client { client, name, .. } => Node {
+            entity: Entity::Client,
+            id: client.uuid(),
+            parent: None,
+            name: Some(name),
         },
     }
 }
@@ -110,7 +123,8 @@ fn pick(candidates: &[&Node<'_>], entity: Entity, segment: &str) -> Result<Uuid,
     let rules: [Vec<Uuid>; 4] = [
         ids(candidates, |n| segment.parse() == Ok(n.id)),
         ids(candidates, |n| {
-            n.name.is_some_and(|name| name.to_lowercase() == lower)
+            n.name
+                .is_some_and(|name| !name.is_empty() && name.to_lowercase() == lower)
         }),
         position.map(|n| vec![n.id]).unwrap_or_default(),
         ids(candidates, |n| {

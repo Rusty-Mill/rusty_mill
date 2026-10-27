@@ -266,6 +266,21 @@ impl Client {
         self.id
     }
 
+    /// Reads, discarding what arrives, until the server closes the
+    /// connection; panics if it is still open after [`PATIENCE`].
+    pub fn wait_closed(&mut self) {
+        let mut chunk = [0u8; 65536];
+        loop {
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(_) => {}
+                // Windows reports a reset where Unix sees end of stream.
+                Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => return,
+                Err(err) => panic!("connection still open: {err}"),
+            }
+        }
+    }
+
     pub fn input(&mut self, block: BlockId, data: &[u8]) {
         let req = self.next_req;
         self.next_req += 1;

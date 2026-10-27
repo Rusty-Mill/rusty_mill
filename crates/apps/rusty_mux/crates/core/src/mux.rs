@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Block, BlockId, Client, ClientId, Error, Event, ExitStatus, Progress, Session, SessionId, Size,
-    Window, WindowId,
+    Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, Progress, Session,
+    SessionId, Size, Window, WindowId,
 };
 
 /// All sessions, windows, blocks and clients, plus the events not yet drained.
@@ -117,6 +117,7 @@ impl Mux {
             Block {
                 id,
                 window,
+                name: String::new(),
                 size,
                 lease: None,
             },
@@ -199,6 +200,65 @@ impl Mux {
         self.note(block, Event::ProcessChanged { block, pid, name })
     }
 
+    /// Names the entity `name`, replacing its old name. Renaming to the
+    /// same name changes nothing and emits nothing.
+    pub fn rename(&mut self, id: EntityId, name: impl Into<String>) -> Result<(), Error> {
+        let name = name.into();
+        let (slot, event) = match id {
+            EntityId::Session(session) => (
+                self.sessions
+                    .get_mut(&session)
+                    .map(|s| &mut s.name)
+                    .ok_or(Error::UnknownSession(session))?,
+                Event::SessionRenamed {
+                    session,
+                    name: name.clone(),
+                },
+            ),
+            EntityId::Window(window) => (
+                self.windows
+                    .get_mut(&window)
+                    .map(|w| &mut w.name)
+                    .ok_or(Error::UnknownWindow(window))?,
+                Event::WindowRenamed {
+                    window,
+                    name: name.clone(),
+                },
+            ),
+            EntityId::Block(block) => (
+                self.blocks
+                    .get_mut(&block)
+                    .map(|b| &mut b.name)
+                    .ok_or(Error::UnknownBlock(block))?,
+                Event::BlockRenamed {
+                    block,
+                    name: name.clone(),
+                },
+            ),
+            EntityId::Client(client) => (
+                self.clients
+                    .get_mut(&client)
+                    .map(|c| &mut c.name)
+                    .ok_or(Error::UnknownClient(client))?,
+                Event::ClientRenamed {
+                    client,
+                    name: name.clone(),
+                },
+            ),
+        };
+        if *slot == name {
+            return Ok(());
+        }
+        *slot = name;
+        self.events.push(event);
+        Ok(())
+    }
+
+    /// Clients in id order.
+    pub fn clients(&self) -> impl Iterator<Item = &Client> {
+        self.clients.values()
+    }
+
     /// Emits `event` about a block the host tracks, if it is live.
     fn note(&mut self, block: BlockId, event: Event) -> Result<(), Error> {
         if !self.blocks.contains_key(&block) {
@@ -255,7 +315,14 @@ impl Mux {
 
     pub fn connect(&mut self) -> ClientId {
         let id = ClientId::random();
-        self.clients.insert(id, Client { id, attached: None });
+        self.clients.insert(
+            id,
+            Client {
+                id,
+                name: String::new(),
+                attached: None,
+            },
+        );
         self.events.push(Event::ClientConnected { client: id });
         id
     }

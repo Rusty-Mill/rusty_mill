@@ -84,6 +84,7 @@ impl Window {
 pub struct Block {
     pub(crate) id: BlockId,
     pub(crate) window: WindowId,
+    pub(crate) name: String,
     pub(crate) size: Size,
     pub(crate) lease: Option<ClientId>,
 }
@@ -95,6 +96,11 @@ impl Block {
 
     pub fn window(&self) -> WindowId {
         self.window
+    }
+
+    /// Empty until a client names it.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// The PTY size.
@@ -112,12 +118,18 @@ impl Block {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Client {
     pub(crate) id: ClientId,
+    pub(crate) name: String,
     pub(crate) attached: Option<BlockId>,
 }
 
 impl Client {
     pub fn id(&self) -> ClientId {
         self.id
+    }
+
+    /// Empty until a client names it.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// The block whose output this client receives, if any.

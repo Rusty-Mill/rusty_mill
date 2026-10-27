@@ -50,3 +50,13 @@ id!(
     /// Identifies a [`Client`](crate::Client): one connection.
     ClientId
 );
+
+/// The id of an entity of any kind, for operations that apply to all four,
+/// such as renaming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EntityId {
+    Session(SessionId),
+    Window(WindowId),
+    Block(BlockId),
+    Client(ClientId),
+}
