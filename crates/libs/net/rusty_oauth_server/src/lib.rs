@@ -32,10 +32,13 @@
 //! - [`types`]: RFC 7591 client records and the RFC 6749 token response.
 //! - [`provider`]: the policy: consent, issuance, refresh, revocation.
 //! - [`endpoints`]: the HTTP surface, as data in and data out.
+//! - `serve` (feature `serve`): the endpoints on `rusty_serve`.
 
 pub mod endpoints;
 pub mod issuer;
 pub mod provider;
+#[cfg(feature = "serve")]
+pub mod serve;
 pub mod store;
 pub mod types;
 

@@ -10,6 +10,10 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 # UI: http://127.0.0.1:8787/#token=S   API: POST /api/<op>   MCP: /mcp
 ```
 
+`--issuer https://board.example.com` adds OAuth sign-in for `/mcp`, so a claude.ai connector can
+"Sign in now" with one of the board's own tokens; see
+[deploy/README.md](deploy/README.md#signing-in-from-claudeai-oauth).
+
 - **Columns:** backlog, ready, building, qa, review, done, blocked.
 - **Rules:** each move needs a capability (triage, build, qa, review, merge); leaving
   building/qa/review needs your claim. A role is a set of capabilities; roles are

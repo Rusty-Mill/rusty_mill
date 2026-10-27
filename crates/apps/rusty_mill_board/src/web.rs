@@ -1,6 +1,15 @@
 //! The HTTP surface: the UI page, `POST /api/<op>`, and `/mcp`, behind one
-//! guard (allowed `Host`, optional bearer token, JSON-only writes).
+//! guard (allowed `Host`, optional bearer token, JSON-only writes), plus
+//! OAuth sign-in when an issuer is set ([`Web::with_oauth`]).
+//!
+//! With OAuth, the consent page takes one of the board's own tokens and the
+//! grant acts as its holder: the actor's current credential (role and
+//! projects as they are now) under `--identities`, or the shared token's
+//! caller under `--auth-token`. Removing an agent suspends their grants;
+//! rotating their token does not touch them. An actor named by more than one
+//! credential can neither approve a grant nor use one.
 
+use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use rusty_crypto_key::constant_time_eq;
@@ -15,8 +24,20 @@ use crate::domain::BoardError;
 use crate::drain::InFlight;
 use crate::identities::Credentials;
 use crate::settings::Settings;
+use rusty_oauth_server::{
+    Branding, Endpoints, Issuer, Provider, StateStore, Subject, Verify, now_unix,
+};
 
 const UI: &str = include_str!("ui.html");
+
+/// The subject of a grant approved with the shared `--auth-token`.
+const SHARED_SUBJECT: &str = "shared";
+
+const BRANDING: Branding = Branding {
+    resource_name: "Mill Board",
+    resource_description: "your Mill Board",
+    token_label: "Your Mill Board token",
+};
 
 /// Refuse to serve an unauthenticated board beyond loopback. The `Host`
 /// check is not client authentication: any remote client can send
@@ -39,6 +60,19 @@ pub fn check_bind(
          (the Host check is not authentication). Use --identities FILE (a token per model) or --auth-token, \
          bind to loopback, or pass --accept-unauthenticated-public if you really mean it"
     ))
+}
+
+/// The `Host` names that reach the board at `issuer`: its host, and for an
+/// IPv6 address also its bracketed form. The web guard compares a `Host`
+/// with its port removed but brackets kept (`[2001:db8::1]`), the MCP
+/// handler without brackets, so both forms are needed for both to agree.
+pub fn issuer_hosts(issuer: &Issuer) -> Vec<String> {
+    let host = issuer.host();
+    if host.contains(':') {
+        vec![format!("[{host}]"), host]
+    } else {
+        vec![host]
+    }
 }
 
 /// How callers of `/api` and `/mcp` are authenticated.
@@ -68,6 +102,8 @@ pub struct Web {
     auth: Auth,
     settings: Arc<Settings>,
     in_flight: Arc<InFlight>,
+    /// OAuth's endpoints, when an issuer is set.
+    oauth: Option<Endpoints>,
 }
 
 impl Web {
@@ -89,7 +125,50 @@ impl Web {
             hosts,
             auth,
             in_flight: Arc::default(),
+            oauth: None,
         }
+    }
+
+    /// Serve OAuth sign-in under `issuer`, with grants kept in `state_file`,
+    /// and accept the access tokens it issues on `/api` and `/mcp`. The
+    /// issuer's host must be among the accepted hosts.
+    ///
+    /// `state_file` is bound to `issuer` on first use, so another board
+    /// pointed at it later is refused rather than honouring this one's grants.
+    ///
+    /// # Errors
+    /// On an open board (with no token to paste there is nothing to consent
+    /// with), and when `state_file` belongs to another issuer or is unreadable.
+    pub fn with_oauth(mut self, issuer: Issuer, state_file: PathBuf) -> Result<Self, String> {
+        let verify: Verify = match &self.auth {
+            Auth::Open => {
+                return Err(
+                    "OAuth needs credentials to approve with: use --identities or --auth-token"
+                        .into(),
+                );
+            }
+            Auth::Shared(expected) => {
+                let expected = expected.clone();
+                Box::new(move |token: &str| {
+                    constant_time_eq(token.as_bytes(), expected.as_bytes())
+                        .then(|| Subject::new(SHARED_SUBJECT))
+                })
+            }
+            Auth::Credentials(all) => {
+                let all = Arc::clone(all);
+                Box::new(move |token: &str| {
+                    let all = all.read().unwrap_or_else(PoisonError::into_inner);
+                    let actor = &all.identify(token)?.actor;
+                    // The grant names only the actor: refuse one that names several credentials.
+                    all.by_actor(actor).map(|i| Subject::new(i.actor.as_str()))
+                })
+            }
+        };
+        let store = StateStore::bound(state_file, issuer.as_str())
+            .map_err(|e| format!("OAuth state: {e}"))?;
+        let provider = Provider::new(verify, store);
+        self.oauth = Some(Endpoints::new(Arc::new(provider), issuer, BRANDING));
+        Ok(self)
     }
 
     /// Count requests in `flight`, the counter the MCP tools share, so one stop
@@ -128,6 +207,29 @@ impl Web {
         let presented = request
             .authorization
             .and_then(rusty_oauth::bearer::token_from_authorization);
+        self.own_identity(presented)
+            .or_else(|()| self.oauth_identity(presented).ok_or(()))
+    }
+
+    /// The identity an OAuth access token acts as now, if it is live and its
+    /// holder still is.
+    fn oauth_identity(&self, presented: Option<&str>) -> Option<Option<Identity>> {
+        let endpoints = self.oauth.as_ref()?;
+        let subject = endpoints.provider().subject_of(presented?, now_unix())?;
+        match &self.auth {
+            Auth::Open => None,
+            Auth::Shared(_) => (subject.as_str() == SHARED_SUBJECT).then_some(None),
+            Auth::Credentials(all) => all
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .by_actor(subject.as_str())
+                .cloned()
+                .map(Some),
+        }
+    }
+
+    /// The board's own credentials: `Err` for a missing or wrong one.
+    fn own_identity(&self, presented: Option<&str>) -> Result<Option<Identity>, ()> {
         match &self.auth {
             Auth::Open => Ok(None),
             Auth::Shared(expected) => presented
@@ -143,6 +245,14 @@ impl Web {
                 })
                 .map(Some)
                 .ok_or(()),
+        }
+    }
+
+    /// The refusal of `/mcp`: with OAuth, a challenge naming its metadata.
+    fn unauthorized(&self) -> Response {
+        match &self.oauth {
+            Some(endpoints) => rusty_oauth_server::serve::unauthorized(endpoints),
+            None => reply(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"})),
         }
     }
 
@@ -214,7 +324,7 @@ impl SharedHandler for Web {
                 Ok(identity) => self
                     .mcp
                     .handle_with(request, identity.and_then(|i| principal(&i))),
-                Err(()) => reply(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"})),
+                Err(()) => self.unauthorized(),
             };
         }
         if path == "/health" && request.method == &Method::Get {
@@ -229,6 +339,10 @@ impl SharedHandler for Web {
         }
         if !self.host_ok(request) {
             return reply(StatusCode::FORBIDDEN, json!({"error": "host not allowed"}));
+        }
+        let oauth = self.oauth.as_ref();
+        if let Some(response) = oauth.and_then(|e| rusty_oauth_server::serve::handle(e, request)) {
+            return response;
         }
         if path == "/" && request.method == &Method::Get {
             // The page holds no data; it reads the token from the URL fragment.

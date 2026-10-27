@@ -68,7 +68,7 @@ impl SharedHandler for Routes {
     fn handle(&self, request: &Request<'_>) -> Response {
         // Before the lock: the consent page's token check takes it.
         let oauth = self.oauth.as_ref();
-        if let Some(response) = oauth.and_then(|e| crate::oauth::handle(e, request)) {
+        if let Some(response) = oauth.and_then(|e| rusty_oauth_server::serve::handle(e, request)) {
             return response;
         }
         let Ok(mut backend) = self.backend.lock() else {
@@ -88,7 +88,7 @@ impl SharedHandler for Routes {
         match (denied, oauth) {
             (Ok(_), _) => self.mcp.handle_with(request, None),
             // The challenge points a client at the OAuth metadata.
-            (Err(_), Some(endpoints)) => crate::oauth::to_serve(endpoints.unauthorized()),
+            (Err(_), Some(endpoints)) => rusty_oauth_server::serve::unauthorized(endpoints),
             (Err(denied), None) => Response::json(denied.status, denied.body),
         }
     }

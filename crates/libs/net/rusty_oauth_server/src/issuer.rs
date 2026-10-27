@@ -22,6 +22,13 @@ impl Issuer {
         &self.origin
     }
 
+    /// The host, lowercased and without a port: what a server that checks
+    /// `Host` must accept for the issuer's URLs to reach it.
+    pub fn host(&self) -> String {
+        let authority = self.origin.split_once("://").map_or("", |(_, a)| a);
+        host_of(authority)
+    }
+
     /// `{origin}{path}` — for building endpoint URLs in AS metadata.
     pub fn endpoint(&self, path: &str) -> String {
         format!("{}{path}", self.origin)
@@ -147,6 +154,11 @@ mod tests {
     fn a_plain_https_origin_is_valid() {
         let issuer = validate_issuer("https://machine.tailnet.ts.net").unwrap();
         assert_eq!(issuer.as_str(), "https://machine.tailnet.ts.net");
+        assert_eq!(issuer.host(), "machine.tailnet.ts.net");
+        assert_eq!(
+            validate_issuer("http://LOCALHOST:8787").unwrap().host(),
+            "localhost"
+        );
         assert_eq!(
             issuer.endpoint("/authorize"),
             "https://machine.tailnet.ts.net/authorize"

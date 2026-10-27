@@ -271,6 +271,18 @@ impl Credentials {
 
     /// Whose token this is. Compares against every entry, so timing does not
     /// reveal which entry matched or how much of a token was right.
+    /// The current identity of `actor`, if exactly one credential names them:
+    /// what an OAuth grant made by that actor acts as. `None` when none does,
+    /// and when several do (a file may give one actor two tokens with
+    /// different roles or projects), so an actor name never picks between
+    /// credentials of different authority.
+    pub fn by_actor(&self, actor: &str) -> Option<&Identity> {
+        let mut named = self.0.iter().map(|(_, i)| i).filter(|i| i.actor == actor);
+        let only = named.next()?;
+        named.next().is_none().then_some(only)
+    }
+
+    /// The identity a token belongs to.
     pub fn identify(&self, token: &str) -> Option<&Identity> {
         let mut found = None;
         for (candidate, identity) in &self.0 {
