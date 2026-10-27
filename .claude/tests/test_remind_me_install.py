@@ -80,7 +80,13 @@ class Install(unittest.TestCase):
         for broken in ('{not json', '[]', '{"hooks": []}', '{"hooks": null}',
                        '{"hooks": {"Stop": {}}}', '{"hooks": {"Stop": [42]}}',
                        '{"hooks": {"Stop": [{"hooks": "x"}]}}',
-                       '{"hooks": {"PreCompact": [{"hooks": [1]}]}}'):
+                       '{"hooks": {"PreCompact": [{"hooks": [1]}]}}',
+                       '{"hooks": {"Stop": [{"hooks": [{}]}]}}',
+                       '{"hooks": {"Stop": [{"hooks": [{"command": "x"}]}]}}',
+                       '{"hooks": {"Stop": [{"hooks": [{"type": "command"}]}]}}',
+                       '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": 7}]}]}}',
+                       '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x", "timeout": "30"}]}]}}',
+                       '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x", "timeout": true}]}]}}'):
             self.settings.write_text(broken)
             code, _, err = run('--home', self.home)
             self.assertEqual(code, 2, broken)
@@ -188,6 +194,69 @@ class Install(unittest.TestCase):
             self.assertEqual(run('--home', self.home)[0], 2)
         self.assertFalse(self.hook.exists() or self.settings.exists())
         self.assertEqual(list(self.hook.parent.iterdir()), [])
+
+
+    def test_other_valid_handler_types_are_kept(self):
+        self.settings.parent.mkdir()
+        prompt = {'type': 'prompt', 'prompt': 'summarise'}
+        self.settings.write_text(json.dumps({'hooks': {'Stop': [{'hooks': [prompt]}]}}))
+        self.assertEqual(run('--home', self.home)[0], 0)
+        stop = json.loads(self.settings.read_text())['hooks']['Stop']
+        self.assertEqual(stop, [{'hooks': [prompt]}, installer.CANONICAL_GROUP])
+
+    def old_copy_and_settings(self):
+        self.hook.parent.mkdir(parents=True)
+        self.hook.write_text('# an older copy\n')
+        self.settings.write_text('{"permissions": {}}')
+
+    def replace_failing_on(self, *failing):
+        real, calls = os.replace, []
+
+        def replace(src, dst):
+            calls.append(dst)
+            if len(calls) in failing:
+                raise OSError(f'replace {len(calls)} failed')
+            return real(src, dst)
+        return mock.patch.object(installer.os, 'replace', replace)
+
+    def test_rollback_still_happens_when_cleanup_fails(self):
+        self.old_copy_and_settings()
+        with self.replace_failing_on(2), \
+                mock.patch.object(pathlib.Path, 'unlink', side_effect=OSError('busy')):
+            code, _, err = run('--home', self.home)
+        self.assertEqual(code, 2)
+        self.assertEqual(self.hook.read_text(), '# an older copy\n')
+        self.assertEqual(self.settings.read_text(), '{"permissions": {}}')
+        self.assertIn('warning: could not remove', err)
+
+    def test_a_failed_rollback_names_the_recovery_copy_it_kept(self):
+        self.old_copy_and_settings()
+        with self.replace_failing_on(2, 3):
+            code, _, err = run('--home', self.home)
+        self.assertEqual(code, 2)
+        self.assertIn('rollback incomplete', err)
+        kept = [p for p in self.hook.parent.iterdir() if p.name != installer.HOOK_NAME]
+        self.assertEqual(len(kept), 1)
+        self.assertIn(str(kept[0]), err)
+        self.assertEqual(kept[0].read_text(), '# an older copy\n')
+
+    def test_a_staging_failure_changes_nothing_and_leaves_nothing(self):
+        self.old_copy_and_settings()
+        real, calls = installer.stage, []
+
+        def third_fails(change):
+            calls.append(change)
+            if len(calls) == 3:
+                raise OSError('no space')
+            return real(change)
+
+        with mock.patch.object(installer, 'stage', third_fails):
+            self.assertEqual(run('--home', self.home)[0], 2)
+        self.assertEqual(self.hook.read_text(), '# an older copy\n')
+        self.assertEqual(self.settings.read_text(), '{"permissions": {}}')
+        self.assertEqual([p.name for p in self.hook.parent.iterdir()], [installer.HOOK_NAME])
+        self.assertEqual(sorted(p.name for p in self.settings.parent.iterdir()),
+                         ['hooks', 'settings.json'])
 
 
 if __name__ == '__main__':
