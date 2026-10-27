@@ -44,7 +44,7 @@ Started 2026-10-25 (owner go-ahead). One PR per step, in order:
 
 From the [Rex gap check](REX-GAP-CHECK.md) §5 (owner, 2026-10-27). Started 2026-10-27, when the owner accepted Phase 2. One PR per step, in order. Exit: each step's behaviour has a server or ctl test, on Linux and on CI's Windows leg where the step does not depend on ConPTY pass-through (R1).
 
-1. Terminal events (C29): program exited with its exit code, bell, progress, notification, behind a new feature bit; reply to the OSC 7501 query.
+1. Terminal events (C29): program exited with its exit code, bell, progress, notification, behind a new feature bit; reply to the OSC 7501 query. Done (#1174).
 2. Wait primitives (C30): `rusty-mux-ctl wait` on a block closing or its program exiting, with a timeout, exiting with the program's status; `create-block` takes an optional command, arguments and working directory per request (proto and server), so run-and-wait starts a program in a new block and exits with its status; wait for an event matching fields, with a timeout.
 3. Process info (C31): a `terminal.process` block method (child, foreground process, ancestors) and a process-changed event, using existing platform crates or `rusty_libc`.
 4. Input and capture (C32): named keys encoded over `input`; `terminal.format` gains trim, unwrap and a VT format.
