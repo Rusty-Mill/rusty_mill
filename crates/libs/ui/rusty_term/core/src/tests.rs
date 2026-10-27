@@ -7315,6 +7315,20 @@ fn a_collecting_host_answers_the_status_query_in_order() {
         "only a bare `?` is the query"
     );
     assert_eq!(g.program_status, [StatusSignal::Report("?:x=1".into())]);
+
+    // Nothing that later resets or trims the status queue loses the answer.
+    p.advance(&mut g, b"\x1b]7501;?\x07\x1bc");
+    assert_eq!(p.take_responses(), ANSWER, "query then RIS");
+    let flood = b"\x1b]7501;state=working\x07".repeat(PROGRAM_STATUS_MAX + 1);
+    p.advance(
+        &mut g,
+        &[&flood[..], b"\x1b]7501;?\x07", &flood[..]].concat(),
+    );
+    assert_eq!(
+        p.take_responses(),
+        ANSWER,
+        "query inside a flood of reports"
+    );
 }
 
 #[test]
