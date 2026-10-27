@@ -1,6 +1,6 @@
-"""install_cloud_capture.py: puts the capture hook into another repository (ADR-0029).
+"""install_cloud_capture.py: puts the capture hook in user-level Claude settings (ADR-0029).
 
-Synthetic only: scratch repositories in a temporary directory.
+Synthetic only: a scratch home directory.
 Run: python3 -m unittest discover -s .claude/tests -v
 """
 import contextlib
@@ -35,10 +35,9 @@ class Install(unittest.TestCase):
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
-        self.repo = pathlib.Path(scratch.name)
-        (self.repo / '.git').mkdir()
-        self.settings = self.repo / '.claude' / 'settings.json'
-        self.hook = self.repo / '.claude' / 'hooks' / installer.HOOK_NAME
+        self.home = pathlib.Path(scratch.name)
+        self.settings = self.home / '.claude' / 'settings.json'
+        self.hook = self.home / '.claude' / 'hooks' / installer.HOOK_NAME
 
     def commands(self, event):
         hooks = json.loads(self.settings.read_text())['hooks'][event]
@@ -49,7 +48,7 @@ class Install(unittest.TestCase):
         self.assertTrue(installer.SOURCE.is_file())
 
     def test_a_bare_repository_gets_the_hook_on_both_events(self):
-        self.assertEqual(run(self.repo)[0], 0)
+        self.assertEqual(run('--home', self.home)[0], 0)
         self.assertEqual(self.hook.read_text(), installer.SOURCE.read_text())
         for event in installer.EVENTS:
             self.assertEqual(self.commands(event), [installer.COMMAND])
@@ -59,22 +58,22 @@ class Install(unittest.TestCase):
         mine = {'permissions': {'allow': ['Bash(ls)']},
                 'hooks': {'Stop': [{'hooks': [{'type': 'command', 'command': 'echo mine'}]}]}}
         self.settings.write_text(json.dumps(mine))
-        run(self.repo)
-        run(self.repo)
+        run('--home', self.home)
+        run('--home', self.home)
         settings = json.loads(self.settings.read_text())
         self.assertEqual(settings['permissions'], mine['permissions'])
         self.assertEqual(self.commands('Stop'), ['echo mine', installer.COMMAND])
         self.assertEqual(self.commands('PreCompact'), [installer.COMMAND])
 
     def test_check_reports_drift_without_writing_then_passes_once_current(self):
-        code, out, _ = run('--check', self.repo)
+        code, out, _ = run('--check', '--home', self.home)
         self.assertEqual(code, 1)
         self.assertIn('stale', out)
         self.assertFalse(self.hook.exists() or self.settings.exists())
-        run(self.repo)
-        self.assertEqual(run('--check', self.repo)[0], 0)
+        run('--home', self.home)
+        self.assertEqual(run('--check', '--home', self.home)[0], 0)
         self.hook.write_text('# an older copy\n')
-        self.assertEqual(run('--check', self.repo)[0], 1)
+        self.assertEqual(run('--check', '--home', self.home)[0], 1)
 
     def test_a_target_it_cannot_safely_edit_is_refused_untouched(self):
         self.settings.parent.mkdir()
@@ -83,16 +82,26 @@ class Install(unittest.TestCase):
                        '{"hooks": {"Stop": [{"hooks": "x"}]}}',
                        '{"hooks": {"PreCompact": [{"hooks": [1]}]}}'):
             self.settings.write_text(broken)
-            code, _, err = run(self.repo)
+            code, _, err = run('--home', self.home)
             self.assertEqual(code, 2, broken)
             self.assertIn('error:', err)
             self.assertEqual(self.settings.read_text(), broken)
             self.assertFalse(self.hook.exists())
 
-    def test_a_directory_that_is_not_a_repository_root_is_refused(self):
-        code, _, err = run(self.repo / 'missing')
+    def test_a_home_that_is_not_a_directory_is_refused(self):
+        code, _, err = run('--home', self.home / 'missing')
         self.assertEqual(code, 2)
-        self.assertIn('not a git repository root', err)
+        self.assertIn('not a directory', err)
+
+    def test_the_source_can_be_a_downloaded_copy(self):
+        download = self.home / 'fetched.py'
+        download.write_text('# the hook as fetched\n')
+        self.assertEqual(run('--home', self.home, '--source', download)[0], 0)
+        self.assertEqual(self.hook.read_text(), '# the hook as fetched\n')
+        self.assertEqual(run('--home', self.home, '--source', self.home / 'gone.py')[0], 2)
+
+    def test_the_command_finds_the_hook_under_home(self):
+        self.assertEqual(installer.COMMAND, 'python3 "$HOME"/.claude/hooks/remind-me-capture.py')
 
     def test_a_registration_that_differs_is_repaired_once_and_other_hooks_stay(self):
         self.settings.parent.mkdir()
@@ -102,10 +111,10 @@ class Install(unittest.TestCase):
             'Stop': [{'hooks': [dict(installer.HOOK_ENTRY, timeout=5)]},
                      {'hooks': [dict(installer.HOOK_ENTRY)]}],
         }}))
-        self.assertEqual(run(self.repo)[0], 0)
+        self.assertEqual(run('--home', self.home)[0], 0)
         written = self.settings.read_text()
-        self.assertEqual(run('--check', self.repo)[0], 0)
-        run(self.repo)
+        self.assertEqual(run('--check', '--home', self.home)[0], 0)
+        run('--home', self.home)
         self.assertEqual(self.settings.read_text(), written, 'a second run changes nothing')
         hooks = json.loads(self.settings.read_text())['hooks']
         self.assertEqual(hooks['PreCompact'], [{'matcher': 'manual', 'hooks': [mine]},
@@ -113,15 +122,15 @@ class Install(unittest.TestCase):
         self.assertEqual(hooks['Stop'], [installer.CANONICAL_GROUP])
 
     def test_a_check_finds_a_registration_that_misses_an_event_or_the_limit(self):
-        run(self.repo)
+        run('--home', self.home)
         settings = json.loads(self.settings.read_text())
         settings['hooks']['PreCompact'][0]['matcher'] = 'manual'
         self.settings.write_text(json.dumps(settings))
         before = self.settings.read_text()
-        self.assertEqual(run('--check', self.repo)[0], 1)
+        self.assertEqual(run('--check', '--home', self.home)[0], 1)
         self.assertEqual(self.settings.read_text(), before, '--check writes nothing')
-        run(self.repo)
-        self.assertEqual(run('--check', self.repo)[0], 0)
+        run('--home', self.home)
+        self.assertEqual(run('--check', '--home', self.home)[0], 0)
 
     def test_symlinked_paths_are_refused_and_nothing_outside_is_touched(self):
         outside = tempfile.TemporaryDirectory()
@@ -129,7 +138,7 @@ class Install(unittest.TestCase):
         elsewhere = pathlib.Path(outside.name)
         sentinel = elsewhere / 'settings.json'
         sentinel.write_text('{"outside": true}')
-        claude = self.repo / '.claude'
+        claude = self.home / '.claude'
         cases = [
             (claude, elsewhere),
             (claude / 'hooks', elsewhere),
@@ -140,7 +149,7 @@ class Install(unittest.TestCase):
             with self.subTest(link=link.name):
                 link.parent.mkdir(parents=True, exist_ok=True)
                 link.symlink_to(referent)
-                code, _, err = run(self.repo)
+                code, _, err = run('--home', self.home)
                 self.assertEqual(code, 2)
                 self.assertIn('symlink', err)
                 self.assertEqual(sentinel.read_text(), '{"outside": true}')
@@ -162,7 +171,7 @@ class Install(unittest.TestCase):
             return real(src, dst)
 
         with mock.patch.object(installer.os, 'replace', second_fails):
-            code, _, err = run(self.repo)
+            code, _, err = run('--home', self.home)
         self.assertEqual(code, 2)
         self.assertIn('disk full', err)
         self.assertEqual(self.hook.read_text(), '# an older copy\n')
@@ -171,12 +180,12 @@ class Install(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.settings.parent.iterdir()),
                          ['hooks', 'settings.json'])
 
-        self.assertEqual(run(self.repo)[0], 0)
+        self.assertEqual(run('--home', self.home)[0], 0)
         self.assertEqual(stat.S_IMODE(self.settings.stat().st_mode), 0o600, 'mode kept')
 
     def test_a_failure_before_any_replacement_changes_nothing(self):
         with mock.patch.object(installer.os, 'replace', side_effect=OSError('read-only')):
-            self.assertEqual(run(self.repo)[0], 2)
+            self.assertEqual(run('--home', self.home)[0], 2)
         self.assertFalse(self.hook.exists() or self.settings.exists())
         self.assertEqual(list(self.hook.parent.iterdir()), [])
 
