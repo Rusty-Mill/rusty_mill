@@ -42,10 +42,11 @@ use rusty_tokio::io::UnixStream;
 /// How the server starts each block's program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// The program run in every new block, normally the user's shell.
+    /// The program run in a new block, normally the user's shell, unless
+    /// the request names one.
     pub program: OsString,
     pub args: Vec<OsString>,
-    /// The working directory of every new block.
+    /// The working directory of a new block, unless the request names one.
     pub cwd: OsString,
 }
 

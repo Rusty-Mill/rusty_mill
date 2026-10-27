@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Mux, Size};
 use rusty_mux_proto::schema::{self, CallError, Value};
-use rusty_mux_proto::{Code, Cursor, Entry, Features, Message, encode};
+use rusty_mux_proto::{Code, Cursor, Entry, Features, Launch, Message, encode};
 use rusty_mux_status::Records;
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::task::JoinHandle;
@@ -41,7 +41,8 @@ const OFFERED: Features = Features::CHECKPOINT_V3
     .union(Features::BLOCK_CALL)
     .union(Features::STATUS)
     .union(Features::TERMINAL_EVENTS)
-    .union(Features::PROGRAM_EVENTS);
+    .union(Features::PROGRAM_EVENTS)
+    .union(Features::LAUNCH);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -219,7 +220,12 @@ impl State {
                         .map_err(Refusal::from),
                 )
             }
-            M::CreateBlock { req, window, size } => (req, self.create_block(shared, window, size)),
+            M::CreateBlock {
+                req,
+                window,
+                size,
+                launch,
+            } => (req, self.create_block(shared, window, size, &launch)),
             M::Attach { req, block } => {
                 if let Err(refusal) = self.require(client, Features::CHECKPOINT_V3, "attach") {
                     return (req, Err(refusal));
@@ -370,8 +376,10 @@ impl State {
         shared: &Shared,
         window: rusty_mux_core::WindowId,
         size: Size,
+        launch: &Launch,
     ) -> Result<Outcome, Refusal> {
         validate_size(size)?;
+        let config = launched(&self.config, launch)?;
         let session = self
             .mux
             .window(window)
@@ -380,7 +388,7 @@ impl State {
         // The id is chosen first so the program starts knowing it.
         let block = BlockId::from_uuid(Uuid::new_v4());
         let env = self.block_env(session, window, block);
-        let (pty, process) = pty::spawn(&self.config, size, &env)
+        let (pty, process) = pty::spawn(&config, size, &env)
             .map_err(|e| format!("spawning the block's program: {e}"))?;
         let pty = Rc::new(pty);
         self.mux.add_block(block, window, size)?;
@@ -609,6 +617,28 @@ impl State {
     }
 }
 
+/// The server's `config` with what `launch` asks for instead. A relative
+/// working directory would depend on where the server started, so it is
+/// refused, as is one that is not a directory.
+fn launched(config: &Config, launch: &Launch) -> Result<Config, Refusal> {
+    let mut config = config.clone();
+    if let Some(cwd) = &launch.cwd {
+        let path = std::path::Path::new(cwd);
+        if !path.is_absolute() {
+            return Err(format!("cwd `{cwd}` is not an absolute path").into());
+        }
+        if !path.is_dir() {
+            return Err(format!("cwd `{cwd}` is not a directory").into());
+        }
+        config.cwd = cwd.into();
+    }
+    if let Some(program) = &launch.program {
+        config.program = program.command.clone().into();
+        config.args = program.args.iter().map(Into::into).collect();
+    }
+    Ok(config)
+}
+
 /// Whether a client with `features` is sent `event`: a status event only
 /// with [`Features::STATUS`], a pwd or title event only with
 /// [`Features::TERMINAL_EVENTS`], so older clients never see a kind they
@@ -777,7 +807,12 @@ mod regression {
         let session = state.mux.create_session("s");
         let window = state.mux.create_window(session, "w").unwrap();
         let Outcome::Done(Some(id)) = state
-            .create_block(&shared, window, Size::new(80, 24).unwrap())
+            .create_block(
+                &shared,
+                window,
+                Size::new(80, 24).unwrap(),
+                &Launch::default(),
+            )
             .unwrap()
         else {
             panic!()
@@ -1065,7 +1100,11 @@ mod regression {
             for (cols, rows) in [(4097, 1), (1, 4097), (65535, 65535), (257, 256), (500, 100)] {
                 let size = Size::new(cols, rows).unwrap();
                 let mut state = shared.borrow_mut();
-                assert!(state.create_block(&shared, window, size).is_err());
+                assert!(
+                    state
+                        .create_block(&shared, window, size, &Launch::default())
+                        .is_err()
+                );
                 assert!(state.resize(client, block, size).is_err());
                 assert_eq!(state.blocks.len(), 1);
                 assert_eq!(state.blocks[&block].grid.cols, 80);

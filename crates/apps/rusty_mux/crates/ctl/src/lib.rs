@@ -16,6 +16,12 @@
 //! `config list` check and list it. `watch` follows events and runs the
 //! config's `on` rules for each.
 //!
+//! `wait --block B` blocks until the block's program exits and exits with
+//! its status; `wait --event KIND --FIELD VALUE` until a matching event.
+//! `run -- COMMAND ARG...` starts a program in a new block, in ctl's
+//! directory, and with `--wait` waits for it the same way. Both give up
+//! after `--timeout SECS` with exit code 124.
+//!
 //! Output is text, or one JSON object per line with `--json`. The exit code
 //! is an [`Exit`]; an interrupt ends the process with the signal, which a
 //! shell reports as 130. An embedder bounds a command with [`run_until`].
@@ -31,10 +37,13 @@ mod conn;
 mod render;
 mod stop;
 pub mod target;
+mod wait;
 mod watch;
 
 use std::io::{self, Write};
+use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use rusty_mux_core::Event;
 use rusty_mux_proto::schema::{CATALOG, Method, Returns, Value};
@@ -47,20 +56,42 @@ use crate::conn::Conn;
 pub use crate::stop::Stop;
 use crate::target::Miss;
 
-/// The process exit code.
+/// The process exit code; see [`Exit::code`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub enum Exit {
-    Ok = 0,
-    /// A request was refused, a stream could not be resumed, or the server
-    /// sent something this client cannot follow.
-    Failed = 1,
+    Ok,
+    /// A request was refused, a stream could not be resumed, the server
+    /// sent something this client cannot follow, or a waited-for block
+    /// closed before its program exited.
+    Failed,
     /// The command line is wrong.
-    Usage = 2,
+    Usage,
     /// A target names nothing, or more than one thing.
-    Target = 3,
+    Target,
     /// No server at the socket, or the connection broke.
-    Unreachable = 4,
+    Unreachable,
+    /// `wait` or `run --wait` gave up at its `--timeout`.
+    TimedOut,
+    /// The status of the program `wait` or `run --wait` waited for (see
+    /// [`Exit::of_program`]), which may coincide with one of the codes
+    /// above.
+    Program(NonZeroU8),
+}
+
+impl Exit {
+    /// 0 to 4 in the order above, 124 for a timeout as `timeout(1)` exits,
+    /// or the program's own status.
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Ok => 0,
+            Self::Failed => 1,
+            Self::Usage => 2,
+            Self::Target => 3,
+            Self::Unreachable => 4,
+            Self::TimedOut => 124,
+            Self::Program(code) => code.get(),
+        }
+    }
 }
 
 /// Where the command runs: the environment a block's program gets.
@@ -68,7 +99,8 @@ pub enum Exit {
 pub struct Env {
     /// `$RUSTY_MUX_SOCKET`.
     pub socket: Option<PathBuf>,
-    /// `$RUSTY_MUX_SESSION`, `$RUSTY_MUX_WINDOW` and `$RUSTY_MUX_BLOCK`.
+    /// `$RUSTY_MUX_SESSION`, `$RUSTY_MUX_WINDOW`, `$RUSTY_MUX_BLOCK` and
+    /// the current directory.
     pub here: Defaults,
     /// The config file `do` and `config` read: `$RUSTY_MUX_CONFIG`, else
     /// `rusty_mux/config.json` in the config directory.
@@ -85,6 +117,7 @@ impl Env {
                 session: id_var("RUSTY_MUX_SESSION"),
                 window: id_var("RUSTY_MUX_WINDOW"),
                 block: id_var("RUSTY_MUX_BLOCK"),
+                dir: std::env::current_dir().ok(),
             },
             config: config::default_path(),
         }
@@ -115,6 +148,8 @@ enum Reply {
 /// Why a command stopped early.
 enum Failure {
     Failed(String),
+    /// A wait ran past its `--timeout`.
+    TimedOut,
     /// A target names nothing, or more than one thing.
     Missing(String),
     Unreachable(io::Error),
@@ -173,7 +208,11 @@ pub fn run_until(
             Ok(calls) => invocation.command = Command::Calls(calls),
             Err((exit, reason)) => return report(err, exit, &reason),
         },
-        Command::Calls(_) | Command::Events { .. } | Command::Watch { .. } => {}
+        Command::Calls(_)
+        | Command::Events { .. }
+        | Command::Watch { .. }
+        | Command::Wait(_)
+        | Command::Run(_) => {}
     }
     let Some(socket) = invocation.socket.clone().or_else(|| env.socket.clone()) else {
         return report(
@@ -185,8 +224,33 @@ pub fn run_until(
     if let Command::Watch { after } = invocation.command {
         return run_watch(after, &socket, env, invocation.json, stop, out, err);
     }
-    let result = execute(&invocation, &socket, env.here.session, stop, out);
-    finish(result, &socket, err)
+    let deadline = timeout(&invocation.command).and_then(|t| Instant::now().checked_add(t));
+    let stop = deadline.map_or_else(|| stop.clone(), |d| stop.sooner(d));
+    let result = execute(&invocation, &socket, env.here.session, &stop, out);
+    finish(timed_out(result, deadline), &socket, err)
+}
+
+/// How long a `wait` or `run --wait` may wait.
+fn timeout(command: &Command) -> Option<std::time::Duration> {
+    match command {
+        Command::Wait(wait) => wait.timeout,
+        Command::Run(run) => run.wait.flatten(),
+        _ => None,
+    }
+}
+
+/// `result`, with running out of time at `deadline` as a timeout rather
+/// than an unreachable server.
+fn timed_out(result: Result<Exit, Failure>, deadline: Option<Instant>) -> Result<Exit, Failure> {
+    match result {
+        Err(Failure::Unreachable(e))
+            if e.kind() == io::ErrorKind::TimedOut
+                && deadline.is_some_and(|d| Instant::now() >= d) =>
+        {
+            Err(Failure::TimedOut)
+        }
+        other => other,
+    }
 }
 
 /// `watch`: follows events and runs the config's rules for each, until
@@ -233,14 +297,15 @@ fn run_watch(
             .event(seq, event, out, &mut *err)
             .map_err(Failure::from)
     });
-    finish(result, socket, err)
+    finish(result.map(|()| Exit::Ok), socket, err)
 }
 
 /// The exit code for a command's `result`, its reason reported on `err`.
-fn finish(result: Result<(), Failure>, socket: &Path, err: &mut dyn Write) -> Exit {
+fn finish(result: Result<Exit, Failure>, socket: &Path, err: &mut dyn Write) -> Exit {
     match result {
-        Ok(()) => Exit::Ok,
+        Ok(exit) => exit,
         Err(Failure::Failed(reason)) => report(err, Exit::Failed, &reason),
+        Err(Failure::TimedOut) => report(err, Exit::TimedOut, "timed out"),
         Err(Failure::Missing(reason)) => report(err, Exit::Target, &reason),
         Err(Failure::Unreachable(e)) => report(
             err,
@@ -317,7 +382,7 @@ fn execute(
     here: Option<Uuid>,
     stop: &Stop,
     out: &mut dyn Write,
-) -> Result<(), Failure> {
+) -> Result<Exit, Failure> {
     let mut conn = Conn::new(conn::connect(socket, stop)?, stop.clone());
     let mut session = Session {
         conn: &mut conn,
@@ -327,17 +392,19 @@ fn execute(
     };
     let json = invocation.json;
     match &invocation.command {
-        Command::Calls(calls) => session.calls(calls),
-        Command::Events { after, follow } => {
-            session.events(*after, *follow, &[], &mut |seq, event, out| {
+        Command::Calls(calls) => session.calls(calls).map(|()| Exit::Ok),
+        Command::Events { after, follow } => session
+            .events(*after, *follow, &[], &mut |seq, event, out| {
                 writeln!(out, "{}", render::event_line(seq, event, json)).map_err(Failure::from)
             })
-        }
+            .map(|()| Exit::Ok),
+        Command::Wait(wait) => session.wait(&wait.until),
+        Command::Run(run) => session.run(run),
         Command::Help(_)
         | Command::Api(_)
         | Command::Do { .. }
         | Command::Config(_)
-        | Command::Watch { .. } => Ok(()),
+        | Command::Watch { .. } => Ok(Exit::Ok),
     }
 }
 
@@ -392,7 +459,7 @@ fn execute(
     _: Option<Uuid>,
     _: &Stop,
     _: &mut dyn Write,
-) -> Result<(), Failure> {
+) -> Result<Exit, Failure> {
     Err(unsupported())
 }
 
@@ -514,9 +581,29 @@ impl<S: io::Read + Write> Session<'_, S> {
     /// Waits for the reply to `wait`, collecting its entries, and fails if
     /// it or request `call` (the method `name`) is refused.
     fn reply(&mut self, wait: u64, call: u64, name: &str) -> Result<Reply, Failure> {
+        self.reply_keeping(wait, call, name, None)
+    }
+
+    /// [`Session::reply`], keeping the numbered events that arrive before
+    /// it in `kept`.
+    fn reply_keeping(
+        &mut self,
+        wait: u64,
+        call: u64,
+        name: &str,
+        mut kept: Option<&mut wait::Kept>,
+    ) -> Result<Reply, Failure> {
         let mut entries = Vec::new();
         loop {
             match self.conn.recv()? {
+                Message::Event {
+                    seq: Some(seq),
+                    event,
+                } => {
+                    if let Some(kept) = kept.as_deref_mut() {
+                        kept.push((seq, event));
+                    }
+                }
                 Message::Entry { req, entry } if req == wait => entries.push(entry),
                 Message::Done { req, created } if req == wait => {
                     return Ok(Reply::Done { created, entries });

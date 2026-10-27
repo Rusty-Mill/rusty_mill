@@ -927,3 +927,217 @@ fn watch_refuses_rules_for_events_the_server_never_sends() {
         std::fs::remove_file(path).expect("cleanup");
     }
 }
+
+/// Creates a session and a window; returns the window id.
+fn window(socket: &Path) -> String {
+    let session = ok(socket, &["create-session", "--name", "s"]);
+    ok(
+        socket,
+        &["create-window", "--session", &session, "--name", "w"],
+    )
+}
+
+/// A program, as `run` takes it, that exits with `code`.
+fn exits_with(code: u8) -> Vec<String> {
+    let line = format!("exit {code}");
+    match cfg!(windows) {
+        true => vec!["cmd.exe".into(), "/c".into(), line],
+        false => vec!["sh".into(), "-c".into(), line],
+    }
+}
+
+#[test]
+fn run_wait_exits_with_the_programs_status() {
+    let socket = start_server();
+    let window = window(&socket);
+    let program = exits_with(3);
+    let mut args = vec!["run", "--window", &window, "--wait", "--"];
+    args.extend(program.iter().map(String::as_str));
+    let output = ctl(&socket, &args);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = stdout(&output);
+    let mut lines = text.lines();
+    let block = lines.next().expect("the new block's id");
+    assert!(block.parse::<rusty_uuid::Uuid>().is_ok(), "{text}");
+    let exited = lines.next().expect("the exit");
+    assert!(
+        exited.contains(&format!("program-exited block={block} code=3")),
+        "{text}"
+    );
+
+    // Without --wait it prints the block and returns at once.
+    let program = exits_with(0);
+    let mut args = vec!["run", "--window", &window, "--"];
+    args.extend(program.iter().map(String::as_str));
+    assert!(ok(&socket, &args).parse::<rusty_uuid::Uuid>().is_ok());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn run_starts_in_ctls_directory_and_reports_a_signal() {
+    let socket = start_server();
+    let window = window(&socket);
+    let check = r#"[ "$(pwd)" = /tmp ]"#;
+    let output = ctl_command(
+        &socket,
+        &["run", "--window", &window, "--wait", "sh", "-c", check],
+    )
+    .current_dir("/tmp")
+    .output()
+    .expect("run");
+    assert_eq!(output.status.code(), Some(0), "the server's dir is /");
+    let killed = ctl(
+        &socket,
+        &[
+            "run",
+            "--window",
+            &window,
+            "--wait",
+            "--",
+            "sh",
+            "-c",
+            "kill -9 $$",
+        ],
+    );
+    assert_eq!(killed.status.code(), Some(128 + 9));
+    assert!(stdout(&killed).contains("signal=9"));
+    let missing = ctl(
+        &socket,
+        &[
+            "run",
+            "--window",
+            &window,
+            "--wait",
+            "--",
+            "/no/such/program",
+        ],
+    );
+    assert_eq!(missing.status.code(), Some(1), "refused, not run");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wait_follows_an_existing_block_until_its_program_exits() {
+    let socket = start_server();
+    let block = block(&socket);
+    let waiter = ctl_command(&socket, &["wait", "--block", &block, "--timeout", "20"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    // Long enough for the waiter to be listening first.
+    ok(
+        &socket,
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+            "input",
+            "--block",
+            &block,
+            "--data",
+            "sleep 1; exit 5\r",
+        ],
+    );
+    let output = waiter.wait_with_output().expect("wait");
+    assert_eq!(output.status.code(), Some(5));
+    assert!(stdout(&output).contains("code=5"), "{}", stdout(&output));
+
+    // The block is gone now.
+    assert_eq!(
+        ctl(&socket, &["wait", "--block", &block]).status.code(),
+        Some(3)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wait_gives_up_at_its_timeout_and_fails_on_a_closed_block() {
+    let socket = start_server();
+    let block = block(&socket);
+    let started = std::time::Instant::now();
+    let output = ctl(&socket, &["wait", "--block", &block, "--timeout", "0.3"]);
+    assert_eq!(output.status.code(), Some(124));
+    assert!(started.elapsed() < PATIENCE);
+
+    let waiter = ctl_command(&socket, &["wait", "--block", &block, "--timeout", "20"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    std::thread::sleep(Duration::from_millis(500));
+    ok(&socket, &["close-block", "--block", &block]);
+    let output = waiter.wait_with_output().expect("wait");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout(&output).contains("block-closed"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("before its program exited"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wait_for_an_event_whose_fields_match() {
+    let socket = start_server();
+    let block = block(&socket);
+    let waiter = ctl_command(
+        &socket,
+        &[
+            "--json",
+            "wait",
+            "--event",
+            "program-exited",
+            "--block",
+            &block,
+            "--code",
+            "7",
+            "--timeout",
+            "20",
+        ],
+    )
+    .stdout(Stdio::piped())
+    .spawn()
+    .expect("spawn");
+    ok(
+        &socket,
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+            "input",
+            "--block",
+            &block,
+            "--data",
+            "sleep 1; exit 7\r",
+        ],
+    );
+    let output = waiter.wait_with_output().expect("wait");
+    assert_eq!(output.status.code(), Some(0));
+    let line = stdout(&output);
+    let event = rusty_json::Value::from_json_str(line.trim()).expect("json");
+    let rusty_json::Value::Object(map) = event else {
+        panic!("{line}")
+    };
+    assert_eq!(
+        map.get("kind"),
+        Some(&rusty_json::Value::from("program-exited"))
+    );
+
+    let output = ctl(&socket, &["wait", "--event", "bell", "--timeout", "0.3"]);
+    assert_eq!(output.status.code(), Some(124));
+    for args in [&["wait"][..], &["wait", "--event", "nope"], &["run"]] {
+        assert_eq!(ctl(&socket, args).status.code(), Some(2), "{args:?}");
+    }
+}

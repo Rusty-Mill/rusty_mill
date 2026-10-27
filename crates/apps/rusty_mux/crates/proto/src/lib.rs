@@ -29,4 +29,4 @@ mod varint;
 
 pub use error::Error;
 pub use frame::{MAX_FRAME, decode, encode};
-pub use message::{Code, Cursor, Entry, Features, Message};
+pub use message::{Code, Cursor, Entry, Features, Launch, Message, Program};

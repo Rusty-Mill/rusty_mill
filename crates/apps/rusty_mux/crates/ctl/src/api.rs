@@ -3,7 +3,7 @@
 //! time.
 
 use rusty_json::{Map, Value};
-use rusty_mux_proto::schema::{self, Method, Param, Returns, Ty};
+use rusty_mux_proto::schema::{self, Method, Param, Presence, Returns, Ty};
 
 /// One line per method: its name and summary, or a JSON object of them.
 pub(crate) fn list(json: bool) -> String {
@@ -40,7 +40,11 @@ pub fn input_schema(method: &Method) -> Value {
         .iter()
         .map(|p| (p.name.to_owned(), property(p)))
         .collect();
-    let required: Vec<Value> = params.iter().map(|p| p.name.into()).collect();
+    let required: Vec<Value> = params
+        .iter()
+        .filter(|p| p.presence == Presence::Required)
+        .map(|p| p.name.into())
+        .collect();
     object([
         ("type", "object".into()),
         ("properties", properties.into()),
@@ -62,6 +66,10 @@ fn property(param: &Param) -> Value {
             ("type", "integer".into()),
             ("minimum", 0.into()),
             ("maximum", u32::MAX.into()),
+        ],
+        Ty::Words => vec![
+            ("type", "array".into()),
+            ("items", object([("type", "string".into())])),
         ],
     };
     fields.push(("description", param.doc.into()));

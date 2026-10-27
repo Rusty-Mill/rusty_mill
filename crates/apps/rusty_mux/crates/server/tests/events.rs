@@ -5,9 +5,9 @@
 
 mod common;
 
-use common::{Client, block_for, start_server};
-use rusty_mux_core::{Event, ExitStatus, Progress, SessionId};
-use rusty_mux_proto::{Cursor, Features, Message};
+use common::{Client, block_for, start_server, window_for};
+use rusty_mux_core::{BlockId, Event, ExitStatus, Progress, SessionId, Size};
+use rusty_mux_proto::{Cursor, Features, Launch, Message, Program};
 use rusty_uuid::Uuid;
 
 const SEQ: Features = Features::EVENT_SEQ;
@@ -293,4 +293,58 @@ fn a_status_query_is_answered_in_order() {
     client.wait_for(block, "1b 5d 37 35 30 31 3b 3f 1b 5c 1b 5b 3f 31 3b 32");
     client.input(block, ask(da1, query).as_bytes());
     client.wait_for(block, "1b 5b 3f 31 3b 32 3b 34 63 1b 5d 37 35 30 31 3b");
+}
+
+/// A block can run a given program in a given directory instead of the
+/// shell, and its exit code comes back as an event.
+#[test]
+fn a_launched_program_reports_its_exit_code() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, SEQ.union(Features::PROGRAM_EVENTS), None);
+    let window = window_for(&mut client);
+    let launch = Launch {
+        program: Some(Program {
+            command: "sh".into(),
+            args: vec!["-c".into(), r#"[ "$(pwd)" = /tmp ] && exit 3"#.into()],
+        }),
+        cwd: Some("/tmp".into()),
+    };
+    let size = Size::new(80, 24).expect("size");
+    let block = BlockId::from_uuid(
+        client
+            .request(|req| Message::CreateBlock {
+                req,
+                window,
+                size,
+                launch: launch.clone(),
+            })
+            .expect("id"),
+    );
+    let exited = Event::ProgramExited {
+        block,
+        status: ExitStatus::Code(3),
+    };
+    while !client.events.iter().any(|(_, e)| *e == exited) {
+        client.recv();
+    }
+
+    for (cwd, why) in [
+        ("tmp", "not an absolute path"),
+        ("/no/such/dir", "not a directory"),
+    ] {
+        let launch = Launch {
+            cwd: Some(cwd.into()),
+            ..launch.clone()
+        };
+        let answer = client.answer(|req| Message::CreateBlock {
+            req,
+            window,
+            size,
+            launch,
+        });
+        assert!(
+            matches!(answer.last(), Some(Message::Failed { reason, .. }) if reason.contains(why)),
+            "{cwd}: {answer:?}"
+        );
+    }
 }

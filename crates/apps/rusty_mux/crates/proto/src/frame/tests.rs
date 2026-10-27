@@ -5,7 +5,7 @@ use rusty_wire::Writer;
 use super::*;
 use crate::field::Out;
 use crate::schema::Value;
-use crate::{Code, Cursor, Entry, Features};
+use crate::{Code, Cursor, Entry, Features, Launch, Program};
 
 const REQ_ID: u32 = 1;
 
@@ -67,6 +67,31 @@ fn every_message_round_trips() {
             req: 3,
             window,
             size: size(80, 24),
+            launch: Launch::default(),
+        },
+        Message::CreateBlock {
+            req: 3,
+            window,
+            size: size(80, 24),
+            launch: Launch {
+                program: Some(Program {
+                    command: "sh".into(),
+                    args: vec!["-c".into(), String::new(), "exit 3".into()],
+                }),
+                cwd: Some("/tmp/wörk".into()),
+            },
+        },
+        Message::CreateBlock {
+            req: 3,
+            window,
+            size: size(80, 24),
+            launch: Launch {
+                program: Some(Program {
+                    command: "true".into(),
+                    args: Vec::new(),
+                }),
+                cwd: None,
+            },
         },
         Message::Attach { req: 4, block },
         Message::Detach { req: 5 },
@@ -657,6 +682,9 @@ fn feature_bits_are_distinct() {
         Features::INSPECT,
         Features::BLOCK_CALL,
         Features::STATUS,
+        Features::TERMINAL_EVENTS,
+        Features::PROGRAM_EVENTS,
+        Features::LAUNCH,
     ];
     let mut seen = 0u64;
     for feature in all {
@@ -744,4 +772,73 @@ fn block_call_args_are_bounded_in_count() {
             "{count}"
         );
     }
+}
+
+#[test]
+fn launch_arguments_need_a_command_and_well_formed_texts() {
+    let window = [9u8; 16];
+    let create = |body: &dyn Fn(&mut Out)| {
+        raw_frame(0x04, |out| {
+            out.varint(REQ_ID, 1)
+                .bytes(3, &window)
+                .varint(7, 80)
+                .varint(8, 24);
+            body(out);
+        })
+    };
+    // Arguments without a command; one running past the end; one not UTF-8.
+    let cases: [&dyn Fn(&mut Out); 3] = [
+        &|out| {
+            out.bytes(30, b"\x01a");
+        },
+        &|out| {
+            out.bytes(29, b"sh").bytes(30, b"\x05ab");
+        },
+        &|out| {
+            out.bytes(29, b"sh").bytes(30, b"\x01\xff");
+        },
+    ];
+    for body in cases {
+        assert!(matches!(
+            decode(&create(body)),
+            Err(Error::InvalidField { field: 30, .. })
+        ));
+    }
+    // A command alone runs with no arguments.
+    let Ok(Some((Message::CreateBlock { launch, .. }, _))) = decode(&create(&|out| {
+        out.bytes(29, b"true");
+    })) else {
+        panic!("a command alone decodes");
+    };
+    assert_eq!(
+        launch.program,
+        Some(Program {
+            command: "true".into(),
+            args: Vec::new()
+        })
+    );
+}
+
+#[test]
+fn block_call_words_round_trip_and_are_bounded() {
+    round_trip(Message::BlockCall {
+        req: 1,
+        block: BlockId::from_uuid(Uuid::nil()),
+        method: "terminal.format".into(),
+        args: vec![(
+            "words".into(),
+            Value::Words(vec!["a".into(), String::new()]),
+        )],
+    });
+    // A count larger than the bytes left is refused before reading.
+    let frame = raw_frame(0x0f, |out| {
+        out.varint(REQ_ID, 1)
+            .bytes(4, &[9; 16])
+            .bytes(22, b"terminal.format")
+            .bytes(23, b"\x01a\x06\xff\xff\xff\x0f");
+    });
+    assert!(matches!(
+        decode(&frame),
+        Err(Error::InvalidField { field: 23, .. })
+    ));
 }

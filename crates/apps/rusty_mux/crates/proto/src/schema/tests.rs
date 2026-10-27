@@ -18,6 +18,7 @@ fn sample(ty: Ty) -> Value {
         Ty::Bytes => Value::Bytes(b"ls\r".to_vec()),
         Ty::Cells => Value::Cells(80),
         Ty::Lines => Value::Lines(0),
+        Ty::Words => Value::Words(vec!["-c".into(), "exit 3".into()]),
     }
 }
 
@@ -154,6 +155,63 @@ fn methods_need_the_features_their_messages_are_gated_by() {
     assert_eq!(needs("terminal.format"), Features::BLOCK_CALL);
     assert_eq!(needs("list"), Features::INSPECT);
     assert_eq!(needs("create-session"), Features::NONE);
+    assert_eq!(needs("create-block"), Features::NONE);
+}
+
+#[test]
+fn optional_parameters_add_their_features_only_when_given() {
+    let create = method("create-block").expect("create-block");
+    assert_eq!(create.needs_for(["window", "cols", "rows"]), Features::NONE);
+    assert_eq!(create.needs_for(["window", "cwd"]), Features::LAUNCH);
+    assert_eq!(create.needs_for(["command", "arg"]), Features::LAUNCH);
+    let optional: Vec<&str> = CATALOG
+        .iter()
+        .flat_map(|m| m.params)
+        .filter(|p| p.presence != Presence::Required)
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(optional, ["command", "arg", "cwd"]);
+}
+
+#[test]
+fn create_block_launches_a_program_only_with_a_command() {
+    let create = method("create-block").expect("create-block");
+    let base = || {
+        vec![
+            ("window", Value::Id(id(1))),
+            ("cols", Value::Cells(80)),
+            ("rows", Value::Cells(24)),
+        ]
+    };
+    let launch = |extra: Vec<(&'static str, Value)>| {
+        let mut args = base();
+        args.extend(extra);
+        match create.request(1, &args) {
+            Ok(Message::CreateBlock { launch, .. }) => Ok(launch),
+            Ok(other) => panic!("{other:?}"),
+            Err(e) => Err(e),
+        }
+    };
+    assert_eq!(launch(Vec::new()), Ok(Launch::default()));
+    assert_eq!(
+        launch(vec![
+            ("cwd", Value::Text("/srv".into())),
+            ("command", Value::Text("make".into())),
+            ("arg", Value::Words(vec!["-j".into(), "4".into()])),
+        ]),
+        Ok(Launch {
+            program: Some(Program {
+                command: "make".into(),
+                args: vec!["-j".into(), "4".into()],
+            }),
+            cwd: Some("/srv".into()),
+        })
+    );
+    assert!(matches!(
+        launch(vec![("arg", Value::Words(vec!["x".into()]))]),
+        Err(CallError::Invalid { param: "arg", .. })
+    ));
+    assert_eq!(Ty::Words.parse("a b"), Ok(Value::Words(vec!["a b".into()])));
 }
 
 #[test]

@@ -47,6 +47,21 @@ fn plain_calls_become_one_request() {
 }
 
 #[test]
+fn a_list_argument_repeats_its_flag() {
+    let call = args(r#"{"arg": ["-c", "exit 3"]}"#);
+    assert_eq!(
+        argv(known("create-block"), Some(&call)),
+        Ok(vec![
+            "create-block".into(),
+            "--arg=-c".into(),
+            "--arg=exit 3".into()
+        ])
+    );
+    let refused = argv(known("create-block"), Some(&args(r#"{"arg": [1]}"#)));
+    assert!(refused.expect_err("a number").contains("list of strings"));
+}
+
+#[test]
 fn leased_calls_attach_and_take_the_lease_first() {
     let call = args(r#"{"block": "2", "data": "a + b\r"}"#);
     assert_eq!(

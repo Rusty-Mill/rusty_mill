@@ -30,7 +30,7 @@ use std::fmt;
 use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
 use rusty_uuid::Uuid;
 
-use crate::{Features, Message};
+use crate::{Features, Launch, Message, Program};
 
 /// Which entity an id names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +63,9 @@ pub enum Ty {
     Cells,
     /// A count of lines, possibly 0.
     Lines,
+    /// A list of UTF-8 texts. From text it is one item; a front end
+    /// gathers a repeated flag into one list.
+    Words,
 }
 
 impl Ty {
@@ -81,6 +84,7 @@ impl Ty {
                 _ => return Err(bad()),
             },
             Self::Lines => Value::Lines(text.parse().map_err(|_| bad())?),
+            Self::Words => Value::Words(vec![text.to_owned()]),
         })
     }
 
@@ -93,6 +97,7 @@ impl Ty {
                 | (Self::Bytes, Value::Bytes(_))
                 | (Self::Cells, Value::Cells(_))
                 | (Self::Lines, Value::Lines(_))
+                | (Self::Words, Value::Words(_))
         )
     }
 }
@@ -105,6 +110,7 @@ impl fmt::Display for Ty {
             Self::Bytes => f.write_str("bytes"),
             Self::Cells => f.write_str("cell count"),
             Self::Lines => f.write_str("line count"),
+            Self::Words => f.write_str("text list"),
         }
     }
 }
@@ -117,15 +123,28 @@ pub enum Value {
     Bytes(Vec<u8>),
     Cells(u16),
     Lines(u32),
+    Words(Vec<String>),
 }
 
-/// One parameter of a request. Every parameter is required.
+/// One parameter of a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Param {
     /// Kebab-case, unique within its method.
     pub name: &'static str,
     pub ty: Ty,
     pub doc: &'static str,
+    pub presence: Presence,
+}
+
+/// Whether a request must carry a parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    Required,
+    /// May be left out; when given, the connection must also have
+    /// negotiated `needs`, since a server without it would ignore it.
+    Optional {
+        needs: Features,
+    },
 }
 
 /// What a successful request returns.
@@ -184,8 +203,22 @@ impl Method {
         self.name.contains('.')
     }
 
+    /// The features a connection needs to send this method with arguments
+    /// named `given`: the method's own, plus those of each optional
+    /// parameter given.
+    pub fn needs_for<'a>(&self, given: impl IntoIterator<Item = &'a str>) -> Features {
+        given
+            .into_iter()
+            .filter_map(|name| self.params.iter().find(|p| p.name == name))
+            .fold(self.needs, |all, param| match param.presence {
+                Presence::Required => all,
+                Presence::Optional { needs } => all.union(needs),
+            })
+    }
+
     /// Builds the request message, numbered `req`, from named arguments.
-    /// Each parameter must appear exactly once, with a value of its type.
+    /// Each required parameter must appear exactly once, and an optional
+    /// one at most once, with a value of its type.
     pub fn request(&self, req: u64, args: &[(&str, Value)]) -> Result<Message, CallError> {
         for (i, (name, value)) in args.iter().enumerate() {
             let param = self
@@ -206,6 +239,7 @@ impl Method {
         if let Some(missing) = self
             .params
             .iter()
+            .filter(|p| p.presence == Presence::Required)
             .find(|p| !args.iter().any(|(name, _)| *name == p.name))
         {
             return Err(CallError::Missing(missing.name));
@@ -310,6 +344,39 @@ impl Args<'_> {
         }
     }
 
+    fn opt_text(&self, name: &'static str) -> Result<Option<String>, CallError> {
+        self.has(name).then(|| self.text(name)).transpose()
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.0.iter().any(|(n, _)| *n == name)
+    }
+
+    /// The program `command` and `arg` name; arguments need a command.
+    fn launch(&self) -> Result<Launch, CallError> {
+        let args = match self.has("arg") {
+            false => Vec::new(),
+            true => match self.get("arg")? {
+                Value::Words(words) => words.clone(),
+                _ => return Err(self.wrong("arg", Ty::Words)),
+            },
+        };
+        let program = match self.opt_text("command")? {
+            Some(command) => Some(Program { command, args }),
+            None if args.is_empty() => None,
+            None => {
+                return Err(CallError::Invalid {
+                    param: "arg",
+                    why: "arguments need a `command`".into(),
+                });
+            }
+        };
+        Ok(Launch {
+            program,
+            cwd: self.opt_text("cwd")?,
+        })
+    }
+
     fn size(&self) -> Result<Size, CallError> {
         let cells = |name| match self.get(name)? {
             Value::Cells(n) => Ok(*n),
@@ -331,32 +398,38 @@ impl Args<'_> {
     }
 }
 
-const BLOCK: Param = Param {
-    name: "block",
-    ty: Ty::Id(Entity::Block),
-    doc: "The block to act on.",
-};
-const COLS: Param = Param {
-    name: "cols",
-    ty: Ty::Cells,
-    doc: "Width in cells.",
-};
-const ROWS: Param = Param {
-    name: "rows",
-    ty: Ty::Cells,
-    doc: "Height in cells.",
-};
+/// A parameter every request must carry.
+const fn required(name: &'static str, ty: Ty, doc: &'static str) -> Param {
+    Param {
+        name,
+        ty,
+        doc,
+        presence: Presence::Required,
+    }
+}
+
+/// An optional parameter of a block's [`Launch`].
+const fn launch(name: &'static str, ty: Ty, doc: &'static str) -> Param {
+    Param {
+        name,
+        ty,
+        doc,
+        presence: Presence::Optional {
+            needs: Features::LAUNCH,
+        },
+    }
+}
+
+const BLOCK: Param = required("block", Ty::Id(Entity::Block), "The block to act on.");
+const COLS: Param = required("cols", Ty::Cells, "Width in cells.");
+const ROWS: Param = required("rows", Ty::Cells, "Height in cells.");
 
 /// Every client request except the [`Message::Hello`] handshake.
 pub static CATALOG: &[Method] = &[
     Method {
         name: "create-session",
         doc: "Create a named session.",
-        params: &[Param {
-            name: "name",
-            ty: Ty::Text,
-            doc: "The session's name.",
-        }],
+        params: &[required("name", Ty::Text, "The session's name.")],
         needs: Features::NONE,
         returns: Returns::Created(Entity::Session),
         build: |req, a| {
@@ -370,16 +443,12 @@ pub static CATALOG: &[Method] = &[
         name: "create-window",
         doc: "Create a named window in a session.",
         params: &[
-            Param {
-                name: "session",
-                ty: Ty::Id(Entity::Session),
-                doc: "The session to add the window to.",
-            },
-            Param {
-                name: "name",
-                ty: Ty::Text,
-                doc: "The window's name.",
-            },
+            required(
+                "session",
+                Ty::Id(Entity::Session),
+                "The session to add the window to.",
+            ),
+            required("name", Ty::Text, "The window's name."),
         ],
         needs: Features::NONE,
         returns: Returns::Created(Entity::Window),
@@ -393,15 +462,30 @@ pub static CATALOG: &[Method] = &[
     },
     Method {
         name: "create-block",
-        doc: "Start a shell in a new block of a window.",
+        doc: "Start a program, the server's shell unless `command` names one, in a new block of a window.",
         params: &[
-            Param {
-                name: "window",
-                ty: Ty::Id(Entity::Window),
-                doc: "The window to add the block to.",
-            },
+            required(
+                "window",
+                Ty::Id(Entity::Window),
+                "The window to add the block to.",
+            ),
             COLS,
             ROWS,
+            launch(
+                "command",
+                Ty::Text,
+                "The program to run instead of the shell; a bare name is looked up in the server's PATH.",
+            ),
+            launch(
+                "arg",
+                Ty::Words,
+                "The command's arguments, in order; repeat the flag for each.",
+            ),
+            launch(
+                "cwd",
+                Ty::Text,
+                "The absolute path to start in, instead of the server's directory.",
+            ),
         ],
         needs: Features::NONE,
         returns: Returns::Created(Entity::Block),
@@ -410,6 +494,7 @@ pub static CATALOG: &[Method] = &[
                 req,
                 window: WindowId::from_uuid(a.uuid("window", Entity::Window)?),
                 size: a.size()?,
+                launch: a.launch()?,
             })
         },
     },
@@ -463,14 +548,7 @@ pub static CATALOG: &[Method] = &[
     Method {
         name: "input",
         doc: "Send bytes to the block's program, as if typed. Needs the lease.",
-        params: &[
-            BLOCK,
-            Param {
-                name: "data",
-                ty: Ty::Bytes,
-                doc: "The bytes to send.",
-            },
-        ],
+        params: &[BLOCK, required("data", Ty::Bytes, "The bytes to send.")],
         needs: Features::NONE,
         returns: Returns::Unanswered,
         build: |req, a| {
@@ -516,11 +594,11 @@ pub static CATALOG: &[Method] = &[
         doc: "Read the terminal's screen as text, after some lines of its history.",
         params: &[
             BLOCK,
-            Param {
-                name: "history",
-                ty: Ty::Lines,
-                doc: "How many scrollback lines above the screen to include.",
-            },
+            required(
+                "history",
+                Ty::Lines,
+                "How many scrollback lines above the screen to include.",
+            ),
         ],
         needs: Features::BLOCK_CALL,
         returns: Returns::Text,

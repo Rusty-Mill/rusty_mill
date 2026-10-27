@@ -44,7 +44,7 @@ mod client {
     #[cfg(windows)]
     use platform_windows::{WindowsTerminal as Term, WindowsUnixStream as UnixStream};
     use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
-    use rusty_mux_proto::{Features, Message};
+    use rusty_mux_proto::{Features, Launch, Message};
     use rusty_mux_server::checkpoint::Receiver;
     use rusty_mux_tui::{Conn, RESTORE, paint};
     use rusty_uuid::Uuid;
@@ -212,7 +212,12 @@ mod client {
                 .ok_or_else(missing)?,
             );
             let block = self
-                .call(|req| Message::CreateBlock { req, window, size })?
+                .call(|req| Message::CreateBlock {
+                    req,
+                    window,
+                    size,
+                    launch: Launch::default(),
+                })?
                 .ok_or_else(missing)?;
             Ok(BlockId::from_uuid(block))
         }

@@ -33,6 +33,14 @@ impl Stop {
         }
     }
 
+    /// Also stops at `deadline`, if that is sooner.
+    pub(crate) fn sooner(&self, deadline: Instant) -> Self {
+        Self {
+            deadline: Some(self.deadline.map_or(deadline, |d| d.min(deadline))),
+            cancelled: self.cancelled.clone(),
+        }
+    }
+
     /// Whether I/O must poll, so a stop is noticed while the server is silent.
     pub(crate) fn is_bounded(&self) -> bool {
         self.deadline.is_some() || self.cancelled.is_some()
@@ -83,6 +91,15 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
         assert!(Stop::after(Duration::from_secs(60)).check().is_ok());
         assert!(Stop::after(Duration::MAX).check().is_ok());
+    }
+
+    #[test]
+    fn the_sooner_deadline_wins() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(60);
+        assert!(Stop::default().sooner(now).check().is_err());
+        assert!(Stop::default().sooner(later).check().is_ok());
+        assert!(Stop::after(Duration::ZERO).sooner(later).check().is_err());
     }
 
     #[test]
