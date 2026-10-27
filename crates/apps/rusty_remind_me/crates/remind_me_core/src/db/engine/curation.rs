@@ -43,26 +43,97 @@ pub(crate) fn capture_tags(tables: &EngineTables, capture_id: &str) -> Result<Op
         .map(|row| tags(&row)))
 }
 
-/// Captures, not themselves decomposed facts and not deleted, that no
-/// memory names as its `source_capture_id`, newest first.
-fn undecomposed_rows(core: &CoreTables) -> Vec<MemoryRow> {
-    let named: HashSet<String> = memories::rows(core)
-        .filter_map(|row| row.source_capture_id)
-        .collect();
-    let mut rows: Vec<MemoryRow> = memories::rows(core)
+/// The revision of the capture a fact was drawn from: its
+/// `metadata.capture_revision` when that is an RFC 3339 time no later than
+/// the fact itself, else its own `created_at`. A marker that is not a time,
+/// or lies in the fact's future, was never validated and is ignored.
+fn drawn_from(row: &MemoryRow) -> String {
+    let parse = |raw: &str| chrono::DateTime::parse_from_rfc3339(raw.trim()).ok();
+    serde_json::from_str::<serde_json::Value>(&row.metadata)
+        .ok()
+        .and_then(|m| parse(m.get("capture_revision")?.as_str()?))
+        .filter(|at| parse(&row.created_at).is_some_and(|created| *at <= created))
+        .map(|at| at.with_timezone(&chrono::Utc).to_rfc3339())
+        .unwrap_or_else(|| row.created_at.clone())
+}
+
+/// Up to which revision each capture has been decomposed: the newest
+/// [`drawn_from`] among the memories naming it as their `source_capture_id`.
+fn decomposed_at(core: &CoreTables) -> HashMap<String, String> {
+    let mut newest: HashMap<String, String> = HashMap::new();
+    for row in memories::rows(core) {
+        let Some(capture) = row.source_capture_id.clone() else {
+            continue;
+        };
+        let at = drawn_from(&row);
+        let slot = newest.entry(capture).or_default();
+        if at > *slot {
+            *slot = at;
+        }
+    }
+    newest
+}
+
+/// The newest `updated_at` among each capture's own rows.
+fn capture_revisions(core: &CoreTables) -> HashMap<String, String> {
+    let mut newest: HashMap<String, String> = HashMap::new();
+    for row in memories::rows(core) {
+        let (Some(capture), None) = (row.capture_id, row.source_capture_id) else {
+            continue;
+        };
+        let slot = newest.entry(capture).or_default();
+        if row.updated_at > *slot {
+            *slot = row.updated_at;
+        }
+    }
+    newest
+}
+
+/// Whether capture row `row` still needs decomposing: no fact names its
+/// capture, or the row changed after the revision its newest facts were
+/// drawn from (a session recaptured after, or during, decomposition;
+/// ADR-0029).
+pub(crate) fn needs_decomposing(row: &MemoryRow, decomposed: &HashMap<String, String>) -> bool {
+    row.capture_id
+        .as_ref()
+        .is_some_and(|c| decomposed.get(c).is_none_or(|at| row.updated_at > *at))
+}
+
+/// The captures still needing decomposition, as [`needs_decomposing`] says.
+pub(crate) fn undecomposed_captures(core: &CoreTables) -> impl Iterator<Item = MemoryRow> + '_ {
+    let decomposed = decomposed_at(core);
+    memories::rows(core)
         .filter(|row| row.deleted_at.is_none() && row.source_capture_id.is_none())
-        .filter(|row| row.capture_id.as_ref().is_some_and(|c| !named.contains(c)))
+        .filter(move |row| needs_decomposing(row, &decomposed))
+}
+
+/// Captures, not themselves decomposed facts and not deleted, that need
+/// decomposing and last changed at or before `settled_before`, newest first.
+fn undecomposed_rows(core: &CoreTables, settled_before: Option<&str>) -> Vec<MemoryRow> {
+    let mut rows: Vec<MemoryRow> = undecomposed_captures(core)
+        .filter(|row| settled_before.is_none_or(|cutoff| row.updated_at.as_str() <= cutoff))
         .collect();
     newest_first(&mut rows);
     rows
 }
 
-pub(crate) fn undecomposed(tables: &EngineTables, limit: usize) -> Result<Vec<CaptureRow>> {
-    Ok(undecomposed_rows(core_ref(tables)?)
+pub(crate) fn undecomposed(
+    tables: &EngineTables,
+    limit: usize,
+    settled_before: Option<&str>,
+) -> Result<Vec<CaptureRow>> {
+    let core = core_ref(tables)?;
+    let revisions = capture_revisions(core);
+    Ok(undecomposed_rows(core, settled_before)
         .into_iter()
         .take(limit)
         .map(|row| CaptureRow {
             tags: tags(&row),
+            revision: row
+                .capture_id
+                .as_ref()
+                .and_then(|c| revisions.get(c).cloned())
+                .unwrap_or_else(|| row.updated_at.clone()),
             capture_id: row.capture_id.unwrap_or_default(),
             id: row.id,
             content: row.content,
@@ -71,8 +142,13 @@ pub(crate) fn undecomposed(tables: &EngineTables, limit: usize) -> Result<Vec<Ca
         .collect())
 }
 
-pub(crate) fn count_undecomposed(tables: &EngineTables) -> Result<i64> {
-    Ok(count(undecomposed_rows(core_ref(tables)?).len()))
+pub(crate) fn count_undecomposed(
+    tables: &EngineTables,
+    settled_before: Option<&str>,
+) -> Result<i64> {
+    Ok(count(
+        undecomposed_rows(core_ref(tables)?, settled_before).len(),
+    ))
 }
 
 pub(crate) fn capture_activity(tables: &EngineTables) -> Result<CaptureActivity> {
@@ -160,7 +236,7 @@ pub(crate) fn normalization_source(
 pub(crate) fn backlog_depth(tables: &EngineTables, backlog: Backlog) -> Result<i64> {
     let core = core_ref(tables)?;
     let depth = match backlog {
-        Backlog::Undecomposed => undecomposed_rows(core).len(),
+        Backlog::Undecomposed => undecomposed_rows(core, None).len(),
         Backlog::Unannotated => {
             let linked: HashSet<String> = super::graph::link_pairs(core)
                 .into_iter()
