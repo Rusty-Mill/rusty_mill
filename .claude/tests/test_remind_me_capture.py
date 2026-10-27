@@ -32,6 +32,7 @@ class FakeServer(http.server.BaseHTTPRequestHandler):
     fail_tool = False
     redirect_to = None
     pad = 0
+    init_version = None
 
     def do_POST(self):
         raw = self.rfile.read(int(self.headers['Content-Length']))
@@ -52,7 +53,8 @@ class FakeServer(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
         if message['method'] == 'initialize':
-            body, kind = json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': {}}), 'application/json'
+            result = {'protocolVersion': FakeServer.init_version} if FakeServer.init_version else {}
+            body, kind = json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), 'application/json'
         else:
             content = [{'type': 'text', 'text': FakeServer.tool_text + ' ' * FakeServer.pad}]
             result = {'isError': FakeServer.fail_tool, 'content': content}
@@ -82,7 +84,7 @@ class Run(unittest.TestCase):
         self.server = serve()
         FakeServer.calls, FakeServer.bodies = [], []
         FakeServer.fail_tool, FakeServer.redirect_to = False, None
-        FakeServer.tool_text, FakeServer.pad = 'ok', 0
+        FakeServer.tool_text, FakeServer.pad, FakeServer.init_version = 'ok', 0, None
         self.env = {'CLAUDE_CODE_REMOTE': 'true', 'REMIND_ME_CLOUD_CAPTURE': '1',
                     'REMIND_ME_TOKEN': TOKEN,
                     'REMIND_ME_URL': f'http://127.0.0.1:{self.server.server_port}/mcp'}
@@ -162,6 +164,38 @@ class Run(unittest.TestCase):
             self.assertNotIn(leaked, sent)
         self.assertIn('[REDACTED:github_token]', sent)
         self.assertIn('[REDACTED:secret]', sent)
+
+    def test_secret_named_fields_and_serialized_results_are_withheld(self):
+        result = json.dumps({'config': {'db_password': 'opaque-one'}, 'rows': 3})
+        lines = [
+            {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'name': 'login', 'input': {
+                'user': 'bob', 'password': 'opaque-two', 'nested': {'API_KEY': 'opaque-three'}}}],
+                'usage': {'output_tokens': 41}}},
+            {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'content': result}]}},
+            {'type': 'user', 'message': {'content': json.dumps(json.dumps({'client_secret': 'opaque-four'}))}},
+            {'type': 'user', 'message': {'content': 'creds.yaml has token: "op5"'}},
+            {'type': 'system', 'env': {GHP: 'set'}},
+        ]
+        self.transcript.write_text(''.join(json.dumps(line) + '\n' for line in lines))
+        self.assertEqual(self.run_hook(self.payload()), 'captured')
+        sent = FakeServer.bodies[-1].decode()
+        for leaked in ('opaque-one', 'opaque-two', 'opaque-three', 'opaque-four', 'op5', GHP):
+            self.assertNotIn(leaked, sent)
+        transcript = FakeServer.calls[-1][1]['params']['arguments']['transcript']
+        first = json.loads(transcript.splitlines()[0])
+        self.assertEqual(first['message']['usage'], {'output_tokens': 41}, 'counts are not secrets')
+        self.assertEqual(first['message']['content'][0]['input']['user'], 'bob')
+
+    def test_the_negotiated_protocol_version_is_used_or_refused(self):
+        FakeServer.init_version = '2025-03-26'
+        self.assertEqual(self.run_hook(self.payload()), 'captured')
+        headers = {k.lower(): v for k, v in FakeServer.calls[-1][0].items()}
+        self.assertEqual(headers.get('mcp-protocol-version'), '2025-03-26')
+        FakeServer.init_version = '1999-01-01'
+        with self.assertRaises(hook.CaptureError) as caught:
+            self.run_hook(self.payload('PreCompact'))
+        self.assertEqual(str(caught.exception), 'unsupported protocol version')
+        self.assertNotEqual(FakeServer.calls[-1][1].get('method'), 'tools/call')
 
     def test_remote_metadata_carries_no_credentials(self):
         hook_git = hook.git

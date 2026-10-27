@@ -14,9 +14,11 @@ hook and holding remind-me credentials alone never turns capture on:
   REMIND_ME_URL                the server's MCP endpoint, https://…/mcp
   REMIND_ME_TOKEN              its bearer token (an environment secret, never committed)
 
-What leaves the container is scrubbed first: thinking blocks are dropped and
-every string is passed through the same secret shapes the server redacts
-(ADR-0026), plus bearer values and the token itself. The server redacts again
+What leaves the container is scrubbed first: thinking blocks are dropped, the
+values of fields named like secrets are withheld (JSON carried in a string is
+scrubbed field by field), and every string is passed through the secret shapes
+the server redacts (ADR-0026), plus quoted key-value pairs, bearer values and
+the token itself. The server redacts again
 at write. The endpoint must be https (http only for loopback), redirects are
 never followed, and responses are read up to a cap.
 
@@ -24,7 +26,8 @@ Stop is skipped when re-entrant and throttled to once a minute after a
 successful capture; PreCompact always runs. Two overlapping runs may both
 send; the server replaces the capture in place, so the later one wins.
 SessionEnd is not used, because a reclaimed container may never fire it. The
-whole run shares one deadline inside the hook's 30 s timeout. Failures are
+whole run shares one deadline inside the hook's 30 s timeout; a socket timeout
+bounds each read, so a slow trickle can run to that 30 s hard stop. Failures are
 reported on stderr as a fixed category, never server text or header values,
 and the hook exits 0.
 """
@@ -48,6 +51,8 @@ THROTTLE_SECONDS = 60
 BUDGET_SECONDS = 25
 GIT_SECONDS = 2
 PROTOCOL_VERSION = '2025-06-18'
+# Versions whose initialize, tools/call and Streamable HTTP framing this client speaks.
+SUPPORTED_VERSIONS = {PROTOCOL_VERSION, '2025-03-26'}
 OPT_IN = 'REMIND_ME_CLOUD_CAPTURE'
 LOOPBACK = {'127.0.0.1', '::1', 'localhost'}
 THINKING = {'thinking', 'redacted_thinking'}
@@ -94,6 +99,10 @@ def bearer(token):
     return token
 
 
+SECRET_WORDS = (r'api_key|api-key|apikey|secret|token|password|passwd|authorization'
+                r'|credential|access_key|private_key|cookie')
+SECRET_KEY = re.compile(r'(?i)(?:' + SECRET_WORDS + r')')
+
 # The shapes remind_me_core::redact scrubs, as (kind, pattern, group kept before
 # the secret). Bearer values are added here: a transcript can quote a header.
 RULES = [
@@ -105,8 +114,13 @@ RULES = [
     ('github_token', re.compile(r'(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{36,}'), None),
     ('slack_token', re.compile(r'(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9_-]{10,}'), None),
     ('bearer', re.compile(r'(?i)(\bbearer[ \t]+)(?!\[REDACTED:)[A-Za-z0-9._~+/=-]{8,}'), 1),
-    ('secret', re.compile(r'(?i)((?:api_key|api-key|apikey|secret|token|password)[ \t]*[:=][ \t]*)'
-                          r'(?!\[REDACTED:)\S{8,}'), 1),
+    # `key: "value"`, `"key": "value"` and their escaped forms inside serialized
+    # JSON: the whole quoted value, however short.
+    ('secret', re.compile(r'(?i)((?:' + SECRET_WORDS + r')[\w-]*\\?["\']?[ \t]*[:=][ \t]*\\?(["\']))'
+                          r'(?!\[REDACTED:)(?:(?!\\?\2).)+'), 1),
+    # `key=value`, `key: value`: an unquoted value of eight or more characters.
+    ('secret', re.compile(r'(?i)((?:' + SECRET_WORDS + r')[\w-]*["\']?[ \t]*[:=][ \t]*)'
+                          r'(?![\\"\']|\[REDACTED:)\S{8,}'), 1),
 ]
 
 
@@ -121,15 +135,39 @@ def redact(text, token=None):
 
 
 def scrub(value, token=None):
-    """`value` with thinking blocks dropped and every string redacted."""
+    """`value` with thinking blocks dropped, secret-named fields blanked and every string redacted."""
     if isinstance(value, str):
-        return redact(value, token)
+        return scrub_text(value, token)
     if isinstance(value, list):
         return [scrub(v, token) for v in value
                 if not (isinstance(v, dict) and v.get('type') in THINKING)]
     if isinstance(value, dict):
-        return {k: scrub(v, token) for k, v in value.items()}
+        return {redact(k, token): secret_field(v) if SECRET_KEY.search(k) else scrub(v, token)
+                for k, v in value.items()}
     return value
+
+
+def secret_field(value):
+    """The value of a field named like a secret, with any text in it withheld. Numbers
+    and booleans stay, so counts such as `output_tokens` survive."""
+    if isinstance(value, (str, list, dict)) and value:
+        return '[REDACTED:secret]'
+    return value
+
+
+def scrub_text(text, token=None):
+    """A string, read as JSON first when it is one, so a serialized tool result is
+    scrubbed field by field."""
+    if text.lstrip()[:1] in ('{', '['):
+        try:
+            value = json.loads(text)
+        except ValueError:
+            pass
+        else:
+            clean = scrub(value, token)
+            if clean != value:
+                return json.dumps(clean, ensure_ascii=False)
+    return redact(text, token)
 
 
 def scrub_line(line, token=None):
@@ -240,13 +278,13 @@ class Mcp:
 
     def __init__(self, url, token, deadline):
         self.url, self.token, self.deadline = endpoint(url), bearer(token), deadline
-        self.session, self.next_id = None, 1
+        self.session, self.next_id, self.version = None, 1, PROTOCOL_VERSION
 
     def post(self, message):
         headers = {'Content-Type': 'application/json',
                    'Accept': 'application/json, text/event-stream',
                    'Authorization': f'Bearer {self.token}',
-                   'MCP-Protocol-Version': PROTOCOL_VERSION}
+                   'MCP-Protocol-Version': self.version}
         if self.session:
             headers['Mcp-Session-Id'] = self.session
         body = json.dumps(message, ensure_ascii=False).encode()
@@ -257,6 +295,7 @@ class Mcp:
                 kind = response.headers.get('Content-Type', '')
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as e:
+            e.close()
             raise CaptureError(f'http {int(e.code)}') from None
         except TimeoutError:
             raise CaptureError('timeout') from None
@@ -266,6 +305,7 @@ class Mcp:
             raise CaptureError('invalid request') from None
         if len(raw) > MAX_RESPONSE_BYTES:
             raise CaptureError('response too large')
+        self.deadline.remaining()  # a socket timeout bounds each read, not the whole response
         if session and re.fullmatch(r'[\x21-\x7e]+', session):
             self.session = session
         if 'id' not in message:
@@ -283,8 +323,12 @@ class Mcp:
         return reply['result']
 
     def call(self, tool, arguments):
-        self.request('initialize', {'protocolVersion': PROTOCOL_VERSION, 'capabilities': {},
-                                    'clientInfo': {'name': 'remind-me-capture-hook', 'version': '2'}})
+        init = self.request('initialize', {'protocolVersion': PROTOCOL_VERSION, 'capabilities': {},
+                                           'clientInfo': {'name': 'remind-me-capture-hook', 'version': '2'}})
+        version = init.get('protocolVersion', PROTOCOL_VERSION)
+        if version not in SUPPORTED_VERSIONS:
+            raise CaptureError('unsupported protocol version')
+        self.version = version
         self.post({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
         result = self.request('tools/call', {'name': tool, 'arguments': arguments})
         if result.get('isError'):
