@@ -26,3 +26,6 @@ platform = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+platform-windows = { workspace = true }

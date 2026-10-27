@@ -415,3 +415,66 @@ fn a_none_read_timeout_waits_for_data() {
     assert!(n > 0);
     drop(writer.join().expect("writer"));
 }
+
+#[test]
+fn a_clone_shares_the_connection_both_ways() {
+    let path = socket_path("clone");
+    let (_listener, mut server, mut client) = pair(&path);
+    let mut clone = client.try_clone().expect("try_clone");
+    server.write_all(b"to clone").expect("server write");
+    let mut buf = [0u8; 8];
+    clone.read_exact(&mut buf).expect("clone read");
+    assert_eq!(&buf, b"to clone");
+    clone.write_all(b"from it").expect("clone write");
+    let mut buf = [0u8; 7];
+    server.read_exact(&mut buf).expect("server read");
+    assert_eq!(&buf, b"from it");
+    // The original still works alongside the clone.
+    client.write_all(b"!").expect("original write");
+    let mut one = [0u8; 1];
+    server.read_exact(&mut one).expect("server read");
+    assert_eq!(&one, b"!");
+}
+
+/// The attach client's detach: its output thread is blocked reading a
+/// clone, the input side shuts the original down, and the server closes
+/// its end once it reads end of stream. The read must end. This does not
+/// cover a server that never closes (a hung server).
+#[test]
+fn shutdown_ends_a_read_blocked_on_a_clone() {
+    let path = socket_path("shutdown");
+    let (_listener, mut server, client) = pair(&path);
+    let peer = std::thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        while matches!(server.read(&mut buf), Ok(n) if n > 0) {}
+        drop(server);
+    });
+    let clone = client.try_clone().expect("try_clone");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut clone = clone;
+        let _ = tx.send(clone.read(&mut [0u8; 8]));
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    let started = Instant::now();
+    client.shutdown(std::net::Shutdown::Both).expect("shutdown");
+    let ended = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the clone's read did not end within 2 s of the shutdown");
+    println!(
+        "clone read ended after {:?} with {ended:?}",
+        started.elapsed()
+    );
+    assert!(matches!(ended, Ok(0) | Err(_)), "{ended:?}");
+    peer.join().expect("peer");
+}
+
+#[test]
+fn writing_after_shutdown_fails() {
+    let path = socket_path("shutdown-write");
+    let (_listener, _server, mut client) = pair(&path);
+    client
+        .shutdown(std::net::Shutdown::Write)
+        .expect("shutdown");
+    assert!(client.write_all(b"late").is_err());
+}

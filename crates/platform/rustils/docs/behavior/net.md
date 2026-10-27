@@ -162,6 +162,12 @@ from the other two slices (see below).
   `InvalidInput`; a positive duration under 1 ms becomes 1 ms, because
   Winsock reads 0 ms as "wait forever". The `TcpStream` trait's
   `set_read_timeout` is unchanged.
+- `WindowsUnixStream::try_clone() -> io::Result<Self>` and
+  `shutdown(Shutdown) -> io::Result<()>` mirror std's. A clone is a
+  second socket handle on the same connection (`WSADuplicateSocketW`
+  into this process), so one thread reads while another writes, and a
+  `shutdown` through either handle ends a read blocked on the other.
+  Both are concrete-type only, not on the `UnixStream` trait.
 - Error mapping mirrors `tcp_connect`/`tcp_listen`'s kinds wherever the
   underlying condition is the same: a bind collision (live or stale
   path) maps to `AddrInUse`; connecting to a socket file that exists but

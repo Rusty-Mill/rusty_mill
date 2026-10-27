@@ -19,25 +19,30 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 mod client {
     pub fn run(_args: &[std::ffi::OsString]) -> Result<(), String> {
-        Err("the Phase 1 client runs on Linux only".into())
+        Err("the client runs on Linux and Windows only".into())
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod client {
     use std::ffi::OsString;
     use std::io::Write;
     use std::net::Shutdown;
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
+    use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use platform::term::Terminal;
-    use platform_linux::LinuxTerminal;
+    #[cfg(target_os = "linux")]
+    use platform_linux::LinuxTerminal as Term;
+    #[cfg(windows)]
+    use platform_windows::{WindowsTerminal as Term, WindowsUnixStream as UnixStream};
     use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
     use rusty_mux_proto::{Features, Message};
     use rusty_mux_server::checkpoint::Receiver;
@@ -60,10 +65,20 @@ mod client {
         Stdout,
     }
 
+    #[cfg(unix)]
+    fn connect(path: &Path) -> Result<UnixStream, String> {
+        UnixStream::connect(path).map_err(|e| format!("connecting: {e}"))
+    }
+
+    #[cfg(windows)]
+    fn connect(path: &Path) -> Result<UnixStream, String> {
+        UnixStream::connect(path).map_err(|e| format!("connecting: {e:?}"))
+    }
+
     pub fn run(args: &[OsString]) -> Result<(), String> {
-        let stream = UnixStream::connect(&args[0]).map_err(|e| format!("connecting: {e}"))?;
+        let stream = connect(Path::new(&args[0]))?;
         let mut conn = Conn::new(stream.try_clone().map_err(|e| e.to_string())?);
-        let mut term = LinuxTerminal::new();
+        let mut term = Term::new();
         let win = term
             .window_size()
             .map_err(|e| format!("terminal size: {e:?}"))?;
@@ -136,7 +151,7 @@ mod client {
 
     /// Undoes the modes a block's program may have set on this terminal,
     /// then leaves raw mode.
-    fn restore(term: &mut LinuxTerminal) {
+    fn restore(term: &mut Term) {
         let mut stdout = std::io::stdout();
         if let Err(err) = stdout.write_all(RESTORE).and_then(|()| stdout.flush()) {
             eprintln!("rusty-mux: resetting the terminal: {err}");
@@ -253,7 +268,7 @@ mod client {
     /// Keyboard to server, until Ctrl-], the end of keyboard input, or the
     /// output side ending (`done`), which it checks every [`TICK`].
     fn forward(
-        term: &LinuxTerminal,
+        term: &Term,
         stream: UnixStream,
         block: BlockId,
         writer: bool,

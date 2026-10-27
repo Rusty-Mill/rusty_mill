@@ -482,37 +482,63 @@ async fn an_acceptor_chooses_the_certificate_per_connection() {
     assert_eq!(get_health_over_tls(&server, &second_trust).await, 200);
 }
 
-/// Takes every connection over: answers it with raw bytes on its own task.
-struct TakeOver;
+/// The request the takeover test sends.
+const TAKEN_REQUEST: &[u8] = b"GET /health HTTP/1.1\r\nhost: localhost\r\n\r\n";
+
+/// Takes every connection over: answers it with raw bytes on its own task
+/// and reports how that went.
+struct TakeOver(UnboundedSender<std::io::Result<()>>);
 
 impl Accept for TakeOver {
     fn accept(&self, tcp: TcpStream, _peer: SocketAddr) -> BoxFuture<'static, Accepted> {
+        let done = self.0.clone();
         rusty_tokio::spawn(async move {
-            let _ = tcp.write_all(b"taken").await;
+            let _ = done.send(take_over(tcp).await);
         });
         Box::pin(async { Accepted::Done })
     }
 }
 
+/// Reads the whole request before answering and closes with a FIN: a
+/// socket closed with unread input may be reset, which can discard the
+/// answer before the client reads it.
+async fn take_over(mut tcp: TcpStream) -> std::io::Result<()> {
+    let mut request = vec![0u8; TAKEN_REQUEST.len()];
+    tcp.read_exact(&mut request).await?;
+    if request != TAKEN_REQUEST {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unexpected request {request:?}"),
+        ));
+    }
+    tcp.write_all(b"taken").await?;
+    tcp.shutdown().await
+}
+
 #[rusty_tokio::test]
 async fn a_connection_taken_over_is_not_served_as_http() {
-    let server = start_with(ServeOptions::default(), TakeOver);
+    let (done, mut taken) = unbounded_channel();
+    let server = start_with(ServeOptions::default(), TakeOver(done));
     let tcp = TcpStream::connect_addr(server.local_addr()).await.unwrap();
-    tcp.write_all(b"GET /health HTTP/1.1\r\nhost: localhost\r\n\r\n")
-        .await
-        .unwrap();
+    tcp.write_all(TAKEN_REQUEST).await.unwrap();
     let mut seen = Vec::new();
     let mut buf = [0u8; 64];
     loop {
-        match timeout(Duration::from_secs(5), tcp.read(&mut buf))
+        let n = timeout(Duration::from_secs(5), tcp.read(&mut buf))
             .await
-            .unwrap()
-        {
-            Ok(0) | Err(_) => break,
-            Ok(n) => seen.extend_from_slice(&buf[..n]),
+            .expect("the answer or its end within the bound")
+            .expect("reading the answer");
+        if n == 0 {
+            break;
         }
+        seen.extend_from_slice(&buf[..n]);
     }
     assert_eq!(seen, b"taken");
+    timeout(Duration::from_secs(5), taken.recv())
+        .await
+        .expect("the takeover task finished within the bound")
+        .expect("the takeover task reported")
+        .expect("the takeover task read, answered and shut down");
     timeout(Duration::from_secs(5), server.shutdown())
         .await
         .unwrap();

@@ -15,14 +15,17 @@
 //! Track W (D-15, slice 3): the donor stopped being only a donor here.
 //! Every foreign call in this module now has a `rusty_win32` arm behind
 //! `track-w` except [`reopen`], which documents its own reason for
-//! staying. The mode get/set pair is factored into two-armed [`get_mode`]/
+//! staying, and the input-record peek and read behind [`poll_readable`]
+//! and the UTF-16 read behind [`read_chunk`], which `rusty_win32` does not
+//! bind. The mode get/set pair is factored into two-armed [`get_mode`]/
 //! [`set_mode`] helpers so the ten public functions built on it keep a
 //! single body each.
 
 #![allow(unsafe_code)]
 
 use std::ffi::OsStr;
-use std::time::Duration;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use platform::error::Result;
 use platform::term::{ConsoleState, TermStream};
@@ -249,19 +252,115 @@ pub fn set_echo(on: bool) -> Result<bool> {
     Ok(was_on)
 }
 
-/// `WaitForSingleObject(stdin, timeout_ms)`; `None` timeout blocks
-/// forever. A console input handle is "signaled" when an unread input
-/// record is queued — coarser than "a byte is ready" (any input event,
-/// not just keystrokes, wakes it), but `ReadFile` afterward blocks
-/// correctly on whatever was actually queued, so a spurious wake costs
-/// one extra round trip, never a wrong read.
+/// Waits until a read of stdin returns data, or `timeout` passes; `None`
+/// waits forever.
+///
+/// A console input handle is signalled by any queued input record,
+/// including the key-up every keystroke leaves and focus or size events,
+/// none of which a read returns as a byte; a plain wait would then report
+/// readable and the read block until the next key. So on a console the
+/// records ahead of the first one that carries a character (see
+/// `carries_text`) are read and dropped, and the wait resumes for what is
+/// left of `timeout`: `true` means a read returns at least one byte. Text
+/// a smaller read left behind counts as readable at once. When stdin is
+/// not a console (a pipe or a file) this is the plain wait on the handle.
 pub fn poll_readable(timeout: Option<Duration>) -> Result<bool> {
     let hin = std_handle(TermStream::Stdin);
-    let timeout_ms: u32 = match timeout {
+    if get_mode(hin).is_err() {
+        return wait_signaled(hin, wait_ms(timeout));
+    }
+    if !pending_for(hin).bytes.is_empty() {
+        return Ok(true);
+    }
+    let deadline = timeout.map(|d| Instant::now() + d);
+    loop {
+        let left = deadline.map(|at| at.saturating_duration_since(Instant::now()));
+        if !wait_signaled(hin, wait_ms(left))? {
+            return Ok(false);
+        }
+        if drop_records_without_text(hin)? {
+            return Ok(true);
+        }
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            return Ok(false);
+        }
+    }
+}
+
+fn wait_ms(timeout: Option<Duration>) -> u32 {
+    match timeout {
         None => w::INFINITE,
         Some(d) => u32::try_from(d.as_millis()).unwrap_or(u32::MAX),
+    }
+}
+
+/// `VK_MENU`: the Alt key.
+const VK_MENU: u16 = 0x12;
+
+/// Whether a console read returns a character for this record, by
+/// conhost's rule (`GetChar`, `src/host/stream.cpp`): a key-down with a
+/// character, Alt's release with one (Alt+numpad entry), or a key-down
+/// without one that types NUL.
+fn carries_text(record: &w::INPUT_RECORD) -> bool {
+    if u32::from(record.EventType) != w::KEY_EVENT {
+        return false;
+    }
+    // SAFETY: `EventType` is `KEY_EVENT`, so `KeyEvent` is the union's
+    // active field; `UnicodeChar` is the `W` API's active character.
+    let (key, ch) = unsafe {
+        (
+            record.Event.KeyEvent,
+            record.Event.KeyEvent.uChar.UnicodeChar,
+        )
     };
-    wait_signaled(hin, timeout_ms)
+    match (ch, key.bKeyDown != 0) {
+        (0, down) => down && types_nul(&key),
+        (_, down) => down || key.wVirtualKeyCode == VK_MENU,
+    }
+}
+
+/// Whether a key-down without a character types NUL: its key and its
+/// exact Alt, Ctrl and Shift state are what `VkKeyScanW(0)` names for the
+/// keyboard layout (Ctrl+@ on US English), which is the test conhost
+/// applies before returning the NUL.
+fn types_nul(key: &w::KEY_EVENT_RECORD) -> bool {
+    // SAFETY: no pointers; it reads this thread's keyboard layout.
+    let scan = unsafe { w::VkKeyScanW(0) };
+    let Ok(scan) = u16::try_from(scan) else {
+        return false;
+    };
+    let held = |mask: u32| key.dwControlKeyState & mask != 0;
+    let wants = |bit: u16| scan & bit != 0;
+    key.wVirtualKeyCode == scan & 0xff
+        && held(w::LEFT_ALT_PRESSED | w::RIGHT_ALT_PRESSED) == wants(0x400)
+        && held(w::LEFT_CTRL_PRESSED | w::RIGHT_CTRL_PRESSED) == wants(0x200)
+        && held(w::SHIFT_PRESSED) == wants(0x100)
+}
+
+/// Reads and drops queued records until one carries text; `true` if one
+/// does (it stays queued), `false` once the queue is empty.
+fn drop_records_without_text(hin: w::HANDLE) -> Result<bool> {
+    loop {
+        // SAFETY: `INPUT_RECORD` is plain data; all-zero is valid.
+        let mut record: w::INPUT_RECORD = unsafe { std::mem::zeroed() };
+        let mut count: u32 = 0;
+        // SAFETY: `hin` is the live console input handle; `record` holds
+        // the one record asked for and `count` is a valid out-pointer.
+        if unsafe { w::PeekConsoleInputW(hin, &mut record, 1, &mut count) } == 0 {
+            return Err(errmap::last_win32_err("PeekConsoleInputW", OsStr::new("")));
+        }
+        if count == 0 {
+            return Ok(false);
+        }
+        if carries_text(&record) {
+            return Ok(true);
+        }
+        // SAFETY: as above; this removes the record just peeked, which a
+        // single-threaded reader of this console still has at the front.
+        if unsafe { w::ReadConsoleInputW(hin, &mut record, 1, &mut count) } == 0 {
+            return Err(errmap::last_win32_err("ReadConsoleInputW", OsStr::new("")));
+        }
+    }
 }
 
 /// `WaitForSingleObject` reduced to signaled/timed-out — Track W (D-15):
@@ -291,15 +390,118 @@ fn wait_signaled(h: w::HANDLE, timeout_ms: u32) -> Result<bool> {
     }
 }
 
-/// `ReadFile(stdin, buf)` — one call, batched, `Ok(0)` = EOF.
+/// Reads what stdin has, blocking for at least one byte; `Ok(0)` = EOF.
+///
+/// On a console the text is read as UTF-16 (`ReadConsoleW`) and returned
+/// as UTF-8, whatever the console's input code page, as a Unix tty in a
+/// UTF-8 locale delivers it; a lone surrogate becomes U+FFFD. A character
+/// whose UTF-8 form does not fit `buf` is returned over the next reads,
+/// and [`poll_readable`] reports it readable meanwhile. A pipe or a file
+/// is read as bytes, unchanged.
+pub fn read_chunk(buf: &mut [u8]) -> Result<usize> {
+    let hin = std_handle(TermStream::Stdin);
+    if get_mode(hin).is_err() {
+        return read_file(hin, buf);
+    }
+    read_console_utf8(hin, buf)
+}
+
+/// Text decoded from a console but not yet returned, and the input handle
+/// it came from. The console's input buffer belongs to the process, so
+/// its undelivered text does too; it is dropped once stdin is another
+/// handle, and whenever this process gains, loses or reopens a console.
+struct Pending {
+    source: usize,
+    bytes: Vec<u8>,
+}
+
+static PENDING: Mutex<Pending> = Mutex::new(Pending {
+    source: 0,
+    bytes: Vec::new(),
+});
+
+fn lock_pending() -> MutexGuard<'static, Pending> {
+    // The bytes stay valid whatever a panicking holder was doing.
+    PENDING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The text pending from `hin`, none if it came from another handle.
+fn pending_for(hin: w::HANDLE) -> MutexGuard<'static, Pending> {
+    let mut pending = lock_pending();
+    if pending.source != hin as usize {
+        pending.bytes.clear();
+        pending.source = hin as usize;
+    }
+    pending
+}
+
+fn discard_pending() {
+    lock_pending().bytes.clear();
+}
+
+fn read_console_utf8(hin: w::HANDLE, buf: &mut [u8]) -> Result<usize> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let mut pending = pending_for(hin);
+    if pending.bytes.is_empty() {
+        // A UTF-16 unit takes at most 3 bytes of UTF-8, so this many
+        // usually fit; anything over waits in `PENDING`.
+        let units = read_console_units(hin, (buf.len() / 3).max(1))?;
+        if units.is_empty() {
+            return Ok(0);
+        }
+        pending.bytes = String::from_utf16_lossy(&units).into_bytes();
+    }
+    let n = pending.bytes.len().min(buf.len());
+    buf[..n].copy_from_slice(&pending.bytes[..n]);
+    pending.bytes.drain(..n);
+    Ok(n)
+}
+
+/// Up to `max` UTF-16 units, plus the second half of a surrogate pair the
+/// last one starts, so a character is never split between reads.
+fn read_console_units(hin: w::HANDLE, max: usize) -> Result<Vec<u16>> {
+    let mut units = vec![0u16; max];
+    let n = read_console_w(hin, &mut units)?;
+    units.truncate(n);
+    if units.last().is_some_and(|u| (0xD800..0xDC00).contains(u)) {
+        let mut low = [0u16; 1];
+        let n = read_console_w(hin, &mut low)?;
+        units.extend_from_slice(&low[..n]);
+    }
+    Ok(units)
+}
+
+fn read_console_w(hin: w::HANDLE, units: &mut [u16]) -> Result<usize> {
+    let len = u32::try_from(units.len()).unwrap_or(u32::MAX);
+    let mut n: u32 = 0;
+    // SAFETY: `hin` is the live console input handle; `units` holds at
+    // least `len` UTF-16 units and `n` is a valid out-pointer, both
+    // outliving the call; no read control is passed.
+    let ok = unsafe {
+        w::ReadConsoleW(
+            hin,
+            units.as_mut_ptr().cast(),
+            len,
+            &mut n,
+            std::ptr::null(),
+        )
+    };
+    if ok == 0 {
+        return Err(errmap::last_win32_err("ReadConsoleW", OsStr::new("")));
+    }
+    Ok(n as usize)
+}
+
+/// `ReadFile` on a non-console stdin — one call, batched.
 ///
 /// Track W (D-15): `rusty_win32::console::read`. Same clamp as
 /// `sys::fileio::read`'s track-w arm and for the same reason — the donor
 /// passes `buf.len() as u32` straight through, which wraps rather than
 /// saturating on an oversized slice.
 #[cfg(feature = "track-w")]
-pub fn read_chunk(buf: &mut [u8]) -> Result<usize> {
-    let hin = std_handle(TermStream::Stdin);
+fn read_file(hin: w::HANDLE, buf: &mut [u8]) -> Result<usize> {
     let len = buf.len().min(u32::MAX as usize);
     // SAFETY: `hin` is a live process-owned std handle open for reading.
     unsafe { rusty_win32::console::read(hin, &mut buf[..len]) }
@@ -307,8 +509,7 @@ pub fn read_chunk(buf: &mut [u8]) -> Result<usize> {
 }
 
 #[cfg(not(feature = "track-w"))]
-pub fn read_chunk(buf: &mut [u8]) -> Result<usize> {
-    let hin = std_handle(TermStream::Stdin);
+fn read_file(hin: w::HANDLE, buf: &mut [u8]) -> Result<usize> {
     let mut n: u32 = 0;
     let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
     // SAFETY: `buf` is a valid writable region of at least `len` bytes
@@ -403,7 +604,9 @@ pub fn initial_state() -> ConsoleState {
 /// Track W (D-15): `rusty_win32::console::alloc`.
 #[cfg(feature = "track-w")]
 pub fn alloc() -> Result<()> {
-    rusty_win32::console::alloc().map_err(|e| errmap::trackw_err("AllocConsole", e))
+    rusty_win32::console::alloc().map_err(|e| errmap::trackw_err("AllocConsole", e))?;
+    discard_pending();
+    Ok(())
 }
 
 #[cfg(not(feature = "track-w"))]
@@ -412,6 +615,7 @@ pub fn alloc() -> Result<()> {
     if unsafe { w::AllocConsole() } == 0 {
         return Err(errmap::last_win32_err("AllocConsole", OsStr::new("")));
     }
+    discard_pending();
     Ok(())
 }
 
@@ -419,7 +623,9 @@ pub fn alloc() -> Result<()> {
 /// Track W (D-15): `rusty_win32::console::free`.
 #[cfg(feature = "track-w")]
 pub fn free() -> Result<()> {
-    rusty_win32::console::free().map_err(|e| errmap::trackw_err("FreeConsole", e))
+    rusty_win32::console::free().map_err(|e| errmap::trackw_err("FreeConsole", e))?;
+    discard_pending();
+    Ok(())
 }
 
 #[cfg(not(feature = "track-w"))]
@@ -428,6 +634,7 @@ pub fn free() -> Result<()> {
     if unsafe { w::FreeConsole() } == 0 {
         return Err(errmap::last_win32_err("FreeConsole", OsStr::new("")));
     }
+    discard_pending();
     Ok(())
 }
 
@@ -441,7 +648,9 @@ pub fn free() -> Result<()> {
 /// this crate's exactly, sentinel handling included.
 #[cfg(feature = "track-w")]
 pub fn attach(pid: Option<u32>) -> Result<()> {
-    rusty_win32::console::attach(pid).map_err(|e| errmap::trackw_err("AttachConsole", e))
+    rusty_win32::console::attach(pid).map_err(|e| errmap::trackw_err("AttachConsole", e))?;
+    discard_pending();
+    Ok(())
 }
 
 #[cfg(not(feature = "track-w"))]
@@ -453,6 +662,7 @@ pub fn attach(pid: Option<u32>) -> Result<()> {
     if unsafe { w::AttachConsole(process_id) } == 0 {
         return Err(errmap::last_win32_err("AttachConsole", OsStr::new("")));
     }
+    discard_pending();
     Ok(())
 }
 
@@ -524,6 +734,7 @@ pub fn reopen_std_handles() -> Result<()> {
     set_std(w::STD_INPUT_HANDLE, hin, "stdin")?;
     set_std(w::STD_OUTPUT_HANDLE, hout, "stdout")?;
     set_std(w::STD_ERROR_HANDLE, herr, "stderr")?;
+    discard_pending();
 
     // Best-effort VT enable, matching `enter_raw`'s own stdout posture
     // (see its doc comment): a failure here doesn't fail acquisition
