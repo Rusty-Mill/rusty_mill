@@ -1,5 +1,7 @@
 //! The client side: `connect(url, options)`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use rusty_h2::client::builder::Builder;
@@ -84,6 +86,9 @@ pub struct Connection {
     closed: Driver,
     /// How the connection ended, once it has been awaited.
     outcome: Option<Result<(), Error>>,
+    /// Set by the keepalive before it aborts the driver over an
+    /// unanswered ping, so the abort reads as that timeout.
+    ping_timed_out: Arc<AtomicBool>,
     _keepalive: Option<AbortOnDrop>,
 }
 
@@ -97,7 +102,7 @@ impl Connection {
     /// wind-down. Asking again returns the same answer.
     pub async fn closed(&mut self) -> Result<(), &Error> {
         if self.outcome.is_none() {
-            self.outcome = Some(finished(&mut self.closed).await);
+            self.outcome = Some(finished(&mut self.closed, &self.ping_timed_out).await);
         }
         match &self.outcome {
             Some(Err(e)) => Err(e),
@@ -113,19 +118,26 @@ impl Connection {
             client,
             mut closed,
             outcome,
+            ping_timed_out,
             _keepalive,
         } = self;
         drop(_keepalive);
         drop(client);
         match outcome {
             Some(done) => done,
-            None => finished(&mut closed).await,
+            None => finished(&mut closed, &ping_timed_out).await,
         }
     }
 }
 
-async fn finished(driver: &mut Driver) -> Result<(), Error> {
-    driver.await.unwrap_or(Err(Error::Aborted))
+/// The driver's own result; a cancelled driver is a keepalive timeout when
+/// the keepalive cancelled it, else [`Error::Aborted`].
+async fn finished(driver: &mut Driver, ping_timed_out: &AtomicBool) -> Result<(), Error> {
+    match driver.await {
+        Ok(done) => done,
+        Err(_) if ping_timed_out.load(Ordering::Acquire) => Err(Error::Timeout("keepalive")),
+        Err(_) => Err(Error::Aborted),
+    }
 }
 
 /// Connects to `url` (`http://` is plain h2c with prior knowledge; `https://`
@@ -147,11 +159,16 @@ pub async fn connect(url: &str, options: ConnectOptions) -> Result<Connection, E
     let (client, closed) = timeout(connect_timeout, establish(&url, trust, identity, h2))
         .await
         .map_err(|_| Error::Timeout("connect"))??;
-    let guard = keepalive.map(|ka| spawn_keepalive(client.clone(), ka, closed.abort_handle()));
+    let ping_timed_out = Arc::new(AtomicBool::new(false));
+    let guard = keepalive.map(|ka| {
+        let driver = closed.abort_handle();
+        spawn_keepalive(client.clone(), ka, driver, ping_timed_out.clone())
+    });
     Ok(Connection {
         client,
         closed,
         outcome: None,
+        ping_timed_out,
         _keepalive: guard,
     })
 }
@@ -205,14 +222,25 @@ where
     Ok((client, task))
 }
 
-/// Pings every `interval`; a ping unanswered for `timeout` aborts the driver.
-fn spawn_keepalive(client: ClientHandle, ka: Keepalive, driver: AbortHandle) -> AbortOnDrop {
+/// Pings every `interval`; a ping unanswered for `timeout` sets
+/// `timed_out` and aborts the driver. A ping that fails means the driver
+/// has already ended, with its own error, so the keepalive just stops.
+fn spawn_keepalive(
+    client: ClientHandle,
+    ka: Keepalive,
+    driver: AbortHandle,
+    timed_out: Arc<AtomicBool>,
+) -> AbortOnDrop {
     let task = rusty_tokio::spawn(async move {
         loop {
             sleep(ka.interval).await;
             match timeout(ka.timeout, client.ping()).await {
                 Ok(Ok(())) => {}
-                _ => return driver.abort(),
+                Ok(Err(_)) => return,
+                Err(_) => {
+                    timed_out.store(true, Ordering::Release);
+                    return driver.abort();
+                }
             }
         }
     });
