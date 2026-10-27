@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// How long a bounded connection blocks in one read or write before it
-/// checks its [`Stop`] again.
+/// checks its [`Stop`] again (in one read only, on Windows).
 pub(crate) const POLL: Duration = Duration::from_millis(50);
 
 /// A deadline and a cancellation check for a command's socket I/O. The

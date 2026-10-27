@@ -20,8 +20,9 @@
 //! is an [`Exit`]; an interrupt ends the process with the signal, which a
 //! shell reports as 130. An embedder bounds a command with [`run_until`].
 
-// Off Unix the connection code compiles but `execute` never reaches it.
-#![cfg_attr(not(unix), allow(dead_code))]
+// Off Unix and Windows the connection code compiles but `execute` never
+// reaches it.
+#![cfg_attr(not(any(unix, windows)), allow(dead_code))]
 
 mod api;
 pub mod cli;
@@ -148,6 +149,10 @@ pub fn run(args: &[String], env: &Env, out: &mut dyn Write, err: &mut dyn Write)
 
 /// [`run`], giving up on the server once `stop` says so (past its deadline,
 /// or cancelled) with [`Exit::Unreachable`]. Requests already sent stand.
+///
+/// `stop` bounds reads everywhere. It bounds connecting only on Linux, and
+/// writes only on Unix: on Windows a connect or a write blocked on a server
+/// that stopped reading runs past the deadline.
 pub fn run_until(
     args: &[String],
     env: &Env,
@@ -305,7 +310,7 @@ fn write_line(out: &mut dyn Write, line: &str) -> Exit {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn execute(
     invocation: &Invocation,
     socket: &Path,
@@ -348,7 +353,7 @@ struct Follow<'a> {
 /// Follows the events after `how.after` on a connection of its own,
 /// passing each to `on_event`; fails first unless the server sends every
 /// event kind `how.needs`.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn follow(
     socket: &Path,
     how: &Follow<'_>,
@@ -366,7 +371,7 @@ fn follow(
     session.events(how.after, true, how.needs, on_event)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn follow(
     _: &Path,
     _: &Follow<'_>,
@@ -380,7 +385,7 @@ fn follow(
 /// What happens to each numbered event that is followed.
 type OnEvent<'a> = dyn FnMut(u64, &Event, &mut dyn Write) -> Result<(), Failure> + 'a;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn execute(
     _: &Invocation,
     _: &Path,
@@ -391,11 +396,11 @@ fn execute(
     Err(unsupported())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn unsupported() -> Failure {
     Failure::Unreachable(io::Error::new(
         io::ErrorKind::Unsupported,
-        "rusty-mux-ctl connects over a Unix socket",
+        "rusty-mux-ctl connects over a Unix socket (Unix or Windows)",
     ))
 }
 

@@ -1,21 +1,46 @@
 //! `rusty-mux-ctl` against a real server: output, chains, events and every
-//! exit code (0, 1, 2, 3, 4, and 130 from an interrupt).
+//! exit code (0, 1, 2, 3, 4, and 130 from an interrupt), on Linux and
+//! Windows.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", windows))]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixListener as StdListener;
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+#[cfg(windows)]
+use platform_windows::WindowsUnixListener as StdListener;
 use rusty_mux_server::{Config, serve};
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::{Builder, LocalOptions};
+#[cfg(unix)]
+use std::os::unix::net::UnixListener as StdListener;
 
 const PATIENCE: Duration = Duration::from_secs(20);
+
+/// The shell each test block runs: `/bin/sh` in `/`, or `cmd.exe /Q` (no
+/// command echo) in the temp directory. The server's own tests use the
+/// same; one crate's integration tests cannot share another's helpers.
+fn shell() -> Config {
+    if cfg!(windows) {
+        Config {
+            program: "cmd.exe".into(),
+            args: vec!["/Q".into()],
+            cwd: std::env::temp_dir().into_os_string(),
+        }
+    } else {
+        Config {
+            program: "/bin/sh".into(),
+            args: Vec::new(),
+            cwd: "/".into(),
+        }
+    }
+}
+
+/// A command that does nothing and prints nothing.
+const NOTHING: &str = if cfg!(windows) { "rem" } else { "true" };
 
 fn socket_path(tag: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -37,12 +62,7 @@ fn start_server() -> PathBuf {
         runtime.block_on(async move {
             let listener = UnixListener::bind(&bind_path).expect("bind");
             ready_tx.send(()).expect("signal ready");
-            let config = Config {
-                program: "/bin/sh".into(),
-                args: Vec::new(),
-                cwd: "/".into(),
-            };
-            serve(listener, config).await.expect("serve");
+            serve(listener, shell()).await.expect("serve");
         });
     });
     ready_rx.recv_timeout(PATIENCE).expect("server bound");
@@ -137,7 +157,7 @@ fn a_chain_takes_the_lease_and_types() {
         "--block",
         &block,
         "--data",
-        "true\r",
+        &format!("{NOTHING}\r"),
     ];
     let output = ctl(&socket, &chain);
     assert_eq!(
@@ -185,7 +205,12 @@ fn format_prints_the_screen_and_list_the_tree() {
         "--block",
         &block,
         "--data",
-        "echo HI$((6*7))\r",
+        // Output differs from the echo: `cmd.exe` drops the `^` escape.
+        if cfg!(windows) {
+            "echo HI^42\r"
+        } else {
+            "echo HI$((6*7))\r"
+        },
     ];
     ok(&socket, &chain);
     let capture = ["terminal.format", "--block", &block, "--history", "0"];
@@ -214,6 +239,9 @@ fn format_prints_the_screen_and_list_the_tree() {
     assert!(listing.contains(&format!("\"block\":\"{block}\"")));
 }
 
+/// Unix only: on Windows `pwd` is known only from OSC 7, which `cmd.exe`
+/// does not send, and `cmd.exe` sets a title.
+#[cfg(unix)]
 #[test]
 fn terminal_methods_read_the_block() {
     let socket = start_server();
@@ -363,7 +391,7 @@ fn each_input_is_confirmed_in_order() {
         "--block",
         &block,
         "--data",
-        "true",
+        NOTHING,
         "+",
         "input",
         "--block",
@@ -561,8 +589,12 @@ fn events_resume_from_the_printed_cursor() {
     );
 }
 
+/// Unix only: it sends `SIGINT` and checks the signal in the exit status.
+#[cfg(unix)]
 #[test]
 fn an_interrupted_follow_ends_with_sigint() {
+    use std::os::unix::process::ExitStatusExt;
+
     let socket = start_server();
     let mut child = ctl_command(&socket, &["events", "--follow"])
         .stdout(Stdio::piped())
@@ -696,6 +728,9 @@ const RULES: &str = r#"{
   ]
 }"#;
 
+/// Unix only: it reports the directory with `printf` and OSC 7, which
+/// `cmd.exe` cannot print and ConPTY may not pass through.
+#[cfg(unix)]
 #[test]
 fn watch_runs_rules_for_events_and_survives_a_failing_one() {
     let socket = start_server();

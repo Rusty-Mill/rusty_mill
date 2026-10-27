@@ -12584,6 +12584,7 @@ dependencies = [
 name = "rusty_mux_ctl"
 version = "0.1.0"
 dependencies = [
+ "platform-windows",
  "rusty_json",
  "rusty_libc",
  "rusty_mux_core",
