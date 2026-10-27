@@ -330,7 +330,9 @@ tic -x extra/rusty_term.terminfo
 probes, colors, SGR, glyphs, widths, mode 2027, cursor, screen editing, sync
 output, OSC, images, input and throughput. Run it from the shell inside
 rusty_term (TUI or `--gui`). Width, grapheme and probe rows check themselves
-and print PASS/FAIL; the rest say what you should see.
+and print PASS/FAIL; the rest say what you should see. Interrupting it restores
+the tty and any mode a section turned on. The OSC 52 clipboard demo runs only
+with `RT_CLIPBOARD=1`, since it overwrites the clipboard.
 
 ```sh
 sh extra/rt-caps.sh              # every non-interactive section

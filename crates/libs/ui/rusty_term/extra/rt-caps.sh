@@ -9,13 +9,15 @@
 #   sh rt-caps.sh widths sync      # just those sections
 #   sh rt-caps.sh list             # section names
 #
-# Env: RT_NOPAUSE=1 skips "press enter" stops; RT_MB=<n> sets throughput size.
+# Env: RT_NOPAUSE=1 skips "press enter" stops; RT_MB=<n> sets throughput size;
+# RT_CLIPBOARD=1 lets the osc section overwrite the clipboard (OSC 52).
 set -u
 
 TTY=/dev/tty
 ESC=$(printf '\033')
 BEL=$(printf '\007')
 SAVED=''
+ORIG_TTY=''
 ALT=0
 TMPF=''
 PASS=0
@@ -71,6 +73,22 @@ pause() {
 raw_on() { SAVED=$(stty -g <"$TTY"); stty -echo -icanon min 0 time "${1:-3}" <"$TTY"; }
 raw_off() { [ -n "$SAVED" ] && stty "$SAVED" <"$TTY"; SAVED=''; }
 
+# Terminal state a section changes is "owned" until the section undoes it, so an
+# interrupted run can unwind it. own <key> <printf format that undoes it>.
+OWNED='g2027 sync kitty input colors title cursor screen'
+own() { eval "OWN_$1=\$2"; }
+release() { eval "OWN_$1=''"; } # the section already undid it
+undo() {
+    eval "u=\${OWN_$1:-}"
+    [ -n "$u" ] && printf "$u"
+    eval "OWN_$1=''"
+}
+
+# Remember mode 2027 as DECRQM reported it ($1) and own restoring it.
+own_2027() {
+    if [ "$1" = 1 ]; then own g2027 '\033[?2027h'; else own g2027 '\033[?2027l'; fi
+}
+
 # Read whatever the terminal sends until it has been quiet for one read timeout.
 drain() {
     r=''
@@ -107,12 +125,16 @@ enter_alt() { ALT=1; printf '\033[?1049h\033[2J\033[H'; }
 leave_alt() { printf '\033[r\033[?1049l'; ALT=0; }
 at() { printf '\033[%d;%dH' "$1" "$2"; }
 
+# Runs on every exit. Query helpers run raw mode inside subshells, so an
+# interrupt can leave the tty raw with SAVED empty here: restore ORIG_TTY too.
 cleanup() {
     raw_off
+    [ -n "$ORIG_TTY" ] && stty "$ORIG_TTY" <"$TTY"
     [ "$ALT" = 1 ] && leave_alt
-    printf '\033[0m\033[?25h\033[r\033[?69l\033[0 q'
-    printf '\033[?1000l\033[?1002l\033[?1006l\033[?1004l\033[?2004l'
+    printf '\033[0m'
+    for k in $OWNED; do undo "$k"; done
     [ -n "$TMPF" ] && rm -f "$TMPF"
+    return 0
 }
 
 # ---------------------------------------------------------------- sections
@@ -233,6 +255,7 @@ sec_widths() {
     hdr widths "cell widths, measured with cursor position reports"
     see "PASS on every row; the | marks line up if the display agrees with the grid"
     was=$(decrqm 2027)
+    own_2027 "$was"
     printf '\033[?2027l'
     measure ascii 'hello, world' 12
     measure cjk '漢字かなカナ' 12
@@ -243,7 +266,7 @@ sec_widths() {
     measure fullwidth 'ＡＢＣ' 6
     measure halfwidth 'ｱｲｳ' 3
     measure zero-width 'a\342\200\213b\342\200\215c' 3
-    [ "$was" = 1 ] && printf '\033[?2027h'
+    undo g2027
     printf '  %d PASS, %d FAIL so far\n' "$PASS" "$FAIL"
 }
 
@@ -254,6 +277,7 @@ sec_graphemes() {
     case $was in 1 | 2) ok ;; *) bad 'mode 2027 not recognized' ;; esac
     printf '\n'
     see "OFF: widths per code point (what most apps assume); shown, not judged"
+    own_2027 "$was"
     printf '\033[?2027l'
     set -- family '\360\237\221\250\342\200\215\360\237\221\251\342\200\215\360\237\221\247' \
         flag '\360\237\207\257\360\237\207\265' \
@@ -274,12 +298,13 @@ sec_graphemes() {
             i=$((i + 2))
         done
     done
-    [ "$was" = 1 ] || printf '\033[?2027l'
+    undo g2027
     note "server and client must agree on 2027; a mux pane inherits the program's choice"
 }
 
 sec_cursor() {
     hdr cursor "movement, save/restore, shapes, visibility"
+    own cursor '\033[0 q\033[?25h'
     see "a closed box with a centered label and an X in its middle-right, drawn with relative moves"
     lines 7
     printf '\033[7A\0337'
@@ -302,6 +327,7 @@ sec_cursor() {
     printf '\033[?25l'; nap 2; printf '\033[?25h back\n'
     see "CHA and CUB: the digits below read 1-9 left to right"
     printf '  \033[10G9\033[2G1\033[4G3\033[3G2\033[6G5\033[5G4\033[8G7\033[7G6\033[9G8\n'
+    release cursor
 }
 
 sec_screen() {
@@ -310,6 +336,7 @@ sec_screen() {
     printf '  MAIN SCREEN MARKER: this line must still be here after the tour\n'
     see "the tour opens on the alternate screen; enter steps through it"
     pause 'to enter the alt screen'
+    own screen '\033[?69l\033[r'
     enter_alt
     at 1 1; printf '\033[7m header: fixed, row 1 \033[0m   scroll region rows 3-8, margins rows 12-17'
     at 2 1; printf '%s' '------ region top ------'
@@ -350,6 +377,7 @@ sec_screen() {
     at 12 20; printf '\033[7m DECALN: the whole screen fills with E \033[0m'
     at 24 1; pause 'to leave the alt screen'
     leave_alt
+    undo screen
     see "the marker line above is intact and the prompt continues below it"
 }
 
@@ -363,14 +391,14 @@ sec_sync() {
     # frame <bg color> <sync 0|1> <half-way hold, s> <caption>
     frame() {
         printf '\033[2J'; at 22 1; printf '%s' "$4"; nap 1.5
-        [ "$2" = 1 ] && printf '\033[?2026h'
+        [ "$2" = 1 ] && { own sync '\033[?2026l'; printf '\033[?2026h'; }
         r=1
         while [ $r -le 20 ]; do
             at $r 1; printf '\033[4%dm%60s\033[0m' "$1" "frame row $r "
             [ $r = 10 ] && nap "$3"
             r=$((r + 1))
         done
-        [ "$2" = 1 ] && printf '\033[?2026l'
+        [ "$2" = 1 ] && undo sync
         nap 1.5
     }
     frame 1 0 0.6 'phase 1: no sync. Watch the top half appear first.'
@@ -381,6 +409,7 @@ sec_sync() {
 
 sec_osc() {
     hdr osc "operating system commands"
+    own title '\033[23;0t'
     printf '\033[22;0t\033]2;rt-caps: title test ✓\007'
     see "window or tab title reads 'rt-caps: title test ✓' (restored at the end)"
     printf '  OSC 8 links: \033]8;;https://github.com/Rusty-Mill/rusty_mill\033\\rusty_mill repo\033]8;;\033\\'
@@ -388,22 +417,27 @@ sec_osc() {
     see "both link texts are clickable (window mode: hover shows the URL)"
     printf '\033]9;rt-caps: OSC 9 notification\007\033]777;notify;rt-caps;OSC 777 notification\007'
     see "two desktop notifications, OSC 9 and OSC 777 (window mode)"
-    printf '\033]52;c;cnVzdHlfdGVybSBPU0MgNTIgb2s=\007'
-    see "paste now: the clipboard holds 'rusty_term OSC 52 ok'"
+    if [ "${RT_CLIPBOARD:-0}" = 1 ]; then
+        printf '\033]52;c;cnVzdHlfdGVybSBPU0MgNTIgb2s=\007'
+        see "paste now: the clipboard holds 'rusty_term OSC 52 ok'"
+    else
+        note "OSC 52 skipped: it overwrites the clipboard; set RT_CLIPBOARD=1 to try it"
+    fi
     printf '\033]7;file://%s%s\007' "$(uname -n)" "$PWD"
     see "OSC 7 sent for $PWD: a new tab (window mode) starts in this directory"
     printf '\033]133;A\007$ \033]133;B\007echo marked\n\033]133;C\007marked\n\033]133;D;0\007'
     see "OSC 133 marks the prompt above: prompt jumps / mux blocks see it"
     printf '\033]7501;state=working\007\033]7501;state=done\007'
     note "OSC 7501 status sent (working, done): no visible change; a mux host records it"
+    own colors '\033]104;1\007\033]110\007\033]111\007\033]112\007'
     printf '  \033[31mpalette 1 normal\033[0m -> '
     printf '\033]4;1;rgb:ff/88/00\007\033[31mpalette 1 now orange (OSC 4)\033[0m\n'
     printf '\033]10;rgb:ff/ff/aa\007\033]11;rgb:10/20/50\007\033]12;rgb:ff/00/00\007'
     see "colors: fg pale yellow, bg navy, red cursor for 3 s (OSC 10/11/12, window mode)"
     nap 3
-    printf '\033]104;1\007\033]110\007\033]111\007\033]112\007'
+    undo colors
     printf '  \033[31mpalette 1 restored (OSC 104)\033[0m, fg/bg/cursor reset (OSC 110-112)\n'
-    printf '\033[23;0t'
+    undo title
 }
 
 sec_images() {
@@ -435,15 +469,19 @@ capture() {
 
 sec_input() {
     hdr input "interactive input reporting"
+    own input '\033[?1000l\033[?1002l\033[?1006l\033[?1004l\033[?2004l'
     printf '\033[?1002h\033[?1006h'
     capture 'Click, drag and scroll; expect ^[[<b;x;yM / m reports' 6
     printf '\033[?1002l\033[?1006l\033[?2004h'
     capture 'Paste something; expect it wrapped in ^[[200~ ... ^[[201~' 8
     printf '\033[?2004l\033[?1004h'
     capture 'Switch focus away and back; expect ^[[O then ^[[I' 8
-    printf '\033[?1004l\033[>1u'
+    printf '\033[?1004l'
+    release input
+    own kitty '\033[<u'
+    printf '\033[>1u'
     capture 'Press Esc, ctrl+i and alt+a; kitty keyboard gives ^[[27u, ^[[105;5u, ^[[97;3u' 6
-    printf '\033[<u'
+    undo kitty
 }
 
 gen() {
@@ -496,6 +534,7 @@ main() {
     if ! [ -t 1 ] || ! : <"$TTY" 2>/dev/null; then
         echo 'rt-caps.sh needs an interactive terminal' >&2; exit 1
     fi
+    ORIG_TTY=$(stty -g <"$TTY")
     trap cleanup EXIT
     trap 'exit 130' INT TERM HUP
     for s; do
