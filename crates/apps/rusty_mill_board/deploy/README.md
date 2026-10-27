@@ -53,8 +53,8 @@ agent's role and projects as they are at each request.
 - Existing bearer tokens keep working, OAuth on or off.
 - Grants are kept in `settings/oauth.json` (owner-only), which is bound to the issuer on first
   start: a board started with another issuer on the same file refuses to start, and so does one
-  pointed at an existing grant file that names no issuer (one from before binding, or another
-  server's) — give it a new file instead. A running board checks the binding on every access,
+  pointed at an existing file that names no issuer (even an empty one) — give it a new file
+  instead. A running board checks the binding on every access,
   so a file replaced or claimed by another board meanwhile serves no grants and takes no writes. Removing an agent in settings suspends
   their grants; adding an agent of the same name again restores them. Rotating an agent's token
   does not affect their grants. To end every grant, stop the board, delete `oauth.json` and start

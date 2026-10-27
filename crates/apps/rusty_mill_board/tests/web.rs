@@ -699,7 +699,7 @@ fn a_board_refuses_an_old_grant_file_that_names_no_issuer() {
         state.clone(),
     );
     assert!(
-        refused.is_err_and(|e| e.contains("no known issuer")),
+        refused.is_err_and(|e| e.contains("names no issuer")),
         "an unbound file with grants is refused"
     );
     assert_eq!(std::fs::read_to_string(&state).expect("read"), legacy);

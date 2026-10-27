@@ -62,10 +62,6 @@ struct State {
 }
 
 impl State {
-    fn is_empty(&self) -> bool {
-        self.clients.is_empty() && self.access_tokens.is_empty() && self.refresh_tokens.is_empty()
-    }
-
     fn tokens(&self, kind: TokenKind) -> &Map {
         match kind {
             TokenKind::Access => &self.access_tokens,
@@ -162,14 +158,14 @@ impl StateStore {
     /// A store for `issuer`'s grants, so grants made by one server are never
     /// honoured by another that was pointed at the same file. A missing file
     /// is created for `issuer` exclusively (of two servers creating it at
-    /// once, one fails). A file that names no issuer is claimed only while it
-    /// holds nothing: grants in an unbound file are no evidence of which
-    /// server made them.
+    /// once, one fails). An existing file is never rewritten to claim it: it
+    /// must already name `issuer`. One that names no issuer is refused even
+    /// when empty, since grants in it are no evidence of which server made
+    /// them, and rewriting it could erase a racing server's fresh claim.
     ///
     /// # Errors
-    /// If the file names a different issuer, names none but holds clients or
-    /// tokens, exists but does not parse (it is never silently replaced), was
-    /// claimed by another server meanwhile, or cannot be written.
+    /// If the file names a different issuer or none, exists but does not
+    /// parse (it is never silently replaced), or cannot be created.
     pub fn bound(path: impl Into<PathBuf>, issuer: &str) -> io::Result<Self> {
         let store = Self {
             path: path.into(),
@@ -300,18 +296,13 @@ impl StateStore {
                 self.path.display()
             ))
         })?;
-        match (&found.issuer, found.is_empty()) {
+        match found.issuer {
             // Ours, or another's (refused).
-            (Some(_), _) => self.load().map(drop),
-            (None, false) => Err(invalid(format!(
-                "{} holds grants of no known issuer: give this server a new state file, or delete this one with its server stopped",
+            Some(_) => self.load().map(drop),
+            None => Err(invalid(format!(
+                "{} names no issuer: give this server a new state file, or delete this one with its server stopped",
                 self.path.display()
             ))),
-            (None, true) => {
-                self.write(&bound)?;
-                // A server claiming the same empty file at once may have won.
-                self.load().map(drop)
-            }
         }
     }
 
@@ -898,20 +889,13 @@ mod compat {
             "{refused}"
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), before);
-
-        // An existing but empty, unbound file is claimed too.
-        let empty = dir.path().join("empty.json");
-        fs::write(&empty, "{}").unwrap();
-        StateStore::bound(&empty, "https://a.example").unwrap();
-        assert!(fs::read_to_string(&empty)
-            .unwrap()
-            .contains("https://a.example"));
     }
 
     #[test]
     fn an_unbound_state_file_with_grants_is_refused_and_left_alone() {
         let dir = tempfile::tempdir().unwrap();
         for seed in [
+            "{}",
             r#"{"clients":{"c":{"client_id":"c"}}}"#,
             r#"{"access_tokens":{"a":{"client_id":"c","subject":"claude"}}}"#,
             r#"{"refresh_tokens":{"r":{"client_id":"c","subject":"claude"}}}"#,
@@ -919,7 +903,7 @@ mod compat {
             let path = dir.path().join("legacy.json");
             fs::write(&path, seed).unwrap();
             let refused = StateStore::bound(&path, "https://a.example").err().unwrap();
-            assert!(refused.to_string().contains("no known issuer"), "{refused}");
+            assert!(refused.to_string().contains("names no issuer"), "{refused}");
             assert_eq!(fs::read_to_string(&path).unwrap(), seed, "untouched");
         }
     }
@@ -964,28 +948,32 @@ mod compat {
     }
 
     #[test]
-    fn of_servers_claiming_one_empty_state_file_at_once_only_the_owner_can_use_it() {
-        for round in 0..20 {
+    fn servers_racing_on_an_existing_empty_file_are_all_refused_and_leave_it() {
+        for _ in 0..20 {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("oauth.json");
             fs::write(&path, "{}").unwrap();
-            let started = race(&path, 8);
-            // Several may have passed their startup check; the file names one.
-            let usable: Vec<_> = started
-                .iter()
-                .enumerate()
-                .filter(|(i, s)| access(s, &format!("t{round}-{i}")).is_ok())
-                .collect();
-            assert!(usable.len() <= 1, "at most one uses the file");
-            for s in &started {
-                let own = usable.iter().any(|(_, u)| std::ptr::eq(*u, s));
-                let seen = (0..8).any(|i| {
-                    s.get_token(TokenKind::Access, &format!("t{round}-{i}"))
-                        .is_some()
-                });
-                assert_eq!(seen, own, "no store sees another's grant");
-            }
+            assert!(race(&path, 8).is_empty(), "none adopts it");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "{}");
         }
+    }
+
+    #[test]
+    fn a_late_claimant_cannot_erase_the_winners_grants() {
+        // The winner claims the file and persists a grant while the other
+        // claimant is paused; when it resumes it must fail, changing nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oauth.json");
+        let winner = StateStore::bound(&path, "https://a.example").unwrap();
+        winner
+            .put_client("c", rusty_json::json!({ "client_id": "c" }))
+            .unwrap();
+        access(&winner, "grant").unwrap();
+        let state = fs::read_to_string(&path).unwrap();
+        assert!(StateStore::bound(&path, "https://b.example").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), state, "exactly kept");
+        assert!(winner.get_token(TokenKind::Access, "grant").is_some());
+        access(&winner, "more").unwrap();
     }
 
     #[test]
