@@ -318,3 +318,71 @@ fn a_block_program_knows_where_it_is() {
     );
     client.wait_for(block, &expected);
 }
+
+const CAPTURE: Features = INSPECT.union(Features::CAPTURE);
+
+fn send_keys(block: BlockId, keys: &[&str]) -> impl FnOnce(u64) -> Message {
+    let keys = Value::Words(keys.iter().map(|k| (*k).to_owned()).collect());
+    move |req| Message::BlockCall {
+        req,
+        block,
+        method: "terminal.send-keys".into(),
+        args: vec![("key".into(), keys)],
+    }
+}
+
+#[test]
+fn keys_reach_the_program_in_its_cursor_mode() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, INSPECT, None);
+    let block = block_for(&mut client);
+    // `cat -v` shows what it reads; DECCKM on turns Up into SS3 A.
+    client.input(block, b"printf '\\033[?1h'; cat -v\r");
+    client.wait_for(block, "cat -v\r\n");
+    let pressed = send_keys(block, &["up", "ctrl+a", "x", "enter", "ctrl+d"]);
+    client.send(&pressed(99));
+    client.wait_for(block, "^[OA^Ax\r\n");
+    let answer = client.answer(send_keys(block, &["up", "hyper+x"]));
+    let reason = refusal(answer);
+    assert!(reason.contains("`hyper+x` is not a key"), "{reason}");
+
+    let mut other = Client::connect_with(&path, INSPECT, None);
+    other.request(|req| Message::Attach { req, block });
+    let reason = refusal(other.answer(send_keys(block, &["enter"])));
+    assert!(reason.contains("lease"), "{reason}");
+}
+
+#[test]
+fn capture_options_trim_unwrap_and_keep_styles() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, CAPTURE, None);
+    let block = block_for(&mut client);
+    client.input(
+        block,
+        b"clear; printf '\\033[1mBOLD\\033[0m %0100d\\n' 0; echo END$((1+1))\r",
+    );
+    client.wait_for(block, "END2");
+    let format = |client: &mut Client, flags: &[&str]| {
+        let mut args = vec![("history", Value::Lines(0))];
+        args.extend(flags.iter().map(|f| (*f, Value::Flag(true))));
+        text(client, block, "terminal.format", &args)
+    };
+    let zeros = "0".repeat(100);
+
+    let plain = format(&mut client, &[]);
+    assert_eq!(plain.split('\n').count(), 24, "{plain:?}");
+    assert!(!plain.contains(&zeros), "{plain:?}");
+
+    let trimmed = format(&mut client, &["trim", "unwrap"]);
+    let lines: Vec<&str> = trimmed.lines().collect();
+    assert_eq!(lines[..2], [format!("BOLD {zeros}").as_str(), "END2"]);
+    assert!(!trimmed.ends_with('\n'), "{trimmed:?}");
+
+    let vt = format(&mut client, &["vt"]);
+    assert!(vt.contains("\x1b[0;1mBOLD\x1b[0m 000"), "{vt:?}");
+
+    let mut old = Client::connect_with(&path, INSPECT, None);
+    let args = [("history", Value::Lines(0)), ("trim", Value::Flag(true))];
+    let reason = refusal(old.answer(block_call(block, "terminal.format", &args)));
+    assert!(reason.contains("requires feature bits"), "{reason}");
+}

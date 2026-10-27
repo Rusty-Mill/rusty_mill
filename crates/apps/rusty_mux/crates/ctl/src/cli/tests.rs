@@ -102,6 +102,29 @@ fn help_and_nothing_show_usage() {
 }
 
 #[test]
+fn a_flag_alone_is_on() {
+    let line = format!("terminal.format --block {ID} --trim --history 0 --vt=false --unwrap");
+    let [call] = calls(&line).try_into().expect("one call");
+    let flags: Vec<_> = call.args[1..].iter().collect();
+    assert_eq!(
+        flags,
+        [
+            &("trim", Arg::Value(Value::Flag(true))),
+            &("history", Arg::Value(Value::Lines(0))),
+            &("vt", Arg::Value(Value::Flag(false))),
+            &("unwrap", Arg::Value(Value::Flag(true))),
+        ]
+    );
+    let refused = parse(&args(&format!("terminal.format --block {ID} --history")));
+    assert!(refused.is_err(), "only a flag stands alone");
+    let help = usage(schema::method("terminal.format"));
+    assert!(
+        help.contains("--history <line count> [--trim] [--unwrap] [--vt]"),
+        "{help}"
+    );
+}
+
+#[test]
 fn an_id_flag_takes_a_target() {
     let [call] = calls("terminal.format --block build/2 --history 0")
         .try_into()

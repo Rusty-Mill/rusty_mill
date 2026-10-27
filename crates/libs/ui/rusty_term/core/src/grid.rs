@@ -4749,6 +4749,19 @@ impl Grid {
         Some(self.text_of(line))
     }
 
+    /// The cells of absolute row `abs`, counted as for [`Grid::line_text`],
+    /// and whether the program's text wrapped from it onto the next row.
+    /// Holds only the cells stored, so trailing blanks may be missing.
+    /// `None` past the last screen row.
+    pub fn line_cells(&self, abs: usize) -> Option<(Vec<Cell>, bool)> {
+        let history = self.scrollback.len();
+        let line = match abs.checked_sub(history) {
+            None => self.scrollback.get(abs)?,
+            Some(row) => self.screen.get(row)?,
+        };
+        Some((self.resolved(line.cells()), line.wrapped))
+    }
+
     /// Join the cell rows in the absolute line range `[start, cursor line)` into
     /// text, one row per line, trailing blanks trimmed per row.
     #[cfg(feature = "l13")]

@@ -131,7 +131,7 @@ fn every_problem_is_reported_with_where_it_is() {
         "actions[1].run: needs at least one request",
         "actions[2].args[1]: argument `x` is declared twice",
         "actions[2].args[2]: `Y` is not an argument name",
-        "actions[2].run[0].args.history: expected a string or a non-negative integer",
+        "actions[2].run[0].args.history: expected a string, a non-negative integer or a boolean",
         "actions[2].run[0].args.block: `${y}` is not an argument of this action",
         "actions[2].run[0].args.lines: `terminal.format` has no parameter `lines`",
         "actions[2].run[0]: `terminal.format` needs parameter `history`",

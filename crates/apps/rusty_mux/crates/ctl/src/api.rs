@@ -71,6 +71,7 @@ fn property(param: &Param) -> Value {
             ("type", "array".into()),
             ("items", object([("type", "string".into())])),
         ],
+        Ty::Flag => vec![("type", "boolean".into())],
     };
     fields.push(("description", param.doc.into()));
     object(fields)
@@ -112,27 +113,40 @@ mod tests {
 
     #[test]
     fn describe_gives_a_json_schema_of_the_arguments() {
-        let method = schema::method("terminal.format").expect("format");
+        let method = schema::method("terminal.title").expect("title");
         let expected = parse(
             r#"{
-                "name": "terminal.format",
-                "description": "Read the terminal's screen as text, after some lines of its history.",
+                "name": "terminal.title",
+                "description": "Read the title the terminal's program last set.",
                 "params": {
                     "type": "object",
                     "properties": {
-                        "block": {"type": "string", "format": "uuid", "description": "The block to act on."},
-                        "history": {
-                            "type": "integer", "minimum": 0, "maximum": 4294967295,
-                            "description": "How many scrollback lines above the screen to include."
-                        }
+                        "block": {"type": "string", "format": "uuid", "description": "The block to act on."}
                     },
-                    "required": ["block", "history"],
+                    "required": ["block"],
                     "additionalProperties": false
                 },
                 "returns": "text"
             }"#,
         );
         assert_eq!(parse(&describe(method)), expected);
+    }
+
+    #[test]
+    fn parameter_types_map_to_json_schema_types() {
+        let format = schema::method("terminal.format").expect("format");
+        let described = parse(&describe(format));
+        let property = |name: &str| {
+            described
+                .get("params")
+                .and_then(|p| p.get("properties"))
+                .and_then(|p| p.get(name))
+                .and_then(|p| p.get("type"))
+                .cloned()
+        };
+        assert_eq!(property("history"), Some(Value::from("integer")));
+        assert_eq!(property("trim"), Some(Value::from("boolean")));
+        assert_eq!(property("vt"), Some(Value::from("boolean")));
     }
 
     #[test]

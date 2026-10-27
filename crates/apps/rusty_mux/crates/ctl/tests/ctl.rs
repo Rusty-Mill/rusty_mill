@@ -220,6 +220,45 @@ fn format_prints_the_screen_and_list_the_tree() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
+    // Rows below the prompt are blank; `--trim` leaves them out.
+    let rows = |args: &[&str]| stdout(&ctl(&socket, args)).lines().count();
+    assert_eq!(rows(&capture), 24);
+    let trimmed = [&capture[..], &["--trim"]].concat();
+    assert!(rows(&trimmed) < 24);
+    assert!(ok(&socket, &trimmed).lines().any(|l| l == "HI42"));
+
+    // The same command, typed as keys; only its output says KEY42.
+    let typed = if cfg!(windows) {
+        "echo KEY^42"
+    } else {
+        "echo KEY$((6*7))"
+    };
+    let mut keys = vec!["terminal.send-keys", "--block", &block];
+    for key in typed.split("").filter(|k| !k.is_empty()) {
+        keys.extend(["--key", key]);
+    }
+    keys.extend(["--key", "enter"]);
+    let pressed = [
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+        ][..],
+        &keys,
+    ]
+    .concat();
+    ok(&socket, &pressed);
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !ok(&socket, &capture).lines().any(|l| l == "KEY42") {
+        assert!(std::time::Instant::now() < deadline, "no KEY42 on screen");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
     let listing = ok(&socket, &["--json", "list"]);
     let kinds: Vec<String> = listing
         .lines()

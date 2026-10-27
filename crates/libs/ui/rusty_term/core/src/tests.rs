@@ -71,6 +71,22 @@ fn line_text_spans_scrollback_then_screen() {
 }
 
 #[test]
+fn line_cells_carry_style_and_the_wrap_bit() {
+    // "abc" wraps after "ab" and scrolls into history; "\x1b[1md" is bold.
+    let g = parse(b"abc\r\n\x1b[1md", 2, 2);
+    assert_eq!(g.scrollback_len(), 1);
+    let (first, wrapped) = g.line_cells(0).expect("history row");
+    assert!(wrapped);
+    assert_eq!(first.iter().map(|c| c.ch).collect::<String>(), "ab");
+    let (second, wrapped) = g.line_cells(1).expect("screen row");
+    assert!(!wrapped);
+    assert_eq!(second[0].ch, 'c');
+    let (third, _) = g.line_cells(2).expect("screen row");
+    assert_ne!(third[0].flags & crate::ATTR_BOLD, 0);
+    assert_eq!(g.line_cells(3), None);
+}
+
+#[test]
 fn put_char_wraps_at_right_margin() {
     let g = parse(b"abc", 2, 24);
     assert_eq!(row_text(&g, 0), "ab");

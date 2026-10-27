@@ -39,7 +39,8 @@ impl Features {
     /// [`Message::List`], which reads the server's state without changing
     /// it.
     pub const INSPECT: Self = Self(1 << 6);
-    /// [`Message::BlockCall`], answered with [`Message::Text`].
+    /// [`Message::BlockCall`], answered with [`Message::Text`], or, for a
+    /// method that writes to the block, only if it fails.
     pub const BLOCK_CALL: Self = Self(1 << 7);
     /// [`Event::BlockStatus`] events. A client without it never receives
     /// one, so its event numbers skip them.
@@ -58,6 +59,9 @@ impl Features {
     /// [`Event::ProcessChanged`] events, skipped for a client without it
     /// as the other optional kinds are.
     pub const PROCESS: Self = Self(1 << 12);
+    /// `terminal.format`'s `trim`, `unwrap` and `vt` options. A server
+    /// without it refuses them as unknown parameters.
+    pub const CAPTURE: Self = Self(1 << 13);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -212,7 +216,8 @@ pub enum Message {
     },
     /// Runs `method`, one of the methods of the block's type such as
     /// `terminal.format`, with named arguments. Answered with
-    /// [`Message::Text`], or [`Message::Failed`] with
+    /// [`Message::Text`], nothing for a method that writes to the block
+    /// (as [`Message::Input`] is), or [`Message::Failed`] with
     /// [`Code::MethodNotFound`] if the type has no such method. Negotiated
     /// with [`Features::BLOCK_CALL`]; [`crate::schema`] lists the methods.
     /// At most [`crate::args::MAX_ARGS`] arguments decode.

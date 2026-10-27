@@ -4,25 +4,182 @@ use std::path::Path;
 
 use rusty_mux_core::Progress;
 use rusty_mux_status::Records;
-use rusty_term_core::{Grid, StatusSignal};
+use rusty_term_core::{
+    ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_MASK, ATTR_REVERSE,
+    ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell, Grid, StatusSignal, UnderlineStyle,
+    WIDE_TRAILER,
+};
+
+/// What `terminal.format` reads, and how.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Capture {
+    /// Scrollback lines above the screen to include.
+    pub(crate) history: u32,
+    /// Leave out blank lines at either end.
+    pub(crate) trim: bool,
+    /// Join soft-wrapped rows into one line.
+    pub(crate) unwrap: bool,
+    /// Keep styles as SGR sequences.
+    pub(crate) vt: bool,
+}
 
 /// The last `history` scrollback lines and the screen, one line per row
-/// without trailing blanks, joined by `\n`. Stops once the text passes
-/// `max` bytes; the caller refuses a reply that large.
-pub(crate) fn format(grid: &Grid, history: u32, max: usize) -> String {
+/// (per wrapped run with `unwrap`) without trailing blanks, joined by `\n`.
+/// Stops once the text passes `max` bytes; the caller refuses a reply that
+/// large.
+pub(crate) fn format(grid: &Grid, capture: Capture, max: usize) -> String {
     let scrollback = grid.scrollback_len();
-    let from = scrollback.saturating_sub(usize::try_from(history).unwrap_or(usize::MAX));
-    let mut text = String::new();
-    for abs in from..scrollback + grid.rows {
-        if abs > from {
-            text.push('\n');
+    let history = usize::try_from(capture.history).unwrap_or(usize::MAX);
+    let end = scrollback + grid.rows;
+    let mut lines = Vec::new();
+    let mut size = 0;
+    let mut run: Vec<Cell> = Vec::new();
+    for abs in scrollback.saturating_sub(history)..end {
+        let Some((mut cells, wrapped)) = grid.line_cells(abs) else {
+            break;
+        };
+        // A wide glyph that did not fit left a blank before it wrapped.
+        if run.last().is_some_and(is_padding) && cells.get(1).is_some_and(is_trailer) {
+            run.pop();
         }
-        text.push_str(&grid.line_text(abs).unwrap_or_default());
-        if text.len() > max {
+        if capture.unwrap && wrapped && abs + 1 < end {
+            cells.resize(grid.cols.max(cells.len()), Cell::blank());
+            run.append(&mut cells);
+            continue;
+        }
+        run.append(&mut cells);
+        let line = line(&run, &grid.clusters, capture.vt);
+        run.clear();
+        size += line.len() + 1;
+        lines.push(line);
+        if size > max {
             break;
         }
     }
+    if capture.trim {
+        let first = lines
+            .iter()
+            .position(|l| !l.is_empty())
+            .unwrap_or(lines.len());
+        let last = lines
+            .iter()
+            .rposition(|l| !l.is_empty())
+            .map_or(first, |i| i + 1);
+        return lines[first..last].join("\n");
+    }
+    lines.join("\n")
+}
+
+/// `cells` as text without trailing blanks; with `vt`, each change of
+/// style as one SGR sequence, ending in the default style.
+fn line(cells: &[Cell], clusters: &[String], vt: bool) -> String {
+    let len = match vt {
+        true => cells
+            .iter()
+            .rposition(|c| !is_padding(c))
+            .map_or(0, |i| i + 1),
+        false => cells.len(),
+    };
+    let blank = Style::of(&Cell::blank());
+    let mut style = blank;
+    let mut text = String::new();
+    for cell in cells[..len].iter().filter(|c| !is_trailer(c)) {
+        if vt && Style::of(cell) != style {
+            style = Style::of(cell);
+            style.sgr(&mut text);
+        }
+        text.push(cell.ch);
+        if let Some(rest) = usize::from(cell.cluster)
+            .checked_sub(1)
+            .and_then(|i| clusters.get(i))
+        {
+            text.push_str(rest);
+        }
+    }
+    if vt && style != blank {
+        text.push_str("\x1b[0m");
+    }
+    if !vt {
+        text.truncate(text.trim_end().len());
+    }
     text
+}
+
+/// A blank in the default style, which ends no line.
+fn is_padding(cell: &Cell) -> bool {
+    let blank = Cell::blank();
+    cell.ch == ' ' && cell.cluster == 0 && cell.link == 0 && Style::of(cell) == Style::of(&blank)
+}
+
+/// The second cell of a wide glyph, which holds no text.
+fn is_trailer(cell: &Cell) -> bool {
+    cell.flags & WIDE_TRAILER != 0
+}
+
+/// What a cell's SGR sequence sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Style {
+    fg: u32,
+    bg: u32,
+    attrs: u16,
+    /// Only with [`ATTR_UNDERLINE_COLOR`].
+    underline: Option<u32>,
+}
+
+impl Style {
+    fn of(cell: &Cell) -> Self {
+        let attrs = cell.flags & ATTR_MASK;
+        Self {
+            fg: cell.fg,
+            bg: cell.bg,
+            attrs,
+            underline: (attrs & ATTR_UNDERLINE_COLOR != 0).then_some(cell.underline_color),
+        }
+    }
+
+    /// One SGR sequence that resets, then sets this style.
+    fn sgr(self, out: &mut String) {
+        let blank = Cell::blank();
+        out.push_str("\x1b[0");
+        for (bit, code) in [
+            (ATTR_BOLD, "1"),
+            (ATTR_DIM, "2"),
+            (ATTR_ITALIC, "3"),
+            (ATTR_BLINK, "5"),
+            (ATTR_REVERSE, "7"),
+            (ATTR_HIDDEN, "8"),
+            (ATTR_STRIKE, "9"),
+        ] {
+            if self.attrs & bit != 0 {
+                out.push(';');
+                out.push_str(code);
+            }
+        }
+        if self.attrs & ATTR_UNDERLINE != 0 {
+            out.push_str(match UnderlineStyle::from_attrs(self.attrs) {
+                UnderlineStyle::Straight => ";4",
+                UnderlineStyle::Double => ";4:2",
+                UnderlineStyle::Curly => ";4:3",
+                UnderlineStyle::Dotted => ";4:4",
+                UnderlineStyle::Dashed => ";4:5",
+            });
+        }
+        if self.fg != blank.fg {
+            push_rgb(out, 38, self.fg);
+        }
+        if self.bg != blank.bg {
+            push_rgb(out, 48, self.bg);
+        }
+        if let Some(rgb) = self.underline {
+            push_rgb(out, 58, rgb);
+        }
+        out.push('m');
+    }
+}
+
+fn push_rgb(out: &mut String, code: u8, rgb: u32) {
+    let [_, r, g, b] = rgb.to_be_bytes();
+    out.push_str(&format!(";{code};2;{r};{g};{b}"));
 }
 
 /// The program's working directory: the one it last reported with OSC 7,
@@ -238,12 +395,103 @@ mod tests {
         assert_eq!(records.bodies(), ["state=done"]);
     }
 
+    fn screen(cols: usize, rows: usize, input: &[u8]) -> Grid {
+        let mut grid = Grid::new(cols, rows);
+        rusty_term_core::AnsiParser::new().advance(&mut grid, input);
+        grid
+    }
+
+    fn capture(history: u32) -> Capture {
+        Capture {
+            history,
+            ..Capture::default()
+        }
+    }
+
     #[test]
     fn format_stops_past_the_limit() {
-        let mut grid = Grid::new(4, 3);
-        let mut parser = rusty_term_core::AnsiParser::new();
-        parser.advance(&mut grid, b"abcd\r\nefgh\r\nijkl");
-        assert_eq!(format(&grid, 0, usize::MAX), "abcd\nefgh\nijkl");
-        assert_eq!(format(&grid, 0, 5), "abcd\nefgh");
+        let grid = screen(4, 3, b"abcd\r\nefgh\r\nijkl");
+        assert_eq!(format(&grid, capture(0), usize::MAX), "abcd\nefgh\nijkl");
+        assert_eq!(format(&grid, capture(0), 5), "abcd\nefgh");
+    }
+
+    #[test]
+    fn format_includes_the_history_asked_for() {
+        let grid = screen(4, 2, b"a\r\nb\r\nc\r\nd");
+        assert_eq!(format(&grid, capture(0), usize::MAX), "c\nd");
+        assert_eq!(format(&grid, capture(1), usize::MAX), "b\nc\nd");
+        assert_eq!(format(&grid, capture(u32::MAX), usize::MAX), "a\nb\nc\nd");
+    }
+
+    #[test]
+    fn trim_drops_blank_lines_at_either_end() {
+        let grid = screen(4, 5, b"\r\nab\r\n\r\ncd");
+        let trim = Capture {
+            trim: true,
+            ..capture(0)
+        };
+        assert_eq!(format(&grid, capture(0), usize::MAX), "\nab\n\ncd\n");
+        assert_eq!(format(&grid, trim, usize::MAX), "ab\n\ncd");
+        assert_eq!(format(&screen(4, 2, b""), trim, usize::MAX), "");
+    }
+
+    #[test]
+    fn unwrap_joins_wrapped_rows_and_keeps_their_blanks() {
+        // "ab c" wraps after "ab c" at width 4; "d" ends the line.
+        let grid = screen(4, 3, b"ab cd\r\nx");
+        let unwrap = Capture {
+            unwrap: true,
+            ..capture(0)
+        };
+        assert_eq!(format(&grid, capture(0), usize::MAX), "ab c\nd\nx");
+        assert_eq!(format(&grid, unwrap, usize::MAX), "ab cd\nx");
+        let spaced = screen(4, 2, b"ab  cd");
+        assert_eq!(format(&spaced, unwrap, usize::MAX), "ab  cd");
+    }
+
+    #[test]
+    fn unwrap_drops_the_blank_a_wide_glyph_left() {
+        // The wide glyph does not fit in column 3, so it wraps.
+        let grid = screen(4, 2, "abc\u{4e2d}".as_bytes());
+        let unwrap = Capture {
+            unwrap: true,
+            ..capture(0)
+        };
+        assert_eq!(format(&grid, unwrap, usize::MAX), "abc\u{4e2d}");
+    }
+
+    #[test]
+    fn vt_keeps_styles_per_line() {
+        let grid = screen(
+            8,
+            2,
+            b"\x1b[1;31mab\x1b[0m c\r\n\x1b[4:3;48;2;1;2;3mx\x1b[0m",
+        );
+        let vt = Capture {
+            vt: true,
+            ..capture(0)
+        };
+        let text = format(&grid, vt, usize::MAX);
+        let mut lines = text.lines();
+        let first = lines.next().expect("first line");
+        assert!(first.starts_with("\x1b[0;1;38;2;"), "{first:?}");
+        assert!(first.ends_with("mab\x1b[0m c"), "{first:?}");
+        assert_eq!(lines.next(), Some("\x1b[0;4:3;48;2;1;2;3mx\x1b[0m"));
+        let plain = format(&grid, capture(0), usize::MAX);
+        assert_eq!(plain, "ab c\nx");
+    }
+
+    #[test]
+    fn vt_keeps_a_colored_blank_at_the_end() {
+        let grid = screen(4, 1, b"a\x1b[41m \x1b[0m");
+        let vt = Capture {
+            vt: true,
+            ..capture(0)
+        };
+        let text = format(&grid, vt, usize::MAX);
+        assert!(
+            text.starts_with('a') && text.ends_with(" \x1b[0m"),
+            "{text:?}"
+        );
     }
 }

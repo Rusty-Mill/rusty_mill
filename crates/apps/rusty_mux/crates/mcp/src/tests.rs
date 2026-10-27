@@ -47,6 +47,26 @@ fn plain_calls_become_one_request() {
 }
 
 #[test]
+fn a_boolean_becomes_true_or_false() {
+    let call = args(r#"{"block": "b", "history": 0, "trim": true, "vt": false}"#);
+    assert_eq!(
+        argv(known("terminal.format"), Some(&call)).map(|a| a.join(" ")),
+        Ok("terminal.format --block=b --history=0 --trim=true --vt=false".into())
+    );
+}
+
+#[test]
+fn keys_are_sent_under_the_lease() {
+    let call = args(r#"{"block": "2", "key": ["ctrl+c", "enter"]}"#);
+    assert_eq!(
+        argv(known("terminal.send-keys"), Some(&call)).map(|a| a.join(" ")),
+        Ok("attach --block=2 + acquire-lease --block=2 + \
+            terminal.send-keys --block=2 --key=ctrl+c --key=enter"
+            .into())
+    );
+}
+
+#[test]
 fn a_list_argument_repeats_its_flag() {
     let call = args(r#"{"arg": ["-c", "exit 3"]}"#);
     assert_eq!(

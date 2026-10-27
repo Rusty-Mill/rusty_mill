@@ -18,6 +18,7 @@ use rusty_uuid::Uuid;
 use crate::Config;
 use crate::checkpoint::validate_size;
 use crate::history::History;
+use crate::keys;
 use crate::outbox::Outbox;
 use crate::process;
 use crate::pty::{self, Process, Pty};
@@ -49,7 +50,8 @@ const OFFERED: Features = Features::CHECKPOINT_V3
     .union(Features::TERMINAL_EVENTS)
     .union(Features::PROGRAM_EVENTS)
     .union(Features::LAUNCH)
-    .union(Features::PROCESS);
+    .union(Features::PROCESS)
+    .union(Features::CAPTURE);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -280,7 +282,7 @@ impl State {
             } => (
                 req,
                 self.require(client, Features::BLOCK_CALL, "a block call")
-                    .and_then(|()| self.block_call(req, block, &method, args)),
+                    .and_then(|()| self.block_call(client, req, block, &method, args)),
             ),
             M::List { req } => (
                 req,
@@ -307,6 +309,7 @@ impl State {
     /// against the catalog.
     fn block_call(
         &self,
+        client: ClientId,
         req: u64,
         block: BlockId,
         method: &str,
@@ -335,13 +338,24 @@ impl State {
         found
             .request(req, &named)
             .map_err(|e| format!("{method}: {e}"))?;
+        self.require(
+            client,
+            found.needs_for(named.iter().map(|(name, _)| *name)),
+            method,
+        )?;
         let text = match found.name {
-            "terminal.format" => {
-                let history = match named.iter().find(|(name, _)| *name == "history") {
-                    Some((_, Value::Lines(n))) => *n,
-                    _ => return Err(format!("{method}: missing history").into()),
+            "terminal.format" => terminal::format(&rt.grid, capture(&named), REPLY_MAX),
+            "terminal.send-keys" => {
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                let keys = match named.iter().find(|(name, _)| *name == "key") {
+                    Some((_, Value::Words(keys))) => keys,
+                    _ => return Err(format!("{method}: missing key").into()),
                 };
-                terminal::format(&rt.grid, history, REPLY_MAX)
+                let data = keys::encode(keys, rt.grid.app_cursor_keys)
+                    .map_err(|e| format!("{method}: {e}"))?;
+                return Ok(Outcome::Write((rt.pty.clone(), data)));
             }
             "terminal.pwd" => terminal::pwd(&rt.grid, rt.process.pid())
                 .ok_or("the program's working directory is unknown")?,
@@ -773,6 +787,29 @@ enum Outcome {
     /// Encoded messages answering the request, in order.
     Reply(Vec<Vec<u8>>),
     Write(PtyWrite),
+}
+
+/// `terminal.format`'s options from its arguments, which the catalog
+/// checked: a flag left out is off.
+fn capture(named: &[(&str, Value)]) -> terminal::Capture {
+    let flag = |param| {
+        named
+            .iter()
+            .any(|(name, value)| *name == param && *value == Value::Flag(true))
+    };
+    terminal::Capture {
+        // Required, so always there.
+        history: named
+            .iter()
+            .find_map(|(name, value)| match (*name, value) {
+                ("history", Value::Lines(n)) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or_default(),
+        trim: flag("trim"),
+        unwrap: flag("unwrap"),
+        vt: flag("vt"),
+    }
 }
 
 /// Encodes the messages answering a `what` request, all or nothing: a reply
