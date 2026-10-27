@@ -13,7 +13,6 @@ layer = "libs"
 [dependencies]
 # PKCE verification, SHA-256 and bearer parsing are rusty_oauth's.
 rusty_oauth = { workspace = true }
-rusty_crypto_key = { workspace = true }
 rusty_rand = { workspace = true }
 rusty_hex = { workspace = true }
 rusty_atomic_file = { workspace = true }

@@ -10415,7 +10415,6 @@ dependencies = [
  "rusty_oauth",
  "rusty_oauth_server",
  "rusty_tokio",
- "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -12672,7 +12671,6 @@ name = "rusty_oauth_server"
 version = "0.1.0"
 dependencies = [
  "rusty_atomic_file",
- "rusty_crypto_key",
  "rusty_hex",
  "rusty_json",
  "rusty_oauth",
