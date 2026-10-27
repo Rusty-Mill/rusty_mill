@@ -2,7 +2,7 @@
 
 Date: 2026-10-23. Repo `Rusty-Mill/rusty_mill`. Scope: `crates/libs/ui/rusty_term` (front-ends) and `crates/libs/ui/rusty_term/core` (`rusty_term_core`, the headless VT engine the mux will link).
 
-This picks up from `docs/research/RUSTY-TERM-PERF-BACKLOG.md` (row numbers below refer to it) and from the owner's directives. The decision log and design context are in [RUSTY-TERM-NOTES.md](RUSTY-TERM-NOTES.md). Read both before starting.
+This picks up from `docs/research/RUSTY-TERM-PERF-BACKLOG.md` (row numbers below refer to it) and from the owner's directives. The decision log and design context are in [NOTES.md](NOTES.md). Read both before starting.
 
 ## 1. State at handoff
 
@@ -187,7 +187,7 @@ The ratchet rule: a PR that lowers a count lowers that ceiling to about measured
   - `docs/research/rusty-term-perf/FIDELITY.md`
   - `docs/projects/mux/{CHARTER,DECISIONS,RISKS,SPIKES}.md`
   - `crates/libs/ui/rusty_term/bench/README.md`
-  - `docs/projects/mux/RUSTY-TERM-NOTES.md`
+  - `docs/projects/term/NOTES.md`
 - **Pull requests:** #851, #857, #862, #872, #894, #925, #930, #936, #939, #940, #943, #944 (closed), #952, #953, #955, #956, #974, #982 (by other sessions).
 - **Issues:** #850 (closed by #949), #854, #855, #856 (closed).
 - **Branch used:** `claude/new-session-s68lms`. Start new work from `origin/main` on a fresh branch.
