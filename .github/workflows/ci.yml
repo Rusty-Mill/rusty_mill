@@ -859,6 +859,8 @@ jobs:
           valgrind --version
       - name: Gate script unit tests
         run: python3 -m unittest discover -s bench -p 'test_*.py' -v
+      - name: rt-caps.sh interruption tests
+        run: python3 -m unittest discover -s extra -p 'test_*.py' -v
       - name: Build bench_vt_throughput (release)
         run: cargo build --release --locked -p rusty_term --bin bench_vt_throughput
       - name: Generate quick workloads
