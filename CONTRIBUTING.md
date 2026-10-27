@@ -44,11 +44,10 @@ How the repo is organised, validated and released:
     credential handling, deletions, public-API breaks that cross crates,
     CI-control changes) should still wait for an independent reviewer when one
     can be found within a reasonable time.
-- Board robot PRs are the exception. PRs opened and merged by the super-board pipeline
-  under [`docs/super-board/autonomy-policy.md`](docs/super-board/autonomy-policy.md)
-  (owner decision, 2026-10-15) need no independent review, including for security-sensitive
-  changes. They still go through the merge queue and need a green `required-gate`.
-  Human-authored PRs follow the rules above unchanged.
+- Agents, including the super-board robot, never queue or merge PRs. DottiusMaximus
+  manages reviews and merges (owner decision, 2026-10-27, superseding the robot's
+  self-merge in [`docs/super-board/autonomy-policy.md`](docs/super-board/autonomy-policy.md)).
+  Robot PRs follow the rules above like any other PR.
 - Reviewers, independent or self: check for scope creep, missing tests, and
   unexplained non-obvious decisions.
 - Merge with a **merge commit** ("Create a merge commit" — merge and sync). Do **not**

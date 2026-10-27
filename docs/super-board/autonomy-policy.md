@@ -4,6 +4,10 @@
 below is the decision). It takes effect when the PR that carries this file merges. Changes
 to it need a reviewed PR.
 
+**Superseded in part (owner, 2026-10-27):** decision 1 ("Who merges? The robot") no longer
+holds. DottiusMaximus manages reviews and merges; the robot opens PRs and never queues or
+merges them. See [AGENTS.md](../../AGENTS.md).
+
 **Owner direction (2026-10-15):** automatic merging is the point. No category of change is
 routed to a human by default, and the policy does not require an independent reviewer. The
 safeguards below are mechanical (CI, target, size, kill switch), not human.
