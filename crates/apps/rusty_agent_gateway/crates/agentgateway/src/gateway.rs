@@ -31,7 +31,9 @@ use agentgateway_tls::{Passthrough, TlsBinds, TlsTerminator};
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::Full;
-use rusty_mcp::otel::metrics::{HEADER_MCP_METHOD, HEADER_MCP_NAME, Instruments, McpMetrics};
+use rusty_mcp_middleware::otel::metrics::{
+    HEADER_MCP_METHOD, HEADER_MCP_NAME, Instruments, McpMetrics,
+};
 use rusty_mcp_server::{HttpConfig, HttpHandler};
 
 use crate::body::Body;

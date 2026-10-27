@@ -9,7 +9,7 @@
 //! serialization back out for onward calls.
 //!
 //! ```
-//! use rusty_mcp::trace::TraceContext;
+//! use rusty_mcp_middleware::trace::TraceContext;
 //! use rusty_json::json;
 //!
 //! let meta = json!({

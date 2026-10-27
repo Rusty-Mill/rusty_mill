@@ -8,11 +8,14 @@ member of the `rusty_mill` workspace. Workspace crates depend on it through the
 root `[workspace.dependencies]` entry and pick features themselves:
 
 ```toml
-rusty-mcp = { workspace = true, features = ["jwt"] }
+rusty_mcp_middleware = { workspace = true, features = ["jwt"] }
 ```
 
-Tags and links to `baileyrd/rusty_mcp` below are history from the standalone
-repository.
+Until 0.13.0 the crate was named `rusty-mcp` and lived at
+`crates/libs/protocol/rusty_mcp/crates/rusty-mcp` (#876); entries below use
+that name. Changes since 0.6.0 are recorded in the workspace's `changes/`
+directory. Tags and links to `baileyrd/rusty_mcp` below are history from the
+standalone repository.
 
 Being `0.x`, the API may still break in a minor release. Breaking changes will
 be called out here.

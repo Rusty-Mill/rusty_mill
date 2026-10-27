@@ -19,7 +19,7 @@ use std::{
 };
 
 use rusty_http::StatusCode;
-use rusty_mcp::{
+use rusty_mcp_middleware::{
     auth::{
         AuthConfig, StaticTokenValidator, TokenError, TokenValidator, ValidateFuture, VerifiedToken,
     },

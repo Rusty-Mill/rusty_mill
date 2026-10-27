@@ -386,11 +386,11 @@ dependencies = [
  "reqwest 0.13.4",
  "rmcp",
  "rsa",
- "rusty-mcp",
  "rusty_axum",
  "rusty_base64",
  "rusty_http",
  "rusty_log",
+ "rusty_mcp_middleware",
  "rusty_mcp_server",
  "rusty_prost",
  "rusty_serve",
@@ -441,10 +441,10 @@ dependencies = [
  "jsonwebtoken 11.0.0",
  "rand 0.8.8",
  "rsa",
- "rusty-mcp",
  "rusty_base64",
  "rusty_json",
  "rusty_log",
+ "rusty_mcp_middleware",
  "rusty_request",
  "rusty_tokio",
  "serde_json",
@@ -506,10 +506,10 @@ dependencies = [
  "http",
  "http-body-util",
  "regex",
- "rusty-mcp",
  "rusty_json",
  "rusty_log",
  "rusty_mcp_client_native",
+ "rusty_mcp_middleware",
  "rusty_mcp_server",
  "rusty_prost",
  "rusty_serve",
@@ -11557,30 +11557,6 @@ name = "rusty-hister-vectorstore"
 version = "0.1.0"
 
 [[package]]
-name = "rusty-mcp"
-version = "0.12.0"
-dependencies = [
- "axum",
- "jsonwebtoken 11.0.0",
- "rand 0.8.8",
- "reqwest 0.13.4",
- "rsa",
- "rusty_base64",
- "rusty_http",
- "rusty_json",
- "rusty_log",
- "rusty_mcp_server",
- "rusty_oauth",
- "rusty_percent",
- "rusty_rand",
- "rusty_request",
- "rusty_serve",
- "rusty_tokio",
- "rusty_url",
- "tokio",
-]
-
-[[package]]
 name = "rusty-mcp-client"
 version = "0.1.0"
 dependencies = [
@@ -12453,6 +12429,30 @@ dependencies = [
  "rusty_serve",
  "rusty_tokio",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rusty_mcp_middleware"
+version = "0.13.0"
+dependencies = [
+ "axum",
+ "jsonwebtoken 11.0.0",
+ "rand 0.8.8",
+ "reqwest 0.13.4",
+ "rsa",
+ "rusty_base64",
+ "rusty_http",
+ "rusty_json",
+ "rusty_log",
+ "rusty_mcp_server",
+ "rusty_oauth",
+ "rusty_percent",
+ "rusty_rand",
+ "rusty_request",
+ "rusty_serve",
+ "rusty_tokio",
+ "rusty_url",
  "tokio",
 ]
 

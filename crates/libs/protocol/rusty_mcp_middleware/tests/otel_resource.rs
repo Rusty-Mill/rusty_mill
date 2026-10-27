@@ -15,7 +15,7 @@ use std::{process::Command, time::Duration};
 use otel_support::Collector;
 use rusty_json::Value;
 use rusty_log::tracing_subscriber::prelude::*;
-use rusty_mcp::otel::{OtelConfig, metrics::Outcome};
+use rusty_mcp_middleware::otel::{OtelConfig, metrics::Outcome};
 
 const CHILD_MARKER: &str = "RUSTY_MCP_RESOURCE_CHILD";
 
@@ -47,7 +47,7 @@ fn child_exports_and_checks() {
     }
 
     let collector = Collector::start(200);
-    let (guard, layer) = rusty_mcp::otel::pipeline(
+    let (guard, layer) = rusty_mcp_middleware::otel::pipeline(
         OtelConfig::new("configured-name")
             .with_service_version("9.9.9")
             .with_endpoint(collector.url())

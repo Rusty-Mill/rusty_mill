@@ -123,10 +123,10 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust |
 | libs | rusty_log | rusty_log | The workspace's single door to \`tracing\`: re-exports the logging and span API, and (feature \`subscriber\`) the subscriber kit, so that one crate owns the third-party dependency. |
 | libs | rusty_lsp | rusty_lsp | A small, reusable async Language Server Protocol framework. Own the protocol plumbing; implement one trait for your language. |
-| libs | rusty_mcp | rusty-mcp | Transport-level building blocks for MCP servers and gateways: OAuth resource-server auth, load shedding, W3C trace context, OpenTelemetry |
 | libs | rusty_mcp | rusty-mcp-client | Protocol-only MCP client: stdio child process and Streamable HTTP, with API-key, bearer and OAuth client-credentials auth |
 | libs | rusty_mcp | rusty-mcp-demo | Example MCP server built on rusty_mcp_server |
 | libs | rusty_mcp_client_native | rusty_mcp_client_native | Sovereign MCP client core on rusty_mcp_proto: a sans-IO session for the classic and stateless handshakes, a server-sent-events parser, and a blocking client over a child-process transport |
+| libs | rusty_mcp_middleware | rusty_mcp_middleware | Transport-level building blocks for MCP servers and gateways: OAuth resource-server auth, load shedding, W3C trace context, OpenTelemetry |
 | libs | rusty_mcp_proto | rusty_mcp_proto | Sovereign MCP wire types on rusty_json: JSON-RPC 2.0 envelope, error codes, protocol versions, content, tools and paginated lists, with a hand-written codec and no serde |
 | libs | rusty_mcp_server | rusty_mcp_server | Sovereign MCP server core on rusty_mcp_proto: a tool registry, a sans-IO connection dispatcher for the classic and stateless handshakes, cancellation and progress, pagination, and a stdio transport |
 | libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs |

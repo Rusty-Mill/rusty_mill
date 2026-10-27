@@ -4,7 +4,7 @@
 //! lives in the binary rather than a library crate. Two shapes:
 //!
 //! - No `config.tracing`: plain stderr logging, as before.
-//! - With it: [`rusty_mcp::otel::init`] stands up an OTLP pipeline and installs
+//! - With it: [`rusty_mcp_middleware::otel::init`] stands up an OTLP pipeline and installs
 //!   a subscriber feeding both stderr and the collector.
 //!
 //! # The guard is the whole point
@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use agentgateway_config::Config;
-use rusty_mcp::otel::{OtelConfig, OtelGuard, metrics::Instruments};
+use rusty_mcp_middleware::otel::{OtelConfig, OtelGuard, metrics::Instruments};
 
 /// Installed telemetry, alive for as long as the gateway is.
 pub struct Telemetry {
@@ -75,7 +75,7 @@ impl Telemetry {
         }
 
         // `init` says where it is exporting, naming the collector's origin only.
-        let guard = rusty_mcp::otel::init(otel, &filter)?;
+        let guard = rusty_mcp_middleware::otel::init(otel, &filter)?;
 
         Ok(Telemetry {
             guard: Some(Arc::new(guard)),

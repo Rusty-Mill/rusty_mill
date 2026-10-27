@@ -20,7 +20,7 @@
 //! CLI and config, resources, tasks, subscriptions) was removed once no
 //! consumer used it; it is in git history before that change.
 
-#![doc(html_root_url = "https://docs.rs/rusty-mcp/0.6.0")]
+#![doc(html_root_url = "https://docs.rs/rusty_mcp_middleware/0.13.0")]
 
 #[cfg(feature = "serve")]
 pub(crate) mod admission;
