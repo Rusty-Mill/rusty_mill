@@ -226,6 +226,29 @@ async fn write_all(afd: &AsyncFd<OwnedFd>, data: &[u8]) -> std::io::Result<()> {
 }
 
 /// Build a small multi-threaded runtime and drive the terminal on it.
+/// Wait for child `pid` to exit and reap it, returning its exit code; `None`
+/// when SIGCHLD cannot be watched.
+///
+/// The child is spawned before the runtime (and so before this subscription)
+/// exists, and a SIGCHLD delivered before subscribing is not replayed. So the
+/// child is polled once right after subscribing, then after every signal.
+#[cfg(unix)]
+async fn reap_child(pid: libc::pid_t) -> Option<i32> {
+    let mut sigchld = signal(SignalKind::child()).ok()?;
+    loop {
+        let mut status: libc::c_int = 0;
+        // SAFETY: WNOHANG never blocks; `pid` is a plain pid_t value (not an
+        // owned resource), so reaping it here is sound even though the caller
+        // doesn't hold the owning `BackendHandle`.
+        if unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } == pid {
+            return Some(crate::backend::unix::exit_code_from_wait_status(status));
+        }
+        // Still running, or some *other* child exited (e.g. a background
+        // process the shell spawned and detached): keep watching for ours.
+        sigchld.recv().await?;
+    }
+}
+
 /// Runs the TUI to completion and returns the child shell's exit status as a
 /// `std::process::exit`-compatible value (the caller is expected to exit the
 /// process with it) — its own exit code on a normal exit, 128+signal on a
@@ -365,27 +388,10 @@ async fn run_async(
         let pid = reader.child_pid();
         rusty_tokio::spawn(async move {
             let Some(pid) = pid else { return };
-            let Ok(mut sigchld) = signal(SignalKind::child()) else {
-                return;
-            };
-            loop {
-                if sigchld.recv().await.is_none() {
-                    break;
-                }
-                let mut status: libc::c_int = 0;
-                // SAFETY: WNOHANG never blocks; `pid` is a plain pid_t value
-                // (not an owned resource), so reaping it here is sound even
-                // though this task doesn't hold the owning `BackendHandle`.
-                let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-                if r == pid {
-                    *exit_status.lock() =
-                        Some(crate::backend::unix::exit_code_from_wait_status(status));
-                    running.store(false, Ordering::Relaxed);
-                    frame.notify_one();
-                    break;
-                }
-                // Some *other* child was reaped (e.g. a background process
-                // the shell spawned and detached) — keep watching for ours.
+            if let Some(code) = reap_child(pid).await {
+                *exit_status.lock() = Some(code);
+                running.store(false, Ordering::Relaxed);
+                frame.notify_one();
             }
         })
     };
@@ -966,5 +972,34 @@ mod tests {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(is_open(src));
+    }
+
+    /// A child that exited before the SIGCHLD subscription existed (its
+    /// signal already spent) is still reaped, rather than waited on forever.
+    #[rusty_tokio::test]
+    async fn reap_child_finds_a_child_that_exited_before_subscribing() {
+        // `reap_child` is what waits on it.
+        #[allow(clippy::zombie_processes)]
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        // Block until it has exited, leaving it a zombie (WNOWAIT) for
+        // `reap_child` to collect.
+        // SAFETY: a zeroed siginfo_t is a valid out-parameter.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` outlives the call; waitid only writes to it.
+        let r = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(r, 0, "waitid: {}", std::io::Error::last_os_error());
+        let reaped = rusty_tokio::time::timeout(Duration::from_secs(2), reap_child(pid)).await;
+        assert_eq!(reaped.ok(), Some(Some(7)), "missed an already-exited child");
     }
 }
