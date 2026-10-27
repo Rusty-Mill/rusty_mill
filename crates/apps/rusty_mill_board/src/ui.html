@@ -141,7 +141,7 @@ function render(){
       const d=el("div",null,"card");d.draggable=true;d.append(el("b",k.title));
       const m=el("div",null,"meta");
       if(projects().length>1&&!sel.project){const t=el("span",k.project,"tag proj");t.title=repoOf(k.project);m.append(t)}
-      k.tags.forEach(t=>m.append(el("span",t,"tag")));
+      k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
       if(k.claim){
         d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
         const t=el("span",null,"tag agent"+(RUNNING.includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);

@@ -10,19 +10,14 @@ use std::thread;
 
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{BoardError, Card, Event, EventKind};
-use rusty_mill_board::mmdb::MmdbStore;
 use rusty_mill_board::store::{MemStore, Store};
+use rusty_mill_board::tick::TickStore;
 use uuid::Uuid;
+
+mod fake_tick;
 
 const WRITERS: usize = 8;
 const PER_WRITER: usize = 40;
-
-fn temp_store(name: &str) -> (MmdbStore, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!("mill_order_{name}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("dir");
-    (MmdbStore::open(&dir.join("b.mmap")).expect("open"), dir)
-}
 
 /// Writers commit concurrently while a reader polls with a cursor. The reader must
 /// see every event exactly once, in increasing id order, whatever the interleaving.
@@ -107,10 +102,8 @@ fn mem_store_never_skips_an_event() {
 }
 
 #[test]
-fn mmdb_store_never_skips_an_event() {
-    let (store, dir) = temp_store("skip");
-    no_event_is_skipped(store);
-    let _ = std::fs::remove_dir_all(dir);
+fn tick_store_never_skips_an_event() {
+    no_event_is_skipped(TickStore::new(fake_tick::FakeTick::default()));
 }
 
 /// A store that fails the Nth commit, standing in for a disk error.
@@ -186,55 +179,6 @@ fn a_failed_commit_changes_neither_the_card_nor_the_log() {
     // The board is still usable: the retry commits at the same revision.
     let ok = board.comment(card.id, &human, "again").expect("retry");
     assert_eq!(ok.rev, card.rev + 1);
-}
-
-#[test]
-fn state_is_rebuilt_from_the_single_commit_records_after_a_restart() {
-    let (store, dir) = temp_store("restart");
-    let board = Board::new(store, Roles::default());
-    let human = board.roles().actor("nano", "human").expect("role");
-    let a = board.add(&human, "a", "", vec![]).expect("add");
-    let b = board.add(&human, "b", "", vec![]).expect("add");
-    board.comment(a.id, &human, "note").expect("comment");
-    board.link_issue(b.id, 7, None, &human).expect("link");
-    let (cards, events) = (
-        board.list(None).expect("list"),
-        board.events(None, 100).expect("events"),
-    );
-    assert_eq!(
-        events.iter().map(|e| e.kind).collect::<Vec<_>>(),
-        [
-            EventKind::Created,
-            EventKind::Created,
-            EventKind::Commented,
-            EventKind::Linked
-        ]
-    );
-    drop(board);
-
-    let reopened = Board::new(
-        MmdbStore::open(&dir.join("b.mmap")).expect("reopen"),
-        Roles::default(),
-    );
-    assert_eq!(
-        reopened.list(None).expect("list"),
-        cards,
-        "cards come back exactly"
-    );
-    assert_eq!(
-        reopened.events(None, 100).expect("events"),
-        events,
-        "the log comes back exactly, in order"
-    );
-    // New commits continue the id order after a restart.
-    let c = reopened.add(&human, "c", "", vec![]).expect("add");
-    let tail = reopened
-        .events(events.last().map(|e| e.id), 10)
-        .expect("tail");
-    assert_eq!(tail.len(), 1);
-    assert_eq!(tail[0].card, c.id);
-    assert!(tail[0].id > events.last().expect("last").id);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

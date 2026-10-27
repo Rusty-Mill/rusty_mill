@@ -1,19 +1,17 @@
 //! `rusty_mill_board`: the board as an MCP server (stdio or HTTP) with a web UI.
 //!
 //! ```text
-//! rusty_mill_board --store board.mmap                    # MCP over stdio
-//! rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
+//! RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788   # MCP over stdio
+//! RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.0.0.1:8787 --auth-token S
 //! ```
+//! The cards are rusty_tick tasks tagged `agent` (ADR-0012); without `--tick-url`
+//! the board lives in memory and is gone when the process ends.
 //! Add `--github-repo owner/name` (and `GITHUB_TOKEN`) to mirror cards to issues.
 //! Add `--identities FILE` for a token per model, each bound to an actor and role.
 //! The HTTP mode serves the UI at `/`, the web API at `/api/<op>` and MCP at
 //! `/mcp`; open `http://127.0.0.1:8787/#token=S` for the UI. `GET /health` answers
 //! 200 while the store can commit and 503 once it needs a restart. SIGTERM and
-//! SIGINT stop the server cleanly. `--backup-dir DIR` takes a pruned backup
-//! of the store and settings every `--backup-secs`.
-//!
-//! `--tick-url URL` (and `RUSTY_TICK_TOKEN`) keeps the cards in rusty_tick
-//! instead of `--store`: tasks tagged `agent` are the board (ADR-0012).
+//! SIGINT stop the server cleanly.
 
 use std::io::IsTerminal;
 use std::net::SocketAddr;
@@ -25,11 +23,9 @@ use std::time::Duration;
 use clap::Parser;
 use rusty_mcp_server::{HttpConfig, HttpHandler, serve_stdio};
 use rusty_mill_board::api::Shared;
-use rusty_mill_board::backup::Backups;
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
 use rusty_mill_board::mcp;
-use rusty_mill_board::mmdb::MmdbStore;
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::settings::{
     Files, GithubFile, Settings, load_github, load_roles, open_credentials,
@@ -39,7 +35,7 @@ use rusty_mill_board::syncer::Syncer;
 use rusty_mill_board::tick::{TickHttp, TickStore};
 use rusty_mill_board::web::{Auth, Web, check_bind};
 
-/// How long a stop waits for requests and a running backup before it ends them.
+/// How long a stop waits for running requests before it ends them.
 const DRAIN: Duration = Duration::from_secs(10);
 
 /// Mill Board: kanban for humans and agents.
@@ -49,11 +45,8 @@ struct Cli {
     /// Requires --projects; emits the existing projects file format.
     #[arg(long, requires = "projects")]
     export_projects: bool,
-    /// Board file (created if absent). Omit for an in-memory board.
-    #[arg(long, env = "MILL_BOARD_STORE", conflicts_with = "tick_url")]
-    store: Option<PathBuf>,
-    /// Keep the cards in this rusty_tick (e.g. `http://127.0.0.1:8788`) instead of a store
-    /// file: its tasks tagged `agent` are the board. The token is read from the
+    /// Keep the cards in this rusty_tick (e.g. `http://127.0.0.1:8788`): its tasks tagged
+    /// `agent` are the board. Omit for an in-memory board. The token is read from the
     /// `RUSTY_TICK_TOKEN` environment variable only, never an argument (which process
     /// listings show).
     #[arg(long, env = "MILL_BOARD_TICK_URL")]
@@ -104,17 +97,6 @@ struct Cli {
     /// Seconds between sync runs.
     #[arg(long, env = "MILL_BOARD_GITHUB_SECS", default_value_t = 60, value_parser = clap::value_parser!(u64).range(5..))]
     github_secs: u64,
-    /// Take a backup of the store and the settings files into this directory (HTTP mode, durable
-    /// store only): one `board-<time>` folder each time, the newest `--backup-keep` kept. The
-    /// store is compacted after each.
-    #[arg(long, env = "MILL_BOARD_BACKUP_DIR")]
-    backup_dir: Option<PathBuf>,
-    /// Seconds between backups.
-    #[arg(long, env = "MILL_BOARD_BACKUP_SECS", default_value_t = 86_400, value_parser = clap::value_parser!(u64).range(60..))]
-    backup_secs: u64,
-    /// Backups to keep.
-    #[arg(long, env = "MILL_BOARD_BACKUP_KEEP", default_value_t = 14, value_parser = clap::value_parser!(u64).range(1..))]
-    backup_keep: u64,
     /// Serve with no authentication on a non-loopback address. Anyone who can reach the
     /// port can act as any role, including human. Almost never what you want.
     #[arg(long)]
@@ -212,14 +194,13 @@ fn run(cli: Cli) -> Result<(), String> {
         println!("{}", Projects::load(path)?.file_json()?);
         return Ok(());
     }
-    let store: Box<dyn Store> = match (&cli.store, &cli.tick_url) {
-        (Some(path), _) => Box::new(MmdbStore::open(path).map_err(|e| e.to_string())?),
-        (None, Some(url)) => {
+    let store: Box<dyn Store> = match &cli.tick_url {
+        Some(url) => {
             let token = std::env::var("RUSTY_TICK_TOKEN")
                 .map_err(|_| "--tick-url needs RUSTY_TICK_TOKEN in the environment".to_owned())?;
             Box::new(TickStore::new(TickHttp::new(url, &token)?))
         }
-        (None, None) => Box::new(MemStore::default()),
+        None => Box::new(MemStore::default()),
     };
     let files = files(&cli);
     required(&cli.projects, "--projects")?;
@@ -309,27 +290,13 @@ fn run(cli: Cli) -> Result<(), String> {
     .with_in_flight(in_flight.clone());
     let http = rusty_serve::Server::bind_shared(addr, web)
         .map_err(|e| format!("cannot bind {addr}: {e}"))?;
-    if let Some(dir) = cli.backup_dir {
-        if cli.store.is_none() {
-            return Err(
-                "--backup-dir needs --store: an in-memory board has nothing to keep".into(),
-            );
-        }
-        let keep = usize::try_from(cli.backup_keep).map_err(|e| e.to_string())?;
-        Backups::new(dir, keep).start(
-            board,
-            settings,
-            in_flight.clone(),
-            Duration::from_secs(cli.backup_secs),
-        )?;
-    }
     stop_on_signal(
         http.shutdown_handle().map_err(|e| e.to_string())?,
         in_flight.clone(),
     )?;
     rusty_log::info!(%addr, "Mill Board listening");
-    // The accept loop ends on a signal. Then the requests being answered, the tool calls running
-    // and a backup under way get one bounded wait: a commit whose reply is cut off is durable but
+    // The accept loop ends on a signal. Then the requests being answered and the tool calls
+    // running get one bounded wait: a commit whose reply is cut off is durable but
     // looks failed to its caller, who may then repeat it.
     match serve_until_drained(http, &in_flight, DRAIN) {
         Ok(true) => Ok(()),

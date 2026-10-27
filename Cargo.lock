@@ -12504,7 +12504,6 @@ dependencies = [
  "rusty_http",
  "rusty_log",
  "rusty_mcp_server",
- "rusty_multimodal_db_engine",
  "rusty_oauth",
  "rusty_rand",
  "rusty_request",

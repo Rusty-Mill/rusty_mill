@@ -209,23 +209,6 @@ impl<S: Store> Board<S> {
         self.store.health()
     }
 
-    /// Copy a consistent image of the store into the directory `dir`; returns the file name of
-    /// the store's main file as copied.
-    ///
-    /// # Errors
-    /// If the store is not durable or a file cannot be copied.
-    pub fn backup(&self, dir: &std::path::Path) -> Result<std::ffi::OsString, BoardError> {
-        self.store.backup(dir)
-    }
-
-    /// Fold the store's append log into its main files.
-    ///
-    /// # Errors
-    /// On storage failure.
-    pub fn compact(&self) -> Result<(), BoardError> {
-        self.store.compact()
-    }
-
     /// Create a Backlog card in the `default` project.
     ///
     /// # Errors

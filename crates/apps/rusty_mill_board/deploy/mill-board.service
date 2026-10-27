@@ -16,13 +16,13 @@ EnvironmentFile=/home/baileyrd/.mill-board/board.env
 ExecStart=/usr/local/bin/rusty_mill_board
 Restart=always
 RestartSec=5
-# SIGTERM stops the accept loop and the process exits; commits are atomic, so a
-# kill at any point loses nothing, and this only avoids dying mid-request.
+# SIGTERM stops the accept loop and the process exits; every write is one fenced
+# rusty_tick request, so this only avoids dying mid-request.
 KillSignal=SIGTERM
 TimeoutStopSec=30
 MemoryMax=1G
 
-# The board writes only under its own directory.
+# The board writes only its settings, under its own directory.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

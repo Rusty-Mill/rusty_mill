@@ -4,9 +4,9 @@ Mill Board: a kanban board that humans and agents share, over MCP and a web UI.
 The board is the only state; it enforces who may move a card where.
 
 ```text
-rusty_mill_board --store board.mmap                                  # MCP over stdio
-rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
+RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788                          # MCP over stdio
 RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.0.0.1:8787 --auth-token S
+rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone when it stops
 # UI: http://127.0.0.1:8787/#token=S   API: POST /api/<op>   MCP: /mcp
 ```
 
@@ -50,17 +50,12 @@ RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.
   actor and role) and register `/mcp` in each model's own client; a model then pulls work with `card_take`,
   comments, and moves it on, using its own subscription session. See
   [`docs/connecting-models.md`](docs/connecting-models.md) for setup and the paste-in working loop.
-- **As a service:** `GET /health` (200, or 503 when the store must be reopened), SIGTERM stops accepting, waits for running requests and a backup, then exits, a second
-  process on the same `--store` is refused (`<store>.lock`), and `--backup-dir DIR` keeps pruned, consistent backups
-  of the store and settings (`--backup-secs`, `--backup-keep`; none while the store needs a restart), compacting the store after each. A systemd unit, an
-  env example and the install, restore and rollback steps are in [`deploy/`](deploy/README.md). ADR-0005.
-- **Storage:** `rusty_multimodal_db_engine` (one durable record per commit holds the event and the card after it,
-  so a commit is atomic; state is rebuilt from those records at open), or in memory when `--store` is omitted.
-  Event ids are UUIDv7 assigned inside the commit, so id order is commit order and doubles as the polling
+- **As a service:** `GET /health` (200, or 503 while rusty_tick is unreachable); SIGTERM stops accepting, waits
+  for running requests, then exits. A systemd unit, an env example and the install and rollback steps are in
+  [`deploy/`](deploy/README.md). ADR-0005.
+- **Event ids** are UUIDv7 assigned inside the commit, so id order is commit order and doubles as the polling
   cursor (`board_events` returns a `cursor`; `tail: true` starts a watcher at the current end).
-  A failed append is *unknown*, not "nothing happened" (the engine can fail after the record is durable): the store
-  then refuses writes until reopened, and a reopen replays the log and shows what really committed.
-- **rusty_tick as the store** (`--tick-url`, token only from the `RUSTY_TICK_TOKEN` environment variable; [ADR-0012](../../../docs/adr/0012-one-task-store.md)):
+- **Storage: rusty_tick** (`--tick-url`, token only from the `RUSTY_TICK_TOKEN` environment variable; [ADR-0012](../../../docs/adr/0012-one-task-store.md)):
   the board is the rusty_tick tasks tagged `agent`, so the owner reads and edits the same tasks on the phone or web.
   Column and claim are `board:`/`claim:` tags, the project is the task's list (the Inbox is `default`), comments are
   rusty_tick comments with their author, and dependencies, the forge link and the execution link are one `board`
@@ -71,9 +66,11 @@ RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.
   completes it.
   Tags come back lowercase, so actor names must be lowercase. Events are kept in memory only: the board's own
   writes plus an `edited` event (actor `tick`) when a task changes in rusty_tick. `/health` is 503 while rusty_tick
-  is down. No `--backup-dir`: rusty_tick keeps the data.
+  is down. rusty_tick keeps the data, so back up its data directory. Without `--tick-url` the board lives in
+  memory (tests, demos).
   [`tools/migrate_artifact_board.py`](tools/migrate_artifact_board.py) moves the Mill Board artifact's cards
-  into rusty_tick once (dry run by default, safe to re-run, `--rollback --yes` trashes what it wrote).
+  into rusty_tick once (dry run by default, safe to re-run, `--rollback --yes` trashes what it wrote). The
+  board's own `--store` file and `--backup-dir` were removed once that migration had run.
 
 - **GitHub sync** (`--github-repo owner/name`, token in `GITHUB_TOKEN`, every
   `--github-secs`, default 60): stateless reconcile between cards and issues.
@@ -95,7 +92,7 @@ UI: the card dialog is kept in step with the board without touching unsaved text
 unsaved edit raises a conflict (keep mine / take theirs), and `card_update` takes the `rev` you last saw and refuses a
 stale one. `tests/ui/drafts.mjs` checks this in a real browser (Playwright; see the file's header).
 
-Layout: `domain` (pure) / `store` + `mmdb` + `tick` (port and adapters) / `board` (service) /
+Layout: `domain` (pure) / `store` + `tick` (port and adapters) / `board` (service) /
 `api` (operation table) / `mcp` + `web` (surfaces) / `sync` (forge port + reconcile) +
 `github` (adapter).
 
