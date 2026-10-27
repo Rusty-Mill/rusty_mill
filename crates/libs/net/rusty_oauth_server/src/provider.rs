@@ -428,25 +428,49 @@ impl Provider {
         })
     }
 
-    /// Rotate: retire the presented refresh token, issue a fresh pair for the
-    /// same subject.
+    /// Rotate: retire the presented refresh token and issue a fresh pair
+    /// for the same subject, atomically ([`StateStore::replace_token`]).
+    /// The token is checked again under the store's lock: it must still be
+    /// live, be `client_id`'s, and cover `scopes`. So of two concurrent
+    /// rotations only one issues, and a rotation that loaded the token
+    /// before a revocation finished cannot bring the grant back.
+    ///
+    /// `Ok(None)`: the token is gone, foreign, expired or too narrow.
+    /// `Err`: the rotation could not be written, and nothing was issued.
     pub fn exchange_refresh_token(
         &self,
-        refresh: &RefreshTokenView,
+        client_id: &str,
         token: &str,
         scopes: Vec<String>,
         now: i64,
-    ) -> io::Result<TokenResponse> {
-        // Retire first, and refuse to issue if that fails: otherwise the
-        // presented token would stay live beside its replacement.
-        self.store.delete_token(TokenKind::Refresh, token)?;
-        let grant = Grant {
-            client_id: &refresh.client_id,
-            subject: refresh.subject.as_ref(),
-            scopes,
-            resource: None,
+    ) -> io::Result<Option<TokenResponse>> {
+        let (access_token, refresh_token) = (generate_token()?, generate_token()?);
+        let rotate = |meta: &Value| {
+            let live = meta.get("client_id").and_then(Value::as_str) == Some(client_id)
+                && !meta
+                    .get("expires_at")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|exp| exp < now);
+            let granted = scopes_of(meta);
+            if !live || !scopes.iter().all(|s| granted.contains(s)) {
+                return None;
+            }
+            let subject = subject_of(meta);
+            let grant = Grant {
+                client_id,
+                subject: subject.as_ref(),
+                scopes: scopes.clone(),
+                resource: None,
+            };
+            Some(token_records(&grant, &access_token, &refresh_token, now))
         };
-        self.issue_tokens(grant, now)
+        if !self
+            .store
+            .replace_token(TokenKind::Refresh, token, rotate)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(token_response(&scopes, access_token, refresh_token)))
     }
 
     // -- bearer verification --------------------------------------------------
@@ -506,18 +530,35 @@ impl Provider {
     fn issue_tokens(&self, grant: Grant<'_>, now: i64) -> io::Result<TokenResponse> {
         let access_token = generate_token()?;
         let refresh_token = generate_token()?;
-        let subject = grant
-            .subject
-            .map_or(Value::Null, |s| Value::from(s.as_str()));
-        let scopes: Vec<Value> = grant
-            .scopes
-            .iter()
-            .map(|s| Value::from(s.as_str()))
-            .collect();
-        let resource = grant.resource.as_deref().map_or(Value::Null, Value::from);
-        self.store.put_token(
+        for (kind, token, meta) in token_records(&grant, &access_token, &refresh_token, now) {
+            self.store.put_token(kind, &token, meta)?;
+        }
+        // Both halves are on disk before the pair is handed back, so a client
+        // never holds a token the server will not recognise.
+        Ok(token_response(&grant.scopes, access_token, refresh_token))
+    }
+}
+
+/// The stored records of a fresh pair issued for `grant`.
+fn token_records(
+    grant: &Grant<'_>,
+    access_token: &str,
+    refresh_token: &str,
+    now: i64,
+) -> Vec<(TokenKind, String, Value)> {
+    let subject = grant
+        .subject
+        .map_or(Value::Null, |s| Value::from(s.as_str()));
+    let scopes: Vec<Value> = grant
+        .scopes
+        .iter()
+        .map(|s| Value::from(s.as_str()))
+        .collect();
+    let resource = grant.resource.as_deref().map_or(Value::Null, Value::from);
+    vec![
+        (
             TokenKind::Access,
-            &access_token,
+            access_token.to_string(),
             json!({
                 "client_id": grant.client_id,
                 "subject": subject.clone(),
@@ -525,26 +566,27 @@ impl Provider {
                 "expires_at": now + ACCESS_TOKEN_TTL,
                 "resource": resource,
             }),
-        )?;
-        self.store.put_token(
+        ),
+        (
             TokenKind::Refresh,
-            &refresh_token,
+            refresh_token.to_string(),
             json!({
                 "client_id": grant.client_id,
                 "subject": subject,
                 "scopes": scopes,
                 "expires_at": now + REFRESH_TOKEN_TTL,
             }),
-        )?;
-        // Both halves are on disk before the pair is handed back, so a client
-        // never holds a token the server will not recognise.
-        Ok(TokenResponse {
-            access_token,
-            token_type: "Bearer",
-            expires_in: Some(ACCESS_TOKEN_TTL),
-            scope: (!grant.scopes.is_empty()).then(|| grant.scopes.join(" ")),
-            refresh_token: Some(refresh_token),
-        })
+        ),
+    ]
+}
+
+fn token_response(scopes: &[String], access_token: String, refresh_token: String) -> TokenResponse {
+    TokenResponse {
+        access_token,
+        token_type: "Bearer",
+        expires_in: Some(ACCESS_TOKEN_TTL),
+        scope: (!scopes.is_empty()).then(|| scopes.join(" ")),
+        refresh_token: Some(refresh_token),
     }
 }
 
@@ -777,8 +819,10 @@ mod tests {
         assert!(provider
             .load_refresh_token("other", &old_refresh, now)
             .is_none());
+        assert_eq!(view.client_id, client_id);
         let rotated = provider
-            .exchange_refresh_token(&view, &old_refresh, vec![], now)
+            .exchange_refresh_token(&client_id, &old_refresh, vec![], now)
+            .unwrap()
             .unwrap();
         assert_ne!(rotated.access_token, tokens.access_token);
         assert!(provider
@@ -884,5 +928,91 @@ mod tests {
         assert!(provider
             .load_refresh_token(&client_id, &alice_refresh, now)
             .is_some());
+    }
+
+    /// A provider with one approved grant: the provider, its client and
+    /// the issued pair.
+    fn granted() -> (Provider, tempfile::TempDir, String, TokenResponse) {
+        let (provider, dir) = provider();
+        let client_id = register(&provider);
+        let now = now_unix();
+        let code = approved_code(&provider, &client_id, now);
+        let tokens = provider
+            .exchange_authorization_code(&code, now)
+            .unwrap()
+            .unwrap();
+        (provider, dir, client_id, tokens)
+    }
+
+    #[test]
+    fn of_concurrent_rotations_of_one_refresh_token_exactly_one_issues() {
+        let (provider, _dir, client_id, tokens) = granted();
+        let refresh = tokens.refresh_token.unwrap();
+        let now = now_unix();
+        let threads = 8;
+        let start = std::sync::Barrier::new(threads);
+        let issued: Vec<Option<TokenResponse>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        provider
+                            .exchange_refresh_token(&client_id, &refresh, vec![], now)
+                            .unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let winners: Vec<_> = issued.into_iter().flatten().collect();
+        assert_eq!(winners.len(), 1, "exactly one rotation issues a pair");
+        let counts = provider.store().list_clients();
+        assert_eq!(counts.len(), 1);
+        assert_eq!(
+            (counts[0].access_tokens, counts[0].refresh_tokens),
+            (2, 1),
+            "the first access token, and one rotated pair"
+        );
+    }
+
+    #[test]
+    fn a_rotation_that_loaded_the_token_before_a_revocation_issues_nothing() {
+        let (provider, _dir, client_id, tokens) = granted();
+        let refresh = tokens.refresh_token.unwrap();
+        let now = now_unix();
+        // Paused after the lookup /token does first...
+        let stale = provider
+            .load_refresh_token(&client_id, &refresh, now)
+            .unwrap();
+        // ...while the grant is revoked...
+        provider
+            .revoke_grant(&client_id, stale.subject.as_ref())
+            .unwrap();
+        // ...then resumed: nothing comes back to life.
+        let resumed = provider
+            .exchange_refresh_token(&client_id, &refresh, stale.scopes, now)
+            .unwrap();
+        assert!(resumed.is_none());
+        let counts = &provider.store().list_clients()[0];
+        assert_eq!((counts.access_tokens, counts.refresh_tokens), (0, 0));
+    }
+
+    #[test]
+    fn a_rotation_refuses_a_foreign_expired_or_widened_token_and_keeps_it() {
+        let (provider, _dir, client_id, tokens) = granted();
+        let refresh = tokens.refresh_token.unwrap();
+        let now = now_unix();
+        let rotate = |client: &str, scopes: Vec<String>, at: i64| {
+            provider
+                .exchange_refresh_token(client, &refresh, scopes, at)
+                .unwrap()
+        };
+        assert!(rotate("other", vec![], now).is_none());
+        assert!(rotate(&client_id, vec!["admin".into()], now).is_none());
+        assert!(rotate(&client_id, vec![], now + REFRESH_TOKEN_TTL + 1).is_none());
+        assert!(
+            rotate(&client_id, vec![], now).is_some(),
+            "the token survived"
+        );
     }
 }

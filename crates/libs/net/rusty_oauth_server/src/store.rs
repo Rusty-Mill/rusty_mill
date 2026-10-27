@@ -311,6 +311,35 @@ impl StateStore {
         Ok(())
     }
 
+    /// Replace the `kind` token `old` with the tokens `with` makes from its
+    /// metadata, in one locked read-modify-write: `true` if it was replaced.
+    /// `false`, with nothing changed, when `old` is absent (already used or
+    /// revoked) or `with` refuses it. A refresh rotation is this, so two
+    /// concurrent rotations of one token cannot both issue, and a revocation
+    /// that ran first cannot be undone by one that read the token earlier.
+    pub fn replace_token(
+        &self,
+        kind: TokenKind,
+        old: &str,
+        with: impl FnOnce(&Value) -> Option<Vec<(TokenKind, String, Value)>>,
+    ) -> io::Result<bool> {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.read();
+        let hash = hash_token(old);
+        let Some(meta) = state.tokens(kind).get(&hash) else {
+            return Ok(false);
+        };
+        let Some(replacements) = with(meta) else {
+            return Ok(false);
+        };
+        state.tokens_mut(kind).remove(&hash);
+        for (kind, token, meta) in replacements {
+            state.tokens_mut(kind).insert(hash_token(&token), meta);
+        }
+        self.write(&state)?;
+        Ok(true)
+    }
+
     /// Drop every access/refresh token of one grant family: `client_id`'s
     /// tokens for `subject`, keeping the registration and every other
     /// subject's tokens. `None` is the family of grants written before

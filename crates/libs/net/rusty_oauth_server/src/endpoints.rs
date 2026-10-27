@@ -432,11 +432,14 @@ impl Endpoints {
                 &format!("cannot request scope `{scope}` not provided by refresh token"),
             );
         }
+        // Checked again, atomically, as it is consumed: a concurrent
+        // rotation or revocation since the lookup above wins.
         match self
             .provider
-            .exchange_refresh_token(&loaded, refresh_token, scopes, now)
+            .exchange_refresh_token(client_id, refresh_token, scopes, now)
         {
-            Ok(tokens) => token_success(&tokens),
+            Ok(Some(tokens)) => token_success(&tokens),
+            Ok(None) => token_error(400, "invalid_grant", "refresh token does not exist"),
             Err(e) => {
                 eprintln!("oauth: could not persist rotated tokens: {e}");
                 token_error(500, "server_error", "rotated tokens could not be persisted")

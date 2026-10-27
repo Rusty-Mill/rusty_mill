@@ -88,10 +88,12 @@ that asks for one of the server's own tokens (the shared token, or a user's `<ke
 The grant then acts as that token's user.
 
 - Existing bearer tokens keep working everywhere, OAuth on or off.
-- Grants are kept in `<data-dir>/oauth.json` and checked against `users.json` on every request,
-  so disabling a user ends their grants. Revoking one of their tokens, or changing
-  `RUSTY_TICK_TOKEN`, does not. To end every grant, stop the server, delete `oauth.json` and
-  start it again.
+- Grants are kept in `<data-dir>/oauth.json` and checked against `users.json` on every request.
+  Disabling a user suspends their grants (within a second) but does not delete them: enabling
+  the user again restores them.
+- Revoking the token that approved a grant, or changing `RUSTY_TICK_TOKEN`, does not affect the
+  grant. To end every grant, stop the server, delete `oauth.json` and start it again; a
+  connector's own disconnect revokes just its grant.
 - Back up `oauth.json` with the rest of the data directory, or every connector signs in again.
 
 ## Backups, upgrade and rollback

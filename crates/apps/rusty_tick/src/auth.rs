@@ -102,8 +102,8 @@ impl Authenticator {
 
     /// The live user an OAuth grant's subject names: the one user in
     /// single-user mode, and a user in `users.json` who is not disabled in
-    /// multi-user mode. Checked on every request, so disabling a user also
-    /// cuts off their OAuth tokens.
+    /// multi-user mode. Checked on every request, so a disabled user's OAuth
+    /// tokens are refused while they stay disabled.
     pub fn resolve(&mut self, subject: &str) -> Option<UserKey> {
         match self {
             Self::Single { user, .. } => (user.as_str() == subject).then(|| user.clone()),

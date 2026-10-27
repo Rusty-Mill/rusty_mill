@@ -7,13 +7,18 @@
 //! http on localhost). The consent page asks for one of the server's own
 //! tokens, and the grant then acts as that token's user: the subject is the
 //! user key (`default` in single-user mode). Each request resolves it to a
-//! live user ([`crate::auth::Authenticator::resolve`]), so disabling a user
-//! cuts off their OAuth tokens too.
+//! live user ([`crate::auth::Authenticator::resolve`]).
 //!
-//! Grants are kept in `<data-dir>/oauth.json`. They outlive the token that
-//! approved them: revoking one token of a user, or changing
-//! `RUSTY_TICK_TOKEN`, does not end them. Disable the user, or delete
-//! `oauth.json` and restart, to end every grant.
+//! Grants are kept in `<data-dir>/oauth.json`. Their lifecycle:
+//!
+//! - Disabling a user suspends their grants once `users.json` is re-read:
+//!   their OAuth tokens are refused. The grants stay stored, and refresh
+//!   still rotates them (refresh does not look at users), so enabling the
+//!   user again brings them back.
+//! - Revoking the token that approved a grant, or changing
+//!   `RUSTY_TICK_TOKEN`, does not touch the grant.
+//! - A client revoking its own token (RFC 7009) ends that grant.
+//! - Deleting `oauth.json` with the server stopped ends every grant.
 
 use crate::backend::Backend;
 use rusty_http::{Method, StatusCode};
