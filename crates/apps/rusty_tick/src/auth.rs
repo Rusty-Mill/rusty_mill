@@ -99,4 +99,19 @@ impl Authenticator {
             }
         }
     }
+
+    /// The live user an OAuth grant's subject names: the one user in
+    /// single-user mode, and a user in `users.json` who is not disabled in
+    /// multi-user mode. Checked on every request, so disabling a user also
+    /// cuts off their OAuth tokens.
+    pub fn resolve(&mut self, subject: &str) -> Option<UserKey> {
+        match self {
+            Self::Single { user, .. } => (user.as_str() == subject).then(|| user.clone()),
+            Self::Multi { users, .. } => {
+                let key = UserKey::parse(subject).ok()?;
+                let live = users.current().user(&key).is_some_and(|u| !u.disabled);
+                live.then_some(key)
+            }
+        }
+    }
 }

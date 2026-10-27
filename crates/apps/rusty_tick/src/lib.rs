@@ -12,6 +12,7 @@ pub mod dto;
 pub mod fetch;
 pub mod lists;
 pub mod mcp;
+pub mod oauth;
 pub mod pool;
 pub mod server;
 pub mod service;

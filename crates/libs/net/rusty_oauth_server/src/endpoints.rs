@@ -60,6 +60,11 @@ pub const PATHS: &[&str] = &[
 const NO_STORE: (&str, &str) = ("cache-control", "no-store");
 const NO_CACHE: (&str, &str) = ("pragma", "no-cache");
 const PUBLIC_HOUR: (&str, &str) = ("cache-control", "public, max-age=3600");
+/// The pages are static HTML with inline styles and one same-origin form,
+/// and are never framed, so a hostile page cannot overlay the consent form.
+/// No `form-action`: browsers apply it to the redirect back to the client.
+const PAGE_CSP: &str =
+    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'";
 
 /// The request methods the endpoints tell apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +115,12 @@ impl Response {
     fn html(status: u16, body: String) -> Self {
         Self {
             status,
-            headers: vec![("content-type", "text/html; charset=utf-8".to_string())],
+            headers: vec![
+                ("content-type", "text/html; charset=utf-8".to_string()),
+                ("content-security-policy", PAGE_CSP.to_string()),
+                ("x-frame-options", "DENY".to_string()),
+                ("referrer-policy", "no-referrer".to_string()),
+            ],
             body: body.into_bytes(),
         }
     }
@@ -991,7 +1001,10 @@ mod tests {
     #[test]
     fn an_expired_consent_link_is_a_400_page() {
         let (e, _dir) = endpoints();
-        assert_eq!(call(&e, Method::Get, "/consent?txn=nope", b"").status, 400);
+        let page = call(&e, Method::Get, "/consent?txn=nope", b"");
+        assert_eq!(page.status, 400);
+        assert!(header(&page, "content-security-policy").contains("frame-ancestors 'none'"));
+        assert_eq!(header(&page, "x-frame-options"), "DENY");
         let post = call(&e, Method::Post, "/consent", b"txn=nope&action=approve");
         assert_eq!(post.status, 400);
     }

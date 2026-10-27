@@ -76,8 +76,23 @@ The new store must be a complete snapshot, never copied into a store a server ha
 ## Reaching it from another machine
 
 It speaks plain HTTP on loopback. From your own machine use an SSH tunnel
-(`ssh -L 8788:127.0.0.1:8788 <host>`, then `http://127.0.0.1:8788`) or TLS in front. Agents use Mill
-Board, not rusty_tick, so rusty_tick never needs a public address.
+(`ssh -L 8788:127.0.0.1:8788 <host>`, then `http://127.0.0.1:8788`) or TLS in front.
+
+## Signing in from claude.ai (OAuth)
+
+A claude.ai custom connector signs in with OAuth instead of a pasted bearer token. Publish the
+server at an https origin through TLS in front (it still binds loopback), then set
+`RUSTY_TICK_ISSUER` in `tick.env` to that origin, e.g. `https://tick.baileyfam.us`, and restart.
+Add `https://tick.baileyfam.us/mcp` as the connector's URL; "Sign in now" opens a consent page
+that asks for one of the server's own tokens (the shared token, or a user's `<key>.<secret>`).
+The grant then acts as that token's user.
+
+- Existing bearer tokens keep working everywhere, OAuth on or off.
+- Grants are kept in `<data-dir>/oauth.json` and checked against `users.json` on every request,
+  so disabling a user ends their grants. Revoking one of their tokens, or changing
+  `RUSTY_TICK_TOKEN`, does not. To end every grant, stop the server, delete `oauth.json` and
+  start it again.
+- Back up `oauth.json` with the rest of the data directory, or every connector signs in again.
 
 ## Backups, upgrade and rollback
 

@@ -95,6 +95,10 @@ are refused (no `Origin` is accepted). For Claude Code:
 claude mcp add --transport http tick http://127.0.0.1:8787/mcp --header "Authorization: Bearer $RUSTY_TICK_TOKEN"
 ```
 
+With `RUSTY_TICK_ISSUER` set to the server's public https origin, a client can
+sign in with OAuth instead (a claude.ai connector's "Sign in now"); see
+[deploy/README.md](deploy/README.md#signing-in-from-claudeai-oauth).
+
 The web UI's assistant (`/api/agent`) offers the same tools, by the same
 names, run in the browser. It is rule-based, not a model: “add buy milk”,
 “find milk”, “what's due today?”, “what's overdue?”, “due this week”,
@@ -122,7 +126,8 @@ unreadable day changes nothing.
 `api` (pure router) and `dto` (wire shapes) sit over `service` (rules), which
 sits over `store`/`lists` (the engine). `server` binds `Backend` to
 `rusty_serve`, the shared blocking HTTP server that also serves `web/dist`;
-`mcp` routes `/mcp` beside it and turns tool calls into API requests.
+`mcp` routes `/mcp` beside it and turns tool calls into API requests; `oauth`
+adapts `rusty_oauth_server`'s sign-in endpoints to it.
 
 ```
 cargo test -p rusty_tick

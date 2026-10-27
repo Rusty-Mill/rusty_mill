@@ -16,10 +16,12 @@ use crate::assistant::{
 };
 use crate::backend::Backend;
 use crate::lists::INBOX_ID;
+use crate::oauth::OAuth;
 use rusty_http::Method;
 use rusty_json::{json, Value};
 use rusty_mcp_server::proto::{CallToolParams, CallToolResult, ContentBlock, Tool};
 use rusty_mcp_server::{CallContext, HttpConfig, HttpHandler, Server};
+use rusty_oauth_server::Endpoints;
 use rusty_serve::{Handler, Request, Response, SharedHandler};
 use rusty_url::form_urlencoded::byte_serialize;
 use std::sync::{Arc, Mutex};
@@ -28,18 +30,24 @@ use uuid::Uuid;
 /// Where MCP is served.
 pub const MCP_PATH: &str = "/mcp";
 
-/// The whole HTTP surface: `/mcp` without the backend's lock (a tool call
-/// takes it, per call), everything else under it, as before.
+/// The whole HTTP surface: `/mcp` and the OAuth endpoints without the
+/// backend's lock (a tool call takes it, per call), everything else under
+/// it, as before.
 pub struct Routes {
     backend: Arc<Mutex<Backend>>,
     mcp: HttpHandler,
+    /// The OAuth endpoints, when OAuth is on ([`crate::oauth`]).
+    oauth: Option<Endpoints>,
 }
 
 impl Routes {
+    /// The routes over `backend`, with OAuth when `oauth` is given.
+    ///
     /// # Errors
     /// The MCP server refused its tool table (a bug: the table is fixed).
-    pub fn new(backend: Backend) -> std::io::Result<Self> {
+    pub fn new(backend: Backend, oauth: Option<OAuth>) -> std::io::Result<Self> {
         let backend = Arc::new(Mutex::new(backend));
+        let oauth = oauth.map(|oauth| crate::oauth::endpoints(oauth, &backend));
         // Any `Host`: every call carries a bearer token, which a page that
         // rebinds DNS cannot attach. No `Origin` is accepted, so browsers are refused.
         let config = HttpConfig {
@@ -48,12 +56,21 @@ impl Routes {
             ..HttpConfig::default()
         };
         let mcp = HttpHandler::new(Arc::new(server(Arc::clone(&backend))?), config);
-        Ok(Self { backend, mcp })
+        Ok(Self {
+            backend,
+            mcp,
+            oauth,
+        })
     }
 }
 
 impl SharedHandler for Routes {
     fn handle(&self, request: &Request<'_>) -> Response {
+        // Before the lock: the consent page's token check takes it.
+        let oauth = self.oauth.as_ref();
+        if let Some(response) = oauth.and_then(|e| crate::oauth::handle(e, request)) {
+            return response;
+        }
         let Ok(mut backend) = self.backend.lock() else {
             return Response::internal_error();
         };
@@ -68,9 +85,11 @@ impl SharedHandler for Routes {
             b"",
         ));
         drop(backend);
-        match denied {
-            Ok(_) => self.mcp.handle_with(request, None),
-            Err(denied) => Response::json(denied.status, denied.body),
+        match (denied, oauth) {
+            (Ok(_), _) => self.mcp.handle_with(request, None),
+            // The challenge points a client at the OAuth metadata.
+            (Err(_), Some(endpoints)) => crate::oauth::to_serve(endpoints.unauthorized()),
+            (Err(denied), None) => Response::json(denied.status, denied.body),
         }
     }
 }
