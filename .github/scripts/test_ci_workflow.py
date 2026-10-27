@@ -299,6 +299,8 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         # daily full sweep covers feature unification in unrelated crates.
         self.assertNotIn("cargo_toml_diff.py --members", self.workflow)
         self.assertNotIn("Member dependency declarations changed", self.workflow)
+        # A lock change beside a manifest edit adds its consumers to the path selection.
+        self.assertIn('packages="$(printf \'%s\\n\' "$packages" "$lockfile_packages"', self.workflow)
 
     def test_unrelated_base_falls_back_after_fetch_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
