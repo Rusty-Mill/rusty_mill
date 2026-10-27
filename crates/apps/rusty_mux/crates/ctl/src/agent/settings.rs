@@ -2,9 +2,10 @@
 //! the parsed file: everything else in it is kept as it was.
 //!
 //! The hook is one group in `hooks.SessionStart` whose single command runs
-//! `rusty-mux-ctl agent hook`. A hook is ours when its command names
-//! `rusty-mux-ctl` and ends in ` agent hook`, so a ctl that moved is found
-//! and updated rather than added twice.
+//! `rusty-mux-ctl agent hook`. A hook is ours only in the exact shape
+//! [`command`] writes, a quoted path to an executable named `rusty-mux-ctl`
+//! then ` agent hook`, so a ctl that moved is found and updated rather than
+//! added twice, and nobody else's hook is ever taken for ours.
 
 use rusty_json::{Map, Value};
 
@@ -20,9 +21,30 @@ pub(crate) fn command(ctl: &str) -> String {
 }
 
 fn is_ours(hook: &Value) -> bool {
-    hook.get("command")
-        .and_then(Value::as_str)
-        .is_some_and(|c| c.contains("rusty-mux-ctl") && c.trim_end().ends_with(SUFFIX))
+    hook.get("type").and_then(Value::as_str) == Some("command")
+        && hook
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(is_ours_command)
+}
+
+/// Whether [`command`] wrote `command`, for a ctl at any path.
+fn is_ours_command(command: &str) -> bool {
+    let Some(path) = command.strip_suffix(SUFFIX).and_then(unquote) else {
+        return false;
+    };
+    let name = path.rsplit(['/', '\\']).next().unwrap_or_default();
+    matches!(name, "rusty-mux-ctl" | "rusty-mux-ctl.exe") && name.len() < path.len()
+}
+
+/// The word that [`command`]'s quoting turns into `word`, if it is one.
+fn unquote(word: &str) -> Option<String> {
+    let inner = word.strip_prefix('\'')?.strip_suffix('\'')?;
+    let parts: Vec<&str> = inner.split(r"'\''").collect();
+    match parts.iter().any(|part| part.contains('\'')) {
+        true => None,
+        false => Some(parts.join("'")),
+    }
 }
 
 /// The `SessionStart` groups, if any; fails on a file whose shape setup
@@ -91,9 +113,13 @@ pub(crate) fn with_hook(mut settings: Value, command: &str) -> Result<Value, Str
     Ok(settings)
 }
 
-/// `settings` without the hook, dropping the group, `SessionStart` and
-/// `hooks` too where it leaves them empty.
-pub(crate) fn without_hook(mut settings: Value) -> Result<Value, String> {
+/// `settings` without the hook, dropping the group, and `SessionStart` and
+/// `hooks` where it leaves them empty unless `before` (the settings as they
+/// were before setup) had them.
+pub(crate) fn without_hook(mut settings: Value, before: Option<&Value>) -> Result<Value, String> {
+    let had_hooks = before.and_then(|b| b.get("hooks"));
+    let had_event = had_hooks.and_then(|h| h.get(EVENT)).is_some();
+    let had_hooks = had_hooks.is_some();
     groups(&settings)?;
     let root = settings
         .as_object_mut()
@@ -112,10 +138,10 @@ pub(crate) fn without_hook(mut settings: Value) -> Result<Value, String> {
         hooks.retain(|h| !is_ours(h));
         hooks.len() == before || !hooks.is_empty()
     });
-    if groups.is_empty() {
+    if groups.is_empty() && !had_event {
         hooks.remove(EVENT);
     }
-    if hooks.is_empty() {
+    if hooks.is_empty() && !had_hooks {
         root.remove("hooks");
     }
     Ok(settings)

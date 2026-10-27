@@ -97,22 +97,22 @@ fn removing_drops_only_ours_and_the_containers_it_empties() {
     let mine =
         json(r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo hi"}]}]}}"#);
     let with = settings::with_hook(mine.clone(), &ours()).expect("adds");
-    assert_eq!(settings::without_hook(with), Ok(mine.clone()));
+    assert_eq!(settings::without_hook(with, None), Ok(mine.clone()));
     let alone = settings::with_hook(json(r#"{"a":1}"#), &ours()).expect("adds");
-    assert_eq!(settings::without_hook(alone), Ok(json(r#"{"a":1}"#)));
+    assert_eq!(settings::without_hook(alone, None), Ok(json(r#"{"a":1}"#)));
     // A group shared with someone else's hook keeps theirs.
     let shared = json(&format!(
         r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"echo hi"}},{{"type":"command","command":"{}"}}]}}]}}}}"#,
         ours()
     ));
-    assert_eq!(settings::without_hook(shared), Ok(mine));
+    assert_eq!(settings::without_hook(shared, None), Ok(mine));
 }
 
 #[test]
 fn a_shape_it_cannot_edit_is_refused() {
     for bad in [r"[]", r#"{"hooks":[]}"#, r#"{"hooks":{"SessionStart":{}}}"#] {
         assert!(settings::with_hook(json(bad), &ours()).is_err(), "{bad}");
-        assert!(settings::without_hook(json(bad)).is_err(), "{bad}");
+        assert!(settings::without_hook(json(bad), None).is_err(), "{bad}");
     }
 }
 
@@ -263,4 +263,128 @@ fn the_hook_speaks_only_inside_a_block() {
 fn the_skill_carries_its_mark_after_the_front_matter() {
     assert!(SKILL.starts_with("---\nname: rusty-mux\ndescription: "));
     assert!(SKILL.contains(MARK));
+}
+
+#[test]
+fn only_the_exact_generated_command_is_ours() {
+    for theirs in [
+        "echo rusty-mux-ctl agent hook",
+        "rusty-mux-ctl agent hook",
+        "'rusty-mux-ctl' agent hook",
+        "'/usr/bin/my-rusty-mux-ctl' agent hook",
+        "'/usr/bin/rusty-mux-ctl-wrapper' agent hook",
+        "'/usr/bin/rusty-mux-ctl' agent hook --verbose",
+        "'/usr/bin/rusty-mux-ctl' agent hook; echo hi",
+        "'/a'b/rusty-mux-ctl' agent hook",
+        "/usr/bin/wrap '/usr/bin/rusty-mux-ctl' agent hook",
+    ] {
+        let settings = json(&format!(
+            r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":{}}}]}}]}}}}"#,
+            Value::from(theirs).to_json_string()
+        ));
+        assert_eq!(
+            settings::state(&settings, &ours()),
+            Ok(State::Missing),
+            "{theirs}"
+        );
+        let added = settings::with_hook(settings.clone(), &ours()).expect("adds");
+        assert_eq!(
+            added["hooks"]["SessionStart"][0], settings["hooks"]["SessionStart"][0],
+            "{theirs}"
+        );
+        assert_eq!(
+            settings::without_hook(added, Some(&settings)),
+            Ok(settings.clone()),
+            "{theirs}"
+        );
+    }
+    for moved in ["/it's/rusty-mux-ctl", r"C:\Program Files\rusty-mux-ctl.exe"] {
+        let old = settings::with_hook(json("{}"), &settings::command(moved)).expect("adds");
+        assert_eq!(
+            settings::state(&old, &ours()),
+            Ok(State::Outdated),
+            "{moved}"
+        );
+    }
+}
+
+#[test]
+fn empty_hook_containers_round_trip_byte_for_byte() {
+    for original in [r#"{"hooks":{}}"#, "{\"hooks\": {\"SessionStart\": []}}\n"] {
+        let dir = scratch();
+        fs::write(dir.join("settings.json"), original).expect("write");
+        agent(AgentCommand::Setup, &dir, CTL);
+        agent(AgentCommand::Remove, &dir, CTL);
+        assert_eq!(
+            fs::read_to_string(dir.join("settings.json")).expect("read"),
+            original
+        );
+
+        // An edit after setup is kept, and so are the containers.
+        agent(AgentCommand::Setup, &dir, CTL);
+        let mut edited = json(&fs::read_to_string(dir.join("settings.json")).expect("read"));
+        edited["model"] = "x".into();
+        fs::write(dir.join("settings.json"), edited.to_json_string()).expect("write");
+        agent(AgentCommand::Remove, &dir, CTL);
+        let mut expected = json(original);
+        expected["model"] = "x".into();
+        let left = json(&fs::read_to_string(dir.join("settings.json")).expect("read"));
+        assert_eq!(left, expected, "{original}");
+    }
+}
+
+#[test]
+fn occupied_temporary_names_are_skipped_not_truncated() {
+    let dir = scratch();
+    fs::write(dir.join("settings.json"), "{}").expect("write");
+    let target = fs::canonicalize(dir.join("settings.json")).expect("canonical");
+    let temp = |n: u32| {
+        let mut name = target.clone().into_os_string();
+        name.push(format!(".rusty-mux-{}-{n}.tmp", std::process::id()));
+        PathBuf::from(name)
+    };
+    fs::write(temp(0), "someone else's").expect("write");
+    #[cfg(unix)]
+    {
+        let victim = dir.join("victim");
+        fs::write(&victim, "keep me").expect("write");
+        std::os::unix::fs::symlink(&victim, temp(1)).expect("symlink");
+    }
+    assert_eq!(agent(AgentCommand::Setup, &dir, CTL).0, Exit::Ok);
+    assert_eq!(fs::read_to_string(temp(0)).expect("read"), "someone else's");
+    #[cfg(unix)]
+    {
+        assert!(
+            fs::symlink_metadata(temp(1))
+                .expect("link")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("victim")).expect("read"),
+            "keep me"
+        );
+    }
+    assert_eq!(agent(AgentCommand::Status, &dir, CTL).0, Exit::Ok);
+}
+
+#[cfg(unix)]
+#[test]
+fn private_settings_stay_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &Path| fs::metadata(path).expect("meta").permissions().mode() & 0o777;
+    let dir = scratch();
+    let settings = dir.join("settings.json");
+    fs::write(&settings, "{}").expect("write");
+    fs::set_permissions(&settings, fs::Permissions::from_mode(0o600)).expect("chmod");
+    agent(AgentCommand::Setup, &dir, CTL);
+    assert_eq!(mode(&settings), 0o600);
+    assert_eq!(mode(&dir.join("settings.json.rusty-mux.bak")), 0o600);
+    agent(AgentCommand::Remove, &dir, CTL);
+    assert_eq!(mode(&settings), 0o600);
+
+    // A file setup creates is private too, whatever the umask.
+    let fresh = scratch();
+    agent(AgentCommand::Setup, &fresh, CTL);
+    assert_eq!(mode(&fresh.join("settings.json")), 0o600);
 }

@@ -189,7 +189,9 @@ fn setup(files: &Files, command: &str) -> Result<Vec<Line>, String> {
         let value = match existing {
             Some((text, value)) => {
                 if hook == State::Missing && !exists(&files.backup)? {
-                    write(&files.backup, &text)?;
+                    let protection = permissions(&files.settings)?;
+                    create(&files.backup, &text, protection.as_ref())
+                        .map_err(|e| at(&files.backup, e))?;
                 }
                 value
             }
@@ -243,7 +245,9 @@ fn remove_hook(files: &Files) -> Result<Done, String> {
             if !ours {
                 Done::Absent
             } else {
-                let value = settings::without_hook(value).map_err(|e| at(&files.settings, e))?;
+                let before = backup.as_ref().map(|(_, before)| before);
+                let value =
+                    settings::without_hook(value, before).map_err(|e| at(&files.settings, e))?;
                 match &backup {
                     Some((text, before)) if *before == value => write(&files.settings, text)?,
                     None if value == Value::Object(Map::new()) => {
@@ -302,20 +306,64 @@ fn exists(path: &Path) -> Result<bool, String> {
     path.try_exists().map_err(|e| at(path, e))
 }
 
-/// Writes `text` to a temporary file beside `path`'s target and renames it
-/// over, so a crash leaves the old file or the new one. A symlink, such as
-/// a dotfile manager's, is followed rather than replaced.
+/// Writes `text` to a new temporary file beside `path`'s target and renames
+/// it over, so a crash leaves the old file or the new one. The new file has
+/// the old one's permissions (only the read-only flag on Windows, where the
+/// directory's ACL applies), or is private to the owner on Unix. A symlink,
+/// such as a dotfile manager's, is followed rather than replaced.
 fn write(path: &Path, text: &str) -> Result<(), String> {
     let target = match fs::canonicalize(path) {
         Ok(target) => target,
         Err(e) if e.kind() == io::ErrorKind::NotFound => path.to_path_buf(),
         Err(e) => return Err(at(path, e)),
     };
-    let mut temp = target.clone().into_os_string();
-    temp.push(".rusty-mux.tmp");
-    let temp = PathBuf::from(temp);
-    fs::write(&temp, text).map_err(|e| at(&temp, e))?;
-    fs::rename(&temp, &target).map_err(|e| at(&target, e))
+    let protection = permissions(&target)?;
+    let temp = (0..100)
+        .find_map(|n| {
+            let mut temp = target.clone().into_os_string();
+            temp.push(format!(".rusty-mux-{}-{n}.tmp", std::process::id()));
+            let temp = PathBuf::from(temp);
+            match create(&temp, text, protection.as_ref()) {
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => None,
+                done => Some(done.map(|()| temp.clone()).map_err(|e| at(&temp, e))),
+            }
+        })
+        .unwrap_or_else(|| Err(at(&target, "no free temporary file name beside it")))?;
+    fs::rename(&temp, &target).map_err(|e| {
+        // The rename's error is the one to report; the temporary file is ours.
+        let _ = fs::remove_file(&temp);
+        at(&target, e)
+    })
+}
+
+/// The permissions of the file at `path`, if there is one.
+fn permissions(path: &Path) -> Result<Option<fs::Permissions>, String> {
+    match fs::metadata(path) {
+        Ok(meta) => Ok(Some(meta.permissions())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(at(path, e)),
+    }
+}
+
+/// Creates `path`, failing if anything is there (a symlink included), with
+/// `text` and `protection`, or private to the owner on Unix.
+fn create(path: &Path, text: &str, protection: Option<&fs::Permissions>) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    let written = io::Write::write_all(&mut file, text.as_bytes())
+        .and_then(|()| match protection {
+            Some(protection) => file.set_permissions(protection.clone()),
+            None => Ok(()),
+        })
+        .and_then(|()| file.sync_all());
+    if written.is_err() {
+        // The write's error is the one to report; the file is ours.
+        let _ = fs::remove_file(path);
+    }
+    written
 }
 
 fn pretty(value: &Value) -> String {
