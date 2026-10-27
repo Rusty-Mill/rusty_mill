@@ -15,14 +15,16 @@
 //! Track W (D-15, slice 3): the donor stopped being only a donor here.
 //! Every foreign call in this module now has a `rusty_win32` arm behind
 //! `track-w` except [`reopen`], which documents its own reason for
-//! staying, and the input-record peek and read behind [`poll_readable`],
-//! which `rusty_win32` does not bind. The mode get/set pair is factored into two-armed [`get_mode`]/
+//! staying, and the input-record peek and read behind [`poll_readable`]
+//! and the UTF-16 read behind [`read_chunk`], which `rusty_win32` does not
+//! bind. The mode get/set pair is factored into two-armed [`get_mode`]/
 //! [`set_mode`] helpers so the ten public functions built on it keep a
 //! single body each.
 
 #![allow(unsafe_code)]
 
 use std::ffi::OsStr;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use platform::error::Result;
@@ -255,18 +257,20 @@ pub fn set_echo(on: bool) -> Result<bool> {
 ///
 /// A console input handle is signalled by any queued input record,
 /// including the key-up every keystroke leaves and focus or size events,
-/// none of which `ReadFile` returns as a byte; a plain wait would then
-/// report readable and the read block until the next key. So on a console
-/// the records ahead of the first one that carries a character are read
-/// and dropped, and the wait resumes for what is left of `timeout`:
-/// `true` means a read returns at least one byte. A character-carrying
-/// key-up is kept when it is Alt's, because Alt+numpad entry delivers its
-/// character on Alt's release. When stdin is not a console (a pipe or a
-/// file) this is the plain wait on the handle.
+/// none of which a read returns as a byte; a plain wait would then report
+/// readable and the read block until the next key. So on a console the
+/// records ahead of the first one that carries a character (see
+/// `carries_text`) are read and dropped, and the wait resumes for what is
+/// left of `timeout`: `true` means a read returns at least one byte. Text
+/// a smaller read left behind counts as readable at once. When stdin is
+/// not a console (a pipe or a file) this is the plain wait on the handle.
 pub fn poll_readable(timeout: Option<Duration>) -> Result<bool> {
     let hin = std_handle(TermStream::Stdin);
     if get_mode(hin).is_err() {
         return wait_signaled(hin, wait_ms(timeout));
+    }
+    if !pending().is_empty() {
+        return Ok(true);
     }
     let deadline = timeout.map(|d| Instant::now() + d);
     loop {
@@ -293,7 +297,10 @@ fn wait_ms(timeout: Option<Duration>) -> u32 {
 /// `VK_MENU`: the Alt key.
 const VK_MENU: u16 = 0x12;
 
-/// Whether `ReadFile` returns a character for this record.
+/// Whether a console read returns a character for this record, by
+/// conhost's rule (`GetChar`, `src/host/stream.cpp`): a key-down with a
+/// character, Alt's release with one (Alt+numpad entry), or a key-down
+/// without one that types NUL.
 fn carries_text(record: &w::INPUT_RECORD) -> bool {
     if u32::from(record.EventType) != w::KEY_EVENT {
         return false;
@@ -306,7 +313,28 @@ fn carries_text(record: &w::INPUT_RECORD) -> bool {
             record.Event.KeyEvent.uChar.UnicodeChar,
         )
     };
-    ch != 0 && (key.bKeyDown != 0 || key.wVirtualKeyCode == VK_MENU)
+    match (ch, key.bKeyDown != 0) {
+        (0, down) => down && types_nul(&key),
+        (_, down) => down || key.wVirtualKeyCode == VK_MENU,
+    }
+}
+
+/// Whether a key-down without a character types NUL: its key and its
+/// exact Alt, Ctrl and Shift state are what `VkKeyScanW(0)` names for the
+/// keyboard layout (Ctrl+@ on US English), which is the test conhost
+/// applies before returning the NUL.
+fn types_nul(key: &w::KEY_EVENT_RECORD) -> bool {
+    // SAFETY: no pointers; it reads this thread's keyboard layout.
+    let scan = unsafe { w::VkKeyScanW(0) };
+    let Ok(scan) = u16::try_from(scan) else {
+        return false;
+    };
+    let held = |mask: u32| key.dwControlKeyState & mask != 0;
+    let wants = |bit: u16| scan & bit != 0;
+    key.wVirtualKeyCode == scan & 0xff
+        && held(w::LEFT_ALT_PRESSED | w::RIGHT_ALT_PRESSED) == wants(0x400)
+        && held(w::LEFT_CTRL_PRESSED | w::RIGHT_CTRL_PRESSED) == wants(0x200)
+        && held(w::SHIFT_PRESSED) == wants(0x100)
 }
 
 /// Reads and drops queued records until one carries text; `true` if one
@@ -362,15 +390,94 @@ fn wait_signaled(h: w::HANDLE, timeout_ms: u32) -> Result<bool> {
     }
 }
 
-/// `ReadFile(stdin, buf)` — one call, batched, `Ok(0)` = EOF.
+/// Reads what stdin has, blocking for at least one byte; `Ok(0)` = EOF.
+///
+/// On a console the text is read as UTF-16 (`ReadConsoleW`) and returned
+/// as UTF-8, whatever the console's input code page, as a Unix tty in a
+/// UTF-8 locale delivers it; a lone surrogate becomes U+FFFD. A character
+/// whose UTF-8 form does not fit `buf` is returned over the next reads,
+/// and [`poll_readable`] reports it readable meanwhile. A pipe or a file
+/// is read as bytes, unchanged.
+pub fn read_chunk(buf: &mut [u8]) -> Result<usize> {
+    let hin = std_handle(TermStream::Stdin);
+    if get_mode(hin).is_err() {
+        return read_file(hin, buf);
+    }
+    read_console_utf8(hin, buf)
+}
+
+/// Text decoded from the console but not yet returned. The console's
+/// input buffer belongs to the process, so its undelivered text does too.
+static PENDING: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+fn pending() -> MutexGuard<'static, Vec<u8>> {
+    // The bytes stay valid whatever a panicking holder was doing.
+    PENDING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn read_console_utf8(hin: w::HANDLE, buf: &mut [u8]) -> Result<usize> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let mut pending = pending();
+    if pending.is_empty() {
+        // A UTF-16 unit takes at most 3 bytes of UTF-8, so this many
+        // usually fit; anything over waits in `PENDING`.
+        let units = read_console_units(hin, (buf.len() / 3).max(1))?;
+        if units.is_empty() {
+            return Ok(0);
+        }
+        *pending = String::from_utf16_lossy(&units).into_bytes();
+    }
+    let n = pending.len().min(buf.len());
+    buf[..n].copy_from_slice(&pending[..n]);
+    pending.drain(..n);
+    Ok(n)
+}
+
+/// Up to `max` UTF-16 units, plus the second half of a surrogate pair the
+/// last one starts, so a character is never split between reads.
+fn read_console_units(hin: w::HANDLE, max: usize) -> Result<Vec<u16>> {
+    let mut units = vec![0u16; max];
+    let n = read_console_w(hin, &mut units)?;
+    units.truncate(n);
+    if units.last().is_some_and(|u| (0xD800..0xDC00).contains(u)) {
+        let mut low = [0u16; 1];
+        let n = read_console_w(hin, &mut low)?;
+        units.extend_from_slice(&low[..n]);
+    }
+    Ok(units)
+}
+
+fn read_console_w(hin: w::HANDLE, units: &mut [u16]) -> Result<usize> {
+    let len = u32::try_from(units.len()).unwrap_or(u32::MAX);
+    let mut n: u32 = 0;
+    // SAFETY: `hin` is the live console input handle; `units` holds at
+    // least `len` UTF-16 units and `n` is a valid out-pointer, both
+    // outliving the call; no read control is passed.
+    let ok = unsafe {
+        w::ReadConsoleW(
+            hin,
+            units.as_mut_ptr().cast(),
+            len,
+            &mut n,
+            std::ptr::null(),
+        )
+    };
+    if ok == 0 {
+        return Err(errmap::last_win32_err("ReadConsoleW", OsStr::new("")));
+    }
+    Ok(n as usize)
+}
+
+/// `ReadFile` on a non-console stdin — one call, batched.
 ///
 /// Track W (D-15): `rusty_win32::console::read`. Same clamp as
 /// `sys::fileio::read`'s track-w arm and for the same reason — the donor
 /// passes `buf.len() as u32` straight through, which wraps rather than
 /// saturating on an oversized slice.
 #[cfg(feature = "track-w")]
-pub fn read_chunk(buf: &mut [u8]) -> Result<usize> {
-    let hin = std_handle(TermStream::Stdin);
+fn read_file(hin: w::HANDLE, buf: &mut [u8]) -> Result<usize> {
     let len = buf.len().min(u32::MAX as usize);
     // SAFETY: `hin` is a live process-owned std handle open for reading.
     unsafe { rusty_win32::console::read(hin, &mut buf[..len]) }
@@ -378,8 +485,7 @@ pub fn read_chunk(buf: &mut [u8]) -> Result<usize> {
 }
 
 #[cfg(not(feature = "track-w"))]
-pub fn read_chunk(buf: &mut [u8]) -> Result<usize> {
-    let hin = std_handle(TermStream::Stdin);
+fn read_file(hin: w::HANDLE, buf: &mut [u8]) -> Result<usize> {
     let mut n: u32 = 0;
     let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
     // SAFETY: `buf` is a valid writable region of at least `len` bytes

@@ -63,13 +63,22 @@ contract tests.
   (key-ups, bare modifiers, focus, mouse and menu records) are removed
   and the wait resumes for what is left of the timeout, so `true`
   means a following `read_chunk` returns without blocking, as on Linux.
-  A key-up that carries a character is kept: Alt+numpad entry delivers
-  its character on the Alt release. Windows, on a pipe or file: the
-  plain `WaitForSingleObject`, as before.
+  The test is conhost's own (`GetChar`): a key-down with a character;
+  Alt's release with one, since Alt+numpad entry delivers its character
+  then; and the key-down without one whose key and modifiers match
+  `VkKeyScanW(0)`, which types NUL (Ctrl+@ on US English). Text a smaller
+  `read_chunk` left behind is readable at once. Windows, on a pipe or
+  file: the plain `WaitForSingleObject`, as before.
 - `read_chunk` is one call, batched — not per-byte. In raw mode this is
   the VMIN=1/VTIME=0 shape: blocks for at least one byte, then returns
   whatever else is already buffered without a second round trip.
   `Ok(0)` is EOF, matching `std::io::Read`'s convention.
+- Windows, on a console: `read_chunk` reads UTF-16 (`ReadConsoleW`) and
+  returns UTF-8 whatever the console's input code page, the bytes a Unix
+  tty in a UTF-8 locale delivers; a lone surrogate becomes U+FFFD. A
+  surrogate pair is never split between reads, and a character whose
+  UTF-8 form does not fit the buffer is returned over the next calls.
+  On a pipe or file it is `ReadFile`, bytes unchanged.
 - **Live-verified** (not parity-pinned — timing-sensitive, exercised by
   hand): `rterm --raw-probe` under a real pty polls, then reads a
   batched chunk, entirely through these two primitives.

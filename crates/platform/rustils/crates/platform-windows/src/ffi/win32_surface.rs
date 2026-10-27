@@ -188,12 +188,18 @@ pub use windows_sys::Win32::Networking::WinSock::{
 pub use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 // `console::poll_readable` drops queued input records that carry no
 // character (key-ups, bare modifier presses, focus and size events), so
-// "readable" means a read will return a byte; `WriteConsoleInputW` is
-// how its tests queue records.
+// "readable" means a read will return a byte; `VkKeyScanW(0)` names the
+// key that types NUL, as conhost decides it. `console::read_chunk` reads
+// a console with `ReadConsoleW` and encodes UTF-8 itself, so the input
+// code page never applies. `WriteConsoleInputW` and the code-page pair
+// are how its tests queue records under a non-UTF-8 code page.
 pub use windows_sys::Win32::System::Console::{
-    PeekConsoleInputW, ReadConsoleInputW, WriteConsoleInputW, INPUT_RECORD, INPUT_RECORD_0,
-    KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0,
+    GetConsoleCP, PeekConsoleInputW, ReadConsoleInputW, ReadConsoleW, SetConsoleCP,
+    WriteConsoleInputW, INPUT_RECORD, INPUT_RECORD_0, KEY_EVENT, KEY_EVENT_RECORD,
+    KEY_EVENT_RECORD_0, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, RIGHT_ALT_PRESSED, RIGHT_CTRL_PRESSED,
+    SHIFT_PRESSED,
 };
+pub use windows_sys::Win32::UI::Input::KeyboardAndMouse::VkKeyScanW;
 
 // Security surface, CSPRNG slice (RFC v2 R5+, D15, first slice) —
 // rusty_rdp's five hand-rolled `/dev/urandom` reads. `BCryptGenRandom`

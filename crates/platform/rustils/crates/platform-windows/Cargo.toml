@@ -18,7 +18,10 @@ winargv.workspace = true
 # `Win32_Security_Authorization` (SDDL and SID strings) is not in the
 # workspace's windows-sys feature list; naming it here keeps
 # `-p platform-windows` building on its own.
-windows-sys = { workspace = true, features = ["Win32_Security_Authorization"] }
+windows-sys = { workspace = true, features = [
+    "Win32_Security_Authorization",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
 # D-15: rusty_win32 is the Track W backend, feature-gated behind
 # `track-w`. Previously a pinned git dependency; now a sibling crate in
 # this same workspace (rusty_mill), plain path dependency, matching the

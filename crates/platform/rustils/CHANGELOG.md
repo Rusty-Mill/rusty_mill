@@ -35,8 +35,16 @@ and **`coreutils`**.
   that carry no text (key-ups, bare modifiers, focus and mouse records)
   are dropped and the wait resumes for the rest of the timeout, so
   `true` means a following `read_chunk` returns without blocking. A
-  key-up that carries a character (Alt+numpad entry) is kept. Piped
-  stdin keeps the plain wait.
+  key-up that carries a character (Alt+numpad entry) is kept, and so is
+  the key-down that types NUL (conhost's `VkKeyScanW(0)` rule, Ctrl+@ on
+  US English). Piped stdin keeps the plain wait.
+- **Behaviour change: `WindowsTerminal::read_chunk` returns UTF-8 on a
+  console.** It reads UTF-16 with `ReadConsoleW` and encodes UTF-8
+  itself, so the input code page no longer applies (before, an OEM code
+  page turned é into 0x82 and unmappable text into `?`). A character
+  that does not fit the buffer arrives over the next reads. Piped stdin
+  is still read as bytes. `platform-windows` now enables windows-sys's
+  `Win32_UI_Input_KeyboardAndMouse` feature for `VkKeyScanW`.
 
 ### 0.28.0
 

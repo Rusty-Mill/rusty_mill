@@ -1,9 +1,11 @@
-//! `Terminal::poll_readable` on a console reports readable only once a
-//! read returns a byte: records that carry no character (key-ups, bare
-//! modifiers) are dropped first. rusty_mux's attach client relies on it:
-//! it re-checks its own state between waits, and a wake for a key-up
-//! would leave it blocked in a read until the next key. Runs only on CI's
-//! Windows leg.
+//! Console input on Windows, as rusty_mux's attach client reads it.
+//! `Terminal::poll_readable` reports readable only once a read returns a
+//! byte: records that carry no character (key-ups, bare modifiers) are
+//! dropped first, while the key that types NUL is kept. The client
+//! re-checks its own state between waits, so a wake for a key-up would
+//! leave it blocked in a read until the next key. `read_chunk` returns
+//! UTF-8 whatever the input code page, since the client forwards the bytes
+//! to a ConPTY, which reads UTF-8. Runs only on CI's Windows leg.
 //!
 //! Allocating a console acts on the whole process, so every test here is
 //! serialized and starts from a known state, as `tests/console_acquisition.rs`
@@ -40,6 +42,10 @@ fn fresh_console() -> WindowsTerminal {
 }
 
 fn key(down: bool, vk: u16, ch: char) -> w::INPUT_RECORD {
+    unit(down, vk, ch as u16, 0)
+}
+
+fn unit(down: bool, vk: u16, ch: u16, state: u32) -> w::INPUT_RECORD {
     w::INPUT_RECORD {
         EventType: w::KEY_EVENT as u16,
         Event: w::INPUT_RECORD_0 {
@@ -48,10 +54,8 @@ fn key(down: bool, vk: u16, ch: char) -> w::INPUT_RECORD {
                 wRepeatCount: 1,
                 wVirtualKeyCode: vk,
                 wVirtualScanCode: 0,
-                uChar: w::KEY_EVENT_RECORD_0 {
-                    UnicodeChar: ch as u16,
-                },
-                dwControlKeyState: 0,
+                uChar: w::KEY_EVENT_RECORD_0 { UnicodeChar: ch },
+                dwControlKeyState: state,
             },
         },
     }
@@ -124,4 +128,98 @@ fn piped_stdin_keeps_the_plain_wait() {
         w::CloseHandle(read);
         w::CloseHandle(write);
     }
+}
+
+/// The key-down records that type `text`, one per UTF-16 unit.
+fn typed(text: &str) -> Vec<w::INPUT_RECORD> {
+    text.encode_utf16().map(|u| unit(true, 0, u, 0)).collect()
+}
+
+/// Reads until `want` bytes arrived, polling before each read, with
+/// `chunk`-byte reads.
+fn read_polled(term: &WindowsTerminal, chunk: usize, want: usize) -> Vec<u8> {
+    let mut got = Vec::new();
+    let mut buf = vec![0u8; chunk];
+    while got.len() < want {
+        assert!(
+            term.poll_readable(WAIT).expect("poll"),
+            "not readable after {} of {want} bytes",
+            got.len()
+        );
+        let n = term.read_chunk(&mut buf).expect("read");
+        assert!(n > 0, "end of input after {} of {want} bytes", got.len());
+        got.extend_from_slice(&buf[..n]);
+    }
+    got
+}
+
+/// Raw mode on a fresh console whose input code page is `cp`.
+fn raw_console(cp: u32) -> WindowsTerminal {
+    let mut term = fresh_console();
+    // SAFETY: plain value; this process's console.
+    assert_ne!(unsafe { w::SetConsoleCP(cp) }, 0, "SetConsoleCP({cp})");
+    // SAFETY: no arguments.
+    assert_eq!(unsafe { w::GetConsoleCP() }, cp);
+    term.enter_raw().expect("raw mode");
+    term
+}
+
+fn close(mut term: WindowsTerminal) {
+    term.leave_raw().expect("leave raw mode");
+    term.free_console().expect("FreeConsole");
+}
+
+/// The key-down that types NUL is input; its key-up is not.
+#[test]
+fn the_key_that_types_nul_is_readable() {
+    let _guard = lock_console_tests();
+    let term = raw_console(437);
+    // SAFETY: no pointers.
+    let scan = unsafe { w::VkKeyScanW(0) };
+    let scan = u16::try_from(scan).expect("the layout types NUL with some key");
+    let mut state = 0;
+    if scan & 0x100 != 0 {
+        state |= w::SHIFT_PRESSED;
+    }
+    if scan & 0x200 != 0 {
+        state |= w::LEFT_CTRL_PRESSED;
+    }
+    if scan & 0x400 != 0 {
+        state |= w::LEFT_ALT_PRESSED;
+    }
+    let vk = scan & 0xff;
+    queue(&[unit(false, vk, 0, state)]);
+    assert!(!term.poll_readable(WAIT).expect("poll"), "NUL's key-up");
+    queue(&[unit(true, vk, 0, state)]);
+    assert_eq!(read_polled(&term, 8, 1), [0]);
+    close(term);
+}
+
+/// Text arrives as UTF-8 under an OEM code page, including characters
+/// that page cannot represent.
+#[test]
+fn text_is_utf8_under_a_non_utf8_code_page() {
+    let _guard = lock_console_tests();
+    let term = raw_console(437);
+    let text = "é€😀x";
+    queue(&typed(text));
+    assert_eq!(read_polled(&term, 64, text.len()), text.as_bytes());
+    close(term);
+}
+
+/// A character whose UTF-8 form straddles a read's end arrives whole
+/// over the next reads, with a poll between each.
+#[test]
+fn a_character_split_across_reads_arrives_whole() {
+    let _guard = lock_console_tests();
+    let term = raw_console(437);
+    let text = format!("{}é😀x", "a".repeat(4095));
+    queue(&typed(&text));
+    assert_eq!(read_polled(&term, 4096, text.len()), text.as_bytes());
+    let small = "é😀x";
+    queue(&typed(small));
+    assert_eq!(read_polled(&term, 1, small.len()), small.as_bytes());
+    queue(&typed(small));
+    assert_eq!(read_polled(&term, 3, small.len()), small.as_bytes());
+    close(term);
 }
