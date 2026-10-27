@@ -8,6 +8,8 @@ license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_a2a"
 keywords = ["a2a", "agent", "protocol", "agent2agent"]
 categories = ["network-programming", "asynchronous"]
+# Depends on unpublished workspace crates (`rusty_ip`, `rusty_tonic`), and its API still moves.
+publish = false
 
 [package.metadata.rusty_mill]
 layer = "libs"
