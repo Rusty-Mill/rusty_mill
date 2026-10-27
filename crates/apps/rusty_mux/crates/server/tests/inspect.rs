@@ -359,7 +359,7 @@ fn capture_options_trim_unwrap_and_keep_styles() {
     let block = block_for(&mut client);
     client.input(
         block,
-        b"clear; printf '\\033[1mBOLD\\033[0m %0100d\\n' 0; echo END$((1+1))\r",
+        b"printf '\\033[H\\033[2J'; printf '\\033[1mBOLD\\033[0m %0100d\\n' 0; echo END$((1+1))\r",
     );
     client.wait_for(block, "END2");
     let format = |client: &mut Client, flags: &[&str]| {
