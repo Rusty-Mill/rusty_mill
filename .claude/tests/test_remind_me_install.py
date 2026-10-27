@@ -225,6 +225,8 @@ class Install(unittest.TestCase):
             {'type': 'command', 'command': f'curl -H "Authorization: {secret}"', 'timeout': 'soon'},
             {'type': 'http', 'url': f'https://u/?k={secret}', 'headers': {'Authorization': 7}},
             {'type': f'{secret}'},
+            {'type': [secret]},
+            {'type': {'k': secret}},
         ):
             text = json.dumps({'hooks': {'Stop': [{'hooks': [broken]}]}})
             self.settings.write_text(text)
