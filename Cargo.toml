@@ -80,6 +80,7 @@ members = [
     "crates/foundation/rusty_json_patch",
     "crates/foundation/rusty_json/rusty_json-derive",
     "crates/libs/net/rusty_oauth",
+    "crates/libs/net/rusty_oauth_server",
     "crates/libs/protocol/rusty_channel",
     "crates/libs/protocol/rusty_routine",
     "crates/libs/protocol/rusty_bbp",
@@ -579,6 +580,7 @@ rusty_sandbox = { path = "crates/libs/rusty_sandbox" }
 rusty_worktree = { path = "crates/libs/rusty_worktree" }
 rusty_bot = { path = "crates/libs/rusty_bot" }
 rusty_oauth = { path = "crates/libs/net/rusty_oauth" }
+rusty_oauth_server = { path = "crates/libs/net/rusty_oauth_server" }
 rusty_std = { path = "crates/foundation/rusty_std" }
 thiserror = "1"
 futures-core = "0.3"

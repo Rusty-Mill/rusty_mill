@@ -10360,8 +10360,10 @@ dependencies = [
  "rusty_atomic_file",
  "rusty_crypto_key",
  "rusty_hex",
+ "rusty_json",
  "rusty_multimodal_db_engine",
  "rusty_oauth",
+ "rusty_oauth_server",
  "rusty_percent",
  "serde",
  "serde_json",
@@ -10396,6 +10398,7 @@ name = "remind_me_mcp"
 version = "0.4.0"
 dependencies = [
  "remind_me_core",
+ "rusty_json",
  "serde_json",
 ]
 
@@ -10407,15 +10410,12 @@ dependencies = [
  "remind_me_mcp",
  "reqwest 0.13.4",
  "rusty_axum",
- "rusty_base64",
- "rusty_hex",
+ "rusty_crypto_key",
  "rusty_mcp_server",
  "rusty_oauth",
- "rusty_percent",
+ "rusty_oauth_server",
  "rusty_tokio",
- "serde",
  "serde_json",
- "sha256",
  "thiserror 2.0.20",
  "tokio",
 ]
@@ -12664,6 +12664,20 @@ dependencies = [
  "rusty_json",
  "rusty_rand",
  "rusty_rsa",
+]
+
+[[package]]
+name = "rusty_oauth_server"
+version = "0.1.0"
+dependencies = [
+ "rusty_atomic_file",
+ "rusty_hex",
+ "rusty_json",
+ "rusty_oauth",
+ "rusty_rand",
+ "rusty_url",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]
