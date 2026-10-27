@@ -66,4 +66,47 @@ pub enum Event {
     TitleChanged {
         block: BlockId,
     },
+    /// The block's program exited by itself; [`Event::BlockClosed`] follows.
+    ProgramExited {
+        block: BlockId,
+        status: ExitStatus,
+    },
+    /// The block's program rang the bell. A burst read at once is one event.
+    Bell {
+        block: BlockId,
+    },
+    /// The progress the block's program shows changed (OSC 9;4).
+    ProgressChanged {
+        block: BlockId,
+        progress: Progress,
+    },
+    /// The block's program asked for a desktop notification (OSC 9 or 777);
+    /// an empty title leaves it to the client.
+    Notification {
+        block: BlockId,
+        title: String,
+        body: String,
+    },
+}
+
+/// How a block's program ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitStatus {
+    /// It exited with this code.
+    Code(i32),
+    /// This signal ended it (Unix only).
+    Signal(i32),
+}
+
+/// The progress a program shows, as ConEmu's OSC 9;4 reports it; the
+/// numbers are percentages, at most 100.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    /// None shown.
+    Cleared,
+    Normal(u8),
+    Error(u8),
+    /// Busy, with no known amount.
+    Indeterminate,
+    Paused(u8),
 }

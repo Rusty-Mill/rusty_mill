@@ -116,9 +116,10 @@ pub struct Bind {
 }
 
 /// The event kinds a rule can name, as `rusty-mux-ctl events` prints them,
-/// and the fields each gives its placeholders: the ids and numbers of the
-/// event, and for `pwd-changed` and `title-changed` the new directory or
-/// title.
+/// and the fields each gives its placeholders: the ids, numbers and text
+/// of the event, and for `pwd-changed` and `title-changed` the new
+/// directory or title. A program that exits has a `code` or, killed by a
+/// signal, a `signal`, never both.
 pub const EVENTS: &[(&str, &[&str])] = &[
     ("session-created", &["session"]),
     ("session-closed", &["session"]),
@@ -135,6 +136,10 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ("block-status", &["block"]),
     ("pwd-changed", &["block", "pwd"]),
     ("title-changed", &["block", "title"]),
+    ("program-exited", &["block", "code", "signal"]),
+    ("bell", &["block"]),
+    ("progress-changed", &["block", "state", "percent"]),
+    ("notification", &["block", "title", "body"]),
 ];
 
 /// What to run when an event of one kind happens.

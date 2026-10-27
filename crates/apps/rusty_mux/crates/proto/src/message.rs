@@ -1,6 +1,6 @@
 //! The messages and their field layouts.
 
-use rusty_mux_core::{BlockId, ClientId, Event, SessionId, Size, WindowId};
+use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Progress, SessionId, Size, WindowId};
 use rusty_uuid::Uuid;
 
 use crate::field::{In, Out};
@@ -46,6 +46,10 @@ impl Features {
     /// [`Event::PwdChanged`] and [`Event::TitleChanged`] events, likewise
     /// skipped for a client without it.
     pub const TERMINAL_EVENTS: Self = Self(1 << 9);
+    /// [`Event::ProgramExited`], [`Event::Bell`], [`Event::ProgressChanged`]
+    /// and [`Event::Notification`] events, likewise skipped for a client
+    /// without it.
+    pub const PROGRAM_EVENTS: Self = Self(1 << 10);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -275,8 +279,15 @@ const TITLE: u32 = 20;
 const CODE: u32 = 21;
 const METHOD: u32 = 22;
 const ARGS: u32 = 23;
-// IDs 1..=ARGS are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = ARGS as usize;
+/// A program's exit code, its two's-complement bits.
+const EXIT: u32 = 24;
+const SIGNAL: u32 = 25;
+/// A progress state, numbered as OSC 9;4 numbers them.
+const PROGRESS: u32 = 26;
+const PERCENT: u32 = 27;
+const BODY: u32 = 28;
+// IDs 1..=BODY are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = BODY as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -607,6 +618,10 @@ mod kind {
     pub const BLOCK_STATUS: u64 = 13;
     pub const PWD_CHANGED: u64 = 14;
     pub const TITLE_CHANGED: u64 = 15;
+    pub const PROGRAM_EXITED: u64 = 16;
+    pub const BELL: u64 = 17;
+    pub const PROGRESS_CHANGED: u64 = 18;
+    pub const NOTIFICATION: u64 = 19;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -688,6 +703,80 @@ fn put_event(out: &mut Out, event: &Event) {
             out.varint(KIND, kind::TITLE_CHANGED)
                 .uuid(BLOCK, block.uuid());
         }
+        E::ProgramExited { block, status } => {
+            let o = out
+                .varint(KIND, kind::PROGRAM_EXITED)
+                .uuid(BLOCK, block.uuid());
+            match status {
+                ExitStatus::Code(code) => o.varint(EXIT, code.cast_unsigned().into()),
+                ExitStatus::Signal(signal) => o.varint(SIGNAL, signal.cast_unsigned().into()),
+            };
+        }
+        E::Bell { block } => {
+            out.varint(KIND, kind::BELL).uuid(BLOCK, block.uuid());
+        }
+        E::ProgressChanged { block, progress } => {
+            put_progress(
+                out.varint(KIND, kind::PROGRESS_CHANGED)
+                    .uuid(BLOCK, block.uuid()),
+                progress,
+            );
+        }
+        E::Notification {
+            block,
+            ref title,
+            ref body,
+        } => {
+            out.varint(KIND, kind::NOTIFICATION)
+                .uuid(BLOCK, block.uuid())
+                .bytes(TITLE, title.as_bytes())
+                .bytes(BODY, body.as_bytes());
+        }
+    }
+}
+
+fn put_progress(out: &mut Out, progress: Progress) {
+    let (state, percent) = match progress {
+        Progress::Cleared => (0, None),
+        Progress::Normal(p) => (1, Some(p)),
+        Progress::Error(p) => (2, Some(p)),
+        Progress::Indeterminate => (3, None),
+        Progress::Paused(p) => (4, Some(p)),
+    };
+    out.varint(PROGRESS, state);
+    if let Some(percent) = percent {
+        out.varint(PERCENT, percent.into());
+    }
+}
+
+/// A percentage is at most 100; a state that has one needs it.
+fn get_progress(f: &In<'_>) -> Result<Progress, Error> {
+    let percent = || {
+        u8::try_from(f.varint(PERCENT)?)
+            .ok()
+            .filter(|p| *p <= 100)
+            .ok_or_else(|| f.invalid(PERCENT))
+    };
+    Ok(match f.varint(PROGRESS)? {
+        0 => Progress::Cleared,
+        1 => Progress::Normal(percent()?),
+        2 => Progress::Error(percent()?),
+        3 => Progress::Indeterminate,
+        4 => Progress::Paused(percent()?),
+        _ => return Err(f.invalid(PROGRESS)),
+    })
+}
+
+/// An exit code or a signal, whichever is present; a value is 32 bits.
+fn get_exit(f: &In<'_>) -> Result<ExitStatus, Error> {
+    let bits = |id| {
+        u32::try_from(f.varint(id)?)
+            .map(u32::cast_signed)
+            .map_err(|_| f.invalid(id))
+    };
+    match f.opt(EXIT, |_, id| bits(id))? {
+        Some(code) => Ok(ExitStatus::Code(code)),
+        None => bits(SIGNAL).map(ExitStatus::Signal),
     }
 }
 
@@ -745,6 +834,22 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         },
         kind::TITLE_CHANGED => E::TitleChanged {
             block: block(f, BLOCK)?,
+        },
+        kind::PROGRAM_EXITED => E::ProgramExited {
+            block: block(f, BLOCK)?,
+            status: get_exit(f)?,
+        },
+        kind::BELL => E::Bell {
+            block: block(f, BLOCK)?,
+        },
+        kind::PROGRESS_CHANGED => E::ProgressChanged {
+            block: block(f, BLOCK)?,
+            progress: get_progress(f)?,
+        },
+        kind::NOTIFICATION => E::Notification {
+            block: block(f, BLOCK)?,
+            title: f.string(TITLE)?,
+            body: f.string(BODY)?,
         },
         _ => return Err(f.invalid(KIND)),
     })

@@ -10,7 +10,7 @@ use std::time::Duration;
 use platform::error::{ErrorKind, PlatformError};
 use platform::process::{Command, EnvSpec};
 use platform::term::WinSize;
-use rusty_mux_core::Size;
+use rusty_mux_core::{ExitStatus, Size};
 
 use crate::Config;
 
@@ -40,6 +40,17 @@ fn command(config: &Config, env: &[(&str, OsString)]) -> Command {
         cmd = cmd.arg(arg.clone());
     }
     cmd
+}
+
+/// How a program ended, as the model tells it; `None` for a stop or a
+/// continue, which `try_wait` never reports.
+fn exit_status(status: platform::process::ExitStatus) -> Option<ExitStatus> {
+    use platform::process::ExitStatus as S;
+    match status {
+        S::Code(code) => Some(ExitStatus::Code(code)),
+        S::Signaled(signal) => Some(ExitStatus::Signal(signal)),
+        S::Stopped(_) | S::Continued => None,
+    }
 }
 
 fn win_size(size: Size) -> WinSize {

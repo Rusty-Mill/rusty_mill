@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use rusty_mux_core::Progress;
 use rusty_mux_status::Records;
 use rusty_term_core::{Grid, StatusSignal};
 
@@ -63,6 +64,8 @@ pub(crate) fn absorb_status(grid: &mut Grid, records: &mut Records) -> bool {
 pub(crate) struct Seen {
     cwd: String,
     title: String,
+    /// OSC 9;4's `(state, percent)`, as the grid keeps it.
+    progress: Option<(u8, u8)>,
 }
 
 impl Seen {
@@ -73,6 +76,21 @@ impl Seen {
             update(&mut self.cwd, &grid.cwd),
             update(&mut self.title, &grid.title),
         )
+    }
+
+    /// The grid's progress, if it changed since the last call.
+    pub(crate) fn progress(&mut self, grid: &Grid) -> Option<Progress> {
+        if self.progress == grid.progress {
+            return None;
+        }
+        self.progress = grid.progress;
+        Some(match grid.progress {
+            Some((1, p)) => Progress::Normal(p),
+            Some((2, p)) => Progress::Error(p),
+            Some((3, _)) => Progress::Indeterminate,
+            Some((4, p)) => Progress::Paused(p),
+            _ => Progress::Cleared,
+        })
     }
 }
 
@@ -153,6 +171,26 @@ mod tests {
         assert_eq!(seen.changes(&grid), (false, false), "announced once");
         parser.advance(&mut grid, b"\x1b]7;file://host/tmp\x07\x1b]2;next\x07");
         assert_eq!(seen.changes(&grid), (false, true), "same directory");
+    }
+
+    #[test]
+    fn progress_changes_are_seen_once() {
+        let mut grid = Grid::new(20, 2);
+        let mut parser = rusty_term_core::AnsiParser::new();
+        let mut seen = Seen::default();
+        assert_eq!(seen.progress(&grid), None, "nothing yet");
+        let steps: [(&[u8], Option<Progress>); 6] = [
+            (b"\x1b]9;4;1;40\x07", Some(Progress::Normal(40))),
+            (b"\x1b]9;4;1;40\x07", None),
+            (b"\x1b]9;4;2;150\x07", Some(Progress::Error(100))),
+            (b"\x1b]9;4;3\x07", Some(Progress::Indeterminate)),
+            (b"\x1b]9;4;4;7\x07", Some(Progress::Paused(7))),
+            (b"\x1b]9;4;0\x07", Some(Progress::Cleared)),
+        ];
+        for (input, expected) in steps {
+            parser.advance(&mut grid, input);
+            assert_eq!(seen.progress(&grid), expected, "{input:?}");
+        }
     }
 
     fn status_grid() -> (Grid, rusty_term_core::AnsiParser, Records) {

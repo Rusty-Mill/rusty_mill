@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use rusty_mux_core::{BlockId, ClientId, Event, Mux, Size};
+use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Mux, Size};
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::{Code, Cursor, Entry, Features, Message, encode};
 use rusty_mux_status::Records;
@@ -40,7 +40,8 @@ const OFFERED: Features = Features::CHECKPOINT_V3
     .union(Features::INSPECT)
     .union(Features::BLOCK_CALL)
     .union(Features::STATUS)
-    .union(Features::TERMINAL_EVENTS);
+    .union(Features::TERMINAL_EVENTS)
+    .union(Features::PROGRAM_EVENTS);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -59,15 +60,15 @@ struct BlockRt {
 
 impl BlockRt {
     /// Stops reading (unless the reader is the caller), releases the PTY's
-    /// output whatever other handles remain, closes this handle on the
-    /// master, and reaps the program in the background.
-    fn release(self, abort_reader: bool) {
+    /// output whatever other handles remain and closes this handle on the
+    /// master. The program, for the caller to reap.
+    fn release(self, abort_reader: bool) -> Process {
         if abort_reader {
             self.reader.abort();
         }
         self.pty.release();
         drop(self.pty);
-        rusty_tokio::task::spawn_local(self.process.reap());
+        self.process
     }
 }
 
@@ -225,6 +226,11 @@ impl State {
                 }
                 if self.clients.get(&client).is_some_and(|out| out.attaching()) {
                     return (req, Err("checkpoint transfer already in progress".into()));
+                }
+                // Its output ended and its program is being reaped: nothing
+                // is left to send a checkpoint from.
+                if self.mux.block(block).is_some() && !self.blocks.contains_key(&block) {
+                    return (req, Err(format!("block {block} is closing").into()));
                 }
                 let result = self.mux.attach(client, block);
                 (
@@ -461,18 +467,31 @@ impl State {
         };
         rt.parser.advance(&mut rt.grid, data);
         let replies = rt.parser.take_responses();
-        if terminal::absorb_status(&mut rt.grid, &mut rt.status)
-            && let Err(err) = self.mux.note_status(block)
-        {
-            eprintln!("rusty-mux-server: model out of step on status: {err}");
+        if terminal::absorb_status(&mut rt.grid, &mut rt.status) {
+            in_step("status", self.mux.note_status(block));
         }
         let (pwd, title) = rt.seen.changes(&rt.grid);
-        if pwd && let Err(err) = self.mux.note_pwd(block) {
-            eprintln!("rusty-mux-server: model out of step on pwd: {err}");
+        if pwd {
+            in_step("pwd", self.mux.note_pwd(block));
         }
-        if title && let Err(err) = self.mux.note_title(block) {
-            eprintln!("rusty-mux-server: model out of step on title: {err}");
+        if title {
+            in_step("title", self.mux.note_title(block));
         }
+        if std::mem::take(&mut rt.grid.bell) {
+            in_step("bell", self.mux.note_bell(block));
+        }
+        if let Some(progress) = rt.seen.progress(&rt.grid) {
+            in_step("progress", self.mux.note_progress(block, progress));
+        }
+        for (title, body) in rt.grid.notifications.drain(..) {
+            in_step(
+                "notification",
+                self.mux.note_notification(block, title, body),
+            );
+        }
+        // What a terminal host would relay, such as the bell; clients
+        // already have the raw output.
+        rt.grid.take_host_out();
         let frame = encode(&Message::Output {
             block,
             data: data.to_vec(),
@@ -493,11 +512,20 @@ impl State {
         replies
     }
 
-    /// The program exited: close its block.
-    fn exited(&mut self, block: BlockId) {
-        // Released first, without aborting the reader that is calling this.
-        if let Some(rt) = self.blocks.remove(&block) {
-            rt.release(false);
+    /// The block's output ended: stop serving its PTY, without aborting the
+    /// reader that is calling this. Its program, to reap; `None` if a
+    /// client closed the block first.
+    fn hang_up(&mut self, block: BlockId) -> Option<Process> {
+        self.blocks.remove(&block).map(|rt| rt.release(false))
+    }
+
+    /// The block's program ended: announce how, if known, and close the
+    /// block, unless a client closed it while the program was reaped.
+    fn exited(&mut self, block: BlockId, status: Option<ExitStatus>) {
+        if let Some(status) = status
+            && self.mux.note_exit(block, status).is_err()
+        {
+            return;
         }
         if self.mux.close_block(block).is_ok() {
             self.flush();
@@ -558,7 +586,7 @@ impl State {
                 if let Event::BlockClosed { block } = event
                     && let Some(rt) = self.blocks.remove(&block)
                 {
-                    rt.release(true);
+                    rusty_tokio::task::spawn_local(rt.release(true).reap());
                 }
                 let seq = self.history.push(event.clone());
                 let (Some(plain), Some(numbered)) =
@@ -589,9 +617,21 @@ fn receives(features: Features, event: &Event) -> bool {
     let needs = match event {
         Event::BlockStatus { .. } => Features::STATUS,
         Event::PwdChanged { .. } | Event::TitleChanged { .. } => Features::TERMINAL_EVENTS,
+        Event::ProgramExited { .. }
+        | Event::Bell { .. }
+        | Event::ProgressChanged { .. }
+        | Event::Notification { .. } => Features::PROGRAM_EVENTS,
         _ => Features::NONE,
     };
     features.contains(needs)
+}
+
+/// Reports a model call that fails only if the server's state and the
+/// model's disagree.
+fn in_step(what: &str, result: Result<(), rusty_mux_core::Error>) {
+    if let Err(err) = result {
+        eprintln!("rusty-mux-server: model out of step on {what}: {err}");
+    }
 }
 
 fn event_frame(seq: Option<u64>, event: &Event) -> Option<Vec<u8>> {
@@ -684,7 +724,12 @@ async fn pump(shared: Shared, block: BlockId, pty: Rc<Pty>) {
         // writes get their turn between chunks.
         rusty_tokio::task::yield_now().await;
     }
-    shared.borrow_mut().exited(block);
+    let process = shared.borrow_mut().hang_up(block);
+    let status = match process {
+        Some(process) => process.reap().await,
+        None => None,
+    };
+    shared.borrow_mut().exited(block, status);
 }
 
 #[cfg(all(test, unix))]
@@ -922,6 +967,86 @@ mod regression {
                 );
                 State::request(&shared, client, Message::Detach { req: req + 10 });
             }
+            State::request(&shared, client, Message::CloseBlock { req: 99, block });
+        });
+    }
+
+    /// Reads until the reply to `req`.
+    async fn reply_to(inbox: &mut Inbox, req: u64) -> Message {
+        loop {
+            let frame = inbox.next().await.expect("a reply");
+            let message = rusty_mux_proto::decode(&frame).unwrap().unwrap().0;
+            if let Message::Done { req: r, .. } | Message::Failed { req: r, .. } = message
+                && r == req
+            {
+                return message;
+            }
+        }
+    }
+
+    #[test]
+    fn a_block_being_reaped_refuses_attach_and_may_still_be_closed() {
+        runtime().block_on(async {
+            let (shared, client, block, mut inbox) = fixture();
+            let process = shared.borrow_mut().hang_up(block).expect("program");
+            State::request(&shared, client, Message::Attach { req: 7, block });
+            let reply = reply_to(&mut inbox, 7).await;
+            assert!(
+                matches!(&reply, Message::Failed { reason, .. } if reason.contains("closing")),
+                "{reply:?}"
+            );
+            assert_eq!(shared.borrow().mux.client(client).unwrap().attached(), None);
+
+            // A client closes it before the reap ends: no exit is announced.
+            State::request(&shared, client, Message::CloseBlock { req: 8, block });
+            assert!(shared.borrow().mux.block(block).is_none());
+            let before = shared.borrow().history.cursor();
+            shared.borrow_mut().exited(block, Some(ExitStatus::Code(0)));
+            assert_eq!(shared.borrow().history.cursor(), before);
+            drop(process);
+        });
+    }
+
+    #[test]
+    fn an_exit_is_announced_before_the_close() {
+        runtime().block_on(async {
+            let (shared, _, block, _inbox) = fixture();
+            shared.borrow_mut().flush();
+            let process = shared.borrow_mut().hang_up(block).expect("program");
+            let before = shared.borrow().history.cursor();
+            shared.borrow_mut().exited(block, Some(ExitStatus::Code(3)));
+            let state = shared.borrow();
+            let events: Vec<&Event> = state
+                .history
+                .since(before)
+                .expect("held")
+                .map(|(_, e)| e)
+                .collect();
+            assert_eq!(
+                events.first(),
+                Some(&&Event::ProgramExited {
+                    block,
+                    status: ExitStatus::Code(3)
+                })
+            );
+            assert_eq!(events.last(), Some(&&Event::BlockClosed { block }));
+            drop(state);
+            drop(process);
+        });
+    }
+
+    #[test]
+    fn a_status_query_is_answered_in_order_with_other_replies() {
+        runtime().block_on(async {
+            let (shared, client, block, _inbox) = fixture();
+            let replies = shared
+                .borrow_mut()
+                .output(block, b"\x1b]7501;?\x1b\\\x1b[c");
+            assert!(
+                replies.starts_with(b"\x1b]7501;?\x1b\\\x1b["),
+                "{replies:?}"
+            );
+            assert!(shared.borrow().blocks[&block].status.bodies().is_empty());
             State::request(&shared, client, Message::CloseBlock { req: 99, block });
         });
     }

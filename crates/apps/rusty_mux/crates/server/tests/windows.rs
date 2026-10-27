@@ -1,6 +1,7 @@
 //! How blocks end on Windows: a close reaches every program on the pseudo
 //! console, a flooding block closes without stalling the server, and a
-//! server that dies takes its blocks with it.
+//! server that dies takes its blocks with it. A program that exits by
+//! itself reports its exit code.
 
 #![cfg(windows)]
 
@@ -11,8 +12,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use common::{Client, PATIENCE, block_for, connect, run_and_wait, start_server};
-use rusty_mux_core::BlockId;
-use rusty_mux_proto::Message;
+use rusty_mux_core::{BlockId, Event, ExitStatus};
+use rusty_mux_proto::{Features, Message};
 
 /// Prints the block's shell pid as `SHELL=<n>`: powershell's parent.
 const SHELL_PID: &[u8] = b"powershell -NoProfile -c \"'SHELL=' + (Get-CimInstance Win32_Process -Filter ('ProcessId=' + $PID)).ParentProcessId\"\r";
@@ -122,4 +123,24 @@ fn wait_until_listening(path: &Path) {
         assert!(Instant::now() < deadline, "server never listened");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+fn a_program_that_exits_reports_its_code() {
+    let path = start_server();
+    let wanted = Features::PROGRAM_EVENTS.union(Features::CHECKPOINT_V3);
+    let mut a = Client::connect_with(&path, wanted, None);
+    let block = block_for(&mut a);
+    a.input(block, b"exit 3\r");
+    let closed = Event::BlockClosed { block };
+    while !a.events.iter().any(|(_, e)| *e == closed) {
+        a.recv();
+    }
+    let exited = Event::ProgramExited {
+        block,
+        status: ExitStatus::Code(3),
+    };
+    let at = |event: &Event| a.events.iter().position(|(_, e)| e == event);
+    let exited_at = at(&exited).unwrap_or_else(|| panic!("no exit in {:?}", a.events));
+    assert!(Some(exited_at) < at(&closed), "exit after the close");
 }

@@ -1,4 +1,4 @@
-use rusty_mux_core::{BlockId, ClientId, Event, SessionId, Size, WindowId};
+use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Progress, SessionId, Size, WindowId};
 use rusty_uuid::Uuid;
 use rusty_wire::Writer;
 
@@ -229,6 +229,40 @@ fn every_event_round_trips() {
         Event::BlockStatus { block },
         Event::PwdChanged { block },
         Event::TitleChanged { block },
+        Event::ProgramExited {
+            block,
+            status: ExitStatus::Code(-1),
+        },
+        Event::ProgramExited {
+            block,
+            status: ExitStatus::Signal(9),
+        },
+        Event::Bell { block },
+        Event::ProgressChanged {
+            block,
+            progress: Progress::Cleared,
+        },
+        Event::ProgressChanged {
+            block,
+            progress: Progress::Normal(100),
+        },
+        Event::ProgressChanged {
+            block,
+            progress: Progress::Error(5),
+        },
+        Event::ProgressChanged {
+            block,
+            progress: Progress::Indeterminate,
+        },
+        Event::ProgressChanged {
+            block,
+            progress: Progress::Paused(0),
+        },
+        Event::Notification {
+            block,
+            title: String::new(),
+            body: "done; ok".into(),
+        },
     ];
     for event in events {
         round_trip(Message::Event {
@@ -442,6 +476,62 @@ fn invalid_values_are_rejected() {
             message: 0x84,
             field: 13
         })
+    );
+}
+
+#[test]
+fn program_event_values_are_checked() {
+    let block = BlockId::from_uuid(Uuid::nil());
+    let event = |kind: u64, fields: &dyn Fn(&mut Out)| {
+        decode(&raw_frame(0x84, |o| {
+            o.varint(13, kind).uuid(4, block.uuid());
+            fields(o);
+        }))
+    };
+    let invalid = |field| {
+        Err(Error::InvalidField {
+            message: 0x84,
+            field,
+        })
+    };
+    assert_eq!(
+        event(18, &|o| {
+            o.varint(26, 1).varint(27, 101);
+        }),
+        invalid(27),
+        "over 100%"
+    );
+    assert_eq!(
+        event(18, &|o| {
+            o.varint(26, 5);
+        }),
+        invalid(26),
+        "unknown state"
+    );
+    assert_eq!(
+        event(18, &|o| {
+            o.varint(26, 4);
+        }),
+        Err(Error::MissingField {
+            message: 0x84,
+            field: 27
+        }),
+        "paused needs a percentage"
+    );
+    assert_eq!(
+        event(16, &|o| {
+            o.varint(24, 1 << 32);
+        }),
+        invalid(24),
+        "wider than 32 bits"
+    );
+    assert_eq!(
+        event(16, &|_| {}),
+        Err(Error::MissingField {
+            message: 0x84,
+            field: 25
+        }),
+        "neither a code nor a signal"
     );
 }
 

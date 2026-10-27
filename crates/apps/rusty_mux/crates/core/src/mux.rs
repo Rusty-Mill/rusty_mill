@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Block, BlockId, Client, ClientId, Error, Event, Session, SessionId, Size, Window, WindowId,
+    Block, BlockId, Client, ClientId, Error, Event, ExitStatus, Progress, Session, SessionId, Size,
+    Window, WindowId,
 };
 
 /// All sessions, windows, blocks and clients, plus the events not yet drained.
@@ -164,6 +165,32 @@ impl Mux {
     /// does its status.
     pub fn note_title(&mut self, block: BlockId) -> Result<(), Error> {
         self.note(block, Event::TitleChanged { block })
+    }
+
+    /// Announces that the block's program exited by itself, before the host
+    /// closes the block.
+    pub fn note_exit(&mut self, block: BlockId, status: ExitStatus) -> Result<(), Error> {
+        self.note(block, Event::ProgramExited { block, status })
+    }
+
+    /// Announces that the block's program rang the bell.
+    pub fn note_bell(&mut self, block: BlockId) -> Result<(), Error> {
+        self.note(block, Event::Bell { block })
+    }
+
+    /// Announces the progress the block's program now shows.
+    pub fn note_progress(&mut self, block: BlockId, progress: Progress) -> Result<(), Error> {
+        self.note(block, Event::ProgressChanged { block, progress })
+    }
+
+    /// Announces a desktop notification the block's program asked for.
+    pub fn note_notification(
+        &mut self,
+        block: BlockId,
+        title: String,
+        body: String,
+    ) -> Result<(), Error> {
+        self.note(block, Event::Notification { block, title, body })
     }
 
     /// Emits `event` about a block the host tracks, if it is live.

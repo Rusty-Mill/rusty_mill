@@ -32,6 +32,6 @@ mod mux;
 
 pub use entity::{Block, Client, Session, Size, Window};
 pub use error::Error;
-pub use event::Event;
+pub use event::{Event, ExitStatus, Progress};
 pub use id::{BlockId, ClientId, SessionId, WindowId};
 pub use mux::Mux;

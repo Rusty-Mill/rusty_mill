@@ -7288,6 +7288,50 @@ fn clearing_history_releases_its_styles() {
 }
 
 #[test]
+fn a_collecting_host_answers_the_status_query_in_order() {
+    const ANSWER: &[u8] = b"\x1b]7501;?\x1b\\";
+    const DA1: &[u8] = b"\x1b[?1;2;4c";
+    let mut p = AnsiParser::new();
+    let mut silent = Grid::new(80, 24);
+    p.advance(&mut silent, b"\x1b]7501;?\x07\x1b[c");
+    assert_eq!(
+        p.take_responses(),
+        DA1,
+        "a host that doesn't collect is silent"
+    );
+
+    let mut g = Grid::new(80, 24);
+    g.collect_program_status = true;
+    p.advance(&mut g, b"\x1b]7501;?\x1b\\\x1b[c");
+    assert_eq!(p.take_responses(), [ANSWER, DA1].concat(), "query then DA1");
+    p.advance(&mut g, b"\x1b[c\x1b]7501;?\x07");
+    assert_eq!(p.take_responses(), [DA1, ANSWER].concat(), "DA1 then query");
+    p.advance(&mut g, b"\x1b]7501;");
+    p.advance(&mut g, b"?\x07\x1b[c");
+    assert_eq!(p.take_responses(), [ANSWER, DA1].concat(), "split query");
+    p.advance(&mut g, b"\x1b]7501;?:x=1\x07");
+    assert!(
+        p.take_responses().is_empty(),
+        "only a bare `?` is the query"
+    );
+    assert_eq!(g.program_status, [StatusSignal::Report("?:x=1".into())]);
+
+    // Nothing that later resets or trims the status queue loses the answer.
+    p.advance(&mut g, b"\x1b]7501;?\x07\x1bc");
+    assert_eq!(p.take_responses(), ANSWER, "query then RIS");
+    let flood = b"\x1b]7501;state=working\x07".repeat(PROGRAM_STATUS_MAX + 1);
+    p.advance(
+        &mut g,
+        &[&flood[..], b"\x1b]7501;?\x07", &flood[..]].concat(),
+    );
+    assert_eq!(
+        p.take_responses(),
+        ANSWER,
+        "query inside a flood of reports"
+    );
+}
+
+#[test]
 fn program_status_is_collected_only_when_asked() {
     let input = b"\x1b]7501;state=working\x07\x1b]133;A\x07\x1bc";
     assert!(parse(input, 80, 24).program_status.is_empty());

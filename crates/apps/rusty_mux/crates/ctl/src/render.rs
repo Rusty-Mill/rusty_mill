@@ -2,14 +2,16 @@
 //! `--json`.
 
 use rusty_json::{Map, Value};
-use rusty_mux_core::{Event, Size};
+use rusty_mux_core::{Event, ExitStatus, Progress, Size};
 use rusty_mux_proto::{Cursor, Entry};
 use rusty_uuid::Uuid;
 
 /// An event or entry field's value.
 enum Field {
     Id(Uuid),
-    Num(u64),
+    Num(i64),
+    /// A fixed word, such as a progress state.
+    Word(&'static str),
     Text(String),
     /// No value, such as a lease nobody holds.
     Absent,
@@ -83,6 +85,7 @@ pub(crate) fn event_fields(event: &Event) -> (&'static str, Vec<(String, String)
             let value = match field {
                 Field::Id(id) => id.to_string(),
                 Field::Num(n) => n.to_string(),
+                Field::Word(word) => word.to_owned(),
                 Field::Text(text) => text,
                 Field::Absent => return None,
             };
@@ -124,6 +127,7 @@ impl Field {
         match self {
             Self::Id(id) => Value::from(id.to_string()),
             Self::Num(n) => Value::from(n),
+            Self::Word(w) => Value::from(w),
             Self::Text(t) => Value::from(t),
             Self::Absent => Value::Null,
         }
@@ -133,6 +137,7 @@ impl Field {
         match self {
             Self::Id(id) => id.to_string(),
             Self::Num(n) => n.to_string(),
+            Self::Word(w) => w.to_owned(),
             // Quoted and escaped: a name can't add a line or reach the terminal.
             Self::Text(t) => format!("\"{}\"", t.escape_debug()),
             Self::Absent => "-".into(),
@@ -193,7 +198,7 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
 
 fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
     use Event as E;
-    use Field::Id;
+    use Field::{Id, Text};
     match *event {
         E::SessionCreated { session } => ("session-created", vec![("session", Id(session.uuid()))]),
         E::SessionClosed { session } => ("session-closed", vec![("session", Id(session.uuid()))]),
@@ -242,6 +247,53 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
         E::BlockStatus { block } => ("block-status", vec![("block", Id(block.uuid()))]),
         E::PwdChanged { block } => ("pwd-changed", vec![("block", Id(block.uuid()))]),
         E::TitleChanged { block } => ("title-changed", vec![("block", Id(block.uuid()))]),
+        E::ProgramExited { block, status } => {
+            let (code, signal) = match status {
+                ExitStatus::Code(code) => (Field::Num(code.into()), Field::Absent),
+                ExitStatus::Signal(signal) => (Field::Absent, Field::Num(signal.into())),
+            };
+            (
+                "program-exited",
+                vec![
+                    ("block", Id(block.uuid())),
+                    ("code", code),
+                    ("signal", signal),
+                ],
+            )
+        }
+        E::Bell { block } => ("bell", vec![("block", Id(block.uuid()))]),
+        E::ProgressChanged { block, progress } => {
+            let (state, percent) = match progress {
+                Progress::Cleared => ("cleared", None),
+                Progress::Normal(p) => ("normal", Some(p)),
+                Progress::Error(p) => ("error", Some(p)),
+                Progress::Indeterminate => ("indeterminate", None),
+                Progress::Paused(p) => ("paused", Some(p)),
+            };
+            (
+                "progress-changed",
+                vec![
+                    ("block", Id(block.uuid())),
+                    ("state", Field::Word(state)),
+                    (
+                        "percent",
+                        percent.map_or(Field::Absent, |p| Field::Num(p.into())),
+                    ),
+                ],
+            )
+        }
+        E::Notification {
+            block,
+            ref title,
+            ref body,
+        } => (
+            "notification",
+            vec![
+                ("block", Id(block.uuid())),
+                ("title", Text(title.clone())),
+                ("body", Text(body.clone())),
+            ],
+        ),
     }
 }
 
@@ -291,6 +343,36 @@ mod tests {
     }
 
     #[test]
+    fn program_events_render_their_details() {
+        let block = BlockId::from_uuid(id(1));
+        let line = |event: Event, json: bool| event_line(1, &event, json);
+        let killed = Event::ProgramExited {
+            block,
+            status: ExitStatus::Signal(9),
+        };
+        assert!(line(killed.clone(), false).ends_with("code=- signal=9"));
+        let json = line(killed, true);
+        assert!(json.contains("\"code\":null") && json.contains("\"signal\":9"));
+        let exited = Event::ProgramExited {
+            block,
+            status: ExitStatus::Code(-1),
+        };
+        assert!(line(exited, false).ends_with("code=-1 signal=-"));
+        let busy = Event::ProgressChanged {
+            block,
+            progress: Progress::Indeterminate,
+        };
+        assert!(line(busy, false).ends_with("state=indeterminate percent=-"));
+        let note = Event::Notification {
+            block,
+            title: String::new(),
+            body: "a\nb".into(),
+        };
+        assert!(line(note.clone(), false).ends_with("title=\"\" body=\"a\\nb\""));
+        assert!(line(note, true).contains("\"body\":\"a\\nb\""));
+    }
+
+    #[test]
     fn status_events_name_their_block() {
         let event = Event::BlockStatus {
             block: BlockId::from_uuid(id(1)),
@@ -333,18 +415,38 @@ mod tests {
             Event::BlockStatus { block },
             Event::PwdChanged { block },
             Event::TitleChanged { block },
+            Event::ProgramExited {
+                block,
+                status: ExitStatus::Code(3),
+            },
+            Event::Bell { block },
+            Event::ProgressChanged {
+                block,
+                progress: Progress::Paused(7),
+            },
+            Event::Notification {
+                block,
+                title: "t".into(),
+                body: "b".into(),
+            },
         ];
         assert_eq!(events.len(), rusty_mux_script::EVENTS.len());
         for (event, (kind, declared)) in events.iter().zip(rusty_mux_script::EVENTS) {
             let (found, values) = event_fields(event);
             assert_eq!(found, *kind);
             let names: Vec<&str> = values.iter().map(|(n, _)| n.as_str()).collect();
-            // `watch` reads the new directory or title from the block.
-            let read = ["pwd", "title"];
+            // `watch` reads the new directory or title from the block, and
+            // an exit has a code or a signal.
+            let missing: &[&str] = match *kind {
+                "pwd-changed" => &["pwd"],
+                "title-changed" => &["title"],
+                "program-exited" => &["signal"],
+                _ => &[],
+            };
             let expected: Vec<&str> = declared
                 .iter()
                 .copied()
-                .filter(|f| !read.contains(f))
+                .filter(|f| !missing.contains(f))
                 .collect();
             assert_eq!(names, expected, "{kind}");
         }

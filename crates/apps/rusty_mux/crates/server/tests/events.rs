@@ -6,7 +6,7 @@
 mod common;
 
 use common::{Client, block_for, start_server};
-use rusty_mux_core::{Event, SessionId};
+use rusty_mux_core::{Event, ExitStatus, Progress, SessionId};
 use rusty_mux_proto::{Cursor, Features, Message};
 use rusty_uuid::Uuid;
 
@@ -192,4 +192,105 @@ fn pwd_and_title_changes_reach_only_clients_that_asked() {
     let later = create_session(&mut watcher, "later");
     wait_for_session(&mut plain, later);
     assert!(!plain.events.iter().any(|(_, e)| changes.contains(e)));
+}
+
+#[test]
+fn program_events_reach_only_clients_that_asked() {
+    let path = start_server();
+    let wanted = SEQ
+        .union(Features::PROGRAM_EVENTS)
+        .union(Features::CHECKPOINT_V3);
+    let mut watcher = Client::connect_with(&path, wanted, None);
+    let mut plain = Client::connect_with(&path, SEQ.union(Features::TERMINAL_EVENTS), None);
+    let block = block_for(&mut watcher);
+    watcher.input(
+        block,
+        b"printf '\\a\\033]9;4;1;40\\a\\033]777;notify;T;B\\a'; exit 3\r",
+    );
+    let closed = Event::BlockClosed { block };
+    while !watcher.events.iter().any(|(_, e)| *e == closed) {
+        watcher.recv();
+    }
+    let program: Vec<&Event> = watcher
+        .events
+        .iter()
+        .map(|(_, e)| e)
+        .skip_while(|e| !matches!(e, Event::Bell { .. }))
+        .collect();
+    // Closing the block then lets go of its lease and clients.
+    assert_eq!(program.last(), Some(&&closed));
+    assert_eq!(
+        program[..4],
+        [
+            &Event::Bell { block },
+            &Event::ProgressChanged {
+                block,
+                progress: Progress::Normal(40)
+            },
+            &Event::Notification {
+                block,
+                title: "T".into(),
+                body: "B".into()
+            },
+            &Event::ProgramExited {
+                block,
+                status: ExitStatus::Code(3)
+            },
+        ]
+    );
+
+    while !plain.events.iter().any(|(_, e)| *e == closed) {
+        plain.recv();
+    }
+    assert!(!plain.events.iter().any(|(_, e)| matches!(
+        e,
+        Event::Bell { .. }
+            | Event::ProgressChanged { .. }
+            | Event::Notification { .. }
+            | Event::ProgramExited { .. }
+    )));
+}
+
+#[test]
+fn a_closed_block_reports_no_exit() {
+    let path = start_server();
+    let wanted = SEQ
+        .union(Features::PROGRAM_EVENTS)
+        .union(Features::CHECKPOINT_V3);
+    let mut client = Client::connect_with(&path, wanted, None);
+    let block = block_for(&mut client);
+    client.request(|req| Message::CloseBlock { req, block });
+    let closed = Event::BlockClosed { block };
+    while !client.events.iter().any(|(_, e)| *e == closed) {
+        client.recv();
+    }
+    // Anything after the close would follow it on the stream.
+    let later = create_session(&mut client, "later");
+    wait_for_session(&mut client, later);
+    assert!(
+        !client
+            .events
+            .iter()
+            .any(|(_, e)| matches!(e, Event::ProgramExited { .. }))
+    );
+}
+
+/// The answer and DA1's, in the order the program asked, even when both
+/// questions arrive in one write.
+#[test]
+fn a_status_query_is_answered_in_order() {
+    let path = start_server();
+    let mut client = Client::connect(&path);
+    let block = block_for(&mut client);
+    let ask = |first: &str, second: &str| {
+        format!(
+            "stty raw -echo; printf '{first}{second}'; \
+             dd bs=1 count=19 2>/dev/null | od -An -tx1; stty sane\r"
+        )
+    };
+    let (query, da1) = ("\\033]7501;?\\033\\\\", "\\033[c");
+    client.input(block, ask(query, da1).as_bytes());
+    client.wait_for(block, "1b 5d 37 35 30 31 3b 3f 1b 5c 1b 5b 3f 31 3b 32");
+    client.input(block, ask(da1, query).as_bytes());
+    client.wait_for(block, "1b 5b 3f 31 3b 32 3b 34 63 1b 5d 37 35 30 31 3b");
 }
