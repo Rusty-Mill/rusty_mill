@@ -57,13 +57,15 @@ contract tests.
 
 - `poll_readable` blocks on stdin up to a timeout (`None` = forever),
   returning whether it became readable — works on any stdin, tty or
-  not (a redirected pipe polls fine). Linux: `poll(2)`. Windows:
-  `WaitForSingleObject` on the console input handle — coarser than
-  "a byte is ready" (any input record wakes it, not just keystrokes),
-  but `ReadFile` afterward blocks correctly on whatever was actually
-  queued, so a spurious wake costs one extra round trip, never a wrong
-  read (recorded here rather than as a divergence: both ends produce
-  the same observable contract, only the wake granularity differs).
+  not (a redirected pipe polls fine). Linux: `poll(2)`. Windows, on a
+  console: `WaitForSingleObject` on the input handle, then a peek at the
+  queued input records. Records `read_chunk` would not turn into bytes
+  (key-ups, bare modifiers, focus, mouse and menu records) are removed
+  and the wait resumes for what is left of the timeout, so `true`
+  means a following `read_chunk` returns without blocking, as on Linux.
+  A key-up that carries a character is kept: Alt+numpad entry delivers
+  its character on the Alt release. Windows, on a pipe or file: the
+  plain `WaitForSingleObject`, as before.
 - `read_chunk` is one call, batched — not per-byte. In raw mode this is
   the VMIN=1/VTIME=0 shape: blocks for at least one byte, then returns
   whatever else is already buffered without a second round trip.

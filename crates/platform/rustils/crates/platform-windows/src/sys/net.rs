@@ -1154,6 +1154,56 @@ pub fn unix_peer_pid(sock: &OwnedSocket) -> Result<u32> {
     Ok(pid)
 }
 
+/// A second socket for the same connection, std's `Socket::duplicate`
+/// recipe: `WSADuplicateSocketW` for this process, then `WSASocketW` from
+/// the protocol info it fills, overlapped (as `socket` creates them) and
+/// not inherited by children. Both sockets share the connection, so
+/// reading on one and writing on the other works from two threads, and a
+/// [`shutdown`] through either applies to both. Stays on windows-sys
+/// under `track-w`: `rusty_win32` has no binding for either call.
+pub fn try_clone(sock: &OwnedSocket) -> Result<OwnedSocket> {
+    // SAFETY: `WSAPROTOCOL_INFOW` is plain data; all-zero is a valid
+    // value for the call to overwrite.
+    let mut info: w::WSAPROTOCOL_INFOW = unsafe { std::mem::zeroed() };
+    // SAFETY: `sock` is a valid socket and `info` a valid out-buffer.
+    let r = unsafe { w::WSADuplicateSocketW(sock.raw(), w::GetCurrentProcessId(), &mut info) };
+    if r != 0 {
+        return Err(wsa_err("WSADuplicateSocketW"));
+    }
+    // SAFETY: `info` was just filled for this process; plain integer
+    // arguments otherwise.
+    let dup = unsafe {
+        w::WSASocketW(
+            w::FROM_PROTOCOL_INFO,
+            w::FROM_PROTOCOL_INFO,
+            w::FROM_PROTOCOL_INFO,
+            &info,
+            0,
+            w::WSA_FLAG_OVERLAPPED | w::WSA_FLAG_NO_HANDLE_INHERIT,
+        )
+    };
+    if dup == w::INVALID_SOCKET {
+        return Err(wsa_err("WSASocketW(FROM_PROTOCOL_INFO)"));
+    }
+    Ok(OwnedSocket(dup))
+}
+
+/// `shutdown`: `how` is `SD_RECEIVE`, `SD_SEND` or `SD_BOTH`. Stays on
+/// windows-sys under `track-w`, like [`try_clone`].
+pub fn shutdown(sock: &OwnedSocket, how: std::net::Shutdown) -> Result<()> {
+    let how = match how {
+        std::net::Shutdown::Read => w::SD_RECEIVE,
+        std::net::Shutdown::Write => w::SD_SEND,
+        std::net::Shutdown::Both => w::SD_BOTH,
+    };
+    // SAFETY: `sock` is a valid socket; `how` is one of the three values
+    // the call accepts.
+    if unsafe { w::shutdown(sock.raw(), how) } != 0 {
+        return Err(wsa_err("shutdown"));
+    }
+    Ok(())
+}
+
 // --- UDP datagram sockets (D16 final slice) --------------------------
 //
 // Connectionless: one socket both sends and receives, addressed per

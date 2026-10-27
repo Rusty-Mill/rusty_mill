@@ -20,6 +20,24 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.29.0
+
+- **Windows pieces for the `rusty-mux` attach client
+  (`platform-windows`).** New public items:
+  `WindowsUnixStream::try_clone` and `shutdown`,
+  `sys::net::{try_clone, shutdown}`, and the windows-sys items they and
+  `poll_readable` use in `ffi::win32_surface`. A clone is a second
+  socket handle on the same connection (`WSADuplicateSocketW` into this
+  process, overlapped, not inheritable), so one thread can read while
+  another writes; `shutdown` on either ends a read blocked on the other.
+- **Behaviour change: `WindowsTerminal::poll_readable` ignores input
+  that `read_chunk` would not return.** On a console, input records
+  that carry no text (key-ups, bare modifiers, focus and mouse records)
+  are dropped and the wait resumes for the rest of the timeout, so
+  `true` means a following `read_chunk` returns without blocking. A
+  key-up that carries a character (Alt+numpad entry) is kept. Piped
+  stdin keeps the plain wait.
+
 ### 0.28.0
 
 - **Windows pieces for `rusty-mux-server` (`platform-windows`).** New

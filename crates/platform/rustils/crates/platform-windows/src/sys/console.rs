@@ -15,14 +15,15 @@
 //! Track W (D-15, slice 3): the donor stopped being only a donor here.
 //! Every foreign call in this module now has a `rusty_win32` arm behind
 //! `track-w` except [`reopen`], which documents its own reason for
-//! staying. The mode get/set pair is factored into two-armed [`get_mode`]/
+//! staying, and the input-record peek and read behind [`poll_readable`],
+//! which `rusty_win32` does not bind. The mode get/set pair is factored into two-armed [`get_mode`]/
 //! [`set_mode`] helpers so the ten public functions built on it keep a
 //! single body each.
 
 #![allow(unsafe_code)]
 
 use std::ffi::OsStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use platform::error::Result;
 use platform::term::{ConsoleState, TermStream};
@@ -249,19 +250,89 @@ pub fn set_echo(on: bool) -> Result<bool> {
     Ok(was_on)
 }
 
-/// `WaitForSingleObject(stdin, timeout_ms)`; `None` timeout blocks
-/// forever. A console input handle is "signaled" when an unread input
-/// record is queued — coarser than "a byte is ready" (any input event,
-/// not just keystrokes, wakes it), but `ReadFile` afterward blocks
-/// correctly on whatever was actually queued, so a spurious wake costs
-/// one extra round trip, never a wrong read.
+/// Waits until a read of stdin returns data, or `timeout` passes; `None`
+/// waits forever.
+///
+/// A console input handle is signalled by any queued input record,
+/// including the key-up every keystroke leaves and focus or size events,
+/// none of which `ReadFile` returns as a byte; a plain wait would then
+/// report readable and the read block until the next key. So on a console
+/// the records ahead of the first one that carries a character are read
+/// and dropped, and the wait resumes for what is left of `timeout`:
+/// `true` means a read returns at least one byte. A character-carrying
+/// key-up is kept when it is Alt's, because Alt+numpad entry delivers its
+/// character on Alt's release. When stdin is not a console (a pipe or a
+/// file) this is the plain wait on the handle.
 pub fn poll_readable(timeout: Option<Duration>) -> Result<bool> {
     let hin = std_handle(TermStream::Stdin);
-    let timeout_ms: u32 = match timeout {
+    if get_mode(hin).is_err() {
+        return wait_signaled(hin, wait_ms(timeout));
+    }
+    let deadline = timeout.map(|d| Instant::now() + d);
+    loop {
+        let left = deadline.map(|at| at.saturating_duration_since(Instant::now()));
+        if !wait_signaled(hin, wait_ms(left))? {
+            return Ok(false);
+        }
+        if drop_records_without_text(hin)? {
+            return Ok(true);
+        }
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            return Ok(false);
+        }
+    }
+}
+
+fn wait_ms(timeout: Option<Duration>) -> u32 {
+    match timeout {
         None => w::INFINITE,
         Some(d) => u32::try_from(d.as_millis()).unwrap_or(u32::MAX),
+    }
+}
+
+/// `VK_MENU`: the Alt key.
+const VK_MENU: u16 = 0x12;
+
+/// Whether `ReadFile` returns a character for this record.
+fn carries_text(record: &w::INPUT_RECORD) -> bool {
+    if u32::from(record.EventType) != w::KEY_EVENT {
+        return false;
+    }
+    // SAFETY: `EventType` is `KEY_EVENT`, so `KeyEvent` is the union's
+    // active field; `UnicodeChar` is the `W` API's active character.
+    let (key, ch) = unsafe {
+        (
+            record.Event.KeyEvent,
+            record.Event.KeyEvent.uChar.UnicodeChar,
+        )
     };
-    wait_signaled(hin, timeout_ms)
+    ch != 0 && (key.bKeyDown != 0 || key.wVirtualKeyCode == VK_MENU)
+}
+
+/// Reads and drops queued records until one carries text; `true` if one
+/// does (it stays queued), `false` once the queue is empty.
+fn drop_records_without_text(hin: w::HANDLE) -> Result<bool> {
+    loop {
+        // SAFETY: `INPUT_RECORD` is plain data; all-zero is valid.
+        let mut record: w::INPUT_RECORD = unsafe { std::mem::zeroed() };
+        let mut count: u32 = 0;
+        // SAFETY: `hin` is the live console input handle; `record` holds
+        // the one record asked for and `count` is a valid out-pointer.
+        if unsafe { w::PeekConsoleInputW(hin, &mut record, 1, &mut count) } == 0 {
+            return Err(errmap::last_win32_err("PeekConsoleInputW", OsStr::new("")));
+        }
+        if count == 0 {
+            return Ok(false);
+        }
+        if carries_text(&record) {
+            return Ok(true);
+        }
+        // SAFETY: as above; this removes the record just peeked, which a
+        // single-threaded reader of this console still has at the front.
+        if unsafe { w::ReadConsoleInputW(hin, &mut record, 1, &mut count) } == 0 {
+            return Err(errmap::last_win32_err("ReadConsoleInputW", OsStr::new("")));
+        }
+    }
 }
 
 /// `WaitForSingleObject` reduced to signaled/timed-out — Track W (D-15):

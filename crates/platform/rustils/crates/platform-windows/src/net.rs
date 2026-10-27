@@ -222,6 +222,22 @@ impl WindowsUnixStream {
         let timeout = timeout.map(|d| d.max(Duration::from_millis(1)));
         sysnet::set_read_timeout(&self.sock, timeout).map_err(to_io)
     }
+
+    /// A second handle to the same connection, as
+    /// `std::os::unix::net::UnixStream::try_clone` gives: one thread can
+    /// read while another writes. Options set later through one handle
+    /// may not apply to the other.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            sock: sysnet::try_clone(&self.sock).map_err(to_io)?,
+        })
+    }
+
+    /// `shutdown`, as `std::os::unix::net::UnixStream::shutdown`: it
+    /// applies to the connection, so every clone sees it.
+    pub fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
+        sysnet::shutdown(&self.sock, how).map_err(to_io)
+    }
 }
 
 /// `PlatformError` to `io::Error` through the OS code when there is one,
