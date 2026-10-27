@@ -12433,7 +12433,6 @@ dependencies = [
 name = "rusty_mcp_middleware"
 version = "0.13.0"
 dependencies = [
- "axum",
  "jsonwebtoken 11.0.0",
  "rand 0.8.8",
  "reqwest 0.13.4",
