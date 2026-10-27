@@ -1144,8 +1144,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: x86_64-pc-windows-gnu
           components: clippy
-      - name: Install mingw-w64
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      # These compile-only checks need Rust's target std, not a MinGW linker
+      # or C/C++ compiler. Keep native toolchain installation out of this job.
       - name: cargo check --target x86_64-pc-windows-gnu (std feature)
         run: cargo check -p rusty_win32 --target x86_64-pc-windows-gnu --all-targets --features std
       - name: cargo clippy --target x86_64-pc-windows-gnu

@@ -55,6 +55,33 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = WORKFLOW.read_text(encoding="utf-8")
 
+    def test_win32_cross_check_needs_no_native_compiler_and_stays_gated(self) -> None:
+        start = self.workflow.index("  win32-cross-compile-check:\n")
+        end = self.workflow.index("\n  rusty-rand-platforms:", start)
+        job = self.workflow[start:end]
+        self.assertIn("needs: plan", job)
+        self.assertIn("if: needs.plan.outputs.win32 == 'true' && needs.plan.outputs.linux == 'true'", job)
+        self.assertIn("runs-on: ubuntu-latest", job)
+        self.assertIn("targets: x86_64-pc-windows-gnu", job)
+        self.assertIn("components: clippy", job)
+        self.assertIn("run: cargo check -p rusty_win32 --target x86_64-pc-windows-gnu --all-targets --features std\n", job)
+        self.assertIn("run: cargo clippy -p rusty_win32 --target x86_64-pc-windows-gnu --all-targets --features std -- -D warnings\n", job)
+        self.assertNotIn("apt-get", job)
+        self.assertNotIn("continue-on-error", job)
+        gate = self.workflow[self.workflow.index("  required-gate:\n"):]
+        self.assertIn("      - win32-cross-compile-check\n", gate)
+
+    def test_win32_check_runs_for_ci_edits_and_affected_package_only(self) -> None:
+        for path in (".github/workflows/ci.yml", ".github/scripts/ci_plan.py",
+                     ".github/scripts/test_ci_workflow.py"):
+            with self.subTest(path=path):
+                self.assertTrue(specialized_job_flags([path], [])["win32"])
+                smoke = self._planner_map("--emit-ci-smoke", input=path + "\n")
+                self.assertEqual(smoke["win32"], "true")
+        self.assertTrue(specialized_job_flags([], ["rusty_win32"])["win32"])
+        self.assertFalse(specialized_job_flags([], ["rusty_tick"])["win32"])
+        self.assertFalse(specialized_job_flags(["changes/2026-10-27-other.md"], [])["win32"])
+
     def test_build_environment_setup_has_a_blocking_step_timeout(self) -> None:
         steps = re.findall(
             r"(?m)^      - uses: \./\.github/actions/setup-build-env\n"
@@ -1068,11 +1095,13 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 own = path in {".github/workflows/ci.yml", ".github/scripts/ci_plan.py"}
                 for key in ("tls_engine", "rleval_service", "rleval_image"):
                     self.assertEqual(outputs[key], "true" if own else "false", key)
+                win32 = own or path == ".github/scripts/test_ci_workflow.py"
+                self.assertEqual(outputs["win32"], "true" if win32 else "false")
                 self.assertTrue(
                     all(
                         outputs[key] == "false"
                         for key in SPECIALIZED_KEYS
-                        - {"rand_platforms", "tls_engine", "rleval_service", "rleval_image"}
+                        - {"rand_platforms", "tls_engine", "rleval_service", "rleval_image", "win32"}
                     )
                 )
         self.assertIn(
