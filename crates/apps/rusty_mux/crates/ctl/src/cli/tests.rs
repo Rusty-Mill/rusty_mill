@@ -229,14 +229,19 @@ fn arg_of<'a>(call: &'a Call, name: &str) -> Option<&'a Arg> {
 
 #[test]
 fn run_builds_a_create_block_request_in_the_current_directory() {
+    fn text(s: &str) -> Option<Arg> {
+        Some(Arg::Value(Value::Text(s.into())))
+    }
+    // Absolute on every platform.
+    let work = std::env::temp_dir().join("work");
     let here = Defaults {
         window: Some(ID.parse().unwrap()),
-        dir: Some(PathBuf::from("/work")),
+        dir: Some(work.clone()),
         ..Defaults::default()
     };
+    let native = |path: PathBuf| text(path.to_str().expect("UTF-8"));
     let run = run_of("run --wait -- make -j 4 --keep-going", &here);
     assert_eq!(run.wait, Some(None));
-    let text = |s: &str| Some(Arg::Value(Value::Text(s.into())));
     assert_eq!(arg_of(&run.create, "command").cloned(), text("make"));
     assert_eq!(
         arg_of(&run.create, "arg").cloned(),
@@ -244,7 +249,7 @@ fn run_builds_a_create_block_request_in_the_current_directory() {
             ["-j", "4", "--keep-going"].map(String::from).to_vec()
         )))
     );
-    assert_eq!(arg_of(&run.create, "cwd").cloned(), text("/work"));
+    assert_eq!(arg_of(&run.create, "cwd").cloned(), native(work.clone()));
     assert_eq!(
         arg_of(&run.create, "cols").cloned(),
         Some(Arg::Value(Value::Cells(80)))
@@ -261,9 +266,19 @@ fn run_builds_a_create_block_request_in_the_current_directory() {
         &here,
     );
     assert_eq!(run.wait, Some(Some(Duration::from_secs(2))));
-    assert_eq!(arg_of(&run.create, "cwd").cloned(), text("/work/sub"));
+    assert_eq!(
+        arg_of(&run.create, "cwd").cloned(),
+        native(work.join("sub"))
+    );
     assert_eq!(arg_of(&run.create, "arg"), None);
     assert!(run.create.has_target());
+    // An absolute --cwd is kept as given.
+    let elsewhere = std::env::temp_dir().join("elsewhere");
+    let line = ["run", "--cwd", elsewhere.to_str().expect("UTF-8"), "true"].map(String::from);
+    let Command::Run(run) = super::parse(&line, &here).expect("parses").command else {
+        panic!("run");
+    };
+    assert_eq!(arg_of(&run.create, "cwd").cloned(), native(elsewhere));
 
     let nowhere = Defaults::default();
     assert_eq!(

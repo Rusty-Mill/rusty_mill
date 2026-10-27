@@ -225,7 +225,16 @@ impl State {
                 window,
                 size,
                 launch,
-            } => (req, self.create_block(shared, window, size, &launch)),
+            } => {
+                // As the catalog's contract: a launch only on a connection
+                // that negotiated it.
+                if launch != Launch::default()
+                    && let Err(refusal) = self.require(client, Features::LAUNCH, "a launch")
+                {
+                    return (req, Err(refusal));
+                }
+                (req, self.create_block(shared, window, size, &launch))
+            }
             M::Attach { req, block } => {
                 if let Err(refusal) = self.require(client, Features::CHECKPOINT_V3, "attach") {
                     return (req, Err(refusal));

@@ -300,7 +300,8 @@ fn a_status_query_is_answered_in_order() {
 #[test]
 fn a_launched_program_reports_its_exit_code() {
     let path = start_server();
-    let mut client = Client::connect_with(&path, SEQ.union(Features::PROGRAM_EVENTS), None);
+    let wanted = SEQ.union(Features::PROGRAM_EVENTS);
+    let mut client = Client::connect_with(&path, wanted.union(Features::LAUNCH), None);
     let window = window_for(&mut client);
     let launch = Launch {
         program: Some(Program {
@@ -347,4 +348,63 @@ fn a_launched_program_reports_its_exit_code() {
             "{cwd}: {answer:?}"
         );
     }
+}
+
+/// A launch on a connection that did not negotiate it is refused before
+/// anything starts; a plain block still works there.
+#[test]
+fn a_launch_needs_the_negotiated_feature() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, SEQ, None);
+    let window = window_for(&mut client);
+    let size = Size::new(80, 24).expect("size");
+    let launches = [
+        Launch {
+            program: Some(Program {
+                command: "true".into(),
+                args: Vec::new(),
+            }),
+            cwd: None,
+        },
+        Launch {
+            program: None,
+            cwd: Some("/tmp".into()),
+        },
+    ];
+    for launch in launches {
+        let answer = client.answer(|req| Message::CreateBlock {
+            req,
+            window,
+            size,
+            launch: launch.clone(),
+        });
+        assert!(
+            matches!(answer.last(), Some(Message::Failed { reason, .. }) if reason.contains("a launch requires")),
+            "{launch:?}: {answer:?}"
+        );
+    }
+    let plain = BlockId::from_uuid(
+        client
+            .request(|req| Message::CreateBlock {
+                req,
+                window,
+                size,
+                launch: Launch::default(),
+            })
+            .expect("id"),
+    );
+    // Events arrive in order: the plain block's is the only one created.
+    while !client
+        .events
+        .iter()
+        .any(|(_, e)| matches!(e, Event::BlockCreated { block, .. } if *block == plain))
+    {
+        client.recv();
+    }
+    let created = client
+        .events
+        .iter()
+        .filter(|(_, e)| matches!(e, Event::BlockCreated { .. }))
+        .count();
+    assert_eq!(created, 1);
 }
