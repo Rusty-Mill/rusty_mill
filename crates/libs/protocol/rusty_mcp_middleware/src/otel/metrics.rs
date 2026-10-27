@@ -9,10 +9,10 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use rusty_mcp::otel::{OtelConfig, metrics::McpMetrics};
+//! use rusty_mcp_middleware::otel::{OtelConfig, metrics::McpMetrics};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let guard = rusty_mcp::otel::init(OtelConfig::new("my-mcp-server"), "info")?;
+//! let guard = rusty_mcp_middleware::otel::init(OtelConfig::new("my-mcp-server"), "info")?;
 //! let instruments = guard.instruments().expect("metrics are enabled");
 //!
 //! // Tool names are the only request-derived label, and only these ones.

@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use rusty_json::{Map, json};
-use rusty_mcp::trace::TraceContext;
+use rusty_mcp_middleware::trace::TraceContext;
 use rusty_mcp_server::json::Value;
 use rusty_mcp_server::proto::{CallToolResult, ContentBlock, Tool};
 use rusty_mcp_server::{HttpConfig, HttpHandler, Server};

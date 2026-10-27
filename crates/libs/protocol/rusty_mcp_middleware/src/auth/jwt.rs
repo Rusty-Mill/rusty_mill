@@ -7,7 +7,7 @@
 //!
 //! ```no_run
 //! # use std::sync::Arc;
-//! # use rusty_mcp::auth::{AuthConfig, JwtValidator};
+//! # use rusty_mcp_middleware::auth::{AuthConfig, JwtValidator};
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let validator = JwtValidator::builder(
 //!     "https://auth.example.com",

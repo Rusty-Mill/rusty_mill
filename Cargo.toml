@@ -67,7 +67,7 @@ members = [
     "crates/libs/protocol/rusty_mcp_server",
     "crates/libs/protocol/rusty_mcp_client_native",
     "crates/libs/protocol/rusty_a2a",
-    "crates/libs/protocol/rusty_mcp/crates/rusty-mcp",
+    "crates/libs/protocol/rusty_mcp_middleware",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo",
     "crates/libs/async/rusty_journal",
@@ -690,7 +690,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     # reqwest 0.13 renamed the 0.12-era "rustls-tls"/"rustls-tls-native-roots"
     # features to a single "rustls" feature (native-cert loading is no
     # longer a separate opt-in); the workspace's other direct 0.13
-    # consumers (agentgateway*, rusty_acp, rusty-mcp) already use this name.
+    # consumers (agentgateway*, rusty_acp, rusty_mcp_middleware) already use this name.
     "rustls",
     "http2",
     # 0.13 also split RequestBuilder::query()/form() out from the
@@ -808,18 +808,15 @@ rusty_a2a = { path = "crates/libs/protocol/rusty_a2a", default-features = false 
 
 # Hoisted from rusty_provider's own former `[workspace.dependencies]`. Its
 # `[workspace.package]` collided on `license` ("MIT"), so its six crates
-# carry literal `[package]` fields -- rusty_db treatment. `rusty-mcp` is a
-# merged sibling here, retiring rusty_provider's branch-tracking git
-# dependency on it.
+# carry literal `[package]` fields -- rusty_db treatment.
 rp-core = { path = "crates/apps/rusty_provider/crates/core" }
 rp-mcp = { path = "crates/apps/rusty_provider/crates/mcp" }
 rp-providers = { path = "crates/apps/rusty_provider/crates/providers" }
 rp-router = { path = "crates/apps/rusty_provider/crates/router" }
 # `default-features = false` because rusty_agent_gateway's crates ask for it
 # explicitly and an inheriting member may not override the root's choice.
-# A no-op for rusty_provider, which inherits this entry as-is: rusty-mcp's
-# own `default` feature is empty.
-rusty-mcp = { path = "crates/libs/protocol/rusty_mcp/crates/rusty-mcp", default-features = false }
+# Was `rusty-mcp` until 0.13.0 (#876).
+rusty_mcp_middleware = { path = "crates/libs/protocol/rusty_mcp_middleware", default-features = false }
 rusty-mcp-client = { path = "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client" }
 rmcp = { version = "3.1", default-features = false }
 axum = { version = "0.8", features = ["json"] }

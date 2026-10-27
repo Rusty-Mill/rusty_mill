@@ -7,8 +7,8 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use rusty_mcp::auth::{AuthConfig, StaticTokenValidator};
-//! use rusty_mcp::serve::{AuthorizedHandler, LimitedHandler};
+//! use rusty_mcp_middleware::auth::{AuthConfig, StaticTokenValidator};
+//! use rusty_mcp_middleware::serve::{AuthorizedHandler, LimitedHandler};
 //! use rusty_serve::{Request, Response, Server};
 //!
 //! let config = AuthConfig::new(

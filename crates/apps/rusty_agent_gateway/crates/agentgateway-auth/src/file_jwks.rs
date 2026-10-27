@@ -1,6 +1,6 @@
 //! A JWKS read from local disk.
 //!
-//! [`rusty_mcp::auth::JwtValidator`] fetches its key set over HTTP, which is
+//! [`rusty_mcp_middleware::auth::JwtValidator`] fetches its key set over HTTP, which is
 //! what most deployments want. Our config also accepts `jwks: {file: ...}` —
 //! for air-gapped installs, and for tests that should not stand up an HTTP
 //! server to prove a signature check works.
@@ -8,7 +8,7 @@
 //! The verification below deliberately mirrors `JwtValidator::verify`,
 //! including the ordering that matters: the algorithm is pinned to the
 //! allow-list *before* any key is loaded, which is what defeats the `alg: none`
-//! and RS256-verified-as-HS256 family of attacks. If `rusty_mcp` grows a
+//! and RS256-verified-as-HS256 family of attacks. If `rusty_mcp_middleware` grows a
 //! `JwtValidator::from_jwks` constructor this module should collapse into it;
 //! duplicated crypto is duplicated risk.
 //!
@@ -23,7 +23,7 @@ use jsonwebtoken::{
     Algorithm, DecodingKey, Validation, decode, decode_header, errors::ErrorKind, jwk::JwkSet,
 };
 use rusty_json::Value;
-use rusty_mcp::auth::{TokenError, TokenValidator, ValidateFuture, VerifiedToken};
+use rusty_mcp_middleware::auth::{TokenError, TokenValidator, ValidateFuture, VerifiedToken};
 
 /// Failure to load a JWKS from disk.
 #[derive(Debug, thiserror::Error)]

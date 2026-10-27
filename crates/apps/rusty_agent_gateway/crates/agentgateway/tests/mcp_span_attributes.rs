@@ -24,7 +24,7 @@ use std::time::Duration;
 use agentgateway_config::Config;
 use agentgateway_mcp::{McpRequest, McpRequestResult, McpResponseResult, request_result};
 use rmcp::{ServiceExt, model::CallToolRequestParams, transport::StreamableHttpClientTransport};
-use rusty_mcp::otel::OtelConfig;
+use rusty_mcp_middleware::otel::OtelConfig;
 use rusty_prost::Message as _;
 use rusty_prost::wkt::Value;
 use tokio_util::sync::CancellationToken;
@@ -201,7 +201,7 @@ async fn a_guardrails_metadata_reaches_the_collector_as_span_attributes() {
 
     // `pipeline` rather than `init`, so this test brings its own subscriber
     // instead of racing for the process-wide one.
-    let (guard, layer) = rusty_mcp::otel::pipeline(
+    let (guard, layer) = rusty_mcp_middleware::otel::pipeline(
         OtelConfig::new("span-attribute-test")
             .with_endpoint(format!("http://{collector_addr}"))
             .without_metrics()
