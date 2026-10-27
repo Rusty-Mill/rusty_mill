@@ -7,4 +7,4 @@ changelog: The Rusty Mux project docs add a gap check against Rex's public docs 
 - **Added:** `docs/projects/mux/REX-GAP-CHECK.md`: Rex's object model resolved from its public docs, a 29-row gap table against CAPABILITIES, corrections to the owner's capability brief, and conflicts (server-side layout, Tailscale crate location, agent installer).
 - **Changed:** on the owner's approval, CAPABILITIES adds C29–C36 and moves C12 to a server-owned window layout; ROADMAP adds Phase 2b (agent parity, seven steps) and extends Phases 3 and 5; DECISIONS records both choices.
 - **Changed:** the owner accepted Phase 2 and started Phase 2b; ROADMAP marks step 7 done (#1128, #1138) and CAPABILITIES marks C04–C07 and C17–C20 done with their evidence, their Rex-parity extensions continuing in C29–C34.
-- **Known limitations:** plans only, no code. Some Rex docs pages (key modes, login and shared servers, upgrading) were not read.
+- **Known limitations:** plans only, no code. Some Rex docs pages (key modes, login and shared servers) were not read.

@@ -30,7 +30,7 @@ rusty_mux has the same four kinds (`crates/core/src/entity.rs`, `crates/core/src
 
 ## 3. Gap table
 
-Status: **present**, **partial**, **absent**, **ahead** (rusty_mux does more), **by decision** (an owner decision chose another shape).
+Status: **present**, **partial**, **absent**, **ahead** (rusty_mux does more), **par** (both do the same), **by decision** (an owner decision chose another shape).
 
 | # | Rex capability | Source | rusty_mux | Status | Evidence / what is missing |
 |---|---|---|---|---|---|
@@ -92,4 +92,4 @@ Not proposed: a scripting language, timers or exec (K2); mouse input (undocument
 
 ## 6. Sources
 
-Rex docs pages read 2026-10-27: home, automate/cli, automate/server-api, automate/agent-skill, automate/lua-scripts, automate/lua-events, automate/shell-scripting, customize/actions, build/program-status, reference/events, reference/lua, reference/privacy, linux/server-modes, linux/remote-access, beta/community-mcp. Not read: customize/config, keyboard-shortcuts, key-sequences, key-modes, linux/installation, shared-server, login-server, upgrading.
+Rex docs pages read 2026-10-27: home, automate/cli, automate/server-api, automate/agent-skill, automate/lua-scripts, automate/lua-events, automate/shell-scripting, customize/actions, build/program-status, reference/events, reference/lua, reference/privacy, linux/server-modes, linux/remote-access, linux/upgrading, beta/community-mcp. Not read: customize/config, keyboard-shortcuts, key-sequences, key-modes, linux/installation, shared-server, login-server.
