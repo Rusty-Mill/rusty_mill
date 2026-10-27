@@ -323,9 +323,17 @@ const CALLBACK: &str = "https%3A%2F%2Fclaude.ai%2Fcb";
 
 /// A board signing in under [`ISSUER`] with `auth`, its grants in a fresh directory.
 fn start_oauth(auth: Auth) -> SocketAddr {
+    start_oauth_at(auth, ISSUER)
+}
+
+/// [`start_oauth`] under `issuer`, accepting 127.0.0.1 and the issuer's hosts as `main` does.
+fn start_oauth_at(auth: Auth, issuer: &str) -> SocketAddr {
+    let issuer = rusty_oauth_server::validate_issuer(issuer).expect("issuer");
+    let mut hosts = vec!["127.0.0.1".to_owned()];
+    hosts.extend(rusty_mill_board::web::issuer_hosts(&issuer));
     let board: Arc<Shared> = Arc::new(Board::new(Box::new(MemStore::default()), Roles::default()));
     let config = HttpConfig {
-        allowed_hosts: vec!["127.0.0.1".into()],
+        allowed_hosts: hosts.clone(),
         ..HttpConfig::default()
     };
     let path = config.path.clone();
@@ -333,8 +341,7 @@ fn start_oauth(auth: Auth) -> SocketAddr {
     let state = std::env::temp_dir()
         .join(format!("mill-board-oauth-{}", uuid::Uuid::new_v4()))
         .join("oauth.json");
-    let issuer = rusty_oauth_server::validate_issuer(ISSUER).expect("issuer");
-    let web = Web::new(board, mcp, path, vec!["127.0.0.1".into()], auth)
+    let web = Web::new(board, mcp, path, hosts, auth)
         .with_oauth(issuer, state)
         .expect("oauth");
     let server =
@@ -585,5 +592,51 @@ fn an_actor_named_by_two_credentials_can_neither_approve_nor_use_a_grant() {
         api(addr, &access, "board_whoami", "{}").0,
         401,
         "no elevation"
+    );
+}
+
+#[test]
+fn an_ipv6_issuer_is_reachable_through_the_web_guard_and_mcp_alike() {
+    let addr = start_oauth_at(
+        Auth::Credentials(credentials()),
+        "https://[2001:db8::1]:8787",
+    );
+    for host in ["[2001:db8::1]:8787", "[2001:db8::1]"] {
+        let get = |path: &str| send(addr, "GET", path, &[("Host", host)], "");
+        let metadata = get("/.well-known/oauth-authorization-server");
+        assert_eq!(metadata.0, 200, "{host}: {}", metadata.1);
+        assert!(
+            metadata.1.contains("https://[2001:db8::1]:8787"),
+            "{}",
+            metadata.1
+        );
+        assert_eq!(
+            get("/consent?txn=nope").0,
+            400,
+            "{host}: the consent page, not 403"
+        );
+        let accept = ("Accept", "application/json, text/event-stream");
+        let (k, v) = bearer(CLAUDE_TOKEN);
+        let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let mcp = send(
+            addr,
+            "POST",
+            "/mcp",
+            &[("Host", host), JSON, accept, (k, &v)],
+            call,
+        );
+        assert_eq!(mcp.0, 200, "{host}: {}", mcp.1);
+    }
+    assert_eq!(
+        send(
+            addr,
+            "GET",
+            "/.well-known/oauth-authorization-server",
+            &[("Host", "[2001:db8::2]")],
+            ""
+        )
+        .0,
+        403,
+        "another address is still refused"
     );
 }

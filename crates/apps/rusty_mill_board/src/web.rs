@@ -62,6 +62,19 @@ pub fn check_bind(
     ))
 }
 
+/// The `Host` names that reach the board at `issuer`: its host, and for an
+/// IPv6 address also its bracketed form. The web guard compares a `Host`
+/// with its port removed but brackets kept (`[2001:db8::1]`), the MCP
+/// handler without brackets, so both forms are needed for both to agree.
+pub fn issuer_hosts(issuer: &Issuer) -> Vec<String> {
+    let host = issuer.host();
+    if host.contains(':') {
+        vec![format!("[{host}]"), host]
+    } else {
+        vec![host]
+    }
+}
+
 /// How callers of `/api` and `/mcp` are authenticated.
 pub enum Auth {
     /// No credential required (loopback use).

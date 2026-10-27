@@ -34,7 +34,7 @@ use rusty_mill_board::settings::{
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
 use rusty_mill_board::tick::{TickHttp, TickStore};
-use rusty_mill_board::web::{Auth, Web, check_bind};
+use rusty_mill_board::web::{Auth, Web, check_bind, issuer_hosts};
 use rusty_oauth_server::{Issuer, validate_issuer};
 
 /// OAuth's grant file, by default.
@@ -320,7 +320,7 @@ fn run(cli: Cli) -> Result<(), String> {
     let oauth = oauth(&cli, &files)?;
     let mut allowed_hosts = cli.allowed_hosts.clone();
     if let Some((issuer, _)) = &oauth {
-        allowed_hosts.push(issuer.host());
+        allowed_hosts.extend(issuer_hosts(issuer));
     }
     let config = HttpConfig {
         allowed_hosts: allowed_hosts.clone(),
