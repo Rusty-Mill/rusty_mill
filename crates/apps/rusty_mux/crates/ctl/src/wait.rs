@@ -145,10 +145,11 @@ impl<S: std::io::Read + std::io::Write> Session<'_, S> {
     }
 
     /// Starts a fresh numbered event stream, failing unless the server
-    /// has `needs` too.
+    /// has `needs` too. Asks for [`Features::LABELS`] besides, so that a
+    /// listing includes clients for targets to name.
     fn open_stream(&mut self, needs: Features, what: &str) -> Result<(), Failure> {
         let needs = needs.union(Features::EVENT_SEQ);
-        let (features, _) = self.hello(needs, None)?;
+        let (features, _) = self.hello(needs.union(Features::LABELS), None)?;
         if features.contains(needs) {
             return Ok(());
         }
@@ -181,7 +182,7 @@ impl<S: std::io::Read + std::io::Write> Session<'_, S> {
         Ok(target::resolve(entries, Entity::Block, spec, self.here)?)
     }
 
-    /// A filter's value: a session, window or block target as its id.
+    /// A filter's value: a session, window, block or client target as its id.
     fn field(
         &self,
         name: &str,
@@ -192,6 +193,7 @@ impl<S: std::io::Read + std::io::Write> Session<'_, S> {
             "session" => Entity::Session,
             "window" => Entity::Window,
             "block" => Entity::Block,
+            "client" => Entity::Client,
             _ => return Ok(text.to_owned()),
         };
         if let Ok(Value::Id(id)) = rusty_mux_proto::schema::Ty::Id(entity).parse(text) {

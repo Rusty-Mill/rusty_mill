@@ -140,10 +140,26 @@ fn tools_carry_the_catalog_schema_and_hints() {
     );
     let hint = |t: &Tool, k: &str| t.annotations.as_ref().and_then(|a| a.get(k)).cloned();
     assert_eq!(hint(&format, "readOnlyHint"), Some(Value::Bool(true)));
-    let close = tool(known("close-block"));
-    assert_eq!(hint(&close, "destructiveHint"), Some(Value::Bool(true)));
-    assert_eq!(hint(&close, "readOnlyHint"), Some(Value::Bool(false)));
-    assert_eq!(hint(&close, "openWorldHint"), Some(Value::Bool(false)));
+    for name in ["close-block", "disconnect-client"] {
+        let ends = tool(known(name));
+        assert_eq!(
+            hint(&ends, "destructiveHint"),
+            Some(Value::Bool(true)),
+            "{name}"
+        );
+        assert_eq!(
+            hint(&ends, "readOnlyHint"),
+            Some(Value::Bool(false)),
+            "{name}"
+        );
+        assert_eq!(
+            hint(&ends, "openWorldHint"),
+            Some(Value::Bool(false)),
+            "{name}"
+        );
+    }
+    let rename = tool(known("rename-client"));
+    assert_eq!(hint(&rename, "destructiveHint"), Some(Value::Bool(false)));
     for name in ["input", "create-block"] {
         let runs = tool(known(name));
         assert_eq!(

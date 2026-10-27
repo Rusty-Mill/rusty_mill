@@ -186,13 +186,27 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
             size,
             holder,
             title,
+            name,
         } => {
             let mut fields = vec![("window", Id(window.uuid()))];
             fields.extend(size_fields(*size));
             fields.push(("holder", holder.map_or(Field::Absent, |c| Id(c.uuid()))));
             fields.push(("title", Text(title.clone())));
+            fields.push(("name", Text(name.clone())));
             ("block", block.uuid(), fields)
         }
+        Entry::Client {
+            client,
+            name,
+            attached,
+        } => (
+            "client",
+            client.uuid(),
+            vec![
+                ("name", Text(name.clone())),
+                ("attached", attached.map_or(Field::Absent, |b| Id(b.uuid()))),
+            ],
+        ),
     }
 }
 
@@ -306,12 +320,32 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
                 ("name", Text(name.clone())),
             ],
         ),
+        E::SessionRenamed { session, ref name } => {
+            ("session-renamed", renamed("session", session.uuid(), name))
+        }
+        E::WindowRenamed { window, ref name } => {
+            ("window-renamed", renamed("window", window.uuid(), name))
+        }
+        E::BlockRenamed { block, ref name } => {
+            ("block-renamed", renamed("block", block.uuid(), name))
+        }
+        E::ClientRenamed { client, ref name } => {
+            ("client-renamed", renamed("client", client.uuid(), name))
+        }
     }
+}
+
+/// A rename's fields: the entity's id under its kind, and its new name.
+fn renamed(entity: &'static str, id: Uuid, name: &str) -> Vec<(&'static str, Field)> {
+    vec![
+        (entity, Field::Id(id)),
+        ("name", Field::Text(name.to_owned())),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
-    use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
+    use rusty_mux_core::{BlockId, ClientId, SessionId, Size, WindowId};
 
     use super::*;
 
@@ -402,7 +436,7 @@ mod tests {
             WindowId::from_uuid(id(2)),
             BlockId::from_uuid(id(3)),
         );
-        let client = rusty_mux_core::ClientId::from_uuid(id(4));
+        let client = ClientId::from_uuid(id(4));
         let size = Size::new(80, 24).unwrap();
         let events = [
             Event::SessionCreated { session },
@@ -446,6 +480,22 @@ mod tests {
                 pid: 42,
                 name: "vim".into(),
             },
+            Event::SessionRenamed {
+                session,
+                name: "work".into(),
+            },
+            Event::WindowRenamed {
+                window,
+                name: "logs".into(),
+            },
+            Event::BlockRenamed {
+                block,
+                name: "build".into(),
+            },
+            Event::ClientRenamed {
+                client,
+                name: "laptop".into(),
+            },
         ];
         assert_eq!(events.len(), rusty_mux_script::EVENTS.len());
         for (event, (kind, declared)) in events.iter().zip(rusty_mux_script::EVENTS) {
@@ -485,14 +535,24 @@ mod tests {
             size: Size::new(80, 24).unwrap(),
             holder: None,
             title: "vim".into(),
+            name: "edit".into(),
         };
         assert_eq!(
             entry_line(&block, false),
             format!(
-                "block {} window={} cols=80 rows=24 holder=- title=\"vim\"",
+                "block {} window={} cols=80 rows=24 holder=- title=\"vim\" name=\"edit\"",
                 id(1),
                 id(2)
             )
+        );
+        let client = Entry::Client {
+            client: ClientId::from_uuid(id(3)),
+            name: "laptop".into(),
+            attached: Some(BlockId::from_uuid(id(1))),
+        };
+        assert_eq!(
+            entry_line(&client, false),
+            format!("client {} name=\"laptop\" attached={}", id(3), id(1))
         );
         let Value::Object(map) = Value::from_json_str(&entry_line(&block, true)).unwrap() else {
             panic!("an object")

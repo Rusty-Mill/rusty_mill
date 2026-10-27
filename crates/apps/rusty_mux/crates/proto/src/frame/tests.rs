@@ -1,4 +1,6 @@
-use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Progress, SessionId, Size, WindowId};
+use rusty_mux_core::{
+    BlockId, ClientId, EntityId, Event, ExitStatus, Progress, SessionId, Size, WindowId,
+};
 use rusty_uuid::Uuid;
 use rusty_wire::Writer;
 
@@ -155,6 +157,7 @@ fn every_message_round_trips() {
                 size: size(80, 24),
                 holder: Some(client),
                 title: "vim".into(),
+                name: "editor".into(),
             },
         },
         Message::Entry {
@@ -165,8 +168,46 @@ fn every_message_round_trips() {
                 size: size(1, 1),
                 holder: None,
                 title: String::new(),
+                name: String::new(),
             },
         },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Client {
+                client,
+                name: "laptop".into(),
+                attached: Some(block),
+            },
+        },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Client {
+                client,
+                name: String::new(),
+                attached: None,
+            },
+        },
+        Message::Rename {
+            req: 19,
+            target: EntityId::Session(session),
+            name: "work".into(),
+        },
+        Message::Rename {
+            req: 19,
+            target: EntityId::Window(window),
+            name: String::new(),
+        },
+        Message::Rename {
+            req: 19,
+            target: EntityId::Block(block),
+            name: "build".into(),
+        },
+        Message::Rename {
+            req: 19,
+            target: EntityId::Client(client),
+            name: "laptop".into(),
+        },
+        Message::Disconnect { req: 20, client },
         Message::Welcome {
             features: Features::NONE,
             client,
@@ -297,6 +338,22 @@ fn every_event_round_trips() {
             block,
             pid: 1,
             name: String::new(),
+        },
+        Event::SessionRenamed {
+            session,
+            name: "work".into(),
+        },
+        Event::WindowRenamed {
+            window,
+            name: String::new(),
+        },
+        Event::BlockRenamed {
+            block,
+            name: "build".into(),
+        },
+        Event::ClientRenamed {
+            client,
+            name: "laptop".into(),
         },
     ];
     for event in events {
@@ -703,6 +760,8 @@ fn feature_bits_are_distinct() {
         Features::PROGRAM_EVENTS,
         Features::LAUNCH,
         Features::PROCESS,
+        Features::CAPTURE,
+        Features::LABELS,
     ];
     let mut seen = 0u64;
     for feature in all {
@@ -882,4 +941,46 @@ fn block_call_flags_round_trip_and_are_one_bit() {
         decode(&frame),
         Err(Error::InvalidField { field: 23, .. })
     ));
+}
+
+#[test]
+fn a_rename_names_exactly_one_entity() {
+    const RENAME: u8 = 0x10;
+    let (session, block) = (Uuid::new_v4(), Uuid::new_v4());
+    let none = raw_frame(RENAME, |out| {
+        out.varint(REQ_ID, 1).bytes(6, b"x");
+    });
+    let two = raw_frame(RENAME, |out| {
+        out.varint(REQ_ID, 1)
+            .uuid(2, session)
+            .uuid(4, block)
+            .bytes(6, b"x");
+    });
+    for frame in [none, two] {
+        assert!(matches!(
+            decode(&frame),
+            Err(Error::InvalidField {
+                message: RENAME,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn a_block_entry_from_an_older_server_has_an_empty_name() {
+    const ENTRY: u8 = 0x8a;
+    let frame = raw_frame(ENTRY, |out| {
+        out.varint(REQ_ID, 1)
+            .varint(13, 3)
+            .uuid(4, Uuid::nil())
+            .uuid(3, Uuid::nil())
+            .bytes(20, b"")
+            .varint(7, 80)
+            .varint(8, 24);
+    });
+    let Ok(Some((Message::Entry { entry, .. }, _))) = decode(&frame) else {
+        panic!("a block entry");
+    };
+    assert!(matches!(entry, Entry::Block { name, .. } if name.is_empty()));
 }

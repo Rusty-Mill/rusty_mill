@@ -27,7 +27,7 @@
 
 use std::fmt;
 
-use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
+use rusty_mux_core::{BlockId, ClientId, EntityId, SessionId, Size, WindowId};
 use rusty_uuid::Uuid;
 
 use crate::{Features, Launch, Message, Program};
@@ -38,6 +38,7 @@ pub enum Entity {
     Session,
     Window,
     Block,
+    Client,
 }
 
 impl Entity {
@@ -46,6 +47,17 @@ impl Entity {
             Self::Session => "session",
             Self::Window => "window",
             Self::Block => "block",
+            Self::Client => "client",
+        }
+    }
+
+    /// The id `uuid` as this kind's.
+    pub const fn id(self, uuid: Uuid) -> EntityId {
+        match self {
+            Self::Session => EntityId::Session(SessionId::from_uuid(uuid)),
+            Self::Window => EntityId::Window(WindowId::from_uuid(uuid)),
+            Self::Block => EntityId::Block(BlockId::from_uuid(uuid)),
+            Self::Client => EntityId::Client(ClientId::from_uuid(uuid)),
         }
     }
 }
@@ -320,6 +332,15 @@ fn block_call(req: u64, a: &Args<'_>, method: &'static str) -> Result<Message, C
     })
 }
 
+/// A [`Message::Rename`] of the `entity` its parameter of that name holds.
+fn rename(req: u64, a: &Args<'_>, entity: Entity) -> Result<Message, CallError> {
+    Ok(Message::Rename {
+        req,
+        target: entity.id(a.uuid(entity.name(), entity)?),
+        name: a.text("name")?,
+    })
+}
+
 /// Arguments already checked against their method's parameters, so lookups
 /// of a declared parameter find a value of its type.
 struct Args<'a>(&'a [(&'a str, Value)]);
@@ -443,6 +464,11 @@ const fn capture(name: &'static str, doc: &'static str) -> Param {
 }
 
 const BLOCK: Param = required("block", Ty::Id(Entity::Block), "The block to act on.");
+const NEW_NAME: Param = required(
+    "name",
+    Ty::Text,
+    "The new name, at most 256 bytes; empty clears it.",
+);
 const COLS: Param = required("cols", Ty::Cells, "Width in cells.");
 const ROWS: Param = required("rows", Ty::Cells, "Height in cells.");
 
@@ -451,7 +477,11 @@ pub static CATALOG: &[Method] = &[
     Method {
         name: "create-session",
         doc: "Create a named session.",
-        params: &[required("name", Ty::Text, "The session's name.")],
+        params: &[required(
+            "name",
+            Ty::Text,
+            "The session's name, at most 256 bytes.",
+        )],
         needs: Features::NONE,
         returns: Returns::Created(Entity::Session),
         build: |req, a| {
@@ -470,7 +500,7 @@ pub static CATALOG: &[Method] = &[
                 Ty::Id(Entity::Session),
                 "The session to add the window to.",
             ),
-            required("name", Ty::Text, "The window's name."),
+            required("name", Ty::Text, "The window's name, at most 256 bytes."),
         ],
         needs: Features::NONE,
         returns: Returns::Created(Entity::Window),
@@ -604,8 +634,70 @@ pub static CATALOG: &[Method] = &[
         build: |req, _| Ok(Message::Sync { req }),
     },
     Method {
+        name: "rename-session",
+        doc: "Rename a session.",
+        params: &[
+            required("session", Ty::Id(Entity::Session), "The session to rename."),
+            NEW_NAME,
+        ],
+        needs: Features::LABELS,
+        returns: Returns::Nothing,
+        build: |req, a| rename(req, a, Entity::Session),
+    },
+    Method {
+        name: "rename-window",
+        doc: "Rename a window.",
+        params: &[
+            required("window", Ty::Id(Entity::Window), "The window to rename."),
+            NEW_NAME,
+        ],
+        needs: Features::LABELS,
+        returns: Returns::Nothing,
+        build: |req, a| rename(req, a, Entity::Window),
+    },
+    Method {
+        name: "rename-block",
+        doc: "Name a block, so a target can name it.",
+        params: &[
+            required("block", Ty::Id(Entity::Block), "The block to rename."),
+            NEW_NAME,
+        ],
+        needs: Features::LABELS,
+        returns: Returns::Nothing,
+        build: |req, a| rename(req, a, Entity::Block),
+    },
+    Method {
+        name: "rename-client",
+        doc: "Name a client connection, such as an attached terminal.",
+        params: &[
+            required("client", Ty::Id(Entity::Client), "The client to rename."),
+            NEW_NAME,
+        ],
+        needs: Features::LABELS,
+        returns: Returns::Nothing,
+        build: |req, a| rename(req, a, Entity::Client),
+    },
+    Method {
+        name: "disconnect-client",
+        doc: "End another client's connection: it is detached and gives up its input lease. \
+              It may connect again.",
+        params: &[required(
+            "client",
+            Ty::Id(Entity::Client),
+            "The client to disconnect; not the caller's own.",
+        )],
+        needs: Features::LABELS,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::Disconnect {
+                req,
+                client: ClientId::from_uuid(a.uuid("client", Entity::Client)?),
+            })
+        },
+    },
+    Method {
         name: "list",
-        doc: "List every session, window and block.",
+        doc: "List every session, window, block and client.",
         params: &[],
         needs: Features::INSPECT,
         returns: Returns::Entries,

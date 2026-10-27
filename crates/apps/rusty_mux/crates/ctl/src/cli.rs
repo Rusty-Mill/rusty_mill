@@ -57,8 +57,8 @@ pub enum Until {
     /// resolved like an id flag's.
     Exit { block: String },
     /// An event of `kind`, one of [`rusty_mux_script::EVENTS`], whose
-    /// fields have these values. A `session`, `window` or `block` value is
-    /// a target.
+    /// fields have these values. A `session`, `window`, `block` or
+    /// `client` value is a target.
     Event {
         kind: &'static str,
         fields: Vec<(&'static str, String)>,
@@ -138,6 +138,7 @@ impl Defaults {
             Entity::Session => self.session,
             Entity::Window => self.window,
             Entity::Block => self.block,
+            Entity::Client => None,
         }
     }
 }

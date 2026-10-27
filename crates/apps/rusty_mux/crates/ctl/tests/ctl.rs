@@ -274,7 +274,8 @@ fn format_prints_the_screen_and_list_the_tree() {
             }
         })
         .collect();
-    assert_eq!(kinds, ["session", "window", "block", "done"]);
+    // ctl's own connection is a client too.
+    assert_eq!(kinds, ["session", "window", "block", "client", "done"]);
     assert!(listing.contains(&format!("\"block\":\"{block}\"")));
 }
 
@@ -402,6 +403,79 @@ fn targets_resolve_by_name_position_and_suffix() {
     let suffix = &block[block.len() - 6..];
     ok(&socket, &["close-block", "--block", suffix]);
     assert!(!ok(&socket, &["list"]).contains(&block));
+}
+
+/// The ids of the clients `list` shows.
+fn client_ids(socket: &Path) -> Vec<String> {
+    ok(socket, &["list"])
+        .lines()
+        .filter_map(|l| l.strip_prefix("client "))
+        .filter_map(|l| l.split(' ').next())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn rename_then_disconnect_a_client_by_its_name() {
+    let socket = start_server();
+    let block = block(&socket);
+    ok(
+        &socket,
+        &["rename-block", "--block", &block, "--name", "Build"],
+    );
+    ok(
+        &socket,
+        &["terminal.format", "--block", "build", "--history", "0"],
+    );
+
+    // A follower is a client that stays: the one in both listings.
+    let mut follower = ctl_command(&socket, &["events", "--follow"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut lines = BufReader::new(follower.stdout.take().expect("stdout")).lines();
+    let first = lines.next().expect("a line").expect("read");
+    assert!(first.starts_with("cursor "), "{first}");
+    let (one, two) = (client_ids(&socket), client_ids(&socket));
+    let stays: Vec<&String> = one.iter().filter(|id| two.contains(id)).collect();
+    let [id] = stays.as_slice() else {
+        panic!("one lasting client: {one:?} {two:?}");
+    };
+    ok(
+        &socket,
+        &[
+            "rename-client",
+            "--client",
+            &id[id.len() - 6..],
+            "--name",
+            "Follower",
+        ],
+    );
+    let renamed = lines
+        .by_ref()
+        .map(|l| l.expect("read"))
+        .find(|l| l.contains("client-renamed"));
+    assert!(
+        renamed.is_some_and(|l| l.contains(id.as_str()) && l.contains("Follower")),
+        "the follower hears of its new name"
+    );
+
+    let own = ctl(&socket, &["disconnect-client", "--client", "nobody"]);
+    assert_eq!(
+        own.status.code(),
+        Some(3),
+        "a missing client is a missing target"
+    );
+    ok(&socket, &["disconnect-client", "--client", "follower"]);
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while follower.try_wait().expect("wait").is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "follower still connected"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!client_ids(&socket).contains(id));
 }
 
 #[test]

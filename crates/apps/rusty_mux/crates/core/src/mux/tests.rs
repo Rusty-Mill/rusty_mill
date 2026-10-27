@@ -7,7 +7,7 @@ fn size(cols: u16, rows: u16) -> Size {
 /// A session with one window and one block, events drained.
 fn fixture() -> (Mux, SessionId, WindowId, BlockId) {
     let mut mux = Mux::new();
-    let session = mux.create_session("s");
+    let session = mux.create_session("s").expect("session");
     let window = mux.create_window(session, "w").expect("window");
     let block = mux.create_block(window, size(80, 24)).expect("block");
     mux.take_events();
@@ -25,7 +25,7 @@ fn leased_client(mux: &mut Mux, block: BlockId) -> ClientId {
 #[test]
 fn create_links_children_and_emits_in_order() {
     let mut mux = Mux::new();
-    let session = mux.create_session("work");
+    let session = mux.create_session("work").unwrap();
     let window = mux.create_window(session, "main").unwrap();
     let block = mux.create_block(window, size(80, 24)).unwrap();
 
@@ -292,7 +292,9 @@ fn errors_display_their_ids() {
 #[test]
 fn sessions_list_in_creation_order() {
     let mut mux = Mux::new();
-    let ids: Vec<SessionId> = (0..8).map(|n| mux.create_session(n.to_string())).collect();
+    let ids: Vec<SessionId> = (0..8)
+        .map(|n| mux.create_session(n.to_string()).unwrap())
+        .collect();
     mux.close_session(ids[3]).unwrap();
     let listed: Vec<SessionId> = mux.sessions().map(Session::id).collect();
     let expected: Vec<SessionId> = ids.iter().copied().filter(|id| *id != ids[3]).collect();
@@ -389,4 +391,99 @@ fn process_notes_emit_their_event() {
             name: "vim".into()
         }]
     );
+}
+
+#[test]
+fn rename_names_every_kind_and_emits_once() {
+    let (mut mux, session, window, block) = fixture();
+    let client = mux.connect();
+    mux.take_events();
+    mux.rename(EntityId::Session(session), "work").unwrap();
+    mux.rename(EntityId::Window(window), "logs").unwrap();
+    mux.rename(EntityId::Block(block), "build").unwrap();
+    mux.rename(EntityId::Client(client), "laptop").unwrap();
+    // The same name again changes nothing.
+    mux.rename(EntityId::Block(block), "build").unwrap();
+
+    assert_eq!(mux.session(session).unwrap().name(), "work");
+    assert_eq!(mux.window(window).unwrap().name(), "logs");
+    assert_eq!(mux.block(block).unwrap().name(), "build");
+    assert_eq!(mux.client(client).unwrap().name(), "laptop");
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::SessionRenamed {
+                session,
+                name: "work".into()
+            },
+            Event::WindowRenamed {
+                window,
+                name: "logs".into()
+            },
+            Event::BlockRenamed {
+                block,
+                name: "build".into()
+            },
+            Event::ClientRenamed {
+                client,
+                name: "laptop".into()
+            },
+        ]
+    );
+}
+
+#[test]
+fn new_blocks_and_clients_have_empty_names() {
+    let (mut mux, _, _, block) = fixture();
+    let client = mux.connect();
+    assert_eq!(mux.block(block).unwrap().name(), "");
+    assert_eq!(mux.client(client).unwrap().name(), "");
+    assert_eq!(mux.clients().map(Client::id).collect::<Vec<_>>(), [client]);
+}
+
+#[test]
+fn renaming_an_unknown_entity_changes_nothing() {
+    let (mut mux, _, window, block) = fixture();
+    let client = mux.connect();
+    mux.close_window(window).unwrap();
+    mux.disconnect(client).unwrap();
+    mux.take_events();
+    assert_eq!(
+        mux.rename(EntityId::Block(block), "x"),
+        Err(Error::UnknownBlock(block))
+    );
+    assert_eq!(
+        mux.rename(EntityId::Client(client), "x"),
+        Err(Error::UnknownClient(client))
+    );
+    assert!(mux.take_events().is_empty());
+}
+
+#[test]
+fn names_over_the_limit_are_refused_without_a_change() {
+    let (mut mux, session, window, block) = fixture();
+    let client = mux.connect();
+    mux.rename(EntityId::Block(block), "build").unwrap();
+    mux.take_events();
+    let at_limit = "a".repeat(MAX_NAME);
+    let over = "a".repeat(MAX_NAME + 1);
+    let error = Error::NameTooLong { len: MAX_NAME + 1 };
+    let too_long = Err(error.clone());
+    for id in [
+        EntityId::Session(session),
+        EntityId::Window(window),
+        EntityId::Block(block),
+        EntityId::Client(client),
+    ] {
+        assert_eq!(mux.rename(id, over.clone()), too_long, "{id:?}");
+    }
+    assert_eq!(mux.create_session(over.clone()), Err(error.clone()));
+    assert_eq!(mux.create_window(session, over), Err(error));
+    assert_eq!(mux.block(block).unwrap().name(), "build");
+    assert_eq!(mux.sessions().count(), 1);
+    assert!(mux.take_events().is_empty());
+    // Exactly the limit is a name like any other.
+    mux.rename(EntityId::Block(block), at_limit.clone())
+        .unwrap();
+    assert_eq!(mux.block(block).unwrap().name(), at_limit);
 }

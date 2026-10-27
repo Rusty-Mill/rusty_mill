@@ -51,7 +51,8 @@ const OFFERED: Features = Features::CHECKPOINT_V3
     .union(Features::PROGRAM_EVENTS)
     .union(Features::LAUNCH)
     .union(Features::PROCESS)
-    .union(Features::CAPTURE);
+    .union(Features::CAPTURE)
+    .union(Features::LABELS);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -220,8 +221,13 @@ impl State {
         };
         match message {
             M::CreateSession { req, name } => {
-                let session = self.mux.create_session(name);
-                (req, Ok(Outcome::Done(Some(session.uuid()))))
+                let result = self.mux.create_session(name);
+                (
+                    req,
+                    result
+                        .map(|s| Outcome::Done(Some(s.uuid())))
+                        .map_err(Refusal::from),
+                )
             }
             M::CreateWindow { req, session, name } => {
                 let result = self.mux.create_window(session, name);
@@ -287,7 +293,20 @@ impl State {
             M::List { req } => (
                 req,
                 self.require(client, Features::INSPECT, "list")
-                    .and_then(|()| self.list(req)),
+                    .and_then(|()| self.list(client, req)),
+            ),
+            M::Rename { req, target, name } => (
+                req,
+                self.require(client, Features::LABELS, "rename")
+                    .and_then(|()| done(self.mux.rename(target, name))),
+            ),
+            M::Disconnect {
+                req,
+                client: target,
+            } => (
+                req,
+                self.require(client, Features::LABELS, "disconnect")
+                    .and_then(|()| self.disconnect_other(client, target)),
             ),
             other => (0, Err(format!("not a client request: {other:?}").into())),
         }
@@ -371,9 +390,25 @@ impl State {
         reply(method, &[Message::Text { req, text }])
     }
 
+    /// Ends `target`'s connection for `client`, as the budget does a slow
+    /// client's. Any client may end any other's: everyone who can reach
+    /// the socket is trusted alike. A client cannot end its own, since its
+    /// reply would be lost with the connection.
+    fn disconnect_other(&mut self, client: ClientId, target: ClientId) -> Result<Outcome, Refusal> {
+        if target == client {
+            return Err("a client cannot disconnect itself; close the connection instead".into());
+        }
+        if !self.clients.contains_key(&target) {
+            return Err(rusty_mux_core::Error::UnknownClient(target).into());
+        }
+        self.drop_client(target);
+        Ok(Outcome::Done(None))
+    }
+
     /// Every session, window and block, in creation order, each parent
-    /// before its children.
-    fn list(&self, req: u64) -> Result<Outcome, Refusal> {
+    /// before its children; then, for a `client` with
+    /// [`Features::LABELS`], every client.
+    fn list(&self, client: ClientId, req: u64) -> Result<Outcome, Refusal> {
         let mut entries = Vec::new();
         for session in self.mux.sessions() {
             entries.push(Entry::Session {
@@ -397,9 +432,21 @@ impl State {
                             .get(&block.id())
                             .map(|rt| rt.grid.title.clone())
                             .unwrap_or_default(),
+                        name: block.name().to_owned(),
                     });
                 }
             }
+        }
+        if self
+            .features
+            .get(&client)
+            .is_some_and(|f| f.contains(Features::LABELS))
+        {
+            entries.extend(self.mux.clients().map(|c| Entry::Client {
+                client: c.id(),
+                name: c.name().to_owned(),
+                attached: c.attached(),
+            }));
         }
         let mut messages: Vec<Message> = entries
             .into_iter()
@@ -726,6 +773,10 @@ fn receives(features: Features, event: &Event) -> bool {
         | Event::ProgressChanged { .. }
         | Event::Notification { .. } => Features::PROGRAM_EVENTS,
         Event::ProcessChanged { .. } => Features::PROCESS,
+        Event::SessionRenamed { .. }
+        | Event::WindowRenamed { .. }
+        | Event::BlockRenamed { .. }
+        | Event::ClientRenamed { .. } => Features::LABELS,
         _ => Features::NONE,
     };
     features.contains(needs)
@@ -760,7 +811,10 @@ impl From<rusty_mux_core::Error> for Refusal {
     fn from(err: rusty_mux_core::Error) -> Self {
         use rusty_mux_core::Error as E;
         let code = match err {
-            E::UnknownSession(_) | E::UnknownWindow(_) | E::UnknownBlock(_) => Some(Code::NotFound),
+            E::UnknownSession(_)
+            | E::UnknownWindow(_)
+            | E::UnknownBlock(_)
+            | E::UnknownClient(_) => Some(Code::NotFound),
             _ => None,
         };
         Self {
@@ -939,7 +993,7 @@ mod regression {
         let (out, inbox, _) = outbox();
         let mut state = shared.borrow_mut();
         let client = state.connect(out, Features::CHECKPOINT_V3, None);
-        let session = state.mux.create_session("s");
+        let session = state.mux.create_session("s").unwrap();
         let window = state.mux.create_window(session, "w").unwrap();
         let Outcome::Done(Some(id)) = state
             .create_block(

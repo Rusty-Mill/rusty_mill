@@ -4,7 +4,8 @@
 //! [`Session`] groups windows. A [`Client`] is one connection, attached to at
 //! most one block. Splits and tabs are drawn by clients, so the server keeps
 //! no pane tree. Each block takes input from a single writer: the client
-//! holding its input lease.
+//! holding its input lease. Every entity has a name, empty unless given,
+//! that any client may change.
 //!
 //! [`Mux`] owns the state. Every change it makes is queued as an [`Event`]
 //! that the server drains with [`Mux::take_events`] and fans out.
@@ -13,7 +14,7 @@
 //! use rusty_mux_core::{Event, Mux, Size};
 //!
 //! let mut mux = Mux::new();
-//! let session = mux.create_session("work");
+//! let session = mux.create_session("work")?;
 //! let window = mux.create_window(session, "main")?;
 //! let block = mux.create_block(window, Size::new(80, 24)?)?;
 //! let client = mux.connect();
@@ -33,5 +34,5 @@ mod mux;
 pub use entity::{Block, Client, Session, Size, Window};
 pub use error::Error;
 pub use event::{Event, ExitStatus, Progress};
-pub use id::{BlockId, ClientId, SessionId, WindowId};
-pub use mux::Mux;
+pub use id::{BlockId, ClientId, EntityId, SessionId, WindowId};
+pub use mux::{MAX_NAME, Mux};

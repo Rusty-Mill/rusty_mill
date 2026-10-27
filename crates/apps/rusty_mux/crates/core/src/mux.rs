@@ -3,9 +3,22 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Block, BlockId, Client, ClientId, Error, Event, ExitStatus, Progress, Session, SessionId, Size,
-    Window, WindowId,
+    Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, Progress, Session,
+    SessionId, Size, Window, WindowId,
 };
+
+/// The longest name any entity may have, in UTF-8 bytes. Names travel in
+/// every event and listing, so a bound keeps one name from filling a
+/// client's queue or a listing's reply.
+pub const MAX_NAME: usize = 256;
+
+/// Refuses a name longer than [`MAX_NAME`].
+fn check_name(name: &str) -> Result<(), Error> {
+    if name.len() > MAX_NAME {
+        return Err(Error::NameTooLong { len: name.len() });
+    }
+    Ok(())
+}
 
 /// All sessions, windows, blocks and clients, plus the events not yet drained.
 ///
@@ -55,17 +68,19 @@ impl Mux {
             .filter_map(|id| self.sessions.get(id))
     }
 
-    pub fn create_session(&mut self, name: impl Into<String>) -> SessionId {
+    pub fn create_session(&mut self, name: impl Into<String>) -> Result<SessionId, Error> {
+        let name = name.into();
+        check_name(&name)?;
         let id = SessionId::random();
         let session = Session {
             id,
-            name: name.into(),
+            name,
             windows: Vec::new(),
         };
         self.sessions.insert(id, session);
         self.session_order.push(id);
         self.events.push(Event::SessionCreated { session: id });
-        id
+        Ok(id)
     }
 
     pub fn create_window(
@@ -73,6 +88,8 @@ impl Mux {
         session: SessionId,
         name: impl Into<String>,
     ) -> Result<WindowId, Error> {
+        let name = name.into();
+        check_name(&name)?;
         let parent = self
             .sessions
             .get_mut(&session)
@@ -84,7 +101,7 @@ impl Mux {
             Window {
                 id,
                 session,
-                name: name.into(),
+                name,
                 blocks: Vec::new(),
             },
         );
@@ -117,6 +134,7 @@ impl Mux {
             Block {
                 id,
                 window,
+                name: String::new(),
                 size,
                 lease: None,
             },
@@ -199,6 +217,67 @@ impl Mux {
         self.note(block, Event::ProcessChanged { block, pid, name })
     }
 
+    /// Names the entity `name`, replacing its old name. Renaming to the
+    /// same name changes nothing and emits nothing; a name over
+    /// [`MAX_NAME`] is refused.
+    pub fn rename(&mut self, id: EntityId, name: impl Into<String>) -> Result<(), Error> {
+        let name = name.into();
+        check_name(&name)?;
+        let (slot, event) = match id {
+            EntityId::Session(session) => (
+                self.sessions
+                    .get_mut(&session)
+                    .map(|s| &mut s.name)
+                    .ok_or(Error::UnknownSession(session))?,
+                Event::SessionRenamed {
+                    session,
+                    name: name.clone(),
+                },
+            ),
+            EntityId::Window(window) => (
+                self.windows
+                    .get_mut(&window)
+                    .map(|w| &mut w.name)
+                    .ok_or(Error::UnknownWindow(window))?,
+                Event::WindowRenamed {
+                    window,
+                    name: name.clone(),
+                },
+            ),
+            EntityId::Block(block) => (
+                self.blocks
+                    .get_mut(&block)
+                    .map(|b| &mut b.name)
+                    .ok_or(Error::UnknownBlock(block))?,
+                Event::BlockRenamed {
+                    block,
+                    name: name.clone(),
+                },
+            ),
+            EntityId::Client(client) => (
+                self.clients
+                    .get_mut(&client)
+                    .map(|c| &mut c.name)
+                    .ok_or(Error::UnknownClient(client))?,
+                Event::ClientRenamed {
+                    client,
+                    name: name.clone(),
+                },
+            ),
+        };
+        if *slot == name {
+            return Ok(());
+        }
+        *slot = name;
+        self.events.push(event);
+        Ok(())
+    }
+
+    /// Clients in id order.
+    pub fn clients(&self) -> impl Iterator<Item = &Client> {
+        self.clients.values()
+    }
+
     /// Emits `event` about a block the host tracks, if it is live.
     fn note(&mut self, block: BlockId, event: Event) -> Result<(), Error> {
         if !self.blocks.contains_key(&block) {
@@ -255,7 +334,14 @@ impl Mux {
 
     pub fn connect(&mut self) -> ClientId {
         let id = ClientId::random();
-        self.clients.insert(id, Client { id, attached: None });
+        self.clients.insert(
+            id,
+            Client {
+                id,
+                name: String::new(),
+                attached: None,
+            },
+        );
         self.events.push(Event::ClientConnected { client: id });
         id
     }
