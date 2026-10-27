@@ -683,3 +683,24 @@ fn a_grant_file_belongs_to_one_board() {
     .expect("b");
     assert_eq!(api(b, &access, "board_whoami", "{}").0, 401);
 }
+
+#[test]
+fn a_board_refuses_an_old_grant_file_that_names_no_issuer() {
+    let dir = std::env::temp_dir().join(format!("mill-board-oauth-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let state = dir.join("oauth.json");
+    // A grant file from before binding, or from another server, reused by mistake.
+    let legacy =
+        r#"{"access_tokens":{"old":{"client_id":"c","subject":"claude","expires_at":9999999999}}}"#;
+    std::fs::write(&state, legacy).expect("seed");
+    let refused = start_oauth_with(
+        Auth::Credentials(credentials()),
+        "http://localhost:8787",
+        state.clone(),
+    );
+    assert!(
+        refused.is_err_and(|e| e.contains("no known issuer")),
+        "an unbound file with grants is refused"
+    );
+    assert_eq!(std::fs::read_to_string(&state).expect("read"), legacy);
+}

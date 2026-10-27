@@ -62,6 +62,10 @@ struct State {
 }
 
 impl State {
+    fn is_empty(&self) -> bool {
+        self.clients.is_empty() && self.access_tokens.is_empty() && self.refresh_tokens.is_empty()
+    }
+
     fn tokens(&self, kind: TokenKind) -> &Map {
         match kind {
             TokenKind::Access => &self.access_tokens,
@@ -199,12 +203,13 @@ impl StateStore {
 
     /// Tie this file to `issuer`, so grants made by one server are never
     /// honoured by another that was pointed at the same file. A file that
-    /// names no issuer yet (new, or written before this existed) is claimed
-    /// for `issuer`.
+    /// names no issuer is claimed for `issuer` only while it holds nothing:
+    /// grants in an unbound file are no evidence of which server made them.
     ///
     /// # Errors
-    /// If the file names a different issuer, exists but does not parse (it
-    /// is never silently replaced), or cannot be written.
+    /// If the file names a different issuer, names none but holds clients or
+    /// tokens, exists but does not parse (it is never silently replaced), or
+    /// cannot be written.
     pub fn bind_issuer(&self, issuer: &str) -> io::Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = match self.read_once() {
@@ -226,10 +231,17 @@ impl StateStore {
                     self.path.display()
                 ),
             )),
-            None => {
+            None if state.is_empty() => {
                 state.issuer = Some(issuer.to_string());
                 self.write(&state)
             }
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} holds grants of no known issuer: give this server a new state file, or delete this one with its server stopped",
+                    self.path.display()
+                ),
+            )),
         }
     }
 
@@ -792,10 +804,12 @@ mod compat {
     }
 
     #[test]
-    fn a_state_file_is_bound_to_the_first_issuer_and_refuses_another() {
+    fn a_new_or_empty_state_file_is_bound_to_the_first_issuer_and_refuses_another() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("oauth.json");
         let store = StateStore::new(&path);
+        // A new file is claimed; restarting with the same issuer is fine.
+        store.bind_issuer("https://a.example").unwrap();
         store
             .put_token(
                 TokenKind::Access,
@@ -803,8 +817,6 @@ mod compat {
                 rusty_json::json!({ "client_id": "c" }),
             )
             .unwrap();
-        // A file from before binding existed is claimed, its grants kept.
-        store.bind_issuer("https://a.example").unwrap();
         store.bind_issuer("https://a.example").unwrap();
         assert!(store.get_token(TokenKind::Access, "a").is_some());
         // Another server pointed at it is refused, and changes nothing.
@@ -818,14 +830,43 @@ mod compat {
             .unwrap()
             .contains("https://a.example"));
 
+        // An existing but empty, unbound file is claimed too.
+        let empty = dir.path().join("empty.json");
+        fs::write(&empty, "{}").unwrap();
+        StateStore::new(&empty)
+            .bind_issuer("https://a.example")
+            .unwrap();
+        assert!(fs::read_to_string(&empty)
+            .unwrap()
+            .contains("https://a.example"));
+    }
+
+    #[test]
+    fn an_unbound_state_file_with_grants_is_refused_and_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        for seed in [
+            r#"{"clients":{"c":{"client_id":"c"}}}"#,
+            r#"{"access_tokens":{"a":{"client_id":"c","subject":"claude"}}}"#,
+            r#"{"refresh_tokens":{"r":{"client_id":"c","subject":"claude"}}}"#,
+        ] {
+            let path = dir.path().join("legacy.json");
+            fs::write(&path, seed).unwrap();
+            let refused = StateStore::new(&path)
+                .bind_issuer("https://a.example")
+                .unwrap_err();
+            assert!(refused.to_string().contains("no known issuer"), "{refused}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), seed, "untouched");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_state_file_is_refused_and_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oauth.json");
         fs::write(&path, "not json").unwrap();
         assert!(StateStore::new(&path)
             .bind_issuer("https://a.example")
             .is_err());
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            "not json",
-            "never replaced"
-        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "not json");
     }
 }
