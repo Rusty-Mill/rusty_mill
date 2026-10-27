@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use agentgateway_config::{FailureMode, HeaderFilter, McpGuardrails, Phase, Processor};
-use tokio_util::sync::CancellationToken;
+use rusty_tokio::sync::CancellationToken;
 
 use agentgateway_core::Registry;
 
@@ -51,12 +51,14 @@ struct Seen {
     connections: usize,
 }
 
-/// A gRPC `ExtMcp` server, hand-rolled over `axum` so that it shares nothing with the client.
+/// A gRPC `ExtMcp` server, hand-rolled over `rusty_hyper`'s HTTP/2 so that it shares no gRPC
+/// code with the client under test (`rusty_tonic`): the framing, the status trailer and the
+/// dispatch are written out here.
 ///
-/// Serving this by hand rather than through generated server code keeps
-/// `protoc` out of the build for tests too, and it is 30 lines of dispatch.
-/// `axum` needs tokio and the chain under test runs on `rusty_tokio`, so the
-/// server has a tokio runtime on a thread of its own.
+/// Serving this by hand rather than through generated server code keeps `protoc` out of the
+/// build for tests too. The server has a `rusty_tokio` runtime on a thread of its own.
+/// Stopping it frees the port and closes each connection (GOAWAY) once its calls in flight
+/// are answered, as a processor that goes away would.
 async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationToken) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("processor should bind");
     processor_on(listener, script)
@@ -67,190 +69,211 @@ fn processor_on(
     listener: std::net::TcpListener,
     script: Script,
 ) -> (String, Arc<Mutex<Seen>>, CancellationToken) {
-    use axum::body::Body;
-    use http_body_util::BodyExt;
-
     listener
         .set_nonblocking(true)
-        .expect("a tokio listener is non-blocking");
+        .expect("an async listener is non-blocking");
     let addr: SocketAddr = listener.local_addr().expect("should have an address");
     let seen = Arc::new(Mutex::new(Seen::default()));
     let shutdown = CancellationToken::new();
 
     let recorder = Arc::clone(&seen);
-    let counter = Arc::clone(&seen);
     let stopping = shutdown.clone();
-
-    let app = axum::Router::new().fallback(axum::routing::any(
-        move |request: axum::extract::Request| {
-            let script = script.clone();
-            let recorder = Arc::clone(&recorder);
-            async move {
-                let path = request.uri().path().to_string();
-                let body = request
-                    .into_body()
-                    .collect()
-                    .await
-                    .map(|b| b.to_bytes())
-                    .unwrap_or_default();
-
-                if let Script::Fail(code, message) = &script {
-                    return http::Response::builder()
-                        .status(200)
-                        .header("content-type", "application/grpc")
-                        .header("grpc-status", code.to_string())
-                        .header("grpc-message", *message)
-                        .body(Body::empty())
-                        .expect("response should build");
-                }
-
-                if matches!(script, Script::Hang) {
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                }
-
-                // gRPC frames a message as a 1-byte compression flag and a
-                // 4-byte big-endian length, then the protobuf.
-                let message = &body[5..];
-                let (method, params, backends, headers, metadata) =
-                    if path.ends_with("CheckRequest") {
-                        let request = McpRequest::decode(message).expect("should decode");
-                        // The MCP call's own headers travel inside the message, not
-                        // as HTTP headers on the gRPC call that carries it.
-                        let headers = request
-                            .headers
-                            .iter()
-                            .map(|h| {
-                                (
-                                    h.key.clone(),
-                                    String::from_utf8_lossy(&h.value).into_owned(),
-                                )
-                            })
-                            .collect();
-                        (
-                            request.method,
-                            request.mcp_request,
-                            request.service_names,
-                            headers,
-                            request.metadata_context,
-                        )
-                    } else {
-                        let request = McpResponse::decode(message).expect("should decode");
-                        (
-                            request.method,
-                            Some(request.mcp_response),
-                            request.service_names,
-                            Vec::new(),
-                            request.metadata_context,
-                        )
-                    };
-
-                if let Ok(mut seen) = recorder.lock() {
-                    seen.calls += 1;
-                    seen.paths.push(path.clone());
-                    seen.methods.push(method);
-                    seen.bodies.push(params);
-                    seen.backends.push(backends);
-                    seen.headers.push(headers);
-                    seen.metadata.push(metadata);
-                }
-
-                let payload = if path.ends_with("CheckRequest") {
-                    McpRequestResult {
-                        result: Some(match &script {
-                            Script::Rewrite(body) => {
-                                request_result::Result::Mutated(body.as_bytes().to_vec())
-                            }
-                            Script::Refuse(code, reason) => {
-                                request_result::Result::Error(AuthorizationError {
-                                    code: *code as i32,
-                                    reason: (*reason).to_string(),
-                                    mcp_error: None,
-                                })
-                            }
-                            _ => request_result::Result::Pass(Pass {}),
-                        }),
-                        metadata: match &script {
-                            Script::Annotate(value) => match wire::to_proto_value(value.clone()) {
-                                Value::Struct(s) => Some(s),
-                                _ => None,
-                            },
-                            _ => None,
-                        },
-                        header_mutation: match &script {
-                            Script::Headers(set, remove) => Some(HeaderMutation {
-                                set: set
-                                    .iter()
-                                    .map(|(k, v)| McpHeader {
-                                        key: (*k).to_string(),
-                                        value: v.as_bytes().to_vec(),
-                                    })
-                                    .collect(),
-                                remove: remove.iter().map(|n| (*n).to_string()).collect(),
-                            }),
-                            _ => None,
-                        },
-                    }
-                    .encode_to_vec()
-                    .expect("should encode")
-                } else {
-                    McpResponseResult {
-                        result: Some(match &script {
-                            Script::Rewrite(body) => {
-                                response_result::Result::Mutated(body.as_bytes().to_vec())
-                            }
-                            Script::Refuse(code, reason) => {
-                                response_result::Result::Error(AuthorizationError {
-                                    code: *code as i32,
-                                    reason: (*reason).to_string(),
-                                    mcp_error: None,
-                                })
-                            }
-                            _ => response_result::Result::Pass(Pass {}),
-                        }),
-                    }
-                    .encode_to_vec()
-                    .expect("should encode")
-                };
-
-                let mut framed = Vec::with_capacity(payload.len() + 5);
-                framed.push(0);
-                framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-                framed.extend_from_slice(&payload);
-
-                // The status is a trailer, after the message: that is what gRPC says, and a
-                // client that reads it from the headers of a reply with a body is lenient.
-                let mut trailers = HeaderMap::new();
-                trailers.insert("grpc-status", "0".parse().expect("valid"));
-                let body = http_body_util::Full::new(axum::body::Bytes::from(framed))
-                    .with_trailers(
-                        async move { Some(Ok::<_, std::convert::Infallible>(trailers)) },
-                    );
-                http::Response::builder()
-                    .status(200)
-                    .header("content-type", "application/grpc")
-                    .body(Body::new(body))
-                    .expect("response should build")
-            }
-        },
-    ));
-
     std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = rusty_tokio::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("the processor's runtime should start");
         runtime.block_on(async move {
-            use axum::serve::ListenerExt;
-            let listener = tokio::net::TcpListener::from_std(listener)
-                .expect("processor should listen")
-                .tap_io(move |_| counter.lock().expect("lock").connections += 1);
-            let _ = axum::serve(listener, app)
-                .with_graceful_shutdown(async move { stopping.cancelled().await })
-                .await;
+            let listener =
+                rusty_tokio::io::TcpListener::from_std(listener).expect("processor should listen");
+            let mut connections = Vec::new();
+            loop {
+                let tcp = rusty_tokio::select! {
+                    accepted = listener.accept() => match accepted {
+                        Ok((tcp, _)) => tcp,
+                        Err(_) => break,
+                    },
+                    () = stopping.cancelled() => break,
+                };
+                recorder.lock().expect("lock").connections += 1;
+                let script = script.clone();
+                let recorder = Arc::clone(&recorder);
+                let deadline =
+                    rusty_tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                connections.push(rusty_tokio::spawn(rusty_hyper::serve_connection(
+                    tcp,
+                    rusty_hyper::ServeOptions::default().h2,
+                    deadline,
+                    stopping.clone().cancelled_owned(),
+                    move |request, respond| {
+                        answer(script.clone(), Arc::clone(&recorder), request, respond)
+                    },
+                )));
+            }
+            // Stopped: the port is free once `listener` drops here, and each connection
+            // goes away (GOAWAY) once its calls in flight are answered.
+            drop(listener);
+            for connection in connections {
+                let _ = connection.await;
+            }
         });
     });
 
     (format!("{addr}"), seen, shutdown)
+}
+
+/// One call to the scripted processor: read the framed message, record it, answer per `script`.
+async fn answer(
+    script: Script,
+    recorder: Arc<Mutex<Seen>>,
+    mut request: rusty_hyper::Request,
+    respond: rusty_hyper::Respond,
+) {
+    let path = request
+        .headers
+        .iter()
+        .find(|h| h.name == b":path")
+        .map(|h| String::from_utf8_lossy(&h.value).into_owned())
+        .unwrap_or_default();
+    let mut body = Vec::new();
+    while let Some(Ok(piece)) = request.body.next().await {
+        if let rusty_hyper::Body::Data(data) = piece {
+            body.extend(data);
+        }
+    }
+    let field = |name: &str, value: &str| rusty_hyper::HeaderField::new(name, value);
+    let head = vec![
+        field(":status", "200"),
+        field("content-type", "application/grpc"),
+    ];
+
+    if let Script::Fail(code, message) = &script {
+        // Trailers-only: the status travels in the one header block, with no message.
+        let mut head = head;
+        head.push(field("grpc-status", &code.to_string()));
+        head.push(field("grpc-message", message));
+        let _ = respond.send_response(head, true).await;
+        return;
+    }
+
+    if matches!(script, Script::Hang) {
+        rusty_tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    }
+
+    let payload = decide(&script, &recorder, &path, &body);
+    // gRPC frames a message as a 1-byte compression flag and a 4-byte big-endian length, then
+    // the protobuf.
+    let mut framed = Vec::with_capacity(payload.len() + 5);
+    framed.push(0);
+    framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&payload);
+
+    // The status is a trailer, after the message: that is what gRPC says, and a client that
+    // reads it from the headers of a reply with a body is lenient.
+    let Ok(mut send) = respond.send_response(head, false).await else {
+        return;
+    };
+    if send.send_data(framed, false).await.is_ok() {
+        let _ = send.send_trailers(vec![field("grpc-status", "0")]).await;
+    }
+}
+
+/// Records the call at `path` and encodes the scripted reply to it.
+fn decide(script: &Script, recorder: &Mutex<Seen>, path: &str, body: &[u8]) -> Vec<u8> {
+    let message = &body[5..];
+    let (method, params, backends, headers, metadata) = if path.ends_with("CheckRequest") {
+        let request = McpRequest::decode(message).expect("should decode");
+        // The MCP call's own headers travel inside the message, not
+        // as HTTP headers on the gRPC call that carries it.
+        let headers = request
+            .headers
+            .iter()
+            .map(|h| {
+                (
+                    h.key.clone(),
+                    String::from_utf8_lossy(&h.value).into_owned(),
+                )
+            })
+            .collect();
+        (
+            request.method,
+            request.mcp_request,
+            request.service_names,
+            headers,
+            request.metadata_context,
+        )
+    } else {
+        let request = McpResponse::decode(message).expect("should decode");
+        (
+            request.method,
+            Some(request.mcp_response),
+            request.service_names,
+            Vec::new(),
+            request.metadata_context,
+        )
+    };
+
+    if let Ok(mut seen) = recorder.lock() {
+        seen.calls += 1;
+        seen.paths.push(path.to_string());
+        seen.methods.push(method);
+        seen.bodies.push(params);
+        seen.backends.push(backends);
+        seen.headers.push(headers);
+        seen.metadata.push(metadata);
+    }
+
+    if path.ends_with("CheckRequest") {
+        McpRequestResult {
+            result: Some(match script {
+                Script::Rewrite(body) => request_result::Result::Mutated(body.as_bytes().to_vec()),
+                Script::Refuse(code, reason) => request_result::Result::Error(AuthorizationError {
+                    code: *code as i32,
+                    reason: (*reason).to_string(),
+                    mcp_error: None,
+                }),
+                _ => request_result::Result::Pass(Pass {}),
+            }),
+            metadata: match script {
+                Script::Annotate(value) => match wire::to_proto_value(value.clone()) {
+                    Value::Struct(s) => Some(s),
+                    _ => None,
+                },
+                _ => None,
+            },
+            header_mutation: match script {
+                Script::Headers(set, remove) => Some(HeaderMutation {
+                    set: set
+                        .iter()
+                        .map(|(k, v)| McpHeader {
+                            key: (*k).to_string(),
+                            value: v.as_bytes().to_vec(),
+                        })
+                        .collect(),
+                    remove: remove.iter().map(|n| (*n).to_string()).collect(),
+                }),
+                _ => None,
+            },
+        }
+        .encode_to_vec()
+        .expect("should encode")
+    } else {
+        McpResponseResult {
+            result: Some(match script {
+                Script::Rewrite(body) => response_result::Result::Mutated(body.as_bytes().to_vec()),
+                Script::Refuse(code, reason) => {
+                    response_result::Result::Error(AuthorizationError {
+                        code: *code as i32,
+                        reason: (*reason).to_string(),
+                        mcp_error: None,
+                    })
+                }
+                _ => response_result::Result::Pass(Pass {}),
+            }),
+        }
+        .encode_to_vec()
+        .expect("should encode")
+    }
 }
 
 fn processor_config(host: &str, methods: &[(&str, Phase)]) -> Processor {

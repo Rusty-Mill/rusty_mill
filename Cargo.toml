@@ -816,6 +816,8 @@ rp-router = { path = "crates/apps/rusty_provider/crates/router" }
 # `default-features = false` because rusty_agent_gateway's crates ask for it
 # explicitly and an inheriting member may not override the root's choice.
 # Was `rusty-mcp` until 0.13.0 (#876).
+# HTTP/2 server for agentgateway-mcp's scripted gRPC processor (tests).
+rusty_hyper = { path = "crates/libs/net/rusty_hyper" }
 rusty_mcp_middleware = { path = "crates/libs/protocol/rusty_mcp_middleware", default-features = false }
 rusty-mcp-client = { path = "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client" }
 rmcp = { version = "3.1", default-features = false }

@@ -501,11 +501,10 @@ version = "0.1.0"
 dependencies = [
  "agentgateway-config",
  "agentgateway-core",
- "axum",
  "cel",
  "http",
- "http-body-util",
  "regex",
+ "rusty_hyper",
  "rusty_json",
  "rusty_log",
  "rusty_mcp_client_native",
@@ -517,8 +516,6 @@ dependencies = [
  "rusty_tonic",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]
