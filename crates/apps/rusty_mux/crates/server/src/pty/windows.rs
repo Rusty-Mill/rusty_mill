@@ -270,6 +270,11 @@ impl Pty {
         self.master.resize(win_size(size)).map_err(to_io)
     }
 
+    /// Unknown: a pseudo console has no foreground process group.
+    pub(crate) fn foreground(&self) -> Option<u32> {
+        None
+    }
+
     /// Stops forwarding output at once, whatever other handles to this
     /// `Pty` remain: the reader then discards, so the console's pipe never
     /// fills while it is being closed.

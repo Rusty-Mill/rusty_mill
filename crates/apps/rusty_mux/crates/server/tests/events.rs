@@ -251,6 +251,40 @@ fn program_events_reach_only_clients_that_asked() {
     )));
 }
 
+/// A job that starts in the foreground without writing anything is seen by
+/// the poll, and the shell taking the terminal back by its prompt; only
+/// clients that asked hear of either.
+#[test]
+fn process_changes_reach_only_clients_that_asked() {
+    let path = start_server();
+    let wanted = SEQ.union(Features::PROCESS).union(Features::CHECKPOINT_V3);
+    let mut watcher = Client::connect_with(&path, wanted, None);
+    let mut plain = Client::connect_with(&path, SEQ.union(Features::PROGRAM_EVENTS), None);
+    let block = block_for(&mut watcher);
+    let changed_to = |client: &Client, program: &str| {
+        client.events.iter().any(|(_, e)| {
+            matches!(e, Event::ProcessChanged { block: b, name, .. } if *b == block && name == program)
+        })
+    };
+    watcher.input(block, b"sleep 30\r");
+    while !changed_to(&watcher, "sleep") {
+        watcher.recv();
+    }
+    watcher.input(block, b"\x03");
+    while !changed_to(&watcher, "sh") {
+        watcher.recv();
+    }
+
+    let later = create_session(&mut watcher, "later");
+    wait_for_session(&mut plain, later);
+    assert!(
+        !plain
+            .events
+            .iter()
+            .any(|(_, e)| matches!(e, Event::ProcessChanged { .. }))
+    );
+}
+
 #[test]
 fn a_closed_block_reports_no_exit() {
     let path = start_server();

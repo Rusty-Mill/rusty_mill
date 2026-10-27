@@ -5,6 +5,8 @@
 
 mod common;
 
+use std::time::{Duration, Instant};
+
 use common::{Client, block_for, new_block, start_server, window_for};
 use rusty_mux_core::BlockId;
 use rusty_mux_proto::schema::Value;
@@ -176,6 +178,33 @@ fn terminal_status_reads_the_programs_reports() {
         text(&mut client, block, "terminal.status", &[]),
         "state=blocked:kind=question:app=sh:msg=aGk=\nstate=done:id=job:app=sh"
     );
+}
+
+/// The shell is listed alone while idle; a job it runs comes first, above
+/// it, once the job has the terminal.
+#[test]
+fn terminal_process_lists_the_foreground_and_its_ancestors() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, INSPECT, None);
+    let block = block_for(&mut client);
+    let idle = text(&mut client, block, "terminal.process", &[]);
+    let shell: Vec<&str> = idle.split('\t').collect();
+    assert_eq!(shell[1..], ["sh", "/bin/sh"], "{idle}");
+
+    client.input(block, b"sleep 30\r");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let now = text(&mut client, block, "terminal.process", &[]);
+        let rows: Vec<Vec<&str>> = now.lines().map(|l| l.split('\t').collect()).collect();
+        if let [job, last] = rows.as_slice() {
+            assert_eq!(job[1..], ["sleep", "sleep 30"], "{now}");
+            assert_eq!(*last, shell, "{now}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "no job in {now:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    client.input(block, b"\x03");
 }
 
 #[test]

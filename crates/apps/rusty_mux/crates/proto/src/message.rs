@@ -55,6 +55,9 @@ impl Features {
     /// directory of the new block. A server without it ignores them and
     /// starts its default program, so a client must not send them then.
     pub const LAUNCH: Self = Self(1 << 11);
+    /// [`Event::ProcessChanged`] events, skipped for a client without it
+    /// as the other optional kinds are.
+    pub const PROCESS: Self = Self(1 << 12);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -314,8 +317,10 @@ const COMMAND: u32 = 29;
 /// A program's arguments: each a varint length, then its UTF-8 bytes.
 const ARGV: u32 = 30;
 const CWD: u32 = 31;
-// IDs 1..=CWD are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = CWD as usize;
+/// A process id.
+const PID: u32 = 32;
+// IDs 1..=PID are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = PID as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -701,6 +706,7 @@ mod kind {
     pub const BELL: u64 = 17;
     pub const PROGRESS_CHANGED: u64 = 18;
     pub const NOTIFICATION: u64 = 19;
+    pub const PROCESS_CHANGED: u64 = 20;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -810,6 +816,16 @@ fn put_event(out: &mut Out, event: &Event) {
                 .uuid(BLOCK, block.uuid())
                 .bytes(TITLE, title.as_bytes())
                 .bytes(BODY, body.as_bytes());
+        }
+        E::ProcessChanged {
+            block,
+            pid,
+            ref name,
+        } => {
+            out.varint(KIND, kind::PROCESS_CHANGED)
+                .uuid(BLOCK, block.uuid())
+                .varint(PID, pid.into())
+                .bytes(NAME, name.as_bytes());
         }
     }
 }
@@ -929,6 +945,11 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
             block: block(f, BLOCK)?,
             title: f.string(TITLE)?,
             body: f.string(BODY)?,
+        },
+        kind::PROCESS_CHANGED => E::ProcessChanged {
+            block: block(f, BLOCK)?,
+            pid: u32::try_from(f.varint(PID)?).map_err(|_| f.invalid(PID))?,
+            name: f.string(NAME)?,
         },
         _ => return Err(f.invalid(KIND)),
     })

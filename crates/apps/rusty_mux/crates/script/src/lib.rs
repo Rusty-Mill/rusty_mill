@@ -140,6 +140,7 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ("bell", &["block"]),
     ("progress-changed", &["block", "state", "percent"]),
     ("notification", &["block", "title", "body"]),
+    ("process-changed", &["block", "pid", "name"]),
 ];
 
 /// What to run when an event of one kind happens.

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration;
 
 use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Mux, Size};
 use rusty_mux_proto::schema::{self, CallError, Value};
@@ -18,6 +19,7 @@ use crate::Config;
 use crate::checkpoint::validate_size;
 use crate::history::History;
 use crate::outbox::Outbox;
+use crate::process;
 use crate::pty::{self, Process, Pty};
 use crate::terminal;
 
@@ -33,6 +35,10 @@ const REPLY_MAX: usize = crate::outbox::BUDGET / 2;
 /// Events kept for clients that reconnect.
 const HISTORY: usize = 4096;
 
+/// How often every block's foreground process group is checked, to see a
+/// job start that writes nothing; output checks its own block at once.
+const PROCESS_POLL: Duration = Duration::from_millis(500);
+
 /// What the server offers; a client gets the intersection with its own.
 const OFFERED: Features = Features::CHECKPOINT_V3
     .union(Features::EVENT_SEQ)
@@ -42,7 +48,8 @@ const OFFERED: Features = Features::CHECKPOINT_V3
     .union(Features::STATUS)
     .union(Features::TERMINAL_EVENTS)
     .union(Features::PROGRAM_EVENTS)
-    .union(Features::LAUNCH);
+    .union(Features::LAUNCH)
+    .union(Features::PROCESS);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -56,6 +63,8 @@ struct BlockRt {
     status: Records,
     /// The working directory and title last announced.
     seen: terminal::Seen,
+    /// The foreground process group last announced, at first the program's.
+    foreground: Option<u32>,
     reader: JoinHandle<()>,
 }
 
@@ -337,6 +346,10 @@ impl State {
                 .ok_or("the program's working directory is unknown")?,
             "terminal.title" => rt.grid.title.clone(),
             "terminal.status" => rt.status.bodies().join("\n"),
+            "terminal.process" => {
+                let pid = rt.process.pid().ok_or("the program has exited")?;
+                process::text(&process::chain(pid, rt.pty.foreground(), process::lookup))
+            }
             _ => return Err(unknown()),
         };
         reply(method, &[Message::Text { req, text }])
@@ -400,6 +413,7 @@ impl State {
         let (pty, process) = pty::spawn(&config, size, &env)
             .map_err(|e| format!("spawning the block's program: {e}"))?;
         let pty = Rc::new(pty);
+        let foreground = process.pid();
         self.mux.add_block(block, window, size)?;
         let reader = rusty_tokio::task::spawn_local(pump(shared.clone(), block, pty.clone()));
         let mut grid = crate::checkpoint::grid(size);
@@ -413,6 +427,7 @@ impl State {
                 parser: AnsiParser::new(),
                 status: Records::default(),
                 seen: terminal::Seen::default(),
+                foreground,
                 reader,
             },
         );
@@ -509,6 +524,7 @@ impl State {
         // What a terminal host would relay, such as the bell; clients
         // already have the raw output.
         rt.grid.take_host_out();
+        self.check_process(block);
         let frame = encode(&Message::Output {
             block,
             data: data.to_vec(),
@@ -527,6 +543,28 @@ impl State {
         }
         self.flush();
         replies
+    }
+
+    /// Announces a new foreground process group in `block`, if one took
+    /// its terminal since the last check.
+    fn check_process(&mut self, block: BlockId) {
+        let Some(rt) = self.blocks.get_mut(&block) else {
+            return;
+        };
+        let now = rt.pty.foreground();
+        let Some(pid) = now.filter(|_| now != rt.foreground) else {
+            return;
+        };
+        rt.foreground = now;
+        let name = process::lookup(pid).map(|p| p.name).unwrap_or_default();
+        in_step("process", self.mux.note_process(block, pid, name));
+    }
+
+    /// [`Self::check_process`] for every block, then broadcasts.
+    fn check_processes(&mut self) {
+        let blocks: Vec<BlockId> = self.blocks.keys().copied().collect();
+        blocks.into_iter().for_each(|b| self.check_process(b));
+        self.flush();
     }
 
     /// The block's output ended: stop serving its PTY, without aborting the
@@ -660,6 +698,7 @@ fn receives(features: Features, event: &Event) -> bool {
         | Event::Bell { .. }
         | Event::ProgressChanged { .. }
         | Event::Notification { .. } => Features::PROGRAM_EVENTS,
+        Event::ProcessChanged { .. } => Features::PROCESS,
         _ => Features::NONE,
     };
     features.contains(needs)
@@ -738,6 +777,15 @@ fn reply(what: &str, messages: &[Message]) -> Result<Outcome, Refusal> {
         frames.push(frame);
     }
     Ok(Outcome::Reply(frames))
+}
+
+/// Checks every block's foreground process group each [`PROCESS_POLL`],
+/// for as long as the server runs.
+pub(crate) async fn watch_processes(shared: Shared) {
+    loop {
+        rusty_tokio::time::sleep(PROCESS_POLL).await;
+        shared.borrow_mut().check_processes();
+    }
 }
 
 /// Reads a block's PTY until its program exits.

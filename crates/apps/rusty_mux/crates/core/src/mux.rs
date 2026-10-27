@@ -193,6 +193,12 @@ impl Mux {
         self.note(block, Event::Notification { block, title, body })
     }
 
+    /// Announces that process group `pid`, running `name`, now has the
+    /// block's terminal.
+    pub fn note_process(&mut self, block: BlockId, pid: u32, name: String) -> Result<(), Error> {
+        self.note(block, Event::ProcessChanged { block, pid, name })
+    }
+
     /// Emits `event` about a block the host tracks, if it is live.
     fn note(&mut self, block: BlockId, event: Event) -> Result<(), Error> {
         if !self.blocks.contains_key(&block) {

@@ -87,6 +87,15 @@ pub enum Event {
         title: String,
         body: String,
     },
+    /// Another process group took the block's terminal: a job started in
+    /// the foreground, or the shell got it back. `pid` is the group's
+    /// leader and `name` its program, empty when unknown; the
+    /// `terminal.process` block method reads the rest.
+    ProcessChanged {
+        block: BlockId,
+        pid: u32,
+        name: String,
+    },
 }
 
 /// How a block's program ended.

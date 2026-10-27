@@ -26,6 +26,8 @@ mod history;
 #[cfg(any(target_os = "linux", windows))]
 mod outbox;
 #[cfg(any(target_os = "linux", windows))]
+mod process;
+#[cfg(any(target_os = "linux", windows))]
 mod pty;
 #[cfg(any(target_os = "linux", windows))]
 mod state;
@@ -111,6 +113,7 @@ async fn serve_for(
         .and_then(|addr| addr.as_pathname().map(std::path::absolute))
         .and_then(Result::ok);
     let state = state::State::shared(config, socket);
+    rusty_tokio::task::spawn_local(state::watch_processes(state.clone()));
     loop {
         let (stream, _) = listener.accept().await?;
         match allowed(&stream) {

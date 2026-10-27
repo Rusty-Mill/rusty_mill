@@ -294,6 +294,18 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
                 ("body", Text(body.clone())),
             ],
         ),
+        E::ProcessChanged {
+            block,
+            pid,
+            ref name,
+        } => (
+            "process-changed",
+            vec![
+                ("block", Id(block.uuid())),
+                ("pid", Field::Num(pid.into())),
+                ("name", Text(name.clone())),
+            ],
+        ),
     }
 }
 
@@ -428,6 +440,11 @@ mod tests {
                 block,
                 title: "t".into(),
                 body: "b".into(),
+            },
+            Event::ProcessChanged {
+                block,
+                pid: 42,
+                name: "vim".into(),
             },
         ];
         assert_eq!(events.len(), rusty_mux_script::EVENTS.len());

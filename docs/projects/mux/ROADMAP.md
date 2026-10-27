@@ -46,7 +46,7 @@ From the [Rex gap check](REX-GAP-CHECK.md) §5 (owner, 2026-10-27). Started 2026
 
 1. Terminal events (C29): program exited with its exit code, bell, progress, notification, behind a new feature bit; reply to the OSC 7501 query. Done (#1174).
 2. Wait primitives (C30): `rusty-mux-ctl wait` on a block closing or its program exiting, with a timeout, exiting with the program's status; `create-block` takes an optional command, arguments and working directory per request (proto and server), so run-and-wait starts a program in a new block and exits with its status; wait for an event matching fields, with a timeout. Done (#1178): `wait --block`, `wait --event KIND --FIELD VALUE`, `run --wait`, `create-block --command --arg --cwd` behind `Features::LAUNCH`; a timeout exits 124.
-3. Process info (C31): a `terminal.process` block method (child, foreground process, ancestors) and a process-changed event, using existing platform crates or `rusty_libc`.
+3. Process info (C31): a `terminal.process` block method (child, foreground process, ancestors) and a process-changed event, using existing platform crates or `rusty_libc`. Done: `terminal.process` and `process-changed` behind `Features::PROCESS`, from `/proc` and `tcgetpgrp` (`rusty_libc`); Linux only for now.
 4. Input and capture (C32): named keys encoded over `input`; `terminal.format` gains trim, unwrap and a VT format.
 5. Labels and clients (C33): rename methods for all four kinds, block and client labels, label-changed events, client list and force-disconnect.
 6. Agent setup (C34): `rusty-mux-ctl agent setup|status|remove` for Claude Code first, plus a placement-rules doc. Our own skill text; merges into settings without clobbering them. Held until the owner approves those writes (gap check K4).
