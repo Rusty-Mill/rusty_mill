@@ -11,6 +11,10 @@ resolve graph includes edges that only exist behind an optional feature --
 CI itself always builds with --all-features, so the affected-crate set
 has to match that graph, not the default-features one.
 
+A package outside the workspace but inside the repository (a `[patch]`ed
+`vendor/*` crate) owns its files too: every workspace crate whose full
+dependency closure includes it is selected, plus their dependents.
+
 Printing nothing means no workspace crate needs Cargo validation.
 Only the audited prose-only TLS ADR Markdown paths are excluded from seeds.
 
@@ -51,6 +55,38 @@ def owning_crate(file_path: str, crate_dirs: CrateDirs, root_dir: Path) -> Optio
             continue
         return pkg_id
     return None
+
+
+def local_package_dirs(metadata: dict, root_dir: Path) -> CrateDirs:
+    """Map each non-member package whose manifest lives under `root_dir`, longest first."""
+    workspace_ids = set(metadata["workspace_members"])
+    local = {
+        pkg["id"]: pkg
+        for pkg in metadata["packages"]
+        if pkg["id"] not in workspace_ids
+        and Path(pkg["manifest_path"]).resolve().is_relative_to(root_dir)
+    }
+    return workspace_crate_dirs(local)
+
+
+def local_package_consumers(metadata: dict, changed_local: set[str]) -> set[str]:
+    """Workspace members that depend, directly or through any package, on a changed local package.
+
+    Walks the full resolve graph backwards, external packages included, so a
+    member that reaches the patched package only through a registry crate counts.
+    """
+    dependents: dict[str, set[str]] = {}
+    for node in metadata["resolve"]["nodes"]:
+        for dep in node["deps"]:
+            dependents.setdefault(dep["pkg"], set()).add(node["id"])
+    seen = set(changed_local)
+    queue = list(changed_local)
+    while queue:
+        for dependent in dependents.get(queue.pop(), ()):
+            if dependent not in seen:
+                seen.add(dependent)
+                queue.append(dependent)
+    return seen & set(metadata["workspace_members"])
 
 
 def workspace_crate_dirs(packages: dict[str, dict]) -> CrateDirs:
@@ -94,14 +130,19 @@ def affected_packages(metadata: dict, changed_files: Iterable[str]) -> list[str]
     root_dir = Path(metadata["workspace_root"]).resolve()
     crate_dirs = workspace_crate_dirs(packages)
 
+    seeds = [f for f in changed_files if not is_prose_only_tls_adr(f)]
     changed_ids = {
         owner
-        for owner in (
-            owning_crate(f, crate_dirs, root_dir)
-            for f in changed_files if not is_prose_only_tls_adr(f)
-        )
+        for owner in (owning_crate(f, crate_dirs, root_dir) for f in seeds)
         if owner is not None
     }
+    local_dirs = local_package_dirs(metadata, root_dir)
+    changed_local = {
+        owner
+        for owner in (owning_crate(f, local_dirs, root_dir) for f in seeds)
+        if owner is not None
+    }
+    changed_ids |= local_package_consumers(metadata, changed_local)
     if not changed_ids:
         return []
 

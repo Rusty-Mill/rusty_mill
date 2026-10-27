@@ -287,18 +287,20 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_lockfile_is_not_an_unconditional_global_fallback(self) -> None:
         self.assertEqual(self._planner("--requires-full", input="Cargo.lock\n").returncode, 1)
         self.assertIn("lockfile_diff.py", self.workflow)
-        self.assertIn("Cargo.lock changed with a manifest", self.workflow)
+        self.assertNotIn("Cargo.lock changed with a manifest", self.workflow)
         self.assertIn("Unable to establish Cargo.lock impact", self.workflow)
 
     def test_lanes_spanning_most_components_fall_back_to_the_full_sweep(self) -> None:
         self.assertIn('--packages "$packages" --full-if-most)" || components_status=$?', self.workflow)
         self.assertIn('emit_full "Affected crates span most of the workspace\'s components"', self.workflow)
 
-    def test_member_dependency_edits_keep_the_full_sweep(self) -> None:
-        # Feature unification can reach crates that never depend on the edited member.
-        self.assertIn("cargo_toml_diff.py --members /tmp/metadata.json \"$base\"", self.workflow)
-        self.assertIn('emit_full "Member dependency declarations changed ($dependency_edits)"', self.workflow)
-        self.assertIn('emit_full "Unable to compare member manifests with the event base"', self.workflow)
+    def test_member_dependency_edits_are_scoped(self) -> None:
+        # The edited member and its reverse dependencies are path-selected; the
+        # daily full sweep covers feature unification in unrelated crates.
+        self.assertNotIn("cargo_toml_diff.py --members", self.workflow)
+        self.assertNotIn("Member dependency declarations changed", self.workflow)
+        # A lock change beside a manifest edit adds its consumers to the path selection.
+        self.assertIn('packages="$(printf \'%s\\n\' "$packages" "$lockfile_packages"', self.workflow)
 
     def test_unrelated_base_falls_back_after_fetch_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

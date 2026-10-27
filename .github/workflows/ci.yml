@@ -410,31 +410,19 @@ jobs:
           cargo metadata --format-version=1 --all-features > /tmp/metadata.json
           packages="$(echo "$changed" | python3 .github/scripts/affected_crates.py /tmp/metadata.json)"
 
-          # A member's dependency declarations (dependency tables, per-target
-          # ones, [features]) can change the features Cargo unifies for crates
-          # that never depend on it; neither the path selection above nor the
-          # lock shows that. Such edits keep the full sweep.
-          if ! dependency_edits="$(echo "$changed" | python3 .github/scripts/cargo_toml_diff.py --members /tmp/metadata.json "$base")"; then
-            emit_full "Unable to compare member manifests with the event base"
-            exit 0
-          fi
-          if [ -n "$dependency_edits" ]; then
-            emit_full "Member dependency declarations changed ($dependency_edits)"
-            exit 0
-          fi
+          # A member manifest edit, dependency declarations included, selects
+          # that member and its reverse dependencies by path above. Feature
+          # unification can still change how a crate that never depends on it
+          # builds in a workspace-wide build; the daily full sweep covers that.
 
-          # Cargo.lock has no owning crate. For a lock-only update, select
-          # every workspace consumer of an added, removed, version-changed,
-          # source-changed, or checksum-changed resolved package through the
-          # full Cargo graph (including external nodes), then fold those
-          # consumers and their workspace reverse dependencies into scope.
-          # A simultaneous manifest edit or any unreadable/unknown lock
-          # entry is ambiguous, so deliberately retain the full sweep.
+          # Cargo.lock has no owning crate. Select every workspace consumer
+          # of an added, removed, version-changed, source-changed, or
+          # checksum-changed resolved package through the full Cargo graph
+          # (including external nodes), then fold those consumers and their
+          # workspace reverse dependencies into scope, beside any manifest
+          # edit's own selection. An unreadable or unknown lock entry is
+          # ambiguous, so deliberately retain the full sweep.
           if echo "$changed" | grep -Eq '^Cargo\.lock$'; then
-            if echo "$changed" | grep -Eq '(^|/)Cargo\.toml$'; then
-              emit_full "Cargo.lock changed with a manifest"
-              exit 0
-            fi
             if ! git show "$base:Cargo.lock" > /tmp/old-Cargo.lock; then
               emit_full "Event base has no readable Cargo.lock"
               exit 0
