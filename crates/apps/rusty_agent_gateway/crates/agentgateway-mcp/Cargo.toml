@@ -48,10 +48,7 @@ rusty_log = { workspace = true }
 [dev-dependencies]
 rusty_mcp_server = { workspace = true, features = ["http"] }
 rusty_serve = { workspace = true }
-# `http2` is dev-only on purpose: the gateway speaks gRPC as a *client*, and
-# the scripted processor in the tests is the only thing here that serves it.
-axum = { workspace = true, features = ["http2"] }
-http-body-util = { workspace = true }
-tokio-util = { workspace = true }
-# Hosts the scripted processor: `axum` needs a tokio runtime.
-tokio = { workspace = true, features = ["rt", "net", "time"] }
+# Serves HTTP/2 for the scripted processor in the tests. Dev-only on purpose:
+# the gateway speaks gRPC as a *client*; the processor is the only thing here
+# that serves it.
+rusty_hyper = { workspace = true, features = ["rusty-tokio"] }

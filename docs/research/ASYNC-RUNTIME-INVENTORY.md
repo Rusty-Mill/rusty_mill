@@ -204,7 +204,7 @@ through `Cargo.lock`. The counts are not a vetted audit.
 | `agentgateway-agui` | `apps/rusty_agent_gateway/crates/agentgateway-agui` | t(dev) | 1 | t::test×2 | — | — | — | A |
 | `agentgateway-auth` | `apps/rusty_agent_gateway/crates/agentgateway-auth` | — | 0 | — (moved to `rusty_tokio`, #885) | — | rusty_mcp_middleware | — | done |
 | `agentgateway-llm` | `apps/rusty_agent_gateway/crates/agentgateway-llm` | as | 1 | — (moved to `rusty_tokio`, #885; `async-stream` stays) | — | — | G7 | B |
-| `agentgateway-mcp` | `apps/rusty_agent_gateway/crates/agentgateway-mcp` | t(dev) tu(dev) | — | — (moved to `rusty_tokio`, #885; tests host the scripted gRPC processor on tokio for axum) | tonic, tonic-prost | rusty-mcp, rusty_mcp_client_native, rusty_mcp_server | — | done |
+| `agentgateway-mcp` | `apps/rusty_agent_gateway/crates/agentgateway-mcp` | — | — | — (moved to `rusty_tokio`, #885; tests host the scripted gRPC processor on `rusty_hyper`) | tonic, tonic-prost | rusty_mcp_middleware, rusty_mcp_client_native, rusty_mcp_server | — | done |
 | `agentgateway-proxy` | `apps/rusty_agent_gateway/crates/agentgateway-proxy` | — | 0 | — (moved to `rusty_tokio`, #885) | — | — | — | done |
 | `agentgateway-tls` | `apps/rusty_agent_gateway/crates/agentgateway-tls` | — | 0 | — (moved to `rusty_tokio`, the I/O bridge is gone, #885) | — | — | — | done |
 | `rusty-hister-model` | `apps/rusty_hister/crates/rusty-hister-model` | t(dev) | 7 | t::test×120 | — | rusty-db | — | A |
