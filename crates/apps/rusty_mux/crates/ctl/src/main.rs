@@ -13,10 +13,10 @@ fn main() -> ExitCode {
         Ok(args) => args,
         Err(arg) => {
             eprintln!("rusty-mux-ctl: argument {arg:?} is not UTF-8");
-            return ExitCode::from(rusty_mux_ctl::Exit::Usage as u8);
+            return ExitCode::from(rusty_mux_ctl::Exit::Usage.code());
         }
     };
     let env = Env::from_process();
     let exit = rusty_mux_ctl::run(&args, &env, &mut std::io::stdout(), &mut std::io::stderr());
-    ExitCode::from(exit as u8)
+    ExitCode::from(exit.code())
 }

@@ -1,7 +1,7 @@
 //! Reading a config's JSON and checking it against the catalog.
 
 use rusty_json::{Map, Value};
-use rusty_mux_proto::schema::{self, Method, Param, Ty};
+use rusty_mux_proto::schema::{self, Method, Param, Presence, Ty};
 
 use crate::{Action, Bind, Call, Config, EVENTS, Problem, Rule, Run, is_arg_name, placeholders};
 
@@ -219,15 +219,15 @@ impl Check {
         }
     }
 
-    /// A problem for each parameter of `method` that is not `given`, but
-    /// for ids, which may come from the environment.
+    /// A problem for each required parameter of `method` that is not
+    /// `given`, but for ids, which may come from the environment.
     fn required<'n>(&mut self, at: &str, method: &Method, given: impl Iterator<Item = &'n str>) {
         let given: Vec<&str> = given.collect();
-        for missing in method
-            .params
-            .iter()
-            .filter(|p| !matches!(p.ty, Ty::Id(_)) && !given.contains(&p.name))
-        {
+        for missing in method.params.iter().filter(|p| {
+            p.presence == Presence::Required
+                && !matches!(p.ty, Ty::Id(_))
+                && !given.contains(&p.name)
+        }) {
             self.problem(
                 at,
                 format!("`{}` needs parameter `{}`", method.name, missing.name),

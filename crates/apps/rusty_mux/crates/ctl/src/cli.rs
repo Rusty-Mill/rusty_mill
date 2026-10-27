@@ -2,9 +2,10 @@
 //! come from [`schema::CATALOG`].
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use rusty_mux_proto::Cursor;
-use rusty_mux_proto::schema::{self, CallError, Entity, Method, Ty, Value};
+use rusty_mux_proto::schema::{self, CallError, Entity, Method, Presence, Ty, Value};
 use rusty_uuid::Uuid;
 
 /// A parsed command line.
@@ -37,6 +38,39 @@ pub enum Command {
     /// Follows events from `after` (or from now) and runs the config's
     /// rules for each, until the server goes away.
     Watch { after: Option<Cursor> },
+    /// Waits for a block's program to end, or for an event.
+    Wait(Wait),
+    /// Starts a program in a new block, and with `wait` waits for it.
+    Run(Run),
+}
+
+/// What `wait` waits for, and for how long at most.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wait {
+    pub until: Until,
+    pub timeout: Option<Duration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Until {
+    /// The block's program exits, or the block closes; the target is
+    /// resolved like an id flag's.
+    Exit { block: String },
+    /// An event of `kind`, one of [`rusty_mux_script::EVENTS`], whose
+    /// fields have these values. A `session`, `window` or `block` value is
+    /// a target.
+    Event {
+        kind: &'static str,
+        fields: Vec<(&'static str, String)>,
+    },
+}
+
+/// `run`: a `create-block` request that names a program, then, with
+/// `wait`, a wait for that program with an optional timeout.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Run {
+    pub create: Call,
+    pub wait: Option<Option<Duration>>,
 }
 
 /// What `config` does.
@@ -87,12 +121,15 @@ pub enum Arg {
 }
 
 /// The session, window and block a command runs in, the defaults for id
-/// flags it leaves out.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// flags it leaves out, and its working directory, where `run` starts its
+/// program.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Defaults {
     pub session: Option<Uuid>,
     pub window: Option<Uuid>,
     pub block: Option<Uuid>,
+    /// Absolute.
+    pub dir: Option<PathBuf>,
 }
 
 impl Defaults {
@@ -143,6 +180,8 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "do" => run_action(rest),
         "config" => config(rest),
         "watch" => watch(rest),
+        "wait" => wait(rest).map(Command::Wait),
+        "run" => run(rest, defaults).map(Command::Run),
         _ => args
             .split(|a| a == "+")
             .map(|args| call(args, defaults))
@@ -202,6 +241,135 @@ fn watch(args: &[String]) -> Result<Command, String> {
     }
 }
 
+const WAIT_USAGE: &str = "usage: wait --block BLOCK [--timeout SECS] | wait --event KIND [--FIELD VALUE]... [--timeout SECS]";
+
+fn wait(args: &[String]) -> Result<Wait, String> {
+    let mut timeout = None;
+    let mut rest = Vec::new();
+    for (key, text) in flags("wait", args)? {
+        match key {
+            "timeout" => timeout = Some(parse_timeout(text)?),
+            _ => rest.push((key, text)),
+        }
+    }
+    let until = match rest.iter().position(|(key, _)| *key == "event") {
+        Some(at) => {
+            let (_, kind) = rest.remove(at);
+            event_filter(kind, &rest)?
+        }
+        None => match rest.as_slice() {
+            [("block", block)] => Until::Exit {
+                block: (*block).to_owned(),
+            },
+            _ => return Err(WAIT_USAGE.into()),
+        },
+    };
+    Ok(Wait { until, timeout })
+}
+
+/// An event kind and the field values to match, checked against
+/// [`rusty_mux_script::EVENTS`].
+fn event_filter(kind: &str, fields: &[(&str, &str)]) -> Result<Until, String> {
+    let (kind, names) = rusty_mux_script::EVENTS
+        .iter()
+        .find(|(name, _)| *name == kind)
+        .ok_or_else(|| format!("wait: unknown event `{kind}`"))?;
+    let fields = fields
+        .iter()
+        .map(|(key, text)| {
+            let name = names
+                .iter()
+                .find(|name| *name == key)
+                .ok_or_else(|| format!("wait: a `{kind}` event has no field `{key}`"))?;
+            Ok((*name, (*text).to_owned()))
+        })
+        .collect::<Result<_, String>>()?;
+    Ok(Until::Event { kind, fields })
+}
+
+/// Seconds, possibly fractional.
+fn parse_timeout(text: &str) -> Result<Duration, String> {
+    text.parse::<f64>()
+        .ok()
+        .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
+        .ok_or_else(|| format!("`{text}` is not a timeout in seconds"))
+}
+
+const RUN_USAGE: &str = "usage: run [--window WINDOW] [--cols N] [--rows N] [--cwd DIR] \
+                         [--wait [--timeout SECS]] [--] COMMAND [ARG]...";
+
+/// `run`'s flags, up to `--` or the first argument that is not a flag,
+/// then the command and its arguments, as a `create-block` request.
+fn run(args: &[String], defaults: &Defaults) -> Result<Run, String> {
+    let (mut wait, mut timeout, mut cwd) = (false, None, None);
+    let mut create = vec!["create-block".to_owned()];
+    let (mut cols, mut rows) = ("80", "24");
+    let mut rest = args;
+    while let Some((flag, tail)) = rest.split_first() {
+        if flag == "--" {
+            rest = tail;
+            break;
+        }
+        let Some(name) = flag.strip_prefix("--") else {
+            break;
+        };
+        if name == "wait" {
+            (wait, rest) = (true, tail);
+            continue;
+        }
+        let (value, tail) = tail
+            .split_first()
+            .ok_or_else(|| format!("run: --{name} needs a value"))?;
+        match name {
+            "window" => create.extend(["--window".to_owned(), value.clone()]),
+            "cols" => cols = value,
+            "rows" => rows = value,
+            "cwd" => cwd = Some(PathBuf::from(value)),
+            "timeout" => timeout = Some(parse_timeout(value)?),
+            _ => return Err(format!("run: unknown flag `{flag}`; {RUN_USAGE}")),
+        }
+        rest = tail;
+    }
+    let Some((command, command_args)) = rest.split_first() else {
+        return Err(RUN_USAGE.into());
+    };
+    if timeout.is_some() && !wait {
+        return Err("run: --timeout needs --wait".into());
+    }
+    create.extend(["--cols", cols, "--rows", rows, "--command", command].map(String::from));
+    for arg in command_args {
+        create.extend(["--arg".to_owned(), arg.clone()]);
+    }
+    if let Some(dir) = start_dir(cwd, defaults)? {
+        create.extend(["--cwd".to_owned(), dir]);
+    }
+    Ok(Run {
+        create: call(&create, defaults)?,
+        wait: wait.then_some(timeout),
+    })
+}
+
+/// Where `run` starts its program: `cwd` against the directory ctl runs
+/// in, or that directory.
+fn start_dir(cwd: Option<PathBuf>, defaults: &Defaults) -> Result<Option<String>, String> {
+    let dir = match (cwd, &defaults.dir) {
+        (Some(cwd), _) if cwd.is_absolute() => cwd,
+        (Some(cwd), Some(here)) => here.join(cwd),
+        (Some(cwd), None) => {
+            return Err(format!(
+                "run: --cwd {} is relative and the current directory is unknown",
+                cwd.display()
+            ));
+        }
+        (None, Some(here)) => here.clone(),
+        (None, None) => return Ok(None),
+    };
+    dir.into_os_string()
+        .into_string()
+        .map(Some)
+        .map_err(|dir| format!("run: the directory {dir:?} is not UTF-8"))
+}
+
 fn events(mut args: &[String]) -> Result<Command, String> {
     let (mut after, mut follow) = (None, false);
     loop {
@@ -236,17 +404,23 @@ fn call(args: &[String], defaults: &Defaults) -> Result<Call, String> {
         return Err("empty request between `+`".into());
     };
     let method = known(name)?;
-    let mut values = Vec::new();
+    let mut values: Vec<(&'static str, Arg)> = Vec::new();
     for (key, text) in flags(name, rest)? {
         let param = method
             .params
             .iter()
             .find(|p| p.name == key)
             .ok_or_else(|| reason(name, &CallError::UnknownParam(key.into())))?;
-        values.push((
-            param.name,
-            arg(param.ty, text).map_err(|e| reason(name, &e))?,
-        ));
+        let value = arg(param.ty, text).map_err(|e| reason(name, &e))?;
+        // A repeated list flag adds to the list.
+        let earlier = values.iter_mut().find(|(n, _)| *n == param.name);
+        if let (Some((_, Arg::Value(Value::Words(words)))), Arg::Value(Value::Words(more))) =
+            (earlier, &value)
+        {
+            words.extend(more.iter().cloned());
+            continue;
+        }
+        values.push((param.name, value));
     }
     for param in method.params {
         let given = values.iter().any(|(n, _)| *n == param.name);
@@ -336,6 +510,16 @@ pub fn usage(method: Option<&Method>) -> String {
             text.push_str(
                 "  watch            Run the config's rules on events: watch [--after EPOCH:SEQ]\n",
             );
+            text.push_str(
+                "  wait             Wait for a block's program to exit, exiting with its status,\n\
+                 \x20                  or for an event whose fields match: wait --block BLOCK |\n\
+                 \x20                  wait --event KIND [--FIELD VALUE]...; [--timeout SECS] exits 124\n",
+            );
+            text.push_str(
+                "  run              Start a program in a new block; with --wait, exit with its status:\n\
+                 \x20                  run [--window W] [--cols N] [--rows N] [--cwd DIR] [--wait\n\
+                 \x20                  [--timeout SECS]] [--] COMMAND [ARG]...\n",
+            );
             text.push_str("  api              List methods, or describe one as JSON: api list | api describe METHOD\n");
             text.push_str("  help             Show a command's flags: help COMMAND\n");
             text
@@ -343,7 +527,10 @@ pub fn usage(method: Option<&Method>) -> String {
         Some(m) => {
             let mut text = format!("usage: rusty-mux-ctl {}", m.name);
             for p in m.params {
-                text.push_str(&format!(" --{} <{}>", p.name, p.ty));
+                text.push_str(&match p.presence {
+                    Presence::Required => format!(" --{} <{}>", p.name, p.ty),
+                    Presence::Optional { .. } => format!(" [--{} <{}>]", p.name, p.ty),
+                });
             }
             text.push_str(&format!("\n{}\n", m.doc));
             for p in m.params {

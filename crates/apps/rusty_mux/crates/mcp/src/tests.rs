@@ -47,6 +47,21 @@ fn plain_calls_become_one_request() {
 }
 
 #[test]
+fn a_list_argument_repeats_its_flag() {
+    let call = args(r#"{"arg": ["-c", "exit 3"]}"#);
+    assert_eq!(
+        argv(known("create-block"), Some(&call)),
+        Ok(vec![
+            "create-block".into(),
+            "--arg=-c".into(),
+            "--arg=exit 3".into()
+        ])
+    );
+    let refused = argv(known("create-block"), Some(&args(r#"{"arg": [1]}"#)));
+    assert!(refused.expect_err("a number").contains("list of strings"));
+}
+
+#[test]
 fn leased_calls_attach_and_take_the_lease_first() {
     let call = args(r#"{"block": "2", "data": "a + b\r"}"#);
     assert_eq!(
@@ -109,10 +124,27 @@ fn tools_carry_the_catalog_schema_and_hints() {
     assert_eq!(hint(&close, "destructiveHint"), Some(Value::Bool(true)));
     assert_eq!(hint(&close, "readOnlyHint"), Some(Value::Bool(false)));
     assert_eq!(hint(&close, "openWorldHint"), Some(Value::Bool(false)));
-    let input = tool(known("input"));
-    assert_eq!(hint(&input, "destructiveHint"), Some(Value::Bool(true)));
-    assert_eq!(hint(&input, "openWorldHint"), Some(Value::Bool(true)));
-    assert_eq!(hint(&input, "readOnlyHint"), Some(Value::Bool(false)));
+    for name in ["input", "create-block"] {
+        let runs = tool(known(name));
+        assert_eq!(
+            hint(&runs, "destructiveHint"),
+            Some(Value::Bool(true)),
+            "{name}"
+        );
+        assert_eq!(
+            hint(&runs, "openWorldHint"),
+            Some(Value::Bool(true)),
+            "{name}"
+        );
+        assert_eq!(
+            hint(&runs, "readOnlyHint"),
+            Some(Value::Bool(false)),
+            "{name}"
+        );
+    }
+    let session = tool(known("create-session"));
+    assert_eq!(hint(&session, "destructiveHint"), Some(Value::Bool(false)));
+    assert_eq!(hint(&session, "openWorldHint"), Some(Value::Bool(false)));
 }
 
 #[test]

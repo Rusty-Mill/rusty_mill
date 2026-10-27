@@ -2,10 +2,11 @@
 
 use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Progress, SessionId, Size, WindowId};
 use rusty_uuid::Uuid;
+use rusty_wire::{Reader, Writer};
 
 use crate::field::{In, Out};
 use crate::schema::Value;
-use crate::{Error, args};
+use crate::{Error, args, varint};
 
 /// Optional protocol capabilities. Each peer sends its own; the session uses
 /// the intersection. Continuation checkpoints require explicit opt-in.
@@ -50,6 +51,10 @@ impl Features {
     /// and [`Event::Notification`] events, likewise skipped for a client
     /// without it.
     pub const PROGRAM_EVENTS: Self = Self(1 << 10);
+    /// [`Message::CreateBlock`]'s [`Launch`]: the program and working
+    /// directory of the new block. A server without it ignores them and
+    /// starts its default program, so a client must not send them then.
+    pub const LAUNCH: Self = Self(1 << 11);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -90,6 +95,24 @@ pub enum Code {
     NotFound,
     /// The block's type has no method of the requested name.
     MethodNotFound,
+}
+
+/// What a new block runs: the server's default program unless `program`
+/// names one, in the server's default directory unless `cwd` names one.
+/// Negotiated with [`Features::LAUNCH`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Launch {
+    pub program: Option<Program>,
+    /// An absolute path; the server refuses a relative one.
+    pub cwd: Option<String>,
+}
+
+/// A program to run and its arguments, without the program's own name.
+/// The server looks a bare `command` up in its `PATH`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Program {
+    pub command: String,
+    pub args: Vec<String>,
 }
 
 /// One entity in the reply to [`Message::List`].
@@ -142,6 +165,7 @@ pub enum Message {
         req: u64,
         window: WindowId,
         size: Size,
+        launch: Launch,
     },
     Attach {
         req: u64,
@@ -286,8 +310,12 @@ const SIGNAL: u32 = 25;
 const PROGRESS: u32 = 26;
 const PERCENT: u32 = 27;
 const BODY: u32 = 28;
-// IDs 1..=BODY are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = BODY as usize;
+const COMMAND: u32 = 29;
+/// A program's arguments: each a varint length, then its UTF-8 bytes.
+const ARGV: u32 = 30;
+const CWD: u32 = 31;
+// IDs 1..=CWD are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = CWD as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -335,8 +363,15 @@ impl Message {
                     .bytes(NAME, name.as_bytes());
                 ty::CREATE_WINDOW
             }
-            M::CreateBlock { req, window, size } => {
-                put_size(out.varint(REQ, *req).uuid(WINDOW, window.uuid()), *size);
+            M::CreateBlock {
+                req,
+                window,
+                size,
+                launch,
+            } => {
+                let out = out.varint(REQ, *req).uuid(WINDOW, window.uuid());
+                put_size(out, *size);
+                put_launch(out, launch);
                 ty::CREATE_BLOCK
             }
             M::Attach { req, block } => req_block(out, *req, *block, ty::ATTACH),
@@ -465,6 +500,7 @@ impl Message {
                 req: f.varint(REQ)?,
                 window: window(&f, WINDOW)?,
                 size: get_size(&f)?,
+                launch: get_launch(&f)?,
             },
             ty::ATTACH => M::Attach {
                 req: f.varint(REQ)?,
@@ -567,6 +603,49 @@ fn put_size(out: &mut Out, size: Size) {
 
 fn get_size(f: &In<'_>) -> Result<Size, Error> {
     Size::new(f.u16(COLS)?, f.u16(ROWS)?).map_err(|_| f.invalid(COLS))
+}
+
+fn put_launch(out: &mut Out, launch: &Launch) {
+    if let Some(Program { command, args }) = &launch.program {
+        let mut argv = Writer::new();
+        for arg in args {
+            varint::write(&mut argv, arg.len() as u64);
+            argv.write_bytes(arg.as_bytes());
+        }
+        out.bytes(COMMAND, command.as_bytes())
+            .bytes(ARGV, &argv.into_vec());
+    }
+    if let Some(cwd) = &launch.cwd {
+        out.bytes(CWD, cwd.as_bytes());
+    }
+}
+
+/// Arguments only with a command.
+fn get_launch(f: &In<'_>) -> Result<Launch, Error> {
+    let command = f.opt(COMMAND, In::string)?;
+    let argv = f.opt(ARGV, In::bytes)?;
+    let program = match (command, argv) {
+        (None, None) => None,
+        (None, Some(_)) => return Err(f.invalid(ARGV)),
+        (Some(command), argv) => Some(Program {
+            command,
+            args: get_argv(argv.unwrap_or_default()).ok_or_else(|| f.invalid(ARGV))?,
+        }),
+    };
+    Ok(Launch {
+        program,
+        cwd: f.opt(CWD, In::string)?,
+    })
+}
+
+fn get_argv(bytes: &[u8]) -> Option<Vec<String>> {
+    let mut r = Reader::new(bytes);
+    let mut args = Vec::new();
+    while !r.is_empty() {
+        let len = usize::try_from(varint::read(&mut r).ok()?).ok()?;
+        args.push(String::from_utf8(r.read_bytes(len).ok()?.to_vec()).ok()?);
+    }
+    Some(args)
 }
 
 fn put_cursor(out: &mut Out, cursor: Option<Cursor>) {

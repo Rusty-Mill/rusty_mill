@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use platform_windows::WindowsUnixStream as UnixStream;
 use rusty_mux_core::{BlockId, ClientId, Event, SessionId, Size, WindowId};
-use rusty_mux_proto::{Cursor, Features, Message, decode, encode};
+use rusty_mux_proto::{Cursor, Features, Launch, Message, decode, encode};
 use rusty_mux_server::{Config, serve};
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::io::UnixListener;
@@ -365,7 +365,12 @@ pub fn new_block(client: &mut Client, window: WindowId) -> BlockId {
     let size = Size::new(80, 24).expect("size");
     BlockId::from_uuid(
         client
-            .request(|req| Message::CreateBlock { req, window, size })
+            .request(|req| Message::CreateBlock {
+                req,
+                window,
+                size,
+                launch: Launch::default(),
+            })
             .expect("id"),
     )
 }

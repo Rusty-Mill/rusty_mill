@@ -27,7 +27,7 @@ use rusty_mcp_server::json::{Map, Value};
 use rusty_mcp_server::proto::{CallToolResult, ContentBlock, Tool};
 use rusty_mcp_server::{BuildError, Server};
 use rusty_mux_ctl::{Env, Exit, Stop};
-use rusty_mux_proto::schema::{CATALOG, Method, Returns};
+use rusty_mux_proto::schema::{CATALOG, Method, Returns, Ty};
 
 /// How a catalog method is offered, given one connection per call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,16 +85,17 @@ fn tool(method: &Method) -> Tool {
 }
 
 /// Behaviour hints: reads are read-only and closing is destructive.
-/// `input` types into a shell, which can delete data and reach any system,
-/// so it is destructive and open-world; the rest stays on the local server.
+/// `input` types into a shell and `create-block` runs any program it is
+/// given; either can delete data and reach any system, so both are
+/// destructive and open-world. The rest stays on the local server.
 fn annotations(method: &Method) -> Value {
     let read_only = matches!(method.returns, Returns::Text | Returns::Entries);
-    let input = method.name == "input";
-    let destructive = input || method.name.starts_with("close-");
+    let runs = matches!(method.name, "input" | "create-block");
+    let destructive = runs || method.name.starts_with("close-");
     let hints: Map = [
         ("readOnlyHint", read_only),
         ("destructiveHint", destructive),
-        ("openWorldHint", input),
+        ("openWorldHint", runs),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), Value::Bool(v)))
@@ -161,24 +162,35 @@ fn flags(method: &Method, arguments: Option<&Value>) -> Result<Vec<String>, Stri
         Some(Value::Object(map)) => map,
         Some(_) => return Err(format!("{}: the arguments must be an object", method.name)),
     };
-    map.iter()
-        .map(|(name, value)| {
-            if !method.params.iter().any(|p| p.name == name) {
-                return Err(format!("{}: unknown parameter `{name}`", method.name));
-            }
-            let text = match (value.as_str(), value.as_u64()) {
-                (Some(text), _) => text.to_owned(),
-                (None, Some(n)) => n.to_string(),
-                (None, None) => {
-                    return Err(format!(
-                        "{}: `{name}` must be a string or a non-negative integer",
-                        method.name
-                    ));
-                }
-            };
-            Ok(format!("--{name}={text}"))
-        })
-        .collect()
+    let mut flags = Vec::new();
+    for (name, value) in map {
+        let Some(param) = method.params.iter().find(|p| p.name == name) else {
+            return Err(format!("{}: unknown parameter `{name}`", method.name));
+        };
+        let texts = match (param.ty, value) {
+            (Ty::Words, Value::Array(items)) => items
+                .iter()
+                .map(|item| item.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| format!("{}: `{name}` must be a list of strings", method.name))?,
+            _ => vec![scalar(value).ok_or_else(|| {
+                format!(
+                    "{}: `{name}` must be a string or a non-negative integer",
+                    method.name
+                )
+            })?],
+        };
+        flags.extend(texts.iter().map(|text| format!("--{name}={text}")));
+    }
+    Ok(flags)
+}
+
+fn scalar(value: &Value) -> Option<String> {
+    match (value.as_str(), value.as_u64()) {
+        (Some(text), _) => Some(text.to_owned()),
+        (None, Some(n)) => Some(n.to_string()),
+        (None, None) => None,
+    }
 }
 
 #[cfg(test)]

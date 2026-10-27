@@ -83,6 +83,42 @@ fn start_stalled_server() -> (PathBuf, Receiver<&'static str>) {
     (path, rx)
 }
 
+/// A server from before `LAUNCH`: it welcomes with no features, then
+/// reports how many requests it got before the client hung up.
+fn start_server_without_launch() -> (PathBuf, Receiver<usize>) {
+    use rusty_mux_proto::{Message, decode};
+
+    // Welcome with no features and the nil client id, encoded by hand: the
+    // client id type lives in a crate this one does not depend on. Length,
+    // type, then features (field 10) = 0 and client (field 5) = 16 zeros.
+    let mut welcome = vec![0, 0, 0, 21, 0x81, 10 << 1, 0, 5 << 1 | 1, 16];
+    welcome.extend([0; 16]);
+
+    let path = socket_path();
+    let listener = StdListener::bind(&path).expect("bind");
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let (mut buf, mut chunk, mut requests) = (Vec::new(), [0u8; 4096], 0);
+        loop {
+            while let Ok(Some((message, used))) = decode(&buf) {
+                buf.drain(..used);
+                let Message::Hello { .. } = message else {
+                    requests += 1;
+                    continue;
+                };
+                stream.write_all(&welcome).expect("write");
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        let _ = tx.send(requests);
+    });
+    (path, rx)
+}
+
 /// A listening socket nobody accepts on, its one-slot backlog already
 /// taken, so the next connect waits for room. Dropping it closes both.
 struct FullBacklog {
@@ -386,4 +422,23 @@ fn cancelling_a_call_stuck_connecting_ends_it() {
         .recv_timeout(Duration::from_secs(5))
         .expect("the cancelled call still held the session open");
     ended.expect("serve");
+}
+
+#[test]
+fn a_launch_the_server_would_ignore_is_a_tool_error_and_sends_nothing() {
+    let (socket, requests) = start_server_without_launch();
+    let (text, failed) = call(
+        &socket,
+        "create-block",
+        concat!(
+            r#"{"window": "00000000-0000-0000-0000-000000000001", "cols": 80, "rows": 24, "#,
+            r#""command": "sh", "arg": ["-c", "exit 3"]}"#
+        ),
+    );
+    assert!(failed, "{text}");
+    assert!(
+        text.contains("does not support create-block with --"),
+        "{text}"
+    );
+    assert_eq!(requests.recv_timeout(PATIENCE).expect("count"), 0);
 }
