@@ -42,6 +42,20 @@ pub enum Command {
     Wait(Wait),
     /// Starts a program in a new block, and with `wait` waits for it.
     Run(Run),
+    /// Installs, checks or removes agent setup, or runs its hook.
+    Agent(AgentCommand),
+}
+
+/// `agent`: each verb but `hook` works in `--dir`, else the agent's usual
+/// config directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentCommand {
+    Setup(Option<PathBuf>),
+    /// Exits 0 only when the skill and hook are installed and current.
+    Status(Option<PathBuf>),
+    Remove(Option<PathBuf>),
+    /// What the session-start hook runs.
+    Hook,
 }
 
 /// What `wait` waits for, and for how long at most.
@@ -183,6 +197,7 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "watch" => watch(rest),
         "wait" => wait(rest).map(Command::Wait),
         "run" => run(rest, defaults).map(Command::Run),
+        "agent" => agent(rest).map(Command::Agent),
         _ => args
             .split(|a| a == "+")
             .map(|args| call(args, defaults))
@@ -239,6 +254,24 @@ fn watch(args: &[String]) -> Result<Command, String> {
             after: Some(parse_cursor(cursor)?),
         }),
         _ => Err("usage: watch [--after EPOCH:SEQ]".into()),
+    }
+}
+
+const AGENT_USAGE: &str = "usage: agent setup|status|remove [--dir DIR] | agent hook";
+
+fn agent(args: &[String]) -> Result<AgentCommand, String> {
+    let (verb, rest) = args.split_first().ok_or(AGENT_USAGE)?;
+    let dir = match flags("agent", rest, |_| false)?.as_slice() {
+        [] => None,
+        [("dir", dir)] if verb != "hook" => Some(PathBuf::from(dir)),
+        _ => return Err(AGENT_USAGE.into()),
+    };
+    match verb.as_str() {
+        "setup" => Ok(AgentCommand::Setup(dir)),
+        "status" => Ok(AgentCommand::Status(dir)),
+        "remove" => Ok(AgentCommand::Remove(dir)),
+        "hook" => Ok(AgentCommand::Hook),
+        _ => Err(AGENT_USAGE.into()),
     }
 }
 
@@ -532,6 +565,11 @@ pub fn usage(method: Option<&Method>) -> String {
                 "  run              Start a program in a new block; with --wait, exit with its status:\n\
                  \x20                  run [--window W] [--cols N] [--rows N] [--cwd DIR] [--wait\n\
                  \x20                  [--timeout SECS]] [--] COMMAND [ARG]...\n",
+            );
+            text.push_str(
+                "  agent            Set up Claude Code to use rusty_mux: a skill and a session-start\n\
+                 \x20                  hook in $CLAUDE_CONFIG_DIR or ~/.claude: agent setup|status|remove\n\
+                 \x20                  [--dir DIR]; status exits 0 only when both are current\n",
             );
             text.push_str("  api              List methods, or describe one as JSON: api list | api describe METHOD\n");
             text.push_str("  help             Show a command's flags: help COMMAND\n");
