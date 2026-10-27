@@ -7408,3 +7408,105 @@ fn measure_reflow() {
         );
     }
 }
+
+/// Parser throughput on large string bodies (OSC 52, an unknown APC and an
+/// unknown DCS), fed in 4 KiB chunks as a PTY read delivers them. Run with
+/// `--release --ignored --nocapture`.
+#[test]
+#[ignore = "measurement"]
+fn measure_string_body_scan() {
+    use std::time::Instant;
+    let body: Vec<u8> = (0..900_000u32)
+        .map(|i| {
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[i as usize % 64]
+        })
+        .collect();
+    let cases: [(&str, &[u8], &[u8]); 3] = [
+        ("osc 52", b"\x1b]52;c;", b"\x07"),
+        ("apc", b"\x1b_X", b"\x1b\\"),
+        ("dcs", b"\x1bPzz", b"\x1b\\"),
+    ];
+    for (name, open, close) in cases {
+        let stream = [open, &body[..], close].concat().repeat(4);
+        let mut best = f64::MAX;
+        for _ in 0..5 {
+            let mut g = Grid::new(80, 24);
+            let mut p = AnsiParser::new();
+            let t = Instant::now();
+            for chunk in stream.chunks(4096) {
+                p.advance(&mut g, chunk);
+            }
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        println!("{name}: {:.0} MB/s", stream.len() as f64 / best / 1e6);
+    }
+}
+
+#[test]
+fn string_body_len_matches_a_byte_scan() {
+    // Every byte value at every position of a 19-byte buffer (two words plus
+    // a tail), for both terminator sets.
+    for stops in [&[0x07, 0x1b][..], &[0x1b, 0x18, 0x1a][..]] {
+        for bad in 0..=255u8 {
+            for pos in 0..19 {
+                let mut buf = [b'a'; 19];
+                buf[pos] = bad;
+                let want = buf.iter().take_while(|b| !stops.contains(b)).count();
+                assert_eq!(
+                    string_body_len(&buf, stops),
+                    want,
+                    "byte {bad:#04x} at {pos}, stops {stops:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(string_body_len(b"", &[0x1b]), 0);
+}
+
+/// OSC (BEL and ST ended), DCS, APC and SOS/PM strings, ended or aborted
+/// by CAN or SUB, each followed by text: split at any offset or fed a byte
+/// at a time, the grid, title and replies match one chunk's.
+#[test]
+fn string_bodies_split_at_every_offset_match_one_chunk() {
+    let stream: &[u8] = b"\x1b]2;first title\x07A\x1b]2;second\x1b\\B\
+        \x1bP+q544e\x1b\\C\x1b_Gabc\x18D\x1bPzz\x1aE\x1bXsos body\x1b\\F\
+        \x1b^pm\x18G\x1b]2;last\x07H";
+    let run = |chunks: &mut dyn Iterator<Item = &[u8]>| {
+        let mut g = Grid::new(20, 2);
+        let mut p = AnsiParser::new();
+        for chunk in chunks {
+            p.advance(&mut g, chunk);
+        }
+        (grid_state(&g), g.title.clone(), p.take_responses())
+    };
+    let whole = run(&mut std::iter::once(stream));
+    let mut g = Grid::new(20, 2);
+    AnsiParser::new().advance(&mut g, stream);
+    assert_eq!(
+        row_text(&g, 0).trim_end(),
+        "ABCDEFGH",
+        "every string returns to ground"
+    );
+    assert_eq!(whole.1, "last");
+    assert!(!whole.2.is_empty(), "XTGETTCAP answered");
+    assert_eq!(run(&mut stream.chunks(1)), whole, "a byte at a time");
+    for at in 1..stream.len() {
+        let (a, b) = stream.split_at(at);
+        assert_eq!(run(&mut [a, b].into_iter()), whole, "split at {at}");
+    }
+}
+
+/// An unterminated-looking long title keeps only the first `OSC_MAX` bytes
+/// of its OSC string, whatever the chunking.
+#[test]
+fn a_long_osc_is_capped_however_it_is_chunked() {
+    let stream = [b"\x1b]2;".as_slice(), &[b'a'; 5000], b"\x07"].concat();
+    for size in [1, 7, 4096, stream.len()] {
+        let mut g = Grid::new(10, 1);
+        let mut p = AnsiParser::new();
+        for chunk in stream.chunks(size) {
+            p.advance(&mut g, chunk);
+        }
+        assert_eq!(g.title.len(), 4096 - "2;".len(), "chunks of {size}");
+    }
+}

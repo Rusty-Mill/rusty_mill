@@ -154,6 +154,36 @@ pub(crate) fn printable_ascii_len(bytes: &[u8]) -> usize {
             .count()
 }
 
+/// Length of the leading run of `bytes` that holds none of `stops`, found a
+/// word at a time like [`printable_ascii_len`].
+///
+/// Per stop, a byte of `w ^ stop` is zero exactly where `w` holds the stop,
+/// and `(x - ONES) & !x & HIGH` flags zero bytes. A borrow only reaches the
+/// bytes above a real zero, so each stop's lowest flag is exact, and so is
+/// the lowest across all of them.
+pub(crate) fn string_body_len(bytes: &[u8], stops: &[u8]) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let (words, tail) = bytes.as_chunks::<8>();
+    for (i, word) in words.iter().enumerate() {
+        let w = u64::from_le_bytes(*word);
+        let mask = stops.iter().fold(0, |m, &stop| {
+            let x = w ^ (u64::from(stop) * ONES);
+            m | (x.wrapping_sub(ONES) & !x & HIGH)
+        });
+        if mask != 0 {
+            return i * 8 + (mask.trailing_zeros() / 8) as usize;
+        }
+    }
+    words.len() * 8 + tail.iter().take_while(|b| !stops.contains(b)).count()
+}
+
+/// Bytes that end an OSC body: BEL, or the ESC of an ST.
+const OSC_STOPS: &[u8] = &[0x07, 0x1b];
+/// Bytes that end a DCS, APC or ignored string body: the ESC of an ST, or a
+/// CAN or SUB abort.
+const STRING_STOPS: &[u8] = &[0x1b, 0x18, 0x1a];
+
 /// The leading run of valid UTF-8 in the first [`UTF8_RUN_WINDOW`] bytes of
 /// `bytes`, made only of non-ASCII scalars (every byte at or above 0x80), or
 /// `None` when it is empty. It stops before the first ASCII byte and before a
@@ -625,20 +655,9 @@ impl AnsiParser {
                         self.state = ParserState::Ground;
                     }
                     0x1b => self.state = ParserState::OscEsc, // possible ST (ESC \)
-                    _ => {
-                        // Accumulate the payload byte, bounded. iTerm2 inline
-                        // images (`1337;File=`) and OSC 52 clipboard payloads
-                        // get much larger caps; the cheap length check
-                        // short-circuits for every ordinary OSC.
-                        if self.osc_buffer.len() < OSC_MAX
-                            || (self.osc_buffer.len() < OSC_IMAGE_MAX
-                                && self.osc_buffer.starts_with(b"1337;File="))
-                            || (self.osc_buffer.len() < OSC_CLIPBOARD_MAX
-                                && self.osc_buffer.starts_with(b"52;"))
-                        {
-                            self.osc_buffer.push(b);
-                        }
-                    }
+                    // Fast path: the body up to the next terminator is
+                    // collected in one step.
+                    _ => i += self.string_body(&bytes[i - 1..]) - 1,
                 },
                 ParserState::OscEsc => {
                     // Whether or not this is the `\` of an ST, the OSC string is
@@ -669,7 +688,7 @@ impl AnsiParser {
                 ParserState::StrSink => match b {
                     0x1b => self.state = ParserState::StrSinkEsc, // possible ST (ESC \)
                     0x18 | 0x1a => self.state = ParserState::Ground, // CAN / SUB abort
-                    _ => {}                                       // consume body byte
+                    _ => i += self.string_body(&bytes[i - 1..]) - 1, // skip the body
                 },
                 ParserState::StrSinkEsc => {
                     // Whether or not this is the `\` of an ST, the string is
@@ -683,11 +702,7 @@ impl AnsiParser {
                         self.dcs_buffer.clear();
                         self.state = ParserState::Ground;
                     }
-                    _ => {
-                        if self.dcs_buffer.len() < DCS_MAX {
-                            self.dcs_buffer.push(b);
-                        }
-                    }
+                    _ => i += self.string_body(&bytes[i - 1..]) - 1,
                 },
                 ParserState::DcsEsc => {
                     // The DCS string is over (ST or otherwise); act on it.
@@ -701,11 +716,7 @@ impl AnsiParser {
                         self.apc_buffer.clear();
                         self.state = ParserState::Ground;
                     }
-                    _ => {
-                        if self.apc_buffer.len() < DCS_MAX {
-                            self.apc_buffer.push(b);
-                        }
-                    }
+                    _ => i += self.string_body(&bytes[i - 1..]) - 1,
                 },
                 ParserState::ApcEsc => {
                     // The APC string is over (ST or otherwise); act on it.
@@ -716,6 +727,40 @@ impl AnsiParser {
         }
         // Between batches nothing outside the grid's cells holds a style id.
         g.sweep_styles();
+    }
+
+    /// In a string body state, take the leading run of `bytes` that holds no
+    /// terminator into the state's buffer, within its cap, and return its
+    /// length. `bytes` starts with a body byte, so the run is never empty.
+    fn string_body(&mut self, bytes: &[u8]) -> usize {
+        let (stops, buf, cap) = match self.state {
+            ParserState::Osc => (OSC_STOPS, &mut self.osc_buffer, OSC_MAX),
+            ParserState::Dcs => (STRING_STOPS, &mut self.dcs_buffer, DCS_MAX),
+            ParserState::Apc => (STRING_STOPS, &mut self.apc_buffer, DCS_MAX),
+            ParserState::StrSink => (STRING_STOPS, &mut Vec::new(), 0),
+            _ => return 1,
+        };
+        let run = string_body_len(bytes, stops).max(1);
+        let body = &bytes[..run];
+        let fill = |buf: &mut Vec<u8>, cap: usize, from: usize| {
+            let take = cap.saturating_sub(buf.len()).min(body.len() - from);
+            buf.extend_from_slice(&body[from..from + take]);
+            from + take
+        };
+        let used = fill(buf, cap, 0);
+        // Past `OSC_MAX` only an image or clipboard OSC keeps collecting; by
+        // then its prefix is in the buffer.
+        if self.state == ParserState::Osc && used < run {
+            let cap = if buf.starts_with(b"1337;File=") {
+                OSC_IMAGE_MAX
+            } else if buf.starts_with(b"52;") {
+                OSC_CLIPBOARD_MAX
+            } else {
+                OSC_MAX
+            };
+            fill(buf, cap, used);
+        }
+        run
     }
 
     /// Finalize a collected DCS string. If it's a Sixel (`<params> q <data>`),
