@@ -132,6 +132,7 @@ fn the_server_sees_both_the_negotiated_protocol_and_the_client_certificate() {
     .unwrap();
     echo(&mut tls).unwrap();
     assert_eq!(tls.negotiated_alpn_protocol(), Some(&b"h2"[..]));
+    assert_eq!(tls.peer_certificate_der(), Some(f.server_leaf.as_slice()));
 
     let seen = server.join().unwrap().expect("handshake succeeds");
     assert_eq!(seen.alpn.as_deref(), Some(&b"h2"[..]));
