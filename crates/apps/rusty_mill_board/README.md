@@ -72,6 +72,8 @@ RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.
   Tags come back lowercase, so actor names must be lowercase. Events are kept in memory only: the board's own
   writes plus an `edited` event (actor `tick`) when a task changes in rusty_tick. `/health` is 503 while rusty_tick
   is down. No `--backup-dir`: rusty_tick keeps the data.
+  [`tools/migrate_artifact_board.py`](tools/migrate_artifact_board.py) moves the Mill Board artifact's cards
+  into rusty_tick once (dry run by default, safe to re-run, `--rollback --yes` trashes what it wrote).
 
 - **GitHub sync** (`--github-repo owner/name`, token in `GITHUB_TOKEN`, every
   `--github-secs`, default 60): stateless reconcile between cards and issues.
