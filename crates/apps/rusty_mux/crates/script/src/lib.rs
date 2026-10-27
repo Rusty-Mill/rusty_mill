@@ -119,7 +119,8 @@ pub struct Bind {
 /// and the fields each gives its placeholders: the ids, numbers and text
 /// of the event, and for `pwd-changed` and `title-changed` the new
 /// directory or title. A program that exits has a `code` or, killed by a
-/// signal, a `signal`, never both.
+/// signal, a `signal`, never both. A `layout-changed` has no `layout`
+/// once its window is empty, and no `zoomed` unless a block is zoomed.
 pub const EVENTS: &[(&str, &[&str])] = &[
     ("session-created", &["session"]),
     ("session-closed", &["session"]),
@@ -145,6 +146,7 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ("window-renamed", &["window", "name"]),
     ("block-renamed", &["block", "name"]),
     ("client-renamed", &["client", "name"]),
+    ("layout-changed", &["window", "layout", "zoomed"]),
 ];
 
 /// What to run when an event of one kind happens.

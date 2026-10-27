@@ -28,7 +28,11 @@ rule between "here" and "refused", and this page changes with it.
 ## Where an agent puts its work
 
 - New blocks go in the agent's own window, the one it runs in, unless the
-  person names another. `run` and `create-block` default there through rule 2.
+  person names another. `run` and `create-block` default there through rule 2,
+  and the server places them beside the window's largest block without
+  disturbing a zoom. `split-block --side SIDE` puts a block beside a chosen
+  one, the agent's own by default, and unzooms the window so it shows; use it
+  only when the person should see the block.
 - An agent names every block it creates (`rename-block`), so later commands
   target it by name. Positions shift when blocks close.
 - An agent types (`input`, `terminal.send-keys`) only into blocks it created,

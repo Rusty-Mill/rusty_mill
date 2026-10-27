@@ -108,6 +108,7 @@ pub(crate) fn needs(kind: &str) -> Features {
         "session-renamed" | "window-renamed" | "block-renamed" | "client-renamed" => {
             Features::LABELS
         }
+        "layout-changed" => Features::LAYOUT,
         _ => Features::NONE,
     }
 }

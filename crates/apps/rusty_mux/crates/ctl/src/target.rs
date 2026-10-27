@@ -74,6 +74,7 @@ fn node(entry: &Entry) -> Node<'_> {
             window,
             session,
             name,
+            ..
         } => Node {
             entity: Entity::Window,
             id: window.uuid(),

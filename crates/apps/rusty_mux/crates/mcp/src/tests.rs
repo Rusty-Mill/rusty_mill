@@ -160,7 +160,7 @@ fn tools_carry_the_catalog_schema_and_hints() {
     }
     let rename = tool(known("rename-client"));
     assert_eq!(hint(&rename, "destructiveHint"), Some(Value::Bool(false)));
-    for name in ["input", "create-block"] {
+    for name in ["input", "create-block", "split-block"] {
         let runs = tool(known(name));
         assert_eq!(
             hint(&runs, "destructiveHint"),

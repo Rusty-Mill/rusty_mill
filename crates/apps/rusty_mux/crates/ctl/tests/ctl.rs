@@ -515,6 +515,40 @@ fn a_missing_id_defaults_to_where_ctl_runs() {
     assert!(!ok(&socket, &["list"]).contains(&block));
 }
 
+#[test]
+fn split_beside_here_then_zoom_and_read_the_layout() {
+    let socket = start_server();
+    let block = block(&socket);
+    let output = ctl_command(&socket, &["split-block", "--side", "down"])
+        .env("RUSTY_MUX_BLOCK", &block)
+        .output()
+        .expect("run");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let new = stdout(&output).trim().to_owned();
+    ok(&socket, &["zoom-block", "--block", &new]);
+    let listed = ok(&socket, &["list"]);
+    let window = listed
+        .lines()
+        .find(|l| l.starts_with("window "))
+        .expect("a window line");
+    assert!(
+        window.contains(&format!("layout=\"rows50({block},{new})\" zoomed={new}")),
+        "{window}"
+    );
+    let json = ok(&socket, &["--json", "list"]);
+    assert!(json.contains(&format!("\"zoomed\":\"{new}\"")), "{json}");
+    let refused = ctl(
+        &socket,
+        &["split-block", "--block", &block, "--side", "north"],
+    );
+    assert_eq!(refused.status.code(), Some(2));
+}
+
 /// Whether `block` still exists: only an existing block can be attached.
 fn exists(socket: &Path, block: &str) -> bool {
     ctl(socket, &["attach", "--block", block]).status.code() == Some(0)

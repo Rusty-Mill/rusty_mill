@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, Progress, Session,
-    SessionId, Size, Window, WindowId,
+    Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, Layout, MAX_DEPTH,
+    Progress, Session, SessionId, Share, Side, Size, Window, WindowId,
 };
 
 /// The longest name any entity may have, in UTF-8 bytes. Names travel in
@@ -103,6 +103,8 @@ impl Mux {
                 session,
                 name,
                 blocks: Vec::new(),
+                layout: None,
+                zoomed: None,
             },
         );
         self.events.push(Event::WindowCreated {
@@ -119,7 +121,9 @@ impl Mux {
     }
 
     /// Adds a block whose id the caller chose, such as one already given to
-    /// the block's program before it started.
+    /// the block's program before it started. It splits the window's
+    /// largest block, side by side if that block is wider than tall (a cell
+    /// being about twice as tall as wide), stacked otherwise; a zoom stays.
     pub fn add_block(&mut self, id: BlockId, window: WindowId, size: Size) -> Result<(), Error> {
         if self.blocks.contains_key(&id) {
             return Err(Error::BlockExists(id));
@@ -128,7 +132,93 @@ impl Mux {
             .windows
             .get_mut(&window)
             .ok_or(Error::UnknownWindow(window))?;
-        parent.blocks.push(id);
+        let layout = match parent.layout.take() {
+            None => Layout::Block(id),
+            Some(layout) => {
+                let target = layout.largest();
+                let side = match self.blocks.get(&target).map(|b| b.size) {
+                    Some(s) if s.cols / 2 < s.rows => Side::Down,
+                    _ => Side::Right,
+                };
+                layout.split(target, id, side)
+            }
+        };
+        parent.layout = Some(layout);
+        self.insert_block(id, window, size);
+        Ok(())
+    }
+
+    /// The size a block made by splitting `target` toward `side` gets: its
+    /// part of `target`'s size.
+    pub fn split_size(&self, target: BlockId, side: Side) -> Result<Size, Error> {
+        let size = self.split_target(target)?.size;
+        let pick = |len: u16| {
+            let (first, second) = Share::HALF.lengths(len).ok_or(Error::NoRoom {
+                block: target,
+                side,
+            })?;
+            Ok(if side.first() { first } else { second })
+        };
+        Ok(match side.axis() {
+            Axis::Columns => Size {
+                cols: pick(size.cols)?,
+                rows: size.rows,
+            },
+            Axis::Rows => Size {
+                cols: size.cols,
+                rows: pick(size.rows)?,
+            },
+        })
+    }
+
+    /// Adds a block whose id the caller chose beside `target`, splitting
+    /// `target`'s place in half, and unzooms the window so it shows. The
+    /// size is the caller's, usually [`Self::split_size`]; `target` keeps
+    /// its own until a client resizes it.
+    pub fn split_block(
+        &mut self,
+        id: BlockId,
+        target: BlockId,
+        side: Side,
+        size: Size,
+    ) -> Result<(), Error> {
+        if self.blocks.contains_key(&id) {
+            return Err(Error::BlockExists(id));
+        }
+        let window = self.split_target(target)?.window;
+        let parent = self
+            .windows
+            .get_mut(&window)
+            .ok_or(Error::UnknownWindow(window))?;
+        parent.layout = parent.layout.take().map(|l| l.split(target, id, side));
+        parent.zoomed = None;
+        self.insert_block(id, window, size);
+        Ok(())
+    }
+
+    /// The block `target`, if it exists and may be split.
+    fn split_target(&self, target: BlockId) -> Result<&Block, Error> {
+        let block = self
+            .blocks
+            .get(&target)
+            .ok_or(Error::UnknownBlock(target))?;
+        let depth = self
+            .windows
+            .get(&block.window)
+            .and_then(|w| w.layout.as_ref())
+            .and_then(|l| l.depth_of(target))
+            .ok_or(Error::UnknownBlock(target))?;
+        if depth >= MAX_DEPTH {
+            return Err(Error::TooDeep(target));
+        }
+        Ok(block)
+    }
+
+    /// Records a block already placed in its window's layout.
+    fn insert_block(&mut self, id: BlockId, window: WindowId, size: Size) {
+        if let Some(parent) = self.windows.get_mut(&window) {
+            parent.blocks.push(id);
+        }
         self.blocks.insert(
             id,
             Block {
@@ -144,7 +234,47 @@ impl Mux {
             window,
             size,
         });
+        self.push_layout(window);
+    }
+
+    /// Shows `block` alone over its whole window, until it is unzoomed,
+    /// closed, or another block is split off in the window.
+    pub fn zoom(&mut self, block: BlockId) -> Result<(), Error> {
+        let window = self
+            .blocks
+            .get(&block)
+            .ok_or(Error::UnknownBlock(block))?
+            .window;
+        self.set_zoom(window, Some(block))
+    }
+
+    /// Shows every block of the window again.
+    pub fn unzoom(&mut self, window: WindowId) -> Result<(), Error> {
+        self.set_zoom(window, None)
+    }
+
+    fn set_zoom(&mut self, window: WindowId, zoomed: Option<BlockId>) -> Result<(), Error> {
+        let target = self
+            .windows
+            .get_mut(&window)
+            .ok_or(Error::UnknownWindow(window))?;
+        if target.zoomed == zoomed {
+            return Ok(());
+        }
+        target.zoomed = zoomed;
+        self.push_layout(window);
         Ok(())
+    }
+
+    /// Announces the window's layout as it is now.
+    fn push_layout(&mut self, window: WindowId) {
+        if let Some(w) = self.windows.get(&window) {
+            self.events.push(Event::LayoutChanged {
+                window,
+                layout: w.layout.clone(),
+                zoomed: w.zoomed,
+            });
+        }
     }
 
     /// Resizes the block's PTY. Resizing is input, so it needs the lease.
@@ -318,7 +448,8 @@ impl Mux {
         Ok(())
     }
 
-    /// Closes the block, detaching every client attached to it.
+    /// Closes the block, detaching every client attached to it. Its
+    /// sibling takes its split's place, and a zoom on it ends.
     pub fn close_block(&mut self, block: BlockId) -> Result<(), Error> {
         let window = self
             .blocks
@@ -328,7 +459,12 @@ impl Mux {
         self.remove_block(block);
         if let Some(parent) = self.windows.get_mut(&window) {
             parent.blocks.retain(|&b| b != block);
+            parent.layout = parent.layout.take().and_then(|l| l.remove(block));
+            if parent.zoomed == Some(block) {
+                parent.zoomed = None;
+            }
         }
+        self.push_layout(window);
         Ok(())
     }
 

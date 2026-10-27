@@ -43,6 +43,11 @@ fn create_links_children_and_emits_in_order() {
                 window,
                 size: size(80, 24)
             },
+            Event::LayoutChanged {
+                window,
+                layout: Some(Layout::Block(block)),
+                zoomed: None,
+            },
         ]
     );
     assert!(mux.take_events().is_empty());
@@ -312,7 +317,11 @@ fn a_block_can_take_a_chosen_id_once() {
         mux.add_block(id, window, size(80, 24)),
         Err(Error::BlockExists(id))
     );
-    assert_eq!(mux.take_events().len(), 1, "the refused add emits nothing");
+    assert_eq!(
+        mux.take_events().len(),
+        2,
+        "a create and a layout; the refused add emits nothing"
+    );
 }
 
 #[test]
@@ -486,4 +495,173 @@ fn names_over_the_limit_are_refused_without_a_change() {
     mux.rename(EntityId::Block(block), at_limit.clone())
         .unwrap();
     assert_eq!(mux.block(block).unwrap().name(), at_limit);
+}
+
+/// The layout of `window`.
+fn layout_of(mux: &Mux, window: WindowId) -> Option<Layout> {
+    mux.window(window).and_then(|w| w.layout().cloned())
+}
+
+#[test]
+fn new_blocks_split_the_largest_block_by_its_shape() {
+    let (mut mux, _, window, a) = fixture();
+    // 80x24 is wider than tall: side by side.
+    let b = mux.create_block(window, size(80, 24)).unwrap();
+    // `a` and `b` are equal, so `a` splits; at 20x24 it is taller than wide.
+    let client = leased_client(&mut mux, a);
+    mux.resize_block(client, a, size(20, 24)).unwrap();
+    let c = mux.create_block(window, size(20, 12)).unwrap();
+    let expected = Layout::Block(a)
+        .split(a, b, Side::Right)
+        .split(a, c, Side::Down);
+    assert_eq!(layout_of(&mux, window), Some(expected));
+    assert_eq!(mux.window(window).unwrap().blocks(), &[a, b, c]);
+}
+
+#[test]
+fn split_places_the_block_beside_its_target_and_unzooms() {
+    let (mut mux, _, window, a) = fixture();
+    mux.zoom(a).unwrap();
+    mux.take_events();
+    let new = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    let size = mux.split_size(a, Side::Left).unwrap();
+    assert_eq!(size, Size::new(40, 24).unwrap());
+    mux.split_block(new, a, Side::Left, size).unwrap();
+    let layout = Layout::Block(a).split(a, new, Side::Left);
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::BlockCreated {
+                block: new,
+                window,
+                size
+            },
+            Event::LayoutChanged {
+                window,
+                layout: Some(layout),
+                zoomed: None
+            },
+        ]
+    );
+    assert_eq!(
+        mux.split_size(a, Side::Down),
+        Ok(Size::new(80, 11).unwrap())
+    );
+}
+
+#[test]
+fn a_refused_split_changes_nothing() {
+    let (mut mux, _, window, a) = fixture();
+    let client = leased_client(&mut mux, a);
+    mux.resize_block(client, a, size(2, 24)).unwrap();
+    mux.take_events();
+    let no_room = Err(Error::NoRoom {
+        block: a,
+        side: Side::Right,
+    });
+    assert_eq!(mux.split_size(a, Side::Right), no_room);
+    let gone = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    assert_eq!(
+        mux.split_size(gone, Side::Down),
+        Err(Error::UnknownBlock(gone))
+    );
+    assert_eq!(
+        mux.split_block(gone, gone, Side::Down, size(1, 1)),
+        Err(Error::UnknownBlock(gone))
+    );
+    assert_eq!(
+        mux.split_block(a, a, Side::Down, size(1, 1)),
+        Err(Error::BlockExists(a))
+    );
+    assert!(mux.take_events().is_empty());
+    assert_eq!(layout_of(&mux, window), Some(Layout::Block(a)));
+}
+
+#[test]
+fn splits_stop_at_the_depth_limit() {
+    let (mut mux, _, _, mut target) = fixture();
+    for _ in 0..MAX_DEPTH {
+        let new = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+        mux.split_block(new, target, Side::Down, size(80, 24))
+            .unwrap();
+        target = new;
+    }
+    assert_eq!(
+        mux.split_size(target, Side::Down),
+        Err(Error::TooDeep(target))
+    );
+    let new = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    assert_eq!(
+        mux.split_block(new, target, Side::Down, size(80, 24)),
+        Err(Error::TooDeep(target))
+    );
+}
+
+#[test]
+fn closing_a_block_promotes_its_sibling_and_ends_its_zoom() {
+    let (mut mux, _, window, a) = fixture();
+    let b = mux.create_block(window, size(80, 24)).unwrap();
+    mux.zoom(b).unwrap();
+    mux.take_events();
+    mux.close_block(b).unwrap();
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::BlockClosed { block: b },
+            Event::LayoutChanged {
+                window,
+                layout: Some(Layout::Block(a)),
+                zoomed: None
+            },
+        ]
+    );
+    mux.close_block(a).unwrap();
+    assert_eq!(
+        mux.take_events().last(),
+        Some(&Event::LayoutChanged {
+            window,
+            layout: None,
+            zoomed: None
+        })
+    );
+    assert_eq!(layout_of(&mux, window), None);
+}
+
+#[test]
+fn closing_a_window_sends_no_layout() {
+    let (mut mux, _, window, _) = fixture();
+    mux.close_window(window).unwrap();
+    let events = mux.take_events();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::LayoutChanged { .. })),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn zoom_and_unzoom_emit_only_on_a_change() {
+    let (mut mux, _, window, a) = fixture();
+    mux.zoom(a).unwrap();
+    mux.zoom(a).unwrap();
+    let zoomed = Event::LayoutChanged {
+        window,
+        layout: Some(Layout::Block(a)),
+        zoomed: Some(a),
+    };
+    assert_eq!(mux.take_events(), vec![zoomed]);
+    assert_eq!(mux.window(window).unwrap().zoomed(), Some(a));
+    // A new block joins the layout behind the zoom.
+    let b = mux.create_block(window, size(80, 24)).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), Some(a));
+    mux.take_events();
+    mux.unzoom(window).unwrap();
+    mux.unzoom(window).unwrap();
+    assert_eq!(mux.take_events().len(), 1);
+    let gone = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    assert_eq!(mux.zoom(gone), Err(Error::UnknownBlock(gone)));
+    mux.close_window(window).unwrap();
+    assert_eq!(mux.unzoom(window), Err(Error::UnknownWindow(window)));
+    assert!(mux.block(b).is_none());
 }

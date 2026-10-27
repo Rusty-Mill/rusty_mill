@@ -1,5 +1,6 @@
 use rusty_mux_core::{
-    BlockId, ClientId, EntityId, Event, ExitStatus, Progress, SessionId, Size, WindowId,
+    BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Progress, SessionId, Side, Size,
+    WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::Writer;
@@ -147,6 +148,18 @@ fn every_message_round_trips() {
                 window,
                 session,
                 name: String::new(),
+                layout: None,
+                zoomed: None,
+            },
+        },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Window {
+                window,
+                session,
+                name: "w".into(),
+                layout: Some(split_layout(block)),
+                zoomed: Some(block),
             },
         },
         Message::Entry {
@@ -208,6 +221,23 @@ fn every_message_round_trips() {
             name: "laptop".into(),
         },
         Message::Disconnect { req: 20, client },
+        Message::Split {
+            req: 21,
+            block,
+            side: Side::Down,
+            launch: Launch::default(),
+        },
+        Message::Split {
+            req: 21,
+            block,
+            side: Side::Left,
+            launch: Launch {
+                program: None,
+                cwd: Some("/tmp".into()),
+            },
+        },
+        Message::Zoom { req: 22, block },
+        Message::Unzoom { req: 23, window },
         Message::Welcome {
             features: Features::NONE,
             client,
@@ -354,6 +384,16 @@ fn every_event_round_trips() {
         Event::ClientRenamed {
             client,
             name: "laptop".into(),
+        },
+        Event::LayoutChanged {
+            window,
+            layout: Some(split_layout(block)),
+            zoomed: Some(block),
+        },
+        Event::LayoutChanged {
+            window,
+            layout: None,
+            zoomed: None,
         },
     ];
     for event in events {
@@ -762,6 +802,7 @@ fn feature_bits_are_distinct() {
         Features::PROCESS,
         Features::CAPTURE,
         Features::LABELS,
+        Features::LAYOUT,
     ];
     let mut seen = 0u64;
     for feature in all {
@@ -983,4 +1024,57 @@ fn a_block_entry_from_an_older_server_has_an_empty_name() {
         panic!("a block entry");
     };
     assert!(matches!(entry, Entry::Block { name, .. } if name.is_empty()));
+}
+
+/// `block` beside a second block.
+fn split_layout(block: BlockId) -> Layout {
+    let other = BlockId::from_uuid(Uuid::new_v4());
+    format!("cols50({block},{other})")
+        .parse()
+        .expect("a layout")
+}
+
+#[test]
+fn a_bad_side_or_layout_is_refused() {
+    const SPLIT: u8 = 0x12;
+    let side = raw_frame(SPLIT, |out| {
+        out.varint(REQ_ID, 1).uuid(4, Uuid::nil()).varint(33, 4);
+    });
+    assert!(matches!(
+        decode(&side),
+        Err(Error::InvalidField { field: 33, .. })
+    ));
+    const EVENT: u8 = 0x84;
+    let layout = raw_frame(EVENT, |out| {
+        out.varint(13, 25)
+            .uuid(3, Uuid::nil())
+            .bytes(34, b"cols50(");
+    });
+    assert!(matches!(
+        decode(&layout),
+        Err(Error::InvalidField { field: 34, .. })
+    ));
+}
+
+#[test]
+fn a_window_entry_from_an_older_server_has_no_layout() {
+    const ENTRY: u8 = 0x8a;
+    let frame = raw_frame(ENTRY, |out| {
+        out.varint(REQ_ID, 1)
+            .varint(13, 2)
+            .uuid(3, Uuid::nil())
+            .uuid(2, Uuid::nil())
+            .bytes(6, b"w");
+    });
+    let Ok(Some((Message::Entry { entry, .. }, _))) = decode(&frame) else {
+        panic!("a window entry");
+    };
+    assert!(matches!(
+        entry,
+        Entry::Window {
+            layout: None,
+            zoomed: None,
+            ..
+        }
+    ));
 }

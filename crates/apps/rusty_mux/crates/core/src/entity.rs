@@ -1,13 +1,14 @@
 //! The model's entities. Only [`Mux`](crate::Mux) builds or changes them, so
 //! their cross-references stay consistent.
 
-use crate::{BlockId, ClientId, Error, SessionId, WindowId};
+use crate::{BlockId, ClientId, Error, Layout, SessionId, WindowId};
 
 /// A terminal size in cells. Both dimensions are at least 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Size {
-    cols: u16,
-    rows: u16,
+    // Never zero; [`crate::layout`] builds sizes from non-zero parts.
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
 }
 
 impl Size {
@@ -58,6 +59,9 @@ pub struct Window {
     pub(crate) session: SessionId,
     pub(crate) name: String,
     pub(crate) blocks: Vec<BlockId>,
+    /// Holds exactly `blocks`; `None` while there are none.
+    pub(crate) layout: Option<Layout>,
+    pub(crate) zoomed: Option<BlockId>,
 }
 
 impl Window {
@@ -76,6 +80,16 @@ impl Window {
     /// Blocks in creation order.
     pub fn blocks(&self) -> &[BlockId] {
         &self.blocks
+    }
+
+    /// Where its blocks go; `None` while it has none.
+    pub fn layout(&self) -> Option<&Layout> {
+        self.layout.as_ref()
+    }
+
+    /// The block shown alone, over the whole window, if any.
+    pub fn zoomed(&self) -> Option<BlockId> {
+        self.zoomed
     }
 }
 

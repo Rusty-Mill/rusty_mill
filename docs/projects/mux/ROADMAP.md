@@ -50,7 +50,7 @@ From the [Rex gap check](REX-GAP-CHECK.md) §5 (owner, 2026-10-27). Started 2026
 4. Input and capture (C32): named keys encoded over `input`; `terminal.format` gains trim, unwrap and a VT format. Done (#1186): `terminal.send-keys` and `terminal.format --trim --unwrap --vt` behind `Features::CAPTURE`.
 5. Labels and clients (C33): rename methods for all four kinds, block and client labels, label-changed events, client list and force-disconnect. Done: `rename-session|window|block|client`, `*-renamed` events, clients in `list` and `disconnect-client` behind `Features::LABELS`.
 6. Agent setup (C34): `rusty-mux-ctl agent setup|status|remove` for Claude Code first, plus a placement-rules doc. Our own skill text; merges into settings without clobbering them. Done: the owner approved the writes (gap check K4) on 2026-10-27; skill, `SessionStart` hook and `agent hook`, with [AGENT-PLACEMENT.md](AGENT-PLACEMENT.md).
-7. Window layout (C12): a split tree per window in core, split, zoom and close-pane methods, layout events; the attach client renders it.
+7. Window layout (C12): a split tree per window in core, split, zoom and close-pane methods, layout events; the attach client renders it. Server side done: `split-block`, `zoom-block`, `unzoom-window`, `close-block` closing the pane, `layout-changed` events and layouts in `list`, behind `Features::LAYOUT`. The attach client's drawing follows in its own PR.
 
 ## Phase 3: identity and remote
 
