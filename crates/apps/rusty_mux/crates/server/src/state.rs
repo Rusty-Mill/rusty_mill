@@ -55,12 +55,14 @@ struct BlockRt {
 }
 
 impl BlockRt {
-    /// Stops reading (unless the reader is the caller), closes this handle
-    /// on the master, and reaps the program in the background.
+    /// Stops reading (unless the reader is the caller), releases the PTY's
+    /// output whatever other handles remain, closes this handle on the
+    /// master, and reaps the program in the background.
     fn release(self, abort_reader: bool) {
         if abort_reader {
             self.reader.abort();
         }
+        self.pty.release();
         drop(self.pty);
         rusty_tokio::task::spawn_local(self.process.reap());
     }
@@ -668,7 +670,7 @@ async fn pump(shared: Shared, block: BlockId, pty: Rc<Pty>) {
     shared.borrow_mut().exited(block);
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl State {
     pub(crate) fn test_client(&self) -> ClientId {
         *self.clients.keys().next().unwrap()
@@ -684,7 +686,8 @@ impl State {
     }
 }
 
-#[cfg(test)]
+// These start `/bin/sh`.
+#[cfg(all(test, unix))]
 mod regression {
     use super::*;
     use crate::checkpoint::Receiver;
