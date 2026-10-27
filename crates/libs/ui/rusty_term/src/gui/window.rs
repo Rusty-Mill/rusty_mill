@@ -44,6 +44,7 @@ use super::layout::{Dir, Layout, Rect};
 use super::render::{CpuRenderer, PaneFrame, Renderer};
 use super::settings::{CATEGORIES, Field, Settings, Widget};
 use crate::backend::{Backend, BackendHandle};
+use crate::compact::Compactor;
 use crate::config::{ClipboardPolicy, Config, LaunchMode};
 use crate::core::{
     ATTR_BOLD, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, AnsiParser, Cell, Grid, Selection, Theme,
@@ -225,6 +226,8 @@ struct Pane {
     /// The frame last painted, shown again while a synchronized update
     /// (DEC 2026) is open so no other repaint shows it half-drawn.
     shown: std::cell::RefCell<Option<crate::core::FrameView>>,
+    /// When to compact the history next: once output has gone quiet.
+    compactor: Compactor,
 }
 
 /// A tab: one or more [`Pane`]s tiled by a [`Layout`], one of them focused.
@@ -743,6 +746,7 @@ impl WindowState<'_> {
             writer: handle,
             wake,
             shown: std::cell::RefCell::new(None),
+            compactor: Compactor::default(),
         })
     }
 
@@ -4682,7 +4686,23 @@ impl WindowState<'_> {
     fn tick(&mut self, now: Instant) -> Option<Instant> {
         let cursor = self.tick_cursor(now);
         let sync = self.tick_sync();
-        cursor.into_iter().chain(sync).min()
+        let compact = self.tick_compact(now);
+        cursor.into_iter().chain(sync).chain(compact).min()
+    }
+
+    /// Run every pane's due compaction step, background tabs included, and
+    /// return the earliest next one.
+    fn tick_compact(&mut self, now: Instant) -> Option<Instant> {
+        let panes = self.tabs.iter_mut().flat_map(|t| &mut t.panes);
+        panes
+            .filter_map(|p| {
+                // Locked only when a step is due: this runs after every event.
+                if p.compactor.is_due(now) {
+                    p.compactor.run(&mut p.grid.lock(), now);
+                }
+                p.compactor.due()
+            })
+            .min()
     }
 
     /// The next timeout of a synchronized update open on the active tab.
@@ -5499,6 +5519,7 @@ impl WindowState<'_> {
         // Cleared first, so output parsed from here on sends a new wakeup.
         if let Some(p) = self.pane_by_id_mut(id) {
             p.wake.lower();
+            p.compactor.on_output(Instant::now());
         }
         self.service_clipboard(id);
         self.service_notifications(id);
