@@ -633,7 +633,9 @@ pub static CATALOG: &[Method] = &[
         name: "terminal.process",
         doc: "Read what runs in the terminal: one process per line as `PID<TAB>NAME<TAB>COMMAND \
               LINE`, the foreground process first, then its ancestors, the block's own program \
-              last. A name or command line the platform does not tell is empty.",
+              last. A backslash, tab, newline or carriage return in a field is written `\\\\`, \
+              `\\t`, `\\n` or `\\r`, any other control character `\\u{HEX}`. A name or command \
+              line the platform does not tell is empty.",
         params: &[BLOCK],
         needs: Features::BLOCK_CALL,
         returns: Returns::Text,

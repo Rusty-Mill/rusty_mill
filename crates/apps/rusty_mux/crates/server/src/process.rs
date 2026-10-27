@@ -54,13 +54,33 @@ pub(crate) fn chain(
 }
 
 /// `chain` as `terminal.process` replies: `PID<TAB>NAME<TAB>COMMAND` per
+/// line, the name and command [`escape`]d so neither can add a field or a
 /// line.
 pub(crate) fn text(chain: &[Proc]) -> String {
     chain
         .iter()
-        .map(|p| format!("{}\t{}\t{}", p.pid, p.name, p.command))
+        .map(|p| format!("{}\t{}\t{}", p.pid, escape(&p.name), escape(&p.command)))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `text` with a backslash as `\\`, a tab, newline or carriage return as
+/// `\t`, `\n` or `\r`, and any other control character, such as ESC or a
+/// C1 control, as `\u{HEX}`, the notation `rusty-mux-ctl` prints text
+/// fields in. Reversible, and plain commands read as they are.
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Process `pid` from `/proc`; `None` if it has gone.
@@ -161,6 +181,69 @@ mod tests {
         assert_eq!(
             text(&chain(10, Some(20), table(&procs))),
             "20\tvim\tvim\n10\tsh\tsh"
+        );
+    }
+
+    /// Undoes [`escape`], as a reader of `terminal.process` would.
+    fn unescape(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('u') => {
+                    let hex: String = chars.by_ref().skip(1).take_while(|&c| c != '}').collect();
+                    out.push(char::from_u32(u32::from_str_radix(&hex, 16).unwrap()).unwrap());
+                }
+                other => out.extend(other),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn hostile_fields_stay_in_their_row_and_column() {
+        let hostile = Proc {
+            pid: 20,
+            parent: Some(10),
+            name: "a\tb\nc".into(),
+            command: "x\ty\nz\r\\n \u{1b}]2;pwned\u{7} \u{9b}31m \u{7f}".into(),
+        };
+        let reply = text(&[hostile.clone(), proc(10, 1, "sh")]);
+        let rows: Vec<Vec<&str>> = reply.lines().map(|l| l.split('\t').collect()).collect();
+        assert_eq!(rows.len(), 2, "{reply}");
+        assert!(rows.iter().all(|r| r.len() == 3), "{reply}");
+        assert!(
+            !reply
+                .chars()
+                .any(|c| c.is_control() && c != '\t' && c != '\n')
+        );
+        assert_eq!(rows[0][1], "a\\tb\\nc");
+        assert_eq!(
+            rows[0][2],
+            "x\\ty\\nz\\r\\\\n \\u{1b}]2;pwned\\u{7} \\u{9b}31m \\u{7f}"
+        );
+        assert_eq!(unescape(rows[0][1]), hostile.name);
+        assert_eq!(unescape(rows[0][2]), hostile.command);
+    }
+
+    #[test]
+    fn ordinary_commands_read_as_they_are() {
+        let plain = Proc {
+            pid: 7,
+            parent: Some(1),
+            name: "vim".into(),
+            command: "/usr/bin/vim -u ~/.vimrc 'a b' \u{4e2d}.txt".into(),
+        };
+        assert_eq!(
+            text(std::slice::from_ref(&plain)),
+            format!("7\tvim\t{}", plain.command)
         );
     }
 
