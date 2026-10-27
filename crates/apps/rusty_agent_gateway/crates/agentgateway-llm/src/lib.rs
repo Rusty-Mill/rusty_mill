@@ -319,7 +319,7 @@ impl LlmBackend {
                 && let Some(retry) = &self.retry
                 && let Some(wait) = retry.backoff(attempt)
             {
-                tokio::time::sleep(wait).await;
+                rusty_tokio::time::sleep(wait).await;
             }
 
             let sending = match with_headers(self.client.post(url), &headers) {
@@ -334,7 +334,7 @@ impl LlmBackend {
             };
 
             let retryable_left = attempt + 1 < attempts;
-            let deadline = tokio::time::Instant::now() + self.timeout;
+            let deadline = rusty_tokio::time::Instant::now() + self.timeout;
             match sending.send_streaming().await {
                 Ok(response) => {
                     let response = Upstream { response, deadline };
@@ -1152,7 +1152,7 @@ fn with_headers(
 /// here and applies to every chunk after it.
 struct Upstream {
     response: rusty_request::StreamingResponse,
-    deadline: tokio::time::Instant,
+    deadline: rusty_tokio::time::Instant,
 }
 
 impl Upstream {
@@ -1164,10 +1164,10 @@ impl Upstream {
     async fn chunk(&mut self) -> Result<Option<Bytes>, ResponseReadError> {
         // `timeout_at` polls the read first, so a passed deadline alone
         // would not stop a provider whose bytes keep arriving.
-        if tokio::time::Instant::now() >= self.deadline {
+        if rusty_tokio::time::Instant::now() >= self.deadline {
             return Err(ResponseReadError::TimedOut);
         }
-        match tokio::time::timeout_at(self.deadline, self.response.chunk()).await {
+        match rusty_tokio::time::timeout_at(self.deadline, self.response.chunk()).await {
             Ok(chunk) => Ok(chunk?.map(Bytes::from)),
             Err(_) => Err(ResponseReadError::TimedOut),
         }
@@ -1417,18 +1417,16 @@ mod tests {
         assert!(err.to_string().contains("backendAuth"), "got: {err}");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_provider_that_stalls_mid_body_is_cut_off_at_the_deadline() {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
         // The head and a first chunk arrive, then nothing: what reqwest's
         // whole-request timeout used to end, and the deadline now does.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            let Ok((mut stream, _)) = listener.accept().await else {
+        rusty_tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
             let mut request = [0u8; 1024];
@@ -1436,7 +1434,7 @@ mod tests {
             let _ = stream
                 .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n")
                 .await;
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            rusty_tokio::time::sleep(Duration::from_secs(30)).await;
         });
 
         let timeout = Duration::from_millis(200);
@@ -1449,7 +1447,7 @@ mod tests {
             .expect("the head arrives");
         let response = Upstream {
             response,
-            deadline: tokio::time::Instant::now() + timeout,
+            deadline: rusty_tokio::time::Instant::now() + timeout,
         };
 
         let started = std::time::Instant::now();
@@ -1461,16 +1459,14 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_passed_deadline_ends_the_read_even_with_bytes_waiting() {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            let Ok((mut stream, _)) = listener.accept().await else {
+        rusty_tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
             let mut request = [0u8; 1024];
@@ -1478,7 +1474,7 @@ mod tests {
             let _ = stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc")
                 .await;
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            rusty_tokio::time::sleep(Duration::from_secs(30)).await;
         });
 
         let response = client(Duration::from_secs(5))
@@ -1489,10 +1485,10 @@ mod tests {
             .await
             .expect("the head arrives");
         // Let the body land, so the read itself would be ready at once.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
         let response = Upstream {
             response,
-            deadline: tokio::time::Instant::now(),
+            deadline: rusty_tokio::time::Instant::now(),
         };
 
         let read = read_capped(response, MAX_RESPONSE_BYTES).await;
@@ -1502,32 +1498,41 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_response_larger_than_the_cap_is_rejected_rather_than_buffered_whole() {
-        use wiremock::matchers::method;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
         // One byte past the cap: a body this size must never be buffered
         // whole, which is exactly what `response.bytes().await` used to do
         // before `read_capped` existed.
-        let oversized = vec![b'a'; (MAX_RESPONSE_BYTES + 1) as usize];
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(oversized))
-            .mount(&server)
-            .await;
+        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        rusty_tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let oversized = vec![b'a'; (MAX_RESPONSE_BYTES + 1) as usize];
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                oversized.len()
+            );
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(&oversized).await;
+        });
 
         let timeout = Duration::from_secs(60);
         let response = client(timeout)
             .expect("a usable proxy environment")
-            .get(&server.uri())
+            .get(&format!("http://{addr}/"))
             .expect("a valid URL")
             .send_streaming()
             .await
             .expect("mock server should answer");
         let response = Upstream {
             response,
-            deadline: tokio::time::Instant::now() + timeout,
+            deadline: rusty_tokio::time::Instant::now() + timeout,
         };
 
         let backend = LlmBackend {

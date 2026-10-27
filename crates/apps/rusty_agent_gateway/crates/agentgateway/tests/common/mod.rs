@@ -128,3 +128,80 @@ pub fn claim_band(directory: &Path) -> Option<(File, u32)> {
     }
     None
 }
+
+/// The `rusty_tokio` runtime the gateway under test runs on.
+///
+/// The suites drive the gateway with tokio clients (`reqwest`, `rmcp`) and
+/// tokio mock upstreams (`axum`), while the gateway's own timers and sockets
+/// are `rusty_tokio`'s and need a runtime of their own. So the gateway is
+/// built and served here, and a test reaches it over sockets as any client
+/// would.
+fn gateway_runtime() -> &'static rusty_tokio::Runtime {
+    static RUNTIME: std::sync::OnceLock<rusty_tokio::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        rusty_tokio::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("the gateway runtime should start")
+    })
+}
+
+/// [`agentgateway::Gateway::build`], on the gateway's runtime.
+#[allow(
+    dead_code,
+    reason = "every suite builds a gateway, but not every one through each helper"
+)]
+pub async fn build(
+    config: &agentgateway_config::Config,
+    instruments: Option<std::sync::Arc<rusty_mcp::otel::metrics::Instruments>>,
+) -> anyhow::Result<agentgateway::Gateway> {
+    let config = config.clone();
+    gateway_runtime()
+        .spawn(async move { agentgateway::Gateway::build(&config, instruments).await })
+        .await
+        .expect("building the gateway should not panic")
+}
+
+/// [`agentgateway::serve::run_with_shutdown`], on the gateway's runtime,
+/// stopped when the test's `shutdown` is cancelled.
+#[allow(dead_code, reason = "not every suite serves without limits")]
+pub async fn serve(
+    gateway: agentgateway::Gateway,
+    addrs: Vec<std::net::SocketAddr>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<impl std::future::Future<Output = ()> + Send> {
+    serve_with_limits(
+        gateway,
+        addrs,
+        shutdown,
+        rusty_mcp::limits::LimitsLayer::new(),
+    )
+    .await
+}
+
+/// [`agentgateway::serve::run_with_shutdown_and_limits`], as [`serve`].
+#[allow(dead_code, reason = "only the limits suite sets limits")]
+pub async fn serve_with_limits(
+    gateway: agentgateway::Gateway,
+    addrs: Vec<std::net::SocketAddr>,
+    shutdown: tokio_util::sync::CancellationToken,
+    limits: rusty_mcp::limits::LimitsLayer,
+) -> anyhow::Result<impl std::future::Future<Output = ()> + Send> {
+    let stop = rusty_tokio::sync::CancellationToken::new();
+    let serving = {
+        let stop = stop.clone();
+        gateway_runtime()
+            .spawn(async move {
+                agentgateway::serve::run_with_shutdown_and_limits(gateway, addrs, stop, limits)
+                    .await
+            })
+            .await
+            .expect("serving should not panic")?
+    };
+    // The test's token is tokio's; waiting on it needs no tokio runtime.
+    gateway_runtime().spawn(async move {
+        shutdown.cancelled().await;
+        stop.cancel();
+    });
+    Ok(serving)
+}

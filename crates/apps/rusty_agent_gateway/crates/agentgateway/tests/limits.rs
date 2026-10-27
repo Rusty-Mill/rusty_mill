@@ -19,7 +19,6 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
 use rusty_mcp::limits::LimitsLayer;
 use serde_json::json;
@@ -76,7 +75,7 @@ binds:
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     config.validate().expect("config should validate");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
 
@@ -86,6 +85,9 @@ binds:
             if let Some(max) = limits.max_concurrent_requests {
                 layer = layer.with_max_concurrent(max);
             }
+            if let Some(timeout) = limits.request_timeout {
+                layer = layer.with_timeout(timeout.into());
+            }
             layer
         }
         None => LimitsLayer::new(),
@@ -93,10 +95,9 @@ binds:
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving =
-        serve::run_with_shutdown_and_limits(gateway, vec![addr], shutdown.clone(), limits)
-            .await
-            .expect("gateway should bind");
+    let _serving = common::serve_with_limits(gateway, vec![addr], shutdown.clone(), limits)
+        .await
+        .expect("gateway should bind");
 
     (format!("http://127.0.0.1:{port}/mcp"), shutdown)
 }
@@ -281,6 +282,117 @@ async fn nothing_is_shed_when_no_limit_is_configured() {
     }
 
     shutdown.cancel();
+}
+
+/// Sends the head of a `POST /mcp` that promises a body, and none of it.
+async fn start_upload(url: &str) -> tokio::net::TcpStream {
+    use tokio::io::AsyncWriteExt as _;
+    let addr = url
+        .trim_start_matches("http://")
+        .trim_end_matches("/mcp")
+        .to_string();
+    let mut tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    tcp.write_all(
+        b"POST /mcp HTTP/1.1\r\nhost: localhost\r\ncontent-type: application/json\r\ncontent-length: 64\r\n\r\n",
+    )
+    .await
+    .expect("send the head");
+    tcp
+}
+
+/// Everything the gateway sends on `tcp` until it closes it.
+async fn read_to_close(mut tcp: tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt as _;
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), tcp.read_to_end(&mut out))
+        .await
+        .expect("answered and closed promptly")
+        .expect("read");
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[tokio::test]
+async fn an_upload_in_progress_counts_against_the_limit_and_the_next_request_is_shed() {
+    let global = "config:\n  limits:\n    maxConcurrentRequests: 1";
+    let (url, shutdown) = start("", global, 0).await;
+
+    // The one place is held by a request whose body has not arrived; the
+    // server counts it from its head, not from when its body is read.
+    let _uploading = start_upload(&url).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The next is shed at once, its body never read.
+    let shed = read_to_close(start_upload(&url).await).await;
+    assert!(shed.starts_with("HTTP/1.1 503"), "{shed}");
+    assert!(
+        shed.to_ascii_lowercase().contains("retry-after: 1"),
+        "{shed}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn the_request_timeout_covers_a_slow_upload() {
+    let global = "config:\n  limits:\n    requestTimeout: 200ms";
+    let (url, shutdown) = start("", global, 0).await;
+
+    let started = Instant::now();
+    let answer = read_to_close(start_upload(&url).await).await;
+    assert!(answer.starts_with("HTTP/1.1 504"), "{answer}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn shutdown_stops_every_port_accepting_while_one_drains() {
+    let (first, second) = (free_port().await, free_port().await);
+    let yaml = format!(
+        r#"
+binds:
+  - port: {first}
+    listeners:
+      - routes:
+          - backends: [{{host: "127.0.0.1:9"}}]
+  - port: {second}
+    listeners:
+      - routes:
+          - backends: [{{host: "127.0.0.1:9"}}]
+"#
+    );
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    let gateway = common::build(&config, None)
+        .await
+        .expect("gateway should build");
+    let shutdown = CancellationToken::new();
+    let addrs = [first, second]
+        .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
+        .to_vec();
+    let _serving = common::serve(gateway, addrs, shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    // A request in flight on the first port holds its drain.
+    let _held = start_upload(&format!("http://127.0.0.1:{first}/mcp")).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    shutdown.cancel();
+
+    // The second port stops accepting all the same.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let refused = tokio::net::TcpStream::connect(("127.0.0.1", second))
+            .await
+            .is_err();
+        if refused {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the second port is still accepting behind the first one's drain"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[test]

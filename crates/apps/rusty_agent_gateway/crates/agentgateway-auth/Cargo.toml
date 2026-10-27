@@ -30,16 +30,15 @@ rusty-mcp = { workspace = true, default-features = false, features = ["jwt"] }
 rusty_json = { workspace = true }
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 http = { workspace = true }
-# Calls the `extAuthz` service; `tokio` because the gateway still runs on tokio.
-rusty_request = { workspace = true, features = ["tokio"] }
-# The deadline on a denial's body; goes with the gateway's move to rusty_tokio.
-tokio = { workspace = true, features = ["time"] }
+# Calls the `extAuthz` service.
+rusty_request = { workspace = true }
+# The deadline on a denial's body.
+rusty_tokio = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2"
 rusty_log = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 rusty_base64 = { workspace = true }
 rsa = "0.9"
 rand = { workspace = true }

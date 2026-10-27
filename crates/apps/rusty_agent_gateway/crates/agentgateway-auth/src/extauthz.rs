@@ -187,7 +187,7 @@ impl ExtAuthz {
     ) -> Authorization {
         // `rusty_request` bounds only the wait for the head of a streamed
         // response, so the rest of the timeout is kept for a denial's body.
-        let deadline = tokio::time::Instant::now() + self.timeout;
+        let deadline = rusty_tokio::time::Instant::now() + self.timeout;
         let response = match self.ask(method, path, headers, body).await {
             Ok(response) => response,
             Err(err) => {
@@ -279,7 +279,7 @@ impl ExtAuthz {
 /// when it cannot be read whole, since part of a reason is not one.
 async fn denial_body(
     mut response: rusty_request::StreamingResponse,
-    deadline: tokio::time::Instant,
+    deadline: rusty_tokio::time::Instant,
 ) -> Vec<u8> {
     let mut body = Vec::new();
     loop {
@@ -311,13 +311,13 @@ async fn denial_body(
 /// The next chunk of `response`, or `None` once `deadline` has passed --
 /// checked first, since `timeout_at` alone lets an already-ready read win.
 async fn chunk_by(
-    deadline: tokio::time::Instant,
+    deadline: rusty_tokio::time::Instant,
     response: &mut rusty_request::StreamingResponse,
 ) -> Option<rusty_request::Result<Option<Vec<u8>>>> {
-    if tokio::time::Instant::now() >= deadline {
+    if rusty_tokio::time::Instant::now() >= deadline {
         return None;
     }
-    tokio::time::timeout_at(deadline, response.chunk())
+    rusty_tokio::time::timeout_at(deadline, response.chunk())
         .await
         .ok()
 }
@@ -542,14 +542,12 @@ mod tests {
     /// A fail-open authorizer in front of a server that answers one call
     /// with `head` and `body`, then stalls (`stall`) or hangs up.
     async fn answering(head: String, body: Vec<u8>, stall: bool) -> ExtAuthz {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            let Ok((mut stream, _)) = listener.accept().await else {
+        rusty_tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
             let mut request = [0u8; 4096];
@@ -557,7 +555,7 @@ mod tests {
             let _ = stream.write_all(head.as_bytes()).await;
             let _ = stream.write_all(&body).await;
             if stall {
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                rusty_tokio::time::sleep(Duration::from_secs(30)).await;
             }
         });
         ExtAuthz::new(
@@ -599,7 +597,7 @@ mod tests {
         assert!(body.is_empty(), "part of a reason is not one: {body:?}");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_passed_deadline_drops_a_denial_body_even_with_bytes_waiting() {
         let authz = answering(forbidden(4), b"nope".to_vec(), true).await;
         let response = authz
@@ -610,13 +608,13 @@ mod tests {
             .await
             .expect("the head arrives");
         // Let the body land, so the read itself would be ready at once.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let body = denial_body(response, tokio::time::Instant::now()).await;
+        let body = denial_body(response, rusty_tokio::time::Instant::now()).await;
         assert!(body.is_empty(), "read past the deadline: {body:?}");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_denial_relays_its_body() {
         let authz = answering(forbidden(4), b"nope".to_vec(), false).await;
         let Authorization::Deny { status, body, .. } = ask(&authz).await else {
@@ -626,13 +624,13 @@ mod tests {
         assert_eq!(body, b"nope");
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_denial_whose_body_is_cut_short_still_denies() {
         let authz = answering(forbidden(100), b"short".to_vec(), false).await;
         assert_denied_without_a_body(ask(&authz).await);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_denial_whose_body_stalls_still_denies() {
         let authz = answering(forbidden(100), b"short".to_vec(), true).await;
         let started = std::time::Instant::now();
@@ -643,7 +641,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_denial_whose_body_is_over_the_cap_still_denies() {
         let size = MAX_DENIAL_BODY + 1;
         let authz = answering(forbidden(size), vec![b'x'; size], false).await;

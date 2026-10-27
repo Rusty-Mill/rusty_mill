@@ -3,27 +3,44 @@
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::path::Path;
 
+#[cfg(windows)]
+use platform_windows::WindowsUnixStream as UnixStream;
 use rusty_mux_proto::{Message, decode, encode};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::stop::POLL;
 use crate::stop::{Stop, is_wait};
 
 /// A stream to the server at `path`. When `stop` is bounded, connecting
 /// gives up with it too (on Linux; elsewhere only once connected), and the
-/// stream times out every [`POLL`] so [`Conn`] notices a stop.
-#[cfg(unix)]
+/// stream times out every [`POLL`] so [`Conn`] notices a stop. On Windows
+/// only reads time out, so a write to a server that stopped reading is not
+/// bounded.
+#[cfg(any(unix, windows))]
 pub(crate) fn connect(path: &Path, stop: &Stop) -> io::Result<UnixStream> {
     if !stop.is_bounded() {
-        return UnixStream::connect(path);
+        return connect_blocking(path);
     }
     let stream = connect_bounded(path, stop)?;
     stream.set_read_timeout(Some(POLL))?;
+    #[cfg(unix)]
     stream.set_write_timeout(Some(POLL))?;
     Ok(stream)
+}
+
+#[cfg(unix)]
+fn connect_blocking(path: &Path) -> io::Result<UnixStream> {
+    UnixStream::connect(path)
+}
+
+/// Never `InvalidData`, which would read as a protocol failure (exit 1)
+/// instead of an unreachable server (exit 4).
+#[cfg(windows)]
+fn connect_blocking(path: &Path) -> io::Result<UnixStream> {
+    UnixStream::connect(path).map_err(|e| io::Error::other(format!("{e:?}")))
 }
 
 /// Connects without blocking, retrying while the server's accept backlog
@@ -59,10 +76,10 @@ fn connect_bounded(path: &Path, stop: &Stop) -> io::Result<UnixStream> {
     Ok(stream)
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(any(windows, all(unix, not(target_os = "linux"))))]
 fn connect_bounded(path: &Path, stop: &Stop) -> io::Result<UnixStream> {
     stop.check()?;
-    UnixStream::connect(path)
+    connect_blocking(path)
 }
 
 /// A connection whose reads and writes give up when `stop` says so; the

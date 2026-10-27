@@ -105,7 +105,7 @@ fn bearer_headers(token: &str) -> HeaderMap {
     headers
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_valid_token_is_accepted() {
     let (auth, _dir) = authenticator(&[RESOURCE]);
     let token = auth
@@ -118,7 +118,7 @@ async fn a_valid_token_is_accepted() {
     assert!(token.scopes.contains("mcp:write"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_token_for_another_audience_is_rejected() {
     // The confused deputy: a caller replays a token minted for some other
     // service and borrows this gateway's privileges. JwtValidator does not
@@ -141,7 +141,7 @@ async fn a_token_for_another_audience_is_rejected() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn one_matching_audience_in_a_list_is_enough() {
     let (auth, _dir) = authenticator(&[RESOURCE]);
     let mut claims = valid_claims();
@@ -152,7 +152,7 @@ async fn one_matching_audience_in_a_list_is_enough() {
         .expect("aud may be an array; one match is enough");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_empty_audience_list_accepts_any_audience() {
     // Documented as a deliberate opt-out for deployments that bind audience
     // upstream -- not an oversight.
@@ -165,7 +165,7 @@ async fn an_empty_audience_list_accepts_any_audience() {
         .expect("an empty audiences list accepts any audience");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_expired_token_is_rejected() {
     let (auth, _dir) = authenticator(&[RESOURCE]);
     let mut claims = valid_claims();
@@ -180,7 +180,7 @@ async fn an_expired_token_is_rejected() {
     assert!(rejection.description.contains("expired"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_token_from_another_issuer_is_rejected() {
     let (auth, _dir) = authenticator(&[RESOURCE]);
     let mut claims = valid_claims();
@@ -193,7 +193,7 @@ async fn a_token_from_another_issuer_is_rejected() {
     assert_eq!(rejection.status, StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_token_signed_by_an_unknown_key_is_rejected() {
     let (auth, _dir) = authenticator(&[RESOURCE]);
 
@@ -225,7 +225,7 @@ async fn a_token_signed_by_an_unknown_key_is_rejected() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_unsigned_token_is_rejected() {
     // `alg: none` is the canonical JWT attack. The algorithm allow-list is
     // checked before any key is loaded, so this dies early.
@@ -246,7 +246,7 @@ async fn an_unsigned_token_is_rejected() {
     assert_eq!(rejection.status, StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_missing_token_is_challenged_without_an_error_code() {
     let (auth, _dir) = authenticator(&[RESOURCE]);
     let rejection = auth
@@ -262,7 +262,7 @@ async fn a_missing_token_is_challenged_without_an_error_code() {
     assert_eq!(rejection.challenge(), None);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_non_bearer_scheme_is_rejected() {
     let (auth, _dir) = authenticator(&[RESOURCE]);
     let mut headers = HeaderMap::new();
@@ -278,7 +278,7 @@ async fn a_non_bearer_scheme_is_rejected() {
     assert_eq!(rejection.error, Some("invalid_request"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_bearer_scheme_is_matched_case_insensitively() {
     // RFC 7235 says the scheme is case-insensitive, and real clients send
     // `bearer`.
@@ -349,7 +349,7 @@ fn an_empty_jwks_file_fails_at_startup() {
     assert!(err.to_string().contains("no keys"), "got: {err}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn clock_skew_within_the_leeway_is_tolerated() {
     // A token that expired ten seconds ago is still accepted: the 60s default
     // leeway exists because the gateway's clock and the issuer's are never

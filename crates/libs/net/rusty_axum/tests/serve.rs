@@ -13,7 +13,10 @@ use futures_core::Stream;
 use rcgen::{CertificateParams, KeyPair};
 use rusty_axum::response::sse::{Event, KeepAlive, Sse};
 use rusty_axum::routing::{get, post};
-use rusty_axum::{serve, ConnectInfo, IntoResponse, Router, ServeOptions, Server};
+use rusty_axum::{
+    serve, serve_with, Accept, Accepted, Admission, BoxFuture, ConnectInfo, IntoResponse, Router,
+    ServeOptions, Server,
+};
 use rusty_http::async_tokio::AsyncTransport;
 use rusty_http::body::{response_framing, Framing};
 use rusty_http::head::{RequestHead, ResponseHead};
@@ -22,6 +25,8 @@ use rusty_tls::{AsyncTlsStream, TlsAcceptor, TrustPolicy};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, TcpListener, TcpStream};
 use rusty_tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use rusty_tokio::time::timeout;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 type Events = UnboundedReceiver<Result<Event, Infallible>>;
@@ -412,6 +417,209 @@ async fn serves_over_tls() {
         assert_eq!(head.status.as_u16(), 200);
         assert_eq!(body, "ok");
     }
+}
+
+fn certificate() -> (TlsAcceptor, TrustPolicy) {
+    let key = KeyPair::generate().unwrap();
+    let cert = CertificateParams::new(vec!["localhost".to_string()])
+        .unwrap()
+        .self_signed(&key)
+        .unwrap();
+    let acceptor = TlsAcceptor::new(vec![cert.der().to_vec()], key.serialize_der()).unwrap();
+    let trust = TrustPolicy::PinnedAnchors(vec![rustls::pki_types::CertificateDer::from(
+        cert.der().to_vec(),
+    )]);
+    (acceptor, trust)
+}
+
+fn start_with(options: ServeOptions, accept: impl Accept) -> Server {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = TcpListener::from_std(std_listener).unwrap();
+    serve_with(listener, accept, options, app()).unwrap()
+}
+
+/// Hands the `n`th connection the `n`th acceptor, round robin: a stand-in
+/// for a certificate chosen by SNI.
+struct RoundRobin(Vec<TlsAcceptor>, AtomicUsize);
+
+impl Accept for RoundRobin {
+    fn accept(&self, tcp: TcpStream, _peer: SocketAddr) -> BoxFuture<'static, Accepted> {
+        let n = self.1.fetch_add(1, Ordering::SeqCst);
+        let acceptor = self.0[n % self.0.len()].clone();
+        Box::pin(async move {
+            let mut tls = acceptor.accept_async(tcp).unwrap();
+            match tls.complete_handshake().await {
+                Ok(()) => Accepted::Tls(Box::new(tls)),
+                Err(_) => Accepted::Done,
+            }
+        })
+    }
+}
+
+async fn get_health_over_tls(server: &Server, trust: &TrustPolicy) -> u16 {
+    let tcp = TcpStream::connect_addr(server.local_addr()).await.unwrap();
+    let tls = AsyncTlsStream::new(tcp, "localhost", trust).unwrap();
+    let mut conn = AsyncTransport::new(tls);
+    send(&mut conn, Method::Get, "/health", &[], b"").await;
+    conn.get_mut().flush().await.unwrap();
+    let (head, body) = timeout(Duration::from_secs(5), read(&mut conn, &Method::Get))
+        .await
+        .unwrap();
+    assert_eq!(body, "ok");
+    head.status.as_u16()
+}
+
+#[rusty_tokio::test]
+async fn an_acceptor_chooses_the_certificate_per_connection() {
+    let (first, first_trust) = certificate();
+    let (second, second_trust) = certificate();
+    let server = start_with(
+        ServeOptions::default(),
+        RoundRobin(vec![first, second], AtomicUsize::new(0)),
+    );
+    // Each client trusts only the certificate its connection is handed.
+    assert_eq!(get_health_over_tls(&server, &first_trust).await, 200);
+    assert_eq!(get_health_over_tls(&server, &second_trust).await, 200);
+}
+
+/// Takes every connection over: answers it with raw bytes on its own task.
+struct TakeOver;
+
+impl Accept for TakeOver {
+    fn accept(&self, tcp: TcpStream, _peer: SocketAddr) -> BoxFuture<'static, Accepted> {
+        rusty_tokio::spawn(async move {
+            let _ = tcp.write_all(b"taken").await;
+        });
+        Box::pin(async { Accepted::Done })
+    }
+}
+
+#[rusty_tokio::test]
+async fn a_connection_taken_over_is_not_served_as_http() {
+    let server = start_with(ServeOptions::default(), TakeOver);
+    let tcp = TcpStream::connect_addr(server.local_addr()).await.unwrap();
+    tcp.write_all(b"GET /health HTTP/1.1\r\nhost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 64];
+    loop {
+        match timeout(Duration::from_secs(5), tcp.read(&mut buf))
+            .await
+            .unwrap()
+        {
+            Ok(0) | Err(_) => break,
+            Ok(n) => seen.extend_from_slice(&buf[..n]),
+        }
+    }
+    assert_eq!(seen, b"taken");
+    timeout(Duration::from_secs(5), server.shutdown())
+        .await
+        .unwrap();
+}
+
+/// Outlasts any test.
+struct Stall;
+
+impl Accept for Stall {
+    fn accept(&self, tcp: TcpStream, _peer: SocketAddr) -> BoxFuture<'static, Accepted> {
+        Box::pin(async move {
+            rusty_tokio::time::sleep(Duration::from_secs(60)).await;
+            Accepted::Plain(tcp)
+        })
+    }
+}
+
+#[rusty_tokio::test]
+async fn the_handshake_timeout_bounds_the_acceptor() {
+    let options = ServeOptions {
+        handshake_timeout: Duration::from_millis(100),
+        ..ServeOptions::default()
+    };
+    let server = start_with(options, Stall);
+    let tcp = TcpStream::connect_addr(server.local_addr()).await.unwrap();
+    assert!(closed(tcp).await, "the stalled connection is closed");
+}
+
+/// Serves plain connections under `Admission`.
+struct Limited(Admission);
+
+impl Accept for Limited {
+    fn accept(&self, tcp: TcpStream, _peer: SocketAddr) -> BoxFuture<'static, Accepted> {
+        Box::pin(async move { Accepted::Plain(tcp) })
+    }
+
+    fn admission(&self) -> Option<&Admission> {
+        Some(&self.0)
+    }
+}
+
+/// Sends the head of a `POST /echo` with a three-byte body, and no body yet.
+async fn post_head_only(server: &Server) -> AsyncTransport<TcpStream> {
+    let mut conn = connect(server).await;
+    let mut map = HeaderMap::new();
+    map.insert("host", "localhost").unwrap();
+    map.insert("content-length", "3").unwrap();
+    let head = RequestHead {
+        method: Method::Post,
+        target: "/echo".into(),
+        version: Version::Http11,
+        headers: map,
+    };
+    conn.write_request_head(&head).await.unwrap();
+    conn
+}
+
+#[rusty_tokio::test]
+async fn admission_counts_a_request_from_its_head_and_sheds_before_reading_a_body() {
+    let server = start_with(
+        ServeOptions::default(),
+        Limited(Admission::new().with_max_in_flight(1)),
+    );
+    // An upload in progress holds the one place.
+    let mut uploading = post_head_only(&server).await;
+    rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // The next request is shed at once, its body never waited for.
+    let mut shed = post_head_only(&server).await;
+    let (head, body) = timeout(Duration::from_secs(5), read(&mut shed, &Method::Post))
+        .await
+        .expect("shed without waiting for the body");
+    assert_eq!(head.status.as_u16(), 503);
+    assert_eq!(head.headers.get("retry-after"), Some("1"));
+    assert_eq!(head.headers.get("connection"), Some("close"));
+    assert_eq!(body, "Service Unavailable: too many requests in flight");
+    assert!(closed(shed.into_inner()).await);
+
+    // The upload finishes, and its place comes back.
+    uploading.write_body(b"abc").await.unwrap();
+    assert_eq!(read(&mut uploading, &Method::Post).await.1, "abc");
+    let mut next = connect(&server).await;
+    send(&mut next, Method::Get, "/health", &[], b"").await;
+    assert_eq!(read(&mut next, &Method::Get).await.0.status.as_u16(), 200);
+}
+
+#[rusty_tokio::test]
+async fn the_admission_deadline_covers_reading_the_body() {
+    let options = ServeOptions {
+        idle_timeout: Duration::from_secs(30),
+        ..ServeOptions::default()
+    };
+    let server = start_with(
+        options,
+        Limited(Admission::new().with_timeout(Duration::from_millis(200))),
+    );
+    let mut stalled = post_head_only(&server).await;
+    let (head, _) = timeout(Duration::from_secs(5), read(&mut stalled, &Method::Post))
+        .await
+        .expect("answered at the deadline, not after the idle timeout");
+    assert_eq!(head.status.as_u16(), 504);
+    assert_eq!(head.headers.get("connection"), Some("close"));
+    assert!(closed(stalled.into_inner()).await);
+
+    let mut quick = connect(&server).await;
+    send(&mut quick, Method::Post, "/echo", &[], b"abc").await;
+    assert_eq!(read(&mut quick, &Method::Post).await.1, "abc");
 }
 
 type Next = Pin<Box<dyn Future<Output = (Option<Result<Event, Infallible>>, Events)> + Send>>;

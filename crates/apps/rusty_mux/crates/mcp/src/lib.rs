@@ -14,8 +14,11 @@
 //! not tools. `input` and `resize`, which need the lease, attach and take it
 //! first in the same call, so they fail while someone else holds it.
 //!
-//! A call gives up on a silent server at its deadline, or as soon as the
-//! client cancels it, so a stalled server never holds a call slot.
+//! A call gives up on a server that stops answering at its deadline, or as
+//! soon as the client cancels it. On Linux a stalled server therefore never
+//! holds a call slot. Elsewhere connecting is not bounded, and on Windows
+//! neither is a write to a server that stopped reading (see
+//! [`rusty_mux_ctl::run_until`]).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,7 +53,8 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The MCP server: one tool per catalog method that works on a connection
 /// of its own, each run against the server `env` names and given up after
-/// `timeout` or when the client cancels it.
+/// `timeout` or when the client cancels it, within the limits of
+/// [`rusty_mux_ctl::run_until`].
 pub fn server(env: Env, timeout: Duration) -> Result<Server, BuildError> {
     let env = Arc::new(env);
     let builder = Server::builder("rusty-mux", env!("CARGO_PKG_VERSION")).instructions(

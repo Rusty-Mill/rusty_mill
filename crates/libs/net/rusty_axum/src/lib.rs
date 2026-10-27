@@ -12,7 +12,9 @@
 //!   or takes what it needs from `&mut Request`. Response bodies may stream.
 //! - **One server.** [`serve`] runs HTTP/1.1 on `rusty_tokio`, plain or
 //!   over `rusty_tls`, and with the `http2` feature HTTP/2 on a TLS
-//!   connection that negotiates ALPN `h2`. There is no `tokio` dependency.
+//!   connection that negotiates ALPN `h2`. [`serve_with`] lets an
+//!   [`Accept`] choose per connection (a certificate by SNI, passthrough).
+//!   There is no `tokio` dependency.
 //! - **`rusty_http`'s types.** [`Method`], [`StatusCode`] and [`HeaderMap`]
 //!   are re-exported from it; there is no `http` crate.
 //!
@@ -41,7 +43,7 @@ pub use request::Request;
 pub use response::{IntoResponse, Response};
 pub use routing::Router;
 pub use rusty_http::{HeaderMap, Method, StatusCode};
-pub use serve::{serve, ServeOptions, Server};
+pub use serve::{serve, serve_with, Accept, Accepted, Admission, ServeOptions, Server};
 
 use std::future::Future;
 use std::pin::Pin;
