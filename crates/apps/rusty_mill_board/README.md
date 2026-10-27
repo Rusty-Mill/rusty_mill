@@ -6,6 +6,7 @@ The board is the only state; it enforces who may move a card where.
 ```text
 rusty_mill_board --store board.mmap                                  # MCP over stdio
 rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
+RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.0.0.1:8787 --auth-token S
 # UI: http://127.0.0.1:8787/#token=S   API: POST /api/<op>   MCP: /mcp
 ```
 
@@ -59,6 +60,18 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   cursor (`board_events` returns a `cursor`; `tail: true` starts a watcher at the current end).
   A failed append is *unknown*, not "nothing happened" (the engine can fail after the record is durable): the store
   then refuses writes until reopened, and a reopen replays the log and shows what really committed.
+- **rusty_tick as the store** (`--tick-url`, token only from the `RUSTY_TICK_TOKEN` environment variable; [ADR-0012](../../../docs/adr/0012-one-task-store.md)):
+  the board is the rusty_tick tasks tagged `agent`, so the owner reads and edits the same tasks on the phone or web.
+  Column and claim are `board:`/`claim:` tags, the project is the task's list (the Inbox is `default`), comments are
+  rusty_tick comments with their author, and dependencies, the forge link and the execution link are one `board`
+  document per task. Every write is one request fenced on the task version the board read, and every write moves
+  it (rusty_tick moves it for a board document or comment written with `If-Task-Match`), so the version names the
+  whole card. A comment is an explicit append, so one the owner adds meanwhile is kept. Only `card_plan` with both a
+  priority and dependencies takes two requests; if the second fails it reports an error, and the same plan again
+  completes it.
+  Tags come back lowercase, so actor names must be lowercase. Events are kept in memory only: the board's own
+  writes plus an `edited` event (actor `tick`) when a task changes in rusty_tick. `/health` is 503 while rusty_tick
+  is down. No `--backup-dir`: rusty_tick keeps the data.
 
 - **GitHub sync** (`--github-repo owner/name`, token in `GITHUB_TOKEN`, every
   `--github-secs`, default 60): stateless reconcile between cards and issues.
@@ -69,7 +82,9 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   was saved adopts that issue instead of creating a duplicate; the marker also records the text the issue was created
   with, so an edit made on GitHub in that window is merged, not overwritten. Only the marker is stripped from a pulled
   body. A pull is applied only if the card is unchanged since the run read it; otherwise it waits for the next run.
-  Unlinked open issues become Backlog cards (closed ones are not imported). An issue
+  Unlinked open issues become Backlog cards (closed ones are not imported). An imported card's id is derived from
+  the issue number, so an import interrupted before its link is relinked, not repeated or exported as a new issue;
+  the id ignores the repository, so give each repository its own board. An issue
   closed on GitHub while its card is not Done is logged as drift, not reopened or
   moved. The sync actor holds no capabilities, so it cannot move cards. Needs
   issues read/write on the repo; `--github-api` points at GitHub Enterprise Server.
@@ -78,7 +93,7 @@ UI: the card dialog is kept in step with the board without touching unsaved text
 unsaved edit raises a conflict (keep mine / take theirs), and `card_update` takes the `rev` you last saw and refuses a
 stale one. `tests/ui/drafts.mjs` checks this in a real browser (Playwright; see the file's header).
 
-Layout: `domain` (pure) / `store` + `mmdb` (port and adapters) / `board` (service) /
+Layout: `domain` (pure) / `store` + `mmdb` + `tick` (port and adapters) / `board` (service) /
 `api` (operation table) / `mcp` + `web` (surfaces) / `sync` (forge port + reconcile) +
 `github` (adapter).
 

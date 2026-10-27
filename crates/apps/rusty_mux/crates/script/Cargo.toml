@@ -1,0 +1,16 @@
+[package]
+name = "rusty_mux_script"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "rusty_mux actions and key bindings: named chains of catalog requests read from a JSON config, checked against the catalog. No I/O."
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+rusty_json = { workspace = true }
+rusty_mux_proto = { workspace = true }

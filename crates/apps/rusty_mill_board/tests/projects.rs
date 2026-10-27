@@ -228,10 +228,10 @@ impl Store for ReassignAfterGet {
     fn list(&self) -> Result<Vec<Card>, BoardError> {
         self.inner.list()
     }
-    fn insert(&self, c: &Card, e: Event) -> Result<(), BoardError> {
+    fn insert(&self, c: &Card, e: Event) -> Result<u64, BoardError> {
         self.inner.insert(c, e)
     }
-    fn replace(&self, c: &Card, e: Event) -> Result<(), BoardError> {
+    fn replace(&self, c: &Card, e: Event) -> Result<u64, BoardError> {
         self.inner.replace(c, e)
     }
     fn events_since(&self, a: Option<Uuid>, l: usize) -> Result<Vec<Event>, BoardError> {
@@ -292,11 +292,11 @@ impl Store for Gated {
     fn list(&self) -> Result<Vec<Card>, BoardError> {
         self.inner.list()
     }
-    fn insert(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+    fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         self.pause();
         self.inner.insert(card, event)
     }
-    fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+    fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         self.pause();
         self.inner.replace(card, event)
     }

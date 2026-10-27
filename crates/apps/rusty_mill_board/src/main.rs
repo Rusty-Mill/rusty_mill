@@ -11,6 +11,9 @@
 //! 200 while the store can commit and 503 once it needs a restart. SIGTERM and
 //! SIGINT stop the server cleanly. `--backup-dir DIR` takes a pruned backup
 //! of the store and settings every `--backup-secs`.
+//!
+//! `--tick-url URL` (and `RUSTY_TICK_TOKEN`) keeps the cards in rusty_tick
+//! instead of `--store`: tasks tagged `agent` are the board (ADR-0012).
 
 use std::io::IsTerminal;
 use std::net::SocketAddr;
@@ -33,6 +36,7 @@ use rusty_mill_board::settings::{
 };
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
+use rusty_mill_board::tick::{TickHttp, TickStore};
 use rusty_mill_board::web::{Auth, Web, check_bind};
 
 /// How long a stop waits for requests and a running backup before it ends them.
@@ -46,8 +50,14 @@ struct Cli {
     #[arg(long, requires = "projects")]
     export_projects: bool,
     /// Board file (created if absent). Omit for an in-memory board.
-    #[arg(long, env = "MILL_BOARD_STORE")]
+    #[arg(long, env = "MILL_BOARD_STORE", conflicts_with = "tick_url")]
     store: Option<PathBuf>,
+    /// Keep the cards in this rusty_tick (e.g. `http://127.0.0.1:8788`) instead of a store
+    /// file: its tasks tagged `agent` are the board. The token is read from the
+    /// `RUSTY_TICK_TOKEN` environment variable only, never an argument (which process
+    /// listings show).
+    #[arg(long, env = "MILL_BOARD_TICK_URL")]
+    tick_url: Option<String>,
     /// Serve HTTP (UI + API + MCP) on this address instead of MCP over stdio.
     #[arg(long, env = "MILL_BOARD_HTTP")]
     http: Option<SocketAddr>,
@@ -202,9 +212,14 @@ fn run(cli: Cli) -> Result<(), String> {
         println!("{}", Projects::load(path)?.file_json()?);
         return Ok(());
     }
-    let store: Box<dyn Store> = match &cli.store {
-        Some(path) => Box::new(MmdbStore::open(path).map_err(|e| e.to_string())?),
-        None => Box::new(MemStore::default()),
+    let store: Box<dyn Store> = match (&cli.store, &cli.tick_url) {
+        (Some(path), _) => Box::new(MmdbStore::open(path).map_err(|e| e.to_string())?),
+        (None, Some(url)) => {
+            let token = std::env::var("RUSTY_TICK_TOKEN")
+                .map_err(|_| "--tick-url needs RUSTY_TICK_TOKEN in the environment".to_owned())?;
+            Box::new(TickStore::new(TickHttp::new(url, &token)?))
+        }
+        (None, None) => Box::new(MemStore::default()),
     };
     let files = files(&cli);
     required(&cli.projects, "--projects")?;

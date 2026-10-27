@@ -442,7 +442,14 @@ async fn the_interceptor_adds_metadata_and_can_refuse_a_call() {
 
 #[rusty_tokio::test]
 async fn an_unusable_url_is_invalid_argument_and_a_refused_connection_is_unavailable() {
-    for url in ["not a url", "ftp://127.0.0.1:1/", ""] {
+    for url in [
+        "not a url",
+        "ftp://127.0.0.1:1/",
+        "",
+        // No host: nothing to connect to, and nothing to verify a certificate against.
+        "https://:50051",
+        "http://:50051/",
+    ] {
         let err = Channel::new(url, ChannelOptions::default()).err().unwrap();
         assert_eq!(err.code(), Code::InvalidArgument, "{url}");
     }

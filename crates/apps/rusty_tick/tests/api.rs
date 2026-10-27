@@ -1170,13 +1170,16 @@ fn a_task_can_be_created_at_an_explicit_position() {
 }
 
 #[test]
-fn a_board_document_is_fenced_by_its_task_and_by_itself() {
+fn a_board_document_is_fenced_by_its_task_and_moves_it() {
     let (_d, mut h) = harness();
     let list = h.list("L");
     let t = h.task(&list, r#""title":"card""#);
     let id = t["id"].as_str().unwrap().to_string();
-    let v1 = t["etag"].as_str().unwrap().to_string();
     let path = format!("/api/v1/docs/board/{id}");
+    let version = |h: &mut Harness| {
+        let (_, t) = h.call(Method::Get, &format!("/api/v1/tasks/{id}"), "");
+        t["etag"].as_str().unwrap().to_string()
+    };
     let put = |h: &mut Harness, when: Conditions<'_>, gen: u32| {
         let body = format!(r#"{{"v":1,"generation":{gen}}}"#);
         h.send_conditional(Method::Put, &path, &body, Some(TOKEN), when)
@@ -1185,6 +1188,7 @@ fn a_board_document_is_fenced_by_its_task_and_by_itself() {
     let (s, _) = put(&mut h, Conditions::default(), 1);
     assert_eq!(s, 400, "a board document needs If-Task-Match");
 
+    let v1 = version(&mut h);
     let create = Conditions {
         if_none_match: Some("*"),
         if_task_match: Some(&v1),
@@ -1193,9 +1197,20 @@ fn a_board_document_is_fenced_by_its_task_and_by_itself() {
     let (s, doc) = put(&mut h, create, 1);
     assert_eq!(s, 200, "{doc:?}");
     let e1 = doc["etag"].as_str().unwrap().to_string();
-    let create = Conditions {
+    let v2 = version(&mut h);
+    assert_ne!(v1, v2, "the write moves the task's version");
+
+    let replayed = Conditions {
         if_none_match: Some("*"),
         if_task_match: Some(&v1),
+        ..Conditions::default()
+    };
+    let (s, v) = put(&mut h, replayed, 9);
+    assert_eq!(s, 412, "the version before the write no longer matches");
+    assert_eq!(v["current"]["etag"], v2.as_str());
+    let create = Conditions {
+        if_none_match: Some("*"),
+        if_task_match: Some(&v2),
         ..Conditions::default()
     };
     let (s, v) = put(&mut h, create, 9);
@@ -1204,16 +1219,17 @@ fn a_board_document_is_fenced_by_its_task_and_by_itself() {
 
     let next = Conditions {
         if_match: Some(&e1),
-        if_task_match: Some(&v1),
+        if_task_match: Some(&v2),
         ..Conditions::default()
     };
     let (s, doc) = put(&mut h, next, 2);
     assert_eq!(s, 200);
     let e2 = doc["etag"].as_str().unwrap().to_string();
     assert_ne!(e1, e2, "the etag moves even within one millisecond");
+    let v3 = version(&mut h);
     let stale = Conditions {
         if_match: Some(&e1),
-        if_task_match: Some(&v1),
+        if_task_match: Some(&v3),
         ..Conditions::default()
     };
     assert_eq!(
@@ -1229,7 +1245,7 @@ fn a_board_document_is_fenced_by_its_task_and_by_itself() {
     );
     let fenced = Conditions {
         if_match: Some(&e2),
-        if_task_match: Some(&v1),
+        if_task_match: Some(&v3),
         ..Conditions::default()
     };
     let (s, v) = put(&mut h, fenced, 3);
@@ -1245,6 +1261,50 @@ fn a_board_document_is_fenced_by_its_task_and_by_itself() {
     let (s, v) = h.call(Method::Get, &path, "");
     assert_eq!((s, v["body"]["generation"].as_i64()), (200, Some(2)));
     assert_eq!(v["etag"], e2.as_str());
+}
+
+#[test]
+fn a_comment_written_with_if_task_match_is_fenced_by_its_task_and_moves_it() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let t = h.task(&list, r#""title":"card""#);
+    let id = t["id"].as_str().unwrap().to_string();
+    let v1 = t["etag"].as_str().unwrap().to_string();
+    let comment = |h: &mut Harness, task: &str, version: &str| {
+        let path = format!("/api/v1/docs/comment/{}", uuid::Uuid::now_v7());
+        let body = format!(r#"{{"v":1,"taskId":"{task}","text":"x","createdMs":1}}"#);
+        let when = Conditions {
+            if_none_match: Some("*"),
+            if_task_match: Some(version),
+            ..Conditions::default()
+        };
+        h.send_conditional(Method::Put, &path, &body, Some(TOKEN), when)
+            .0
+    };
+
+    assert_eq!(comment(&mut h, &id, &v1), 200);
+    let (_, now) = h.call(Method::Get, &format!("/api/v1/tasks/{id}"), "");
+    assert_ne!(
+        now["etag"].as_str(),
+        Some(v1.as_str()),
+        "it moves the version"
+    );
+    assert_eq!(
+        comment(&mut h, &id, &v1),
+        412,
+        "a second append from the same read is refused"
+    );
+    assert_eq!(comment(&mut h, "not-a-task", &v1), 400);
+    let (_, docs) = h.call(Method::Get, "/api/v1/docs/comment", "");
+    assert_eq!(docs["docs"].as_array().unwrap().len(), 1);
+
+    // Without the header a comment is written as before and the task is untouched.
+    let path = format!("/api/v1/docs/comment/{}", uuid::Uuid::now_v7());
+    let body = format!(r#"{{"v":1,"taskId":"{id}","text":"owner","createdMs":2}}"#);
+    let (s, _) = h.call(Method::Put, &path, &body);
+    assert_eq!(s, 200);
+    let (_, after) = h.call(Method::Get, &format!("/api/v1/tasks/{id}"), "");
+    assert_eq!(after["etag"], now["etag"]);
 }
 
 #[test]

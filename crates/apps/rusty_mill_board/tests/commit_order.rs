@@ -136,11 +136,11 @@ impl<S: Store> Store for FailOnCommit<S> {
     fn list(&self) -> Result<Vec<Card>, BoardError> {
         self.inner.list()
     }
-    fn insert(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+    fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         self.check()?;
         self.inner.insert(card, event)
     }
-    fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+    fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         self.check()?;
         self.inner.replace(card, event)
     }

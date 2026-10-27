@@ -216,12 +216,12 @@ impl Store for MmdbStore {
         Ok(self.log.lock().map_err(poisoned)?.list())
     }
 
-    fn insert(&self, card: &Card, event: Event) -> Result<(), BoardError> {
-        self.commit(card, event, true)
+    fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
+        self.commit(card, event, true).map(|()| card.rev)
     }
 
-    fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError> {
-        self.commit(card, event, false)
+    fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
+        self.commit(card, event, false).map(|()| card.rev)
     }
 
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError> {
