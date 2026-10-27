@@ -358,6 +358,11 @@ two complete builds. In order, no shortcuts:
      permission and the head, then moves it to Review. Re-run the gate; labels do not
      authorize it. For exits 7 and 8, copy `approval-request:` into the canonical
      issue block and link it from the PR (no duplicate request); see block-template.md.
+   - **Exit 13 — handoff-only board.** `merge_policy.handoff_to` names who reviews and
+     merges every PR; the robot never queues or merges, and no approval changes that.
+     Request review from the login on the gate's `handoff:` line. Card → **Blocked** with
+     the 🙋 template: `Why blocked` = handed off to `@<login>`; `To unblock` = they review
+     and merge PR #<P>. Never offer `done`. Label `needs-you`.
    - The rule in one line: the robot migrates the databases it was allowed to test its
      work; live databases, money, auth and destructive schema changes wait for a person.
 3. **Confirm the merge landed** — never trust the merge command's exit code:

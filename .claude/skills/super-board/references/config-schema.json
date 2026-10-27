@@ -110,6 +110,12 @@
     // "human": every PR waits for a human click (the old human_approves_merge).
     // Onboard recommends "human" when base_branch is production-detected.
     "default": "auto",
+    // Handoff-only board: a GitHub login (no @) who reviews and merges every PR.
+    // Set → the gate exits 13 before reading or requesting any approval; the robot
+    // never queues or merges, and a `done` comment cannot change that. The
+    // Reviewer requests review from this login and parks the card in Blocked.
+    // Absent → `default` and the rules below decide.
+    // "handoff_to": "octocat",
     // `gh pr merge` method the gate uses: "merge" (default), "squash" or "rebase".
     // Must be allowed by the repository; the gate exits 9 rather than fall back or
     // change repository settings. CONTRIBUTING-style repos that forbid squash keep "merge".
