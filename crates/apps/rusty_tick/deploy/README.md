@@ -19,6 +19,8 @@ bind, the token in an owner-only file. Mill Board on the same host reads its car
 ```sh
 cargo build --release -p rusty_tick
 sudo install -m 755 target/release/rusty_tick /usr/local/bin/
+# The web UI links two local packages; build them first, as CI does.
+for d in agui-core agui-react; do (cd crates/libs/protocol/rusty_agui/packages/$d && npm ci && npm run build); done
 (cd crates/apps/rusty_tick/web && npm ci && npm run build)
 
 mkdir -p ~/.rusty_tick/data && chmod 700 ~/.rusty_tick
