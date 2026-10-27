@@ -34,7 +34,10 @@ fn openpty() -> (OwnedFd, OwnedFd) {
     // rusty_term into its child, and a grandchild then holds the pty open.
     for fd in [master, slave] {
         // SAFETY: `fd` is open; F_SETFD only changes its flags.
-        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+            0
+        );
     }
     // SAFETY: openpty returned two fresh fds that nothing else owns.
     unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) }
@@ -94,7 +97,10 @@ fn exit_is_prompt_when_a_grandchild_holds_the_pty() {
     // the grandchild does.
     let (out, elapsed) = host_output("trap '' HUP; sleep 3 & echo LAST");
     assert!(out.contains("LAST"), "LAST not painted: {out:?}");
-    assert!(elapsed >= Duration::from_millis(250), "no drain wait: {elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_millis(250),
+        "no drain wait: {elapsed:?}"
+    );
     assert!(elapsed < Duration::from_millis(2500), "took {elapsed:?}");
 }
 
