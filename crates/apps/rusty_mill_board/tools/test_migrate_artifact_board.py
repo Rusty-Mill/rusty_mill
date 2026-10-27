@@ -31,16 +31,25 @@ class FakeTick:
         if method == "GET" and path == "/snapshot":
             return 200, {"tasks": list(self.tasks.values())}
         if method == "DELETE" and path.startswith("/tasks/"):
+            # As rusty_tick answers it: `leaf` checked first where known, then the task,
+            # then If-Match; an older one ignores `leaf` and trashes with the subtasks.
             tid, _, query = path.split("/")[2].partition("?")
-            if query != "leaf=true":
-                assert query == "leaf=probe", "rollback never purges, and always asks for a leaf delete"
-                return (400 if self.knows_leaf else 404), None
-            task = self.tasks[tid]
-            assert headers["If-Match"] == task["etag"], "a stale If-Match is refused"
-            if any(t.get("parentId") == tid for t in self.tasks.values()):
+            params = dict(p.split("=") for p in query.split("&") if p)
+            assert "permanent" not in params, "rollback never purges"
+            leaf = self.knows_leaf and params.get("leaf") == "true"
+            if self.knows_leaf and params.get("leaf") not in (None, "true", "false"):
+                return 400, {"error": "bad_request"}
+            task = self.tasks.get(tid)
+            if task is None:
+                return 404, {"error": "not_found"}
+            if "If-Match" in headers and headers["If-Match"] != task["etag"]:
+                return 412, {"current": task}
+            children = [t for t in self.tasks.values() if t.get("parentId") == tid]
+            if leaf and children:
                 return 409, {"error": "conflict"}
             self.writes += 1
-            task.update(deletedMs=1, etag=str(int(task["etag"]) + 1))
+            for t in [task] + children:
+                t.update(deletedMs=t["deletedMs"] or 1, etag=str(int(t["etag"]) + 1))
             return 204, None
         if method == "GET" and path == "/lists":
             return 200, {"lists": self.lists}
@@ -177,6 +186,18 @@ class Migration(unittest.TestCase):
         with self.assertRaises(m.MigrationError):
             m.rollback(m.Tick(fake.send), lambda _: None)
         self.assertIsNone(fake.tasks["t0"]["deletedMs"])
+
+    def test_the_leaf_probe_changes_nothing_on_any_rusty_tick_even_when_its_id_exists(self):
+        for knows_leaf in (True, False):
+            fake = FakeTick()
+            fake.knows_leaf = knows_leaf
+            nil = "00000000-0000-0000-0000-000000000000"
+            fake.tasks[nil] = {"id": nil, "parentId": None, "title": "the owner's", "notes": "",
+                               "tags": [], "status": "open", "etag": "3", "deletedMs": None}
+            fake.send("POST", "/tasks", {"title": "its subtask", "notes": "", "tags": [], "parentId": nil}, {})
+            before = json.dumps(fake.tasks, sort_keys=True)
+            self.assertEqual(m.knows_leaf_deletes(m.Tick(fake.send)), knows_leaf)
+            self.assertEqual(json.dumps(fake.tasks, sort_keys=True), before, "no task or version changed")
 
     def test_dependencies_are_deduplicated_and_must_fit_one_board_document(self):
         self.assertEqual(m.card_of(doc(2, deps=[1, 1, 3, 1])).deps, (1, 3))

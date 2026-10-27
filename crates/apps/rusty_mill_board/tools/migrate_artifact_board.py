@@ -281,8 +281,18 @@ def foreign_subtasks(migrated: dict[int, dict], tasks: list[dict]) -> list[str]:
 
 
 def knows_leaf_deletes(tick: Tick) -> bool:
-    """Whether rusty_tick refuses an unknown `leaf` value, which only one that knows it does."""
-    status, _ = tick.send("DELETE", "/tasks/00000000-0000-0000-0000-000000000000?leaf=probe", None, {})
+    """Whether rusty_tick knows `leaf`, asked without changing anything on any version.
+
+    One that knows it refuses an unknown value (400) before looking at the task. One
+    that does not answers 404, or, if a task has this id, 412: the `If-Match` names no
+    version a task can have, so even then nothing is trashed.
+    """
+    status, _ = tick.send(
+        "DELETE",
+        "/tasks/00000000-0000-0000-0000-000000000000?leaf=probe",
+        None,
+        {"If-Match": "never-a-version"},
+    )
     return status == 400
 
 
