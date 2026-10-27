@@ -191,14 +191,16 @@ impl Endpoints {
             (AS_METADATA_PATH | AS_METADATA_ALIAS_PATH, Get) => self.as_metadata(),
             (PR_METADATA_PATH | PR_METADATA_ALIAS_PATH, Get) => self.protected_resource_metadata(),
             (AUTHORIZATION_PATH, Get) => {
-                self.authorize(&Form::parse(request.query.as_bytes()), now)
+                with_form(request.query.as_bytes(), |f| self.authorize(f, now))
             }
-            (AUTHORIZATION_PATH, Post) => self.authorize(&Form::parse(request.body), now),
-            (CONSENT_PATH, Get) => self.consent_page(&Form::parse(request.query.as_bytes()), now),
-            (CONSENT_PATH, Post) => self.consent_decision(&Form::parse(request.body), now),
-            (TOKEN_PATH, Post) => self.token(&Form::parse(request.body), now),
+            (AUTHORIZATION_PATH, Post) => with_form(request.body, |f| self.authorize(f, now)),
+            (CONSENT_PATH, Get) => {
+                with_form(request.query.as_bytes(), |f| self.consent_page(f, now))
+            }
+            (CONSENT_PATH, Post) => with_form(request.body, |f| self.consent_decision(f, now)),
+            (TOKEN_PATH, Post) => with_form(request.body, |f| self.token(f, now)),
             (REGISTRATION_PATH, Post) => self.register(request.body),
-            (REVOCATION_PATH, Post) => self.revoke(&Form::parse(request.body), now),
+            (REVOCATION_PATH, Post) => with_form(request.body, |f| self.revoke(f, now)),
             (path, _) if Self::is_oauth_path(path) => Response::empty(405),
             _ => return None,
         };
@@ -525,23 +527,47 @@ impl Endpoints {
 /// consent page this was first.
 const TOKEN_FIELD: &str = "owner_token";
 
-/// A decoded query string or form body. The first value of a repeated key
-/// wins.
+/// A decoded query string or form body.
 struct Form(HashMap<String, String>);
 
 impl Form {
-    fn parse(input: &[u8]) -> Self {
+    /// Decode `input`, refusing a parameter that appears twice. RFC 6749
+    /// §3.1 forbids repeats, and accepting one would let a request carry
+    /// two different values for, say, `client_id`. Names are compared after
+    /// percent-decoding, so `grant%5Ftype` repeats `grant_type`.
+    ///
+    /// # Errors
+    ///
+    /// The name of the first repeated parameter.
+    fn parse(input: &[u8]) -> Result<Self, String> {
         let mut fields = HashMap::new();
         for (key, value) in rusty_url::form_urlencoded::parse(input) {
-            fields
-                .entry(key.into_owned())
-                .or_insert_with(|| value.into_owned());
+            let key = key.into_owned();
+            if fields.contains_key(&key) {
+                return Err(key);
+            }
+            fields.insert(key, value.into_owned());
         }
-        Self(fields)
+        Ok(Self(fields))
     }
 
     fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key).map(String::as_str)
+    }
+}
+
+/// Run `handler` on the decoded `input`, or refuse a repeated parameter
+/// before any state is read or changed.
+fn with_form(input: &[u8], handler: impl FnOnce(&Form) -> Response) -> Response {
+    match Form::parse(input) {
+        Ok(form) => handler(&form),
+        Err(name) => {
+            let body = json!({
+                "error": "invalid_request",
+                "error_description": format!("parameter `{name}` is repeated"),
+            });
+            Response::json(400, &body).with_header(NO_STORE)
+        }
     }
 }
 
@@ -711,7 +737,10 @@ mod tests {
 
     fn query_value(location: &str, key: &str) -> Option<String> {
         let query = location.split_once('?')?.1;
-        Form::parse(query.as_bytes()).get(key).map(str::to_string)
+        Form::parse(query.as_bytes())
+            .ok()?
+            .get(key)
+            .map(str::to_string)
     }
 
     /// Register, authorize and approve with `token`; the redirect back.
@@ -748,6 +777,95 @@ mod tests {
         )
     }
 
+    /// A verifier and its S256 challenge.
+    fn pkce() -> (String, String) {
+        let verifier = crate::generate_token().unwrap();
+        let challenge = Pkce::from_verifier(verifier.clone(), CodeChallengeMethod::S256)
+            .unwrap()
+            .code_challenge;
+        (verifier, challenge)
+    }
+
+    fn assert_repeat_refused(r: &Response) {
+        assert_eq!(r.status, 400);
+        assert_eq!(json_of(r)["error"], "invalid_request");
+        assert_eq!(header(r, "location"), "", "a refusal never redirects");
+    }
+
+    #[test]
+    fn repeated_parameters_are_refused_before_any_state_changes() {
+        let (e, _dir) = endpoints();
+        let (verifier, challenge) = pkce();
+        let reg = call(
+            &e,
+            Method::Post,
+            "/register",
+            br#"{"redirect_uris":["https://claude.ai/cb"]}"#,
+        );
+        let client_id = json_of(&reg)["client_id"].as_str().unwrap().to_string();
+        let cb = "redirect_uri=https%3A%2F%2Fclaude.ai%2Fcb";
+
+        // /authorize, both methods.
+        let base =
+            format!("response_type=code&client_id={client_id}&{cb}&code_challenge={challenge}");
+        let repeated = format!("{base}&client_id=other");
+        assert_repeat_refused(&call(
+            &e,
+            Method::Get,
+            &format!("/authorize?{repeated}"),
+            b"",
+        ));
+        assert_repeat_refused(&call(&e, Method::Post, "/authorize", repeated.as_bytes()));
+        let authorize = call(&e, Method::Get, &format!("/authorize?{base}"), b"");
+        let txn = query_value(header(&authorize, "location"), "txn").unwrap();
+
+        // /consent: a refused decision leaves the transaction pending.
+        assert_repeat_refused(&call(
+            &e,
+            Method::Get,
+            &format!("/consent?txn={txn}&txn=x"),
+            b"",
+        ));
+        for extra in ["txn=x", "action=deny", "owner_token=x"] {
+            let form = format!("txn={txn}&owner_token={TOKEN}&action=approve&{extra}");
+            assert_repeat_refused(&call(&e, Method::Post, "/consent", form.as_bytes()));
+        }
+        let form = format!("txn={txn}&owner_token={TOKEN}&action=approve");
+        let back = call(&e, Method::Post, "/consent", form.as_bytes());
+        let code = query_value(header(&back, "location"), "code").unwrap();
+
+        // /token: a refused exchange leaves the code unspent. The last
+        // repeat is spelled differently but decodes to the same name.
+        let token = format!(
+            "grant_type=authorization_code&code={code}&client_id={client_id}&{cb}&code_verifier={verifier}"
+        );
+        for extra in [
+            "grant_type=refresh_token".to_string(),
+            format!("client_id={client_id}"),
+            "code=other".to_string(),
+            format!("code_verifier={verifier}"),
+            "grant%5Ftype=authorization_code".to_string(),
+        ] {
+            let form = format!("{token}&{extra}");
+            assert_repeat_refused(&call(&e, Method::Post, "/token", form.as_bytes()));
+        }
+        let issued = call(&e, Method::Post, "/token", token.as_bytes());
+        assert_eq!(issued.status, 200, "the refusals must not spend the code");
+        let access = json_of(&issued)["access_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // /revoke: a refused revocation leaves the token live.
+        let form = format!("token={access}&client_id={client_id}&token=x");
+        assert_repeat_refused(&call(&e, Method::Post, "/revoke", form.as_bytes()));
+        let now = crate::now_unix();
+        assert_eq!(
+            e.provider().subject_of(&access, now),
+            Some(Subject::new("alice"))
+        );
+    }
+
     #[test]
     fn metadata_points_every_endpoint_at_the_issuer() {
         let (e, _dir) = endpoints();
@@ -777,11 +895,7 @@ mod tests {
     #[test]
     fn the_full_flow_issues_a_token_for_the_approving_subject() {
         let (e, _dir) = endpoints();
-        let verifier = crate::generate_token().unwrap();
-        let challenge =
-            rusty_oauth::pkce::Pkce::from_verifier(verifier.clone(), CodeChallengeMethod::S256)
-                .unwrap()
-                .code_challenge;
+        let (verifier, challenge) = pkce();
         let (client_id, back) = consent(&e, TOKEN, &challenge);
         assert_eq!(back.status, 302);
         let location = header(&back, "location");
