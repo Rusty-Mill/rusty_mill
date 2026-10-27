@@ -169,8 +169,10 @@ class Run(unittest.TestCase):
         result = json.dumps({'config': {'db_password': 'opaque-one'}, 'rows': 3})
         lines = [
             {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'name': 'login', 'input': {
-                'user': 'bob', 'password': 'opaque-two', 'nested': {'API_KEY': 'opaque-three'}}}],
-                'usage': {'output_tokens': 41}}},
+                'user': 'bob', 'password': 'opaque-two', 'nested': {'API_KEY': 'opaque-three'},
+                'pin': {'token': 90817263}, 'api_key': 55443322, 'secret': 7.25e8}}],
+                'usage': {'output_tokens': 41, 'cache_read_input_tokens': 12}}},
+            {'type': 'user', 'message': {'content': json.dumps({'password': 31415926})}},
             {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'content': result}]}},
             {'type': 'user', 'message': {'content': json.dumps(json.dumps({'client_secret': 'opaque-four'}))}},
             {'type': 'user', 'message': {'content': 'creds.yaml has token: "op5"'}},
@@ -179,11 +181,14 @@ class Run(unittest.TestCase):
         self.transcript.write_text(''.join(json.dumps(line) + '\n' for line in lines))
         self.assertEqual(self.run_hook(self.payload()), 'captured')
         sent = FakeServer.bodies[-1].decode()
-        for leaked in ('opaque-one', 'opaque-two', 'opaque-three', 'opaque-four', 'op5', GHP):
+        for leaked in ('opaque-one', 'opaque-two', 'opaque-three', 'opaque-four', 'op5', GHP,
+                       '90817263', '55443322', '725000000', '31415926'):
             self.assertNotIn(leaked, sent)
         transcript = FakeServer.calls[-1][1]['params']['arguments']['transcript']
         first = json.loads(transcript.splitlines()[0])
-        self.assertEqual(first['message']['usage'], {'output_tokens': 41}, 'counts are not secrets')
+        self.assertEqual(first['message']['usage'], {'output_tokens': 41, 'cache_read_input_tokens': 12},
+                         'usage counters are not secrets')
+        self.assertEqual(first['message']['content'][0]['input']['pin'], {'token': '[REDACTED:secret]'})
         self.assertEqual(first['message']['content'][0]['input']['user'], 'bob')
 
     def test_the_negotiated_protocol_version_is_used_or_refused(self):

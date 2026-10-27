@@ -102,6 +102,8 @@ def bearer(token):
 SECRET_WORDS = (r'api_key|api-key|apikey|secret|token|password|passwd|authorization'
                 r'|credential|access_key|private_key|cookie')
 SECRET_KEY = re.compile(r'(?i)(?:' + SECRET_WORDS + r')')
+# Usage counts named like secrets: `input_tokens`, `cache_read_input_tokens`, `max_tokens`.
+USAGE_COUNTER = re.compile(r'[a-z0-9_]+_tokens')
 
 # The shapes remind_me_core::redact scrubs, as (kind, pattern, group kept before
 # the secret). Bearer values are added here: a transcript can quote a header.
@@ -142,17 +144,19 @@ def scrub(value, token=None):
         return [scrub(v, token) for v in value
                 if not (isinstance(v, dict) and v.get('type') in THINKING)]
     if isinstance(value, dict):
-        return {redact(k, token): secret_field(v) if SECRET_KEY.search(k) else scrub(v, token)
+        return {redact(k, token): secret_field(k, v) if SECRET_KEY.search(k) else scrub(v, token)
                 for k, v in value.items()}
     return value
 
 
-def secret_field(value):
-    """The value of a field named like a secret, with any text in it withheld. Numbers
-    and booleans stay, so counts such as `output_tokens` survive."""
-    if isinstance(value, (str, list, dict)) and value:
-        return '[REDACTED:secret]'
-    return value
+def secret_field(key, value):
+    """The value of a field named like a secret, withheld whatever its type. Only an
+    integer under a `*_tokens` usage counter, a boolean, null or an empty value stays."""
+    if value is None or isinstance(value, bool) or value in ('', [], {}):
+        return value
+    if USAGE_COUNTER.fullmatch(key) and isinstance(value, int):
+        return value
+    return '[REDACTED:secret]'
 
 
 def scrub_text(text, token=None):
