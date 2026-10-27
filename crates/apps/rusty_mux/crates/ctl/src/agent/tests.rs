@@ -388,3 +388,51 @@ fn private_settings_stay_private() {
     agent(AgentCommand::Setup, &fresh, CTL);
     assert_eq!(mode(&fresh.join("settings.json")), 0o600);
 }
+
+/// On Windows every copy is the owner's alone, whatever the directory
+/// grants: a settings file with an explicit owner-only DACL, in the
+/// broader temp directory, stays so through setup, its backup and remove.
+#[cfg(windows)]
+#[test]
+fn private_settings_stay_private_on_windows() {
+    let acl = |path: &Path| {
+        let out = std::process::Command::new("icacls")
+            .arg(path)
+            .output()
+            .expect("icacls");
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let owner_only = |path: &Path| {
+        let text = acl(path);
+        let broad = [
+            "(I)",
+            "Users",
+            "Everyone",
+            "Authenticated",
+            "SYSTEM",
+            "Administrators",
+        ];
+        assert!(
+            !broad.iter().any(|b| text.contains(b)),
+            "{}: {text}",
+            path.display()
+        );
+    };
+    let dir = scratch();
+    assert!(
+        acl(&dir).contains("(I)") || acl(&dir).contains("SYSTEM"),
+        "the parent is broader"
+    );
+    let settings = dir.join("settings.json");
+    fs::write(&settings, "{}").expect("write");
+    platform_windows::fs::restrict_to_owner(&settings).expect("restrict");
+    owner_only(&settings);
+
+    assert_eq!(agent(AgentCommand::Setup, &dir, CTL).0, Exit::Ok);
+    owner_only(&settings);
+    owner_only(&dir.join("settings.json.rusty-mux.bak"));
+    agent(AgentCommand::Remove, &dir, CTL);
+    owner_only(&settings);
+    assert_eq!(fs::read_to_string(&settings).expect("read"), "{}");
+}

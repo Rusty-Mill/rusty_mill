@@ -307,10 +307,11 @@ fn exists(path: &Path) -> Result<bool, String> {
 }
 
 /// Writes `text` to a new temporary file beside `path`'s target and renames
-/// it over, so a crash leaves the old file or the new one. The new file has
-/// the old one's permissions (only the read-only flag on Windows, where the
-/// directory's ACL applies), or is private to the owner on Unix. A symlink,
-/// such as a dotfile manager's, is followed rather than replaced.
+/// it over, so a crash leaves the old file or the new one. The new file is
+/// made by [`create`], so private to the owner, then given the old one's
+/// permissions (on Windows only the read-only flag; the DACL stays
+/// owner-only). A symlink, such as a dotfile manager's, is followed rather
+/// than replaced.
 fn write(path: &Path, text: &str) -> Result<(), String> {
     let target = match fs::canonicalize(path) {
         Ok(target) => target,
@@ -346,13 +347,25 @@ fn permissions(path: &Path) -> Result<Option<fs::Permissions>, String> {
 }
 
 /// Creates `path`, failing if anything is there (a symlink included), with
-/// `text` and `protection`, or private to the owner on Unix.
+/// `text` and `protection`. It is private to the owner from the start: mode
+/// 0600 on Unix (until `protection` applies), and on Windows an owner-only
+/// DACL set before any bytes go in, while the open handle shares no access,
+/// so no other account can read a copy (failing closed if it cannot be set).
 fn create(path: &Path, text: &str, protection: Option<&fs::Permissions>) -> io::Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 0);
     let mut file = options.open(path)?;
+    #[cfg(windows)]
+    if let Err(e) = platform_windows::fs::restrict_to_owner(path) {
+        drop(file);
+        // The DACL's error is the one to report; the empty file is ours.
+        let _ = fs::remove_file(path);
+        return Err(io::Error::other(format!("restricting access: {e}")));
+    }
     let written = io::Write::write_all(&mut file, text.as_bytes())
         .and_then(|()| match protection {
             Some(protection) => file.set_permissions(protection.clone()),
