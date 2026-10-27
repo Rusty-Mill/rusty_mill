@@ -472,11 +472,17 @@ impl Provider {
 
     // -- revocation (RFC 7009) -------------------------------------------------
 
-    /// Revoke every token of `client_id`. Presenting either half of a
-    /// client's pair kills all its tokens; the registration survives, so the
-    /// client can authorize again.
-    pub fn revoke_tokens_for_client(&self, client_id: &str) -> io::Result<TokenCounts> {
-        self.store.delete_tokens_for_client(client_id)
+    /// Revoke one grant family: every token of `client_id` for `subject`
+    /// (`None` for grants written before subjects existed). Presenting either
+    /// half of a pair kills that user's tokens for the client and no one
+    /// else's; the registration survives, so the client can authorize again.
+    pub fn revoke_grant(
+        &self,
+        client_id: &str,
+        subject: Option<&Subject>,
+    ) -> io::Result<TokenCounts> {
+        self.store
+            .delete_grant(client_id, subject.map(Subject::as_str))
     }
 
     // -- issuance ---------------------------------------------------------------
@@ -817,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn revoking_a_clients_tokens_kills_access_and_refresh() {
+    fn revoking_a_grant_kills_its_access_and_refresh_tokens() {
         let (provider, _dir) = provider();
         let client_id = register(&provider);
         let now = now_unix();
@@ -827,7 +833,8 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let counts = provider.revoke_tokens_for_client(&client_id).unwrap();
+        let owner = Subject::new("owner");
+        let counts = provider.revoke_grant(&client_id, Some(&owner)).unwrap();
         assert_eq!((counts.access_tokens, counts.refresh_tokens), (1, 1));
         assert!(provider
             .load_access_token(&tokens.access_token, now)
@@ -836,5 +843,46 @@ mod tests {
         assert!(provider
             .load_refresh_token(&client_id, &refresh, now)
             .is_none());
+    }
+
+    #[test]
+    fn revoking_one_users_grant_leaves_another_users_grant_on_the_same_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path().join("oauth.json"));
+        let verify: Verify = Box::new(|t| match t {
+            "alice-token" | "bob-token" => Some(Subject::new(t.trim_end_matches("-token"))),
+            _ => None,
+        });
+        let provider = Provider::new(verify, store);
+        let client_id = register(&provider);
+        let now = now_unix();
+        let grant = |token: &str| {
+            let path = provider
+                .authorize(&client_id, params("challenge"), now)
+                .unwrap();
+            let txn = path.strip_prefix("/consent?txn=").unwrap();
+            let code = match provider.decide_consent(txn, provider.verify(token), now) {
+                Ok(ConsentOutcome::Approved { code, .. }) => code,
+                _ => panic!("expected Approved"),
+            };
+            provider
+                .exchange_authorization_code(&code, now)
+                .unwrap()
+                .unwrap()
+        };
+        let (alice, bob) = (grant("alice-token"), grant("bob-token"));
+
+        let bobs = provider.subject_of(&bob.access_token, now);
+        let counts = provider.revoke_grant(&client_id, bobs.as_ref()).unwrap();
+        assert_eq!((counts.access_tokens, counts.refresh_tokens), (1, 1));
+        assert_eq!(provider.subject_of(&bob.access_token, now), None);
+        assert_eq!(
+            provider.subject_of(&alice.access_token, now),
+            Some(Subject::new("alice"))
+        );
+        let alice_refresh = alice.refresh_token.unwrap();
+        assert!(provider
+            .load_refresh_token(&client_id, &alice_refresh, now)
+            .is_some());
     }
 }

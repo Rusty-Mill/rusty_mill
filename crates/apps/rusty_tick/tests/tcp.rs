@@ -570,15 +570,24 @@ const ISSUER: &str = "http://localhost:8788";
 /// the OAuth paths are shown not to be shadowed by it). Alice's token, and
 /// the users file for changing her later.
 fn oauth_server() -> (Running, String, std::path::PathBuf, tempfile::TempDir) {
+    let (server, tokens, users, web) = oauth_server_for(&["alice", "bob"]);
+    (server, tokens[0].clone(), users, web)
+}
+
+/// As [`oauth_server`], with a token for each of `names`.
+fn oauth_server_for(
+    names: &[&str],
+) -> (Running, Vec<String>, std::path::PathBuf, tempfile::TempDir) {
     use rusty_tick::backend::USERS_FILE;
     use rusty_tick::users::{Registry, UserKey};
     let dir = tempfile::tempdir().unwrap();
     let mut registry = Registry::default();
-    for name in ["alice", "bob"] {
-        registry.add_user(&UserKey::parse(name).unwrap()).unwrap();
+    let mut tokens = Vec::new();
+    for name in names {
+        let key = UserKey::parse(name).unwrap();
+        registry.add_user(&key).unwrap();
+        tokens.push(registry.add_token(&key, "phone", 1).unwrap());
     }
-    let alice = UserKey::parse("alice").unwrap();
-    let token = registry.add_token(&alice, "phone", 1).unwrap();
     let users = dir.path().join(USERS_FILE);
     registry.save(&users).unwrap();
     let backend = Backend::multi(
@@ -594,7 +603,7 @@ fn oauth_server() -> (Running, String, std::path::PathBuf, tempfile::TempDir) {
     let web = tempfile::tempdir().unwrap();
     std::fs::write(web.path().join("index.html"), "<html>ui</html>").unwrap();
     let server = Running::serve(backend, dir, Some(web.path().to_path_buf()), Some(oauth));
-    (server, token, users, web)
+    (server, tokens, users, web)
 }
 
 fn post_form(server: &Running, path: &str, form: &str, content_type: &str) -> String {
@@ -625,18 +634,28 @@ struct Flow {
     txn: String,
 }
 
-fn begin(server: &Running) -> Flow {
-    use rusty_oauth::pkce::{CodeChallengeMethod, Pkce};
-    let cb = "https://claude.ai/api/mcp/auth_callback";
+const CALLBACK: &str = "https://claude.ai/api/mcp/auth_callback";
+
+/// A fresh client registration: its id.
+fn register(server: &Running) -> String {
     let registered = post_form(
         server,
         "/register",
-        &format!(r#"{{"redirect_uris":["{cb}"],"client_name":"test"}}"#),
+        &format!(r#"{{"redirect_uris":["{CALLBACK}"],"client_name":"test"}}"#),
         "application/json",
     );
     assert_eq!(status(&registered), 201, "{registered}");
     let client: rusty_json::Value = rusty_json::from_str(body(&registered)).unwrap();
-    let client_id = client["client_id"].as_str().unwrap().to_string();
+    client["client_id"].as_str().unwrap().to_string()
+}
+
+fn begin(server: &Running) -> Flow {
+    begin_for(server, register(server))
+}
+
+fn begin_for(server: &Running, client_id: String) -> Flow {
+    use rusty_oauth::pkce::{CodeChallengeMethod, Pkce};
+    let cb = CALLBACK;
 
     let verifier = "v".repeat(64);
     let challenge = Pkce::from_verifier(verifier.clone(), CodeChallengeMethod::S256)
@@ -682,7 +701,14 @@ fn approve(server: &Running, flow: &Flow, token: &str) -> String {
 
 /// The whole sign-in, approved with `token`: an OAuth access token.
 fn sign_in(server: &Running, token: &str) -> String {
-    let flow = begin(server);
+    sign_in_as(server, begin(server), token)["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The sign-in `flow` approved with `token`: the token response.
+fn sign_in_as(server: &Running, flow: Flow, token: &str) -> rusty_json::Value {
     let code = location_param(&approve(server, &flow, token), "code");
     let issued = post_form(
         server,
@@ -694,8 +720,7 @@ fn sign_in(server: &Running, token: &str) -> String {
         "application/x-www-form-urlencoded",
     );
     assert_eq!(status(&issued), 200, "{issued}");
-    let issued: rusty_json::Value = rusty_json::from_str(body(&issued)).unwrap();
-    issued["access_token"].as_str().unwrap().to_string()
+    rusty_json::from_str(body(&issued)).unwrap()
 }
 
 #[test]
@@ -775,4 +800,60 @@ fn consent_takes_only_the_servers_own_tokens() {
         let denied = approve(&server, &begin(&server), token);
         assert_eq!(location_param(&denied, "error"), "access_denied", "{token}");
     }
+}
+
+#[test]
+fn revoking_one_users_grant_leaves_another_users_grant_on_the_same_client() {
+    let (server, tokens, _, _web) = oauth_server_for(&["alice", "bob"]);
+    let client_id = register(&server);
+    let alice = sign_in_as(&server, begin_for(&server, client_id.clone()), &tokens[0]);
+    let bob = sign_in_as(&server, begin_for(&server, client_id.clone()), &tokens[1]);
+    let token = |v: &rusty_json::Value, k: &str| v[k].as_str().unwrap().to_string();
+    let lists = |access: &str| {
+        status(&exchange(
+            &server,
+            &format!("GET /api/v1/lists HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {access}\r\nConnection: close\r\n\r\n"),
+        ))
+    };
+
+    let revoked = post_form(
+        &server,
+        "/revoke",
+        &format!(
+            "token={}&client_id={client_id}",
+            token(&bob, "access_token")
+        ),
+        "application/x-www-form-urlencoded",
+    );
+    assert_eq!(status(&revoked), 200, "{revoked}");
+    assert_eq!(
+        lists(&token(&bob, "access_token")),
+        401,
+        "Bob's grant is gone"
+    );
+    assert_eq!(lists(&token(&alice, "access_token")), 200, "Alice's is not");
+    let refreshed = post_form(
+        &server,
+        "/token",
+        &format!(
+            "grant_type=refresh_token&refresh_token={}&client_id={client_id}",
+            token(&alice, "refresh_token")
+        ),
+        "application/x-www-form-urlencoded",
+    );
+    assert_eq!(
+        status(&refreshed),
+        200,
+        "Alice can still refresh: {refreshed}"
+    );
+    let bob_refresh = post_form(
+        &server,
+        "/token",
+        &format!(
+            "grant_type=refresh_token&refresh_token={}&client_id={client_id}",
+            token(&bob, "refresh_token")
+        ),
+        "application/x-www-form-urlencoded",
+    );
+    assert_eq!(status(&bob_refresh), 400, "Bob's refresh went with it");
 }

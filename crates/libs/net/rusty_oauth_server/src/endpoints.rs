@@ -498,12 +498,12 @@ impl Endpoints {
         let access = || {
             self.provider
                 .load_access_token(token, now)
-                .map(|a| a.client_id)
+                .map(|a| (a.client_id, a.subject))
         };
         let refresh = || {
             self.provider
                 .load_refresh_token(client_id, token, now)
-                .map(|r| r.client_id)
+                .map(|r| (r.client_id, r.subject))
         };
         let owner = if form.get("token_type_hint") == Some("refresh_token") {
             refresh().or_else(access)
@@ -513,8 +513,10 @@ impl Endpoints {
         // An unknown or foreign token is still a 200 (RFC 7009 §2.2): a
         // revocation never reveals whether a token existed. A revocation we
         // failed to carry out is not that, and must not read as success.
-        if owner.as_deref() == Some(client_id) {
-            if let Err(e) = self.provider.revoke_tokens_for_client(client_id) {
+        // Only the presented token's own grant goes: several users can
+        // authorize one public client.
+        if let Some((_, subject)) = owner.filter(|(owner, _)| owner == client_id) {
+            if let Err(e) = self.provider.revoke_grant(client_id, subject.as_ref()) {
                 eprintln!("oauth: could not persist token revocation: {e}");
                 let body = json!({
                     "error": "server_error",
