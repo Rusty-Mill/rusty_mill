@@ -7226,12 +7226,78 @@ mod tests {
             assert_eq!(got, [b"a"]);
         }
 
+        /// A PTY handle that counts its reads.
+        struct Counted {
+            inner: crate::backend::mock::Chunks,
+            reads: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl BackendHandle for Counted {
+            fn read_into(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+                self.reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.inner.read_into(buf)
+            }
+            fn output_ready(&self) -> bool {
+                self.inner.output_ready()
+            }
+            fn write(&mut self, data: &[u8]) -> Result<(), Error> {
+                self.inner.write(data)
+            }
+            fn try_clone(&self) -> Result<Box<dyn BackendHandle>, Error> {
+                self.inner.try_clone()
+            }
+            fn set_winsize(&mut self, cols: u16, rows: u16) -> Result<(), Error> {
+                self.inner.set_winsize(cols, rows)
+            }
+            #[cfg(unix)]
+            fn pty_fd(&self) -> std::os::unix::io::RawFd {
+                self.inner.pty_fd()
+            }
+        }
+
+        /// Ten one-byte batches, and the counter of how many were read.
+        fn ten_parts() -> (Counted, Arc<std::sync::atomic::AtomicUsize>) {
+            let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let parts = (0..10).map(|_| Ok(&b"x"[..])).collect();
+            let handle = Counted {
+                inner: apart(parts),
+                reads: Arc::clone(&reads),
+            };
+            (handle, reads)
+        }
+
         #[test]
         fn a_gone_parser_ends_reading() {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             drop(rx);
-            // Returns instead of reading on into a queue nobody drains.
-            read_ahead(&mut apart(vec![Ok(b"a"), Ok(b"b")]), &tx);
+            let (mut pty, reads) = ten_parts();
+            read_ahead(&mut pty, &tx);
+            assert_eq!(
+                reads.load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "the first failed send stops reading"
+            );
+        }
+
+        #[test]
+        fn a_parser_gone_while_the_queue_is_full_ends_reading() {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let (mut pty, reads) = ten_parts();
+            let counter = Arc::clone(&reads);
+            let (done_tx, done) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                read_ahead(&mut pty, &tx);
+                let _ = done_tx.send(());
+            });
+            // Wait until the reader is blocked on the full queue, then hang up.
+            while counter.load(std::sync::atomic::Ordering::Relaxed) < 2 {
+                std::thread::yield_now();
+            }
+            drop(rx);
+            done.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the blocked send is released and reading stops");
+            assert!(reads.load(std::sync::atomic::Ordering::Relaxed) < 10);
         }
 
         #[test]
