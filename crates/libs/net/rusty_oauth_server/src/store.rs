@@ -75,7 +75,7 @@ impl State {
     /// Remove every token (both buckets) whose metadata `doomed` matches,
     /// mutating `self`.
     fn drop_tokens(&mut self, doomed: impl Fn(&Value) -> bool) -> TokenCounts {
-        let mut drop_from = |tokens: &mut Map| {
+        let drop_from = |tokens: &mut Map| {
             let hashes: Vec<String> = tokens
                 .iter()
                 .filter(|(_, meta)| doomed(meta))
