@@ -151,10 +151,27 @@ impl Mux {
     /// Announces that the block's program status changed. The model holds no
     /// status itself; the host that tracks it calls this.
     pub fn note_status(&mut self, block: BlockId) -> Result<(), Error> {
+        self.note(block, Event::BlockStatus { block })
+    }
+
+    /// Announces that the block's working directory changed, as
+    /// [`Self::note_status`] does its status.
+    pub fn note_pwd(&mut self, block: BlockId) -> Result<(), Error> {
+        self.note(block, Event::PwdChanged { block })
+    }
+
+    /// Announces that the block's title changed, as [`Self::note_status`]
+    /// does its status.
+    pub fn note_title(&mut self, block: BlockId) -> Result<(), Error> {
+        self.note(block, Event::TitleChanged { block })
+    }
+
+    /// Emits `event` about a block the host tracks, if it is live.
+    fn note(&mut self, block: BlockId, event: Event) -> Result<(), Error> {
         if !self.blocks.contains_key(&block) {
             return Err(Error::UnknownBlock(block));
         }
-        self.events.push(Event::BlockStatus { block });
+        self.events.push(event);
         Ok(())
     }
 

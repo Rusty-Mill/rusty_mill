@@ -34,6 +34,9 @@ pub enum Command {
     },
     /// Works with the config file.
     Config(ConfigCommand),
+    /// Follows events from `after` (or from now) and runs the config's
+    /// rules for each, until the server goes away.
+    Watch { after: Option<Cursor> },
 }
 
 /// What `config` does.
@@ -41,7 +44,7 @@ pub enum Command {
 pub enum ConfigCommand {
     /// Checks a config, the given file or the usual one, without running it.
     Check(Option<PathBuf>),
-    /// Lists the configured actions and bindings.
+    /// Lists the configured actions, bindings and rules.
     List,
 }
 
@@ -139,6 +142,7 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "events" => events(rest),
         "do" => run_action(rest),
         "config" => config(rest),
+        "watch" => watch(rest),
         _ => args
             .split(|a| a == "+")
             .map(|args| call(args, defaults))
@@ -185,6 +189,16 @@ fn config(args: &[String]) -> Result<Command, String> {
         }
         [verb] if verb == "list" => Ok(Command::Config(ConfigCommand::List)),
         _ => Err("usage: config check [PATH] | config list".into()),
+    }
+}
+
+fn watch(args: &[String]) -> Result<Command, String> {
+    match args {
+        [] => Ok(Command::Watch { after: None }),
+        [flag, cursor] if flag == "--after" => Ok(Command::Watch {
+            after: Some(parse_cursor(cursor)?),
+        }),
+        _ => Err("usage: watch [--after EPOCH:SEQ]".into()),
     }
 }
 
@@ -318,6 +332,9 @@ pub fn usage(method: Option<&Method>) -> String {
             );
             text.push_str(
                 "  config           Check or list the config: config check [PATH] | config list\n",
+            );
+            text.push_str(
+                "  watch            Run the config's rules on events: watch [--after EPOCH:SEQ]\n",
             );
             text.push_str("  api              List methods, or describe one as JSON: api list | api describe METHOD\n");
             text.push_str("  help             Show a command's flags: help COMMAND\n");

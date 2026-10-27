@@ -225,3 +225,83 @@ fn values_must_suit_the_catalog_as_ctl_would_check_them() {
         ]
     );
 }
+
+const RULES: &str = r#"{
+  "actions": [
+    {"name": "note", "args": ["dir", "where"], "run": [
+      {"call": "input", "args": {"block": "${where}", "data": "echo ${dir}\r"}}
+    ]},
+    {"name": "fit", "args": ["cols"], "run": [
+      {"call": "resize", "args": {"cols": "${cols}", "rows": 24}}
+    ]}
+  ],
+  "on": [
+    {"event": "pwd-changed", "action": "note", "args": {"dir": "${pwd}", "where": "${block}"}},
+    {"event": "block-created", "action": "fit", "args": {"cols": "${cols}"}},
+    {"event": "block-closed", "action": "terminal.title", "args": {"block": "${block}"}}
+  ]
+}"#;
+
+#[test]
+fn rules_fill_event_fields_then_expand() {
+    let config = parse(RULES).expect("valid");
+    assert_eq!(config.rules.len(), 3);
+    assert_eq!(config.rules[0].event, "pwd-changed");
+    let fields = [
+        ("block".to_owned(), "b1".to_owned()),
+        ("pwd".to_owned(), "/tmp/${where}".to_owned()),
+    ];
+    let calls = config.rules[0].calls(&config, &fields).expect("expands");
+    let mut params = calls[0].params.clone();
+    params.sort();
+    assert_eq!(
+        params,
+        [
+            ("block", "b1".to_owned()),
+            ("data", "echo /tmp/${where}\r".to_owned())
+        ],
+        "a field's value is never expanded again"
+    );
+    let calls = config.rules[2]
+        .calls(&config, &[("block".into(), "b2".into())])
+        .expect("a request");
+    assert_eq!(
+        calls,
+        [Call {
+            method: "terminal.title",
+            params: vec![("block", "b2".to_owned())]
+        }]
+    );
+}
+
+#[test]
+fn rules_are_checked_against_events_and_their_fields() {
+    let text = r#"{
+      "actions": [{"name": "fit", "args": ["cols"], "run": [
+        {"call": "resize", "args": {"cols": "${cols}", "rows": 24}}
+      ]}],
+      "on": [
+        {"event": "pwd_changed", "action": "fit", "args": {"cols": "80"}},
+        {"event": "block-closed", "action": "fit", "args": {"cols": "${cols}"}},
+        {"event": "block-created", "action": "fit", "args": {"cols": "0"}},
+        {"event": "block-created", "action": "fit"},
+        {"event": "pwd-changed", "action": "create-session", "args": {"name": "${pwd}", "x": "1"}},
+        {"event": "pwd-changed", "action": "resize", "args": {"cols": "wide", "rows": "${block}"}},
+        {"event": "attached", "action": "nope"},
+        {"action": "fit", "args": {"cols": "1"}}
+      ]
+    }"#;
+    assert_eq!(
+        problems(text),
+        [
+            "on[0].event: unknown event `pwd_changed`",
+            "on[1].args.cols: `${cols}` is not a field of `block-closed`",
+            "on[2]: `cols`: `0` is not a valid cell count",
+            "on[3]: `fit` needs argument `cols`",
+            "on[4]: `create-session` has no parameter `x`",
+            "on[5]: `cols`: `wide` is not a valid cell count",
+            "on[6]: unknown action `nope`",
+            "on[7].event: missing",
+        ]
+    );
+}

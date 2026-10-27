@@ -13,7 +13,8 @@
 //!
 //! `do ACTION --ARG VALUE` runs an action from the config file, a named
 //! chain of requests (see [`rusty_mux_script`]); `config check` and
-//! `config list` check and list it.
+//! `config list` check and list it. `watch` follows events and runs the
+//! config's `on` rules for each.
 //!
 //! Output is text, or one JSON object per line with `--json`. The exit code
 //! is an [`Exit`]; an interrupt ends the process with the signal, which a
@@ -29,10 +30,12 @@ mod conn;
 mod render;
 mod stop;
 pub mod target;
+mod watch;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use rusty_mux_core::Event;
 use rusty_mux_proto::schema::{CATALOG, Method, Returns, Value};
 use rusty_mux_proto::{Code, Cursor, Entry, Features, Message};
 use rusty_uuid::Uuid;
@@ -165,7 +168,7 @@ pub fn run_until(
             Ok(calls) => invocation.command = Command::Calls(calls),
             Err((exit, reason)) => return report(err, exit, &reason),
         },
-        Command::Calls(_) | Command::Events { .. } => {}
+        Command::Calls(_) | Command::Events { .. } | Command::Watch { .. } => {}
     }
     let Some(socket) = invocation.socket.clone().or_else(|| env.socket.clone()) else {
         return report(
@@ -174,7 +177,63 @@ pub fn run_until(
             "no socket: pass --socket or set RUSTY_MUX_SOCKET",
         );
     };
-    match execute(&invocation, &socket, env.here.session, stop, out) {
+    if let Command::Watch { after } = invocation.command {
+        return run_watch(after, &socket, env, invocation.json, stop, out, err);
+    }
+    let result = execute(&invocation, &socket, env.here.session, stop, out);
+    finish(result, &socket, err)
+}
+
+/// `watch`: follows events and runs the config's rules for each, until
+/// the server goes away.
+fn run_watch(
+    after: Option<Cursor>,
+    socket: &Path,
+    env: &Env,
+    json: bool,
+    stop: &Stop,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Exit {
+    let config = match config::load(env.config.as_deref()) {
+        Ok(config) => config,
+        Err(problems) => return report(err, Exit::Failed, &problems),
+    };
+    if config.rules.is_empty() {
+        return report(err, Exit::Failed, "no `on` rules in the config");
+    }
+    let env = Env {
+        socket: Some(socket.to_path_buf()),
+        ..env.clone()
+    };
+    let watcher = watch::Watcher {
+        config: &config,
+        env: &env,
+        json,
+        stop,
+    };
+    let needs: Vec<(&str, Features)> = config
+        .rules
+        .iter()
+        .map(|rule| (rule.event, watch::needs(rule.event)))
+        .collect();
+    let how = Follow {
+        after,
+        needs: &needs,
+        json,
+        here: env.here.session,
+    };
+    let result = follow(socket, &how, stop, out, &mut |seq, event, out| {
+        watcher
+            .event(seq, event, out, &mut *err)
+            .map_err(Failure::from)
+    });
+    finish(result, socket, err)
+}
+
+/// The exit code for a command's `result`, its reason reported on `err`.
+fn finish(result: Result<(), Failure>, socket: &Path, err: &mut dyn Write) -> Exit {
+    match result {
         Ok(()) => Exit::Ok,
         Err(Failure::Failed(reason)) => report(err, Exit::Failed, &reason),
         Err(Failure::Missing(reason)) => report(err, Exit::Target, &reason),
@@ -261,12 +320,65 @@ fn execute(
         json: invocation.json,
         here,
     };
+    let json = invocation.json;
     match &invocation.command {
         Command::Calls(calls) => session.calls(calls),
-        Command::Events { after, follow } => session.events(*after, *follow),
-        Command::Help(_) | Command::Api(_) | Command::Do { .. } | Command::Config(_) => Ok(()),
+        Command::Events { after, follow } => {
+            session.events(*after, *follow, &[], &mut |seq, event, out| {
+                writeln!(out, "{}", render::event_line(seq, event, json)).map_err(Failure::from)
+            })
+        }
+        Command::Help(_)
+        | Command::Api(_)
+        | Command::Do { .. }
+        | Command::Config(_)
+        | Command::Watch { .. } => Ok(()),
     }
 }
+
+/// What [`follow`] follows, and how it prints.
+struct Follow<'a> {
+    after: Option<Cursor>,
+    /// Event kinds the follower needs, each with the feature it takes.
+    needs: &'a [(&'a str, Features)],
+    json: bool,
+    here: Option<Uuid>,
+}
+
+/// Follows the events after `how.after` on a connection of its own,
+/// passing each to `on_event`; fails first unless the server sends every
+/// event kind `how.needs`.
+#[cfg(unix)]
+fn follow(
+    socket: &Path,
+    how: &Follow<'_>,
+    stop: &Stop,
+    out: &mut dyn Write,
+    on_event: &mut OnEvent<'_>,
+) -> Result<(), Failure> {
+    let mut conn = Conn::new(conn::connect(socket, stop)?, stop.clone());
+    let mut session = Session {
+        conn: &mut conn,
+        out,
+        json: how.json,
+        here: how.here,
+    };
+    session.events(how.after, true, how.needs, on_event)
+}
+
+#[cfg(not(unix))]
+fn follow(
+    _: &Path,
+    _: &Follow<'_>,
+    _: &Stop,
+    _: &mut dyn Write,
+    _: &mut OnEvent<'_>,
+) -> Result<(), Failure> {
+    Err(unsupported())
+}
+
+/// What happens to each numbered event that is followed.
+type OnEvent<'a> = dyn FnMut(u64, &Event, &mut dyn Write) -> Result<(), Failure> + 'a;
 
 #[cfg(not(unix))]
 fn execute(
@@ -276,10 +388,15 @@ fn execute(
     _: &Stop,
     _: &mut dyn Write,
 ) -> Result<(), Failure> {
-    Err(Failure::Unreachable(io::Error::new(
+    Err(unsupported())
+}
+
+#[cfg(not(unix))]
+fn unsupported() -> Failure {
+    Failure::Unreachable(io::Error::new(
         io::ErrorKind::Unsupported,
         "rusty-mux-ctl connects over a Unix socket",
-    )))
+    ))
 }
 
 struct Session<'a, S> {
@@ -430,11 +547,23 @@ impl<S: io::Read + Write> Session<'_, S> {
         lines.iter().try_for_each(|line| self.line(line))
     }
 
-    fn events(&mut self, after: Option<Cursor>, follow: bool) -> Result<(), Failure> {
+    fn events(
+        &mut self,
+        after: Option<Cursor>,
+        follow: bool,
+        needs: &[(&str, Features)],
+        on_event: &mut OnEvent<'_>,
+    ) -> Result<(), Failure> {
         let wanted = Features::EVENT_SEQ
             .union(Features::SYNC)
-            .union(Features::STATUS);
+            .union(Features::STATUS)
+            .union(Features::TERMINAL_EVENTS);
         let (features, start) = self.hello(wanted, after)?;
+        if let Some((kind, _)) = needs.iter().find(|(_, need)| !features.contains(*need)) {
+            return Err(Failure::Failed(format!(
+                "the server does not send `{kind}` events, which a rule needs"
+            )));
+        }
         let start =
             start.ok_or_else(|| Failure::Failed("the server does not number events".into()))?;
         self.line(&render::cursor_line(start, self.json))?;
@@ -457,7 +586,7 @@ impl<S: io::Read + Write> Session<'_, S> {
                     seq: Some(seq),
                     event,
                 } => {
-                    self.line(&render::event_line(seq, &event, self.json))?;
+                    on_event(seq, &event, &mut *self.out)?;
                     last.seq = seq;
                 }
                 Message::Event { seq: None, .. } => {

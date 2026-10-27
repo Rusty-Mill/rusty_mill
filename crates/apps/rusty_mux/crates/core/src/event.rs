@@ -57,4 +57,13 @@ pub enum Event {
     BlockStatus {
         block: BlockId,
     },
+    /// The block's program reported a new working directory (OSC 7); the
+    /// `terminal.pwd` block method reads it.
+    PwdChanged {
+        block: BlockId,
+    },
+    /// The block's title changed; the `terminal.title` block method reads it.
+    TitleChanged {
+        block: BlockId,
+    },
 }

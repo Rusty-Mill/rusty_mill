@@ -227,6 +227,8 @@ fn every_event_round_trips() {
             holder: None,
         },
         Event::BlockStatus { block },
+        Event::PwdChanged { block },
+        Event::TitleChanged { block },
     ];
     for event in events {
         round_trip(Message::Event {
