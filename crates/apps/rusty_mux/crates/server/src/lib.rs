@@ -24,6 +24,8 @@ mod conn;
 #[cfg(any(target_os = "linux", windows))]
 mod history;
 #[cfg(any(target_os = "linux", windows))]
+mod keys;
+#[cfg(any(target_os = "linux", windows))]
 mod outbox;
 #[cfg(any(target_os = "linux", windows))]
 mod process;

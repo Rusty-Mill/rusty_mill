@@ -210,7 +210,7 @@ fn run_action(args: &[String]) -> Result<Command, String> {
     let Some((action, rest)) = args.split_first() else {
         return Err("usage: do ACTION [--ARG VALUE]...".into());
     };
-    let args = flags(action, rest)?
+    let args = flags(action, rest, |_| false)?
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
         .collect();
@@ -246,7 +246,7 @@ const WAIT_USAGE: &str = "usage: wait --block BLOCK [--timeout SECS] | wait --ev
 fn wait(args: &[String]) -> Result<Wait, String> {
     let mut timeout = None;
     let mut rest = Vec::new();
-    for (key, text) in flags("wait", args)? {
+    for (key, text) in flags("wait", args, |_| false)? {
         match key {
             "timeout" => timeout = Some(parse_timeout(text)?),
             _ => rest.push((key, text)),
@@ -405,7 +405,13 @@ fn call(args: &[String], defaults: &Defaults) -> Result<Call, String> {
     };
     let method = known(name)?;
     let mut values: Vec<(&'static str, Arg)> = Vec::new();
-    for (key, text) in flags(name, rest)? {
+    let bare = |key: &str| {
+        method
+            .params
+            .iter()
+            .any(|p| p.name == key && p.ty == Ty::Flag)
+    };
+    for (key, text) in flags(name, rest, bare)? {
         let param = method
             .params
             .iter()
@@ -446,8 +452,13 @@ fn call(args: &[String], defaults: &Defaults) -> Result<Call, String> {
     })
 }
 
-/// `--flag=value` or `--flag value` pairs after `command`, in order.
-fn flags<'a>(command: &str, mut rest: &'a [String]) -> Result<Vec<(&'a str, &'a str)>, String> {
+/// `--flag=value` or `--flag value` pairs after `command`, in order. A
+/// `--flag` alone that `bare` admits is `--flag=true`.
+fn flags<'a>(
+    command: &str,
+    mut rest: &'a [String],
+    bare: impl Fn(&str) -> bool,
+) -> Result<Vec<(&'a str, &'a str)>, String> {
     let mut flags = Vec::new();
     while let Some((flag, tail)) = rest.split_first() {
         let flag = flag
@@ -455,6 +466,7 @@ fn flags<'a>(command: &str, mut rest: &'a [String]) -> Result<Vec<(&'a str, &'a 
             .ok_or_else(|| format!("{command}: expected a --flag, got `{flag}`"))?;
         let (key, text, tail) = match flag.split_once('=') {
             Some((key, text)) => (key, text, tail),
+            None if bare(flag) => (flag, "true", tail),
             None => {
                 let (text, tail) = tail
                     .split_first()
@@ -527,9 +539,10 @@ pub fn usage(method: Option<&Method>) -> String {
         Some(m) => {
             let mut text = format!("usage: rusty-mux-ctl {}", m.name);
             for p in m.params {
-                text.push_str(&match p.presence {
-                    Presence::Required => format!(" --{} <{}>", p.name, p.ty),
-                    Presence::Optional { .. } => format!(" [--{} <{}>]", p.name, p.ty),
+                text.push_str(&match (p.presence, p.ty) {
+                    (Presence::Optional { .. }, Ty::Flag) => format!(" [--{}]", p.name),
+                    (Presence::Required, _) => format!(" --{} <{}>", p.name, p.ty),
+                    (Presence::Optional { .. }, _) => format!(" [--{} <{}>]", p.name, p.ty),
                 });
             }
             text.push_str(&format!("\n{}\n", m.doc));

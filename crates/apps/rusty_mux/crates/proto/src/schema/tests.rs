@@ -19,6 +19,7 @@ fn sample(ty: Ty) -> Value {
         Ty::Cells => Value::Cells(80),
         Ty::Lines => Value::Lines(0),
         Ty::Words => Value::Words(vec!["-c".into(), "exit 3".into()]),
+        Ty::Flag => Value::Flag(true),
     }
 }
 
@@ -93,6 +94,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
         block_methods,
         [
             "terminal.format",
+            "terminal.send-keys",
             "terminal.pwd",
             "terminal.title",
             "terminal.status",
@@ -103,7 +105,13 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
         let method = block_method(name).expect(name);
         assert_eq!(method.params[0].ty, Ty::Id(Entity::Block), "{name}");
         assert_eq!(method.needs, Features::BLOCK_CALL, "{name}");
-        assert_eq!(method.returns, Returns::Text, "{name}");
+        let writes = name == "terminal.send-keys";
+        let returns = if writes {
+            Returns::Unanswered
+        } else {
+            Returns::Text
+        };
+        assert_eq!(method.returns, returns, "{name}");
     }
     let format = method("terminal.format").expect("format");
     let args = [("history", Value::Lines(3)), ("block", Value::Id(id(1)))];
@@ -139,13 +147,13 @@ fn only_create_methods_return_an_id() {
 }
 
 #[test]
-fn only_input_goes_unanswered() {
+fn only_writes_go_unanswered() {
     let unanswered: Vec<&str> = CATALOG
         .iter()
         .filter(|m| m.returns == Returns::Unanswered)
         .map(|m| m.name)
         .collect();
-    assert_eq!(unanswered, ["input"]);
+    assert_eq!(unanswered, ["input", "terminal.send-keys"]);
 }
 
 #[test]
@@ -171,7 +179,13 @@ fn optional_parameters_add_their_features_only_when_given() {
         .filter(|p| p.presence != Presence::Required)
         .map(|p| p.name)
         .collect();
-    assert_eq!(optional, ["command", "arg", "cwd"]);
+    assert_eq!(optional, ["command", "arg", "cwd", "trim", "unwrap", "vt"]);
+    let format = method("terminal.format").expect("format");
+    assert_eq!(format.needs_for(["block", "history"]), Features::BLOCK_CALL);
+    assert_eq!(
+        format.needs_for(["history", "vt"]),
+        Features::BLOCK_CALL.union(Features::CAPTURE)
+    );
 }
 
 #[test]
@@ -240,6 +254,8 @@ fn parses_text_arguments() {
     assert_eq!(Ty::Bytes.parse("é"), Ok(Value::Bytes("é".into())));
     assert_eq!(Ty::Cells.parse("65535"), Ok(Value::Cells(u16::MAX)));
     assert_eq!(Ty::Lines.parse("0"), Ok(Value::Lines(0)));
+    assert_eq!(Ty::Flag.parse("true"), Ok(Value::Flag(true)));
+    assert_eq!(Ty::Flag.parse("false"), Ok(Value::Flag(false)));
     for (ty, text) in [
         (block, "not-a-uuid"),
         (Ty::Cells, "0"),
@@ -248,6 +264,8 @@ fn parses_text_arguments() {
         (Ty::Cells, ""),
         (Ty::Lines, "-1"),
         (Ty::Lines, "4294967296"),
+        (Ty::Flag, "yes"),
+        (Ty::Flag, ""),
     ] {
         assert_eq!(
             ty.parse(text),

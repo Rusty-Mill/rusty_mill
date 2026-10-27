@@ -22,6 +22,7 @@ mod tag {
     pub const CELLS: u8 = 4;
     pub const LINES: u8 = 5;
     pub const WORDS: u8 = 6;
+    pub const FLAG: u8 = 7;
 }
 
 pub(crate) fn encode(args: &[(String, Value)]) -> Vec<u8> {
@@ -56,6 +57,10 @@ pub(crate) fn encode(args: &[(String, Value)]) -> Vec<u8> {
                     put_bytes(&mut w, word.as_bytes());
                 }
             }
+            Value::Flag(on) => {
+                w.write_u8(tag::FLAG);
+                w.write_u8(u8::from(*on));
+            }
         }
     }
     w.into_vec()
@@ -78,6 +83,11 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<(String, Value)>> {
             tag::CELLS => Value::Cells(u16::try_from(varint::read(&mut r).ok()?).ok()?),
             tag::LINES => Value::Lines(u32::try_from(varint::read(&mut r).ok()?).ok()?),
             tag::WORDS => Value::Words(get_words(&mut r)?),
+            tag::FLAG => match r.read_u8().ok()? {
+                0 => Value::Flag(false),
+                1 => Value::Flag(true),
+                _ => return None,
+            },
             _ => return None,
         };
         args.push((name, value));

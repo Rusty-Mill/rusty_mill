@@ -66,6 +66,8 @@ pub enum Ty {
     /// A list of UTF-8 texts. From text it is one item; a front end
     /// gathers a repeated flag into one list.
     Words,
+    /// On or off. From text it is `true` or `false`.
+    Flag,
 }
 
 impl Ty {
@@ -85,6 +87,11 @@ impl Ty {
             },
             Self::Lines => Value::Lines(text.parse().map_err(|_| bad())?),
             Self::Words => Value::Words(vec![text.to_owned()]),
+            Self::Flag => Value::Flag(match text {
+                "true" => true,
+                "false" => false,
+                _ => return Err(bad()),
+            }),
         })
     }
 
@@ -98,6 +105,7 @@ impl Ty {
                 | (Self::Cells, Value::Cells(_))
                 | (Self::Lines, Value::Lines(_))
                 | (Self::Words, Value::Words(_))
+                | (Self::Flag, Value::Flag(_))
         )
     }
 }
@@ -111,6 +119,7 @@ impl fmt::Display for Ty {
             Self::Cells => f.write_str("cell count"),
             Self::Lines => f.write_str("line count"),
             Self::Words => f.write_str("text list"),
+            Self::Flag => f.write_str("flag (true or false)"),
         }
     }
 }
@@ -124,6 +133,7 @@ pub enum Value {
     Cells(u16),
     Lines(u32),
     Words(Vec<String>),
+    Flag(bool),
 }
 
 /// One parameter of a request.
@@ -420,6 +430,18 @@ const fn launch(name: &'static str, ty: Ty, doc: &'static str) -> Param {
     }
 }
 
+/// An optional parameter of `terminal.format`.
+const fn capture(name: &'static str, doc: &'static str) -> Param {
+    Param {
+        name,
+        ty: Ty::Flag,
+        doc,
+        presence: Presence::Optional {
+            needs: Features::CAPTURE,
+        },
+    }
+}
+
 const BLOCK: Param = required("block", Ty::Id(Entity::Block), "The block to act on.");
 const COLS: Param = required("cols", Ty::Cells, "Width in cells.");
 const ROWS: Param = required("rows", Ty::Cells, "Height in cells.");
@@ -591,7 +613,8 @@ pub static CATALOG: &[Method] = &[
     },
     Method {
         name: "terminal.format",
-        doc: "Read the terminal's screen as text, after some lines of its history.",
+        doc: "Read the terminal's screen as text, after some lines of its history: one line \
+              per row, without trailing blanks.",
         params: &[
             BLOCK,
             required(
@@ -599,10 +622,41 @@ pub static CATALOG: &[Method] = &[
                 Ty::Lines,
                 "How many scrollback lines above the screen to include.",
             ),
+            capture(
+                "trim",
+                "Leave out the blank lines before the first and after the last line with text.",
+            ),
+            capture(
+                "unwrap",
+                "Join rows the program's text wrapped onto into one line, keeping their blanks.",
+            ),
+            capture(
+                "vt",
+                "Keep colors and attributes as SGR escape sequences, each line starting from \
+                 the default style and returning to it.",
+            ),
         ],
         needs: Features::BLOCK_CALL,
         returns: Returns::Text,
         build: |req, a| block_call(req, a, "terminal.format"),
+    },
+    Method {
+        name: "terminal.send-keys",
+        doc: "Press keys in the terminal, in order, encoded as its program expects them. \
+              Needs the lease.",
+        params: &[
+            BLOCK,
+            required(
+                "key",
+                Ty::Words,
+                "A key: a character, or one of enter, tab, space, backspace, escape, up, down, \
+                 left, right, home, end, page-up, page-down, insert, delete, f1 to f12; after \
+                 any of `ctrl+`, `alt+` and `shift+`, as in `ctrl+c`. Repeat the flag for each.",
+            ),
+        ],
+        needs: Features::BLOCK_CALL,
+        returns: Returns::Unanswered,
+        build: |req, a| block_call(req, a, "terminal.send-keys"),
     },
     Method {
         name: "terminal.pwd",

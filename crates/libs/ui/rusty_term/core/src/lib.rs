@@ -46,12 +46,12 @@ mod webp;
 
 #[cfg(feature = "gui")]
 pub use bidi::mirrored as bidi_mirrored;
+#[cfg(feature = "gui")]
+pub use cell::char_width;
 pub use cell::{
     ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_MASK, ATTR_REVERSE,
-    ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, UnderlineStyle, WIDE_TRAILER,
+    ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell, UnderlineStyle, WIDE_TRAILER,
 };
-#[cfg(feature = "gui")]
-pub use cell::{Cell, char_width};
 pub use color::Theme;
 #[cfg(feature = "gui")]
 pub use color::ensure_contrast;

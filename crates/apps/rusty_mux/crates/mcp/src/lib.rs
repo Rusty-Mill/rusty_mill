@@ -43,7 +43,7 @@ enum Shape {
 fn shape(method: &Method) -> Shape {
     match method.name {
         "attach" | "detach" | "acquire-lease" | "release-lease" | "sync" => Shape::Connection,
-        "input" | "resize" => Shape::Leased,
+        "input" | "resize" | "terminal.send-keys" => Shape::Leased,
         _ => Shape::Plain,
     }
 }
@@ -175,7 +175,7 @@ fn flags(method: &Method, arguments: Option<&Value>) -> Result<Vec<String>, Stri
                 .ok_or_else(|| format!("{}: `{name}` must be a list of strings", method.name))?,
             _ => vec![scalar(value).ok_or_else(|| {
                 format!(
-                    "{}: `{name}` must be a string or a non-negative integer",
+                    "{}: `{name}` must be a string, a non-negative integer or a boolean",
                     method.name
                 )
             })?],
@@ -186,10 +186,11 @@ fn flags(method: &Method, arguments: Option<&Value>) -> Result<Vec<String>, Stri
 }
 
 fn scalar(value: &Value) -> Option<String> {
-    match (value.as_str(), value.as_u64()) {
-        (Some(text), _) => Some(text.to_owned()),
-        (None, Some(n)) => Some(n.to_string()),
-        (None, None) => None,
+    match (value.as_str(), value.as_u64(), value.as_bool()) {
+        (Some(text), ..) => Some(text.to_owned()),
+        (None, Some(n), _) => Some(n.to_string()),
+        (None, None, Some(on)) => Some(on.to_string()),
+        (None, None, None) => None,
     }
 }
 

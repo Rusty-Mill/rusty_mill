@@ -12,7 +12,7 @@ use crate::{Action, Bind, Call, Config, EVENTS, Problem, Rule, Run, is_arg_name,
 ///   letters, digits, `.`, `_` or `-` that is not a catalog method, the
 ///   argument names it takes, and a non-empty array of requests;
 /// - a request is `{"call": METHOD, "args"?: {PARAM: VALUE}}`, each value a
-///   string or a non-negative integer; a string's `${arg}` must name a
+///   string, a non-negative integer or a boolean; a string's `${arg}` must name a
 ///   declared argument (other `${...}`, such as `${HOME}`, is left alone);
 ///   every parameter but an id is required, since an id can come from the
 ///   environment, and a value without a placeholder must suit its type;
@@ -353,7 +353,7 @@ impl Check {
                 None => {
                     self.problem(
                         &format!("{at}.{key}"),
-                        "expected a string or a non-negative integer",
+                        "expected a string, a non-negative integer or a boolean",
                     );
                     None
                 }
@@ -409,12 +409,14 @@ fn has_placeholder(text: &str) -> bool {
     placeholders(text).next().is_some()
 }
 
-/// A string as itself, a non-negative integer in decimal.
+/// A string as itself, a non-negative integer in decimal, a boolean as
+/// `true` or `false`.
 fn text(value: &Value) -> Option<String> {
-    match (value.as_str(), value.as_u64()) {
-        (Some(text), _) => Some(text.to_owned()),
-        (None, Some(n)) => Some(n.to_string()),
-        (None, None) => None,
+    match (value.as_str(), value.as_u64(), value.as_bool()) {
+        (Some(text), ..) => Some(text.to_owned()),
+        (None, Some(n), _) => Some(n.to_string()),
+        (None, None, Some(on)) => Some(on.to_string()),
+        (None, None, None) => None,
     }
 }
 

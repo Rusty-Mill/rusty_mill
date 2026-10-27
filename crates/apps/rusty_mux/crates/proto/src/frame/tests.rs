@@ -860,3 +860,26 @@ fn block_call_words_round_trip_and_are_bounded() {
         Err(Error::InvalidField { field: 23, .. })
     ));
 }
+
+#[test]
+fn block_call_flags_round_trip_and_are_one_bit() {
+    round_trip(Message::BlockCall {
+        req: 1,
+        block: BlockId::from_uuid(Uuid::nil()),
+        method: "terminal.format".into(),
+        args: vec![
+            ("trim".into(), Value::Flag(true)),
+            ("vt".into(), Value::Flag(false)),
+        ],
+    });
+    let frame = raw_frame(0x0f, |out| {
+        out.varint(REQ_ID, 1)
+            .bytes(4, &[9; 16])
+            .bytes(22, b"terminal.format")
+            .bytes(23, b"\x02vt\x07\x02");
+    });
+    assert!(matches!(
+        decode(&frame),
+        Err(Error::InvalidField { field: 23, .. })
+    ));
+}
