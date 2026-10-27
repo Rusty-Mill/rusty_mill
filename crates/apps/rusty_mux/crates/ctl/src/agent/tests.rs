@@ -393,48 +393,54 @@ fn private_settings_stay_private() {
 /// grants: a settings file with an explicit owner-only DACL, in a broader
 /// directory whose path has words like `Users` in it, stays so through
 /// setup, its backup, an update and remove. Checked on the security
-/// descriptor itself (SDDL from `Get-Acl`), by SID, not by account names.
+/// descriptor's access rules (`Get-Acl`), by SID, not by account names.
 #[cfg(windows)]
 #[test]
 fn private_settings_stay_private_on_windows() {
-    // The DACL of `path` in SDDL, and the current user's SID.
-    let dacl = |path: &Path| -> (String, String) {
+    // Whether `path`'s DACL is protected, then one line per entry: its
+    // SID (as a SID, never an account name or SDDL alias such as `LA`),
+    // allow or deny, rights, and whether it is inherited.
+    const DACL: &str = "$acl = Get-Acl -LiteralPath $env:ACL_PATH; \
+        $acl.AreAccessRulesProtected; \
+        $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | \
+        ForEach-Object { '{0} {1} {2} {3}' -f $_.IdentityReference.Value, \
+        $_.AccessControlType, [int]$_.FileSystemRights, $_.IsInherited }";
+    let dacl = |path: &Path| -> (bool, Vec<String>) {
         let out = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "(Get-Acl -LiteralPath $env:ACL_PATH).Sddl; \
-                 [Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
-            ])
+            .args(["-NoProfile", "-NonInteractive", "-Command", DACL])
             .env("ACL_PATH", path)
             .output()
             .expect("powershell");
         assert!(out.status.success(), "{out:?}");
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
-        let sddl = lines.next().expect("sddl").to_owned();
-        let sid = lines.next().expect("sid").to_owned();
-        let dacl = sddl.split_once("D:").expect("a DACL").1;
-        let dacl = dacl.split_once("S:").map_or(dacl, |(d, _)| d).to_owned();
-        (dacl, sid)
+        let protected = lines.next() == Some("True");
+        (protected, lines.map(str::to_owned).collect())
     };
-    // Protected (no inherited entries) with one allow-full-access entry,
-    // for the current user.
+    let me = {
+        let out = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+            ])
+            .output()
+            .expect("powershell");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    assert!(me.starts_with("S-1-"), "the current user's SID: {me}");
+    // Protected, with one entry: full control (0x1F01FF) allowed to the
+    // current user, not inherited.
     let owner_only = |path: &Path| {
-        let (dacl, sid) = dacl(path);
-        let (flags, aces) = dacl.split_once('(').expect("an entry");
-        let aces: Vec<&str> = aces.trim_end_matches(')').split(")(").collect();
-        let ok = flags.contains('P') && aces == [format!("A;;FA;;;{sid}").as_str()];
-        assert!(ok, "{}: D:{dacl}", path.display());
+        let (protected, entries) = dacl(path);
+        let ok = protected && entries == [format!("{me} Allow 2032127 False")];
+        assert!(ok, "{}: protected={protected} {entries:?}", path.display());
     };
     let dir = scratch().join("Users Everyone SYSTEM");
     fs::create_dir_all(&dir).expect("dir");
-    let (parent, _) = dacl(&dir);
-    assert!(
-        parent.matches('(').count() > 1,
-        "the parent is broader: D:{parent}"
-    );
+    let (_, parent) = dacl(&dir);
+    assert!(parent.len() > 1, "the parent is broader: {parent:?}");
     let settings = dir.join("settings.json");
     fs::write(&settings, "{}").expect("write");
     platform_windows::fs::restrict_to_owner(&settings).expect("restrict");
