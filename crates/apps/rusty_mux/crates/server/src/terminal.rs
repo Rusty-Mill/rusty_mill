@@ -69,7 +69,9 @@ pub(crate) fn format(grid: &Grid, capture: Capture, max: usize) -> String {
 }
 
 /// `cells` as text without trailing blanks; with `vt`, each change of
-/// style as one SGR sequence, ending in the default style.
+/// style as one SGR sequence that resets first, so a non-empty line opens
+/// with one even in the default style and ends in the default style; it
+/// prints the same under any pen.
 fn line(cells: &[Cell], clusters: &[String], vt: bool) -> String {
     let len = match vt {
         true => cells
@@ -79,12 +81,14 @@ fn line(cells: &[Cell], clusters: &[String], vt: bool) -> String {
         false => cells.len(),
     };
     let blank = Style::of(&Cell::blank());
-    let mut style = blank;
+    // `None` until the first cell, which always sets its style.
+    let mut style = None;
     let mut text = String::new();
     for cell in cells[..len].iter().filter(|c| !is_trailer(c)) {
-        if vt && Style::of(cell) != style {
-            style = Style::of(cell);
-            style.sgr(&mut text);
+        if vt && style != Some(Style::of(cell)) {
+            let now = Style::of(cell);
+            now.sgr(&mut text);
+            style = Some(now);
         }
         text.push(cell.ch);
         if let Some(rest) = usize::from(cell.cluster)
@@ -94,7 +98,7 @@ fn line(cells: &[Cell], clusters: &[String], vt: bool) -> String {
             text.push_str(rest);
         }
     }
-    if vt && style != blank {
+    if style.is_some_and(|s| s != blank) {
         text.push_str("\x1b[0m");
     }
     if !vt {
@@ -465,7 +469,7 @@ mod tests {
         let styled = screen(4, 2, "abc\x1b[41m \x1b[0m\u{4e2d}".as_bytes());
         assert_eq!(format(&styled, unwrap, usize::MAX), "abc \u{4e2d}");
         let text = format(&styled, vt, usize::MAX);
-        assert!(text.starts_with("abc\x1b[0;48;2;"), "{text:?}");
+        assert!(text.starts_with("\x1b[0mabc\x1b[0;48;2;"), "{text:?}");
         assert!(text.ends_with(" \x1b[0m\u{4e2d}"), "{text:?}");
     }
 
@@ -491,6 +495,35 @@ mod tests {
     }
 
     #[test]
+    fn vt_lines_print_the_same_under_any_pen() {
+        let source = screen(8, 3, b"abc\r\nab\x1b[1;32mcd\x1b[0m\r\n\x1b[44mxy");
+        let vt = Capture {
+            vt: true,
+            ..capture(0)
+        };
+        let text = format(&source, vt, usize::MAX);
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(lines[0], "\x1b[0mabc");
+        assert!(lines[1].starts_with("\x1b[0mab\x1b[0;1;"), "{text:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.ends_with("\x1b[0m") || !l.contains("\x1b[0;"))
+        );
+        // Replayed under a bold red pen, each line reproduces its source row.
+        for (y, line) in lines.iter().enumerate() {
+            let mut replay = Vec::from(&b"\x1b[1;31;47m"[..]);
+            replay.extend_from_slice(line.as_bytes());
+            let copy = screen(8, 1, &replay);
+            let n = line.chars().filter(|c| c.is_alphabetic()).count();
+            let source_row = source.line_cells(y).expect("source row").0;
+            let copy_row = copy.line_cells(0).expect("copy row").0;
+            let styles = |row: &[Cell]| row.iter().take(n).map(Style::of).collect::<Vec<_>>();
+            assert_eq!(styles(&copy_row), styles(&source_row), "row {y}: {line:?}");
+        }
+    }
+
+    #[test]
     fn vt_keeps_a_colored_blank_at_the_end() {
         let grid = screen(4, 1, b"a\x1b[41m \x1b[0m");
         let vt = Capture {
@@ -499,7 +532,7 @@ mod tests {
         };
         let text = format(&grid, vt, usize::MAX);
         assert!(
-            text.starts_with('a') && text.ends_with(" \x1b[0m"),
+            text.starts_with("\x1b[0ma") && text.ends_with(" \x1b[0m"),
             "{text:?}"
         );
     }
