@@ -556,6 +556,60 @@ fn a_chain_the_server_cannot_run_sends_nothing() {
     }
 }
 
+/// A server without `LAUNCH` would ignore a launch argument and start its
+/// shell, so ctl refuses before sending anything, typed, scripted or run.
+#[test]
+fn launch_arguments_are_refused_by_a_server_that_would_ignore_them() {
+    let window = "00000000-0000-0000-0000-000000000001";
+    let create = [
+        "create-block",
+        "--window",
+        window,
+        "--cols",
+        "80",
+        "--rows",
+        "24",
+    ];
+    let launches: [&[&str]; 3] = [
+        &["--command", "true"],
+        &["--command", "sh", "--arg", "-c", "--arg", "exit 3"],
+        &["--cwd", "/tmp"],
+    ];
+    for launch in launches {
+        let (path, frames) = legacy_server();
+        let args: Vec<&str> = create.iter().chain(launch).copied().collect();
+        let output = ctl(&path, &args);
+        assert_eq!(output.status.code(), Some(1), "{launch:?}");
+        let reason = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            reason.contains("does not support create-block with --"),
+            "{reason}"
+        );
+        assert_eq!(
+            frames.recv_timeout(PATIENCE).expect("count"),
+            0,
+            "{launch:?}"
+        );
+    }
+
+    let (path, frames) = legacy_server();
+    let output = ctl(&path, &["run", "--window", window, "--", "true"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(frames.recv_timeout(PATIENCE).expect("count"), 0, "run");
+
+    let config = config_file(
+        "launch",
+        &format!(
+            r#"{{"actions": [{{"name": "go", "run": [{{"call": "create-block", "args": {{"window": "{window}", "cols": 80, "rows": 24, "command": "true"}}}}]}}]}}"#
+        ),
+    );
+    let (path, frames) = legacy_server();
+    let output = with_config(&path, &config, &["do", "go"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(frames.recv_timeout(PATIENCE).expect("count"), 0, "do");
+    std::fs::remove_file(&config).expect("cleanup");
+}
+
 fn cursor_of(line: &str) -> String {
     line.strip_prefix("cursor ")
         .expect("a cursor line")

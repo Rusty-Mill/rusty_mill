@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use rusty_mux_core::Event;
-use rusty_mux_proto::schema::{CATALOG, Method, Returns, Value};
+use rusty_mux_proto::schema::{CATALOG, Returns, Value};
 use rusty_mux_proto::{Code, Cursor, Entry, Features, Message};
 use rusty_uuid::Uuid;
 
@@ -508,13 +508,13 @@ impl<S: io::Read + Write> Session<'_, S> {
     fn calls(&mut self, calls: &[Call]) -> Result<(), Failure> {
         // Everything any method needs, and sync to confirm unanswered ones.
         // The screen an attach sends is ignored.
-        let wanted = CATALOG
-            .iter()
-            .fold(Features::SYNC, |all, m| all.union(m.needs));
+        let wanted = CATALOG.iter().fold(Features::SYNC, |all, m| {
+            all.union(m.needs_for(m.params.iter().map(|p| p.name)))
+        });
         let (features, _) = self.hello(wanted, None)?;
         // Refuse a chain the server cannot run before any of it runs.
         for call in calls {
-            require(features, call.method)?;
+            require(features, call)?;
         }
         let mut reqs = 1..;
         for call in calls {
@@ -694,18 +694,35 @@ impl<S: io::Read + Write> Session<'_, S> {
     }
 }
 
-/// Fails unless the server can run `method` as ctl sends it.
-fn require(features: Features, method: &Method) -> Result<(), Failure> {
+/// Fails unless the server can run `call` as ctl sends it, with every
+/// argument it is given: a server would ignore an optional one it lacks
+/// the feature for.
+fn require(features: Features, call: &Call) -> Result<(), Failure> {
+    let method = call.method;
     if method.returns == Returns::Unanswered {
         require_sync(features)?;
     }
-    if features.contains(method.needs) {
-        return Ok(());
+    if !features.contains(method.needs) {
+        return Err(Failure::Failed(format!(
+            "the server does not support {}",
+            method.name
+        )));
     }
-    Err(Failure::Failed(format!(
-        "the server does not support {}",
-        method.name
-    )))
+    let given = call.args.iter().map(|(name, _)| *name);
+    if !features.contains(method.needs_for(given)) {
+        let optional: Vec<String> = call
+            .args
+            .iter()
+            .filter(|(name, _)| method.needs_for([*name]) != method.needs)
+            .map(|(name, _)| format!("--{name}"))
+            .collect();
+        return Err(Failure::Failed(format!(
+            "the server does not support {} with {}",
+            method.name,
+            optional.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 fn require_sync(features: Features) -> Result<(), Failure> {
@@ -715,4 +732,37 @@ fn require_sync(features: Features) -> Result<(), Failure> {
     Err(Failure::Failed(
         "the server does not support sync, needed to confirm input".into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_block(line: &str) -> Call {
+        let args: Vec<String> = line.split_whitespace().map(String::from).collect();
+        match cli::parse(&args, &Defaults::default()) {
+            Ok(Invocation {
+                command: Command::Calls(mut calls),
+                ..
+            }) => calls.remove(0),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_launch_arguments_need_the_launch_feature() {
+        let plain = create_block(
+            "create-block --window 00000000-0000-0000-0000-000000000001 --cols 80 --rows 24",
+        );
+        assert!(require(Features::NONE, &plain).is_ok());
+        let launched = create_block(
+            "create-block --window 00000000-0000-0000-0000-000000000001 --cols 80 --rows 24 \
+             --cwd /tmp",
+        );
+        assert!(matches!(
+            require(Features::NONE, &launched),
+            Err(Failure::Failed(why)) if why.ends_with("with --cwd")
+        ));
+        assert!(require(Features::LAUNCH, &launched).is_ok());
+    }
 }
