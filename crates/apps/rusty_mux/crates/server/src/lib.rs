@@ -113,7 +113,7 @@ async fn serve_for(
         .and_then(|addr| addr.as_pathname().map(std::path::absolute))
         .and_then(Result::ok);
     let state = state::State::shared(config, socket);
-    rusty_tokio::task::spawn_local(state::watch_processes(state.clone()));
+    rusty_tokio::task::spawn_local(state::watch_processes(std::rc::Rc::downgrade(&state)));
     loop {
         let (stream, _) = listener.accept().await?;
         match allowed(&stream) {

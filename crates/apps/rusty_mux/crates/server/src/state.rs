@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time::Duration;
 
 use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Mux, Size};
@@ -63,8 +63,9 @@ struct BlockRt {
     status: Records,
     /// The working directory and title last announced.
     seen: terminal::Seen,
-    /// The foreground process group last announced, at first the program's.
-    foreground: Option<u32>,
+    /// The foreground process group last announced, at first the program's;
+    /// `None` where the platform tells none.
+    foreground: Option<process::Foreground>,
     reader: JoinHandle<()>,
 }
 
@@ -413,7 +414,15 @@ impl State {
         let (pty, process) = pty::spawn(&config, size, &env)
             .map_err(|e| format!("spawning the block's program: {e}"))?;
         let pty = Rc::new(pty);
-        let foreground = process.pid();
+        // Named after the program as started, so a block does not announce
+        // its own program once it has exec'd.
+        let foreground = process.pid().map(|pid| process::Foreground {
+            pid,
+            name: std::path::Path::new(&config.program)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        });
         self.mux.add_block(block, window, size)?;
         let reader = rusty_tokio::task::spawn_local(pump(shared.clone(), block, pty.clone()));
         let mut grid = crate::checkpoint::grid(size);
@@ -524,7 +533,7 @@ impl State {
         // What a terminal host would relay, such as the bell; clients
         // already have the raw output.
         rt.grid.take_host_out();
-        self.check_process(block);
+        self.check_process(block, false);
         let frame = encode(&Message::Output {
             block,
             data: data.to_vec(),
@@ -545,25 +554,28 @@ impl State {
         replies
     }
 
-    /// Announces a new foreground process group in `block`, if one took
-    /// its terminal since the last check.
-    fn check_process(&mut self, block: BlockId) {
+    /// Announces the foreground process group of `block` if another took
+    /// its terminal since the last check, or, on a `refresh`, if its
+    /// program's name changed ([`process::Foreground::observe`]).
+    fn check_process(&mut self, block: BlockId, refresh: bool) {
         let Some(rt) = self.blocks.get_mut(&block) else {
             return;
         };
-        let now = rt.pty.foreground();
-        let Some(pid) = now.filter(|_| now != rt.foreground) else {
+        let (Some(pid), Some(seen)) = (rt.pty.foreground(), rt.foreground.as_mut()) else {
             return;
         };
-        rt.foreground = now;
-        let name = process::lookup(pid).map(|p| p.name).unwrap_or_default();
+        if !seen.observe(pid, refresh, process::lookup) {
+            return;
+        }
+        let name = seen.name.clone();
         in_step("process", self.mux.note_process(block, pid, name));
     }
 
-    /// [`Self::check_process`] for every block, then broadcasts.
+    /// [`Self::check_process`] for every block, names refreshed, then
+    /// broadcasts.
     fn check_processes(&mut self) {
         let blocks: Vec<BlockId> = self.blocks.keys().copied().collect();
-        blocks.into_iter().for_each(|b| self.check_process(b));
+        blocks.into_iter().for_each(|b| self.check_process(b, true));
         self.flush();
     }
 
@@ -780,10 +792,14 @@ fn reply(what: &str, messages: &[Message]) -> Result<Outcome, Refusal> {
 }
 
 /// Checks every block's foreground process group each [`PROCESS_POLL`],
-/// for as long as the server runs.
-pub(crate) async fn watch_processes(shared: Shared) {
+/// until the server's state is dropped. Holding it weakly, the poll never
+/// keeps a stopped server's state alive.
+pub(crate) async fn watch_processes(state: Weak<RefCell<State>>) {
     loop {
         rusty_tokio::time::sleep(PROCESS_POLL).await;
+        let Some(shared) = state.upgrade() else {
+            return;
+        };
         shared.borrow_mut().check_processes();
     }
 }
@@ -847,6 +863,30 @@ mod regression {
         Builder::new_current_thread()
             .build_local(&LocalOptions::default())
             .unwrap()
+    }
+
+    /// Dropping the state ends the poll; nothing else need stop it.
+    #[test]
+    fn the_process_poll_ends_with_the_state() {
+        runtime().block_on(async {
+            let shared = State::shared(
+                Config {
+                    program: "/bin/sh".into(),
+                    args: vec![],
+                    cwd: "/".into(),
+                },
+                None,
+            );
+            let poll = rusty_tokio::task::spawn_local(watch_processes(Rc::downgrade(&shared)));
+            // One pass over an empty state first.
+            rusty_tokio::time::sleep(PROCESS_POLL * 2).await;
+            assert!(!poll.is_finished());
+            drop(shared);
+            rusty_tokio::time::timeout(PROCESS_POLL * 4, poll)
+                .await
+                .expect("the poll outlived the state")
+                .unwrap();
+        });
     }
 
     fn fixture() -> (Shared, ClientId, BlockId, Inbox) {
