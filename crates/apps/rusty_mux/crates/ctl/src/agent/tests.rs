@@ -395,34 +395,41 @@ fn private_settings_stay_private() {
 #[cfg(windows)]
 #[test]
 fn private_settings_stay_private_on_windows() {
-    let acl = |path: &Path| {
+    // The access entries icacls lists, without the path it echoes first
+    // (which may itself contain words like `Users`).
+    let acl = |path: &Path| -> Vec<String> {
         let out = std::process::Command::new("icacls")
             .arg(path)
             .output()
             .expect("icacls");
         assert!(out.status.success(), "{out:?}");
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        let shown = path.display().to_string();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|line| {
+                line.trim()
+                    .strip_prefix(&shown)
+                    .unwrap_or(line)
+                    .trim()
+                    .to_owned()
+            })
+            .filter(|entry| entry.contains(":("))
+            .collect()
     };
+    let user = std::env::var("USERNAME").expect("USERNAME").to_lowercase();
     let owner_only = |path: &Path| {
-        let text = acl(path);
-        let broad = [
-            "(I)",
-            "Users",
-            "Everyone",
-            "Authenticated",
-            "SYSTEM",
-            "Administrators",
-        ];
-        assert!(
-            !broad.iter().any(|b| text.contains(b)),
-            "{}: {text}",
-            path.display()
+        let entries = acl(path);
+        let only_ours = matches!(
+            entries.as_slice(),
+            [entry] if entry.to_lowercase().ends_with(&format!("\\{user}:(f)"))
         );
+        assert!(only_ours, "{}: {entries:?}", path.display());
     };
     let dir = scratch();
     assert!(
-        acl(&dir).contains("(I)") || acl(&dir).contains("SYSTEM"),
-        "the parent is broader"
+        acl(&dir).len() > 1,
+        "the parent is broader: {:?}",
+        acl(&dir)
     );
     let settings = dir.join("settings.json");
     fs::write(&settings, "{}").expect("write");
