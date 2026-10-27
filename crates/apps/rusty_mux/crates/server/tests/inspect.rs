@@ -247,13 +247,19 @@ fn block_calls_are_checked_against_the_catalog() {
 fn an_oversized_listing_is_refused_and_the_connection_kept() {
     let path = start_server();
     let mut client = Client::connect_with(&path, INSPECT, None);
-    // Each name fits one frame, but five exceed the bound on one reply.
-    for n in 0..5u8 {
-        client.request(|req| Message::CreateSession {
-            req,
-            name: char::from(b'a' + n).to_string().repeat(1 << 20),
+    // Names are short, but enough sessions exceed the bound on one reply
+    // (4 MiB); the requests are sent at once, then confirmed by a sync.
+    let name = "a".repeat(rusty_mux_core::MAX_NAME);
+    for req in 0..16_000 {
+        client.send(&Message::CreateSession {
+            req: 1_000_000 + req,
+            name: name.clone(),
         });
     }
+    assert!(matches!(
+        client.answer(|req| Message::Sync { req }).as_slice(),
+        [Message::Done { .. }]
+    ));
     let reason = refusal(client.answer(|req| Message::List { req }));
     assert!(reason.contains("list reply exceeds"), "{reason}");
     assert!(matches!(

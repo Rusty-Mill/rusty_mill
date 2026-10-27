@@ -10,6 +10,10 @@ pub enum Error {
     UnknownWindow(WindowId),
     UnknownBlock(BlockId),
     UnknownClient(ClientId),
+    /// A name is longer than [`MAX_NAME`](crate::MAX_NAME) bytes.
+    NameTooLong {
+        len: usize,
+    },
     /// A block with this id already exists.
     BlockExists(BlockId),
     ZeroSize {
@@ -41,6 +45,11 @@ impl fmt::Display for Error {
             Self::UnknownBlock(id) => write!(f, "unknown block {id}"),
             Self::UnknownClient(id) => write!(f, "unknown client {id}"),
             Self::BlockExists(id) => write!(f, "block {id} already exists"),
+            Self::NameTooLong { len } => write!(
+                f,
+                "name of {len} bytes is longer than {} bytes",
+                crate::MAX_NAME
+            ),
             Self::ZeroSize { cols, rows } => write!(f, "size {cols}x{rows} has a zero dimension"),
             Self::NotAttached { client, block } => {
                 write!(f, "client {client} is not attached to block {block}")

@@ -5,7 +5,7 @@
 mod common;
 
 use common::{Client, block_for, new_block, start_server, window_for};
-use rusty_mux_core::{BlockId, ClientId, EntityId, Event, SessionId};
+use rusty_mux_core::{BlockId, ClientId, EntityId, Event, MAX_NAME, SessionId};
 use rusty_mux_proto::{Code, Entry, Features, Message};
 
 const LABELS: Features = Features::CHECKPOINT_V3
@@ -206,4 +206,45 @@ fn disconnecting_needs_the_feature() {
         victim.answer(|req| Message::List { req }).last(),
         Some(Message::Done { .. })
     ));
+}
+
+#[test]
+fn an_oversized_name_is_refused_and_changes_nothing() {
+    let path = start_server();
+    let mut holder = Client::connect_with(&path, LABELS, None);
+    let block = block_for(&mut holder);
+    let mut watcher = Client::connect_with(&path, LABELS, None);
+    holder.request(rename(EntityId::Block(block), "build"));
+
+    let over = "x".repeat(MAX_NAME + 1);
+    for target in [EntityId::Block(block), EntityId::Client(watcher.id())] {
+        let answer = holder.answer(rename(target, &over));
+        assert_eq!(failed_code(&answer), None, "{target:?}");
+    }
+    let answer = holder.answer(|req| Message::CreateSession {
+        req,
+        name: over.clone(),
+    });
+    assert_eq!(failed_code(&answer), None);
+
+    // Both clients are still connected, the lease kept and the name too.
+    let listed = entries(&mut watcher);
+    assert!(listed.iter().any(|e| matches!(
+        e,
+        Entry::Block { block: b, name, holder: Some(h), .. }
+            if *b == block && name == "build" && *h == holder.id()
+    )));
+    assert_eq!(
+        listed
+            .iter()
+            .filter(|e| matches!(e, Entry::Client { .. }))
+            .count(),
+        2
+    );
+    assert!(!watcher.events.iter().any(|(_, e)| matches!(
+        e,
+        Event::SessionCreated { .. } | Event::ClientRenamed { .. }
+    )));
+    // Exactly the limit is accepted.
+    holder.request(rename(EntityId::Block(block), &"x".repeat(MAX_NAME)));
 }

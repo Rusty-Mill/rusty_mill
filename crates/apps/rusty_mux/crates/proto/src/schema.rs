@@ -464,7 +464,11 @@ const fn capture(name: &'static str, doc: &'static str) -> Param {
 }
 
 const BLOCK: Param = required("block", Ty::Id(Entity::Block), "The block to act on.");
-const NEW_NAME: Param = required("name", Ty::Text, "The new name; empty clears it.");
+const NEW_NAME: Param = required(
+    "name",
+    Ty::Text,
+    "The new name, at most 256 bytes; empty clears it.",
+);
 const COLS: Param = required("cols", Ty::Cells, "Width in cells.");
 const ROWS: Param = required("rows", Ty::Cells, "Height in cells.");
 
@@ -473,7 +477,11 @@ pub static CATALOG: &[Method] = &[
     Method {
         name: "create-session",
         doc: "Create a named session.",
-        params: &[required("name", Ty::Text, "The session's name.")],
+        params: &[required(
+            "name",
+            Ty::Text,
+            "The session's name, at most 256 bytes.",
+        )],
         needs: Features::NONE,
         returns: Returns::Created(Entity::Session),
         build: |req, a| {
@@ -492,7 +500,7 @@ pub static CATALOG: &[Method] = &[
                 Ty::Id(Entity::Session),
                 "The session to add the window to.",
             ),
-            required("name", Ty::Text, "The window's name."),
+            required("name", Ty::Text, "The window's name, at most 256 bytes."),
         ],
         needs: Features::NONE,
         returns: Returns::Created(Entity::Window),

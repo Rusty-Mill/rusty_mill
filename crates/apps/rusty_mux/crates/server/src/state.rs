@@ -221,8 +221,13 @@ impl State {
         };
         match message {
             M::CreateSession { req, name } => {
-                let session = self.mux.create_session(name);
-                (req, Ok(Outcome::Done(Some(session.uuid()))))
+                let result = self.mux.create_session(name);
+                (
+                    req,
+                    result
+                        .map(|s| Outcome::Done(Some(s.uuid())))
+                        .map_err(Refusal::from),
+                )
             }
             M::CreateWindow { req, session, name } => {
                 let result = self.mux.create_window(session, name);
@@ -988,7 +993,7 @@ mod regression {
         let (out, inbox, _) = outbox();
         let mut state = shared.borrow_mut();
         let client = state.connect(out, Features::CHECKPOINT_V3, None);
-        let session = state.mux.create_session("s");
+        let session = state.mux.create_session("s").unwrap();
         let window = state.mux.create_window(session, "w").unwrap();
         let Outcome::Done(Some(id)) = state
             .create_block(

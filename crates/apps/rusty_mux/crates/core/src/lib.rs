@@ -14,7 +14,7 @@
 //! use rusty_mux_core::{Event, Mux, Size};
 //!
 //! let mut mux = Mux::new();
-//! let session = mux.create_session("work");
+//! let session = mux.create_session("work")?;
 //! let window = mux.create_window(session, "main")?;
 //! let block = mux.create_block(window, Size::new(80, 24)?)?;
 //! let client = mux.connect();
@@ -35,4 +35,4 @@ pub use entity::{Block, Client, Session, Size, Window};
 pub use error::Error;
 pub use event::{Event, ExitStatus, Progress};
 pub use id::{BlockId, ClientId, EntityId, SessionId, WindowId};
-pub use mux::Mux;
+pub use mux::{MAX_NAME, Mux};
