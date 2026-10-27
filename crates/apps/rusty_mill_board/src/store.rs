@@ -10,13 +10,15 @@ use crate::domain::{BoardError, Card, Event, next_event_id};
 /// Persistence for cards and their event log.
 ///
 /// **A commit is a compare-and-swap**: `replace` succeeds only if the stored card
-/// is at `card.rev - 1`, else [`BoardError::Conflict`], and the card and its event
-/// become visible together. The store assigns the event's id inside the commit, so
-/// event ids are in commit order.
+/// is at `card.rev - 1`, else [`BoardError::Conflict`]. The store assigns each
+/// event's id as it records it, so ids are in the order events were recorded.
 ///
-/// Adapters differ in two ways the board allows for. Events may live only as long
-/// as the process ([`crate::tick::TickStore`]: rusty_tick keeps no change log).
-/// A commit may take more than one fenced step (the tick adapter's `card_plan`),
+/// What else a commit promises depends on the adapter. [`MemStore`] records the
+/// card and its event in one step under its lock, so they become visible together
+/// and event order is commit order. [`crate::tick::TickStore`] writes the card to
+/// rusty_tick first and records the event after it: a reader can see the card
+/// before its event, events live only as long as the process (rusty_tick keeps no
+/// change log), and one commit may take more than one fenced step (`card_plan`),
 /// so the revision it returns can be ahead of `card.rev`.
 pub trait Store: Send + Sync {
     /// One card.

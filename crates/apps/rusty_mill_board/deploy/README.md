@@ -51,6 +51,11 @@ off the host so a lost disk does not take them all.
 
 ## Upgrade and rollback
 
+Upgrading from a board file (`MILL_BOARD_STORE`): move the cards into rusty_tick first
+(`tools/migrate_artifact_board.py` for the artifact board), then replace `MILL_BOARD_STORE` and any
+`MILL_BOARD_BACKUP_*` lines in `board.env` with `MILL_BOARD_TICK_URL` and `RUSTY_TICK_TOKEN`. The
+service refuses to start while a retired line is present, rather than coming up empty in memory.
+
 Replace `/usr/local/bin/rusty_mill_board` and `systemctl restart mill-board`. Keep the previous
 binary beside it (`rusty_mill_board.prev`) to roll back.
 

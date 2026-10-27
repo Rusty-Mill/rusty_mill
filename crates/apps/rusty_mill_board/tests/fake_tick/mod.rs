@@ -22,6 +22,17 @@ struct State {
     clock: i64,
     /// Answer the next request whose method and path start like this with a 500, unserved.
     fail_next: Option<(String, String)>,
+    /// After each of the next `n` requests whose method and path start like this is
+    /// served, another writer puts this board document on the task, moving its version.
+    race: Option<Race>,
+}
+
+struct Race {
+    method: String,
+    path: String,
+    left: usize,
+    task: Uuid,
+    doc: Value,
 }
 
 /// A shared handle: the store owns one clone, the test keeps another to act as the owner.
@@ -88,6 +99,19 @@ impl FakeTick {
     /// Fail the next `method` request whose path starts with `path`, before it is served.
     pub fn fail_next(&self, method: &str, path: &str) {
         self.0.lock().expect("lock").fail_next = Some((method.into(), path.into()));
+    }
+
+    /// After each of the next `times` `method` requests whose path starts with `path` is
+    /// served, another writer puts `doc` as `task`'s board document, moving its version as
+    /// a fenced write does: a write landing between two reads of one card.
+    pub fn race_after(&self, method: &str, path: &str, times: usize, task: Uuid, doc: Value) {
+        self.0.lock().expect("lock").race = Some(Race {
+            method: method.into(),
+            path: path.into(),
+            left: times,
+            task,
+            doc,
+        });
     }
 
     /// The task as rusty_tick holds it.
@@ -249,6 +273,26 @@ fn parse(id: &str) -> Uuid {
     Uuid::parse_str(id).unwrap_or_else(|_| Uuid::nil())
 }
 
+impl FakeTick {
+    fn run_race(state: &mut State, request: &TickRequest<'_>) {
+        let Some(race) = state.race.as_mut() else {
+            return;
+        };
+        if race.method != request.method || !request.path.starts_with(race.path.as_str()) {
+            return;
+        }
+        race.left -= 1;
+        let (task, doc, done) = (race.task, race.doc.clone(), race.left == 0);
+        if done {
+            state.race = None;
+        }
+        state.clock += 1;
+        let now = state.clock;
+        state.docs.insert(("board".into(), task), (doc, now));
+        bump(state.tasks.get_mut(&task).expect("task"), now);
+    }
+}
+
 impl TickApi for FakeTick {
     fn send(&self, request: &TickRequest<'_>) -> Result<(u16, Value), BoardError> {
         let mut state = self.0.lock().expect("lock");
@@ -260,6 +304,8 @@ impl TickApi for FakeTick {
             state.fail_next = None;
             return Ok((500, json!({ "error": { "message": "injected" } })));
         }
-        Ok(Self::route(&mut state, request))
+        let served = Self::route(&mut state, request);
+        Self::run_race(&mut state, request);
+        Ok(served)
     }
 }

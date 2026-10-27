@@ -38,6 +38,31 @@ use rusty_mill_board::web::{Auth, Web, check_bind};
 /// How long a stop waits for running requests before it ends them.
 const DRAIN: Duration = Duration::from_secs(10);
 
+/// Settings of the removed board file and its backups (ADR-0012 step 6). A service configured
+/// with them would otherwise start an empty in-memory board and lose its writes at restart.
+const RETIRED_ENV: [&str; 4] = [
+    "MILL_BOARD_STORE",
+    "MILL_BOARD_BACKUP_DIR",
+    "MILL_BOARD_BACKUP_SECS",
+    "MILL_BOARD_BACKUP_KEEP",
+];
+
+/// Refuse to start while a retired setting is present, before anything is opened or started.
+fn refuse_retired_env() -> Result<(), String> {
+    let set: Vec<&str> = RETIRED_ENV
+        .into_iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .collect();
+    if set.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "retired setting(s) {}: the board file and its backups were removed and the cards live in \
+         rusty_tick (ADR-0012). Unset them and set MILL_BOARD_TICK_URL and RUSTY_TICK_TOKEN",
+        set.join(", ")
+    ))
+}
+
 /// Mill Board: kanban for humans and agents.
 #[derive(Parser)]
 struct Cli {
@@ -186,6 +211,7 @@ fn stop_on_signal(
 }
 
 fn run(cli: Cli) -> Result<(), String> {
+    refuse_retired_env()?;
     if cli.export_projects {
         let path = cli
             .projects

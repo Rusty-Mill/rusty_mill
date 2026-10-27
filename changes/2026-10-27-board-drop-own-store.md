@@ -7,7 +7,9 @@ changelog: Mill Board drops its own board file (`--store`) and backups (`--backu
 - **Removed:** the `rusty_multimodal_db` board file (`--store`, `MILL_BOARD_STORE`), its one-owner lock, and the
   in-process backups (`--backup-dir`, `--backup-secs`, `--backup-keep`). The cards were migrated into rusty_tick
   and the board has run on `--tick-url`; back up rusty_tick's data directory instead. Without `--tick-url` the
-  board lives in memory.
+  board lives in memory. A start with any of the retired `MILL_BOARD_STORE` / `MILL_BOARD_BACKUP_*` settings
+  still present is refused with the cutover steps, before anything opens, so an old service unit cannot come up
+  as an empty in-memory board.
 - **Fixed:** a card read from rusty_tick could pair a newer board document with an older revision when a write
   landed between the two reads, so an adopted execution link came back at a stale revision. A card read now
   checks the task's version again and starts over if it moved.
