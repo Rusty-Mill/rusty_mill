@@ -17,14 +17,15 @@ cat > ~/mill-identities.json <<'JSON'
  {"token": "REPLACE-human-token-xxxxxxxxxx", "actor": "nano",       "role": "human"}]
 JSON
 chmod 600 ~/mill-identities.json                 # refused otherwise
-rusty_mill_board --store ~/mill-board.mmap --http 127.0.0.1:8787 --identities ~/mill-identities.json
+RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.0.0.1:8787 --identities ~/mill-identities.json
 ```
 
 To keep a model inside one application of a monorepo, add `"projects": ["rocket_league"]` to its entry (names
 from the board's `--projects FILE`, which the server checks at start): that token cannot see, take or change
 cards of any other project, and `card_take` only ever returns its own.
 
-The simplest start is `rusty_mill_board --store ~/mill-board.mmap --http 127.0.0.1:8787 --settings-dir ~/.mill`:
+The simplest start is `rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.0.0.1:8787 --settings-dir ~/.mill`
+(with `RUSTY_TICK_TOKEN` set):
 the first start creates `~/.mill/identities.json` with an `admin` agent and prints its token once (open
 `http://127.0.0.1:8787/#token=...`), and agents are then added from the ⚙ settings view, which shows each new
 token once for you to paste into that model's client.

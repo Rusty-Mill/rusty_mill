@@ -76,7 +76,7 @@ impl Drop for Running<'_> {
 
 /// Serve until a stop begins ([`begin_stop`]), then spend at most `within` letting the work
 /// finish: first the requests being answered (until their last byte is written), then whatever
-/// `flight` still counts (MCP calls running on detached workers, a backup). `Ok(true)` if all of it
+/// `flight` still counts (MCP calls running on detached workers). `Ok(true)` if all of it
 /// finished; `Ok(false)` if the deadline ended it. One deadline for both, so a stop is bounded.
 ///
 /// # Errors

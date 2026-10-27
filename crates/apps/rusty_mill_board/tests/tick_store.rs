@@ -345,3 +345,29 @@ fn a_write_in_two_steps_returns_the_revision_a_read_sees_and_the_next_edit_names
         .expect("edit at the returned revision");
     assert_eq!(edited.rev, board.get(card.id).expect("get").rev);
 }
+
+/// A write landing between a card read's task and its documents: the read never pairs the
+/// newer document with the older revision; it reads again and returns both as they now stand.
+#[test]
+fn a_write_between_the_task_and_its_document_is_read_again_not_mixed() {
+    let (a, _b, tick, read) = two_readers();
+    let raced = json!({ "v": 1, "deps": [], "execution": link("raced") });
+    tick.race_after("GET", "/docs/board", 1, read.id, raced);
+
+    let card = a.get(read.id).expect("get").expect("card");
+    assert_eq!(
+        (card.rev, card.execution.map(|l| l.execution)),
+        (read.rev + 1, Some("raced".to_owned())),
+        "the document and the revision are from the same moment"
+    );
+}
+
+/// A task that moves under every read is a conflict, not a mixed card or an endless loop.
+#[test]
+fn a_card_that_keeps_moving_under_its_reads_is_a_conflict() {
+    let (a, _b, tick, read) = two_readers();
+    let raced = json!({ "v": 1, "deps": [] });
+    tick.race_after("GET", "/docs/board", 1_000, read.id, raced);
+
+    assert_eq!(a.get(read.id), Err(BoardError::Conflict));
+}

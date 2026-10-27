@@ -18,9 +18,10 @@
 //! then moves the version under one lock. So the version names the whole card
 //! (task and board document), and any write since the board's read fails with
 //! 412, the board's `Conflict`. A comment is an explicit append, so one the owner
-//! adds meanwhile is kept. Reads take the task before its document, so a read
-//! that races a write sees a newer document under an older version, and the
-//! write it makes is refused. Only `card_plan` with both a priority and
+//! adds meanwhile is kept. A card read takes the task, then its documents,
+//! then the task's version again, and starts over if a write moved it, so a card
+//! never pairs a newer document with an older revision. (`list` reads once: a
+//! card in it may be that mix, and a write made from it is refused.) Only `card_plan` with both a priority and
 //! dependencies needs two requests (task, then document), each fenced.
 //!
 //! **Events** are not durable: rusty_tick has no change log. They are kept in
@@ -51,6 +52,9 @@ const INBOX: Uuid = Uuid::from_u128(0x0000_0000_0000_7000_8000_0000_0000_0001);
 const OWNER: &str = "owner";
 /// The actor of events noticed in rusty_tick rather than made by the board.
 const TICK_ACTOR: &str = "tick";
+
+/// Reads of one card before giving up on a task that keeps moving under it.
+const READ_ATTEMPTS: usize = 8;
 
 /// The rusty_tick HTTP API, as this adapter needs it: one request under
 /// `/api/v1` (or `/health`), answered with its status and JSON body
@@ -476,20 +480,30 @@ impl<T: TickApi> TickStore<T> {
         Ok(tasks.into_iter().filter(Task::on_board).collect())
     }
 
-    /// Everything about one task, or `None` when it is not on the board.
+    /// Everything about one task, or `None` when it is not on the board. The task is
+    /// read again after its documents: if a write moved it meanwhile, the documents may
+    /// be newer than the version, so the read starts over. [`BoardError::Conflict`] if
+    /// the task keeps moving.
     fn parts(&self, id: Uuid) -> Result<Option<Parts>, BoardError> {
-        let Some(task) = self.task(id)?.filter(Task::on_board) else {
-            return Ok(None);
-        };
-        let project = self.projects()?.of(&task);
-        let doc = self.board_docs()?.remove(&id);
-        let comments = self.comments()?.remove(&id).unwrap_or_default();
-        Ok(Some(Parts {
-            task,
-            project,
-            doc,
-            comments,
-        }))
+        for _ in 0..READ_ATTEMPTS {
+            let Some(task) = self.task(id)?.filter(Task::on_board) else {
+                return Ok(None);
+            };
+            let project = self.projects()?.of(&task);
+            let doc = self.board_docs()?.remove(&id);
+            let comments = self.comments()?.remove(&id).unwrap_or_default();
+            let after = self.task(id)?.map(|t| t.version()).transpose()?;
+            if after != Some(task.version()?) {
+                continue;
+            }
+            return Ok(Some(Parts {
+                task,
+                project,
+                doc,
+                comments,
+            }));
+        }
+        Err(BoardError::Conflict)
     }
 
     /// The task changes from `current` to `next`, as a rusty_tick `PATCH` body.

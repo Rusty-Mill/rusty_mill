@@ -114,8 +114,10 @@ use std::collections::HashSet;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use rusty_mill_board::mmdb::MmdbStore;
 use rusty_mill_board::store::Store;
+use rusty_mill_board::tick::TickStore;
+
+mod fake_tick;
 
 const WORKERS: usize = 12;
 
@@ -174,12 +176,8 @@ fn racing_workers_never_share_a_card_in_memory() {
 }
 
 #[test]
-fn racing_workers_never_share_a_card_on_disk() {
-    let dir = std::env::temp_dir().join(format!("mill_take_race_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("dir");
-    racing_workers_never_share_a_card(MmdbStore::open(&dir.join("b.mmap")).expect("open"), 30);
-    let _ = std::fs::remove_dir_all(&dir);
+fn racing_workers_never_share_a_card_in_rusty_tick() {
+    racing_workers_never_share_a_card(TickStore::new(fake_tick::FakeTick::default()), 30);
 }
 
 #[test]

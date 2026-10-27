@@ -92,7 +92,7 @@ impl Web {
         }
     }
 
-    /// Count requests in `flight`, the counter the MCP tools and the backups share, so one stop
+    /// Count requests in `flight`, the counter the MCP tools share, so one stop
     /// waits for all of them and, once it has closed, every request is answered 503 unrun.
     #[must_use]
     pub fn with_in_flight(mut self, flight: Arc<InFlight>) -> Self {

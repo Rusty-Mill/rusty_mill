@@ -110,6 +110,12 @@ check(!(await page.locator("#side").isVisible()), "the toggle hides the panel");
 await page.click("#toggle");
 check(await page.locator("#side").isVisible(), "and shows it again");
 
+await api("card_add", { title: "Migrated card", project: "orch", tags: ["migrated:mill-board", "kept"] });
+await page.reload();
+await page.waitForSelector(".card");
+const chips = await page.locator(".card", { hasText: "Migrated card" }).locator(".tag:not(.proj)").allInnerTexts();
+check(chips.join() === "kept", `the migration marker is not shown as a chip (${chips.join()})`);
+
 check(errors.length === 0, `no page errors ${errors.join("; ")}`);
 await browser.close();
 if (failures.length) { console.error(`\n${failures.length} check(s) failed`); process.exit(1); }
