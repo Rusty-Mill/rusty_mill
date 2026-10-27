@@ -335,3 +335,30 @@ fn a_repeated_list_flag_gathers_its_values() {
     let err = parse(&args(&line)).expect_err("arguments without a command");
     assert!(err.contains("need a `command`"), "{err}");
 }
+
+#[test]
+fn agent_verbs_take_an_optional_dir() {
+    let agent = |line: &str| parse(&args(line)).map(|i| i.command);
+    assert_eq!(
+        agent("agent setup"),
+        Ok(Command::Agent(AgentCommand::Setup(None)))
+    );
+    assert_eq!(
+        agent("agent remove --dir .claude"),
+        Ok(Command::Agent(AgentCommand::Remove(Some(".claude".into()))))
+    );
+    assert_eq!(
+        agent("agent status --dir=x"),
+        Ok(Command::Agent(AgentCommand::Status(Some("x".into()))))
+    );
+    assert_eq!(agent("agent hook"), Ok(Command::Agent(AgentCommand::Hook)));
+    for bad in [
+        "agent",
+        "agent install",
+        "agent hook --dir x",
+        "agent setup --to x",
+        "agent setup x",
+    ] {
+        assert!(agent(bad).is_err(), "{bad}");
+    }
+}

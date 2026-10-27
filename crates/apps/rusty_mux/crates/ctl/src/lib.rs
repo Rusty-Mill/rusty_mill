@@ -16,6 +16,9 @@
 //! `config list` check and list it. `watch` follows events and runs the
 //! config's `on` rules for each.
 //!
+//! `agent setup|status|remove` installs, checks and removes a skill and a
+//! session-start hook for Claude Code.
+//!
 //! `wait --block B` blocks until the block's program exits and exits with
 //! its status; `wait --event KIND --FIELD VALUE` until a matching event.
 //! `run -- COMMAND ARG...` starts a program in a new block, in ctl's
@@ -30,6 +33,7 @@
 // reaches it.
 #![cfg_attr(not(any(unix, windows)), allow(dead_code))]
 
+mod agent;
 mod api;
 pub mod cli;
 mod config;
@@ -105,6 +109,11 @@ pub struct Env {
     /// The config file `do` and `config` read: `$RUSTY_MUX_CONFIG`, else
     /// `rusty_mux/config.json` in the config directory.
     pub config: Option<PathBuf>,
+    /// The agent config directory `agent` works in: `$CLAUDE_CONFIG_DIR`,
+    /// else `.claude` in the home directory.
+    pub agent_dir: Option<PathBuf>,
+    /// This program, which the agent's session-start hook runs.
+    pub ctl: Option<PathBuf>,
 }
 
 impl Env {
@@ -120,8 +129,18 @@ impl Env {
                 dir: std::env::current_dir().ok(),
             },
             config: config::default_path(),
+            agent_dir: agent_dir(),
+            ctl: std::env::current_exe().ok(),
         }
     }
+}
+
+fn agent_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return Some(dir.into());
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(Path::new(&home).join(".claude"))
 }
 
 fn id_var(name: &str) -> Option<Uuid> {
@@ -204,6 +223,10 @@ pub fn run_until(
         Command::Api(Api::List) => return write_line(out, &api::list(invocation.json)),
         Command::Api(Api::Describe(method)) => return write_line(out, &api::describe(method)),
         Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
+        Command::Agent(command) => {
+            return agent::run(&command, env, invocation.json, out)
+                .unwrap_or_else(|reason| report(err, Exit::Failed, &reason));
+        }
         Command::Do { action, args } => match action_calls(&action, &args, env) {
             Ok(calls) => invocation.command = Command::Calls(calls),
             Err((exit, reason)) => return report(err, exit, &reason),
@@ -404,6 +427,7 @@ fn execute(
         | Command::Api(_)
         | Command::Do { .. }
         | Command::Config(_)
+        | Command::Agent(_)
         | Command::Watch { .. } => Ok(Exit::Ok),
     }
 }
