@@ -20,7 +20,9 @@ use std::{
 
 use rusty_http::StatusCode;
 use rusty_mcp::{
-    auth::{AuthConfig, StaticTokenValidator, TokenValidator, ValidateFuture, VerifiedToken},
+    auth::{
+        AuthConfig, StaticTokenValidator, TokenError, TokenValidator, ValidateFuture, VerifiedToken,
+    },
     serve::{AuthorizedHandler, LimitedHandler},
 };
 use rusty_serve::{Request, Response, Server, SharedHandler, ShutdownHandle};
@@ -154,6 +156,32 @@ fn every_refusal_has_its_status_and_a_challenge() {
     stop.shutdown();
 }
 
+/// A validator whose dependencies are down.
+struct Down;
+
+impl TokenValidator for Down {
+    fn validate<'a>(&'a self, _token: &'a str) -> ValidateFuture<'a> {
+        Box::pin(async { Err(TokenError::Unavailable("jwks unreachable".into())) })
+    }
+}
+
+#[test]
+fn a_validator_outage_is_503_without_a_challenge() {
+    // A challenge would send a user with a good token through a pointless login.
+    let app = AuthorizedHandler::new(config(Down, &[]), |_req, _token| ok("{}"));
+    let (addr, stop) = serve(app);
+
+    let reply = get(addr, "/mcp", Some("Bearer good"));
+    assert_eq!(reply.status, 503);
+    assert!(reply.header("www-authenticate").is_none(), "{}", reply.head);
+    assert!(
+        reply.body.contains("temporarily_unavailable"),
+        "{}",
+        reply.body
+    );
+    stop.shutdown();
+}
+
 /// Holds a request inside the handler until the test lets it go.
 struct Gate {
     state: Mutex<(bool, bool)>, // (entered, open)
@@ -273,7 +301,7 @@ fn a_shed_request_never_reaches_token_validation() {
 }
 
 #[test]
-fn a_header_the_tower_layer_would_call_not_text_is_refused_unvalidated() {
+fn a_header_that_is_not_visible_text_is_refused_unvalidated() {
     // Trimming or tolerating a no-break space anywhere would accept `good`.
     let validations = Arc::new(AtomicUsize::new(0));
     let app = AuthorizedHandler::new(

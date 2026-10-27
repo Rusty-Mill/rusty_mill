@@ -1,11 +1,8 @@
-//! The decision half of [`crate::limits`], with no I/O.
+//! The decision half of [`crate::serve::LimitedHandler`], with no I/O.
 //!
-//! Counting requests in flight and describing the refusals are pure logic: an
-//! atomic counter and some constants. Nothing here knows about `tokio`, `axum`
-//! or `tower`, so the same core can sit behind any server's adapter. The
-//! adapter is the part that waits on a clock (the timeout) and turns a
-//! [`Rejection`] into its own response type. Status codes are
-//! `rusty_http`'s; the external `http` crate stays in the adapter.
+//! Counting requests in flight and describing the refusal are pure logic: an
+//! atomic counter and some constants. The adapter turns a [`Rejection`] into
+//! its own response type.
 
 use std::sync::{
     Arc,
@@ -36,13 +33,6 @@ impl Rejection {
         retry_after_secs: Some(RETRY_AFTER_SECS),
         body: "Service Unavailable: too many requests in flight",
     };
-
-    /// No response was produced within the timeout.
-    pub(crate) const TIMED_OUT: Self = Self {
-        status: StatusCode::GATEWAY_TIMEOUT,
-        retry_after_secs: None,
-        body: "Gateway Timeout: the server took too long to respond",
-    };
 }
 
 /// A bound on requests in flight. Cheap to clone; clones share one count,
@@ -65,10 +55,6 @@ impl Admission {
             in_flight: Arc::new(AtomicUsize::new(0)),
             max: max.max(1),
         }
-    }
-
-    pub(crate) fn max(&self) -> usize {
-        self.max
     }
 
     /// Slots free right now.
@@ -152,8 +138,9 @@ mod tests {
     #[test]
     fn a_limit_of_zero_is_clamped_to_one() {
         let admission = Admission::new(0);
-        assert_eq!(admission.max(), 1);
-        assert!(admission.try_admit().is_ok());
+        assert_eq!(admission.available(), 1);
+        let _held = admission.try_admit().expect("one slot");
+        assert!(admission.try_admit().is_err(), "and only one");
     }
 
     #[test]
@@ -187,13 +174,11 @@ mod tests {
     }
 
     #[test]
-    fn rejections_say_what_the_adapter_must_send() {
+    fn the_refusal_says_what_the_adapter_must_send() {
         assert_eq!(
             Rejection::OVERLOADED.status,
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(Rejection::OVERLOADED.retry_after_secs, Some(1));
-        assert_eq!(Rejection::TIMED_OUT.status, StatusCode::GATEWAY_TIMEOUT);
-        assert_eq!(Rejection::TIMED_OUT.retry_after_secs, None);
     }
 }

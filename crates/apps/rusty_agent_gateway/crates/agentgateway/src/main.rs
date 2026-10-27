@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use agentgateway::{Gateway, Telemetry, serve};
 use agentgateway_config::Config;
 use clap::Parser;
-use rusty_mcp::limits::LimitsLayer;
+use rusty_axum::Admission;
 
 /// Command line arguments.
 #[derive(Debug, Parser)]
@@ -76,26 +76,26 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// Build the process-wide shedding layer from `config.limits`.
+/// Build the process-wide load shedding from `config.limits`.
 ///
 /// Both bounds are off unless configured. There is no value right for
 /// everyone, and a default would be a silent regression for a gateway already
 /// serving more than it.
-fn limits(config: &Config) -> LimitsLayer {
-    let mut layer = LimitsLayer::new();
+fn limits(config: &Config) -> Admission {
+    let mut admission = Admission::new();
     let Some(limits) = config.config.as_ref().and_then(|c| c.limits.as_ref()) else {
-        return layer;
+        return admission;
     };
 
     if let Some(max) = limits.max_concurrent_requests {
-        layer = layer.with_max_concurrent(max);
+        admission = admission.with_max_in_flight(max);
         rusty_log::info!(max_concurrent = max, "shedding above the concurrency limit");
     }
     // The per-route timeout in the data plane is the one that produces a 504
     // with the route named. This is the outer backstop for anything that
     // escapes it.
     if let Some(timeout) = limits.request_timeout {
-        layer = layer.with_timeout(timeout.into());
+        admission = admission.with_timeout(timeout.into());
     }
-    layer
+    admission
 }

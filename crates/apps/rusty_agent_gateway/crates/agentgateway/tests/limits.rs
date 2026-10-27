@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use agentgateway_config::Config;
-use rusty_mcp::limits::LimitsLayer;
+use rusty_axum::Admission;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -81,16 +81,16 @@ binds:
 
     let limits = match config.config.as_ref().and_then(|c| c.limits.as_ref()) {
         Some(limits) => {
-            let mut layer = LimitsLayer::new();
+            let mut admission = Admission::new();
             if let Some(max) = limits.max_concurrent_requests {
-                layer = layer.with_max_concurrent(max);
+                admission = admission.with_max_in_flight(max);
             }
             if let Some(timeout) = limits.request_timeout {
-                layer = layer.with_timeout(timeout.into());
+                admission = admission.with_timeout(timeout.into());
             }
-            layer
+            admission
         }
-        None => LimitsLayer::new(),
+        None => Admission::new(),
     };
 
     let shutdown = CancellationToken::new();

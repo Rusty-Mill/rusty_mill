@@ -3,11 +3,10 @@
 //! Which header is acceptable, whether a validated token is meant for this
 //! resource, which scopes are missing, and what each refusal must say are pure
 //! functions of the config and the token. Nothing here awaits, touches a
-//! response type, or knows about `tower`, `axum` or `tokio`. The adapter
-//! ([`super::layer`]) supplies the one effectful step — running the validator —
+//! response type, or knows about a server framework. The adapter
+//! ([`crate::serve`]) supplies the one effectful step — running the validator —
 //! and turns a [`Refusal`] into its own response. Status codes are
-//! `rusty_http`'s and the header arrives as plain text, so the external `http`
-//! crate stays in the adapter.
+//! `rusty_http`'s and the header arrives as plain text.
 
 use std::collections::BTreeSet;
 

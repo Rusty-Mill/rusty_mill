@@ -431,7 +431,7 @@ impl OtelGuard {
 
     /// The instruments this crate records to, when metrics are enabled.
     ///
-    /// Share this: `Arc` it into [`metrics::McpMetricsLayer`] for request
+    /// Share this: `Arc` it into [`metrics::McpMetrics`] for request
     /// metrics. It is a no-op if you never wire it up — an instrument that
     /// nothing records to exports nothing.
     pub fn instruments(&self) -> Option<&Arc<Instruments>> {

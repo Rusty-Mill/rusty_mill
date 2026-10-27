@@ -170,13 +170,7 @@ pub async fn serve(
     addrs: Vec<std::net::SocketAddr>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<impl std::future::Future<Output = ()> + Send> {
-    serve_with_limits(
-        gateway,
-        addrs,
-        shutdown,
-        rusty_mcp::limits::LimitsLayer::new(),
-    )
-    .await
+    serve_with_limits(gateway, addrs, shutdown, rusty_axum::Admission::new()).await
 }
 
 /// [`agentgateway::serve::run_with_shutdown_and_limits`], as [`serve`].
@@ -185,7 +179,7 @@ pub async fn serve_with_limits(
     gateway: agentgateway::Gateway,
     addrs: Vec<std::net::SocketAddr>,
     shutdown: tokio_util::sync::CancellationToken,
-    limits: rusty_mcp::limits::LimitsLayer,
+    limits: rusty_axum::Admission,
 ) -> anyhow::Result<impl std::future::Future<Output = ()> + Send> {
     let stop = rusty_tokio::sync::CancellationToken::new();
     let serving = {

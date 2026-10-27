@@ -399,8 +399,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
- "tower-layer",
- "tower-service",
 ]
 
 [[package]]
@@ -11560,11 +11558,9 @@ version = "0.1.0"
 
 [[package]]
 name = "rusty-mcp"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "axum",
- "http",
- "http-body",
  "jsonwebtoken 11.0.0",
  "rand 0.8.8",
  "reqwest 0.13.4",
@@ -11582,8 +11578,6 @@ dependencies = [
  "rusty_tokio",
  "rusty_url",
  "tokio",
- "tower-layer",
- "tower-service",
 ]
 
 [[package]]

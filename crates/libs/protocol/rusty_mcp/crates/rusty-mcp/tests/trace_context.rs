@@ -6,8 +6,7 @@
 //! connection, and that a context survives being written back onto an
 //! outbound request.
 
-mod support;
-
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use rusty_json::{Map, json};
@@ -20,11 +19,14 @@ const TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-
 const TRACESTATE: &str = "vendor=opaque";
 const BAGGAGE: &str = "userId=alice,tier=gold";
 
+/// The path the MCP handler answers on.
+const PATH: &str = "/mcp";
+
 type Observed = Arc<Mutex<Option<Option<TraceContext>>>>;
 
 /// A server whose `observe` tool records the trace context of each call, read
 /// from the request's `_meta` the way a gateway reads it.
-async fn server(observed: Observed) -> std::net::SocketAddr {
+fn server(observed: Observed) -> SocketAddr {
     let mut schema = Value::object();
     schema.insert("type", "object");
     let server = Server::builder("tracing", "1")
@@ -43,18 +45,37 @@ async fn server(observed: Observed) -> std::net::SocketAddr {
         })
         .build()
         .unwrap();
-    let handler = Arc::new(HttpHandler::new(
+    let handler = HttpHandler::new(
         Arc::new(server),
         HttpConfig {
-            path: support::PATH.to_owned(),
+            path: PATH.to_owned(),
             ..HttpConfig::default()
         },
-    ));
-    support::serve(
-        axum::Router::new()
-            .nest_service(support::PATH, support::mcp::router(handler, support::PATH)),
-    )
-    .await
+    );
+    let server = rusty_serve::Server::bind_shared("127.0.0.1:0".parse().unwrap(), handler).unwrap();
+    let addr = server.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let _ = server.run();
+    });
+    addr
+}
+
+/// POST a stateless `tools/call` of `tool` with `body`.
+async fn post(addr: SocketAddr, tool: &str, body: String) -> reqwest::Response {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://{addr}{PATH}"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/call")
+        .header("Mcp-Name", tool)
+        .body(body)
+        .send()
+        .await
+        .expect("request reaches the server")
 }
 
 /// Call `observe` with the given `_meta` trace values and return what the
@@ -65,7 +86,7 @@ async fn round_trip(
     baggage: Option<&str>,
 ) -> Option<TraceContext> {
     let observed: Observed = Arc::new(Mutex::new(None));
-    let addr = server(Arc::clone(&observed)).await;
+    let addr = server(Arc::clone(&observed));
 
     let mut meta = json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -86,7 +107,7 @@ async fn round_trip(
     })
     .to_json_string();
 
-    let response = support::post(addr, "tools/call", Some("observe"), body, None).await;
+    let response = post(addr, "observe", body).await;
     assert!(response.status().is_success());
 
     let seen = observed.lock().unwrap().clone();

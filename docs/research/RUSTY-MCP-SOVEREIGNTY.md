@@ -179,7 +179,7 @@ Each item is one PR, with its own tests and a change fragment.
     (the tower adapter's timeout); `tracing` and `tracing-subscriber` left this list on 2026-10-19 when `rusty-mcp` moved onto `rusty_log` (item 12).
     A dependency off the list fails the `dependency policy` CI job, and so does
     an entry the crate no longer uses, so the list only shrinks: item 6 deleted
-    `axum` (2026-10-18), item 12 deleted the two `tracing` lines for `rusty-mcp` (2026-10-19). ADR-0002 Amendment 1's
+    `axum` (2026-10-18), item 12 deleted the two `tracing` lines for `rusty-mcp` (2026-10-19), and #886 deleted the last four with the tower adapters (2026-10-27), leaving the list empty. ADR-0002 Amendment 1's
     status line and `MCP-NATIVE-PLAN.md` A6 are updated. `rusty-mcp` is 0.10.0
     for item 9's breaking changes (OTLP over HTTP and its endpoints, the
     SDK-typed API removed); items 5, 7 and 8 kept the public API or only added

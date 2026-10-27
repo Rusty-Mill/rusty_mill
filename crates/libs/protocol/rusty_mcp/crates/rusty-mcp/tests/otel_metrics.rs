@@ -3,30 +3,23 @@
 //! The unit tests cover which labels are chosen and how they are encoded. What
 //! only shows up end to end is whether they leave the process at all, in the
 //! right shape, over HTTP — and, more importantly, whether the cardinality
-//! guard holds on the wire. A label the layer decided to drop but the exporter
+//! guard holds on the wire. A label the recorder decided to drop but the exporter
 //! sent anyway would be worth nothing.
 
 #![cfg(feature = "otel")]
 
-mod support;
-
 use std::{
-    convert::Infallible,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    task::{Context, Poll},
     time::{Duration, Instant},
 };
 
-use axum::response::Response;
-use http::Request;
+use rusty_http::StatusCode;
 use rusty_json::Value;
 use rusty_mcp::otel::{
     OtelConfig, OtelGuard,
-    metrics::{McpMetricsLayer, Outcome, TaskOutcome},
+    metrics::{McpMetrics, Outcome, TaskOutcome},
 };
-use tower_layer::Layer as _;
-use tower_service::Service as _;
 
 /// One request the fake collector received.
 #[derive(Debug)]
@@ -201,37 +194,9 @@ fn pushes(received: &Received) -> usize {
     received.lock().expect("lock").len()
 }
 
-/// A service that answers every request with `status`.
-#[derive(Clone)]
-struct Fixed(http::StatusCode);
-
-impl<B> tower_service::Service<Request<B>> for Fixed {
-    type Response = Response;
-    type Error = Infallible;
-    type Future = std::future::Ready<Result<Response, Infallible>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, _request: Request<B>) -> Self::Future {
-        let mut response = Response::new(axum::body::Body::empty());
-        *response.status_mut() = self.0;
-        std::future::ready(Ok(response))
-    }
-}
-
-/// Drive one request through the layer.
-async fn call_through(layer: &McpMetricsLayer, status: http::StatusCode, headers: &[(&str, &str)]) {
-    let mut service = layer.layer(Fixed(status));
-
-    let mut builder = Request::builder();
-    for (name, value) in headers {
-        builder = builder.header(*name, *value);
-    }
-    let request = builder.body(axum::body::Body::empty()).expect("request");
-
-    let _ = service.call(request).await.expect("infallible");
+/// Record one request answered with `status`.
+fn record(metrics: &McpMetrics, status: StatusCode, method: &str, name: Option<&str>) {
+    metrics.start(Some(method), name).finish(status);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -267,22 +232,17 @@ async fn instruments_reach_the_collector_after_a_flush() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_layer_records_a_request_with_its_tool_name() {
+async fn a_request_is_recorded_with_its_tool_name() {
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let addr = spawn_collector(Arc::clone(&received), 200).await;
 
     let guard = pipeline_to(addr);
-    let layer = McpMetricsLayer::new(Arc::clone(
+    let metrics = McpMetrics::new(Arc::clone(
         guard.instruments().expect("metrics are enabled"),
     ))
     .with_known_names(["add"]);
 
-    call_through(
-        &layer,
-        http::StatusCode::OK,
-        &[("mcp-method", "tools/call"), ("mcp-name", "add")],
-    )
-    .await;
+    record(&metrics, StatusCode::OK, "tools/call", Some("add"));
 
     guard.shutdown();
 
@@ -300,21 +260,14 @@ async fn an_unknown_tool_name_never_reaches_the_collector() {
     let addr = spawn_collector(Arc::clone(&received), 200).await;
 
     let guard = pipeline_to(addr);
-    let layer = McpMetricsLayer::new(Arc::clone(
+    let metrics = McpMetrics::new(Arc::clone(
         guard.instruments().expect("metrics are enabled"),
     ))
     .with_known_names(["add"]);
 
     for i in 0..20 {
-        call_through(
-            &layer,
-            http::StatusCode::OK,
-            &[
-                ("mcp-method", "tools/call"),
-                ("mcp-name", &format!("forged-tool-{i:02}")),
-            ],
-        )
-        .await;
+        let forged = format!("forged-tool-{i:02}");
+        record(&metrics, StatusCode::OK, "tools/call", Some(&forged));
     }
 
     guard.shutdown();
@@ -342,16 +295,16 @@ async fn an_unknown_method_never_reaches_the_collector() {
     let addr = spawn_collector(Arc::clone(&received), 200).await;
 
     let guard = pipeline_to(addr);
-    let layer = McpMetricsLayer::new(Arc::clone(
+    let metrics = McpMetrics::new(Arc::clone(
         guard.instruments().expect("metrics are enabled"),
     ));
 
-    call_through(
-        &layer,
-        http::StatusCode::OK,
-        &[("mcp-method", "a-method-invented-by-a-client")],
-    )
-    .await;
+    record(
+        &metrics,
+        StatusCode::OK,
+        "a-method-invented-by-a-client",
+        None,
+    );
 
     guard.shutdown();
 
@@ -366,22 +319,17 @@ async fn an_unknown_method_never_reaches_the_collector() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rejected_request_is_still_counted() {
-    // The layer sits outside authorization precisely so this is true. A flood
-    // of rejected tokens must not look like no traffic at all.
+    // A caller records outside authorization precisely so this counts. A
+    // flood of rejected tokens must not look like no traffic at all.
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let addr = spawn_collector(Arc::clone(&received), 200).await;
 
     let guard = pipeline_to(addr);
-    let layer = McpMetricsLayer::new(Arc::clone(
+    let metrics = McpMetrics::new(Arc::clone(
         guard.instruments().expect("metrics are enabled"),
     ));
 
-    call_through(
-        &layer,
-        http::StatusCode::UNAUTHORIZED,
-        &[("mcp-method", "tools/call")],
-    )
-    .await;
+    record(&metrics, StatusCode::UNAUTHORIZED, "tools/call", None);
 
     guard.shutdown();
 
@@ -437,71 +385,6 @@ async fn metrics_can_be_turned_off() {
     // Neither shutdown nor flush may panic with no push thread behind them.
     guard.flush();
     guard.shutdown();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn the_layer_counts_requests_to_a_mounted_server() {
-    // The layer on a real mounted MCP server, not just driven directly.
-    let received: Received = Arc::new(Mutex::new(Vec::new()));
-    let addr = spawn_collector(Arc::clone(&received), 200).await;
-
-    let guard = pipeline_to(addr);
-    let layer = McpMetricsLayer::new(Arc::clone(
-        guard.instruments().expect("metrics are enabled"),
-    ));
-
-    let (server, _) = support::spawn(|mcp| mcp.layer(layer)).await;
-    assert!(
-        support::post(server, "tools/list", None, support::tools_list(), None)
-            .await
-            .status()
-            .is_success()
-    );
-
-    guard.shutdown();
-
-    assert!(metric(&received, "mcp.server.requests").is_some());
-    assert!(saw(&received, "tools/list"), "the method label is missing");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_request_rejected_by_the_auth_layer_is_still_counted() {
-    // The ordering claim, end to end: metrics mount *outside* authorization, so
-    // a request that never reaches the handler is still counted. Mounted the
-    // other way round, a flood of bad tokens would look like no traffic at all.
-    use rusty_mcp::auth::{AuthConfig, RequireAuthLayer, StaticTokenValidator, VerifiedToken};
-
-    let received: Received = Arc::new(Mutex::new(Vec::new()));
-    let addr = spawn_collector(Arc::clone(&received), 200).await;
-
-    let guard = pipeline_to(addr);
-    let layer = McpMetricsLayer::new(Arc::clone(
-        guard.instruments().expect("metrics are enabled"),
-    ));
-
-    let validator = StaticTokenValidator::new().with_token(
-        "good-token",
-        VerifiedToken::new(["https://mcp.example.com/mcp"]),
-    );
-    let auth = AuthConfig::new("https://mcp.example.com/mcp", Arc::new(validator))
-        .expect("valid resource")
-        .with_authorization_servers(["https://auth.example.com"]);
-
-    // Metrics are the later (outer) layer, so they see what auth rejects.
-    let (server, _) =
-        support::spawn(|mcp| mcp.layer(RequireAuthLayer::new(auth)).layer(layer)).await;
-
-    let status = support::post(server, "tools/list", None, support::tools_list(), None)
-        .await
-        .status();
-    assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
-
-    guard.shutdown();
-
-    assert!(
-        saw(&received, "unauthorized"),
-        "the rejected request was never counted, so metrics sit inside the guard"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -605,16 +488,11 @@ async fn an_unreachable_collector_does_not_break_request_handling() {
     )
     .expect("the pipeline starts even if the collector is unreachable");
 
-    let layer = McpMetricsLayer::new(Arc::clone(
+    let metrics = McpMetrics::new(Arc::clone(
         guard.instruments().expect("metrics are enabled"),
     ));
 
-    call_through(
-        &layer,
-        http::StatusCode::OK,
-        &[("mcp-method", "tools/list")],
-    )
-    .await;
+    record(&metrics, StatusCode::OK, "tools/list", None);
 
     guard.shutdown();
 }

@@ -1,6 +1,6 @@
 [package]
 name = "rusty-mcp"
-version = "0.11.0"
+version = "0.12.0"
 description = "Transport-level building blocks for MCP servers and gateways: OAuth resource-server auth, load shedding, W3C trace context, OpenTelemetry"
 keywords = ["mcp", "model-context-protocol", "ai", "llm"]
 categories = ["network-programming", "development-tools"]
@@ -27,18 +27,12 @@ unwrap_used = "warn"
 [dependencies]
 # Pagination cursors are base64 so clients treat them as opaque.
 rusty_base64 = { workspace = true }
-# The `limits` middleware's timeout and retry sleep run on its consumers' tokio
-# runtimes (agentgateway); `rusty_tokio`'s timer needs a `rusty_tokio` runtime (#906).
-tokio = { version = "1", default-features = false, features = ["rt", "time"] }
-http = { workspace = true }
-# The cores' status type; `http` stays in the tower adapters.
+# Status codes.
 rusty_http = { workspace = true }
 rusty_json = { workspace = true }
-tower-service = "0.3"
 # The workspace's one door to `tracing` (docs/research/TRACING-FACADE-PLAN.md).
 rusty_log = { workspace = true, features = ["subscriber"] }
 rusty_url = { workspace = true }
-tower-layer = "0.3"
 # JWT signature and claim verification (RS256, ES256).
 rusty_oauth = { workspace = true, optional = true }
 # JWKS fetch. The `tokio` feature makes each request run on the caller's own tokio
@@ -54,29 +48,26 @@ rusty_serve = { workspace = true, optional = true }
 rusty_rand = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The mock JWKS endpoint in `tests/jwt_validator.rs`.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 rand = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-# The response body of the test adapter in `tests/support/mcp.rs`.
-http-body = { workspace = true }
 rusty_mcp_server = { workspace = true, features = ["http"] }
-# The test adapter hands requests to the handler's blocking `rusty_serve` API.
+# `tests/trace_context.rs` serves the MCP handler on its blocking server.
 rusty_serve = { workspace = true }
 rsa = "0.9"
 # Signs the RS256 test tokens: `rusty_oauth` only verifies RSA signatures.
 # `rust_crypto` keeps the build pure-Rust.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
-# The layers are tested behind axum, which runs on tokio, and `limits` needs a
-# tokio timer, so those tests stay on tokio (#906). `sync` is for the test
-# adapter's stream pump.
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time"] }
+# The test clients and mock servers (`reqwest`, `axum`) run on tokio (#906).
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
 rusty_tokio = { workspace = true }
 
 [features]
 default = []
-# Auth and load shedding for a blocking `rusty_serve` server, without tower.
+# Auth and load shedding for a blocking `rusty_serve` server.
 serve = ["dep:rusty_serve"]
-# A JWKS-backed JWT validator for the authorization layer.
+# A JWKS-backed JWT validator.
 jwt = ["dep:rusty_oauth", "dep:rusty_request", "dep:rusty_tokio"]
 # Export spans to an OpenTelemetry collector over OTLP.
 otel = [

@@ -17,7 +17,6 @@ use std::time::Duration;
 use agentgateway_proxy::Scheme;
 use agentgateway_tls::{Passthrough, TlsTerminator};
 use rusty_axum::{Accept, Accepted, Admission, BoxFuture, Router, ServeOptions};
-use rusty_mcp::limits::LimitsLayer;
 use rusty_tokio::io::{TcpListener, TcpStream};
 use rusty_tokio::sync::CancellationToken;
 
@@ -37,7 +36,7 @@ const MAX_HEAD_BYTES: usize = 64 * 1024;
 pub async fn run(
     gateway: Gateway,
     addrs: Vec<SocketAddr>,
-    limits: LimitsLayer,
+    limits: Admission,
 ) -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
     let serving = run_with_shutdown_and_limits(gateway, addrs, shutdown.clone(), limits).await?;
@@ -59,7 +58,7 @@ pub async fn run_with_shutdown(
     addrs: Vec<SocketAddr>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<impl Future<Output = ()> + Send> {
-    run_with_shutdown_and_limits(gateway, addrs, shutdown, LimitsLayer::new()).await
+    run_with_shutdown_and_limits(gateway, addrs, shutdown, Admission::new()).await
 }
 
 /// As [`run_with_shutdown`], with process-wide load shedding applied.
@@ -74,14 +73,10 @@ pub async fn run_with_shutdown_and_limits(
     gateway: Gateway,
     addrs: Vec<SocketAddr>,
     shutdown: CancellationToken,
-    limits: LimitsLayer,
+    limits: Admission,
 ) -> anyhow::Result<impl Future<Output = ()> + Send> {
     let gateway = Arc::new(gateway);
     let options = options(&gateway);
-    // One admission, cloned per port: the count is shared, which is the
-    // whole point -- a limit each port counted separately would bound
-    // nothing in a multi-bind config.
-    let admission = admission(&limits);
 
     let mut listeners = Vec::with_capacity(addrs.len());
     for addr in &addrs {
@@ -104,7 +99,9 @@ pub async fn run_with_shutdown_and_limits(
             port,
             tls,
             passthrough: gateway.passthrough(port),
-            admission: admission.clone(),
+            // Cloned per port, and clones share one count: a limit each port
+            // counted separately would bound nothing in a multi-bind config.
+            admission: limits.clone(),
         };
         let router = router(Arc::clone(&gateway), port, scheme);
         servers.push(rusty_axum::serve_with(
@@ -153,18 +150,6 @@ fn options(gateway: &Gateway) -> ServeOptions {
         // The TLS listeners advertise `h2` over ALPN, so they must speak it.
         http2: true,
     }
-}
-
-/// The server-side form of the configured limits.
-fn admission(limits: &LimitsLayer) -> Admission {
-    let mut admission = Admission::new();
-    if let Some(max) = limits.max_concurrent() {
-        admission = admission.with_max_in_flight(max);
-    }
-    if let Some(timeout) = limits.timeout() {
-        admission = admission.with_timeout(timeout);
-    }
-    admission
 }
 
 /// The router for one port: every request goes to the gateway.
