@@ -47,6 +47,8 @@ struct Seen {
     headers: Vec<Vec<(String, String)>>,
     metadata: Vec<Option<rusty_prost::wkt::Struct>>,
     calls: usize,
+    /// TCP connections accepted.
+    connections: usize,
 }
 
 /// A gRPC `ExtMcp` server, hand-rolled over `axum` so that it shares nothing with the client.
@@ -56,10 +58,18 @@ struct Seen {
 /// `axum` needs tokio and the chain under test runs on `rusty_tokio`, so the
 /// server has a tokio runtime on a thread of its own.
 async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationToken) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("processor should bind");
+    processor_on(listener, script)
+}
+
+/// [`processor`], on a listener the caller bound.
+fn processor_on(
+    listener: std::net::TcpListener,
+    script: Script,
+) -> (String, Arc<Mutex<Seen>>, CancellationToken) {
     use axum::body::Body;
     use http_body_util::BodyExt;
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("processor should bind");
     listener
         .set_nonblocking(true)
         .expect("a tokio listener is non-blocking");
@@ -68,6 +78,7 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
     let shutdown = CancellationToken::new();
 
     let recorder = Arc::clone(&seen);
+    let counter = Arc::clone(&seen);
     let stopping = shutdown.clone();
 
     let app = axum::Router::new().fallback(axum::routing::any(
@@ -229,8 +240,10 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
             .build()
             .expect("the processor's runtime should start");
         runtime.block_on(async move {
-            let listener =
-                tokio::net::TcpListener::from_std(listener).expect("processor should listen");
+            use axum::serve::ListenerExt;
+            let listener = tokio::net::TcpListener::from_std(listener)
+                .expect("processor should listen")
+                .tap_io(move |_| counter.lock().expect("lock").connections += 1);
             let _ = axum::serve(listener, app)
                 .with_graceful_shutdown(async move { stopping.cancelled().await })
                 .await;
@@ -1420,5 +1433,60 @@ async fn each_phase_calls_its_own_rpc() {
             "/agentgateway.dev.ext_mcp.ExtMcp/CheckResponse",
         ]
     );
+    stop.cancel();
+}
+
+#[rusty_tokio::test]
+async fn checks_on_one_processor_share_one_connection() {
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let chain = chain(vec![processor_config(
+        &host,
+        &[("tools/call", Phase::Full)],
+    )]);
+
+    for _ in 0..3 {
+        chain
+            .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
+            .await;
+        chain
+            .check_response(call("tools/call"), &["alpha".into()], b"{}")
+            .await;
+    }
+
+    let seen = seen.lock().expect("lock");
+    assert_eq!(seen.calls, 6);
+    assert_eq!(
+        seen.connections, 1,
+        "each check dialled the processor afresh"
+    );
+    stop.cancel();
+}
+
+#[rusty_tokio::test]
+async fn a_processor_that_restarts_is_dialled_again() {
+    let (host, _, stop) = processor(Script::Pass).await;
+    let chain = chain(vec![processor_config(
+        &host,
+        &[("tools/call", Phase::Request)],
+    )]);
+    let backends = ["alpha".to_string()];
+    let check = || chain.check_request(call("tools/call"), &backends, Some(b"{}"));
+    assert_eq!(check().await.outcome, Outcome::Pass);
+
+    // The first instance goes away, closing the shared connection, and another takes its port.
+    stop.cancel();
+    let mut listener = None;
+    for _ in 0..250 {
+        if let Ok(bound) = std::net::TcpListener::bind(&host) {
+            listener = Some(bound);
+            break;
+        }
+        rusty_tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let listener = listener.expect("the first processor never released its port");
+    let (_, seen, stop) = processor_on(listener, Script::Pass);
+
+    assert_eq!(check().await.outcome, Outcome::Pass);
+    assert_eq!(seen.lock().expect("lock").calls, 1);
     stop.cancel();
 }
