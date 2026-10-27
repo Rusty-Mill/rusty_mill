@@ -1,6 +1,6 @@
 ---
 category: Changed
-changelog: rusty_term parses large OSC, DCS and APC payloads, such as inline images, about 7–9x faster.
+changelog: rusty_term collects the bodies of unknown APC and DCS strings about 7–9x faster; OSC 52 throughput is unchanged.
 ---
 ## 2026-10-26 - Bulk scan of escape-string bodies
 
