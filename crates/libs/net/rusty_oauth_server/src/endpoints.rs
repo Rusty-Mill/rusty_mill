@@ -60,6 +60,11 @@ pub const PATHS: &[&str] = &[
 const NO_STORE: (&str, &str) = ("cache-control", "no-store");
 const NO_CACHE: (&str, &str) = ("pragma", "no-cache");
 const PUBLIC_HOUR: (&str, &str) = ("cache-control", "public, max-age=3600");
+/// The pages are static HTML with inline styles and one same-origin form,
+/// and are never framed, so a hostile page cannot overlay the consent form.
+/// No `form-action`: browsers apply it to the redirect back to the client.
+const PAGE_CSP: &str =
+    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'";
 
 /// The request methods the endpoints tell apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +115,12 @@ impl Response {
     fn html(status: u16, body: String) -> Self {
         Self {
             status,
-            headers: vec![("content-type", "text/html; charset=utf-8".to_string())],
+            headers: vec![
+                ("content-type", "text/html; charset=utf-8".to_string()),
+                ("content-security-policy", PAGE_CSP.to_string()),
+                ("x-frame-options", "DENY".to_string()),
+                ("referrer-policy", "no-referrer".to_string()),
+            ],
             body: body.into_bytes(),
         }
     }
@@ -422,11 +432,14 @@ impl Endpoints {
                 &format!("cannot request scope `{scope}` not provided by refresh token"),
             );
         }
+        // Checked again, atomically, as it is consumed: a concurrent
+        // rotation or revocation since the lookup above wins.
         match self
             .provider
-            .exchange_refresh_token(&loaded, refresh_token, scopes, now)
+            .exchange_refresh_token(client_id, refresh_token, scopes, now)
         {
-            Ok(tokens) => token_success(&tokens),
+            Ok(Some(tokens)) => token_success(&tokens),
+            Ok(None) => token_error(400, "invalid_grant", "refresh token does not exist"),
             Err(e) => {
                 eprintln!("oauth: could not persist rotated tokens: {e}");
                 token_error(500, "server_error", "rotated tokens could not be persisted")
@@ -488,12 +501,12 @@ impl Endpoints {
         let access = || {
             self.provider
                 .load_access_token(token, now)
-                .map(|a| a.client_id)
+                .map(|a| (a.client_id, a.subject))
         };
         let refresh = || {
             self.provider
                 .load_refresh_token(client_id, token, now)
-                .map(|r| r.client_id)
+                .map(|r| (r.client_id, r.subject))
         };
         let owner = if form.get("token_type_hint") == Some("refresh_token") {
             refresh().or_else(access)
@@ -503,8 +516,10 @@ impl Endpoints {
         // An unknown or foreign token is still a 200 (RFC 7009 §2.2): a
         // revocation never reveals whether a token existed. A revocation we
         // failed to carry out is not that, and must not read as success.
-        if owner.as_deref() == Some(client_id) {
-            if let Err(e) = self.provider.revoke_tokens_for_client(client_id) {
+        // Only the presented token's own grant goes: several users can
+        // authorize one public client.
+        if let Some((_, subject)) = owner.filter(|(owner, _)| owner == client_id) {
+            if let Err(e) = self.provider.revoke_grant(client_id, subject.as_ref()) {
                 eprintln!("oauth: could not persist token revocation: {e}");
                 let body = json!({
                     "error": "server_error",
@@ -991,7 +1006,10 @@ mod tests {
     #[test]
     fn an_expired_consent_link_is_a_400_page() {
         let (e, _dir) = endpoints();
-        assert_eq!(call(&e, Method::Get, "/consent?txn=nope", b"").status, 400);
+        let page = call(&e, Method::Get, "/consent?txn=nope", b"");
+        assert_eq!(page.status, 400);
+        assert!(header(&page, "content-security-policy").contains("frame-ancestors 'none'"));
+        assert_eq!(header(&page, "x-frame-options"), "DENY");
         let post = call(&e, Method::Post, "/consent", b"txn=nope&action=approve");
         assert_eq!(post.status, 400);
     }

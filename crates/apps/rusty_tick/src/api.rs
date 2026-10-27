@@ -41,7 +41,9 @@ use crate::service::{
 use crate::task::{Priority, Status};
 use crate::users::{RegistryFile, UserKey};
 use rusty_http::{Method, StatusCode};
+use rusty_oauth_server::{now_unix, Provider};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub use crate::auth::MIN_TOKEN_LEN;
@@ -203,6 +205,9 @@ type Result<T> = std::result::Result<T, ApiError>;
 /// ([`Api::serve`]).
 pub struct Api {
     auth: Authenticator,
+    /// The OAuth grants whose access tokens are accepted beside the server's
+    /// own tokens, when OAuth is on ([`crate::oauth`]).
+    oauth: Option<Arc<Provider>>,
 }
 
 impl Api {
@@ -211,6 +216,7 @@ impl Api {
     pub fn new(token: String) -> std::result::Result<Self, String> {
         Ok(Self {
             auth: Authenticator::single(token)?,
+            oauth: None,
         })
     }
 
@@ -218,6 +224,7 @@ impl Api {
     pub fn multi_user(users: RegistryFile) -> Self {
         Self {
             auth: Authenticator::multi(users),
+            oauth: None,
         }
     }
 
@@ -229,13 +236,40 @@ impl Api {
             .then(|| Response::json(StatusCode::OK, &Health { status: "ok" }))
     }
 
-    /// The user behind the request's credential.
+    /// Also accept the access tokens `provider` issued, as the user each
+    /// grant was approved for.
+    pub fn set_oauth(&mut self, provider: Arc<Provider>) {
+        self.oauth = Some(provider);
+    }
+
+    /// The user behind the request's credential: one of the server's own
+    /// tokens, or an OAuth access token whose user is still live.
     ///
     /// # Errors
     ///
     /// [`Denied`] when there is none; [`Response::unauthorized`] is its answer.
     pub fn authenticate(&mut self, request: &Request<'_>) -> std::result::Result<UserKey, Denied> {
-        self.auth.authenticate(request.authorization)
+        let denied = match self.auth.authenticate(request.authorization) {
+            Ok(user) => return Ok(user),
+            Err(denied) => denied,
+        };
+        let Some(provider) = &self.oauth else {
+            return Err(denied);
+        };
+        request
+            .authorization
+            .and_then(rusty_oauth::bearer::token_from_authorization)
+            .and_then(|token| provider.subject_of(token, now_unix()))
+            .and_then(|subject| self.auth.resolve(subject.as_str()))
+            .ok_or(denied)
+    }
+
+    /// The user a pasted token of the server's own belongs to (OAuth access
+    /// tokens are not accepted): what the consent page checks.
+    pub fn verify(&mut self, token: &str) -> Option<UserKey> {
+        self.auth
+            .authenticate(Some(&format!("Bearer {token}")))
+            .ok()
     }
 
     /// `POST /api/v1/fetch-ics {"url"}`: the calendar feed at `url`, as

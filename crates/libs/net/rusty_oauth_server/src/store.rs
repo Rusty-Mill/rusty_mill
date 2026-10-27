@@ -72,34 +72,33 @@ impl State {
         }
     }
 
-    /// Remove every token (both buckets) belonging to `client_id`, mutating
-    /// `self`.
-    fn drop_tokens(&mut self, client_id: &str) -> TokenCounts {
-        let belongs =
-            |meta: &Value| meta.get("client_id").and_then(Value::as_str) == Some(client_id);
-        let access_doomed: Vec<String> = self
-            .access_tokens
-            .iter()
-            .filter(|(_, meta)| belongs(meta))
-            .map(|(hash, _)| hash.clone())
-            .collect();
-        for hash in &access_doomed {
-            self.access_tokens.remove(hash);
-        }
-        let refresh_doomed: Vec<String> = self
-            .refresh_tokens
-            .iter()
-            .filter(|(_, meta)| belongs(meta))
-            .map(|(hash, _)| hash.clone())
-            .collect();
-        for hash in &refresh_doomed {
-            self.refresh_tokens.remove(hash);
-        }
+    /// Remove every token (both buckets) whose metadata `doomed` matches,
+    /// mutating `self`.
+    fn drop_tokens(&mut self, doomed: impl Fn(&Value) -> bool) -> TokenCounts {
+        let drop_from = |tokens: &mut Map| {
+            let hashes: Vec<String> = tokens
+                .iter()
+                .filter(|(_, meta)| doomed(meta))
+                .map(|(hash, _)| hash.clone())
+                .collect();
+            for hash in &hashes {
+                tokens.remove(hash);
+            }
+            hashes.len()
+        };
         TokenCounts {
-            access_tokens: access_doomed.len(),
-            refresh_tokens: refresh_doomed.len(),
+            access_tokens: drop_from(&mut self.access_tokens),
+            refresh_tokens: drop_from(&mut self.refresh_tokens),
         }
     }
+}
+
+fn client_of(meta: &Value) -> Option<&str> {
+    meta.get("client_id").and_then(Value::as_str)
+}
+
+fn subject_of(meta: &Value) -> Option<&str> {
+    meta.get("subject").and_then(Value::as_str)
 }
 
 /// SHA-256 hex digest of a token — what the state file stores instead of
@@ -266,7 +265,7 @@ impl StateStore {
         let Some(record) = state.clients.remove(client_id) else {
             return Ok(None);
         };
-        let counts = state.drop_tokens(client_id);
+        let counts = state.drop_tokens(|meta| client_of(meta) == Some(client_id));
         self.write(&state)?;
         Ok(Some(RevokeSummary {
             client_id: client_id.to_string(),
@@ -312,13 +311,45 @@ impl StateStore {
         Ok(())
     }
 
-    /// Drop every access/refresh token of `client_id`, keeping the
-    /// registration — what RFC 7009 revocation of any one token escalates
-    /// to.
-    pub fn delete_tokens_for_client(&self, client_id: &str) -> io::Result<TokenCounts> {
+    /// Replace the `kind` token `old` with the tokens `with` makes from its
+    /// metadata, in one locked read-modify-write: `true` if it was replaced.
+    /// `false`, with nothing changed, when `old` is absent (already used or
+    /// revoked) or `with` refuses it. A refresh rotation is this, so two
+    /// concurrent rotations of one token cannot both issue, and a revocation
+    /// that ran first cannot be undone by one that read the token earlier.
+    pub fn replace_token(
+        &self,
+        kind: TokenKind,
+        old: &str,
+        with: impl FnOnce(&Value) -> Option<Vec<(TokenKind, String, Value)>>,
+    ) -> io::Result<bool> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.read();
-        let counts = state.drop_tokens(client_id);
+        let hash = hash_token(old);
+        let Some(meta) = state.tokens(kind).get(&hash) else {
+            return Ok(false);
+        };
+        let Some(replacements) = with(meta) else {
+            return Ok(false);
+        };
+        state.tokens_mut(kind).remove(&hash);
+        for (kind, token, meta) in replacements {
+            state.tokens_mut(kind).insert(hash_token(&token), meta);
+        }
+        self.write(&state)?;
+        Ok(true)
+    }
+
+    /// Drop every access/refresh token of one grant family: `client_id`'s
+    /// tokens for `subject`, keeping the registration and every other
+    /// subject's tokens. `None` is the family of grants written before
+    /// subjects existed. One public client registration can be authorized by
+    /// several users, so a client id alone does not name one user's grants.
+    pub fn delete_grant(&self, client_id: &str, subject: Option<&str>) -> io::Result<TokenCounts> {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.read();
+        let counts = state
+            .drop_tokens(|meta| client_of(meta) == Some(client_id) && subject_of(meta) == subject);
         if counts.access_tokens > 0 || counts.refresh_tokens > 0 {
             self.write(&state)?;
         }
@@ -417,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_store_delete_tokens_for_client_drops_only_the_targeted_clients_tokens() {
+    fn oauth_store_delete_grant_drops_only_that_client_and_subjects_tokens() {
         let path = temp_state_path("delete");
         let store = StateStore::new(&path);
         store
@@ -442,7 +473,13 @@ mod tests {
             )
             .expect("write");
 
-        let counts = store.delete_tokens_for_client("c1").expect("write");
+        let alice = rusty_json::json!({ "client_id": "c1", "subject": "alice" });
+        store
+            .put_token(TokenKind::Refresh, "tok-alice", alice.clone())
+            .expect("write");
+
+        // The legacy family (no subject): c1's subjectless tokens only.
+        let counts = store.delete_grant("c1", None).expect("write");
         assert_eq!(counts.access_tokens, 1);
         assert_eq!(counts.refresh_tokens, 1);
         assert!(store.get_token(TokenKind::Access, "tok-a").is_none());
@@ -450,6 +487,17 @@ mod tests {
             store.get_token(TokenKind::Access, "tok-b"),
             Some(rusty_json::json!({ "client_id": "c2" }))
         );
+        assert_eq!(
+            store.get_token(TokenKind::Refresh, "tok-alice"),
+            Some(alice)
+        );
+
+        // Another subject's family on the same client leaves Alice's alone.
+        let none = store.delete_grant("c1", Some("bob")).expect("write");
+        assert_eq!((none.access_tokens, none.refresh_tokens), (0, 0));
+        assert!(store.get_token(TokenKind::Refresh, "tok-alice").is_some());
+        let hers = store.delete_grant("c1", Some("alice")).expect("write");
+        assert_eq!((hers.access_tokens, hers.refresh_tokens), (0, 1));
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }

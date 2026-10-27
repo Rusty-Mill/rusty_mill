@@ -11,12 +11,21 @@ pub use rusty_serve::{Handler, ShutdownHandle, DEFAULT_MAX_CONNECTIONS, MAX_BODY
 pub type Server = rusty_serve::Server<Backend>;
 
 /// Bind the whole surface to `addr`: the API and web UI under the backend's
-/// lock, and MCP at [`crate::mcp::MCP_PATH`] beside them.
+/// lock, and MCP at [`crate::mcp::MCP_PATH`] beside them, with OAuth's
+/// endpoints when `oauth` is given ([`crate::oauth`]).
 ///
 /// # Errors
 /// The bind error, if the address is taken or not allowed.
-pub fn bind(addr: std::net::SocketAddr, backend: Backend) -> std::io::Result<rusty_serve::Server> {
-    rusty_serve::Server::bind_shared(addr, crate::mcp::Routes::new(backend)?)
+pub fn bind(
+    addr: std::net::SocketAddr,
+    backend: Backend,
+    oauth: Option<crate::oauth::OAuth>,
+) -> std::io::Result<rusty_serve::Server> {
+    // A `GET` of these is never the web UI's, even when OAuth is off.
+    let mut paths = vec![crate::mcp::MCP_PATH];
+    paths.extend_from_slice(crate::oauth::PATHS);
+    let server = rusty_serve::Server::bind_shared(addr, crate::mcp::Routes::new(backend, oauth)?)?;
+    Ok(server.with_handler_paths(&paths))
 }
 
 /// The assistant's route: a streamed AG-UI run, so it bypasses the
