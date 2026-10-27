@@ -5796,16 +5796,8 @@ impl Grid {
         if (0..free.len()).any(|i| !free[i] && !style_ok(i)) {
             return Err(Error("style bounds"));
         }
-        let primary = self.primary.iter().flat_map(|p| p.screen.iter());
-        for line in self.screen.iter().chain(primary).chain(&self.scrollback) {
-            if line.cells().len() > 4096
-                || line
-                    .cells()
-                    .iter()
-                    .any(|c| free.get(c.style().0 as usize) != Some(&false))
-            {
-                return Err(Error("cell bounds"));
-            }
+        if self.lines().any(|line| line.cells().len() > 4096) {
+            return Err(Error("cell bounds"));
         }
         if self.screen.iter().any(|l| l.cells().len() != self.cols)
             || self
@@ -5846,5 +5838,22 @@ impl Grid {
             return Err(Error("image store budget"));
         }
         Ok(())
+    }
+
+    /// Whether every cell names a live style. Encoding checks this per run
+    /// as it writes; decoding checks the restored grid here.
+    pub(crate) fn validate_cell_styles(&self) -> crate::checkpoint::Result<()> {
+        let free = self.styles.free_mask();
+        let live = |c: &PackedCell| free.get(c.style().0 as usize) == Some(&false);
+        if self.lines().all(|line| line.cells().iter().all(live)) {
+            return Ok(());
+        }
+        Err(crate::checkpoint::Error("cell bounds"))
+    }
+
+    /// Live and primary screen rows, then history.
+    fn lines(&self) -> impl Iterator<Item = &Line> {
+        let primary = self.primary.iter().flat_map(|p| p.screen.iter());
+        self.screen.iter().chain(primary).chain(&self.scrollback)
     }
 }

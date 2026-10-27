@@ -276,6 +276,11 @@ impl PackedCell {
         self.text & !CHAR_BITS
     }
 
+    /// The layout bits as a small number, below 4 for the known bits.
+    pub(crate) fn layout_index(self) -> usize {
+        (self.text >> CHAR_BITS.count_ones()) as usize
+    }
+
     pub(crate) fn style(self) -> StyleId {
         self.style
     }
