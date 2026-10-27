@@ -1,0 +1,30 @@
+# systemd unit: rusty_tick as a standing service.
+# Install to /etc/systemd/system/rusty-tick.service (see README.md in this directory).
+# Settings come from tick.env; change User= and the paths below if the account differs.
+[Unit]
+Description=rusty_tick
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting, as mill-board.service and remind-me's units do.
+StartLimitIntervalSec=0
+
+[Service]
+User=baileyrd
+EnvironmentFile=/home/baileyrd/.rusty_tick/tick.env
+# The token comes from tick.env as RUSTY_TICK_TOKEN, never an argument.
+ExecStart=/usr/local/bin/rusty_tick --data-dir ${RUSTY_TICK_DATA_DIR} --addr ${RUSTY_TICK_ADDR} --web-dir ${RUSTY_TICK_WEB_DIR}
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+MemoryMax=1G
+
+# rusty_tick writes only its data directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/baileyrd/.rusty_tick/data
+
+[Install]
+WantedBy=multi-user.target

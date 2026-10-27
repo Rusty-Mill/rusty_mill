@@ -3,8 +3,10 @@
 # Settings come from board.env; change User= and the paths below if the account differs.
 [Unit]
 Description=Mill Board
-After=network-online.target
+After=network-online.target rusty-tick.service
 Wants=network-online.target
+# rusty_tick holds the cards (ADR-0012): start after it when it runs on this host. Ordering
+# only, so the board still starts (503 until it answers) where rusty_tick runs elsewhere.
 # Never give up restarting: a start that races the network must retry, not
 # trip systemd's default limit (5 starts in 10 s) and stay down. The hub of
 # rusty_remind_me was down six days that way.
