@@ -533,7 +533,7 @@ async fn run_async(
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }
-                compactor.on_output(Instant::now());
+                compactor.on_change(Instant::now());
                 // Coalesce bursts: hold off until the frame budget since the
                 // last paint has elapsed, so a flood repaints at ~60 Hz.
                 let since = render_state.last_frame.elapsed();
@@ -549,8 +549,13 @@ async fn run_async(
                 // screen for a clean full repaint. Only act on a real change so a
                 // spurious SIGWINCH doesn't blank the screen.
                 if let Some((cols, rows)) = backend.terminal_size() {
-                    let changed =
-                        resize_grid(&grid, &mut render_state, cols as usize, rows as usize);
+                    let changed = resize_grid(
+                        &grid,
+                        &mut render_state,
+                        &mut compactor,
+                        cols as usize,
+                        rows as usize,
+                    );
                     if changed {
                         let _ = resizer.set_winsize(cols, rows);
                         // Tell a subscribed structured client the size changed
@@ -775,7 +780,7 @@ async fn run_async(
                             parser.take_responses()
                         };
                         frame.notify_one();
-                        compactor.on_output(Instant::now());
+                        compactor.on_change(Instant::now());
                         if !responses.is_empty() {
                             let _ = in_tx.send(responses);
                         }
@@ -802,8 +807,13 @@ async fn run_async(
                 }
                 // No SIGWINCH on Windows: poll the console size and act on change.
                 if let Some((cols, rows)) = backend.terminal_size() {
-                    let changed =
-                        resize_grid(&grid, &mut render_state, cols as usize, rows as usize);
+                    let changed = resize_grid(
+                        &grid,
+                        &mut render_state,
+                        &mut compactor,
+                        cols as usize,
+                        rows as usize,
+                    );
                     if changed {
                         let _ = resizer.set_winsize(cols, rows);
                         // Notify a subscribed structured client; routed through the

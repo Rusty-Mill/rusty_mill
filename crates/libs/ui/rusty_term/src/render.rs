@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use crate::sync::Mutex;
 
 use crate::backend::Backend;
+use crate::compact::Compactor;
 use crate::core::{
     ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_MASK, ATTR_REVERSE,
     ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, DirtyFrame, Grid, LineAttr, UnderlineStyle,
@@ -318,14 +319,13 @@ impl RenderState {
 pub(crate) fn resize_grid(
     grid: &Mutex<Grid>,
     st: &mut RenderState,
+    compactor: &mut Compactor,
     cols: usize,
     rows: usize,
 ) -> bool {
-    let mut g = grid.lock();
-    if (g.cols, g.rows) == (cols, rows) {
+    if !compactor.resize(&mut grid.lock(), cols, rows, Instant::now()) {
         return false;
     }
-    g.resize(cols, rows);
     st.clear_pending = true;
     true
 }
@@ -656,8 +656,16 @@ mod tests {
         p.advance(&mut grid.lock(), b"\x1b[?2026hhalf a frame");
         let mut st = RenderState::new();
         assert!(render_once(&grid, &mut st).is_some(), "held");
-        assert!(!resize_grid(&grid, &mut st, 20, 4), "same size: no change");
-        assert!(resize_grid(&grid, &mut st, 30, 6));
+        let mut compactor = Compactor::default();
+        assert!(
+            !resize_grid(&grid, &mut st, &mut compactor, 20, 4),
+            "same size: no change"
+        );
+        assert!(resize_grid(&grid, &mut st, &mut compactor, 30, 6));
+        assert!(
+            compactor.due().is_some(),
+            "the reflowed history is compacted next"
+        );
         assert_eq!(render_once(&grid, &mut st), None, "painted, not held");
         let mut g = grid.lock();
         assert_eq!((g.cols, g.rows), (30, 6));

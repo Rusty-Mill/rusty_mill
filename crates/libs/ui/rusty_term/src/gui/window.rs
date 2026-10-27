@@ -1280,7 +1280,8 @@ impl WindowState<'_> {
                 let (c, rw) = (r.cols.max(1) as u16, r.rows.max(1) as u16);
                 {
                     let mut g = p.grid.lock();
-                    g.resize(c as usize, rw as usize);
+                    p.compactor
+                        .resize(&mut g, c as usize, rw as usize, Instant::now());
                     g.selection = None; // viewport changed; old coords are stale
                 }
                 let _ = p.writer.set_winsize(c, rw);
@@ -5519,7 +5520,7 @@ impl WindowState<'_> {
         // Cleared first, so output parsed from here on sends a new wakeup.
         if let Some(p) = self.pane_by_id_mut(id) {
             p.wake.lower();
-            p.compactor.on_output(Instant::now());
+            p.compactor.on_change(Instant::now());
         }
         self.service_clipboard(id);
         self.service_notifications(id);

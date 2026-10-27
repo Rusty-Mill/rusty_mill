@@ -20,10 +20,30 @@ pub(crate) struct Compactor {
 }
 
 impl Compactor {
-    /// Output arrived at `now`: history may have grown, so compact once it
-    /// has been quiet for [`QUIET`].
-    pub(crate) fn on_output(&mut self, now: Instant) {
+    /// Output arrived or the grid was resized at `now`: history may have
+    /// grown or been stored at full width again, so compact once it has
+    /// been quiet for [`QUIET`].
+    pub(crate) fn on_change(&mut self, now: Instant) {
         self.due = Some(now + QUIET);
+    }
+
+    /// Resize `grid` to `cols` x `rows` at `now`, and whether its size
+    /// changed. A reflow stores every history line at full width again, so
+    /// a real change schedules a pass even if no output follows.
+    pub(crate) fn resize(
+        &mut self,
+        grid: &mut Grid,
+        cols: usize,
+        rows: usize,
+        now: Instant,
+    ) -> bool {
+        let before = (grid.cols, grid.rows);
+        grid.resize(cols, rows);
+        let changed = (grid.cols, grid.rows) != before;
+        if changed {
+            self.on_change(now);
+        }
+        changed
     }
 
     /// When the next step should run, or `None` when there is nothing to do.
@@ -72,10 +92,10 @@ mod tests {
     #[test]
     fn output_defers_compaction_until_quiet() {
         let (mut c, mut g, t0) = (Compactor::default(), grid_with_history(10), Instant::now());
-        c.on_output(t0);
+        c.on_change(t0);
         c.run(&mut g, t0 + QUIET / 2);
         assert_eq!(c.due(), Some(t0 + QUIET), "not yet quiet: nothing ran");
-        c.on_output(t0 + QUIET / 2);
+        c.on_change(t0 + QUIET / 2);
         assert_eq!(
             c.due(),
             Some(t0 + QUIET / 2 + QUIET),
@@ -90,7 +110,7 @@ mod tests {
             grid_with_history(2 * BUDGET + 5),
             Instant::now(),
         );
-        c.on_output(t0);
+        c.on_change(t0);
         let mut steps = 0;
         let mut now = t0 + QUIET;
         while let Some(at) = c.due() {
@@ -102,5 +122,22 @@ mod tests {
         }
         assert_eq!(steps, 3);
         assert!(!g.compact_history(BUDGET), "the history is fully compacted");
+    }
+
+    #[test]
+    fn a_resize_after_a_finished_pass_schedules_another_without_output() {
+        let (mut c, mut g, t0) = (Compactor::default(), grid_with_history(50), Instant::now());
+        c.on_change(t0);
+        c.run(&mut g, t0 + QUIET);
+        assert_eq!(c.due(), None, "one pass covered the history");
+        let t1 = t0 + QUIET * 2;
+        assert!(!c.resize(&mut g, 80, 4, t1), "same size");
+        assert_eq!(c.due(), None, "nothing to schedule");
+        assert!(c.resize(&mut g, 60, 4, t1));
+        assert_eq!(c.due(), Some(t1 + QUIET), "scheduled with no output");
+        assert!(g.compact_history(0), "the reflow left lines to look at");
+        c.run(&mut g, t1 + QUIET);
+        assert_eq!(c.due(), None);
+        assert!(!g.compact_history(0), "the scheduled pass covered them");
     }
 }
