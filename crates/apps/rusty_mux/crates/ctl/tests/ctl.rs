@@ -791,6 +791,47 @@ fn watch_runs_rules_for_events_and_survives_a_failing_one() {
 }
 
 #[test]
+fn watch_hands_a_rule_the_exit_code() {
+    let socket = start_server();
+    let config = config_file(
+        "exit",
+        r#"{"on": [{"event": "program-exited", "action": "create-session", "args": {"name": "exit ${code}"}}]}"#,
+    );
+    let mut child = ctl_command(&socket, &["watch"])
+        .env("RUSTY_MUX_CONFIG", &config)
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let block = block(&socket);
+    ok(
+        &socket,
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+            "input",
+            "--block",
+            &block,
+            "--data",
+            "exit 4\r",
+        ],
+    );
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !ok(&socket, &["list"]).contains("exit 4") {
+        assert!(std::time::Instant::now() < deadline, "the rule never ran");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child.kill().expect("kill");
+    child.wait().expect("wait");
+    std::fs::remove_file(&config).expect("cleanup");
+}
+
+#[test]
 fn watch_needs_rules_and_takes_only_a_cursor() {
     let socket = start_server();
     let none = config_file("norules", WORKSPACE);
@@ -855,6 +896,17 @@ fn watch_refuses_rules_for_events_the_server_never_sends() {
         stderr.contains("does not send `pwd-changed` events"),
         "{stderr}"
     );
+
+    let bell = config_file(
+        "needs-bell",
+        r#"{"on": [{"event": "bell", "action": "list"}]}"#,
+    );
+    let pwd_only = old.union(Features::TERMINAL_EVENTS);
+    let refused = with_config(&events_server(pwd_only), &bell, &["watch"]);
+    assert_eq!(refused.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(stderr.contains("does not send `bell` events"), "{stderr}");
+    std::fs::remove_file(&bell).expect("cleanup");
 
     // Rules for events every numbering server sends still run.
     let generic = config_file(

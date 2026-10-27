@@ -20,10 +20,10 @@ use std::time::Instant;
 use platform::process::{Child, Signal};
 use platform::pty::PtyMaster;
 use platform_windows::{WindowsChild, WindowsPty, WindowsPtyMaster};
-use rusty_mux_core::Size;
+use rusty_mux_core::{ExitStatus, Size};
 use rusty_tokio::sync::{mpsc, oneshot};
 
-use super::{GRACE, POLL, command, to_io, win_size};
+use super::{GRACE, POLL, command, exit_status, to_io, win_size};
 use crate::Config;
 
 /// Bytes per read from the output pipe.
@@ -162,21 +162,20 @@ impl Process {
     /// Windows' console-close notification, and waits for the program to
     /// exit, terminating it after [`GRACE`]. Runs as its own task so the
     /// server keeps serving meanwhile.
-    pub(crate) async fn reap(mut self) {
-        let Some(child) = self.child.as_mut() else {
-            return;
-        };
+    /// How it ended, or `None` if that can't be known.
+    pub(crate) async fn reap(mut self) -> Option<ExitStatus> {
+        let child = self.child.as_mut()?;
         hang_up(&self.master);
         let deadline = Instant::now() + GRACE;
         let mut killed = false;
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(status)) => return exit_status(status),
                 Ok(None) => {}
                 Err(err) => {
                     // The child stays in self, so `Drop` still ends it.
                     eprintln!("rusty-mux-server: polling pid {}: {err:?}", child.id());
-                    return;
+                    return None;
                 }
             }
             if !killed && Instant::now() >= deadline {

@@ -562,7 +562,8 @@ impl<S: io::Read + Write> Session<'_, S> {
         let wanted = Features::EVENT_SEQ
             .union(Features::SYNC)
             .union(Features::STATUS)
-            .union(Features::TERMINAL_EVENTS);
+            .union(Features::TERMINAL_EVENTS)
+            .union(Features::PROGRAM_EVENTS);
         let (features, start) = self.hello(wanted, after)?;
         if let Some((kind, _)) = needs.iter().find(|(_, need)| !features.contains(*need)) {
             return Err(Failure::Failed(format!(

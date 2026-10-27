@@ -323,6 +323,14 @@ fn status_notes_need_a_live_block() {
     assert_eq!(mux.note_status(block), Err(Error::UnknownBlock(block)));
     assert_eq!(mux.note_pwd(block), Err(Error::UnknownBlock(block)));
     assert_eq!(mux.note_title(block), Err(Error::UnknownBlock(block)));
+    let gone = Err(Error::UnknownBlock(block));
+    assert_eq!(mux.note_exit(block, ExitStatus::Code(0)), gone);
+    assert_eq!(mux.note_bell(block), gone);
+    assert_eq!(mux.note_progress(block, Progress::Cleared), gone);
+    assert_eq!(
+        mux.note_notification(block, String::new(), "b".into()),
+        gone
+    );
     assert!(mux.take_events().is_empty());
 }
 
@@ -335,5 +343,34 @@ fn pwd_and_title_notes_emit_their_events() {
     assert_eq!(
         mux.take_events(),
         vec![Event::PwdChanged { block }, Event::TitleChanged { block }]
+    );
+}
+
+#[test]
+fn program_notes_emit_their_events_in_order() {
+    let (mut mux, _, _, block) = fixture();
+    mux.take_events();
+    assert_eq!(mux.note_bell(block), Ok(()));
+    assert_eq!(mux.note_progress(block, Progress::Normal(40)), Ok(()));
+    assert_eq!(mux.note_notification(block, "t".into(), "b".into()), Ok(()));
+    assert_eq!(mux.note_exit(block, ExitStatus::Signal(9)), Ok(()));
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::Bell { block },
+            Event::ProgressChanged {
+                block,
+                progress: Progress::Normal(40)
+            },
+            Event::Notification {
+                block,
+                title: "t".into(),
+                body: "b".into()
+            },
+            Event::ProgramExited {
+                block,
+                status: ExitStatus::Signal(9)
+            },
+        ]
     );
 }
