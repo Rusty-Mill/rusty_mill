@@ -43,6 +43,9 @@ impl Features {
     /// [`Event::BlockStatus`] events. A client without it never receives
     /// one, so its event numbers skip them.
     pub const STATUS: Self = Self(1 << 8);
+    /// [`Event::PwdChanged`] and [`Event::TitleChanged`] events, likewise
+    /// skipped for a client without it.
+    pub const TERMINAL_EVENTS: Self = Self(1 << 9);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -602,6 +605,8 @@ mod kind {
     pub const DETACHED: u64 = 11;
     pub const LEASE_CHANGED: u64 = 12;
     pub const BLOCK_STATUS: u64 = 13;
+    pub const PWD_CHANGED: u64 = 14;
+    pub const TITLE_CHANGED: u64 = 15;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -675,6 +680,14 @@ fn put_event(out: &mut Out, event: &Event) {
             out.varint(KIND, kind::BLOCK_STATUS)
                 .uuid(BLOCK, block.uuid());
         }
+        E::PwdChanged { block } => {
+            out.varint(KIND, kind::PWD_CHANGED)
+                .uuid(BLOCK, block.uuid());
+        }
+        E::TitleChanged { block } => {
+            out.varint(KIND, kind::TITLE_CHANGED)
+                .uuid(BLOCK, block.uuid());
+        }
     }
 }
 
@@ -725,6 +738,12 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
             holder: f.opt(HOLDER, client)?,
         },
         kind::BLOCK_STATUS => E::BlockStatus {
+            block: block(f, BLOCK)?,
+        },
+        kind::PWD_CHANGED => E::PwdChanged {
+            block: block(f, BLOCK)?,
+        },
+        kind::TITLE_CHANGED => E::TitleChanged {
             block: block(f, BLOCK)?,
         },
         _ => return Err(f.invalid(KIND)),

@@ -167,3 +167,29 @@ fn replay_sends_status_events_only_to_clients_that_asked() {
         );
     }
 }
+
+#[test]
+fn pwd_and_title_changes_reach_only_clients_that_asked() {
+    let path = start_server();
+    let wanted = SEQ
+        .union(Features::TERMINAL_EVENTS)
+        .union(Features::CHECKPOINT_V3);
+    let mut watcher = Client::connect_with(&path, wanted, None);
+    let mut plain = Client::connect_with(&path, SEQ.union(Features::STATUS), None);
+    let block = block_for(&mut watcher);
+    watcher.input(
+        block,
+        b"printf '\\033]7;file://host/tmp\\007\\033]2;job\\007'\r",
+    );
+    let changes = [Event::PwdChanged { block }, Event::TitleChanged { block }];
+    while !changes
+        .iter()
+        .all(|c| watcher.events.iter().any(|(_, e)| e == c))
+    {
+        watcher.recv();
+    }
+
+    let later = create_session(&mut watcher, "later");
+    wait_for_session(&mut plain, later);
+    assert!(!plain.events.iter().any(|(_, e)| changes.contains(e)));
+}

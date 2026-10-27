@@ -39,7 +39,8 @@ const OFFERED: Features = Features::CHECKPOINT_V3
     .union(Features::SYNC)
     .union(Features::INSPECT)
     .union(Features::BLOCK_CALL)
-    .union(Features::STATUS);
+    .union(Features::STATUS)
+    .union(Features::TERMINAL_EVENTS);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -51,16 +52,20 @@ struct BlockRt {
     parser: AnsiParser,
     /// What the program reported with OSC 7501.
     status: Records,
+    /// The working directory and title last announced.
+    seen: terminal::Seen,
     reader: JoinHandle<()>,
 }
 
 impl BlockRt {
-    /// Stops reading (unless the reader is the caller), closes this handle
-    /// on the master, and reaps the program in the background.
+    /// Stops reading (unless the reader is the caller), releases the PTY's
+    /// output whatever other handles remain, closes this handle on the
+    /// master, and reaps the program in the background.
     fn release(self, abort_reader: bool) {
         if abort_reader {
             self.reader.abort();
         }
+        self.pty.release();
         drop(self.pty);
         rusty_tokio::task::spawn_local(self.process.reap());
     }
@@ -384,6 +389,7 @@ impl State {
                 grid,
                 parser: AnsiParser::new(),
                 status: Records::default(),
+                seen: terminal::Seen::default(),
                 reader,
             },
         );
@@ -459,6 +465,13 @@ impl State {
             && let Err(err) = self.mux.note_status(block)
         {
             eprintln!("rusty-mux-server: model out of step on status: {err}");
+        }
+        let (pwd, title) = rt.seen.changes(&rt.grid);
+        if pwd && let Err(err) = self.mux.note_pwd(block) {
+            eprintln!("rusty-mux-server: model out of step on pwd: {err}");
+        }
+        if title && let Err(err) = self.mux.note_title(block) {
+            eprintln!("rusty-mux-server: model out of step on title: {err}");
         }
         let frame = encode(&Message::Output {
             block,
@@ -569,10 +582,16 @@ impl State {
 }
 
 /// Whether a client with `features` is sent `event`: a status event only
-/// with [`Features::STATUS`], so older clients never see a kind they can't
-/// decode.
+/// with [`Features::STATUS`], a pwd or title event only with
+/// [`Features::TERMINAL_EVENTS`], so older clients never see a kind they
+/// can't decode.
 fn receives(features: Features, event: &Event) -> bool {
-    !matches!(event, Event::BlockStatus { .. }) || features.contains(Features::STATUS)
+    let needs = match event {
+        Event::BlockStatus { .. } => Features::STATUS,
+        Event::PwdChanged { .. } | Event::TitleChanged { .. } => Features::TERMINAL_EVENTS,
+        _ => Features::NONE,
+    };
+    features.contains(needs)
 }
 
 fn event_frame(seq: Option<u64>, event: &Event) -> Option<Vec<u8>> {
@@ -668,7 +687,7 @@ async fn pump(shared: Shared, block: BlockId, pty: Rc<Pty>) {
     shared.borrow_mut().exited(block);
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl State {
     pub(crate) fn test_client(&self) -> ClientId {
         *self.clients.keys().next().unwrap()
@@ -684,7 +703,8 @@ impl State {
     }
 }
 
-#[cfg(test)]
+// These start `/bin/sh`.
+#[cfg(all(test, unix))]
 mod regression {
     use super::*;
     use crate::checkpoint::Receiver;

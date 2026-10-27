@@ -1,9 +1,12 @@
-//! rusty_mux actions and key bindings (C19), from a JSON config.
+//! rusty_mux actions, key bindings and event rules (C19), from a JSON
+//! config.
 //!
 //! An action is a named chain of catalog requests, run in order on one
 //! connection the way `rusty-mux-ctl a + b` runs them. Its string values
 //! may hold `${arg}` placeholders for the arguments it declares. A binding
-//! maps a key chord sequence to an action or a catalog method.
+//! maps a key chord sequence to an action or a catalog method. A rule (`on`)
+//! runs one when an event happens, its values taking the event's fields,
+//! such as `${block}` or `${pwd}`.
 //!
 //! [`parse`] checks every method, parameter, placeholder and binding
 //! against the catalog and reports every problem at once, so a config that
@@ -41,6 +44,8 @@ pub struct Config {
     pub actions: Vec<Action>,
     /// In the order they are defined, key sequences unique.
     pub binds: Vec<Bind>,
+    /// In the order they are defined.
+    pub rules: Vec<Rule>,
 }
 
 impl Config {
@@ -108,6 +113,73 @@ pub struct Bind {
     pub action: String,
     /// Its arguments or parameters, as text.
     pub args: Vec<(String, String)>,
+}
+
+/// The event kinds a rule can name, as `rusty-mux-ctl events` prints them,
+/// and the fields each gives its placeholders: the ids and numbers of the
+/// event, and for `pwd-changed` and `title-changed` the new directory or
+/// title.
+pub const EVENTS: &[(&str, &[&str])] = &[
+    ("session-created", &["session"]),
+    ("session-closed", &["session"]),
+    ("window-created", &["window", "session"]),
+    ("window-closed", &["window"]),
+    ("block-created", &["block", "window", "cols", "rows"]),
+    ("block-resized", &["block", "cols", "rows"]),
+    ("block-closed", &["block"]),
+    ("client-connected", &["client"]),
+    ("client-disconnected", &["client"]),
+    ("attached", &["client", "block"]),
+    ("detached", &["client", "block"]),
+    ("lease-changed", &["block", "holder"]),
+    ("block-status", &["block"]),
+    ("pwd-changed", &["block", "pwd"]),
+    ("title-changed", &["block", "title"]),
+];
+
+/// What to run when an event of one kind happens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rule {
+    /// One of [`EVENTS`].
+    pub event: &'static str,
+    pub run: Run,
+}
+
+/// What a rule runs; its values may hold the event's `${field}`s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Run {
+    /// An action of the config, given all its arguments.
+    Action {
+        name: String,
+        args: Vec<(String, String)>,
+    },
+    /// One catalog request.
+    Request(Call),
+}
+
+impl Rule {
+    /// The requests to send for an event with `fields`: each `${field}`
+    /// replaced in one pass, then the action expanded. A field the event
+    /// lacks, such as the `holder` of a lease nobody holds, stays as it is.
+    pub fn calls(&self, config: &Config, fields: &[(String, String)]) -> Result<Vec<Call>, String> {
+        match &self.run {
+            Run::Request(call) => Ok(vec![Call {
+                method: call.method,
+                params: fill(&call.params, fields),
+            }]),
+            Run::Action { name, args } => config
+                .action(name)
+                .ok_or_else(|| format!("no action `{name}`"))?
+                .expand(&fill(args, fields)),
+        }
+    }
+}
+
+fn fill<K: Clone>(params: &[(K, String)], fields: &[(String, String)]) -> Vec<(K, String)> {
+    params
+        .iter()
+        .map(|(name, value)| (name.clone(), substitute(value, fields)))
+        .collect()
 }
 
 /// Something wrong in a config, and where.

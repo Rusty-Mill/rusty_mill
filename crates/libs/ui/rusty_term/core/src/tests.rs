@@ -7378,3 +7378,33 @@ fn program_status_queue_keeps_boundaries_when_full() {
         ]
     );
 }
+
+/// Reflow time for a full 10k-line history at 200x50, resized in the order
+/// the perf backlog measured (§2.3). Run in release with `--ignored`.
+#[test]
+#[ignore = "measurement; run in release"]
+fn measure_reflow() {
+    let mut g = Grid::new(200, 50);
+    g.set_scrollback_max(10_000);
+    let mut p = AnsiParser::new();
+    let mut text = Vec::new();
+    for i in 0..10_100 {
+        text.extend_from_slice(
+            format!(
+                "{i:>6} \x1b[3{}m{}\x1b[m\r\n",
+                i % 8,
+                "lorem ipsum dolor sit amet ".repeat(1 + i % 9)
+            )
+            .as_bytes(),
+        );
+    }
+    p.advance(&mut g, &text);
+    for (cols, rows) in [(150, 50), (200, 50), (80, 24), (200, 50)] {
+        let start = std::time::Instant::now();
+        g.resize(cols, rows);
+        println!(
+            "{cols}x{rows}: {:.1} ms",
+            start.elapsed().as_secs_f64() * 1e3
+        );
+    }
+}

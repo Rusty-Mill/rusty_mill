@@ -25,7 +25,10 @@ rusty_tokio = { workspace = true }
 rusty_uuid = { workspace = true }
 platform = { workspace = true }
 
-# Phase 1 is Linux-only (ROADMAP); ConPTY follows spike 1.
+# Linux and Windows (ConPTY over AF_UNIX); other targets build a stub.
 [target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { workspace = true }
 rusty_libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+platform-windows = { workspace = true }

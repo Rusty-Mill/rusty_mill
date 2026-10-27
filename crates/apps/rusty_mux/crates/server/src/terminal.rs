@@ -57,6 +57,34 @@ pub(crate) fn absorb_status(grid: &mut Grid, records: &mut Records) -> bool {
     records.states() != before
 }
 
+/// The working directory URI (OSC 7) and title a block last announced, to
+/// tell when either changes.
+#[derive(Debug, Default)]
+pub(crate) struct Seen {
+    cwd: String,
+    title: String,
+}
+
+impl Seen {
+    /// Whether the grid's working directory and title, in that order,
+    /// changed since the last call.
+    pub(crate) fn changes(&mut self, grid: &Grid) -> (bool, bool) {
+        (
+            update(&mut self.cwd, &grid.cwd),
+            update(&mut self.title, &grid.title),
+        )
+    }
+}
+
+/// Makes `seen` `now`; whether it differed.
+fn update(seen: &mut String, now: &str) -> bool {
+    if seen == now {
+        return false;
+    }
+    now.clone_into(seen);
+    true
+}
+
 /// The path of an OSC 7 `file://HOST/PATH` URI, percent-decoded.
 fn reported_path(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
@@ -112,6 +140,19 @@ mod tests {
         ] {
             assert_eq!(reported_path(uri), None, "{uri}");
         }
+    }
+
+    #[test]
+    fn pwd_and_title_changes_are_seen_once() {
+        let mut grid = Grid::new(20, 2);
+        let mut parser = rusty_term_core::AnsiParser::new();
+        let mut seen = Seen::default();
+        assert_eq!(seen.changes(&grid), (false, false), "nothing yet");
+        parser.advance(&mut grid, b"\x1b]7;file://host/tmp\x07\x1b]2;job\x07");
+        assert_eq!(seen.changes(&grid), (true, true));
+        assert_eq!(seen.changes(&grid), (false, false), "announced once");
+        parser.advance(&mut grid, b"\x1b]7;file://host/tmp\x07\x1b]2;next\x07");
+        assert_eq!(seen.changes(&grid), (false, true), "same directory");
     }
 
     fn status_grid() -> (Grid, rusty_term_core::AnsiParser, Records) {

@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use rusty_json::{Map, Value};
-use rusty_mux_script::{Action, Call, Config};
+use rusty_mux_script::{Action, Call, Config, Rule, Run};
 
 /// `$RUSTY_MUX_CONFIG`, else `rusty_mux/config.json` under
 /// `$XDG_CONFIG_HOME`, else under `$HOME/.config`.
@@ -53,13 +53,15 @@ pub(crate) fn chain(calls: &[Call]) -> Vec<String> {
 /// What `config check` prints for a valid config.
 pub(crate) fn summary(config: &Config) -> String {
     format!(
-        "ok: {} actions, {} bindings",
+        "ok: {} actions, {} bindings, {} rules",
         config.actions.len(),
-        config.binds.len()
+        config.binds.len(),
+        config.rules.len()
     )
 }
 
-/// One line per action, then one per binding, or a JSON object of each.
+/// One line per action, then per binding, then per rule, or a JSON object
+/// of each.
 pub(crate) fn list(config: &Config, json: bool) -> String {
     let actions = config.actions.iter().map(|a| action_line(a, json));
     let binds = config.binds.iter().map(|b| {
@@ -75,7 +77,36 @@ pub(crate) fn list(config: &Config, json: bool) -> String {
                 .to_owned(),
         }
     });
-    actions.chain(binds).collect::<Vec<_>>().join("\n")
+    let rules = config.rules.iter().map(|r| rule_line(r, json));
+    actions
+        .chain(binds)
+        .chain(rules)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn rule_line(rule: &Rule, json: bool) -> String {
+    let (name, args): (&str, Vec<(String, String)>) = match &rule.run {
+        Run::Action { name, args } => (name, args.clone()),
+        Run::Request(call) => (
+            call.method,
+            call.params
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), v.clone()))
+                .collect(),
+        ),
+    };
+    if json {
+        return object([
+            ("on", rule.event.into()),
+            ("action", name.into()),
+            ("args", pairs(&args)),
+        ]);
+    }
+    let flags: Vec<String> = args.iter().map(|(k, v)| format!("--{k}={v}")).collect();
+    format!("on     {:<16} {name} {}", rule.event, flags.join(" "))
+        .trim_end()
+        .to_owned()
 }
 
 fn action_line(action: &Action, json: bool) -> String {
@@ -119,7 +150,8 @@ mod tests {
         {"call": "create-window", "args": {"name": "${name}"}},
         {"call": "input", "args": {"data": "a + b=c"}}
       ]}],
-      "binds": [{"keys": "ctrl+b>c", "action": "scratch", "args": {"name": "x"}}]
+      "binds": [{"keys": "ctrl+b>c", "action": "scratch", "args": {"name": "x"}}],
+      "on": [{"event": "pwd-changed", "action": "scratch", "args": {"name": "${pwd}"}}]
     }"#;
 
     #[test]
@@ -145,7 +177,9 @@ mod tests {
         let config = rusty_mux_script::parse(CONFIG).expect("valid");
         assert_eq!(
             list(&config, false),
-            "action scratch          --name Scratch\nbind   ctrl+b>c         scratch --name=x"
+            "action scratch          --name Scratch\n\
+             bind   ctrl+b>c         scratch --name=x\n\
+             on     pwd-changed      scratch --name=${pwd}"
         );
         let json: Vec<Value> = list(&config, true)
             .lines()
@@ -162,7 +196,11 @@ mod tests {
                 .and_then(Value::as_str),
             Some("x")
         );
-        assert_eq!(summary(&config), "ok: 1 actions, 1 bindings");
+        assert_eq!(
+            json[2].get("on").and_then(Value::as_str),
+            Some("pwd-changed")
+        );
+        assert_eq!(summary(&config), "ok: 1 actions, 1 bindings, 1 rules");
     }
 
     #[test]

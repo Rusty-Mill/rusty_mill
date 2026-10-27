@@ -471,6 +471,16 @@ impl Service {
         Ok(task)
     }
 
+    /// Trash a task only if it has no subtasks, checked in the same step as the
+    /// write, so a subtask added by anyone else is never trashed along with it.
+    pub fn trash_leaf_task(&mut self, id: Uuid) -> Result<Task> {
+        let task = self.task(id)?;
+        if !self.children(&task).is_empty() {
+            return Err(ServiceError::Conflict(format!("{id} has subtasks")));
+        }
+        self.trash_task(id)
+    }
+
     /// Bring a task and the subtasks trashed with it back. A task whose list
     /// is gone (or itself trashed) is restored into the Inbox.
     pub fn restore_task(&mut self, id: Uuid) -> Result<Task> {
@@ -1150,6 +1160,24 @@ mod tests {
         let reopened = Service::open(dir.path(), Box::new(|| 2_000)).unwrap();
         assert!(reopened.task(task.id).unwrap().is_deleted());
         assert_eq!(reopened.doc(BOARD_KIND, task.id).unwrap(), before);
+    }
+
+    #[test]
+    fn a_leaf_trash_refuses_a_task_with_subtasks_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = Service::open(dir.path(), Box::new(|| 1_000)).unwrap();
+        let parent = task_named(&mut service, "parent", None);
+        let child = task_named(&mut service, "child", Some(parent.id));
+        assert!(matches!(
+            service.trash_leaf_task(parent.id),
+            Err(ServiceError::Conflict(_))
+        ));
+        assert_eq!(service.task(parent.id).unwrap(), parent);
+        assert_eq!(service.task(child.id).unwrap(), child);
+
+        let trashed = service.trash_leaf_task(child.id).unwrap();
+        assert!(trashed.is_deleted());
+        assert!(!service.task(parent.id).unwrap().is_deleted());
     }
 
     #[test]

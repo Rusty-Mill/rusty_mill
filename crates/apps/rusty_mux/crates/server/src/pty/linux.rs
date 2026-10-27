@@ -1,26 +1,18 @@
-//! A block's PTY, driven by the reactor through a non-blocking master fd,
-//! and the program running on it.
+//! Linux: a block's PTY, driven by the reactor through a non-blocking
+//! master fd, and the program running on it.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use platform::error::{ErrorKind, PlatformError};
-use platform::process::{Child, Command, EnvSpec, Signal};
+use platform::process::{Child, Signal};
 use platform::pty::PtyMaster;
-use platform::term::WinSize;
 use platform_linux::{LinuxChild, LinuxPty, LinuxPtyMaster};
 use rusty_mux_core::Size;
 use rusty_tokio::io::AsyncFd;
 
+use super::{GRACE, POLL, command, to_io, win_size};
 use crate::Config;
-
-/// How long a closed block's program has to exit after `SIGHUP` before its
-/// process group gets `SIGKILL`.
-const GRACE: Duration = Duration::from_secs(1);
-/// How often [`Process::reap`] polls for the exit.
-const POLL: Duration = Duration::from_millis(10);
 
 /// The master side of a block's PTY. Shared by the reader and by writers;
 /// the fd closes when the last handle drops.
@@ -41,13 +33,7 @@ pub(crate) fn spawn(
     size: Size,
     env: &[(&str, OsString)],
 ) -> io::Result<(Pty, Process)> {
-    let mut vars: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
-    vars.extend(env.iter().map(|(k, v)| (OsString::from(k), v.clone())));
-    let mut cmd =
-        Command::new(config.program.clone(), config.cwd.clone()).env(EnvSpec::Explicit(vars));
-    for arg in &config.args {
-        cmd = cmd.arg(arg.clone());
-    }
+    let cmd = command(config, env);
     let (master, child) = LinuxPty
         .spawn_concrete(&cmd, win_size(size))
         .map_err(to_io)?;
@@ -153,30 +139,16 @@ impl Pty {
     pub(crate) fn resize(&self, size: Size) -> io::Result<()> {
         self.master.get_ref().resize(win_size(size)).map_err(to_io)
     }
-}
 
-fn win_size(size: Size) -> WinSize {
-    WinSize {
-        rows: size.rows(),
-        cols: size.cols(),
-    }
-}
-
-fn to_io(err: PlatformError) -> io::Error {
-    let kind = match err.kind {
-        ErrorKind::WouldBlock => io::ErrorKind::WouldBlock,
-        ErrorKind::Interrupted => io::ErrorKind::Interrupted,
-        ErrorKind::NotFound => io::ErrorKind::NotFound,
-        ErrorKind::PermissionDenied => io::ErrorKind::PermissionDenied,
-        ErrorKind::InvalidInput => io::ErrorKind::InvalidInput,
-        _ => io::ErrorKind::Other,
-    };
-    io::Error::new(kind, format!("{}: {:?}", err.op, err.os))
+    /// Nothing to do on Linux: the fd closes with the last handle, and an
+    /// unread PTY only stalls its own program.
+    pub(crate) fn release(&self) {}
 }
 
 #[cfg(test)]
 mod regression {
     use super::*;
+    use platform::process::Command;
     use rusty_tokio::{Builder, LocalOptions};
 
     #[test]
