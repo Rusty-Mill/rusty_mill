@@ -26,8 +26,6 @@ import sys
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Optional
 
-from lockfile_diff import full_dependency_closure
-
 CrateDirs = list[tuple[Path, str]]
 
 
@@ -72,15 +70,23 @@ def local_package_dirs(metadata: dict, root_dir: Path) -> CrateDirs:
 
 
 def local_package_consumers(metadata: dict, changed_local: set[str]) -> set[str]:
-    """Workspace members whose full dependency closure includes a changed local package."""
-    if not changed_local:
-        return set()
-    closures = full_dependency_closure(metadata)
-    return {
-        pkg_id
-        for pkg_id in metadata["workspace_members"]
-        if closures.get(pkg_id, set()) & changed_local
-    }
+    """Workspace members that depend, directly or through any package, on a changed local package.
+
+    Walks the full resolve graph backwards, external packages included, so a
+    member that reaches the patched package only through a registry crate counts.
+    """
+    dependents: dict[str, set[str]] = {}
+    for node in metadata["resolve"]["nodes"]:
+        for dep in node["deps"]:
+            dependents.setdefault(dep["pkg"], set()).add(node["id"])
+    seen = set(changed_local)
+    queue = list(changed_local)
+    while queue:
+        for dependent in dependents.get(queue.pop(), ()):
+            if dependent not in seen:
+                seen.add(dependent)
+                queue.append(dependent)
+    return seen & set(metadata["workspace_members"])
 
 
 def workspace_crate_dirs(packages: dict[str, dict]) -> CrateDirs:

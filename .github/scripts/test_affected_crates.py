@@ -176,6 +176,11 @@ class ReverseDependencyTests(unittest.TestCase):
         md["resolve"]["nodes"].append({"id": "jwt", "deps": []})
         self.assertEqual(affected_packages(md, ["vendor/jwt/Cargo.toml"]), ["app", "auth", "cli"])
         self.assertEqual(affected_packages(md, ["vendor/jwt/src/lib.rs"]), ["app", "auth", "cli"])
+        # Reached only through a registry crate.
+        md["resolve"]["nodes"][-1:] = [{"id": "jwt", "deps": []}, {"id": "oauth", "deps": [{"name": "jwt", "pkg": "jwt"}]}]
+        md["resolve"]["nodes"][3]["deps"] = [{"name": "oauth", "pkg": "oauth"}]
+        md["packages"].append({"id": "oauth", "name": "oauth", "manifest_path": "/registry/oauth/Cargo.toml"})
+        self.assertEqual(affected_packages(md, ["vendor/jwt/Cargo.toml"]), ["app", "auth", "cli", "other"])
 
     def test_dependency_cycles_terminate(self) -> None:
         # A dev-dependency back-edge makes the resolve graph cyclic.
