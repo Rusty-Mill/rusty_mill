@@ -129,9 +129,8 @@ fn push(out: &mut Vec<u8>, mods: Mods, key: Key, app_cursor: bool) -> Result<(),
 fn push_char(out: &mut Vec<u8>, mods: Mods, c: char) -> Result<(), &'static str> {
     let c = match mods.shift {
         false => c,
-        true if c.is_lowercase() => c.to_uppercase().next().unwrap_or(c),
         true if c.is_uppercase() => c,
-        true => return Err("shift needs a letter; send the shifted character instead"),
+        true => capital(c).ok_or("shift needs a letter with one capital; send it instead")?,
     };
     if mods.alt {
         out.push(0x1b);
@@ -153,6 +152,16 @@ fn push_char(out: &mut Vec<u8>, mods: Mods, c: char) -> Result<(), &'static str>
         _ => return Err("ctrl needs a letter or one of @ [ \\ ] ^ _ ? space"),
     });
     Ok(())
+}
+
+/// The one character that is `c`'s capital; `None` for a character without
+/// case or one whose capital is several (`ß` is `SS`).
+fn capital(c: char) -> Option<char> {
+    let mut upper = c.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(one), None) if c.is_lowercase() => Some(one),
+        _ => None,
+    }
 }
 
 /// Enter, Tab, Backspace or Escape: alt sends ESC first; shift+tab is
@@ -217,6 +226,7 @@ mod tests {
         assert_eq!(one("ctrl+space"), b"\x00");
         assert_eq!(one("alt+x"), b"\x1bx");
         assert_eq!(one("shift+a"), b"A");
+        assert_eq!(one("shift+é"), "É".as_bytes());
         assert_eq!(one("ctrl+alt+a"), b"\x1b\x01");
         assert_eq!(one("alt+enter"), b"\x1b\r");
         assert_eq!(one("shift+tab"), b"\x1b[Z");
@@ -237,6 +247,9 @@ mod tests {
             "ctrl++",
             "shift+1",
             "ctrl+enter",
+            "shift+ß",
+            "ctrl+shift+ß",
+            "shift+\u{fb01}",
         ] {
             let error = keys(&["a", name], false).expect_err(name);
             assert!(error.starts_with(&format!("`{name}`")), "{error}");
