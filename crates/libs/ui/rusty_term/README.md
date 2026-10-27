@@ -324,6 +324,20 @@ sees `xterm-256color`):
 tic -x extra/rusty_term.terminfo
 ```
 
+## Capability tour
+
+[`extra/rt-caps.sh`](extra/rt-caps.sh) walks through what rusty_term supports:
+probes, colors, SGR, glyphs, widths, mode 2027, cursor, screen editing, sync
+output, OSC, images, input and throughput. Run it from the shell inside
+rusty_term (TUI or `--gui`). Width, grapheme and probe rows check themselves
+and print PASS/FAIL; the rest say what you should see.
+
+```sh
+sh extra/rt-caps.sh              # every non-interactive section
+sh extra/rt-caps.sh widths sync  # just those sections
+sh extra/rt-caps.sh list         # section names
+```
+
 ## Structured side-channel (`l13`)
 
 The `l13` feature adds a full-duplex JSON-RPC 2.0 transport over a private OSC
@@ -403,6 +417,7 @@ l13/                 the `rusty_term_l13` workspace crate (feature `l13`)
   src/lib.rs           L13 structured side-channel, against a TerminalState trait
 extra/
   rusty_term.terminfo
+  rt-caps.sh           guided capability tour, partly self-checking
   shell-integration/   bash / zsh / fish / pwsh OSC 133 emitters
   gen_ligtest_font.py  regenerates the GSUB shaper test fixture
 bench/                benchmark harness: rusty_term-only + cross-terminal (see bench/README.md)
