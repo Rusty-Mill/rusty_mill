@@ -24,7 +24,7 @@ Four kinds, each with a permanent, never-reused id (typed prefix plus a UUID) an
 - **Block**: one application in a window; today only terminals.
 - **Client**: a connected program, such as the app; targeted when asking the app itself to act.
 
-Panes are not a fifth kind: a pane is a block's place in its window's layout, and a split creates a block beside another. The layout lives on the server: `session.new_split`, a `session_view_changed` event with a revision, `zoom`, and a Lua layout builder of nested horizontal and vertical splits [docs: automate/server-api, reference/events, reference/lua]. Lua session methods also mention "layers" [docs: reference/lua]; what a layer is (floating or stacked blocks?) is [unverified].
+Panes are not a fifth kind: a pane is a block's place in its window's layout, and a split creates a block beside another. The layout lives on the server: `session.new_split`, a `session_view_changed` event with a revision, `zoom`, and a Lua layout builder of nested horizontal and vertical splits [docs: automate/server-api, reference/events, reference/lua]. Lua session methods also have layers: floating containers of blocks inside a window, which can be created, moved, resized, raised and lowered, and a tiled block can be floated into one [docs: reference/lua]. Not yet in C12's scope.
 
 rusty_mux has the same four kinds (`crates/core/src/entity.rs`, `crates/core/src/event.rs`) but no layout: a window is a list of blocks. See conflict K1.
 
@@ -36,7 +36,7 @@ Status: **present**, **partial**, **absent**, **ahead** (rusty_mux does more), *
 |---|---|---|---|---|---|
 | G1 | Server-owned persistent sessions | docs | C01 | partial | Blocks outlive clients; server is not a daemon. Rex's personal server starts on first use and exits ~10 s after the last session and connection [docs: linux/server-modes] |
 | G2 | Four object kinds | docs | C11 | present | `crates/core/src/entity.rs` |
-| G3 | Window layout: splits, zoom, layout events | docs | C12 | absent | C12 plans client-native splits; see K1 |
+| G3 | Window layout: splits, zoom, layout events | docs | C12 | absent | Baseline: C12 planned client-native splits. Since 2026-10-27, C12 is a server-owned layout (K1) |
 | G4 | Ids plus changeable labels on all four kinds | docs | C11 | partial | Sessions and windows take a name at creation only; no block or client labels, no rename methods, no label-changed events |
 | G5 | Targets by id, label, position, id suffix; exit codes 0/1/2/3/4/130 | docs | C04 | present | #1089, `crates/ctl/src/target.rs` |
 | G6 | Self-describing API (list, describe, call) | docs | C17 | present | `api list`, `api describe`; every catalog method is a ctl command, which covers `call` (`crates/ctl/src/cli.rs`) |
@@ -44,7 +44,7 @@ Status: **present**, **partial**, **absent**, **ahead** (rusty_mux does more), *
 | G8 | Event coverage | docs | C05, C19 | partial | Have: session, window, block, client, lease, status, pwd, title. Missing: child exited with exit code, bell, foreground process changed, desktop notification, progress report, clipboard written, status removed, label changes, active window changed, layout changed, config reloaded, client connection state |
 | G9 | Per-block-type methods | docs | C06 | present | `terminal.format`, `pwd`, `title`, `status` (`crates/proto/src/schema.rs`) |
 | G10 | Running-process info (child and foreground, as JSON) | docs | none | absent | Rex: terminal `process` method and `terminal.process_changed` event (foreground, ancestors, generation) [docs: reference/lua, reference/events] |
-| G11 | Screen capture with options | docs | C18 | partial | Plain text after N history lines. Missing: styled (HTML) and raw VT formats, trim, unwrap. Rex keeps ~64 MiB of scrollback; ours is 10,000 rows ([REPLAY.md](REPLAY.md)) |
+| G11 | Screen capture with options | docs | C18 | partial | Plain text after N history lines. Missing: styled (HTML) and raw VT formats, trim, unwrap. Rex documents a scrollback budget of about 64 MiB [docs: automate/shell-scripting]; ours is a 10,000-row history ([REPLAY.md](REPLAY.md)). Not measured on a common basis |
 | G12 | Input: text, named keys | docs | `input` | partial | Raw bytes only; no named-key encoder (`send-key` equivalent). Mouse: neither documents it |
 | G13 | Wait primitives | docs | `watch` | partial | No wait for a block to close or its program to exit, no run-and-wait returning the program's exit status, no wait-for-event with a filter and timeout. `watch` runs rules but does not block a caller |
 | G14 | Scripting language, timers, exec | docs | C19 | by decision | Declarative JSON actions and `on` rules, no language (DECISIONS 2026-10-26). Rex adds timers and process exec; ours leave those to external programs. Timers were noted as not approved |
@@ -57,11 +57,11 @@ Status: **present**, **partial**, **absent**, **ahead** (rusty_mux does more), *
 | G21 | Remote listeners with caller identity (Tailscale) | docs | C25, C27 | absent | Phase 3. First-party `rusty_tail` exists (`crates/apps/rusty_tailscale`, userspace tailnet on `rusty_tokio`); see K3 |
 | G22 | Server modes: personal, shared, login | docs | C26 | absent | Phase 3 |
 | G23 | Several servers: saved hosts, per-call server target | docs | none | absent | Not in CAPABILITIES |
-| G24 | Upgrade without losing sessions | docs | none | absent | Rex's login server keeps per-account servers running across upgrades. phux-style re-exec with PTY adoption was noted in the design brief §4 |
+| G24 | Upgrade without losing sessions | docs | none | absent | Rex keeps running personal and per-account servers on their old version, with their sessions, until they stop; a login server restart keeps sessions; a shared server restart ends them. No live re-exec is documented [docs: linux/upgrading]. phux-style re-exec with PTY adoption (design brief §4) would go further. Phase 5 (C36) |
 | G25 | Reattach from another device | docs | C03 | partial | Reattach by snapshot works locally; remote needs G21 |
 | G26 | Multiplayer, web, iOS | demo, docs | C14, C15, C16 | absent | Rex documents iOS only (in progress); sharing and web are [demo] |
 | G27 | Windows server | docs | C24 | ahead (for now) | Public on our side; Rex's is internal |
-| G28 | No telemetry, no hidden egress | docs | C09 | ahead | Rex for Mac's update check cannot be turned off [docs: reference/privacy]; rusty_mux makes no outbound calls by design (CHARTER) |
+| G28 | No telemetry, no hidden egress | docs | C09 | par | Rex states it collects no telemetry; its server and CLI make no outbound connections by default, and Rex for Mac makes a documented update check that cannot be turned off [docs: reference/privacy]. CHARTER requires no hidden egress; C09 is still not-started formally |
 | G29 | Command palette | docs | C08 | absent | Client-side, Phase 4 |
 
 ## 4. Conflicts and flags
@@ -72,20 +72,20 @@ Status: **present**, **partial**, **absent**, **ahead** (rusty_mux does more), *
 - **K4, agent installer.** A skill-and-hook installer writes into other tools' settings files (`~/.claude/settings.json` and the like). That is user config outside the repo; it needs the owner's go-ahead and must merge without clobbering. Write our own skill text; do not reuse Rex's guide.
 - **K5, clean room.** OSC 7501 is a published open protocol (already decided). Event and method meanings may follow Rex (DECISIONS 2026-10-25); names, schemas and docs prose must be our own. Nothing in §5 needs Rex code.
 - **K6, rusty_tokio and deps.** None of §5 needs tokio or a third-party crate. Process info (G10) needs per-OS process queries: `/proc` on Linux, Toolhelp on Windows, `libproc` on macOS through existing platform crates or `rusty_libc`; check before adding anything.
-- **K7, scrollback.** Rex's 64 MiB capture budget is ~6x ours. Raising it touches the snapshot and reattach budgets in REPLAY; measure first.
+- **K7, scrollback.** Rex's budget is stated in bytes, ours in rows, so they are not comparable without a measurement. Changing ours touches the snapshot and reattach budgets in REPLAY; measure first.
 
 ## 5. Roadmap additions (adopted 2026-10-27)
 
 For Nano's use case (agents and long-running work), in this order. Each would be one PR, gated by the owner like Phase 2's steps.
 
-1. **Terminal events (G8).** `child-exited` with exit code, `bell`, `progress` (OSC 9;4), `notification` (OSC 9/777), behind a new feature bit. Small; the owner listed bell and exit as not yet approved. Unlocks G13.
-2. **Wait primitives (G13).** `rusty-mux-ctl wait` (block closed or program exited, with a timeout; exits with the program's status) and `run --wait`; an event wait with a field filter and timeout. Agents need this most.
+1. **Terminal events (G8).** `child-exited` with exit code, `bell`, `progress` (OSC 9;4), `notification` (OSC 9/777), behind a new feature bit. Small; bell and exit events were approved on 2026-10-27 (DECISIONS). Unlocks G13.
+2. **Wait primitives (G13).** `create-block` with a per-request command (proto and server), `rusty-mux-ctl wait` (block closed or program exited, with a timeout; exits with the program's status) and `run --wait`; an event wait with a field filter and timeout. Agents need this most.
 3. **Process info (G10).** `terminal.process` block method (child pid, foreground process, its ancestors) and a `process-changed` event.
 4. **Named-key input and capture options (G12, G11).** A key-name encoder over `input`; `terminal.format` gains trim, unwrap and a VT format.
 5. **Labels everywhere (G4, G20).** Rename methods for all four kinds, block and client labels, label-changed events, client list and force-disconnect.
 6. **Agent installer (G17).** `rusty-mux-ctl agent setup|status|remove` for Claude Code first, plus a placement-rules doc. After K4.
 7. **Window layout (G3).** Splits, zoom, layout events in core (K1 resolved).
-8. **Remote and multi-device (G21–G25).** Phase 3 as planned, plus saved hosts and upgrade survival. After K3 and spike 4.
+8. **Remote and multi-device (G21, G22, G23, G25).** Phase 3 as planned, plus saved hosts. After K3 and spike 4. Upgrade survival (G24) is Phase 5, C36.
 9. **OSC 7501 query (G18).** Reply to `?`. Tiny; can ride with item 1.
 
 Not proposed: a scripting language, timers or exec (K2); mouse input (undocumented on both sides).

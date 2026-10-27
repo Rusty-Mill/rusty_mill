@@ -26,10 +26,10 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C01 | Persistent sessions (outlive clients) | 1 | `rusty_mux_server` | in-progress | blocks and their PTYs outlive client connections; the server is not yet a daemon |
 | C02 | Multi-client attach, independent viewports | 1 | `rusty_mux_server` | in-progress | `server/tests/phase1.rs`: two clients converge on one PTY; viewports are client-side |
 | C03 | Snapshot + ready + background history | 1 | `rusty_mux_server`, `rusty_term_core` | in-progress | negotiated RTCP v3 (run-encoded, 0.64 MB at 200x50 + 10k history) checkpoint chunks then ready then raw output; normal 10,000-row history, no lifetime-output cutoff (see [REPLAY.md](REPLAY.md)); reattach test in `server/tests/phase1.rs`; newest-first history streaming not started |
-| C04 | CLI automation (`--json`, stable exit codes) | 2 | `rusty_mux_ctl` | in-progress | `rusty-mux-ctl`, `ctl/tests/ctl.rs`; exit codes as Rex (0/1/2/3 target/4 unreachable/130); targets by id, name, position, id suffix or path (`ctl/src/target.rs`); ids default from `$RUSTY_MUX_SESSION`/`WINDOW`/`BLOCK` |
-| C05 | Resumable event stream | 2 | `rusty_mux_proto`, `rusty_mux_server` | in-progress | `Features::EVENT_SEQ`, `server/tests/events.rs` |
-| C06 | Per-resource (block) methods | 2 | `rusty_mux_server` | in-progress | methods of a block type (`terminal.format`, `terminal.pwd`, `terminal.title`) through one generic `BlockCall`, checked against the catalog; also `input`, `resize`, `close-block` by block id; discovery with `list`; `server/tests/inspect.rs` |
-| C07 | Agent / MCP integration | 2 | `rusty_mux_mcp` on `rusty_mcp_server` | in-progress | `rusty-mux-mcp` (stdio): one tool per catalog method, same schema as `api describe`, each call run as ctl runs it; `mcp/src/tests.rs`, `mcp/tests/stdio.rs` |
+| C04 | CLI automation (`--json`, stable exit codes) | 2 | `rusty_mux_ctl` | done | #1060, #1089; `rusty-mux-ctl`, `ctl/tests/ctl.rs`; exit codes as Rex (0/1/2/3 target/4 unreachable/130); targets by id, name, position, id suffix or path (`ctl/src/target.rs`); ids default from `$RUSTY_MUX_SESSION`/`WINDOW`/`BLOCK`. Waits and run-and-wait continue in C30 |
+| C05 | Resumable event stream | 2 | `rusty_mux_proto`, `rusty_mux_server` | done | #1057; `Features::EVENT_SEQ`, `server/tests/events.rs` (`a_resumed_stream_has_no_gap_and_no_repeat`). More event kinds continue in C29 and C31 |
+| C06 | Per-resource (block) methods | 2 | `rusty_mux_server` | done | methods of a block type (`terminal.format`, `terminal.pwd`, `terminal.title`) through one generic `BlockCall`, checked against the catalog; also `input`, `resize`, `close-block` by block id; discovery with `list`; `server/tests/inspect.rs`; #1072, #1091. More methods continue in C31 and C32 |
+| C07 | Agent / MCP integration | 2 | `rusty_mux_mcp` on `rusty_mcp_server` | done | #1100; `rusty-mux-mcp` (stdio): one tool per catalog method, same schema as `api describe`, each call run as ctl runs it; `mcp/src/tests.rs`, `mcp/tests/stdio.rs`. Agent setup continues in C34 |
 | C08 | Command palette + directory browse | 4 | `rusty_mux` clients | not-started | |
 | C09 | Self-hosted, no account, no telemetry | 1 | all | not-started | |
 | C10 | Native scrollback and selection | 1 | `rusty_term_core`, `rusty_mux_tui` | in-progress | engine rows above |
@@ -39,10 +39,10 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C14 | Live sharing | 3 | `rusty_mux_auth`, `rusty_mux_server` | not-started | |
 | C15 | Web client | 4 | `rusty_mux` web client | not-started | |
 | C16 | Client matrix (TUI, web, native) | 4 | `rusty_mux` clients | not-started | |
-| C17 | Self-describing API (schema-first) | 2 | `rusty_mux_proto` | in-progress | `schema::CATALOG`; `rusty-mux-ctl api list` and `api describe` (parameters as JSON Schema) |
-| C18 | Screen capture | 2 | `rusty_mux_server` | in-progress | `terminal.format`: plain text of the screen after N history lines; `server/tests/inspect.rs`, `ctl/tests/ctl.rs` |
-| C19 | Scripting and config | 2 | `rusty_mux_script` | in-progress | JSON config of actions (chains of catalog requests, `${arg}`), key bindings and `on` event rules (`${field}`); `rusty-mux-ctl do`, `watch`, `config check`, `config list`; `PwdChanged`/`TitleChanged` events with `Features::TERMINAL_EVENTS`; `script/src/tests.rs`, `ctl/tests/ctl.rs`, `server/tests/events.rs` |
-| C20 | Program status signalling | 2 | `rusty_mux_status` | in-progress | OSC 7501 (Program Status Protocol 0.4) reports, records per block, `BlockStatus` events with `Features::STATUS`, `terminal.status`; `status/src/*/tests.rs`, `server/tests/events.rs`, `server/tests/inspect.rs` |
+| C17 | Self-describing API (schema-first) | 2 | `rusty_mux_proto` | done | #1051, #1091; `schema::CATALOG`; `rusty-mux-ctl api list` and `api describe` (parameters as JSON Schema) |
+| C18 | Screen capture | 2 | `rusty_mux_server` | done | #1072, #1091; `terminal.format`: plain text of the screen after N history lines; `server/tests/inspect.rs`, `ctl/tests/ctl.rs`. Trim, unwrap and VT format continue in C32 |
+| C19 | Scripting and config | 2 | `rusty_mux_script` | done | JSON config of actions (chains of catalog requests, `${arg}`), key bindings and `on` event rules (`${field}`); `rusty-mux-ctl do`, `watch`, `config check`, `config list`; `PwdChanged`/`TitleChanged` events with `Features::TERMINAL_EVENTS`; `script/src/tests.rs`, `ctl/tests/ctl.rs`, `server/tests/events.rs`; #1128, #1138 |
+| C20 | Program status signalling | 2 | `rusty_mux_status` | done | #1092; OSC 7501 (Program Status Protocol 0.4) reports, records per block, `BlockStatus` events with `Features::STATUS`, `terminal.status`; `status/src/*/tests.rs`, `server/tests/events.rs`, `server/tests/inspect.rs`. The `?` query reply continues in C29; Windows pass-through is R1 |
 | C21 | Tab indicators | 4 | `rusty_mux` clients | not-started | depends on C20 |
 | C22 | Idle-pane scale (parking) | 5 | `rusty_mux_server` | not-started | spike 5 |
 | C23 | Production controls (limits, audit) | 5 | `rusty_mux_server` | not-started | |
@@ -52,12 +52,12 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C27 | Identity mapping (Tailscale to account) | 3 | `rusty_mux_auth` | not-started | |
 | C28 | Disk-parked encrypted snapshots | 5 | `rusty_mux_server` | not-started | |
 | C29 | Terminal events: program exited (with exit code), bell, progress, notification; OSC 7501 query reply | 2b | `rusty_mux_proto`, `rusty_mux_server` | not-started | gap check G8, G18 |
-| C30 | Wait primitives: wait for a block to close or its program to exit, run and wait, wait for an event | 2b | `rusty_mux_ctl` | not-started | gap check G13; depends on C29 |
+| C30 | Wait primitives: wait for a block to close or its program to exit, run a command in a new block and wait, wait for an event | 2b | `rusty_mux_proto`, `rusty_mux_server`, `rusty_mux_ctl` | not-started | gap check G13; depends on C29. Run-and-wait needs `create-block` to take a command, arguments and working directory per request (today one server-wide `Config` in `server/src/lib.rs`, and `create-block` has only window and size in `proto/src/schema.rs`); typing into a shell gives no exit status |
 | C31 | Running-process info per terminal, and a process-changed event | 2b | `rusty_mux_server` | not-started | gap check G10 |
 | C32 | Named-key input; capture trim, unwrap and VT format | 2b | `rusty_mux_proto`, `rusty_mux_ctl`, `rusty_mux_server` | not-started | gap check G11, G12 |
 | C33 | Labels and renames on all four kinds; client list and force-disconnect | 2b | `rusty_mux_core`, `rusty_mux_server` | not-started | gap check G4, G20 |
 | C34 | Agent setup: install, check and remove a skill and session-start hook for known agents | 2b | `rusty_mux_ctl` | not-started | gap check G17; writes agent settings files, see gap check K4 |
 | C35 | Several servers: saved hosts, a server per call | 3 | `rusty_mux_ctl` | not-started | gap check G23 |
-| C36 | Upgrade without losing sessions | 5 | `rusty_mux_server` | not-started | gap check G24 |
+| C36 | Upgrade without losing sessions | 5 | `rusty_mux_server` | not-started | gap check G24. Rex level: a running server keeps its old version and sessions until it stops, and new connections get the new version. Beyond Rex: live re-exec with PTY adoption, which would also keep a shared server's sessions |
 
 Update a row's status in the same PR that moves it.

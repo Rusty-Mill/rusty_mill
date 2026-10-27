@@ -45,11 +45,11 @@ Started 2026-10-25 (owner go-ahead). One PR per step, in order:
 From the [Rex gap check](REX-GAP-CHECK.md) §5 (owner, 2026-10-27). Started 2026-10-27, when the owner accepted Phase 2. One PR per step, in order. Exit: each step's behaviour has a server or ctl test, on Linux and on CI's Windows leg where the step does not depend on ConPTY pass-through (R1).
 
 1. Terminal events (C29): program exited with its exit code, bell, progress, notification, behind a new feature bit; reply to the OSC 7501 query.
-2. Wait primitives (C30): `rusty-mux-ctl wait` on a block closing or its program exiting, with a timeout, exiting with the program's status; run and wait; wait for an event matching fields, with a timeout.
+2. Wait primitives (C30): `rusty-mux-ctl wait` on a block closing or its program exiting, with a timeout, exiting with the program's status; `create-block` takes an optional command, arguments and working directory per request (proto and server), so run-and-wait starts a program in a new block and exits with its status; wait for an event matching fields, with a timeout.
 3. Process info (C31): a `terminal.process` block method (child, foreground process, ancestors) and a process-changed event, using existing platform crates or `rusty_libc`.
 4. Input and capture (C32): named keys encoded over `input`; `terminal.format` gains trim, unwrap and a VT format.
 5. Labels and clients (C33): rename methods for all four kinds, block and client labels, label-changed events, client list and force-disconnect.
-6. Agent setup (C34): `rusty-mux-ctl agent setup|status|remove` for Claude Code first, plus a placement-rules doc. Our own skill text; merges into settings without clobbering them.
+6. Agent setup (C34): `rusty-mux-ctl agent setup|status|remove` for Claude Code first, plus a placement-rules doc. Our own skill text; merges into settings without clobbering them. Held until the owner approves those writes (gap check K4).
 7. Window layout (C12): a split tree per window in core, split, zoom and close-pane methods, layout events; the attach client renders it.
 
 ## Phase 3: identity and remote
@@ -64,4 +64,4 @@ Windows, ahead of the phase (owner, 2026-10-26): the server, `rusty-mux-ctl`, `r
 
 ## Phase 5: scale and hardening
 
-Parking, encryption at rest, audit, upgrade without losing sessions (C36). Exit: idle-terminal memory measured with and without parking (spike 5 numbers, ours); parked snapshots are encrypted and round-trip to the same grid (test); an outbound-connection audit of the release finds no egress.
+Parking, encryption at rest, audit, upgrade without losing sessions (C36: running servers keep their sessions while a new version installs; live re-exec only if measured worth it). Exit: idle-terminal memory measured with and without parking (spike 5 numbers, ours); parked snapshots are encrypted and round-trip to the same grid (test); an outbound-connection audit of the release finds no egress.
