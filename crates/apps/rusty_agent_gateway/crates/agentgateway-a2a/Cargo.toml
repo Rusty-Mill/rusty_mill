@@ -34,8 +34,8 @@ rusty_a2a = { workspace = true, default-features = false }
 http = { workspace = true }
 regex = { workspace = true }
 serde_json = { workspace = true }
-# Fetches agent cards; `tokio` because the gateway still runs on tokio.
-rusty_request = { workspace = true, features = ["tokio"] }
+# Fetches agent cards.
+rusty_request = { workspace = true }
 thiserror = "2"
 rusty_log = { workspace = true }
 

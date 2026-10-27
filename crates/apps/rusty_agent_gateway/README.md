@@ -1856,7 +1856,9 @@ binds:
 Termination goes through [`rusty_tls`][rusty_tls], the ecosystem's one TLS
 implementation, so the gateway does not roll its own. ALPN advertises `h2` and
 `http/1.1`; over TLS that is how the HTTP version gets chosen, and a client
-capable of HTTP/2 gets it.
+capable of HTTP/2 gets it. A cleartext port speaks HTTP/1.1 only: there is no
+h2c, by prior knowledge or by upgrade (the hyper server this replaced accepted
+prior-knowledge h2c).
 
 Certificates are read at startup, so a missing or malformed one stops the
 gateway booting instead of failing every handshake later. `X-Forwarded-Proto`
@@ -2253,9 +2255,11 @@ duplicated risk, and this is the one place this repo carries any.
 and installs the subscriber; `OtelGuard` is held until after the accept loops
 stop, because spans are batched and whatever is still buffered dies with the
 process otherwise. `McpMetricsLayer` supplies the MCP request metrics described
-above. `LimitsLayer` supplies the concurrency bound, mounted outside routing and
-authentication so a shed request costs a semaphore try-acquire rather than a
-route lookup, a token validation and a JWKS fetch.
+above. `LimitsLayer` carries the concurrency bound and the request timeout from
+the config; the server applies them (as a `rusty_axum::Admission`) when a
+request's head arrives, before its body is read, so a shed request costs a
+semaphore try-acquire rather than an upload held in memory, a route lookup, a
+token validation and a JWKS fetch.
 
 One correction worth recording: `limits` is concurrency and timeout shedding,
 **not** a token bucket, so it does not cover `localRateLimit`
@@ -2272,22 +2276,18 @@ TLS termination is [`rusty_tls`][rusty_tls] — a `rustls` 0.23 wrapper — rath
 than `tokio-rustls`, so the gateway is not the one consumer in this ecosystem
 that rolls its own TLS.
 
-Its async server adapter is written against `rusty_tokio`'s `AsyncRead` and
-`AsyncWrite`, while this gateway runs on `tokio` and hands connections to
-`hyper`, so a TLS stream is adapted twice: the socket goes in as a
-`rusty_tokio` stream and the decrypted stream comes back out as a `tokio` one.
-**That costs nothing per byte.** Both runtimes' `ReadBuf` is an initialized
-`&mut [u8]` plus a filled cursor, so the inner reader writes directly into the
-outer buffer's spare capacity and the adapter only forwards the count — no
-intermediate buffer, no copy, no `unsafe`. The price of the choice is
-dependency weight (`rusty_tokio` for its trait definitions, and `rustils`'
-`platform` crates that only client-side trust anchors use), not throughput.
+The gateway runs on `rusty_tokio`, the runtime `rusty_tls`'s async server
+adapter is written against, and serves with `rusty_axum`, so a TLS stream goes
+from the handshake straight to the HTTP server with no adapter between them.
+`serve.rs`'s acceptor runs the handshake with the certificate the SNI name
+picks and hands `rusty_axum` the decrypted stream, which serves `h2` or
+HTTP/1.1 by the protocol ALPN chose.
 
 One deliberate exception to the crate's "consumers import `rusty_tls`, never
 `rustls`" rule: `rusty_tls` does not install a `rustls` `CryptoProvider`, and
 `rustls` refuses to guess when more than one is present in a build. This
-workspace has two — `ring` via `rusty_tls`, `aws-lc-rs` via `reqwest` — so it
-panics on the first handshake. `agentgateway-tls` installs `ring` explicitly,
+workspace can have two — `ring` via `rusty_tls`, `aws-lc-rs` via `reqwest` in
+the test clients — and it then panics on the first handshake. `agentgateway-tls` installs `ring` explicitly,
 once, which needs a direct `rustls` dependency pinned to the same 0.23.
 
 ## On `rusty_a2a`

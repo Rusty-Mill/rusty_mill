@@ -67,13 +67,15 @@ Two rules hold the graph in shape:
 ## Data flow
 
 ```
-TCP accept (serve.rs, one task per port)
+TCP accept (rusty_axum, one server per port; serve.rs's Acceptor decides)
   │
   ├─ passthrough port?  ── peek SNI ── match tcpRoutes ── splice bytes ── done
   │                                    (nothing is decrypted)
-  ├─ TLS port?          ── peek SNI ── pick certificate ── handshake
+  ├─ TLS port?          ── peek SNI ── pick certificate ── handshake (h2 or HTTP/1.1 by ALPN)
   │
-  └─ hyper service ── gateway.handle(port, peer, scheme, request)
+  └─ request head ── admission: maxConcurrentRequests (503), requestTimeout starts (504)
+       └─ body read whole (cap: the largest route's) ── convert.rs
+            └─ gateway.handle(port, peer, scheme, request)
                         │
                         ├─ router: listener by hostname, route by match
                         ├─ policies: jwtAuth → extAuthz → rate limit → rewrite

@@ -36,7 +36,7 @@ use rusty_mcp_server::proto::{
 use rusty_mcp_server::{
     BuildError, CallContext as Call_, PromptSource, ResourceSource, Server, ToolSource,
 };
-use tokio::runtime::Handle;
+use rusty_tokio::Handle;
 
 use crate::{
     gate::{Authorization, GateError},
@@ -164,7 +164,8 @@ impl Federation {
     ///
     /// Returns an error only when no target at all could be reached; partial
     /// failures are recorded in [`Federation::degraded`]. Must be called from a
-    /// tokio runtime, which the federation keeps to run its guardrail chain.
+    /// `rusty_tokio` runtime, which the federation keeps to run its guardrail
+    /// chain.
     #[allow(
         clippy::too_many_arguments,
         reason = "every one is a distinct piece of a route's configuration, and grouping them \
@@ -211,7 +212,7 @@ impl Federation {
                 // each target's own path, so they are not interchangeable.
                 let over = overrides.get(i).cloned().unwrap_or_default();
                 let place = format!("{at}.targets[{i}]");
-                tokio::task::spawn_blocking(move || {
+                rusty_tokio::spawn_blocking(move || {
                     let result = Target::connect(&config, &over, backend_timeout, &place);
                     (config.name, result)
                 })
@@ -231,9 +232,10 @@ impl Federation {
                     degraded.push(err.to_string());
                 }
                 Err(err) => {
+                    // As text: `rusty_tokio`'s `JoinError` is not `Sync`.
                     let err = TargetError::Handshake {
                         name: "?".to_owned(),
-                        source: Box::new(err),
+                        source: err.to_string().into(),
                     };
                     rusty_log::error!(%err, "MCP target unavailable");
                     degraded.push(err.to_string());
@@ -271,7 +273,7 @@ impl Federation {
         // client has called `tools/list`, and so name collisions surface at
         // startup rather than on whichever request happens to hit them.
         let warm = federation.clone();
-        let warnings = tokio::task::spawn_blocking(move || warm.refresh_index())
+        let warnings = rusty_tokio::spawn_blocking(move || warm.refresh_index())
             .await
             .unwrap_or_default();
         for warning in warnings {

@@ -30,7 +30,7 @@ agentgateway-core = { workspace = true }
 rusty_json = { workspace = true }
 rusty_mcp_server = { workspace = true }
 rusty_mcp_client_native = { workspace = true, features = ["http"] }
-tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+rusty_tokio = { workspace = true }
 serde_json = { workspace = true }
 regex = { workspace = true }
 cel = { workspace = true }
@@ -53,4 +53,5 @@ rusty_serve = { workspace = true }
 axum = { workspace = true, features = ["http2"] }
 http-body-util = { workspace = true }
 tokio-util = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# Hosts the scripted processor: `axum` needs a tokio runtime.
+tokio = { workspace = true, features = ["rt", "net", "time"] }

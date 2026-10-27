@@ -11,7 +11,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
 use agentgateway_mcp::{
     AuthorizationError, McpRequest, McpRequestResult, McpResponse, McpResponseResult,
@@ -278,13 +277,13 @@ binds:
 
         let config = Config::from_yaml(&yaml).expect("config should parse");
         config.validate().expect("config should validate");
-        let gateway = Gateway::build(&config, None)
+        let gateway = common::build(&config, None)
             .await
             .expect("gateway should build");
 
         let shutdown = CancellationToken::new();
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-        let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        let _serving = common::serve(gateway, vec![addr], shutdown.clone())
             .await
             .expect("gateway should bind");
 
@@ -501,12 +500,12 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -558,7 +557,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .err()
         .expect("an unaddressable processor should be a startup failure");
@@ -730,13 +729,13 @@ binds:
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     config.validate().expect("config should validate");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -1257,12 +1256,12 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -1353,13 +1352,13 @@ binds:
 
         let config = Config::from_yaml(&yaml).expect("config should parse");
         config.validate().expect("config should validate");
-        let gateway = Gateway::build(&config, None)
+        let gateway = common::build(&config, None)
             .await
             .expect("gateway should build");
 
         let shutdown = CancellationToken::new();
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-        let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        let _serving = common::serve(gateway, vec![addr], shutdown.clone())
             .await
             .expect("gateway should bind");
 
@@ -1542,13 +1541,13 @@ binds:
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     config.validate().expect("config should validate");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -1731,7 +1730,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .err()
         .expect("an unresolvable placeholder should be a startup failure");
@@ -1811,13 +1810,13 @@ binds:
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     config.validate().expect("config should validate");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -1927,7 +1926,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .err()
         .expect("an invalid header name should be a startup failure");
@@ -1986,12 +1985,12 @@ binds:
         "one target, so the override is unambiguous and lints clean"
     );
 
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("the gateway should reach the target at the overridden path");
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -2053,7 +2052,7 @@ binds:
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     assert!(
-        Gateway::build(&config, None).await.is_err(),
+        common::build(&config, None).await.is_err(),
         "nothing is served at /mcp, so the federation should have no reachable target"
     );
 
@@ -2096,13 +2095,13 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .map_err(|err| err.to_string())?;
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -2176,7 +2175,7 @@ binds:
     );
     let config = Config::from_yaml(&yaml).expect("config should parse");
     assert!(
-        Gateway::build(&config, None).await.is_err(),
+        common::build(&config, None).await.is_err(),
         "nothing listens on the configured port, so the federation has no reachable target"
     );
 
@@ -2306,13 +2305,13 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .map_err(|err| err.to_string())?;
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -2371,7 +2370,7 @@ binds:
     );
     let config = Config::from_yaml(&yaml).expect("config should parse");
     assert!(
-        Gateway::build(&config, None).await.is_err(),
+        common::build(&config, None).await.is_err(),
         "nothing is served at /mcp/v1, so the federation has no reachable target"
     );
 
@@ -2474,12 +2473,12 @@ binds:
         config.lint()
     );
 
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("the target keeps its configured path, so it is still reachable");
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -2542,12 +2541,12 @@ binds:
         "a path rewrite over several targets is well-defined"
     );
 
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("both targets should be reachable at their rewritten paths");
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -2622,12 +2621,12 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("both targets should be reachable at /rpc on their own hosts");
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -2704,12 +2703,12 @@ binds:
         "{findings:?}"
     );
 
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("the path half applies, so both targets are still reachable");
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -2788,12 +2787,12 @@ binds:
         config.lint()
     );
 
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("`via` should have made both targets reachable");
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -2832,7 +2831,7 @@ binds:
     );
     let config = Config::from_yaml(&yaml).expect("config should parse");
     assert!(
-        Gateway::build(&config, None).await.is_err(),
+        common::build(&config, None).await.is_err(),
         "nothing listens on the configured address"
     );
 
@@ -2868,12 +2867,12 @@ binds:
     let config = Config::from_yaml(&yaml).expect("config should parse");
     assert_eq!(config.lint(), Vec::<String>::new());
 
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("the target should be reachable through the egress address");
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -2923,12 +2922,12 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("`via` should have won; the rewrite points at a dead port");
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -2960,7 +2959,7 @@ binds:
 "#
     );
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .err()
         .expect("credentials in an address should be refused")
@@ -3041,7 +3040,7 @@ backends:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .map(|_| ())
         .expect_err("an unresolvable processor should not start");

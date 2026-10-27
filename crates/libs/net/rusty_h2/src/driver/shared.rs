@@ -269,6 +269,14 @@ impl Shared {
         let Some(s) = self.streams.get_mut(&id) else {
             return;
         };
+        // A server that has sent its whole response and will read no more of
+        // the request asks the client to stop sending it (RFC 9113 §8.1).
+        // Otherwise the stream stays half open for as long as the client
+        // likes, and holds a graceful shutdown with it.
+        if self.server && s.local_closed && !s.remote_closed && s.recv_dropped && s.abort.is_none()
+        {
+            return self.reset(id, ErrorCode::NoError);
+        }
         if s.local_closed && s.remote_closed && !s.counted_done {
             s.counted_done = true;
             self.active = self.active.saturating_sub(1);

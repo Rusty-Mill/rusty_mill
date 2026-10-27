@@ -8,6 +8,7 @@
 //! integration tests can drive the same data plane the binary runs.
 
 pub mod body;
+mod convert;
 pub mod gateway;
 mod mcp_service;
 pub mod serve;

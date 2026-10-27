@@ -233,7 +233,7 @@ impl HostProxy {
                 && let Some(retry) = &self.retry
                 && let Some(wait) = retry.backoff(attempt)
             {
-                tokio::time::sleep(wait).await;
+                rusty_tokio::time::sleep(wait).await;
             }
 
             // A fresh endpoint each attempt: retrying the instance that just
@@ -288,7 +288,7 @@ impl HostProxy {
 
             let call = upstream::send(&self.client, &upstream);
             let result = match self.timeout {
-                Some(budget) => match tokio::time::timeout(budget, call).await {
+                Some(budget) => match rusty_tokio::time::timeout(budget, call).await {
                     Ok(result) => result,
                     Err(_) => {
                         rusty_log::warn!(

@@ -1,5 +1,5 @@
-//! The federation's MCP handler as a tower service on the gateway's tokio
-//! runtime (#875: it replaces `rusty_mcp_axum` here).
+//! The federation's MCP handler as a tower service on the gateway's
+//! `rusty_tokio` runtime (#875: it replaces `rusty_mcp_axum` here).
 //!
 //! The handler is blocking and written for `rusty_serve`, so each request is
 //! handed to a blocking thread: the request is copied across, the handler
@@ -16,12 +16,12 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use http::request::Parts;
 use http::{HeaderName, HeaderValue, Request, Response, StatusCode, header};
+use http_body::{Body as HttpBody, Frame};
 use http_body_util::BodyExt as _;
-use hyper::body::{Body as HttpBody, Frame};
 use rusty_mcp_server::HttpHandler;
 use rusty_mcp_server::json::Value;
 use rusty_serve::{Body as ServeBody, Request as ServeRequest};
-use tokio::sync::{mpsc, oneshot};
+use rusty_tokio::sync::{mpsc, oneshot};
 
 use crate::body::{Body, BoxError};
 
@@ -86,7 +86,7 @@ impl McpService {
         let method = rusty_http::Method::parse(parts.method.as_str());
         let handler = self.handler;
         let (head_tx, head_rx) = oneshot::channel();
-        tokio::task::spawn_blocking(move || {
+        rusty_tokio::spawn_blocking(move || {
             let request = ServeRequest {
                 method: &method,
                 target: &target,

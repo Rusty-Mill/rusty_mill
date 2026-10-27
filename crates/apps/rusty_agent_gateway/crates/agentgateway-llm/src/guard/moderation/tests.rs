@@ -223,7 +223,7 @@ fn a_prompt_with_no_text_is_not_classified_at_all() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn nothing_to_classify_is_allowed_without_a_call() {
     // Port 9 is the discard port: reaching it would hang or refuse, and either
     // way this would fail closed. Allowing without calling is the point.
@@ -243,7 +243,7 @@ async fn nothing_to_classify_is_allowed_without_a_call() {
     ));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_key_that_cannot_be_sent_is_reported_without_its_value() {
     let secret = "sk-s3cr3t-moderation-key";
     let moderation = Moderation {
