@@ -7,8 +7,8 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::{Router, routing::get};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use rusty_http::StatusCode;
 use rusty_json::{Value, json};
 use rusty_mcp_middleware::auth::{JwtAlgorithm, JwtValidator, TokenError, TokenValidator};
 use rusty_oauth::jwt::{encode_hs256, es256};
@@ -96,24 +96,7 @@ fn sign(keys: &TestKeys, claims: Value) -> String {
 
 /// Serve the JWKS on a local port and return its URI.
 async fn serve_jwks(jwks: Value) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-
-    let app = Router::new().route(
-        "/jwks.json",
-        get(move || {
-            let jwks = jwks.clone();
-            async move { axum::Json(jwks) }
-        }),
-    );
-
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-
-    format!("http://{addr}/jwks.json")
+    serve_raw(StatusCode::OK, jwks.to_json_string()).await
 }
 
 async fn validator_for(keys: &TestKeys) -> JwtValidator {
@@ -296,14 +279,23 @@ fn token_needing_a_key() -> String {
 }
 
 /// Serve `body` with `status` at `/jwks.json` and return the URI.
-async fn serve_raw(status: axum::http::StatusCode, body: &'static str) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
+///
+/// A blocking `rusty_serve` server on a thread of its own, so the mock shares
+/// no runtime with the validator under test, which fetches on the test's.
+async fn serve_raw(status: StatusCode, body: impl Into<Vec<u8>>) -> String {
+    let body = body.into();
+    let handler = move |request: &rusty_serve::Request<'_>| {
+        if request.target == "/jwks.json" {
+            rusty_serve::Response::json(status, body.clone())
+        } else {
+            rusty_serve::Response::json(StatusCode::NOT_FOUND, Vec::new())
+        }
+    };
+    let server = rusty_serve::Server::bind_shared("127.0.0.1:0".parse().expect("addr"), handler)
         .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    let app = Router::new().route("/jwks.json", get(move || async move { (status, body) }));
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+    let addr = server.local_addr().expect("addr");
+    std::thread::spawn(move || {
+        let _ = server.run();
     });
     format!("http://{addr}/jwks.json")
 }
@@ -392,7 +384,7 @@ async fn a_jwks_over_the_validators_own_cap_is_unavailable() {
 
 #[tokio::test]
 async fn a_failing_jwks_endpoint_is_unavailable_and_says_why() {
-    let uri = serve_raw(axum::http::StatusCode::SERVICE_UNAVAILABLE, "down").await;
+    let uri = serve_raw(StatusCode::SERVICE_UNAVAILABLE, "down").await;
     let validator = JwtValidator::builder(ISSUER, uri).build().expect("build");
 
     let why = unavailable_reason(&validator).await;
@@ -447,7 +439,7 @@ async fn a_jwks_response_preceded_by_an_informational_one_is_read() {
 
 #[tokio::test]
 async fn a_malformed_jwks_is_unavailable_not_invalid() {
-    let uri = serve_raw(axum::http::StatusCode::OK, "this is not json").await;
+    let uri = serve_raw(StatusCode::OK, "this is not json").await;
     let validator = JwtValidator::builder(ISSUER, uri).build().expect("build");
 
     let why = unavailable_reason(&validator).await;

@@ -48,18 +48,17 @@ rusty_serve = { workspace = true, optional = true }
 rusty_rand = { workspace = true, optional = true }
 
 [dev-dependencies]
-# The mock JWKS endpoint in `tests/jwt_validator.rs`.
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 rand = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rusty_mcp_server = { workspace = true, features = ["http"] }
-# `tests/trace_context.rs` serves the MCP handler on its blocking server.
+# The blocking server for `tests/trace_context.rs`'s MCP handler and
+# `tests/jwt_validator.rs`'s mock JWKS endpoint.
 rusty_serve = { workspace = true }
 rsa = "0.9"
 # Signs the RS256 test tokens: `rusty_oauth` only verifies RSA signatures.
 # `rust_crypto` keeps the build pure-Rust.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
-# The test clients and mock servers (`reqwest`, `axum`) run on tokio (#906).
+# The test clients (`reqwest`) and the raw-socket mocks run on tokio (#906).
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
 rusty_tokio = { workspace = true }
 
