@@ -242,7 +242,16 @@ impl AgentServices {
     /// transport has a runtime of its own, started here and stopped when this is dropped.
     #[cfg(feature = "grpc")]
     pub async fn serve_grpc(&self, addr: impl Into<SocketAddr>) -> std::io::Result<()> {
+        self.serve_grpc_on(std::net::TcpListener::bind(addr.into())?)
+            .await
+    }
+
+    /// Serves the gRPC binding on a listener the caller has already bound, until the returned
+    /// future is dropped, as [`AgentServices::serve_grpc`] does. Binding `127.0.0.1:0` first
+    /// gives the port before serving, with no window in which another process can take it.
+    #[cfg(feature = "grpc")]
+    pub async fn serve_grpc_on(&self, listener: std::net::TcpListener) -> std::io::Result<()> {
         let router = self.grpc_router(tokio::runtime::Handle::current());
-        crate::grpc_bridge::server::serve(router, addr.into()).await
+        crate::grpc_bridge::server::serve(router, listener).await
     }
 }

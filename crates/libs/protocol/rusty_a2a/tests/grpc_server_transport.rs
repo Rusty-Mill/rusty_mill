@@ -37,28 +37,19 @@ fn card(port: u16) -> AgentCard {
     )
 }
 
-/// A free port: bound and released, so the server can take it.
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// A listener on a port of its own, bound before serving so no other test can take the port.
+fn listen() -> (std::net::TcpListener, u16) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
 }
 
-/// Serves a stalling agent on a free port and returns its URL. A port taken between being picked
-/// and being bound (other tests are picking too) is tried again with another.
+/// Serves a stalling agent on a port of its own and returns its URL.
 async fn start() -> String {
-    for _ in 0..20 {
-        let port = free_port();
-        let services = AgentServer::new(card(port), Arc::new(Stalls)).build();
-        let task = tokio::spawn(async move { services.serve_grpc(([127, 0, 0, 1], port)).await });
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if !task.is_finished() {
-            return format!("http://127.0.0.1:{port}");
-        }
-    }
-    panic!("no free port to serve on");
+    let (listener, port) = listen();
+    let services = AgentServer::new(card(port), Arc::new(Stalls)).build();
+    tokio::spawn(async move { services.serve_grpc_on(listener).await.unwrap() });
+    format!("http://127.0.0.1:{port}")
 }
 
 async fn connect(url: String) -> pb::a2a_service_client::A2aServiceClient<Channel> {
@@ -202,10 +193,19 @@ async fn port_becomes(port: u16, held: bool) -> bool {
 
 #[tokio::test]
 async fn dropping_serve_grpc_closes_the_listener() {
-    let port = free_port();
+    let (listener, port) = listen();
     let services = AgentServer::new(card(port), Arc::new(Stalls)).build();
-    let task = tokio::spawn(async move { services.serve_grpc(([127, 0, 0, 1], port)).await });
-    assert!(port_becomes(port, true).await, "the server never bound the port");
+    let task = tokio::spawn(async move { services.serve_grpc_on(listener).await });
+    // A call answered proves the server took the listener over, so dropping it is what is tested.
+    let status = connect(format!("http://127.0.0.1:{port}"))
+        .await
+        .get_task(versioned(pb::GetTaskRequest {
+            id: "no-such-task".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::NotFound);
     task.abort();
     let _ = task.await;
     // The runtime that held the listener is stopped on a thread of its own: allow it a moment.
@@ -225,7 +225,7 @@ fn a_stream_cut_short_by_the_application_stopping_ends_in_an_error() {
         .build()
         .unwrap();
     let transport = rusty_tokio::Runtime::new().unwrap();
-    let port = free_port();
+    let (listener, port) = listen();
     let router = {
         let _enter = app.enter();
         AgentServer::new(card(port).with_streaming(true), Arc::new(Stalls))
@@ -234,8 +234,7 @@ fn a_stream_cut_short_by_the_application_stopping_ends_in_an_error() {
     };
     let _server = {
         let _enter = transport.enter();
-        std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
-            .and_then(rusty_tokio::io::TcpListener::from_std)
+        rusty_tokio::io::TcpListener::from_std(listener)
             .and_then(|listener| router.serve(listener, None, rusty_hyper::ServeOptions::default()))
             .unwrap()
     };
