@@ -30,6 +30,12 @@ fn openpty() -> (OwnedFd, OwnedFd) {
         )
     };
     assert_eq!(r, 0, "openpty: {}", std::io::Error::last_os_error());
+    // openpty's fds are inheritable: without close-on-exec they leak through
+    // rusty_term into its child, and a grandchild then holds the pty open.
+    for fd in [master, slave] {
+        // SAFETY: `fd` is open; F_SETFD only changes its flags.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
+    }
     // SAFETY: openpty returned two fresh fds that nothing else owns.
     unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) }
 }
@@ -82,9 +88,20 @@ fn last_frame_is_painted_when_a_short_lived_child_exits() {
 
 #[test]
 fn exit_is_prompt_when_a_grandchild_holds_the_pty() {
-    // The backgrounded sleep keeps the pty's slave open, so EOF never comes
-    // while it runs; shutdown still paints and exits within the drain bound.
-    let (out, elapsed) = host_output("sleep 10 & echo LAST");
+    // The backgrounded sleep ignores the hangup sent when the shell exits, so
+    // it keeps the pty's slave open and EOF never comes while it runs.
+    // Shutdown waits out the drain bound, then paints and exits long before
+    // the grandchild does.
+    let (out, elapsed) = host_output("trap '' HUP; sleep 3 & echo LAST");
     assert!(out.contains("LAST"), "LAST not painted: {out:?}");
-    assert!(elapsed < Duration::from_secs(3), "took {elapsed:?}");
+    assert!(elapsed >= Duration::from_millis(250), "no drain wait: {elapsed:?}");
+    assert!(elapsed < Duration::from_millis(2500), "took {elapsed:?}");
+}
+
+#[test]
+fn final_frame_releases_a_synchronized_update_left_open() {
+    // The child opens a synchronized update (DEC 2026) and exits inside it:
+    // its output is still painted.
+    let (out, _) = host_output("printf '\\033[?2026hLAST'");
+    assert!(out.contains("LAST"), "LAST not painted: {out:?}");
 }
