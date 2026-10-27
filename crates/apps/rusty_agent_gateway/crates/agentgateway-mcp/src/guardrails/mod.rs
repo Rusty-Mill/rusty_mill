@@ -328,8 +328,9 @@ struct Compiled {
     /// however many instances back it, and sending every call to the first
     /// would make the other instances decoration.
     endpoints: Endpoints,
-    /// `http` unless a literal `host` spelled otherwise.
-    scheme: &'static str,
+    /// One channel per authority in the ring, so calls to an instance share its connection. A
+    /// channel dials on its first call and again after the connection is lost.
+    channels: Vec<(String, Channel)>,
     timeout: Duration,
     fail_open: bool,
     /// `metadata` expressions, compiled once at startup.
@@ -392,7 +393,7 @@ impl Guardrails {
                 continue;
             };
 
-            // The scheme is kept beside the ring rather than in it: the ring
+            // The scheme goes into each channel rather than the ring: the ring
             // holds authorities, and only a literal `host` can carry a scheme
             // at all -- a `backend` or `service` resolves to a bare address.
             let mut scheme = "http";
@@ -424,6 +425,23 @@ impl Guardrails {
                     at: at.clone(),
                     host: authorities.join(", "),
                 })?;
+            let timeout = processor
+                .timeout
+                .map(Duration::from)
+                .unwrap_or(DEFAULT_TIMEOUT);
+            let mut channels = Vec::with_capacity(authorities.len());
+            for authority in authorities {
+                let mut options = ChannelOptions::default();
+                options.connect.connect_timeout = timeout;
+                let channel =
+                    Channel::new(&format!("{scheme}://{authority}"), options).map_err(|_| {
+                        GuardrailsError::Host {
+                            at: at.clone(),
+                            host: authority.clone(),
+                        }
+                    })?;
+                channels.push((authority, channel));
+            }
 
             let mut metadata = Vec::with_capacity(processor.metadata.len());
             for (key, expression) in &processor.metadata {
@@ -439,11 +457,8 @@ impl Guardrails {
             processors.push(Compiled {
                 config: processor.clone(),
                 endpoints,
-                scheme,
-                timeout: processor
-                    .timeout
-                    .map(Duration::from)
-                    .unwrap_or(DEFAULT_TIMEOUT),
+                channels,
+                timeout,
                 fail_open: matches!(processor.failure_mode, Some(FailureMode::FailOpen)),
                 metadata,
             });
@@ -699,15 +714,15 @@ impl Compiled {
         }
     }
 
-    /// A client for the next processor in the ring. The channel connects on its first call.
+    /// A client for the next processor in the ring, on that instance's shared channel.
     fn connect(&self) -> Result<wire::client::ExtMcpClient, Status> {
-        let url = format!("{}://{}", self.scheme, self.endpoints.next());
-        let mut options = ChannelOptions::default();
-        options.connect.connect_timeout = self.timeout;
-        let channel = Channel::new(&url, options).map_err(|err| {
-            Status::internal(format!("bad processor endpoint: {}", err.message()))
-        })?;
-        Ok(wire::client::ExtMcpClient::new(channel))
+        let authority = self.endpoints.next().as_str();
+        let (_, channel) = self
+            .channels
+            .iter()
+            .find(|(known, _)| known == authority)
+            .ok_or_else(|| Status::internal(format!("no channel for processor `{authority}`")))?;
+        Ok(wire::client::ExtMcpClient::new(channel.clone()))
     }
 
     /// What to do when a processor did not answer usably.
