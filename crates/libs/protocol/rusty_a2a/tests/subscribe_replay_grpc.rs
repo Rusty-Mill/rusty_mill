@@ -40,7 +40,6 @@ async fn spawn_test_server() -> (String, Arc<Notify>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let port = addr.port();
-    drop(listener);
 
     let advance = Arc::new(Notify::new());
     let card = AgentCard::new(
@@ -59,7 +58,7 @@ async fn spawn_test_server() -> (String, Arc<Notify>) {
     )
     .build();
     tokio::spawn(async move {
-        services.serve_grpc(([127, 0, 0, 1], port)).await.unwrap();
+        services.serve_grpc_on(listener).await.unwrap();
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;

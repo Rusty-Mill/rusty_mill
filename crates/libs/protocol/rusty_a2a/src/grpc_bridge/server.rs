@@ -6,7 +6,6 @@
 //! the handler, which drops these, which abort the `tokio` tasks: the engine call stops waiting.
 
 use std::future::Future;
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -132,17 +131,16 @@ impl Drop for Serving {
     }
 }
 
-/// Serves `router` on `addr`, on a runtime of its own, until the returned future is dropped.
+/// Serves `router` on `listener`, on a runtime of its own, until the returned future is dropped.
 ///
-/// Fails if the address cannot be bound; otherwise it does not return. Dropping it stops the
-/// server and then the runtime, on a thread of its own (this is awaited from `tokio`, where
+/// Fails if the listener cannot be taken over; otherwise it does not return. Dropping it stops
+/// the server and then the runtime, on a thread of its own (this is awaited from `tokio`, where
 /// blocking to wait for the calls in flight would stall the application).
-pub(crate) async fn serve(router: Router, addr: SocketAddr) -> std::io::Result<()> {
+pub(crate) async fn serve(router: Router, listener: std::net::TcpListener) -> std::io::Result<()> {
     let runtime = rusty_tokio::Runtime::new()?;
     let started = {
         let _enter = runtime.enter();
-        std::net::TcpListener::bind(addr)
-            .and_then(rusty_tokio::io::TcpListener::from_std)
+        rusty_tokio::io::TcpListener::from_std(listener)
             .and_then(|listener| router.serve(listener, None, ServeOptions::default()))
     };
     let server = match started {
