@@ -1,6 +1,6 @@
 # Capabilities
 
-The 28 Rex capabilities from the design brief §3, re-baselined against **our** work, not phux's scorecard. Status: `not-started` / `in-progress` / `done` / `blocked`. Phases are from [ROADMAP.md](ROADMAP.md).
+The 28 Rex capabilities from the design brief §3, plus C29–C36 from the [Rex gap check](REX-GAP-CHECK.md) (owner, 2026-10-27), re-baselined against **our** work, not phux's scorecard. Status: `not-started` / `in-progress` / `done` / `blocked`. Phases are from [ROADMAP.md](ROADMAP.md).
 
 Crate names below follow the brief §8 components with the `rusty_mux_*` prefix, confirmed by the owner 2026-10-22 ([DECISIONS.md](DECISIONS.md)).
 
@@ -34,7 +34,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C09 | Self-hosted, no account, no telemetry | 1 | all | not-started | |
 | C10 | Native scrollback and selection | 1 | `rusty_term_core`, `rusty_mux_tui` | in-progress | engine rows above |
 | C11 | Session model (session/window/block/client) | 1 | `rusty_mux_core` | in-progress | model, single-writer input lease and event queue in `crates/apps/rusty_mux/crates/core`; the server wires it to PTYs |
-| C12 | Tabs and splits, client-native | 4 | `rusty_mux` clients | not-started | |
+| C12 | Window layout: splits and zoom, server-owned, rendered by clients | 2b | `rusty_mux_core`, `rusty_mux_server` | not-started | was client-native; changed by the owner 2026-10-27 (DECISIONS). Gap check G3 |
 | C13 | Mosh-like feel (roaming, predictive echo) | 3 | `rusty_mux_transport` | not-started | spike 4 |
 | C14 | Live sharing | 3 | `rusty_mux_auth`, `rusty_mux_server` | not-started | |
 | C15 | Web client | 4 | `rusty_mux` web client | not-started | |
@@ -51,5 +51,13 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C26 | Personal / shared / login modes | 3 | `rusty_mux_server` | not-started | |
 | C27 | Identity mapping (Tailscale to account) | 3 | `rusty_mux_auth` | not-started | |
 | C28 | Disk-parked encrypted snapshots | 5 | `rusty_mux_server` | not-started | |
+| C29 | Terminal events: program exited (with exit code), bell, progress, notification; OSC 7501 query reply | 2b | `rusty_mux_proto`, `rusty_mux_server` | not-started | gap check G8, G18 |
+| C30 | Wait primitives: wait for a block to close or its program to exit, run and wait, wait for an event | 2b | `rusty_mux_ctl` | not-started | gap check G13; depends on C29 |
+| C31 | Running-process info per terminal, and a process-changed event | 2b | `rusty_mux_server` | not-started | gap check G10 |
+| C32 | Named-key input; capture trim, unwrap and VT format | 2b | `rusty_mux_proto`, `rusty_mux_ctl`, `rusty_mux_server` | not-started | gap check G11, G12 |
+| C33 | Labels and renames on all four kinds; client list and force-disconnect | 2b | `rusty_mux_core`, `rusty_mux_server` | not-started | gap check G4, G20 |
+| C34 | Agent setup: install, check and remove a skill and session-start hook for known agents | 2b | `rusty_mux_ctl` | not-started | gap check G17; writes agent settings files, see gap check K4 |
+| C35 | Several servers: saved hosts, a server per call | 3 | `rusty_mux_ctl` | not-started | gap check G23 |
+| C36 | Upgrade without losing sessions | 5 | `rusty_mux_server` | not-started | gap check G24 |
 
 Update a row's status in the same PR that moves it.

@@ -1,6 +1,6 @@
 # Rex gap check, 2026-10-27
 
-What Rex does, from its public docs read on 2026-10-27, against what rusty_mux has on `main` (c4a0d031). Input: the owner's Rex capability brief (2026-10-27, not in the repo). Everything here is paraphrased; no Rex text, schema or code is copied. Nothing here changes [ROADMAP.md](ROADMAP.md) or [CAPABILITIES.md](CAPABILITIES.md): §5 lists proposals that wait for the owner.
+What Rex does, from its public docs read on 2026-10-27, against what rusty_mux has on `main` (c4a0d031). Input: the owner's Rex capability brief (2026-10-27, not in the repo). Everything here is paraphrased; no Rex text, schema or code is copied. The owner adopted §5 and server-side layout (K1) on 2026-10-27: see C12 and C29–C36 in [CAPABILITIES.md](CAPABILITIES.md), Phase 2b in [ROADMAP.md](ROADMAP.md), and [DECISIONS.md](DECISIONS.md).
 
 Tags: **[docs]** a Superlogical docs page under `superlogical.com/rex/docs/` (named in brackets), **[demo]** a Superlogical or Hashimoto post, **[unverified]** inferred or single-source. rusty_mux evidence cites files on `main`.
 
@@ -66,7 +66,7 @@ Status: **present**, **partial**, **absent**, **ahead** (rusty_mux does more), *
 
 ## 4. Conflicts and flags
 
-- **K1, server-side layout vs the design brief.** The design brief §2 says Rex splits are client-native with no server pane tree, and C12 follows it. The docs now show layout on the server (split, zoom, layout revisions, layout builder). Matching Rex's capability for agents (split beside me, zoom on failure, read the layout) needs a window layout in `rusty_mux_core` and events for it. This reverses a design assumption: owner call.
+- **K1, server-side layout vs the design brief.** The design brief §2 says Rex splits are client-native with no server pane tree, and C12 follows it. The docs now show layout on the server (split, zoom, layout revisions, layout builder). Matching Rex's capability for agents (split beside me, zoom on failure, read the layout) needs a window layout in `rusty_mux_core` and events for it. This reverses a design assumption. **Resolved 2026-10-27:** the owner chose server-side layout (DECISIONS).
 - **K2, scripting.** Rex's Lua has timers, process exec and blocking waits. DECISIONS keeps us declarative with no language and no new dependency. G13 waits can live in ctl without a language; timers and exec stay out unless the owner reopens C19.
 - **K3, Tailscale.** `rusty_tail` is first-party, so no new third-party dependency, but it sits in `crates/apps/`. ADR-0003 forbids app-to-app edges, so using it from `rusty_mux_auth` means moving its library crates to `crates/libs/` first: an owner gate (moving crates).
 - **K4, agent installer.** A skill-and-hook installer writes into other tools' settings files (`~/.claude/settings.json` and the like). That is user config outside the repo; it needs the owner's go-ahead and must merge without clobbering. Write our own skill text; do not reuse Rex's guide.
@@ -74,7 +74,7 @@ Status: **present**, **partial**, **absent**, **ahead** (rusty_mux does more), *
 - **K6, rusty_tokio and deps.** None of §5 needs tokio or a third-party crate. Process info (G10) needs per-OS process queries: `/proc` on Linux, Toolhelp on Windows, `libproc` on macOS through existing platform crates or `rusty_libc`; check before adding anything.
 - **K7, scrollback.** Rex's 64 MiB capture budget is ~6x ours. Raising it touches the snapshot and reattach budgets in REPLAY; measure first.
 
-## 5. Proposed roadmap additions (not applied)
+## 5. Roadmap additions (adopted 2026-10-27)
 
 For Nano's use case (agents and long-running work), in this order. Each would be one PR, gated by the owner like Phase 2's steps.
 
@@ -84,7 +84,7 @@ For Nano's use case (agents and long-running work), in this order. Each would be
 4. **Named-key input and capture options (G12, G11).** A key-name encoder over `input`; `terminal.format` gains trim, unwrap and a VT format.
 5. **Labels everywhere (G4, G20).** Rename methods for all four kinds, block and client labels, label-changed events, client list and force-disconnect.
 6. **Agent installer (G17).** `rusty-mux-ctl agent setup|status|remove` for Claude Code first, plus a placement-rules doc. After K4.
-7. **Window layout (G3).** Only if the owner reverses C12 (K1): splits, zoom, layout events in core.
+7. **Window layout (G3).** Splits, zoom, layout events in core (K1 resolved).
 8. **Remote and multi-device (G21–G25).** Phase 3 as planned, plus saved hosts and upgrade survival. After K3 and spike 4.
 9. **OSC 7501 query (G18).** Reply to `?`. Tiny; can ride with item 1.
 

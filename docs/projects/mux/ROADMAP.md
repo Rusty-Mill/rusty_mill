@@ -40,9 +40,21 @@ Started 2026-10-25 (owner go-ahead). One PR per step, in order:
 6. `rusty_mux_mcp` on `rusty_mcp_server`, generated from the same catalog (C07): `rusty-mux-mcp` over stdio, one tool per method that works on a connection of its own. Done (#1100).
 7. Actions and key bindings from a JSON config, `rusty_mux_script` (C19): named chains of catalog requests with `${arg}` placeholders, run by `rusty-mux-ctl do`, checked by `config check`; `on` rules that `rusty-mux-ctl watch` runs when an event happens, including new `pwd-changed` and `title-changed` events. No language: logic lives in programs driving ctl or MCP. In progress.
 
+## Phase 2b: agent parity
+
+From the [Rex gap check](REX-GAP-CHECK.md) §5 (owner, 2026-10-27). Planned; starts after the owner accepts Phase 2. One PR per step, in order. Exit: each step's behaviour has a server or ctl test, on Linux and on CI's Windows leg where the step does not depend on ConPTY pass-through (R1).
+
+1. Terminal events (C29): program exited with its exit code, bell, progress, notification, behind a new feature bit; reply to the OSC 7501 query.
+2. Wait primitives (C30): `rusty-mux-ctl wait` on a block closing or its program exiting, with a timeout, exiting with the program's status; run and wait; wait for an event matching fields, with a timeout.
+3. Process info (C31): a `terminal.process` block method (child, foreground process, ancestors) and a process-changed event, using existing platform crates or `rusty_libc`.
+4. Input and capture (C32): named keys encoded over `input`; `terminal.format` gains trim, unwrap and a VT format.
+5. Labels and clients (C33): rename methods for all four kinds, block and client labels, label-changed events, client list and force-disconnect.
+6. Agent setup (C34): `rusty-mux-ctl agent setup|status|remove` for Claude Code first, plus a placement-rules doc. Our own skill text; merges into settings without clobbering them.
+7. Window layout (C12): a split tree per window in core, split, zoom and close-pane methods, layout events; the attach client renders it.
+
 ## Phase 3: identity and remote
 
-Identity, login server mode, roaming transport, sharing. Exit: a remote session survives a client IP change (test, after spike 4); login mode maps peer credentials or Tailscale identity to an account (test); a shared session enforces input leases (test).
+Identity, login server mode, roaming transport, sharing, several servers per client (C35). Tailscale identity uses first-party `rusty_tail`, after the owner approves moving its library crates to `crates/libs/` (ADR-0003). Exit: a remote session survives a client IP change (test, after spike 4); login mode maps peer credentials or Tailscale identity to an account (test); a shared session enforces input leases (test).
 
 ## Phase 4: clients and Windows
 
@@ -52,4 +64,4 @@ Windows, ahead of the phase (owner, 2026-10-26): the server, `rusty-mux-ctl`, `r
 
 ## Phase 5: scale and hardening
 
-Parking, encryption at rest, audit. Exit: idle-terminal memory measured with and without parking (spike 5 numbers, ours); parked snapshots are encrypted and round-trip to the same grid (test); an outbound-connection audit of the release finds no egress.
+Parking, encryption at rest, audit, upgrade without losing sessions (C36). Exit: idle-terminal memory measured with and without parking (spike 5 numbers, ours); parked snapshots are encrypted and round-trip to the same grid (test); an outbound-connection audit of the release finds no egress.
