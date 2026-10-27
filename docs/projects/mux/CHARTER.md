@@ -6,7 +6,7 @@ Status: active · Owner: Nano · Started: 2026-10-22 · Name confirmed by the ow
 
 A server-side terminal multiplexer with every Rex capability ([CAPABILITIES.md](CAPABILITIES.md), the 28 rows of the design brief §3), built our own way: Rust, first-party crates, no hidden egress, Windows included.
 
-Design brief: `REX-PARITY-DESIGN.md` (owner upload, not in the repo). Adopt/build evidence: [MUX-ADOPT-DECISIONS.md](../../research/MUX-ADOPT-DECISIONS.md). Engine backlog: [RUSTY-TERM-PERF-BACKLOG.md](../../research/RUSTY-TERM-PERF-BACKLOG.md).
+Design brief: `REX-PARITY-DESIGN.md` (owner upload, not in the repo). Adopt/build evidence: [MUX-ADOPT-DECISIONS.md](../../research/MUX-ADOPT-DECISIONS.md). Engine backlog: [RUSTY-TERM-PERF-BACKLOG.md](../../research/RUSTY-TERM-PERF-BACKLOG.md). rusty_term project docs: [../term/](../term/README.md).
 
 ## Non-goals
 
