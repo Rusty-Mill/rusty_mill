@@ -29,6 +29,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
 
 use crate::sync::Mutex;
@@ -412,6 +413,11 @@ pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::er
 /// a flood still leaves the UI thread the lock between batches.
 const READ_BATCH: usize = 64 * 1024;
 
+/// Batches read ahead of the parser: at most 1 MiB queued. The kernel's PTY
+/// buffer holds only a few KiB, so without a separate read thread the child
+/// stalls on every batch the parser works through.
+const READ_AHEAD: usize = 16;
+
 /// A pane's one outstanding wakeup: the reader raises it when it sends a
 /// `Redraw`, the window lowers it when it handles one. Output parsed while
 /// it is raised needs no wakeup of its own, since the pending one repaints
@@ -461,11 +467,11 @@ fn panic_text(panic: &(dyn std::any::Any + Send)) -> &str {
 /// PTY reader loop (own thread, one per tab): parse output into the tab's
 /// grid, send replies (DA/DSR/structured-channel) back to the child, and wake
 /// the window with the tab's id through `send` (`false` once the event loop
-/// is gone). Reads are batched (see [`read_batch`](crate::backend::read_batch)),
-/// and a wakeup is sent only when the window has handled the last one
-/// (`wake`), so a flood costs the UI thread one event per frame, not one per
-/// read. The loop ends on read EOF or error, or when a send fails, and then
-/// sends `Exit`.
+/// is gone). A second thread ([`read_ahead`]) reads the PTY in batches, so
+/// the child keeps writing while this one parses. A wakeup is sent only when
+/// the window has handled the last one (`wake`), so a flood costs the UI
+/// thread one event per frame, not one per read. The loop ends on read EOF
+/// or error, or when a send fails, and then sends `Exit`.
 fn reader_loop(
     id: u64,
     mut reader: Box<dyn BackendHandle>,
@@ -475,39 +481,59 @@ fn reader_loop(
     wake: WakeFlag,
     mut send: impl FnMut(UserEvent) -> bool,
 ) {
-    let mut buf = vec![0u8; READ_BATCH];
-    loop {
-        match crate::backend::read_batch(reader.as_mut(), &mut buf) {
-            Ok(0) => break, // EOF: child exited
-            Ok(n) => {
-                let data = &buf[..n];
-                let response = {
-                    // Bulk: step aside for the UI thread between chunks.
-                    let mut g = grid.lock_bulk();
-                    let mut parser = parser.lock();
-                    parser.advance(&mut g, data);
-                    // host_out (clipboard/title relay) has no host here; dropped.
-                    let _ = g.take_host_out();
-                    parser.take_responses()
-                };
-                if !response.is_empty() {
-                    let _ = replies.write(&response);
-                }
-                // Signal even mid synchronized-output window: the `Redraw`
-                // handler checks `sync_output_active` and skips painting. A
-                // wakeup still unhandled already covers this output. Closing
-                // the pane leaves its flag raised, so the loop then only
-                // parses until read EOF or error, as it did when every send
-                // succeeded: dropping the pane hangs up the direct child, but
-                // a descendant holding the PTY open keeps it reading.
-                if wake.raise() && !send(UserEvent::Redraw(id)) {
-                    break; // loop gone
-                }
-            }
-            Err(_) => break,
+    let (batches, ready) = std::sync::mpsc::sync_channel(READ_AHEAD);
+    let spawned = std::thread::Builder::new()
+        .name(format!("pty-read-{id}"))
+        .spawn(move || read_ahead(reader.as_mut(), &batches));
+    if let Err(e) = spawned {
+        eprintln!("rusty_term: pane {id}: cannot start the PTY read thread: {e}");
+        send(UserEvent::Exit(id));
+        return;
+    }
+    // Ends when the read thread hangs up: PTY EOF or a read error.
+    for data in ready {
+        let response = {
+            // Bulk: step aside for the UI thread between chunks.
+            let mut g = grid.lock_bulk();
+            let mut parser = parser.lock();
+            parser.advance(&mut g, &data);
+            // host_out (clipboard/title relay) has no host here; dropped.
+            let _ = g.take_host_out();
+            parser.take_responses()
+        };
+        if !response.is_empty() {
+            let _ = replies.write(&response);
+        }
+        // Signal even mid synchronized-output window: the `Redraw` handler
+        // checks `sync_output_active` and skips painting. A wakeup still
+        // unhandled already covers this output. Closing the pane leaves its
+        // flag raised, so the loop then only parses until read EOF or error,
+        // as it did when every send succeeded: dropping the pane hangs up the
+        // direct child, but a descendant holding the PTY open keeps it
+        // reading.
+        if wake.raise() && !send(UserEvent::Redraw(id)) {
+            break; // loop gone
         }
     }
     send(UserEvent::Exit(id));
+}
+
+/// Read the PTY in batches (see [`read_batch`](crate::backend::read_batch))
+/// and queue each for the parser, until EOF, a read error, or the parser
+/// hanging up. The queue is bounded, so a parser that falls behind still
+/// pushes back on the child.
+fn read_ahead(reader: &mut dyn BackendHandle, batches: &SyncSender<Vec<u8>>) {
+    let mut buf = vec![0u8; READ_BATCH];
+    loop {
+        match crate::backend::read_batch(reader, &mut buf) {
+            Ok(0) | Err(_) => return, // EOF (child exited) or a dead PTY
+            Ok(n) => {
+                if batches.send(buf[..n].to_vec()).is_err() {
+                    return; // parser gone
+                }
+            }
+        }
+    }
 }
 
 /// An in-progress drag-to-reorder of chrome-bar tabs: pressing a tab arms
@@ -7104,7 +7130,7 @@ mod tests {
     }
 
     mod reader {
-        use super::super::{AnsiParser, Grid, Mutex, UserEvent, WakeFlag, reader_loop};
+        use super::super::{AnsiParser, Grid, Mutex, UserEvent, WakeFlag, read_ahead, reader_loop};
         use crate::backend::BackendHandle;
         use crate::backend::mock::apart;
         use std::io::Error;
@@ -7177,7 +7203,35 @@ mod tests {
             let wake = WakeFlag::default();
             let (sent, line) = run(vec![Ok(b"a"), Ok(b"b")], &wake, false, false);
             assert_eq!(sent, ["redraw", "exit"]);
-            assert_eq!(line, "a", "nothing is read after the failed send");
+            assert_eq!(line, "a", "nothing is parsed after the failed send");
+        }
+
+        /// The batches `read_ahead` queues for `parts` with nobody parsing.
+        fn read_all(parts: Vec<Result<&[u8], Error>>) -> Vec<Vec<u8>> {
+            let (tx, rx) = std::sync::mpsc::sync_channel(super::super::READ_AHEAD);
+            read_ahead(&mut apart(parts), &tx);
+            drop(tx);
+            rx.into_iter().collect()
+        }
+
+        #[test]
+        fn reading_runs_ahead_of_the_parser() {
+            let got = read_all(vec![Ok(b"a"), Ok(b"b"), Ok(b"c")]);
+            assert_eq!(got, [b"a", b"b", b"c"], "all queued before any parse");
+        }
+
+        #[test]
+        fn a_read_error_ends_reading() {
+            let got = read_all(vec![Ok(b"a"), Err(Error::other("gone")), Ok(b"b")]);
+            assert_eq!(got, [b"a"]);
+        }
+
+        #[test]
+        fn a_gone_parser_ends_reading() {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            drop(rx);
+            // Returns instead of reading on into a queue nobody drains.
+            read_ahead(&mut apart(vec![Ok(b"a"), Ok(b"b")]), &tx);
         }
 
         #[test]
