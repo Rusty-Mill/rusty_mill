@@ -223,3 +223,22 @@ fn a_character_split_across_reads_arrives_whole() {
     assert_eq!(read_polled(&term, 3, small.len()), small.as_bytes());
     close(term);
 }
+
+/// Text a small read left behind belongs to its console: freeing it and
+/// allocating another leaves nothing readable.
+#[test]
+fn pending_text_does_not_outlive_its_console() {
+    let _guard = lock_console_tests();
+    let term = raw_console(437);
+    queue(&typed("é"));
+    assert_eq!(read_polled(&term, 1, 1), [0xC3]);
+    close(term);
+    let term = raw_console(437);
+    assert!(
+        !term.poll_readable(WAIT).expect("poll"),
+        "the first console's pending byte reached the second"
+    );
+    queue(&typed("x"));
+    assert_eq!(read_polled(&term, 8, 1), b"x");
+    close(term);
+}

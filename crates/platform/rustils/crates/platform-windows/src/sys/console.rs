@@ -269,7 +269,7 @@ pub fn poll_readable(timeout: Option<Duration>) -> Result<bool> {
     if get_mode(hin).is_err() {
         return wait_signaled(hin, wait_ms(timeout));
     }
-    if !pending().is_empty() {
+    if !pending_for(hin).bytes.is_empty() {
         return Ok(true);
     }
     let deadline = timeout.map(|d| Instant::now() + d);
@@ -406,32 +406,56 @@ pub fn read_chunk(buf: &mut [u8]) -> Result<usize> {
     read_console_utf8(hin, buf)
 }
 
-/// Text decoded from the console but not yet returned. The console's
-/// input buffer belongs to the process, so its undelivered text does too.
-static PENDING: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+/// Text decoded from a console but not yet returned, and the input handle
+/// it came from. The console's input buffer belongs to the process, so
+/// its undelivered text does too; it is dropped once stdin is another
+/// handle, and whenever this process gains, loses or reopens a console.
+struct Pending {
+    source: usize,
+    bytes: Vec<u8>,
+}
 
-fn pending() -> MutexGuard<'static, Vec<u8>> {
+static PENDING: Mutex<Pending> = Mutex::new(Pending {
+    source: 0,
+    bytes: Vec::new(),
+});
+
+fn lock_pending() -> MutexGuard<'static, Pending> {
     // The bytes stay valid whatever a panicking holder was doing.
     PENDING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The text pending from `hin`, none if it came from another handle.
+fn pending_for(hin: w::HANDLE) -> MutexGuard<'static, Pending> {
+    let mut pending = lock_pending();
+    if pending.source != hin as usize {
+        pending.bytes.clear();
+        pending.source = hin as usize;
+    }
+    pending
+}
+
+fn discard_pending() {
+    lock_pending().bytes.clear();
 }
 
 fn read_console_utf8(hin: w::HANDLE, buf: &mut [u8]) -> Result<usize> {
     if buf.is_empty() {
         return Ok(0);
     }
-    let mut pending = pending();
-    if pending.is_empty() {
+    let mut pending = pending_for(hin);
+    if pending.bytes.is_empty() {
         // A UTF-16 unit takes at most 3 bytes of UTF-8, so this many
         // usually fit; anything over waits in `PENDING`.
         let units = read_console_units(hin, (buf.len() / 3).max(1))?;
         if units.is_empty() {
             return Ok(0);
         }
-        *pending = String::from_utf16_lossy(&units).into_bytes();
+        pending.bytes = String::from_utf16_lossy(&units).into_bytes();
     }
-    let n = pending.len().min(buf.len());
-    buf[..n].copy_from_slice(&pending[..n]);
-    pending.drain(..n);
+    let n = pending.bytes.len().min(buf.len());
+    buf[..n].copy_from_slice(&pending.bytes[..n]);
+    pending.bytes.drain(..n);
     Ok(n)
 }
 
@@ -580,7 +604,9 @@ pub fn initial_state() -> ConsoleState {
 /// Track W (D-15): `rusty_win32::console::alloc`.
 #[cfg(feature = "track-w")]
 pub fn alloc() -> Result<()> {
-    rusty_win32::console::alloc().map_err(|e| errmap::trackw_err("AllocConsole", e))
+    rusty_win32::console::alloc().map_err(|e| errmap::trackw_err("AllocConsole", e))?;
+    discard_pending();
+    Ok(())
 }
 
 #[cfg(not(feature = "track-w"))]
@@ -589,6 +615,7 @@ pub fn alloc() -> Result<()> {
     if unsafe { w::AllocConsole() } == 0 {
         return Err(errmap::last_win32_err("AllocConsole", OsStr::new("")));
     }
+    discard_pending();
     Ok(())
 }
 
@@ -596,7 +623,9 @@ pub fn alloc() -> Result<()> {
 /// Track W (D-15): `rusty_win32::console::free`.
 #[cfg(feature = "track-w")]
 pub fn free() -> Result<()> {
-    rusty_win32::console::free().map_err(|e| errmap::trackw_err("FreeConsole", e))
+    rusty_win32::console::free().map_err(|e| errmap::trackw_err("FreeConsole", e))?;
+    discard_pending();
+    Ok(())
 }
 
 #[cfg(not(feature = "track-w"))]
@@ -605,6 +634,7 @@ pub fn free() -> Result<()> {
     if unsafe { w::FreeConsole() } == 0 {
         return Err(errmap::last_win32_err("FreeConsole", OsStr::new("")));
     }
+    discard_pending();
     Ok(())
 }
 
@@ -618,7 +648,9 @@ pub fn free() -> Result<()> {
 /// this crate's exactly, sentinel handling included.
 #[cfg(feature = "track-w")]
 pub fn attach(pid: Option<u32>) -> Result<()> {
-    rusty_win32::console::attach(pid).map_err(|e| errmap::trackw_err("AttachConsole", e))
+    rusty_win32::console::attach(pid).map_err(|e| errmap::trackw_err("AttachConsole", e))?;
+    discard_pending();
+    Ok(())
 }
 
 #[cfg(not(feature = "track-w"))]
@@ -630,6 +662,7 @@ pub fn attach(pid: Option<u32>) -> Result<()> {
     if unsafe { w::AttachConsole(process_id) } == 0 {
         return Err(errmap::last_win32_err("AttachConsole", OsStr::new("")));
     }
+    discard_pending();
     Ok(())
 }
 
@@ -701,6 +734,7 @@ pub fn reopen_std_handles() -> Result<()> {
     set_std(w::STD_INPUT_HANDLE, hin, "stdin")?;
     set_std(w::STD_OUTPUT_HANDLE, hout, "stdout")?;
     set_std(w::STD_ERROR_HANDLE, herr, "stderr")?;
+    discard_pending();
 
     // Best-effort VT enable, matching `enter_raw`'s own stdout posture
     // (see its doc comment): a failure here doesn't fail acquisition

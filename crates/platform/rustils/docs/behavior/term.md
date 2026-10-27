@@ -77,7 +77,9 @@ contract tests.
   returns UTF-8 whatever the console's input code page, the bytes a Unix
   tty in a UTF-8 locale delivers; a lone surrogate becomes U+FFFD. A
   surrogate pair is never split between reads, and a character whose
-  UTF-8 form does not fit the buffer is returned over the next calls.
+  UTF-8 form does not fit the buffer is returned over the next calls,
+  unless stdin changes handle or the process frees, allocates, attaches
+  or reopens a console first, which drops it.
   On a pipe or file it is `ReadFile`, bytes unchanged.
 - **Live-verified** (not parity-pinned — timing-sensitive, exercised by
   hand): `rterm --raw-probe` under a real pty polls, then reads a
