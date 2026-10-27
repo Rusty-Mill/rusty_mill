@@ -149,6 +149,10 @@ pub fn run(args: &[String], env: &Env, out: &mut dyn Write, err: &mut dyn Write)
 
 /// [`run`], giving up on the server once `stop` says so (past its deadline,
 /// or cancelled) with [`Exit::Unreachable`]. Requests already sent stand.
+///
+/// `stop` bounds reads everywhere. It bounds connecting only on Linux, and
+/// writes only on Unix: on Windows a connect or a write blocked on a server
+/// that stopped reading runs past the deadline.
 pub fn run_until(
     args: &[String],
     env: &Env,
