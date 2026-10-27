@@ -224,7 +224,9 @@ where
 
 /// Pings every `interval`; a ping unanswered for `timeout` sets
 /// `timed_out` and aborts the driver. A ping that fails means the driver
-/// has already ended, with its own error, so the keepalive just stops.
+/// has failed, but it may still be flushing its GOAWAY to a peer that
+/// stopped reading: it gets one `timeout` to end with its own error, then
+/// is aborted (a no-op if it already ended), so teardown stays bounded.
 fn spawn_keepalive(
     client: ClientHandle,
     ka: Keepalive,
@@ -236,7 +238,10 @@ fn spawn_keepalive(
             sleep(ka.interval).await;
             match timeout(ka.timeout, client.ping()).await {
                 Ok(Ok(())) => {}
-                Ok(Err(_)) => return,
+                Ok(Err(_)) => {
+                    sleep(ka.timeout).await;
+                    return driver.abort();
+                }
                 Err(_) => {
                     timed_out.store(true, Ordering::Release);
                     return driver.abort();
@@ -245,4 +250,123 @@ fn spawn_keepalive(
         }
     });
     AbortOnDrop(Some(task.abort_handle()))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use rusty_tokio::io::{duplex, DuplexStream, ReadBuf};
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    /// A transport whose writes, flushes and shutdowns stall for good once
+    /// `stalled` is set: a peer that stopped reading.
+    struct Stall {
+        io: DuplexStream,
+        stalled: Arc<AtomicBool>,
+    }
+
+    impl Stall {
+        fn stalled(&self) -> bool {
+            self.stalled.load(Ordering::Acquire)
+        }
+    }
+
+    impl AsyncRead for Stall {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.io).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for Stall {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.stalled() {
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.io).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if self.stalled() {
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.io).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if self.stalled() {
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.io).poll_shutdown(cx)
+        }
+    }
+
+    /// An empty SETTINGS frame: the server's preface.
+    const SETTINGS: [u8; 9] = [0, 0, 0, 4, 0, 0, 0, 0, 0];
+    /// SETTINGS with a 5-byte payload, a connection error (FRAME_SIZE_ERROR).
+    const BAD_SETTINGS: [u8; 14] = [0, 0, 5, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+    /// Connects over an in-memory transport with a keepalive, then has the
+    /// peer break the connection, stopping its reads first when `stall`.
+    /// Returns how the connection ended.
+    async fn broken_by_the_peer(stall: bool) -> String {
+        let (near, mut far) = duplex(64 * 1024);
+        far.write_all(&SETTINGS).await.unwrap();
+        let stalled = Arc::new(AtomicBool::new(false));
+        let io = Stall {
+            io: near,
+            stalled: stalled.clone(),
+        };
+        let (client, closed) = start(io, Builder::new()).await.unwrap();
+        stalled.store(stall, Ordering::Release);
+        far.write_all(&BAD_SETTINGS).await.unwrap();
+
+        let ping_timed_out = Arc::new(AtomicBool::new(false));
+        let ka = Keepalive {
+            interval: Duration::from_millis(20),
+            timeout: Duration::from_millis(100),
+        };
+        let guard = spawn_keepalive(
+            client.clone(),
+            ka,
+            closed.abort_handle(),
+            ping_timed_out.clone(),
+        );
+        let mut conn = Connection {
+            client,
+            closed,
+            outcome: None,
+            ping_timed_out,
+            _keepalive: Some(guard),
+        };
+        let ended = timeout(Duration::from_secs(5), conn.closed())
+            .await
+            .expect("the connection ends");
+        drop(far);
+        format!("{ended:?}")
+    }
+
+    #[rusty_tokio::test]
+    async fn a_failed_driver_reports_its_own_error() {
+        let ended = broken_by_the_peer(false).await;
+        assert!(ended.starts_with("Err(H2("), "{ended}");
+    }
+
+    #[rusty_tokio::test]
+    async fn the_keepalive_ends_a_failed_driver_stuck_on_its_last_flush() {
+        // The driver marks the connection closed (so pings fail), then
+        // stalls flushing its GOAWAY to a peer that stopped reading.
+        assert_eq!(broken_by_the_peer(true).await, "Err(Aborted)");
+    }
 }
