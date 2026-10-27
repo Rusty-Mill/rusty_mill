@@ -17,12 +17,14 @@ use std::io::Write;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use crate::sync::Mutex;
 use rusty_tokio::sync::Notify;
 
 use super::fair::fair_select;
 use crate::backend::Backend;
+use crate::compact::Compactor;
 use crate::core::{AnsiParser, Grid};
 use crate::input::{Scroll, split_input};
 use crate::render::{
@@ -62,13 +64,25 @@ impl Drop for ShutdownOnDrop {
     }
 }
 
-/// What woke the render loop: a repaint request, a size change, or (Windows,
-/// where output arrives over a channel) a chunk of PTY output or its EOF.
+/// What woke the render loop: a repaint request, a size change, a due
+/// history compaction step, or (Windows, where output arrives over a
+/// channel) a chunk of PTY output or its EOF.
 enum Wake {
     Frame,
     Resize,
+    Compact,
     #[cfg(windows)]
     Output(Option<Vec<u8>>),
+}
+
+/// Wake at `due` for a compaction step, or never when none is due. Built
+/// fresh each loop turn, so dropping it on another wake loses nothing.
+async fn compact_when_due(due: Option<Instant>) -> Wake {
+    let Some(at) = due else {
+        return std::future::pending().await;
+    };
+    rusty_tokio::time::sleep(at.saturating_duration_since(Instant::now())).await;
+    Wake::Compact
 }
 
 /// Notify `frame` at `until`: a synchronized update that times out with no
@@ -495,6 +509,7 @@ async fn run_async(
     // and the `sigwinch` branch never drops a pending notification.
     let mut notified = pin!(frame.notified());
     let mut turn = 0;
+    let mut compactor = Compactor::default();
 
     loop {
         // Round-robin, not `select!`'s fixed order: sustained output keeps
@@ -508,14 +523,17 @@ async fn run_async(
                 sigwinch.recv().await;
                 Wake::Resize
             });
-            fair_select(&mut turn, &mut [frame_arm, resize_arm]).await
+            let compact_arm = pin!(compact_when_due(compactor.due()));
+            fair_select(&mut turn, &mut [frame_arm, resize_arm, compact_arm]).await
         };
         match woke {
+            Wake::Compact => compactor.run(&mut grid.lock(), Instant::now()),
             Wake::Frame => {
                 notified.set(frame.notified());
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }
+                compactor.on_change(Instant::now());
                 // Coalesce bursts: hold off until the frame budget since the
                 // last paint has elapsed, so a flood repaints at ~60 Hz.
                 let since = render_state.last_frame.elapsed();
@@ -531,8 +549,13 @@ async fn run_async(
                 // screen for a clean full repaint. Only act on a real change so a
                 // spurious SIGWINCH doesn't blank the screen.
                 if let Some((cols, rows)) = backend.terminal_size() {
-                    let changed =
-                        resize_grid(&grid, &mut render_state, cols as usize, rows as usize);
+                    let changed = resize_grid(
+                        &grid,
+                        &mut render_state,
+                        &mut compactor,
+                        cols as usize,
+                        rows as usize,
+                    );
                     if changed {
                         let _ = resizer.set_winsize(cols, rows);
                         // Tell a subscribed structured client the size changed
@@ -722,6 +745,7 @@ async fn run_async(
     let mut resize_poll = rusty_tokio::time::interval(Duration::from_millis(150));
     let mut notified = pin!(frame.notified());
     let mut turn = 0;
+    let mut compactor = Compactor::default();
 
     loop {
         // Round-robin, not `select!`'s fixed order: a never-empty output
@@ -736,9 +760,15 @@ async fn run_async(
                 resize_poll.tick().await;
                 Wake::Resize
             });
-            fair_select(&mut turn, &mut [output_arm, frame_arm, resize_arm]).await
+            let compact_arm = pin!(compact_when_due(compactor.due()));
+            fair_select(
+                &mut turn,
+                &mut [output_arm, frame_arm, resize_arm, compact_arm],
+            )
+            .await
         };
         match woke {
+            Wake::Compact => compactor.run(&mut grid.lock(), Instant::now()),
             Wake::Output(data) => {
                 match data {
                     Some(data) => {
@@ -750,6 +780,7 @@ async fn run_async(
                             parser.take_responses()
                         };
                         frame.notify_one();
+                        compactor.on_change(Instant::now());
                         if !responses.is_empty() {
                             let _ = in_tx.send(responses);
                         }
@@ -776,8 +807,13 @@ async fn run_async(
                 }
                 // No SIGWINCH on Windows: poll the console size and act on change.
                 if let Some((cols, rows)) = backend.terminal_size() {
-                    let changed =
-                        resize_grid(&grid, &mut render_state, cols as usize, rows as usize);
+                    let changed = resize_grid(
+                        &grid,
+                        &mut render_state,
+                        &mut compactor,
+                        cols as usize,
+                        rows as usize,
+                    );
                     if changed {
                         let _ = resizer.set_winsize(cols, rows);
                         // Notify a subscribed structured client; routed through the

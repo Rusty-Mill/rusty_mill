@@ -19,6 +19,8 @@ mod snapshot;
 pub(crate) use line::Line;
 #[cfg(test)]
 mod stamp_tests;
+#[cfg(test)]
+mod trim_tests;
 pub use snapshot::SnapshotError;
 #[cfg(any(test, feature = "gui"))]
 mod frame;
@@ -492,6 +494,10 @@ pub struct Grid {
     /// its soft-wrap bit, so a resize can rejoin wrapped runs and re-wrap them to
     /// the new width. Rewrapped to the live width on every resize.
     pub(crate) scrollback: VecDeque<Line>,
+    /// How many of the newest [`Grid::scrollback`] lines
+    /// [`Grid::compact_history`] has not looked at yet. Clamped to the
+    /// history length on use, so an eviction or clear needs no update.
+    untrimmed: usize,
     /// The live scrollback cap: [`SCROLLBACK_MAX`] unless overridden by the
     /// `scrollback` config key via [`Grid::set_scrollback_max`].
     pub(crate) scrollback_max: usize,
@@ -935,6 +941,23 @@ fn is_padding(c: &Cell) -> bool {
 /// [`is_padding`] for a stored cell, through its style.
 fn is_padding_packed(c: PackedCell, styles: &StyleTable) -> bool {
     c.ch() == ' ' && is_padding(&c.resolve(&styles.get(c.style())))
+}
+
+/// Store a history line's trailing run of one padding cell as a single
+/// cell and a repeat count.
+/// Only a hard-broken line: the padding of a soft-wrapped one is part of
+/// the logical line that continues below it. A reflow drops this padding
+/// anyway, so it never sees the difference.
+fn trim_padding(line: &mut Line, styles: &StyleTable) {
+    let cells = line.cells();
+    let Some(&last) = cells.last() else {
+        return;
+    };
+    if line.wrapped || !is_padding_packed(last, styles) {
+        return;
+    }
+    let keep = cells.iter().rposition(|c| *c != last).map_or(0, |i| i + 1);
+    line.trim_tail(keep);
 }
 
 /// A pixel image (Sixel/Kitty) placed on the grid: source pixels plus the cell
@@ -1403,6 +1426,7 @@ impl Grid {
             kitty_flags_stack: Vec::new(),
             cwd: String::new(),
             scrollback: VecDeque::new(),
+            untrimmed: 0,
             scrollback_max: SCROLLBACK_MAX,
             view_offset: 0,
             selection: None,
@@ -1537,9 +1561,8 @@ impl Grid {
     /// by-value cell read goes through here, so the cell storage can change
     /// behind it.
     pub(crate) fn line_cell(&self, line: &Line, col: usize) -> Cell {
-        line.cells()
-            .get(col)
-            .map_or_else(Cell::blank, |&cell| self.resolve(cell))
+        line.cell(col)
+            .map_or_else(Cell::blank, |cell| self.resolve(cell))
     }
 
     /// The full cell behind a stored one.
@@ -1551,6 +1574,7 @@ impl Grid {
     /// blanks past its width. A run of one style looks the table up once.
     #[cfg(any(test, feature = "gui"))]
     pub(crate) fn push_resolved(&self, line: &Line, cols: usize, out: &mut Vec<Cell>) {
+        let start = out.len();
         let cells = &line.cells()[..line.cells().len().min(cols)];
         let mut memo: Option<(StyleId, CellStyle)> = None;
         for &cell in cells {
@@ -1564,7 +1588,13 @@ impl Grid {
             };
             out.push(cell.resolve(&style));
         }
-        out.resize(out.len() + (cols - cells.len()), Cell::blank());
+        let width = start + line.width().min(cols);
+        if let Some(&fill) = line.cells().last()
+            && out.len() < width
+        {
+            out.resize(width, self.resolve(fill));
+        }
+        out.resize(start + cols, Cell::blank());
     }
 
     /// `cells` resolved, for readers that want a whole row by value.
@@ -1652,7 +1682,7 @@ impl Grid {
             .chain(&mut self.scrollback)
             .chain(stashed)
         {
-            remap.apply(line.cells_mut());
+            remap.apply(line.cells_restyle());
         }
     }
 
@@ -2214,6 +2244,7 @@ impl Grid {
             let mut line = std::mem::take(&mut self.screen[bottom]);
             line.attr = LineAttr::Single;
             self.scrollback.push_back(line);
+            self.untrimmed += 1;
             self.touch_hist();
             if self.scrollback.len() > self.scrollback_max {
                 if let Some(evicted) = self.scrollback.pop_front() {
@@ -3410,12 +3441,28 @@ impl Grid {
         self.set_cursor_style(shape, blink);
     }
 
-    /// Override the scrollback line cap (the `scrollback` config key). `0`
     /// Number of lines currently held in scrollback (folds not applied).
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
     }
 
+    /// Release the memory of trailing padding in up to `budget` history lines
+    /// not yet looked at, oldest first. Readers see the same cells, so call
+    /// it whenever the terminal is idle; it is never needed for correctness.
+    /// `true` while lines remain to look at.
+    pub fn compact_history(&mut self, budget: usize) -> bool {
+        let len = self.scrollback.len();
+        let pending = self.untrimmed.min(len);
+        let take = pending.min(budget);
+        let first = len - pending;
+        for line in self.scrollback.range_mut(first..first + take) {
+            trim_padding(line, &self.styles);
+        }
+        self.untrimmed = pending - take;
+        self.untrimmed > 0
+    }
+
+    /// Override the scrollback line cap (the `scrollback` config key). `0`
     /// disables history. An already-overfull buffer is trimmed immediately.
     pub fn set_scrollback_max(&mut self, max: usize) {
         self.scrollback_max = max;
@@ -3533,6 +3580,7 @@ impl Grid {
                 &self.styles,
             );
             self.scrollback = r.scrollback;
+            self.untrimmed = self.scrollback.len();
             self.touch_hist();
             self.prompt_marks = r.prompt_marks;
             #[cfg(feature = "l13")]
@@ -3570,6 +3618,7 @@ impl Grid {
                 &self.styles,
             );
             self.scrollback = r.scrollback;
+            self.untrimmed = self.scrollback.len();
             self.touch_hist();
             self.screen = r.screen;
             self.cursor = r.cursor;
@@ -4808,7 +4857,7 @@ impl Grid {
     #[cfg(any(test, feature = "gui"))]
     fn phys_row(&self, abs: usize) -> (Vec<Cell>, bool) {
         let line = self.phys_line(abs);
-        (self.resolved(line.cells()), line.wrapped)
+        (self.resolved(&line.padded()), line.wrapped)
     }
 
     /// Scroll the viewport so absolute row `abs` is visible, about a third
@@ -5625,6 +5674,7 @@ impl crate::checkpoint::Wire for Grid {
         grid.kitty_flags_stack = crate::checkpoint::Wire::read(r)?;
         grid.cwd = crate::checkpoint::Wire::read(r)?;
         grid.scrollback = crate::checkpoint::Wire::read(r)?;
+        grid.untrimmed = grid.scrollback.len();
         grid.scrollback_max = crate::checkpoint::Wire::read(r)?;
         grid.current_link = crate::checkpoint::Wire::read(r)?;
         grid.tab_stops = crate::checkpoint::Wire::read(r)?;

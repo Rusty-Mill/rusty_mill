@@ -634,6 +634,10 @@ mod tests {
             ("id", "fresh per-grid renderer cache key"),
             ("spare_screen", "recycled blank allocation"),
             ("blank_row", "rebuilt blank-row template"),
+            (
+                "untrimmed",
+                "memory compaction progress; restored lines are all untrimmed",
+            ),
             ("styles", "rebuilt from the line run styles"),
             ("epoch", "renderer freshness counter"),
             ("view_offset", "client viewport"),

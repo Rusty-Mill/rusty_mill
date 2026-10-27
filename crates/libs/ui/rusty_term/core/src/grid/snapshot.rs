@@ -260,6 +260,7 @@ impl Grid {
         g.rebuild_cluster_caches();
         g.scrollback_max = g.scrollback_max.max(history);
         g.scrollback = scrollback;
+        g.untrimmed = g.scrollback.len();
         g.primary = primary;
         g.reset_damage();
         g.touch_hist();
@@ -297,7 +298,7 @@ impl Encoder<'_> {
         row.clear();
         let table = self.table;
         row.extend(
-            line.cells()
+            line.padded()
                 .iter()
                 .map(|c| c.resolve(&table.get(c.style()))),
         );

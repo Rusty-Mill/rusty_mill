@@ -4,6 +4,7 @@
 //! binary (`main.rs`) is a thin CLI over this.
 
 pub mod backend;
+mod compact;
 pub mod config;
 /// The headless VT engine, re-exported from the `rusty_term_core` crate.
 pub use rusty_term_core as core;

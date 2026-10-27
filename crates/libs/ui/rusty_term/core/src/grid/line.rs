@@ -6,6 +6,8 @@
 //! private to this module so every write goes through [`Line::cells_mut`],
 //! which drops the flag: a missed write site is a compile error, not stale text.
 
+use std::borrow::Cow;
+
 use super::{Cell, LineAttr};
 use crate::cell::PackedCell;
 use crate::checkpoint::{Error, Reader, Result, Wire, Writer};
@@ -30,6 +32,11 @@ pub(crate) struct Line {
     /// [`LineAttr::Single`] in scrollback: a double-width line is meaningless
     /// once scrolled off.
     pub attr: LineAttr,
+    /// How many more times the last stored cell repeats past
+    /// [`Line::cells`]: the trailing padding a trimmed history line no
+    /// longer stores (see [`Line::trim_tail`]). A count, not a cell, so a
+    /// line stays as small as before; a row is at most 4096 cells wide.
+    repeat: u16,
 }
 
 impl Line {
@@ -40,6 +47,7 @@ impl Line {
             blank: false,
             wrapped,
             attr,
+            repeat: 0,
         }
     }
 
@@ -50,23 +58,100 @@ impl Line {
             blank: true,
             wrapped: false,
             attr: LineAttr::Single,
+            repeat: 0,
         }
     }
 
-    /// The row's cell buffer, for reuse.
+    /// The row's cell buffer, for reuse; its contents are not meaningful.
     pub(crate) fn into_cells(self) -> Vec<PackedCell> {
         self.cells
     }
 
-    /// The row's cells.
+    /// The row's stored cells: all of them, unless [`Line::trim_tail`]
+    /// left the last one standing for a repeated run.
     pub(crate) fn cells(&self) -> &[PackedCell] {
         &self.cells
     }
 
-    /// The row's cells for writing. Drops the blank flag, so the next clear
-    /// rewrites the row.
+    /// The row's width before any trim: the stored cells and the repeats.
+    pub(crate) fn width(&self) -> usize {
+        self.cells.len() + usize::from(self.repeat)
+    }
+
+    /// The cell at `col`, repeats included; `None` past [`Line::width`].
+    pub(crate) fn cell(&self, col: usize) -> Option<PackedCell> {
+        match self.cells.get(col) {
+            Some(&c) => Some(c),
+            None if col < self.width() => self.cells.last().copied(),
+            None => None,
+        }
+    }
+
+    /// Every cell, repeats included, borrowed when there are none.
+    pub(crate) fn padded(&self) -> Cow<'_, [PackedCell]> {
+        match self.cells.last() {
+            Some(&fill) if self.repeat > 0 => {
+                let mut cells = Vec::with_capacity(self.width());
+                cells.extend_from_slice(&self.cells);
+                cells.resize(self.width(), fill);
+                Cow::Owned(cells)
+            }
+            _ => Cow::Borrowed(&self.cells),
+        }
+    }
+
+    /// Store `cells[keep]` once in place of the run from `keep` to the end,
+    /// which must all equal it, releasing the rest's memory. A line already
+    /// trimmed, or with at most one cell from `keep` on, is left as it is.
+    pub(crate) fn trim_tail(&mut self, keep: usize) {
+        let Some(repeat) = self.cells.len().checked_sub(keep + 1) else {
+            return;
+        };
+        let Ok(repeat) = u16::try_from(repeat) else {
+            return;
+        };
+        if repeat == 0 || self.repeat > 0 {
+            return;
+        }
+        debug_assert!(
+            self.cells[keep..].iter().all(|c| *c == self.cells[keep]),
+            "trimmed run is not uniform"
+        );
+        self.repeat = repeat;
+        self.cells.truncate(keep + 1);
+        self.cells.shrink_to_fit();
+    }
+
+    /// Store the repeats again, so the cells span the whole width. Only
+    /// history lines have any, so writers pay just the check.
+    #[inline]
+    fn untrim(&mut self) {
+        if self.repeat > 0 {
+            self.store_repeats();
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn store_repeats(&mut self) {
+        if let Some(&fill) = self.cells.last() {
+            self.cells.resize(self.width(), fill);
+        }
+        self.repeat = 0;
+    }
+
+    /// The row's cells for writing, the repeats stored again first. Drops
+    /// the blank flag, so the next clear rewrites the row.
     pub(crate) fn cells_mut(&mut self) -> &mut [PackedCell] {
+        self.untrim();
         self.blank = false;
+        &mut self.cells
+    }
+
+    /// The stored cells for a style remap, keeping the trim: the repeats
+    /// follow the last cell. A remap maps equal cells to equal cells, so
+    /// the blank flag stays true.
+    pub(crate) fn cells_restyle(&mut self) -> &mut [PackedCell] {
         &mut self.cells
     }
 
@@ -87,6 +172,7 @@ impl Line {
             }
             self.blank = true;
         }
+        self.repeat = 0;
         self.wrapped = false;
         self.attr = LineAttr::Single;
     }
@@ -94,6 +180,7 @@ impl Line {
     /// Set every cell to `fill` and drop the soft wrap, keeping the width and
     /// the line size (`ED 2` semantics).
     pub(crate) fn fill(&mut self, fill: PackedCell) {
+        self.untrim();
         if !self.is_blank_with(self.cells.len(), fill) {
             self.cells.fill(fill);
             self.blank = true;
@@ -127,12 +214,13 @@ const MIN_REPEAT: usize = 4;
 /// reading interns each wire style once into the reader's table.
 impl Wire for Line {
     fn write(&self, w: &mut Writer) -> Result<()> {
-        w.charge(self.cells.len().saturating_mul(size_of::<Cell>()))?;
-        w.varint(self.cells.len() as u64)?;
+        let cells = self.padded();
+        w.charge(cells.len().saturating_mul(size_of::<Cell>()))?;
+        w.varint(cells.len() as u64)?;
         let mut at = 0;
-        while at < self.cells.len() {
-            let (len, repeat) = run_len(&self.cells[at..]);
-            write_run(w, &self.cells[at..at + len], repeat)?;
+        while at < cells.len() {
+            let (len, repeat) = run_len(&cells[at..]);
+            write_run(w, &cells[at..at + len], repeat)?;
             at += len;
         }
         self.wrapped.write(w)?;
