@@ -23,14 +23,17 @@ sudo install -m 755 target/release/rusty_tick /usr/local/bin/
 for d in agui-core agui-react; do (cd crates/libs/protocol/rusty_agui/packages/$d && npm ci && npm run build); done
 (cd crates/apps/rusty_tick/web && npm ci && npm run build)
 
-mkdir -p ~/.rusty_tick/data && chmod 700 ~/.rusty_tick
-cp -r crates/apps/rusty_tick/web/dist ~/.rusty_tick/web
+mkdir -p ~/.rusty_tick && chmod 700 ~/.rusty_tick
+cp -r crates/apps/rusty_tick/web/dist ~/.rusty_tick/web     # first install only; see Upgrade
 install -m 600 crates/apps/rusty_tick/deploy/tick.env.example ~/.rusty_tick/tick.env
 $EDITOR ~/.rusty_tick/tick.env        # user, paths, token
 
 sudo install -m 644 crates/apps/rusty_tick/deploy/rusty-tick.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now rusty-tick
+sudo systemctl enable rusty-tick
+# Moving an existing store? Put it in place now (below), before the first start.
+mkdir -p ~/.rusty_tick/data           # a fresh store otherwise
+sudo systemctl start rusty-tick
 ```
 
 ```sh
@@ -47,10 +50,26 @@ is down the board's `/health` answers 503 and writes fail; nothing is lost.
 
 ## Moving an existing data directory
 
-Stop the old server first, so the copy is one moment of the store, then copy the whole directory
-into `~/.rusty_tick/data` and keep the old one until the new server has run. Use the old token in
-`tick.env`, or every client needs a new one. Point each client (Mill Board, `claude mcp add` entries,
-the phone) at the new address.
+The new store must be a complete snapshot, never copied into a store a server has already opened.
+
+1. Stop the old server, so its directory is one moment of the store. Keep it as it is: it is the
+   rollback until the new one checks out.
+2. Copy the whole directory to the host (say `~/rusty_tick_data.snapshot`).
+3. If `rusty-tick` has started here, stop it and move its directory aside, don't merge into it:
+
+   ```sh
+   sudo systemctl stop rusty-tick
+   [ -e ~/.rusty_tick/data ] && mv ~/.rusty_tick/data ~/.rusty_tick/data.replaced-$(date +%s)
+   mv ~/rusty_tick_data.snapshot ~/.rusty_tick/data
+   sudo systemctl start rusty-tick
+   ```
+
+4. Tokens. A single-user store: put the old server's token in `RUSTY_TICK_TOKEN`, so clients keep
+   working. A store with `users.json`: delete the `RUSTY_TICK_TOKEN` line; each user's tokens come
+   with the directory.
+5. Check the new server before any client moves: `/health`, then the task counts through the API
+   (`GET /api/v1/snapshot`) against the old server's.
+6. Then point each client (Mill Board, `claude mcp add` entries, the phone) at the new address.
 
 ## Reaching it from another machine
 
@@ -60,6 +79,21 @@ Board, not rusty_tick, so rusty_tick never needs a public address.
 
 ## Backups, upgrade and rollback
 
-Back up `~/.rusty_tick/data` with the service stopped, and copy it off the host. Replace
-`/usr/local/bin/rusty_tick` and `systemctl restart rusty-tick` to upgrade; keep the previous binary
-beside it (`rusty_tick.prev`) to roll back.
+Back up `~/.rusty_tick/data` with the service stopped, and copy it off the host.
+
+Upgrade the binary and the web UI together, keeping the previous pair for rollback. Rebuild both as
+in Install, then swap whole directories (`cp -r dist web` onto an existing `web` would nest `dist`
+inside it):
+
+```sh
+sudo cp -p /usr/local/bin/rusty_tick /usr/local/bin/rusty_tick.prev
+rm -rf ~/.rusty_tick/web.prev ~/.rusty_tick/web.new
+cp -r crates/apps/rusty_tick/web/dist ~/.rusty_tick/web.new
+sudo systemctl stop rusty-tick
+sudo install -m 755 target/release/rusty_tick /usr/local/bin/
+mv ~/.rusty_tick/web ~/.rusty_tick/web.prev && mv ~/.rusty_tick/web.new ~/.rusty_tick/web
+sudo systemctl start rusty-tick
+```
+
+Roll back by stopping the service, putting `rusty_tick.prev` and `web.prev` back in place, and
+starting it.
