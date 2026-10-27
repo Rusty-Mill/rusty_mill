@@ -227,6 +227,11 @@ impl State {
                 if self.clients.get(&client).is_some_and(|out| out.attaching()) {
                     return (req, Err("checkpoint transfer already in progress".into()));
                 }
+                // Its output ended and its program is being reaped: nothing
+                // is left to send a checkpoint from.
+                if self.mux.block(block).is_some() && !self.blocks.contains_key(&block) {
+                    return (req, Err(format!("block {block} is closing").into()));
+                }
                 let result = self.mux.attach(client, block);
                 (
                     req,
@@ -461,8 +466,8 @@ impl State {
             return Vec::new();
         };
         rt.parser.advance(&mut rt.grid, data);
-        let mut replies = rt.parser.take_responses();
-        if terminal::absorb_status(&mut rt.grid, &mut rt.status, &mut replies) {
+        let replies = rt.parser.take_responses();
+        if terminal::absorb_status(&mut rt.grid, &mut rt.status) {
             in_step("status", self.mux.note_status(block));
         }
         let (pwd, title) = rt.seen.changes(&rt.grid);
@@ -962,6 +967,86 @@ mod regression {
                 );
                 State::request(&shared, client, Message::Detach { req: req + 10 });
             }
+            State::request(&shared, client, Message::CloseBlock { req: 99, block });
+        });
+    }
+
+    /// Reads until the reply to `req`.
+    async fn reply_to(inbox: &mut Inbox, req: u64) -> Message {
+        loop {
+            let frame = inbox.next().await.expect("a reply");
+            let message = rusty_mux_proto::decode(&frame).unwrap().unwrap().0;
+            if let Message::Done { req: r, .. } | Message::Failed { req: r, .. } = message
+                && r == req
+            {
+                return message;
+            }
+        }
+    }
+
+    #[test]
+    fn a_block_being_reaped_refuses_attach_and_may_still_be_closed() {
+        runtime().block_on(async {
+            let (shared, client, block, mut inbox) = fixture();
+            let process = shared.borrow_mut().hang_up(block).expect("program");
+            State::request(&shared, client, Message::Attach { req: 7, block });
+            let reply = reply_to(&mut inbox, 7).await;
+            assert!(
+                matches!(&reply, Message::Failed { reason, .. } if reason.contains("closing")),
+                "{reply:?}"
+            );
+            assert_eq!(shared.borrow().mux.client(client).unwrap().attached(), None);
+
+            // A client closes it before the reap ends: no exit is announced.
+            State::request(&shared, client, Message::CloseBlock { req: 8, block });
+            assert!(shared.borrow().mux.block(block).is_none());
+            let before = shared.borrow().history.cursor();
+            shared.borrow_mut().exited(block, Some(ExitStatus::Code(0)));
+            assert_eq!(shared.borrow().history.cursor(), before);
+            drop(process);
+        });
+    }
+
+    #[test]
+    fn an_exit_is_announced_before_the_close() {
+        runtime().block_on(async {
+            let (shared, _, block, _inbox) = fixture();
+            shared.borrow_mut().flush();
+            let process = shared.borrow_mut().hang_up(block).expect("program");
+            let before = shared.borrow().history.cursor();
+            shared.borrow_mut().exited(block, Some(ExitStatus::Code(3)));
+            let state = shared.borrow();
+            let events: Vec<&Event> = state
+                .history
+                .since(before)
+                .expect("held")
+                .map(|(_, e)| e)
+                .collect();
+            assert_eq!(
+                events.first(),
+                Some(&&Event::ProgramExited {
+                    block,
+                    status: ExitStatus::Code(3)
+                })
+            );
+            assert_eq!(events.last(), Some(&&Event::BlockClosed { block }));
+            drop(state);
+            drop(process);
+        });
+    }
+
+    #[test]
+    fn a_status_query_is_answered_in_order_with_other_replies() {
+        runtime().block_on(async {
+            let (shared, client, block, _inbox) = fixture();
+            let replies = shared
+                .borrow_mut()
+                .output(block, b"\x1b]7501;?\x1b\\\x1b[c");
+            assert!(
+                replies.starts_with(b"\x1b]7501;?\x1b\\\x1b["),
+                "{replies:?}"
+            );
+            assert!(shared.borrow().blocks[&block].status.bodies().is_empty());
             State::request(&shared, client, Message::CloseBlock { req: 99, block });
         });
     }

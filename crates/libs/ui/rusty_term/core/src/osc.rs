@@ -15,6 +15,10 @@ use super::cell::Pen;
 use super::color::{Palette, format_color_spec, parse_color_spec};
 use super::grid::Grid;
 
+/// The answer to an OSC 7501 `?` query. Listing no states or kinds, it
+/// claims all of draft 0.4's: five states and three kinds.
+const STATUS_ANSWER: &[u8] = b"\x1b]7501;?\x1b\\";
+
 /// Act on the OSC string in `osc_buffer` (the bytes between `ESC ]` and its
 /// `BEL`/`ST` terminator). The payload is `<code>` optionally followed by
 /// `; <args>`. `palette` is the live color table; `responses` is the child-bound
@@ -279,12 +283,16 @@ pub(crate) fn dispatch(
         }
         // 7501 (Program Status Protocol) reports a program's state. The grid
         // only queues the body for a host that collects it; validation and the
-        // record store live with the host.
-        "7501" => {
-            if let Some(text) = text {
+        // record store live with the host. For such a host the `?` query is
+        // answered here, in order with every other reply, since a program may
+        // follow it with DA1 and take DA1's answer first to mean unsupported.
+        "7501" => match text {
+            Some("?") if g.collect_program_status => responses.extend_from_slice(STATUS_ANSWER),
+            Some(text) => {
                 g.push_program_status(super::grid::StatusSignal::Report(text.to_string()));
             }
-        }
+            None => {}
+        },
         // 1337 (iTerm2) multiplexes several subcommands; we handle inline images
         // (`File=<args>:<base64>`) and ignore the rest.
         "1337" => {

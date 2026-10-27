@@ -36,22 +36,16 @@ pub(crate) fn pwd(grid: &Grid, pid: Option<u32>) -> Option<String> {
     })
 }
 
-/// The answer to an OSC 7501 `?` query: the protocol, with exactly its five
-/// states and three kinds, which an answer that lists none means.
-const STATUS_ANSWER: &[u8] = b"\x1b]7501;?\x1b\\";
-
 /// Applies the status signals the grid collected since the last call: OSC
-/// 7501 reports, prompts and resets. A `?` query adds its answer to
-/// `replies`. Whether any record's state changed, the part worth
-/// announcing; progress and text alone are not.
-pub(crate) fn absorb_status(grid: &mut Grid, records: &mut Records, replies: &mut Vec<u8>) -> bool {
+/// 7501 reports, prompts and resets. Whether any record's state changed, the
+/// part worth announcing; progress and text alone are not.
+pub(crate) fn absorb_status(grid: &mut Grid, records: &mut Records) -> bool {
     if grid.program_status.is_empty() {
         return false;
     }
     let before = records.states();
     for signal in grid.program_status.drain(..) {
         match signal {
-            StatusSignal::Report(body) if body == "?" => replies.extend_from_slice(STATUS_ANSWER),
             StatusSignal::Report(body) => {
                 if let Some(report) = rusty_mux_status::parse(&body) {
                     records.apply(report);
@@ -199,16 +193,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_status_query_is_answered_without_touching_records() {
-        let (mut grid, mut parser, mut records) = status_grid();
-        let mut replies = b"before".to_vec();
-        parser.advance(&mut grid, b"\x1b]7501;?\x1b\\\x1b]7501;?:x=1\x07");
-        assert!(!absorb_status(&mut grid, &mut records, &mut replies));
-        assert_eq!(replies, b"before\x1b]7501;?\x1b\\", "one answer, appended");
-        assert!(records.bodies().is_empty());
-    }
-
     fn status_grid() -> (Grid, rusty_term_core::AnsiParser, Records) {
         let mut grid = Grid::new(20, 2);
         grid.collect_program_status = true;
@@ -218,22 +202,13 @@ mod tests {
     #[test]
     fn status_changes_are_announced_once() {
         let (mut grid, mut parser, mut records) = status_grid();
-        assert!(
-            !absorb_status(&mut grid, &mut records, &mut Vec::new()),
-            "nothing collected"
-        );
+        assert!(!absorb_status(&mut grid, &mut records), "nothing collected");
         parser.advance(&mut grid, b"\x1b]7501;state=working:progress=10\x07");
-        assert!(absorb_status(&mut grid, &mut records, &mut Vec::new()));
+        assert!(absorb_status(&mut grid, &mut records));
         parser.advance(&mut grid, b"\x1b]7501;state=working:progress=90\x07");
-        assert!(
-            !absorb_status(&mut grid, &mut records, &mut Vec::new()),
-            "progress only"
-        );
+        assert!(!absorb_status(&mut grid, &mut records), "progress only");
         parser.advance(&mut grid, b"\x1b]7501;state=bogus\x07");
-        assert!(
-            !absorb_status(&mut grid, &mut records, &mut Vec::new()),
-            "ignored report"
-        );
+        assert!(!absorb_status(&mut grid, &mut records), "ignored report");
         assert!(grid.program_status.is_empty(), "drained");
         assert_eq!(records.bodies(), ["state=working:progress=90"]);
     }
@@ -243,12 +218,12 @@ mod tests {
         let (mut grid, mut parser, mut records) = status_grid();
         parser.advance(&mut grid, b"\x1b]7501;state=blocked:kind=question\x07");
         parser.advance(&mut grid, b"\x1b]7501;state=done:id=build\x07");
-        assert!(absorb_status(&mut grid, &mut records, &mut Vec::new()));
+        assert!(absorb_status(&mut grid, &mut records));
         parser.advance(&mut grid, b"\x1b]133;A\x07");
-        assert!(absorb_status(&mut grid, &mut records, &mut Vec::new()));
+        assert!(absorb_status(&mut grid, &mut records));
         assert_eq!(records.bodies(), ["state=done:id=build"]);
         parser.advance(&mut grid, b"\x1bc");
-        assert!(absorb_status(&mut grid, &mut records, &mut Vec::new()));
+        assert!(absorb_status(&mut grid, &mut records));
         assert!(records.bodies().is_empty());
     }
 
@@ -259,7 +234,7 @@ mod tests {
         let burst = round.repeat(rusty_term_core::PROGRAM_STATUS_MAX * 2);
         parser.advance(&mut grid, &burst);
         parser.advance(&mut grid, b"\x1b]7501;state=done\x07");
-        assert!(absorb_status(&mut grid, &mut records, &mut Vec::new()));
+        assert!(absorb_status(&mut grid, &mut records));
         assert_eq!(records.bodies(), ["state=done"]);
     }
 

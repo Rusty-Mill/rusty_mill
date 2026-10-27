@@ -275,15 +275,22 @@ fn a_closed_block_reports_no_exit() {
     );
 }
 
+/// The answer and DA1's, in the order the program asked, even when both
+/// questions arrive in one write.
 #[test]
-fn a_status_query_is_answered() {
+fn a_status_query_is_answered_in_order() {
     let path = start_server();
     let mut client = Client::connect(&path);
     let block = block_for(&mut client);
-    client.input(
-        block,
-        b"stty raw -echo; printf '\\033]7501;?\\033\\\\'; \
-          dd bs=1 count=10 2>/dev/null | od -An -tx1; stty sane\r",
-    );
-    client.wait_for(block, "1b 5d 37 35 30 31 3b 3f 1b 5c");
+    let ask = |first: &str, second: &str| {
+        format!(
+            "stty raw -echo; printf '{first}{second}'; \
+             dd bs=1 count=19 2>/dev/null | od -An -tx1; stty sane\r"
+        )
+    };
+    let (query, da1) = ("\\033]7501;?\\033\\\\", "\\033[c");
+    client.input(block, ask(query, da1).as_bytes());
+    client.wait_for(block, "1b 5d 37 35 30 31 3b 3f 1b 5c 1b 5b 3f 31 3b 32");
+    client.input(block, ask(da1, query).as_bytes());
+    client.wait_for(block, "1b 5b 3f 31 3b 32 3b 34 63 1b 5d 37 35 30 31 3b");
 }

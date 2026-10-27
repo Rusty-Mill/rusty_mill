@@ -698,7 +698,10 @@ pub struct Grid {
     /// front-end picks a default. Bounded by [`Grid::push_notification`].
     pub notifications: Vec<(String, String)>,
     /// Whether to queue [`StatusSignal`]s in [`Grid::program_status`]. Off by
-    /// default, so a host that never drains them stores nothing.
+    /// default, so a host that never drains them stores nothing. When on,
+    /// the parser answers the OSC 7501 `?` query for the host, claiming all
+    /// of draft 0.4's states and kinds, so set it only in a host that
+    /// handles them all.
     pub collect_program_status: bool,
     /// Program-status signals (OSC 7501 reports and the events that end
     /// records' lifetimes), in arrival order, for a host such as a
