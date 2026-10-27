@@ -363,23 +363,18 @@ impl StyleTable {
         Some(self.rebuild(|i| !is_free[i], |i| i))
     }
 
-    /// Map every entry's foreground through `fg` and background through `bg`
-    /// (a theme or default-colour change). Entries that become equal merge
-    /// into the lowest id; the returned remap, when some merged, must be
-    /// applied to every cell.
-    pub(crate) fn retheme(
-        &mut self,
-        fg: impl Fn(u32) -> u32,
-        bg: impl Fn(u32) -> u32,
-    ) -> Option<Remap> {
+    /// Map every entry's colours through `map` (a theme change). Entries that
+    /// become equal merge into the lowest id; the returned remap, when some
+    /// merged, must be applied to every cell.
+    pub(crate) fn retheme(&mut self, map: impl Fn(u32) -> u32) -> Option<Remap> {
         self.recent.clear();
         self.last.1 = Recent::EMPTY;
         self.last_pen.1 = Recent::EMPTY;
         let is_free = self.is_free.clone();
         for (i, style) in self.entries.iter_mut().enumerate() {
             if !is_free[i] {
-                style.fg = fg(style.fg);
-                style.bg = bg(style.bg);
+                style.fg = map(style.fg);
+                style.bg = map(style.bg);
             }
         }
         let mut first: HashMap<CellStyle, usize> = HashMap::new();
@@ -526,14 +521,13 @@ mod tests {
         let mut t = StyleTable::default();
         let [a, b, c] = [1, 2, 3].map(|n| t.intern(fg(n)));
         // 2 becomes 1: b merges into a; 3 is untouched.
-        let map = |v| if v == 2 { 1 } else { v };
-        let remap = t.retheme(map, map).expect("a merge");
+        let remap = t.retheme(|v| if v == 2 { 1 } else { v }).expect("a merge");
         assert_eq!(remap.get(b), remap.get(a));
         assert_eq!(t.get(remap.get(c)), fg(3));
         assert_eq!(t.len(), 3);
         assert_eq!(t.intern(fg(1)), remap.get(a), "one id for the merged style");
         // A retheme that merges nothing keeps every id.
-        assert!(t.retheme(|v| v + 10, |v| v + 10).is_none());
+        assert!(t.retheme(|v| v + 10).is_none());
         let moved = CellStyle {
             bg: fg(3).bg + 10,
             ..fg(13)

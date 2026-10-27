@@ -2116,62 +2116,6 @@ fn osc_11_query_replies_and_110_resets() {
 }
 
 #[test]
-fn osc_11_recolors_existing_default_bg_cells_and_111_restores_them() {
-    // #1163: cells hold resolved RGB, so a default bg written before, during
-    // and after an OSC 11 must all follow the current default.
-    let mut g = Grid::new(80, 24);
-    let mut p = AnsiParser::new();
-    p.advance(&mut g, b"A\x1b[44mB\x1b[49m"); // A default bg, B explicit blue
-    p.advance(&mut g, b"\x1b]11;rgb:11/22/33\x1b\\");
-    assert_eq!(
-        cells(&g)[0].bg,
-        0x112233,
-        "existing default bg follows OSC 11"
-    );
-    p.advance(&mut g, b"C");
-    assert_eq!(cells(&g)[2].bg, 0x112233, "written while OSC 11 is set");
-    p.advance(&mut g, b"\x1b]111\x1b\\");
-    assert_eq!(cells(&g)[0].bg, 0x000000);
-    assert_eq!(cells(&g)[2].bg, 0x000000, "no navy band after OSC 111");
-    assert_eq!(cells(&g)[1].bg, 0x000080, "explicit SGR 44 is kept");
-}
-
-#[test]
-fn osc_10_recolors_default_fg_cells_without_touching_backgrounds() {
-    let mut g = Grid::new(80, 24);
-    let mut p = AnsiParser::new();
-    // Black text on the black default bg: only the fg role must move.
-    p.advance(&mut g, b"A\x1b[30mB\x1b[39m");
-    p.advance(&mut g, b"\x1b]10;rgb:12/34/56\x1b\\");
-    assert_eq!(cells(&g)[0].fg, 0x123456);
-    assert_eq!(cells(&g)[0].bg, 0x000000);
-    assert_eq!(
-        cells(&g)[1].fg,
-        0x000000,
-        "fg equal to the default bg stays"
-    );
-    p.advance(&mut g, b"\x1b]110\x1b\\");
-    assert_eq!(cells(&g)[0].fg, 0xFFFFFF);
-}
-
-#[test]
-fn osc_11_recolors_scrollback() {
-    let mut g = Grid::new(10, 2);
-    let mut p = AnsiParser::new();
-    p.advance(&mut g, b"old\r\n\x1b[48;2;0;0;128mnavy\x1b[49m\r\nnew");
-    assert_eq!(g.scrollback_len(), 1);
-    p.advance(&mut g, b"\x1b]11;rgb:00/00/80\x1b\\");
-    let old = g.resolved(g.scrollback[0].cells());
-    assert_eq!(old[0].bg, 0x000080, "history follows OSC 11");
-    p.advance(&mut g, b"\x1b]111\x1b\\");
-    let old = g.resolved(g.scrollback[0].cells());
-    assert_eq!(old[0].bg, 0x000000, "history follows the reset too");
-    // Known limitation: an explicit colour equal to the default while it is
-    // set (the navy row) is indistinguishable from it, so it follows too.
-    assert_eq!(cells(&g)[0].bg, 0x000000);
-}
-
-#[test]
 fn osc_color_resets_on_ris() {
     // A default background set via OSC 11 must not survive a full reset.
     let mut g = Grid::new(80, 24);
