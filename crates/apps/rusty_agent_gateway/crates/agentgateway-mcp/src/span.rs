@@ -60,7 +60,11 @@ pub fn request(method: &'static str, context: &CallContext) -> Span {
             .and_then(rusty_mcp_server::json::Value::as_str)
     };
     match text("traceparent").and_then(|parent| {
-        rusty_mcp::trace::TraceContext::from_parts(parent, text("tracestate"), text("baggage"))
+        rusty_mcp_middleware::trace::TraceContext::from_parts(
+            parent,
+            text("tracestate"),
+            text("baggage"),
+        )
     }) {
         Some(trace) => trace.span(method),
         None => rusty_log::info_span!("mcp.request", otel.name = method),
@@ -78,7 +82,7 @@ pub fn annotate(span: &Span, annotations: &Annotations) {
         return;
     }
 
-    use rusty_mcp::otel::AttributeValue;
+    use rusty_mcp_middleware::otel::AttributeValue;
 
     for (key, value) in annotations.iter() {
         let value = match value {
@@ -96,7 +100,7 @@ pub fn annotate(span: &Span, annotations: &Annotations) {
             serde_json::Value::Null => AttributeValue::String(String::new()),
             nested => AttributeValue::String(nested.to_string()),
         };
-        rusty_mcp::otel::set_attribute(span, &format!("{PREFIX}{key}"), value);
+        rusty_mcp_middleware::otel::set_attribute(span, &format!("{PREFIX}{key}"), value);
     }
 }
 

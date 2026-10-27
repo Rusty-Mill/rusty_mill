@@ -11,10 +11,10 @@
 //! OTLP/JSON and POSTed with `rusty_request` from a thread of their own.
 //!
 //! ```no_run
-//! use rusty_mcp::otel::OtelConfig;
+//! use rusty_mcp_middleware::otel::OtelConfig;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let guard = rusty_mcp::otel::init(
+//! let guard = rusty_mcp_middleware::otel::init(
 //!     OtelConfig::new("my-mcp-server").with_endpoint("http://localhost:4318"),
 //!     "info",
 //! )?;
@@ -443,7 +443,7 @@ impl OtelGuard {
     ///
     /// ```no_run
     /// # use std::sync::Arc;
-    /// # use rusty_mcp::otel::{OtelConfig, self};
+    /// # use rusty_mcp_middleware::otel::{OtelConfig, self};
     /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let guard = Arc::new(otel::init(OtelConfig::new("my-server"), "info")?);
     /// let hook = guard.shutdown_hook();
@@ -491,9 +491,9 @@ impl Drop for OtelGuard {
 ///
 /// ```no_run
 /// use rusty_log::tracing_subscriber::prelude::*;
-/// # use rusty_mcp::otel::OtelConfig;
+/// # use rusty_mcp_middleware::otel::OtelConfig;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let (guard, layer) = rusty_mcp::otel::pipeline(OtelConfig::new("my-server"))?;
+/// let (guard, layer) = rusty_mcp_middleware::otel::pipeline(OtelConfig::new("my-server"))?;
 ///
 /// rusty_log::tracing_subscriber::registry()
 ///     .with(rusty_log::tracing_subscriber::fmt::layer().with_writer(std::io::stderr))

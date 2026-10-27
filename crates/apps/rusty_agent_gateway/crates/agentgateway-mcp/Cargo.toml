@@ -41,7 +41,7 @@ http = { workspace = true }
 rusty_prost = { workspace = true }
 rusty_tonic = { workspace = true, features = ["rusty-tokio"] }
 # Spans for MCP requests, and the attributes a guardrail writes on them.
-rusty-mcp = { workspace = true, default-features = false, features = ["otel"] }
+rusty_mcp_middleware = { workspace = true, default-features = false, features = ["otel"] }
 thiserror = "2"
 rusty_log = { workspace = true }
 

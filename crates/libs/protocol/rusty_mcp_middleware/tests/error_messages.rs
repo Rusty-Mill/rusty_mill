@@ -4,9 +4,9 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use rusty_mcp::auth::{AuthConfig, StaticTokenValidator, TokenError};
+use rusty_mcp_middleware::auth::{AuthConfig, StaticTokenValidator, TokenError};
 
-fn config_error(resource: &str) -> rusty_mcp::auth::AuthConfigError {
+fn config_error(resource: &str) -> rusty_mcp_middleware::auth::AuthConfigError {
     match AuthConfig::new(resource, Arc::new(StaticTokenValidator::new())) {
         Err(err) => err,
         Ok(_) => panic!("`{resource}` should be rejected"),
@@ -60,7 +60,7 @@ fn config_errors_name_the_uri_and_chain_the_parse_failure() {
 #[cfg(feature = "jwt")]
 #[test]
 fn the_jwt_builder_error_reads_as_written() {
-    use rusty_mcp::auth::{JwtValidator, JwtValidatorError};
+    use rusty_mcp_middleware::auth::{JwtValidator, JwtValidatorError};
 
     let Err(err) = JwtValidator::builder("https://auth.example.com", "https://auth/jwks")
         .with_algorithms([])

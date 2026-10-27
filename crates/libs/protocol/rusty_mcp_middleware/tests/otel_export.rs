@@ -14,7 +14,7 @@ use std::{sync::Arc, time::Duration};
 use otel_support::Collector;
 use rusty_json::Value;
 use rusty_log::tracing_subscriber::prelude::*;
-use rusty_mcp::{
+use rusty_mcp_middleware::{
     otel::{OtelConfig, OtelGuard},
     trace::TraceContext,
 };
@@ -32,7 +32,7 @@ const UNSAMPLED: &str = "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-00
 /// would leave all but one exporting nothing. `pipeline` exists precisely for
 /// callers that bring their own subscriber, and that is what is exercised here.
 fn with_pipeline(config: OtelConfig, body: impl FnOnce()) -> OtelGuard {
-    let (guard, layer) = rusty_mcp::otel::pipeline(config).expect("pipeline starts");
+    let (guard, layer) = rusty_mcp_middleware::otel::pipeline(config).expect("pipeline starts");
     rusty_log::subscriber::with_default(
         rusty_log::tracing_subscriber::registry().with(layer),
         body,
@@ -207,7 +207,8 @@ fn root_spans_are_sampled_by_the_configured_ratio() {
 fn a_full_batch_is_sent_without_waiting_for_a_flush() {
     let collector = Collector::start(200);
 
-    let (guard, layer) = rusty_mcp::otel::pipeline(config_for(&collector)).expect("pipeline");
+    let (guard, layer) =
+        rusty_mcp_middleware::otel::pipeline(config_for(&collector)).expect("pipeline");
     rusty_log::subscriber::with_default(
         rusty_log::tracing_subscriber::registry().with(layer),
         || {
@@ -232,8 +233,8 @@ fn spans_set_after_creation_reach_the_collector() {
 
     let guard = with_pipeline(config_for(&collector), || {
         let span = rusty_log::info_span!("mcp.request");
-        rusty_mcp::otel::set_attribute(&span, "mcpGuardrails.rule", "rule-9b2e");
-        rusty_mcp::otel::set_attribute(&span, "mcpGuardrails.score", 0.75);
+        rusty_mcp_middleware::otel::set_attribute(&span, "mcpGuardrails.rule", "rule-9b2e");
+        rusty_mcp_middleware::otel::set_attribute(&span, "mcpGuardrails.score", 0.75);
     });
 
     guard.shutdown();

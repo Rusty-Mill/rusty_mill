@@ -17,7 +17,7 @@ use std::{
 
 use otel_support::{Collector, dead_address};
 use rusty_log::tracing_subscriber::{fmt::MakeWriter, prelude::*};
-use rusty_mcp::otel::{OtelConfig, OtelError, Signal, metrics::Outcome};
+use rusty_mcp_middleware::otel::{OtelConfig, OtelError, Signal, metrics::Outcome};
 
 /// Everything logged so far, as text.
 #[derive(Clone, Default)]
@@ -65,7 +65,7 @@ fn logs() -> &'static Captured {
 /// both of which fail, and return everything logged.
 fn send_that_fails(base: String, metrics_endpoint: String) -> String {
     let logs = logs();
-    let (guard, layer) = rusty_mcp::otel::pipeline(
+    let (guard, layer) = rusty_mcp_middleware::otel::pipeline(
         OtelConfig::new("test-server")
             .with_endpoint(base)
             .with_metrics_endpoint(metrics_endpoint)
@@ -149,7 +149,7 @@ fn an_endpoint_with_userinfo_is_refused_without_echoing_it() {
             (Signal::Traces, OtelConfig::new("s").with_endpoint(endpoint)),
         ];
         for (signal, config) in cases {
-            let Err(err) = rusty_mcp::otel::pipeline(config) else {
+            let Err(err) = rusty_mcp_middleware::otel::pipeline(config) else {
                 panic!("{endpoint} should be refused");
             };
             assert!(

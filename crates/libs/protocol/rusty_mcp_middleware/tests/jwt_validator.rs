@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::{Router, routing::get};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use rusty_json::{Value, json};
-use rusty_mcp::auth::{JwtAlgorithm, JwtValidator, TokenError, TokenValidator};
+use rusty_mcp_middleware::auth::{JwtAlgorithm, JwtValidator, TokenError, TokenValidator};
 use rusty_oauth::jwt::{encode_hs256, es256};
 
 const ISSUER: &str = "https://auth.example.com";

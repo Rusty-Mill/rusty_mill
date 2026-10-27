@@ -153,7 +153,7 @@ fn gateway_runtime() -> &'static rusty_tokio::Runtime {
 )]
 pub async fn build(
     config: &agentgateway_config::Config,
-    instruments: Option<std::sync::Arc<rusty_mcp::otel::metrics::Instruments>>,
+    instruments: Option<std::sync::Arc<rusty_mcp_middleware::otel::metrics::Instruments>>,
 ) -> anyhow::Result<agentgateway::Gateway> {
     let config = config.clone();
     gateway_runtime()
