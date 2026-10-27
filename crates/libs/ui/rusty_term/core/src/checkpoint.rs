@@ -1046,7 +1046,8 @@ mod tests {
     }
 
     /// Lines over styles 0..n, two cells each in style `i` then `i + 1`,
-    /// with every fourth line's second run wide or protected.
+    /// the second run cycling through plain, wide, protected, and wide and
+    /// protected, so every [`LAYOUTS`] combination is cached.
     fn styled_lines(table: &mut StyleTable, ids: impl Iterator<Item = u32>) -> Vec<Line> {
         ids.map(|i| {
             let a = Cell {
@@ -1056,7 +1057,12 @@ mod tests {
             let b = Cell {
                 ch: 'x',
                 fg: i + 1,
-                flags: [0, WIDE_TRAILER, ATTR_PROTECTED, 0][i as usize % 4],
+                flags: [
+                    0,
+                    WIDE_TRAILER,
+                    ATTR_PROTECTED,
+                    WIDE_TRAILER | ATTR_PROTECTED,
+                ][i as usize % LAYOUTS],
                 ..Cell::blank()
             };
             line_in(table, &[a, a, b, a], false, LineAttr::Single)
@@ -1079,6 +1085,11 @@ mod tests {
     fn a_capped_style_cache_writes_the_same_bytes() {
         let mut table = StyleTable::default();
         let lines = styled_lines(&mut table, (0..300).chain(0..300));
+        let layouts: std::collections::BTreeSet<usize> = lines
+            .iter()
+            .flat_map(|l| l.cells().iter().map(|c| c.layout_index()))
+            .collect();
+        assert_eq!(layouts, (0..LAYOUTS).collect());
         let full = cached_write(&table, &lines, IDS_MAX);
         for cap in [0, 1, 7, 64, 513] {
             let capped = cached_write(&table, &lines, cap);
