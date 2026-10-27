@@ -23,42 +23,31 @@ struct Upstream {
 
 /// Start an echo upstream labelled `name`.
 async fn upstream(name: &'static str) -> Upstream {
-    use axum::{Router, extract::Request, routing::any};
+    use rusty_axum::{Request, Router};
 
     let port = free_port().await;
     let hits = Arc::new(AtomicUsize::new(0));
 
     let counter = Arc::clone(&hits);
-    let app = Router::new().fallback(any(move |request: Request| {
+    let app = Router::new().fallback(move |request: Request| {
         let counter = Arc::clone(&counter);
         async move {
             counter.fetch_add(1, Ordering::Relaxed);
-            let headers: serde_json::Map<String, Value> = request
-                .headers()
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.as_str().to_string(),
-                        Value::String(v.to_str().unwrap_or_default().to_string()),
-                    )
-                })
+            let headers: serde_json::Map<String, Value> = common::header_pairs(request.headers())
+                .into_iter()
+                .map(|(k, v)| (k, Value::String(v)))
                 .collect();
-            axum::Json(json!({
+            rusty_axum::Json(json!({
                 "upstream": name,
                 "method": request.method().as_str(),
-                "path": request.uri().path(),
-                "query": request.uri().query().unwrap_or_default(),
+                "path": request.path(),
+                "query": request.query().unwrap_or_default(),
                 "headers": headers,
             }))
         }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("upstream should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
     });
+
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     Upstream { port, hits }
 }
@@ -390,16 +379,11 @@ async fn a_slow_upstream_hits_the_backend_timeout() {
     // Unlike MCP, a proxied response is not produced until the upstream
     // answers, so this budget genuinely bounds the wait.
     let port = free_port().await;
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("should bind");
-    tokio::spawn(async move {
-        let app = axum::Router::new().fallback(axum::routing::any(|| async {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            "too late"
-        }));
-        let _ = axum::serve(listener, app).await;
+    let app = rusty_axum::Router::new().fallback(|| async {
+        rusty_tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        "too late"
     });
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     let (base, shutdown) = start(&format!(
         r#"          - name: proxy

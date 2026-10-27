@@ -27,7 +27,7 @@ struct Agent {
 }
 
 async fn agent() -> Agent {
-    use axum::{Router, extract::Request, routing::any};
+    use rusty_axum::{Request, Response, Router, StatusCode};
 
     let port = free_port().await;
     let hits = Arc::new(AtomicUsize::new(0));
@@ -35,32 +35,20 @@ async fn agent() -> Agent {
     let counter = Arc::clone(&hits);
     let recorder = Arc::clone(&last);
 
-    let app = Router::new().fallback(any(move |request: Request| {
+    let app = Router::new().fallback(move |request: Request| {
         let counter = Arc::clone(&counter);
         let recorder = Arc::clone(&recorder);
         async move {
             counter.fetch_add(1, Ordering::Relaxed);
             let method = request.method().to_string();
-            let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
-                .await
-                .unwrap_or_default();
-            let body = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+            let body = serde_json::from_slice::<Value>(request.body()).unwrap_or(Value::Null);
             if let Ok(mut seen) = recorder.lock() {
                 *seen = (method, body);
             }
-            axum::response::Response::builder()
-                .header("content-type", "text/event-stream")
-                .body(axum::body::Body::from(STREAM))
-                .expect("response should build")
+            Response::new(StatusCode::OK, STREAM).with_header("content-type", "text/event-stream")
         }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("agent should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
     });
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     Agent { port, hits, last }
 }
