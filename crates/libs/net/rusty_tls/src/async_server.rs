@@ -72,6 +72,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncTlsServerStream<S> {
         self.conn.alpn_protocol()
     }
 
+    /// The DER-encoded end-entity certificate the client presented during
+    /// the handshake, if any. See
+    /// [`TlsServerStream::peer_certificate_der`](crate::TlsServerStream::peer_certificate_der)'s
+    /// docs for when this is (and isn't) populated.
+    pub fn peer_certificate_der(&self) -> Option<&[u8]> {
+        self.conn
+            .peer_certificates()
+            .and_then(|certs| certs.first())
+            .map(|cert| cert.as_ref())
+    }
+
     /// Drive the handshake until it completes, then write out its last
     /// flight. Stops as soon as `is_handshaking()` goes false: reading on
     /// past that point (`wants_read()` stays true on an idle connection)
