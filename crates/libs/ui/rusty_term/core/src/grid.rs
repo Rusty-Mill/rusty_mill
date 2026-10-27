@@ -3410,12 +3410,25 @@ impl Grid {
         self.erase_bg = bg;
     }
 
-    /// Update the default foreground/background/cursor colors (OSC 10/11/12).
-    /// Mirrors the parser's palette so subsequent erases fill with the new
-    /// background and the windowed cursor paints in the new cursor color.
+    /// Update the default foreground/background/cursor colors (OSC 10/11/12
+    /// and their resets). Mirrors the parser's palette so subsequent erases
+    /// fill with the new background and the windowed cursor paints in the new
+    /// cursor color.
+    ///
+    /// Cells store resolved RGB, so cells already drawn in the old default
+    /// fg/bg are recolored to the new one, as xterm repaints them: a theme
+    /// switch and its reset (OSC 111) both reach existing output. A color the
+    /// child set explicitly that equals the old default follows too.
     pub(crate) fn set_default_colors(&mut self, fg: u32, bg: u32, cursor: u32) {
+        let (old_fg, old_bg) = (self.default_fg, self.default_bg);
         self.default_fg = fg;
         self.default_bg = bg;
+        if (old_fg, old_bg) != (fg, bg) {
+            self.recolor(
+                |c| if c == old_fg { fg } else { c },
+                |c| if c == old_bg { bg } else { c },
+            );
+        }
         if self.cursor_color != cursor {
             self.cursor_color = cursor;
             // Repaint the cursor cell's row so a pure OSC 12 change shows.
@@ -3506,19 +3519,26 @@ impl Grid {
     /// new defaults. Truecolor/256-cube colors pass through untouched (we
     /// can't know they meant "the theme's red"). Full repaint requested.
     pub fn retheme(&mut self, old: &super::Theme, new: &super::Theme) {
-        let map = |c: &mut u32| *c = super::color::remap(*c, old, new);
-        // Cells hold style ids, so only the table changes; styles that become
-        // equal merge, and only then are the cells rewritten.
+        let map = |c: u32| super::color::remap(c, old, new);
+        self.recolor(map, map);
+        self.default_fg = map(self.default_fg);
+        self.default_bg = map(self.default_bg);
+        if let Some(bg) = &mut self.erase_bg {
+            *bg = map(*bg);
+        }
+        self.cursor_color = map(self.cursor_color);
+    }
+
+    /// Map every cell's foreground through `fg` and background through `bg`,
+    /// across the live screen, scrollback and the stashed primary screen, and
+    /// request a full repaint. Cells hold style ids, so only the table
+    /// changes; styles that become equal merge, and only then are the cells
+    /// rewritten.
+    fn recolor(&mut self, fg: impl Fn(u32) -> u32, bg: impl Fn(u32) -> u32) {
         self.blank_row.clear();
-        if let Some(remap) = self.styles.retheme(|c| super::color::remap(c, old, new)) {
+        if let Some(remap) = self.styles.retheme(fg, bg) {
             self.apply_remap(&remap);
         }
-        map(&mut self.default_fg);
-        map(&mut self.default_bg);
-        if let Some(bg) = &mut self.erase_bg {
-            map(bg);
-        }
-        self.cursor_color = super::color::remap(self.cursor_color, old, new);
         self.reset_damage();
         self.touch_hist();
         self.epoch += 1;
