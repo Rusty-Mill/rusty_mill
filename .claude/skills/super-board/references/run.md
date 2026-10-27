@@ -489,7 +489,16 @@ on the base branch**.
           verifies their permission and the head before resuming Review. For exits
           7 and 8, copy the gate's `approval-request:` line into the canonical issue
           block; link it from the PR without duplicating the request.
-   → do NOT leave a card in Review on exit 2, 3, 5, 7 or 8. A card left in Review is
+    13 → handoff-only board (`merge_policy.handoff_to`): the robot never queues or
+          merges, and no approval changes that. Stdout carries
+          `handoff: @<login> reviews and merges PR #<P>`. Mark the PR ready, request
+          review from `<login>`, post the report as `human-gated`, and move the card
+          Review → **Blocked** with the 🙋 template: `Why blocked` = handed off to
+          `@<login>`; `To unblock` = "[ ] @<login> reviews and merges PR #<P>". Do not
+          offer `done`: the gate posts no approval request, so `resume` never
+          picks the card up, and a re-run exits 13 again. Their merge moves the card
+          to Done the usual way.
+   → do NOT leave a card in Review on exit 2, 3, 5, 7, 8 or 13. A card left in Review is
      re-picked next tick and re-reviewed forever, which is the re-dispatch waste
      tracked in issue #10. Exits 4 and 6 are the exceptions: 4 simply queued, and
      6 needs a fresh review of a commit nobody has reviewed yet.

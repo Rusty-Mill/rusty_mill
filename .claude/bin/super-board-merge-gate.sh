@@ -90,6 +90,10 @@
 #   10 CI for the exact head is still running — leave the card in Review, retry later
 #   11 CI for the exact head failed — back to Build
 #   12 CI evidence missing, unreadable, or for another head — fail closed
+#   13 handoff-only board (merge_policy.handoff_to). Stdout carries
+#      `handoff: @<login> reviews and merges PR #<N>`. Nothing merged and no
+#      approval read or requested: a `done` never lets the robot merge here. The
+#      card → Blocked, handed to that person, who merges through the queue.
 #   79 required GitHub evidence unavailable: local run halt; preserve card and
 #      approval state, stop dispatch, and explicitly restart after diagnosis.
 #   8  🙋 needs you — the PR has migrations for a database the robot may not
@@ -103,7 +107,7 @@
 # MERGE POLICY AND MIGRATIONS (config, all optional — defaults shown in
 # references/config-schema.json)
 #
-#   merge_policy: { default: "auto"|"human", auto_max_lines: 400, size_exclude,
+#   merge_policy: { default: "auto"|"human", handoff_to, auto_max_lines: 400, size_exclude,
 #                   always_human: { <category>: {labels, paths, keywords} } }
 #   migrations:   { globs, allowed_envs, target_env, commands: {<env>: cmd},
 #                   human_steps }
@@ -227,6 +231,17 @@ if [ -n "$EXPECT_HEAD" ]; then
   esac
 else
   say "WARNING: no --expect-head; pinning the head read now (${HEAD_SHA}), not the reviewed one"
+fi
+
+# ---- handoff-only boards ---------------------------------------------------
+# merge_policy.handoff_to names the person who reviews and merges every PR. The
+# robot never queues or merges on such a board, whatever approval exists: this
+# exits before approval is read or requested, so a `done` cannot reach the merge.
+HANDOFF=$(echo "$CONFIG_JSON" | jq -r '.merge_policy.handoff_to // empty')
+if [ -n "$HANDOFF" ]; then
+  echo "handoff: @${HANDOFF} reviews and merges PR #${PR}"
+  say "handoff-only board: the robot does not queue or merge; hand off to @${HANDOFF}"
+  exit 13
 fi
 
 # ---- target branch and merge method (fail closed, before any work) ---------
