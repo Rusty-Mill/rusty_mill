@@ -344,7 +344,8 @@ impl State {
             method,
         )?;
         let text = match found.name {
-            "terminal.format" => terminal::format(&rt.grid, capture(&named), REPLY_MAX),
+            "terminal.format" => terminal::format(&rt.grid, capture(&named), REPLY_MAX)
+                .ok_or_else(|| format!("{method} reply exceeds {REPLY_MAX} bytes"))?,
             "terminal.send-keys" => {
                 self.mux
                     .authorize_input(client, block)

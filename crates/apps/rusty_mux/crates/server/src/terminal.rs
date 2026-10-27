@@ -27,14 +27,17 @@ pub(crate) struct Capture {
 /// (per wrapped run with `unwrap`) without trailing blanks, joined by `\n`.
 /// A blank left where a wide glyph did not fit is kept: the grid stores it
 /// as it does a typed space, and dropping a typed one would lose text.
-/// Stops once the text passes `max` bytes; the caller refuses a reply that
-/// large.
-pub(crate) fn format(grid: &Grid, capture: Capture, max: usize) -> String {
+/// `trim` leaves out blank lines at either end. `None` if the text,
+/// trimmed, would pass `max` bytes: a capture is whole or refused, never
+/// cut short.
+pub(crate) fn format(grid: &Grid, capture: Capture, max: usize) -> Option<String> {
     let scrollback = grid.scrollback_len();
     let history = usize::try_from(capture.history).unwrap_or(usize::MAX);
     let end = scrollback + grid.rows;
-    let mut lines = Vec::new();
-    let mut size = 0;
+    let mut text = String::new();
+    let mut lines = 0usize;
+    // Blank lines `trim` holds back until a line with text follows.
+    let mut held = 0usize;
     let mut run: Vec<Cell> = Vec::new();
     for abs in scrollback.saturating_sub(history)..end {
         let Some((mut cells, wrapped)) = grid.line_cells(abs) else {
@@ -48,24 +51,22 @@ pub(crate) fn format(grid: &Grid, capture: Capture, max: usize) -> String {
         run.append(&mut cells);
         let line = line(&run, &grid.clusters, capture.vt);
         run.clear();
-        size += line.len() + 1;
-        lines.push(line);
-        if size > max {
-            break;
+        if capture.trim && line.is_empty() {
+            // Leading blanks are dropped, later ones held.
+            held += usize::from(lines > 0);
+            continue;
+        }
+        for _ in 0..held + usize::from(lines > 0) {
+            text.push('\n');
+        }
+        lines += held + 1;
+        held = 0;
+        text.push_str(&line);
+        if text.len() > max {
+            return None;
         }
     }
-    if capture.trim {
-        let first = lines
-            .iter()
-            .position(|l| !l.is_empty())
-            .unwrap_or(lines.len());
-        let last = lines
-            .iter()
-            .rposition(|l| !l.is_empty())
-            .map_or(first, |i| i + 1);
-        return lines[first..last].join("\n");
-    }
-    lines.join("\n")
+    Some(text)
 }
 
 /// `cells` as text without trailing blanks; with `vt`, each change of
@@ -413,16 +414,57 @@ mod tests {
     #[test]
     fn format_stops_past_the_limit() {
         let grid = screen(4, 3, b"abcd\r\nefgh\r\nijkl");
-        assert_eq!(format(&grid, capture(0), usize::MAX), "abcd\nefgh\nijkl");
-        assert_eq!(format(&grid, capture(0), 5), "abcd\nefgh");
+        assert_eq!(
+            format(&grid, capture(0), usize::MAX).expect("within the limit"),
+            "abcd\nefgh\nijkl"
+        );
+        assert_eq!(
+            format(&grid, capture(0), 14),
+            Some("abcd\nefgh\nijkl".into())
+        );
+        assert_eq!(format(&grid, capture(0), 13), None, "whole or nothing");
+    }
+
+    #[test]
+    fn trim_counts_only_what_it_keeps() {
+        let grid = screen(4, 6, b"\r\n\r\n\r\nabc\r\ndef\r\nxyz");
+        let trim = Capture {
+            trim: true,
+            ..capture(0)
+        };
+        assert_eq!(format(&grid, trim, 11), Some("abc\ndef\nxyz".into()));
+        assert_eq!(format(&grid, trim, 10), None, "never a prefix");
+        assert_eq!(
+            format(&grid, capture(0), 11),
+            None,
+            "untrimmed it is larger"
+        );
+        let all = Capture {
+            unwrap: true,
+            vt: true,
+            ..trim
+        };
+        let whole = format(&grid, all, usize::MAX).expect("within the limit");
+        assert_eq!(whole, "\x1b[0mabc\n\x1b[0mdef\n\x1b[0mxyz");
+        assert_eq!(format(&grid, all, whole.len()), Some(whole.clone()));
+        assert_eq!(format(&grid, all, whole.len() - 1), None);
     }
 
     #[test]
     fn format_includes_the_history_asked_for() {
         let grid = screen(4, 2, b"a\r\nb\r\nc\r\nd");
-        assert_eq!(format(&grid, capture(0), usize::MAX), "c\nd");
-        assert_eq!(format(&grid, capture(1), usize::MAX), "b\nc\nd");
-        assert_eq!(format(&grid, capture(u32::MAX), usize::MAX), "a\nb\nc\nd");
+        assert_eq!(
+            format(&grid, capture(0), usize::MAX).expect("within the limit"),
+            "c\nd"
+        );
+        assert_eq!(
+            format(&grid, capture(1), usize::MAX).expect("within the limit"),
+            "b\nc\nd"
+        );
+        assert_eq!(
+            format(&grid, capture(u32::MAX), usize::MAX).expect("within the limit"),
+            "a\nb\nc\nd"
+        );
     }
 
     #[test]
@@ -432,9 +474,18 @@ mod tests {
             trim: true,
             ..capture(0)
         };
-        assert_eq!(format(&grid, capture(0), usize::MAX), "\nab\n\ncd\n");
-        assert_eq!(format(&grid, trim, usize::MAX), "ab\n\ncd");
-        assert_eq!(format(&screen(4, 2, b""), trim, usize::MAX), "");
+        assert_eq!(
+            format(&grid, capture(0), usize::MAX).expect("within the limit"),
+            "\nab\n\ncd\n"
+        );
+        assert_eq!(
+            format(&grid, trim, usize::MAX).expect("within the limit"),
+            "ab\n\ncd"
+        );
+        assert_eq!(
+            format(&screen(4, 2, b""), trim, usize::MAX).expect("within the limit"),
+            ""
+        );
     }
 
     #[test]
@@ -445,10 +496,19 @@ mod tests {
             unwrap: true,
             ..capture(0)
         };
-        assert_eq!(format(&grid, capture(0), usize::MAX), "ab c\nd\nx");
-        assert_eq!(format(&grid, unwrap, usize::MAX), "ab cd\nx");
+        assert_eq!(
+            format(&grid, capture(0), usize::MAX).expect("within the limit"),
+            "ab c\nd\nx"
+        );
+        assert_eq!(
+            format(&grid, unwrap, usize::MAX).expect("within the limit"),
+            "ab cd\nx"
+        );
         let spaced = screen(4, 2, b"ab  cd");
-        assert_eq!(format(&spaced, unwrap, usize::MAX), "ab  cd");
+        assert_eq!(
+            format(&spaced, unwrap, usize::MAX).expect("within the limit"),
+            "ab  cd"
+        );
     }
 
     #[test]
@@ -460,15 +520,24 @@ mod tests {
         let vt = Capture { vt: true, ..unwrap };
         // A typed space fills column 3, then the wide glyph wraps.
         let typed = screen(4, 2, "abc \u{4e2d}".as_bytes());
-        assert_eq!(format(&typed, unwrap, usize::MAX), "abc \u{4e2d}");
+        assert_eq!(
+            format(&typed, unwrap, usize::MAX).expect("within the limit"),
+            "abc \u{4e2d}"
+        );
         // The glyph does not fit in column 3 and wraps; the blank it left
         // is stored as a typed space would be, so it is kept too.
         let skipped = screen(4, 2, "abc\u{4e2d}".as_bytes());
-        assert_eq!(format(&skipped, unwrap, usize::MAX), "abc \u{4e2d}");
+        assert_eq!(
+            format(&skipped, unwrap, usize::MAX).expect("within the limit"),
+            "abc \u{4e2d}"
+        );
         // A styled blank is kept, with its style.
         let styled = screen(4, 2, "abc\x1b[41m \x1b[0m\u{4e2d}".as_bytes());
-        assert_eq!(format(&styled, unwrap, usize::MAX), "abc \u{4e2d}");
-        let text = format(&styled, vt, usize::MAX);
+        assert_eq!(
+            format(&styled, unwrap, usize::MAX).expect("within the limit"),
+            "abc \u{4e2d}"
+        );
+        let text = format(&styled, vt, usize::MAX).expect("within the limit");
         assert!(text.starts_with("\x1b[0mabc\x1b[0;48;2;"), "{text:?}");
         assert!(text.ends_with(" \x1b[0m\u{4e2d}"), "{text:?}");
     }
@@ -484,13 +553,13 @@ mod tests {
             vt: true,
             ..capture(0)
         };
-        let text = format(&grid, vt, usize::MAX);
+        let text = format(&grid, vt, usize::MAX).expect("within the limit");
         let mut lines = text.lines();
         let first = lines.next().expect("first line");
         assert!(first.starts_with("\x1b[0;1;38;2;"), "{first:?}");
         assert!(first.ends_with("mab\x1b[0m c"), "{first:?}");
         assert_eq!(lines.next(), Some("\x1b[0;4:3;48;2;1;2;3mx\x1b[0m"));
-        let plain = format(&grid, capture(0), usize::MAX);
+        let plain = format(&grid, capture(0), usize::MAX).expect("within the limit");
         assert_eq!(plain, "ab c\nx");
     }
 
@@ -501,7 +570,7 @@ mod tests {
             vt: true,
             ..capture(0)
         };
-        let text = format(&source, vt, usize::MAX);
+        let text = format(&source, vt, usize::MAX).expect("within the limit");
         let lines: Vec<&str> = text.split('\n').collect();
         assert_eq!(lines[0], "\x1b[0mabc");
         assert!(lines[1].starts_with("\x1b[0mab\x1b[0;1;"), "{text:?}");
@@ -530,7 +599,7 @@ mod tests {
             vt: true,
             ..capture(0)
         };
-        let text = format(&grid, vt, usize::MAX);
+        let text = format(&grid, vt, usize::MAX).expect("within the limit");
         assert!(
             text.starts_with("\x1b[0ma") && text.ends_with(" \x1b[0m"),
             "{text:?}"
