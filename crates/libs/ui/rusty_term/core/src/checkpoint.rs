@@ -74,8 +74,11 @@ pub(crate) struct Writer<'a> {
     styles: HashMap<Cell, usize>,
     /// `1 + index` of each run style already defined, by grid style id and
     /// layout bits ([`layout_slot`]); 0 until first referenced. Spares
-    /// resolving and hashing a style for every run.
+    /// resolving and hashing a style for every run. A cache only: grown on
+    /// use, fallibly, to at most `ids_max` entries; a style it does not
+    /// hold falls back to `styles`, with the same bytes and charges.
     ids: Vec<u32>,
+    ids_max: usize,
 }
 impl<'a> Writer<'a> {
     pub(crate) fn new(budget: usize, table: Option<&'a StyleTable>) -> Self {
@@ -85,7 +88,8 @@ impl<'a> Writer<'a> {
             budget,
             table,
             styles: HashMap::new(),
-            ids: vec![0; table.map_or(0, |t| t.len() * LAYOUTS)],
+            ids: Vec::new(),
+            ids_max: IDS_MAX,
         }
     }
     /// LEB128 varint: 7 bits per byte, low group first, high bit = more.
@@ -134,12 +138,28 @@ impl<'a> Writer<'a> {
             return self.varint(u64::from(i));
         }
         let index = self.style(cell.resolve(&table.get(id)))?;
-        if let Some(s) = slot
-            && let Some(entry) = self.ids.get_mut(s)
-        {
-            *entry = u32::try_from(index + 1).unwrap_or(0);
+        if let Some(s) = slot {
+            self.cache(s, u32::try_from(index + 1).unwrap_or(0));
         }
         Ok(())
+    }
+    /// Remember `entry` at `slot` of [`Writer::ids`], growing it by doubling
+    /// up to `ids_max`. Past the cap, or if growing fails, the slot stays
+    /// uncached.
+    fn cache(&mut self, slot: usize, entry: u32) {
+        if slot >= self.ids_max {
+            return;
+        }
+        if slot >= self.ids.len() {
+            let len = (slot + 1).next_power_of_two().min(self.ids_max);
+            if self.ids.try_reserve_exact(len - self.ids.len()).is_err() {
+                return;
+            }
+            self.ids.resize(len, 0);
+        }
+        if let Some(e) = self.ids.get_mut(slot) {
+            *e = entry;
+        }
     }
     /// Reference a run style (a cell whose `ch` is ignored): `0` followed by
     /// its definition the first time, then `1 + index` of that definition.
@@ -488,6 +508,8 @@ impl Wire for Instant {
 }
 /// Layout-bit combinations of a [`PackedCell`] (wide trailer, protected).
 const LAYOUTS: usize = 4;
+/// Most [`Writer::ids`] entries: 4 MiB, the first 262,144 grid styles.
+const IDS_MAX: usize = 1 << 20;
 /// Where `cell`'s run style sits in [`Writer::ids`]: one entry per grid
 /// style and layout combination. `None` for layout bits it does not know.
 fn layout_slot(cell: PackedCell) -> Option<usize> {
@@ -920,6 +942,7 @@ mod tests {
         }
     }
 
+    use crate::cell::{ATTR_PROTECTED, WIDE_TRAILER};
     use crate::grid::{Line, LineAttr};
 
     /// A line of `cells`, its styles interned in `table`.
@@ -1020,6 +1043,67 @@ mod tests {
         assert_eq!(write(&table, &bad), Err(Error("cell bounds")));
         table.sweep(std::iter::empty());
         assert_eq!(write(&table, &line), Err(Error("cell bounds")));
+    }
+
+    /// Lines over styles 0..n, two cells each in style `i` then `i + 1`,
+    /// with every fourth line's second run wide or protected.
+    fn styled_lines(table: &mut StyleTable, ids: impl Iterator<Item = u32>) -> Vec<Line> {
+        ids.map(|i| {
+            let a = Cell {
+                fg: i,
+                ..Cell::blank()
+            };
+            let b = Cell {
+                ch: 'x',
+                fg: i + 1,
+                flags: [0, WIDE_TRAILER, ATTR_PROTECTED, 0][i as usize % 4],
+                ..Cell::blank()
+            };
+            line_in(table, &[a, a, b, a], false, LineAttr::Single)
+        })
+        .collect()
+    }
+
+    /// Bytes, the budget left, and the cache length after writing `lines`
+    /// with at most `ids_max` cache entries.
+    fn cached_write(table: &StyleTable, lines: &[Line], ids_max: usize) -> (Vec<u8>, usize, usize) {
+        let mut w = Writer::new(MAX_DECODED, Some(table));
+        w.ids_max = ids_max;
+        lines.iter().for_each(|l| l.write(&mut w).unwrap());
+        (w.bytes, w.budget, w.ids.len())
+    }
+
+    /// The style cache changes neither the bytes nor the charges, whether
+    /// it holds every style, some, or none.
+    #[test]
+    fn a_capped_style_cache_writes_the_same_bytes() {
+        let mut table = StyleTable::default();
+        let lines = styled_lines(&mut table, (0..300).chain(0..300));
+        let full = cached_write(&table, &lines, IDS_MAX);
+        for cap in [0, 1, 7, 64, 513] {
+            let capped = cached_write(&table, &lines, cap);
+            assert_eq!((&capped.0, capped.1), (&full.0, full.1), "cap {cap}");
+            assert!(capped.2 <= cap);
+        }
+        let (read, styles) = read_lines(&full.0, lines.len()).unwrap();
+        assert_eq!(resolved(&styles, &read), resolved(&table, &lines));
+    }
+
+    /// The cache grows with the styles written, not the table's high-water
+    /// length: freed slots past the last live style cost nothing.
+    #[test]
+    fn the_style_cache_ignores_dead_high_water_slots() {
+        let mut table = StyleTable::default();
+        let _dead = styled_lines(&mut table, 0..5000);
+        let live = styled_lines(&mut table, 0..2);
+        table.sweep(live.iter().map(|l| l.cells()));
+        assert!(table.len() > 5000);
+        let (bytes, budget, len) = cached_write(&table, &live, IDS_MAX);
+        assert!(len <= 4 * LAYOUTS, "cache of {len}");
+        assert_eq!((bytes, budget), {
+            let (b, r, _) = cached_write(&table, &live, 0);
+            (b, r)
+        });
     }
 
     #[test]
