@@ -183,6 +183,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
 
+  claude-hooks:
+    # The remind-me capture hook (.claude/hooks) is stdlib-only Python and its
+    # tests run against a local fake endpoint, so like library-tests this
+    # needs no cargo and runs for every event.
+    name: claude hook unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python3 -I -m unittest discover -s .claude/tests -p 'test_remind_me_*.py' -v
+
   library-tests:
     # library/ is stdlib-only Python (its builder and the offline UI it emits),
     # so this needs no cargo and runs for every event like plan-tests. The mod
@@ -2206,6 +2216,7 @@ jobs:
       - rl-live-test-safety
       - rb-tape-verifier
       - library-tests
+      - claude-hooks
       - workflow-lint
       - dependency-policy
       - cargo-deny

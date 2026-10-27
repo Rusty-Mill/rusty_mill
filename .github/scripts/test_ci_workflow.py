@@ -579,7 +579,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         jobs = re.split(r"^  ([a-z][a-z0-9-]+):\n", self.workflow.split("\njobs:\n", 1)[1], flags=re.M)
         groups = []
         for job, body in zip(jobs[1::2], jobs[2::2]):
-            if job in {"fmt", "plan-tests", "library-tests", "workflow-lint", "dependency-policy", "cargo-deny", "cargo-shear", "plan", "required-gate"}:
+            if job in {"fmt", "plan-tests", "library-tests", "claude-hooks", "workflow-lint", "dependency-policy", "cargo-deny", "cargo-shear", "plan", "required-gate"}:
                 self.assertNotIn("    concurrency:", body)
                 continue  # These start for every SHA, without a coalescing lock.
             with self.subTest(job=job):

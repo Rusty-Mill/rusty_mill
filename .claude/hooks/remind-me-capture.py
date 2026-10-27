@@ -7,15 +7,28 @@ sends the transcript to the remote remind-me server's MCP endpoint
 (`remind_me_capture_transcript`), which keeps one capture per session, replaced
 in place on every call.
 
-Runs only when all three are set, so a local CLI session stays with the plugin hook:
-  CLAUDE_CODE_REMOTE=true   set by Claude Code in a cloud session
-  REMIND_ME_URL             the server's MCP endpoint, e.g. https://memory.example/mcp
-  REMIND_ME_TOKEN           its bearer token (an environment secret, never committed)
+Runs only when all four are set, so a local CLI session stays with the plugin
+hook and holding remind-me credentials alone never turns capture on:
+  CLAUDE_CODE_REMOTE=true      set by Claude Code in a cloud session
+  REMIND_ME_CLOUD_CAPTURE=1    the explicit opt-in
+  REMIND_ME_URL                the server's MCP endpoint, https://…/mcp
+  REMIND_ME_TOKEN              its bearer token (an environment secret, never committed)
 
-Like the plugin's capture.sh: Stop is skipped when re-entrant and throttled to once a
-minute; PreCompact always runs. SessionEnd is not used, because a reclaimed container
-may never fire it. Every failure is reported on stderr and the hook exits 0.
+What leaves the container is scrubbed first: thinking blocks are dropped and
+every string is passed through the same secret shapes the server redacts
+(ADR-0026), plus bearer values and the token itself. The server redacts again
+at write. The endpoint must be https (http only for loopback), redirects are
+never followed, and responses are read up to a cap.
+
+Stop is skipped when re-entrant and throttled to once a minute after a
+successful capture; PreCompact always runs. Two overlapping runs may both
+send; the server replaces the capture in place, so the later one wins.
+SessionEnd is not used, because a reclaimed container may never fire it. The
+whole run shares one deadline inside the hook's 30 s timeout. Failures are
+reported on stderr as a fixed category, never server text or header values,
+and the hook exits 0.
 """
+import http.client
 import json
 import os
 import pathlib
@@ -24,55 +37,164 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
 # remind_me_core::transcript::MAX_TRANSCRIPT_BYTES, counted once JSON-escaped.
 MAX_TRANSCRIPT_BYTES = 3 * 1024 * 1024
+MAX_RESPONSE_BYTES = 1024 * 1024
 THROTTLE_SECONDS = 60
-TIMEOUT_SECONDS = 20
+BUDGET_SECONDS = 25
+GIT_SECONDS = 2
 PROTOCOL_VERSION = '2025-06-18'
+OPT_IN = 'REMIND_ME_CLOUD_CAPTURE'
+LOOPBACK = {'127.0.0.1', '::1', 'localhost'}
+THINKING = {'thinking', 'redacted_thinking'}
+
+
+class CaptureError(Exception):
+    """A failure named by a fixed category: never a server's text or a header value."""
+
+
+class Deadline:
+    def __init__(self, seconds, clock=time.monotonic):
+        self.clock, self.end = clock, clock() + seconds
+
+    def remaining(self):
+        left = self.end - self.clock()
+        if left <= 0:
+            raise CaptureError('timeout')
+        return left
 
 
 def enabled(env):
-    return (env.get('CLAUDE_CODE_REMOTE') == 'true'
+    return (env.get('CLAUDE_CODE_REMOTE') == 'true' and env.get(OPT_IN) == '1'
             and bool(env.get('REMIND_ME_URL')) and bool(env.get('REMIND_ME_TOKEN')))
 
 
-def escaped_len(raw):
-    """Bytes `raw` costs in the request body, as transcript::encoded_len counts them."""
-    return len(json.dumps(raw.decode('utf-8', 'replace'), ensure_ascii=False).encode()) - 2
+def endpoint(url):
+    """`url` if it is a credential-free https URL (http for loopback only)."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        raise CaptureError('invalid REMIND_ME_URL') from None
+    secure = parts.scheme == 'https' or (parts.scheme == 'http' and host in LOOPBACK)
+    if (not secure or not host or '@' in parts.netloc or parts.fragment
+            or re.search(r'[\x00-\x20\x7f]', url)):
+        raise CaptureError('invalid REMIND_ME_URL')
+    return url
 
 
-def tail(raw, limit=MAX_TRANSCRIPT_BYTES):
-    """The newest whole lines of `raw` whose JSON-escaped size fits in `limit`."""
-    if escaped_len(raw) <= limit:
-        return raw
+def bearer(token):
+    """`token` if it can be sent as a header without being echoed in an error."""
+    if not re.fullmatch(r'[\x21-\x7e]+', token):
+        raise CaptureError('invalid REMIND_ME_TOKEN')
+    return token
+
+
+# The shapes remind_me_core::redact scrubs, as (kind, pattern, group kept before
+# the secret). Bearer values are added here: a transcript can quote a header.
+RULES = [
+    ('private_key', re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----.*?'
+                               r'(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)', re.S), None),
+    ('jwt', re.compile(r'(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{7,}\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*'), None),
+    ('url_credentials', re.compile(r'(://[^\s/@:]*:)(?!\[REDACTED:)[^\s/@]+(?=@)'), 1),
+    ('aws_access_key', re.compile(r'(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])'), None),
+    ('github_token', re.compile(r'(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{36,}'), None),
+    ('slack_token', re.compile(r'(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9_-]{10,}'), None),
+    ('bearer', re.compile(r'(?i)(\bbearer[ \t]+)(?!\[REDACTED:)[A-Za-z0-9._~+/=-]{8,}'), 1),
+    ('secret', re.compile(r'(?i)((?:api_key|api-key|apikey|secret|token|password)[ \t]*[:=][ \t]*)'
+                          r'(?!\[REDACTED:)\S{8,}'), 1),
+]
+
+
+def redact(text, token=None):
+    """`text` with every secret shape, and `token` itself, replaced by `[REDACTED:<kind>]`."""
+    if token:
+        text = text.replace(token, '[REDACTED:token]')
+    for kind, pattern, keep in RULES:
+        mark = f'[REDACTED:{kind}]'
+        text = pattern.sub((lambda m, mark=mark, keep=keep: m.group(keep) + mark) if keep else mark, text)
+    return text
+
+
+def scrub(value, token=None):
+    """`value` with thinking blocks dropped and every string redacted."""
+    if isinstance(value, str):
+        return redact(value, token)
+    if isinstance(value, list):
+        return [scrub(v, token) for v in value
+                if not (isinstance(v, dict) and v.get('type') in THINKING)]
+    if isinstance(value, dict):
+        return {k: scrub(v, token) for k, v in value.items()}
+    return value
+
+
+def scrub_line(line, token=None):
+    """One JSONL line, scrubbed; a clean line is returned byte for byte."""
+    try:
+        value = json.loads(line)
+    except ValueError:
+        return redact(line, token)
+    clean = scrub(value, token)
+    return line if clean == value else json.dumps(clean, ensure_ascii=False, separators=(',', ':'))
+
+
+def escaped_len(text):
+    """Bytes `text` costs in the request body, as transcript::encoded_len counts them."""
+    return len(json.dumps(text, ensure_ascii=False).encode()) - 2
+
+
+def read_tail(path, limit=MAX_TRANSCRIPT_BYTES):
+    """The whole lines in the last `limit` bytes of `path`, oldest first.
+
+    Escaping never shrinks a line, so no line outside them could fit.
+    """
+    with open(path, 'rb') as f:
+        start = max(0, f.seek(0, os.SEEK_END) - limit)
+        f.seek(start)
+        lines = f.read(limit).decode('utf-8', 'replace').split('\n')
+    return lines[1:] if start else lines
+
+
+def compose(lines, limit=MAX_TRANSCRIPT_BYTES, token=None):
+    """The newest scrubbed lines whose escaped size fits in `limit`, joined as JSONL."""
     kept, used = [], 0
-    for line in reversed(raw.splitlines(keepends=True)):
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        line = scrub_line(line, token) + '\n'
         used += escaped_len(line)
         if used > limit:
             break
         kept.append(line)
-    return b''.join(reversed(kept))
+    return ''.join(reversed(kept))
+
+
+def stamp_path(session_id, state_dir):
+    return pathlib.Path(state_dir) / (re.sub(r'[^A-Za-z0-9_-]', '_', session_id) + '.last')
 
 
 def throttled(session_id, now, state_dir):
-    """True when this session was captured on Stop less than a minute ago; else stamp it."""
-    stamp = pathlib.Path(state_dir) / (re.sub(r'[^A-Za-z0-9_-]', '_', session_id) + '.last')
+    """True when this session was captured on Stop less than a minute ago."""
     try:
-        if now - float(stamp.read_text()) < THROTTLE_SECONDS:
-            return True
+        return now - float(stamp_path(session_id, state_dir).read_text()) < THROTTLE_SECONDS
     except (OSError, ValueError):
-        pass
-    stamp.parent.mkdir(parents=True, exist_ok=True)
-    stamp.write_text(str(now))
-    return False
+        return False
 
 
-def git(cwd, *args):
+def stamp(session_id, now, state_dir):
+    path = stamp_path(session_id, state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(now))
+
+
+def git(cwd, deadline, *args):
     try:
-        r = subprocess.run(['git', '-C', cwd, *args], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(['git', '-C', cwd, *args], capture_output=True, text=True,
+                           timeout=min(GIT_SECONDS, deadline.remaining()))
     except (OSError, subprocess.TimeoutExpired):
         return None
     if r.returncode:
@@ -80,34 +202,45 @@ def git(cwd, *args):
     return r.stdout.strip() or None
 
 
-def without_userinfo(url):
-    """A remote URL with any credentials removed: a proxy remote can carry a token."""
+def bare_remote(url):
+    """A remote URL with credentials, query and fragment removed: a proxy remote can carry a token."""
     if not url:
         return None
     parts = urllib.parse.urlsplit(url)
-    if not parts.netloc or '@' not in parts.netloc:
+    if not parts.netloc:
         return url
-    host = parts.netloc.rsplit('@', 1)[1]
-    return urllib.parse.urlunsplit(parts._replace(netloc=host))
+    host = parts.netloc.rsplit('@', 1)[-1]
+    return urllib.parse.urlunsplit(parts._replace(netloc=host, query='', fragment=''))
 
 
-def context(cwd):
-    top = git(cwd, 'rev-parse', '--show-toplevel')
+def context(cwd, deadline, token=None):
+    top = git(cwd, deadline, 'rev-parse', '--show-toplevel')
     fields = {
         'project': os.path.basename(top or cwd) or None,
-        'git_branch': git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD'),
-        'git_sha': git(cwd, 'rev-parse', 'HEAD'),
-        'git_remote': without_userinfo(git(cwd, 'remote', 'get-url', 'origin')),
+        'git_branch': git(cwd, deadline, 'rev-parse', '--abbrev-ref', 'HEAD'),
+        'git_sha': git(cwd, deadline, 'rev-parse', 'HEAD'),
+        'git_remote': bare_remote(git(cwd, deadline, 'remote', 'get-url', 'origin')),
         'cwd': cwd,
     }
-    return {k: v for k, v in fields.items() if v}
+    return {k: redact(v, token) for k, v in fields.items() if v}
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: it could carry the token to another origin or over http."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
 
 
 class Mcp:
     """Just enough Streamable HTTP MCP client to make one tool call."""
 
-    def __init__(self, url, token):
-        self.url, self.token, self.session, self.next_id = url, token, None, 1
+    def __init__(self, url, token, deadline):
+        self.url, self.token, self.deadline = endpoint(url), bearer(token), deadline
+        self.session, self.next_id = None, 1
 
     def post(self, message):
         headers = {'Content-Type': 'application/json',
@@ -116,37 +249,66 @@ class Mcp:
                    'MCP-Protocol-Version': PROTOCOL_VERSION}
         if self.session:
             headers['Mcp-Session-Id'] = self.session
-        request = urllib.request.Request(self.url, json.dumps(message, ensure_ascii=False).encode(), headers)
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            self.session = response.headers.get('Mcp-Session-Id') or self.session
-            body = response.read().decode('utf-8', 'replace')
-            kind = response.headers.get('Content-Type', '')
+        body = json.dumps(message, ensure_ascii=False).encode()
+        request = urllib.request.Request(self.url, body, headers, method='POST')
+        try:
+            with OPENER.open(request, timeout=self.deadline.remaining()) as response:
+                session = response.headers.get('Mcp-Session-Id')
+                kind = response.headers.get('Content-Type', '')
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+        except urllib.error.HTTPError as e:
+            raise CaptureError(f'http {int(e.code)}') from None
+        except TimeoutError:
+            raise CaptureError('timeout') from None
+        except (urllib.error.URLError, http.client.HTTPException, OSError):
+            raise CaptureError('network') from None
+        except ValueError:
+            raise CaptureError('invalid request') from None
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise CaptureError('response too large')
+        if session and re.fullmatch(r'[\x21-\x7e]+', session):
+            self.session = session
         if 'id' not in message:
             return None
-        return reply_to(message['id'], body, 'text/event-stream' in kind)
+        return reply_to(message['id'], raw.decode('utf-8', 'replace'), 'text/event-stream' in kind)
 
     def request(self, method, params):
         message = {'jsonrpc': '2.0', 'id': self.next_id, 'method': method, 'params': params}
         self.next_id += 1
         reply = self.post(message)
-        if reply is None or 'error' in reply:
-            raise RuntimeError(f'{method}: {reply and reply["error"]}')
+        if reply is None:
+            raise CaptureError(f'{method}: no reply')
+        if 'error' in reply or not isinstance(reply.get('result'), dict):
+            raise CaptureError(f'{method}: error')
         return reply['result']
 
     def call(self, tool, arguments):
         self.request('initialize', {'protocolVersion': PROTOCOL_VERSION, 'capabilities': {},
-                                    'clientInfo': {'name': 'remind-me-capture-hook', 'version': '1'}})
+                                    'clientInfo': {'name': 'remind-me-capture-hook', 'version': '2'}})
         self.post({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
         result = self.request('tools/call', {'name': tool, 'arguments': arguments})
         if result.get('isError'):
-            raise RuntimeError(''.join(c.get('text', '') for c in result.get('content', [])))
+            raise CaptureError('tool error')
         return result
+
+
+def sse_events(body):
+    """The data of each complete event in an event stream; a trailing partial one is dropped."""
+    events, data = [], []
+    for line in body.splitlines():
+        if not line:
+            if data:
+                events.append('\n'.join(data))
+            data = []
+        elif line.startswith('data:'):
+            value = line[5:]
+            data.append(value[1:] if value.startswith(' ') else value)
+    return events
 
 
 def reply_to(message_id, body, sse):
     """The JSON-RPC reply to `message_id` in a plain or event-stream body."""
-    chunks = [line[5:].strip() for line in body.splitlines() if line.startswith('data:')] if sse else [body]
-    for chunk in chunks:
+    for chunk in sse_events(body) if sse else [body]:
         try:
             reply = json.loads(chunk)
         except ValueError:
@@ -156,10 +318,11 @@ def reply_to(message_id, body, sse):
     return None
 
 
-def run(payload, env, now, state_dir):
-    """Capture the session; returns what happened, for the log line and tests."""
+def run(payload, env, now, state_dir, deadline=None):
+    """Capture the session; returns what happened, for tests. Raises CaptureError."""
     if not enabled(env):
         return 'off'
+    deadline = deadline or Deadline(BUDGET_SECONDS)
     event = payload.get('hook_event_name', '')
     session_id = payload.get('session_id') or ''
     path = payload.get('transcript_path') or ''
@@ -170,13 +333,17 @@ def run(payload, env, now, state_dir):
             return 're-entrant'
         if throttled(session_id, now, state_dir):
             return 'throttled'
-    transcript = tail(pathlib.Path(path).read_bytes()).decode('utf-8', 'replace')
+    token = env['REMIND_ME_TOKEN']
+    mcp = Mcp(env['REMIND_ME_URL'], token, deadline)
+    transcript = compose(read_tail(path), token=token)
     if not transcript.strip():
         return 'nothing to capture'
     arguments = {'session_id': session_id, 'transcript': transcript,
                  'reason': 'precompact' if event == 'PreCompact' else 'stop',
-                 **context(payload.get('cwd') or os.getcwd())}
-    Mcp(env['REMIND_ME_URL'], env['REMIND_ME_TOKEN']).call('remind_me_capture_transcript', arguments)
+                 **context(payload.get('cwd') or os.getcwd(), deadline, token)}
+    mcp.call('remind_me_capture_transcript', arguments)
+    if event == 'Stop':
+        stamp(session_id, now, state_dir)
     return 'captured'
 
 
@@ -185,8 +352,10 @@ def main():
         payload = json.load(sys.stdin)
         state_dir = os.path.join(tempfile.gettempdir(), 'remind-me-capture')
         run(payload, os.environ, time.time(), state_dir)
-    except Exception as e:  # a hook must never fail the session
-        print(f'remind-me-capture: {type(e).__name__}: {e}', file=sys.stderr)
+    except CaptureError as e:
+        print(f'remind-me-capture: {e}', file=sys.stderr)
+    except Exception as e:  # a hook must never fail the session, nor echo what failed
+        print(f'remind-me-capture: unexpected {type(e).__name__}', file=sys.stderr)
     return 0
 
 
