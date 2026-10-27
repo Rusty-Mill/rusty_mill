@@ -55,7 +55,12 @@ The new store must be a complete snapshot, never copied into a store a server ha
 1. Stop the old server, so its directory is one moment of the store. Keep it as it is: it is the
    rollback until the new one checks out.
 2. Copy the whole directory to the host (say `~/rusty_tick_data.snapshot`).
-3. If `rusty-tick` has started here, stop it and move its directory aside, don't merge into it:
+3. Set the tokens in `~/.rusty_tick/tick.env` before the server opens the store, because it reads
+   them only at start. A single-user store: put the old server's token in `RUSTY_TICK_TOKEN`, so
+   clients keep working. A store with `users.json`: delete the `RUSTY_TICK_TOKEN` line; each user's
+   tokens come with the directory.
+4. If `rusty-tick` has started here, stop it and move its directory aside, don't merge into it.
+   Then put the snapshot in place and start:
 
    ```sh
    sudo systemctl stop rusty-tick
@@ -64,9 +69,6 @@ The new store must be a complete snapshot, never copied into a store a server ha
    sudo systemctl start rusty-tick
    ```
 
-4. Tokens. A single-user store: put the old server's token in `RUSTY_TICK_TOKEN`, so clients keep
-   working. A store with `users.json`: delete the `RUSTY_TICK_TOKEN` line; each user's tokens come
-   with the directory.
 5. Check the new server before any client moves: `/health`, then the task counts through the API
    (`GET /api/v1/snapshot`) against the old server's.
 6. Then point each client (Mill Board, `claude mcp add` entries, the phone) at the new address.
