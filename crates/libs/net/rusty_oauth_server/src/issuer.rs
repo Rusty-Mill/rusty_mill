@@ -1,15 +1,13 @@
-//! Issuer validation for the OAuth authorization server (FT-07, `#86`).
+//! Issuer validation.
 //!
-//! `REMIND_ME_REMOTE_ISSUER` must be validated, never derived from the
-//! inbound `Host` header: behind a tunnel the public hostname is not
-//! knowable in advance, and `Host` is attacker-influenced (this is exactly
-//! why `server::build_router` disables `rmcp`'s DNS-rebinding protection —
-//! see that module's doc). The issuer is the one piece of OAuth metadata
-//! that must instead come from operator-controlled configuration.
+//! The issuer must come from operator configuration, never from the inbound
+//! `Host` header: behind a tunnel the public hostname is not knowable in
+//! advance, and `Host` is attacker-influenced. It is the one piece of OAuth
+//! metadata that cannot be derived from the request.
 
 use std::fmt;
 
-/// A validated `REMIND_ME_REMOTE_ISSUER`: an https origin (or http on
+/// A validated issuer: an https origin (or http on
 /// `localhost`/`127.0.0.1`, for local testing), no path beyond the root, no
 /// query string, no fragment.
 #[derive(Debug, Clone, PartialEq, Eq)]

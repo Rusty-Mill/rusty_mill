@@ -1,0 +1,27 @@
+[package]
+name = "rusty_oauth_server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "A small, sans-IO OAuth 2.1 authorization server for single-owner MCP servers: PKCE, refresh rotation, dynamic registration, revocation and a token-pasting consent page."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+# PKCE verification, SHA-256 and bearer parsing are rusty_oauth's.
+rusty_oauth = { workspace = true }
+rusty_crypto_key = { workspace = true }
+rusty_rand = { workspace = true }
+rusty_hex = { workspace = true }
+rusty_atomic_file = { workspace = true }
+# JSON and form decoding are the monorepo's own, so a caller that avoids
+# serde_json (rusty_tick, ADR-0002) does not gain it through this crate.
+rusty_json = { workspace = true }
+rusty_url = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,14 +1,11 @@
-//! Wire types for the OAuth authorization server (FT-07, `#86`) — RFC 7591
-//! client registration/records and the RFC 6749 §5.1 token response.
+//! Wire types: RFC 7591 client registration and records, and the RFC 6749
+//! §5.1 token response.
 //!
-//! Metadata documents (RFC 8414 / RFC 9728) and error responses are built
-//! as ad hoc `serde_json::json!` values in `routes.rs` instead of typed
-//! structs here — matching this workspace's own convention throughout
-//! `remind_me_mcp` (every tool response is a `json!` literal, not a
-//! response struct) and avoiding a type for every one-shot response shape.
+//! Metadata documents (RFC 8414 / RFC 9728) and error bodies are one-shot
+//! `json!` values in [`crate::endpoints`], not a struct each.
 
+use rusty_json::Map;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 
 fn default_grant_types() -> Vec<String> {
     vec![
@@ -23,8 +20,7 @@ fn default_response_types() -> Vec<String> {
 
 /// RFC 7591 §2 dynamic client registration request body.
 ///
-/// Unknown/extra fields the reference's Pydantic model declares but this
-/// single-user server never inspects (`jwks_uri`, `software_id`,
+/// Fields this server never inspects (`jwks_uri`, `software_id`,
 /// `contacts`, ...) are preserved via `extra` and echoed back verbatim in
 /// the registration response — RFC 7591 §3.2.1 says the server "MUST
 /// include" every registered metadata field in the response, so round-
@@ -44,12 +40,12 @@ pub struct ClientMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_name: Option<String>,
     #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    pub extra: Map,
 }
 
 /// RFC 7591 full client information record: what's persisted and what
 /// `/register` returns. `client_secret`/`client_secret_expires_at` are
-/// always `None` — see `provider::Provider::register_client`'s doc for why.
+/// always `None` — see [`crate::Provider::register_client`]'s doc for why.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientInformation {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,7 +65,7 @@ pub struct ClientInformation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_name: Option<String>,
     #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    pub extra: Map,
 }
 
 /// Why a redirect_uri was rejected — RFC 6749 §3.1.2 redirect_uri pinning.
