@@ -21,6 +21,7 @@ class FakeTick:
 
     def __init__(self):
         self.tasks, self.docs, self.lists, self.writes = {}, {}, [], 0
+        self.knows_leaf = True
 
     def send(self, method, path, body, headers):
         status, reply = self.answer(method, path, body, headers)
@@ -30,13 +31,16 @@ class FakeTick:
         if method == "GET" and path == "/snapshot":
             return 200, {"tasks": list(self.tasks.values())}
         if method == "DELETE" and path.startswith("/tasks/"):
-            assert "?" not in path, "rollback never purges"
-            self.writes += 1
-            task = self.tasks[path.split("/")[2]]
+            tid, _, query = path.split("/")[2].partition("?")
+            if query != "leaf=true":
+                assert query == "leaf=probe", "rollback never purges, and always asks for a leaf delete"
+                return (400 if self.knows_leaf else 404), None
+            task = self.tasks[tid]
             assert headers["If-Match"] == task["etag"], "a stale If-Match is refused"
-            for t in self.tasks.values():  # trashing takes the subtasks along, as rusty_tick does
-                if t["id"] == task["id"] or t.get("parentId") == task["id"]:
-                    t.update(deletedMs=1, etag=str(int(t["etag"]) + 1))
+            if any(t.get("parentId") == tid for t in self.tasks.values()):
+                return 409, {"error": "conflict"}
+            self.writes += 1
+            task.update(deletedMs=1, etag=str(int(task["etag"]) + 1))
             return 204, None
         if method == "GET" and path == "/lists":
             return 200, {"lists": self.lists}
@@ -152,18 +156,33 @@ class Migration(unittest.TestCase):
         self.assertEqual(fake.writes, before, "nothing trashed")
         self.assertIsNone(fake.tasks["t1"]["deletedMs"])
 
-    def test_a_subtask_added_after_the_rollback_check_goes_to_the_trash_not_away(self):
+    def test_a_subtask_added_after_the_rollback_check_is_never_trashed(self):
         fake = FakeTick()
         m.run([m.card_of(doc(1))], m.Tick(fake.send), lambda _: None)
 
         def owner_adds_a_subtask_after_the_check(method, path, body, headers):
-            if method == "DELETE" and "t1" not in fake.tasks:
+            if method == "DELETE" and "leaf=true" in path and "t1" not in fake.tasks:
                 fake.send("POST", "/tasks", {"title": "mine", "notes": "", "tags": [], "parentId": "t0"}, {})
             return fake.send(method, path, body, headers)
 
-        m.rollback(m.Tick(owner_adds_a_subtask_after_the_check), lambda _: None)
-        self.assertIsNotNone(fake.tasks["t1"]["deletedMs"], "trashed with its parent")
-        self.assertIn("t1", fake.tasks, "and still there, so restoring the parent brings it back")
+        with self.assertRaises(m.MigrationError):
+            m.rollback(m.Tick(owner_adds_a_subtask_after_the_check), lambda _: None)
+        self.assertIsNone(fake.tasks["t1"]["deletedMs"])
+        self.assertIsNone(fake.tasks["t0"]["deletedMs"], "the refused parent stays too")
+
+    def test_rollback_refuses_a_rusty_tick_without_leaf_deletes(self):
+        fake = FakeTick()
+        m.run([m.card_of(doc(1))], m.Tick(fake.send), lambda _: None)
+        fake.knows_leaf = False
+        with self.assertRaises(m.MigrationError):
+            m.rollback(m.Tick(fake.send), lambda _: None)
+        self.assertIsNone(fake.tasks["t0"]["deletedMs"])
+
+    def test_dependencies_are_deduplicated_and_must_fit_one_board_document(self):
+        self.assertEqual(m.card_of(doc(2, deps=[1, 1, 3, 1])).deps, (1, 3))
+        m.card_of(doc(2, deps=list(range(1, 1600))))
+        with self.assertRaises(m.MigrationError):
+            m.card_of(doc(2, deps=list(range(1, 1700))))
 
     def test_two_tasks_for_one_card_stop_it(self):
         fake = FakeTick()

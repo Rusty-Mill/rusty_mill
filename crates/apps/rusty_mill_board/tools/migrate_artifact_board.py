@@ -19,10 +19,12 @@ then writes every task's `board` document (its dependencies) and closes the done
 ones; both are the same write however often they run. So a crash anywhere is
 finished by running again.
 
-Rollback moves every marked task to the trash, where rusty_tick's restore brings
-it back; emptying the trash deletes it for good. It refuses, writing nothing,
-while a marked task has a subtask that is not marked. Trashing takes a task's
-subtasks with it, so one added after that check is trashed too, and restored too.
+Rollback moves every marked task to the trash with `DELETE ?leaf=true`, which
+rusty_tick refuses (409) in the same step if the task has a subtask, so nothing
+it did not create goes with it. It checks for subtasks first, so a refusal
+normally writes nothing, and refuses a rusty_tick too old to know `leaf`. The
+trashed tasks keep their markers, so a later run does not create them again:
+restore them in rusty_tick, or delete them from its trash, before migrating again.
 
 Standard library only.
 """
@@ -58,6 +60,7 @@ MAX_TITLE_CHARS = 500
 MAX_NOTES_CHARS = 100_000
 MAX_TAGS = 20
 MAX_TAG_CHARS = 64
+MAX_DOC_BYTES = 64 * 1024
 I64 = range(-(2**63), 2**63)
 
 Send = Callable[[str, str, Optional[dict], dict], "tuple[int, Any]"]
@@ -106,7 +109,7 @@ def card_of(doc: dict) -> Card:
         notes=notes_of(doc),
         tags=tuple(dict.fromkeys(tags)),
         sort_order=int(doc.get("order") or 0),
-        deps=tuple(int(d) for d in doc.get("deps") or []),
+        deps=tuple(dict.fromkeys(int(d) for d in doc.get("deps") or [])),
         done=status == "done",
     )
     problem = limit_problem(card)
@@ -127,6 +130,9 @@ def limit_problem(card: Card) -> Optional[str]:
         return f"tags longer than {MAX_TAG_CHARS} characters: {long_tags}"
     if card.sort_order not in I64:
         return f"order {card.sort_order} is out of range"
+    board_doc = json.dumps({"v": 1, "deps": ["0" * 36] * len(card.deps)})
+    if len(board_doc.encode()) > MAX_DOC_BYTES:
+        return f"{len(card.deps)} dependencies do not fit a {MAX_DOC_BYTES}-byte board document"
     return None
 
 
@@ -274,7 +280,15 @@ def foreign_subtasks(migrated: dict[int, dict], tasks: list[dict]) -> list[str]:
     )
 
 
+def knows_leaf_deletes(tick: Tick) -> bool:
+    """Whether rusty_tick refuses an unknown `leaf` value, which only one that knows it does."""
+    status, _ = tick.send("DELETE", "/tasks/00000000-0000-0000-0000-000000000000?leaf=probe", None, {})
+    return status == 400
+
+
 def rollback(tick: Tick, out: Callable[[str], None]) -> None:
+    if not knows_leaf_deletes(tick):
+        raise MigrationError("this rusty_tick cannot trash a task without its subtasks (DELETE ?leaf=true); update it first")
     tasks = tick.snapshot_tasks()
     migrated = tick.migrated(tasks)
     foreign = foreign_subtasks(migrated, tasks)
@@ -283,8 +297,9 @@ def rollback(tick: Tick, out: Callable[[str], None]) -> None:
     for n, task in sorted(migrated.items()):
         if task.get("deletedMs") is not None:
             continue
-        # Fenced, so a task changed since it was read is reported, not trashed.
-        tick.call("DELETE", f"/tasks/{task['id']}", ok=204, **{"If-Match": task["etag"]})
+        # Fenced, so a task changed since it was read is reported, not trashed; `leaf`
+        # makes rusty_tick refuse one that has gained a subtask since the check above.
+        tick.call("DELETE", f"/tasks/{task['id']}?leaf=true", ok=204, **{"If-Match": task["etag"]})
         out(f"#{n} trashed {task['id']}")
 
 

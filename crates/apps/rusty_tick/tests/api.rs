@@ -1414,3 +1414,55 @@ fn document_preconditions_and_single_reads() {
         "a document is read under its own kind"
     );
 }
+
+#[test]
+fn a_leaf_delete_refuses_a_task_with_subtasks() {
+    let (_dir, mut h) = harness();
+    let list = h.list("L");
+    let parent = h.task(&list, r#""title":"parent""#)["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let child = h.task(&list, &format!(r#""title":"child","parentId":"{parent}""#))["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, _) = h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{parent}?leaf=true"),
+        "",
+    );
+    assert_eq!(status, 409);
+    let (_, v) = h.call(Method::Get, &format!("/api/v1/tasks/{child}"), "");
+    assert!(v["deletedMs"].is_null(), "the subtask is untouched");
+    let (status, _) = h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{parent}?leaf=true&permanent=true"),
+        "",
+    );
+    assert_eq!(status, 400, "a purge cannot be a leaf delete");
+
+    let (status, _) = h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{child}?leaf=true"),
+        "",
+    );
+    assert_eq!(status, 204);
+    let (status, _) = h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{parent}?leaf=true"),
+        "",
+    );
+    assert_eq!(status, 409, "a trashed subtask is still its subtask");
+
+    let (status, _) = h.call(
+        Method::Delete,
+        "/api/v1/tasks/00000000-0000-0000-0000-000000000000?leaf=probe",
+        "",
+    );
+    assert_eq!(
+        status, 400,
+        "an unknown leaf value is refused before the task is looked up"
+    );
+}

@@ -13,7 +13,7 @@
 //! | GET, PATCH, DELETE | `/lists/{id}` | delete sends its tasks to the trash; the Inbox is permanent |
 //! | GET | `/lists/{id}/tasks?status=open\|done\|wontdo&sort=manual\|due` | |
 //! | POST | `/tasks` | accepts a client-chosen `id` |
-//! | GET, PATCH, DELETE | `/tasks/{id}` | DELETE trashes; `?permanent=true` purges |
+//! | GET, PATCH, DELETE | `/tasks/{id}` | DELETE trashes (with its subtasks; `?leaf=true` refuses with 409 if it has any); `?permanent=true` purges |
 //! | POST | `/tasks/{id}/complete`, `/reopen`, `/restore` | |
 //! | PUT | `/tasks/{id}/order` | `{"sortOrder": n}` |
 //! | DELETE | `/trash` | purge everything in the trash |
@@ -523,11 +523,24 @@ fn route_tasks(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
         }
         (Method::Delete, [id]) => {
             let id = parse_id(id)?;
+            let leaf = match cx.query.get("leaf") {
+                None | Some("false") => false,
+                Some("true") => true,
+                Some(_) => return Err(ApiError::BadRequest("leaf must be true or false".into())),
+            };
             if let Some(stale) = stale_task(service, cx, id)? {
                 return Ok(stale);
             }
             match cx.query.get("permanent") {
+                Some("true") if leaf => {
+                    return Err(ApiError::BadRequest(
+                        "leaf applies to trashing, not to permanent".into(),
+                    ))
+                }
                 Some("true") => service.purge_task(id)?,
+                None | Some("false") if leaf => {
+                    service.trash_leaf_task(id)?;
+                }
                 None | Some("false") => {
                     service.trash_task(id)?;
                 }

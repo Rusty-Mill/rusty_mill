@@ -210,11 +210,18 @@ Steps:
    rusty_tick is the only place to edit.
 
 **Rollback:** the artifact is never written by the migration, so it is still
-whole. Purge every task tagged `migrated:mill-board`, trash included
-(`DELETE /tasks/{id}?permanent=true`; with change 3.1 that also removes its
-`board` document and comments), remove the banner, and the artifact is the
-board again. Nothing marks a card as migrated outside its task, so a later
-migration starts clean. A deployed crate board `--store`, if any, is
+whole. The script moves every task tagged `migrated:mill-board` to the trash
+(`DELETE /tasks/{id}?leaf=true` under `If-Match`); remove the banner, and the
+artifact is the board again. Rollback is reversible and never deletes anything
+for good: rusty_tick's restore brings a task back. Trashing a task takes its
+subtasks with it, so `leaf=true` makes rusty_tick refuse (409), in the same
+step as the write, a task that has any subtask; the migration creates none, so
+anything the owner added under a migrated task stays where it is. The script
+checks for such subtasks first, so a refusal normally writes nothing, and it
+refuses a rusty_tick without `leaf`. The trashed tasks keep their markers, so
+a later run counts them as migrated and creates nothing: to migrate again,
+restore them (the run then brings their documents up to date) or delete those
+tasks for good from the trash, by hand, first. A deployed crate board `--store`, if any, is
 exported with `board_list` and imported the same way; its store file is kept
 until the tick-backed board has run.
 
