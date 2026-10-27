@@ -9,16 +9,19 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use rusty_mcp::otel::{OtelConfig, metrics::McpMetricsLayer};
+//! use rusty_mcp::otel::{OtelConfig, metrics::McpMetrics};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let guard = rusty_mcp::otel::init(OtelConfig::new("my-mcp-server"), "info")?;
 //! let instruments = guard.instruments().expect("metrics are enabled");
 //!
 //! // Tool names are the only request-derived label, and only these ones.
-//! let layer = McpMetricsLayer::new(Arc::clone(&instruments))
+//! let metrics = McpMetrics::new(Arc::clone(&instruments))
 //!     .with_known_names(["add", "divide", "slugify"]);
-//! # let _ = layer;
+//!
+//! // Per request: the two header values in, the response status out.
+//! let timer = metrics.start(Some("tools/call"), Some("add"));
+//! timer.finish(rusty_http::StatusCode::OK);
 //! # Ok(())
 //! # }
 //! ```
@@ -33,7 +36,7 @@
 //!   else is recorded as `other`.
 //! - `mcp.name` is recorded only for `tools/call` and `prompts/get`, and only
 //!   when it appears in the set passed to
-//!   [`McpMetricsLayer::with_known_names`]. Anything else is `other`.
+//!   [`McpMetrics::with_known_names`]. Anything else is `other`.
 //! - `resources/read` carries the **URI** in `Mcp-Name`, which is unbounded.
 //!   It is never used as a label. Neither are task ids.
 //!
@@ -43,30 +46,21 @@
 //!
 //! # What `outcome` can and cannot tell you
 //!
-//! The layer sees HTTP, so `outcome` is the transport-level result. A tool that
+//! The recorder sees HTTP, so `outcome` is the transport-level result. A tool that
 //! returns `isError: true` is still a *successful* HTTP request and counts as
 //! `ok` here — JSON-RPC puts application errors in a `200` body, and a
-//! middleware that does not parse bodies cannot see them. Count those in the
+//! recorder that does not parse bodies cannot see them. Count those in the
 //! tool itself if you need them.
 
-use std::{
-    convert::Infallible,
-    future::Future,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-    time::Instant,
-};
+use std::{sync::Arc, time::Instant};
 
-use http::{Request, Response};
 use rusty_http::StatusCode;
 
 use super::instrument::{Counter, Histogram, Meta, Registry, UpDownCounter};
 use super::labels::{
-    self, HEADER_MCP_METHOD, HEADER_MCP_NAME, KnownNames, decode_header, in_flight_labels,
-    request_labels, task_labels,
+    self, KnownNames, decode_header, in_flight_labels, request_labels, task_labels,
 };
-pub use super::labels::{Outcome, TaskOutcome};
+pub use super::labels::{HEADER_MCP_METHOD, HEADER_MCP_NAME, Outcome, TaskOutcome};
 
 /// Latency buckets, in seconds.
 ///
@@ -80,7 +74,7 @@ const LATENCY_BUCKETS: &[f64] = &[
 /// The instruments this crate records to.
 ///
 /// Built by the pipeline and shared by `Arc`: hand [`OtelGuard::instruments`]
-/// to the [`McpMetricsLayer`]. Recording is atomic adds; the pipeline's push
+/// to [`McpMetrics`]. Recording is atomic adds; the pipeline's push
 /// thread reads the same values and sends them to the collector.
 ///
 /// [`OtelGuard::instruments`]: super::OtelGuard::instruments
@@ -172,6 +166,11 @@ impl Instruments {
         self.requests.add(1, &request_labels(method, name, outcome));
     }
 
+    /// A request ended without an answer to record.
+    pub(crate) fn request_abandoned(&self, method: &str) {
+        self.in_flight.add(-1, &in_flight_labels(method));
+    }
+
     /// A task was spawned.
     pub fn task_started(&self) {
         self.tasks_started.add(1, &[]);
@@ -191,22 +190,24 @@ impl Instruments {
     }
 }
 
-/// Records request metrics for the service it wraps.
+/// Records request metrics for an MCP endpoint, whatever server it is on.
 ///
-/// Mount it on the MCP endpoint. Labels come from the SEP-2243 `Mcp-Method` and
-/// `Mcp-Name` headers, so no request body is ever parsed.
+/// Call [`McpMetrics::start`] when a request arrives and
+/// [`RequestTimer::finish`] with its response status. Labels come from the
+/// SEP-2243 `Mcp-Method` and `Mcp-Name` headers, so no request body is ever
+/// parsed. Cheap to clone; clones record to the same instruments.
 ///
 /// This covers the **HTTP transport only**. A stdio server is a single process
-/// serving a single client over a pipe, where there is no middleware position
-/// to occupy — and rather less to be told, since one client cannot generate the
+/// serving a single client over a pipe, where there is no request boundary to
+/// measure — and rather less to be told, since one client cannot generate the
 /// traffic pattern these metrics exist to describe.
 #[derive(Debug, Clone)]
-pub struct McpMetricsLayer {
+pub struct McpMetrics {
     instruments: Arc<Instruments>,
     known_names: Arc<KnownNames>,
 }
 
-impl McpMetricsLayer {
+impl McpMetrics {
     /// Record to `instruments`, with no tool or prompt names labelled.
     pub fn new(instruments: Arc<Instruments>) -> Self {
         Self {
@@ -224,127 +225,62 @@ impl McpMetricsLayer {
         self.known_names = Arc::new(KnownNames::new(names));
         self
     }
-}
 
-impl<S> tower_layer::Layer<S> for McpMetricsLayer {
-    type Service = McpMetrics<S>;
-
-    fn layer(&self, inner: S) -> Self::Service {
-        McpMetrics {
-            inner,
+    /// A request has arrived carrying these [`HEADER_MCP_METHOD`] and
+    /// [`HEADER_MCP_NAME`] values, each `None` when absent or not text.
+    pub fn start(&self, method: Option<&str>, name: Option<&str>) -> RequestTimer {
+        let method = method.and_then(decode_header).unwrap_or_default();
+        let name = self.known_names.name_label(&method, name);
+        self.instruments.request_started(&method);
+        RequestTimer {
             instruments: Arc::clone(&self.instruments),
-            known_names: Arc::clone(&self.known_names),
+            method,
+            name,
+            started: Instant::now(),
+            open: true,
         }
     }
 }
 
-/// Service produced by [`McpMetricsLayer`].
-#[derive(Debug, Clone)]
-pub struct McpMetrics<S> {
-    inner: S,
+/// One request being measured, from [`McpMetrics::start`].
+///
+/// Dropped without [`RequestTimer::finish`] — the request was abandoned, say
+/// because the client hung up — it leaves the in-flight count and records
+/// nothing else, since there is no outcome to record.
+#[derive(Debug)]
+#[must_use = "a request is counted in flight until its timer is finished or dropped"]
+pub struct RequestTimer {
     instruments: Arc<Instruments>,
-    known_names: Arc<KnownNames>,
+    method: String,
+    name: Option<String>,
+    started: Instant,
+    open: bool,
 }
 
-impl<S, ReqBody, ResBody> tower_service::Service<Request<ReqBody>> for McpMetrics<S>
-where
-    S: tower_service::Service<Request<ReqBody>, Response = Response<ResBody>, Error = Infallible>
-        + Clone
-        + Send
-        + 'static,
-    S::Future: Send + 'static,
-    ReqBody: Send + 'static,
-    ResBody: Send + 'static,
-{
-    type Response = Response<ResBody>;
-    type Error = Infallible;
-    type Future = Pin<Box<dyn Future<Output = Result<Response<ResBody>, Infallible>> + Send>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, request: Request<ReqBody>) -> Self::Future {
-        // Swap in the readied service: `self.inner` is the one that passed
-        // `poll_ready`, and the fresh clone may not be ready yet.
-        let clone = self.inner.clone();
-        let mut inner = std::mem::replace(&mut self.inner, clone);
-
-        let method = method_of(&request);
-        let name = self
-            .known_names
-            .name_label(&method, text_header(&request, HEADER_MCP_NAME));
-        let instruments = Arc::clone(&self.instruments);
-
-        Box::pin(async move {
-            instruments.request_started(&method);
-            let started = Instant::now();
-
-            let response = inner.call(request).await?;
-
-            instruments.request_finished(
-                &method,
-                name.as_deref(),
-                Outcome::from_status(StatusCode::from_u16(response.status().as_u16())),
-                started.elapsed().as_secs_f64(),
-            );
-
-            Ok(response)
-        })
+impl RequestTimer {
+    /// The request was answered with `status`: count and time it.
+    pub fn finish(mut self, status: StatusCode) {
+        self.open = false;
+        self.instruments.request_finished(
+            &self.method,
+            self.name.as_deref(),
+            Outcome::from_status(status),
+            self.started.elapsed().as_secs_f64(),
+        );
     }
 }
 
-/// The request's MCP method, decoded if `rmcp` base64-wrapped it; empty if absent
-/// or unreadable (which labels as `other`).
-fn method_of<ReqBody>(request: &Request<ReqBody>) -> String {
-    text_header(request, HEADER_MCP_METHOD)
-        .and_then(decode_header)
-        .unwrap_or_default()
-}
-
-/// A header value as text, if it has one.
-fn text_header<'a, ReqBody>(request: &'a Request<ReqBody>, name: &str) -> Option<&'a str> {
-    request.headers().get(name)?.to_str().ok()
+impl Drop for RequestTimer {
+    fn drop(&mut self) {
+        if self.open {
+            self.instruments.request_abandoned(&self.method);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_method_is_decoded_when_wrapped_and_empty_when_unreadable() {
-        let wrapped = format!(
-            "=?base64?{}?=",
-            rusty_base64::encode_standard(b"tools/call")
-        );
-        let build = |value: &str| {
-            Request::builder()
-                .header("mcp-method", value)
-                .body(())
-                .expect("request")
-        };
-
-        assert_eq!(method_of(&build("tools/list")), "tools/list");
-        assert_eq!(method_of(&build(&wrapped)), "tools/call");
-        assert_eq!(method_of(&build("=?base64?!!!?=")), "");
-        assert_eq!(method_of(&Request::new(())), "");
-    }
-
-    #[test]
-    fn a_present_text_header_is_read_and_anything_else_is_not() {
-        let request = Request::builder()
-            .header("mcp-method", "tools/call")
-            .header(
-                "mcp-name",
-                http::HeaderValue::from_bytes(b"\xff").expect("opaque"),
-            )
-            .body(())
-            .expect("request");
-
-        assert_eq!(text_header(&request, "mcp-method"), Some("tools/call"));
-        assert_eq!(text_header(&request, "mcp-name"), None, "not text");
-        assert_eq!(text_header(&request, "absent"), None);
-    }
 
     use crate::otel::instrument::Data;
 
@@ -421,5 +357,79 @@ mod tests {
             Data::Sum { points, .. } => assert_eq!(points.len(), 1),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// The `mcp.server.requests` points as (labels, count).
+    fn requests(instruments: &Instruments) -> Vec<(Vec<String>, u64)> {
+        instruments
+            .registry()
+            .collect()
+            .into_iter()
+            .filter(|metric| metric.name == "mcp.server.requests")
+            .flat_map(|metric| match metric.data {
+                Data::Sum { points, .. } => points
+                    .into_iter()
+                    .map(|(labels, value)| {
+                        let labels = labels.iter().map(|l| format!("{l:?}")).collect();
+                        (labels, value as u64)
+                    })
+                    .collect::<Vec<_>>(),
+                other => panic!("unexpected aggregation: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_finished_timer_counts_its_request_under_the_decoded_method() {
+        let instruments = Arc::new(Instruments::new());
+        let metrics = McpMetrics::new(Arc::clone(&instruments)).with_known_names(["add"]);
+        let wrapped = format!(
+            "=?base64?{}?=",
+            rusty_base64::encode_standard(b"tools/call")
+        );
+
+        let timer = metrics.start(Some(&wrapped), Some("add"));
+        assert_eq!(in_flight(&instruments), 1);
+        timer.finish(StatusCode::FORBIDDEN);
+
+        assert_eq!(in_flight(&instruments), 0);
+        let counted = requests(&instruments);
+        assert_eq!(counted.len(), 1, "{counted:?}");
+        let labels = counted[0].0.join(" ");
+        for needle in ["tools/call", "add", "unauthorized"] {
+            assert!(labels.contains(needle), "{needle} missing from {labels}");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_method_and_an_unknown_name_label_as_other() {
+        let instruments = Arc::new(Instruments::new());
+        let metrics = McpMetrics::new(Arc::clone(&instruments)).with_known_names(["add"]);
+
+        metrics
+            .start(Some("=?base64?!!!?="), Some("invented"))
+            .finish(StatusCode::OK);
+        metrics.start(None, None).finish(StatusCode::OK);
+
+        let counted = requests(&instruments);
+        assert_eq!(counted.len(), 1, "both share one label set: {counted:?}");
+        assert_eq!(counted[0].1, 2);
+        let labels = counted[0].0.join(" ");
+        assert!(!labels.contains("invented"), "{labels}");
+        assert!(labels.contains("other"), "{labels}");
+    }
+
+    #[test]
+    fn a_dropped_timer_leaves_in_flight_and_counts_nothing() {
+        // A client that hangs up mid-request must not hold the gauge up forever.
+        let instruments = Arc::new(Instruments::new());
+        let metrics = McpMetrics::new(Arc::clone(&instruments));
+
+        let timer = metrics.start(Some("tools/call"), None);
+        assert_eq!(in_flight(&instruments), 1);
+        drop(timer);
+
+        assert_eq!(in_flight(&instruments), 0);
+        assert!(requests(&instruments).iter().all(|(_, n)| *n == 0));
     }
 }

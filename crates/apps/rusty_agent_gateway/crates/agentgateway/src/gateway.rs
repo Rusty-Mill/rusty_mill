@@ -31,13 +31,11 @@ use agentgateway_tls::{Passthrough, TlsBinds, TlsTerminator};
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::Full;
-use rusty_mcp::otel::metrics::{Instruments, McpMetricsLayer};
+use rusty_mcp::otel::metrics::{HEADER_MCP_METHOD, HEADER_MCP_NAME, Instruments, McpMetrics};
 use rusty_mcp_server::{HttpConfig, HttpHandler};
 
 use crate::body::Body;
 use crate::mcp_service::McpService;
-use tower_layer::Layer as _;
-use tower_service::Service as _;
 
 /// What the data plane answers with.
 type Response = http::Response<Body>;
@@ -231,7 +229,7 @@ enum BackendState {
     /// A federated MCP server, optionally instrumented.
     Mcp {
         service: McpService,
-        metrics: Option<McpMetricsLayer>,
+        metrics: Option<McpMetrics>,
     },
     /// One or more `host` upstreams, proxied over HTTP.
     ///
@@ -386,7 +384,7 @@ impl Gateway {
                     // a client invents would mint a new time series -- which is
                     // how a metrics backend gets taken down from the outside.
                     let metrics = instruments.as_ref().map(|instruments| {
-                        McpMetricsLayer::new(Arc::clone(instruments))
+                        McpMetrics::new(Arc::clone(instruments))
                             .with_known_names(federation.tool_names())
                     });
 
@@ -793,27 +791,23 @@ impl Gateway {
         request: Request<Bytes>,
     ) -> Response {
         match &state.backend {
-            // `call` takes &mut self, but the service is cheap to clone and
-            // clones share the session manager -- which is what makes an
+            // One service per route: its session manager is what makes an
             // Mcp-Session-Id issued on one request usable on the next.
-            BackendState::Mcp { service, metrics } => match metrics {
-                // Layering per request is just a struct wrap; the instruments
-                // behind it are shared, which is what makes the counts add up.
-                Some(metrics) => {
-                    let mut service = metrics.layer(service.clone());
-                    match service.call(request.map(Full::new)).await {
-                        Ok(response) => response,
-                        Err(never) => match never {},
-                    }
-                }
-                None => {
-                    let mut service = service.clone();
-                    match service.call(request.map(Full::new)).await {
-                        Ok(response) => response,
-                        Err(never) => match never {},
-                    }
-                }
-            },
+            BackendState::Mcp { service, metrics } => {
+                let Some(metrics) = metrics else {
+                    return service.call(request).await;
+                };
+                let header = |name| {
+                    request
+                        .headers()
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                };
+                let timer = metrics.start(header(HEADER_MCP_METHOD), header(HEADER_MCP_NAME));
+                let response = service.call(request).await;
+                timer.finish(rusty_http::StatusCode::from_u16(response.status().as_u16()));
+                response
+            }
             BackendState::Host { proxy, a2a, agui } => {
                 let (parts, body) = request.into_parts();
                 let prefix = selection.matched_prefix.as_deref();

@@ -13,9 +13,9 @@ use std::collections::BTreeSet;
 use rusty_http::StatusCode;
 
 /// The `Mcp-Method` header (SEP-2243).
-pub(crate) const HEADER_MCP_METHOD: &str = "mcp-method";
+pub const HEADER_MCP_METHOD: &str = "mcp-method";
 /// The `Mcp-Name` header (SEP-2243).
-pub(crate) const HEADER_MCP_NAME: &str = "mcp-name";
+pub const HEADER_MCP_NAME: &str = "mcp-name";
 
 /// `rmcp` wraps a header value that will not survive as-is in these sentinels.
 const BASE64_PREFIX: &str = "=?base64?";

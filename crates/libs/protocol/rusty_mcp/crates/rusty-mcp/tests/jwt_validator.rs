@@ -296,7 +296,7 @@ fn token_needing_a_key() -> String {
 }
 
 /// Serve `body` with `status` at `/jwks.json` and return the URI.
-async fn serve_raw(status: http::StatusCode, body: &'static str) -> String {
+async fn serve_raw(status: axum::http::StatusCode, body: &'static str) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -392,7 +392,7 @@ async fn a_jwks_over_the_validators_own_cap_is_unavailable() {
 
 #[tokio::test]
 async fn a_failing_jwks_endpoint_is_unavailable_and_says_why() {
-    let uri = serve_raw(http::StatusCode::SERVICE_UNAVAILABLE, "down").await;
+    let uri = serve_raw(axum::http::StatusCode::SERVICE_UNAVAILABLE, "down").await;
     let validator = JwtValidator::builder(ISSUER, uri).build().expect("build");
 
     let why = unavailable_reason(&validator).await;
@@ -447,7 +447,7 @@ async fn a_jwks_response_preceded_by_an_informational_one_is_read() {
 
 #[tokio::test]
 async fn a_malformed_jwks_is_unavailable_not_invalid() {
-    let uri = serve_raw(http::StatusCode::OK, "this is not json").await;
+    let uri = serve_raw(axum::http::StatusCode::OK, "this is not json").await;
     let validator = JwtValidator::builder(ISSUER, uri).build().expect("build");
 
     let why = unavailable_reason(&validator).await;

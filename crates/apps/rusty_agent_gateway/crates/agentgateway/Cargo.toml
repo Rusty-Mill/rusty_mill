@@ -50,9 +50,6 @@ rusty-mcp = { workspace = true, default-features = false, features = ["otel"] }
 # looks like a network fault rather than a missing feature flag.
 rusty_axum = { workspace = true, features = ["http2"] }
 rusty_tokio = { workspace = true }
-# The MCP handler and its metrics are tower services until #886.
-tower-layer = "0.3"
-tower-service = "0.3"
 http = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }

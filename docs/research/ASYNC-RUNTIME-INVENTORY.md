@@ -200,7 +200,7 @@ through `Cargo.lock`. The counts are not a vetted audit.
 
 | Crate | Path | Deps | Files | API used (top 6, count) | Tokio-bound deps | Uses (in-house, async) | Gaps | Tier |
 |---|---|---|---|---|---|---|---|---|
-| `agentgateway` | `apps/rusty_agent_gateway/crates/agentgateway` | t(dev) tu(dev) | — | — (server on `rusty_axum`, `#[rusty_tokio::main]`, #885; integration tests keep tokio for their axum/rmcp/reqwest clients and mocks) | tower-layer, tower-service (MCP handler, #886) | rusty-mcp | — | done |
+| `agentgateway` | `apps/rusty_agent_gateway/crates/agentgateway` | t(dev) tu(dev) | — | — (server on `rusty_axum`, `#[rusty_tokio::main]`, #885; integration tests keep tokio for their axum/rmcp/reqwest clients and mocks) | — (tower gone, #886) | rusty-mcp | — | done |
 | `agentgateway-agui` | `apps/rusty_agent_gateway/crates/agentgateway-agui` | t(dev) | 1 | t::test×2 | — | — | — | A |
 | `agentgateway-auth` | `apps/rusty_agent_gateway/crates/agentgateway-auth` | — | 0 | — (moved to `rusty_tokio`, #885) | — | rusty-mcp | — | done |
 | `agentgateway-llm` | `apps/rusty_agent_gateway/crates/agentgateway-llm` | as | 1 | — (moved to `rusty_tokio`, #885; `async-stream` stays) | — | — | G7 | B |

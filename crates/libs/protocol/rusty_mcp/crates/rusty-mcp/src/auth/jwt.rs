@@ -3,7 +3,7 @@
 //! Enabled by the `jwt` feature. This is the validator most deployments want:
 //! point it at your authorization server's issuer and JWKS URI, and it verifies
 //! signature, expiry, not-before, and issuer, then hands the claims to the
-//! layer.
+//! audience and scope check.
 //!
 //! ```no_run
 //! # use std::sync::Arc;
@@ -25,9 +25,10 @@
 //!
 //! # Audience is deliberately not checked here
 //!
-//! This validator reads `aud` into [`VerifiedToken::audiences`] and lets
-//! [`crate::auth::RequireAuthLayer`] compare it against
-//! [`AuthConfig::resource`](crate::auth::AuthConfig::resource). Checking it in
+//! This validator reads `aud` into [`VerifiedToken::audiences`] and leaves its
+//! caller to compare it against
+//! [`AuthConfig::resource`](crate::auth::AuthConfig::resource), as
+//! `serve::AuthorizedHandler` does. Checking it in
 //! both places would mean two sources of truth for the same value, and the one
 //! that silently stopped matching would be the one nobody noticed.
 //!
@@ -372,7 +373,7 @@ impl JwtValidator {
             })
     }
 
-    /// Verify `token` and extract the claims the layer needs.
+    /// Verify `token` and extract the claims the audience and scope check needs.
     async fn verify(&self, token: &str) -> Result<VerifiedToken, TokenError> {
         let decoded = decode_unverified(token)
             .map_err(|err| TokenError::Invalid(format!("malformed token: {err}")))?;
@@ -483,7 +484,7 @@ fn numeric_date(value: &Value) -> Result<u64, TokenError> {
     ))
 }
 
-/// Check `exp`, `nbf` and `iss`. Audience is left to the layer.
+/// Check `exp`, `nbf` and `iss`. Audience is left to the caller's check.
 fn check_claims(claims: &Value, issuer: &str, leeway_secs: u64) -> Result<(), TokenError> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -593,7 +594,7 @@ mod tests {
 
     #[test]
     fn a_missing_audience_yields_none() {
-        // The layer then rejects the token, which is the safe direction.
+        // The audience check then rejects the token, which is the safe direction.
         assert!(extract_audiences(None).is_empty());
         assert!(extract_audiences(Some(&json!(42))).is_empty());
     }

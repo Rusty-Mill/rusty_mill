@@ -2254,10 +2254,10 @@ duplicated risk, and this is the one place this repo carries any.
 **Also reused: `otel` and `limits`.** `otel::init` stands up the OTLP pipeline
 and installs the subscriber; `OtelGuard` is held until after the accept loops
 stop, because spans are batched and whatever is still buffered dies with the
-process otherwise. `McpMetricsLayer` supplies the MCP request metrics described
-above. `LimitsLayer` carries the concurrency bound and the request timeout from
-the config; the server applies them (as a `rusty_axum::Admission`) when a
-request's head arrives, before its body is read, so a shed request costs a
+process otherwise. `McpMetrics` records the MCP request metrics described
+above around each MCP route's handler. The concurrency bound and the request
+timeout from the config are a `rusty_axum::Admission`, which the server applies
+when a request's head arrives, before its body is read, so a shed request costs a
 semaphore try-acquire rather than an upload held in memory, a route lookup, a
 token validation and a JWKS fetch.
 

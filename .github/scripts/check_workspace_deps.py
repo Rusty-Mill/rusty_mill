@@ -30,17 +30,13 @@ from pathlib import Path
 # violation, and so is an entry the crate no longer depends on, so finishing
 # a migration means deleting its line here.
 #
-# `rusty-mcp` is Tier T under ADR-0002 Amendment 1: sovereign except for these.
+# `rusty-mcp` was Tier T under ADR-0002 Amendment 1; its last exceptions (the
+# tower adapters' `http`, `tower-*` and `tokio`) went with #886.
 PINNED_EXTERNAL_DEPENDENCIES: dict[str, dict[str, str]] = {
     # Tier S: the first-party replay parser (rleval/docs/replay-parser-scope.md).
     # boxcars stays a dev-dependency oracle only.
     "rl_replay": {},
-    "rusty-mcp": {
-        "http": "request and response types of the tower layers; adapter boundary only (D4)",
-        "tower-layer": "the Layer impls of the tower adapters, until the gateway leaves axum",
-        "tower-service": "the Service impls of the tower adapters, until the gateway leaves axum",
-        "tokio": "tokio::time in the tower adapter's timeout; the layers run on the gateway's runtime",
-    },
+    "rusty-mcp": {},
 }
 
 # The facade itself is the one crate allowed to depend on `tracing` for good.

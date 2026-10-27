@@ -1,9 +1,9 @@
 //! Auth and load shedding for a blocking [`rusty_serve`] server.
 //!
-//! The same decisions as [`crate::auth::RequireAuthLayer`] and
-//! [`crate::limits::LimitsLayer`], without `tower`: each is a wrapper around a
-//! [`rusty_serve::SharedHandler`]. Compose them by nesting, outermost first, so
-//! that shed requests never reach token validation:
+//! The resource-server contract of [`crate::auth`] and a concurrency limit,
+//! each as a wrapper around a [`rusty_serve::SharedHandler`]. Compose them by
+//! nesting, outermost first, so that shed requests never reach token
+//! validation:
 //!
 //! ```no_run
 //! use std::sync::Arc;
@@ -31,7 +31,7 @@
 //! Wrap the MCP route only. The Protected Resource Metadata document must stay
 //! reachable without a token, so route it before the wrapped handler.
 //!
-//! # What differs from the tower layers
+//! # Limits
 //!
 //! - **No timeout.** A blocking handler cannot be cancelled from outside, so
 //!   [`LimitedHandler`] bounds concurrency only. [`rusty_serve::Limits`]
@@ -41,9 +41,8 @@
 //!   that answers from memory (such as
 //!   [`StaticTokenValidator`](crate::auth::StaticTokenValidator)) and not for
 //!   one that needs a `tokio` runtime, like the JWKS-backed one, whose fetch
-//!   would never be driven. Use the tower layers for that, or validate before
-//!   the request reaches this wrapper. A validator that never completes holds
-//!   its connection thread.
+//!   would never be driven. Validate before the request reaches this wrapper
+//!   for that. A validator that never completes holds its connection thread.
 
 use std::{
     future::Future,
@@ -148,8 +147,8 @@ fn authorize(config: &AuthConfig, header: Option<&str>) -> Result<VerifiedToken,
     decision::check_claims(config, verified).map_err(|r| r.refusal(config))
 }
 
-/// Classify a present header as the tower layer does: only visible ASCII and
-/// tabs are text (`http::HeaderValue::to_str`), so a value with, say, a
+/// Classify a present header as `http::HeaderValue::to_str` does: only
+/// visible ASCII and tabs are text, so a value with, say, a
 /// no-break space is refused before token parsing can trim it away.
 fn authorization_text(value: &str) -> AuthorizationHeader<'_> {
     let text = value

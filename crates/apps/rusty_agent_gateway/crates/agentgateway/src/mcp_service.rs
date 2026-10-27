@@ -1,5 +1,5 @@
-//! The federation's MCP handler as a tower service on the gateway's
-//! `rusty_tokio` runtime (#875: it replaces `rusty_mcp_axum` here).
+//! The federation's MCP handler, served on the gateway's `rusty_tokio`
+//! runtime (#875: it replaces `rusty_mcp_axum` here).
 //!
 //! The handler is blocking and written for `rusty_serve`, so each request is
 //! handed to a blocking thread: the request is copied across, the handler
@@ -8,7 +8,6 @@
 //! which ends the pump and, with it, the handler's work for that request.
 
 use std::convert::Infallible;
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -17,13 +16,12 @@ use bytes::Bytes;
 use http::request::Parts;
 use http::{HeaderName, HeaderValue, Request, Response, StatusCode, header};
 use http_body::{Body as HttpBody, Frame};
-use http_body_util::BodyExt as _;
 use rusty_mcp_server::HttpHandler;
 use rusty_mcp_server::json::Value;
 use rusty_serve::{Body as ServeBody, Request as ServeRequest};
 use rusty_tokio::sync::{mpsc, oneshot};
 
-use crate::body::{Body, BoxError};
+use crate::body::Body;
 
 /// Chunks buffered between the handler's thread and the connection.
 const STREAM_BUFFER: usize = 8;
@@ -58,24 +56,17 @@ impl McpService {
         }
     }
 
-    async fn serve<B>(self, request: Request<B>) -> Response<Body>
-    where
-        B: HttpBody<Data = Bytes> + Send + 'static,
-        B::Error: Into<BoxError>,
-    {
+    /// Answers `request`.
+    pub async fn call(&self, request: Request<Bytes>) -> Response<Body> {
         let (parts, body) = request.into_parts();
+        if body.len() > self.max_body_bytes {
+            return plain(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
+        }
         let target = match parts.uri.query() {
             Some(query) => format!("{}?{query}", self.path),
             None => self.path.to_string(),
         };
         let principal = (self.principal_of)(&parts);
-        let Ok(body) = http_body_util::Limited::new(body, self.max_body_bytes)
-            .collect()
-            .await
-        else {
-            return plain(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
-        };
-        let body = body.to_bytes();
         let mut headers = rusty_http::HeaderMap::new();
         for (name, value) in &parts.headers {
             // A header that is not text cannot matter to the MCP handler.
@@ -84,7 +75,7 @@ impl McpService {
             }
         }
         let method = rusty_http::Method::parse(parts.method.as_str());
-        let handler = self.handler;
+        let handler = Arc::clone(&self.handler);
         let (head_tx, head_rx) = oneshot::channel();
         rusty_tokio::spawn_blocking(move || {
             let request = ServeRequest {
@@ -102,25 +93,6 @@ impl McpService {
             // The handler panicked before answering.
             Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         }
-    }
-}
-
-impl<B> tower_service::Service<Request<B>> for McpService
-where
-    B: HttpBody<Data = Bytes> + Send + 'static,
-    B::Error: Into<BoxError>,
-{
-    type Response = Response<Body>;
-    type Error = Infallible;
-    type Future = Pin<Box<dyn Future<Output = Result<Response<Body>, Infallible>> + Send>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, request: Request<B>) -> Self::Future {
-        let this = self.clone();
-        Box::pin(async move { Ok(this.serve(request).await) })
     }
 }
 
