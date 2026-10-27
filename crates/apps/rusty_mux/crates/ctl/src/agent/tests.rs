@@ -390,46 +390,50 @@ fn private_settings_stay_private() {
 }
 
 /// On Windows every copy is the owner's alone, whatever the directory
-/// grants: a settings file with an explicit owner-only DACL, in the
-/// broader temp directory, stays so through setup, its backup and remove.
+/// grants: a settings file with an explicit owner-only DACL, in a broader
+/// directory whose path has words like `Users` in it, stays so through
+/// setup, its backup, an update and remove. Checked on the security
+/// descriptor itself (SDDL from `Get-Acl`), by SID, not by account names.
 #[cfg(windows)]
 #[test]
 fn private_settings_stay_private_on_windows() {
-    // The access entries icacls lists, without the path it echoes first
-    // (which may itself contain words like `Users`).
-    let acl = |path: &Path| -> Vec<String> {
-        let out = std::process::Command::new("icacls")
-            .arg(path)
+    // The DACL of `path` in SDDL, and the current user's SID.
+    let dacl = |path: &Path| -> (String, String) {
+        let out = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Get-Acl -LiteralPath $env:ACL_PATH).Sddl; \
+                 [Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+            ])
+            .env("ACL_PATH", path)
             .output()
-            .expect("icacls");
+            .expect("powershell");
         assert!(out.status.success(), "{out:?}");
-        let shown = path.display().to_string();
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(|line| {
-                line.trim()
-                    .strip_prefix(&shown)
-                    .unwrap_or(line)
-                    .trim()
-                    .to_owned()
-            })
-            .filter(|entry| entry.contains(":("))
-            .collect()
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+        let sddl = lines.next().expect("sddl").to_owned();
+        let sid = lines.next().expect("sid").to_owned();
+        let dacl = sddl.split_once("D:").expect("a DACL").1;
+        let dacl = dacl.split_once("S:").map_or(dacl, |(d, _)| d).to_owned();
+        (dacl, sid)
     };
-    let user = std::env::var("USERNAME").expect("USERNAME").to_lowercase();
+    // Protected (no inherited entries) with one allow-full-access entry,
+    // for the current user.
     let owner_only = |path: &Path| {
-        let entries = acl(path);
-        let only_ours = matches!(
-            entries.as_slice(),
-            [entry] if entry.to_lowercase().ends_with(&format!("\\{user}:(f)"))
-        );
-        assert!(only_ours, "{}: {entries:?}", path.display());
+        let (dacl, sid) = dacl(path);
+        let (flags, aces) = dacl.split_once('(').expect("an entry");
+        let aces: Vec<&str> = aces.trim_end_matches(')').split(")(").collect();
+        let ok = flags.contains('P') && aces == [format!("A;;FA;;;{sid}").as_str()];
+        assert!(ok, "{}: D:{dacl}", path.display());
     };
-    let dir = scratch();
+    let dir = scratch().join("Users Everyone SYSTEM");
+    fs::create_dir_all(&dir).expect("dir");
+    let (parent, _) = dacl(&dir);
     assert!(
-        acl(&dir).len() > 1,
-        "the parent is broader: {:?}",
-        acl(&dir)
+        parent.matches('(').count() > 1,
+        "the parent is broader: D:{parent}"
     );
     let settings = dir.join("settings.json");
     fs::write(&settings, "{}").expect("write");
@@ -439,7 +443,15 @@ fn private_settings_stay_private_on_windows() {
     assert_eq!(agent(AgentCommand::Setup, &dir, CTL).0, Exit::Ok);
     owner_only(&settings);
     owner_only(&dir.join("settings.json.rusty-mux.bak"));
-    agent(AgentCommand::Remove, &dir, CTL);
+    owner_only(&dir.join("skills").join("rusty-mux").join("SKILL.md"));
+    // An update replaces the file again.
+    assert_eq!(
+        agent(AgentCommand::Setup, &dir, r"C:\moved\rusty-mux-ctl.exe").0,
+        Exit::Ok
+    );
+    owner_only(&settings);
+    assert_eq!(agent(AgentCommand::Remove, &dir, CTL).0, Exit::Ok);
     owner_only(&settings);
     assert_eq!(fs::read_to_string(&settings).expect("read"), "{}");
+    assert!(!dir.join("settings.json.rusty-mux.bak").exists());
 }
