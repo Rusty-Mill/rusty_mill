@@ -124,10 +124,27 @@ fn tools_carry_the_catalog_schema_and_hints() {
     assert_eq!(hint(&close, "destructiveHint"), Some(Value::Bool(true)));
     assert_eq!(hint(&close, "readOnlyHint"), Some(Value::Bool(false)));
     assert_eq!(hint(&close, "openWorldHint"), Some(Value::Bool(false)));
-    let input = tool(known("input"));
-    assert_eq!(hint(&input, "destructiveHint"), Some(Value::Bool(true)));
-    assert_eq!(hint(&input, "openWorldHint"), Some(Value::Bool(true)));
-    assert_eq!(hint(&input, "readOnlyHint"), Some(Value::Bool(false)));
+    for name in ["input", "create-block"] {
+        let runs = tool(known(name));
+        assert_eq!(
+            hint(&runs, "destructiveHint"),
+            Some(Value::Bool(true)),
+            "{name}"
+        );
+        assert_eq!(
+            hint(&runs, "openWorldHint"),
+            Some(Value::Bool(true)),
+            "{name}"
+        );
+        assert_eq!(
+            hint(&runs, "readOnlyHint"),
+            Some(Value::Bool(false)),
+            "{name}"
+        );
+    }
+    let session = tool(known("create-session"));
+    assert_eq!(hint(&session, "destructiveHint"), Some(Value::Bool(false)));
+    assert_eq!(hint(&session, "openWorldHint"), Some(Value::Bool(false)));
 }
 
 #[test]

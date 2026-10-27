@@ -85,16 +85,17 @@ fn tool(method: &Method) -> Tool {
 }
 
 /// Behaviour hints: reads are read-only and closing is destructive.
-/// `input` types into a shell, which can delete data and reach any system,
-/// so it is destructive and open-world; the rest stays on the local server.
+/// `input` types into a shell and `create-block` runs any program it is
+/// given; either can delete data and reach any system, so both are
+/// destructive and open-world. The rest stays on the local server.
 fn annotations(method: &Method) -> Value {
     let read_only = matches!(method.returns, Returns::Text | Returns::Entries);
-    let input = method.name == "input";
-    let destructive = input || method.name.starts_with("close-");
+    let runs = matches!(method.name, "input" | "create-block");
+    let destructive = runs || method.name.starts_with("close-");
     let hints: Map = [
         ("readOnlyHint", read_only),
         ("destructiveHint", destructive),
-        ("openWorldHint", input),
+        ("openWorldHint", runs),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), Value::Bool(v)))
