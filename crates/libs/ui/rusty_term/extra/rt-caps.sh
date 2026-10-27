@@ -50,8 +50,7 @@ Launch rusty_term from the repo root, then run this script in its shell:
   cargo run --release -p rusty_term
   cargo run --release -p rusty_term --features gui -- --gui
   cargo run --release -p rusty_term --features gui-gpu -- --gui --gpu
-Run it from the shell inside rusty_term: when rusty_term runs the script
-itself (-- sh rt-caps.sh), it exits with the child and can drop the last frame.
+Or have rusty_term run it directly: rusty_term -- sh rt-caps.sh
 Windows: run it from WSL (rusty_term -- wsl sh rt-caps.sh) or Git Bash.
 EOF
 }
@@ -545,7 +544,6 @@ main() {
         fi
     done
     printf '\n\033[1mdone:\033[0m %d PASS, %d FAIL (self-checked rows); everything else is by eye.\n' "$PASS" "$FAIL"
-    nap 0.3 # let the last frame paint before a parent rusty_term exits with us
 }
 
 main "$@"

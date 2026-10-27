@@ -28,7 +28,8 @@ use crate::compact::Compactor;
 use crate::core::{AnsiParser, Grid};
 use crate::input::{Scroll, split_input};
 use crate::render::{
-    FRAME_BUDGET, RawModeGuard, RenderState, render_once, resize_grid, restore_host_modes,
+    FRAME_BUDGET, RawModeGuard, RenderState, render_final, render_once, resize_grid,
+    restore_host_modes,
 };
 
 #[cfg(unix)]
@@ -40,8 +41,12 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 #[cfg(windows)]
 use std::io::Read;
-#[cfg(windows)]
 use std::time::Duration;
+
+/// How long shutdown waits for the child's last output after the loop stops,
+/// so it is parsed and painted before the TUI exits. Bounded, because a
+/// grandchild that inherited the PTY can hold its EOF off indefinitely.
+const DRAIN_LIMIT: Duration = Duration::from_millis(250);
 
 /// Signals the render loop to stop when a task ends — on its own, the task's
 /// `running.store(false)` + `frame.notify_one()` only run after the loop body,
@@ -581,9 +586,18 @@ async fn run_async(
     // scope) reaps the child (if the SIGCHLD watcher didn't already win that
     // race) on the explicit call below and on drop; `_raw_guard` restores
     // cooked mode on return.
-    parser_task.abort();
     input_task.abort();
     sigchld_task.abort();
+    // SIGCHLD usually beats the child's last output through the PTY: let the
+    // parser task read on to EOF (bounded) and paint what it parsed.
+    let parser_abort = parser_task.abort_handle();
+    if rusty_tokio::time::timeout(DRAIN_LIMIT, parser_task)
+        .await
+        .is_err()
+    {
+        parser_abort.abort();
+    }
+    render_final(&grid, &mut render_state);
     restore_host_modes();
     let code = exit_status
         .lock()
@@ -591,6 +605,22 @@ async fn run_async(
         .or_else(|| reader.reap_exit_status())
         .unwrap_or(0);
     Ok(code)
+}
+
+/// A quiet gap this long ends the Windows shutdown drain: ConPTY gives no EOF
+/// to wait for, only the end of the child's output.
+#[cfg(windows)]
+const DRAIN_IDLE: Duration = Duration::from_millis(50);
+
+/// Feed one chunk of PTY output to the parser; returns its replies (DA/DSR)
+/// for the child.
+#[cfg(windows)]
+fn parse_chunk(parser: &Mutex<AnsiParser>, grid: &Mutex<Grid>, data: &[u8]) -> Vec<u8> {
+    let mut g = grid.lock();
+    let mut parser = parser.lock();
+    parser.advance(&mut g, data);
+    g.epoch += 1;
+    parser.take_responses()
 }
 
 /// Windows ConPTY driver: the pipes are synchronous (no readiness-pollable fd),
@@ -772,13 +802,7 @@ async fn run_async(
             Wake::Output(data) => {
                 match data {
                     Some(data) => {
-                        let responses = {
-                            let mut g = grid.lock();
-                            let mut parser = parser.lock();
-                            parser.advance(&mut g, &data);
-                            g.epoch += 1;
-                            parser.take_responses()
-                        };
+                        let responses = parse_chunk(&parser, &grid, &data);
                         frame.notify_one();
                         compactor.on_change(Instant::now());
                         if !responses.is_empty() {
@@ -833,6 +857,19 @@ async fn run_async(
         }
     }
 
+    // The exit watcher usually beats the child's last output through ConPTY,
+    // whose pipe only EOFs on our teardown: parse until it goes quiet
+    // (bounded) and paint what arrived.
+    let drain = async {
+        while let Ok(Some(data)) = rusty_tokio::time::timeout(DRAIN_IDLE, out_rx.recv()).await {
+            let responses = parse_chunk(&parser, &grid, &data);
+            if !responses.is_empty() {
+                let _ = in_tx.send(responses);
+            }
+        }
+    };
+    let _ = rusty_tokio::time::timeout(DRAIN_LIMIT, drain).await;
+    render_final(&grid, &mut render_state);
     restore_host_modes();
     // The `exit_token` watcher thread above only stops the event loop; it
     // doesn't fetch the exit code (`WaitForSingleObject` isn't
