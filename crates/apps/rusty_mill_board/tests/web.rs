@@ -534,3 +534,56 @@ fn with_a_shared_token_a_grant_is_that_tokens_caller_and_an_open_board_has_no_oa
         .with_oauth(issuer, std::env::temp_dir().join("never-written.json"));
     assert!(open.is_err_and(|e| e.contains("--identities")));
 }
+
+#[test]
+fn an_actor_named_by_two_credentials_can_neither_approve_nor_use_a_grant() {
+    const HUMAN: &str = "x-human-token-0123456789";
+    const BUILDER: &str = "x-builder-token-0123456";
+    let entry =
+        |token: &str, role: &str| format!(r#"{{"token":"{token}","actor":"x","role":"{role}"}}"#);
+    let parse = |json: String| {
+        rusty_mill_board::identities::Credentials::parse(
+            &json,
+            &Roles::default(),
+            &rusty_mill_board::projects::Projects::default(),
+        )
+        .expect("credentials")
+    };
+    for (first, second) in [
+        (entry(HUMAN, "human"), entry(BUILDER, "builder")),
+        (entry(BUILDER, "builder"), entry(HUMAN, "human")),
+    ] {
+        let addr = start_oauth(Auth::Credentials(
+            parse(format!("[{first},{second}]")).shared(),
+        ));
+        for token in [HUMAN, BUILDER] {
+            let (back, _, _) = consent(addr, token);
+            assert_eq!(
+                location_param(&back, "error").as_deref(),
+                Some("access_denied"),
+                "{token}"
+            );
+            // The board's own tokens still tell the two apart.
+            assert_eq!(api(addr, token, "board_whoami", "{}").0, 200);
+        }
+    }
+
+    // A grant made while the actor was unique is refused once a reload makes it ambiguous.
+    let creds = parse(format!("[{}]", entry(BUILDER, "builder"))).shared();
+    let addr = start_oauth(Auth::Credentials(Arc::clone(&creds)));
+    let access = sign_in(addr, BUILDER);
+    assert_eq!(
+        api(addr, &access, "board_whoami", "{}").1["role"],
+        "builder"
+    );
+    *creds.write().expect("lock") = parse(format!(
+        "[{},{}]",
+        entry(HUMAN, "human"),
+        entry(BUILDER, "builder")
+    ));
+    assert_eq!(
+        api(addr, &access, "board_whoami", "{}").0,
+        401,
+        "no elevation"
+    );
+}

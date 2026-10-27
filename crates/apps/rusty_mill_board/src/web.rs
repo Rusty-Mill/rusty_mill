@@ -6,7 +6,8 @@
 //! grant acts as its holder: the actor's current credential (role and
 //! projects as they are now) under `--identities`, or the shared token's
 //! caller under `--auth-token`. Removing an agent suspends their grants;
-//! rotating their token does not touch them.
+//! rotating their token does not touch them. An actor named by more than one
+//! credential can neither approve a grant nor use one.
 
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
@@ -140,7 +141,9 @@ impl Web {
                 let all = Arc::clone(all);
                 Box::new(move |token: &str| {
                     let all = all.read().unwrap_or_else(PoisonError::into_inner);
-                    all.identify(token).map(|i| Subject::new(i.actor.as_str()))
+                    let actor = &all.identify(token)?.actor;
+                    // The grant names only the actor: refuse one that names several credentials.
+                    all.by_actor(actor).map(|i| Subject::new(i.actor.as_str()))
                 })
             }
         };
