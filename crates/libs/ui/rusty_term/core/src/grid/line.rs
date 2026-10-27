@@ -262,7 +262,8 @@ fn run_len(cells: &[PackedCell]) -> (usize, bool) {
         if !prev.same_run(*c) {
             break;
         }
-        streak = if c.ch() == prev.ch() { streak + 1 } else { 1 };
+        // Same style and layout, so equal cells means equal chars.
+        streak = if c == prev { streak + 1 } else { 1 };
         if streak == MIN_REPEAT {
             return (len + 1 - MIN_REPEAT, false);
         }
@@ -277,8 +278,7 @@ fn repeat_len(cells: &[PackedCell]) -> usize {
 }
 
 fn write_run(w: &mut Writer, run: &[PackedCell], repeat: bool) -> Result<()> {
-    let style = w.resolve(run[0])?;
-    w.style(style)?;
+    w.run_style(run[0])?;
     w.varint((run.len() as u64) << 1 | u64::from(repeat))?;
     if repeat {
         return w.utf8(run[0].ch());

@@ -101,8 +101,19 @@ ragged tails:
 | 200x50 + 10k | 44.32 MB | 0.64 MB | 0.65 MB | 67.3 ms | 18.9 ms | 45.1 ms | 24.6 ms |
 
 Encoding still runs under the server's state borrow, so its time is a stall
-for the server's other blocks. Most of it is the per-cell run scan; the
-existing pre-encode grid validation is about a fifth.
+for the server's other blocks. The table above predates the 8-byte cell.
+Re-measured on 2026-10-27 (`checkpoint::encode` alone, same workload and
+method, a 4-vCPU cloud host; the bytes are identical before and after):
+
+| Grid | before the 8-byte cell (#1058) | 8-byte cell (#1090) | per-run style checks |
+|---|---:|---:|---:|
+| 120x40 + 10k | — | 4.1 ms | 2.2 ms |
+| 200x50 + 10k | 17.0 ms | 5.4 ms | 2.8 ms |
+
+The last column checks each cell's style id once per run while writing,
+instead of in a separate pass over every cell, and finds a run's wire style by
+grid style id instead of hashing the resolved style. Encode instructions fell
+by 46% (callgrind). What remains is the run scan and UTF-8 output.
 `coloured_history_checkpoint_stays_compact` fails if the 200x50 case grows
 past twice the RTSN size.
 Incremental deltas for reconnecting clients are designed in
