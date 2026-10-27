@@ -298,6 +298,16 @@ def specialized_job_flags(
     }
     for job, matching_packages in PACKAGE_JOB_NAMES.items():
         flags[job] = flags.get(job, False) or bool(package_set & matching_packages)
+    # Exercise the compile-only Windows job when its workflow or planner changes,
+    # including CI-only PRs with no affected Cargo package.
+    flags["win32"] |= any(
+        path in {
+            ".github/workflows/ci.yml",
+            ".github/scripts/ci_plan.py",
+            ".github/scripts/test_ci_workflow.py",
+        }
+        for path in paths
+    )
     # Exercise the platform commands when their workflow or selection logic
     # changes, even when Cargo reports no affected crates (including CI-only).
     flags["rand_platforms"] |= any(
