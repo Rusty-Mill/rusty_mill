@@ -46,7 +46,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C21 | Tab indicators | 4 | `rusty_mux` clients | not-started | depends on C20 |
 | C22 | Idle-pane scale (parking) | 5 | `rusty_mux_server` | not-started | spike 5 |
 | C23 | Production controls (limits, audit) | 5 | `rusty_mux_server` | not-started | |
-| C24 | Windows server | 4 | `rusty_mux_server`, `platform::pty` | not-started | spike 1 |
+| C24 | Windows server | 4 | `rusty_mux_server`, `platform::pty` | done | Server, ctl and attach client on Windows over AF_UNIX (#1109, #1136, #1142, #1148); `server/tests/windows.rs`, `server/tests/phase1.rs`, `ctl/tests/ctl.rs` on CI's Windows leg. Limits: RISKS R1, R10–R15 |
 | C25 | Real-login remote, per-user accounts | 3 | `rusty_mux_auth` | not-started | |
 | C26 | Personal / shared / login modes | 3 | `rusty_mux_server` | not-started | |
 | C27 | Identity mapping (Tailscale to account) | 3 | `rusty_mux_auth` | not-started | |

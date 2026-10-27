@@ -48,6 +48,8 @@ Identity, login server mode, roaming transport, sharing. Exit: a remote session 
 
 Web and native clients, ConPTY server and client. Exit: the Phase 1 acceptance suite passes on Windows; web and native clients pass the convergence test.
 
+Windows, ahead of the phase (owner, 2026-10-26): the server, `rusty-mux-ctl`, `rusty-mux-mcp` and the attach client run on Windows (#1109, #1136, #1142, #1148). `server/tests/phase1.rs` passes on CI's Windows leg except `reattach_after_more_than_four_mib_of_real_pty_output`, which stays Linux-only because ConPTY re-renders output. Still Linux-only: the attach client's lifecycle tests, `rusty-mux-mcp`'s stdio tests, and the ctl interrupt, `terminal.pwd`/`title` and `watch` rules tests. Open: spike 1 (R1) and the two-account check (R10).
+
 ## Phase 5: scale and hardening
 
 Parking, encryption at rest, audit. Exit: idle-terminal memory measured with and without parking (spike 5 numbers, ours); parked snapshots are encrypted and round-trip to the same grid (test); an outbound-connection audit of the release finds no egress.
