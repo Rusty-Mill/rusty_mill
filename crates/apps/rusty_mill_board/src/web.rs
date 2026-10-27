@@ -133,8 +133,12 @@ impl Web {
     /// and accept the access tokens it issues on `/api` and `/mcp`. The
     /// issuer's host must be among the accepted hosts.
     ///
+    /// `state_file` is bound to `issuer` on first use, so another board
+    /// pointed at it later is refused rather than honouring this one's grants.
+    ///
     /// # Errors
-    /// On an open board: with no token to paste there is nothing to consent with.
+    /// On an open board (with no token to paste there is nothing to consent
+    /// with), and when `state_file` belongs to another issuer or is unreadable.
     pub fn with_oauth(mut self, issuer: Issuer, state_file: PathBuf) -> Result<Self, String> {
         let verify: Verify = match &self.auth {
             Auth::Open => {
@@ -160,7 +164,11 @@ impl Web {
                 })
             }
         };
-        let provider = Provider::new(verify, StateStore::new(state_file));
+        let store = StateStore::new(state_file);
+        store
+            .bind_issuer(issuer.as_str())
+            .map_err(|e| format!("OAuth state: {e}"))?;
+        let provider = Provider::new(verify, store);
         self.oauth = Some(Endpoints::new(Arc::new(provider), issuer, BRANDING));
         Ok(self)
     }

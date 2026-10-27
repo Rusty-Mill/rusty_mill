@@ -51,7 +51,8 @@ asks for one of the board's own tokens. The grant then acts as that token's agen
 agent's role and projects as they are at each request.
 
 - Existing bearer tokens keep working, OAuth on or off.
-- Grants are kept in `settings/oauth.json` (owner-only). Removing an agent in settings suspends
+- Grants are kept in `settings/oauth.json` (owner-only), which is bound to the issuer on first
+  start: a board started with another issuer on the same file refuses to start. Removing an agent in settings suspends
   their grants; adding an agent of the same name again restores them. Rotating an agent's token
   does not affect their grants. To end every grant, stop the board, delete `oauth.json` and start
   it again; a connector's own disconnect revokes just its grant.

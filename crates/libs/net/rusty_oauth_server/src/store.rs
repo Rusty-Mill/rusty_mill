@@ -49,6 +49,10 @@ pub struct RevokeSummary {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct State {
+    /// The issuer this file's grants were made under; see
+    /// [`StateStore::bind_issuer`]. Absent in files written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    issuer: Option<String>,
     #[serde(default)]
     clients: Map,
     #[serde(default)]
@@ -191,6 +195,42 @@ impl StateStore {
         }
 
         rusty_atomic_file::write_private(&self.path, body.as_bytes())
+    }
+
+    /// Tie this file to `issuer`, so grants made by one server are never
+    /// honoured by another that was pointed at the same file. A file that
+    /// names no issuer yet (new, or written before this existed) is claimed
+    /// for `issuer`.
+    ///
+    /// # Errors
+    /// If the file names a different issuer, exists but does not parse (it
+    /// is never silently replaced), or cannot be written.
+    pub fn bind_issuer(&self, issuer: &str) -> io::Result<()> {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = match self.read_once() {
+            Some(state) => state,
+            None if self.path.exists() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} is not a readable OAuth state file", self.path.display()),
+                ));
+            }
+            None => State::default(),
+        };
+        match state.issuer.as_deref() {
+            Some(bound) if bound == issuer => Ok(()),
+            Some(bound) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} holds the grants of issuer {bound}, not {issuer}: give each server its own state file",
+                    self.path.display()
+                ),
+            )),
+            None => {
+                state.issuer = Some(issuer.to_string());
+                self.write(&state)
+            }
+        }
     }
 
     // -- clients --------------------------------------------------------
@@ -749,5 +789,43 @@ mod compat {
         assert_eq!(clients[0].access_tokens, 1);
         let meta = store.get_token(TokenKind::Access, "live-access").unwrap();
         assert_eq!(meta["client_id"], "c1");
+    }
+
+    #[test]
+    fn a_state_file_is_bound_to_the_first_issuer_and_refuses_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oauth.json");
+        let store = StateStore::new(&path);
+        store
+            .put_token(
+                TokenKind::Access,
+                "a",
+                rusty_json::json!({ "client_id": "c" }),
+            )
+            .unwrap();
+        // A file from before binding existed is claimed, its grants kept.
+        store.bind_issuer("https://a.example").unwrap();
+        store.bind_issuer("https://a.example").unwrap();
+        assert!(store.get_token(TokenKind::Access, "a").is_some());
+        // Another server pointed at it is refused, and changes nothing.
+        let other = StateStore::new(&path);
+        let refused = other.bind_issuer("https://b.example").unwrap_err();
+        assert!(
+            refused.to_string().contains("https://a.example"),
+            "{refused}"
+        );
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("https://a.example"));
+
+        fs::write(&path, "not json").unwrap();
+        assert!(StateStore::new(&path)
+            .bind_issuer("https://a.example")
+            .is_err());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "not json",
+            "never replaced"
+        );
     }
 }

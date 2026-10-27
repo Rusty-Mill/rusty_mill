@@ -136,8 +136,9 @@ struct Cli {
     /// page takes one of the board's own tokens. Its host is accepted as a Host name.
     #[arg(long, env = "MILL_BOARD_ISSUER")]
     issuer: Option<String>,
-    /// Where OAuth keeps its grants (owner-only JSON). Default: `oauth.json` in
-    /// --settings-dir, else beside --identities.
+    /// Where OAuth keeps its grants (owner-only JSON), bound to the issuer on first use.
+    /// Default: `oauth.json` in --settings-dir, else `<identities stem>.oauth.json` beside
+    /// --identities.
     #[arg(long, env = "MILL_BOARD_OAUTH_STATE", requires = "issuer")]
     oauth_state: Option<PathBuf>,
     /// Accepted Host names (HTTP only).
@@ -168,15 +169,21 @@ fn oauth(cli: &Cli, files: &Files) -> Result<Option<(Issuer, PathBuf)>, String> 
     let state = cli
         .oauth_state
         .clone()
-        .or_else(|| cli.settings_dir.as_ref().map(|d| d.join(OAUTH_STATE)))
-        .or_else(|| {
-            files
-                .identities
-                .as_ref()
-                .map(|i| i.with_file_name(OAUTH_STATE))
-        })
+        .or_else(|| default_oauth_state(cli.settings_dir.as_deref(), files.identities.as_deref()))
         .ok_or("--issuer needs --oauth-state, --settings-dir or --identities to keep grants in")?;
     Ok(Some((issuer, state)))
+}
+
+/// Where a board keeps its grants by default: `oauth.json` in its settings
+/// directory, else `<identities stem>.oauth.json` beside its identities file,
+/// so two boards whose identities share a directory do not share grants.
+fn default_oauth_state(settings_dir: Option<&Path>, identities: Option<&Path>) -> Option<PathBuf> {
+    if let Some(dir) = settings_dir {
+        return Some(dir.join(OAUTH_STATE));
+    }
+    let identities = identities?;
+    let stem = identities.file_stem()?.to_string_lossy();
+    Some(identities.with_file_name(format!("{stem}.{OAUTH_STATE}")))
 }
 
 /// A file named by its own flag must exist; one found through `--settings-dir` may be missing.
@@ -391,5 +398,23 @@ fn main() -> ExitCode {
             eprintln!("rusty_mill_board: {why}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_board_gets_its_own_default_oauth_state() {
+        let a = default_oauth_state(None, Some(Path::new("/cfg/a.json")));
+        let b = default_oauth_state(None, Some(Path::new("/cfg/b.json")));
+        assert_eq!(a.as_deref(), Some(Path::new("/cfg/a.oauth.json")));
+        assert_eq!(b.as_deref(), Some(Path::new("/cfg/b.oauth.json")));
+        assert_eq!(
+            default_oauth_state(Some(Path::new("/s")), Some(Path::new("/cfg/a.json"))).as_deref(),
+            Some(Path::new("/s/oauth.json"))
+        );
+        assert_eq!(default_oauth_state(None, None), None);
     }
 }

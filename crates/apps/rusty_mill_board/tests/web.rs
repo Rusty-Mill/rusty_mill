@@ -328,6 +328,18 @@ fn start_oauth(auth: Auth) -> SocketAddr {
 
 /// [`start_oauth`] under `issuer`, accepting 127.0.0.1 and the issuer's hosts as `main` does.
 fn start_oauth_at(auth: Auth, issuer: &str) -> SocketAddr {
+    let state = std::env::temp_dir()
+        .join(format!("mill-board-oauth-{}", uuid::Uuid::new_v4()))
+        .join("oauth.json");
+    start_oauth_with(auth, issuer, state).expect("oauth")
+}
+
+/// A board under `issuer` keeping its grants in `state`, or why it refused.
+fn start_oauth_with(
+    auth: Auth,
+    issuer: &str,
+    state: std::path::PathBuf,
+) -> Result<SocketAddr, String> {
     let issuer = rusty_oauth_server::validate_issuer(issuer).expect("issuer");
     let mut hosts = vec!["127.0.0.1".to_owned()];
     hosts.extend(rusty_mill_board::web::issuer_hosts(&issuer));
@@ -338,19 +350,14 @@ fn start_oauth_at(auth: Auth, issuer: &str) -> SocketAddr {
     };
     let path = config.path.clone();
     let mcp = HttpHandler::new(mcp::server(board.clone()).expect("server"), config);
-    let state = std::env::temp_dir()
-        .join(format!("mill-board-oauth-{}", uuid::Uuid::new_v4()))
-        .join("oauth.json");
-    let web = Web::new(board, mcp, path, hosts, auth)
-        .with_oauth(issuer, state)
-        .expect("oauth");
+    let web = Web::new(board, mcp, path, hosts, auth).with_oauth(issuer, state)?;
     let server =
         rusty_serve::Server::bind_shared("127.0.0.1:0".parse().expect("addr"), web).expect("bind");
     let addr = server.local_addr().expect("addr");
     std::thread::spawn(move || {
         let _ = server.run();
     });
-    addr
+    Ok(addr)
 }
 
 const FORM: (&str, &str) = ("Content-Type", "application/x-www-form-urlencoded");
@@ -639,4 +646,40 @@ fn an_ipv6_issuer_is_reachable_through_the_web_guard_and_mcp_alike() {
         403,
         "another address is still refused"
     );
+}
+
+#[test]
+fn a_grant_file_belongs_to_one_board() {
+    let dir = std::env::temp_dir().join(format!("mill-board-oauth-{}", uuid::Uuid::new_v4()));
+    let state = dir.join("oauth.json");
+    let a = "http://localhost:8787";
+    let first = start_oauth_with(Auth::Credentials(credentials()), a, state.clone()).expect("a");
+    let access = sign_in(first, CLAUDE_TOKEN);
+
+    // Another board pointed at the same file, by mistake, refuses to start.
+    let other = start_oauth_with(
+        Auth::Credentials(credentials()),
+        "http://127.0.0.1:8789",
+        state.clone(),
+    );
+    assert!(
+        other.is_err_and(|e| e.contains(a)),
+        "another issuer is refused"
+    );
+
+    // The same board started again keeps its grants.
+    let again = start_oauth_with(Auth::Credentials(credentials()), a, state).expect("a again");
+    assert_eq!(
+        api(again, &access, "board_whoami", "{}").1["actor"],
+        "claude"
+    );
+
+    // A board with its own file does not know A's grant.
+    let b = start_oauth_with(
+        Auth::Credentials(credentials()),
+        "http://127.0.0.1:8789",
+        dir.join("b.oauth.json"),
+    )
+    .expect("b");
+    assert_eq!(api(b, &access, "board_whoami", "{}").0, 401);
 }
