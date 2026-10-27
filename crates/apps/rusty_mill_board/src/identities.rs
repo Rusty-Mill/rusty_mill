@@ -271,6 +271,13 @@ impl Credentials {
 
     /// Whose token this is. Compares against every entry, so timing does not
     /// reveal which entry matched or how much of a token was right.
+    /// The current identity of `actor`, if they still hold a credential: what
+    /// an OAuth grant made by that actor acts as.
+    pub fn by_actor(&self, actor: &str) -> Option<&Identity> {
+        self.0.iter().map(|(_, i)| i).find(|i| i.actor == actor)
+    }
+
+    /// The identity a token belongs to.
     pub fn identify(&self, token: &str) -> Option<&Identity> {
         let mut found = None;
         for (candidate, identity) in &self.0 {

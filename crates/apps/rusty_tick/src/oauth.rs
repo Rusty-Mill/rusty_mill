@@ -1,7 +1,7 @@
 //! OAuth 2.1 for `/mcp`, so a client such as a claude.ai custom connector
 //! can sign in instead of being handed a bearer token. The authorization
-//! server is [`rusty_oauth_server`]; this file only adapts it to
-//! [`rusty_serve`] and to rusty_tick's users.
+//! server is [`rusty_oauth_server`] (its `serve` adapter); this file only
+//! connects it to rusty_tick's users.
 //!
 //! On when `RUSTY_TICK_ISSUER` names the public origin (an https URL, or
 //! http on localhost). The consent page asks for one of the server's own
@@ -21,10 +21,7 @@
 //! - Deleting `oauth.json` with the server stopped ends every grant.
 
 use crate::backend::Backend;
-use rusty_http::{Method, StatusCode};
-use rusty_oauth_server::{
-    now_unix, Branding, Endpoints, Issuer, Provider, StateStore, Subject, Verify,
-};
+use rusty_oauth_server::{Branding, Endpoints, Issuer, Provider, StateStore, Subject, Verify};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -71,43 +68,4 @@ fn verifier(backend: Weak<Mutex<Backend>>) -> Verify {
             .verify(token)
             .map(|user| Subject::new(user.as_str()))
     })
-}
-
-/// The OAuth answer to `request`, or `None` for any other path.
-pub(crate) fn handle(
-    endpoints: &Endpoints,
-    request: &rusty_serve::Request<'_>,
-) -> Option<rusty_serve::Response> {
-    let (path, query) = request
-        .target
-        .split_once('?')
-        .unwrap_or((request.target, ""));
-    let method = match request.method {
-        Method::Get => rusty_oauth_server::Method::Get,
-        Method::Post => rusty_oauth_server::Method::Post,
-        _ => rusty_oauth_server::Method::Other,
-    };
-    let oauth_request = rusty_oauth_server::Request {
-        method,
-        path,
-        query,
-        body: request.body,
-    };
-    endpoints.handle(&oauth_request, now_unix()).map(to_serve)
-}
-
-/// `response` as [`rusty_serve`] sends it.
-pub(crate) fn to_serve(response: rusty_oauth_server::Response) -> rusty_serve::Response {
-    let status = StatusCode::from_u16(response.status);
-    let headers = response.headers;
-    headers
-        .iter()
-        .try_fold(
-            rusty_serve::Response::json(status, response.body),
-            |out, (name, value)| out.with_header(name, value),
-        )
-        .unwrap_or_else(|error| {
-            eprintln!("rusty_tick: an OAuth response header was refused: {error}");
-            rusty_serve::Response::internal_error()
-        })
 }

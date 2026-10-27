@@ -21,6 +21,12 @@ rusty_atomic_file = { workspace = true }
 rusty_json = { workspace = true }
 rusty_url = { workspace = true }
 serde = { workspace = true }
+# The `serve` adapter, for servers on rusty_serve (rusty_tick, Mill Board).
+rusty_serve = { workspace = true, optional = true }
+rusty_http = { workspace = true, optional = true }
+
+[features]
+serve = ["dep:rusty_serve", "dep:rusty_http"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

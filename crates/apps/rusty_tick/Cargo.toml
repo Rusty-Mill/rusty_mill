@@ -14,7 +14,7 @@ layer = "apps"
 [dependencies]
 rusty_oauth = { workspace = true }
 # OAuth 2.1 sign-in for `/mcp` (claude.ai connectors), beside the bearer tokens.
-rusty_oauth_server = { workspace = true }
+rusty_oauth_server = { workspace = true, features = ["serve"] }
 rusty_crypto_key = { workspace = true }
 rusty_atomic_file = { workspace = true }
 rusty_multimodal_db_engine = { workspace = true }

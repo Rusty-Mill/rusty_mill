@@ -10,7 +10,8 @@
 //! Add `--identities FILE` for a token per model, each bound to an actor and role.
 //! The HTTP mode serves the UI at `/`, the web API at `/api/<op>` and MCP at
 //! `/mcp`; open `http://127.0.0.1:8787/#token=S` for the UI. `GET /health` answers
-//! 200 while the store can commit and 503 once it needs a restart. SIGTERM and
+//! 200 while the store can commit and 503 once it needs a restart. `--issuer
+//! https://board.example.com` adds OAuth sign-in for claude.ai connectors. SIGTERM and
 //! SIGINT stop the server cleanly.
 
 use std::io::IsTerminal;
@@ -34,6 +35,10 @@ use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
 use rusty_mill_board::tick::{TickHttp, TickStore};
 use rusty_mill_board::web::{Auth, Web, check_bind};
+use rusty_oauth_server::{Issuer, validate_issuer};
+
+/// OAuth's grant file, by default.
+const OAUTH_STATE: &str = "oauth.json";
 
 /// How long a stop waits for running requests before it ends them.
 const DRAIN: Duration = Duration::from_secs(10);
@@ -126,6 +131,15 @@ struct Cli {
     /// port can act as any role, including human. Almost never what you want.
     #[arg(long)]
     accept_unauthenticated_public: bool,
+    /// Serve OAuth sign-in for /mcp under this public origin (an https URL, e.g.
+    /// `https://board.example.com`), so a claude.ai connector can "Sign in now". The consent
+    /// page takes one of the board's own tokens. Its host is accepted as a Host name.
+    #[arg(long, env = "MILL_BOARD_ISSUER")]
+    issuer: Option<String>,
+    /// Where OAuth keeps its grants (owner-only JSON). Default: `oauth.json` in
+    /// --settings-dir, else beside --identities.
+    #[arg(long, env = "MILL_BOARD_OAUTH_STATE", requires = "issuer")]
+    oauth_state: Option<PathBuf>,
     /// Accepted Host names (HTTP only).
     #[arg(long = "allowed-host", env = "MILL_BOARD_ALLOWED_HOSTS", value_delimiter = ',', default_values_t = ["127.0.0.1".to_owned(), "localhost".to_owned(), "[::1]".to_owned()])]
     allowed_hosts: Vec<String>,
@@ -143,6 +157,26 @@ fn files(cli: &Cli) -> Files {
     files.roles = cli.roles.clone().or(files.roles);
     files.github = cli.github_config.clone().or(files.github);
     files
+}
+
+/// The issuer and grant file, when OAuth is on.
+fn oauth(cli: &Cli, files: &Files) -> Result<Option<(Issuer, PathBuf)>, String> {
+    let Some(raw) = &cli.issuer else {
+        return Ok(None);
+    };
+    let issuer = validate_issuer(raw).map_err(|e| format!("--issuer {raw:?}: {e}"))?;
+    let state = cli
+        .oauth_state
+        .clone()
+        .or_else(|| cli.settings_dir.as_ref().map(|d| d.join(OAUTH_STATE)))
+        .or_else(|| {
+            files
+                .identities
+                .as_ref()
+                .map(|i| i.with_file_name(OAUTH_STATE))
+        })
+        .ok_or("--issuer needs --oauth-state, --settings-dir or --identities to keep grants in")?;
+    Ok(Some((issuer, state)))
 }
 
 /// A file named by its own flag must exist; one found through `--settings-dir` may be missing.
@@ -283,8 +317,13 @@ fn run(cli: Cli) -> Result<(), String> {
     {
         return Err("--auth-token is empty".into());
     }
+    let oauth = oauth(&cli, &files)?;
+    let mut allowed_hosts = cli.allowed_hosts.clone();
+    if let Some((issuer, _)) = &oauth {
+        allowed_hosts.push(issuer.host());
+    }
     let config = HttpConfig {
-        allowed_hosts: cli.allowed_hosts.clone(),
+        allowed_hosts: allowed_hosts.clone(),
         ..HttpConfig::default()
     };
     let mcp_path = config.path.clone();
@@ -305,15 +344,19 @@ fn run(cli: Cli) -> Result<(), String> {
     };
     check_bind(addr, &auth, cli.accept_unauthenticated_public)?;
     let settings = Arc::new(Settings::new(board.clone(), files, creds, syncer, github));
-    let web = Web::new(
+    let mut web = Web::new(
         board.clone(),
         HttpHandler::new(server, config),
         mcp_path,
-        cli.allowed_hosts,
+        allowed_hosts,
         auth,
     )
     .with_settings(settings.clone())
     .with_in_flight(in_flight.clone());
+    if let Some((issuer, state)) = oauth {
+        rusty_log::info!(%issuer, state = %state.display(), "OAuth sign-in on");
+        web = web.with_oauth(issuer, state)?;
+    }
     let http = rusty_serve::Server::bind_shared(addr, web)
         .map_err(|e| format!("cannot bind {addr}: {e}"))?;
     stop_on_signal(

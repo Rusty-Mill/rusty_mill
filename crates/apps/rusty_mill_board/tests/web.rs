@@ -315,3 +315,222 @@ fn mcp_calls_carry_the_callers_identity() {
             .contains("fixed by your credential")
     );
 }
+
+// ---- OAuth ---------------------------------------------------------------
+
+const ISSUER: &str = "http://localhost:8787";
+const CALLBACK: &str = "https%3A%2F%2Fclaude.ai%2Fcb";
+
+/// A board signing in under [`ISSUER`] with `auth`, its grants in a fresh directory.
+fn start_oauth(auth: Auth) -> SocketAddr {
+    let board: Arc<Shared> = Arc::new(Board::new(Box::new(MemStore::default()), Roles::default()));
+    let config = HttpConfig {
+        allowed_hosts: vec!["127.0.0.1".into()],
+        ..HttpConfig::default()
+    };
+    let path = config.path.clone();
+    let mcp = HttpHandler::new(mcp::server(board.clone()).expect("server"), config);
+    let state = std::env::temp_dir()
+        .join(format!("mill-board-oauth-{}", uuid::Uuid::new_v4()))
+        .join("oauth.json");
+    let issuer = rusty_oauth_server::validate_issuer(ISSUER).expect("issuer");
+    let web = Web::new(board, mcp, path, vec!["127.0.0.1".into()], auth)
+        .with_oauth(issuer, state)
+        .expect("oauth");
+    let server =
+        rusty_serve::Server::bind_shared("127.0.0.1:0".parse().expect("addr"), web).expect("bind");
+    let addr = server.local_addr().expect("addr");
+    std::thread::spawn(move || {
+        let _ = server.run();
+    });
+    addr
+}
+
+const FORM: (&str, &str) = ("Content-Type", "application/x-www-form-urlencoded");
+
+/// `name`'s value in a redirect's `Location` query.
+fn location_param(raw: &str, name: &str) -> Option<String> {
+    let location = raw.lines().find_map(|l| {
+        l.strip_prefix("location: ")
+            .or_else(|| l.strip_prefix("Location: "))
+    })?;
+    let query = location.split_once('?')?.1;
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix(&format!("{name}=")))
+        .map(str::to_owned)
+}
+
+/// One raw exchange, headers included.
+fn raw(addr: SocketAddr, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> String {
+    let mut out = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    for (k, v) in headers {
+        out.push_str(&format!("{k}: {v}\r\n"));
+    }
+    out.push_str("\r\n");
+    out.push_str(body);
+    let mut sock = TcpStream::connect(addr).expect("connect");
+    sock.write_all(out.as_bytes()).expect("write");
+    let mut reply = String::new();
+    sock.read_to_string(&mut reply).expect("read");
+    reply
+}
+
+/// Register, authorize and consent with `token`: the redirect back to the client.
+fn consent(addr: SocketAddr, token: &str) -> (String, String, String) {
+    let (status, client) = send(
+        addr,
+        "POST",
+        "/register",
+        &[JSON],
+        r#"{"redirect_uris":["https://claude.ai/cb"]}"#,
+    );
+    assert_eq!(status, 201, "{client}");
+    let client: serde_json::Value = serde_json::from_str(&client).expect("client");
+    let client_id = client["client_id"].as_str().expect("id").to_owned();
+    let verifier = "v".repeat(64);
+    let challenge = rusty_oauth::pkce::Pkce::from_verifier(
+        verifier.clone(),
+        rusty_oauth::pkce::CodeChallengeMethod::S256,
+    )
+    .expect("pkce")
+    .code_challenge;
+    let authorize = raw(
+        addr,
+        "GET",
+        &format!(
+            "/authorize?response_type=code&client_id={client_id}&redirect_uri={CALLBACK}&code_challenge={challenge}&code_challenge_method=S256"
+        ),
+        &[],
+        "",
+    );
+    let txn = location_param(&authorize, "txn").expect("txn");
+    let back = raw(
+        addr,
+        "POST",
+        "/consent",
+        &[FORM],
+        &format!("txn={txn}&owner_token={token}&action=approve"),
+    );
+    (back, client_id, verifier)
+}
+
+/// The whole sign-in with `token`: an OAuth access token.
+fn sign_in(addr: SocketAddr, token: &str) -> String {
+    let (back, client_id, verifier) = consent(addr, token);
+    let code = location_param(&back, "code").expect("code");
+    let (status, issued) = send(
+        addr,
+        "POST",
+        "/token",
+        &[FORM],
+        &format!(
+            "grant_type=authorization_code&code={code}&client_id={client_id}&redirect_uri={CALLBACK}&code_verifier={verifier}"
+        ),
+    );
+    assert_eq!(status, 200, "{issued}");
+    let issued: serde_json::Value = serde_json::from_str(&issued).expect("tokens");
+    issued["access_token"].as_str().expect("access").to_owned()
+}
+
+fn credentials() -> Arc<std::sync::RwLock<rusty_mill_board::identities::Credentials>> {
+    let json = format!(
+        r#"[{{"token":"{CLAUDE_TOKEN}","actor":"claude","role":"builder"}},{{"token":"{CODEX_TOKEN}","actor":"codex","role":"reviewer"}}]"#
+    );
+    rusty_mill_board::identities::Credentials::parse(
+        &json,
+        &Roles::default(),
+        &rusty_mill_board::projects::Projects::default(),
+    )
+    .expect("credentials")
+    .shared()
+}
+
+#[test]
+fn an_oauth_grant_acts_as_the_agent_who_approved_it_until_they_are_removed() {
+    let creds = credentials();
+    let addr = start_oauth(Auth::Credentials(Arc::clone(&creds)));
+
+    let metadata = send(
+        addr,
+        "GET",
+        "/.well-known/oauth-authorization-server",
+        &[],
+        "",
+    );
+    assert_eq!(metadata.0, 200);
+    assert!(metadata.1.contains(ISSUER), "{}", metadata.1);
+    let accept = ("Accept", "application/json, text/event-stream");
+    let refused = raw(addr, "POST", "/mcp", &[JSON, accept], "{}");
+    assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
+    assert!(
+        refused.contains(&format!(
+            "resource_metadata=\"{ISSUER}/.well-known/oauth-protected-resource/mcp\""
+        )),
+        "{refused}"
+    );
+
+    let claude = sign_in(addr, CLAUDE_TOKEN);
+    let (status, me) = api(addr, &claude, "board_whoami", "{}");
+    assert_eq!(
+        (status, me["actor"].clone(), me["role"].clone()),
+        (200, "claude".into(), "builder".into())
+    );
+    let codex = sign_in(addr, CODEX_TOKEN);
+    assert_eq!(api(addr, &codex, "board_whoami", "{}").1["actor"], "codex");
+    let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    let (k, v) = bearer(&claude);
+    assert_eq!(
+        send(addr, "POST", "/mcp", &[JSON, accept, (k, &v)], call).0,
+        200
+    );
+
+    // A role change applies to the grant at once; removing the agent suspends it.
+    creds
+        .write()
+        .expect("lock")
+        .update("claude", Some("qa".into()), None)
+        .expect("update");
+    assert_eq!(api(addr, &claude, "board_whoami", "{}").1["role"], "qa");
+    creds
+        .write()
+        .expect("lock")
+        .remove("claude")
+        .expect("remove");
+    assert_eq!(api(addr, &claude, "board_whoami", "{}").0, 401);
+    assert_eq!(api(addr, &codex, "board_whoami", "{}").0, 200);
+}
+
+#[test]
+fn consent_takes_only_the_boards_own_tokens() {
+    let addr = start_oauth(Auth::Credentials(credentials()));
+    let access = sign_in(addr, CLAUDE_TOKEN);
+    for token in [access.as_str(), "nope-nope-nope-nope"] {
+        let (back, _, _) = consent(addr, token);
+        assert_eq!(
+            location_param(&back, "error").as_deref(),
+            Some("access_denied"),
+            "{token}"
+        );
+    }
+}
+
+#[test]
+fn with_a_shared_token_a_grant_is_that_tokens_caller_and_an_open_board_has_no_oauth() {
+    let addr = start_oauth(Auth::from(Some("shared-token-0123456789")));
+    let access = sign_in(addr, "shared-token-0123456789");
+    let (status, me) = api(addr, &access, "board_whoami", "{}");
+    assert_eq!((status, me["authenticated"].clone()), (200, false.into()));
+
+    let board: Arc<Shared> = Arc::new(Board::new(Box::new(MemStore::default()), Roles::default()));
+    let config = HttpConfig::default();
+    let path = config.path.clone();
+    let mcp = HttpHandler::new(mcp::server(board.clone()).expect("server"), config);
+    let issuer = rusty_oauth_server::validate_issuer(ISSUER).expect("issuer");
+    let open = Web::new(board, mcp, path, vec![], Auth::Open)
+        .with_oauth(issuer, std::env::temp_dir().join("never-written.json"));
+    assert!(open.is_err_and(|e| e.contains("--identities")));
+}
