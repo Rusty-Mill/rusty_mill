@@ -25,6 +25,8 @@ pub(crate) struct Capture {
 
 /// The last `history` scrollback lines and the screen, one line per row
 /// (per wrapped run with `unwrap`) without trailing blanks, joined by `\n`.
+/// A blank left where a wide glyph did not fit is kept: the grid stores it
+/// as it does a typed space, and dropping a typed one would lose text.
 /// Stops once the text passes `max` bytes; the caller refuses a reply that
 /// large.
 pub(crate) fn format(grid: &Grid, capture: Capture, max: usize) -> String {
@@ -38,10 +40,6 @@ pub(crate) fn format(grid: &Grid, capture: Capture, max: usize) -> String {
         let Some((mut cells, wrapped)) = grid.line_cells(abs) else {
             break;
         };
-        // A wide glyph that did not fit left a blank before it wrapped.
-        if run.last().is_some_and(is_padding) && cells.get(1).is_some_and(is_trailer) {
-            run.pop();
-        }
         if capture.unwrap && wrapped && abs + 1 < end {
             cells.resize(grid.cols.max(cells.len()), Cell::blank());
             run.append(&mut cells);
@@ -450,14 +448,25 @@ mod tests {
     }
 
     #[test]
-    fn unwrap_drops_the_blank_a_wide_glyph_left() {
-        // The wide glyph does not fit in column 3, so it wraps.
-        let grid = screen(4, 2, "abc\u{4e2d}".as_bytes());
+    fn unwrap_keeps_the_blank_before_a_wrapped_wide_glyph() {
         let unwrap = Capture {
             unwrap: true,
             ..capture(0)
         };
-        assert_eq!(format(&grid, unwrap, usize::MAX), "abc\u{4e2d}");
+        let vt = Capture { vt: true, ..unwrap };
+        // A typed space fills column 3, then the wide glyph wraps.
+        let typed = screen(4, 2, "abc \u{4e2d}".as_bytes());
+        assert_eq!(format(&typed, unwrap, usize::MAX), "abc \u{4e2d}");
+        // The glyph does not fit in column 3 and wraps; the blank it left
+        // is stored as a typed space would be, so it is kept too.
+        let skipped = screen(4, 2, "abc\u{4e2d}".as_bytes());
+        assert_eq!(format(&skipped, unwrap, usize::MAX), "abc \u{4e2d}");
+        // A styled blank is kept, with its style.
+        let styled = screen(4, 2, "abc\x1b[41m \x1b[0m\u{4e2d}".as_bytes());
+        assert_eq!(format(&styled, unwrap, usize::MAX), "abc \u{4e2d}");
+        let text = format(&styled, vt, usize::MAX);
+        assert!(text.starts_with("abc\x1b[0;48;2;"), "{text:?}");
+        assert!(text.ends_with(" \x1b[0m\u{4e2d}"), "{text:?}");
     }
 
     #[test]
