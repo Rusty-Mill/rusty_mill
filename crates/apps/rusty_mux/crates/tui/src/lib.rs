@@ -18,10 +18,28 @@ use rusty_term_core::{Grid, WIDE_TRAILER};
 /// Written on every exit after raw output stops: leaves the alternate
 /// screen, soft-resets (DECSTR: pen, cursor visibility and keys, margins,
 /// charsets), restores the numeric keypad and turns off bracketed paste,
-/// mouse and focus reporting. A block's program may have set any of them on
-/// this terminal through the passthrough.
+/// mouse and focus reporting and win32-input-mode. A block's program may
+/// have set any of them on this terminal through the passthrough.
 pub const RESTORE: &[u8] = b"\x1b[?1049l\x1b[!p\x1b[?25h\x1b>\x1b[?2004l\
-\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[0m";
+\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?9001l\x1b[0m";
+
+/// Turns win32-input-mode (DEC `?9001`) off. The client reads the keyboard
+/// itself, for its Ctrl-] commands, so the local terminal must send plain
+/// VT keys; a Windows server's pseudo console asks for the mode at start
+/// and takes plain VT input as well.
+const NO_WIN32_INPUT: &[u8] = b"\x1b[?9001l";
+
+/// A block's raw `data` as written to the local terminal while it passes
+/// through: unchanged, then win32-input-mode turned back off if the
+/// program, `grid` having just parsed `data`, asked for it.
+pub fn passthrough(grid: &Grid, data: &[u8]) -> Vec<u8> {
+    let off = if grid.win32_input {
+        NO_WIN32_INPUT
+    } else {
+        b""
+    };
+    [data, off].concat()
+}
 
 /// Repaints the local terminal from a restored grid: every visible row
 /// with its colours, then the cursor. Attributes other than colour are not
@@ -76,7 +94,8 @@ pub fn pass(grid: &Grid) -> Vec<u8> {
 
 /// The input modes `grid`'s program set, each as a sequence that sets it on
 /// the local terminal or clears it: cursor and keypad keys, bracketed
-/// paste, alternate scroll and win32 input. With `whole` the block has the
+/// paste and alternate scroll; win32 input stays off (see [`passthrough`]).
+/// With `whole` the block has the
 /// whole terminal, so its mouse and focus reports and its cursor's
 /// visibility go too; otherwise those are cleared, as screen coordinates
 /// and focus belong to the composed screen.
@@ -88,7 +107,7 @@ pub fn modes(grid: &Grid, whole: bool) -> Vec<u8> {
     dec(1, grid.app_cursor_keys);
     dec(2004, grid.bracketed_paste);
     dec(1007, grid.alt_scroll);
-    dec(9001, grid.win32_input);
+    dec(9001, false);
     dec(1004, whole && grid.focus_reporting);
     let mouse = grid.mouse_modes;
     for mode in [1000, 1002, 1003] {
@@ -176,6 +195,24 @@ mod tests {
             assert!(part.contains(&format!("\x1b[{set}")), "{set}: {part:?}");
         }
         assert!(!part.contains("?25"));
+    }
+
+    #[test]
+    fn win32_input_mode_never_reaches_the_local_terminal() {
+        let mut grid = Grid::new(20, 3);
+        let mut parser = AnsiParser::new();
+        assert_eq!(passthrough(&grid, b"hi"), b"hi");
+        // What a Windows pseudo console writes when it starts.
+        let start = b"\x1b[?9001h\x1b[?1004h";
+        parser.advance(&mut grid, start);
+        assert!(grid.win32_input);
+        assert_eq!(
+            passthrough(&grid, start),
+            b"\x1b[?9001h\x1b[?1004h\x1b[?9001l"
+        );
+        let modes = String::from_utf8(modes(&grid, true)).unwrap();
+        assert!(modes.contains("\x1b[?9001l"), "{modes:?}");
+        assert!(String::from_utf8_lossy(RESTORE).contains("\x1b[?9001l"));
     }
 
     #[test]

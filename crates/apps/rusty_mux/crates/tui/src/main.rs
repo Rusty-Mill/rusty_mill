@@ -3,7 +3,9 @@
 //! creates a session, window and block first. Ctrl-] then `d` detaches;
 //! the blocks keep running and the focused one's id is printed for
 //! reattaching. The other Ctrl-] commands are listed in
-//! `rusty_mux_tui::keys`.
+//! `rusty_mux_tui::keys`. With `RUSTY_MUX_KEYLOG` set to a path, every
+//! keyboard read is appended to that file as one line of hex, to see what a
+//! terminal really sends.
 
 use std::process::ExitCode;
 
@@ -54,7 +56,7 @@ mod client {
     use rusty_mux_server::checkpoint::Receiver;
     use rusty_mux_tui::keys::{Action, Keys};
     use rusty_mux_tui::screen::{self, Frame, View};
-    use rusty_mux_tui::{Conn, RESTORE, modes, pass};
+    use rusty_mux_tui::{Conn, RESTORE, modes, pass, passthrough};
     use rusty_term_core::{AnsiParser, Grid};
     use rusty_uuid::Uuid;
 
@@ -144,9 +146,10 @@ mod client {
             let tx = tx.clone();
             std::thread::spawn(move || read(conn, &tx, Input::Control, None))
         };
+        let keylog = keylog()?;
         term.enter_raw().map_err(|e| format!("raw mode: {e:?}"))?;
         let stop = Arc::new(AtomicBool::new(false));
-        let keyboard = keyboard(tx.clone(), stop.clone());
+        let keyboard = keyboard(tx.clone(), stop.clone(), keylog);
         let mut app = App {
             socket,
             tx,
@@ -216,9 +219,29 @@ mod client {
         let _ = tx.send(Input::Ended(pane));
     }
 
+    /// The file `RUSTY_MUX_KEYLOG` names, opened for appending; `None`
+    /// when it is unset.
+    fn keylog() -> Result<Option<std::fs::File>, String> {
+        let Some(path) = std::env::var_os("RUSTY_MUX_KEYLOG") else {
+            return Ok(None);
+        };
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map(Some)
+            .map_err(|e| format!("RUSTY_MUX_KEYLOG {}: {e}", Path::new(&path).display()))
+    }
+
     /// Reads the keyboard into the main loop until `stop`; an empty read
-    /// means the keyboard is gone.
-    fn keyboard(tx: Sender<Input>, stop: Arc<AtomicBool>) -> JoinHandle<()> {
+    /// means the keyboard is gone. Each read goes to `keylog` too, as a
+    /// line of hex; logging stops at the first failed write, since the
+    /// terminal is raw and has nowhere to report it.
+    fn keyboard(
+        tx: Sender<Input>,
+        stop: Arc<AtomicBool>,
+        mut keylog: Option<std::fs::File>,
+    ) -> JoinHandle<()> {
         std::thread::spawn(move || {
             let term = Term::new();
             let mut buf = [0u8; 4096];
@@ -228,6 +251,12 @@ mod client {
                     Ok(true) => term.read_chunk(&mut buf).unwrap_or(0),
                     Err(_) => 0,
                 };
+                if let Some(file) = keylog.as_mut() {
+                    let hex: String = buf[..n].iter().map(|b| format!("{b:02x} ")).collect();
+                    if writeln!(file, "{}", hex.trim_end()).is_err() {
+                        keylog = None;
+                    }
+                }
                 if tx.send(Input::Keys(buf[..n].to_vec())).is_err() || n == 0 {
                     return;
                 }
@@ -767,7 +796,11 @@ mod client {
                 }
                 Ok(Change::Output(data)) => {
                     if self.shown == Shown::Passing(block) {
-                        write(&data, &mut self.ended);
+                        let bytes = match pane.term.as_ref() {
+                            Some((grid, _)) => passthrough(grid, &data),
+                            None => data,
+                        };
+                        write(&bytes, &mut self.ended);
                     }
                 }
                 // The focus may have moved on while the lease was asked for.

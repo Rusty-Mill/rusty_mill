@@ -14,7 +14,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use platform::process::{Child, Command};
+use platform::process::{Child, Command, EnvSpec};
 use platform::pty::PtyMaster;
 use platform::term::WinSize;
 use platform_linux::{LinuxPty, LinuxPtyMaster};
@@ -27,8 +27,9 @@ use rusty_uuid::Uuid;
 const BLOCK: &str = "6a1c0f3e-2b4d-4e5f-8a9b-0c1d2e3f4a5b";
 const PATIENCE: Duration = Duration::from_secs(10);
 /// Modes a block's program might leave set: alternate screen, hidden
-/// cursor, bracketed paste and mouse reporting.
-const REMOTE: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000hREMOTE";
+/// cursor, bracketed paste, mouse reporting, and the win32-input-mode a
+/// Windows pseudo console asks for.
+const REMOTE: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?9001hREMOTE";
 
 /// How the scripted server ends the attach.
 #[derive(Clone, Copy)]
@@ -172,9 +173,14 @@ impl Tui {
     }
 
     fn attach(socket: &Path, block: &str) -> Self {
+        Self::spawn(socket, block, EnvSpec::Inherit)
+    }
+
+    fn spawn(socket: &Path, block: &str, env: EnvSpec) -> Self {
         let cmd = Command::new(env!("CARGO_BIN_EXE_rusty-mux"), "/")
             .arg(socket.as_os_str())
-            .arg(block);
+            .arg(block)
+            .env(env);
         let (master, child) = LinuxPty
             .spawn_concrete(&cmd, WinSize { rows: 24, cols: 80 })
             .expect("spawn");
@@ -272,6 +278,36 @@ fn detaching_after_the_program_set_modes_resets_the_terminal() {
     let screen = tui.exit();
     server.join().expect("server");
     assert_restored(&screen, "detached from block");
+}
+
+/// The local terminal must keep sending plain keys, or Ctrl-] arrives
+/// win32-encoded and passes to the block: the client turns the mode off
+/// right after passing the program's request on.
+#[test]
+fn win32_input_mode_is_turned_off_after_the_program_asks() {
+    let (socket, server) = scripted_server(true, End::Open);
+    let tui = Tui::start(&socket);
+    tui.wait_for(b"REMOTE\x1b[?9001l");
+    tui.master.write(b"\x1dd").expect("ctrl-] d");
+    tui.exit();
+    server.join().expect("server");
+}
+
+#[test]
+fn the_keylog_records_each_keyboard_read_in_hex() {
+    let log = std::env::temp_dir().join(format!("rusty-mux-keylog-{}", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let mut env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
+    env.insert("RUSTY_MUX_KEYLOG".into(), log.clone().into_os_string());
+    let (socket, server) = scripted_server(true, End::Open);
+    let tui = Tui::spawn(&socket, BLOCK, EnvSpec::Explicit(env));
+    tui.wait_for(b"REMOTE");
+    tui.master.write(b"\x1dd").expect("ctrl-] d");
+    tui.exit();
+    server.join().expect("server");
+    let logged = std::fs::read_to_string(&log).expect("keylog");
+    assert_eq!(logged, "1d 64\n", "{logged:?}");
+    std::fs::remove_file(&log).expect("cleanup");
 }
 
 const OTHER: &str = "0b5e2a7c-9d14-4f36-8e21-7a6c3b9d0e4f";
