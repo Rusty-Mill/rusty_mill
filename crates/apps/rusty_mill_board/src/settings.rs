@@ -6,19 +6,21 @@
 //! files never disagree and every file stays human-readable. Each operation needs the `Admin`
 //! capability. They are not MCP tools: a model should not mint credentials.
 //!
-//! Nothing here ever returns a token except the one it just made, once.
+//! Apps signed in through OAuth are listed and revoked here too; their grants live in OAuth's own
+//! state file. Nothing here ever returns a token except the one it just made, once.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 
+use rusty_oauth_server::Provider;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
 use crate::api::{CallError, Identity, Shared, Who, acting};
-use crate::board::Roles;
+use crate::board::{ProjectsSink, Roles};
 use crate::domain::{Actor, BoardError, Capability};
 use crate::github::GithubConfig;
 use crate::identities::{Credentials, read_private};
@@ -53,6 +55,17 @@ impl Files {
             github: Some(dir.join("github.json")),
         }
     }
+}
+
+/// How the server was started, shown read-only in the settings view.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ServerInfo {
+    /// Where the cards are kept: a rusty_tick URL, or `None` for memory.
+    pub tick: Option<String>,
+    /// The public origin OAuth sign-in is served under, when on.
+    pub issuer: Option<String>,
+    /// Accepted `Host` names.
+    pub hosts: Vec<String>,
 }
 
 /// The GitHub sync as its file holds it. The token is a secret: the file is owner-only.
@@ -104,6 +117,15 @@ pub fn load_roles(path: &Path) -> Result<Roles, String> {
 }
 
 /// Roles must be plainly named, and some role must hold `Admin`.
+/// Persist a project registry to the projects file at `path`, atomically.
+pub fn projects_sink(path: PathBuf) -> ProjectsSink {
+    Box::new(move |projects: &Projects| {
+        let json = projects.file_json()?;
+        rusty_atomic_file::write(&path, json.as_bytes())
+            .map_err(|e| format!("{}: {e}", path.display()))
+    })
+}
+
 fn check_roles(roles: &Roles) -> Result<(), String> {
     let plain = |n: &str| {
         !n.is_empty()
@@ -209,6 +231,11 @@ struct AgentName {
 }
 
 #[derive(Deserialize)]
+struct AppId {
+    client_id: String,
+}
+
+#[derive(Deserialize)]
 struct ProjectsSet {
     repos: BTreeMap<String, BTreeMap<String, Vec<String>>>,
 }
@@ -243,6 +270,9 @@ pub struct Settings {
     github: Mutex<Option<GithubFile>>,
     /// One change at a time.
     changing: Mutex<()>,
+    /// OAuth's provider, once the web layer turns sign-in on.
+    oauth: OnceLock<Arc<Provider>>,
+    server: ServerInfo,
 }
 
 impl Settings {
@@ -262,7 +292,21 @@ impl Settings {
             syncer,
             github: Mutex::new(github),
             changing: Mutex::new(()),
+            oauth: OnceLock::new(),
+            server: ServerInfo::default(),
         }
+    }
+
+    /// Show how the server was started.
+    #[must_use]
+    pub fn with_server(mut self, server: ServerInfo) -> Self {
+        self.server = server;
+        self
+    }
+
+    /// List and revoke the apps signed in through `provider`. Only the first one is kept.
+    pub fn attach_oauth(&self, provider: Arc<Provider>) {
+        let _ = self.oauth.set(provider);
     }
 
     /// Settings with nothing configured: every change is refused with the way to enable it.
@@ -290,6 +334,7 @@ impl Settings {
             "settings_roles_set" => |s, _, a| s.roles_set(&parse(a)?),
             "settings_github_set" => |s, _, a| s.github_set(&parse(a)?),
             "settings_github_clear" => |s, _, _| s.github_clear(),
+            "settings_app_revoke" => |s, _, a| s.app_revoke(&parse(a)?),
             _ => return None,
         };
         Some(self.admin(identity, args, run))
@@ -334,8 +379,30 @@ impl Settings {
             "repos": self.board.projects(),
             "roles": self.board.roles(),
             "capabilities": Capability::ALL,
+            "capability_about": Capability::ALL.map(|c| (c, c.about())).into_iter().collect::<BTreeMap<_, _>>(),
             "github": github,
+            "apps": self.oauth.get().map(|p| p.store().list_clients()),
+            "server": self.server,
+            "paths": {
+                "agents": self.files.identities,
+                "projects": self.files.projects,
+                "roles": self.files.roles,
+                "github": self.files.github,
+            },
         }))
+    }
+
+    /// Sign an app out: drop its registration and every token it holds. It can sign in again.
+    fn app_revoke(&self, a: &AppId) -> Res {
+        let provider = self
+            .oauth
+            .get()
+            .ok_or_else(|| refused("OAuth sign-in is off: start the board with --issuer"))?;
+        match provider.store().revoke_client(&a.client_id) {
+            Ok(Some(gone)) => Ok(json!(gone)),
+            Ok(None) => Err(refused(format!("no app {:?}", a.client_id))),
+            Err(e) => Err(refused(format!("not revoked: {e}"))),
+        }
     }
 
     /// The role must exist and every named project too.
@@ -450,11 +517,7 @@ impl Settings {
             }
         }
         // Persisted inside the board's critical section: live and disk change together or not at all.
-        self.board.set_projects(new.clone(), |projects| {
-            let json = projects.file_json()?;
-            rusty_atomic_file::write(&path, json.as_bytes())
-                .map_err(|e| format!("{}: {e}", path.display()))
-        })?;
+        self.board.set_projects(new.clone(), projects_sink(path))?;
         Ok(json!({ "repos": new }))
     }
 

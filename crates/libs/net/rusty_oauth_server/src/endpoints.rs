@@ -401,7 +401,11 @@ impl Endpoints {
         }
         match self.provider.exchange_authorization_code(code, now) {
             Ok(Some(tokens)) => token_success(&tokens),
-            Ok(None) => token_error(400, "invalid_grant", "authorization code does not exist"),
+            Ok(None) => token_error(
+                400,
+                "invalid_grant",
+                "authorization code does not exist, or its client was revoked",
+            ),
             // The code is spent but the tokens never reached disk: our fault,
             // and handing back a token the next request rejects is worse.
             Err(e) => {

@@ -79,6 +79,13 @@ await dialog.locator("tr", { hasText: "tester" }).locator("input[type=checkbox]"
 await dialog.getByRole("button", { name: "Save roles" }).click();
 await page.waitForTimeout(400);
 check(JSON.stringify((await api(rotated, "board_roles")).body.roles.tester) === '["qa"]', "its capabilities are saved");
+check((await dialog.innerText()).includes("Verify built work"), "each capability is explained");
+
+// Apps and Server: read-only views of sign-in and how the board was started.
+await dialog.getByRole("button", { name: "Apps" }).click();
+check((await dialog.innerText()).includes("OAuth sign-in is off"), "the Apps tab says when sign-in is off");
+await dialog.getByRole("button", { name: "Server" }).click();
+check((await dialog.innerText()).includes("roles.json"), "the Server tab shows the settings files");
 
 // GitHub: a bad repository is refused; the token is not shown again.
 await dialog.getByRole("button", { name: "GitHub" }).click();
