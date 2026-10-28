@@ -18,7 +18,8 @@ Revert the freeze commit (it only moves the member lines, prunes
 `Cargo.lock` and regenerates `docs/WORKSPACE-MAP.md`), or move the
 `crates/apps/nexus/crates/*` lines back into `members` and regenerate both
 (`cargo metadata --format-version=1 --all-features --locked`, then
-`.github/scripts/generate_workspace_map.py`).
+`.github/scripts/generate_workspace_map.py`). Restore the `nexus-cli` and
+`nexus-memory-hub` rows in `crates/tools/rusty_baseline/products.txt`.
 
 ## Retire
 

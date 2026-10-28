@@ -20,7 +20,10 @@
 # the nexus and rusty_key shells: they need system WebKit); mill-term and
 # nexus-tui (need a real tty); rusty_voice (needs a display); rusty-keys
 # and rp-server (need a model or config file to start); dev and test
-# helpers (xtask, harnesses, examples).
+# helpers (xtask, harnesses, examples); anything outside the workspace:
+# frozen Nexus (`nexus`, `nexus-memory-hub`; see crates/apps/nexus/FROZEN.md)
+# and rusty-remind-me, which moved to Rusty-Mill/rusty-remind-me.
+# A unit test resolves every row against `cargo metadata`.
 
 # CLIs
 rush                  rush                 exit  -c true
@@ -31,7 +34,6 @@ skillopt-cli          skillopt             exit  --help
 rusty-croc            rusty-croc           exit  --help
 rp-cli                rp-cli               exit  --help
 sessionmgr-daemon     sessionmgr           exit  --help
-nexus-cli             nexus                exit  --help
 rusty-meshed-cli      meshed               exit  --help
 rusty_homelab_mcp     rusty_homelab_mcp    exit  --help
 rusty_fedora_agent    rusty_fedora_agent   exit  @platform=linux  --help
@@ -44,8 +46,5 @@ ts-daemon             ts-daemon            exit  @unsupported=windows @expect-ex
 
 # Servers and daemons
 rusty_tick                     rusty_tick           idle  RUSTY_TICK_TOKEN=baseline-dummy-token
-rusty-remind-me                rusty-remind-me      idle  daemon
-remind_me_hub                  rusty-remind-me-hub  idle  SYNC_SECRET=baseline-dummy REMIND_ME_HUB_DATA_DIR=hub
-nexus-memory-hub               nexus-memory-hub     idle  --secret baseline-dummy
 rusty-meshed-registry          meshed_registry      idle
 rusty_multimodal_db:server     memory_server        idle  127.0.0.1:0
