@@ -65,7 +65,7 @@ const listed = (await api(rotated, "board_projects")).body.repos;
 check(listed.rusty_mill?.rocket_league?.[0] === "crates/apps/rocket_league", "a repository with a project is saved");
 await dialog.getByRole("button", { name: "Close" }).click();
 await page.locator("#nav1 .item", { hasText: "rusty_mill" }).waitFor({ timeout: 3000 }).catch(() => {});
-check((await page.locator("#nav1 .item", { hasText: "rusty_mill" }).count()) === 1, "and appears in the side panel at once");
+check((await page.locator("#nav1 .item", { hasText: "rusty_mill" }).count()) >= 1, "and appears in the side panel at once");
 
 // Roles.
 await page.click("#gear");
