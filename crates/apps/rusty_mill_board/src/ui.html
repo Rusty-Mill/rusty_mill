@@ -44,6 +44,7 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 #side .item .n{opacity:.75;font-variant-numeric:tabular-nums;white-space:nowrap}
 #side .item .name{display:flex;align-items:center}
 #toggle,#gear{padding:4px 9px}
+#signin form{display:grid;gap:8px}#signin .err{color:var(--err);min-height:1.2em;margin:0}
 #settings{width:min(860px,94vw);max-height:90vh}
 #settings .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:10px}
 #settings .tabs button{border:0;border-radius:6px 6px 0 0;background:none}
@@ -80,16 +81,23 @@ dialog form{display:grid;gap:8px}
   <input id="title" placeholder="New card title" size="26" aria-label="new card title">
   <button id="add">Add</button>
   <button id="gear" title="Settings" aria-label="settings">&#9881;</button>
+  <button id="signout" hidden>Sign out</button>
 </header>
 <main id="board"></main>
 </div>
 </div>
 <dialog id="dlg"></dialog>
 <dialog id="settings" aria-label="settings"></dialog>
+<dialog id="signin" aria-label="sign in"><form method="dialog">
+  <h2>Sign in to Mill Board</h2>
+  <p id="signin-why" class="err" role="alert"></p>
+  <input id="signin-token" type="password" placeholder="board token" autocomplete="current-password" aria-label="board token" required>
+  <button>Sign in</button>
+</form></dialog>
 <div id="toast" role="alert"></div>
 <script>
 const COLS=["backlog","ready","building","qa","review","done","blocked"];
-let tok=new URLSearchParams(location.hash.slice(1)).get("token");
+let tok=null;
 const $=id=>document.getElementById(id);
 let cards=[],cursor=null,dlg=null,repos={},sel={repo:"",project:"",agent:""};
 const projects=()=>Object.values(repos).flat();
@@ -114,9 +122,29 @@ function agentColor(n){
 }
 const RUNNING=["building","qa","review"];
 const pref=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch{}};
+/* The token: a #token= in the address is kept in this browser and dropped from the address bar;
+   otherwise the one kept from before. With none, or a refused one, the first call asks for it. */
+function setToken(t){tok=t;pref("token",t);$("signout").hidden=false}
+{const h=new URLSearchParams(location.hash.slice(1)).get("token");
+  if(h){setToken(h);try{history.replaceState(null,"",location.pathname+location.search)}catch{}}
+  else if(pref("token"))setToken(pref("token"))}
+let signing=null;   // one prompt, however many calls were refused at once
+function signIn(why){
+  return signing??=new Promise(done=>{
+    const d=$("signin"),f=$("signin-token");$("signin-why").textContent=why;f.value="";
+    d.oncancel=e=>e.preventDefault();   // nothing works without a token, so Escape does not dismiss it
+    d.querySelector("form").onsubmit=()=>{setToken(f.value.trim());signing=null;done()};
+    d.showModal();f.focus();
+  });
+}
 
 async function api(op,args={}){
-  const r=await fetch("/api/"+op,{method:"POST",headers:{"content-type":"application/json",...(tok&&{authorization:"Bearer "+tok})},body:JSON.stringify(args)});
+  let r;
+  for(;;){
+    r=await fetch("/api/"+op,{method:"POST",headers:{"content-type":"application/json",...(tok&&{authorization:"Bearer "+tok})},body:JSON.stringify(args)});
+    if(r.status!==401)break;
+    await signIn(tok?"That token was refused. Enter a current one.":"This board needs a token.");
+  }
   const j=await r.json().catch(()=>({error:r.statusText}));
   if(!r.ok){const e=new Error(j.error||r.statusText);e.status=r.status;throw e}
   return j;
@@ -317,7 +345,7 @@ function agentsTab(){
     const save=el("button","Save"),rot=el("button","New token"),del=el("button","Remove");[save,rot,del].forEach(b=>{b.type="button"});
     save.onclick=guard(err,()=>setting("settings_agent_update",{agent:{name:a.actor,role:role.value,projects:pick.value()}}));
     rot.onclick=guard(err,async()=>{const r=await setting("settings_agent_rotate",{name:a.actor});secret={name:a.actor,token:r.token};
-      if(a.actor===who().actor){tok=r.token;try{history.replaceState(null,"","#token="+r.token)}catch(e){}}});
+      if(a.actor===who().actor)setToken(r.token)});
     del.onclick=guard(err,async()=>{if(!confirm("Remove "+a.actor+"? Its token stops working."))return;await setting("settings_agent_remove",{name:a.actor});secret=null});
     acts.append(save," ",rot," ",del);
     const r=el("td"),p=el("td");r.append(role);p.append(pick);tr.append(name,r,p,acts);tbl.append(tr);
@@ -450,6 +478,7 @@ async function loadMeta(){
   if(r in repos&&(!p||repos[r].includes(p)))sel={repo:r,project:p||"",agent:""};
   $("actor").onchange=()=>pref("actor",$("actor").value);$("role").onchange=()=>pref("role",$("role").value);
   $("gear").onclick=openSettings;
+  $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
   $("toggle").onclick=()=>{pref("side",pref("side")==="0"?"1":"0");renderSide()};
   // New cards go to the chosen project, else to the chosen repository's own project.
   $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project||sel.repo;if(t){$("title").value="";act("card_add",{title:t,...(project&&{project})})}};
