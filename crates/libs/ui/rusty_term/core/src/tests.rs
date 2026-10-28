@@ -8072,3 +8072,119 @@ fn status_line_in_default_colours_follows_osc_10_and_11() {
     p.advance(&mut g, b"\x1b]110\x1b\\");
     assert_eq!(g.status_row().expect("status line")[0].fg, DEFAULT_FG);
 }
+
+// ---- Mode 2027 emoji presentation width and allocation-free joining, #1161 #1191 ----
+
+#[test]
+fn mode_2027_vs16_widens_a_narrow_emoji_base() {
+    // ❤ (1 column) + VS16 is the emoji ❤️, two columns.
+    let g = parse("\x1b[?2027h❤\u{fe0f}x".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "❤\u{fe0f}");
+    assert_ne!(cells(&g)[1].flags & WIDE_TRAILER, 0);
+    assert_eq!(cells(&g)[2].ch, 'x');
+    assert_eq!(g.cursor, (3, 0));
+}
+
+#[test]
+fn mode_2027_keycap_is_two_columns() {
+    let g = parse("\x1b[?2027h1\u{fe0f}\u{20e3}x".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "1\u{fe0f}\u{20e3}");
+    assert_ne!(cells(&g)[1].flags & WIDE_TRAILER, 0);
+    assert_eq!(g.cursor, (3, 0));
+}
+
+#[test]
+fn mode_2027_vs16_on_a_non_emoji_base_stays_narrow() {
+    let g = parse("\x1b[?2027ha\u{fe0f}x".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "a\u{fe0f}");
+    assert_eq!(g.cursor, (2, 0));
+}
+
+#[test]
+fn mode_2027_vs16_at_the_right_edge_wraps_the_glyph() {
+    // ❤ lands in the last column; widening moves it to the next line.
+    let g = parse("\x1b[?2027hab❤\u{fe0f}".as_bytes(), 3, 2);
+    assert_eq!(row_text(&g, 0), "ab ");
+    assert_eq!(glyph(&g, 0, 1), "❤\u{fe0f}");
+    assert_ne!(cells(&g)[4].flags & WIDE_TRAILER, 0);
+    assert_eq!(g.cursor, (2, 1));
+    // Autowrap off: no room, so the glyph keeps its one column.
+    let g = parse("\x1b[?7l\x1b[?2027hab❤\u{fe0f}".as_bytes(), 3, 2);
+    assert_eq!(glyph(&g, 2, 0), "❤\u{fe0f}");
+    assert_eq!(g.cursor.1, 0);
+}
+
+#[test]
+fn default_widths_keep_vs16_zero_width() {
+    // 2027 reset: per code point, so ❤ + VS16 stays one column.
+    let g = parse("❤\u{fe0f}x".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "❤\u{fe0f}");
+    assert_eq!(g.cursor, (2, 0));
+    let g = parse("1\u{fe0f}\u{20e3}x".as_bytes(), 20, 1);
+    assert_eq!(g.cursor, (2, 0));
+}
+
+#[test]
+fn mode_2027_joining_matches_uax29_segmentation() {
+    use unicode_segmentation::UnicodeSegmentation;
+    // Scalars that exercise every joining rule: combining marks, ZWJ
+    // sequences, regional indicators, skin tones, VS16, keycaps, Hangul jamo
+    // and Indic conjuncts, plus plain bases and a narrow emoji base.
+    const POOL: &[char] = &[
+        'a',
+        '1',
+        '#',
+        '❤',
+        '👨',
+        '👩',
+        '👍',
+        '💻',
+        '\u{0301}',
+        '\u{0308}',
+        '\u{200d}',
+        '\u{fe0f}',
+        '\u{20e3}',
+        '\u{1f3fd}',
+        '\u{1f1ef}',
+        '\u{1f1f5}',
+        '\u{1f1fa}',
+        '\u{1100}',
+        '\u{1161}',
+        '\u{11a8}',
+        'न',
+        '\u{093f}',
+        '\u{094d}',
+        'क',
+        '漢',
+    ];
+    let mut seed: u64 = 0x2027_1191;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for _ in 0..2000 {
+        let len = 1 + (next() % 12) as usize;
+        let text: String = (0..len)
+            .map(|_| POOL[(next() % POOL.len() as u64) as usize])
+            .collect();
+        let g = parse(format!("\x1b[?2027h{text}").as_bytes(), 200, 1);
+        let got: Vec<String> = (0..200)
+            .filter(|&x| cells(&g)[x].flags & WIDE_TRAILER == 0 && cells(&g)[x].ch != ' ')
+            .map(|x| glyph(&g, x, 0))
+            .collect();
+        // The reference: the glyph joins `ch` when the two stay one UAX #29
+        // cluster; otherwise a zero-width scalar is dropped and any other
+        // starts a new glyph.
+        let mut want: Vec<String> = Vec::new();
+        for ch in text.chars() {
+            match want.last_mut() {
+                Some(last) if format!("{last}{ch}").graphemes(true).count() == 1 => last.push(ch),
+                _ if char_width(ch) == 0 => {}
+                _ => want.push(ch.to_string()),
+            }
+        }
+        assert_eq!(got, want, "{text:?}");
+    }
+}

@@ -42,3 +42,7 @@ cursor_thrash         60
 scroll_heavy         111
 sgr_churn             88
 unicode_heavy        112
+# unicode_2027 (unicode_heavy's mix under mode 2027) added with the
+# allocation-free cluster join (#1191), measured: 344.8 (500.1 with the old
+# allocate-and-resegment join). Other workloads unchanged.
+unicode_2027         379

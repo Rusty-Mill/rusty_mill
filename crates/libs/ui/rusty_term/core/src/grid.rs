@@ -13,7 +13,8 @@ use super::cell::{
     WIDE_TRAILER, char_width,
 };
 use super::style::{CellStyle, Defaults, StyleId, StyleTable};
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
+use unicode_width::UnicodeWidthStr;
 
 use super::sixel::SixelImage;
 
@@ -821,6 +822,32 @@ pub struct Grid {
 /// 8th column (0, 8, 16, …), matching the classic 8-column default.
 fn default_tab_stops(cols: usize) -> Vec<bool> {
     (0..cols).map(|i| i % 8 == 0).collect()
+}
+
+/// VARIATION SELECTOR-16: asks for emoji presentation of the scalar before it.
+const VS16: char = '\u{fe0f}';
+
+/// Whether an extended grapheme boundary (UAX #29) falls between the glyph
+/// `base` + `suffix` and the scalar `next`. The three pieces are handed to the
+/// segmenter as chunks of one logical string, so nothing is concatenated.
+fn is_grapheme_boundary(base: &str, suffix: &str, next: &str) -> bool {
+    let at = base.len() + suffix.len();
+    let mut cursor = GraphemeCursor::new(at, at + next.len(), true);
+    loop {
+        match cursor.is_boundary(next, at) {
+            Ok(boundary) => return boundary,
+            // Context runs back at most through the suffix, then the base.
+            Err(GraphemeIncomplete::PreContext(end)) if end == at && !suffix.is_empty() => {
+                cursor.provide_context(suffix, base.len());
+            }
+            Err(GraphemeIncomplete::PreContext(end)) if end == base.len() && end > 0 => {
+                cursor.provide_context(base, 0);
+            }
+            // Out of context (or an unexpected request): treat as a boundary,
+            // so the scalar starts its own glyph.
+            Err(_) => return true,
+        }
+    }
 }
 
 /// Per-row size attribute set by `ESC # 3/4/5/6` (DECDHL/DECDWL/DECSWL). A
@@ -2331,6 +2358,9 @@ impl Grid {
                     && self.continues_grapheme(bx, by, ch)
                 {
                     self.append_to_glyph(bx, by, ch);
+                    if ch == VS16 {
+                        self.widen_for_emoji(bx, by);
+                    }
                     return;
                 }
             } else if w == 0
@@ -2347,26 +2377,10 @@ impl Grid {
                 return;
             }
         }
-        // With DECSLRM margins, a cursor inside them wraps (or pins) at the
-        // right margin instead of the screen edge.
-        let limit = if self.side_margins_active() && self.cursor.0 >= self.left_margin {
-            (self.right_margin + 1).min(self.cols)
-        } else {
-            self.cols
-        };
+        let limit = self.wrap_limit();
         if self.cursor.0 + w > limit {
             if self.autowrap {
-                // Mark this row as soft-wrapped before leaving it, so the reflow
-                // and scrollback know it and its successor are one logical line.
-                let y = self.cursor.1;
-                if let Some(line) = self.screen.get_mut(y)
-                    && !line.wrapped
-                {
-                    line.wrapped = true;
-                    self.touch(y);
-                }
-                self.carriage_return();
-                self.newline();
+                self.soft_wrap();
             } else {
                 // Autowrap off: keep the glyph in the last cell(s) of the row
                 // (or of the margin band).
@@ -2394,6 +2408,66 @@ impl Grid {
         // glyph wider than the grid itself (w=2, cols=1) must not push past it,
         // or later column arithmetic indexes outside the row.
         self.cursor.0 = (self.cursor.0 + w).min(self.cols);
+    }
+
+    /// The column a glyph at the cursor must end before: the right margin
+    /// while DECSLRM margins hold the cursor, otherwise the screen edge.
+    fn wrap_limit(&self) -> usize {
+        if self.side_margins_active() && self.cursor.0 >= self.left_margin {
+            (self.right_margin + 1).min(self.cols)
+        } else {
+            self.cols
+        }
+    }
+
+    /// Autowrap: mark the cursor row soft-wrapped (so reflow and scrollback
+    /// know it and its successor are one logical line), then move to the
+    /// start of the next line.
+    fn soft_wrap(&mut self) {
+        let y = self.cursor.1;
+        if let Some(line) = self.screen.get_mut(y)
+            && !line.wrapped
+        {
+            line.wrapped = true;
+            self.touch(y);
+        }
+        self.carriage_return();
+        self.newline();
+    }
+
+    /// Mode 2027: a VS16 just joined the narrow glyph at `(x, y)`, left of the
+    /// cursor. If that makes an emoji presentation sequence (`❤️`, `1️⃣`), the
+    /// glyph becomes two columns: in place when the next column fits, else
+    /// moved to the next line by autowrap. Without autowrap it stays narrow.
+    fn widen_for_emoji(&mut self, x: usize, y: usize) {
+        let head = self.screen[y].cells()[x];
+        if head.is_wide_trailer() || self.cursor != (x + 1, y) {
+            return; // already wide (or not the glyph the cursor just passed)
+        }
+        let mut buf = [0u8; 8];
+        let base = self.resolve(head).ch.encode_utf8(&mut buf).len();
+        let pair = VS16.encode_utf8(&mut buf[base..]).len() + base;
+        if std::str::from_utf8(&buf[..pair]).map_or(1, UnicodeWidthStr::width) != 2 {
+            return;
+        }
+        let (mut x, mut y) = (x, y);
+        if x + 2 > self.wrap_limit() {
+            if !self.autowrap {
+                return;
+            }
+            let blank = self.default_packed();
+            self.screen[y].cells_mut()[x] = blank;
+            self.touch(y);
+            self.soft_wrap();
+            (x, y) = self.cursor;
+            self.set_packed(x, y, head);
+        }
+        let mut trailer = self.styles.get(head.style());
+        trailer.attrs &= ATTR_DEFAULT_COLORS;
+        trailer.cluster = 0;
+        let id = self.styles.intern(trailer);
+        self.set_packed(x + 1, y, PackedCell::trailer(id));
+        self.cursor = ((x + 2).min(self.cols), y);
     }
 
     /// Write a run of printable ASCII at the cursor, as [`Grid::put_char`]
@@ -2548,32 +2622,23 @@ impl Grid {
         }
     }
 
-    /// Whether appending `next` to the glyph at `(x, y)` keeps it a single
-    /// grapheme cluster (UAX #29) — i.e. `next` continues that glyph rather than
-    /// starting a new one.
+    /// Whether `next` continues the glyph at `(x, y)` rather than starting a
+    /// new grapheme cluster (UAX #29): no extended grapheme boundary falls
+    /// between the glyph's text and `next`. Asks only about that one boundary,
+    /// reading the base scalar and the interned suffix in place, so joining
+    /// neither allocates nor re-segments the glyph.
     fn continues_grapheme(&self, x: usize, y: usize, next: char) -> bool {
-        let mut s = self.glyph_text(x, y);
-        s.push(next);
-        s.graphemes(true).count() == 1
-    }
-
-    /// The full glyph text at `(x, y)` of the live grid: the base scalar plus
-    /// any interned grapheme continuation.
-    fn glyph_text(&self, x: usize, y: usize) -> String {
-        self.cell_text(self.resolve(self.screen[y].cells()[x]))
-    }
-
-    /// The full glyph text of `cell` (live or scrollback — the cluster table is
-    /// shared): the base scalar plus any interned grapheme continuation.
-    fn cell_text(&self, cell: Cell) -> String {
-        let mut s = String::new();
-        s.push(cell.ch);
-        if cell.cluster != 0
-            && let Some(suffix) = self.clusters.get((cell.cluster - 1) as usize)
-        {
-            s.push_str(suffix);
-        }
-        s
+        let cell = self.resolve(self.screen[y].cells()[x]);
+        let mut base_buf = [0u8; 4];
+        let base: &str = cell.ch.encode_utf8(&mut base_buf);
+        let suffix = cell
+            .cluster
+            .checked_sub(1)
+            .and_then(|i| self.clusters.get(usize::from(i)))
+            .map_or("", String::as_str);
+        let mut next_buf = [0u8; 4];
+        let next: &str = next.encode_utf8(&mut next_buf);
+        !is_grapheme_boundary(base, suffix, next)
     }
 
     /// Normalize the active selection into an inclusive `(start, end)` pair of
