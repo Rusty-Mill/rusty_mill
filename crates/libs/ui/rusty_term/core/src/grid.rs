@@ -824,6 +824,15 @@ fn default_tab_stops(cols: usize) -> Vec<bool> {
     (0..cols).map(|i| i % 8 == 0).collect()
 }
 
+/// The columns a row of size `attr` holds on a `cols`-wide grid: all of
+/// them, or the left half for a double-width row (DECDWL/DECDHL).
+fn line_capacity(cols: usize, attr: LineAttr) -> usize {
+    match attr {
+        LineAttr::Single => cols,
+        _ => cols.div_ceil(2),
+    }
+}
+
 /// VARIATION SELECTOR-16: asks for emoji presentation of the scalar before it.
 const VS16: char = '\u{fe0f}';
 
@@ -1140,7 +1149,9 @@ fn reflow_history(
         // Append this row's content. A wrapped row that ends in one padding cell
         // because a wide glyph didn't fit drops that filler — detected precisely
         // by the next row beginning with a width-2 glyph.
-        let mut take = cells.len();
+        // A double-width row holds only its left half; the cells past it are
+        // never shown, so they are not part of the logical line.
+        let mut take = cells.len().min(line_capacity(old_cols, attr));
         if wrapped && take > 0 && is_padding(&cells[take - 1]) {
             let next_wide = i + 1 < old_total && {
                 let (nc, _, _) = phys(i + 1);
@@ -1209,10 +1220,11 @@ fn reflow_history(
             out_attr.push(attr);
             continue;
         }
+        let cap = line_capacity(new_cols, attr);
         let mut i = 0;
         let mut seg_start = 0;
         while i < line.len() {
-            let mut take = new_cols.min(line.len() - i);
+            let mut take = cap.min(line.len() - i);
             // Don't cut a double-width glyph from its trailer: if the cell just
             // past the segment is a trailer, push its head to the next row.
             if i + take < line.len() && line[i + take].is_wide_trailer() && take > 1 {
@@ -1221,10 +1233,10 @@ fn reflow_history(
             if take == 0 {
                 take = 1; // degenerate new_cols == 1 vs a wide glyph: force progress
             }
-            let n = take.min(new_cols);
+            let n = take.min(cap);
             seg_start = i;
             if li == cursor_logical && !cursor_set && cursor_off >= i && cursor_off < i + take {
-                ncur = (out_cells.len(), (cursor_off - i).min(new_cols - 1));
+                ncur = (out_cells.len(), (cursor_off - i).min(cap - 1));
                 cursor_set = true;
             }
             let more = i + take < line.len();
@@ -1235,7 +1247,7 @@ fn reflow_history(
         }
         if li == cursor_logical && !cursor_set {
             // Cursor sat at or past the last cell of its (trimmed) line.
-            let col = (cursor_off - seg_start).min(new_cols - 1);
+            let col = (cursor_off - seg_start).min(cap - 1);
             ncur = (out_cells.len() - 1, col);
             cursor_set = true;
         }
@@ -2419,11 +2431,11 @@ impl Grid {
         } else {
             self.cols
         };
-        if self.cursor_row_is_double() {
-            edge.min(self.cols.div_ceil(2))
-        } else {
-            edge
-        }
+        let attr = self
+            .screen
+            .get(self.cursor.1)
+            .map_or(LineAttr::Single, |l| l.attr);
+        edge.min(line_capacity(self.cols, attr))
     }
 
     /// Whether the cursor row is double-width (DECDWL, or either half of
@@ -2475,6 +2487,11 @@ impl Grid {
             self.soft_wrap();
             (x, y) = self.cursor;
             self.set_packed(x, y, head);
+            if x + 2 > self.wrap_limit() {
+                // Narrower than two columns (a one-column grid): stays narrow.
+                self.cursor = ((x + 1).min(self.cols), y);
+                return;
+            }
         }
         let mut trailer = self.styles.get(head.style());
         trailer.attrs &= ATTR_DEFAULT_COLORS;
@@ -4033,7 +4050,7 @@ impl Grid {
         // A double-width row shows half the columns: a cursor in the right
         // half moves to the last one it shows.
         if attr != LineAttr::Single {
-            let last = self.cols.div_ceil(2).saturating_sub(1);
+            let last = line_capacity(self.cols, attr).saturating_sub(1);
             self.cursor.0 = self.cursor.0.min(last);
         }
     }

@@ -1126,7 +1126,13 @@ impl GpuCore {
                     // The span follows the stored character, so a concealed
                     // wide glyph still paints both columns' background.
                     let ch = glyph_char(&r.cell, bidi, col);
-                    let span = char_width(r.cell.ch).max(1);
+                    // The columns as stored, trailer included: a mode 2027
+                    // VS16 cluster on a narrow base is two wide.
+                    let span = if cols.get(col + 1).is_some_and(|c| c.trailer) {
+                        2
+                    } else {
+                        1
+                    };
                     let x = scale * vis(col);
                     if x >= grid.cols {
                         col += span; // past the half a double-width row shows
@@ -1147,10 +1153,13 @@ impl GpuCore {
                         half_deco(r.deco, attr),
                         r.dcol,
                     ));
+                    // A concealed cell hides its marks too; a Kitty
+                    // placeholder's suffix is image metadata, never drawn.
+                    let hidden = concealed(&r.cell) || r.cell.ch == '\u{10EEEE}';
                     let marks = grid
                         .cluster_suffix(&r.cell)
                         .chars()
-                        .filter(|&c| is_overlay_mark(c));
+                        .filter(|&c| !hidden && is_overlay_mark(c));
                     for mark in marks {
                         let rect = self.tile_for_mark(mark, style, span, font);
                         let mut inst = Self::base_inst(
@@ -2196,6 +2205,18 @@ mod tests {
     }
 
     #[test]
+    fn widened_vs16_cluster_quad_spans_both_columns() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let mut g = Grid::new(4, 1);
+        AnsiParser::new().advance(&mut g, "\x1b[?2027h\x1b[48;2;0;0;255m❤\u{fe0f}".as_bytes());
+        let base = row_instances(&mut core, &mut font, &g);
+        let head = base.iter().rfind(|i| i.col == 0).expect("head cell");
+        assert_eq!((head.span, head.bg), (2, 0x0000FF), "{base:?}");
+    }
+
+    #[test]
     fn combining_mark_adds_an_overlay_glyph() {
         let Some((mut core, mut font)) = headless_core() else {
             return;
@@ -2223,6 +2244,9 @@ mod tests {
         };
         let bare = overlays(&mut core, &mut font, "e");
         assert_eq!(overlays(&mut core, &mut font, "e\u{301}"), bare + 1);
+        // Concealed: the mark hides with its base.
+        let hidden = overlays(&mut core, &mut font, "\x1b[8me");
+        assert_eq!(overlays(&mut core, &mut font, "\x1b[8me\u{301}"), hidden);
     }
 
     #[test]

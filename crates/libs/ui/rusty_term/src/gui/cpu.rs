@@ -370,11 +370,13 @@ pub(crate) fn draw_grid(
             continue;
         };
         let y0 = oy + (row0 + row) * ch;
+        // The glyph's top edge: a DECDHL bottom half draws the lower half of
+        // a glyph that starts one row up, above the pane at its top row.
         let (sx, sy, top) = match grid.line_attr(row) {
-            LineAttr::Single => (1, 1, y0),
-            LineAttr::DoubleWidth => (2, 1, y0),
-            LineAttr::DoubleTop => (2, 2, y0),
-            LineAttr::DoubleBottom => (2, 2, y0.saturating_sub(ch)),
+            LineAttr::Single => (1, 1, y0 as i32),
+            LineAttr::DoubleWidth => (2, 1, y0 as i32),
+            LineAttr::DoubleTop => (2, 2, y0 as i32),
+            LineAttr::DoubleBottom => (2, 2, y0 as i32 - ch as i32),
         };
         // A double-height half shows only its own row band of the glyph.
         let own_band = move |py: usize| py >= y0 && py < (y0 + ch).min(height) && band_on(py);
@@ -387,7 +389,7 @@ pub(crate) fn draw_grid(
         };
         let pen = |g: &Glyph, x: usize| {
             let pen_x = x as i32 + sx as i32 * g.left;
-            (pen_x, top as i32 + sy as i32 * (baseline + g.top))
+            (pen_x, top + sy as i32 * (baseline + g.top))
         };
         let (pen_x, pen_y) = pen(glyph, x0);
         blit_scaled(
@@ -402,7 +404,10 @@ pub(crate) fn draw_grid(
         );
         // Combining marks of the cell's cluster overlay the base, their ink
         // centered over its columns (#1160).
-        let span = sx * cw * char_width(cell.ch).max(1);
+        // The glyph's columns as stored: a mode 2027 VS16 cluster on a
+        // narrow base is two wide.
+        let wide = col + 1 < grid.cols && cell_at(col + 1, row).flags & WIDE_TRAILER != 0;
+        let span = sx * cw * if wide { 2 } else { 1 };
         for mark in grid
             .cluster_suffix(&cell)
             .chars()
@@ -530,7 +535,8 @@ pub(crate) fn draw_grid(
     {
         // A pending wrap leaves the cursor one past the last column; draw
         // it on that column, never outside the pane.
-        let ccol = ccol.min(grid.cols.saturating_sub(1));
+        // On a double-width row the pending wrap sits at the half it shows.
+        let ccol = ccol.min(grid.cols.div_ceil(scale(crow)).saturating_sub(1));
         let (x0, cw) = cell_x(ccol, crow).unwrap_or((ox + (col0 + vis(ccol, crow)) * cw, cw));
         let y0 = oy + (row0 + crow) * ch;
         let color = grid.cursor_color;
@@ -1843,6 +1849,65 @@ mod tests {
         let buf = render_with("\x1b#3X\r\nX", 2, 2, &mut font());
         assert_eq!(lit(&buf, 8, (0, 8), (0, 8)), 64);
         assert_eq!(lit(&buf, 8, (0, 8), (8, 16)), 32, "the plain X below");
+    }
+
+    #[test]
+    fn concealed_cell_hides_its_combining_marks() {
+        let font = || BoxFont { w: 2, h: 2, top: 4 };
+        let blank = render_with("\x1b[8me", 1, 1, &mut font());
+        assert_eq!(render_with("\x1b[8me\u{301}", 1, 1, &mut font()), blank);
+        assert!(blank.iter().all(|&px| px == 0), "background only");
+    }
+
+    #[test]
+    fn widened_vs16_cluster_paints_two_columns_and_centers_marks_over_both() {
+        // Mode 2027: 1 + VS16 + keycap is two columns. Both take the blue
+        // background, and the keycap mark centers over all 8 pixels.
+        let font = || BoxFont { w: 2, h: 2, top: 4 };
+        let text = "\x1b[?2027h\x1b[48;2;0;0;255m1\u{fe0f}\u{20e3}";
+        let buf = render_with(text, 2, 1, &mut font());
+        assert_eq!(
+            (buf[7 * 8], buf[7 * 8 + 7]),
+            (0x0000FF, 0x0000FF),
+            "both columns"
+        );
+        let top: Vec<usize> = (0..8).filter(|&x| buf[x] == 0xFFFFFF).collect();
+        assert_eq!(top, [3, 4], "the mark centered over two columns");
+    }
+
+    #[test]
+    fn double_height_bottom_half_at_the_top_row_draws_the_glyph_bottom() {
+        // Only the bottom half of a DECDHL glyph shows on a bottom-half row,
+        // even at the pane's top (its glyph starts above the pane).
+        let upper = render_with("\x1b#4X", 2, 1, &mut BoxFont { w: 4, h: 4, top: 0 });
+        assert_eq!(
+            lit(&upper, 8, (0, 8), (0, 8)),
+            0,
+            "upper-half ink stays above"
+        );
+        let lower = render_with("\x1b#4X", 2, 1, &mut BoxFont { w: 4, h: 4, top: 4 });
+        assert_eq!(
+            lit(&lower, 8, (0, 8), (0, 8)),
+            64,
+            "lower-half ink fills the row"
+        );
+    }
+
+    #[test]
+    fn pending_wrap_cursor_on_a_full_double_row_draws_on_the_last_shown_cell() {
+        let mut g = Grid::new(4, 1);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, b"\x1b]12;#00ff00\x07\x1b[4 q\x1b#6AB");
+        assert_eq!(g.cursor, (2, 0), "pending wrap at the half");
+        let (w, h) = (16, 8);
+        let mut buf = vec![0u32; w * h];
+        render(&g, &[], &mut MockFont, &mut buf, w, h, true);
+        let bottom = &buf[(h - 1) * w..];
+        assert!(
+            bottom[8..16].iter().all(|&px| px == 0x00FF00),
+            "{bottom:x?}"
+        );
+        assert!(bottom[..8].iter().all(|&px| px != 0x00FF00));
     }
 
     #[test]

@@ -3566,6 +3566,25 @@ fn double_width_row_holds_half_the_columns() {
 }
 
 #[test]
+fn resize_rejoins_a_wrapped_double_width_row_at_its_half() {
+    // 8 columns: "ABCD" on the double row, "E" wrapped below. At 10 columns
+    // the double row holds 5, so the logical line rejoins as "ABCDE".
+    let mut g = parse(b"\x1b#6ABCDE", 8, 2);
+    g.resize(10, 2);
+    let row0: String = row_text(&g, 0).trim_end().into();
+    assert_eq!(row0, "ABCDE");
+    assert_eq!(g.snapshot_dirty().line_attrs[0], LineAttr::DoubleWidth);
+    assert_rows_sized(&g);
+    // Narrower again: 6 columns hold 3 per double row.
+    g.resize(6, 3);
+    let rows: Vec<String> = (0..3)
+        .map(|y| row_text(&g, y).trim_end().to_owned())
+        .collect();
+    assert_eq!(rows[..2], ["ABC".to_owned(), "DE".to_owned()]);
+    assert_rows_sized(&g);
+}
+
+#[test]
 fn double_width_moves_a_right_half_cursor_to_the_last_shown_column() {
     let g = parse(b"\x1b[7G\x1b#6", 8, 2);
     assert_eq!(g.cursor, (3, 0));
@@ -8142,6 +8161,18 @@ fn mode_2027_vs16_at_the_right_edge_wraps_the_glyph() {
     let g = parse("\x1b[?7l\x1b[?2027hab❤\u{fe0f}".as_bytes(), 3, 2);
     assert_eq!(glyph(&g, 2, 0), "❤\u{fe0f}");
     assert_eq!(g.cursor.1, 0);
+}
+
+#[test]
+fn mode_2027_vs16_on_a_one_column_grid_stays_narrow() {
+    // No row holds two columns: the glyph wraps once, then keeps one column.
+    let g = parse("\x1b[?2027h❤\u{fe0f}".as_bytes(), 1, 2);
+    assert_eq!(glyph(&g, 0, 1), "❤\u{fe0f}");
+    assert_eq!(g.cursor, (1, 1));
+    assert_rows_sized(&g);
+    // A two-column double-width row holds one column as well.
+    let g = parse("\x1b#6\x1b[?2027h❤\u{fe0f}x".as_bytes(), 2, 3);
+    assert_rows_sized(&g);
 }
 
 #[test]
