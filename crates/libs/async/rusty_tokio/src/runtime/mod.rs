@@ -291,6 +291,30 @@ impl Shared {
         self.park_condvar.notify_all();
     }
 
+    /// [`park`](Self::park), unless `notified` is set; clears it. A
+    /// notifier sets `notified` and then calls
+    /// [`unpark_notified`](Self::unpark_notified), which takes the park
+    /// lock, so a wake between the caller's last look at its queues and
+    /// this wait is never lost.
+    fn park_unless(&self, idx: usize, notified: &AtomicBool) {
+        self.park_counts[idx].fetch_add(1, Ordering::Relaxed);
+        self.park_unpark_counts[idx].fetch_add(1, Ordering::Relaxed);
+        let guard = self.park_lock.lock().unwrap();
+        if !notified.swap(false, Ordering::AcqRel) {
+            let _ = self
+                .park_condvar
+                .wait_timeout(guard, std::time::Duration::from_millis(50));
+            notified.store(false, Ordering::Release);
+        }
+        self.park_unpark_counts[idx].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The notifier's half of [`park_unless`](Self::park_unless).
+    fn unpark_notified(&self) {
+        drop(self.park_lock.lock().unwrap());
+        self.park_condvar.notify_all();
+    }
+
     fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
     }
@@ -943,10 +967,16 @@ impl LocalRuntime {
 
         let shared = self.rt.primary_shared().clone();
         let mut future = std::pin::pin!(future);
-        let waker = Waker::from(Arc::new(LocalRuntimeWaker {
+        let parker = Arc::new(LocalRuntimeWaker {
             shared: shared.clone(),
-        }));
+            notified: AtomicBool::new(false),
+        });
+        let waker = Waker::from(parker.clone());
         let mut cx = Context::from_waker(&waker);
+        // A locally-spawned task's wake also wakes this loop, so it runs
+        // at once rather than at the park timeout.
+        self.local.set_unpark(Some(waker.clone()));
+        let _unpark = ClearUnpark(&self.local);
 
         loop {
             if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
@@ -970,30 +1000,37 @@ impl LocalRuntime {
                 continue;
             }
 
-            // Bounded (not precisely-woken) park, same as
-            // `current_thread::block_on`/`LocalSet::run_until` each use
-            // on their own single queue -- parking on the ordinary
-            // queue's own condvar specifically (rather than the local
-            // set's) is fine here even though the two are otherwise
-            // independent: a locally-spawned task's own wake still
-            // reaches this loop within this same bounded timeout, just
-            // not instantly, and `LocalRuntimeWaker` below wakes this
-            // exact condvar regardless of which queue's task caused the
-            // wake.
-            shared.park(0);
+            // Parks on the ordinary queue's condvar. Every wake that can
+            // make work for this loop reaches it: `future`'s and each
+            // local task's through `LocalRuntimeWaker` (with the
+            // `notified` flag, so none is lost), and the ordinary queue's
+            // through `task::spawn`. The timeout only bounds a missed
+            // ordinary-queue wake, as in `current_thread::block_on`.
+            shared.park_unless(0, &parker.notified);
         }
     }
 }
 
+/// Clears the `LocalSet`'s unpark waker when [`LocalRuntime::block_on`]
+/// returns or unwinds.
+struct ClearUnpark<'a>(&'a crate::task::LocalSet);
+
+impl Drop for ClearUnpark<'_> {
+    fn drop(&mut self) {
+        self.0.set_unpark(None);
+    }
+}
+
 /// Wakes [`LocalRuntime::block_on`]'s own parked loop -- shared by
-/// `future`'s own waker and (via [`task::spawn`]'s ordinary wake path)
-/// anything spawned onto the runtime's regular queue. A locally-spawned
-/// task's wake doesn't go through this (it notifies the `LocalSet`'s own
-/// separate condvar instead), which is fine: see
-/// [`LocalRuntime::block_on`]'s own docs for why the bounded park this
-/// wakes still catches it promptly enough regardless.
+/// `future`'s own waker and every wake of a task on the runtime's
+/// `LocalSet` (see `LocalSet::set_unpark`). Anything spawned onto the
+/// runtime's regular queue wakes the same condvar through
+/// [`task::spawn`]'s ordinary path.
 struct LocalRuntimeWaker {
     shared: Arc<Shared>,
+    /// Set by every wake, so a wake that lands just before the loop parks
+    /// is not lost (`Shared::park_unless`).
+    notified: AtomicBool,
 }
 
 impl Wake for LocalRuntimeWaker {
@@ -1002,7 +1039,8 @@ impl Wake for LocalRuntimeWaker {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        self.shared.wake_all_parked();
+        self.notified.store(true, Ordering::Release);
+        self.shared.unpark_notified();
     }
 }
 

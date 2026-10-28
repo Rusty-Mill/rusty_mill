@@ -198,6 +198,10 @@ struct LocalShared {
     queue: Mutex<VecDeque<Arc<LocalTask>>>,
     park_lock: Mutex<()>,
     park_condvar: Condvar,
+    /// Also woken on every schedule: the loop of a
+    /// [`crate::runtime::LocalRuntime::block_on`] driving this set, which
+    /// parks on the runtime's condvar rather than `park_condvar`.
+    unpark: Mutex<Option<Waker>>,
 }
 
 impl LocalShared {
@@ -206,12 +210,16 @@ impl LocalShared {
             queue: Mutex::new(VecDeque::new()),
             park_lock: Mutex::new(()),
             park_condvar: Condvar::new(),
+            unpark: Mutex::new(None),
         }
     }
 
     fn schedule(&self, task: Arc<LocalTask>) {
         self.queue.lock().unwrap().push_back(task);
         self.park_condvar.notify_all();
+        if let Some(waker) = self.unpark.lock().unwrap().as_ref() {
+            waker.wake_by_ref();
+        }
     }
 
     fn next_task(&self) -> Option<Arc<LocalTask>> {
@@ -466,6 +474,13 @@ impl LocalSet {
     /// way to do that.
     pub(crate) fn next_local_task(&self) -> Option<Arc<LocalTask>> {
         self.shared.next_task()
+    }
+
+    /// Sets the waker every schedule also wakes, so a
+    /// [`crate::runtime::LocalRuntime::block_on`] parked on its own
+    /// condvar runs a woken local task at once; `None` clears it.
+    pub(crate) fn set_unpark(&self, waker: Option<Waker>) {
+        *self.shared.unpark.lock().unwrap() = waker;
     }
 }
 

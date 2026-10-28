@@ -317,16 +317,21 @@ fn a_status_query_is_answered_in_order() {
     let path = start_server();
     let mut client = Client::connect(&path);
     let block = block_for(&mut client);
-    let ask = |first: &str, second: &str| {
+    // Each round ends by printing its own marker after `stty sane`, and the
+    // next is typed only once that marker is out: a line typed while the
+    // terminal is still raw keeps its `\r`, so the shell never sees it end.
+    let ask = |first: &str, second: &str, round: u32| {
         format!(
             "stty raw -echo; printf '{first}{second}'; \
-             dd bs=1 count=19 2>/dev/null | od -An -tx1; stty sane\r"
+             dd bs=1 count=19 2>/dev/null | od -An -tx1; stty sane; echo END$(({round}*2))\r"
         )
     };
     let (query, da1) = ("\\033]7501;?\\033\\\\", "\\033[c");
-    client.input(block, ask(query, da1).as_bytes());
+    client.input(block, ask(query, da1, 1).as_bytes());
+    client.wait_for(block, "END2");
     client.wait_for(block, "1b 5d 37 35 30 31 3b 3f 1b 5c 1b 5b 3f 31 3b 32");
-    client.input(block, ask(da1, query).as_bytes());
+    client.input(block, ask(da1, query, 2).as_bytes());
+    client.wait_for(block, "END4");
     client.wait_for(block, "1b 5b 3f 31 3b 32 3b 34 63 1b 5d 37 35 30 31 3b");
 }
 
