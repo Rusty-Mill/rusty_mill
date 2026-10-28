@@ -35,7 +35,6 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .shell.noside{grid-template-columns:minmax(0,1fr)}.shell.noside #side{display:none}
 #side{display:flex;background:var(--panel);border-right:1px solid var(--line)}
 #side nav{width:220px;padding:12px 8px;overflow-y:auto;min-height:100%}
-#side nav+nav{width:210px;border-left:1px solid var(--line)}
 #side h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mute);margin:4px 8px 8px}
 #side h2.sep{margin-top:18px}
 #side .item{display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;background:none;border:0;border-radius:6px;padding:7px 8px;margin-top:2px;overflow-wrap:anywhere}
@@ -60,7 +59,7 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 #settings .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
 #settings details{display:inline-block}
 #settings details label{display:block}
-@media (max-width:760px){.shell{grid-template-columns:minmax(0,1fr)}#side{flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line)}#side nav,#side nav+nav{width:100%;min-height:0;border-left:0}}
+@media (max-width:760px){.shell{grid-template-columns:minmax(0,1fr)}#side{flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line)}#side nav{width:100%;min-height:0}}
 #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--err);color:#fff;padding:8px 14px;border-radius:6px;display:none}
 dialog{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;width:min(560px,92vw)}
 dialog form{display:grid;gap:8px}
@@ -71,7 +70,7 @@ dialog form{display:grid;gap:8px}
 </head>
 <body>
 <div class="shell" id="shell">
-<aside id="side" aria-label="repositories, projects and agents"><nav id="nav1" aria-label="repositories"></nav><nav id="nav2" aria-label="projects" hidden></nav></aside>
+<aside id="side" aria-label="repositories, projects and agents"><nav id="nav1" aria-label="repositories, projects and agents"></nav></aside>
 <div>
 <header>
   <button id="toggle" aria-label="toggle repositories panel" title="Repositories">&#9776;</button>
@@ -207,9 +206,11 @@ function renderSide(){
   if(projects().length>1){
     n1.append(el("h2","Repositories"),item("All repositories",cards.length,!sel.repo,()=>pick("","")));
     for(const r of names)n1.append(item(r,count(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
-    // Every repository's projects in one list, so one project's cards are a click away. A repository's own
-    // project (named like it) is left out: choosing the repository shows it.
-    const named=Object.entries(repos).flatMap(([r,ps])=>ps.filter(p=>p!==r)).sort();
+    // The projects of the chosen repository, or of every repository, so one project's cards are a click
+    // away. A repository whose only project is its own is left out: it is the repository, listed above.
+    // (A credential limited to some projects may see a repository with one other project: that one stays.)
+    const named=Object.entries(repos).filter(([r])=>!sel.repo||r===sel.repo)
+      .flatMap(([r,ps])=>ps.length===1&&ps[0]===r?[]:ps).sort();
     if(named.length)n1.append(el("h2","Projects","sep"));
     for(const p of named)n1.append(item(p,count(k=>k.project===p),sel.project===p,()=>pick(repoOf(p),p)));
   }
@@ -219,11 +220,6 @@ function renderSide(){
   if(agents.length){
     n1.append(el("h2","Agents","sep"),item("Everyone",cards.filter(k=>k.claim).length,!sel.agent,()=>pickAgent("")));
     for(const a of agents)n1.append(item(a,claims[a],sel.agent===a,()=>pickAgent(a),a));
-  }
-  const n2=$("nav2");n2.hidden=!sel.repo;n2.replaceChildren();
-  if(sel.repo){
-    n2.append(el("h2",sel.repo),item("All projects",count(k=>repoOf(k.project)===sel.repo),!sel.project,()=>pick(sel.repo,"")));
-    for(const p of repos[sel.repo]||[])n2.append(item(p,count(k=>k.project===p),sel.project===p,()=>pick(sel.repo,p)));
   }
 }
 function pick(repo,project){sel={...sel,repo,project};pref("repo",repo);pref("project",project);render()}

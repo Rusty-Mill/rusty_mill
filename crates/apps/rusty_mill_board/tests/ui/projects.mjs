@@ -43,24 +43,25 @@ const repoButtons = () => items("#nav1");
 check((await titles()).length === 4, "all repositories show every card");
 const rows = await repoButtons();
 check(rows.slice(0, 3).join("|") === "All repositories 4|rusty_mill 3|super_board 1", `the panel lists repositories with counts (${rows.join("|")}); an empty default repository is hidden`);
-check(rows.slice(3, 6).join("|") === "orch 1|rl 1|skills 1", `every repository's projects but its own are listed together (${rows.slice(3, 6).join("|")})`);
-check(rows.slice(6).join("|") === "Everyone 1|claude 1", `agents holding claims are listed with their counts (${rows.slice(6).join("|")})`);
-check(await page.locator("#nav2").isHidden(), "no project pane until a repository is chosen");
+check(rows.slice(3, 8).join("|") === "orch 1|rl 1|rusty_mill 1|skills 1|super_board 0", `every project of a repository with several is listed (${rows.slice(3, 8).join("|")})`);
+check(rows.slice(8).join("|") === "Everyone 1|claude 1", `agents holding claims are listed with their counts (${rows.slice(8).join("|")})`);
+check((await page.locator("#side nav").count()) === 1, "one panel: no second column of projects");
 
-await page.locator("#nav1 .item").filter({ hasText: /^skills/ }).click();
-check((await titles()).join() === "Skills card", "choosing a project in the list shows only its cards");
-check((await page.locator("#nav2 .item.on").innerText()).startsWith("skills"), "and opens its repository with it chosen");
+const project = (name) => page.locator("#nav1 .item").filter({ hasText: new RegExp(`^${name}\\d`) });
+await project("skills").click();
+check((await titles()).join() === "Skills card", "choosing a project shows only its cards");
 await page.locator("#nav1 .item", { hasText: "All repositories" }).click();
 check((await titles()).length === 4, "All repositories clears it");
 
-await page.locator("#nav1 .item", { hasText: "super_board" }).click();
+await page.locator("#nav1 .item", { hasText: "super_board" }).first().click();
 check((await titles()).join() === "Skills card", "choosing a repository filters the board");
-await page.locator("#nav1 .item", { hasText: "rusty_mill" }).click();
+await page.locator("#nav1 .item", { hasText: "rusty_mill" }).first().click();
 check((await titles()).join() === "Mill loose card,Orch card,RL card", "another repository, its three cards");
-const options = await items("#nav2");
-check(options.join("|") === "All projects 3|orch 1|rl 1|rusty_mill 1", `the second pane lists that repository's projects (${options.join("|")})`);
+check((await page.locator("#side nav").count()) === 1, "choosing a repository opens no second column");
+const listed = (await repoButtons()).slice(3, -2).join("|");
+check(listed === "orch 1|rl 1|rusty_mill 1", `and the Projects list narrows to that repository's projects (${listed})`);
 
-await page.locator("#nav2 .item", { hasText: "rl" }).click();
+await project("rl").click();
 check((await titles()).join() === "RL card", "choosing a project narrows further");
 check((await page.locator(".card .tag.proj").count()) === 0, "no project chip when one project is chosen");
 
@@ -69,7 +70,7 @@ await page.click("#add");
 await page.waitForFunction(() => [...document.querySelectorAll(".card b")].some((b) => b.textContent === "Added under rl"));
 check((await api("board_list", { project: "rl" })).cards.some((c) => c.title === "Added under rl"), "a card added while a project is chosen belongs to it");
 
-await page.locator("#nav2 .item", { hasText: "All projects" }).click();
+await page.locator("#nav1 .item", { hasText: "rusty_mill" }).first().click();
 await page.fill("#title", "Added under repo");
 await page.click("#add");
 await page.waitForFunction(() => [...document.querySelectorAll(".card b")].some((b) => b.textContent === "Added under repo"));

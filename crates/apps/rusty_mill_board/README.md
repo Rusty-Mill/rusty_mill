@@ -38,8 +38,8 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `default`; `card_add` takes `project`, `card_assign` moves one and needs Triage, or `project` for a card nobody else has claimed). A credential in
   `--identities` may carry `"projects": [...]`: it then cannot see, take or change any other project's cards,
   checked inside every write's compare-and-swap, so a card re-assigned mid-call is still refused.
-  `board_list` and `card_take` take a `project` filter. The UI has a two-pane side panel: repositories with card counts, and for the chosen one
-  its projects; both filter the board, and new cards go to the chosen project (else the repository's own). An
+  `board_list` and `card_take` take a `project` filter. The UI's side panel lists repositories and then every project
+  (a repository's only project is the repository itself), with card counts; both filter the board, and new cards go to the chosen project (else the repository's own). An
   Agents list under the repositories (everyone holding a claim, with their count) filters by claimant. Each agent
   has its own colour (twelve hues; two agents never share one), shown in the list and on every card it holds:
   a coloured edge, a tint and a chip, whose dot pulses while the card is in building, qa or review. The runner
