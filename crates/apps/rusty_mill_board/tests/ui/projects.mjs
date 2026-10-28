@@ -43,8 +43,15 @@ const repoButtons = () => items("#nav1");
 check((await titles()).length === 4, "all repositories show every card");
 const rows = await repoButtons();
 check(rows.slice(0, 3).join("|") === "All repositories 4|rusty_mill 3|super_board 1", `the panel lists repositories with counts (${rows.join("|")}); an empty default repository is hidden`);
-check(rows.slice(3).join("|") === "Everyone 1|claude 1", `agents holding claims are listed with their counts (${rows.slice(3).join("|")})`);
+check(rows.slice(3, 6).join("|") === "orch 1|rl 1|skills 1", `every repository's projects but its own are listed together (${rows.slice(3, 6).join("|")})`);
+check(rows.slice(6).join("|") === "Everyone 1|claude 1", `agents holding claims are listed with their counts (${rows.slice(6).join("|")})`);
 check(await page.locator("#nav2").isHidden(), "no project pane until a repository is chosen");
+
+await page.locator("#nav1 .item").filter({ hasText: /^skills/ }).click();
+check((await titles()).join() === "Skills card", "choosing a project in the list shows only its cards");
+check((await page.locator("#nav2 .item.on").innerText()).startsWith("skills"), "and opens its repository with it chosen");
+await page.locator("#nav1 .item", { hasText: "All repositories" }).click();
+check((await titles()).length === 4, "All repositories clears it");
 
 await page.locator("#nav1 .item", { hasText: "super_board" }).click();
 check((await titles()).join() === "Skills card", "choosing a repository filters the board");

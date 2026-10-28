@@ -207,6 +207,11 @@ function renderSide(){
   if(projects().length>1){
     n1.append(el("h2","Repositories"),item("All repositories",cards.length,!sel.repo,()=>pick("","")));
     for(const r of names)n1.append(item(r,count(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
+    // Every repository's projects in one list, so one project's cards are a click away. A repository's own
+    // project (named like it) is left out: choosing the repository shows it.
+    const named=Object.entries(repos).flatMap(([r,ps])=>ps.filter(p=>p!==r)).sort();
+    if(named.length)n1.append(el("h2","Projects","sep"));
+    for(const p of named)n1.append(item(p,count(k=>k.project===p),sel.project===p,()=>pick(repoOf(p),p)));
   }
   // Agents: whoever holds a claim, with how many cards. A second filter, independent of the repository.
   const claims={};cards.forEach(k=>{if(k.claim)claims[k.claim]=(claims[k.claim]||0)+1});
