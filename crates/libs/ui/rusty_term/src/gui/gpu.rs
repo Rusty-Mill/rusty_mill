@@ -326,6 +326,9 @@ enum TileKey {
     Shaped(usize),
     /// A combining mark centered over a base `span` cells wide.
     Mark(char, Style, usize),
+    /// A glyph stored wider than its scalar (a mode 2027 VS16 cluster on a
+    /// narrow base), drawn at its own size in a `span`-cell tile.
+    Spanned(char, Style, usize),
 }
 
 /// One pane row's instances as last built, and what they were built from.
@@ -1139,7 +1142,16 @@ impl GpuCore {
                         continue;
                     }
                     let quad = (scale * span).min(grid.cols - x) as u32;
-                    let (rect, is_color) = self.tile_for_char(ch, style, font);
+                    let (rect, is_color) = if span > char_width(ch).max(1) && ch != ' ' {
+                        // A two-column cluster on a narrow base: a two-cell
+                        // tile, so the quad does not stretch the glyph.
+                        let key = TileKey::Spanned(ch, style, span);
+                        let glyph = font.glyph(ch, style);
+                        let color = glyph.color.is_some();
+                        (self.upload_tile(key, &glyph, span, font.baseline()), color)
+                    } else {
+                        self.tile_for_char(ch, style, font)
+                    };
                     let fg = if is_color { 0xFFFFFF } else { r.fg };
                     frame.base.push(Self::base_inst(
                         (col0 + x) as u32,
@@ -2214,6 +2226,9 @@ mod tests {
         let base = row_instances(&mut core, &mut font, &g);
         let head = base.iter().rfind(|i| i.col == 0).expect("head cell");
         assert_eq!((head.span, head.bg), (2, 0x0000FF), "{base:?}");
+        // The tile is two cells wide, so the narrow glyph is not stretched.
+        let cell_w = core.cell_w;
+        assert_eq!(head.uv_wh >> 16, 2 * cell_w, "two-cell tile");
     }
 
     #[test]
