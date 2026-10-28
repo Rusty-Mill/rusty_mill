@@ -3,9 +3,11 @@
 //! creates a session, window and block first. Ctrl-] then `d` detaches;
 //! the blocks keep running and the focused one's id is printed for
 //! reattaching. The other Ctrl-] commands are listed in
-//! `rusty_mux_tui::keys`. With `RUSTY_MUX_KEYLOG` set to a path, every
-//! keyboard read is appended to that file as one line of hex, to see what a
-//! terminal really sends.
+//! `rusty_mux_tui::keys`. With `RUSTY_MUX_KEYLOG` set to a new file's path,
+//! every keyboard read is written to it as one line of hex, to see what a
+//! terminal really sends. That is everything typed, passwords included:
+//! the file is created owner-only on Unix (on Windows it takes its
+//! directory's permissions), and an existing file is refused.
 
 use std::process::ExitCode;
 
@@ -220,18 +222,26 @@ mod client {
         let _ = tx.send(Input::Ended(pane));
     }
 
-    /// The file `RUSTY_MUX_KEYLOG` names, opened for appending; `None`
-    /// when it is unset.
+    /// The file `RUSTY_MUX_KEYLOG` names, created for the log; `None` when
+    /// it is unset. It must not exist yet, so the keys never go to a file
+    /// someone else may read; on Unix it is created owner-only.
     fn keylog() -> Result<Option<std::fs::File>, String> {
         let Some(path) = std::env::var_os("RUSTY_MUX_KEYLOG") else {
             return Ok(None);
         };
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map(Some)
-            .map_err(|e| format!("RUSTY_MUX_KEYLOG {}: {e}", Path::new(&path).display()))
+        let path = Path::new(&path);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options
+            .open(path)
+            .map_err(|e| format!("RUSTY_MUX_KEYLOG {}: {e}", path.display()))?;
+        eprintln!(
+            "rusty-mux: logging every key typed, passwords included, to {}",
+            path.display()
+        );
+        Ok(Some(file))
     }
 
     /// Reads the keyboard into the main loop until `stop`; an empty read

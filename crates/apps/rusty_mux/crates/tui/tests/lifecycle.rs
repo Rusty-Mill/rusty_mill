@@ -299,19 +299,47 @@ fn win32_input_mode_never_reaches_the_local_terminal() {
 
 #[test]
 fn the_keylog_records_each_keyboard_read_in_hex() {
-    let log = std::env::temp_dir().join(format!("rusty-mux-keylog-{}", std::process::id()));
+    let log = keylog_path("new");
     let _ = std::fs::remove_file(&log);
-    let mut env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
-    env.insert("RUSTY_MUX_KEYLOG".into(), log.clone().into_os_string());
     let (socket, server) = scripted_server(true, End::Open);
-    let tui = Tui::spawn(&socket, BLOCK, EnvSpec::Explicit(env));
+    let tui = Tui::spawn(&socket, BLOCK, keylog_env(&log));
     tui.wait_for(b"REMOTE");
     tui.master.write(b"\x1dd").expect("ctrl-] d");
-    tui.exit();
+    let screen = tui.exit();
     server.join().expect("server");
     let logged = std::fs::read_to_string(&log).expect("keylog");
     assert_eq!(logged, "1d 64\n", "{logged:?}");
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &std::fs::metadata(&log).expect("stat").permissions(),
+    );
+    assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    let warned = String::from_utf8_lossy(&screen).contains("passwords included");
+    assert!(warned, "{:?}", String::from_utf8_lossy(&screen));
     std::fs::remove_file(&log).expect("cleanup");
+}
+
+/// The keys must never land in a file another user may already read.
+#[test]
+fn the_keylog_refuses_an_existing_file() {
+    let log = keylog_path("existing");
+    std::fs::write(&log, "kept\n").expect("existing log");
+    let (socket, _server) = scripted_server(true, End::Open);
+    let screen = Tui::spawn(&socket, BLOCK, keylog_env(&log)).exit();
+    let text = String::from_utf8_lossy(&screen);
+    assert!(text.contains("RUSTY_MUX_KEYLOG"), "{text:?}");
+    assert_eq!(std::fs::read_to_string(&log).expect("log"), "kept\n");
+    std::fs::remove_file(&log).expect("cleanup");
+}
+
+fn keylog_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("rusty-mux-keylog-{name}-{}", std::process::id()))
+}
+
+/// This process's environment with `RUSTY_MUX_KEYLOG` set to `log`.
+fn keylog_env(log: &Path) -> EnvSpec {
+    let mut env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
+    env.insert("RUSTY_MUX_KEYLOG".into(), log.as_os_str().to_owned());
+    EnvSpec::Explicit(env)
 }
 
 const OTHER: &str = "0b5e2a7c-9d14-4f36-8e21-7a6c3b9d0e4f";

@@ -23,8 +23,10 @@ use rusty_term_core::{Grid, WIDE_TRAILER};
 pub const RESTORE: &[u8] = b"\x1b[?1049l\x1b[!p\x1b[?25h\x1b>\x1b[?2004l\
 \x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?9001l\x1b[0m";
 
-/// The longest unfinished mode set [`NoWin32Input`] holds back; past it
-/// the bytes pass as they are, as no real program sends one so long.
+/// The longest unfinished mode set [`NoWin32Input`] holds back. Past it
+/// the bytes pass as they are, so a set split across reads after this
+/// many bytes keeps its 9001; no real program sends one so long, and a
+/// hold without a bound would let a block's output grow it for ever.
 const HOLD_MAX: usize = 64;
 
 /// Drops win32-input-mode (DEC `?9001`) from the mode sets in a block's
@@ -80,10 +82,21 @@ enum Scan {
     Other,
 }
 
+/// A C0 control a terminal runs in the middle of a sequence, which goes
+/// on after it; CAN and SUB cancel the sequence and ESC starts another.
+fn runs_inside(b: u8) -> bool {
+    b < 0x20 && !matches!(b, 0x18 | 0x1a | 0x1b)
+}
+
 fn mode_set(seq: &[u8]) -> Scan {
+    // How far into `ESC [ ? params h`, the C0 controls inside it aside.
+    let mut at = 1;
     for (i, &b) in seq.iter().enumerate().skip(1) {
-        match (i, b) {
-            (1, b'[') | (2, b'?') | (3.., b'0'..=b'9' | b';') => {}
+        if runs_inside(b) {
+            continue;
+        }
+        match (at, b) {
+            (1, b'[') | (2, b'?') | (3.., b'0'..=b'9' | b';') => at += 1,
             (3.., b'h') => return Scan::Set(i + 1),
             _ => return Scan::Other,
         }
@@ -92,9 +105,11 @@ fn mode_set(seq: &[u8]) -> Scan {
 }
 
 /// A whole mode set `seq` without 9001: unchanged when it lacks it,
-/// nothing when 9001 was all it set.
+/// nothing when 9001 was all it set. The C0 controls inside it go first,
+/// as the terminal runs them before the set completes.
 fn without_win32(seq: &[u8]) -> Vec<u8> {
-    let params = &seq[3..seq.len() - 1];
+    let (controls, set): (Vec<u8>, Vec<u8>) = seq.iter().partition(|&&b| runs_inside(b));
+    let params = &set[3..set.len() - 1];
     let is_win32 = |p: &&[u8]| {
         std::str::from_utf8(p)
             .ok()
@@ -109,9 +124,9 @@ fn without_win32(seq: &[u8]) -> Vec<u8> {
         .filter(|p| !is_win32(p))
         .collect();
     if kept.iter().all(|p| p.is_empty()) {
-        return Vec::new();
+        return controls;
     }
-    [b"\x1b[?", kept.join(&b';').as_slice(), b"h"].concat()
+    [&controls, b"\x1b[?".as_slice(), &kept.join(&b';'), b"h"].concat()
 }
 
 /// Repaints the local terminal from a restored grid: every visible row
@@ -309,6 +324,17 @@ mod tests {
                 assert_eq!(filtered(&[a, b, c]), whole, "split at {at}, {to}");
             }
         }
+    }
+
+    #[test]
+    fn the_win32_filter_sees_through_controls_inside_a_mode_set() {
+        // A terminal runs NUL, BEL and CR mid-sequence and goes on with it.
+        assert_eq!(filtered(&[b"\x1b[?90\x0001\x07h"]), b"\x00\x07");
+        assert_eq!(filtered(&[b"\x1b\r[?25;9001h"]), b"\r\x1b[?25h");
+        assert_eq!(filtered(&[b"\x1b[?900", b"\x001h"]), b"\x00");
+        // CAN cancels it, so what follows is text.
+        let cancelled: &[u8] = b"\x1b[?90\x1801h";
+        assert_eq!(filtered(&[cancelled]), cancelled);
     }
 
     #[test]
