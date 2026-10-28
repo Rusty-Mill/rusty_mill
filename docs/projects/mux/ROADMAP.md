@@ -2,9 +2,9 @@
 
 Phases from the design brief §9. Each exit criterion is a test or a measured number. Phase N+1 starts only after the owner accepts phase N's go/no-go.
 
-## Phase 0: engine prerequisites (done 2026-10-23, two targets open)
+## Phase 0: engine prerequisites (done 2026-10-23, one target open)
 
-Status: items 1, 2 and 4 landed (#872, #894, #939); item 3 landed as #930 plus #936. Open: the MB/s floors (#889) and reliable ≤ 11.2 ms encode (#939). See CAPABILITIES.
+Status: items 1, 2 and 4 landed (#872, #894, #939); item 3 landed as #930 plus #936. The MB/s floors (#889) are met on the 4 MB workloads (#1019; #889 closed 2026-10-25). Open: reliable ≤ 11.2 ms encode (#939). See CAPABILITIES.
 
 1. #872 lands: instruction-count gate in `required-gate`.
 2. #855 lands: per-code-point widths by default, mode 2027 opt-in; `vim_edit` matches the oracle.
@@ -42,15 +42,15 @@ Started 2026-10-25 (owner go-ahead). One PR per step, in order:
 
 ## Phase 2b: agent parity
 
-From the [Rex gap check](REX-GAP-CHECK.md) §5 (owner, 2026-10-27). Started 2026-10-27, when the owner accepted Phase 2. One PR per step, in order. Exit: each step's behaviour has a server or ctl test, on Linux and on CI's Windows leg where the step does not depend on ConPTY pass-through (R1).
+From the [Rex gap check](REX-GAP-CHECK.md) §5 (owner, 2026-10-27). Started 2026-10-27, when the owner accepted Phase 2. One PR per step, in order. All seven steps merged by 2026-10-28; the phase is done once the owner accepts the exit evidence. Exit: each step's behaviour has a server or ctl test, on Linux and on CI's Windows leg where the step does not depend on ConPTY pass-through (R1).
 
 1. Terminal events (C29): program exited with its exit code, bell, progress, notification, behind a new feature bit; reply to the OSC 7501 query. Done (#1174).
 2. Wait primitives (C30): `rusty-mux-ctl wait` on a block closing or its program exiting, with a timeout, exiting with the program's status; `create-block` takes an optional command, arguments and working directory per request (proto and server), so run-and-wait starts a program in a new block and exits with its status; wait for an event matching fields, with a timeout. Done (#1178): `wait --block`, `wait --event KIND --FIELD VALUE`, `run --wait`, `create-block --command --arg --cwd` behind `Features::LAUNCH`; a timeout exits 124.
-3. Process info (C31): a `terminal.process` block method (child, foreground process, ancestors) and a process-changed event, using existing platform crates or `rusty_libc`. Done: `terminal.process` and `process-changed` behind `Features::PROCESS`, from `/proc` and `tcgetpgrp` (`rusty_libc`); Linux only for now.
+3. Process info (C31): a `terminal.process` block method (child, foreground process, ancestors) and a process-changed event, using existing platform crates or `rusty_libc`. Done (#1183): `terminal.process` and `process-changed` behind `Features::PROCESS`, from `/proc` and `tcgetpgrp` (`rusty_libc`); on Windows the program's pid only, and no event.
 4. Input and capture (C32): named keys encoded over `input`; `terminal.format` gains trim, unwrap and a VT format. Done (#1186): `terminal.send-keys` and `terminal.format --trim --unwrap --vt` behind `Features::CAPTURE`.
-5. Labels and clients (C33): rename methods for all four kinds, block and client labels, label-changed events, client list and force-disconnect. Done: `rename-session|window|block|client`, `*-renamed` events, clients in `list` and `disconnect-client` behind `Features::LABELS`.
-6. Agent setup (C34): `rusty-mux-ctl agent setup|status|remove` for Claude Code first, plus a placement-rules doc. Our own skill text; merges into settings without clobbering them. Done: the owner approved the writes (gap check K4) on 2026-10-27; skill, `SessionStart` hook and `agent hook`, with [AGENT-PLACEMENT.md](AGENT-PLACEMENT.md).
-7. Window layout (C12): a split tree per window in core, split, zoom and close-pane methods, layout events; the attach client renders it. Server side done: `split-block`, `zoom-block`, `unzoom-window`, `close-block` closing the pane, `layout-changed` events and layouts in `list`, behind `Features::LAYOUT`. Done: server side in #1196; the attach client draws the layout, with Ctrl-] commands for focus, split, zoom and close.
+5. Labels and clients (C33): rename methods for all four kinds, block and client labels, label-changed events, client list and force-disconnect. Done (#1189): `rename-session|window|block|client`, `*-renamed` events, clients in `list` and `disconnect-client` behind `Features::LABELS`.
+6. Agent setup (C34): `rusty-mux-ctl agent setup|status|remove` for Claude Code first, plus a placement-rules doc. Our own skill text; merges into settings without clobbering them. Done (#1190): the owner approved the writes (gap check K4) on 2026-10-27; skill, `SessionStart` hook and `agent hook`, with [AGENT-PLACEMENT.md](AGENT-PLACEMENT.md).
+7. Window layout (C12): a split tree per window in core, split, zoom and close-pane methods, layout events; the attach client renders it. Server side done: `split-block`, `zoom-block`, `unzoom-window`, `close-block` closing the pane, `layout-changed` events and layouts in `list`, behind `Features::LAYOUT`. Done: server side in #1196; the attach client (#1200) draws the layout, with Ctrl-] commands for focus, split, zoom and close.
 
 ## Phase 3: identity and remote
 

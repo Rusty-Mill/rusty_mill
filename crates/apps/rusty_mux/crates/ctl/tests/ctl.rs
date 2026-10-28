@@ -1204,6 +1204,15 @@ fn exits_with(code: u8) -> Vec<String> {
     }
 }
 
+/// What to type at the block's shell so it waits a second, long enough
+/// for a waiter to be listening, then exits with `code`.
+fn pause_then_exit(code: u8) -> String {
+    match cfg!(windows) {
+        true => format!("ping -n 2 127.0.0.1 >nul & exit {code}\r"),
+        false => format!("sleep 1; exit {code}\r"),
+    }
+}
+
 #[test]
 fn run_wait_exits_with_the_programs_status() {
     let socket = start_server();
@@ -1278,7 +1287,6 @@ fn run_starts_in_ctls_directory_and_reports_a_signal() {
     assert_eq!(missing.status.code(), Some(1), "refused, not run");
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn wait_follows_an_existing_block_until_its_program_exits() {
     let socket = start_server();
@@ -1303,7 +1311,7 @@ fn wait_follows_an_existing_block_until_its_program_exits() {
             "--block",
             &block,
             "--data",
-            "sleep 1; exit 5\r",
+            &pause_then_exit(5),
         ],
     );
     let output = waiter.wait_with_output().expect("wait");
@@ -1317,7 +1325,6 @@ fn wait_follows_an_existing_block_until_its_program_exits() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn wait_gives_up_at_its_timeout_and_fails_on_a_closed_block() {
     let socket = start_server();
@@ -1340,7 +1347,6 @@ fn wait_gives_up_at_its_timeout_and_fails_on_a_closed_block() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("before its program exited"));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn wait_for_an_event_whose_fields_match() {
     let socket = start_server();
@@ -1378,7 +1384,7 @@ fn wait_for_an_event_whose_fields_match() {
             "--block",
             &block,
             "--data",
-            "sleep 1; exit 7\r",
+            &pause_then_exit(7),
         ],
     );
     let output = waiter.wait_with_output().expect("wait");
