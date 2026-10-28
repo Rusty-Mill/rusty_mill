@@ -124,22 +124,23 @@ const RUNNING=["building","qa","review"];
 const pref=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch{}};
 /* The token: a #token= in the address is kept in this browser and dropped from the address bar;
    otherwise the one kept from before. With none, or a refused one, the first call asks for it. */
-function setToken(t){tok=t;pref("token",t);$("signout").hidden=false}
+let signing=null,resume=()=>{};   // the open sign-in box, and how to let its waiting calls go
+function setToken(t){tok=t;pref("token",t);$("signout").hidden=false;resume()}
 {const h=new URLSearchParams(location.hash.slice(1)).get("token");
   if(h){setToken(h);try{history.replaceState(null,"",location.pathname+location.search)}catch{}}
   else if(pref("token"))setToken(pref("token"))}
 /* Signing in reloads the page: the new token may be another agent, with its own role, projects
    and view of the board, so everything is read again and no refused write is replayed as someone else.
-   Until then the refused calls wait, and every one shares the one box. */
+   Until then the refused calls wait, and every one shares the one box. If the token is replaced
+   meanwhile (your own rotation answering late), the box closes and the waiting calls retry with it. */
 function signIn(why){
-  const d=$("signin"),f=$("signin-token");
-  if(!d.open){
-    $("signin-why").textContent=why;f.value="";
+  return signing??=new Promise(done=>{
+    const d=$("signin"),f=$("signin-token");$("signin-why").textContent=why;f.value="";
     d.oncancel=e=>e.preventDefault();   // nothing works without a token, so Escape does not dismiss it
     d.querySelector("form").onsubmit=()=>{pref("token",f.value.trim());location.reload()};
+    resume=()=>{resume=()=>{};signing=null;d.close();done()};
     d.showModal();f.focus();
-  }
-  return new Promise(()=>{});
+  });
 }
 
 async function api(op,args={}){

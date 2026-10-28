@@ -62,10 +62,29 @@ const raced = await page.evaluate(async (good) => {
 }, TOKEN);
 check(raced === "admin" && !(await page.locator("#signin").evaluate((d) => d.open)), "a 401 for a replaced token retries without asking");
 
+// The other order: your own rotation is applied on the server but its answer is late, so another
+// call is refused first and the box opens. When the answer lands, the box closes and the calls resume.
+let release;
+const held = new Promise((r) => { release = r; });
+await page.route("**/api/settings_agent_rotate", async (route) => { const reply = await route.fetch(); await held; await route.fulfill({ response: reply }); });
+await page.evaluate(() => { window.rotated = api("settings_agent_rotate", { name: "admin" }).then((r) => setToken(r.token)); });
+await page.waitForSelector("#signin[open]");
+check(true, "a call refused before the rotation answers opens the box");
+release();
+await page.waitForFunction(() => !document.querySelector("#signin").open);
+await page.evaluate(() => window.rotated);
+await page.unroute("**/api/settings_agent_rotate");
+const admin = await page.evaluate(() => tok);
+check(admin !== TOKEN && (await api(admin, "board_whoami")).body.actor === "admin", "the late answer closes the box and the new token is used");
+await page.fill("#title", "after late rotation");
+await page.click("#add");
+await page.locator(".card", { hasText: "after late rotation" }).waitFor();
+check(true, "and the board carries on");
+
 // Signing in as another agent after a revoke re-reads who you are; nothing of the old agent stays.
-const added = await api(TOKEN, "settings_agent_add", { agent: { name: "bob", role: "builder" } });
+const added = await api(admin, "settings_agent_add", { agent: { name: "bob", role: "builder" } });
 check(added.status === 200, "(setup) a second agent");
-check((await api(TOKEN, "settings_agent_rotate", { name: "admin" })).status === 200, "(setup) the admin token is revoked");
+check((await api(admin, "settings_agent_rotate", { name: "admin" })).status === 200, "(setup) the admin token is revoked");
 await page.waitForSelector("#signin[open]");
 check((await page.locator("#signin-why").innerText()).includes("refused"), "a revoked token is said so on the next call");
 await page.fill("#signin-token", added.body.token);
