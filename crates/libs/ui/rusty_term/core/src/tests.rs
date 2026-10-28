@@ -2320,6 +2320,74 @@ fn checkpoint_keeps_colour_provenance() {
     assert_eq!(colours(&g, 2, 0).1, DEFAULT_BG, "restored pen is default");
 }
 
+const GREEN: u32 = 0x00FF00;
+
+#[test]
+fn osc_4_recolours_palette_cells_but_not_equal_rgb() {
+    let mut g = Grid::new(6, 2);
+    let mut p = AnsiParser::new();
+    // a: SGR 31 (entry 1); b: the same red as RGB; c: 38;5;200; then a BCE
+    // erase on SGR 44 (entry 4).
+    p.advance(
+        &mut g,
+        b"\x1b[31ma\x1b[38;2;128;0;0mb\x1b[38;5;200mc\x1b[44m\x1b[K",
+    );
+    let red = colours(&g, 0, 0).0;
+    assert_eq!(colours(&g, 1, 0).0, red, "equal before");
+    p.advance(
+        &mut g,
+        b"\x1b]4;1;rgb:00/ff/00;200;rgb:00/00/ff;4;rgb:00/ff/00\x1b\\",
+    );
+    assert_eq!(colours(&g, 0, 0).0, GREEN, "SGR 31 follows entry 1");
+    assert_eq!(colours(&g, 1, 0).0, red, "RGB stays");
+    assert_eq!(colours(&g, 2, 0).0, BLUE, "38;5;200 follows entry 200");
+    assert_eq!(colours(&g, 4, 0).1, GREEN, "BCE erase follows entry 4");
+    // The pen follows too: text and erases written next use the new entry.
+    p.advance(&mut g, b"\r\n\x1b[31mx\x1b[K");
+    assert_eq!(colours(&g, 0, 1), (GREEN, GREEN));
+    // OSC 104 restores the entries, and everything drawn in them.
+    p.advance(&mut g, b"\x1b]104\x1b\\");
+    assert_eq!(colours(&g, 0, 0).0, red);
+    assert_eq!(colours(&g, 0, 1).0, red);
+    assert_eq!(colours(&g, 3, 1).1, PALETTE_16[4], "erase restored");
+    assert_eq!(colours(&g, 1, 0).0, red);
+}
+
+#[test]
+fn osc_4_recolours_the_primary_screen_under_the_alt_screen() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[32ma\x1b[?1049h\x1b]4;2;rgb:00/00/ff\x1b\\\x1b[?1049l",
+    );
+    assert_eq!(colours(&g, 0, 0).0, BLUE);
+}
+
+#[test]
+fn decsc_restores_a_palette_colour_as_it_reads_now() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[33m\x1b7\x1b[0m\x1b]4;3;rgb:00/ff/00\x1b\\\x1b8x",
+    );
+    assert_eq!(colours(&g, 0, 0).0, GREEN);
+}
+
+#[test]
+fn checkpoint_keeps_palette_tags() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[31ma\x1b[38;2;128;0;0mb\x1b[31m");
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b]4;1;rgb:00/ff/00\x1b\\c");
+    assert_eq!(colours(&g, 0, 0).0, GREEN, "tag restored");
+    assert_eq!(colours(&g, 1, 0).0, PALETTE_16[1], "RGB stays");
+    assert_eq!(colours(&g, 2, 0).0, GREEN, "restored pen is entry 1");
+}
+
 #[test]
 fn checkpoint_rejects_rtcp_v3_and_other_versions() {
     // v3 has v4's layout but no colour provenance, so restoring it would
@@ -7018,11 +7086,14 @@ fn ascii_fast_path_matches_put_char_one_byte_at_a_time() {
     let style = "\x1b[1;31;44;4:3;58;2;1;2;3m";
     let link = "\x1b]8;;https://x.test\x07";
     let probe = cells(&parse(format!("{style}X").as_bytes(), 2, 1))[0];
+    // SGR 31 and 44: palette entries 1 and 4.
     let pen = Pen {
         fg: probe.fg,
         bg: probe.bg,
         attrs: probe.flags,
         underline_color: probe.underline_color,
+        fg_index: 2,
+        bg_index: 5,
     };
     for setup in setups {
         for x in 1..=9 {
@@ -7066,11 +7137,14 @@ fn text_fast_path_matches_put_char_one_scalar_at_a_time() {
     let style = "\x1b[1;31;44;4:3;58;2;1;2;3m";
     let link = "\x1b]8;;https://x.test\x07";
     let probe = cells(&parse(format!("{style}X").as_bytes(), 2, 1))[0];
+    // SGR 31 and 44: palette entries 1 and 4.
     let pen = Pen {
         fg: probe.fg,
         bg: probe.bg,
         attrs: probe.flags,
         underline_color: probe.underline_color,
+        fg_index: 2,
+        bg_index: 5,
     };
     for setup in setups {
         for x in 1..=9 {

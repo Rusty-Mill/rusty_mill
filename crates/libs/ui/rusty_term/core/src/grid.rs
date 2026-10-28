@@ -756,8 +756,10 @@ pub struct Grid {
     pub(crate) insert_mode: bool,
     /// Background color erases fill with (BCE): the parser's SGR background,
     /// or `None` while that is the default, so the fill tracks OSC 11. Kept in
-    /// sync by the parser via [`Grid::set_erase_bg`].
-    erase_bg: Option<u32>,
+    /// sync by the parser via [`Grid::set_erase_bg`]. Held as the colour and
+    /// its palette tag ([`crate::cell::Source::tag`]), so OSC 4 recolours
+    /// the fill as it does the pen.
+    erase_bg: Option<(u32, u16)>,
     /// Cursor color (OSC 12 / the `cursor` config key), mirrored from the
     /// parser's palette like the defaults above. The windowed renderers paint
     /// the block cursor in it; the TUI host owns its own cursor.
@@ -1530,6 +1532,12 @@ impl Grid {
             return;
         }
         let cell = self.pack(cell);
+        self.set_packed(x, y, cell);
+    }
+
+    /// [`Grid::set_cell`] for a cell already stored; `(x, y)` must be on
+    /// the screen.
+    fn set_packed(&mut self, x: usize, y: usize, cell: PackedCell) {
         let blank = self.default_packed();
         let row = self.screen[y].cells_mut();
         if row[x].is_wide_trailer() {
@@ -1637,15 +1645,18 @@ impl Grid {
 
     /// The style id of a glyph written in `pen` under `link`. `pen`'s DECSCA
     /// bit is a layout bit and does not reach the style.
+    #[inline]
     fn pen_id(&mut self, pen: Pen, link: u16) -> StyleId {
-        self.styles.intern_pen(CellStyle {
-            fg: pen.fg,
-            bg: pen.bg,
-            underline_color: pen.underline_color,
-            attrs: pen.attrs & !super::cell::ATTR_PROTECTED,
-            link,
-            cluster: 0,
-        })
+        self.styles.intern_pen(CellStyle::of_pen(&pen, link))
+    }
+
+    /// The style of a wide glyph's trailer in `pen`: its colours and their
+    /// provenance, but no rendition.
+    fn trailer_style(pen: Pen, link: u16) -> CellStyle {
+        CellStyle {
+            attrs: pen.attrs & ATTR_DEFAULT_COLORS,
+            ..CellStyle::of_pen(&pen, link)
+        }
     }
 
     /// Run a style sweep if one is due, and a compaction if the sweep left
@@ -2368,35 +2379,16 @@ impl Grid {
         }
         let (x, y) = self.cursor;
         let link = self.current_link;
-        self.set_cell(
-            x,
-            y,
-            Cell {
-                ch,
-                cluster: 0,
-                fg: pen.fg,
-                bg: pen.bg,
-                flags: pen.attrs,
-                link,
-                underline_color: pen.underline_color,
-            },
-        );
-        if w == 2 && x + 1 < self.cols {
+        if x < self.cols && y < self.rows {
+            let protected = pen.attrs & super::cell::ATTR_PROTECTED != 0;
+            let head = PackedCell::glyph(ch, protected, self.pen_id(pen, link));
+            self.set_packed(x, y, head);
+        }
+        if w == 2 && x + 1 < self.cols && y < self.rows {
             // Trailing half: a flagged placeholder the renderer skips. It keeps
             // the pen's colors but only the WIDE_TRAILER layout bit.
-            self.set_cell(
-                x + 1,
-                y,
-                Cell {
-                    ch: ' ',
-                    cluster: 0,
-                    fg: pen.fg,
-                    bg: pen.bg,
-                    flags: WIDE_TRAILER | (pen.attrs & ATTR_DEFAULT_COLORS),
-                    link,
-                    underline_color: pen.underline_color,
-                },
-            );
+            let id = self.styles.intern(Self::trailer_style(pen, link));
+            self.set_packed(x + 1, y, PackedCell::trailer(id));
         }
         // `cols` (one past the last column) is the pending-wrap position; a
         // glyph wider than the grid itself (w=2, cols=1) must not push past it,
@@ -2470,17 +2462,9 @@ impl Grid {
             return 0;
         }
         let head_id = self.pen_id(pen, link);
-        // A trailer carries the pen's colours and their provenance but no
-        // rendition. It and the blank are interned only when a wide glyph
+        // The trailer and the blank are interned only when a wide glyph
         // needs them.
-        let trailer = CellStyle {
-            fg: pen.fg,
-            bg: pen.bg,
-            underline_color: pen.underline_color,
-            attrs: pen.attrs & ATTR_DEFAULT_COLORS,
-            link,
-            cluster: 0,
-        };
+        let trailer = Self::trailer_style(pen, link);
         let protected = pen.attrs & super::cell::ATTR_PROTECTED != 0;
         let styles = &mut self.styles;
         let blank = |styles: &mut StyleTable| {
@@ -3264,16 +3248,12 @@ impl Grid {
         if top > bottom || left > right || top >= self.rows || left >= self.cols {
             return;
         }
-        let cell = Cell {
+        let protected = pen.attrs & super::cell::ATTR_PROTECTED != 0;
+        let cell = PackedCell::glyph(
             ch,
-            cluster: 0,
-            fg: pen.fg,
-            bg: pen.bg,
-            flags: pen.attrs,
-            link: 0,
-            underline_color: pen.underline_color,
-        };
-        let cell = self.pack(cell);
+            protected,
+            self.styles.intern(CellStyle::of_pen(&pen, 0)),
+        );
         for y in top..=bottom {
             self.screen[y].cells_mut()[left..=right].fill(cell);
             self.touch(y);
@@ -3357,27 +3337,17 @@ impl Grid {
     /// The fill used by every erase / scroll-clear path: a blank in the
     /// default foreground on the current SGR background (BCE, as xterm does),
     /// falling back to the default background, so an OSC 11 theme also colors
-    /// cleared regions.
-    fn erase_cell(&self) -> Cell {
-        let mut c = self.default_cell();
-        if let Some(bg) = self.erase_bg {
-            c.bg = bg;
-            c.flags &= !crate::cell::ATTR_BG_DEFAULT;
-        }
-        c
-    }
-
-    /// [`Grid::erase_cell`], stored. Every scroll and erase takes one, so it
-    /// goes through the pen cache rather than the table's hash index.
+    /// cleared regions. Every scroll and erase takes one, so it goes through
+    /// the pen cache rather than the table's hash index.
+    #[inline]
     fn erase_packed(&mut self) -> PackedCell {
-        let cell = self.erase_cell();
-        let pen = Pen {
-            fg: cell.fg,
-            bg: cell.bg,
-            attrs: cell.flags,
-            underline_color: cell.underline_color,
-        };
-        PackedCell::glyph(cell.ch, false, self.pen_id(pen, cell.link))
+        let d = self.styles.defaults();
+        let mut pen = Pen::default_colors(d.fg, d.bg);
+        if let Some((bg, tag)) = self.erase_bg {
+            (pen.bg, pen.bg_index) = (bg, tag);
+            pen.attrs &= !ATTR_BG_DEFAULT;
+        }
+        PackedCell::glyph(' ', false, self.pen_id(pen, 0))
     }
 
     /// [`Grid::default_cell`], stored.
@@ -3428,9 +3398,9 @@ impl Grid {
         self.styles.defaults().bg
     }
 
-    /// Set the background erases fill with (see [`Grid::erase_cell`]):
-    /// `Some(rgb)` for an SGR background, `None` for the default.
-    pub(crate) fn set_erase_bg(&mut self, bg: Option<u32>) {
+    /// Set the background erases fill with (see [`Grid::erase_packed`]):
+    /// `Some((rgb, tag))` for an SGR background, `None` for the default.
+    pub(crate) fn set_erase_bg(&mut self, bg: Option<(u32, u16)>) {
         self.erase_bg = bg;
     }
 
@@ -3552,11 +3522,26 @@ impl Grid {
             fg: map(d.fg),
             bg: map(d.bg),
         });
-        if let Some(bg) = &mut self.erase_bg {
+        if let Some((bg, _)) = &mut self.erase_bg {
             *bg = map(*bg);
         }
         self.relayout_status();
         self.cursor_color = super::color::remap(self.cursor_color, old, new);
+        self.reset_damage();
+        self.touch_hist();
+        self.epoch += 1;
+    }
+
+    /// Palette change (OSC 4, OSC 104, RIS, DECSTR): recolour every cell
+    /// written in a palette colour, on both screens and in history, to
+    /// `palette` of its entry. Cells in explicit RGB, even an equal one,
+    /// keep their colour. The parser re-syncs the erase fill. Full repaint
+    /// requested.
+    pub(crate) fn repaint(&mut self, palette: impl Fn(u8) -> u32) {
+        self.blank_row.clear();
+        if let Some(remap) = self.styles.repaint(palette) {
+            self.apply_remap(&remap);
+        }
         self.reset_damage();
         self.touch_hist();
         self.epoch += 1;

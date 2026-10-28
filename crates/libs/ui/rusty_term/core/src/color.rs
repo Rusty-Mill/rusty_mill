@@ -4,7 +4,7 @@
 //! foreground/background/cursor — and the helpers that resolve SGR color
 //! selectors and parse/format the X11 color specs carried by OSC 4/10/11/12.
 
-use super::cell::{DEFAULT_BG, DEFAULT_FG};
+use super::cell::{DEFAULT_BG, DEFAULT_FG, Source};
 
 /// Startup color theme: the default foreground/background/cursor plus the
 /// 16-color ANSI palette, as configured by the user. The "built-in values"
@@ -46,8 +46,8 @@ pub(crate) const PALETTE_16: [u32; 16] = [
 /// A live, mutable color table: the 256 indexed colors plus the dynamic default
 /// foreground, background, and cursor colors. Initialized to the built-in xterm
 /// values and mutated by OSC 4 (palette) and OSC 10/11/12 (defaults). SGR color
-/// selectors resolve through it, so a palette change recolors text written
-/// afterwards.
+/// selectors resolve through it. Cells drawn in a palette colour keep its
+/// entry, so a palette change also recolours them (see `Grid::repaint`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Palette {
     /// The 256-color table; `colors[n]` is the `0xRRGGBB` of index `n`.
@@ -162,6 +162,11 @@ impl Palette {
         self.colors.get(n).copied().unwrap_or(DEFAULT_FG)
     }
 
+    /// The 256 indexed colours, to tell whether an OSC changed any.
+    pub(crate) fn colors(&self) -> &[u32; 256] {
+        &self.colors
+    }
+
     /// Set palette index `n` (OSC 4). Out-of-range indices are ignored.
     pub(crate) fn set_index(&mut self, n: usize, rgb: u32) {
         if let Some(slot) = self.colors.get_mut(n) {
@@ -170,22 +175,24 @@ impl Palette {
     }
 
     /// Resolve the tail of an extended SGR color selector (the part after
-    /// `38`/`48`). Returns the resolved `0xRRGGBB` color and how many additional
-    /// params were consumed, or `None` if the form is unrecognized.
+    /// `38`/`48`). Returns the resolved `0xRRGGBB` color, where it came from,
+    /// and how many additional params were consumed, or `None` if the form is
+    /// unrecognized.
     ///
     /// * `5; n`        → 256-color palette index `n` (2 params consumed)
     /// * `2; r; g; b`  → truecolor (4 params consumed)
-    pub(crate) fn extended(&self, rest: &[usize]) -> Option<(u32, usize)> {
+    pub(crate) fn extended(&self, rest: &[usize]) -> Option<(u32, Source, usize)> {
         match rest.first().copied() {
             Some(5) => {
                 let n = *rest.get(1)?;
-                Some((self.index(n), 2))
+                let source = u8::try_from(n).map_or(Source::Rgb, Source::Index);
+                Some((self.index(n), source, 2))
             }
             Some(2) => {
                 let r = (*rest.get(1)? & 0xFF) as u32;
                 let g = (*rest.get(2)? & 0xFF) as u32;
                 let b = (*rest.get(3)? & 0xFF) as u32;
-                Some(((r << 16) | (g << 8) | b, 4))
+                Some(((r << 16) | (g << 8) | b, Source::Rgb, 4))
             }
             _ => None,
         }
@@ -204,7 +211,7 @@ fn theme_index(theme: &Theme, n: usize) -> u32 {
 /// Remap a resolved color from `old`'s theme to `new`'s: a color that exactly
 /// matches the old default fg/bg/cursor or one of the old 16 ANSI entries
 /// becomes the new theme's counterpart; anything else (truecolor, 256-cube)
-/// passes through. Cells store resolved RGB rather than palette indices, so
+/// passes through. Cells store resolved RGB beside any palette entry, so
 /// this exact-match mapping is how a live config reload recolors content that
 /// is already on screen. First match wins when old entries collide.
 pub(crate) fn remap(c: u32, old: &Theme, new: &Theme) -> u32 {

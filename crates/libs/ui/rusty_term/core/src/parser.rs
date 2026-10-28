@@ -9,7 +9,7 @@
 
 use super::cell::{
     ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_PROTECTED, ATTR_REVERSE,
-    ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Pen, UnderlineStyle,
+    ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Pen, Source, UnderlineStyle,
 };
 use super::charset::Charset;
 use super::color::Palette;
@@ -420,19 +420,14 @@ impl AnsiParser {
     /// old built-in value follow the new theme, while colors the child set
     /// itself (OSC 4/10/11/12) are kept — the child's choices outrank ours,
     /// exactly as they would have had the new theme been set at startup. The
-    /// pen's default colours follow the new palette and its explicit ones are
-    /// remapped, so text typed next stays coherent.
+    /// pen's default and palette colours follow the new palette and its
+    /// explicit ones are remapped, so text typed next stays coherent.
     pub fn retheme(&mut self, new: super::color::Theme) -> super::color::Theme {
         let old = self.palette.seed();
         self.pen.fg = super::color::remap(self.pen.fg, &old, &new);
         self.pen.bg = super::color::remap(self.pen.bg, &old, &new);
         self.palette.retheme(&old, &new);
-        if self.pen.fg_is_default() {
-            self.pen.fg = self.palette.fg;
-        }
-        if self.pen.bg_is_default() {
-            self.pen.bg = self.palette.bg;
-        }
+        self.pen = resolve_pen(self.pen, &self.palette);
         old
     }
 
@@ -545,6 +540,7 @@ impl AnsiParser {
                     }
                     // RIS — reset to initial state (full reset).
                     b'c' => {
+                        let before = *self.palette.colors();
                         self.palette.reset();
                         self.reset_sgr();
                         self.protected = false;
@@ -556,6 +552,7 @@ impl AnsiParser {
                         self.charsets = [Charset::Ascii; 4];
                         self.gl = 0;
                         self.saved = [None; 2];
+                        self.sync_palette(g, &before);
                         self.last_char = None;
                         self.state = ParserState::Ground;
                     }
@@ -948,6 +945,7 @@ impl AnsiParser {
             rusty_term_l13::handle(payload, g, &mut self.responses);
             return;
         }
+        let before = *self.palette.colors();
         osc::dispatch(
             &self.osc_buffer,
             g,
@@ -955,7 +953,21 @@ impl AnsiParser {
             &mut self.responses,
             &mut self.pen,
         );
-        // OSC 4/10/11/104 can move the pen's background or the default.
+        self.sync_palette(g, &before);
+    }
+
+    /// After the indexed colours may have changed from `before` (OSC 4,
+    /// OSC 104, RIS, DECSTR): recolour the pens and every cell drawn in a
+    /// changed entry, then re-sync the erase fill, which OSC 10/11 can also
+    /// move.
+    fn sync_palette(&mut self, g: &mut Grid, before: &[u32; 256]) {
+        if self.palette.colors() != before {
+            self.pen = resolve_pen(self.pen, &self.palette);
+            for saved in self.saved.iter_mut().flatten() {
+                saved.pen = resolve_pen(saved.pen, &self.palette);
+            }
+            g.repaint(|n| self.palette.index(usize::from(n)));
+        }
         self.sync_erase_bg(g);
     }
 
@@ -1572,6 +1584,7 @@ impl AnsiParser {
             }
             b'p' if self.csi_intermediate == b'!' => {
                 // DECSTR — soft terminal reset (`CSI ! p`).
+                let before = *self.palette.colors();
                 self.palette.reset();
                 self.reset_sgr();
                 self.protected = false;
@@ -1581,6 +1594,7 @@ impl AnsiParser {
                 self.charsets = [Charset::Ascii; 4];
                 self.gl = 0;
                 self.saved = [None; 2];
+                self.sync_palette(g, &before);
             }
             b'q' if self.csi_intermediate == b'"' => {
                 // DECSCA — select character protection attribute
@@ -1701,7 +1715,7 @@ impl AnsiParser {
     }
 
     /// Restore the current screen's saved state, or the reset state if none
-    /// was saved. A saved default colour takes the default in force now.
+    /// was saved. A saved default or palette colour takes its value now.
     fn restore_state(&mut self, g: &mut Grid) {
         let Some(saved) = self.saved[usize::from(g.in_alt_screen())] else {
             self.reset_sgr();
@@ -1711,13 +1725,7 @@ impl AnsiParser {
             self.sync_erase_bg(g);
             return;
         };
-        self.pen = saved.pen;
-        if self.pen.fg_is_default() {
-            self.pen.fg = self.palette.fg;
-        }
-        if self.pen.bg_is_default() {
-            self.pen.bg = self.palette.bg;
-        }
+        self.pen = resolve_pen(saved.pen, &self.palette);
         (self.protected, self.charsets, self.gl) = (saved.protected, saved.charsets, saved.gl);
         self.sync_erase_bg(g);
     }
@@ -1725,7 +1733,7 @@ impl AnsiParser {
     /// Tell the grid which background erases fill with (BCE): the pen's,
     /// or `None` while it is the default colour so OSC 11 still applies.
     fn sync_erase_bg(&self, g: &mut Grid) {
-        g.set_erase_bg((!self.pen.bg_is_default()).then_some(self.pen.bg));
+        g.set_erase_bg((!self.pen.bg_is_default()).then_some((self.pen.bg, self.pen.bg_index)));
     }
 
     /// Reset SGR state to the default pen (default colors, no attributes).
@@ -1795,44 +1803,70 @@ impl AnsiParser {
                 28 => self.pen.attrs &= !ATTR_HIDDEN,
                 29 => self.pen.attrs &= !ATTR_STRIKE,
                 // Colors.
-                30..=37 => self.pen.set_fg(self.palette.index(params[i] - 30), false),
+                30..=37 => self.set_fg_index(params[i] - 30),
                 38 => {
-                    if let Some((color, consumed)) = self.palette.extended(&params[i + 1..]) {
-                        self.pen.set_fg(color, false);
+                    if let Some((color, source, consumed)) = self.palette.extended(&params[i + 1..])
+                    {
+                        self.pen.set_fg(color, source);
                         i += consumed;
                     }
                 }
-                39 => self.pen.set_fg(self.palette.fg, true),
-                40..=47 => self.pen.set_bg(self.palette.index(params[i] - 40), false),
+                39 => self.pen.set_fg(self.palette.fg, Source::Default),
+                40..=47 => self.set_bg_index(params[i] - 40),
                 48 => {
-                    if let Some((color, consumed)) = self.palette.extended(&params[i + 1..]) {
-                        self.pen.set_bg(color, false);
+                    if let Some((color, source, consumed)) = self.palette.extended(&params[i + 1..])
+                    {
+                        self.pen.set_bg(color, source);
                         i += consumed;
                     }
                 }
-                49 => self.pen.set_bg(self.palette.bg, true),
+                49 => self.pen.set_bg(self.palette.bg, Source::Default),
                 // 58/59 — set/reset the underline color independent of `fg`
                 // (colon `58:2:r:g:b`/`58:5:n` and semicolon `58;2;r;g;b` both
                 // land here identically; see `palette.extended`).
                 58 => {
-                    if let Some((color, consumed)) = self.palette.extended(&params[i + 1..]) {
+                    if let Some((color, _, consumed)) = self.palette.extended(&params[i + 1..]) {
                         self.pen.underline_color = color;
                         self.pen.attrs |= ATTR_UNDERLINE_COLOR;
                         i += consumed;
                     }
                 }
                 59 => self.pen.attrs &= !ATTR_UNDERLINE_COLOR,
-                90..=97 => self
-                    .pen
-                    .set_fg(self.palette.index(8 + (params[i] - 90)), false),
-                100..=107 => self
-                    .pen
-                    .set_bg(self.palette.index(8 + (params[i] - 100)), false),
+                90..=97 => self.set_fg_index(8 + (params[i] - 90)),
+                100..=107 => self.set_bg_index(8 + (params[i] - 100)),
                 _ => {}
             }
             i += 1;
         }
     }
+
+    /// Set the pen's foreground to palette entry `n` (below 16).
+    fn set_fg_index(&mut self, n: usize) {
+        let source = u8::try_from(n).map_or(Source::Rgb, Source::Index);
+        self.pen.set_fg(self.palette.index(n), source);
+    }
+
+    /// Set the pen's background to palette entry `n` (below 16).
+    fn set_bg_index(&mut self, n: usize) {
+        let source = u8::try_from(n).map_or(Source::Rgb, Source::Index);
+        self.pen.set_bg(self.palette.index(n), source);
+    }
+}
+
+/// `pen` with its default and palette colours taken from `palette`, as
+/// they read now; explicit RGB is kept.
+fn resolve_pen(mut pen: Pen, palette: &Palette) -> Pen {
+    if pen.fg_is_default() {
+        pen.fg = palette.fg;
+    } else if let Some(n) = Source::entry(pen.fg_index) {
+        pen.fg = palette.index(usize::from(n));
+    }
+    if pen.bg_is_default() {
+        pen.bg = palette.bg;
+    } else if let Some(n) = Source::entry(pen.bg_index) {
+        pen.bg = palette.index(usize::from(n));
+    }
+    pen
 }
 
 /// Whether a DEC private mode controls *host-terminal input generation* —

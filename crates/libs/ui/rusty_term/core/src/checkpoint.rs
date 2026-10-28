@@ -75,7 +75,7 @@ pub(crate) struct Writer<'a> {
     /// `None` only for writers that never see a `Line`.
     table: Option<&'a StyleTable>,
     /// Line run styles already defined, by index (see [`Writer::style`]).
-    styles: HashMap<Cell, usize>,
+    styles: HashMap<RunStyle, usize>,
     /// `1 + index` of each run style already defined, by grid style id and
     /// layout bits ([`layout_slot`]); 0 until first referenced. Spares
     /// resolving and hashing a style for every run. A cache only: grown on
@@ -141,7 +141,11 @@ impl<'a> Writer<'a> {
         {
             return self.varint(u64::from(i));
         }
-        let index = self.style(cell.resolve(&table.get(id)))?;
+        let style = table.get(id);
+        let index = self.style(RunStyle {
+            cell: cell.resolve(&style),
+            index: [style.fg_index, style.bg_index],
+        })?;
         if let Some(s) = slot {
             self.cache(s, u32::try_from(index + 1).unwrap_or(0));
         }
@@ -171,8 +175,12 @@ impl<'a> Writer<'a> {
     /// grid style it may intern (every grid style arrives with a new wire
     /// style, so the grid table never outgrows the wire table plus id 0).
     /// Returns the style's index.
-    pub(crate) fn style(&mut self, cell: Cell) -> Result<usize> {
-        let key = Cell { ch: '\0', ..cell };
+    pub(crate) fn style(&mut self, style: RunStyle) -> Result<usize> {
+        let cell = Cell {
+            ch: '\0',
+            ..style.cell
+        };
+        let key = RunStyle { cell, ..style };
         if let Some(&i) = self.styles.get(&key) {
             self.varint(i as u64 + 1)?;
             return Ok(i);
@@ -287,8 +295,12 @@ impl<'a> Reader<'a> {
                     .try_reserve(grow)
                     .map_err(|_| Error("allocation failed"))?;
             }
-            let style = read_style(self)?;
-            let id = self.table.intern(CellStyle::of(&style));
+            let RunStyle { cell: style, index } = read_style(self)?;
+            let id = self.table.intern(CellStyle {
+                fg_index: index[0],
+                bg_index: index[1],
+                ..CellStyle::of(&style)
+            });
             self.styles.push((style, id));
             return Ok((style, id));
         }
@@ -534,17 +546,28 @@ fn style_growth(len: usize) -> usize {
         _ => 0,
     }
 }
-/// A run style: every [`Cell`] field but `ch`, in `Cell`'s v2 field order.
-fn write_style(c: &Cell, w: &mut Writer) -> Result<()> {
+/// A line run's style: the resolved cell (its `ch` ignored) and the palette
+/// tags ([`crate::cell::Source::tag`]) of its foreground and background.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct RunStyle {
+    pub(crate) cell: Cell,
+    pub(crate) index: [u16; 2],
+}
+/// A run style: every [`Cell`] field but `ch`, in `Cell`'s v2 field order,
+/// then the two palette tags.
+fn write_style(s: &RunStyle, w: &mut Writer) -> Result<()> {
+    let c = &s.cell;
     c.fg.write(w)?;
     c.bg.write(w)?;
     c.flags.write(w)?;
     c.link.write(w)?;
     c.cluster.write(w)?;
-    c.underline_color.write(w)
+    c.underline_color.write(w)?;
+    s.index[0].write(w)?;
+    s.index[1].write(w)
 }
-fn read_style(r: &mut Reader<'_>) -> Result<Cell> {
-    Ok(Cell {
+fn read_style(r: &mut Reader<'_>) -> Result<RunStyle> {
+    let cell = Cell {
         ch: '\0',
         fg: Wire::read(r)?,
         bg: Wire::read(r)?,
@@ -552,7 +575,12 @@ fn read_style(r: &mut Reader<'_>) -> Result<Cell> {
         link: Wire::read(r)?,
         cluster: Wire::read(r)?,
         underline_color: Wire::read(r)?,
-    })
+    };
+    let index: [u16; 2] = [Wire::read(r)?, Wire::read(r)?];
+    if index.iter().any(|&tag| tag > 256) {
+        return Err(Error("palette tag"));
+    }
+    Ok(RunStyle { cell, index })
 }
 macro_rules! fields {
     ($t:ty, [$($field:ident),* $(,)?]) => {
@@ -1124,7 +1152,13 @@ mod tests {
     #[test]
     fn hostile_line_runs_fail_cleanly() {
         type Build<'a> = &'a dyn Fn(&mut Writer);
-        let define = |w: &mut Writer| w.style(Cell::blank()).unwrap();
+        let define = |w: &mut Writer| {
+            w.style(RunStyle {
+                cell: Cell::blank(),
+                index: [0; 2],
+            })
+            .unwrap()
+        };
         let case = |build: Build| {
             let mut w = Writer::new(MAX_DECODED, None);
             build(&mut w);
