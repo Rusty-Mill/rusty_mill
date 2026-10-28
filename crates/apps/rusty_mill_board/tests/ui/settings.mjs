@@ -1,7 +1,7 @@
 // Browser check of the settings view, against a board started with a settings directory:
 //
 //   D=$(mktemp -d); rusty_mill_board --settings-dir $D --http 127.0.0.1:8798 2>$D/log &
-//   TOKEN=$(grep -o 'shown once: .*' $D/log | cut -d' ' -f3)
+//   TOKEN=$(cat $D/first-admin.token)
 //   node tests/ui/settings.mjs "$(npm root -g)/playwright" http://127.0.0.1:8798 "$TOKEN"
 import { createRequire } from "node:module";
 const { chromium } = createRequire(import.meta.url)(process.argv[2]);
@@ -113,7 +113,7 @@ check(adminToken !== TOKEN && adminToken.length === 48, "rotating your own token
 check((await api(TOKEN, "board_whoami")).status === 401, "the old admin token stops working");
 check((await api(adminToken, "settings_get")).status === 200, "the new admin token works");
 check((await dialog.locator("table tr").count()) >= 3, "the settings view refreshed with the new token");
-check((await page.evaluate(() => location.hash)).includes(adminToken), "and a reload would keep working");
+check((await page.evaluate(() => localStorage.getItem("token"))) === adminToken, "and a reload would keep working");
 const before = await page.locator(".card").count();
 await dialog.getByRole("button", { name: "Close" }).click();
 await page.fill("#title", "after rotation");

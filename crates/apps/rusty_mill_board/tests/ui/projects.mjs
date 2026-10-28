@@ -71,8 +71,8 @@ check(own.includes("Added under repo"), "with only a repository chosen, it goes 
 check((await page.locator(".card .tag.proj").count()) === 5, "chips name each card's project when several are shown");
 
 await page.locator(".card", { hasText: "Added under rl" }).click();
-check((await page.locator("dialog optgroup").count()) === 3, "the dialog groups projects by repository");
-await page.locator("dialog select").selectOption("skills");
+check((await page.locator("#dlg optgroup").count()) === 3, "the dialog groups projects by repository");
+await page.locator("#dlg select").selectOption("skills");
 await sleep(600);
 const moved = (await api("board_list", { project: "skills" })).cards.map((c) => c.title);
 check(moved.includes("Added under rl"), "the dialog moves a card to a project of another repository");
