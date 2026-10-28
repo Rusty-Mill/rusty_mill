@@ -2389,14 +2389,14 @@ fn checkpoint_keeps_palette_tags() {
 }
 
 #[test]
-fn checkpoint_rejects_rtcp_v3_and_other_versions() {
-    // v3 has v4's layout but no colour provenance, so restoring it would
-    // bake its default colours in; it fails closed instead.
+fn checkpoint_rejects_rtcp_v3_v4_and_other_versions() {
+    // v3 has no colour provenance and v4 no palette tags, so restoring
+    // either would bake colours in; they fail closed instead.
     let (g, p) = (Grid::new(4, 1), AnsiParser::new());
     let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
-    assert_eq!(&bytes[..5], b"RTCP\x04");
+    assert_eq!(&bytes[..5], b"RTCP\x05");
     assert!(crate::checkpoint::decode(&bytes).is_ok());
-    for version in [3u8, 5] {
+    for version in [3u8, 4, 6] {
         let mut other = bytes.clone();
         other[4] = version;
         assert!(crate::checkpoint::decode(&other).is_err(), "v{version}");

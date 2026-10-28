@@ -566,7 +566,7 @@ pub static CATALOG: &[Method] = &[
         name: "attach",
         doc: "Receive the block's screen, then its output.",
         params: &[BLOCK],
-        needs: Features::CHECKPOINT_V4,
+        needs: Features::CHECKPOINT_V5,
         returns: Returns::Nothing,
         build: |req, a| {
             Ok(Message::Attach {

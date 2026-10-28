@@ -41,7 +41,7 @@ const HISTORY: usize = 4096;
 const PROCESS_POLL: Duration = Duration::from_millis(500);
 
 /// What the server offers; a client gets the intersection with its own.
-const OFFERED: Features = Features::CHECKPOINT_V4
+const OFFERED: Features = Features::CHECKPOINT_V5
     .union(Features::EVENT_SEQ)
     .union(Features::SYNC)
     .union(Features::INSPECT)
@@ -282,7 +282,7 @@ impl State {
                     .and_then(|()| done(self.mux.unzoom(window))),
             ),
             M::Attach { req, block } => {
-                if let Err(refusal) = self.require(client, Features::CHECKPOINT_V4, "attach") {
+                if let Err(refusal) = self.require(client, Features::CHECKPOINT_V5, "attach") {
                     return (req, Err(refusal));
                 }
                 if self.clients.get(&client).is_some_and(|out| out.attaching()) {
@@ -1046,7 +1046,7 @@ mod regression {
         );
         let (out, inbox, _) = outbox();
         let mut state = shared.borrow_mut();
-        let client = state.connect(out, Features::CHECKPOINT_V4, None);
+        let client = state.connect(out, Features::CHECKPOINT_V5, None);
         let session = state.mux.create_session("s").unwrap();
         let window = state.mux.create_window(session, "w").unwrap();
         let Outcome::Done(Some(id)) = state
@@ -1127,6 +1127,8 @@ mod regression {
                 Features::REPLAY_SNAPSHOT,
                 Features::CHECKPOINT_V1,
                 Features::CHECKPOINT_V2,
+                Features::CHECKPOINT_V3,
+                Features::CHECKPOINT_V4,
             ] {
                 shared.borrow_mut().features.insert(client, features);
                 State::request(&shared, client, Message::Attach { req: 10, block });
