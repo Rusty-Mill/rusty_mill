@@ -464,15 +464,17 @@ function githubTab(){
   return t;
 }
 
+// Board metadata: on failure carry on with a fallback, but say why, so a refusal is not an empty panel.
+const meta=(op,fallback)=>api(op).catch(e=>{toast(op+" failed: "+e.message);return fallback});
 async function loadMeta(){
-  const roles=Object.keys((await api("board_roles").catch(()=>({roles:{human:1}}))).roles);
+  const roles=Object.keys((await meta("board_roles",{roles:{human:1}})).roles);
   const cur=$("role").value;$("role").replaceChildren(...roles.map(r=>new Option(r,r)));
   $("role").value=roles.includes(cur)?cur:(pref("role")&&roles.includes(pref("role"))?pref("role"):(roles.includes("human")?"human":roles[0]));
   // With a per-model token, who you are is fixed by the token: show it, do not ask.
-  const me=await api("board_whoami").catch(()=>({}));
+  const me=await meta("board_whoami",{});
   if(me.authenticated){$("actor").value=me.actor;$("actor").disabled=true;$("role").value=me.role;$("role").disabled=true}
   // repo -> its projects. A credential limited to some projects hears only of those.
-  const listed=(await api("board_projects").catch(()=>({repos:{}}))).repos;
+  const listed=(await meta("board_projects",{repos:{}})).repos;
   repos=Object.fromEntries(Object.entries(listed).map(([r,p])=>[r,Object.keys(p)]));
   if(sel.repo&&!(sel.repo in repos))sel={repo:"",project:"",agent:sel.agent};
   if(sel.project&&!projects().includes(sel.project))sel={...sel,project:""};

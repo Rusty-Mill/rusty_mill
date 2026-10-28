@@ -116,6 +116,16 @@ await page.waitForSelector(".card");
 const chips = await page.locator(".card", { hasText: "Migrated card" }).locator(".tag:not(.proj)").allInnerTexts();
 check(chips.join() === "kept", `the migration marker is not shown as a chip (${chips.join()})`);
 
+check(!(await page.locator("#toast").isVisible()), "a normal load shows no error");
+
+// A refused project list is said so, not shown as an empty panel.
+const refused = await browser.newPage({ viewport: { width: 1300, height: 700 } });
+await refused.route("**/api/board_projects", (route) => route.fulfill({ status: 403, contentType: "application/json", body: '{"error":"not allowed"}' }));
+await refused.goto(BASE);
+await refused.waitForFunction(() => document.querySelector("#toast").textContent.includes("board_projects failed: not allowed"));
+check(true, "a failed project list shows why");
+await refused.close();
+
 check(errors.length === 0, `no page errors ${errors.join("; ")}`);
 await browser.close();
 if (failures.length) { console.error(`\n${failures.length} check(s) failed`); process.exit(1); }
