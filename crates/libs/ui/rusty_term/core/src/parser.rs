@@ -366,12 +366,7 @@ impl AnsiParser {
     /// default colors, so text drawn before any SGR lands in the right colors.
     pub fn with_theme(theme: super::color::Theme) -> Self {
         let palette = Palette::with_theme(theme);
-        let pen = Pen {
-            fg: palette.fg,
-            bg: palette.bg,
-            attrs: 0,
-            underline_color: palette.fg,
-        };
+        let pen = Pen::default_colors(palette.fg, palette.bg);
         Self {
             state: ParserState::Ground,
             pen,
@@ -410,12 +405,19 @@ impl AnsiParser {
     /// old built-in value follow the new theme, while colors the child set
     /// itself (OSC 4/10/11/12) are kept — the child's choices outrank ours,
     /// exactly as they would have had the new theme been set at startup. The
-    /// pen is remapped the same way, so text typed next stays coherent.
+    /// pen's default colours follow the new palette and its explicit ones are
+    /// remapped, so text typed next stays coherent.
     pub fn retheme(&mut self, new: super::color::Theme) -> super::color::Theme {
         let old = self.palette.seed();
         self.pen.fg = super::color::remap(self.pen.fg, &old, &new);
         self.pen.bg = super::color::remap(self.pen.bg, &old, &new);
         self.palette.retheme(&old, &new);
+        if self.pen.fg_is_default() {
+            self.pen.fg = self.palette.fg;
+        }
+        if self.pen.bg_is_default() {
+            self.pen.bg = self.palette.bg;
+        }
         old
     }
 
@@ -866,8 +868,8 @@ impl AnsiParser {
     }
 
     /// Serialize the parser's current pen as SGR parameters for DECRQSS `m`
-    /// (leading `0` reset, then each set attribute, then explicit truecolor
-    /// fg/bg/underline parameters when they differ from the palette defaults),
+    /// (leading `0` reset, then each set attribute, then truecolor fg/bg/
+    /// underline parameters for each explicit colour),
     /// ending with the `m` final byte.
     fn pen_sgr_params(&self) -> String {
         use std::fmt::Write as _;
@@ -896,11 +898,11 @@ impl AnsiParser {
             let _ = write!(s, ";4:{style}");
         }
         let rgb = |c: u32| ((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
-        if self.pen.fg != self.palette.fg {
+        if !self.pen.fg_is_default() {
             let (r, g, b) = rgb(self.pen.fg);
             let _ = write!(s, ";38;2;{r};{g};{b}");
         }
-        if self.pen.bg != self.palette.bg {
+        if !self.pen.bg_is_default() {
             let (r, g, b) = rgb(self.pen.bg);
             let _ = write!(s, ";48;2;{r};{g};{b}");
         }
@@ -1650,19 +1652,14 @@ impl AnsiParser {
     }
 
     /// Tell the grid which background erases fill with (BCE): the pen's,
-    /// or `None` while it is the palette default so OSC 11 still applies.
+    /// or `None` while it is the default colour so OSC 11 still applies.
     fn sync_erase_bg(&self, g: &mut Grid) {
-        g.set_erase_bg((self.pen.bg != self.palette.bg).then_some(self.pen.bg));
+        g.set_erase_bg((!self.pen.bg_is_default()).then_some(self.pen.bg));
     }
 
     /// Reset SGR state to the default pen (default colors, no attributes).
     fn reset_sgr(&mut self) {
-        self.pen = Pen {
-            fg: self.palette.fg,
-            bg: self.palette.bg,
-            attrs: 0,
-            underline_color: self.palette.fg,
-        };
+        self.pen = Pen::default_colors(self.palette.fg, self.palette.bg);
     }
 
     /// Apply an SGR (`CSI … m`) parameter list. Supports reset, the text
@@ -1727,22 +1724,22 @@ impl AnsiParser {
                 28 => self.pen.attrs &= !ATTR_HIDDEN,
                 29 => self.pen.attrs &= !ATTR_STRIKE,
                 // Colors.
-                30..=37 => self.pen.fg = self.palette.index(params[i] - 30),
+                30..=37 => self.pen.set_fg(self.palette.index(params[i] - 30), false),
                 38 => {
                     if let Some((color, consumed)) = self.palette.extended(&params[i + 1..]) {
-                        self.pen.fg = color;
+                        self.pen.set_fg(color, false);
                         i += consumed;
                     }
                 }
-                39 => self.pen.fg = self.palette.fg,
-                40..=47 => self.pen.bg = self.palette.index(params[i] - 40),
+                39 => self.pen.set_fg(self.palette.fg, true),
+                40..=47 => self.pen.set_bg(self.palette.index(params[i] - 40), false),
                 48 => {
                     if let Some((color, consumed)) = self.palette.extended(&params[i + 1..]) {
-                        self.pen.bg = color;
+                        self.pen.set_bg(color, false);
                         i += consumed;
                     }
                 }
-                49 => self.pen.bg = self.palette.bg,
+                49 => self.pen.set_bg(self.palette.bg, true),
                 // 58/59 — set/reset the underline color independent of `fg`
                 // (colon `58:2:r:g:b`/`58:5:n` and semicolon `58;2;r;g;b` both
                 // land here identically; see `palette.extended`).
@@ -1754,8 +1751,12 @@ impl AnsiParser {
                     }
                 }
                 59 => self.pen.attrs &= !ATTR_UNDERLINE_COLOR,
-                90..=97 => self.pen.fg = self.palette.index(8 + (params[i] - 90)),
-                100..=107 => self.pen.bg = self.palette.index(8 + (params[i] - 100)),
+                90..=97 => self
+                    .pen
+                    .set_fg(self.palette.index(8 + (params[i] - 90)), false),
+                100..=107 => self
+                    .pen
+                    .set_bg(self.palette.index(8 + (params[i] - 100)), false),
                 _ => {}
             }
             i += 1;

@@ -80,8 +80,8 @@ fn handshake(stream: Stream, features: Features) -> Conn<Stream> {
 fn scripted_server(lease: bool, end: End) -> (PathBuf, JoinHandle<()>) {
     let (path, listener) = listen();
     let server = std::thread::spawn(move || {
-        let _control = welcome(&listener, Features::CHECKPOINT_V3);
-        let pane = welcome(&listener, Features::CHECKPOINT_V3);
+        let _control = welcome(&listener, Features::CHECKPOINT_V4);
+        let pane = welcome(&listener, Features::CHECKPOINT_V4);
         serve_block(Conn::new(pane), lease, end);
     });
     (path, server)
@@ -345,7 +345,7 @@ fn layout_server(script: Script) -> (PathBuf, Arc<Shared>) {
     });
     let server = shared.clone();
     std::thread::spawn(move || {
-        let features = Features::CHECKPOINT_V3
+        let features = Features::CHECKPOINT_V4
             .union(Features::INSPECT)
             .union(Features::LAYOUT);
         let control = welcome(&listener, features);
@@ -360,7 +360,7 @@ fn layout_server(script: Script) -> (PathBuf, Arc<Shared>) {
         while let Ok((stream, _)) = listener.accept() {
             let block = server.clone();
             std::thread::spawn(move || {
-                serve_layout_block(handshake(stream, Features::CHECKPOINT_V3), &block)
+                serve_layout_block(handshake(stream, Features::CHECKPOINT_V4), &block)
             });
         }
     });
@@ -628,4 +628,17 @@ fn a_block_passed_through_again_gets_its_modes_back() {
         passed.contains("\x1b[?1h") && passed.contains("\x1b[?2004h"),
         "{passed:?}"
     );
+}
+
+#[test]
+fn a_server_offering_only_v3_checkpoints_is_refused() {
+    // An older server's RTCP v3 has no colour provenance; the client
+    // refuses it rather than restore its default colours baked in.
+    let (socket, listener) = listen();
+    let server = std::thread::spawn(move || welcome(&listener, Features::CHECKPOINT_V3));
+    let tui = Tui::start(&socket);
+    let screen = tui.exit();
+    drop(server.join().expect("server"));
+    let text = String::from_utf8_lossy(&screen);
+    assert!(text.contains("cannot send checkpoints"), "{text:?}");
 }

@@ -64,7 +64,7 @@ mod client {
 
     /// What the control connection asks for; a server without `LAYOUT`
     /// shows only the block asked for.
-    const CONTROL: Features = Features::CHECKPOINT_V3
+    const CONTROL: Features = Features::CHECKPOINT_V4
         .union(Features::INSPECT)
         .union(Features::LAYOUT);
 
@@ -256,7 +256,7 @@ mod client {
     impl Requests<'_> {
         fn welcome(&mut self) -> Result<Features, String> {
             match self.conn.recv().map_err(|e| e.to_string())? {
-                Message::Welcome { features, .. } if features.contains(Features::CHECKPOINT_V3) => {
+                Message::Welcome { features, .. } if features.contains(Features::CHECKPOINT_V4) => {
                     Ok(features)
                 }
                 Message::Welcome { .. } => Err("the server cannot send checkpoints".into()),
@@ -904,7 +904,7 @@ mod client {
             let stream = connect(&self.socket)?;
             let mut conn = Conn::new(clone(&stream)?);
             conn.send(&Message::Hello {
-                features: Features::CHECKPOINT_V3,
+                features: Features::CHECKPOINT_V4,
                 resume: None,
             })
             .map_err(|e| e.to_string())?;

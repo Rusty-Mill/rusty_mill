@@ -2115,6 +2115,150 @@ fn osc_11_query_replies_and_110_resets() {
     assert_eq!(cells(&g)[0].bg, 0x000000);
 }
 
+// ---- Default vs explicit colours under OSC 10/11, #1163 ----
+//
+// A cell drawn in the default colours follows a later OSC 10/11/110/111; a
+// colour the child chose stays, even when it equals the old or new default.
+
+const BLUE: u32 = 0x0000FF;
+
+/// `(fg, bg)` of cell `(x, y)`.
+fn colours(g: &Grid, x: usize, y: usize) -> (u32, u32) {
+    let c = g.row(y)[x];
+    (c.fg, c.bg)
+}
+
+#[test]
+fn osc_11_recolours_default_cells_but_not_explicit_ones() {
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    // A in the default bg, B explicitly black (the old default), C
+    // explicitly blue (the new one).
+    p.advance(&mut g, b"A\x1b[48;2;0;0;0mB\x1b[48;2;0;0;255mC\x1b[0m");
+    p.advance(&mut g, b"\x1b]11;rgb:00/00/ff\x1b\\");
+    assert_eq!(colours(&g, 0, 0).1, BLUE, "default follows");
+    assert_eq!(
+        colours(&g, 1, 0).1,
+        DEFAULT_BG,
+        "explicit old default stays"
+    );
+    assert_eq!(colours(&g, 2, 0).1, BLUE);
+    assert_eq!(colours(&g, 5, 1).1, BLUE, "an untouched blank follows");
+    p.advance(&mut g, b"\x1b]111\x1b\\");
+    assert_eq!(colours(&g, 0, 0).1, DEFAULT_BG);
+    assert_eq!(colours(&g, 1, 0).1, DEFAULT_BG);
+    assert_eq!(colours(&g, 2, 0).1, BLUE, "explicit new default stays");
+    assert_eq!(colours(&g, 5, 1).1, DEFAULT_BG);
+}
+
+#[test]
+fn osc_10_recolours_default_foreground_but_not_explicit_one() {
+    let mut g = Grid::new(10, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"A\x1b[38;2;255;255;255mB\x1b[39mC");
+    p.advance(&mut g, b"\x1b]10;rgb:00/00/ff\x1b\\");
+    assert_eq!(colours(&g, 0, 0).0, BLUE);
+    assert_eq!(colours(&g, 1, 0).0, DEFAULT_FG, "explicit white stays");
+    assert_eq!(colours(&g, 2, 0).0, BLUE, "SGR 39 is the default");
+    p.advance(&mut g, b"\x1b]110\x1b\\");
+    assert_eq!(colours(&g, 0, 0).0, DEFAULT_FG);
+}
+
+#[test]
+fn osc_11_recolours_default_cells_in_history() {
+    let mut g = Grid::new(4, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"a\x1b[48;2;0;0;0mb\x1b[0m\r\n\r\n\r\n");
+    assert_eq!(g.scrollback_len(), 2);
+    p.advance(&mut g, b"\x1b]11;rgb:00/00/ff\x1b\\");
+    let (line, _) = g.line_cells(0).expect("history line");
+    assert_eq!((line[0].bg, line[1].bg), (BLUE, DEFAULT_BG));
+}
+
+#[test]
+fn osc_11_recolours_both_screens() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"p\x1b[48;2;0;0;0mq\x1b[0m\x1b[?1049h");
+    p.advance(&mut g, b"a\x1b[48;2;0;0;0mb\x1b[0m");
+    p.advance(&mut g, b"\x1b]11;rgb:00/00/ff\x1b\\");
+    assert_eq!(
+        (colours(&g, 0, 0).1, colours(&g, 1, 0).1),
+        (BLUE, DEFAULT_BG)
+    );
+    p.advance(&mut g, b"\x1b[?1049l");
+    assert_eq!(row_text(&g, 0), "pq  ");
+    assert_eq!(
+        (colours(&g, 0, 0).1, colours(&g, 1, 0).1),
+        (BLUE, DEFAULT_BG)
+    );
+}
+
+#[test]
+fn pen_keeps_colour_provenance_across_decsc_and_osc_11() {
+    // DECSC/DECRC save the position only; the live pen keeps its provenance
+    // through them and through OSC 11.
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    // An explicit black pen is not the default: OSC 11 does not move it.
+    p.advance(
+        &mut g,
+        b"\x1b[48;2;0;0;0m\x1b7\x1b]11;rgb:00/00/ff\x1b\\\x1b8x",
+    );
+    assert_eq!(colours(&g, 0, 0).1, DEFAULT_BG);
+    // A default pen draws in the default in force when it draws.
+    p.advance(
+        &mut g,
+        b"\x1b[49m\x1b7\x1b]11;rgb:00/ff/00\x1b\\\x1b8\x1b[Cy",
+    );
+    assert_eq!(colours(&g, 1, 0).1, 0x00FF00);
+    assert_eq!(colours(&g, 0, 0).1, DEFAULT_BG, "explicit glyph stays");
+}
+
+#[test]
+fn osc_11_leaves_the_explicit_pen_and_its_erases_alone() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    // The pen's explicit black equals the default; OSC 11 must not move it.
+    p.advance(&mut g, b"\x1b[48;2;0;0;0m\x1b]11;rgb:00/00/ff\x1b\\x\x1b[K");
+    assert_eq!(colours(&g, 0, 0).1, DEFAULT_BG, "glyph");
+    assert_eq!(colours(&g, 2, 0).1, DEFAULT_BG, "BCE erase");
+    p.advance(&mut g, b"\x1b]11;rgb:00/ff/00\x1b\\");
+    assert_eq!(colours(&g, 2, 0).1, DEFAULT_BG, "an explicit erase stays");
+}
+
+#[test]
+fn checkpoint_keeps_colour_provenance() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b]11;rgb:00/00/ff\x1b\\a\x1b[48;2;0;0;255mb\x1b[49m",
+    );
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    assert_eq!((colours(&g, 0, 0).1, colours(&g, 1, 0).1), (BLUE, BLUE));
+    p.advance(&mut g, b"\x1b]111\x1b\\c");
+    assert_eq!(colours(&g, 0, 0).1, DEFAULT_BG, "default follows");
+    assert_eq!(colours(&g, 1, 0).1, BLUE, "explicit stays");
+    assert_eq!(colours(&g, 2, 0).1, DEFAULT_BG, "restored pen is default");
+}
+
+#[test]
+fn checkpoint_rejects_rtcp_v3_and_other_versions() {
+    // v3 has v4's layout but no colour provenance, so restoring it would
+    // bake its default colours in; it fails closed instead.
+    let (g, p) = (Grid::new(4, 1), AnsiParser::new());
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    assert_eq!(&bytes[..5], b"RTCP\x04");
+    assert!(crate::checkpoint::decode(&bytes).is_ok());
+    for version in [3u8, 5] {
+        let mut other = bytes.clone();
+        other[4] = version;
+        assert!(crate::checkpoint::decode(&other).is_err(), "v{version}");
+    }
+}
+
 #[test]
 fn osc_color_resets_on_ris() {
     // A default background set via OSC 11 must not survive a full reset.
@@ -2453,10 +2597,10 @@ fn sgr_22_clears_both_bold_and_dim() {
 #[test]
 fn wide_trailer_carries_only_layout_bit_under_attributes() {
     // A bold wide glyph: the head carries the bold bit; the trailer carries
-    // only WIDE_TRAILER, never a rendition attribute.
+    // only WIDE_TRAILER and its colours' provenance, never a rendition.
     let g = parse("\x1b[1m世".as_bytes(), 80, 24);
     assert_ne!(cells(&g)[0].flags & ATTR_BOLD, 0); // head is bold
-    assert_eq!(cells(&g)[1].flags, WIDE_TRAILER); // trailer: layout bit only
+    assert_eq!(cells(&g)[1].flags, WIDE_TRAILER | ATTR_DEFAULT_COLORS);
 }
 
 #[test]
@@ -6442,7 +6586,7 @@ fn assert_bce(g: &Grid, y: usize, xs: std::ops::Range<usize>, what: &str) {
         let c = g.row(y)[x];
         assert_eq!(
             (c.ch, c.bg, c.fg, c.flags),
-            (' ', BCE_BG, DEFAULT_FG, 0),
+            (' ', BCE_BG, DEFAULT_FG, ATTR_FG_DEFAULT),
             "{what}: cell ({x},{y})"
         );
     }
@@ -7017,6 +7161,32 @@ fn snapshot_round_trips_the_drawable_state() {
 }
 
 #[test]
+fn snapshot_keeps_default_colours_and_their_provenance() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b]11;rgb:00/00/ff\x1b\\a\x1b[48;2;0;0;255mb");
+    let mut back = Grid::decode_snapshot(&g.encode_snapshot()).expect("decode");
+    assert_eq!(back.row(0), g.row(0));
+    back.set_default_colors(DEFAULT_FG, DEFAULT_BG, DEFAULT_FG);
+    assert_eq!(colours(&back, 0, 0).1, DEFAULT_BG, "default follows");
+    assert_eq!(colours(&back, 1, 0).1, BLUE, "explicit stays");
+}
+
+#[test]
+fn snapshot_decodes_version_1_with_every_colour_explicit() {
+    // A 1x1 version 1 snapshot: one 'x' in fg 1, bg 2, underline 3.
+    let mut v1 = b"RTSN\x01".to_vec();
+    v1.extend([1, 1, 0, 0, 0, 0, 0, 0]); // size, cursors, scroll region
+    v1.extend([0, 0, 0, 0, 0, 0]); // flags, shape, title, clusters, links, history
+    v1.extend([1, 0, 1 << 2, 0, 1, 2, 0, 0, 3, b'x']); // line: run, style, glyph
+    v1.push(0); // no primary screen
+    let mut g = Grid::decode_snapshot(&v1).expect("decode v1");
+    assert_eq!((g.row(0)[0].ch, colours(&g, 0, 0)), ('x', (1, 2)));
+    g.set_default_colors(9, 9, 9);
+    assert_eq!(colours(&g, 0, 0), (1, 2), "baked colours stay as written");
+}
+
+#[test]
 fn snapshot_collapses_blank_runs() {
     // An empty 200x50 screen: one repeat run per line, under 10 bytes each
     // (24 bytes per cell in memory).
@@ -7035,11 +7205,11 @@ fn snapshot_decode_rejects_bad_headers() {
         Grid::decode_snapshot(b"XXXX\x01").err(),
         Some(SnapshotError::BadMagic)
     );
-    let mut v2 = good.clone();
-    v2[4] = 2;
+    let mut v3 = good.clone();
+    v3[4] = 3;
     assert_eq!(
-        Grid::decode_snapshot(&v2).err(),
-        Some(SnapshotError::UnsupportedVersion(2))
+        Grid::decode_snapshot(&v3).err(),
+        Some(SnapshotError::UnsupportedVersion(3))
     );
     let mut trailing = good.clone();
     trailing.push(0);

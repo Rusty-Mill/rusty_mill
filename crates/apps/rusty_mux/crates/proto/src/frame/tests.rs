@@ -803,6 +803,7 @@ fn feature_bits_are_distinct() {
         Features::CAPTURE,
         Features::LABELS,
         Features::LAYOUT,
+        Features::CHECKPOINT_V4,
     ];
     let mut seen = 0u64;
     for feature in all {

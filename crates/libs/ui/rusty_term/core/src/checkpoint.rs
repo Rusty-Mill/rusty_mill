@@ -1,7 +1,11 @@
-//! RTCP v3: a headless terminal continuation checkpoint, independent of RTSN.
+//! RTCP v4: a headless terminal continuation checkpoint, independent of RTSN.
 //! Durable parser/Grid state is included; front-end view state and pending
 //! host side effects are excluded. L13 channels are outside this profile.
 //! Lines are run-encoded (see `grid/line.rs`); v3 differs from v2 only there.
+//! v4 keeps v3's layout but changes what cell and pen flags mean: a colour
+//! without `ATTR_FG_DEFAULT` / `ATTR_BG_DEFAULT` is explicit, so a v3 image
+//! (whose default colours carry no bit) would restore with them baked in. v3
+//! is therefore rejected rather than reinterpreted.
 
 use crate::{
     AnsiParser, Grid,
@@ -30,7 +34,7 @@ impl std::error::Error for Error {}
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 /// Magic and version byte that open every checkpoint.
-const HEADER: &[u8; 5] = b"RTCP\x03";
+const HEADER: &[u8; 5] = b"RTCP\x04";
 
 /// Encode a consistent headless Grid and parser. No output log is retained.
 pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
@@ -44,7 +48,7 @@ pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
     Ok(w.bytes)
 }
 
-/// Decode untrusted RTCP v3, validating allocation budgets and internal indices
+/// Decode untrusted RTCP v4, validating allocation budgets and internal indices
 /// before returning objects that can safely continue parsing. No host actions
 /// or terminal responses are replayed while restoring.
 pub fn decode(data: &[u8]) -> Result<(Grid, AnsiParser)> {

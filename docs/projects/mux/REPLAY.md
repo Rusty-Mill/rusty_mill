@@ -1,4 +1,4 @@
-# Phase 1 attach: RTCP v3 headless checkpoints
+# Phase 1 attach: RTCP v4 headless checkpoints
 
 The former experimental RMRP lifetime replay mechanism is removed. There is
 no cumulative output cutoff, no replay log, and no reduction of the engine's
@@ -8,12 +8,14 @@ output, subject to current-state memory limits.
 
 ## Negotiation and transfer
 
-`Features::CHECKPOINT_V3` is bit 3 (value 8). Bits 0, 1 and 2 are reserved for
-rejected RMRP replay, incomplete RTCP v1 and superseded fixed-width RTCP v2
-respectively; none enables attach. Hello/Welcome negotiate bit 3; Attach
-without it returns Failed. No released client spoke v2, so the server does not
-offer it. Existing frame layouts and the drawable
-RTSN v1 API remain unchanged.
+`Features::CHECKPOINT_V4` is bit 16 (value 65536). Bits 0, 1, 2 and 3 are
+reserved for rejected RMRP replay, incomplete RTCP v1, superseded fixed-width
+RTCP v2 and superseded RTCP v3 respectively; none enables attach. Hello/Welcome
+negotiate bit 16; Attach without it returns Failed. The server offers no older
+version, and the client refuses a Welcome without bit 16, so a v3 peer on
+either side fails closed instead of restoring v3's baked-in default colours.
+Existing frame layouts are unchanged. The drawable RTSN snapshot is a separate
+format: it writes v2 (default fg/bg in the header, #1163) and still decodes v1.
 
 A successful attach sends Done, then ordered `Checkpoint` messages (type `0x88`),
 then Ready, then raw Output and subsequent model events. A Checkpoint contains
@@ -38,11 +40,11 @@ reader/writer futures and socket halves. It does not modify the block or its
 ability to produce a fresh checkpoint for another attach. A blocked non-reading
 peer cannot retain the transfer indefinitely after eviction.
 
-## RTCP v3 binary format
+## RTCP v4 binary format
 
 The codec is `rusty_term_core::checkpoint::{encode,decode}`. Magic `RTCP` is
-followed by version byte `3`, then Grid fields and AnsiParser fields in the
-explicit order in their `Wire` implementations. Field order is part of v3;
+followed by version byte `4`, then Grid fields and AnsiParser fields in the
+explicit order in their `Wire` implementations. Field order is part of v4;
 changing it or its meaning requires another version. This is an independent
 continuation format, not a reinterpretation of RTSN's drawable snapshot.
 
@@ -83,7 +85,7 @@ Front-end selection/search/folds, render caches and spare allocations, pending
 host clipboard/notification/bell effects, and L13 application channel state are
 outside this *headless VT* profile. Pixel overlays present only in GUI builds
 are front-end state; headless Sixel/iTerm display cells and Kitty stored pixels
-are preserved. Enabling a library feature does not change RTCP v3's schema.
+are preserved. Enabling a library feature does not change RTCP v4's schema.
 The Phase 1 server does not enable GUI or L13. Clients must not treat RTCP as a
 GUI/L13 session checkpoint or replay host actions during restore.
 
@@ -144,6 +146,10 @@ to KILL after one second, and reaps it. Setup/teardown fallback kills and waits.
 The review correction adds cursor_visible symmetrically after tab_stops in the
 Grid schema and used version 2/capability bit 2 so old v1 layouts fail closed;
 v3 (bit 3) changes only the line encoding, so v2 layouts fail closed too.
+v4 (bit 16, #1163) keeps v3's layout but changes the meaning of cell and pen
+flags: `ATTR_FG_DEFAULT` / `ATTR_BG_DEFAULT` mark a colour that follows the
+default (OSC 10/11), and a colour without them is explicit. A v3 image has no
+such bits, so it is rejected rather than restored with every colour explicit.
 An independent inventory test covers all 87 Grid fields: 60 durable fields are
 encoded and decoded, and 27 excluded fields have explicit profile reasons.
 Exclusions are rebuildable caches/allocations, client view/render configuration,

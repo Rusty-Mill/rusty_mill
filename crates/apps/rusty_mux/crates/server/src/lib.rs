@@ -2,7 +2,7 @@
 //!
 //! The server owns one PTY per block and feeds its output to a server-side
 //! `rusty_term_core` grid, so a client that attaches gets a snapshot of the
-//! terminal (negotiated RTCP v3 checkpoint chunks), then a ready frame and
+//! terminal (negotiated RTCP v4 checkpoint chunks), then a ready frame and
 //! raw PTY bytes. Every attached client
 //! parses those bytes itself; the server never re-renders. Input reaches a
 //! PTY only from the client holding that block's lease ([`rusty_mux_core`]).

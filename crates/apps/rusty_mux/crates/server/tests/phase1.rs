@@ -9,7 +9,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{Client, block_for, run_and_wait, start_server};
-use rusty_mux_proto::Message;
+use rusty_mux_proto::{Features, Message};
 
 #[test]
 fn two_clients_converge_on_one_pty() {
@@ -91,6 +91,24 @@ fn input_round_trips_while_the_pty_floods() {
         elapsed < Duration::from_secs(1),
         "{marker} took {elapsed:?} under flood"
     );
+}
+
+#[test]
+fn a_v3_checkpoint_client_is_refused_attach() {
+    // RTCP v3 carries no colour provenance, so a v3-only peer is neither
+    // granted a checkpoint capability nor sent one: both sides fail closed.
+    let path = start_server();
+    let mut a = Client::connect(&path);
+    let block = block_for(&mut a);
+    let mut old = Client::connect_with(&path, Features::CHECKPOINT_V3, None);
+    assert!(!old.features.contains(Features::CHECKPOINT_V3));
+    assert!(!old.features.contains(Features::CHECKPOINT_V4));
+    let answer = old.answer(|req| Message::Attach { req, block });
+    assert!(
+        matches!(answer.last(), Some(Message::Failed { reason, .. }) if reason.contains("requires feature bits")),
+        "{answer:?}"
+    );
+    assert!(a.features.contains(Features::CHECKPOINT_V4));
 }
 
 #[test]
