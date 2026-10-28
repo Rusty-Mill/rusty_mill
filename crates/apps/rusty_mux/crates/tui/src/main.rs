@@ -6,8 +6,8 @@
 //! `rusty_mux_tui::keys`. With `RUSTY_MUX_KEYLOG` set to a new file's path,
 //! every keyboard read is written to it as one line of hex, to see what a
 //! terminal really sends. That is everything typed, passwords included:
-//! the file is created owner-only on Unix (on Windows it takes its
-//! directory's permissions), and an existing file is refused.
+//! the file is created the owner's alone (mode 0600 on Unix, an
+//! owner-only DACL on Windows), and an existing file is refused.
 
 use std::process::ExitCode;
 
@@ -58,7 +58,7 @@ mod client {
     use rusty_mux_server::checkpoint::Receiver;
     use rusty_mux_tui::keys::{Action, Keys};
     use rusty_mux_tui::screen::{self, Frame, View};
-    use rusty_mux_tui::{Conn, NoWin32Input, RESTORE, modes, pass};
+    use rusty_mux_tui::{Conn, NoWin32Input, RESTORE, create_private, modes, pass};
     use rusty_term_core::{AnsiParser, Grid};
     use rusty_uuid::Uuid;
 
@@ -223,19 +223,13 @@ mod client {
     }
 
     /// The file `RUSTY_MUX_KEYLOG` names, created for the log; `None` when
-    /// it is unset. It must not exist yet, so the keys never go to a file
-    /// someone else may read; on Unix it is created owner-only.
+    /// it is unset. See [`create_private`].
     fn keylog() -> Result<Option<std::fs::File>, String> {
         let Some(path) = std::env::var_os("RUSTY_MUX_KEYLOG") else {
             return Ok(None);
         };
         let path = Path::new(&path);
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let file = options
-            .open(path)
+        let file = create_private(path)
             .map_err(|e| format!("RUSTY_MUX_KEYLOG {}: {e}", path.display()))?;
         eprintln!(
             "rusty-mux: logging every key typed, passwords included, to {}",

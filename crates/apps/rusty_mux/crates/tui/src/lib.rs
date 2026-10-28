@@ -11,6 +11,7 @@ pub mod screen;
 
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};
+use std::path::Path;
 
 use rusty_mux_proto::{Message, decode, encode};
 use rusty_term_core::{Grid, WIDE_TRAILER};
@@ -127,6 +128,30 @@ fn without_win32(seq: &[u8]) -> Vec<u8> {
         return controls;
     }
     [&controls, b"\x1b[?".as_slice(), &kept.join(&b';'), b"h"].concat()
+}
+
+/// Creates the key log at `path`, which must not exist yet (a symlink
+/// included). It records everything typed, so it is the owner's alone
+/// before any byte goes in: mode 0600 on Unix, and on Windows an
+/// owner-only DACL set while the open handle shares no access, failing
+/// closed (the empty file removed) if it cannot be set. As `rusty_mux_ctl`
+/// creates its private agent files.
+pub fn create_private(path: &Path) -> io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 0);
+    let file = options.open(path)?;
+    #[cfg(windows)]
+    if let Err(e) = platform_windows::fs::restrict_to_owner(path) {
+        drop(file);
+        // The DACL's error is the one to report; the empty file is ours.
+        let _ = std::fs::remove_file(path);
+        return Err(io::Error::other(format!("restricting access: {e}")));
+    }
+    Ok(file)
 }
 
 /// Repaints the local terminal from a restored grid: every visible row
@@ -344,6 +369,93 @@ mod tests {
         // A run too long to be a real mode set is not held for ever.
         let long = [b"\x1b[?".as_slice(), &[b'1'; HOLD_MAX]].concat();
         assert_eq!(filtered(&[&long]), long);
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rusty-mux-tui-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        dir
+    }
+
+    #[test]
+    fn a_private_file_is_new() {
+        let dir = scratch("new");
+        let path = dir.join("keys");
+        std::fs::write(&path, "kept").unwrap();
+        let refused = create_private(&path).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_file_is_the_owners_alone_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("unix");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = dir.join("keys");
+        drop(create_private(&path).unwrap());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Whatever the directory grants and passes down, the file's DACL is
+    /// protected with one entry, full control for the current user, by
+    /// the time the handle is back. Checked by SID with `Get-Acl`.
+    #[cfg(windows)]
+    #[test]
+    fn a_private_file_is_the_owners_alone_on_windows() {
+        const DACL: &str = "$acl = Get-Acl -LiteralPath $env:ACL_PATH; \
+            $acl.AreAccessRulesProtected; \
+            $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | \
+            ForEach-Object { '{0} {1} {2} {3}' -f $_.IdentityReference.Value, \
+            $_.AccessControlType, [int]$_.FileSystemRights, $_.IsInherited }";
+        let powershell = |script: &str, path: &Path| {
+            let out = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .env("ACL_PATH", path)
+                .output()
+                .expect("powershell");
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let dacl = |path: &Path| -> (bool, Vec<String>) {
+            let text = powershell(DACL, path);
+            let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+            let protected = lines.next() == Some("True");
+            (protected, lines.map(str::to_owned).collect())
+        };
+        let dir = scratch("windows");
+        // Everyone (S-1-1-0) may read the directory and what it holds.
+        let grant = "$acl = Get-Acl -LiteralPath $env:ACL_PATH; \
+            $rule = New-Object Security.AccessControl.FileSystemAccessRule(\
+            (New-Object Security.Principal.SecurityIdentifier('S-1-1-0')), 'Read', \
+            'ContainerInherit,ObjectInherit', 'None', 'Allow'); \
+            $acl.AddAccessRule($rule); Set-Acl -LiteralPath $env:ACL_PATH -AclObject $acl";
+        powershell(grant, &dir);
+        let (_, parent) = dacl(&dir);
+        assert!(
+            parent.iter().any(|e| e.starts_with("S-1-1-0 Allow")),
+            "{parent:?}"
+        );
+        let me = powershell(
+            "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+            &dir,
+        );
+        let me = me.trim();
+        assert!(me.starts_with("S-1-"), "the current user's SID: {me}");
+
+        let path = dir.join("keys");
+        let mut file = create_private(&path).unwrap();
+        file.write_all(b"1d 64\n").unwrap();
+        drop(file);
+        let (protected, entries) = dacl(&path);
+        let ok = protected && entries == [format!("{me} Allow 2032127 False")];
+        assert!(ok, "protected={protected} {entries:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
