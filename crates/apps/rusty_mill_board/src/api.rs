@@ -524,7 +524,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_move",
-            "Move a card. Needs the capability for that transition; leaving building/qa/review needs your claim.",
+            "Move a card. Needs the capability for that transition; leaving building/qa/review needs your claim. While an admin has turned movement rules off, any move but out of Done is allowed.",
             |b, i, a: MoveArgs| {
                 let who = acting(b, i, &a.who)?;
                 card(b.move_card(id(&a.id)?, a.to, &who)?)

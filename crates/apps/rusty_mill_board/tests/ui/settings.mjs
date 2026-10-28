@@ -102,6 +102,39 @@ await page.waitForTimeout(400);
 check(JSON.stringify((await api(rotated, "board_roles")).body.roles.tester) === '["qa"]', "its capabilities are saved");
 check((await dialog.innerText()).includes("Verify built work"), "each capability is explained");
 
+// Rules: turning movement rules off and on is saved at once.
+await dialog.getByRole("button", { name: "Rules" }).click();
+const enforce = dialog.getByLabel("Enforce card movement rules");
+check(await enforce.isChecked(), "movement rules start on");
+await enforce.uncheck();
+await page.waitForFunction(() => document.querySelector("#settings")?.innerText.includes("except out of Done"));
+check((await api(TOKEN, "settings_get")).body.rules.movement === "open", "unticking turns them off");
+await dialog.getByLabel("Enforce card movement rules").check();
+await page.waitForFunction(() => document.querySelector("#settings")?.innerText.includes("along the column table"));
+check((await api(TOKEN, "settings_get")).body.rules.movement === "enforced", "ticking turns them back on");
+// A failed save, either way, shows the error and puts the checkbox and its note back to what the server holds.
+const rulesShown = (on, note) => page.waitForFunction(([on, note]) => {
+  const box = [...document.querySelectorAll("#settings input[type=checkbox]")].find((b) => b.parentElement.textContent.includes("Enforce card movement rules"));
+  return box && box.checked === on && !box.disabled && document.querySelector("#settings").innerText.includes(note);
+}, [on, note]);
+const refuse = () => page.route("**/api/settings_rules_set", (r) => r.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "disk full" }) }));
+await refuse();
+await dialog.getByLabel("Enforce card movement rules").uncheck();
+await page.waitForFunction(() => document.querySelector("#settings .err")?.textContent.includes("disk full"));
+await rulesShown(true, "along the column table");
+check((await api(TOKEN, "settings_get")).body.rules.movement === "enforced", "a failed turn-off leaves the checkbox, its note and the server on");
+await page.unroute("**/api/settings_rules_set");
+await dialog.getByLabel("Enforce card movement rules").uncheck();
+await rulesShown(false, "except out of Done");
+await refuse();
+await dialog.getByLabel("Enforce card movement rules").check();
+await page.waitForFunction(() => document.querySelector("#settings .err")?.textContent.includes("disk full"));
+await rulesShown(false, "except out of Done");
+check((await api(TOKEN, "settings_get")).body.rules.movement === "open", "a failed turn-on leaves the checkbox, its note and the server off");
+await page.unroute("**/api/settings_rules_set");
+await dialog.getByLabel("Enforce card movement rules").check();
+await rulesShown(true, "along the column table");
+
 // Apps and Server: read-only views of sign-in and how the board was started.
 await dialog.getByRole("button", { name: "Apps" }).click();
 check((await dialog.innerText()).includes("OAuth sign-in is off"), "the Apps tab says when sign-in is off");

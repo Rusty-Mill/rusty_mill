@@ -145,6 +145,18 @@ pub fn required_capability(from: Column, to: Column) -> Result<Option<Capability
     }
 }
 
+/// Whether moves follow [`required_capability`] (the default), or are open: an admin's
+/// temporary switch for when the table is in the way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveRules {
+    /// The transition table, its capabilities and the claim rule apply.
+    #[default]
+    Enforced,
+    /// Any column to any other, by any actor holding a capability. Done stays terminal.
+    Open,
+}
+
 /// Columns where work is picked up, in the order a worker should look:
 /// finish what is nearest Done first.
 pub const WORK_QUEUES: [Column; 4] = [Column::Review, Column::Qa, Column::Building, Column::Ready];
@@ -570,6 +582,28 @@ impl Card {
         })
     }
 
+    /// Move to `to` with the movement rules off: no transition table, capability or claim
+    /// check, only an actor holding some capability. The claim is cleared on arrival.
+    ///
+    /// # Errors
+    /// If the card is Done, already in `to`, or the actor holds no capability.
+    pub fn move_freely(&self, to: Column, by: &Actor, now_ms: i64) -> Result<Self, BoardError> {
+        if self.column == Column::Done {
+            return Err(BoardError::Terminal);
+        }
+        if self.column == to {
+            return Err(BoardError::NoSuchMove { from: to, to });
+        }
+        if by.caps.is_empty() {
+            return Err(BoardError::Invalid("moving a card needs some capability"));
+        }
+        Ok(Self {
+            column: to,
+            claim: None,
+            ..self.next(now_ms)
+        })
+    }
+
     /// Replace title/body/tags (each optional).
     ///
     /// # Errors
@@ -799,6 +833,41 @@ mod tests {
         assert_eq!(
             done.move_to(Column::Ready, &all, 1),
             Err(BoardError::Terminal)
+        );
+    }
+
+    #[test]
+    fn open_rules_allow_any_move_but_keep_done_terminal() {
+        let builder = actor("claude-cloud", &[Capability::Build]);
+        let mut c = card();
+        c.column = Column::Review;
+        c.claim = Some("someone-else".into());
+        let c = c
+            .move_freely(Column::Ready, &builder, 1)
+            .expect("out of review");
+        assert_eq!((c.column, c.claim.as_deref()), (Column::Ready, None));
+        let c = c
+            .move_freely(Column::Done, &builder, 2)
+            .expect("ready to done");
+        assert_eq!(
+            c.move_freely(Column::Backlog, &builder, 3),
+            Err(BoardError::Terminal)
+        );
+    }
+
+    #[test]
+    fn open_rules_refuse_a_same_column_move_and_an_actor_without_capabilities() {
+        let builder = actor("b", &[Capability::Build]);
+        assert_eq!(
+            card().move_freely(Column::Backlog, &builder, 1),
+            Err(BoardError::NoSuchMove {
+                from: Column::Backlog,
+                to: Column::Backlog
+            })
+        );
+        assert_eq!(
+            card().move_freely(Column::Ready, &actor("none", &[]), 1),
+            Err(BoardError::Invalid("moving a card needs some capability"))
         );
     }
 

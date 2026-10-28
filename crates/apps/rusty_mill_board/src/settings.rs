@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 
 use crate::api::{CallError, Identity, Shared, Who, acting};
 use crate::board::{ProjectsSink, Roles};
-use crate::domain::{Actor, BoardError, Capability};
+use crate::domain::{Actor, BoardError, Capability, MoveRules};
 use crate::github::GithubConfig;
 use crate::identities::{Credentials, read_private};
 use crate::projects::Projects;
@@ -43,16 +43,19 @@ pub struct Files {
     pub roles: Option<PathBuf>,
     /// The GitHub sync.
     pub github: Option<PathBuf>,
+    /// Whether card movement rules are enforced.
+    pub rules: Option<PathBuf>,
 }
 
 impl Files {
-    /// The four files in one directory.
+    /// The settings files in one directory.
     pub fn in_dir(dir: &Path) -> Self {
         Self {
             identities: Some(dir.join("identities.json")),
             projects: Some(dir.join("projects.json")),
             roles: Some(dir.join("roles.json")),
             github: Some(dir.join("github.json")),
+            rules: Some(dir.join("rules.json")),
         }
     }
 }
@@ -114,6 +117,28 @@ pub fn load_roles(path: &Path) -> Result<Roles, String> {
     let roles: Roles = serde_json::from_str(&json).map_err(|e| format!("roles: {e}"))?;
     check_roles(&roles)?;
     Ok(roles)
+}
+
+/// The rules file: `{"movement": "enforced" | "open"}`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RulesFile {
+    /// Whether card moves follow the transition table.
+    pub movement: MoveRules,
+}
+
+/// The movement rules from `path`, or the default ([`MoveRules::Enforced`]) if there is no such
+/// file yet.
+///
+/// # Errors
+/// If it exists but cannot be read or parsed.
+pub fn load_rules(path: &Path) -> Result<MoveRules, String> {
+    if !path.exists() {
+        return Ok(MoveRules::default());
+    }
+    let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let file: RulesFile = serde_json::from_str(&json).map_err(|e| format!("rules: {e}"))?;
+    Ok(file.movement)
 }
 
 /// Roles must be plainly named, and some role must hold `Admin`.
@@ -246,6 +271,11 @@ struct RolesSet {
 }
 
 #[derive(Deserialize)]
+struct RulesSet {
+    movement: MoveRules,
+}
+
+#[derive(Deserialize)]
 struct GithubSet {
     repo: String,
     api: Option<String>,
@@ -334,6 +364,7 @@ impl Settings {
             "settings_roles_set" => |s, _, a| s.roles_set(&parse(a)?),
             "settings_github_set" => |s, _, a| s.github_set(&parse(a)?),
             "settings_github_clear" => |s, _, _| s.github_clear(),
+            "settings_rules_set" => |s, by, a| s.rules_set(by, &parse(a)?),
             "settings_app_revoke" => |s, _, a| s.app_revoke(&parse(a)?),
             _ => return None,
         };
@@ -374,6 +405,7 @@ impl Settings {
                 "projects": self.files.projects.is_some(),
                 "roles": self.files.roles.is_some(),
                 "github": self.files.github.is_some(),
+                "rules": self.files.rules.is_some(),
             },
             "agents": agents,
             "repos": self.board.projects(),
@@ -381,6 +413,7 @@ impl Settings {
             "capabilities": Capability::ALL,
             "capability_about": Capability::ALL.map(|c| (c, c.about())).into_iter().collect::<BTreeMap<_, _>>(),
             "github": github,
+            "rules": RulesFile { movement: self.board.move_rules() },
             "apps": self.oauth.get().map(|p| p.store().list_clients()),
             "server": self.server,
             "paths": {
@@ -388,6 +421,7 @@ impl Settings {
                 "projects": self.files.projects,
                 "roles": self.files.roles,
                 "github": self.files.github,
+                "rules": self.files.rules,
             },
         }))
     }
@@ -539,6 +573,20 @@ impl Settings {
             .map_err(|e| refused(format!("{}: {e}", path.display())))?;
         self.board.set_roles(a.roles.clone());
         Ok(json!({ "roles": a.roles }))
+    }
+
+    /// Turn the movement rules on or off: written first, then applied, and logged.
+    fn rules_set(&self, by: &Actor, a: &RulesSet) -> Res {
+        let path = self.file(&self.files.rules)?;
+        let file = RulesFile {
+            movement: a.movement,
+        };
+        let json = serde_json::to_string_pretty(&file).map_err(|e| refused(e.to_string()))?;
+        rusty_atomic_file::write(&path, json.as_bytes())
+            .map_err(|e| refused(format!("{}: {e}", path.display())))?;
+        self.board.set_move_rules(a.movement);
+        rusty_log::warn!(actor = %by.name, movement = ?a.movement, "card movement rules changed");
+        Ok(json!(file))
     }
 
     fn github_set(&self, a: &GithubSet) -> Res {
