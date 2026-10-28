@@ -264,7 +264,7 @@ async function poll(){
 }
 /* ---- Settings: agents, repositories and projects, roles, GitHub. Each tab edits one thing and sends
    the whole of it; the server validates, writes its file, and applies it. ---- */
-const CAPS=["triage","build","qa","review","merge","close","admin"];
+const CAPS=["triage","build","qa","review","merge","close","project","admin"];
 let cfg=null,secret=null,tab="agents";
 async function setting(op,args){return api(op,{...who(),...args})}
 async function openSettings(){

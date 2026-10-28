@@ -32,9 +32,9 @@ impl Default for Roles {
         Self(BTreeMap::from([
             (
                 "human".into(),
-                role(&[Triage, Build, Qa, Review, Merge, Close, Admin]),
+                role(&[Triage, Build, Qa, Review, Merge, Close, Project, Admin]),
             ),
-            ("builder".into(), role(&[Build, Close])),
+            ("builder".into(), role(&[Build, Close, Project])),
             ("qa".into(), role(&[Qa])),
             ("reviewer".into(), role(&[Review, Merge])),
         ]))
@@ -62,11 +62,15 @@ impl Roles {
     }
 }
 
+/// Makes a changed project registry durable (the projects file); see [`Board::set_projects`].
+pub type ProjectsSink = Box<dyn Fn(&Projects) -> Result<(), String> + Send + Sync>;
+
 /// The board over a store.
 pub struct Board<S> {
     store: S,
     roles: RwLock<Roles>,
     projects: RwLock<Projects>,
+    projects_sink: Option<ProjectsSink>,
     clock: fn() -> i64,
 }
 
@@ -95,6 +99,7 @@ impl<S: Store> Board<S> {
             store,
             roles: RwLock::new(roles),
             projects: RwLock::new(Projects::default()),
+            projects_sink: None,
             clock,
         }
     }
@@ -107,6 +112,42 @@ impl<S: Store> Board<S> {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = projects;
         self
+    }
+
+    /// Let [`Board::add_project`] change the registry, persisting it through `sink`.
+    #[must_use]
+    pub fn with_projects_sink(mut self, sink: ProjectsSink) -> Self {
+        self.projects_sink = Some(sink);
+        self
+    }
+
+    /// Add project `name`, owning `paths`, to repository `repo` (created if new). Additive
+    /// only (see [`Projects::with_project`]), so it widens no credential's reach: a credential
+    /// limited to some projects does not gain the new one.
+    ///
+    /// # Errors
+    /// If `by` lacks `Project`, the board has no projects file, or the project is refused.
+    pub fn add_project(
+        &self,
+        by: &Actor,
+        repo: &str,
+        name: &str,
+        paths: &[String],
+    ) -> Result<Projects, BoardError> {
+        if !by.caps.contains(&Capability::Project) {
+            return Err(BoardError::Forbidden(Capability::Project));
+        }
+        let Some(sink) = &self.projects_sink else {
+            return Err(BoardError::Refused(
+                "this board has no projects file to add a project to".to_owned(),
+            ));
+        };
+        let projects = self
+            .projects()
+            .with_project(repo, name, paths)
+            .map_err(BoardError::Refused)?;
+        self.set_projects(projects.clone(), |p| sink(p))?;
+        Ok(projects)
     }
 
     /// A snapshot of the project registry.
@@ -147,7 +188,7 @@ impl<S: Store> Board<S> {
             .store
             .list()?
             .iter()
-            .find(|c| !projects.contains(&c.project))
+            .find(|c| guard.contains(&c.project) && !projects.contains(&c.project))
         {
             return Err(BoardError::Refused(format!(
                 "project {:?} still has cards (for example {:?}); move them to another project first",

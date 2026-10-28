@@ -64,19 +64,22 @@ pub enum Capability {
     /// Record as Done a card from Building or QA whose work already merged
     /// outside the board's flow (the PR was reviewed and merged on the forge).
     Close,
+    /// Add a project (never change or remove one).
+    Project,
     /// Change the board's settings: agents and their credentials, repositories, projects, roles.
     Admin,
 }
 
 impl Capability {
     /// Every capability, in display order.
-    pub const ALL: [Capability; 7] = [
+    pub const ALL: [Capability; 8] = [
         Capability::Triage,
         Capability::Build,
         Capability::Qa,
         Capability::Review,
         Capability::Merge,
         Capability::Close,
+        Capability::Project,
         Capability::Admin,
     ];
 }

@@ -181,6 +181,19 @@ struct AssignArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct ProjectAddArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// Repository the project belongs to (see `board_projects`); a new name adds a repository.
+    repo: String,
+    /// Project name: 1-40 of a-z 0-9 _ -, unique across repositories.
+    name: String,
+    /// Repository paths the project's cards may change, e.g. `crates/libs/ui/rusty_term`. None
+    /// may overlap another project's path in that repository.
+    paths: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct PlanArgs {
     #[serde(flatten)]
     who: Who,
@@ -493,6 +506,15 @@ pub fn ops() -> Vec<Op> {
             },
         ),
         op(
+            "project_add",
+            "Add a project to a repository (needs `project`). Additive only: existing projects are never changed or removed, and a new project's paths may not overlap another's. Returns the projects as `board_projects` does.",
+            |b, i, a: ProjectAddArgs| {
+                let who = acting(b, i, &a.who)?;
+                let projects = b.add_project(&who, &a.repo, &a.name, &a.paths)?;
+                Ok(json!({ "repos": projects }))
+            },
+        ),
+        op(
             "card_assign",
             "Move a card to another project (needs Triage). Drops any claim.",
             |b, i, a: AssignArgs| {
@@ -720,7 +742,11 @@ mod tests {
                 me["actor"].clone(),
                 me["capabilities"].clone()
             ),
-            (json!(true), json!("claude"), json!(["build", "close"]))
+            (
+                json!(true),
+                json!("claude"),
+                json!(["build", "close", "project"])
+            )
         );
         let anon = call_as(&board, None, "board_whoami", json!({})).expect("whoami");
         assert_eq!(anon["authenticated"], json!(false));
