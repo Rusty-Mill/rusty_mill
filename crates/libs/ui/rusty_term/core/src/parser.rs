@@ -126,6 +126,20 @@ pub struct AnsiParser {
     /// fg/bg/cursor. SGR color selectors resolve through it; OSC 4/10/11/12
     /// mutate it.
     palette: Palette,
+    /// What DECSC saved beside the cursor position (which the grid keeps),
+    /// for the primary screen (`[0]`) and the alternate one (`[1]`). `None`
+    /// until a save; DECRC then restores the reset state, as xterm does.
+    saved: [Option<SavedState>; 2],
+}
+
+/// The rendition and character-set state DECSC / SCOSC / `?1049h` save and
+/// DECRC / SCORC / `?1049l` restore (the position lives in the grid).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SavedState {
+    pen: Pen,
+    protected: bool,
+    charsets: [Charset; 4],
+    gl: usize,
 }
 
 /// Length of the leading run of printable ASCII (`0x20..=0x7e`) in `bytes`,
@@ -388,6 +402,7 @@ impl AnsiParser {
             gl: 0,
             charset_slot: 0,
             palette,
+            saved: [None; 2],
         }
     }
 
@@ -500,11 +515,11 @@ impl AnsiParser {
                     }
                     // DECSC / DECRC: save and restore the cursor.
                     b'7' => {
-                        g.save_cursor();
+                        self.save_cursor(g);
                         self.state = ParserState::Ground;
                     }
                     b'8' => {
-                        g.restore_cursor();
+                        self.restore_cursor(g);
                         self.state = ParserState::Ground;
                     }
                     // IND — index: down one line, scrolling at the region bottom.
@@ -540,6 +555,7 @@ impl AnsiParser {
                         g.push_program_status(super::grid::StatusSignal::Reset);
                         self.charsets = [Charset::Ascii; 4];
                         self.gl = 0;
+                        self.saved = [None; 2];
                         self.last_char = None;
                         self.state = ParserState::Ground;
                     }
@@ -1157,10 +1173,20 @@ impl AnsiParser {
                 // 47 / 1047 / 1049 select the alternate screen buffer; the mode
                 // governs cursor save/restore (only 1049). The leave path uses
                 // the mode stashed on entry, so the reset value doesn't matter.
+                // 1049 saves and restores the rendition with the cursor,
+                // in the primary screen's slot.
+                let decsc = mode == super::grid::AltMode::Dec1049;
                 if set {
+                    if decsc && !g.in_alt_screen() {
+                        self.save_state(g);
+                    }
                     g.enter_alt_screen(mode);
                 } else {
+                    let restore = decsc && g.in_alt_screen();
                     g.leave_alt_screen();
+                    if restore {
+                        self.restore_state(g);
+                    }
                 }
             } else if is_host_input_mode(param) {
                 // Relay verbatim to the host terminal so it starts/stops
@@ -1438,10 +1464,10 @@ impl AnsiParser {
                     let right = p(1, g.cols).saturating_sub(1);
                     g.set_lr_margins(left, right);
                 } else {
-                    g.save_cursor(); // SCP
+                    self.save_cursor(g); // SCOSC
                 }
             }
-            b'u' => g.restore_cursor(), // RCP
+            b'u' => self.restore_cursor(g), // SCORC
             b'r' => {
                 // DECSTBM — set top/bottom scrolling margins (1-based).
                 let top = p(0, 1).saturating_sub(1);
@@ -1554,6 +1580,7 @@ impl AnsiParser {
                 self.last_char = None;
                 self.charsets = [Charset::Ascii; 4];
                 self.gl = 0;
+                self.saved = [None; 2];
             }
             b'q' if self.csi_intermediate == b'"' => {
                 // DECSCA — select character protection attribute
@@ -1649,6 +1676,50 @@ impl AnsiParser {
             },
             _ => {}
         }
+    }
+
+    /// DECSC / SCOSC: save the cursor position and the rendition state.
+    fn save_cursor(&mut self, g: &mut Grid) {
+        g.save_cursor();
+        self.save_state(g);
+    }
+
+    /// DECRC / SCORC: restore what [`Self::save_cursor`] saved.
+    fn restore_cursor(&mut self, g: &mut Grid) {
+        g.restore_cursor();
+        self.restore_state(g);
+    }
+
+    /// Save the pen, protection and charsets in the current screen's slot.
+    fn save_state(&mut self, g: &Grid) {
+        self.saved[usize::from(g.in_alt_screen())] = Some(SavedState {
+            pen: self.pen,
+            protected: self.protected,
+            charsets: self.charsets,
+            gl: self.gl,
+        });
+    }
+
+    /// Restore the current screen's saved state, or the reset state if none
+    /// was saved. A saved default colour takes the default in force now.
+    fn restore_state(&mut self, g: &mut Grid) {
+        let Some(saved) = self.saved[usize::from(g.in_alt_screen())] else {
+            self.reset_sgr();
+            self.protected = false;
+            self.charsets = [Charset::Ascii; 4];
+            self.gl = 0;
+            self.sync_erase_bg(g);
+            return;
+        };
+        self.pen = saved.pen;
+        if self.pen.fg_is_default() {
+            self.pen.fg = self.palette.fg;
+        }
+        if self.pen.bg_is_default() {
+            self.pen.bg = self.palette.bg;
+        }
+        (self.protected, self.charsets, self.gl) = (saved.protected, saved.charsets, saved.gl);
+        self.sync_erase_bg(g);
     }
 
     /// Tell the grid which background erases fill with (BCE): the pen's,
@@ -1836,9 +1907,11 @@ crate::checkpoint::fields!(
         charsets,
         gl,
         charset_slot,
-        palette
+        palette,
+        saved
     ]
 );
+crate::checkpoint::fields!(SavedState, [pen, protected, charsets, gl]);
 crate::checkpoint::variants!(
     ParserState,
     [
@@ -1849,6 +1922,7 @@ crate::checkpoint::variants!(
 impl AnsiParser {
     pub(crate) fn validate_checkpoint(&self) -> crate::checkpoint::Result<()> {
         if self.gl > 1
+            || self.saved.iter().flatten().any(|s| s.gl > 1)
             || self.charset_slot > 3
             || self.utf8_remaining > 3
             || (self.state == ParserState::Utf8 && self.utf8_remaining == 0)

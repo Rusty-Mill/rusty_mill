@@ -2196,8 +2196,8 @@ fn osc_11_recolours_both_screens() {
 
 #[test]
 fn pen_keeps_colour_provenance_across_decsc_and_osc_11() {
-    // DECSC/DECRC save the position only; the live pen keeps its provenance
-    // through them and through OSC 11.
+    // DECSC saves the pen with its provenance; a saved default colour comes
+    // back as the default in force at DECRC.
     let mut g = Grid::new(4, 1);
     let mut p = AnsiParser::new();
     // An explicit black pen is not the default: OSC 11 does not move it.
@@ -2213,6 +2213,82 @@ fn pen_keeps_colour_provenance_across_decsc_and_osc_11() {
     );
     assert_eq!(colours(&g, 1, 0).1, 0x00FF00);
     assert_eq!(colours(&g, 0, 0).1, DEFAULT_BG, "explicit glyph stays");
+}
+
+#[test]
+fn decsc_saves_and_decrc_restores_the_rendition() {
+    let mut g = Grid::new(6, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[1;31m\x1b7\x1b[0m\x1b[5Ga\x1b8b");
+    let (a, b) = (g.row(0)[4], g.row(0)[0]);
+    assert_eq!(
+        (a.flags & ATTR_BOLD, a.fg),
+        (0, DEFAULT_FG),
+        "drawn after SGR 0"
+    );
+    assert_ne!(b.flags & ATTR_BOLD, 0, "bold restored");
+    assert_eq!(b.fg, 0x800000, "red restored");
+    // SCOSC / SCORC (`CSI s` / `CSI u`) do the same.
+    p.advance(&mut g, b"\x1b[0;32m\x1b[s\x1b[0m\x1b[uc");
+    assert_eq!(g.row(0)[1].fg, 0x008000);
+}
+
+#[test]
+fn decrc_without_a_save_restores_the_reset_rendition() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[1;31m\x1b8x");
+    let c = g.row(0)[0];
+    assert_eq!((c.flags & ATTR_BOLD, c.fg), (0, DEFAULT_FG));
+}
+
+#[test]
+fn decsc_saves_the_character_sets_and_protection() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    // DEC line drawing in G0 and DECSCA on, saved; both undone, restored.
+    p.advance(&mut g, b"\x1b(0\x1b[1\"q\x1b7\x1b(B\x1b[0\"q\x1b8q");
+    assert_eq!(g.row(0)[0].ch, '\u{2500}', "line drawing restored");
+    p.advance(&mut g, b"\x1b[1;1H\x1b[?2K");
+    assert_eq!(
+        g.row(0)[0].ch,
+        '\u{2500}',
+        "protection restored: DECSEL kept it"
+    );
+}
+
+#[test]
+fn mode_1049_saves_the_rendition_apart_from_the_alt_screens_own_decsc() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    // Red on entering; inside, the app saves and restores blue for itself.
+    p.advance(&mut g, b"\x1b[31m\x1b[?1049h\x1b[34m\x1b7\x1b[0m\x1b8a");
+    assert_eq!(g.row(0)[0].fg, 0x000080, "alt screen's own DECSC");
+    p.advance(&mut g, b"\x1b[0m\x1b[?1049lb");
+    assert_eq!(g.row(0)[0].fg, 0x800000, "1049 restored the primary's red");
+}
+
+#[test]
+fn decstr_and_ris_forget_the_saved_rendition() {
+    for reset in [&b"\x1b[!p"[..], b"\x1bc"] {
+        let mut g = Grid::new(4, 1);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, b"\x1b[31m\x1b7");
+        p.advance(&mut g, reset);
+        p.advance(&mut g, b"\x1b8x");
+        assert_eq!(g.row(0)[0].fg, DEFAULT_FG, "{reset:?}");
+    }
+}
+
+#[test]
+fn checkpoint_keeps_the_saved_rendition() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[31m\x1b7\x1b[0m");
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b8x");
+    assert_eq!(g.row(0)[0].fg, 0x800000);
 }
 
 #[test]
@@ -7747,7 +7823,10 @@ fn status_line_in_default_colours_follows_osc_10_and_11() {
     let mut g = Grid::new(6, 2);
     let mut p = AnsiParser::new();
     g.set_status_line("ab".into(), None, Some(0x123456));
-    p.advance(&mut g, b"\x1b]10;rgb:00/00/ff\x1b\\\x1b]11;rgb:00/ff/00\x1b\\");
+    p.advance(
+        &mut g,
+        b"\x1b]10;rgb:00/00/ff\x1b\\\x1b]11;rgb:00/ff/00\x1b\\",
+    );
     let row = g.status_row().expect("status line").to_vec();
     // The unset foreground follows OSC 10; the explicit background stays.
     assert_eq!((row[0].ch, row[0].fg, row[0].bg), ('a', 0x0000FF, 0x123456));
