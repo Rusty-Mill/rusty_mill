@@ -74,7 +74,7 @@ PACKAGE_JOB_NAMES = {
 }
 
 SPECIALIZED_JOB_NAMES = tuple(
-    dict.fromkeys((*PATH_JOB_PREFIXES, *PACKAGE_JOB_NAMES, "remind_me", "remind_me_legacy_import"))
+    dict.fromkeys((*PATH_JOB_PREFIXES, *PACKAGE_JOB_NAMES))
 )
 
 
@@ -348,27 +348,6 @@ def specialized_job_flags(
     # edge represents.
     flags["tick"] = flags.get("tick", False) or any(
         path.startswith("crates/libs/protocol/rusty_agui/packages/") for path in paths
-    )
-    flags["remind_me"] = any(
-        path.startswith("crates/apps/rusty_remind_me/") for path in paths
-    ) or any(
-        package == "rusty-remind-me" or package.startswith("remind_me_")
-        for package in package_set
-    )
-    # The hub is engine-only. A real Postgres server is needed solely for
-    # legacy recovery tests. Cargo impact includes shared engine dependencies;
-    # path selection also covers deleted fixtures and deployment contracts.
-    # Node and hub wire records are separate types, not a Cargo dependency.
-    # Sync/schema changes therefore need explicit contract coverage too.
-    flags["remind_me_legacy_import"] = "remind_me_hub" in package_set or any(
-        path.startswith("crates/apps/rusty_remind_me/crates/remind_me_hub/")
-        or path.startswith("crates/apps/rusty_remind_me/crates/remind_me_core/src/sync/")
-        or path.startswith("crates/apps/rusty_remind_me/crates/remind_me_core/src/db/")
-        or path.startswith("crates/apps/rusty_remind_me/crates/remind_me_core/src/models")
-        or path.startswith("crates/apps/rusty_remind_me/docs/")
-        or path == "crates/apps/rusty_remind_me/ARCHITECTURE.md"
-        or path == "Cargo.lock"
-        for path in paths
     )
     return flags
 

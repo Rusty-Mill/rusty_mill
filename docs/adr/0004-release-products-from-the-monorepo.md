@@ -1,6 +1,8 @@
 # ADR-0004: Release shipped products from the monorepo, one prefixed tag series each
 
-Status: Accepted
+Status: Superseded on 2026-10-28: rusty-remind-me, its only product, moved to
+`Rusty-Mill/rusty-remind-me` and releases from there (ADR-0013, Mill Board #61).
+The rest of this record describes how it worked until then.
 Date: 2026-09-24
 
 ## Context

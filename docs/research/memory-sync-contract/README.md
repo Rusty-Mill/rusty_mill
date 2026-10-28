@@ -52,9 +52,9 @@ values discarded by a peer. The node's existing
 `the_v32_columns_round_trip_through_the_outbox_and_apply` test is evidence
 for its own outbox/apply path, not for Nexus or every hub backend.
 
-[node-record]: ../../../crates/apps/rusty_remind_me/crates/remind_me_core/src/sync/record.rs
-[hub-row]: ../../../crates/apps/rusty_remind_me/crates/remind_me_hub/src/store/multimodal/rows.rs
-[core-manifest]: ../../../crates/apps/rusty_remind_me/crates/remind_me_core/Cargo.toml
+[node-record]: https://github.com/Rusty-Mill/rusty-remind-me/blob/v0.4.0/crates/remind_me_core/src/sync/record.rs
+[hub-row]: https://github.com/Rusty-Mill/rusty-remind-me/blob/v0.4.0/crates/remind_me_hub/src/store/multimodal/rows.rs
+[core-manifest]: https://github.com/Rusty-Mill/rusty-remind-me/blob/v0.4.0/crates/remind_me_core/Cargo.toml
 
 ## Concrete round-trip and migration risks
 
