@@ -8,8 +8,8 @@
 //! DCS/APC/PM/SOS strings are consumed opaquely so they never leak as text.
 
 use super::cell::{
-    ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_PROTECTED, ATTR_REVERSE,
-    ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Pen, Source, UnderlineStyle,
+    ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_OVERLINE, ATTR_PROTECTED,
+    ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Pen, Source, UnderlineStyle,
 };
 use super::charset::Charset;
 use super::color::{Palette, Theme};
@@ -911,6 +911,7 @@ impl AnsiParser {
             (ATTR_REVERSE, 7),
             (ATTR_HIDDEN, 8),
             (ATTR_STRIKE, 9),
+            (ATTR_OVERLINE, 53),
         ] {
             if self.pen.attrs & bit != 0 {
                 let _ = write!(s, ";{code}");
@@ -1764,8 +1765,9 @@ impl AnsiParser {
     }
 
     /// Apply an SGR (`CSI … m`) parameter list. Supports reset, the text
-    /// attributes (bold/dim/italic/underline/blink/reverse/hidden/strike and
-    /// their resets), the underline style/color sub-forms (`4:0`-`4:5`, `58`,
+    /// attributes (bold/dim/italic/underline/blink/reverse/hidden/strike/
+    /// overline and their resets, and 21 as double underline), the underline
+    /// style/color sub-forms (`4:0`-`4:5`, `58`,
     /// `59`), the 16-color palette (normal + bright), and the extended
     /// `38/48;5;n` (256-color) and `38/48;2;r;g;b` (truecolor) forms. An empty
     /// list means reset. `params[i]` in `4000..=4005` is the synthetic
@@ -1813,6 +1815,12 @@ impl AnsiParser {
                 7 => self.pen.attrs |= ATTR_REVERSE,
                 8 => self.pen.attrs |= ATTR_HIDDEN,
                 9 => self.pen.attrs |= ATTR_STRIKE,
+                // ECMA-48 doubly underlined, as current xterm-compatible
+                // terminals read it (not the old "bold off").
+                21 => {
+                    self.pen.attrs =
+                        UnderlineStyle::Double.pack_into(self.pen.attrs | ATTR_UNDERLINE)
+                }
                 // Reset text attributes. 22 clears both bold and dim.
                 22 => self.pen.attrs &= !(ATTR_BOLD | ATTR_DIM),
                 23 => self.pen.attrs &= !ATTR_ITALIC,
@@ -1824,6 +1832,8 @@ impl AnsiParser {
                 27 => self.pen.attrs &= !ATTR_REVERSE,
                 28 => self.pen.attrs &= !ATTR_HIDDEN,
                 29 => self.pen.attrs &= !ATTR_STRIKE,
+                53 => self.pen.attrs |= ATTR_OVERLINE,
+                55 => self.pen.attrs &= !ATTR_OVERLINE,
                 // Colors.
                 30..=37 => self.set_fg_index(params[i] - 30),
                 38 => {

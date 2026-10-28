@@ -2969,7 +2969,7 @@ impl Grid {
             c => out.push(c),
         };
         let hex = |c: u32| format!("#{:06x}", c & 0xFF_FF_FF);
-        let style_of = |cell: &Cell| -> (u32, u32, u16) {
+        let style_of = |cell: &Cell| -> (u32, u32, u32) {
             // Reverse video swaps the resolved pair; the run key is what the
             // reader sees, not the raw attribute.
             let (fg, bg) = if cell.flags & super::cell::ATTR_REVERSE != 0 {
@@ -2977,10 +2977,11 @@ impl Grid {
             } else {
                 (cell.fg, cell.bg)
             };
-            const STYLED: u16 = super::cell::ATTR_BOLD
+            const STYLED: u32 = super::cell::ATTR_BOLD
                 | super::cell::ATTR_ITALIC
                 | super::cell::ATTR_UNDERLINE
                 | super::cell::ATTR_STRIKE
+                | super::cell::ATTR_OVERLINE
                 | super::cell::ATTR_DIM;
             (fg, bg, cell.flags & STYLED)
         };
@@ -3000,7 +3001,7 @@ impl Grid {
             // plain flavor does.
             let hi = c1.min(cells.len().saturating_sub(1));
             // One selected char: its cluster suffix and (fg, bg, flags) run key.
-            type StyledChar<'a> = (char, Option<&'a str>, (u32, u32, u16));
+            type StyledChar<'a> = (char, Option<&'a str>, (u32, u32, u32));
             let mut line: Vec<StyledChar> = Vec::new();
             for cell in cells.get(c0..=hi).unwrap_or(&[]) {
                 if cell.flags & WIDE_TRAILER != 0 {
@@ -3018,7 +3019,7 @@ impl Grid {
             {
                 line.pop();
             }
-            let mut open: Option<(u32, u32, u16)> = None;
+            let mut open: Option<(u32, u32, u32)> = None;
             for (ch, suffix, style) in line {
                 if open != Some(style) {
                     if open.is_some() {
@@ -3038,6 +3039,7 @@ impl Grid {
                     let deco: Vec<&str> = [
                         (flags & super::cell::ATTR_UNDERLINE != 0, "underline"),
                         (flags & super::cell::ATTR_STRIKE != 0, "line-through"),
+                        (flags & super::cell::ATTR_OVERLINE != 0, "overline"),
                     ]
                     .iter()
                     .filter_map(|&(on, name)| on.then_some(name))

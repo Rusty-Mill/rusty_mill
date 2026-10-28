@@ -805,6 +805,7 @@ fn feature_bits_are_distinct() {
         Features::LAYOUT,
         Features::CHECKPOINT_V4,
         Features::CHECKPOINT_V5,
+        Features::CHECKPOINT_V6,
     ];
     let mut seen = 0u64;
     for feature in all {

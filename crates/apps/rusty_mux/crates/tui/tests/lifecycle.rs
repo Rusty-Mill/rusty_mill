@@ -80,8 +80,8 @@ fn handshake(stream: Stream, features: Features) -> Conn<Stream> {
 fn scripted_server(lease: bool, end: End) -> (PathBuf, JoinHandle<()>) {
     let (path, listener) = listen();
     let server = std::thread::spawn(move || {
-        let _control = welcome(&listener, Features::CHECKPOINT_V5);
-        let pane = welcome(&listener, Features::CHECKPOINT_V5);
+        let _control = welcome(&listener, Features::CHECKPOINT_V6);
+        let pane = welcome(&listener, Features::CHECKPOINT_V6);
         serve_block(Conn::new(pane), lease, end);
     });
     (path, server)
@@ -345,7 +345,7 @@ fn layout_server(script: Script) -> (PathBuf, Arc<Shared>) {
     });
     let server = shared.clone();
     std::thread::spawn(move || {
-        let features = Features::CHECKPOINT_V5
+        let features = Features::CHECKPOINT_V6
             .union(Features::INSPECT)
             .union(Features::LAYOUT);
         let control = welcome(&listener, features);
@@ -360,7 +360,7 @@ fn layout_server(script: Script) -> (PathBuf, Arc<Shared>) {
         while let Ok((stream, _)) = listener.accept() {
             let block = server.clone();
             std::thread::spawn(move || {
-                serve_layout_block(handshake(stream, Features::CHECKPOINT_V5), &block)
+                serve_layout_block(handshake(stream, Features::CHECKPOINT_V6), &block)
             });
         }
     });

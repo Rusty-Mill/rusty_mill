@@ -111,7 +111,7 @@ fn a_client_without_the_feature_gets_unnumbered_events() {
 #[test]
 fn status_changes_reach_only_clients_that_asked() {
     let path = start_server();
-    let wanted = SEQ.union(Features::STATUS).union(Features::CHECKPOINT_V5);
+    let wanted = SEQ.union(Features::STATUS).union(Features::CHECKPOINT_V6);
     let mut watcher = Client::connect_with(&path, wanted, None);
     // With layout events, so its only gap is the status event.
     let mut plain = Client::connect_with(&path, SEQ.union(Features::LAYOUT), None);
@@ -147,7 +147,7 @@ fn replay_sends_status_events_only_to_clients_that_asked() {
     }
 
     // While both are away: a status change, then a later event.
-    let mut writer = Client::connect_with(&path, status.union(Features::CHECKPOINT_V5), None);
+    let mut writer = Client::connect_with(&path, status.union(Features::CHECKPOINT_V6), None);
     let block = block_for(&mut writer);
     writer.input(block, b"printf '\\033]7501;state=working\\007'\r");
     let changed = Event::BlockStatus { block };
@@ -174,7 +174,7 @@ fn pwd_and_title_changes_reach_only_clients_that_asked() {
     let path = start_server();
     let wanted = SEQ
         .union(Features::TERMINAL_EVENTS)
-        .union(Features::CHECKPOINT_V5);
+        .union(Features::CHECKPOINT_V6);
     let mut watcher = Client::connect_with(&path, wanted, None);
     let mut plain = Client::connect_with(&path, SEQ.union(Features::STATUS), None);
     let block = block_for(&mut watcher);
@@ -200,7 +200,7 @@ fn program_events_reach_only_clients_that_asked() {
     let path = start_server();
     let wanted = SEQ
         .union(Features::PROGRAM_EVENTS)
-        .union(Features::CHECKPOINT_V5);
+        .union(Features::CHECKPOINT_V6);
     let mut watcher = Client::connect_with(&path, wanted, None);
     let mut plain = Client::connect_with(&path, SEQ.union(Features::TERMINAL_EVENTS), None);
     let block = block_for(&mut watcher);
@@ -258,7 +258,7 @@ fn program_events_reach_only_clients_that_asked() {
 #[test]
 fn process_changes_reach_only_clients_that_asked() {
     let path = start_server();
-    let wanted = SEQ.union(Features::PROCESS).union(Features::CHECKPOINT_V5);
+    let wanted = SEQ.union(Features::PROCESS).union(Features::CHECKPOINT_V6);
     let mut watcher = Client::connect_with(&path, wanted, None);
     let mut plain = Client::connect_with(&path, SEQ.union(Features::PROGRAM_EVENTS), None);
     let block = block_for(&mut watcher);
@@ -291,7 +291,7 @@ fn a_closed_block_reports_no_exit() {
     let path = start_server();
     let wanted = SEQ
         .union(Features::PROGRAM_EVENTS)
-        .union(Features::CHECKPOINT_V5);
+        .union(Features::CHECKPOINT_V6);
     let mut client = Client::connect_with(&path, wanted, None);
     let block = block_for(&mut client);
     client.request(|req| Message::CloseBlock { req, block });

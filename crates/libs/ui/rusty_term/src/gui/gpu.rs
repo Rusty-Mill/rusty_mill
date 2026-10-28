@@ -34,13 +34,13 @@ use winit::window::Window;
 #[cfg(test)]
 use crate::core::Grid;
 use crate::core::{
-    ATTR_BOLD, ATTR_ITALIC, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell, CursorShape,
-    UnderlineStyle, WIDE_TRAILER, char_width,
+    ATTR_BOLD, ATTR_ITALIC, ATTR_OVERLINE, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell,
+    CursorShape, UnderlineStyle, WIDE_TRAILER, char_width,
 };
 
 use super::damage::{self, RowState};
 use super::font::{FontCache, Glyph, GlyphSource, Style};
-use super::render::{PaneFrame, Renderer, SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG};
+use super::render::{PaneFrame, Renderer, SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG, drawn};
 
 /// Atlas texture edge (clamped to the device limit at creation).
 const ATLAS_MAX: u32 = 2048;
@@ -149,12 +149,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // curs: 0 none/block (block uses the fg/bg swap); 2 underline, 3 bar.
     if (in.curs == 2u && in.local.y >= 0.85) { return vec4(in.ccol.rgb, u.opacity); }
     if (in.curs == 3u && in.local.x <= 0.12) { return vec4(in.ccol.rgb, u.opacity); }
-    // deco: bit 3 (8) strikethrough; bits 0-2 underline style (0 = none, per
-    // UnderlineStyle::pack_into's 1-5 encoding). Drawn as thin stripes near
-    // the cell's bottom (underline) or vertical middle (strike), matching the
-    // CPU rasterizer's `draw_underline`/`draw_strike`.
+    // deco: bit 4 (16) overline; bit 3 (8) strikethrough; bits 0-2 underline
+    // style (0 = none, per UnderlineStyle::pack_into's 1-5 encoding). Drawn
+    // as thin stripes near the cell's bottom (underline), vertical middle
+    // (strike) or top (overline), matching the CPU rasterizer.
     if ((in.deco & 8u) != 0u && in.local.y >= 0.45 && in.local.y < 0.55) {
         return vec4(in.dcol.rgb, u.opacity);
+    }
+    // Overline (bit 4): a stripe along the top edge in the text colour.
+    if ((in.deco & 16u) != 0u && in.local.y < 0.08) {
+        return vec4(in.fg.rgb, u.opacity);
     }
     let style = in.deco & 7u;
     if (style != 0u) {
@@ -243,7 +247,7 @@ struct Instance {
     bg: u32,
     curs: u32,
     ccol: u32,
-    /// Bit 3: strikethrough. Bits 0-2: underline style, `0` none else
+    /// Bit 4: overline. Bit 3: strikethrough. Bits 0-2: underline style, `0` none else
     /// `UnderlineStyle`'s 1-5 encoding (straight/double/curly/dotted/dashed).
     deco: u32,
     /// Underline/strike stripe color (`dcol`), used only when `deco != 0`.
@@ -975,11 +979,11 @@ impl GpuCore {
             };
             let mut cols: Vec<Resolved> = Vec::with_capacity(grid.cols);
             for col in 0..grid.cols {
-                let cell = if on_status {
+                let cell = drawn(if on_status {
                     status.unwrap()[col]
                 } else {
                     grid.cell(col, row)
-                };
+                });
                 if cell.flags & WIDE_TRAILER != 0 {
                     cols.push(Resolved {
                         cell,
@@ -1597,7 +1601,7 @@ fn grown_size(have: u64, need: u64) -> Option<u64> {
     (need > have).then(|| need.next_power_of_two().max(4096))
 }
 
-/// Pack a cell's underline/strikethrough state into the `Instance::deco` bits
+/// Pack a cell's underline/strikethrough/overline state into the `Instance::deco` bits
 /// and pick the stripe color: `underline_color` when SGR 58 set it and `plain`
 /// (the cell isn't under the cursor, a selection, or a search highlight —
 /// those already swapped `fg` to something that should win instead).
@@ -1605,10 +1609,13 @@ fn grown_size(have: u64, need: u64) -> Option<u64> {
 /// underline in `fg`, overriding the cell's own SGR underline attribute —
 /// it's a click affordance, not a text style, so it never takes
 /// `underline_color`.
-fn deco_for(flags: u16, underline_color: u32, fg: u32, plain: bool, hovered: bool) -> (u32, u32) {
+fn deco_for(flags: u32, underline_color: u32, fg: u32, plain: bool, hovered: bool) -> (u32, u32) {
     let mut deco = 0u32;
     if flags & ATTR_STRIKE != 0 {
         deco |= 8;
+    }
+    if flags & ATTR_OVERLINE != 0 {
+        deco |= 16;
     }
     if hovered {
         deco |= 1; // Straight
@@ -1735,6 +1742,18 @@ mod tests {
             deco_for(flags, 0x0000FF, 0xFF0000, true, false),
             (1, 0x0000FF)
         );
+    }
+
+    #[test]
+    fn deco_for_colours_every_underline_style_and_flags_overline() {
+        for style in [UnderlineStyle::Straight, UnderlineStyle::Double] {
+            let flags = style.pack_into(ATTR_UNDERLINE | ATTR_UNDERLINE_COLOR);
+            let (deco, dcol) = deco_for(flags, 0x0087FF, 0xFFFFFF, true, false);
+            assert_eq!(dcol, 0x0087FF, "{style:?}");
+            assert_ne!(deco & 7, 0, "{style:?}");
+        }
+        let (deco, _) = deco_for(ATTR_OVERLINE, 0, 0xFFFFFF, true, false);
+        assert_eq!(deco, 16);
     }
 
     /// The adapter, WGSL shader, render pipeline, and glyph atlas all build.

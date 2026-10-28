@@ -1357,6 +1357,35 @@ fn sgr58_colon_form_matches_semicolon_form() {
 }
 
 #[test]
+fn sgr21_is_a_double_underline_that_24_clears() {
+    let g = parse(b"\x1b[21mA\x1b[24mB", 80, 24);
+    assert_ne!(cells(&g)[0].flags & ATTR_UNDERLINE, 0);
+    assert_eq!(
+        UnderlineStyle::from_attrs(cells(&g)[0].flags),
+        UnderlineStyle::Double
+    );
+    assert_eq!(cells(&g)[1].flags & ATTR_UNDERLINE, 0);
+}
+
+#[test]
+fn sgr53_sets_overline_and_55_or_0_clears_it() {
+    let g = parse(b"\x1b[53mA\x1b[55mB\x1b[53mC\x1b[0mD", 80, 24);
+    let overline = |i: usize| cells(&g)[i].flags & ATTR_OVERLINE != 0;
+    assert_eq!(
+        [overline(0), overline(1), overline(2), overline(3)],
+        [true, false, true, false]
+    );
+}
+
+#[test]
+fn decrqss_reports_overline_and_sgr21_as_their_sgr() {
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[21;53m\x1bP$qm\x1b\\");
+    assert_eq!(p.take_responses(), b"\x1bP1$r0;53;4:2m\x1b\\");
+}
+
+#[test]
 fn sgr_reset_clears_underline_style_and_color() {
     let g = parse(b"\x1b[4:3m\x1b[58;2;1;2;3m\x1b[0mx", 80, 24);
     assert_eq!(cells(&g)[0].flags & ATTR_UNDERLINE, 0);
@@ -2451,14 +2480,15 @@ fn checkpoint_keeps_palette_tags() {
 }
 
 #[test]
-fn checkpoint_rejects_rtcp_v3_v4_and_other_versions() {
+fn checkpoint_rejects_rtcp_v3_to_v5_and_other_versions() {
     // v3 has no colour provenance and v4 no palette tags, so restoring
-    // either would bake colours in; they fail closed instead.
+    // either would bake colours in; v5's 16-bit flags would misread as the
+    // wider v6 ones. They fail closed instead.
     let (g, p) = (Grid::new(4, 1), AnsiParser::new());
     let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
-    assert_eq!(&bytes[..5], b"RTCP\x05");
+    assert_eq!(&bytes[..5], b"RTCP\x06");
     assert!(crate::checkpoint::decode(&bytes).is_ok());
-    for version in [3u8, 4, 6] {
+    for version in [3u8, 4, 5, 7] {
         let mut other = bytes.clone();
         other[4] = version;
         assert!(crate::checkpoint::decode(&other).is_err(), "v{version}");
@@ -7440,6 +7470,29 @@ fn snapshot_decodes_version_1_with_every_colour_explicit() {
 }
 
 #[test]
+fn snapshot_carries_overline_past_16_bits() {
+    let g = parse(b"\x1b[53mo\x1b[55mp", 4, 1);
+    assert_ne!(g.row(0)[0].flags & ATTR_OVERLINE, 0);
+    let back = Grid::decode_snapshot(&g.encode_snapshot()).expect("decode");
+    assert_eq!(back.row(0), g.row(0));
+    assert_eq!(back.row(0)[1].flags & ATTR_OVERLINE, 0);
+}
+
+#[test]
+fn snapshot_versions_before_3_keep_style_flags_to_16_bits() {
+    // The version 1 cell above with flags 1 << 16 (varint 80 80 04).
+    let mut v1 = b"RTSN\x01".to_vec();
+    v1.extend([1, 1, 0, 0, 0, 0, 0, 0]);
+    v1.extend([0, 0, 0, 0, 0, 0]);
+    v1.extend([1, 0, 1 << 2, 0, 1, 2, 0x80, 0x80, 0x04, 0, 3, b'x']);
+    v1.push(0);
+    assert_eq!(
+        Grid::decode_snapshot(&v1).err(),
+        Some(SnapshotError::Invalid("integer too large"))
+    );
+}
+
+#[test]
 fn snapshot_collapses_blank_runs() {
     // An empty 200x50 screen: one repeat run per line, under 10 bytes each
     // (24 bytes per cell in memory).
@@ -7458,11 +7511,11 @@ fn snapshot_decode_rejects_bad_headers() {
         Grid::decode_snapshot(b"XXXX\x01").err(),
         Some(SnapshotError::BadMagic)
     );
-    let mut v3 = good.clone();
-    v3[4] = 3;
+    let mut v4 = good.clone();
+    v4[4] = 4;
     assert_eq!(
-        Grid::decode_snapshot(&v3).err(),
-        Some(SnapshotError::UnsupportedVersion(3))
+        Grid::decode_snapshot(&v4).err(),
+        Some(SnapshotError::UnsupportedVersion(4))
     );
     let mut trailing = good.clone();
     trailing.push(0);

@@ -15,9 +15,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rusty_term_core::{
-    ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_REVERSE, ATTR_STRIKE,
-    ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, AnsiParser, Grid, UnderlineStyle, WIDE_TRAILER,
-    checkpoint,
+    ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_OVERLINE, ATTR_REVERSE,
+    ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, AnsiParser, Grid, UnderlineStyle,
+    WIDE_TRAILER, checkpoint,
 };
 
 /// Every recording is made on an 80x24 PTY (see `record.py`).
@@ -55,8 +55,8 @@ fn color(value: u32, default: u32) -> String {
     }
 }
 
-fn attrs(flags: u16) -> String {
-    const NAMES: [(u16, &str); 7] = [
+fn attrs(flags: u32) -> String {
+    const NAMES: [(u32, &str); 8] = [
         (ATTR_BOLD, "bold"),
         (ATTR_DIM, "dim"),
         (ATTR_ITALIC, "italic"),
@@ -64,6 +64,7 @@ fn attrs(flags: u16) -> String {
         (ATTR_REVERSE, "reverse"),
         (ATTR_HIDDEN, "hidden"),
         (ATTR_STRIKE, "strike"),
+        (ATTR_OVERLINE, "overline"),
     ];
     let mut out: Vec<String> = NAMES
         .iter()

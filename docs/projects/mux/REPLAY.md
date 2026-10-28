@@ -1,4 +1,4 @@
-# Phase 1 attach: RTCP v5 headless checkpoints
+# Phase 1 attach: RTCP v6 headless checkpoints
 
 The former experimental RMRP lifetime replay mechanism is removed. There is
 no cumulative output cutoff, no replay log, and no reduction of the engine's
@@ -8,15 +8,17 @@ output, subject to current-state memory limits.
 
 ## Negotiation and transfer
 
-`Features::CHECKPOINT_V5` is bit 17 (value 131072). Bits 0, 1, 2, 3 and 16
-are reserved for rejected RMRP replay, incomplete RTCP v1, superseded
-fixed-width RTCP v2, superseded RTCP v3 and superseded RTCP v4 respectively;
-none enables attach. Hello/Welcome negotiate bit 17; Attach without it returns
-Failed. The server offers no older version, and the client refuses a Welcome
-without bit 17, so a v3 or v4 peer on either side fails closed instead of
-restoring v3's baked-in default colours or v4's untagged palette colours.
-Existing frame layouts are unchanged. The drawable RTSN snapshot is a separate
-format: it writes v2 (default fg/bg in the header, #1163) and still decodes v1.
+`Features::CHECKPOINT_V6` is bit 18 (value 262144). Bits 0, 1, 2, 3, 16 and
+17 are reserved for rejected RMRP replay, incomplete RTCP v1, superseded
+fixed-width RTCP v2, superseded RTCP v3, superseded RTCP v4 and superseded
+RTCP v5 respectively; none enables attach. Hello/Welcome negotiate bit 18;
+Attach without it returns Failed. The server offers no older version, and the
+client refuses a Welcome without bit 18, so a v3, v4 or v5 peer on either side
+fails closed instead of restoring v3's baked-in default colours, v4's untagged
+palette colours or v5's 16-bit cell flags. Existing frame layouts are
+unchanged. The drawable RTSN snapshot is a separate format: it writes v3
+(32-bit style flags, for overline) and still decodes v2 (default fg/bg in the
+header, #1163) and v1.
 
 A successful attach sends Done, then ordered `Checkpoint` messages (type `0x88`),
 then Ready, then raw Output and subsequent model events. A Checkpoint contains
@@ -41,12 +43,13 @@ reader/writer futures and socket halves. It does not modify the block or its
 ability to produce a fresh checkpoint for another attach. A blocked non-reading
 peer cannot retain the transfer indefinitely after eviction.
 
-## RTCP v5 binary format
+## RTCP v6 binary format
 
 The codec is `rusty_term_core::checkpoint::{encode,decode}`. Magic `RTCP` is
-followed by version byte `5`, then Grid fields and AnsiParser fields in the
-explicit order in their `Wire` implementations. Field order is part of v5;
-changing it or its meaning requires another version. v5 adds palette tags to
+followed by version byte `6`, then Grid fields and AnsiParser fields in the
+explicit order in their `Wire` implementations. Field order is part of v6;
+changing it or its meaning requires another version. v6 widens cell, style
+and pen flags to u32 (for `ATTR_OVERLINE`, bit 16). v5 added palette tags to
 line styles, the pen and the erase colour (so OSC 4 recolours restored text),
 the DECSC pen, protection and charsets and the `?1049` entry stash, and status-line colours
 that may follow the defaults. This is an independent
@@ -91,7 +94,7 @@ Front-end selection/search/folds, render caches and spare allocations, pending
 host clipboard/notification/bell effects, and L13 application channel state are
 outside this *headless VT* profile. Pixel overlays present only in GUI builds
 are front-end state; headless Sixel/iTerm display cells and Kitty stored pixels
-are preserved. Enabling a library feature does not change RTCP v5's schema.
+are preserved. Enabling a library feature does not change RTCP v6's schema.
 The Phase 1 server does not enable GUI or L13. Clients must not treat RTCP as a
 GUI/L13 session checkpoint or replay host actions during restore.
 

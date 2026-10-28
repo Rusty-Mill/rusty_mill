@@ -720,7 +720,7 @@ fn legacy_server() -> (PathBuf, std::sync::mpsc::Receiver<usize>) {
                 buf.drain(..used);
                 if let Message::Hello { .. } = message {
                     let welcome = Message::Welcome {
-                        features: Features::CHECKPOINT_V5,
+                        features: Features::CHECKPOINT_V6,
                         client: ClientId::from_uuid(rusty_uuid::Uuid::nil()),
                         cursor: None,
                     };

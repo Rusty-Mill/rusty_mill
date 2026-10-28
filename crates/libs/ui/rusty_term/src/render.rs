@@ -13,9 +13,9 @@ use crate::sync::Mutex;
 use crate::backend::Backend;
 use crate::compact::Compactor;
 use crate::core::{
-    ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_MASK, ATTR_REVERSE,
-    ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, DirtyFrame, Grid, LineAttr, UnderlineStyle,
-    WIDE_TRAILER,
+    ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_MASK, ATTR_OVERLINE,
+    ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, DirtyFrame, Grid, LineAttr,
+    UnderlineStyle, WIDE_TRAILER,
 };
 
 /// Minimum wall-clock spacing between repaints. Bursts of output coalesce into
@@ -82,12 +82,12 @@ pub(crate) fn restore_host_modes() {
 struct Rendition {
     fg: u32,
     bg: u32,
-    attrs: u16,
+    attrs: u32,
     underline_color: u32,
 }
 
 impl Rendition {
-    fn new(fg: u32, bg: u32, flags: u16, underline_color: u32) -> Self {
+    fn new(fg: u32, bg: u32, flags: u32, underline_color: u32) -> Self {
         let mut attrs = flags & ATTR_MASK;
         if attrs & ATTR_UNDERLINE == 0 {
             attrs = UnderlineStyle::Straight.pack_into(attrs);
@@ -107,7 +107,7 @@ impl Rendition {
 }
 
 /// On/off attributes and their SGR parameters, in emission order.
-const SGR_FLAGS: [(u16, &str); 7] = [
+const SGR_FLAGS: [(u32, &str); 8] = [
     (ATTR_BOLD, "1"),
     (ATTR_DIM, "2"),
     (ATTR_ITALIC, "3"),
@@ -115,6 +115,7 @@ const SGR_FLAGS: [(u16, &str); 7] = [
     (ATTR_REVERSE, "7"),
     (ATTR_HIDDEN, "8"),
     (ATTR_STRIKE, "9"),
+    (ATTR_OVERLINE, "53"),
 ];
 
 /// Append the SGR that takes the host from `prev` to `next`. With `prev`
@@ -454,22 +455,22 @@ mod tests {
             .enumerate()
             .filter(|&(i, _)| r >> i & 1 == 1)
             .fold(0, |acc, (_, &(flag, _))| acc | flag);
-        if r >> 7 & 1 == 1 {
+        if r >> 8 & 1 == 1 {
             let style = [
                 UnderlineStyle::Straight,
                 UnderlineStyle::Double,
                 UnderlineStyle::Curly,
                 UnderlineStyle::Dotted,
                 UnderlineStyle::Dashed,
-            ][(r >> 8) as usize % 5];
+            ][(r >> 9) as usize % 5];
             flags = style.pack_into(flags | ATTR_UNDERLINE);
         }
-        if r >> 11 & 1 == 1 {
+        if r >> 12 & 1 == 1 {
             flags |= ATTR_UNDERLINE_COLOR;
         }
         let palette = [0x000000, 0xFFFFFF, 0x102030, 0xC0FFEE];
         let color = |shift: u64| palette[(r >> shift) as usize % palette.len()];
-        Rendition::new(color(12), color(14), flags, color(16))
+        Rendition::new(color(13), color(15), flags, color(17))
     }
 
     /// The renditions a real parser assigns to the cells printed after each
@@ -525,6 +526,14 @@ mod tests {
             push_sgr(&mut out, Some(base), next);
             assert_eq!(out, want, "{next:?}");
         }
+    }
+
+    #[test]
+    fn overline_is_stated_as_sgr_53() {
+        let pen = Rendition::new(0x010203, 0x0A0B0C, ATTR_OVERLINE, 0);
+        let mut out = String::new();
+        push_sgr(&mut out, None, pen);
+        assert_eq!(out, "\x1b[0;53;38;2;1;2;3;48;2;10;11;12m");
     }
 
     #[test]

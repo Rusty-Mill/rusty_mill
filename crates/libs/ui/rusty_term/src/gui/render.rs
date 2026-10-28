@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 use winit::window::Window;
 
-use crate::core::{Cell, FrameView};
+use crate::core::{
+    ATTR_DIM, ATTR_HIDDEN, ATTR_OVERLINE, ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, Cell,
+    FrameView,
+};
 
 use super::cpu;
 use super::damage::{Damage, Frame};
@@ -39,6 +42,43 @@ pub(super) fn grid_top(chrome: &[Cell], pad: usize, cell_h: usize) -> usize {
 pub(super) const SEARCH_BG: u32 = 0xFFD24A;
 pub(super) const SEARCH_CUR_BG: u32 = 0xFF7A1A;
 pub(super) const SEARCH_FG: u32 = 0x101010;
+
+/// How much of a dim (SGR 2) cell's foreground survives its fade toward the
+/// background: two thirds.
+const DIM_KEEP: u8 = 170;
+
+/// A grid cell as the window draws it, shared by both renderers. SGR 7 swaps
+/// fg and bg, SGR 2 then fades the fg toward the bg, and SGR 8 blanks the
+/// glyph and its lines, leaving only the background. The grid keeps the
+/// attributes (the TUI and the mux re-emit them), so the window resolves
+/// them here; cursor, selection and search colours apply on top.
+pub(super) fn drawn(mut cell: Cell) -> Cell {
+    if cell.flags & ATTR_REVERSE != 0 {
+        std::mem::swap(&mut cell.fg, &mut cell.bg);
+    }
+    if cell.flags & ATTR_DIM != 0 {
+        cell.fg = blend(cell.bg, cell.fg, DIM_KEEP);
+    }
+    if cell.flags & ATTR_HIDDEN != 0 {
+        cell.ch = ' ';
+        cell.cluster = 0;
+        cell.flags &= !(ATTR_UNDERLINE | ATTR_STRIKE | ATTR_OVERLINE);
+    }
+    cell
+}
+
+/// `fg` over `bg` at coverage `a` (`0` is all `bg`, `255` all `fg`), per
+/// channel of `0xRRGGBB`.
+pub(super) fn blend(bg: u32, fg: u32, a: u8) -> u32 {
+    let a = a as u32;
+    let inv = 255 - a;
+    let chan = |shift: u32| {
+        let f = (fg >> shift) & 0xff;
+        let b = (bg >> shift) & 0xff;
+        (f * a + b * inv) / 255
+    };
+    (chan(16) << 16) | (chan(8) << 8) | chan(0)
+}
 
 /// One pane to paint this frame: its `grid` at cell offset `(col0, row0)`,
 /// sized to the grid's own `cols × rows`. `focused` gates the cursor/IME
@@ -325,5 +365,61 @@ pub(super) fn composite(
             buffer, w, h, p.grid, p.col0, p.row0, pad, oy, &p.trail, font, None,
         );
         cpu::draw_marks(buffer, w, h, p.col0, p.row0, pad, oy, &p.marks, font);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{AnsiParser, Grid};
+
+    /// The first cell of a 1×1 grid after `bytes`, as the window draws it.
+    fn drawn_after(bytes: &[u8]) -> Cell {
+        let mut g = Grid::new(1, 1);
+        AnsiParser::new().advance(&mut g, bytes);
+        drawn(g.frame_view().cell(0, 0))
+    }
+
+    #[test]
+    fn plain_cells_draw_as_stored() {
+        let cell = drawn_after(b"\x1b[38;2;255;0;0;48;2;0;0;255mX");
+        assert_eq!((cell.ch, cell.fg, cell.bg), ('X', 0xFF0000, 0x0000FF));
+    }
+
+    #[test]
+    fn reverse_swaps_fg_and_bg() {
+        let cell = drawn_after(b"\x1b[38;2;255;0;0;48;2;0;0;255;7mX");
+        assert_eq!((cell.fg, cell.bg), (0x0000FF, 0xFF0000));
+    }
+
+    #[test]
+    fn dim_fades_fg_toward_bg() {
+        let cell = drawn_after(b"\x1b[38;2;255;255;255;48;2;0;0;0;2mX");
+        assert_eq!(cell.bg, 0x000000);
+        assert_eq!(cell.fg, 0xAAAAAA);
+    }
+
+    #[test]
+    fn dim_reverse_fades_the_swapped_fg() {
+        let cell = drawn_after(b"\x1b[38;2;255;255;255;48;2;0;0;0;2;7mX");
+        assert_eq!((cell.fg, cell.bg), (0x555555, 0xFFFFFF));
+    }
+
+    #[test]
+    fn hidden_blanks_the_glyph_and_its_lines() {
+        let cell = drawn_after(b"\x1b[48;2;0;0;255;8;4;9;53mX");
+        assert_eq!((cell.ch, cell.cluster), (' ', 0));
+        assert_eq!(
+            cell.flags & (ATTR_UNDERLINE | ATTR_STRIKE | ATTR_OVERLINE),
+            0
+        );
+        assert_eq!(cell.bg, 0x0000FF);
+    }
+
+    #[test]
+    fn blend_endpoints() {
+        assert_eq!(blend(0x000000, 0xFFFFFF, 255), 0xFFFFFF); // full coverage = fg
+        assert_eq!(blend(0x0000FF, 0xFF0000, 0), 0x0000FF); // zero coverage = bg
+        assert_eq!(blend(0x000000, 0xFFFFFF, 128), 0x808080); // half = mid-gray
     }
 }

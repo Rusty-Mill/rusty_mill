@@ -496,6 +496,17 @@ mod tests {
     }
 
     #[test]
+    fn vt_keeps_overline() {
+        let grid = screen(4, 1, b"\x1b[53mo\x1b[0m");
+        let vt = Capture {
+            vt: true,
+            ..capture(0)
+        };
+        let text = format(&grid, vt, usize::MAX).expect("within the limit");
+        assert_eq!(text, "\x1b[0;53mo\x1b[0m");
+    }
+
+    #[test]
     fn vt_lines_print_the_same_under_any_pen() {
         let source = screen(8, 3, b"abc\r\nab\x1b[1;32mcd\x1b[0m\r\n\x1b[44mxy");
         let vt = Capture {

@@ -4,8 +4,8 @@
 use std::fmt::Write as _;
 
 use rusty_term_core::{
-    ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_MASK, ATTR_REVERSE,
-    ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell, UnderlineStyle,
+    ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_MASK, ATTR_OVERLINE,
+    ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell, UnderlineStyle,
 };
 
 /// What a cell's SGR sequence sets. Colours equal to the grid's defaults
@@ -14,7 +14,7 @@ use rusty_term_core::{
 pub struct Style {
     pub fg: u32,
     pub bg: u32,
-    pub attrs: u16,
+    pub attrs: u32,
     /// Only with [`ATTR_UNDERLINE_COLOR`].
     pub underline: Option<u32>,
 }
@@ -42,6 +42,7 @@ impl Style {
             (ATTR_REVERSE, "7"),
             (ATTR_HIDDEN, "8"),
             (ATTR_STRIKE, "9"),
+            (ATTR_OVERLINE, "53"),
         ] {
             if self.attrs & bit != 0 {
                 out.push(';');
