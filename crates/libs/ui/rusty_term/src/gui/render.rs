@@ -11,7 +11,7 @@ use winit::window::Window;
 
 use crate::core::{
     ATTR_DIM, ATTR_HIDDEN, ATTR_OVERLINE, ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, BidiRow, Cell,
-    FrameView,
+    FrameView, char_width,
 };
 
 use super::cpu;
@@ -65,6 +65,16 @@ pub(super) fn drawn(mut cell: Cell) -> Cell {
         cell.flags &= !(ATTR_UNDERLINE | ATTR_STRIKE | ATTR_OVERLINE);
     }
     cell
+}
+
+/// Whether `ch`, in a cell's grapheme continuation, is a mark drawn over the
+/// base glyph: zero width, but not a joiner or variation selector (those
+/// only steer which glyph a font picks and draw nothing themselves).
+pub(super) fn is_overlay_mark(ch: char) -> bool {
+    char_width(ch) == 0
+        && ch != '\u{200d}'
+        && !('\u{fe00}'..='\u{fe0f}').contains(&ch)
+        && !('\u{e0100}'..='\u{e01ef}').contains(&ch)
 }
 
 /// Whether `cell` is concealed (SGR 8): drawn as its background only.

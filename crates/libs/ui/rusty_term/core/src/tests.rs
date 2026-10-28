@@ -1552,12 +1552,13 @@ fn scrolled_off_line_keeps_its_wrap_and_drops_its_size_attr() {
     // travels into history (the reflow needs it), the size attribute does not.
     let mut g = Grid::new(4, 2);
     let mut p = AnsiParser::new();
-    p.advance(&mut g, b"\x1b#6abcdef\r\nx");
+    // The double-width row holds two of the four columns, so "ab" wraps.
+    p.advance(&mut g, b"\x1b#6abcd\r\nx");
     assert_eq!(g.scrollback.len(), 1);
     assert!(g.scrollback[0].wrapped);
     assert_eq!(g.scrollback[0].attr, LineAttr::Single);
-    assert_eq!(hist_text(&g, 0), "abcd");
-    assert_eq!(row_text(&g, 0), "ef  ");
+    assert_eq!(hist_text(&g, 0), "ab  ");
+    assert_eq!(row_text(&g, 0), "cd  ");
 }
 
 #[test]
@@ -3546,15 +3547,44 @@ fn decdwl_decdhl_decswl_set_line_size() {
 }
 
 #[test]
+fn double_width_row_holds_half_the_columns() {
+    // 8 columns, double width: 4 glyphs fit, the 5th wraps (#1159).
+    let g = parse(b"\x1b#6ABCDE", 8, 2);
+    assert_eq!(row_text(&g, 0), "ABCD    ");
+    assert_eq!(cells(&g)[8].ch, 'E');
+    assert_eq!(g.cursor, (1, 1));
+    // DECDHL halves wrap the same way.
+    let g = parse(b"\x1b#3ABCDE", 8, 2);
+    assert_eq!(cells(&g)[8].ch, 'E');
+    // Autowrap off: the last glyph overwrites the last shown column.
+    let g = parse(b"\x1b[?7l\x1b#6ABCDE", 8, 2);
+    assert_eq!(row_text(&g, 0), "ABCE    ");
+    assert_eq!(g.cursor, (4, 0));
+    // Non-ASCII text takes the same path.
+    let g = parse("\x1b#6éééé漢".as_bytes(), 8, 2);
+    assert_eq!(cells(&g)[8].ch, '漢');
+}
+
+#[test]
+fn double_width_moves_a_right_half_cursor_to_the_last_shown_column() {
+    let g = parse(b"\x1b[7G\x1b#6", 8, 2);
+    assert_eq!(g.cursor, (3, 0));
+    let g = parse(b"\x1b[3G\x1b#6", 8, 2);
+    assert_eq!(g.cursor, (2, 0), "left half unchanged");
+    let g = parse(b"\x1b[7G\x1b#5", 8, 2);
+    assert_eq!(g.cursor, (6, 0), "single width leaves it");
+}
+
+#[test]
 fn line_attr_follows_content_when_scrolling() {
     // A double-width line must keep its size as the screen scrolls it upward.
     let mut g = Grid::new(4, 3);
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"AAAA\r\n"); // row 0
-    p.advance(&mut g, b"\x1b#6BBBB\r\n"); // row 1, double-width
+    p.advance(&mut g, b"\x1b#6BB\r\n"); // row 1, double-width (half the columns)
     p.advance(&mut g, b"CCCC\r\n"); // scrolls row 0 off; BBBB rises to row 0
     let attrs = g.snapshot_dirty().line_attrs;
-    assert_eq!(attrs[0], LineAttr::DoubleWidth); // followed BBBB up to row 0
+    assert_eq!(attrs[0], LineAttr::DoubleWidth); // followed BB up to row 0
     assert_eq!(attrs[1], LineAttr::Single);
 }
 

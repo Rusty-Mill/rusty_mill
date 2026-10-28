@@ -2411,13 +2411,27 @@ impl Grid {
     }
 
     /// The column a glyph at the cursor must end before: the right margin
-    /// while DECSLRM margins hold the cursor, otherwise the screen edge.
+    /// while DECSLRM margins hold the cursor, otherwise the screen edge; on a
+    /// double-width row (DECDWL/DECDHL) no further than half the columns.
     fn wrap_limit(&self) -> usize {
-        if self.side_margins_active() && self.cursor.0 >= self.left_margin {
+        let edge = if self.side_margins_active() && self.cursor.0 >= self.left_margin {
             (self.right_margin + 1).min(self.cols)
         } else {
             self.cols
+        };
+        if self.cursor_row_is_double() {
+            edge.min(self.cols.div_ceil(2))
+        } else {
+            edge
         }
+    }
+
+    /// Whether the cursor row is double-width (DECDWL, or either half of
+    /// DECDHL), which shows only its left half of the columns.
+    fn cursor_row_is_double(&self) -> bool {
+        self.screen
+            .get(self.cursor.1)
+            .is_some_and(|line| line.attr != LineAttr::Single)
     }
 
     /// Autowrap: mark the cursor row soft-wrapped (so reflow and scrollback
@@ -2479,7 +2493,11 @@ impl Grid {
         while let Some((&first, tail)) = rest.split_first() {
             let (x, y) = self.cursor;
             let room = self.cols.saturating_sub(x);
-            if room == 0 || self.insert_mode || self.side_margins_active() {
+            if room == 0
+                || self.insert_mode
+                || self.side_margins_active()
+                || self.cursor_row_is_double()
+            {
                 self.put_char(char::from(first), pen);
                 rest = tail;
                 continue;
@@ -2522,6 +2540,7 @@ impl Grid {
             && !self.side_margins_active()
             && !self.grapheme_clustering
             && self.cursor.1 < self.rows
+            && !self.cursor_row_is_double()
     }
 
     /// Fill the leading glyphs of `text` into the cursor row while each has a
@@ -4010,6 +4029,12 @@ impl Grid {
         if let Some(line) = self.screen.get_mut(y) {
             line.attr = attr;
             self.touch(y);
+        }
+        // A double-width row shows half the columns: a cursor in the right
+        // half moves to the last one it shows.
+        if attr != LineAttr::Single {
+            let last = self.cols.div_ceil(2).saturating_sub(1);
+            self.cursor.0 = self.cursor.0.min(last);
         }
     }
 

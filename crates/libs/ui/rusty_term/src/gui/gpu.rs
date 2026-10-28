@@ -35,14 +35,41 @@ use winit::window::Window;
 use crate::core::Grid;
 use crate::core::{
     ATTR_BOLD, ATTR_ITALIC, ATTR_OVERLINE, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell,
-    CursorShape, UnderlineStyle, WIDE_TRAILER, char_width,
+    CursorShape, LineAttr, UnderlineStyle, WIDE_TRAILER, char_width,
 };
 
 use super::damage::{self, RowState};
 use super::font::{FontCache, Glyph, GlyphSource, Style};
 use super::render::{
     PaneFrame, Renderer, SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG, concealed, drawn, glyph_char,
+    is_overlay_mark,
 };
+
+/// The part of atlas tile `rect` (`x, y, w, h`) a row of size `attr` shows:
+/// a DECDHL half samples its half of the tile, stretched over the cell.
+fn half_tile(rect: (u32, u32, u32, u32), attr: LineAttr) -> (u32, u32, u32, u32) {
+    let (x, y, w, h) = rect;
+    match attr {
+        LineAttr::DoubleTop => (x, y, w, h / 2),
+        LineAttr::DoubleBottom => (x, y + h / 2, w, h - h / 2),
+        LineAttr::Single | LineAttr::DoubleWidth => rect,
+    }
+}
+
+/// [`Instance::deco`] bits for strikethrough and overline.
+const DECO_STRIKE: u32 = 8;
+const DECO_OVERLINE: u32 = 16;
+
+/// The decoration bits (see [`Instance::deco`]) a row of size `attr` draws:
+/// a DECDHL line's underline sits on its bottom half, overline and strike on
+/// its top half.
+fn half_deco(deco: u32, attr: LineAttr) -> u32 {
+    match attr {
+        LineAttr::DoubleTop => deco & !0b111,
+        LineAttr::DoubleBottom => deco & !(DECO_STRIKE | DECO_OVERLINE),
+        LineAttr::Single | LineAttr::DoubleWidth => deco,
+    }
+}
 
 /// Atlas texture edge (clamped to the device limit at creation).
 const ATLAS_MAX: u32 = 2048;
@@ -297,6 +324,8 @@ struct Uniforms {
 enum TileKey {
     Char(char, Style),
     Shaped(usize),
+    /// A combining mark centered over a base `span` cells wide.
+    Mark(char, Style, usize),
 }
 
 /// One pane row's instances as last built, and what they were built from.
@@ -762,6 +791,29 @@ impl GpuCore {
         )
     }
 
+    /// The tile of combining mark `ch`, its ink centered over a base glyph
+    /// `span` cells wide (#1160).
+    fn tile_for_mark(
+        &mut self,
+        ch: char,
+        style: Style,
+        span: usize,
+        font: &mut FontCache,
+    ) -> (u32, u32, u32, u32) {
+        let key = TileKey::Mark(ch, style, span);
+        if let Some(&r) = self.tiles.get(&key) {
+            return r;
+        }
+        let glyph = font.glyph(ch, style);
+        let centered = Glyph {
+            left: (span as i32 * self.cell_w as i32 - glyph.width as i32) / 2,
+            coverage: glyph.coverage.clone(),
+            color: glyph.color.clone(),
+            ..*glyph
+        };
+        self.upload_tile(key, &centered, span, font.baseline())
+    }
+
     /// Set the window background opacity (`[window] opacity`), clamped to
     /// `0.0..=1.0`. A no-op visually unless `alpha_mode` negotiated straight
     /// alpha compositing — see [`Self::alpha_mode`].
@@ -979,6 +1031,10 @@ impl GpuCore {
                     .and_then(|b| b.log2vis.get(col))
                     .map_or(col, |&v| v as usize)
             };
+            // DECDWL/DECDHL: each cell's quad spans twice the columns (the
+            // tile stretches), DECDHL halves sample half the tile each.
+            let attr = grid.line_attr(row);
+            let scale = if attr == LineAttr::Single { 1 } else { 2 };
             let mut cols: Vec<Resolved> = Vec::with_capacity(grid.cols);
             for col in 0..grid.cols {
                 let cell = drawn(if on_status {
@@ -1035,8 +1091,10 @@ impl GpuCore {
                     && !super::boxdraw::is_synthesized(cell.ch)
                     && cell.ch != '\u{10EEEE}'
                     // A reordered (bidi) row draws cell-by-cell; a shaped run
-                    // across visually non-adjacent cells would garble it.
+                    // across visually non-adjacent cells would garble it. So
+                    // does a scaled (double-width) row.
                     && bidi.is_none()
+                    && attr == LineAttr::Single
                     && font.has_ligatures();
                 cols.push(Resolved {
                     cell,
@@ -1068,22 +1126,49 @@ impl GpuCore {
                     // The span follows the stored character, so a concealed
                     // wide glyph still paints both columns' background.
                     let ch = glyph_char(&r.cell, bidi, col);
+                    let span = char_width(r.cell.ch).max(1);
+                    let x = scale * vis(col);
+                    if x >= grid.cols {
+                        col += span; // past the half a double-width row shows
+                        continue;
+                    }
+                    let quad = (scale * span).min(grid.cols - x) as u32;
                     let (rect, is_color) = self.tile_for_char(ch, style, font);
-                    let span = char_width(r.cell.ch).max(1) as u32;
                     let fg = if is_color { 0xFFFFFF } else { r.fg };
                     frame.base.push(Self::base_inst(
-                        (col0 + vis(col)) as u32,
+                        (col0 + x) as u32,
                         (row0 + row) as u32,
-                        span,
-                        rect,
+                        quad,
+                        half_tile(rect, attr),
                         fg,
                         r.bg,
                         r.curs,
                         r.ccol,
-                        r.deco,
+                        half_deco(r.deco, attr),
                         r.dcol,
                     ));
-                    col += span as usize;
+                    let marks = grid
+                        .cluster_suffix(&r.cell)
+                        .chars()
+                        .filter(|&c| is_overlay_mark(c));
+                    for mark in marks {
+                        let rect = self.tile_for_mark(mark, style, span, font);
+                        let mut inst = Self::base_inst(
+                            (col0 + x) as u32,
+                            (row0 + row) as u32,
+                            quad,
+                            half_tile(rect, attr),
+                            r.fg,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        );
+                        inst.kind = 1;
+                        frame.overlay.push(inst);
+                    }
+                    col += span;
                     continue;
                 }
                 // A run: same style and fg, contiguous eligible cells.
@@ -2074,6 +2159,70 @@ mod tests {
         };
         let frame = core.frame_lists(400, &[pane], &[], &[], font, 1, 2);
         frame.base.into_iter().filter(|i| i.row == 0).collect()
+    }
+
+    #[test]
+    fn double_height_halves_sample_half_the_tile_and_split_decorations() {
+        let rect = (10, 20, 8, 17);
+        assert_eq!(half_tile(rect, LineAttr::Single), rect);
+        assert_eq!(half_tile(rect, LineAttr::DoubleWidth), rect);
+        assert_eq!(half_tile(rect, LineAttr::DoubleTop), (10, 20, 8, 8));
+        assert_eq!(half_tile(rect, LineAttr::DoubleBottom), (10, 28, 8, 9));
+        // Underline (bits 0-2) on the bottom half; strike and overline on
+        // the top; layout bits (6, 7) on both.
+        let deco = 1 | DECO_STRIKE | DECO_OVERLINE | 64;
+        assert_eq!(
+            half_deco(deco, LineAttr::DoubleTop),
+            DECO_STRIKE | DECO_OVERLINE | 64
+        );
+        assert_eq!(half_deco(deco, LineAttr::DoubleBottom), 1 | 64);
+        assert_eq!(half_deco(deco, LineAttr::DoubleWidth), deco);
+    }
+
+    #[test]
+    fn double_width_row_emits_two_column_quads() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let mut g = Grid::new(6, 1);
+        AnsiParser::new().advance(&mut g, b"\x1b#6XYZ");
+        let base = row_instances(&mut core, &mut font, &g);
+        for col in [0, 2, 4] {
+            assert!(
+                base.iter().any(|i| i.col == col && i.span == 2),
+                "cell at column {col}: {base:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn combining_mark_adds_an_overlay_glyph() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let overlays = |core: &mut GpuCore, font: &mut FontCache, text: &str| {
+            let mut g = Grid::new(4, 1);
+            AnsiParser::new().advance(&mut g, text.as_bytes());
+            let v = g.frame_view();
+            let pane = PaneFrame {
+                grid: &v,
+                col0: 0,
+                row0: 0,
+                focused: false,
+                cursor_on: false,
+                trail: Vec::new(),
+                hover_link: None,
+                marks: Vec::new(),
+            };
+            let frame = core.frame_lists(400, &[pane], &[], &[], font, 1, 2);
+            frame
+                .overlay
+                .iter()
+                .filter(|i| i.row == 0 && i.kind == 1)
+                .count()
+        };
+        let bare = overlays(&mut core, &mut font, "e");
+        assert_eq!(overlays(&mut core, &mut font, "e\u{301}"), bare + 1);
     }
 
     #[test]
