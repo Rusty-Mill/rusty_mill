@@ -1,7 +1,7 @@
 //! How blocks end on Windows: a close reaches every program on the pseudo
 //! console, a flooding block closes without stalling the server, and a
 //! server that dies takes its blocks with it. A program that exits by
-//! itself reports its exit code.
+//! itself reports its exit code, and `terminal.process` names its pid.
 
 #![cfg(windows)]
 
@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use common::{Client, PATIENCE, block_for, connect, run_and_wait, start_server};
 use rusty_mux_core::{BlockId, Event, ExitStatus};
+use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Features, Message};
 
 /// Prints the block's shell pid as `SHELL=<n>`: powershell's parent.
@@ -143,4 +144,25 @@ fn a_program_that_exits_reports_its_code() {
     let at = |event: &Event| a.events.iter().position(|(_, e)| e == event);
     let exited_at = at(&exited).unwrap_or_else(|| panic!("no exit in {:?}", a.events));
     assert!(Some(exited_at) < at(&closed), "exit after the close");
+}
+
+/// Windows has no foreground process group, so `terminal.process` lists
+/// only the block's own program, by pid alone.
+#[test]
+fn terminal_process_names_the_programs_pid() {
+    let path = start_server();
+    let wanted = Features::CHECKPOINT_V5.union(Features::BLOCK_CALL);
+    let mut a = Client::connect_with(&path, wanted, None);
+    let block = block_for(&mut a);
+    let shell = shell_pid(&mut a, block);
+    let answer = a.answer(|req| Message::BlockCall {
+        req,
+        block,
+        method: "terminal.process".into(),
+        args: Vec::<(String, Value)>::new(),
+    });
+    let [Message::Text { text, .. }] = answer.as_slice() else {
+        panic!("expected Text, got {answer:?}")
+    };
+    assert_eq!(text.as_str(), format!("{shell}\t\t"), "{text:?}");
 }
