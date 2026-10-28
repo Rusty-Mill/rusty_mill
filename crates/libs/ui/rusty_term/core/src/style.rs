@@ -17,7 +17,10 @@
 
 use std::collections::{HashMap, TryReserveError};
 
-use crate::cell::{ATTR_PROTECTED, Cell, PackedCell, WIDE_TRAILER};
+use crate::cell::{
+    ATTR_BG_DEFAULT, ATTR_FG_DEFAULT, ATTR_PROTECTED, Cell, DEFAULT_BG, DEFAULT_FG, PackedCell,
+    WIDE_TRAILER,
+};
 
 /// Everything a [`Cell`] holds except its character and the two layout bits
 /// ([`WIDE_TRAILER`], [`ATTR_PROTECTED`]), which live in [`PackedCell`].
@@ -33,7 +36,7 @@ pub(crate) struct CellStyle {
 }
 
 impl CellStyle {
-    /// The style of `cell`, layout bits dropped.
+    /// The style of `cell`, layout bits dropped, in canonical form.
     pub(crate) fn of(cell: &Cell) -> Self {
         CellStyle {
             fg: cell.fg,
@@ -42,6 +45,50 @@ impl CellStyle {
             attrs: cell.flags & !(WIDE_TRAILER | ATTR_PROTECTED),
             link: cell.link,
             cluster: cell.cluster,
+        }
+        .canonical()
+    }
+
+    /// A colour marked default ([`ATTR_FG_DEFAULT`] / [`ATTR_BG_DEFAULT`])
+    /// stored as `0`: the table resolves it on read, so styles that differ
+    /// only in the default in force when they were written are one entry.
+    #[inline]
+    pub(crate) fn canonical(mut self) -> Self {
+        if self.attrs & ATTR_FG_DEFAULT != 0 {
+            self.fg = 0;
+        }
+        if self.attrs & ATTR_BG_DEFAULT != 0 {
+            self.bg = 0;
+        }
+        self
+    }
+
+    /// This style with its default colours filled in from `defaults`.
+    #[inline]
+    fn resolved(mut self, defaults: Defaults) -> Self {
+        if self.attrs & ATTR_FG_DEFAULT != 0 {
+            self.fg = defaults.fg;
+        }
+        if self.attrs & ATTR_BG_DEFAULT != 0 {
+            self.bg = defaults.bg;
+        }
+        self
+    }
+}
+
+/// The default foreground and background (OSC 10 / 11) that styles marked
+/// default resolve to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Defaults {
+    pub fg: u32,
+    pub bg: u32,
+}
+
+impl Default for Defaults {
+    fn default() -> Self {
+        Defaults {
+            fg: DEFAULT_FG,
+            bg: DEFAULT_BG,
         }
     }
 }
@@ -96,7 +143,7 @@ struct Recent(Box<[(CellStyle, StyleId)]>);
 
 impl Default for Recent {
     fn default() -> Self {
-        let empty = (CellStyle::of(&Cell::blank()), Recent::EMPTY);
+        let empty = (CellStyle::of(&Cell::default_blank()), Recent::EMPTY);
         Recent(vec![empty; Recent::SLOTS].into_boxed_slice())
     }
 }
@@ -124,7 +171,8 @@ impl Recent {
     }
 
     fn clear(&mut self) {
-        self.0.fill((CellStyle::of(&Cell::blank()), Self::EMPTY));
+        self.0
+            .fill((CellStyle::of(&Cell::default_blank()), Self::EMPTY));
     }
 }
 
@@ -155,11 +203,13 @@ pub(crate) struct StyleTable {
     marked: usize,
     /// Cells evicted from history since the last sweep.
     turnover: usize,
+    /// What colours marked default resolve to on [`StyleTable::get`].
+    defaults: Defaults,
 }
 
 impl Default for StyleTable {
     fn default() -> Self {
-        let blank = CellStyle::of(&Cell::blank());
+        let blank = CellStyle::of(&Cell::default_blank());
         StyleTable {
             entries: vec![blank],
             index: HashMap::from([(blank, StyleId::DEFAULT)]),
@@ -172,6 +222,7 @@ impl Default for StyleTable {
             live_after_sweep: 1,
             marked: 0,
             turnover: 0,
+            defaults: Defaults::default(),
         }
     }
 }
@@ -181,6 +232,7 @@ impl StyleTable {
     /// available). A freed id still indexed under `style` is revived.
     #[inline]
     pub(crate) fn intern(&mut self, style: CellStyle) -> StyleId {
+        let style = style.canonical();
         if self.last.1 != Recent::EMPTY && self.last.0 == style {
             return self.last.1;
         }
@@ -191,6 +243,7 @@ impl StyleTable {
     /// its own so other interns between two writes do not evict the pen.
     #[inline]
     pub(crate) fn intern_pen(&mut self, style: CellStyle) -> StyleId {
+        let style = style.canonical();
         if self.last_pen.1 != Recent::EMPTY && self.last_pen.0 == style {
             return self.last_pen.1;
         }
@@ -254,8 +307,9 @@ impl StyleTable {
         None
     }
 
-    /// The style behind `id`. An id this table never issued reads as the
-    /// default style (a debug build asserts instead).
+    /// The style behind `id`, its default colours resolved to the current
+    /// [`Defaults`]. An id this table never issued reads as the default style
+    /// (a debug build asserts instead).
     pub(crate) fn get(&self, id: StyleId) -> CellStyle {
         debug_assert!(
             id.index() < self.entries.len(),
@@ -265,6 +319,18 @@ impl StyleTable {
             .get(id.index())
             .copied()
             .unwrap_or(self.entries[0])
+            .resolved(self.defaults)
+    }
+
+    /// The colours that styles marked default resolve to.
+    pub(crate) fn defaults(&self) -> Defaults {
+        self.defaults
+    }
+
+    /// Change what styles marked default resolve to (OSC 10 / 11 and their
+    /// resets). No entry changes: every cell in a default colour follows.
+    pub(crate) fn set_defaults(&mut self, defaults: Defaults) {
+        self.defaults = defaults;
     }
 
     /// Entries ever allocated, freed slots included: ids are below this.
@@ -372,9 +438,15 @@ impl StyleTable {
         self.last_pen.1 = Recent::EMPTY;
         let is_free = self.is_free.clone();
         for (i, style) in self.entries.iter_mut().enumerate() {
+            // A default colour is stored as 0 and resolved on read: only the
+            // colours the child chose are remapped.
             if !is_free[i] {
-                style.fg = map(style.fg);
-                style.bg = map(style.bg);
+                if style.attrs & ATTR_FG_DEFAULT == 0 {
+                    style.fg = map(style.fg);
+                }
+                if style.attrs & ATTR_BG_DEFAULT == 0 {
+                    style.bg = map(style.bg);
+                }
             }
         }
         let mut first: HashMap<CellStyle, usize> = HashMap::new();
@@ -449,7 +521,10 @@ mod tests {
     #[test]
     fn equal_styles_share_one_id_and_id_0_is_blank() {
         let mut t = StyleTable::default();
-        assert_eq!(t.intern(CellStyle::of(&Cell::blank())), StyleId::DEFAULT);
+        assert_eq!(
+            t.intern(CellStyle::of(&Cell::default_blank())),
+            StyleId::DEFAULT
+        );
         let a = t.intern(fg(1));
         assert_eq!(t.intern(fg(1)), a);
         assert_ne!(t.intern(fg(2)), a);
@@ -534,5 +609,24 @@ mod tests {
         };
         assert_eq!(t.get(remap.get(c)), moved);
         assert_eq!(t.intern(moved), remap.get(c), "index follows the new keys");
+    }
+
+    #[test]
+    fn default_colours_resolve_at_read_and_survive_retheme() {
+        let mut t = StyleTable::default();
+        let blank = t.intern(CellStyle::of(&Cell::default_blank()));
+        // An explicit colour equal to the default is a different style.
+        let explicit = t.intern(fg(DEFAULT_FG));
+        assert_ne!(blank, explicit);
+        t.set_defaults(Defaults { fg: 7, bg: 9 });
+        assert_eq!((t.get(blank).fg, t.get(blank).bg), (7, 9));
+        assert_eq!(
+            (t.get(explicit).fg, t.get(explicit).bg),
+            (DEFAULT_FG, DEFAULT_BG)
+        );
+        // A retheme maps explicit colours only; the defaults are set apart.
+        assert!(t.retheme(|v| v + 1).is_none());
+        assert_eq!(t.get(blank).fg, 7);
+        assert_eq!(t.get(explicit).fg, DEFAULT_FG + 1);
     }
 }

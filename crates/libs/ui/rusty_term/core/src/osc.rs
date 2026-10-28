@@ -222,20 +222,18 @@ pub(crate) fn dispatch(
         "11" => set_dynamic_colors(11, text, g, palette, responses, pen),
         "12" => set_dynamic_colors(12, text, g, palette, responses, pen),
         // 110/111/112 reset the default fg / bg / cursor to the built-in values.
-        // A pen currently sitting on the old default follows the reset, so text
-        // drawn next uses the restored color.
+        // A pen on the default colour follows the reset, so text drawn next
+        // uses the restored color.
         "110" => {
-            let old = palette.fg;
             palette.reset_fg();
-            if pen.fg == old {
+            if pen.fg_is_default() {
                 pen.fg = palette.fg;
             }
             g.set_default_colors(palette.fg, palette.bg, palette.cursor);
         }
         "111" => {
-            let old = palette.bg;
             palette.reset_bg();
-            if pen.bg == old {
+            if pen.bg_is_default() {
                 pen.bg = palette.bg;
             }
             g.set_default_colors(palette.fg, palette.bg, palette.cursor);
@@ -416,17 +414,17 @@ fn set_dynamic_colors(
             responses.extend_from_slice(format_color_spec(value).as_bytes());
             responses.extend_from_slice(b"\x1b\\");
         } else if let Some(rgb) = parse_color_spec(spec) {
-            // A pen currently showing the old default follows the change, so the
-            // common "set OSC 10/11 then print" pattern recolors immediately.
+            // A pen on the default colour follows the change, so the common
+            // "set OSC 10/11 then print" pattern recolors immediately.
             match role {
                 10 => {
-                    if pen.fg == palette.fg {
+                    if pen.fg_is_default() {
                         pen.fg = rgb;
                     }
                     palette.fg = rgb;
                 }
                 11 => {
-                    if pen.bg == palette.bg {
+                    if pen.bg_is_default() {
                         pen.bg = rgb;
                     }
                     palette.bg = rgb;

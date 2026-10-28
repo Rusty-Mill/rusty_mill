@@ -47,6 +47,17 @@ pub const ATTR_UNDERLINE_COLOR: u16 = 1 << 12;
 /// clear it, so the parser tracks it separately from the pen's SGR state
 /// and stamps it onto cells at write time.
 pub const ATTR_PROTECTED: u16 = 1 << 13;
+/// The foreground is the terminal's default (SGR 39, a reset or a blank),
+/// not a colour the child chose. [`Cell::fg`] still holds the resolved RGB;
+/// this bit makes it follow later default changes (OSC 10 / 110), and tells
+/// an explicit colour that happens to equal the default apart from it.
+pub const ATTR_FG_DEFAULT: u16 = 1 << 14;
+/// The background is the terminal's default (SGR 49, a reset, a default
+/// erase or a blank): the [`ATTR_FG_DEFAULT`] of the background, following
+/// OSC 11 / 111.
+pub const ATTR_BG_DEFAULT: u16 = 1 << 15;
+/// Both colour-provenance bits: a cell or pen in the default colours.
+pub const ATTR_DEFAULT_COLORS: u16 = ATTR_FG_DEFAULT | ATTR_BG_DEFAULT;
 
 /// Bit offset of the 3-bit underline-style sub-field (SGR `4:0`-`4:5`) packed
 /// into the same `u16` as the `ATTR_*` bits. Only meaningful when
@@ -55,7 +66,8 @@ const UNDERLINE_STYLE_SHIFT: u16 = 9;
 /// Mask isolating the underline-style sub-field before shifting.
 const UNDERLINE_STYLE_MASK: u16 = 0b111 << UNDERLINE_STYLE_SHIFT;
 
-/// Mask of every rendition attribute bit (everything except [`WIDE_TRAILER`]).
+/// Mask of every rendition attribute bit (everything except [`WIDE_TRAILER`],
+/// [`ATTR_PROTECTED`] and the colour-provenance bits).
 pub const ATTR_MASK: u16 = ATTR_BOLD
     | ATTR_DIM
     | ATTR_ITALIC
@@ -127,6 +139,47 @@ pub struct Pen {
     pub underline_color: u32,
 }
 
+impl Pen {
+    /// The reset pen in `fg`/`bg`, both flagged as the default colours.
+    pub(crate) fn default_colors(fg: u32, bg: u32) -> Self {
+        Pen {
+            fg,
+            bg,
+            attrs: ATTR_DEFAULT_COLORS,
+            underline_color: fg,
+        }
+    }
+
+    /// Set the foreground to `rgb`, as the default colour when `default`
+    /// (SGR 39) or as an explicit one otherwise.
+    pub(crate) fn set_fg(&mut self, rgb: u32, default: bool) {
+        self.fg = rgb;
+        self.attrs = flag(self.attrs, ATTR_FG_DEFAULT, default);
+    }
+
+    /// Set the background to `rgb`, as the default colour when `default`
+    /// (SGR 49) or as an explicit one otherwise.
+    pub(crate) fn set_bg(&mut self, rgb: u32, default: bool) {
+        self.bg = rgb;
+        self.attrs = flag(self.attrs, ATTR_BG_DEFAULT, default);
+    }
+
+    /// Whether the foreground is the default colour rather than an explicit one.
+    pub(crate) fn fg_is_default(&self) -> bool {
+        self.attrs & ATTR_FG_DEFAULT != 0
+    }
+
+    /// Whether the background is the default colour rather than an explicit one.
+    pub(crate) fn bg_is_default(&self) -> bool {
+        self.attrs & ATTR_BG_DEFAULT != 0
+    }
+}
+
+/// `bits` with `bit` set when `on`, cleared otherwise.
+fn flag(bits: u16, bit: u16, on: bool) -> u16 {
+    if on { bits | bit } else { bits & !bit }
+}
+
 impl Default for Pen {
     /// The reset pen: default colors and no attributes.
     fn default() -> Self {
@@ -178,7 +231,8 @@ pub struct Cell {
     pub fg: u32,
     /// Background color as `0xRRGGBB`.
     pub bg: u32,
-    /// Attribute bitset (bold, italic, …). Reserved for future use.
+    /// Attribute bitset: [`WIDE_TRAILER`], the `ATTR_*` renditions, and the
+    /// colour-provenance bits [`ATTR_FG_DEFAULT`] / [`ATTR_BG_DEFAULT`].
     pub flags: u16,
     /// Hyperlink id (OSC 8): `0` for none, else an index+1 into `Grid::links`.
     pub link: u16,
@@ -198,6 +252,15 @@ impl Cell {
             flags: 0,
             link: 0,
             underline_color: DEFAULT_FG,
+        }
+    }
+
+    /// A blank whose colours are the default ones: written to a grid, it
+    /// follows later OSC 10/11 changes instead of keeping the built-in RGB.
+    pub(crate) fn default_blank() -> Self {
+        Cell {
+            flags: ATTR_DEFAULT_COLORS,
+            ..Cell::blank()
         }
     }
 }

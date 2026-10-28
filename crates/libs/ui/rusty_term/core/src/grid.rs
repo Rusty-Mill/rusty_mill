@@ -8,8 +8,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
-use super::cell::{Cell, DEFAULT_BG, DEFAULT_FG, PackedCell, Pen, WIDE_TRAILER, char_width};
-use super::style::{CellStyle, StyleId, StyleTable};
+use super::cell::{ATTR_DEFAULT_COLORS, Cell, PackedCell, Pen, WIDE_TRAILER, char_width};
+use super::style::{CellStyle, Defaults, StyleId, StyleTable};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::sixel::SixelImage;
@@ -751,11 +751,6 @@ pub struct Grid {
     /// on, a printed glyph shifts the rest of the row right instead of
     /// overwriting.
     pub(crate) insert_mode: bool,
-    /// Default foreground/background colors (OSC 10/11), mirrored from the
-    /// parser's palette. The background doubles as the erase-fill color, so a
-    /// theme set via OSC 11 colors cleared regions, not just freshly written text.
-    default_fg: u32,
-    default_bg: u32,
     /// Background color erases fill with (BCE): the parser's SGR background,
     /// or `None` while that is the default, so the fill tracks OSC 11. Kept in
     /// sync by the parser via [`Grid::set_erase_bg`].
@@ -938,7 +933,7 @@ fn reflow_clip(old: &[Line], cols: usize, rows: usize, blank: PackedCell) -> Vec
 /// padding. `flags == 0` excludes both [`WIDE_TRAILER`] and any SGR attribute,
 /// so a colored/attributed blank is *kept* (its background is content).
 fn is_padding(c: &Cell) -> bool {
-    c.ch == ' ' && c.cluster == 0 && c.link == 0 && c.flags == 0
+    c.ch == ' ' && c.cluster == 0 && c.link == 0 && c.flags & !ATTR_DEFAULT_COLORS == 0
 }
 
 /// [`is_padding`] for a stored cell, through its style.
@@ -1495,10 +1490,8 @@ impl Grid {
             left_margin: 0,
             right_margin: cols.saturating_sub(1),
             insert_mode: false,
-            default_fg: DEFAULT_FG,
-            default_bg: DEFAULT_BG,
             erase_bg: None,
-            cursor_color: DEFAULT_FG,
+            cursor_color: crate::cell::DEFAULT_FG,
             cursor_shape: CursorShape::default(),
             cursor_blink: false,
             default_cursor_shape: CursorShape::default(),
@@ -1529,7 +1522,7 @@ impl Grid {
             return;
         }
         let cell = self.pack(cell);
-        let blank = self.pack(Cell::blank());
+        let blank = self.default_packed();
         let row = self.screen[y].cells_mut();
         if row[x].is_wide_trailer() {
             // Overwriting the trailing half: blank the head to its left.
@@ -1565,7 +1558,7 @@ impl Grid {
     /// behind it.
     pub(crate) fn line_cell(&self, line: &Line, col: usize) -> Cell {
         line.cell(col)
-            .map_or_else(Cell::blank, |cell| self.resolve(cell))
+            .map_or_else(|| self.default_cell(), |cell| self.resolve(cell))
     }
 
     /// The full cell behind a stored one.
@@ -1597,7 +1590,7 @@ impl Grid {
         {
             out.resize(width, self.resolve(fill));
         }
-        out.resize(start + cols, Cell::blank());
+        out.resize(start + cols, self.default_cell());
     }
 
     /// `cells` resolved, for readers that want a whole row by value.
@@ -2082,7 +2075,7 @@ impl Grid {
                 }
                 let top = sample(cc, cr * 2, tw, th);
                 let bottom = sample(cc, cr * 2 + 1, tw, th);
-                if let Some(cell) = half_block(top, bottom, self.default_bg) {
+                if let Some(cell) = half_block(top, bottom, self.default_bg()) {
                     self.set_cell(col, y, cell);
                 }
             }
@@ -2391,7 +2384,7 @@ impl Grid {
                     cluster: 0,
                     fg: pen.fg,
                     bg: pen.bg,
-                    flags: WIDE_TRAILER,
+                    flags: WIDE_TRAILER | (pen.attrs & ATTR_DEFAULT_COLORS),
                     link,
                     underline_color: pen.underline_color,
                 },
@@ -2469,23 +2462,25 @@ impl Grid {
             return 0;
         }
         let head_id = self.pen_id(pen, link);
-        // A trailer carries the pen's colours but only the layout bit. It and
-        // the blank are interned only when a wide glyph needs them.
+        // A trailer carries the pen's colours and their provenance but no
+        // rendition. It and the blank are interned only when a wide glyph
+        // needs them.
         let trailer = CellStyle {
             fg: pen.fg,
             bg: pen.bg,
             underline_color: pen.underline_color,
-            attrs: 0,
+            attrs: pen.attrs & ATTR_DEFAULT_COLORS,
             link,
             cluster: 0,
         };
         let protected = pen.attrs & super::cell::ATTR_PROTECTED != 0;
         let styles = &mut self.styles;
         let blank = |styles: &mut StyleTable| {
-            PackedCell::new(&Cell::blank(), styles.intern(CellStyle::of(&Cell::blank())))
+            let cell = Cell::default_blank();
+            PackedCell::new(&cell, styles.intern(CellStyle::of(&cell)))
         };
         // With no attributes the trailer's style is the head's.
-        let plain = pen.attrs & !super::cell::ATTR_PROTECTED == 0;
+        let plain = pen.attrs & !(super::cell::ATTR_PROTECTED | ATTR_DEFAULT_COLORS) == 0;
         let mut trailer_id = plain.then_some(head_id);
         let row = self.screen[y].cells_mut();
         let (mut x, mut used) = (x0, 0);
@@ -2530,7 +2525,7 @@ impl Grid {
         let blank_needed =
             (x >= 1 && row[x].is_wide_trailer()) || (end < row.len() && row[end].is_wide_trailer());
         if blank_needed {
-            let blank = self.pack(Cell::blank());
+            let blank = self.default_packed();
             let row = self.screen[y].cells_mut();
             if x >= 1 && row[x].is_wide_trailer() {
                 row[x - 1] = blank;
@@ -2789,11 +2784,8 @@ impl Grid {
         Cell {
             ch,
             cluster: 0,
-            fg: self.default_fg,
-            bg: self.default_bg,
-            flags: crate::cell::ATTR_DIM | crate::cell::ATTR_ITALIC,
-            link: 0,
-            underline_color: self.default_fg,
+            flags: crate::cell::ATTR_DIM | crate::cell::ATTR_ITALIC | ATTR_DEFAULT_COLORS,
+            ..self.default_cell()
         }
     }
 
@@ -3002,8 +2994,8 @@ impl Grid {
         };
         let mut out = format!(
             "<pre style=\"font-family:monospace;background:{};color:{}\">",
-            hex(self.default_bg),
-            hex(self.default_fg)
+            hex(self.default_bg()),
+            hex(self.default_fg())
         );
         for row in start.1..=end.1 {
             let (cells, _) = self.phys_row(row);
@@ -3042,7 +3034,7 @@ impl Grid {
                     }
                     let (fg, bg, flags) = style;
                     let mut css = format!("color:{}", hex(fg));
-                    if bg != self.default_bg {
+                    if bg != self.default_bg() {
                         css.push_str(&format!(";background:{}", hex(bg)));
                     }
                     if flags & super::cell::ATTR_BOLD != 0 {
@@ -3360,7 +3352,10 @@ impl Grid {
     /// cleared regions.
     fn erase_cell(&self) -> Cell {
         let mut c = self.default_cell();
-        c.bg = self.erase_bg.unwrap_or(self.default_bg);
+        if let Some(bg) = self.erase_bg {
+            c.bg = bg;
+            c.flags &= !crate::cell::ATTR_BG_DEFAULT;
+        }
         c
     }
 
@@ -3398,10 +3393,23 @@ impl Grid {
     /// A blank cell in the default colors, for fills that are not erases
     /// (resize, theme application, full reset).
     fn default_cell(&self) -> Cell {
-        let mut c = Cell::blank();
-        c.fg = self.default_fg;
-        c.bg = self.default_bg;
-        c
+        let d = self.styles.defaults();
+        Cell {
+            fg: d.fg,
+            bg: d.bg,
+            underline_color: d.fg,
+            ..Cell::default_blank()
+        }
+    }
+
+    /// The default foreground (OSC 10), which cells marked default show.
+    fn default_fg(&self) -> u32 {
+        self.styles.defaults().fg
+    }
+
+    /// The default background (OSC 11), which cells marked default show.
+    fn default_bg(&self) -> u32 {
+        self.styles.defaults().bg
     }
 
     /// Set the background erases fill with (see [`Grid::erase_cell`]):
@@ -3410,12 +3418,20 @@ impl Grid {
         self.erase_bg = bg;
     }
 
-    /// Update the default foreground/background/cursor colors (OSC 10/11/12).
-    /// Mirrors the parser's palette so subsequent erases fill with the new
-    /// background and the windowed cursor paints in the new cursor color.
+    /// Update the default foreground/background/cursor colors (OSC 10/11/12
+    /// and their resets). Mirrors the parser's palette so subsequent erases
+    /// fill with the new background and the windowed cursor paints in the new
+    /// cursor color. Every cell whose colour is marked default
+    /// ([`crate::ATTR_FG_DEFAULT`] / [`crate::ATTR_BG_DEFAULT`]) follows, on
+    /// screen and in history; colours the child chose do not.
     pub(crate) fn set_default_colors(&mut self, fg: u32, bg: u32, cursor: u32) {
-        self.default_fg = fg;
-        self.default_bg = bg;
+        let defaults = Defaults { fg, bg };
+        if self.styles.defaults() != defaults {
+            self.styles.set_defaults(defaults);
+            self.reset_damage();
+            self.touch_hist();
+            self.epoch += 1;
+        }
         if self.cursor_color != cursor {
             self.cursor_color = cursor;
             // Repaint the cursor cell's row so a pure OSC 12 change shows.
@@ -3506,17 +3522,21 @@ impl Grid {
     /// new defaults. Truecolor/256-cube colors pass through untouched (we
     /// can't know they meant "the theme's red"). Full repaint requested.
     pub fn retheme(&mut self, old: &super::Theme, new: &super::Theme) {
-        let map = |c: &mut u32| *c = super::color::remap(*c, old, new);
+        let map = |c: u32| super::color::remap(c, old, new);
         // Cells hold style ids, so only the table changes; styles that become
-        // equal merge, and only then are the cells rewritten.
+        // equal merge, and only then are the cells rewritten. Cells in the
+        // default colours follow the new defaults without a remap.
         self.blank_row.clear();
-        if let Some(remap) = self.styles.retheme(|c| super::color::remap(c, old, new)) {
+        if let Some(remap) = self.styles.retheme(map) {
             self.apply_remap(&remap);
         }
-        map(&mut self.default_fg);
-        map(&mut self.default_bg);
+        let d = self.styles.defaults();
+        self.styles.set_defaults(Defaults {
+            fg: map(d.fg),
+            bg: map(d.bg),
+        });
         if let Some(bg) = &mut self.erase_bg {
-            map(bg);
+            *bg = map(*bg);
         }
         self.cursor_color = super::color::remap(self.cursor_color, old, new);
         self.reset_damage();
@@ -4077,7 +4097,7 @@ impl Grid {
     /// Screen-alignment test (`DECALN`, `ESC # 8`): fill every cell with `E` and
     /// home the cursor. Used to check character positioning.
     pub(crate) fn fill_alignment(&mut self) {
-        let mut e = Cell::blank();
+        let mut e = self.default_cell();
         e.ch = 'E';
         let e = self.pack(e);
         self.prime_blank_row(e);
@@ -4153,8 +4173,8 @@ impl Grid {
     /// Marks the bottom row dirty so the next frame composites it.
     #[cfg(feature = "l13")]
     pub fn set_status_line(&mut self, text: String, fg: Option<u32>, bg: Option<u32>) {
-        let fg = fg.unwrap_or(self.default_fg);
-        let bg = bg.unwrap_or(self.default_bg);
+        let fg = fg.unwrap_or(self.default_fg());
+        let bg = bg.unwrap_or(self.default_bg());
         self.status_line = Some(StatusLine::new(text, fg, bg, self.cols));
         if let Some(y) = self.rows.checked_sub(1) {
             self.touch(y);
@@ -4209,7 +4229,7 @@ impl Grid {
     /// mode-2031 reports. Derived from the live default background, so it
     /// tracks theme changes with no extra state.
     pub fn appearance_is_dark(&self) -> bool {
-        super::color::luminance(self.default_bg) < 0.5
+        super::color::luminance(self.default_bg()) < 0.5
     }
 
     /// The Contour color-scheme report (`CSI ? 997 ; 1|2 n`): `1` dark,
@@ -4306,7 +4326,7 @@ impl Grid {
             let ch = |sh: u32| (((a >> sh) & 0xFF) * 2 + ((b >> sh) & 0xFF)) / 3;
             (ch(16) << 16) | (ch(8) << 8) | ch(0)
         };
-        Some((first, len, mix(self.default_fg, self.default_bg)))
+        Some((first, len, mix(self.default_fg(), self.default_bg())))
     }
 
     /// Store a Kitty image by id (`a=t`/`a=T`), bounded: a 17th image (or
@@ -5659,8 +5679,8 @@ impl crate::checkpoint::Wire for Grid {
         crate::checkpoint::Wire::write(&self.left_margin, w)?;
         crate::checkpoint::Wire::write(&self.right_margin, w)?;
         crate::checkpoint::Wire::write(&self.insert_mode, w)?;
-        crate::checkpoint::Wire::write(&self.default_fg, w)?;
-        crate::checkpoint::Wire::write(&self.default_bg, w)?;
+        crate::checkpoint::Wire::write(&self.default_fg(), w)?;
+        crate::checkpoint::Wire::write(&self.default_bg(), w)?;
         crate::checkpoint::Wire::write(&self.erase_bg, w)?;
         crate::checkpoint::Wire::write(&self.cursor_color, w)?;
         crate::checkpoint::Wire::write(&self.cursor_shape, w)?;
@@ -5725,8 +5745,10 @@ impl crate::checkpoint::Wire for Grid {
         grid.left_margin = crate::checkpoint::Wire::read(r)?;
         grid.right_margin = crate::checkpoint::Wire::read(r)?;
         grid.insert_mode = crate::checkpoint::Wire::read(r)?;
-        grid.default_fg = crate::checkpoint::Wire::read(r)?;
-        grid.default_bg = crate::checkpoint::Wire::read(r)?;
+        let defaults = Defaults {
+            fg: crate::checkpoint::Wire::read(r)?,
+            bg: crate::checkpoint::Wire::read(r)?,
+        };
         grid.erase_bg = crate::checkpoint::Wire::read(r)?;
         grid.cursor_color = crate::checkpoint::Wire::read(r)?;
         grid.cursor_shape = crate::checkpoint::Wire::read(r)?;
@@ -5745,6 +5767,7 @@ impl crate::checkpoint::Wire for Grid {
         }
         r.charge(grid.table_cache_cost())?;
         grid.styles = r.take_styles();
+        grid.styles.set_defaults(defaults);
         grid.links_arc = grid.links.clone().into();
         grid.rebuild_cluster_caches();
         r.charge(grid.rows)?;
