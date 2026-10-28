@@ -2268,6 +2268,68 @@ fn mode_1049_saves_the_rendition_apart_from_the_alt_screens_own_decsc() {
     assert_eq!(g.row(0)[0].fg, 0x800000, "1049 restored the primary's red");
 }
 
+/// The colour and column of the glyph `p` writes next at the cursor.
+fn next_glyph(g: &mut Grid, p: &mut AnsiParser) -> (u32, usize) {
+    let x = g.cursor.0;
+    p.advance(g, b"x");
+    (g.row(0)[x].fg, x)
+}
+
+#[test]
+fn mode_1049_keeps_the_primary_decsc_register() {
+    // A red save at column 1, then blue; 1049 in and out must leave the
+    // register as it was, as the grid does for the cursor.
+    let mut g = Grid::new(8, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[2G\x1b[31m\x1b7\x1b[5G\x1b[34m\x1b[?1049h\x1b[32m\x1b[?1049l",
+    );
+    assert_eq!(
+        next_glyph(&mut g, &mut p),
+        (0x000080, 4),
+        "1049 restored blue"
+    );
+    p.advance(&mut g, b"\x1b8");
+    assert_eq!(next_glyph(&mut g, &mut p), (0x800000, 1), "ESC 8 still red");
+}
+
+#[test]
+fn the_entry_mode_decides_the_restore_for_pen_and_cursor_alike() {
+    // Entered by 1049, left by 47: cursor and pen both come back.
+    let mut g = Grid::new(8, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[3G\x1b[31m\x1b[?1049h\x1b[6G\x1b[34m\x1b[?47l",
+    );
+    assert_eq!(next_glyph(&mut g, &mut p), (0x800000, 2));
+    // Entered by 47, left by 1049: neither comes back.
+    let mut g = Grid::new(8, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[3G\x1b[31m\x1b[?47h\x1b[6G\x1b[34m\x1b[?1049l",
+    );
+    assert_eq!(next_glyph(&mut g, &mut p), (0x000080, 5));
+}
+
+#[test]
+fn checkpoint_mid_alt_screen_keeps_the_1049_entry() {
+    let mut g = Grid::new(8, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[2G\x1b[31m\x1b7\x1b[4G\x1b[32m\x1b[?1049h\x1b[34m\x1b7",
+    );
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b[?1049l");
+    assert_eq!(next_glyph(&mut g, &mut p), (0x008000, 3), "entry state");
+    p.advance(&mut g, b"\x1b8");
+    assert_eq!(next_glyph(&mut g, &mut p), (0x800000, 1), "entry register");
+}
+
 #[test]
 fn decstr_and_ris_forget_the_saved_rendition() {
     for reset in [&b"\x1b[!p"[..], b"\x1bc"] {
@@ -5245,6 +5307,47 @@ fn retheme_preserves_truecolor_and_child_overrides() {
     // And a reset returns to the *new* theme, not the old one.
     p.advance(&mut g, b"\x1b]104;2\x07\x1b[32mz");
     assert_eq!(cells(&g)[3].fg, 0x444444, "reset lands on the new theme");
+}
+
+#[test]
+fn retheme_follows_palette_provenance_not_equal_rgb() {
+    // Old palette 0 equals the old default background; the new theme splits
+    // them. SGR 30 text, old and new, follows palette 0; RGB equal to it
+    // follows the background, as an explicit colour equal to it always has.
+    let mut old = test_theme();
+    old.palette16[0] = old.bg;
+    let mut g = Grid::new(8, 1);
+    g.apply_theme(&old);
+    let mut p = AnsiParser::with_theme(old);
+    p.advance(&mut g, b"\x1b[30ma\x1b[38;2;29;31;33mb\x1b[30m");
+    let mut new = Theme {
+        bg: 0x222222,
+        ..old
+    };
+    new.palette16[0] = 0x333333;
+    let was = p.retheme(new);
+    g.retheme(&was, &new);
+    p.advance(&mut g, b"c");
+    let fg: Vec<u32> = g.row(0)[..3].iter().map(|c| c.fg).collect();
+    assert_eq!(fg, [0x333333, 0x222222, 0x333333]);
+}
+
+#[test]
+fn retheme_remaps_saved_pens_like_the_live_one() {
+    let mut g = Grid::new(8, 1);
+    g.apply_theme(&test_theme());
+    let mut p = AnsiParser::with_theme(test_theme());
+    // An explicit RGB equal to the old red, saved; then palette red, saved
+    // by 1049 entry.
+    p.advance(&mut g, b"\x1b[38;2;204;102;102m\x1b7\x1b[31m\x1b[?1049h");
+    let mut new = test_theme();
+    new.palette16[1] = 0x333333;
+    let was = p.retheme(new);
+    g.retheme(&was, &new);
+    p.advance(&mut g, b"\x1b[?1049l");
+    assert_eq!(next_glyph(&mut g, &mut p).0, 0x333333, "1049 entry pen");
+    p.advance(&mut g, b"\x1b8");
+    assert_eq!(next_glyph(&mut g, &mut p).0, 0x333333, "DECSC pen");
 }
 
 #[test]

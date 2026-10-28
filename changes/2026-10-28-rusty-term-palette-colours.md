@@ -8,10 +8,15 @@ changelog: rusty_term recolours text drawn in palette colours when OSC 4 changes
   a palette colour (SGR 30-37, 90-97, 40-47, 100-107 and `38/48;5;n`), on both
   screens and in history, and BCE erases made in one. A colour given as RGB
   stays, even when it equals the entry. The pen and saved pens follow too.
-- **Fixed:** DECSC (`ESC 7`, `CSI s`) and DECSET 1049 save the pen, DECSCA
-  protection and the charsets with the cursor, one save per screen, as xterm
-  does; DECRC restores them, a saved default or palette colour taking its
-  current value. DECRC with nothing saved resets them.
+- **Fixed:** DECSC (`ESC 7`, `CSI s`) saves the pen, DECSCA protection and
+  the charsets with the cursor, and DECRC restores them, a saved default or
+  palette colour taking its current value; DECRC with nothing saved resets
+  them. `?1049` stashes them with the cursor and the DECSC register on entry
+  and restores all three when the screen it opened is left, by whichever
+  mode, exactly as the cursor is handled.
+- **Fixed:** a live theme switch recolours text drawn in a palette colour
+  by its entry, as the palette itself switches, rather than by the RGB it
+  happens to equal; saved pens are switched like the live one.
 - **Fixed:** the status line drawn in the default colours (L13) follows OSC
   10/11 and theme changes instead of keeping the colours it was set in.
 - **Changed:** the RTCP checkpoint is version 5, negotiated by the new mux

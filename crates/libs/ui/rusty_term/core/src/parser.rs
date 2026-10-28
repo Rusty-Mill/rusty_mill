@@ -12,7 +12,7 @@ use super::cell::{
     ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Pen, Source, UnderlineStyle,
 };
 use super::charset::Charset;
-use super::color::Palette;
+use super::color::{Palette, Theme};
 use super::grid::{CursorShape, Grid, LineAttr, alt_mode};
 use super::kitty;
 use super::osc;
@@ -126,10 +126,23 @@ pub struct AnsiParser {
     /// fg/bg/cursor. SGR color selectors resolve through it; OSC 4/10/11/12
     /// mutate it.
     palette: Palette,
-    /// What DECSC saved beside the cursor position (which the grid keeps),
-    /// for the primary screen (`[0]`) and the alternate one (`[1]`). `None`
-    /// until a save; DECRC then restores the reset state, as xterm does.
-    saved: [Option<SavedState>; 2],
+    /// What DECSC saved beside the cursor position, which the grid keeps in
+    /// its one register. `None` until a save; DECRC then restores the reset
+    /// state, as xterm does.
+    saved: Option<SavedState>,
+    /// What `?1049h` stashed, as the grid stashes the cursor and its DECSC
+    /// register: restored when the alternate screen it opened is left,
+    /// whatever mode leaves it. `None` outside a `?1049` alternate screen.
+    alt_entry: Option<AltEntry>,
+}
+
+/// The parser's side of a `?1049` alternate-screen entry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AltEntry {
+    /// The live state at entry, restored on exit.
+    state: SavedState,
+    /// The DECSC register at entry, put back on exit.
+    register: Option<SavedState>,
 }
 
 /// The rendition and character-set state DECSC / SCOSC / `?1049h` save and
@@ -402,7 +415,8 @@ impl AnsiParser {
             gl: 0,
             charset_slot: 0,
             palette,
-            saved: [None; 2],
+            saved: None,
+            alt_entry: None,
         }
     }
 
@@ -420,14 +434,16 @@ impl AnsiParser {
     /// old built-in value follow the new theme, while colors the child set
     /// itself (OSC 4/10/11/12) are kept — the child's choices outrank ours,
     /// exactly as they would have had the new theme been set at startup. The
-    /// pen's default and palette colours follow the new palette and its
-    /// explicit ones are remapped, so text typed next stays coherent.
+    /// pen's and the saved pens' default and palette colours follow the new
+    /// palette and their explicit ones are remapped, as [`Grid::retheme`]
+    /// treats cells, so text typed next stays coherent.
     pub fn retheme(&mut self, new: super::color::Theme) -> super::color::Theme {
         let old = self.palette.seed();
-        self.pen.fg = super::color::remap(self.pen.fg, &old, &new);
-        self.pen.bg = super::color::remap(self.pen.bg, &old, &new);
         self.palette.retheme(&old, &new);
-        self.pen = resolve_pen(self.pen, &self.palette);
+        self.pen = retheme_pen(self.pen, &old, &new, &self.palette);
+        for pen in saved_pens(&mut self.saved, &mut self.alt_entry) {
+            *pen = retheme_pen(*pen, &old, &new, &self.palette);
+        }
         old
     }
 
@@ -551,7 +567,7 @@ impl AnsiParser {
                         g.push_program_status(super::grid::StatusSignal::Reset);
                         self.charsets = [Charset::Ascii; 4];
                         self.gl = 0;
-                        self.saved = [None; 2];
+                        (self.saved, self.alt_entry) = (None, None);
                         self.sync_palette(g, &before);
                         self.last_char = None;
                         self.state = ParserState::Ground;
@@ -963,8 +979,8 @@ impl AnsiParser {
     fn sync_palette(&mut self, g: &mut Grid, before: &[u32; 256]) {
         if self.palette.colors() != before {
             self.pen = resolve_pen(self.pen, &self.palette);
-            for saved in self.saved.iter_mut().flatten() {
-                saved.pen = resolve_pen(saved.pen, &self.palette);
+            for pen in saved_pens(&mut self.saved, &mut self.alt_entry) {
+                *pen = resolve_pen(*pen, &self.palette);
             }
             g.repaint(|n| self.palette.index(usize::from(n)));
         }
@@ -1185,19 +1201,22 @@ impl AnsiParser {
                 // 47 / 1047 / 1049 select the alternate screen buffer; the mode
                 // governs cursor save/restore (only 1049). The leave path uses
                 // the mode stashed on entry, so the reset value doesn't matter.
-                // 1049 saves and restores the rendition with the cursor,
-                // in the primary screen's slot.
-                let decsc = mode == super::grid::AltMode::Dec1049;
+                // The rendition follows the cursor through the same stash.
                 if set {
-                    if decsc && !g.in_alt_screen() {
-                        self.save_state(g);
+                    if mode == super::grid::AltMode::Dec1049 && !g.in_alt_screen() {
+                        self.alt_entry = Some(AltEntry {
+                            state: self.state(),
+                            register: self.saved,
+                        });
                     }
                     g.enter_alt_screen(mode);
                 } else {
-                    let restore = decsc && g.in_alt_screen();
+                    let entered = g.alt_mode();
                     g.leave_alt_screen();
-                    if restore {
-                        self.restore_state(g);
+                    let entry = self.alt_entry.take();
+                    if let (Some(super::grid::AltMode::Dec1049), Some(entry)) = (entered, entry) {
+                        self.apply_state(g, Some(entry.state));
+                        self.saved = entry.register;
                     }
                 }
             } else if is_host_input_mode(param) {
@@ -1593,7 +1612,8 @@ impl AnsiParser {
                 self.last_char = None;
                 self.charsets = [Charset::Ascii; 4];
                 self.gl = 0;
-                self.saved = [None; 2];
+                // DECSTR keeps the alternate screen, so it keeps its entry.
+                self.saved = None;
                 self.sync_palette(g, &before);
             }
             b'q' if self.csi_intermediate == b'"' => {
@@ -1695,38 +1715,40 @@ impl AnsiParser {
     /// DECSC / SCOSC: save the cursor position and the rendition state.
     fn save_cursor(&mut self, g: &mut Grid) {
         g.save_cursor();
-        self.save_state(g);
+        self.saved = Some(self.state());
     }
 
     /// DECRC / SCORC: restore what [`Self::save_cursor`] saved.
     fn restore_cursor(&mut self, g: &mut Grid) {
         g.restore_cursor();
-        self.restore_state(g);
+        self.apply_state(g, self.saved);
     }
 
-    /// Save the pen, protection and charsets in the current screen's slot.
-    fn save_state(&mut self, g: &Grid) {
-        self.saved[usize::from(g.in_alt_screen())] = Some(SavedState {
+    /// The pen, protection and charsets, as DECSC saves them.
+    fn state(&self) -> SavedState {
+        SavedState {
             pen: self.pen,
             protected: self.protected,
             charsets: self.charsets,
             gl: self.gl,
-        });
+        }
     }
 
-    /// Restore the current screen's saved state, or the reset state if none
-    /// was saved. A saved default or palette colour takes its value now.
-    fn restore_state(&mut self, g: &mut Grid) {
-        let Some(saved) = self.saved[usize::from(g.in_alt_screen())] else {
-            self.reset_sgr();
-            self.protected = false;
-            self.charsets = [Charset::Ascii; 4];
-            self.gl = 0;
-            self.sync_erase_bg(g);
-            return;
-        };
-        self.pen = resolve_pen(saved.pen, &self.palette);
-        (self.protected, self.charsets, self.gl) = (saved.protected, saved.charsets, saved.gl);
+    /// Restore `state`, or the reset state for `None`. A saved default or
+    /// palette colour takes its value now.
+    fn apply_state(&mut self, g: &mut Grid, state: Option<SavedState>) {
+        match state {
+            Some(s) => {
+                self.pen = resolve_pen(s.pen, &self.palette);
+                (self.protected, self.charsets, self.gl) = (s.protected, s.charsets, s.gl);
+            }
+            None => {
+                self.reset_sgr();
+                self.protected = false;
+                self.charsets = [Charset::Ascii; 4];
+                self.gl = 0;
+            }
+        }
         self.sync_erase_bg(g);
     }
 
@@ -1853,6 +1875,35 @@ impl AnsiParser {
     }
 }
 
+/// Every pen held for later: the DECSC register and the `?1049` entry's
+/// state and register.
+fn saved_pens<'a>(
+    saved: &'a mut Option<SavedState>,
+    entry: &'a mut Option<AltEntry>,
+) -> impl Iterator<Item = &'a mut Pen> {
+    let (state, register) = match entry {
+        Some(e) => (Some(&mut e.state), e.register.as_mut()),
+        None => (None, None),
+    };
+    [saved.as_mut(), state, register]
+        .into_iter()
+        .flatten()
+        .map(|s| &mut s.pen)
+}
+
+/// `pen` after a theme change from `old` to `new`: explicit RGB remapped as
+/// [`super::color::remap`] does, default and palette colours taken from
+/// `palette`, which has already switched.
+fn retheme_pen(mut pen: Pen, old: &Theme, new: &Theme, palette: &Palette) -> Pen {
+    if !pen.fg_is_default() && pen.fg_index == 0 {
+        pen.fg = super::color::remap(pen.fg, old, new);
+    }
+    if !pen.bg_is_default() && pen.bg_index == 0 {
+        pen.bg = super::color::remap(pen.bg, old, new);
+    }
+    resolve_pen(pen, palette)
+}
+
 /// `pen` with its default and palette colours taken from `palette`, as
 /// they read now; explicit RGB is kept.
 fn resolve_pen(mut pen: Pen, palette: &Palette) -> Pen {
@@ -1942,10 +1993,12 @@ crate::checkpoint::fields!(
         gl,
         charset_slot,
         palette,
-        saved
+        saved,
+        alt_entry
     ]
 );
 crate::checkpoint::fields!(SavedState, [pen, protected, charsets, gl]);
+crate::checkpoint::fields!(AltEntry, [state, register]);
 crate::checkpoint::variants!(
     ParserState,
     [
@@ -1956,7 +2009,10 @@ crate::checkpoint::variants!(
 impl AnsiParser {
     pub(crate) fn validate_checkpoint(&self) -> crate::checkpoint::Result<()> {
         if self.gl > 1
-            || self.saved.iter().flatten().any(|s| s.gl > 1)
+            || self.saved.is_some_and(|s| s.gl > 1)
+            || self
+                .alt_entry
+                .is_some_and(|e| e.state.gl > 1 || e.register.is_some_and(|s| s.gl > 1))
             || self.charset_slot > 3
             || self.utf8_remaining > 3
             || (self.state == ParserState::Utf8 && self.utf8_remaining == 0)

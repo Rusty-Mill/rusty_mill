@@ -474,19 +474,27 @@ impl StyleTable {
         Some(self.rebuild(|i| !is_free[i], |i| i))
     }
 
-    /// Map every entry's colours through `map` (a theme change). Entries that
+    /// Map every entry's explicit colours through `map` and its palette
+    /// colours through `entry` (a theme change). Entries that
     /// become equal merge into the lowest id; the returned remap, when some
     /// merged, must be applied to every cell.
-    pub(crate) fn retheme(&mut self, map: impl Fn(u32) -> u32) -> Option<Remap> {
+    pub(crate) fn retheme(
+        &mut self,
+        map: impl Fn(u32) -> u32,
+        entry: impl Fn(u8, u32) -> u32,
+    ) -> Option<Remap> {
         // A default colour is stored as 0 and resolved on read: only the
-        // colours the child chose are remapped.
+        // colours the child chose are remapped. A palette colour goes
+        // through `entry` with its entry, so it follows the palette rather
+        // than whatever RGB it happens to equal.
+        let colour = |c: u32, tag: u16, default: bool| match Source::entry(tag) {
+            _ if default => c,
+            Some(n) => entry(n, c),
+            None => map(c),
+        };
         self.restyle(|style| {
-            if style.attrs & ATTR_FG_DEFAULT == 0 {
-                style.fg = map(style.fg);
-            }
-            if style.attrs & ATTR_BG_DEFAULT == 0 {
-                style.bg = map(style.bg);
-            }
+            style.fg = colour(style.fg, style.fg_index, style.attrs & ATTR_FG_DEFAULT != 0);
+            style.bg = colour(style.bg, style.bg_index, style.attrs & ATTR_BG_DEFAULT != 0);
         })
     }
 
@@ -664,13 +672,15 @@ mod tests {
         let mut t = StyleTable::default();
         let [a, b, c] = [1, 2, 3].map(|n| t.intern(fg(n)));
         // 2 becomes 1: b merges into a; 3 is untouched.
-        let remap = t.retheme(|v| if v == 2 { 1 } else { v }).expect("a merge");
+        let remap = t
+            .retheme(|v| if v == 2 { 1 } else { v }, |_, c| c)
+            .expect("a merge");
         assert_eq!(remap.get(b), remap.get(a));
         assert_eq!(t.get(remap.get(c)), fg(3));
         assert_eq!(t.len(), 3);
         assert_eq!(t.intern(fg(1)), remap.get(a), "one id for the merged style");
         // A retheme that merges nothing keeps every id.
-        assert!(t.retheme(|v| v + 10).is_none());
+        assert!(t.retheme(|v| v + 10, |_, c| c).is_none());
         let moved = CellStyle {
             bg: fg(3).bg + 10,
             ..fg(13)
@@ -693,7 +703,7 @@ mod tests {
             (DEFAULT_FG, DEFAULT_BG)
         );
         // A retheme maps explicit colours only; the defaults are set apart.
-        assert!(t.retheme(|v| v + 1).is_none());
+        assert!(t.retheme(|v| v + 1, |_, c| c).is_none());
         assert_eq!(t.get(blank).fg, 7);
         assert_eq!(t.get(explicit).fg, DEFAULT_FG + 1);
     }

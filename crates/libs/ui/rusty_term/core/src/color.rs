@@ -232,6 +232,18 @@ pub(crate) fn remap(c: u32, old: &Theme, new: &Theme) -> u32 {
     c
 }
 
+/// Remap palette entry `n`'s colour `c` from `old`'s theme to `new`'s, by
+/// [`Palette::retheme`]'s rule: an entry still at its old built-in value
+/// follows the new theme; one the child changed, or past the 16 a theme
+/// sets, stays.
+pub(crate) fn remap_entry(n: u8, c: u32, old: &Theme, new: &Theme) -> u32 {
+    let n = usize::from(n);
+    match (old.palette16.get(n), new.palette16.get(n)) {
+        (Some(&was), Some(&now)) if was == c => now,
+        _ => c,
+    }
+}
+
 /// Convert an xterm 256-color index to `0xRRGGBB`.
 ///
 /// 0-15 map to the base palette, 16-231 form a 6×6×6 color cube, and 232-255

@@ -48,7 +48,7 @@ followed by version byte `5`, then Grid fields and AnsiParser fields in the
 explicit order in their `Wire` implementations. Field order is part of v5;
 changing it or its meaning requires another version. v5 adds palette tags to
 line styles, the pen and the erase colour (so OSC 4 recolours restored text),
-the per-screen DECSC pen, protection and charsets, and status-line colours
+the DECSC pen, protection and charsets and the `?1049` entry stash, and status-line colours
 that may follow the defaults. This is an independent
 continuation format, not a reinterpretation of RTSN's drawable snapshot.
 

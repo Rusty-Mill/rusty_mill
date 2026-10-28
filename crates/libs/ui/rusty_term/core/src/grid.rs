@@ -9,8 +9,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use super::cell::{
-    ATTR_BG_DEFAULT, ATTR_DEFAULT_COLORS, ATTR_FG_DEFAULT, Cell, PackedCell, Pen, WIDE_TRAILER,
-    char_width,
+    ATTR_BG_DEFAULT, ATTR_DEFAULT_COLORS, ATTR_FG_DEFAULT, Cell, PackedCell, Pen, Source,
+    WIDE_TRAILER, char_width,
 };
 use super::style::{CellStyle, Defaults, StyleId, StyleTable};
 use unicode_segmentation::UnicodeSegmentation;
@@ -3506,15 +3506,18 @@ impl Grid {
     /// Live theme switch (config reload): remap every color that resolves to
     /// an `old`-theme entry — across the live screen, scrollback, and the
     /// stashed primary screen — to its `new`-theme counterpart, and adopt the
-    /// new defaults. Truecolor/256-cube colors pass through untouched (we
-    /// can't know they meant "the theme's red"). Full repaint requested.
+    /// new defaults. A palette colour (SGR 30-37 and the like) follows its
+    /// entry as the parser's palette does; an explicit RGB one is remapped
+    /// only when it equals an old theme colour, and truecolor/256-cube
+    /// colors otherwise pass through. Full repaint requested.
     pub fn retheme(&mut self, old: &super::Theme, new: &super::Theme) {
         let map = |c: u32| super::color::remap(c, old, new);
         // Cells hold style ids, so only the table changes; styles that become
         // equal merge, and only then are the cells rewritten. Cells in the
         // default colours follow the new defaults without a remap.
         self.blank_row.clear();
-        if let Some(remap) = self.styles.retheme(map) {
+        let entry = |n: u8, c: u32| super::color::remap_entry(n, c, old, new);
+        if let Some(remap) = self.styles.retheme(map, entry) {
             self.apply_remap(&remap);
         }
         let d = self.styles.defaults();
@@ -3522,8 +3525,8 @@ impl Grid {
             fg: map(d.fg),
             bg: map(d.bg),
         });
-        if let Some((bg, _)) = &mut self.erase_bg {
-            *bg = map(*bg);
+        if let Some((bg, tag)) = &mut self.erase_bg {
+            *bg = Source::entry(*tag).map_or_else(|| map(*bg), |n| entry(n, *bg));
         }
         self.relayout_status();
         self.cursor_color = super::color::remap(self.cursor_color, old, new);
@@ -3732,6 +3735,11 @@ impl Grid {
             self.reset_scroll_region();
             self.touch_all();
         }
+    }
+
+    /// The mode that opened the active alternate screen, if one is.
+    pub(crate) fn alt_mode(&self) -> Option<AltMode> {
+        self.primary.as_ref().map(|p| p.mode)
     }
 
     /// Whether the alternate screen buffer (`?47`/`?1047`/`?1049`) is active.
