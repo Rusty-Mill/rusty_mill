@@ -27,7 +27,11 @@ fn samples(method: &Method) -> Vec<(&'static str, Value)> {
     method
         .params
         .iter()
-        .map(|p| (p.name, sample(p.ty)))
+        .map(|p| match p.name {
+            // Text, but one of four words.
+            "side" => (p.name, Value::Text("right".into())),
+            _ => (p.name, sample(p.ty)),
+        })
         .collect()
 }
 
@@ -82,7 +86,7 @@ fn catalog_covers_each_request_type_once() {
     let unique: BTreeSet<u8> = types.iter().copied().collect();
     assert_eq!(unique.len(), types.len(), "two methods build one type");
     // 0x0d was Capture; 0x0f is BlockCall, 0x10 Rename.
-    let expected = (0x02..=0x11).filter(|t| ![0x0d, 0x0f, 0x10].contains(t));
+    let expected = (0x02..=0x14).filter(|t| ![0x0d, 0x0f, 0x10].contains(t));
     assert_eq!(unique, expected.collect());
     assert!(block.iter().all(|m| ty(m) == 0x0f));
     assert_eq!(renames.len(), 4);
@@ -145,7 +149,7 @@ fn only_create_methods_return_an_id() {
         let creates = matches!(method.returns, Returns::Created(_));
         assert_eq!(
             creates,
-            method.name.starts_with("create-"),
+            method.name.starts_with("create-") || method.name == "split-block",
             "{}",
             method.name
         );
@@ -179,6 +183,9 @@ fn methods_need_the_features_their_messages_are_gated_by() {
         "disconnect-client",
     ] {
         assert_eq!(needs(name), Features::LABELS, "{name}");
+    }
+    for name in ["split-block", "zoom-block", "unzoom-window"] {
+        assert_eq!(needs(name), Features::LAYOUT, "{name}");
     }
 }
 
@@ -230,7 +237,12 @@ fn optional_parameters_add_their_features_only_when_given() {
         .filter(|p| p.presence != Presence::Required)
         .map(|p| p.name)
         .collect();
-    assert_eq!(optional, ["command", "arg", "cwd", "trim", "unwrap", "vt"]);
+    assert_eq!(
+        optional,
+        [
+            "command", "arg", "cwd", "command", "arg", "cwd", "trim", "unwrap", "vt"
+        ]
+    );
     let format = method("terminal.format").expect("format");
     assert_eq!(format.needs_for(["block", "history"]), Features::BLOCK_CALL);
     assert_eq!(
@@ -376,4 +388,41 @@ fn rejects_a_zero_size_naming_the_zero_side() {
 fn unknown_method_is_none() {
     assert!(method("hello").is_none());
     assert!(method("").is_none());
+}
+
+#[test]
+fn split_names_its_side_and_launch() {
+    let method = method("split-block").expect("split-block");
+    let args = [
+        ("block", Value::Id(id(1))),
+        ("side", Value::Text("up".into())),
+        ("command", Value::Text("top".into())),
+    ];
+    assert_eq!(
+        method.request(3, &args),
+        Ok(Message::Split {
+            req: 3,
+            block: BlockId::from_uuid(id(1)),
+            side: rusty_mux_core::Side::Up,
+            launch: Launch {
+                program: Some(Program {
+                    command: "top".into(),
+                    args: Vec::new()
+                }),
+                cwd: None
+            },
+        })
+    );
+    let bad = [
+        ("block", Value::Id(id(1))),
+        ("side", Value::Text("north".into())),
+    ];
+    assert!(matches!(
+        method.request(3, &bad),
+        Err(CallError::Invalid { param: "side", .. })
+    ));
+    assert_eq!(
+        method.needs_for(["block", "side", "cwd"]),
+        Features::LAYOUT.union(Features::LAUNCH)
+    );
 }

@@ -2,8 +2,8 @@
 //!
 //! The server owns one PTY per [`Block`]. A [`Window`] groups blocks and a
 //! [`Session`] groups windows. A [`Client`] is one connection, attached to at
-//! most one block. Splits and tabs are drawn by clients, so the server keeps
-//! no pane tree. Each block takes input from a single writer: the client
+//! most one block. Each window keeps a [`Layout`], a split tree of its
+//! blocks, and may zoom one of them; clients draw it. Each block takes input from a single writer: the client
 //! holding its input lease. Every entity has a name, empty unless given,
 //! that any client may change.
 //!
@@ -29,10 +29,12 @@ mod entity;
 mod error;
 mod event;
 mod id;
+mod layout;
 mod mux;
 
 pub use entity::{Block, Client, Session, Size, Window};
 pub use error::Error;
 pub use event::{Event, ExitStatus, Progress};
 pub use id::{BlockId, ClientId, EntityId, SessionId, WindowId};
+pub use layout::{Axis, Layout, MAX_DEPTH, ParseError, Rect, Share, Side};
 pub use mux::{MAX_NAME, Mux};

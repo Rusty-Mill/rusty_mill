@@ -27,7 +27,7 @@
 
 use std::fmt;
 
-use rusty_mux_core::{BlockId, ClientId, EntityId, SessionId, Size, WindowId};
+use rusty_mux_core::{BlockId, ClientId, EntityId, SessionId, Side, Size, WindowId};
 use rusty_uuid::Uuid;
 
 use crate::{Features, Launch, Message, Program};
@@ -420,6 +420,15 @@ impl Args<'_> {
         })
     }
 
+    /// The `side` parameter: `left`, `right`, `up` or `down`.
+    fn side(&self) -> Result<Side, CallError> {
+        let text = self.text("side")?;
+        text.parse().map_err(|_| CallError::Invalid {
+            param: "side",
+            why: format!("`{text}` is not left, right, up or down"),
+        })
+    }
+
     fn block(&self) -> Result<BlockId, CallError> {
         self.uuid("block", Entity::Block).map(BlockId::from_uuid)
     }
@@ -468,6 +477,21 @@ const NEW_NAME: Param = required(
     "name",
     Ty::Text,
     "The new name, at most 256 bytes; empty clears it.",
+);
+const COMMAND: Param = launch(
+    "command",
+    Ty::Text,
+    "The program to run instead of the shell; a bare name is looked up in the server's PATH.",
+);
+const ARG: Param = launch(
+    "arg",
+    Ty::Words,
+    "The command's arguments, in order; repeat the flag for each.",
+);
+const CWD: Param = launch(
+    "cwd",
+    Ty::Text,
+    "The absolute path to start in, instead of the server's directory.",
 );
 const COLS: Param = required("cols", Ty::Cells, "Width in cells.");
 const ROWS: Param = required("rows", Ty::Cells, "Height in cells.");
@@ -523,21 +547,9 @@ pub static CATALOG: &[Method] = &[
             ),
             COLS,
             ROWS,
-            launch(
-                "command",
-                Ty::Text,
-                "The program to run instead of the shell; a bare name is looked up in the server's PATH.",
-            ),
-            launch(
-                "arg",
-                Ty::Words,
-                "The command's arguments, in order; repeat the flag for each.",
-            ),
-            launch(
-                "cwd",
-                Ty::Text,
-                "The absolute path to start in, instead of the server's directory.",
-            ),
+            COMMAND,
+            ARG,
+            CWD,
         ],
         needs: Features::NONE,
         returns: Returns::Created(Entity::Block),
@@ -692,6 +704,71 @@ pub static CATALOG: &[Method] = &[
             Ok(Message::Disconnect {
                 req,
                 client: ClientId::from_uuid(a.uuid("client", Entity::Client)?),
+            })
+        },
+    },
+    Method {
+        name: "split-block",
+        doc: "Start a program, the server's shell unless `command` names one, in a new block \
+              beside another, splitting its place in half; unzooms the window.",
+        params: &[
+            required(
+                "block",
+                Ty::Id(Entity::Block),
+                "The block to split; the new one takes part of its size.",
+            ),
+            required(
+                "side",
+                Ty::Text,
+                "Where the new block goes: `left`, `right`, `up` or `down`.",
+            ),
+            COMMAND,
+            ARG,
+            CWD,
+        ],
+        needs: Features::LAYOUT,
+        returns: Returns::Created(Entity::Block),
+        build: |req, a| {
+            Ok(Message::Split {
+                req,
+                block: a.block()?,
+                side: a.side()?,
+                launch: a.launch()?,
+            })
+        },
+    },
+    Method {
+        name: "zoom-block",
+        doc: "Show a block alone over its whole window, until it is unzoomed or closed, \
+              or a block is split off in the window.",
+        params: &[required(
+            "block",
+            Ty::Id(Entity::Block),
+            "The block to zoom.",
+        )],
+        needs: Features::LAYOUT,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::Zoom {
+                req,
+                block: a.block()?,
+            })
+        },
+    },
+    Method {
+        name: "unzoom-window",
+        doc: "Show every block of a window again.",
+        params: &[required(
+            "window",
+            Ty::Id(Entity::Window),
+            "The window to unzoom.",
+        )],
+        needs: Features::LAYOUT,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::Unzoom {
+                req,
+                window: WindowId::from_uuid(a.uuid("window", Entity::Window)?),
             })
         },
     },

@@ -1,7 +1,8 @@
 //! The messages and their field layouts.
 
 use rusty_mux_core::{
-    BlockId, ClientId, EntityId, Event, ExitStatus, Progress, SessionId, Size, WindowId,
+    BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Progress, SessionId, Side, Size,
+    WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::{Reader, Writer};
@@ -68,6 +69,11 @@ impl Features {
     /// events (skipped for a client without it); clients in the reply to
     /// [`Message::List`]; and [`Message::Disconnect`].
     pub const LABELS: Self = Self(1 << 14);
+    /// Window layouts: [`Message::Split`], [`Message::Zoom`],
+    /// [`Message::Unzoom`] and [`Event::LayoutChanged`] (skipped for a
+    /// client without it). A window entry carries its layout regardless,
+    /// since older decoders skip the fields.
+    pub const LAYOUT: Self = Self(1 << 15);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -139,6 +145,10 @@ pub enum Entry {
         window: WindowId,
         session: SessionId,
         name: String,
+        /// `None` while it has no blocks, or from a server without
+        /// [`Features::LAYOUT`].
+        layout: Option<Layout>,
+        zoomed: Option<BlockId>,
     },
     Block {
         block: BlockId,
@@ -256,6 +266,28 @@ pub enum Message {
         req: u64,
         client: ClientId,
     },
+    /// Starts a block beside `block` in its window, splitting its place in
+    /// half, and unzooms the window. Answered with the new block's id.
+    /// Negotiated with [`Features::LAYOUT`]; `launch` as for
+    /// [`Message::CreateBlock`].
+    Split {
+        req: u64,
+        block: BlockId,
+        side: Side,
+        launch: Launch,
+    },
+    /// Shows `block` alone over its window. Negotiated with
+    /// [`Features::LAYOUT`].
+    Zoom {
+        req: u64,
+        block: BlockId,
+    },
+    /// Shows every block of `window` again. Negotiated with
+    /// [`Features::LAYOUT`].
+    Unzoom {
+        req: u64,
+        window: WindowId,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -353,8 +385,13 @@ const ARGV: u32 = 30;
 const CWD: u32 = 31;
 /// A process id.
 const PID: u32 = 32;
-// IDs 1..=PID are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = PID as usize;
+/// A [`Side`]: 0 left, 1 right, 2 up, 3 down.
+const SIDE: u32 = 33;
+/// A [`Layout`] in its text form; empty for none.
+const LAYOUT: u32 = 34;
+const ZOOMED: u32 = 35;
+// IDs 1..=ZOOMED are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = ZOOMED as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -374,6 +411,9 @@ mod ty {
     pub const BLOCK_CALL: u8 = 0x0f;
     pub const RENAME: u8 = 0x10;
     pub const DISCONNECT: u8 = 0x11;
+    pub const SPLIT: u8 = 0x12;
+    pub const ZOOM: u8 = 0x13;
+    pub const UNZOOM: u8 = 0x14;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -460,6 +500,24 @@ impl Message {
             M::Disconnect { req, client } => {
                 out.varint(REQ, *req).uuid(CLIENT, client.uuid());
                 ty::DISCONNECT
+            }
+            M::Split {
+                req,
+                block,
+                side,
+                launch,
+            } => {
+                let out = out
+                    .varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .varint(SIDE, side_wire(*side));
+                put_launch(out, launch);
+                ty::SPLIT
+            }
+            M::Zoom { req, block } => req_block(out, *req, *block, ty::ZOOM),
+            M::Unzoom { req, window } => {
+                out.varint(REQ, *req).uuid(WINDOW, window.uuid());
+                ty::UNZOOM
             }
             M::Welcome {
                 features,
@@ -600,6 +658,20 @@ impl Message {
             ty::DISCONNECT => M::Disconnect {
                 req: f.varint(REQ)?,
                 client: client(&f, CLIENT)?,
+            },
+            ty::SPLIT => M::Split {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                side: get_side(&f)?,
+                launch: get_launch(&f)?,
+            },
+            ty::ZOOM => M::Zoom {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+            },
+            ty::UNZOOM => M::Unzoom {
+                req: f.varint(REQ)?,
+                window: window(&f, WINDOW)?,
             },
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
@@ -764,6 +836,42 @@ fn get_target(f: &In<'_>) -> Result<EntityId, Error> {
     }
 }
 
+const SIDES: [Side; 4] = [Side::Left, Side::Right, Side::Up, Side::Down];
+
+fn side_wire(side: Side) -> u64 {
+    match side {
+        Side::Left => 0,
+        Side::Right => 1,
+        Side::Up => 2,
+        Side::Down => 3,
+    }
+}
+
+fn get_side(f: &In<'_>) -> Result<Side, Error> {
+    usize::try_from(f.varint(SIDE)?)
+        .ok()
+        .and_then(|i| SIDES.get(i).copied())
+        .ok_or_else(|| f.invalid(SIDE))
+}
+
+/// A layout and zoom, the layout as text, empty for none.
+fn put_layout(out: &mut Out, layout: Option<&Layout>, zoomed: Option<BlockId>) {
+    let text = layout.map(Layout::to_string).unwrap_or_default();
+    out.bytes(LAYOUT, text.as_bytes());
+    if let Some(block) = zoomed {
+        out.uuid(ZOOMED, block.uuid());
+    }
+}
+
+/// The layout field; `None` when empty.
+fn get_layout(f: &In<'_>) -> Result<Option<Layout>, Error> {
+    let text = f.string(LAYOUT)?;
+    if text.is_empty() {
+        return Ok(None);
+    }
+    text.parse().map(Some).map_err(|_| f.invalid(LAYOUT))
+}
+
 mod kind {
     pub const SESSION_CREATED: u64 = 1;
     pub const SESSION_CLOSED: u64 = 2;
@@ -789,6 +897,7 @@ mod kind {
     pub const WINDOW_RENAMED: u64 = 22;
     pub const BLOCK_RENAMED: u64 = 23;
     pub const CLIENT_RENAMED: u64 = 24;
+    pub const LAYOUT_CHANGED: u64 = 25;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -920,6 +1029,16 @@ fn put_event(out: &mut Out, event: &Event) {
         }
         E::ClientRenamed { client, ref name } => {
             renamed(out, kind::CLIENT_RENAMED, EntityId::Client(client), name);
+        }
+        E::LayoutChanged {
+            window,
+            ref layout,
+            zoomed,
+        } => {
+            let out = out
+                .varint(KIND, kind::LAYOUT_CHANGED)
+                .uuid(WINDOW, window.uuid());
+            put_layout(out, layout.as_ref(), zoomed);
         }
     }
 }
@@ -1065,6 +1184,11 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
             client: client(f, CLIENT)?,
             name: f.string(NAME)?,
         },
+        kind::LAYOUT_CHANGED => E::LayoutChanged {
+            window: window(f, WINDOW)?,
+            layout: get_layout(f)?,
+            zoomed: f.opt(ZOOMED, block)?,
+        },
         _ => return Err(f.invalid(KIND)),
     })
 }
@@ -1087,11 +1211,15 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             window,
             session,
             name,
+            layout,
+            zoomed,
         } => {
-            out.varint(KIND, entry::WINDOW)
+            let out = out
+                .varint(KIND, entry::WINDOW)
                 .uuid(WINDOW, window.uuid())
                 .uuid(SESSION, session.uuid())
                 .bytes(NAME, name.as_bytes());
+            put_layout(out, layout.as_ref(), *zoomed);
         }
         Entry::Block {
             block,
@@ -1138,6 +1266,9 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             window: window(f, WINDOW)?,
             session: session(f, SESSION)?,
             name: f.string(NAME)?,
+            // An older server sends no layout.
+            layout: f.opt(LAYOUT, |_, _| get_layout(f))?.flatten(),
+            zoomed: f.opt(ZOOMED, block)?,
         },
         entry::BLOCK => Entry::Block {
             block: block(f, BLOCK)?,
