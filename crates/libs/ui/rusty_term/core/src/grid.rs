@@ -8,7 +8,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
-use super::cell::{ATTR_DEFAULT_COLORS, Cell, PackedCell, Pen, WIDE_TRAILER, char_width};
+use super::cell::{
+    ATTR_BG_DEFAULT, ATTR_DEFAULT_COLORS, ATTR_FG_DEFAULT, Cell, PackedCell, Pen, Source,
+    WIDE_TRAILER, char_width,
+};
 use super::style::{CellStyle, Defaults, StyleId, StyleTable};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -753,8 +756,10 @@ pub struct Grid {
     pub(crate) insert_mode: bool,
     /// Background color erases fill with (BCE): the parser's SGR background,
     /// or `None` while that is the default, so the fill tracks OSC 11. Kept in
-    /// sync by the parser via [`Grid::set_erase_bg`].
-    erase_bg: Option<u32>,
+    /// sync by the parser via [`Grid::set_erase_bg`]. Held as the colour and
+    /// its palette tag ([`crate::cell::Source::tag`]), so OSC 4 recolours
+    /// the fill as it does the pen.
+    erase_bg: Option<(u32, u16)>,
     /// Cursor color (OSC 12 / the `cursor` config key), mirrored from the
     /// parser's palette like the defaults above. The windowed renderers paint
     /// the block cursor in it; the TUI host owns its own cursor.
@@ -1296,25 +1301,42 @@ fn reflow_history(
 /// pre-rendered cells the renderer composites over the bottom of the live
 /// screen, independent of the child's output stream. Kept pre-rendered so the
 /// hot render path just borrows the slice; re-laid from `text`/`fg`/`bg` on a
-/// resize.
+/// resize and whenever the default colours change.
 pub(crate) struct StatusLine {
     text: String,
-    fg: u32,
-    bg: u32,
+    /// The colours asked for; `None` is the default colour, resolved when
+    /// the cells are laid out.
+    fg: Option<u32>,
+    bg: Option<u32>,
     cells: Vec<Cell>,
 }
 
 impl StatusLine {
-    /// Lay `text` out into exactly `cols` cells in `fg`/`bg`: advance wide glyphs
-    /// by two columns with a flagged trailer, drop zero-width scalars, stop at the
-    /// margin, and pad the tail with blanks in `bg`.
-    fn lay_out(text: &str, fg: u32, bg: u32, cols: usize) -> Vec<Cell> {
+    /// Lay `text` out into exactly `cols` cells in `fg`/`bg` (the defaults
+    /// where unset): advance wide glyphs by two columns with a flagged
+    /// trailer, drop zero-width scalars, stop at the margin, and pad the tail
+    /// with blanks in `bg`.
+    fn lay_out(
+        text: &str,
+        fg: Option<u32>,
+        bg: Option<u32>,
+        d: Defaults,
+        cols: usize,
+    ) -> Vec<Cell> {
+        let mut provenance = 0;
+        if fg.is_none() {
+            provenance |= ATTR_FG_DEFAULT;
+        }
+        if bg.is_none() {
+            provenance |= ATTR_BG_DEFAULT;
+        }
+        let (fg, bg) = (fg.unwrap_or(d.fg), bg.unwrap_or(d.bg));
         let blank = Cell {
             ch: ' ',
             cluster: 0,
             fg,
             bg,
-            flags: 0,
+            flags: provenance,
             link: 0,
             underline_color: fg,
         };
@@ -1328,24 +1350,11 @@ impl StatusLine {
             if x + w > cols {
                 break;
             }
-            cells[x] = Cell {
-                ch,
-                cluster: 0,
-                fg,
-                bg,
-                flags: 0,
-                link: 0,
-                underline_color: fg,
-            };
+            cells[x] = Cell { ch, ..blank };
             if w == 2 {
                 cells[x + 1] = Cell {
-                    ch: ' ',
-                    cluster: 0,
-                    fg,
-                    bg,
-                    flags: WIDE_TRAILER,
-                    link: 0,
-                    underline_color: fg,
+                    flags: WIDE_TRAILER | provenance,
+                    ..blank
                 };
             }
             x += w;
@@ -1354,8 +1363,8 @@ impl StatusLine {
     }
 
     #[cfg(feature = "l13")]
-    fn new(text: String, fg: u32, bg: u32, cols: usize) -> Self {
-        let cells = Self::lay_out(&text, fg, bg, cols);
+    fn new(text: String, fg: Option<u32>, bg: Option<u32>, d: Defaults, cols: usize) -> Self {
+        let cells = Self::lay_out(&text, fg, bg, d, cols);
         StatusLine {
             text,
             fg,
@@ -1364,9 +1373,10 @@ impl StatusLine {
         }
     }
 
-    /// Re-lay the existing text/colors at a new width (after a resize).
-    fn relayout(&mut self, cols: usize) {
-        self.cells = Self::lay_out(&self.text, self.fg, self.bg, cols);
+    /// Re-lay the existing text/colours at `cols` in the defaults `d`
+    /// (after a resize or a default-colour change).
+    fn relayout(&mut self, cols: usize, d: Defaults) {
+        self.cells = Self::lay_out(&self.text, self.fg, self.bg, d, cols);
     }
 }
 
@@ -1522,6 +1532,12 @@ impl Grid {
             return;
         }
         let cell = self.pack(cell);
+        self.set_packed(x, y, cell);
+    }
+
+    /// [`Grid::set_cell`] for a cell already stored; `(x, y)` must be on
+    /// the screen.
+    fn set_packed(&mut self, x: usize, y: usize, cell: PackedCell) {
         let blank = self.default_packed();
         let row = self.screen[y].cells_mut();
         if row[x].is_wide_trailer() {
@@ -1629,15 +1645,18 @@ impl Grid {
 
     /// The style id of a glyph written in `pen` under `link`. `pen`'s DECSCA
     /// bit is a layout bit and does not reach the style.
+    #[inline]
     fn pen_id(&mut self, pen: Pen, link: u16) -> StyleId {
-        self.styles.intern_pen(CellStyle {
-            fg: pen.fg,
-            bg: pen.bg,
-            underline_color: pen.underline_color,
-            attrs: pen.attrs & !super::cell::ATTR_PROTECTED,
-            link,
-            cluster: 0,
-        })
+        self.styles.intern_pen(CellStyle::of_pen(&pen, link))
+    }
+
+    /// The style of a wide glyph's trailer in `pen`: its colours and their
+    /// provenance, but no rendition.
+    fn trailer_style(pen: Pen, link: u16) -> CellStyle {
+        CellStyle {
+            attrs: pen.attrs & ATTR_DEFAULT_COLORS,
+            ..CellStyle::of_pen(&pen, link)
+        }
     }
 
     /// Run a style sweep if one is due, and a compaction if the sweep left
@@ -2360,35 +2379,16 @@ impl Grid {
         }
         let (x, y) = self.cursor;
         let link = self.current_link;
-        self.set_cell(
-            x,
-            y,
-            Cell {
-                ch,
-                cluster: 0,
-                fg: pen.fg,
-                bg: pen.bg,
-                flags: pen.attrs,
-                link,
-                underline_color: pen.underline_color,
-            },
-        );
-        if w == 2 && x + 1 < self.cols {
+        if x < self.cols && y < self.rows {
+            let protected = pen.attrs & super::cell::ATTR_PROTECTED != 0;
+            let head = PackedCell::glyph(ch, protected, self.pen_id(pen, link));
+            self.set_packed(x, y, head);
+        }
+        if w == 2 && x + 1 < self.cols && y < self.rows {
             // Trailing half: a flagged placeholder the renderer skips. It keeps
             // the pen's colors but only the WIDE_TRAILER layout bit.
-            self.set_cell(
-                x + 1,
-                y,
-                Cell {
-                    ch: ' ',
-                    cluster: 0,
-                    fg: pen.fg,
-                    bg: pen.bg,
-                    flags: WIDE_TRAILER | (pen.attrs & ATTR_DEFAULT_COLORS),
-                    link,
-                    underline_color: pen.underline_color,
-                },
-            );
+            let id = self.styles.intern(Self::trailer_style(pen, link));
+            self.set_packed(x + 1, y, PackedCell::trailer(id));
         }
         // `cols` (one past the last column) is the pending-wrap position; a
         // glyph wider than the grid itself (w=2, cols=1) must not push past it,
@@ -2462,17 +2462,9 @@ impl Grid {
             return 0;
         }
         let head_id = self.pen_id(pen, link);
-        // A trailer carries the pen's colours and their provenance but no
-        // rendition. It and the blank are interned only when a wide glyph
+        // The trailer and the blank are interned only when a wide glyph
         // needs them.
-        let trailer = CellStyle {
-            fg: pen.fg,
-            bg: pen.bg,
-            underline_color: pen.underline_color,
-            attrs: pen.attrs & ATTR_DEFAULT_COLORS,
-            link,
-            cluster: 0,
-        };
+        let trailer = Self::trailer_style(pen, link);
         let protected = pen.attrs & super::cell::ATTR_PROTECTED != 0;
         let styles = &mut self.styles;
         let blank = |styles: &mut StyleTable| {
@@ -3256,16 +3248,12 @@ impl Grid {
         if top > bottom || left > right || top >= self.rows || left >= self.cols {
             return;
         }
-        let cell = Cell {
+        let protected = pen.attrs & super::cell::ATTR_PROTECTED != 0;
+        let cell = PackedCell::glyph(
             ch,
-            cluster: 0,
-            fg: pen.fg,
-            bg: pen.bg,
-            flags: pen.attrs,
-            link: 0,
-            underline_color: pen.underline_color,
-        };
-        let cell = self.pack(cell);
+            protected,
+            self.styles.intern(CellStyle::of_pen(&pen, 0)),
+        );
         for y in top..=bottom {
             self.screen[y].cells_mut()[left..=right].fill(cell);
             self.touch(y);
@@ -3349,27 +3337,17 @@ impl Grid {
     /// The fill used by every erase / scroll-clear path: a blank in the
     /// default foreground on the current SGR background (BCE, as xterm does),
     /// falling back to the default background, so an OSC 11 theme also colors
-    /// cleared regions.
-    fn erase_cell(&self) -> Cell {
-        let mut c = self.default_cell();
-        if let Some(bg) = self.erase_bg {
-            c.bg = bg;
-            c.flags &= !crate::cell::ATTR_BG_DEFAULT;
-        }
-        c
-    }
-
-    /// [`Grid::erase_cell`], stored. Every scroll and erase takes one, so it
-    /// goes through the pen cache rather than the table's hash index.
+    /// cleared regions. Every scroll and erase takes one, so it goes through
+    /// the pen cache rather than the table's hash index.
+    #[inline]
     fn erase_packed(&mut self) -> PackedCell {
-        let cell = self.erase_cell();
-        let pen = Pen {
-            fg: cell.fg,
-            bg: cell.bg,
-            attrs: cell.flags,
-            underline_color: cell.underline_color,
-        };
-        PackedCell::glyph(cell.ch, false, self.pen_id(pen, cell.link))
+        let d = self.styles.defaults();
+        let mut pen = Pen::default_colors(d.fg, d.bg);
+        if let Some((bg, tag)) = self.erase_bg {
+            (pen.bg, pen.bg_index) = (bg, tag);
+            pen.attrs &= !ATTR_BG_DEFAULT;
+        }
+        PackedCell::glyph(' ', false, self.pen_id(pen, 0))
     }
 
     /// [`Grid::default_cell`], stored.
@@ -3402,6 +3380,14 @@ impl Grid {
         }
     }
 
+    /// Re-lay the status line in the current defaults.
+    fn relayout_status(&mut self) {
+        let (cols, defaults) = (self.cols, self.styles.defaults());
+        if let Some(s) = &mut self.status_line {
+            s.relayout(cols, defaults);
+        }
+    }
+
     /// The default foreground (OSC 10), which cells marked default show.
     fn default_fg(&self) -> u32 {
         self.styles.defaults().fg
@@ -3412,9 +3398,9 @@ impl Grid {
         self.styles.defaults().bg
     }
 
-    /// Set the background erases fill with (see [`Grid::erase_cell`]):
-    /// `Some(rgb)` for an SGR background, `None` for the default.
-    pub(crate) fn set_erase_bg(&mut self, bg: Option<u32>) {
+    /// Set the background erases fill with (see [`Grid::erase_packed`]):
+    /// `Some((rgb, tag))` for an SGR background, `None` for the default.
+    pub(crate) fn set_erase_bg(&mut self, bg: Option<(u32, u16)>) {
         self.erase_bg = bg;
     }
 
@@ -3428,6 +3414,7 @@ impl Grid {
         let defaults = Defaults { fg, bg };
         if self.styles.defaults() != defaults {
             self.styles.set_defaults(defaults);
+            self.relayout_status();
             self.reset_damage();
             self.touch_hist();
             self.epoch += 1;
@@ -3519,15 +3506,18 @@ impl Grid {
     /// Live theme switch (config reload): remap every color that resolves to
     /// an `old`-theme entry — across the live screen, scrollback, and the
     /// stashed primary screen — to its `new`-theme counterpart, and adopt the
-    /// new defaults. Truecolor/256-cube colors pass through untouched (we
-    /// can't know they meant "the theme's red"). Full repaint requested.
+    /// new defaults. A palette colour (SGR 30-37 and the like) follows its
+    /// entry as the parser's palette does; an explicit RGB one is remapped
+    /// only when it equals an old theme colour, and truecolor/256-cube
+    /// colors otherwise pass through. Full repaint requested.
     pub fn retheme(&mut self, old: &super::Theme, new: &super::Theme) {
         let map = |c: u32| super::color::remap(c, old, new);
         // Cells hold style ids, so only the table changes; styles that become
         // equal merge, and only then are the cells rewritten. Cells in the
         // default colours follow the new defaults without a remap.
         self.blank_row.clear();
-        if let Some(remap) = self.styles.retheme(map) {
+        let entry = |n: u8, c: u32| super::color::remap_entry(n, c, old, new);
+        if let Some(remap) = self.styles.retheme(map, entry) {
             self.apply_remap(&remap);
         }
         let d = self.styles.defaults();
@@ -3535,10 +3525,26 @@ impl Grid {
             fg: map(d.fg),
             bg: map(d.bg),
         });
-        if let Some(bg) = &mut self.erase_bg {
-            *bg = map(*bg);
+        if let Some((bg, tag)) = &mut self.erase_bg {
+            *bg = Source::entry(*tag).map_or_else(|| map(*bg), |n| entry(n, *bg));
         }
+        self.relayout_status();
         self.cursor_color = super::color::remap(self.cursor_color, old, new);
+        self.reset_damage();
+        self.touch_hist();
+        self.epoch += 1;
+    }
+
+    /// Palette change (OSC 4, OSC 104, RIS, DECSTR): recolour every cell
+    /// written in a palette colour, on both screens and in history, to
+    /// `palette` of its entry. Cells in explicit RGB, even an equal one,
+    /// keep their colour. The parser re-syncs the erase fill. Full repaint
+    /// requested.
+    pub(crate) fn repaint(&mut self, palette: impl Fn(u8) -> u32) {
+        self.blank_row.clear();
+        if let Some(remap) = self.styles.repaint(palette) {
+            self.apply_remap(&remap);
+        }
         self.reset_damage();
         self.touch_hist();
         self.epoch += 1;
@@ -3662,8 +3668,9 @@ impl Grid {
         self.rows = rows;
         self.reset_damage();
         self.view_offset = 0;
+        let defaults = self.styles.defaults();
         if let Some(s) = &mut self.status_line {
-            s.relayout(cols);
+            s.relayout(cols, defaults);
         }
         self.reset_scroll_region();
         self.styles.request_sweep();
@@ -3728,6 +3735,11 @@ impl Grid {
             self.reset_scroll_region();
             self.touch_all();
         }
+    }
+
+    /// The mode that opened the active alternate screen, if one is.
+    pub(crate) fn alt_mode(&self) -> Option<AltMode> {
+        self.primary.as_ref().map(|p| p.mode)
     }
 
     /// Whether the alternate screen buffer (`?47`/`?1047`/`?1049`) is active.
@@ -4169,13 +4181,13 @@ impl Grid {
     }
 
     /// Overlay a status line at the bottom of the screen (L13 `render/set_status`),
-    /// laid out at the current width; `fg`/`bg` default to the grid's defaults.
-    /// Marks the bottom row dirty so the next frame composites it.
+    /// laid out at the current width; an unset `fg`/`bg` is the default colour
+    /// and follows later OSC 10/11 changes. Marks the bottom row dirty so the
+    /// next frame composites it.
     #[cfg(feature = "l13")]
     pub fn set_status_line(&mut self, text: String, fg: Option<u32>, bg: Option<u32>) {
-        let fg = fg.unwrap_or(self.default_fg());
-        let bg = bg.unwrap_or(self.default_bg());
-        self.status_line = Some(StatusLine::new(text, fg, bg, self.cols));
+        let defaults = self.styles.defaults();
+        self.status_line = Some(StatusLine::new(text, fg, bg, defaults, self.cols));
         if let Some(y) = self.rows.checked_sub(1) {
             self.touch(y);
         }

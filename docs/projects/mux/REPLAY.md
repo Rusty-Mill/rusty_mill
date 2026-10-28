@@ -1,4 +1,4 @@
-# Phase 1 attach: RTCP v4 headless checkpoints
+# Phase 1 attach: RTCP v5 headless checkpoints
 
 The former experimental RMRP lifetime replay mechanism is removed. There is
 no cumulative output cutoff, no replay log, and no reduction of the engine's
@@ -8,12 +8,13 @@ output, subject to current-state memory limits.
 
 ## Negotiation and transfer
 
-`Features::CHECKPOINT_V4` is bit 16 (value 65536). Bits 0, 1, 2 and 3 are
-reserved for rejected RMRP replay, incomplete RTCP v1, superseded fixed-width
-RTCP v2 and superseded RTCP v3 respectively; none enables attach. Hello/Welcome
-negotiate bit 16; Attach without it returns Failed. The server offers no older
-version, and the client refuses a Welcome without bit 16, so a v3 peer on
-either side fails closed instead of restoring v3's baked-in default colours.
+`Features::CHECKPOINT_V5` is bit 17 (value 131072). Bits 0, 1, 2, 3 and 16
+are reserved for rejected RMRP replay, incomplete RTCP v1, superseded
+fixed-width RTCP v2, superseded RTCP v3 and superseded RTCP v4 respectively;
+none enables attach. Hello/Welcome negotiate bit 17; Attach without it returns
+Failed. The server offers no older version, and the client refuses a Welcome
+without bit 17, so a v3 or v4 peer on either side fails closed instead of
+restoring v3's baked-in default colours or v4's untagged palette colours.
 Existing frame layouts are unchanged. The drawable RTSN snapshot is a separate
 format: it writes v2 (default fg/bg in the header, #1163) and still decodes v1.
 
@@ -40,12 +41,15 @@ reader/writer futures and socket halves. It does not modify the block or its
 ability to produce a fresh checkpoint for another attach. A blocked non-reading
 peer cannot retain the transfer indefinitely after eviction.
 
-## RTCP v4 binary format
+## RTCP v5 binary format
 
 The codec is `rusty_term_core::checkpoint::{encode,decode}`. Magic `RTCP` is
-followed by version byte `4`, then Grid fields and AnsiParser fields in the
-explicit order in their `Wire` implementations. Field order is part of v4;
-changing it or its meaning requires another version. This is an independent
+followed by version byte `5`, then Grid fields and AnsiParser fields in the
+explicit order in their `Wire` implementations. Field order is part of v5;
+changing it or its meaning requires another version. v5 adds palette tags to
+line styles, the pen and the erase colour (so OSC 4 recolours restored text),
+the DECSC pen, protection and charsets and the `?1049` entry stash, and status-line colours
+that may follow the defaults. This is an independent
 continuation format, not a reinterpretation of RTSN's drawable snapshot.
 
 - Integers are fixed-width little endian; usize/counts use u64 and reject
@@ -62,7 +66,9 @@ continuation format, not a reinterpretation of RTSN's drawable snapshot.
   allocating), then runs that cover exactly that many cells, then the wrapped
   flag and line attribute. A run is a style reference, a varint
   `len << 1 | repeat`, then one UTF-8 scalar repeated `len` times or `len`
-  UTF-8 scalars. A style is every Cell field but `ch`, in Cell's field order.
+  UTF-8 scalars. A style is every Cell field but `ch`, in Cell's field order,
+  then the u16 palette tags of fg and bg (`1 + n` for entry `n`, at most 256;
+  0 for a default or RGB colour).
   Style reference 0 defines the next style in a per-checkpoint table; `i + 1`
   reuses entry `i`. The writer uses a repeat run for four or more identical
   cells. Zero-length runs, runs past the count, unknown style indices, varint
@@ -85,7 +91,7 @@ Front-end selection/search/folds, render caches and spare allocations, pending
 host clipboard/notification/bell effects, and L13 application channel state are
 outside this *headless VT* profile. Pixel overlays present only in GUI builds
 are front-end state; headless Sixel/iTerm display cells and Kitty stored pixels
-are preserved. Enabling a library feature does not change RTCP v4's schema.
+are preserved. Enabling a library feature does not change RTCP v5's schema.
 The Phase 1 server does not enable GUI or L13. Clients must not treat RTCP as a
 GUI/L13 session checkpoint or replay host actions during restore.
 

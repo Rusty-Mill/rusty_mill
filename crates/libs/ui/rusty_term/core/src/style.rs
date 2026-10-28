@@ -16,15 +16,16 @@
 //! lookup that finds a freed id revives it, since no cell holds it.
 
 use std::collections::{HashMap, TryReserveError};
+use std::hash::{Hash, Hasher};
 
 use crate::cell::{
     ATTR_BG_DEFAULT, ATTR_FG_DEFAULT, ATTR_PROTECTED, Cell, DEFAULT_BG, DEFAULT_FG, PackedCell,
-    WIDE_TRAILER,
+    Pen, Source, WIDE_TRAILER,
 };
 
 /// Everything a [`Cell`] holds except its character and the two layout bits
 /// ([`WIDE_TRAILER`], [`ATTR_PROTECTED`]), which live in [`PackedCell`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellStyle {
     pub fg: u32,
     pub bg: u32,
@@ -33,6 +34,29 @@ pub(crate) struct CellStyle {
     pub attrs: u16,
     pub link: u16,
     pub cluster: u16,
+    /// [`crate::cell::Source::tag`] of `fg`: `1 + n` while it is palette
+    /// entry `n`, so OSC 4 recolours it ([`StyleTable::repaint`]).
+    pub fg_index: u16,
+    /// [`crate::cell::Source::tag`] of `bg`.
+    pub bg_index: u16,
+}
+
+/// Every field, packed into three words: one hasher write each instead of
+/// one per field, on the intern path every uncached write takes.
+impl Hash for CellStyle {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(u64::from(self.fg) | u64::from(self.bg) << 32);
+        state.write_u64(
+            u64::from(self.underline_color)
+                | u64::from(self.attrs) << 32
+                | u64::from(self.link) << 48,
+        );
+        state.write_u64(
+            u64::from(self.cluster)
+                | u64::from(self.fg_index) << 16
+                | u64::from(self.bg_index) << 32,
+        );
+    }
 }
 
 impl CellStyle {
@@ -45,8 +69,26 @@ impl CellStyle {
             attrs: cell.flags & !(WIDE_TRAILER | ATTR_PROTECTED),
             link: cell.link,
             cluster: cell.cluster,
+            fg_index: 0,
+            bg_index: 0,
         }
         .canonical()
+    }
+
+    /// The style of a glyph written in `pen` under `link`. The pen's DECSCA
+    /// bit is a layout bit and does not reach the style.
+    #[inline]
+    pub(crate) fn of_pen(pen: &Pen, link: u16) -> Self {
+        CellStyle {
+            fg: pen.fg,
+            bg: pen.bg,
+            underline_color: pen.underline_color,
+            attrs: pen.attrs & !ATTR_PROTECTED,
+            link,
+            cluster: 0,
+            fg_index: pen.fg_index,
+            bg_index: pen.bg_index,
+        }
     }
 
     /// A colour marked default ([`ATTR_FG_DEFAULT`] / [`ATTR_BG_DEFAULT`])
@@ -129,10 +171,10 @@ impl Remap {
 pub(crate) const SWEEP_MIN: usize = 4096;
 /// Fewest entries before a compaction is worth its full rewrite.
 const COMPACT_MIN: usize = 65_536;
-/// Bytes a decoder charges per reserved grid style: 20 B entry, 1 B free
-/// flag, and two 25 B index buckets (hashbrown gives a power-of-two capacity
-/// `c` exactly `2c` buckets), rounded up from 71.
-pub(crate) const GRID_STYLE_BYTES: usize = 74;
+/// Bytes a decoder charges per reserved grid style: 24 B entry, 1 B free
+/// flag, and two 29 B index buckets (hashbrown gives a power-of-two capacity
+/// `c` exactly `2c` buckets), rounded up from 83.
+pub(crate) const GRID_STYLE_BYTES: usize = 86;
 
 /// A direct-mapped cache in front of the hash index. Output repeats a few
 /// hundred pens at most (every write interns its pen), and a hit skips
@@ -154,7 +196,10 @@ impl Recent {
     const EMPTY: StyleId = StyleId(u32::MAX);
 
     fn slot(style: &CellStyle) -> usize {
-        let rest = u32::from(style.attrs) << 16 | u32::from(style.link ^ style.cluster);
+        let rest = u32::from(style.attrs) << 16
+            | u32::from(
+                style.link ^ style.cluster ^ style.fg_index ^ style.bg_index.rotate_left(8),
+            );
         let mix =
             (style.fg ^ style.bg.rotate_left(8) ^ style.underline_color.rotate_left(16) ^ rest)
                 .wrapping_mul(0x9e37_79b9);
@@ -429,24 +474,55 @@ impl StyleTable {
         Some(self.rebuild(|i| !is_free[i], |i| i))
     }
 
-    /// Map every entry's colours through `map` (a theme change). Entries that
+    /// Map every entry's explicit colours through `map` and its palette
+    /// colours through `entry` (a theme change). Entries that
     /// become equal merge into the lowest id; the returned remap, when some
     /// merged, must be applied to every cell.
-    pub(crate) fn retheme(&mut self, map: impl Fn(u32) -> u32) -> Option<Remap> {
+    pub(crate) fn retheme(
+        &mut self,
+        map: impl Fn(u32) -> u32,
+        entry: impl Fn(u8, u32) -> u32,
+    ) -> Option<Remap> {
+        // A default colour is stored as 0 and resolved on read: only the
+        // colours the child chose are remapped. A palette colour goes
+        // through `entry` with its entry, so it follows the palette rather
+        // than whatever RGB it happens to equal.
+        let colour = |c: u32, tag: u16, default: bool| match Source::entry(tag) {
+            _ if default => c,
+            Some(n) => entry(n, c),
+            None => map(c),
+        };
+        self.restyle(|style| {
+            style.fg = colour(style.fg, style.fg_index, style.attrs & ATTR_FG_DEFAULT != 0);
+            style.bg = colour(style.bg, style.bg_index, style.attrs & ATTR_BG_DEFAULT != 0);
+        })
+    }
+
+    /// Recolour every entry in a palette colour from `palette` (OSC 4 and
+    /// its resets): a colour tagged `1 + n` becomes `palette(n)`. Merges as
+    /// [`StyleTable::retheme`] does.
+    pub(crate) fn repaint(&mut self, palette: impl Fn(u8) -> u32) -> Option<Remap> {
+        self.restyle(|style| {
+            if let Some(n) = Source::entry(style.fg_index) {
+                style.fg = palette(n);
+            }
+            if let Some(n) = Source::entry(style.bg_index) {
+                style.bg = palette(n);
+            }
+        })
+    }
+
+    /// Apply `edit` to every live entry, merging entries that become equal
+    /// into the lowest id; the returned remap, when some merged, must be
+    /// applied to every cell.
+    fn restyle(&mut self, edit: impl Fn(&mut CellStyle)) -> Option<Remap> {
         self.recent.clear();
         self.last.1 = Recent::EMPTY;
         self.last_pen.1 = Recent::EMPTY;
         let is_free = self.is_free.clone();
         for (i, style) in self.entries.iter_mut().enumerate() {
-            // A default colour is stored as 0 and resolved on read: only the
-            // colours the child chose are remapped.
             if !is_free[i] {
-                if style.attrs & ATTR_FG_DEFAULT == 0 {
-                    style.fg = map(style.fg);
-                }
-                if style.attrs & ATTR_BG_DEFAULT == 0 {
-                    style.bg = map(style.bg);
-                }
+                edit(style);
             }
         }
         let mut first: HashMap<CellStyle, usize> = HashMap::new();
@@ -596,13 +672,15 @@ mod tests {
         let mut t = StyleTable::default();
         let [a, b, c] = [1, 2, 3].map(|n| t.intern(fg(n)));
         // 2 becomes 1: b merges into a; 3 is untouched.
-        let remap = t.retheme(|v| if v == 2 { 1 } else { v }).expect("a merge");
+        let remap = t
+            .retheme(|v| if v == 2 { 1 } else { v }, |_, c| c)
+            .expect("a merge");
         assert_eq!(remap.get(b), remap.get(a));
         assert_eq!(t.get(remap.get(c)), fg(3));
         assert_eq!(t.len(), 3);
         assert_eq!(t.intern(fg(1)), remap.get(a), "one id for the merged style");
         // A retheme that merges nothing keeps every id.
-        assert!(t.retheme(|v| v + 10).is_none());
+        assert!(t.retheme(|v| v + 10, |_, c| c).is_none());
         let moved = CellStyle {
             bg: fg(3).bg + 10,
             ..fg(13)
@@ -625,7 +703,7 @@ mod tests {
             (DEFAULT_FG, DEFAULT_BG)
         );
         // A retheme maps explicit colours only; the defaults are set apart.
-        assert!(t.retheme(|v| v + 1).is_none());
+        assert!(t.retheme(|v| v + 1, |_, c| c).is_none());
         assert_eq!(t.get(blank).fg, 7);
         assert_eq!(t.get(explicit).fg, DEFAULT_FG + 1);
     }

@@ -1,11 +1,13 @@
-//! RTCP v4: a headless terminal continuation checkpoint, independent of RTSN.
+//! RTCP v5: a headless terminal continuation checkpoint, independent of RTSN.
 //! Durable parser/Grid state is included; front-end view state and pending
 //! host side effects are excluded. L13 channels are outside this profile.
 //! Lines are run-encoded (see `grid/line.rs`); v3 differs from v2 only there.
 //! v4 keeps v3's layout but changes what cell and pen flags mean: a colour
 //! without `ATTR_FG_DEFAULT` / `ATTR_BG_DEFAULT` is explicit, so a v3 image
 //! (whose default colours carry no bit) would restore with them baked in. v3
-//! is therefore rejected rather than reinterpreted.
+//! is therefore rejected rather than reinterpreted. v5 adds palette tags to
+//! line styles, the pen and the erase colour, the DECSC pen and charsets,
+//! and status-line colours that may follow the defaults; v4 is rejected too.
 
 use crate::{
     AnsiParser, Grid,
@@ -34,7 +36,7 @@ impl std::error::Error for Error {}
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 /// Magic and version byte that open every checkpoint.
-const HEADER: &[u8; 5] = b"RTCP\x04";
+const HEADER: &[u8; 5] = b"RTCP\x05";
 
 /// Encode a consistent headless Grid and parser. No output log is retained.
 pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
@@ -48,7 +50,7 @@ pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
     Ok(w.bytes)
 }
 
-/// Decode untrusted RTCP v4, validating allocation budgets and internal indices
+/// Decode untrusted RTCP v5, validating allocation budgets and internal indices
 /// before returning objects that can safely continue parsing. No host actions
 /// or terminal responses are replayed while restoring.
 pub fn decode(data: &[u8]) -> Result<(Grid, AnsiParser)> {
@@ -75,7 +77,7 @@ pub(crate) struct Writer<'a> {
     /// `None` only for writers that never see a `Line`.
     table: Option<&'a StyleTable>,
     /// Line run styles already defined, by index (see [`Writer::style`]).
-    styles: HashMap<Cell, usize>,
+    styles: HashMap<RunStyle, usize>,
     /// `1 + index` of each run style already defined, by grid style id and
     /// layout bits ([`layout_slot`]); 0 until first referenced. Spares
     /// resolving and hashing a style for every run. A cache only: grown on
@@ -141,7 +143,11 @@ impl<'a> Writer<'a> {
         {
             return self.varint(u64::from(i));
         }
-        let index = self.style(cell.resolve(&table.get(id)))?;
+        let style = table.get(id);
+        let index = self.style(RunStyle {
+            cell: cell.resolve(&style),
+            index: [style.fg_index, style.bg_index],
+        })?;
         if let Some(s) = slot {
             self.cache(s, u32::try_from(index + 1).unwrap_or(0));
         }
@@ -171,8 +177,12 @@ impl<'a> Writer<'a> {
     /// grid style it may intern (every grid style arrives with a new wire
     /// style, so the grid table never outgrows the wire table plus id 0).
     /// Returns the style's index.
-    pub(crate) fn style(&mut self, cell: Cell) -> Result<usize> {
-        let key = Cell { ch: '\0', ..cell };
+    pub(crate) fn style(&mut self, style: RunStyle) -> Result<usize> {
+        let cell = Cell {
+            ch: '\0',
+            ..style.cell
+        };
+        let key = RunStyle { cell, ..style };
         if let Some(&i) = self.styles.get(&key) {
             self.varint(i as u64 + 1)?;
             return Ok(i);
@@ -287,8 +297,12 @@ impl<'a> Reader<'a> {
                     .try_reserve(grow)
                     .map_err(|_| Error("allocation failed"))?;
             }
-            let style = read_style(self)?;
-            let id = self.table.intern(CellStyle::of(&style));
+            let RunStyle { cell: style, index } = read_style(self)?;
+            let id = self.table.intern(CellStyle {
+                fg_index: index[0],
+                bg_index: index[1],
+                ..CellStyle::of(&style)
+            });
             self.styles.push((style, id));
             return Ok((style, id));
         }
@@ -534,17 +548,28 @@ fn style_growth(len: usize) -> usize {
         _ => 0,
     }
 }
-/// A run style: every [`Cell`] field but `ch`, in `Cell`'s v2 field order.
-fn write_style(c: &Cell, w: &mut Writer) -> Result<()> {
+/// A line run's style: the resolved cell (its `ch` ignored) and the palette
+/// tags ([`crate::cell::Source::tag`]) of its foreground and background.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct RunStyle {
+    pub(crate) cell: Cell,
+    pub(crate) index: [u16; 2],
+}
+/// A run style: every [`Cell`] field but `ch`, in `Cell`'s v2 field order,
+/// then the two palette tags.
+fn write_style(s: &RunStyle, w: &mut Writer) -> Result<()> {
+    let c = &s.cell;
     c.fg.write(w)?;
     c.bg.write(w)?;
     c.flags.write(w)?;
     c.link.write(w)?;
     c.cluster.write(w)?;
-    c.underline_color.write(w)
+    c.underline_color.write(w)?;
+    s.index[0].write(w)?;
+    s.index[1].write(w)
 }
-fn read_style(r: &mut Reader<'_>) -> Result<Cell> {
-    Ok(Cell {
+fn read_style(r: &mut Reader<'_>) -> Result<RunStyle> {
+    let cell = Cell {
         ch: '\0',
         fg: Wire::read(r)?,
         bg: Wire::read(r)?,
@@ -552,7 +577,12 @@ fn read_style(r: &mut Reader<'_>) -> Result<Cell> {
         link: Wire::read(r)?,
         cluster: Wire::read(r)?,
         underline_color: Wire::read(r)?,
-    })
+    };
+    let index: [u16; 2] = [Wire::read(r)?, Wire::read(r)?];
+    if index.iter().any(|&tag| tag > 256) {
+        return Err(Error("palette tag"));
+    }
+    Ok(RunStyle { cell, index })
 }
 macro_rules! fields {
     ($t:ty, [$($field:ident),* $(,)?]) => {
@@ -1124,7 +1154,13 @@ mod tests {
     #[test]
     fn hostile_line_runs_fail_cleanly() {
         type Build<'a> = &'a dyn Fn(&mut Writer);
-        let define = |w: &mut Writer| w.style(Cell::blank()).unwrap();
+        let define = |w: &mut Writer| {
+            w.style(RunStyle {
+                cell: Cell::blank(),
+                index: [0; 2],
+            })
+            .unwrap()
+        };
         let case = |build: Build| {
             let mut w = Writer::new(MAX_DECODED, None);
             build(&mut w);
