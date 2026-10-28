@@ -28,7 +28,8 @@ use crate::compact::Compactor;
 use crate::core::{AnsiParser, Grid};
 use crate::input::{Scroll, split_input};
 use crate::render::{
-    FRAME_BUDGET, RawModeGuard, RenderState, render_once, resize_grid, restore_host_modes,
+    FRAME_BUDGET, RawModeGuard, RenderState, render_final, render_once, resize_grid,
+    restore_host_modes,
 };
 
 #[cfg(unix)]
@@ -40,8 +41,12 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 #[cfg(windows)]
 use std::io::Read;
-#[cfg(windows)]
 use std::time::Duration;
+
+/// How long shutdown waits for the child's last output after the loop stops,
+/// so it is parsed and painted before the TUI exits. Bounded, because a
+/// grandchild that inherited the PTY can hold its EOF off indefinitely.
+const DRAIN_LIMIT: Duration = Duration::from_millis(250);
 
 /// Signals the render loop to stop when a task ends — on its own, the task's
 /// `running.store(false)` + `frame.notify_one()` only run after the loop body,
@@ -221,6 +226,29 @@ async fn write_all(afd: &AsyncFd<OwnedFd>, data: &[u8]) -> std::io::Result<()> {
 }
 
 /// Build a small multi-threaded runtime and drive the terminal on it.
+/// Wait for child `pid` to exit and reap it, returning its exit code; `None`
+/// when SIGCHLD cannot be watched.
+///
+/// The child is spawned before the runtime (and so before this subscription)
+/// exists, and a SIGCHLD delivered before subscribing is not replayed. So the
+/// child is polled once right after subscribing, then after every signal.
+#[cfg(unix)]
+async fn reap_child(pid: libc::pid_t) -> Option<i32> {
+    let mut sigchld = signal(SignalKind::child()).ok()?;
+    loop {
+        let mut status: libc::c_int = 0;
+        // SAFETY: WNOHANG never blocks; `pid` is a plain pid_t value (not an
+        // owned resource), so reaping it here is sound even though the caller
+        // doesn't hold the owning `BackendHandle`.
+        if unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } == pid {
+            return Some(crate::backend::unix::exit_code_from_wait_status(status));
+        }
+        // Still running, or some *other* child exited (e.g. a background
+        // process the shell spawned and detached): keep watching for ours.
+        sigchld.recv().await?;
+    }
+}
+
 /// Runs the TUI to completion and returns the child shell's exit status as a
 /// `std::process::exit`-compatible value (the caller is expected to exit the
 /// process with it) — its own exit code on a normal exit, 128+signal on a
@@ -360,27 +388,10 @@ async fn run_async(
         let pid = reader.child_pid();
         rusty_tokio::spawn(async move {
             let Some(pid) = pid else { return };
-            let Ok(mut sigchld) = signal(SignalKind::child()) else {
-                return;
-            };
-            loop {
-                if sigchld.recv().await.is_none() {
-                    break;
-                }
-                let mut status: libc::c_int = 0;
-                // SAFETY: WNOHANG never blocks; `pid` is a plain pid_t value
-                // (not an owned resource), so reaping it here is sound even
-                // though this task doesn't hold the owning `BackendHandle`.
-                let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-                if r == pid {
-                    *exit_status.lock() =
-                        Some(crate::backend::unix::exit_code_from_wait_status(status));
-                    running.store(false, Ordering::Relaxed);
-                    frame.notify_one();
-                    break;
-                }
-                // Some *other* child was reaped (e.g. a background process
-                // the shell spawned and detached) — keep watching for ours.
+            if let Some(code) = reap_child(pid).await {
+                *exit_status.lock() = Some(code);
+                running.store(false, Ordering::Relaxed);
+                frame.notify_one();
             }
         })
     };
@@ -581,9 +592,18 @@ async fn run_async(
     // scope) reaps the child (if the SIGCHLD watcher didn't already win that
     // race) on the explicit call below and on drop; `_raw_guard` restores
     // cooked mode on return.
-    parser_task.abort();
     input_task.abort();
     sigchld_task.abort();
+    // SIGCHLD usually beats the child's last output through the PTY: let the
+    // parser task read on to EOF (bounded) and paint what it parsed.
+    let parser_abort = parser_task.abort_handle();
+    if rusty_tokio::time::timeout(DRAIN_LIMIT, parser_task)
+        .await
+        .is_err()
+    {
+        parser_abort.abort();
+    }
+    render_final(&grid, &mut render_state);
     restore_host_modes();
     let code = exit_status
         .lock()
@@ -591,6 +611,22 @@ async fn run_async(
         .or_else(|| reader.reap_exit_status())
         .unwrap_or(0);
     Ok(code)
+}
+
+/// A quiet gap this long ends the Windows shutdown drain: ConPTY gives no EOF
+/// to wait for, only the end of the child's output.
+#[cfg(windows)]
+const DRAIN_IDLE: Duration = Duration::from_millis(50);
+
+/// Feed one chunk of PTY output to the parser; returns its replies (DA/DSR)
+/// for the child.
+#[cfg(windows)]
+fn parse_chunk(parser: &Mutex<AnsiParser>, grid: &Mutex<Grid>, data: &[u8]) -> Vec<u8> {
+    let mut g = grid.lock();
+    let mut parser = parser.lock();
+    parser.advance(&mut g, data);
+    g.epoch += 1;
+    parser.take_responses()
 }
 
 /// Windows ConPTY driver: the pipes are synchronous (no readiness-pollable fd),
@@ -772,13 +808,7 @@ async fn run_async(
             Wake::Output(data) => {
                 match data {
                     Some(data) => {
-                        let responses = {
-                            let mut g = grid.lock();
-                            let mut parser = parser.lock();
-                            parser.advance(&mut g, &data);
-                            g.epoch += 1;
-                            parser.take_responses()
-                        };
+                        let responses = parse_chunk(&parser, &grid, &data);
                         frame.notify_one();
                         compactor.on_change(Instant::now());
                         if !responses.is_empty() {
@@ -833,6 +863,19 @@ async fn run_async(
         }
     }
 
+    // The exit watcher usually beats the child's last output through ConPTY,
+    // whose pipe only EOFs on our teardown: parse until it goes quiet
+    // (bounded) and paint what arrived.
+    let drain = async {
+        while let Ok(Some(data)) = rusty_tokio::time::timeout(DRAIN_IDLE, out_rx.recv()).await {
+            let responses = parse_chunk(&parser, &grid, &data);
+            if !responses.is_empty() {
+                let _ = in_tx.send(responses);
+            }
+        }
+    };
+    let _ = rusty_tokio::time::timeout(DRAIN_LIMIT, drain).await;
+    render_final(&grid, &mut render_state);
     restore_host_modes();
     // The `exit_token` watcher thread above only stops the event loop; it
     // doesn't fetch the exit code (`WaitForSingleObject` isn't
@@ -929,5 +972,34 @@ mod tests {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(is_open(src));
+    }
+
+    /// A child that exited before the SIGCHLD subscription existed (its
+    /// signal already spent) is still reaped, rather than waited on forever.
+    #[rusty_tokio::test]
+    async fn reap_child_finds_a_child_that_exited_before_subscribing() {
+        // `reap_child` is what waits on it.
+        #[allow(clippy::zombie_processes)]
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        // Block until it has exited, leaving it a zombie (WNOWAIT) for
+        // `reap_child` to collect.
+        // SAFETY: a zeroed siginfo_t is a valid out-parameter.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` outlives the call; waitid only writes to it.
+        let r = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(r, 0, "waitid: {}", std::io::Error::last_os_error());
+        let reaped = rusty_tokio::time::timeout(Duration::from_secs(2), reap_child(pid)).await;
+        assert_eq!(reaped.ok(), Some(Some(7)), "missed an already-exited child");
     }
 }

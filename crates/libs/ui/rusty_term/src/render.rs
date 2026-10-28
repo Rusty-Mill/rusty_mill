@@ -330,6 +330,17 @@ pub(crate) fn resize_grid(
     true
 }
 
+/// Paint the TUI's last frame, after the child has exited and its remaining
+/// output is parsed. A synchronized update still open then can never be
+/// closed by its writer, so it is released, as on a resize, rather than
+/// leaving the child's final output unpainted.
+pub(crate) fn render_final(grid: &Mutex<Grid>, st: &mut RenderState) {
+    if grid.lock().sync_output_active() {
+        st.clear_pending = true;
+    }
+    let _held = render_once(grid, st);
+}
+
 /// Snapshot the grid and paint one frame if warranted, forwarding any clipboard
 /// (OSC 52) bytes, title (OSC 0/2) changes, and cursor-visibility (DECTCEM)
 /// changes to the host terminal. Shared verbatim by both runtimes.
