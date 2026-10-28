@@ -68,8 +68,8 @@ mod client {
         .union(Features::INSPECT)
         .union(Features::LAYOUT);
 
-    /// How long a closed window waits for its blocks' own close, so their
-    /// last output shows before the client leaves.
+    /// How long a layout change that drops shown blocks waits for their own
+    /// close, so their last output shows first.
     const GRACE: Duration = Duration::from_millis(500);
 
     /// A block's connection: the block, and which of the connections the
@@ -165,7 +165,7 @@ mod client {
             arriving: None,
             opened: 0,
             mirrored: None,
-            closing: None,
+            pending: None,
             ended: None,
         };
         app.sync();
@@ -356,6 +356,8 @@ mod client {
     struct Pane {
         /// Which connection to its block this is.
         generation: u64,
+        /// The block's close came on this connection, after its last output.
+        closed: bool,
         stream: UnixStream,
         conn: Conn<UnixStream>,
         next: u64,
@@ -504,9 +506,21 @@ mod client {
         /// The input modes last mirrored from the focused block while
         /// composed.
         mirrored: Option<Vec<u8>>,
-        /// When the window closed, the deadline for its blocks' own close.
-        closing: Option<Instant>,
+        /// A layout change held back while blocks it drops drain.
+        pending: Option<Pending>,
         ended: Option<Ended>,
+    }
+
+    /// A layout change that drops shown blocks. The server tells it on the
+    /// control connection, which is not ordered with the blocks' own; so
+    /// the old layout stays on screen until each dropped block's connection
+    /// has told its close (after its last output) or ended, or [`GRACE`]
+    /// runs out.
+    struct Pending {
+        layout: Option<Layout>,
+        zoomed: Option<BlockId>,
+        leaving: Vec<BlockId>,
+        by: Instant,
     }
 
     impl App {
@@ -528,8 +542,12 @@ mod client {
                     self.sync();
                 }
                 self.draw();
-                if self.closing.is_some_and(|by| Instant::now() >= by) {
-                    self.end(Ended::Closed);
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|p| Instant::now() >= p.by)
+                {
+                    self.settle();
                 }
                 if let Some(ended) = self.ended.take() {
                     return ended;
@@ -551,11 +569,19 @@ mod client {
                 // block's own is left to report it, after its last output.
                 Input::Ended(None) if !self.panes.is_empty() => {}
                 Input::Ended(None) => self.end(Ended::Disconnected),
-                Input::Ended(Some(tag)) if self.current(tag) => match self.closing {
-                    Some(_) => self.drained(tag.0),
-                    // A block this client still shows lost its connection.
-                    None => self.end(Ended::Disconnected),
-                },
+                Input::Ended(Some(tag)) if self.current(tag) => {
+                    let block = tag.0;
+                    let leaving = self
+                        .pending
+                        .as_ref()
+                        .is_some_and(|p| p.leaving.contains(&block));
+                    let closed = self.panes.get(&block).is_some_and(|p| p.closed);
+                    match leaving || closed {
+                        true => self.drained(block),
+                        // A block this client still shows lost its connection.
+                        false => self.end(Ended::Disconnected),
+                    }
+                }
                 // A connection this client already hung up on.
                 Input::Ended(Some(_)) => {}
             }
@@ -568,22 +594,58 @@ mod client {
                 .is_some_and(|p| p.generation == generation)
         }
 
-        /// The window is gone: leave once each block still connected has
-        /// told its own close, which comes after its last output, or ended,
-        /// or after [`GRACE`].
-        fn close(&mut self) {
-            match self.panes.is_empty() {
-                true => self.end(Ended::Closed),
-                false => {
-                    self.closing.get_or_insert_with(|| Instant::now() + GRACE);
+        /// Takes the window's new layout: at once, or once the shown blocks
+        /// it drops have drained (see [`Pending`]).
+        fn relayout(&mut self, layout: Option<Layout>, zoomed: Option<BlockId>) {
+            let staying = layout.as_ref().map(Layout::blocks).unwrap_or_default();
+            let mut leaving: Vec<BlockId> = self
+                .panes
+                .iter()
+                .filter(|(b, p)| !staying.contains(b) && !p.closed)
+                .map(|(b, _)| *b)
+                .collect();
+            if let Some(old) = self.pending.take() {
+                for block in old.leaving {
+                    if !leaving.contains(&block) {
+                        leaving.push(block);
+                    }
                 }
+            }
+            self.pending = Some(Pending {
+                layout,
+                zoomed,
+                by: Instant::now() + GRACE,
+                leaving,
+            });
+            if self.pending.as_ref().is_some_and(|p| p.leaving.is_empty()) {
+                self.settle();
             }
         }
 
-        /// A closing window's block is done.
+        /// A block's connection told its close, or ended: once drawn, it
+        /// is done, and a held layout change may go ahead.
         fn drained(&mut self, block: BlockId) {
+            self.draw();
             self.panes.remove(&block);
-            self.close();
+            let Some(pending) = self.pending.as_mut() else {
+                return;
+            };
+            pending.leaving.retain(|b| *b != block);
+            if pending.leaving.is_empty() {
+                self.settle();
+            }
+        }
+
+        /// Applies the held layout change, with what the leaving blocks
+        /// last showed drawn first.
+        fn settle(&mut self) {
+            let Some(pending) = self.pending.take() else {
+                return;
+            };
+            self.draw();
+            self.layout = pending.layout;
+            self.zoomed = pending.zoomed;
+            self.sync();
         }
 
         /// Keeps the first reason the client stops.
@@ -670,18 +732,15 @@ mod client {
                     window,
                     layout,
                     zoomed,
-                } if Some(window) == self.window => {
-                    self.layout = layout;
-                    self.zoomed = zoomed;
-                    self.sync();
+                } if Some(window) == self.window => self.relayout(layout, zoomed),
+                Event::WindowClosed { window } if Some(window) == self.window => {
+                    self.relayout(None, None)
                 }
-                Event::WindowClosed { window } if Some(window) == self.window => self.close(),
                 // Without layouts the only block shown is the first.
                 Event::BlockClosed { block }
                     if !self.layouts && self.layout == Some(Layout::Block(block)) =>
                 {
-                    self.layout = None;
-                    self.sync();
+                    self.relayout(None, None)
                 }
                 _ => {}
             }
@@ -717,8 +776,13 @@ mod client {
                     self.fit();
                 }
                 Ok(Change::Closed) => {
+                    pane.closed = true;
                     self.on_event(Event::BlockClosed { block });
-                    if self.closing.is_some() {
+                    let leaving = self
+                        .pending
+                        .as_ref()
+                        .is_some_and(|p| p.leaving.contains(&block));
+                    if leaving {
                         self.drained(block);
                     }
                 }
@@ -754,7 +818,7 @@ mod client {
         fn sync(&mut self) {
             let visible = self.visible();
             let Some(&(first, _)) = visible.first() else {
-                self.close();
+                self.end(Ended::Closed);
                 return;
             };
             let shows = |block: BlockId| visible.iter().any(|(b, _)| *b == block);
@@ -859,6 +923,7 @@ mod client {
             });
             let mut pane = Pane {
                 generation: tag.1,
+                closed: false,
                 conn: Conn::new(clone(&stream)?),
                 stream,
                 next: 1,

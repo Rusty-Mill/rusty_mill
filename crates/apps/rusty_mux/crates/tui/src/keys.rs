@@ -49,8 +49,8 @@ enum State {
     Prefix,
     /// ESC after the prefix: an arrow key may follow.
     Escape,
-    /// `ESC [` after the prefix.
-    Csi,
+    /// `ESC [`, or `ESC O` with application cursor keys, after the prefix.
+    Arrow,
 }
 
 /// Turns keyboard bytes into actions.
@@ -73,9 +73,9 @@ impl Keys {
                     None
                 }
                 State::Prefix => self.command(b),
-                State::Escape if b == b'[' => self.go(State::Csi, None),
+                State::Escape if b == b'[' || b == b'O' => self.go(State::Arrow, None),
                 State::Escape => self.go(State::Typing, Some(Action::Unknown)),
-                State::Csi => self.go(State::Typing, Some(arrow(b))),
+                State::Arrow => self.go(State::Typing, Some(arrow(b))),
             };
             let Some(action) = action else {
                 continue;
@@ -173,6 +173,8 @@ mod tests {
         assert_eq!(keys.feed(b"\x1b"), vec![]);
         assert_eq!(keys.feed(b"["), vec![]);
         assert_eq!(keys.feed(b"C"), vec![Action::Focus(Dir::Right)]);
+        assert_eq!(keys.feed(b"\x1d\x1bO"), vec![]);
+        assert_eq!(keys.feed(b"D"), vec![Action::Focus(Dir::Left)]);
         assert_eq!(keys.feed(b"\x1d-"), vec![Action::Split { beside: false }]);
     }
 
@@ -186,6 +188,11 @@ mod tests {
             (b"\x1d\x1b[A", Action::Focus(Dir::Up)),
             (b"\x1d\x1b[B", Action::Focus(Dir::Down)),
             (b"\x1d\x1b[D", Action::Focus(Dir::Left)),
+            // Application cursor keys (DECCKM), mirrored from the block.
+            (b"\x1d\x1bOA", Action::Focus(Dir::Up)),
+            (b"\x1d\x1bOB", Action::Focus(Dir::Down)),
+            (b"\x1d\x1bOC", Action::Focus(Dir::Right)),
+            (b"\x1d\x1bOD", Action::Focus(Dir::Left)),
             (b"\x1d|", Action::Split { beside: true }),
             (b"\x1dx", Action::Close),
             (b"\x1dq", Action::Unknown),

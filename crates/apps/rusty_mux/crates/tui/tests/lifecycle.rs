@@ -291,6 +291,9 @@ struct Script {
     /// Once the left block's lease is granted, the control connection
     /// reports the window empty; later the block prints FINAL and closes.
     close: bool,
+    /// Once the right block is attached, the control connection drops it
+    /// from the layout; later the block prints BYE and closes.
+    close_right: bool,
 }
 
 /// What the client asked of the blocks.
@@ -306,8 +309,8 @@ struct Shared {
     log: Mutex<Log>,
     /// Set once the right block asks for its lease.
     right_asked: (Mutex<bool>, Condvar),
-    /// Tells the control connection the left lease was granted.
-    granted: Mutex<Sender<()>>,
+    /// Events for the control connection to send.
+    events: Mutex<Sender<Event>>,
 }
 
 impl Shared {
@@ -316,6 +319,11 @@ impl Shared {
             true => format!("cols50({BLOCK},{OTHER})").parse().expect("layout"),
             false => Layout::Block(id(BLOCK)),
         }
+    }
+
+    /// Has the control connection send `event`.
+    fn tell(&self, event: Event) {
+        let _ = self.events.lock().expect("lock").send(event);
     }
 
     fn released(&self) -> Vec<BlockId> {
@@ -327,13 +335,13 @@ impl Shared {
 /// accepts is served on its own thread, for as long as the test runs.
 fn layout_server(script: Script) -> (PathBuf, Arc<Shared>) {
     let (path, listener) = listen();
-    let (granted, grants) = mpsc::channel();
+    let (events, queued) = mpsc::channel();
     let shared = Arc::new(Shared {
         script,
         window: WindowId::from_uuid(Uuid::nil()),
         log: Mutex::default(),
         right_asked: (Mutex::new(false), Condvar::new()),
-        granted: Mutex::new(granted),
+        events: Mutex::new(events),
     });
     let server = shared.clone();
     std::thread::spawn(move || {
@@ -341,14 +349,12 @@ fn layout_server(script: Script) -> (PathBuf, Arc<Shared>) {
             .union(Features::INSPECT)
             .union(Features::LAYOUT);
         let control = welcome(&listener, features);
-        let events = control.try_clone().expect("clone");
+        let mut sender = Conn::new(control.try_clone().expect("clone"));
         let control_shared = server.clone();
         std::thread::spawn(move || serve_control(control, &control_shared));
-        let close_shared = server.clone();
         std::thread::spawn(move || {
-            if grants.recv().is_ok() {
-                let window = close_shared.window;
-                send_event(&mut Conn::new(events), layout_changed(window, None, None));
+            while let Ok(event) = queued.recv() {
+                send_event(&mut sender, event);
             }
         });
         while let Ok((stream, _)) = listener.accept() {
@@ -422,6 +428,17 @@ fn serve_control(stream: Stream, shared: &Shared) {
     }
 }
 
+/// After the control connection has dropped the block: its last output,
+/// then its close, on its own connection.
+fn last_words(conn: &mut Conn<Stream>, block: BlockId, data: &[u8]) {
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = conn.send(&Message::Output {
+        block,
+        data: data.to_vec(),
+    });
+    send_event(conn, Event::BlockClosed { block });
+}
+
 /// Serves one block connection of a layout server.
 fn serve_layout_block(mut conn: Conn<Stream>, shared: &Shared) {
     let script = shared.script;
@@ -433,6 +450,11 @@ fn serve_layout_block(mut conn: Conn<Stream>, shared: &Shared) {
                     .expect("done");
                 let output: &[u8] = if block == left { LEFT } else { b"RIGHT" };
                 attach(&mut conn, block, output);
+                if block == right && script.close_right {
+                    let layout = Some(Layout::Block(left));
+                    shared.tell(layout_changed(shared.window, layout, None));
+                    last_words(&mut conn, block, b"BYE");
+                }
             }
             Message::AcquireLease { req, block } => {
                 if block == right {
@@ -450,13 +472,8 @@ fn serve_layout_block(mut conn: Conn<Stream>, shared: &Shared) {
                 conn.send(&Message::Done { req, created: None })
                     .expect("lease");
                 if block == left && script.close {
-                    let _ = shared.granted.lock().expect("lock").send(());
-                    std::thread::sleep(Duration::from_millis(300));
-                    let _ = conn.send(&Message::Output {
-                        block,
-                        data: b"FINAL".to_vec(),
-                    });
-                    send_event(&mut conn, Event::BlockClosed { block });
+                    shared.tell(layout_changed(shared.window, None, None));
+                    last_words(&mut conn, block, b"FINAL");
                 }
             }
             Message::ReleaseLease { req, block } => {
@@ -550,22 +567,40 @@ fn a_block_hidden_and_shown_again_at_once_keeps_the_client() {
 
 #[test]
 fn a_closed_window_shows_its_blocks_last_output_first() {
+    // Passed through alone, and composed beside a block that never closes.
+    for both in [false, true] {
+        let (socket, _server) = layout_server(Script {
+            both,
+            close: true,
+            ..Script::default()
+        });
+        let tui = Tui::start(&socket);
+        let text = String::from_utf8_lossy(&tui.exit()).into_owned();
+        let restore = text
+            .rfind(std::str::from_utf8(RESTORE).expect("utf-8"))
+            .unwrap_or_else(|| panic!("terminal not reset: {text:?}"));
+        let last = text
+            .rfind("FINAL")
+            .unwrap_or_else(|| panic!("no last output ({both}): {text:?}"));
+        let said = text
+            .rfind("closed")
+            .unwrap_or_else(|| panic!("no close: {text:?}"));
+        assert!(last < restore && restore < said, "{both}: {text:?}");
+    }
+}
+
+#[test]
+fn a_block_dropped_from_the_layout_shows_its_last_output_first() {
     let (socket, _server) = layout_server(Script {
-        close: true,
+        both: true,
+        close_right: true,
         ..Script::default()
     });
     let tui = Tui::start(&socket);
-    let text = String::from_utf8_lossy(&tui.exit()).into_owned();
-    let restore = text
-        .rfind(std::str::from_utf8(RESTORE).expect("utf-8"))
-        .unwrap_or_else(|| panic!("terminal not reset: {text:?}"));
-    let last = text
-        .rfind("FINAL")
-        .unwrap_or_else(|| panic!("no last output: {text:?}"));
-    let said = text
-        .rfind("closed")
-        .unwrap_or_else(|| panic!("no close: {text:?}"));
-    assert!(last < restore && restore < said, "{text:?}");
+    // The layout drops the right block before its last output arrives.
+    tui.wait_for(b"RIGHTBYE");
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
 }
 
 #[test]
