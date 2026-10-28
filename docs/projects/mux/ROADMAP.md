@@ -40,9 +40,9 @@ Started 2026-10-25 (owner go-ahead). One PR per step, in order:
 6. `rusty_mux_mcp` on `rusty_mcp_server`, generated from the same catalog (C07): `rusty-mux-mcp` over stdio, one tool per method that works on a connection of its own. Done (#1100).
 7. Actions and key bindings from a JSON config, `rusty_mux_script` (C19): named chains of catalog requests with `${arg}` placeholders, run by `rusty-mux-ctl do`, checked by `config check`; `on` rules that `rusty-mux-ctl watch` runs when an event happens, including new `pwd-changed` and `title-changed` events. No language: logic lives in programs driving ctl or MCP. Done (#1128, #1138).
 
-## Phase 2b: agent parity
+## Phase 2b: agent parity (done 2026-10-28)
 
-From the [Rex gap check](REX-GAP-CHECK.md) §5 (owner, 2026-10-27). Started 2026-10-27, when the owner accepted Phase 2. One PR per step, in order. All seven steps merged by 2026-10-28; the phase is done once the owner accepts the exit evidence. Exit: each step's behaviour has a server or ctl test, on Linux and on CI's Windows leg where the step does not depend on ConPTY pass-through (R1).
+From the [Rex gap check](REX-GAP-CHECK.md) §5 (owner, 2026-10-27). Started 2026-10-27, when the owner accepted Phase 2. One PR per step, in order. All seven steps merged by 2026-10-28, and the owner accepted the exit evidence the same day. The manual Windows check ([WINDOWS-MANUAL-CHECK](WINDOWS-MANUAL-CHECK-2026-10-28.md), #1212) passed after #1214 fixed Ctrl-] in Windows Terminal; the two-account check (R10) was not run. Exit: each step's behaviour has a server or ctl test, on Linux and on CI's Windows leg where the step does not depend on ConPTY pass-through (R1).
 
 1. Terminal events (C29): program exited with its exit code, bell, progress, notification, behind a new feature bit; reply to the OSC 7501 query. Done (#1174).
 2. Wait primitives (C30): `rusty-mux-ctl wait` on a block closing or its program exiting, with a timeout, exiting with the program's status; `create-block` takes an optional command, arguments and working directory per request (proto and server), so run-and-wait starts a program in a new block and exits with its status; wait for an event matching fields, with a timeout. Done (#1178): `wait --block`, `wait --event KIND --FIELD VALUE`, `run --wait`, `create-block --command --arg --cwd` behind `Features::LAUNCH`; a timeout exits 124.
