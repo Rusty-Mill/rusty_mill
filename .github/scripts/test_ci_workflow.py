@@ -806,6 +806,18 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         script = alert.split("        run: |\n", 1)[1]
         self.assertNotIn("${{", script)
 
+    def test_libs_tags_only_name_main_and_never_move(self) -> None:
+        tagger = (WORKFLOW.parent / "libs-tag.yml").read_text(encoding="utf-8")
+        # Run by hand only, on main's head, which reached main through the queue (ADR-0013).
+        self.assertIn("on:\n  workflow_dispatch:\n\n", tagger)
+        self.assertIn("          ref: main\n", tagger)
+        self.assertRegex(tagger, r"(?m)^permissions:\n  contents: read$")
+        self.assertEqual(re.findall(r"(?m)^\s+[a-z-]+: write$", tagger), ["      contents: write"])
+        # A published tag is never moved, replaced or deleted.
+        for flag in ("--force", " -f ", "--delete", "push origin :"):
+            with self.subTest(flag=flag):
+                self.assertNotIn(flag, tagger)
+
     def test_merge_queue_reaper_is_narrow(self) -> None:
         reaper = (WORKFLOW.parent / "merge-queue-reaper.yml").read_text(encoding="utf-8")
         # Main's copy runs on every CI request; no PR or queue check of its own.

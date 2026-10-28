@@ -1,0 +1,42 @@
+name: Tag libs
+
+# Repositories outside the monorepo pin its crates to a `libs-YYYY.MM.N` tag
+# (ADR-0013). Run this by hand when such a repository needs a newer pin. It
+# tags the current head of `main`, which only moves through the merge queue,
+# so every tag names a commit that passed required-gate.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: libs-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: Tag main with the next libs tag of this month
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin 'refs/tags/libs-*:refs/tags/libs-*'
+          month="$(date -u +%Y.%m)"
+          last="$(git tag --list "libs-${month}.*" | sed "s/^libs-${month}\.//" | sort -n | tail -1)"
+          tag="libs-${month}.$(( ${last:--1} + 1 ))"
+          head="$(git rev-parse HEAD)"
+          if git tag --points-at "$head" | grep -q '^libs-'; then
+            echo "main ($head) already has $(git tag --points-at "$head" | grep '^libs-' | head -1)"
+            exit 0
+          fi
+          git tag "$tag" "$head"
+          git push origin "refs/tags/$tag"
+          echo "Tagged $head as $tag" >> "$GITHUB_STEP_SUMMARY"
