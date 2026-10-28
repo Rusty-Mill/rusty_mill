@@ -266,12 +266,6 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_provider | rp-providers |  |
 | apps | rusty_provider | rp-router |  |
 | apps | rusty_provider | rp-server |  |
-| apps | rusty_remind_me | remind_me_api |  |
-| apps | rusty_remind_me | remind_me_core |  |
-| apps | rusty_remind_me | remind_me_hub |  |
-| apps | rusty_remind_me | remind_me_mcp |  |
-| apps | rusty_remind_me | remind_me_remote |  |
-| apps | rusty_remind_me | rusty-remind-me |  |
 | apps | rusty_rsi | rsi-cli | Composition root of the rusty_rsi harness: the \`rsi\` binary (calibrate, run, report, inner) and its sandbox and grader entry points |
 | apps | rusty_rsi | rsi-core | Pure domain core of the rusty_rsi self-improvement harness: accept gate, noise margin, budget metering, search helpers and lineage types |
 | apps | rusty_rsi | rsi-harness | a0, the inner agent of the rusty_rsi harness: AIDE0-style tree search over a metered broker; the outer loop's only mutable surface |

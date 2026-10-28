@@ -31,8 +31,6 @@ PLAN_KEYS = {
     "tick",
     "fair_play",
     "agui",
-    "remind_me",
-    "remind_me_legacy_import",
     "win32",
     "multimodal_db",
     "rusty_config_no_std",
@@ -399,7 +397,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
         )
 
     def test_rleval_jobs_follow_cargo_impact_and_the_viewer_fixture(self) -> None:
@@ -536,11 +534,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
         )
 
     def test_agui_package_change_selects_tick_web_too(self) -> None:
@@ -555,44 +553,12 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
 
     def test_shared_and_specialized_package_rules(self) -> None:
         flags = specialized_job_flags(
-            [], ["rusty_win32", "rusty_multimodal_db", "rusty_config", "rusty_tls", "remind_me_hub"]
+            [], ["rusty_win32", "rusty_multimodal_db", "rusty_config", "rusty_tls"]
         )
         self.assertTrue(flags["win32"])
         self.assertTrue(flags["multimodal_db"])
         self.assertTrue(flags["rusty_config_no_std"])
         self.assertTrue(flags["tls_engine"])
-        self.assertTrue(flags["remind_me"])
-
-    def test_legacy_import_routes_sources_contracts_and_dependencies(self) -> None:
-        hub = "crates/apps/rusty_remind_me/crates/remind_me_hub/"
-        for path in ("src/import/postgres.rs", "src/record.rs", "src/store/multimodal/rows.rs",
-                     "tests/fixtures/postgres_hub.sql", "tests/suite/recorded.rs",
-                     "Cargo.toml", "Containerfile", "setup.sh"):
-            with self.subTest(path=path):
-                self.assertTrue(specialized_job_flags([hub + path], [])["remind_me_legacy_import"])
-        self.assertTrue(specialized_job_flags(["Cargo.lock"], [])["remind_me_legacy_import"])
-        self.assertTrue(specialized_job_flags([], ["remind_me_hub"])["remind_me_legacy_import"])
-        flags = specialized_job_flags(
-            ["crates/apps/rusty_remind_me/crates/remind_me_core/src/lib.rs"], ["remind_me_core"]
-        )
-        self.assertTrue(flags["remind_me"])
-        self.assertFalse(flags["remind_me_legacy_import"])
-
-    def test_node_wire_contract_selects_import_even_without_hub_cargo_impact(self) -> None:
-        core = "crates/apps/rusty_remind_me/crates/remind_me_core/src/"
-        for path in ("sync/record.rs", "sync/push.rs", "db/engine/rows.rs", "models.rs"):
-            with self.subTest(path=path):
-                flags = specialized_job_flags([core + path], ["remind_me_core"])
-                self.assertTrue(flags["remind_me_legacy_import"])
-
-    def test_engine_checks_do_not_need_a_postgres_service(self) -> None:
-        engine = self.workflow.split("  remind-me-hub:\n")[1].split("  remind-me-legacy-import:\n")[0]
-        self.assertNotIn("services:", engine)
-        self.assertIn("--no-default-features", engine)
-        legacy = self.workflow.split("  remind-me-legacy-import:\n")[1].split("  remind-me-windows:\n")[0]
-        self.assertIn("if: needs.plan.outputs.remind_me_legacy_import == 'true'", legacy)
-        self.assertIn('REMIND_ME_HUB_REQUIRE_POSTGRES: "1"', legacy)
-        self.assertIn("--features postgres-import --test hub_postgres_copy_test", legacy)
 
     def test_pr_runs_cancel_but_main_and_manual_runs_are_isolated(self) -> None:
         self.assertIn(
@@ -764,7 +730,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
 
     def test_every_workflow_pin_matches_rust_toolchain_file(self) -> None:
         channel = tomllib.loads((REPO / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
-        for path in (WORKFLOW, BASELINE_WORKFLOW, WORKFLOW.with_name("remind-me-release.yml")):
+        for path in (WORKFLOW, BASELINE_WORKFLOW):
             with self.subTest(workflow=path.name):
                 pin = re.search(r'(?m)^  RUST_TOOLCHAIN: "([^"]+)"', path.read_text(encoding="utf-8"))
                 self.assertEqual(pin and pin.group(1), channel)
@@ -891,60 +857,6 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
             if path != WORKFLOW and re.search(r"(?m)^  pull_request(_target)?:", path.read_text(encoding="utf-8"))
         ]
         self.assertEqual(outside, [], "PR checks outside ci.yml bypass required-gate")
-
-    def test_plugin_version_check_is_a_gated_planner_job(self) -> None:
-        job = self.workflow.split("  remind-me-plugin-version:\n")[1].split("  remind-me-hub:\n")[0]
-        self.assertIn("if: needs.plan.outputs.remind_me == 'true'", job)
-        self.assertIn("crates/apps/rusty_remind_me/scripts/check_plugin_version.sh", job)
-        gate = self.workflow.split("  required-gate:\n")[1]
-        self.assertIn("      - remind-me-plugin-version\n", gate.split("runs-on:")[0])
-
-    def test_plugin_version_job_runs_for_product_changes_and_not_for_unrelated_ones(self) -> None:
-        def flag(paths: list[str]) -> bool:
-            return specialized_job_flags(paths, [])["remind_me"]
-
-        self.assertTrue(flag(["crates/apps/rusty_remind_me/.claude-plugin/plugin.json"]))
-        self.assertTrue(flag(["crates/apps/rusty_remind_me/crates/remind_me_core/Cargo.toml"]))
-        self.assertFalse(flag(["crates/libs/net/rusty_http/src/lib.rs", "README.md"]))
-        # Sweeps that run everything (manual, scheduled, no usable base) include it.
-        self.assertEqual(self._planner_map("--emit-full")["remind_me"], "true")
-
-    @unittest.skipUnless(shutil.which("bash") and shutil.which("jq"), "bash and jq are needed to run the check")
-    def test_plugin_version_drift_fails_the_check_and_agreement_passes(self) -> None:
-        product = Path(__file__).parents[2] / "crates" / "apps" / "rusty_remind_me"
-        members = "remind_me_core remind_me_mcp remind_me_api remind_me_cli remind_me_remote remind_me_hub".split()
-
-        def run(edit=None) -> subprocess.CompletedProcess[str]:
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                shutil.copytree(product / "scripts", root / "scripts")
-                (root / ".claude-plugin").mkdir()
-                shutil.copy(product / ".claude-plugin" / "plugin.json", root / ".claude-plugin" / "plugin.json")
-                for member in members:
-                    (root / "crates" / member).mkdir(parents=True)
-                    shutil.copy(product / "crates" / member / "Cargo.toml", root / "crates" / member / "Cargo.toml")
-                if edit:
-                    edit(root)
-                return subprocess.run(
-                    ["bash", str(root / "scripts" / "check_plugin_version.sh")],
-                    capture_output=True, text=True, check=False,
-                )
-
-        self.assertEqual(run().returncode, 0, "the repo as committed must agree")
-
-        def bump_plugin(root: Path) -> None:
-            manifest = root / ".claude-plugin" / "plugin.json"
-            manifest.write_text(re.sub(r'("version"\s*:\s*")[^"]+', r"\g<1>99.0.0", manifest.read_text()))
-
-        drifted = run(bump_plugin)
-        self.assertEqual(drifted.returncode, 1, drifted.stderr)
-        self.assertIn("Plugin version drift", drifted.stderr)
-
-        def bump_one_crate(root: Path) -> None:
-            manifest = root / "crates" / "remind_me_hub" / "Cargo.toml"
-            manifest.write_text(re.sub(r'(?m)^version = "[^"]+"', 'version = "99.0.0"', manifest.read_text(), count=1))
-
-        self.assertEqual(run(bump_one_crate).returncode, 1, "crates disagreeing also fails")
 
     @unittest.skipUnless(shutil.which("bash"), "bash is needed to run the gate step")
     def test_required_gate_fails_when_any_needed_job_fails_and_passes_when_skipped(self) -> None:

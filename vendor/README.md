@@ -67,7 +67,6 @@ cargo test --locked --manifest-path vendor/jsonwebtoken/Cargo.toml --no-default-
 cargo test --locked --manifest-path vendor/jsonwebtoken/Cargo.toml --no-default-features --features rust_crypto
 cargo test --locked -p agentgateway-auth
 cargo test --locked -p rusty_mcp_middleware --features jwt
-cargo test --locked -p remind_me_core --features cloud-backup --lib cloud_backup::
 cargo test --locked -p rusty-croc
 bash crates/apps/rusty_croc/scripts/interop_test.sh
 cargo deny --workspace check
