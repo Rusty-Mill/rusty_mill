@@ -13,8 +13,9 @@ reserved for rejected RMRP replay, incomplete RTCP v1, superseded fixed-width
 RTCP v2 and superseded RTCP v3 respectively; none enables attach. Hello/Welcome
 negotiate bit 16; Attach without it returns Failed. The server offers no older
 version, and the client refuses a Welcome without bit 16, so a v3 peer on
-either side fails closed instead of restoring v3's baked-in default colours. Existing frame layouts and the drawable
-RTSN v1 API remain unchanged.
+either side fails closed instead of restoring v3's baked-in default colours.
+Existing frame layouts are unchanged. The drawable RTSN snapshot is a separate
+format: it writes v2 (default fg/bg in the header, #1163) and still decodes v1.
 
 A successful attach sends Done, then ordered `Checkpoint` messages (type `0x88`),
 then Ready, then raw Output and subsequent model events. A Checkpoint contains
