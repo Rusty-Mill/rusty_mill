@@ -246,7 +246,7 @@ impl StateStore {
     /// **Failures propagate.** They used to be swallowed after a few
     /// retries, on the reasoning that a caller holding the token in memory
     /// keeps working. That is the wrong trade for the one caller that
-    /// matters: `issue_tokens` would hand a client a bearer token that was
+    /// matters: an issuance would hand a client a bearer token that was
     /// never persisted, so the very next authenticated request fails with
     /// no indication why, on either side. A refused issuance is a worse
     /// user experience and a far better failure.
@@ -403,6 +403,28 @@ impl StateStore {
         let mut state = self.load()?;
         state.tokens_mut(kind).insert(hash_token(token), meta);
         self.write(&state)
+    }
+
+    /// Store a fresh token set for `client_id` in one locked write, only while
+    /// the client is still registered: `false`, with nothing written, once
+    /// [`Self::revoke_client`] has removed it. Checking registration and
+    /// writing every token under the same lock is what keeps a revocation
+    /// from being undone by an issuance that checked the client before it.
+    pub fn put_tokens_for_client(
+        &self,
+        client_id: &str,
+        tokens: Vec<(TokenKind, String, Value)>,
+    ) -> io::Result<bool> {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.load()?;
+        if !state.clients.contains_key(client_id) {
+            return Ok(false);
+        }
+        for (kind, token, meta) in tokens {
+            state.tokens_mut(kind).insert(hash_token(&token), meta);
+        }
+        self.write(&state)?;
+        Ok(true)
     }
 
     /// Look up a raw token by hash; `None` when unknown.
@@ -820,6 +842,34 @@ mod tests {
         assert!(observations > 0, "reader never ran");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tokens_for_a_revoked_client_are_not_written() {
+        let path = temp_state_path("for_client");
+        let store = StateStore::new(path.clone());
+        store.put_client("c", json!({})).unwrap();
+        let pair = || {
+            vec![
+                (
+                    TokenKind::Access,
+                    "a".to_string(),
+                    json!({"client_id": "c"}),
+                ),
+                (
+                    TokenKind::Refresh,
+                    "r".to_string(),
+                    json!({"client_id": "c"}),
+                ),
+            ]
+        };
+        assert!(store.put_tokens_for_client("c", pair()).unwrap());
+        assert!(store.get_token(TokenKind::Access, "a").is_some());
+        store.revoke_client("c").unwrap().unwrap();
+        assert!(!store.put_tokens_for_client("c", pair()).unwrap());
+        assert!(store.get_token(TokenKind::Access, "a").is_none());
+        assert!(store.get_token(TokenKind::Refresh, "r").is_none());
+        let _ = fs::remove_file(&path);
     }
 }
 

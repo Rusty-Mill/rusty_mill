@@ -382,9 +382,11 @@ impl Provider {
     /// pair. Only called once every check on the loaded code passed, so a
     /// failed check never consumes it.
     ///
-    /// `Ok(None)`: the code did not exist. `Err`: it did, was consumed, and
-    /// the tokens could not be written. The code stays consumed either way;
-    /// re-admitting it would open a replay window.
+    /// `Ok(None)`: the code did not exist, or its client was revoked since it
+    /// was issued (checked under the store's lock as the pair is written, so a
+    /// revocation that finished first is never undone). `Err`: it did, was
+    /// consumed, and the tokens could not be written. The code stays consumed
+    /// either way; re-admitting it would open a replay window.
     pub fn exchange_authorization_code(
         &self,
         code: &str,
@@ -403,7 +405,7 @@ impl Provider {
             scopes: entry.scopes,
             resource: entry.resource,
         };
-        self.issue_tokens(grant, now).map(Some)
+        self.issue_tokens(grant, now)
     }
 
     // -- refresh grant --------------------------------------------------------
@@ -527,15 +529,21 @@ impl Provider {
         Some(meta)
     }
 
-    fn issue_tokens(&self, grant: Grant<'_>, now: i64) -> io::Result<TokenResponse> {
+    /// A fresh pair for `grant`, or `None` if its client is no longer registered.
+    fn issue_tokens(&self, grant: Grant<'_>, now: i64) -> io::Result<Option<TokenResponse>> {
         let access_token = generate_token()?;
         let refresh_token = generate_token()?;
-        for (kind, token, meta) in token_records(&grant, &access_token, &refresh_token, now) {
-            self.store.put_token(kind, &token, meta)?;
+        let records = token_records(&grant, &access_token, &refresh_token, now);
+        // Both halves are on disk, in one write, before the pair is handed back, so
+        // a client never holds a token the server will not recognise.
+        if !self.store.put_tokens_for_client(grant.client_id, records)? {
+            return Ok(None);
         }
-        // Both halves are on disk before the pair is handed back, so a client
-        // never holds a token the server will not recognise.
-        Ok(token_response(&grant.scopes, access_token, refresh_token))
+        Ok(Some(token_response(
+            &grant.scopes,
+            access_token,
+            refresh_token,
+        )))
     }
 }
 
@@ -973,6 +981,24 @@ mod tests {
             (2, 1),
             "the first access token, and one rotated pair"
         );
+    }
+
+    #[test]
+    fn an_exchange_that_checked_the_client_before_a_revocation_issues_nothing() {
+        let (provider, _dir) = provider();
+        let client_id = register(&provider);
+        let now = now_unix();
+        let code = approved_code(&provider, &client_id, now);
+        // Paused after /token checked the registration and loaded the code...
+        assert!(provider.get_client(&client_id).is_some());
+        provider.load_authorization_code(&client_id, &code).unwrap();
+        // ...while an admin revokes the client...
+        provider.store().revoke_client(&client_id).unwrap().unwrap();
+        // ...then resumed: no token is written, and none comes back.
+        let resumed = provider.exchange_authorization_code(&code, now).unwrap();
+        assert!(resumed.is_none());
+        let raw = std::fs::read_to_string(provider.store().path()).unwrap();
+        assert!(!raw.contains(&client_id), "no orphan token for it: {raw}");
     }
 
     #[test]
