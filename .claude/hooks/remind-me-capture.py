@@ -51,6 +51,8 @@ THROTTLE_SECONDS = 60
 BUDGET_SECONDS = 25
 GIT_SECONDS = 2
 PROTOCOL_VERSION = '2025-06-18'
+# Cloudflare's browser integrity check refuses urllib's default agent (error 1010).
+USER_AGENT = 'remind-me-capture/1'
 # Versions whose initialize, tools/call and Streamable HTTP framing this client speaks.
 SUPPORTED_VERSIONS = {PROTOCOL_VERSION, '2025-03-26'}
 OPT_IN = 'REMIND_ME_CLOUD_CAPTURE'
@@ -288,7 +290,8 @@ class Mcp:
         headers = {'Content-Type': 'application/json',
                    'Accept': 'application/json, text/event-stream',
                    'Authorization': f'Bearer {self.token}',
-                   'MCP-Protocol-Version': self.version}
+                   'MCP-Protocol-Version': self.version,
+                   'User-Agent': USER_AGENT}
         if self.session:
             headers['Mcp-Session-Id'] = self.session
         body = json.dumps(message, ensure_ascii=False).encode()

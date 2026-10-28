@@ -117,6 +117,7 @@ class Run(unittest.TestCase):
         self.assertEqual(methods, ['initialize', 'notifications/initialized', 'tools/call'])
         headers, call = FakeServer.calls[-1]
         self.assertEqual(headers.get('Mcp-Session-Id'), 'sess-1')
+        self.assertEqual(headers.get('User-Agent'), 'remind-me-capture/1', 'not urllib\'s default')
         args = call['params']['arguments']
         self.assertEqual(call['params']['name'], 'remind_me_capture_transcript')
         self.assertEqual((args['session_id'], args['reason']), ('cloud-1', 'stop'))
