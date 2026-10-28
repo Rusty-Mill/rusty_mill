@@ -17,8 +17,9 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 - **Columns:** backlog, ready, building, qa, review, done, blocked.
 - **Rules:** each move needs a capability (triage, build, qa, review, merge, close); leaving
   building/qa/review needs your claim. `close` moves a card from building or qa straight to done when
-  its work already merged on the forge (bookkeeping, not a review: it never makes a card someone's work in
-  `card_take`). The default `builder` role holds it. A role is a set of capabilities; roles are
+  its work already merged on the forge, and lets `card_add` with `done: true` record merged work that never
+  had a card (bookkeeping, not a review: it never makes a card someone's work in `card_take`). The default
+  `builder` role holds it. A role is a set of capabilities; roles are
   defined by the caller, `Roles::default()` is a starting set. `actor`/`role` are
   trusted as given: this is a workflow guard between cooperating agents, and the
   bearer token is the authentication.

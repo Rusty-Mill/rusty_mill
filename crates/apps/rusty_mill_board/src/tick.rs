@@ -672,6 +672,13 @@ impl<T: TickApi> Store for TickStore<T> {
         } else {
             self.put_doc(card, 1)?
         };
+        // rusty_tick creates tasks open; a card recorded straight in Done closes its task
+        // (its `board:done` tag already reads as Done if this request is lost).
+        let version = if card.column == Column::Done {
+            self.patch_task(card.id, json!({"status": "done"}), version)?
+        } else {
+            version
+        };
         self.record(event, version)
     }
 

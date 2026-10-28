@@ -236,6 +236,38 @@ impl<S: Store> Board<S> {
         body: &str,
         tags: Vec<String>,
     ) -> Result<Card, BoardError> {
+        let card = Card::new(title, body, tags, (self.clock)())?;
+        self.create(by, project, card)
+    }
+
+    /// Create a card straight in Done in `project`, recording work that
+    /// already merged outside the board's flow. Needs `Close`.
+    ///
+    /// # Errors
+    /// As [`Board::add_in`], or if `by` lacks `Close`.
+    pub fn add_done_in(
+        &self,
+        by: &Actor,
+        project: &str,
+        title: &str,
+        body: &str,
+        tags: Vec<String>,
+    ) -> Result<Card, BoardError> {
+        if !by.caps.contains(&Capability::Close) {
+            return Err(BoardError::Forbidden(Capability::Close));
+        }
+        let card = Card::new(title, body, tags, (self.clock)())?;
+        self.create(
+            by,
+            project,
+            Card {
+                column: Column::Done,
+                ..card
+            },
+        )
+    }
+
+    fn create(&self, by: &Actor, project: &str, mut card: Card) -> Result<Card, BoardError> {
         let registry = self.registry();
         if !registry.contains(project) {
             return Err(BoardError::Invalid("unknown project"));
@@ -243,7 +275,6 @@ impl<S: Store> Board<S> {
         if !by.may_work_in(project) {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
-        let mut card = Card::new(title, body, tags, (self.clock)())?;
         project.clone_into(&mut card.project);
         card.rev = self
             .store

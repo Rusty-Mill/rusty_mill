@@ -103,6 +103,17 @@ fn done_closes_the_task_and_a_task_closed_in_rusty_tick_is_done() {
 }
 
 #[test]
+fn a_card_recorded_in_done_closes_its_task() {
+    let (board, tick) = board();
+    let builder = board.roles().actor("claude", "builder").expect("role");
+    let card = board
+        .add_done_in(&builder, "default", "shipped in #1", "", vec![])
+        .expect("add done");
+    assert_eq!(tick.task(card.id)["status"], "done");
+    assert_eq!(board.get(card.id).expect("get").column, Column::Done);
+}
+
+#[test]
 fn the_default_project_is_the_inbox_and_a_project_is_a_list() {
     let (board, tick) = board();
     let human = board.roles().actor("nano", "human").expect("role");
