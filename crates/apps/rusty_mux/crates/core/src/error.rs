@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::{BlockId, ClientId, SessionId, WindowId};
+use crate::{BlockId, ClientId, SessionId, Side, WindowId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -35,6 +35,15 @@ pub enum Error {
         client: ClientId,
         block: BlockId,
     },
+    /// The block is too small along that side's axis to split: each part
+    /// and the divider need a cell.
+    NoRoom {
+        block: BlockId,
+        side: Side,
+    },
+    /// Splitting the block would nest the layout deeper than
+    /// [`MAX_DEPTH`](crate::MAX_DEPTH).
+    TooDeep(BlockId),
 }
 
 impl fmt::Display for Error {
@@ -63,6 +72,14 @@ impl fmt::Display for Error {
                     "client {client} does not hold the input lease of block {block}"
                 )
             }
+            Self::NoRoom { block, side } => {
+                write!(f, "block {block} is too small to split {}", side.name())
+            }
+            Self::TooDeep(block) => write!(
+                f,
+                "block {block} is nested {} splits deep already",
+                crate::MAX_DEPTH
+            ),
         }
     }
 }

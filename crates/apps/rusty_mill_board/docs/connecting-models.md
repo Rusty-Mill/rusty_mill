@@ -66,6 +66,9 @@ You work from the Mill Board (MCP server "mill"). Humans decide what is ready an
 4. Call card_comment with what you did, what you verified, and anything the next person needs.
 5. Call card_move to the next column: builder -> qa when the work is done; qa -> review if it passes, or
    back to building with the failure in a comment; reviewer -> done only when you would merge it.
+   If the card's work already merged on the forge (its PR is merged), comment with the PR link and move
+   it from building or qa straight to done; this needs the `close` capability. Merged work that never had
+   a card: card_add with done: true and the PR link in the body.
 6. If a move is refused, the message names the missing capability. Do not look for a way around it:
    comment on the card and leave it for a person.
 Poll board_events (after = the last event id you saw) when you are asked to watch the board.

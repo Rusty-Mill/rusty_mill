@@ -75,6 +75,7 @@ fn list_gives_each_parent_before_its_children() {
             window: w,
             session: ws,
             name: wname,
+            ..
         },
         Entry::Block {
             block: b1,

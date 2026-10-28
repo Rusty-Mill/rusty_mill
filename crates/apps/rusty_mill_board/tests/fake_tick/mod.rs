@@ -171,7 +171,7 @@ impl FakeTick {
                     "listId": body.get("listId").cloned().unwrap_or(json!(INBOX)),
                     "title": body["title"],
                     "notes": body.get("notes").cloned().unwrap_or(json!("")),
-                    "status": "open",
+                    "status": body.get("status").cloned().unwrap_or(json!("open")),
                     "priority": body.get("priority").cloned().unwrap_or(json!(0)),
                     "tags": lower_tags(&body["tags"]),
                     "sortOrder": body.get("sortOrder").cloned().unwrap_or(json!(0)),

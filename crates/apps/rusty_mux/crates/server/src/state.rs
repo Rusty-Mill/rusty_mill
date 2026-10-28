@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
-use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Mux, Size};
+use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Mux, Side, Size, WindowId};
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::{Code, Cursor, Entry, Features, Launch, Message, encode};
 use rusty_mux_status::Records;
@@ -52,7 +52,8 @@ const OFFERED: Features = Features::CHECKPOINT_V3
     .union(Features::LAUNCH)
     .union(Features::PROCESS)
     .union(Features::CAPTURE)
-    .union(Features::LABELS);
+    .union(Features::LABELS)
+    .union(Features::LAYOUT);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -251,8 +252,35 @@ impl State {
                 {
                     return (req, Err(refusal));
                 }
-                (req, self.create_block(shared, window, size, &launch))
+                (req, self.create_block(shared, window, size, &launch, None))
             }
+            M::Split {
+                req,
+                block,
+                side,
+                launch,
+            } => {
+                let launched = match launch == Launch::default() {
+                    true => Ok(()),
+                    false => self.require(client, Features::LAUNCH, "a launch"),
+                };
+                (
+                    req,
+                    self.require(client, Features::LAYOUT, "split")
+                        .and(launched)
+                        .and_then(|()| self.split(shared, block, side, &launch)),
+                )
+            }
+            M::Zoom { req, block } => (
+                req,
+                self.require(client, Features::LAYOUT, "zoom")
+                    .and_then(|()| done(self.mux.zoom(block))),
+            ),
+            M::Unzoom { req, window } => (
+                req,
+                self.require(client, Features::LAYOUT, "unzoom")
+                    .and_then(|()| done(self.mux.unzoom(window))),
+            ),
             M::Attach { req, block } => {
                 if let Err(refusal) = self.require(client, Features::CHECKPOINT_V3, "attach") {
                     return (req, Err(refusal));
@@ -420,6 +448,8 @@ impl State {
                     window: window.id(),
                     session: session.id(),
                     name: window.name().to_owned(),
+                    layout: window.layout().cloned(),
+                    zoomed: window.zoomed(),
                 });
                 for block in window.blocks().iter().filter_map(|b| self.mux.block(*b)) {
                     entries.push(Entry::Block {
@@ -456,12 +486,32 @@ impl State {
         reply("list", &messages)
     }
 
+    /// Starts a block beside `target`, sized as its part of `target`.
+    fn split(
+        &mut self,
+        shared: &Shared,
+        target: BlockId,
+        side: Side,
+        launch: &Launch,
+    ) -> Result<Outcome, Refusal> {
+        let size = self.mux.split_size(target, side)?;
+        let window = self
+            .mux
+            .block(target)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(target))?
+            .window();
+        self.create_block(shared, window, size, launch, Some((target, side)))
+    }
+
+    /// Starts a block in `window`, placed by the model, or beside the
+    /// block `beside` names.
     fn create_block(
         &mut self,
         shared: &Shared,
-        window: rusty_mux_core::WindowId,
+        window: WindowId,
         size: Size,
         launch: &Launch,
+        beside: Option<(BlockId, Side)>,
     ) -> Result<Outcome, Refusal> {
         validate_size(size)?;
         let config = launched(&self.config, launch)?;
@@ -485,7 +535,10 @@ impl State {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         });
-        self.mux.add_block(block, window, size)?;
+        match beside {
+            None => self.mux.add_block(block, window, size)?,
+            Some((target, side)) => self.mux.split_block(block, target, side, size)?,
+        }
         let reader = rusty_tokio::task::spawn_local(pump(shared.clone(), block, pty.clone()));
         let mut grid = crate::checkpoint::grid(size);
         grid.collect_program_status = true;
@@ -509,7 +562,7 @@ impl State {
     fn block_env(
         &self,
         session: rusty_mux_core::SessionId,
-        window: rusty_mux_core::WindowId,
+        window: WindowId,
         block: BlockId,
     ) -> Vec<(&'static str, OsString)> {
         let mut env = vec![
@@ -777,6 +830,7 @@ fn receives(features: Features, event: &Event) -> bool {
         | Event::WindowRenamed { .. }
         | Event::BlockRenamed { .. }
         | Event::ClientRenamed { .. } => Features::LABELS,
+        Event::LayoutChanged { .. } => Features::LAYOUT,
         _ => Features::NONE,
     };
     features.contains(needs)
@@ -1001,6 +1055,7 @@ mod regression {
                 window,
                 Size::new(80, 24).unwrap(),
                 &Launch::default(),
+                None,
             )
             .unwrap()
         else {
@@ -1253,7 +1308,8 @@ mod regression {
                     status: ExitStatus::Code(3)
                 })
             );
-            assert_eq!(events.last(), Some(&&Event::BlockClosed { block }));
+            // Then the close, and the window's layout without the block.
+            assert_eq!(events.get(1), Some(&&Event::BlockClosed { block }));
             drop(state);
             drop(process);
         });
@@ -1291,7 +1347,7 @@ mod regression {
                 let mut state = shared.borrow_mut();
                 assert!(
                     state
-                        .create_block(&shared, window, size, &Launch::default())
+                        .create_block(&shared, window, size, &Launch::default(), None)
                         .is_err()
                 );
                 assert!(state.resize(client, block, size).is_err());

@@ -1,6 +1,6 @@
 //! Changes to the model, in the order they happened.
 
-use crate::{BlockId, ClientId, SessionId, Size, WindowId};
+use crate::{BlockId, ClientId, Layout, SessionId, Size, WindowId};
 
 /// One change made by [`Mux`](crate::Mux).
 ///
@@ -112,6 +112,16 @@ pub enum Event {
     ClientRenamed {
         client: ClientId,
         name: String,
+    },
+    /// The window's layout or zoom changed: a block was added or closed,
+    /// or a block was zoomed or unzoomed. It follows the
+    /// [`Event::BlockCreated`] or [`Event::BlockClosed`] that caused it;
+    /// closing the whole window sends none.
+    LayoutChanged {
+        window: WindowId,
+        /// `None` once the window has no blocks.
+        layout: Option<Layout>,
+        zoomed: Option<BlockId>,
     },
 }
 

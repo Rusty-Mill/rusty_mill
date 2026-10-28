@@ -36,7 +36,9 @@ pub fn server_with(board: Arc<Shared>, flight: Arc<InFlight>) -> Result<Arc<Serv
          every write. Working loop: card_take (your next card, claimed for you; null means nothing is \
          waiting), do the work, card_comment what you did and anything the next person needs, then \
          card_move it to the next column (leaving building, qa or review needs your claim). Humans move \
-         cards into Ready and out of Review; if a move is refused, the reason says which capability is \
+         cards into Ready and out of Review. A card in building or qa whose PR already merged on the \
+         forge may be moved straight to done by a role holding `close`: comment with the merged PR first. \
+         Merged work with no card: card_add with done: true. A missing project: project_add. If a move is refused, the reason says which capability is \
          missing, so do not try to work around it: comment and leave the card. Poll board_events \
          (after = the last event id you saw) to follow changes.",
     );

@@ -32,9 +32,9 @@ impl Default for Roles {
         Self(BTreeMap::from([
             (
                 "human".into(),
-                role(&[Triage, Build, Qa, Review, Merge, Admin]),
+                role(&[Triage, Build, Qa, Review, Merge, Close, Project, Admin]),
             ),
-            ("builder".into(), role(&[Build])),
+            ("builder".into(), role(&[Build, Close, Project])),
             ("qa".into(), role(&[Qa])),
             ("reviewer".into(), role(&[Review, Merge])),
         ]))
@@ -62,11 +62,15 @@ impl Roles {
     }
 }
 
+/// Makes a changed project registry durable (the projects file); see [`Board::set_projects`].
+pub type ProjectsSink = Box<dyn Fn(&Projects) -> Result<(), String> + Send + Sync>;
+
 /// The board over a store.
 pub struct Board<S> {
     store: S,
     roles: RwLock<Roles>,
     projects: RwLock<Projects>,
+    projects_sink: Option<ProjectsSink>,
     clock: fn() -> i64,
 }
 
@@ -95,6 +99,7 @@ impl<S: Store> Board<S> {
             store,
             roles: RwLock::new(roles),
             projects: RwLock::new(Projects::default()),
+            projects_sink: None,
             clock,
         }
     }
@@ -107,6 +112,48 @@ impl<S: Store> Board<S> {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = projects;
         self
+    }
+
+    /// Let [`Board::add_project`] change the registry, persisting it through `sink`.
+    #[must_use]
+    pub fn with_projects_sink(mut self, sink: ProjectsSink) -> Self {
+        self.projects_sink = Some(sink);
+        self
+    }
+
+    /// Add project `name`, owning `paths`, to repository `repo` (created if new). Additive
+    /// only (see [`Projects::with_project`]), so it widens no credential's reach: a credential
+    /// limited to some projects does not gain the new one.
+    ///
+    /// # Errors
+    /// If `by` lacks `Project`, the board has no projects file, or the project is refused.
+    pub fn add_project(
+        &self,
+        by: &Actor,
+        repo: &str,
+        name: &str,
+        paths: &[String],
+    ) -> Result<Projects, BoardError> {
+        if !by.caps.contains(&Capability::Project) {
+            return Err(BoardError::Forbidden(Capability::Project));
+        }
+        let Some(sink) = &self.projects_sink else {
+            return Err(BoardError::Refused(
+                "this board has no projects file to add a project to".to_owned(),
+            ));
+        };
+        let mut added = None;
+        self.update_projects(
+            |current| {
+                let next = current
+                    .with_project(repo, name, paths)
+                    .map_err(BoardError::Refused)?;
+                added = Some(next.clone());
+                Ok(next)
+            },
+            |p| sink(p),
+        )?;
+        added.ok_or_else(|| BoardError::Storage("project registry not derived".to_owned()))
     }
 
     /// A snapshot of the project registry.
@@ -139,15 +186,26 @@ impl<S: Store> Board<S> {
         projects: Projects,
         persist: impl FnOnce(&Projects) -> Result<(), String>,
     ) -> Result<(), BoardError> {
+        self.update_projects(|_| Ok(projects), persist)
+    }
+
+    /// [`Board::set_projects`] with the new registry derived from the current one under the
+    /// same write lock, so a concurrent change is never lost.
+    fn update_projects(
+        &self,
+        derive: impl FnOnce(&Projects) -> Result<Projects, BoardError>,
+        persist: impl FnOnce(&Projects) -> Result<(), String>,
+    ) -> Result<(), BoardError> {
         let mut guard = self
             .projects
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let projects = derive(&guard)?;
         if let Some(card) = self
             .store
             .list()?
             .iter()
-            .find(|c| !projects.contains(&c.project))
+            .find(|c| guard.contains(&c.project) && !projects.contains(&c.project))
         {
             return Err(BoardError::Refused(format!(
                 "project {:?} still has cards (for example {:?}); move them to another project first",
@@ -236,6 +294,38 @@ impl<S: Store> Board<S> {
         body: &str,
         tags: Vec<String>,
     ) -> Result<Card, BoardError> {
+        let card = Card::new(title, body, tags, (self.clock)())?;
+        self.create(by, project, card)
+    }
+
+    /// Create a card straight in Done in `project`, recording work that
+    /// already merged outside the board's flow. Needs `Close`.
+    ///
+    /// # Errors
+    /// As [`Board::add_in`], or if `by` lacks `Close`.
+    pub fn add_done_in(
+        &self,
+        by: &Actor,
+        project: &str,
+        title: &str,
+        body: &str,
+        tags: Vec<String>,
+    ) -> Result<Card, BoardError> {
+        if !by.caps.contains(&Capability::Close) {
+            return Err(BoardError::Forbidden(Capability::Close));
+        }
+        let card = Card::new(title, body, tags, (self.clock)())?;
+        self.create(
+            by,
+            project,
+            Card {
+                column: Column::Done,
+                ..card
+            },
+        )
+    }
+
+    fn create(&self, by: &Actor, project: &str, mut card: Card) -> Result<Card, BoardError> {
         let registry = self.registry();
         if !registry.contains(project) {
             return Err(BoardError::Invalid("unknown project"));
@@ -243,7 +333,6 @@ impl<S: Store> Board<S> {
         if !by.may_work_in(project) {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
-        let mut card = Card::new(title, body, tags, (self.clock)())?;
         project.clone_into(&mut card.project);
         card.rev = self
             .store
@@ -504,22 +593,30 @@ impl<S: Store> Board<S> {
         self.apply(id, by, EventKind::Moved, |c, now| c.move_to(to, by, now))
     }
 
-    /// Move a card to another project. Needs `Triage`, and both projects in scope.
+    /// Move a card to another project. Needs `Triage` or `Project`, and both projects in
+    /// scope; without `Triage`, not a card someone else has claimed.
     ///
     /// # Errors
-    /// An unknown project, a missing capability, an out-of-scope project, or a Done card.
+    /// An unknown project, a missing capability, an out-of-scope project, a card claimed by
+    /// someone else (without `Triage`), or a Done card.
     pub fn assign(&self, id: Uuid, project: &str, by: &Actor) -> Result<Card, BoardError> {
         let registry = self.registry();
         if !registry.contains(project) {
             return Err(BoardError::Invalid("unknown project"));
         }
-        if !by.caps.contains(&Capability::Triage) {
-            return Err(BoardError::Forbidden(Capability::Triage));
+        let triage = by.caps.contains(&Capability::Triage);
+        if !triage && !by.caps.contains(&Capability::Project) {
+            return Err(BoardError::Forbidden(Capability::Project));
         }
         if !by.may_work_in(project) {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
-        let card = self.apply(id, by, EventKind::Assigned, |c, now| c.assign(project, now));
+        let card = self.apply(id, by, EventKind::Assigned, |c, now| match &c.claim {
+            Some(holder) if !triage && *holder != by.name => {
+                Err(BoardError::Claimed(holder.clone()))
+            }
+            _ => c.assign(project, now),
+        });
         drop(registry);
         card
     }

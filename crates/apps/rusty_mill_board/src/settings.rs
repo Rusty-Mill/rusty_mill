@@ -20,7 +20,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
 use crate::api::{CallError, Identity, Shared, Who, acting};
-use crate::board::Roles;
+use crate::board::{ProjectsSink, Roles};
 use crate::domain::{Actor, BoardError, Capability};
 use crate::github::GithubConfig;
 use crate::identities::{Credentials, read_private};
@@ -117,6 +117,15 @@ pub fn load_roles(path: &Path) -> Result<Roles, String> {
 }
 
 /// Roles must be plainly named, and some role must hold `Admin`.
+/// Persist a project registry to the projects file at `path`, atomically.
+pub fn projects_sink(path: PathBuf) -> ProjectsSink {
+    Box::new(move |projects: &Projects| {
+        let json = projects.file_json()?;
+        rusty_atomic_file::write(&path, json.as_bytes())
+            .map_err(|e| format!("{}: {e}", path.display()))
+    })
+}
+
 fn check_roles(roles: &Roles) -> Result<(), String> {
     let plain = |n: &str| {
         !n.is_empty()
@@ -508,11 +517,7 @@ impl Settings {
             }
         }
         // Persisted inside the board's critical section: live and disk change together or not at all.
-        self.board.set_projects(new.clone(), |projects| {
-            let json = projects.file_json()?;
-            rusty_atomic_file::write(&path, json.as_bytes())
-                .map_err(|e| format!("{}: {e}", path.display()))
-        })?;
+        self.board.set_projects(new.clone(), projects_sink(path))?;
         Ok(json!({ "repos": new }))
     }
 

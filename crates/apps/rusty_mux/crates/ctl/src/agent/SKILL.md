@@ -39,6 +39,11 @@ rusty-mux-ctl wait --block dev-server --timeout 30    # 124 on timeout
 rusty-mux-ctl close-block --block dev-server
 ```
 
+`run` places a block out of the way. To show one beside yours instead, split
+it off: `rusty-mux-ctl split-block --side right --command htop`. `zoom-block`
+shows one block alone and `unzoom-window` ends it; `list` gives each window's
+`layout`.
+
 Prefer `wait` over polling. `wait --event KIND --FIELD VALUE` waits for an
 event, such as `wait --event bell --block dev-server`.
 

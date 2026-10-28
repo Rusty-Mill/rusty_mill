@@ -86,12 +86,12 @@ fn tool(method: &Method) -> Tool {
 
 /// Behaviour hints: reads are read-only; closing and disconnecting another
 /// client, which ends its connection and frees its lease, are destructive.
-/// `input` types into a shell and `create-block` runs any program it is
-/// given; either can delete data and reach any system, so both are
-/// destructive and open-world. The rest stays on the local server.
+/// `input` types into a shell, and `create-block` and `split-block` run
+/// any program they are given; each can delete data and reach any system,
+/// so all are destructive and open-world. The rest stays on the local server.
 fn annotations(method: &Method) -> Value {
     let read_only = matches!(method.returns, Returns::Text | Returns::Entries);
-    let runs = matches!(method.name, "input" | "create-block");
+    let runs = matches!(method.name, "input" | "create-block" | "split-block");
     let destructive =
         runs || method.name.starts_with("close-") || method.name.starts_with("disconnect-");
     let hints: Map = [

@@ -358,7 +358,9 @@ fn roles_are_edited_live_and_written_to_their_file() {
     let (_, out, _) = f.admin("settings_get", &json!({}));
     assert_eq!(
         out["capabilities"],
-        json!(["triage", "build", "qa", "review", "merge", "admin"])
+        json!([
+            "triage", "build", "qa", "review", "merge", "close", "project", "admin"
+        ])
     );
     let mut roles = out["roles"].clone();
     roles["tester"] = json!(["qa"]);

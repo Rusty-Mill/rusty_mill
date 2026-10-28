@@ -2,7 +2,7 @@
 //! `--json`.
 
 use rusty_json::{Map, Value};
-use rusty_mux_core::{Event, ExitStatus, Progress, Size};
+use rusty_mux_core::{BlockId, Event, ExitStatus, Layout, Progress, Size};
 use rusty_mux_proto::{Cursor, Entry};
 use rusty_uuid::Uuid;
 
@@ -172,14 +172,16 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
             window,
             session,
             name,
-        } => (
-            "window",
-            window.uuid(),
-            vec![
+            layout,
+            zoomed,
+        } => {
+            let mut fields = vec![
                 ("session", Id(session.uuid())),
                 ("name", Text(name.clone())),
-            ],
-        ),
+            ];
+            fields.extend(layout_fields(layout.as_ref(), *zoomed));
+            ("window", window.uuid(), fields)
+        }
         Entry::Block {
             block,
             window,
@@ -332,7 +334,31 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
         E::ClientRenamed { client, ref name } => {
             ("client-renamed", renamed("client", client.uuid(), name))
         }
+        E::LayoutChanged {
+            window,
+            ref layout,
+            zoomed,
+        } => {
+            let mut fields = vec![("window", Id(window.uuid()))];
+            fields.extend(layout_fields(layout.as_ref(), zoomed));
+            ("layout-changed", fields)
+        }
     }
+}
+
+/// A window's layout in its text form and its zoomed block, each absent
+/// when there is none.
+fn layout_fields(layout: Option<&Layout>, zoomed: Option<BlockId>) -> [(&'static str, Field); 2] {
+    [
+        (
+            "layout",
+            layout.map_or(Field::Absent, |l| Field::Text(l.to_string())),
+        ),
+        (
+            "zoomed",
+            zoomed.map_or(Field::Absent, |b| Field::Id(b.uuid())),
+        ),
+    ]
 }
 
 /// A rename's fields: the entity's id under its kind, and its new name.
@@ -496,6 +522,11 @@ mod tests {
                 client,
                 name: "laptop".into(),
             },
+            Event::LayoutChanged {
+                window,
+                layout: Some(Layout::Block(block)),
+                zoomed: Some(block),
+            },
         ];
         assert_eq!(events.len(), rusty_mux_script::EVENTS.len());
         for (event, (kind, declared)) in events.iter().zip(rusty_mux_script::EVENTS) {
@@ -561,6 +592,50 @@ mod tests {
         assert_eq!(map.get("block"), Some(&Value::from(id(1).to_string())));
         assert_eq!(map.get("holder"), Some(&Value::Null));
         assert_eq!(map.get("title"), Some(&Value::from("vim")));
+    }
+
+    #[test]
+    fn windows_render_their_layout_and_zoom() {
+        let (a, b) = (BlockId::from_uuid(id(1)), BlockId::from_uuid(id(3)));
+        let layout: Layout = format!("rows50({a},{b})").parse().unwrap();
+        let window = Entry::Window {
+            window: WindowId::from_uuid(id(2)),
+            session: SessionId::from_uuid(id(4)),
+            name: "w".into(),
+            layout: Some(layout.clone()),
+            zoomed: None,
+        };
+        assert_eq!(
+            entry_line(&window, false),
+            format!(
+                "window {} session={} name=\"w\" layout=\"rows50({a},{b})\" zoomed=-",
+                id(2),
+                id(4)
+            )
+        );
+        let empty = Event::LayoutChanged {
+            window: WindowId::from_uuid(id(2)),
+            layout: None,
+            zoomed: None,
+        };
+        assert_eq!(
+            event_line(5, &empty, false),
+            format!("5 layout-changed window={} layout=- zoomed=-", id(2))
+        );
+        let zoomed = Event::LayoutChanged {
+            window: WindowId::from_uuid(id(2)),
+            layout: Some(layout),
+            zoomed: Some(b),
+        };
+        let Value::Object(map) = Value::from_json_str(&event_line(6, &zoomed, true)).unwrap()
+        else {
+            panic!("an object")
+        };
+        assert_eq!(map.get("zoomed"), Some(&Value::from(b.to_string())));
+        assert_eq!(
+            map.get("layout"),
+            Some(&Value::from(format!("rows50({a},{b})")))
+        );
     }
 
     #[test]

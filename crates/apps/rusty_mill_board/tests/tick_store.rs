@@ -103,6 +103,33 @@ fn done_closes_the_task_and_a_task_closed_in_rusty_tick_is_done() {
 }
 
 #[test]
+fn a_card_recorded_in_done_closes_its_task() {
+    let (board, tick) = board();
+    let builder = board.roles().actor("claude", "builder").expect("role");
+    let card = board
+        .add_done_in(&builder, "default", "shipped in #1", "", vec![])
+        .expect("add done");
+    assert_eq!(tick.task(card.id)["status"], "done");
+    assert_eq!(board.get(card.id).expect("get").column, Column::Done);
+    assert_eq!(tick.task(card.id)["etag"], "1", "one write: created closed");
+
+    // A refused create leaves nothing behind, so a retry cannot duplicate it.
+    tick.fail_next("POST", "/tasks");
+    assert!(
+        board
+            .add_done_in(&builder, "default", "again", "", vec![])
+            .is_err()
+    );
+    let titles: Vec<String> = board
+        .list(None)
+        .expect("list")
+        .into_iter()
+        .map(|c| c.title)
+        .collect();
+    assert_eq!(titles, ["shipped in #1"]);
+}
+
+#[test]
 fn the_default_project_is_the_inbox_and_a_project_is_a_list() {
     let (board, tick) = board();
     let human = board.roles().actor("nano", "human").expect("role");
