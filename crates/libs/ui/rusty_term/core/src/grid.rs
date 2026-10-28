@@ -8,7 +8,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
-use super::cell::{ATTR_DEFAULT_COLORS, Cell, PackedCell, Pen, WIDE_TRAILER, char_width};
+use super::cell::{
+    ATTR_BG_DEFAULT, ATTR_DEFAULT_COLORS, ATTR_FG_DEFAULT, Cell, PackedCell, Pen, WIDE_TRAILER,
+    char_width,
+};
 use super::style::{CellStyle, Defaults, StyleId, StyleTable};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -1296,25 +1299,42 @@ fn reflow_history(
 /// pre-rendered cells the renderer composites over the bottom of the live
 /// screen, independent of the child's output stream. Kept pre-rendered so the
 /// hot render path just borrows the slice; re-laid from `text`/`fg`/`bg` on a
-/// resize.
+/// resize and whenever the default colours change.
 pub(crate) struct StatusLine {
     text: String,
-    fg: u32,
-    bg: u32,
+    /// The colours asked for; `None` is the default colour, resolved when
+    /// the cells are laid out.
+    fg: Option<u32>,
+    bg: Option<u32>,
     cells: Vec<Cell>,
 }
 
 impl StatusLine {
-    /// Lay `text` out into exactly `cols` cells in `fg`/`bg`: advance wide glyphs
-    /// by two columns with a flagged trailer, drop zero-width scalars, stop at the
-    /// margin, and pad the tail with blanks in `bg`.
-    fn lay_out(text: &str, fg: u32, bg: u32, cols: usize) -> Vec<Cell> {
+    /// Lay `text` out into exactly `cols` cells in `fg`/`bg` (the defaults
+    /// where unset): advance wide glyphs by two columns with a flagged
+    /// trailer, drop zero-width scalars, stop at the margin, and pad the tail
+    /// with blanks in `bg`.
+    fn lay_out(
+        text: &str,
+        fg: Option<u32>,
+        bg: Option<u32>,
+        d: Defaults,
+        cols: usize,
+    ) -> Vec<Cell> {
+        let mut provenance = 0;
+        if fg.is_none() {
+            provenance |= ATTR_FG_DEFAULT;
+        }
+        if bg.is_none() {
+            provenance |= ATTR_BG_DEFAULT;
+        }
+        let (fg, bg) = (fg.unwrap_or(d.fg), bg.unwrap_or(d.bg));
         let blank = Cell {
             ch: ' ',
             cluster: 0,
             fg,
             bg,
-            flags: 0,
+            flags: provenance,
             link: 0,
             underline_color: fg,
         };
@@ -1328,24 +1348,11 @@ impl StatusLine {
             if x + w > cols {
                 break;
             }
-            cells[x] = Cell {
-                ch,
-                cluster: 0,
-                fg,
-                bg,
-                flags: 0,
-                link: 0,
-                underline_color: fg,
-            };
+            cells[x] = Cell { ch, ..blank };
             if w == 2 {
                 cells[x + 1] = Cell {
-                    ch: ' ',
-                    cluster: 0,
-                    fg,
-                    bg,
-                    flags: WIDE_TRAILER,
-                    link: 0,
-                    underline_color: fg,
+                    flags: WIDE_TRAILER | provenance,
+                    ..blank
                 };
             }
             x += w;
@@ -1354,8 +1361,8 @@ impl StatusLine {
     }
 
     #[cfg(feature = "l13")]
-    fn new(text: String, fg: u32, bg: u32, cols: usize) -> Self {
-        let cells = Self::lay_out(&text, fg, bg, cols);
+    fn new(text: String, fg: Option<u32>, bg: Option<u32>, d: Defaults, cols: usize) -> Self {
+        let cells = Self::lay_out(&text, fg, bg, d, cols);
         StatusLine {
             text,
             fg,
@@ -1364,9 +1371,10 @@ impl StatusLine {
         }
     }
 
-    /// Re-lay the existing text/colors at a new width (after a resize).
-    fn relayout(&mut self, cols: usize) {
-        self.cells = Self::lay_out(&self.text, self.fg, self.bg, cols);
+    /// Re-lay the existing text/colours at `cols` in the defaults `d`
+    /// (after a resize or a default-colour change).
+    fn relayout(&mut self, cols: usize, d: Defaults) {
+        self.cells = Self::lay_out(&self.text, self.fg, self.bg, d, cols);
     }
 }
 
@@ -3402,6 +3410,14 @@ impl Grid {
         }
     }
 
+    /// Re-lay the status line in the current defaults.
+    fn relayout_status(&mut self) {
+        let (cols, defaults) = (self.cols, self.styles.defaults());
+        if let Some(s) = &mut self.status_line {
+            s.relayout(cols, defaults);
+        }
+    }
+
     /// The default foreground (OSC 10), which cells marked default show.
     fn default_fg(&self) -> u32 {
         self.styles.defaults().fg
@@ -3428,6 +3444,7 @@ impl Grid {
         let defaults = Defaults { fg, bg };
         if self.styles.defaults() != defaults {
             self.styles.set_defaults(defaults);
+            self.relayout_status();
             self.reset_damage();
             self.touch_hist();
             self.epoch += 1;
@@ -3538,6 +3555,7 @@ impl Grid {
         if let Some(bg) = &mut self.erase_bg {
             *bg = map(*bg);
         }
+        self.relayout_status();
         self.cursor_color = super::color::remap(self.cursor_color, old, new);
         self.reset_damage();
         self.touch_hist();
@@ -3662,8 +3680,9 @@ impl Grid {
         self.rows = rows;
         self.reset_damage();
         self.view_offset = 0;
+        let defaults = self.styles.defaults();
         if let Some(s) = &mut self.status_line {
-            s.relayout(cols);
+            s.relayout(cols, defaults);
         }
         self.reset_scroll_region();
         self.styles.request_sweep();
@@ -4169,13 +4188,13 @@ impl Grid {
     }
 
     /// Overlay a status line at the bottom of the screen (L13 `render/set_status`),
-    /// laid out at the current width; `fg`/`bg` default to the grid's defaults.
-    /// Marks the bottom row dirty so the next frame composites it.
+    /// laid out at the current width; an unset `fg`/`bg` is the default colour
+    /// and follows later OSC 10/11 changes. Marks the bottom row dirty so the
+    /// next frame composites it.
     #[cfg(feature = "l13")]
     pub fn set_status_line(&mut self, text: String, fg: Option<u32>, bg: Option<u32>) {
-        let fg = fg.unwrap_or(self.default_fg());
-        let bg = bg.unwrap_or(self.default_bg());
-        self.status_line = Some(StatusLine::new(text, fg, bg, self.cols));
+        let defaults = self.styles.defaults();
+        self.status_line = Some(StatusLine::new(text, fg, bg, defaults, self.cols));
         if let Some(y) = self.rows.checked_sub(1) {
             self.touch(y);
         }

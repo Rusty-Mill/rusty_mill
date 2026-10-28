@@ -7740,3 +7740,26 @@ fn a_long_osc_is_capped_however_it_is_chunked() {
         assert_eq!(g.title.len(), 4096 - "2;".len(), "chunks of {size}");
     }
 }
+
+#[cfg(feature = "l13")]
+#[test]
+fn status_line_in_default_colours_follows_osc_10_and_11() {
+    let mut g = Grid::new(6, 2);
+    let mut p = AnsiParser::new();
+    g.set_status_line("ab".into(), None, Some(0x123456));
+    p.advance(&mut g, b"\x1b]10;rgb:00/00/ff\x1b\\\x1b]11;rgb:00/ff/00\x1b\\");
+    let row = g.status_row().expect("status line").to_vec();
+    // The unset foreground follows OSC 10; the explicit background stays.
+    assert_eq!((row[0].ch, row[0].fg, row[0].bg), ('a', 0x0000FF, 0x123456));
+    assert_eq!((row[5].fg, row[5].bg), (0x0000FF, 0x123456), "padding");
+    assert_eq!(row[0].flags, ATTR_FG_DEFAULT);
+    g.set_status_line("c".into(), None, None);
+    p.advance(&mut g, b"\x1b]111\x1b\\");
+    let row = g.status_row().expect("status line");
+    assert_eq!((row[0].fg, row[0].bg), (0x0000FF, DEFAULT_BG));
+    // It survives a checkpoint and keeps following the defaults.
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b]110\x1b\\");
+    assert_eq!(g.status_row().expect("status line")[0].fg, DEFAULT_FG);
+}
