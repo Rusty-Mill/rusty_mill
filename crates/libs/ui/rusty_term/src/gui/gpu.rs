@@ -40,7 +40,9 @@ use crate::core::{
 
 use super::damage::{self, RowState};
 use super::font::{FontCache, Glyph, GlyphSource, Style};
-use super::render::{PaneFrame, Renderer, SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG, drawn};
+use super::render::{
+    PaneFrame, Renderer, SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG, concealed, drawn, glyph_char,
+};
 
 /// Atlas texture edge (clamped to the device limit at creation).
 const ATLAS_MAX: u32 = 2048;
@@ -1026,6 +1028,7 @@ impl GpuCore {
                 let (deco, dcol) = deco_for(cell.flags, cell.underline_color, fg, plain, hovered);
                 // Same run eligibility as the CPU renderer's ligature plan.
                 let run_ok = plain
+                    && !concealed(&cell)
                     && cell.cluster == 0
                     && cell.ch != ' '
                     && char_width(cell.ch) == 1
@@ -1062,24 +1065,9 @@ impl GpuCore {
                         r.cell.flags & ATTR_BOLD != 0,
                         r.cell.flags & ATTR_ITALIC != 0,
                     );
-                    let ch = if r.cell.ch == '\u{10EEEE}' {
-                        ' '
-                    } else {
-                        r.cell.ch
-                    };
-                    // Arabic contextual form first (phase 3), then rule L4
-                    // mirroring for RTL-run chars.
-                    let ch = match &bidi {
-                        Some(b) => {
-                            let ch = b.shaped.as_ref().and_then(|s| s[col]).unwrap_or(ch);
-                            if b.rtl[col] {
-                                crate::core::bidi_mirrored(ch).unwrap_or(ch)
-                            } else {
-                                ch
-                            }
-                        }
-                        None => ch,
-                    };
+                    // The span follows the stored character, so a concealed
+                    // wide glyph still paints both columns' background.
+                    let ch = glyph_char(&r.cell, bidi, col);
                     let (rect, is_color) = self.tile_for_char(ch, style, font);
                     let span = char_width(r.cell.ch).max(1) as u32;
                     let fg = if is_color { 0xFFFFFF } else { r.fg };
@@ -2067,6 +2055,67 @@ mod tests {
             assert_eq!(
                 cached.overlay, fresh.overlay,
                 "frame {n}: overlay instances"
+            );
+        }
+    }
+
+    /// The base instances of a one-pane, one-row frame of `grid`.
+    fn row_instances(core: &mut GpuCore, font: &mut FontCache, grid: &Grid) -> Vec<Instance> {
+        let v = grid.frame_view();
+        let pane = PaneFrame {
+            grid: &v,
+            col0: 0,
+            row0: 0,
+            focused: false,
+            cursor_on: false,
+            trail: Vec::new(),
+            hover_link: None,
+            marks: Vec::new(),
+        };
+        let frame = core.frame_lists(400, &[pane], &[], &[], font, 1, 2);
+        frame.base.into_iter().filter(|i| i.row == 0).collect()
+    }
+
+    #[test]
+    fn concealed_wide_glyph_keeps_both_columns_background() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let (blank, _) = core.tile_for_char(' ', Style::Regular, &mut font);
+        let mut g = Grid::new(4, 1);
+        AnsiParser::new().advance(&mut g, "\x1b[48;2;0;0;255;8m\u{754c}".as_bytes());
+        let base = row_instances(&mut core, &mut font, &g);
+        // Skip the pane's background fill; the cells come after it.
+        let lead = base.iter().rfind(|i| i.col == 0).expect("lead cell");
+        assert!(!base.iter().any(|i| i.col == 1 && i.span == 1), "{base:?}");
+        assert_eq!((lead.span, lead.bg), (2, 0x0000FF), "covers both columns");
+        assert_eq!(
+            (lead.uv_xy, lead.uv_wh),
+            (blank.0 << 16 | blank.1, blank.2 << 16 | blank.3)
+        );
+    }
+
+    #[test]
+    fn concealed_arabic_draws_no_shaped_glyph() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let (blank, _) = core.tile_for_char(' ', Style::Regular, &mut font);
+        let mut g = Grid::new(4, 1);
+        g.bidi = true;
+        AnsiParser::new().advance(&mut g, "\x1b[8m\u{628}\u{628}".as_bytes());
+        // `glyph_char` is pinned without a font in `render::tests`; here a
+        // font with no Arabic draws the shaped form as blank anyway.
+        let shaped = g.frame_view().bidi_row(0).and_then(|b| b.shaped.clone());
+        let form = shaped.and_then(|s| s[0]).expect("a shaped form");
+        if core.tile_for_char(form, Style::Regular, &mut font).0 == blank {
+            eprintln!("no Arabic glyph in the test font; nothing to tell apart");
+        }
+        let base = row_instances(&mut core, &mut font, &g);
+        for i in base.iter().filter(|i| i.col < 2) {
+            assert_eq!(
+                (i.uv_xy, i.uv_wh),
+                (blank.0 << 16 | blank.1, blank.2 << 16 | blank.3)
             );
         }
     }

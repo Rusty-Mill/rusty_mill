@@ -14,7 +14,7 @@ use crate::core::{
 };
 
 use super::font::{Glyph, GlyphSource, Style};
-use super::render::{SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG, blend, drawn};
+use super::render::{SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG, blend, concealed, drawn, glyph_char};
 
 /// Composite the grid's visible cells into `buf` (`width × height` pixels,
 /// `len() == width * height`). Each cell is filled with its background, then its
@@ -270,6 +270,7 @@ pub(crate) fn draw_grid(
             let special = !on_status
                 && (block_cursor(col, row) || inverted(col, row) || search_hl(col, row).is_some());
             !special
+                && !concealed(cell)
                 && cell.flags & WIDE_TRAILER == 0
                 && cell.cluster == 0
                 && cell.ch != ' '
@@ -289,28 +290,15 @@ pub(crate) fn draw_grid(
             let cell = cell_at(col);
             if !eligible(col, &cell) {
                 // Kitty Unicode placeholders draw image content (the pass
-                // below), never a font glyph.
+                // below), never a font glyph; concealed cells draw none.
                 let blank = cell.flags & WIDE_TRAILER != 0
+                    || concealed(&cell)
                     || (cell.ch == ' ' && cell.cluster == 0)
                     || cell.ch == '\u{10EEEE}';
                 plan[row * grid.cols + col] = (!blank).then(|| {
                     let style =
                         Style::new(cell.flags & ATTR_BOLD != 0, cell.flags & ATTR_ITALIC != 0);
-                    // Arabic contextual form first (phase 3), then rule L4
-                    // mirroring for RTL-run chars (Arabic never mirrors, so
-                    // the order can't double-substitute).
-                    let ch = match grid.bidi_row(row) {
-                        Some(b) => {
-                            let ch = b.shaped.as_ref().and_then(|s| s[col]).unwrap_or(cell.ch);
-                            if b.rtl[col] {
-                                crate::core::bidi_mirrored(ch).unwrap_or(ch)
-                            } else {
-                                ch
-                            }
-                        }
-                        None => cell.ch,
-                    };
-                    font.glyph(ch, style)
+                    font.glyph(glyph_char(&cell, grid.bidi_row(row), col), style)
                 });
                 col += 1;
                 continue;
@@ -1095,6 +1083,16 @@ mod tests {
     #[test]
     fn hidden_cell_paints_only_its_background() {
         let buf = render_one(b"\x1b[38;2;255;0;0;48;2;0;0;255;8;4;9mX");
+        assert!(buf.iter().all(|&px| px == 0x0000FF));
+    }
+
+    #[test]
+    fn hidden_wide_glyph_paints_both_columns_background_only() {
+        let mut g = Grid::new(2, 1);
+        AnsiParser::new().advance(&mut g, "\x1b[48;2;0;0;255;8m\u{754c}".as_bytes());
+        g.cursor_visible = false;
+        let mut buf = vec![0u32; 8 * 8];
+        render(&g, &[], &mut MockFont, &mut buf, 8, 8, true);
         assert!(buf.iter().all(|&px| px == 0x0000FF));
     }
 

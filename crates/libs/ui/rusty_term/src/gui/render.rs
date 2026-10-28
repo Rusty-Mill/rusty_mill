@@ -10,7 +10,7 @@ use std::sync::Arc;
 use winit::window::Window;
 
 use crate::core::{
-    ATTR_DIM, ATTR_HIDDEN, ATTR_OVERLINE, ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, Cell,
+    ATTR_DIM, ATTR_HIDDEN, ATTR_OVERLINE, ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, BidiRow, Cell,
     FrameView,
 };
 
@@ -48,10 +48,12 @@ pub(super) const SEARCH_FG: u32 = 0x101010;
 const DIM_KEEP: u8 = 170;
 
 /// A grid cell as the window draws it, shared by both renderers. SGR 7 swaps
-/// fg and bg, SGR 2 then fades the fg toward the bg, and SGR 8 blanks the
-/// glyph and its lines, leaving only the background. The grid keeps the
-/// attributes (the TUI and the mux re-emit them), so the window resolves
-/// them here; cursor, selection and search colours apply on top.
+/// fg and bg, SGR 2 then fades the fg toward the bg, and SGR 8 drops the
+/// cell's lines; its glyph is dropped by [`glyph_char`], so the cell keeps
+/// its character and width (a concealed wide glyph still covers two
+/// columns). The grid keeps the attributes (the TUI and the mux re-emit
+/// them), so the window resolves them here; cursor, selection and search
+/// colours apply on top.
 pub(super) fn drawn(mut cell: Cell) -> Cell {
     if cell.flags & ATTR_REVERSE != 0 {
         std::mem::swap(&mut cell.fg, &mut cell.bg);
@@ -59,12 +61,33 @@ pub(super) fn drawn(mut cell: Cell) -> Cell {
     if cell.flags & ATTR_DIM != 0 {
         cell.fg = blend(cell.bg, cell.fg, DIM_KEEP);
     }
-    if cell.flags & ATTR_HIDDEN != 0 {
-        cell.ch = ' ';
-        cell.cluster = 0;
+    if concealed(&cell) {
         cell.flags &= !(ATTR_UNDERLINE | ATTR_STRIKE | ATTR_OVERLINE);
     }
     cell
+}
+
+/// Whether `cell` is concealed (SGR 8): drawn as its background only.
+pub(super) fn concealed(cell: &Cell) -> bool {
+    cell.flags & ATTR_HIDDEN != 0
+}
+
+/// The character the cell at logical column `col` draws: a space for a
+/// concealed cell or a Kitty placeholder (which draws image content), else
+/// its character after the row's Arabic contextual form (`bidi.shaped`) and
+/// RTL mirroring. Concealment wins over shaping, which is computed from the
+/// stored characters.
+pub(super) fn glyph_char(cell: &Cell, bidi: Option<&BidiRow>, col: usize) -> char {
+    if concealed(cell) || cell.ch == '\u{10EEEE}' {
+        return ' ';
+    }
+    let Some(b) = bidi else { return cell.ch };
+    let ch = b.shaped.as_ref().and_then(|s| s[col]).unwrap_or(cell.ch);
+    if b.rtl[col] {
+        crate::core::bidi_mirrored(ch).unwrap_or(ch)
+    } else {
+        ch
+    }
 }
 
 /// `fg` over `bg` at coverage `a` (`0` is all `bg`, `255` all `fg`), per
@@ -406,14 +429,35 @@ mod tests {
     }
 
     #[test]
-    fn hidden_blanks_the_glyph_and_its_lines() {
+    fn hidden_keeps_its_character_but_draws_no_glyph_or_lines() {
         let cell = drawn_after(b"\x1b[48;2;0;0;255;8;4;9;53mX");
-        assert_eq!((cell.ch, cell.cluster), (' ', 0));
+        assert_eq!(cell.ch, 'X', "layout unchanged");
+        assert_eq!(glyph_char(&cell, None, 0), ' ');
         assert_eq!(
             cell.flags & (ATTR_UNDERLINE | ATTR_STRIKE | ATTR_OVERLINE),
             0
         );
         assert_eq!(cell.bg, 0x0000FF);
+    }
+
+    #[test]
+    fn concealed_arabic_stays_blank_through_bidi_shaping() {
+        let mut g = Grid::new(4, 1);
+        g.bidi = true;
+        AnsiParser::new().advance(&mut g, "\x1b[8m\u{628}\u{628}".as_bytes());
+        let view = g.frame_view();
+        let row = view.bidi_row(0).expect("an RTL row");
+        assert!(row.shaped.is_some(), "the row is shaped");
+        for col in 0..2 {
+            assert_eq!(glyph_char(&drawn(view.cell(col, 0)), Some(row), col), ' ');
+        }
+        // Not concealed, the same row draws its shaped forms.
+        let mut g = Grid::new(4, 1);
+        g.bidi = true;
+        AnsiParser::new().advance(&mut g, "\u{628}\u{628}".as_bytes());
+        let view = g.frame_view();
+        let row = view.bidi_row(0).expect("an RTL row");
+        assert_ne!(glyph_char(&view.cell(0, 0), Some(row), 0), '\u{628}');
     }
 
     #[test]
