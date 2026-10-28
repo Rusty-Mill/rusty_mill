@@ -9,7 +9,8 @@
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,7 @@ use platform::process::{Child, Command};
 use platform::pty::PtyMaster;
 use platform::term::WinSize;
 use platform_linux::{LinuxPty, LinuxPtyMaster};
-use rusty_mux_core::{BlockId, ClientId, Event, Layout, Size, WindowId};
+use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Size, WindowId};
 use rusty_mux_proto::{Entry, Features, Message};
 use rusty_mux_tui::{Conn, RESTORE};
 use rusty_term_core::{AnsiParser, Grid};
@@ -50,9 +51,17 @@ fn listen() -> (PathBuf, UnixListener) {
     (path, listener)
 }
 
-/// Accepts the next client and welcomes it with `features`.
-fn welcome(listener: &UnixListener, features: Features) -> Conn<Stream> {
+/// Accepts the next client and welcomes it with `features`. The client
+/// waits for Welcome before sending more, so the stream holds nothing
+/// unread.
+fn welcome(listener: &UnixListener, features: Features) -> Stream {
     let (stream, _) = listener.accept().expect("accept");
+    handshake(stream.try_clone().expect("clone"), features);
+    stream
+}
+
+/// Takes the client's Hello and answers Welcome with `features`.
+fn handshake(stream: Stream, features: Features) -> Conn<Stream> {
     let mut conn = Conn::new(stream);
     assert!(matches!(conn.recv().expect("hello"), Message::Hello { .. }));
     conn.send(&Message::Welcome {
@@ -73,27 +82,20 @@ fn scripted_server(lease: bool, end: End) -> (PathBuf, JoinHandle<()>) {
     let server = std::thread::spawn(move || {
         let _control = welcome(&listener, Features::CHECKPOINT_V3);
         let pane = welcome(&listener, Features::CHECKPOINT_V3);
-        serve_block(pane, |_| REMOTE.to_vec(), lease, end, &Mutex::default());
+        serve_block(Conn::new(pane), lease, end);
     });
     (path, server)
 }
 
-/// Serves one block connection; `output` is what the block prints after
-/// attaching. Resizes are noted in `resized`.
-fn serve_block(
-    mut conn: Conn<Stream>,
-    output: impl Fn(BlockId) -> Vec<u8>,
-    lease: bool,
-    end: End,
-    resized: &Mutex<Vec<(BlockId, Size)>>,
-) {
+/// Serves one block connection, which prints [`REMOTE`] once attached.
+fn serve_block(mut conn: Conn<Stream>, lease: bool, end: End) {
     let mut attached = None;
     while let Ok(message) = conn.recv() {
         match message {
             Message::Attach { req, block } => {
                 conn.send(&Message::Done { req, created: None })
                     .expect("done");
-                attach(&mut conn, block, &output(block));
+                attach(&mut conn, block, REMOTE);
                 attached = Some(block);
             }
             Message::AcquireLease { req, block } => {
@@ -110,8 +112,7 @@ fn serve_block(
                     return;
                 }
             }
-            Message::Resize { req, block, size } => {
-                resized.lock().expect("lock").push((block, size));
+            Message::Resize { req, .. } => {
                 conn.send(&Message::Done { req, created: None })
                     .expect("done");
             }
@@ -199,6 +200,16 @@ impl Tui {
         screen.windows(needle.len()).any(|w| w == needle)
     }
 
+    /// How much the client has written so far.
+    fn written(&self) -> usize {
+        self.screen.lock().expect("lock").len()
+    }
+
+    /// What the client wrote after `from`.
+    fn since(&self, from: usize) -> Vec<u8> {
+        self.screen.lock().expect("lock")[from..].to_vec()
+    }
+
     fn wait_for(&self, needle: &[u8]) {
         let deadline = Instant::now() + PATIENCE;
         while !self.saw(needle) {
@@ -264,84 +275,322 @@ fn detaching_after_the_program_set_modes_resets_the_terminal() {
 }
 
 const OTHER: &str = "0b5e2a7c-9d14-4f36-8e21-7a6c3b9d0e4f";
+/// The left block's output: application cursor keys, bracketed paste and
+/// its name.
+const LEFT: &[u8] = b"\x1b[?1h\x1b[?2004hLEFT";
 
-/// A server with layouts whose window holds [`BLOCK`] and [`OTHER`] side
-/// by side; each block prints its name. Returns what the client resized.
-fn layout_server() -> (PathBuf, JoinHandle<Vec<(BlockId, Size)>>) {
+/// How a layout server behaves.
+#[derive(Clone, Copy, Default)]
+struct Script {
+    /// The window holds [`BLOCK`] left of [`OTHER`]; else [`BLOCK`] alone.
+    both: bool,
+    /// A zoom is answered with the zoom and at once the unzoom.
+    bounce: bool,
+    /// The left block's lease is granted only once the right one asks.
+    late_grant: bool,
+    /// Once the left block's lease is granted, the control connection
+    /// reports the window empty; later the block prints FINAL and closes.
+    close: bool,
+}
+
+/// What the client asked of the blocks.
+#[derive(Default)]
+struct Log {
+    resized: Vec<(BlockId, Size)>,
+    released: Vec<BlockId>,
+}
+
+struct Shared {
+    script: Script,
+    window: WindowId,
+    log: Mutex<Log>,
+    /// Set once the right block asks for its lease.
+    right_asked: (Mutex<bool>, Condvar),
+    /// Tells the control connection the left lease was granted.
+    granted: Mutex<Sender<()>>,
+}
+
+impl Shared {
+    fn layout(&self) -> Layout {
+        match self.script.both {
+            true => format!("cols50({BLOCK},{OTHER})").parse().expect("layout"),
+            false => Layout::Block(id(BLOCK)),
+        }
+    }
+
+    fn released(&self) -> Vec<BlockId> {
+        self.log.lock().expect("lock").released.clone()
+    }
+}
+
+/// A server with layouts, serving `script`. Every block connection it
+/// accepts is served on its own thread, for as long as the test runs.
+fn layout_server(script: Script) -> (PathBuf, Arc<Shared>) {
     let (path, listener) = listen();
-    let server = std::thread::spawn(move || {
+    let (granted, grants) = mpsc::channel();
+    let shared = Arc::new(Shared {
+        script,
+        window: WindowId::from_uuid(Uuid::nil()),
+        log: Mutex::default(),
+        right_asked: (Mutex::new(false), Condvar::new()),
+        granted: Mutex::new(granted),
+    });
+    let server = shared.clone();
+    std::thread::spawn(move || {
         let features = Features::CHECKPOINT_V3
             .union(Features::INSPECT)
             .union(Features::LAYOUT);
-        let mut control = welcome(&listener, features);
-        let (left, right) = (id(BLOCK), id(OTHER));
-        let window = WindowId::from_uuid(Uuid::nil());
-        let Message::List { req } = control.recv().expect("list") else {
-            panic!("expected List");
-        };
-        let layout: Layout = format!("cols50({left},{right})").parse().expect("layout");
-        for entry in [
-            Entry::Block {
-                block: left,
-                window,
-                size: Size::new(80, 24).expect("size"),
-                holder: None,
-                title: String::new(),
-                name: String::new(),
-            },
-            Entry::Window {
-                window,
-                session: rusty_mux_core::SessionId::from_uuid(Uuid::nil()),
-                name: "main".into(),
-                layout: Some(layout),
-                zoomed: None,
-            },
-        ] {
-            control.send(&Message::Entry { req, entry }).expect("entry");
+        let control = welcome(&listener, features);
+        let events = control.try_clone().expect("clone");
+        let control_shared = server.clone();
+        std::thread::spawn(move || serve_control(control, &control_shared));
+        let close_shared = server.clone();
+        std::thread::spawn(move || {
+            if grants.recv().is_ok() {
+                let window = close_shared.window;
+                send_event(&mut Conn::new(events), layout_changed(window, None, None));
+            }
+        });
+        while let Ok((stream, _)) = listener.accept() {
+            let block = server.clone();
+            std::thread::spawn(move || {
+                serve_layout_block(handshake(stream, Features::CHECKPOINT_V3), &block)
+            });
         }
-        control
-            .send(&Message::Done { req, created: None })
-            .expect("done");
-        let resized = Arc::new(Mutex::new(Vec::new()));
-        let panes: Vec<_> = (0..2)
-            .map(|_| {
-                let conn = welcome(&listener, Features::CHECKPOINT_V3);
-                let resized = resized.clone();
-                std::thread::spawn(move || {
-                    let name = |b: BlockId| match b == left {
-                        true => b"LEFT".to_vec(),
-                        false => b"RIGHT".to_vec(),
-                    };
-                    serve_block(conn, name, true, End::Open, &resized);
-                })
-            })
-            .collect();
-        panes.into_iter().for_each(|p| p.join().expect("pane"));
-        resized.lock().expect("lock").clone()
     });
-    (path, server)
+    (path, shared)
+}
+
+fn layout_changed(window: WindowId, layout: Option<Layout>, zoomed: Option<BlockId>) -> Event {
+    Event::LayoutChanged {
+        window,
+        layout,
+        zoomed,
+    }
+}
+
+fn send_event(conn: &mut Conn<Stream>, event: Event) {
+    // The client may already have gone.
+    let _ = conn.send(&Message::Event { seq: None, event });
+}
+
+/// Answers `list` with the window and its blocks, and zoom requests with
+/// layout events.
+fn serve_control(stream: Stream, shared: &Shared) {
+    let mut conn = Conn::new(stream);
+    let window = shared.window;
+    while let Ok(message) = conn.recv() {
+        match message {
+            Message::List { req } => {
+                let mut entries = vec![Entry::Window {
+                    window,
+                    session: SessionId::from_uuid(Uuid::nil()),
+                    name: "main".into(),
+                    layout: Some(shared.layout()),
+                    zoomed: None,
+                }];
+                for block in shared.layout().blocks() {
+                    entries.push(Entry::Block {
+                        block,
+                        window,
+                        size: Size::new(80, 24).expect("size"),
+                        holder: None,
+                        title: String::new(),
+                        name: String::new(),
+                    });
+                }
+                for entry in entries {
+                    conn.send(&Message::Entry { req, entry }).expect("entry");
+                }
+                conn.send(&Message::Done { req, created: None })
+                    .expect("done");
+            }
+            Message::Zoom { req, block } => {
+                conn.send(&Message::Done { req, created: None })
+                    .expect("done");
+                let layout = Some(shared.layout());
+                send_event(
+                    &mut conn,
+                    layout_changed(window, layout.clone(), Some(block)),
+                );
+                if shared.script.bounce {
+                    send_event(&mut conn, layout_changed(window, layout, None));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Serves one block connection of a layout server.
+fn serve_layout_block(mut conn: Conn<Stream>, shared: &Shared) {
+    let script = shared.script;
+    let (left, right) = (id(BLOCK), id(OTHER));
+    while let Ok(message) = conn.recv() {
+        match message {
+            Message::Attach { req, block } => {
+                conn.send(&Message::Done { req, created: None })
+                    .expect("done");
+                let output: &[u8] = if block == left { LEFT } else { b"RIGHT" };
+                attach(&mut conn, block, output);
+            }
+            Message::AcquireLease { req, block } => {
+                if block == right {
+                    let (asked, wake) = &shared.right_asked;
+                    *asked.lock().expect("lock") = true;
+                    wake.notify_all();
+                }
+                if block == left && script.late_grant {
+                    let (asked, wake) = &shared.right_asked;
+                    let guard = asked.lock().expect("lock");
+                    let (_guard, _) = wake
+                        .wait_timeout_while(guard, PATIENCE, |asked| !*asked)
+                        .expect("wait");
+                }
+                conn.send(&Message::Done { req, created: None })
+                    .expect("lease");
+                if block == left && script.close {
+                    let _ = shared.granted.lock().expect("lock").send(());
+                    std::thread::sleep(Duration::from_millis(300));
+                    let _ = conn.send(&Message::Output {
+                        block,
+                        data: b"FINAL".to_vec(),
+                    });
+                    send_event(&mut conn, Event::BlockClosed { block });
+                }
+            }
+            Message::ReleaseLease { req, block } => {
+                shared.log.lock().expect("lock").released.push(block);
+                let _ = conn.send(&Message::Done { req, created: None });
+            }
+            Message::Resize { req, block, size } => {
+                shared.log.lock().expect("lock").resized.push((block, size));
+                let _ = conn.send(&Message::Done { req, created: None });
+            }
+            _ => {}
+        }
+    }
 }
 
 fn id(text: &str) -> BlockId {
     BlockId::from_uuid(text.parse().expect("uuid"))
 }
 
+fn detach(tui: Tui) -> String {
+    tui.master.write(b"\x1dd").expect("ctrl-] d");
+    String::from_utf8_lossy(&tui.exit()).into_owned()
+}
+
 #[test]
 fn a_window_of_two_blocks_is_drawn_side_by_side() {
-    let (socket, server) = layout_server();
+    let (socket, server) = layout_server(Script {
+        both: true,
+        ..Script::default()
+    });
     let tui = Tui::start(&socket);
     tui.wait_for(b"LEFT");
     tui.wait_for(b"RIGHT");
     tui.wait_for("│".as_bytes());
-    tui.master.write(b"\x1dd").expect("ctrl-] d");
-    let screen = tui.exit();
-    let resized = server.join().expect("server");
+    let text = detach(tui);
     // Only the focused block, which holds the lease, fits its half.
+    let resized = server.log.lock().expect("lock").resized.clone();
     assert_eq!(resized, vec![(id(BLOCK), Size::new(40, 24).expect("size"))]);
-    let text = String::from_utf8_lossy(&screen);
-    let find = |needle: &[u8]| screen.windows(needle.len()).rposition(|w| w == needle);
-    let alternate = find(b"\x1b[?1049h").unwrap_or_else(|| panic!("no alternate screen: {text:?}"));
-    let restore = find(RESTORE).unwrap_or_else(|| panic!("terminal not reset: {text:?}"));
-    let said = find(b"detached from block").unwrap_or_else(|| panic!("no detach: {text:?}"));
+    let find = |needle: &str| text.rfind(needle);
+    let alternate = find("\x1b[?1049h").unwrap_or_else(|| panic!("no alternate screen: {text:?}"));
+    let restore = find(std::str::from_utf8(RESTORE).expect("utf-8"))
+        .unwrap_or_else(|| panic!("terminal not reset: {text:?}"));
+    let said = find("detached from block").unwrap_or_else(|| panic!("no detach: {text:?}"));
     assert!(alternate < restore && restore < said, "{text:?}");
+}
+
+#[test]
+fn a_lease_granted_after_the_focus_moved_is_given_back() {
+    let (socket, server) = layout_server(Script {
+        both: true,
+        late_grant: true,
+        ..Script::default()
+    });
+    let tui = Tui::start(&socket);
+    tui.wait_for(b"RIGHT");
+    // Focus the right block while the left one's lease is still asked for.
+    tui.master.write(b"\x1dl").expect("ctrl-] l");
+    let deadline = Instant::now() + PATIENCE;
+    while !server.released().contains(&id(BLOCK)) {
+        assert!(Instant::now() < deadline, "the left lease was kept");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
+}
+
+#[test]
+fn a_block_hidden_and_shown_again_at_once_keeps_the_client() {
+    let (socket, _server) = layout_server(Script {
+        both: true,
+        bounce: true,
+        ..Script::default()
+    });
+    let tui = Tui::start(&socket);
+    tui.wait_for(b"RIGHT");
+    // The right block's first connection ends after its second opens.
+    let from = tui.written();
+    tui.master.write(b"\x1dz").expect("ctrl-] z");
+    let deadline = Instant::now() + PATIENCE;
+    while tui.since(from).windows(5).filter(|w| w == b"RIGHT").count() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the right block was not shown again"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
+}
+
+#[test]
+fn a_closed_window_shows_its_blocks_last_output_first() {
+    let (socket, _server) = layout_server(Script {
+        close: true,
+        ..Script::default()
+    });
+    let tui = Tui::start(&socket);
+    let text = String::from_utf8_lossy(&tui.exit()).into_owned();
+    let restore = text
+        .rfind(std::str::from_utf8(RESTORE).expect("utf-8"))
+        .unwrap_or_else(|| panic!("terminal not reset: {text:?}"));
+    let last = text
+        .rfind("FINAL")
+        .unwrap_or_else(|| panic!("no last output: {text:?}"));
+    let said = text
+        .rfind("closed")
+        .unwrap_or_else(|| panic!("no close: {text:?}"));
+    assert!(last < restore && restore < said, "{text:?}");
+}
+
+#[test]
+fn a_block_passed_through_again_gets_its_modes_back() {
+    let (socket, _server) = layout_server(Script {
+        both: true,
+        ..Script::default()
+    });
+    let tui = Tui::start(&socket);
+    tui.wait_for(b"RIGHT");
+    // Composing reset the left block's modes; zooming it passes it again.
+    let from = tui.written();
+    tui.master.write(b"\x1dz").expect("ctrl-] z");
+    let deadline = Instant::now() + PATIENCE;
+    let passed = loop {
+        let since = String::from_utf8_lossy(&tui.since(from)).into_owned();
+        if let Some(at) = since.find("\x1b[1;24r") {
+            break since[at..].to_owned();
+        }
+        assert!(Instant::now() < deadline, "not passed through: {since:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    detach(tui);
+    assert!(
+        passed.contains("\x1b[?1h") && passed.contains("\x1b[?2004h"),
+        "{passed:?}"
+    );
 }

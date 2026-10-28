@@ -60,6 +60,50 @@ pub fn paint(grid: &Grid) -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Hands the local terminal to `grid`'s program: its screen (main or
+/// alternate) and scroll region, its cells and cursor, then its [`modes`].
+/// Used when a block's raw output starts passing through, since the
+/// program will not set its modes again.
+pub fn pass(grid: &Grid) -> Vec<u8> {
+    let screen: &[u8] = match grid.in_alt_screen() {
+        true => b"\x1b[?1049h",
+        false => b"\x1b[?1049l",
+    };
+    // DECSTBM homes the cursor, so it goes before the paint places it.
+    let region = format!("\x1b[{};{}r", grid.scroll_top + 1, grid.scroll_bottom + 1);
+    [screen, region.as_bytes(), &paint(grid), &modes(grid, true)].concat()
+}
+
+/// The input modes `grid`'s program set, each as a sequence that sets it on
+/// the local terminal or clears it: cursor and keypad keys, bracketed
+/// paste, alternate scroll and win32 input. With `whole` the block has the
+/// whole terminal, so its mouse and focus reports and its cursor's
+/// visibility go too; otherwise those are cleared, as screen coordinates
+/// and focus belong to the composed screen.
+pub fn modes(grid: &Grid, whole: bool) -> Vec<u8> {
+    let mut out = String::new();
+    let mut dec = |mode: usize, on: bool| {
+        let _ = write!(out, "\x1b[?{mode}{}", if on { 'h' } else { 'l' });
+    };
+    dec(1, grid.app_cursor_keys);
+    dec(2004, grid.bracketed_paste);
+    dec(1007, grid.alt_scroll);
+    dec(9001, grid.win32_input);
+    dec(1004, whole && grid.focus_reporting);
+    let mouse = grid.mouse_modes;
+    for mode in [1000, 1002, 1003] {
+        dec(mode, whole && mouse.base == mode);
+    }
+    for (bit, mode) in [(1, 1005), (2, 1006), (4, 1015), (8, 1016)] {
+        dec(mode, whole && mouse.extended & bit != 0);
+    }
+    if whole {
+        dec(25, grid.cursor_visible);
+    }
+    out.push_str(if grid.app_keypad { "\x1b=" } else { "\x1b>" });
+    out.into_bytes()
+}
+
 fn rgb(color: u32) -> (u8, u8, u8) {
     ((color >> 16) as u8, (color >> 8) as u8, color as u8)
 }
@@ -108,6 +152,43 @@ mod tests {
     use rusty_mux_core::BlockId;
     use rusty_term_core::AnsiParser;
     use rusty_uuid::Uuid;
+
+    #[test]
+    fn modes_follow_what_the_program_set() {
+        let mut grid = Grid::new(20, 3);
+        let plain = String::from_utf8(modes(&grid, true)).unwrap();
+        assert!(plain.contains("\x1b[?1l") && plain.contains("\x1b[?2004l"));
+        assert!(plain.contains("\x1b[?25h") && plain.ends_with("\x1b>"));
+        AnsiParser::new().advance(
+            &mut grid,
+            b"\x1b[?1h\x1b=\x1b[?2004h\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[?25l",
+        );
+        let whole = String::from_utf8(modes(&grid, true)).unwrap();
+        for set in [
+            "?1h", "?2004h", "?1002h", "?1006h", "?1004h", "?25l", "?1000l",
+        ] {
+            assert!(whole.contains(&format!("\x1b[{set}")), "{set}: {whole:?}");
+        }
+        assert!(whole.ends_with("\x1b="));
+        // Composed: keys as set, but no mouse or focus reports.
+        let part = String::from_utf8(modes(&grid, false)).unwrap();
+        for set in ["?1h", "?2004h", "?1002l", "?1006l", "?1004l"] {
+            assert!(part.contains(&format!("\x1b[{set}")), "{set}: {part:?}");
+        }
+        assert!(!part.contains("?25"));
+    }
+
+    #[test]
+    fn pass_restores_the_screen_and_region_before_painting() {
+        let mut grid = Grid::new(20, 5);
+        AnsiParser::new().advance(&mut grid, b"\x1b[?1049h\x1b[2;4r\x1b[?1h");
+        let passed = String::from_utf8(pass(&grid)).unwrap();
+        assert!(
+            passed.starts_with("\x1b[?1049h\x1b[2;4r\x1b[0m\x1b[2J"),
+            "{passed:?}"
+        );
+        assert!(passed.contains("\x1b[?1h"));
+    }
 
     #[test]
     fn paint_draws_text_and_places_the_cursor() {

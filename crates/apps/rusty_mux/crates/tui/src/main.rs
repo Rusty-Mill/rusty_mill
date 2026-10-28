@@ -42,7 +42,7 @@ mod client {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{Receiver as Inbox, RecvTimeoutError, Sender};
     use std::thread::JoinHandle;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use platform::term::Terminal;
     #[cfg(target_os = "linux")]
@@ -54,7 +54,7 @@ mod client {
     use rusty_mux_server::checkpoint::Receiver;
     use rusty_mux_tui::keys::{Action, Keys};
     use rusty_mux_tui::screen::{self, Frame, View};
-    use rusty_mux_tui::{Conn, RESTORE, paint};
+    use rusty_mux_tui::{Conn, RESTORE, modes, pass};
     use rusty_term_core::{AnsiParser, Grid};
     use rusty_uuid::Uuid;
 
@@ -68,14 +68,22 @@ mod client {
         .union(Features::INSPECT)
         .union(Features::LAYOUT);
 
+    /// How long a closed window waits for its blocks' own close, so their
+    /// last output shows before the client leaves.
+    const GRACE: Duration = Duration::from_millis(500);
+
+    /// A block's connection: the block, and which of the connections the
+    /// client opened for it, so a stale one's messages are told apart.
+    type Tag = (BlockId, u64);
+
     /// Something for the main loop.
     enum Input {
         Keys(Vec<u8>),
         Control(Message),
-        Pane(BlockId, Message),
+        Pane(Tag, Message),
         /// A connection ended: the server's control one (`None`), or a
         /// block's.
-        Ended(Option<BlockId>),
+        Ended(Option<Tag>),
     }
 
     /// Why the client stopped.
@@ -155,6 +163,9 @@ mod client {
             shown: Shown::Nothing,
             split: None,
             arriving: None,
+            opened: 0,
+            mirrored: None,
+            closing: None,
             ended: None,
         };
         app.sync();
@@ -195,7 +206,7 @@ mod client {
         mut conn: Conn<UnixStream>,
         tx: &Sender<Input>,
         wrap: impl Fn(Message) -> Input,
-        pane: Option<BlockId>,
+        pane: Option<Tag>,
     ) {
         while let Ok(message) = conn.recv() {
             if tx.send(wrap(message)).is_err() {
@@ -343,6 +354,8 @@ mod client {
 
     /// One block's connection and its local copy of the block's terminal.
     struct Pane {
+        /// Which connection to its block this is.
+        generation: u64,
         stream: UnixStream,
         conn: Conn<UnixStream>,
         next: u64,
@@ -486,6 +499,13 @@ mod client {
         split: Option<u64>,
         /// The split's new block, until the layout shows it.
         arriving: Option<BlockId>,
+        /// Block connections opened so far, to tag each.
+        opened: u64,
+        /// The input modes last mirrored from the focused block while
+        /// composed.
+        mirrored: Option<Vec<u8>>,
+        /// When the window closed, the deadline for its blocks' own close.
+        closing: Option<Instant>,
         ended: Option<Ended>,
     }
 
@@ -508,6 +528,9 @@ mod client {
                     self.sync();
                 }
                 self.draw();
+                if self.closing.is_some_and(|by| Instant::now() >= by) {
+                    self.end(Ended::Closed);
+                }
                 if let Some(ended) = self.ended.take() {
                     return ended;
                 }
@@ -523,17 +546,44 @@ mod client {
                     }
                 }
                 Input::Control(message) => self.on_control(message),
-                Input::Pane(block, message) => self.on_pane(block, message),
+                Input::Pane(tag, message) => self.on_pane(tag, message),
                 // The server closes every connection when it goes; a
                 // block's own is left to report it, after its last output.
                 Input::Ended(None) if !self.panes.is_empty() => {}
                 Input::Ended(None) => self.end(Ended::Disconnected),
-                // A block this client still shows lost its connection.
-                Input::Ended(Some(block)) if self.panes.contains_key(&block) => {
-                    self.end(Ended::Disconnected)
-                }
+                Input::Ended(Some(tag)) if self.current(tag) => match self.closing {
+                    Some(_) => self.drained(tag.0),
+                    // A block this client still shows lost its connection.
+                    None => self.end(Ended::Disconnected),
+                },
+                // A connection this client already hung up on.
                 Input::Ended(Some(_)) => {}
             }
+        }
+
+        /// Whether `tag` is the open connection to its block.
+        fn current(&self, (block, generation): Tag) -> bool {
+            self.panes
+                .get(&block)
+                .is_some_and(|p| p.generation == generation)
+        }
+
+        /// The window is gone: leave once each block still connected has
+        /// told its own close, which comes after its last output, or ended,
+        /// or after [`GRACE`].
+        fn close(&mut self) {
+            match self.panes.is_empty() {
+                true => self.end(Ended::Closed),
+                false => {
+                    self.closing.get_or_insert_with(|| Instant::now() + GRACE);
+                }
+            }
+        }
+
+        /// A closing window's block is done.
+        fn drained(&mut self, block: BlockId) {
+            self.panes.remove(&block);
+            self.close();
         }
 
         /// Keeps the first reason the client stops.
@@ -625,9 +675,7 @@ mod client {
                     self.zoomed = zoomed;
                     self.sync();
                 }
-                Event::WindowClosed { window } if Some(window) == self.window => {
-                    self.end(Ended::Closed)
-                }
+                Event::WindowClosed { window } if Some(window) == self.window => self.close(),
                 // Without layouts the only block shown is the first.
                 Event::BlockClosed { block }
                     if !self.layouts && self.layout == Some(Layout::Block(block)) =>
@@ -639,7 +687,11 @@ mod client {
             }
         }
 
-        fn on_pane(&mut self, block: BlockId, message: Message) {
+        fn on_pane(&mut self, tag: Tag, message: Message) {
+            if !self.current(tag) {
+                return;
+            }
+            let block = tag.0;
             let Some(pane) = self.panes.get_mut(&block) else {
                 return;
             };
@@ -649,7 +701,7 @@ mod client {
                     if self.shown == Shown::Passing(block) {
                         let painted = self.panes.get(&block).and_then(|p| p.term.as_ref());
                         if let Some((grid, _)) = painted {
-                            write(&paint(grid), &mut self.ended);
+                            write(&pass(grid), &mut self.ended);
                         }
                     }
                     self.fit();
@@ -659,8 +711,17 @@ mod client {
                         write(&data, &mut self.ended);
                     }
                 }
-                Ok(Change::Leased) => self.fit(),
-                Ok(Change::Closed) => self.on_event(Event::BlockClosed { block }),
+                // The focus may have moved on while the lease was asked for.
+                Ok(Change::Leased) => {
+                    self.lease();
+                    self.fit();
+                }
+                Ok(Change::Closed) => {
+                    self.on_event(Event::BlockClosed { block });
+                    if self.closing.is_some() {
+                        self.drained(block);
+                    }
+                }
                 // Only the block asked for is worth stopping over; any
                 // other is closing, and the layout will drop it.
                 Ok(Change::Refused(reason)) if self.panes.len() == 1 => {
@@ -693,7 +754,7 @@ mod client {
         fn sync(&mut self) {
             let visible = self.visible();
             let Some(&(first, _)) = visible.first() else {
-                self.end(Ended::Closed);
+                self.close();
                 return;
             };
             let shows = |block: BlockId| visible.iter().any(|(b, _)| *b == block);
@@ -773,7 +834,9 @@ mod client {
         }
 
         /// Connects to the server for `block` and attaches to it.
-        fn open(&self, block: BlockId) -> Result<Pane, String> {
+        fn open(&mut self, block: BlockId) -> Result<Pane, String> {
+            self.opened += 1;
+            let tag = (block, self.opened);
             let stream = connect(&self.socket)?;
             let mut conn = Conn::new(clone(&stream)?);
             conn.send(&Message::Hello {
@@ -790,11 +853,12 @@ mod client {
                 read(
                     conn,
                     &tx,
-                    move |message| Input::Pane(block, message),
-                    Some(block),
+                    move |message| Input::Pane(tag, message),
+                    Some(tag),
                 )
             });
             let mut pane = Pane {
+                generation: tag.1,
                 conn: Conn::new(clone(&stream)?),
                 stream,
                 next: 1,
@@ -814,12 +878,12 @@ mod client {
         /// several composed on the alternate screen.
         fn show(&mut self, shown: Shown) {
             let bytes = match &shown {
+                // A block not ready yet is passed on Ready.
                 Shown::Passing(block) => {
-                    let mut bytes = b"\x1b[?1049l".to_vec();
-                    if let Some((grid, _)) = self.panes.get(block).and_then(|p| p.term.as_ref()) {
-                        bytes.extend(paint(grid));
+                    match self.panes.get(block).and_then(|p| p.term.as_ref()) {
+                        Some((grid, _)) => pass(grid),
+                        None => b"\x1b[?1049l".to_vec(),
                     }
-                    bytes
                 }
                 Shown::Composed(_) => match self.shown {
                     Shown::Composed(_) => Vec::new(),
@@ -830,6 +894,7 @@ mod client {
                 Shown::Nothing => Vec::new(),
             };
             write(&bytes, &mut self.ended);
+            self.mirrored = None;
             self.shown = shown;
         }
 
@@ -852,7 +917,14 @@ mod client {
                 })
                 .collect();
             let frame = screen::compose(self.area, &views, self.focus);
-            let bytes = screen::render(last.as_ref(), &frame);
+            let mut bytes = screen::render(last.as_ref(), &frame);
+            // Keys reach the focused block encoded as it asked for.
+            let focused = views.iter().find(|v| v.block == self.focus);
+            let wanted = focused.and_then(|v| v.grid).map(|g| modes(g, false));
+            if wanted.is_some() && wanted != self.mirrored {
+                bytes.extend(wanted.iter().flatten());
+                self.mirrored = wanted;
+            }
             write(&bytes, &mut self.ended);
             self.shown = Shown::Composed(Some(frame));
         }
