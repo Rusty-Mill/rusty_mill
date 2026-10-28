@@ -516,7 +516,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_assign",
-            "Move a card to another project (needs Triage). Drops any claim.",
+            "Move a card to another project (needs `triage`, or `project` for a card nobody else has claimed). Drops any claim.",
             |b, i, a: AssignArgs| {
                 let who = acting(b, i, &a.who)?;
                 card(b.assign(id(&a.id)?, &a.project, &who)?)

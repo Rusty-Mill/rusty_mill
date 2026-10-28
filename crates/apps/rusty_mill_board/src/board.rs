@@ -576,22 +576,30 @@ impl<S: Store> Board<S> {
         self.apply(id, by, EventKind::Moved, |c, now| c.move_to(to, by, now))
     }
 
-    /// Move a card to another project. Needs `Triage`, and both projects in scope.
+    /// Move a card to another project. Needs `Triage` or `Project`, and both projects in
+    /// scope; without `Triage`, not a card someone else has claimed.
     ///
     /// # Errors
-    /// An unknown project, a missing capability, an out-of-scope project, or a Done card.
+    /// An unknown project, a missing capability, an out-of-scope project, a card claimed by
+    /// someone else (without `Triage`), or a Done card.
     pub fn assign(&self, id: Uuid, project: &str, by: &Actor) -> Result<Card, BoardError> {
         let registry = self.registry();
         if !registry.contains(project) {
             return Err(BoardError::Invalid("unknown project"));
         }
-        if !by.caps.contains(&Capability::Triage) {
-            return Err(BoardError::Forbidden(Capability::Triage));
+        let triage = by.caps.contains(&Capability::Triage);
+        if !triage && !by.caps.contains(&Capability::Project) {
+            return Err(BoardError::Forbidden(Capability::Project));
         }
         if !by.may_work_in(project) {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
-        let card = self.apply(id, by, EventKind::Assigned, |c, now| c.assign(project, now));
+        let card = self.apply(id, by, EventKind::Assigned, |c, now| match &c.claim {
+            Some(holder) if !triage && *holder != by.name => {
+                Err(BoardError::Claimed(holder.clone()))
+            }
+            _ => c.assign(project, now),
+        });
         drop(registry);
         card
     }

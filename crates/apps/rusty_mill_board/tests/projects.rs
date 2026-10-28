@@ -169,11 +169,25 @@ fn assign_needs_triage_and_clears_the_claim() {
     let dev = actor(&b, "claude", "builder", None);
     b.take(&dev, Some(id)).expect("take");
     assert_eq!(
-        b.assign(id, "orch", &dev),
+        b.assign(id, "orch", &actor(&b, "q", "qa", None)),
         Err(BoardError::Forbidden(
-            rusty_mill_board::domain::Capability::Triage
+            rusty_mill_board::domain::Capability::Project
         ))
     );
+    assert_eq!(
+        b.assign(id, "orch", &actor(&b, "gemini", "builder", None)),
+        Err(BoardError::Claimed("claude".into())),
+        "a builder does not take another's claimed card away"
+    );
+    let own = b
+        .assign(id, "orch", &dev)
+        .expect("a builder moves its own card");
+    assert_eq!((own.project.as_str(), own.claim), ("orch", None));
+    let unclaimed = ready_in(&b, "rl", "free");
+    b.assign(unclaimed, "orch", &actor(&b, "gemini", "builder", None))
+        .expect("or an unclaimed one");
+    b.assign(id, "rl", &actor(&b, "nano", "human", None))
+        .expect("back");
     let human = actor(&b, "nano", "human", None);
     assert_eq!(
         b.assign(id, "nope", &human),
