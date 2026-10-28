@@ -128,22 +128,27 @@ function setToken(t){tok=t;pref("token",t);$("signout").hidden=false}
 {const h=new URLSearchParams(location.hash.slice(1)).get("token");
   if(h){setToken(h);try{history.replaceState(null,"",location.pathname+location.search)}catch{}}
   else if(pref("token"))setToken(pref("token"))}
-let signing=null;   // one prompt, however many calls were refused at once
+/* Signing in reloads the page: the new token may be another agent, with its own role, projects
+   and view of the board, so everything is read again and no refused write is replayed as someone else.
+   Until then the refused calls wait, and every one shares the one box. */
 function signIn(why){
-  return signing??=new Promise(done=>{
-    const d=$("signin"),f=$("signin-token");$("signin-why").textContent=why;f.value="";
+  const d=$("signin"),f=$("signin-token");
+  if(!d.open){
+    $("signin-why").textContent=why;f.value="";
     d.oncancel=e=>e.preventDefault();   // nothing works without a token, so Escape does not dismiss it
-    d.querySelector("form").onsubmit=()=>{setToken(f.value.trim());signing=null;done()};
+    d.querySelector("form").onsubmit=()=>{pref("token",f.value.trim());location.reload()};
     d.showModal();f.focus();
-  });
+  }
+  return new Promise(()=>{});
 }
 
 async function api(op,args={}){
   let r;
   for(;;){
-    r=await fetch("/api/"+op,{method:"POST",headers:{"content-type":"application/json",...(tok&&{authorization:"Bearer "+tok})},body:JSON.stringify(args)});
+    const sent=tok;   // a 401 for a token since replaced (own rotation) is retried with the current one
+    r=await fetch("/api/"+op,{method:"POST",headers:{"content-type":"application/json",...(sent&&{authorization:"Bearer "+sent})},body:JSON.stringify(args)});
     if(r.status!==401)break;
-    await signIn(tok?"That token was refused. Enter a current one.":"This board needs a token.");
+    if(sent===tok)await signIn(tok?"That token was refused. Enter a current one.":"This board needs a token.");
   }
   const j=await r.json().catch(()=>({error:r.statusText}));
   if(!r.ok){const e=new Error(j.error||r.statusText);e.status=r.status;throw e}

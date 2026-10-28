@@ -9,6 +9,10 @@ const [BASE, TOKEN] = [process.argv[3], process.argv[4]];
 
 const failures = [];
 const check = (ok, what) => { console.log(`${ok ? "ok  " : "FAIL"} ${what}`); if (!ok) failures.push(what); };
+const api = async (token, op, args = {}) => {
+  const r = await fetch(`${BASE}/api/${op}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(args) });
+  return { status: r.status, body: await r.json().catch(() => ({})) };
+};
 const signedInAs = (page) => page.waitForFunction(() => document.querySelector("#actor").value === "admin");
 
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? "/opt/pw-browsers/chromium" });
@@ -47,6 +51,31 @@ await linked.goto(`${BASE}/#token=${TOKEN}`);
 await signedInAs(linked);
 check((await linked.evaluate(() => location.hash)) === "", "a #token= link is taken and dropped from the address");
 await linked.close();
+
+// A call refused for a token that has since been replaced (rotating your own) retries with the new
+// one instead of asking.
+const raced = await page.evaluate(async (good) => {
+  tok = "replaced";                     // the request below goes out with this
+  const call = api("board_whoami");
+  setToken(good);                       // and the token changes while it is in flight
+  return (await call).actor;
+}, TOKEN);
+check(raced === "admin" && !(await page.locator("#signin").evaluate((d) => d.open)), "a 401 for a replaced token retries without asking");
+
+// Signing in as another agent after a revoke re-reads who you are; nothing of the old agent stays.
+const added = await api(TOKEN, "settings_agent_add", { agent: { name: "bob", role: "builder" } });
+check(added.status === 200, "(setup) a second agent");
+check((await api(TOKEN, "settings_agent_rotate", { name: "admin" })).status === 200, "(setup) the admin token is revoked");
+await page.waitForSelector("#signin[open]");
+check((await page.locator("#signin-why").innerText()).includes("refused"), "a revoked token is said so on the next call");
+await page.fill("#signin-token", added.body.token);
+await page.click("#signin button");
+await page.waitForFunction(() => document.querySelector("#actor").value === "bob");
+check((await page.inputValue("#role")) === "builder" && (await page.locator("#actor").isDisabled()), "the new agent's actor and role replace the old ones");
+await page.fill("#title", "as bob");
+await page.click("#add");
+await page.locator(".card", { hasText: "as bob" }).waitFor();
+check(true, "and writes go out as the new agent");
 
 // Sign out forgets it.
 await page.click("#signout");
