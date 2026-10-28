@@ -3,7 +3,11 @@
 //! creates a session, window and block first. Ctrl-] then `d` detaches;
 //! the blocks keep running and the focused one's id is printed for
 //! reattaching. The other Ctrl-] commands are listed in
-//! `rusty_mux_tui::keys`.
+//! `rusty_mux_tui::keys`. With `RUSTY_MUX_KEYLOG` set to a new file's path,
+//! every keyboard read is written to it as one line of hex, to see what a
+//! terminal really sends. That is everything typed, passwords included:
+//! the file is created the owner's alone (mode 0600 on Unix, an
+//! owner-only DACL on Windows), and an existing file is refused.
 
 use std::process::ExitCode;
 
@@ -54,7 +58,7 @@ mod client {
     use rusty_mux_server::checkpoint::Receiver;
     use rusty_mux_tui::keys::{Action, Keys};
     use rusty_mux_tui::screen::{self, Frame, View};
-    use rusty_mux_tui::{Conn, RESTORE, modes, pass};
+    use rusty_mux_tui::{Conn, NoWin32Input, RESTORE, create_private, modes, pass};
     use rusty_term_core::{AnsiParser, Grid};
     use rusty_uuid::Uuid;
 
@@ -144,9 +148,10 @@ mod client {
             let tx = tx.clone();
             std::thread::spawn(move || read(conn, &tx, Input::Control, None))
         };
+        let keylog = keylog()?;
         term.enter_raw().map_err(|e| format!("raw mode: {e:?}"))?;
         let stop = Arc::new(AtomicBool::new(false));
-        let keyboard = keyboard(tx.clone(), stop.clone());
+        let keyboard = keyboard(tx.clone(), stop.clone(), keylog);
         let mut app = App {
             socket,
             tx,
@@ -165,6 +170,7 @@ mod client {
             arriving: None,
             opened: 0,
             mirrored: None,
+            no_win32: NoWin32Input::default(),
             pending: None,
             ended: None,
         };
@@ -216,9 +222,31 @@ mod client {
         let _ = tx.send(Input::Ended(pane));
     }
 
+    /// The file `RUSTY_MUX_KEYLOG` names, created for the log; `None` when
+    /// it is unset. See [`create_private`].
+    fn keylog() -> Result<Option<std::fs::File>, String> {
+        let Some(path) = std::env::var_os("RUSTY_MUX_KEYLOG") else {
+            return Ok(None);
+        };
+        let path = Path::new(&path);
+        let file = create_private(path)
+            .map_err(|e| format!("RUSTY_MUX_KEYLOG {}: {e}", path.display()))?;
+        eprintln!(
+            "rusty-mux: logging every key typed, passwords included, to {}",
+            path.display()
+        );
+        Ok(Some(file))
+    }
+
     /// Reads the keyboard into the main loop until `stop`; an empty read
-    /// means the keyboard is gone.
-    fn keyboard(tx: Sender<Input>, stop: Arc<AtomicBool>) -> JoinHandle<()> {
+    /// means the keyboard is gone. Each read goes to `keylog` too, as a
+    /// line of hex; logging stops at the first failed write, since the
+    /// terminal is raw and has nowhere to report it.
+    fn keyboard(
+        tx: Sender<Input>,
+        stop: Arc<AtomicBool>,
+        mut keylog: Option<std::fs::File>,
+    ) -> JoinHandle<()> {
         std::thread::spawn(move || {
             let term = Term::new();
             let mut buf = [0u8; 4096];
@@ -228,6 +256,12 @@ mod client {
                     Ok(true) => term.read_chunk(&mut buf).unwrap_or(0),
                     Err(_) => 0,
                 };
+                if let Some(file) = keylog.as_mut() {
+                    let hex: String = buf[..n].iter().map(|b| format!("{b:02x} ")).collect();
+                    if writeln!(file, "{}", hex.trim_end()).is_err() {
+                        keylog = None;
+                    }
+                }
                 if tx.send(Input::Keys(buf[..n].to_vec())).is_err() || n == 0 {
                     return;
                 }
@@ -506,6 +540,8 @@ mod client {
         /// The input modes last mirrored from the focused block while
         /// composed.
         mirrored: Option<Vec<u8>>,
+        /// Filters the passing block's raw output.
+        no_win32: NoWin32Input,
         /// A layout change held back while blocks it drops drain.
         pending: Option<Pending>,
         ended: Option<Ended>,
@@ -767,7 +803,8 @@ mod client {
                 }
                 Ok(Change::Output(data)) => {
                     if self.shown == Shown::Passing(block) {
-                        write(&data, &mut self.ended);
+                        let bytes = self.no_win32.filter(&data);
+                        write(&bytes, &mut self.ended);
                     }
                 }
                 // The focus may have moved on while the lease was asked for.
@@ -945,6 +982,8 @@ mod client {
             let bytes = match &shown {
                 // A block not ready yet is passed on Ready.
                 Shown::Passing(block) => {
+                    // A new stream: what was held belongs to the last one.
+                    self.no_win32 = NoWin32Input::default();
                     match self.panes.get(block).and_then(|p| p.term.as_ref()) {
                         Some((grid, _)) => pass(grid),
                         None => b"\x1b[?1049l".to_vec(),

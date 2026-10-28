@@ -14,7 +14,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use platform::process::{Child, Command};
+use platform::process::{Child, Command, EnvSpec};
 use platform::pty::PtyMaster;
 use platform::term::WinSize;
 use platform_linux::{LinuxPty, LinuxPtyMaster};
@@ -27,8 +27,11 @@ use rusty_uuid::Uuid;
 const BLOCK: &str = "6a1c0f3e-2b4d-4e5f-8a9b-0c1d2e3f4a5b";
 const PATIENCE: Duration = Duration::from_secs(10);
 /// Modes a block's program might leave set: alternate screen, hidden
-/// cursor, bracketed paste and mouse reporting.
-const REMOTE: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000hREMOTE";
+/// cursor, bracketed paste, mouse reporting, and the win32-input-mode a
+/// Windows pseudo console asks for.
+const REMOTE: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?9001hREMOTE";
+/// [`REMOTE`] as the client passes it on, without win32-input-mode.
+const SHOWN: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000hREMOTE";
 
 /// How the scripted server ends the attach.
 #[derive(Clone, Copy)]
@@ -172,9 +175,14 @@ impl Tui {
     }
 
     fn attach(socket: &Path, block: &str) -> Self {
+        Self::spawn(socket, block, EnvSpec::Inherit)
+    }
+
+    fn spawn(socket: &Path, block: &str, env: EnvSpec) -> Self {
         let cmd = Command::new(env!("CARGO_BIN_EXE_rusty-mux"), "/")
             .arg(socket.as_os_str())
-            .arg(block);
+            .arg(block)
+            .env(env);
         let (master, child) = LinuxPty
             .spawn_concrete(&cmd, WinSize { rows: 24, cols: 80 })
             .expect("spawn");
@@ -239,7 +247,7 @@ impl Tui {
 fn assert_restored(screen: &[u8], line: &str) {
     let find = |needle: &[u8]| screen.windows(needle.len()).rposition(|w| w == needle);
     let text = String::from_utf8_lossy(screen);
-    let remote = find(REMOTE).unwrap_or_else(|| panic!("no remote output: {text:?}"));
+    let remote = find(SHOWN).unwrap_or_else(|| panic!("no remote output: {text:?}"));
     let restore = find(RESTORE).unwrap_or_else(|| panic!("terminal not reset: {text:?}"));
     let said = find(line.as_bytes()).unwrap_or_else(|| panic!("no {line:?}: {text:?}"));
     assert!(remote < restore && restore < said, "{text:?}");
@@ -272,6 +280,66 @@ fn detaching_after_the_program_set_modes_resets_the_terminal() {
     let screen = tui.exit();
     server.join().expect("server");
     assert_restored(&screen, "detached from block");
+}
+
+/// The local terminal must keep sending plain keys, or Ctrl-] arrives
+/// win32-encoded and passes to the block: the client drops the program's
+/// request for the mode.
+#[test]
+fn win32_input_mode_never_reaches_the_local_terminal() {
+    let (socket, server) = scripted_server(true, End::Open);
+    let tui = Tui::start(&socket);
+    tui.wait_for(SHOWN);
+    tui.master.write(b"\x1dd").expect("ctrl-] d");
+    let screen = tui.exit();
+    server.join().expect("server");
+    let asked = screen.windows(8).any(|w| w == b"\x1b[?9001h");
+    assert!(!asked, "{:?}", String::from_utf8_lossy(&screen));
+}
+
+#[test]
+fn the_keylog_records_each_keyboard_read_in_hex() {
+    let log = keylog_path("new");
+    let _ = std::fs::remove_file(&log);
+    let (socket, server) = scripted_server(true, End::Open);
+    let tui = Tui::spawn(&socket, BLOCK, keylog_env(&log));
+    tui.wait_for(b"REMOTE");
+    tui.master.write(b"\x1dd").expect("ctrl-] d");
+    let screen = tui.exit();
+    server.join().expect("server");
+    let logged = std::fs::read_to_string(&log).expect("keylog");
+    assert_eq!(logged, "1d 64\n", "{logged:?}");
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &std::fs::metadata(&log).expect("stat").permissions(),
+    );
+    assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    let warned = String::from_utf8_lossy(&screen).contains("passwords included");
+    assert!(warned, "{:?}", String::from_utf8_lossy(&screen));
+    std::fs::remove_file(&log).expect("cleanup");
+}
+
+/// The keys must never land in a file another user may already read.
+#[test]
+fn the_keylog_refuses_an_existing_file() {
+    let log = keylog_path("existing");
+    std::fs::write(&log, "kept\n").expect("existing log");
+    let (socket, _server) = scripted_server(true, End::Open);
+    let screen = Tui::spawn(&socket, BLOCK, keylog_env(&log)).exit();
+    let text = String::from_utf8_lossy(&screen);
+    assert!(text.contains("RUSTY_MUX_KEYLOG"), "{text:?}");
+    assert_eq!(std::fs::read_to_string(&log).expect("log"), "kept\n");
+    std::fs::remove_file(&log).expect("cleanup");
+}
+
+fn keylog_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("rusty-mux-keylog-{name}-{}", std::process::id()))
+}
+
+/// This process's environment with `RUSTY_MUX_KEYLOG` set to `log`.
+fn keylog_env(log: &Path) -> EnvSpec {
+    let mut env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
+    env.insert("RUSTY_MUX_KEYLOG".into(), log.as_os_str().to_owned());
+    EnvSpec::Explicit(env)
 }
 
 const OTHER: &str = "0b5e2a7c-9d14-4f36-8e21-7a6c3b9d0e4f";
