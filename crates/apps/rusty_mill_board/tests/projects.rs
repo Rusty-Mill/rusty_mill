@@ -561,3 +561,86 @@ fn a_card_in_an_unregistered_project_does_not_block_an_unrelated_change() {
     b.set_projects(more, |_| Ok(()))
         .expect("additive change is not blocked");
 }
+
+/// A persist step that signals `reached` and waits for `go` before it returns.
+fn gate() -> (
+    impl Fn(&Projects) -> Result<(), String> + Send + Sync + 'static,
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+) {
+    let (reached, at_persist) = mpsc::channel();
+    let (go, release) = mpsc::channel::<()>();
+    let (reached, release) = (Mutex::new(reached), Mutex::new(release));
+    let persist = move |_: &Projects| {
+        reached.lock().expect("lock").send(()).expect("send");
+        release.lock().expect("lock").recv().expect("go");
+        Ok(())
+    };
+    (persist, at_persist, go)
+}
+
+fn one(path: &str) -> Vec<String> {
+    vec![path.to_owned()]
+}
+
+#[test]
+fn concurrent_project_adds_both_survive() {
+    let (persist, at_persist, go) = gate();
+    let first = Arc::new(AtomicBool::new(true));
+    let b = Arc::new(board().with_projects_sink(Box::new(move |p: &Projects| {
+        if first.swap(false, Ordering::SeqCst) {
+            persist(p)?;
+        }
+        Ok(())
+    })));
+    let dev = actor(&b, "claude", "builder", None);
+    let a = {
+        let (b, dev) = (b.clone(), dev.clone());
+        thread::spawn(move || b.add_project(&dev, "default", "a", &one("a")).map(|_| ()))
+    };
+    at_persist.recv().expect("the first add is persisting");
+    let second = {
+        let (b, dev) = (b.clone(), dev.clone());
+        thread::spawn(move || b.add_project(&dev, "default", "c", &one("c")).map(|_| ()))
+    };
+    thread::sleep(SOON);
+    go.send(()).expect("go");
+    a.join().expect("join").expect("first add");
+    second.join().expect("join").expect("second add");
+    let projects = b.projects();
+    assert!(
+        projects.contains("a") && projects.contains("c"),
+        "{projects:?}"
+    );
+}
+
+#[test]
+fn a_project_add_keeps_an_administrators_concurrent_change() {
+    let (persist, at_persist, go) = gate();
+    let b = Arc::new(board().with_projects_sink(Box::new(|_: &Projects| Ok(()))));
+    let admin = {
+        let b = b.clone();
+        let next = projects()
+            .with_project("default", "admins", &one("admins"))
+            .expect("next");
+        thread::spawn(move || b.set_projects(next, persist))
+    };
+    at_persist.recv().expect("the admin change is persisting");
+    let dev = actor(&b, "claude", "builder", None);
+    let add = {
+        let b = b.clone();
+        thread::spawn(move || {
+            b.add_project(&dev, "default", "mine", &one("mine"))
+                .map(|_| ())
+        })
+    };
+    thread::sleep(SOON);
+    go.send(()).expect("go");
+    admin.join().expect("join").expect("admin change");
+    add.join().expect("join").expect("add");
+    let projects = b.projects();
+    assert!(
+        projects.contains("admins") && projects.contains("mine"),
+        "{projects:?}"
+    );
+}

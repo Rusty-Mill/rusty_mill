@@ -142,12 +142,18 @@ impl<S: Store> Board<S> {
                 "this board has no projects file to add a project to".to_owned(),
             ));
         };
-        let projects = self
-            .projects()
-            .with_project(repo, name, paths)
-            .map_err(BoardError::Refused)?;
-        self.set_projects(projects.clone(), |p| sink(p))?;
-        Ok(projects)
+        let mut added = None;
+        self.update_projects(
+            |current| {
+                let next = current
+                    .with_project(repo, name, paths)
+                    .map_err(BoardError::Refused)?;
+                added = Some(next.clone());
+                Ok(next)
+            },
+            |p| sink(p),
+        )?;
+        added.ok_or_else(|| BoardError::Storage("project registry not derived".to_owned()))
     }
 
     /// A snapshot of the project registry.
@@ -180,10 +186,21 @@ impl<S: Store> Board<S> {
         projects: Projects,
         persist: impl FnOnce(&Projects) -> Result<(), String>,
     ) -> Result<(), BoardError> {
+        self.update_projects(|_| Ok(projects), persist)
+    }
+
+    /// [`Board::set_projects`] with the new registry derived from the current one under the
+    /// same write lock, so a concurrent change is never lost.
+    fn update_projects(
+        &self,
+        derive: impl FnOnce(&Projects) -> Result<Projects, BoardError>,
+        persist: impl FnOnce(&Projects) -> Result<(), String>,
+    ) -> Result<(), BoardError> {
         let mut guard = self
             .projects
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let projects = derive(&guard)?;
         if let Some(card) = self
             .store
             .list()?
