@@ -1552,12 +1552,13 @@ fn scrolled_off_line_keeps_its_wrap_and_drops_its_size_attr() {
     // travels into history (the reflow needs it), the size attribute does not.
     let mut g = Grid::new(4, 2);
     let mut p = AnsiParser::new();
-    p.advance(&mut g, b"\x1b#6abcdef\r\nx");
+    // The double-width row holds two of the four columns, so "ab" wraps.
+    p.advance(&mut g, b"\x1b#6abcd\r\nx");
     assert_eq!(g.scrollback.len(), 1);
     assert!(g.scrollback[0].wrapped);
     assert_eq!(g.scrollback[0].attr, LineAttr::Single);
-    assert_eq!(hist_text(&g, 0), "abcd");
-    assert_eq!(row_text(&g, 0), "ef  ");
+    assert_eq!(hist_text(&g, 0), "ab  ");
+    assert_eq!(row_text(&g, 0), "cd  ");
 }
 
 #[test]
@@ -3546,15 +3547,63 @@ fn decdwl_decdhl_decswl_set_line_size() {
 }
 
 #[test]
+fn double_width_row_holds_half_the_columns() {
+    // 8 columns, double width: 4 glyphs fit, the 5th wraps (#1159).
+    let g = parse(b"\x1b#6ABCDE", 8, 2);
+    assert_eq!(row_text(&g, 0), "ABCD    ");
+    assert_eq!(cells(&g)[8].ch, 'E');
+    assert_eq!(g.cursor, (1, 1));
+    // DECDHL halves wrap the same way.
+    let g = parse(b"\x1b#3ABCDE", 8, 2);
+    assert_eq!(cells(&g)[8].ch, 'E');
+    // Autowrap off: the last glyph overwrites the last shown column.
+    let g = parse(b"\x1b[?7l\x1b#6ABCDE", 8, 2);
+    assert_eq!(row_text(&g, 0), "ABCE    ");
+    assert_eq!(g.cursor, (4, 0));
+    // Non-ASCII text takes the same path.
+    let g = parse("\x1b#6éééé漢".as_bytes(), 8, 2);
+    assert_eq!(cells(&g)[8].ch, '漢');
+}
+
+#[test]
+fn resize_rejoins_a_wrapped_double_width_row_at_its_half() {
+    // 8 columns: "ABCD" on the double row, "E" wrapped below. At 10 columns
+    // the double row holds 5, so the logical line rejoins as "ABCDE".
+    let mut g = parse(b"\x1b#6ABCDE", 8, 2);
+    g.resize(10, 2);
+    let row0: String = row_text(&g, 0).trim_end().into();
+    assert_eq!(row0, "ABCDE");
+    assert_eq!(g.snapshot_dirty().line_attrs[0], LineAttr::DoubleWidth);
+    assert_rows_sized(&g);
+    // Narrower again: 6 columns hold 3 per double row.
+    g.resize(6, 3);
+    let rows: Vec<String> = (0..3)
+        .map(|y| row_text(&g, y).trim_end().to_owned())
+        .collect();
+    assert_eq!(rows[..2], ["ABC".to_owned(), "DE".to_owned()]);
+    assert_rows_sized(&g);
+}
+
+#[test]
+fn double_width_moves_a_right_half_cursor_to_the_last_shown_column() {
+    let g = parse(b"\x1b[7G\x1b#6", 8, 2);
+    assert_eq!(g.cursor, (3, 0));
+    let g = parse(b"\x1b[3G\x1b#6", 8, 2);
+    assert_eq!(g.cursor, (2, 0), "left half unchanged");
+    let g = parse(b"\x1b[7G\x1b#5", 8, 2);
+    assert_eq!(g.cursor, (6, 0), "single width leaves it");
+}
+
+#[test]
 fn line_attr_follows_content_when_scrolling() {
     // A double-width line must keep its size as the screen scrolls it upward.
     let mut g = Grid::new(4, 3);
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"AAAA\r\n"); // row 0
-    p.advance(&mut g, b"\x1b#6BBBB\r\n"); // row 1, double-width
+    p.advance(&mut g, b"\x1b#6BB\r\n"); // row 1, double-width (half the columns)
     p.advance(&mut g, b"CCCC\r\n"); // scrolls row 0 off; BBBB rises to row 0
     let attrs = g.snapshot_dirty().line_attrs;
-    assert_eq!(attrs[0], LineAttr::DoubleWidth); // followed BBBB up to row 0
+    assert_eq!(attrs[0], LineAttr::DoubleWidth); // followed BB up to row 0
     assert_eq!(attrs[1], LineAttr::Single);
 }
 
@@ -8071,4 +8120,132 @@ fn status_line_in_default_colours_follows_osc_10_and_11() {
     let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
     p.advance(&mut g, b"\x1b]110\x1b\\");
     assert_eq!(g.status_row().expect("status line")[0].fg, DEFAULT_FG);
+}
+
+// ---- Mode 2027 emoji presentation width and allocation-free joining, #1161 #1191 ----
+
+#[test]
+fn mode_2027_vs16_widens_a_narrow_emoji_base() {
+    // ❤ (1 column) + VS16 is the emoji ❤️, two columns.
+    let g = parse("\x1b[?2027h❤\u{fe0f}x".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "❤\u{fe0f}");
+    assert_ne!(cells(&g)[1].flags & WIDE_TRAILER, 0);
+    assert_eq!(cells(&g)[2].ch, 'x');
+    assert_eq!(g.cursor, (3, 0));
+}
+
+#[test]
+fn mode_2027_keycap_is_two_columns() {
+    let g = parse("\x1b[?2027h1\u{fe0f}\u{20e3}x".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "1\u{fe0f}\u{20e3}");
+    assert_ne!(cells(&g)[1].flags & WIDE_TRAILER, 0);
+    assert_eq!(g.cursor, (3, 0));
+}
+
+#[test]
+fn mode_2027_vs16_on_a_non_emoji_base_stays_narrow() {
+    let g = parse("\x1b[?2027ha\u{fe0f}x".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "a\u{fe0f}");
+    assert_eq!(g.cursor, (2, 0));
+}
+
+#[test]
+fn mode_2027_vs16_at_the_right_edge_wraps_the_glyph() {
+    // ❤ lands in the last column; widening moves it to the next line.
+    let g = parse("\x1b[?2027hab❤\u{fe0f}".as_bytes(), 3, 2);
+    assert_eq!(row_text(&g, 0), "ab ");
+    assert_eq!(glyph(&g, 0, 1), "❤\u{fe0f}");
+    assert_ne!(cells(&g)[4].flags & WIDE_TRAILER, 0);
+    assert_eq!(g.cursor, (2, 1));
+    // Autowrap off: no room, so the glyph keeps its one column.
+    let g = parse("\x1b[?7l\x1b[?2027hab❤\u{fe0f}".as_bytes(), 3, 2);
+    assert_eq!(glyph(&g, 2, 0), "❤\u{fe0f}");
+    assert_eq!(g.cursor.1, 0);
+}
+
+#[test]
+fn mode_2027_vs16_on_a_one_column_grid_stays_narrow() {
+    // No row holds two columns: the glyph wraps once, then keeps one column.
+    let g = parse("\x1b[?2027h❤\u{fe0f}".as_bytes(), 1, 2);
+    assert_eq!(glyph(&g, 0, 1), "❤\u{fe0f}");
+    assert_eq!(g.cursor, (1, 1));
+    assert_rows_sized(&g);
+    // A two-column double-width row holds one column as well.
+    let g = parse("\x1b#6\x1b[?2027h❤\u{fe0f}x".as_bytes(), 2, 3);
+    assert_rows_sized(&g);
+}
+
+#[test]
+fn default_widths_keep_vs16_zero_width() {
+    // 2027 reset: per code point, so ❤ + VS16 stays one column.
+    let g = parse("❤\u{fe0f}x".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "❤\u{fe0f}");
+    assert_eq!(g.cursor, (2, 0));
+    let g = parse("1\u{fe0f}\u{20e3}x".as_bytes(), 20, 1);
+    assert_eq!(g.cursor, (2, 0));
+}
+
+#[test]
+fn mode_2027_joining_matches_uax29_segmentation() {
+    use unicode_segmentation::UnicodeSegmentation;
+    // Scalars that exercise every joining rule: combining marks, ZWJ
+    // sequences, regional indicators, skin tones, VS16, keycaps, Hangul jamo
+    // and Indic conjuncts, plus plain bases and a narrow emoji base.
+    const POOL: &[char] = &[
+        'a',
+        '1',
+        '#',
+        '❤',
+        '👨',
+        '👩',
+        '👍',
+        '💻',
+        '\u{0301}',
+        '\u{0308}',
+        '\u{200d}',
+        '\u{fe0f}',
+        '\u{20e3}',
+        '\u{1f3fd}',
+        '\u{1f1ef}',
+        '\u{1f1f5}',
+        '\u{1f1fa}',
+        '\u{1100}',
+        '\u{1161}',
+        '\u{11a8}',
+        'न',
+        '\u{093f}',
+        '\u{094d}',
+        'क',
+        '漢',
+    ];
+    let mut seed: u64 = 0x2027_1191;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for _ in 0..2000 {
+        let len = 1 + (next() % 12) as usize;
+        let text: String = (0..len)
+            .map(|_| POOL[(next() % POOL.len() as u64) as usize])
+            .collect();
+        let g = parse(format!("\x1b[?2027h{text}").as_bytes(), 200, 1);
+        let got: Vec<String> = (0..200)
+            .filter(|&x| cells(&g)[x].flags & WIDE_TRAILER == 0 && cells(&g)[x].ch != ' ')
+            .map(|x| glyph(&g, x, 0))
+            .collect();
+        // The reference: the glyph joins `ch` when the two stay one UAX #29
+        // cluster; otherwise a zero-width scalar is dropped and any other
+        // starts a new glyph.
+        let mut want: Vec<String> = Vec::new();
+        for ch in text.chars() {
+            match want.last_mut() {
+                Some(last) if format!("{last}{ch}").graphemes(true).count() == 1 => last.push(ch),
+                _ if char_width(ch) == 0 => {}
+                _ => want.push(ch.to_string()),
+            }
+        }
+        assert_eq!(got, want, "{text:?}");
+    }
 }

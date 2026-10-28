@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use super::view::{View, ViewLine};
-use super::{BidiRow, BlockMark, Cell, CursorShape, Grid};
+use super::{BidiRow, BlockMark, Cell, CursorShape, Grid, LineAttr};
 
 /// Per-cell highlight bits.
 const HL_SELECTED: u8 = 1;
@@ -79,12 +79,29 @@ pub struct FrameView {
     placeholders: Option<Vec<Option<Placeholder>>>,
     images: Vec<FrameImage>,
     kitty: Vec<FrameKitty>,
+    clusters: Arc<[String]>,
+    line_attrs: Vec<LineAttr>,
 }
 
 impl FrameView {
     /// The cell at viewport `(col, row)`, as [`Grid::viewport_cell`].
     pub fn cell(&self, col: usize, row: usize) -> Cell {
         self.cells[row * self.cols + col]
+    }
+
+    /// The grapheme continuation of `cell` (combining marks, ZWJ joins, …)
+    /// drawn after its base scalar; empty for a lone scalar.
+    pub fn cluster_suffix(&self, cell: &Cell) -> &str {
+        cell.cluster
+            .checked_sub(1)
+            .and_then(|i| self.clusters.get(usize::from(i)))
+            .map_or("", String::as_str)
+    }
+
+    /// The DECDWL/DECDHL size of viewport `row`; [`LineAttr::Single`] for a
+    /// fold summary and the status line.
+    pub fn line_attr(&self, row: usize) -> LineAttr {
+        self.line_attrs.get(row).copied().unwrap_or_default()
     }
 
     /// The cells of viewport `row`.
@@ -207,6 +224,17 @@ impl Grid {
             })
             .collect();
         let keys = view.lines().iter().map(|&l| self.row_key_of(l)).collect();
+        let line_attrs = view
+            .lines()
+            .iter()
+            .enumerate()
+            .map(|(r, &l)| match l {
+                _ if status.is_some() && r == last => LineAttr::Single,
+                ViewLine::Live(y) => self.screen[y].attr,
+                ViewLine::Hist(i) => self.scrollback[i].attr,
+                ViewLine::Summary(_) => LineAttr::Single,
+            })
+            .collect();
         let placeholders = self.placeholders_of(&cells);
         let kitty = self.frame_kitty(placeholders.as_deref().unwrap_or(&[]));
         FrameView {
@@ -229,6 +257,8 @@ impl Grid {
             placeholders,
             images: self.frame_images(),
             kitty,
+            clusters: self.clusters_arc(),
+            line_attrs,
         }
     }
 

@@ -13,7 +13,8 @@ use super::cell::{
     WIDE_TRAILER, char_width,
 };
 use super::style::{CellStyle, Defaults, StyleId, StyleTable};
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
+use unicode_width::UnicodeWidthStr;
 
 use super::sixel::SixelImage;
 
@@ -823,6 +824,41 @@ fn default_tab_stops(cols: usize) -> Vec<bool> {
     (0..cols).map(|i| i % 8 == 0).collect()
 }
 
+/// The columns a row of size `attr` holds on a `cols`-wide grid: all of
+/// them, or the left half for a double-width row (DECDWL/DECDHL).
+fn line_capacity(cols: usize, attr: LineAttr) -> usize {
+    match attr {
+        LineAttr::Single => cols,
+        _ => cols.div_ceil(2),
+    }
+}
+
+/// VARIATION SELECTOR-16: asks for emoji presentation of the scalar before it.
+const VS16: char = '\u{fe0f}';
+
+/// Whether an extended grapheme boundary (UAX #29) falls between the glyph
+/// `base` + `suffix` and the scalar `next`. The three pieces are handed to the
+/// segmenter as chunks of one logical string, so nothing is concatenated.
+fn is_grapheme_boundary(base: &str, suffix: &str, next: &str) -> bool {
+    let at = base.len() + suffix.len();
+    let mut cursor = GraphemeCursor::new(at, at + next.len(), true);
+    loop {
+        match cursor.is_boundary(next, at) {
+            Ok(boundary) => return boundary,
+            // Context runs back at most through the suffix, then the base.
+            Err(GraphemeIncomplete::PreContext(end)) if end == at && !suffix.is_empty() => {
+                cursor.provide_context(suffix, base.len());
+            }
+            Err(GraphemeIncomplete::PreContext(end)) if end == base.len() && end > 0 => {
+                cursor.provide_context(base, 0);
+            }
+            // Out of context (or an unexpected request): treat as a boundary,
+            // so the scalar starts its own glyph.
+            Err(_) => return true,
+        }
+    }
+}
+
 /// Per-row size attribute set by `ESC # 3/4/5/6` (DECDHL/DECDWL/DECSWL). A
 /// double-width or double-height line renders at twice the cell width, so only
 /// the left half of the columns is displayed; the renderer relays the attribute
@@ -1113,7 +1149,9 @@ fn reflow_history(
         // Append this row's content. A wrapped row that ends in one padding cell
         // because a wide glyph didn't fit drops that filler — detected precisely
         // by the next row beginning with a width-2 glyph.
-        let mut take = cells.len();
+        // A double-width row holds only its left half; the cells past it are
+        // never shown, so they are not part of the logical line.
+        let mut take = cells.len().min(line_capacity(old_cols, attr));
         if wrapped && take > 0 && is_padding(&cells[take - 1]) {
             let next_wide = i + 1 < old_total && {
                 let (nc, _, _) = phys(i + 1);
@@ -1182,10 +1220,11 @@ fn reflow_history(
             out_attr.push(attr);
             continue;
         }
+        let cap = line_capacity(new_cols, attr);
         let mut i = 0;
         let mut seg_start = 0;
         while i < line.len() {
-            let mut take = new_cols.min(line.len() - i);
+            let mut take = cap.min(line.len() - i);
             // Don't cut a double-width glyph from its trailer: if the cell just
             // past the segment is a trailer, push its head to the next row.
             if i + take < line.len() && line[i + take].is_wide_trailer() && take > 1 {
@@ -1194,10 +1233,10 @@ fn reflow_history(
             if take == 0 {
                 take = 1; // degenerate new_cols == 1 vs a wide glyph: force progress
             }
-            let n = take.min(new_cols);
+            let n = take.min(cap);
             seg_start = i;
             if li == cursor_logical && !cursor_set && cursor_off >= i && cursor_off < i + take {
-                ncur = (out_cells.len(), (cursor_off - i).min(new_cols - 1));
+                ncur = (out_cells.len(), (cursor_off - i).min(cap - 1));
                 cursor_set = true;
             }
             let more = i + take < line.len();
@@ -1208,7 +1247,7 @@ fn reflow_history(
         }
         if li == cursor_logical && !cursor_set {
             // Cursor sat at or past the last cell of its (trimmed) line.
-            let col = (cursor_off - seg_start).min(new_cols - 1);
+            let col = (cursor_off - seg_start).min(cap - 1);
             ncur = (out_cells.len() - 1, col);
             cursor_set = true;
         }
@@ -2331,6 +2370,9 @@ impl Grid {
                     && self.continues_grapheme(bx, by, ch)
                 {
                     self.append_to_glyph(bx, by, ch);
+                    if ch == VS16 {
+                        self.widen_for_emoji(bx, by);
+                    }
                     return;
                 }
             } else if w == 0
@@ -2347,26 +2389,10 @@ impl Grid {
                 return;
             }
         }
-        // With DECSLRM margins, a cursor inside them wraps (or pins) at the
-        // right margin instead of the screen edge.
-        let limit = if self.side_margins_active() && self.cursor.0 >= self.left_margin {
-            (self.right_margin + 1).min(self.cols)
-        } else {
-            self.cols
-        };
+        let limit = self.wrap_limit();
         if self.cursor.0 + w > limit {
             if self.autowrap {
-                // Mark this row as soft-wrapped before leaving it, so the reflow
-                // and scrollback know it and its successor are one logical line.
-                let y = self.cursor.1;
-                if let Some(line) = self.screen.get_mut(y)
-                    && !line.wrapped
-                {
-                    line.wrapped = true;
-                    self.touch(y);
-                }
-                self.carriage_return();
-                self.newline();
+                self.soft_wrap();
             } else {
                 // Autowrap off: keep the glyph in the last cell(s) of the row
                 // (or of the margin band).
@@ -2396,6 +2422,85 @@ impl Grid {
         self.cursor.0 = (self.cursor.0 + w).min(self.cols);
     }
 
+    /// The column a glyph at the cursor must end before: the right margin
+    /// while DECSLRM margins hold the cursor, otherwise the screen edge; on a
+    /// double-width row (DECDWL/DECDHL) no further than half the columns.
+    fn wrap_limit(&self) -> usize {
+        let edge = if self.side_margins_active() && self.cursor.0 >= self.left_margin {
+            (self.right_margin + 1).min(self.cols)
+        } else {
+            self.cols
+        };
+        let attr = self
+            .screen
+            .get(self.cursor.1)
+            .map_or(LineAttr::Single, |l| l.attr);
+        edge.min(line_capacity(self.cols, attr))
+    }
+
+    /// Whether the cursor row is double-width (DECDWL, or either half of
+    /// DECDHL), which shows only its left half of the columns.
+    fn cursor_row_is_double(&self) -> bool {
+        self.screen
+            .get(self.cursor.1)
+            .is_some_and(|line| line.attr != LineAttr::Single)
+    }
+
+    /// Autowrap: mark the cursor row soft-wrapped (so reflow and scrollback
+    /// know it and its successor are one logical line), then move to the
+    /// start of the next line.
+    fn soft_wrap(&mut self) {
+        let y = self.cursor.1;
+        if let Some(line) = self.screen.get_mut(y)
+            && !line.wrapped
+        {
+            line.wrapped = true;
+            self.touch(y);
+        }
+        self.carriage_return();
+        self.newline();
+    }
+
+    /// Mode 2027: a VS16 just joined the narrow glyph at `(x, y)`, left of the
+    /// cursor. If that makes an emoji presentation sequence (`❤️`, `1️⃣`), the
+    /// glyph becomes two columns: in place when the next column fits, else
+    /// moved to the next line by autowrap. Without autowrap it stays narrow.
+    fn widen_for_emoji(&mut self, x: usize, y: usize) {
+        let head = self.screen[y].cells()[x];
+        if head.is_wide_trailer() || self.cursor != (x + 1, y) {
+            return; // already wide (or not the glyph the cursor just passed)
+        }
+        let mut buf = [0u8; 8];
+        let base = self.resolve(head).ch.encode_utf8(&mut buf).len();
+        let pair = VS16.encode_utf8(&mut buf[base..]).len() + base;
+        if std::str::from_utf8(&buf[..pair]).map_or(1, UnicodeWidthStr::width) != 2 {
+            return;
+        }
+        let (mut x, mut y) = (x, y);
+        if x + 2 > self.wrap_limit() {
+            if !self.autowrap {
+                return;
+            }
+            let blank = self.default_packed();
+            self.screen[y].cells_mut()[x] = blank;
+            self.touch(y);
+            self.soft_wrap();
+            (x, y) = self.cursor;
+            self.set_packed(x, y, head);
+            if x + 2 > self.wrap_limit() {
+                // Narrower than two columns (a one-column grid): stays narrow.
+                self.cursor = ((x + 1).min(self.cols), y);
+                return;
+            }
+        }
+        let mut trailer = self.styles.get(head.style());
+        trailer.attrs &= ATTR_DEFAULT_COLORS;
+        trailer.cluster = 0;
+        let id = self.styles.intern(trailer);
+        self.set_packed(x + 1, y, PackedCell::trailer(id));
+        self.cursor = ((x + 2).min(self.cols), y);
+    }
+
     /// Write a run of printable ASCII at the cursor, as [`Grid::put_char`]
     /// would one byte at a time. The part that fits before the right edge is
     /// filled straight into the row; wrapping, insert mode and DECSLRM margins
@@ -2405,7 +2510,11 @@ impl Grid {
         while let Some((&first, tail)) = rest.split_first() {
             let (x, y) = self.cursor;
             let room = self.cols.saturating_sub(x);
-            if room == 0 || self.insert_mode || self.side_margins_active() {
+            if room == 0
+                || self.insert_mode
+                || self.side_margins_active()
+                || self.cursor_row_is_double()
+            {
                 self.put_char(char::from(first), pen);
                 rest = tail;
                 continue;
@@ -2448,6 +2557,7 @@ impl Grid {
             && !self.side_margins_active()
             && !self.grapheme_clustering
             && self.cursor.1 < self.rows
+            && !self.cursor_row_is_double()
     }
 
     /// Fill the leading glyphs of `text` into the cursor row while each has a
@@ -2548,32 +2658,23 @@ impl Grid {
         }
     }
 
-    /// Whether appending `next` to the glyph at `(x, y)` keeps it a single
-    /// grapheme cluster (UAX #29) — i.e. `next` continues that glyph rather than
-    /// starting a new one.
+    /// Whether `next` continues the glyph at `(x, y)` rather than starting a
+    /// new grapheme cluster (UAX #29): no extended grapheme boundary falls
+    /// between the glyph's text and `next`. Asks only about that one boundary,
+    /// reading the base scalar and the interned suffix in place, so joining
+    /// neither allocates nor re-segments the glyph.
     fn continues_grapheme(&self, x: usize, y: usize, next: char) -> bool {
-        let mut s = self.glyph_text(x, y);
-        s.push(next);
-        s.graphemes(true).count() == 1
-    }
-
-    /// The full glyph text at `(x, y)` of the live grid: the base scalar plus
-    /// any interned grapheme continuation.
-    fn glyph_text(&self, x: usize, y: usize) -> String {
-        self.cell_text(self.resolve(self.screen[y].cells()[x]))
-    }
-
-    /// The full glyph text of `cell` (live or scrollback — the cluster table is
-    /// shared): the base scalar plus any interned grapheme continuation.
-    fn cell_text(&self, cell: Cell) -> String {
-        let mut s = String::new();
-        s.push(cell.ch);
-        if cell.cluster != 0
-            && let Some(suffix) = self.clusters.get((cell.cluster - 1) as usize)
-        {
-            s.push_str(suffix);
-        }
-        s
+        let cell = self.resolve(self.screen[y].cells()[x]);
+        let mut base_buf = [0u8; 4];
+        let base: &str = cell.ch.encode_utf8(&mut base_buf);
+        let suffix = cell
+            .cluster
+            .checked_sub(1)
+            .and_then(|i| self.clusters.get(usize::from(i)))
+            .map_or("", String::as_str);
+        let mut next_buf = [0u8; 4];
+        let next: &str = next.encode_utf8(&mut next_buf);
+        !is_grapheme_boundary(base, suffix, next)
     }
 
     /// Normalize the active selection into an inclusive `(start, end)` pair of
@@ -3945,6 +4046,12 @@ impl Grid {
         if let Some(line) = self.screen.get_mut(y) {
             line.attr = attr;
             self.touch(y);
+        }
+        // A double-width row shows half the columns: a cursor in the right
+        // half moves to the last one it shows.
+        if attr != LineAttr::Single {
+            let last = line_capacity(self.cols, attr).saturating_sub(1);
+            self.cursor.0 = self.cursor.0.min(last);
         }
     }
 
