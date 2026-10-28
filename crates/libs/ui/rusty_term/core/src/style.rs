@@ -31,7 +31,7 @@ pub(crate) struct CellStyle {
     pub bg: u32,
     pub underline_color: u32,
     /// `Cell::flags` without the two layout bits.
-    pub attrs: u16,
+    pub attrs: u32,
     pub link: u16,
     pub cluster: u16,
     /// [`crate::cell::Source::tag`] of `fg`: `1 + n` while it is palette
@@ -46,15 +46,12 @@ pub(crate) struct CellStyle {
 impl Hash for CellStyle {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_u64(u64::from(self.fg) | u64::from(self.bg) << 32);
+        state.write_u64(u64::from(self.underline_color) | u64::from(self.attrs) << 32);
         state.write_u64(
-            u64::from(self.underline_color)
-                | u64::from(self.attrs) << 32
-                | u64::from(self.link) << 48,
-        );
-        state.write_u64(
-            u64::from(self.cluster)
-                | u64::from(self.fg_index) << 16
-                | u64::from(self.bg_index) << 32,
+            u64::from(self.link)
+                | u64::from(self.cluster) << 16
+                | u64::from(self.fg_index) << 32
+                | u64::from(self.bg_index) << 48,
         );
     }
 }
@@ -196,7 +193,7 @@ impl Recent {
     const EMPTY: StyleId = StyleId(u32::MAX);
 
     fn slot(style: &CellStyle) -> usize {
-        let rest = u32::from(style.attrs) << 16
+        let rest = style.attrs.rotate_left(16)
             | u32::from(
                 style.link ^ style.cluster ^ style.fg_index ^ style.bg_index.rotate_left(8),
             );

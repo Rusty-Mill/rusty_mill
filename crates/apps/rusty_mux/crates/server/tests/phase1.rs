@@ -95,23 +95,27 @@ fn input_round_trips_while_the_pty_floods() {
 
 #[test]
 fn an_old_checkpoint_client_is_refused_attach() {
-    // RTCP v3 carries no colour provenance and v4 no palette tags, so a peer
-    // with only either is neither granted a checkpoint capability nor sent
-    // one: both sides fail closed.
+    // RTCP v3 carries no colour provenance, v4 no palette tags and v5 only
+    // 16-bit cell flags, so a peer with only one of them is neither granted
+    // a checkpoint capability nor sent one: both sides fail closed.
     let path = start_server();
     let mut a = Client::connect(&path);
     let block = block_for(&mut a);
-    for version in [Features::CHECKPOINT_V3, Features::CHECKPOINT_V4] {
+    for version in [
+        Features::CHECKPOINT_V3,
+        Features::CHECKPOINT_V4,
+        Features::CHECKPOINT_V5,
+    ] {
         let mut old = Client::connect_with(&path, version, None);
         assert!(!old.features.contains(version), "{version:?}");
-        assert!(!old.features.contains(Features::CHECKPOINT_V5));
+        assert!(!old.features.contains(Features::CHECKPOINT_V6));
         let answer = old.answer(|req| Message::Attach { req, block });
         assert!(
             matches!(answer.last(), Some(Message::Failed { reason, .. }) if reason.contains("requires feature bits")),
             "{answer:?}"
         );
     }
-    assert!(a.features.contains(Features::CHECKPOINT_V5));
+    assert!(a.features.contains(Features::CHECKPOINT_V6));
 }
 
 #[test]

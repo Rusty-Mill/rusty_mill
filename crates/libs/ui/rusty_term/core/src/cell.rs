@@ -19,56 +19,58 @@ pub const DEFAULT_BG: u32 = 0x000000;
 ///
 /// This is a *layout* flag (bit 0); the `ATTR_*` rendition bits live above it,
 /// so a cell's `flags` is `WIDE_TRAILER | <pen attributes>`.
-pub const WIDE_TRAILER: u16 = 1 << 0;
+pub const WIDE_TRAILER: u32 = 1 << 0;
 
 // SGR text-attribute bits, stored in [`Cell::flags`] and carried by [`Pen`].
 // They occupy bits 1.. so they never collide with [`WIDE_TRAILER`].
 /// SGR 1 — bold / increased intensity.
-pub const ATTR_BOLD: u16 = 1 << 1;
+pub const ATTR_BOLD: u32 = 1 << 1;
 /// SGR 2 — dim / decreased intensity.
-pub const ATTR_DIM: u16 = 1 << 2;
+pub const ATTR_DIM: u32 = 1 << 2;
 /// SGR 3 — italic.
-pub const ATTR_ITALIC: u16 = 1 << 3;
+pub const ATTR_ITALIC: u32 = 1 << 3;
 /// SGR 4 — underline.
-pub const ATTR_UNDERLINE: u16 = 1 << 4;
+pub const ATTR_UNDERLINE: u32 = 1 << 4;
 /// SGR 5 — blink.
-pub const ATTR_BLINK: u16 = 1 << 5;
+pub const ATTR_BLINK: u32 = 1 << 5;
 /// SGR 7 — reverse video (swap fg/bg).
-pub const ATTR_REVERSE: u16 = 1 << 6;
+pub const ATTR_REVERSE: u32 = 1 << 6;
 /// SGR 8 — concealed / hidden.
-pub const ATTR_HIDDEN: u16 = 1 << 7;
+pub const ATTR_HIDDEN: u32 = 1 << 7;
 /// SGR 9 — crossed-out / strikethrough.
-pub const ATTR_STRIKE: u16 = 1 << 8;
+pub const ATTR_STRIKE: u32 = 1 << 8;
 /// SGR 58 — a custom underline color is set (in [`Cell::underline_color`] /
 /// [`Pen::underline_color`]) rather than following the foreground.
-pub const ATTR_UNDERLINE_COLOR: u16 = 1 << 12;
+pub const ATTR_UNDERLINE_COLOR: u32 = 1 << 12;
 /// DECSCA (`CSI 1 " q`) — the cell is protected from selective erase
 /// (DECSED/DECSEL). Deliberately *not* an SGR rendition: SGR 0 must not
 /// clear it, so the parser tracks it separately from the pen's SGR state
 /// and stamps it onto cells at write time.
-pub const ATTR_PROTECTED: u16 = 1 << 13;
+pub const ATTR_PROTECTED: u32 = 1 << 13;
 /// The foreground is the terminal's default (SGR 39, a reset or a blank),
 /// not a colour the child chose. [`Cell::fg`] still holds the resolved RGB;
 /// this bit makes it follow later default changes (OSC 10 / 110), and tells
 /// an explicit colour that happens to equal the default apart from it.
-pub const ATTR_FG_DEFAULT: u16 = 1 << 14;
+pub const ATTR_FG_DEFAULT: u32 = 1 << 14;
 /// The background is the terminal's default (SGR 49, a reset, a default
 /// erase or a blank): the [`ATTR_FG_DEFAULT`] of the background, following
 /// OSC 11 / 111.
-pub const ATTR_BG_DEFAULT: u16 = 1 << 15;
+pub const ATTR_BG_DEFAULT: u32 = 1 << 15;
 /// Both colour-provenance bits: a cell or pen in the default colours.
-pub const ATTR_DEFAULT_COLORS: u16 = ATTR_FG_DEFAULT | ATTR_BG_DEFAULT;
+pub const ATTR_DEFAULT_COLORS: u32 = ATTR_FG_DEFAULT | ATTR_BG_DEFAULT;
+/// SGR 53 — overline (a line along the top of the cell); SGR 55 clears it.
+pub const ATTR_OVERLINE: u32 = 1 << 16;
 
 /// Bit offset of the 3-bit underline-style sub-field (SGR `4:0`-`4:5`) packed
-/// into the same `u16` as the `ATTR_*` bits. Only meaningful when
+/// into the same `u32` as the `ATTR_*` bits. Only meaningful when
 /// [`ATTR_UNDERLINE`] is set.
-const UNDERLINE_STYLE_SHIFT: u16 = 9;
+const UNDERLINE_STYLE_SHIFT: u32 = 9;
 /// Mask isolating the underline-style sub-field before shifting.
-const UNDERLINE_STYLE_MASK: u16 = 0b111 << UNDERLINE_STYLE_SHIFT;
+const UNDERLINE_STYLE_MASK: u32 = 0b111 << UNDERLINE_STYLE_SHIFT;
 
 /// Mask of every rendition attribute bit (everything except [`WIDE_TRAILER`],
 /// [`ATTR_PROTECTED`] and the colour-provenance bits).
-pub const ATTR_MASK: u16 = ATTR_BOLD
+pub const ATTR_MASK: u32 = ATTR_BOLD
     | ATTR_DIM
     | ATTR_ITALIC
     | ATTR_UNDERLINE
@@ -77,6 +79,7 @@ pub const ATTR_MASK: u16 = ATTR_BOLD
     | ATTR_HIDDEN
     | ATTR_STRIKE
     | ATTR_UNDERLINE_COLOR
+    | ATTR_OVERLINE
     | UNDERLINE_STYLE_MASK;
 
 /// Underline stroke style (SGR `4:0`.."4:5"` — the colon sub-parameter form
@@ -98,7 +101,7 @@ impl UnderlineStyle {
     /// Decode the style packed into `attrs` (a `Cell::flags` or `Pen::attrs`
     /// value). An out-of-range sub-field (shouldn't happen — only this module
     /// writes it) falls back to [`UnderlineStyle::Straight`].
-    pub fn from_attrs(attrs: u16) -> Self {
+    pub fn from_attrs(attrs: u32) -> Self {
         match (attrs & UNDERLINE_STYLE_MASK) >> UNDERLINE_STYLE_SHIFT {
             1 => UnderlineStyle::Double,
             2 => UnderlineStyle::Curly,
@@ -111,7 +114,7 @@ impl UnderlineStyle {
     /// Pack `self` into the style sub-field of an attribute bitset, replacing
     /// whatever was there (the other `ATTR_*` bits of `attrs` pass through
     /// untouched).
-    pub fn pack_into(self, attrs: u16) -> u16 {
+    pub fn pack_into(self, attrs: u32) -> u32 {
         let bits = match self {
             UnderlineStyle::Straight => 0,
             UnderlineStyle::Double => 1,
@@ -133,7 +136,7 @@ pub struct Pen {
     /// Background color as `0xRRGGBB`.
     pub bg: u32,
     /// Active text-attribute bits (`ATTR_*`).
-    pub attrs: u16,
+    pub attrs: u32,
     /// Underline color as `0xRRGGBB` (SGR 58). Only consulted when
     /// [`ATTR_UNDERLINE_COLOR`] is set; otherwise the underline follows `fg`.
     pub underline_color: u32,
@@ -216,7 +219,7 @@ impl Pen {
 }
 
 /// `bits` with `bit` set when `on`, cleared otherwise.
-fn flag(bits: u16, bit: u16, on: bool) -> u16 {
+fn flag(bits: u32, bit: u32, on: bool) -> u32 {
     if on { bits | bit } else { bits & !bit }
 }
 
@@ -268,7 +271,7 @@ pub struct Cell {
     pub bg: u32,
     /// Attribute bitset: [`WIDE_TRAILER`], the `ATTR_*` renditions, and the
     /// colour-provenance bits [`ATTR_FG_DEFAULT`] / [`ATTR_BG_DEFAULT`].
-    pub flags: u16,
+    pub flags: u32,
     /// Hyperlink id (OSC 8): `0` for none, else an index+1 into `Grid::links`.
     pub link: u16,
     /// Underline color as `0xRRGGBB` (SGR 58). Only meaningful when

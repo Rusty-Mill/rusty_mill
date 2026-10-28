@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 use winit::window::Window;
 
-use crate::core::{Cell, FrameView};
+use crate::core::{
+    ATTR_DIM, ATTR_HIDDEN, ATTR_OVERLINE, ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, BidiRow, Cell,
+    FrameView,
+};
 
 use super::cpu;
 use super::damage::{Damage, Frame};
@@ -39,6 +42,66 @@ pub(super) fn grid_top(chrome: &[Cell], pad: usize, cell_h: usize) -> usize {
 pub(super) const SEARCH_BG: u32 = 0xFFD24A;
 pub(super) const SEARCH_CUR_BG: u32 = 0xFF7A1A;
 pub(super) const SEARCH_FG: u32 = 0x101010;
+
+/// How much of a dim (SGR 2) cell's foreground survives its fade toward the
+/// background: two thirds.
+const DIM_KEEP: u8 = 170;
+
+/// A grid cell as the window draws it, shared by both renderers. SGR 7 swaps
+/// fg and bg, SGR 2 then fades the fg toward the bg, and SGR 8 drops the
+/// cell's lines; its glyph is dropped by [`glyph_char`], so the cell keeps
+/// its character and width (a concealed wide glyph still covers two
+/// columns). The grid keeps the attributes (the TUI and the mux re-emit
+/// them), so the window resolves them here; cursor, selection and search
+/// colours apply on top.
+pub(super) fn drawn(mut cell: Cell) -> Cell {
+    if cell.flags & ATTR_REVERSE != 0 {
+        std::mem::swap(&mut cell.fg, &mut cell.bg);
+    }
+    if cell.flags & ATTR_DIM != 0 {
+        cell.fg = blend(cell.bg, cell.fg, DIM_KEEP);
+    }
+    if concealed(&cell) {
+        cell.flags &= !(ATTR_UNDERLINE | ATTR_STRIKE | ATTR_OVERLINE);
+    }
+    cell
+}
+
+/// Whether `cell` is concealed (SGR 8): drawn as its background only.
+pub(super) fn concealed(cell: &Cell) -> bool {
+    cell.flags & ATTR_HIDDEN != 0
+}
+
+/// The character the cell at logical column `col` draws: a space for a
+/// concealed cell or a Kitty placeholder (which draws image content), else
+/// its character after the row's Arabic contextual form (`bidi.shaped`) and
+/// RTL mirroring. Concealment wins over shaping, which is computed from the
+/// stored characters.
+pub(super) fn glyph_char(cell: &Cell, bidi: Option<&BidiRow>, col: usize) -> char {
+    if concealed(cell) || cell.ch == '\u{10EEEE}' {
+        return ' ';
+    }
+    let Some(b) = bidi else { return cell.ch };
+    let ch = b.shaped.as_ref().and_then(|s| s[col]).unwrap_or(cell.ch);
+    if b.rtl[col] {
+        crate::core::bidi_mirrored(ch).unwrap_or(ch)
+    } else {
+        ch
+    }
+}
+
+/// `fg` over `bg` at coverage `a` (`0` is all `bg`, `255` all `fg`), per
+/// channel of `0xRRGGBB`.
+pub(super) fn blend(bg: u32, fg: u32, a: u8) -> u32 {
+    let a = a as u32;
+    let inv = 255 - a;
+    let chan = |shift: u32| {
+        let f = (fg >> shift) & 0xff;
+        let b = (bg >> shift) & 0xff;
+        (f * a + b * inv) / 255
+    };
+    (chan(16) << 16) | (chan(8) << 8) | chan(0)
+}
 
 /// One pane to paint this frame: its `grid` at cell offset `(col0, row0)`,
 /// sized to the grid's own `cols × rows`. `focused` gates the cursor/IME
@@ -325,5 +388,82 @@ pub(super) fn composite(
             buffer, w, h, p.grid, p.col0, p.row0, pad, oy, &p.trail, font, None,
         );
         cpu::draw_marks(buffer, w, h, p.col0, p.row0, pad, oy, &p.marks, font);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{AnsiParser, Grid};
+
+    /// The first cell of a 1×1 grid after `bytes`, as the window draws it.
+    fn drawn_after(bytes: &[u8]) -> Cell {
+        let mut g = Grid::new(1, 1);
+        AnsiParser::new().advance(&mut g, bytes);
+        drawn(g.frame_view().cell(0, 0))
+    }
+
+    #[test]
+    fn plain_cells_draw_as_stored() {
+        let cell = drawn_after(b"\x1b[38;2;255;0;0;48;2;0;0;255mX");
+        assert_eq!((cell.ch, cell.fg, cell.bg), ('X', 0xFF0000, 0x0000FF));
+    }
+
+    #[test]
+    fn reverse_swaps_fg_and_bg() {
+        let cell = drawn_after(b"\x1b[38;2;255;0;0;48;2;0;0;255;7mX");
+        assert_eq!((cell.fg, cell.bg), (0x0000FF, 0xFF0000));
+    }
+
+    #[test]
+    fn dim_fades_fg_toward_bg() {
+        let cell = drawn_after(b"\x1b[38;2;255;255;255;48;2;0;0;0;2mX");
+        assert_eq!(cell.bg, 0x000000);
+        assert_eq!(cell.fg, 0xAAAAAA);
+    }
+
+    #[test]
+    fn dim_reverse_fades_the_swapped_fg() {
+        let cell = drawn_after(b"\x1b[38;2;255;255;255;48;2;0;0;0;2;7mX");
+        assert_eq!((cell.fg, cell.bg), (0x555555, 0xFFFFFF));
+    }
+
+    #[test]
+    fn hidden_keeps_its_character_but_draws_no_glyph_or_lines() {
+        let cell = drawn_after(b"\x1b[48;2;0;0;255;8;4;9;53mX");
+        assert_eq!(cell.ch, 'X', "layout unchanged");
+        assert_eq!(glyph_char(&cell, None, 0), ' ');
+        assert_eq!(
+            cell.flags & (ATTR_UNDERLINE | ATTR_STRIKE | ATTR_OVERLINE),
+            0
+        );
+        assert_eq!(cell.bg, 0x0000FF);
+    }
+
+    #[test]
+    fn concealed_arabic_stays_blank_through_bidi_shaping() {
+        let mut g = Grid::new(4, 1);
+        g.bidi = true;
+        AnsiParser::new().advance(&mut g, "\x1b[8m\u{628}\u{628}".as_bytes());
+        let view = g.frame_view();
+        let row = view.bidi_row(0).expect("an RTL row");
+        assert!(row.shaped.is_some(), "the row is shaped");
+        for col in 0..2 {
+            assert_eq!(glyph_char(&drawn(view.cell(col, 0)), Some(row), col), ' ');
+        }
+        // Not concealed, the same row draws its shaped forms.
+        let mut g = Grid::new(4, 1);
+        g.bidi = true;
+        AnsiParser::new().advance(&mut g, "\u{628}\u{628}".as_bytes());
+        let view = g.frame_view();
+        let row = view.bidi_row(0).expect("an RTL row");
+        assert_ne!(glyph_char(&view.cell(0, 0), Some(row), 0), '\u{628}');
+    }
+
+    #[test]
+    fn blend_endpoints() {
+        assert_eq!(blend(0x000000, 0xFFFFFF, 255), 0xFFFFFF); // full coverage = fg
+        assert_eq!(blend(0x0000FF, 0xFF0000, 0), 0x0000FF); // zero coverage = bg
+        assert_eq!(blend(0x000000, 0xFFFFFF, 128), 0x808080); // half = mid-gray
     }
 }

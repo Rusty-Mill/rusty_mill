@@ -34,13 +34,15 @@ use winit::window::Window;
 #[cfg(test)]
 use crate::core::Grid;
 use crate::core::{
-    ATTR_BOLD, ATTR_ITALIC, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell, CursorShape,
-    UnderlineStyle, WIDE_TRAILER, char_width,
+    ATTR_BOLD, ATTR_ITALIC, ATTR_OVERLINE, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell,
+    CursorShape, UnderlineStyle, WIDE_TRAILER, char_width,
 };
 
 use super::damage::{self, RowState};
 use super::font::{FontCache, Glyph, GlyphSource, Style};
-use super::render::{PaneFrame, Renderer, SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG};
+use super::render::{
+    PaneFrame, Renderer, SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG, concealed, drawn, glyph_char,
+};
 
 /// Atlas texture edge (clamped to the device limit at creation).
 const ATLAS_MAX: u32 = 2048;
@@ -149,12 +151,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // curs: 0 none/block (block uses the fg/bg swap); 2 underline, 3 bar.
     if (in.curs == 2u && in.local.y >= 0.85) { return vec4(in.ccol.rgb, u.opacity); }
     if (in.curs == 3u && in.local.x <= 0.12) { return vec4(in.ccol.rgb, u.opacity); }
-    // deco: bit 3 (8) strikethrough; bits 0-2 underline style (0 = none, per
-    // UnderlineStyle::pack_into's 1-5 encoding). Drawn as thin stripes near
-    // the cell's bottom (underline) or vertical middle (strike), matching the
-    // CPU rasterizer's `draw_underline`/`draw_strike`.
+    // deco: bit 4 (16) overline; bit 3 (8) strikethrough; bits 0-2 underline
+    // style (0 = none, per UnderlineStyle::pack_into's 1-5 encoding). Drawn
+    // as thin stripes near the cell's bottom (underline), vertical middle
+    // (strike) or top (overline), matching the CPU rasterizer.
     if ((in.deco & 8u) != 0u && in.local.y >= 0.45 && in.local.y < 0.55) {
         return vec4(in.dcol.rgb, u.opacity);
+    }
+    // Overline (bit 4): a stripe along the top edge in the text colour.
+    if ((in.deco & 16u) != 0u && in.local.y < 0.08) {
+        return vec4(in.fg.rgb, u.opacity);
     }
     let style = in.deco & 7u;
     if (style != 0u) {
@@ -243,7 +249,7 @@ struct Instance {
     bg: u32,
     curs: u32,
     ccol: u32,
-    /// Bit 3: strikethrough. Bits 0-2: underline style, `0` none else
+    /// Bit 4: overline. Bit 3: strikethrough. Bits 0-2: underline style, `0` none else
     /// `UnderlineStyle`'s 1-5 encoding (straight/double/curly/dotted/dashed).
     deco: u32,
     /// Underline/strike stripe color (`dcol`), used only when `deco != 0`.
@@ -975,11 +981,11 @@ impl GpuCore {
             };
             let mut cols: Vec<Resolved> = Vec::with_capacity(grid.cols);
             for col in 0..grid.cols {
-                let cell = if on_status {
+                let cell = drawn(if on_status {
                     status.unwrap()[col]
                 } else {
                     grid.cell(col, row)
-                };
+                });
                 if cell.flags & WIDE_TRAILER != 0 {
                     cols.push(Resolved {
                         cell,
@@ -1022,6 +1028,7 @@ impl GpuCore {
                 let (deco, dcol) = deco_for(cell.flags, cell.underline_color, fg, plain, hovered);
                 // Same run eligibility as the CPU renderer's ligature plan.
                 let run_ok = plain
+                    && !concealed(&cell)
                     && cell.cluster == 0
                     && cell.ch != ' '
                     && char_width(cell.ch) == 1
@@ -1058,24 +1065,9 @@ impl GpuCore {
                         r.cell.flags & ATTR_BOLD != 0,
                         r.cell.flags & ATTR_ITALIC != 0,
                     );
-                    let ch = if r.cell.ch == '\u{10EEEE}' {
-                        ' '
-                    } else {
-                        r.cell.ch
-                    };
-                    // Arabic contextual form first (phase 3), then rule L4
-                    // mirroring for RTL-run chars.
-                    let ch = match &bidi {
-                        Some(b) => {
-                            let ch = b.shaped.as_ref().and_then(|s| s[col]).unwrap_or(ch);
-                            if b.rtl[col] {
-                                crate::core::bidi_mirrored(ch).unwrap_or(ch)
-                            } else {
-                                ch
-                            }
-                        }
-                        None => ch,
-                    };
+                    // The span follows the stored character, so a concealed
+                    // wide glyph still paints both columns' background.
+                    let ch = glyph_char(&r.cell, bidi, col);
                     let (rect, is_color) = self.tile_for_char(ch, style, font);
                     let span = char_width(r.cell.ch).max(1) as u32;
                     let fg = if is_color { 0xFFFFFF } else { r.fg };
@@ -1597,7 +1589,7 @@ fn grown_size(have: u64, need: u64) -> Option<u64> {
     (need > have).then(|| need.next_power_of_two().max(4096))
 }
 
-/// Pack a cell's underline/strikethrough state into the `Instance::deco` bits
+/// Pack a cell's underline/strikethrough/overline state into the `Instance::deco` bits
 /// and pick the stripe color: `underline_color` when SGR 58 set it and `plain`
 /// (the cell isn't under the cursor, a selection, or a search highlight —
 /// those already swapped `fg` to something that should win instead).
@@ -1605,10 +1597,13 @@ fn grown_size(have: u64, need: u64) -> Option<u64> {
 /// underline in `fg`, overriding the cell's own SGR underline attribute —
 /// it's a click affordance, not a text style, so it never takes
 /// `underline_color`.
-fn deco_for(flags: u16, underline_color: u32, fg: u32, plain: bool, hovered: bool) -> (u32, u32) {
+fn deco_for(flags: u32, underline_color: u32, fg: u32, plain: bool, hovered: bool) -> (u32, u32) {
     let mut deco = 0u32;
     if flags & ATTR_STRIKE != 0 {
         deco |= 8;
+    }
+    if flags & ATTR_OVERLINE != 0 {
+        deco |= 16;
     }
     if hovered {
         deco |= 1; // Straight
@@ -1735,6 +1730,18 @@ mod tests {
             deco_for(flags, 0x0000FF, 0xFF0000, true, false),
             (1, 0x0000FF)
         );
+    }
+
+    #[test]
+    fn deco_for_colours_every_underline_style_and_flags_overline() {
+        for style in [UnderlineStyle::Straight, UnderlineStyle::Double] {
+            let flags = style.pack_into(ATTR_UNDERLINE | ATTR_UNDERLINE_COLOR);
+            let (deco, dcol) = deco_for(flags, 0x0087FF, 0xFFFFFF, true, false);
+            assert_eq!(dcol, 0x0087FF, "{style:?}");
+            assert_ne!(deco & 7, 0, "{style:?}");
+        }
+        let (deco, _) = deco_for(ATTR_OVERLINE, 0, 0xFFFFFF, true, false);
+        assert_eq!(deco, 16);
     }
 
     /// The adapter, WGSL shader, render pipeline, and glyph atlas all build.
@@ -2048,6 +2055,67 @@ mod tests {
             assert_eq!(
                 cached.overlay, fresh.overlay,
                 "frame {n}: overlay instances"
+            );
+        }
+    }
+
+    /// The base instances of a one-pane, one-row frame of `grid`.
+    fn row_instances(core: &mut GpuCore, font: &mut FontCache, grid: &Grid) -> Vec<Instance> {
+        let v = grid.frame_view();
+        let pane = PaneFrame {
+            grid: &v,
+            col0: 0,
+            row0: 0,
+            focused: false,
+            cursor_on: false,
+            trail: Vec::new(),
+            hover_link: None,
+            marks: Vec::new(),
+        };
+        let frame = core.frame_lists(400, &[pane], &[], &[], font, 1, 2);
+        frame.base.into_iter().filter(|i| i.row == 0).collect()
+    }
+
+    #[test]
+    fn concealed_wide_glyph_keeps_both_columns_background() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let (blank, _) = core.tile_for_char(' ', Style::Regular, &mut font);
+        let mut g = Grid::new(4, 1);
+        AnsiParser::new().advance(&mut g, "\x1b[48;2;0;0;255;8m\u{754c}".as_bytes());
+        let base = row_instances(&mut core, &mut font, &g);
+        // Skip the pane's background fill; the cells come after it.
+        let lead = base.iter().rfind(|i| i.col == 0).expect("lead cell");
+        assert!(!base.iter().any(|i| i.col == 1 && i.span == 1), "{base:?}");
+        assert_eq!((lead.span, lead.bg), (2, 0x0000FF), "covers both columns");
+        assert_eq!(
+            (lead.uv_xy, lead.uv_wh),
+            (blank.0 << 16 | blank.1, blank.2 << 16 | blank.3)
+        );
+    }
+
+    #[test]
+    fn concealed_arabic_draws_no_shaped_glyph() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let (blank, _) = core.tile_for_char(' ', Style::Regular, &mut font);
+        let mut g = Grid::new(4, 1);
+        g.bidi = true;
+        AnsiParser::new().advance(&mut g, "\x1b[8m\u{628}\u{628}".as_bytes());
+        // `glyph_char` is pinned without a font in `render::tests`; here a
+        // font with no Arabic draws the shaped form as blank anyway.
+        let shaped = g.frame_view().bidi_row(0).and_then(|b| b.shaped.clone());
+        let form = shaped.and_then(|s| s[0]).expect("a shaped form");
+        if core.tile_for_char(form, Style::Regular, &mut font).0 == blank {
+            eprintln!("no Arabic glyph in the test font; nothing to tell apart");
+        }
+        let base = row_instances(&mut core, &mut font, &g);
+        for i in base.iter().filter(|i| i.col < 2) {
+            assert_eq!(
+                (i.uv_xy, i.uv_wh),
+                (blank.0 << 16 | blank.1, blank.2 << 16 | blank.3)
             );
         }
     }

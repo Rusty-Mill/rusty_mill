@@ -129,7 +129,7 @@ fn wait_until_listening(path: &Path) {
 #[test]
 fn a_program_that_exits_reports_its_code() {
     let path = start_server();
-    let wanted = Features::PROGRAM_EVENTS.union(Features::CHECKPOINT_V5);
+    let wanted = Features::PROGRAM_EVENTS.union(Features::CHECKPOINT_V6);
     let mut a = Client::connect_with(&path, wanted, None);
     let block = block_for(&mut a);
     a.input(block, b"exit 3\r");
@@ -151,7 +151,7 @@ fn a_program_that_exits_reports_its_code() {
 #[test]
 fn terminal_process_names_the_programs_pid() {
     let path = start_server();
-    let wanted = Features::CHECKPOINT_V5.union(Features::BLOCK_CALL);
+    let wanted = Features::CHECKPOINT_V6.union(Features::BLOCK_CALL);
     let mut a = Client::connect_with(&path, wanted, None);
     let block = block_for(&mut a);
     let shell = shell_pid(&mut a, block);

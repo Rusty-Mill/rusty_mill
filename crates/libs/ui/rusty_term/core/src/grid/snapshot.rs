@@ -9,7 +9,7 @@
 //! modes (mouse, keypad, bracketed paste), the colour palette (beyond the
 //! default fg/bg), images, selection, search and folds.
 //!
-//! # Format (version 2)
+//! # Format (version 3)
 //!
 //! All integers are unsigned LEB128 varints unless noted.
 //!
@@ -33,6 +33,8 @@
 //! colour is the default one and follows `default_fg` / `default_bg` (its
 //! stored RGB is ignored). Version 1 has no defaults in the header and no
 //! default bits; it decodes with every colour explicit, as it was written.
+//! Version 3 widens `flags` past 16 bits for `ATTR_OVERLINE`; versions 1 and
+//! 2 still decode, their flags limited to 16 bits as they were written.
 //!
 //! A style is a cell's colours, attributes and link; the wide-glyph trailer
 //! bit travels with the glyph, so a wide glyph does not split its run. A run
@@ -51,7 +53,9 @@ use crate::cell::{Cell, PackedCell, WIDE_TRAILER};
 use crate::style::{CellStyle, Defaults, StyleId, StyleTable};
 
 const MAGIC: &[u8; 4] = b"RTSN";
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
+/// The last version whose style flags fit in 16 bits.
+const VERSION_2: u8 = 2;
 /// The last version without the default colours in its header.
 const VERSION_1: u8 = 1;
 /// Largest width or height a snapshot may declare.
@@ -113,7 +117,7 @@ type Result<T> = std::result::Result<T, SnapshotError>;
 struct Style {
     fg: u32,
     bg: u32,
-    flags: u16,
+    flags: u32,
     link: u16,
     underline_color: u32,
 }
@@ -210,7 +214,7 @@ impl Grid {
             return Err(SnapshotError::BadMagic);
         }
         let version = d.r.read_u8()?;
-        if version != VERSION && version != VERSION_1 {
+        if !matches!(version, VERSION_1 | VERSION_2 | VERSION) {
             return Err(SnapshotError::UnsupportedVersion(version));
         }
         let cols = d.dim()?;
@@ -226,7 +230,8 @@ impl Grid {
         let flags = d.r.read_u8()?;
         let cursor_shape = shape_from(d.r.read_u8()?)?;
         let title = d.string()?;
-        if version == VERSION {
+        d.wide_flags = version == VERSION;
+        if version != VERSION_1 {
             let (fg, bg) = (d.u32()?, d.u32()?);
             d.table.set_defaults(Defaults { fg, bg });
         }
@@ -372,7 +377,7 @@ impl Encoder<'_> {
             for v in [
                 style.fg,
                 style.bg,
-                style.flags.into(),
+                style.flags,
                 style.link.into(),
                 style.underline_color,
             ] {
@@ -414,6 +419,8 @@ struct Decoder<'a> {
     lines_left: usize,
     clusters: usize,
     links: usize,
+    /// Style flags may use all 32 bits (version 3 on), not just 16.
+    wide_flags: bool,
 }
 
 impl<'a> Decoder<'a> {
@@ -428,6 +435,7 @@ impl<'a> Decoder<'a> {
             lines_left: MAX_LINES,
             clusters: 0,
             links: 0,
+            wide_flags: true,
         }
     }
 
@@ -550,7 +558,11 @@ impl<'a> Decoder<'a> {
         let style = Style {
             fg: self.u32()?,
             bg: self.u32()?,
-            flags: self.u16()?,
+            flags: if self.wide_flags {
+                self.u32()?
+            } else {
+                self.u16()?.into()
+            },
             link: self.u16()?,
             underline_color: self.u32()?,
         };
