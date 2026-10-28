@@ -91,6 +91,13 @@ check((await api(TOKEN, "settings_get")).body.rules.movement === "open", "untick
 await dialog.getByLabel("Enforce card movement rules").check();
 await page.waitForFunction(() => document.querySelector("#settings")?.innerText.includes("along the column table"));
 check((await api(TOKEN, "settings_get")).body.rules.movement === "enforced", "ticking turns them back on");
+// A failed save shows the error and leaves the checkbox and its note as the server holds them.
+await page.route("**/api/settings_rules_set", (r) => r.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "disk full" }) }));
+await dialog.getByLabel("Enforce card movement rules").uncheck();
+await page.waitForFunction(() => document.querySelector("#settings .err")?.textContent.includes("disk full"));
+check(await dialog.getByLabel("Enforce card movement rules").isChecked(), "a failed save puts the checkbox back to the server's setting");
+check((await dialog.innerText()).includes("along the column table") && !(await dialog.getByLabel("Enforce card movement rules").isDisabled()), "and its note and control match it");
+await page.unroute("**/api/settings_rules_set");
 
 // Apps and Server: read-only views of sign-in and how the board was started.
 await dialog.getByRole("button", { name: "Apps" }).click();

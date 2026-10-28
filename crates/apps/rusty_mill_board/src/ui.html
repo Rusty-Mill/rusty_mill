@@ -419,15 +419,24 @@ function rolesTab(){
 
 /* Card movement rules: on, moves follow the column table and each role's capabilities; off, any move but out of Done. */
 function rulesTab(){
-  const t=el("div"),err=el("div",null,"err");
+  const t=el("div"),err=el("div",null,"err"),note=el("p",null,"note");
   if(!cfg.files.rules)t.append(unwritable("--settings-dir DIR"));
-  const on=(cfg.rules||{}).movement!=="open";
-  const box=field("input",{type:"checkbox",checked:on,disabled:!cfg.files.rules});
-  box.onchange=guard(err,()=>setting("settings_rules_set",{movement:box.checked?"enforced":"open"}));
+  const box=field("input",{type:"checkbox"});
+  // Always show what the server holds: after a save, and after a failed one too.
+  const show=()=>{const on=(cfg.rules||{}).movement!=="open";box.checked=on;box.disabled=!cfg.files.rules;
+    note.textContent=on
+      ?"On: a card moves only along the column table, by a role holding that move's capability, and leaving Building, QA or Review needs the claim."
+      :"Off: anyone signed in with any capability may move any card to any column, except out of Done. Each such move is logged."};
+  box.onchange=async()=>{
+    const movement=box.checked?"enforced":"open";err.textContent="";box.disabled=true;
+    try{await setting("settings_rules_set",{movement});await changed();return}
+    catch(e){err.textContent=e.message}
+    try{cfg=await setting("settings_get")}catch(e){err.textContent+=" (and the current setting could not be re-read: "+e.message+")"}
+    show();
+  };
+  show();
   const l=el("label");l.append(box," Enforce card movement rules");
-  t.append(l,err,el("p",on
-    ?"On: a card moves only along the column table, by a role holding that move's capability, and leaving Building, QA or Review needs the claim."
-    :"Off: anyone signed in with any capability may move any card to any column, except out of Done. Each such move is logged.","note"));
+  t.append(l,err,note);
   return t;
 }
 
