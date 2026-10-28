@@ -42,6 +42,11 @@ enum End {
 /// A server that welcomes one client, attaches it to [`BLOCK`] with an
 /// empty checkpoint and [`REMOTE`] as output, then ends as `end` says.
 fn scripted_server(lease: bool, end: End) -> (PathBuf, JoinHandle<()>) {
+    serve(Features::CHECKPOINT_V4, lease, end)
+}
+
+/// [`scripted_server`], granting `features` in its Welcome.
+fn serve(features: Features, lease: bool, end: End) -> (PathBuf, JoinHandle<()>) {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("rusty-mux-tui-{}-{n}.sock", std::process::id()));
@@ -52,7 +57,7 @@ fn scripted_server(lease: bool, end: End) -> (PathBuf, JoinHandle<()>) {
         let block = BlockId::from_uuid(BLOCK.parse().expect("uuid"));
         assert!(matches!(conn.recv().expect("hello"), Message::Hello { .. }));
         conn.send(&Message::Welcome {
-            features: Features::CHECKPOINT_V3,
+            features,
             client: ClientId::from_uuid(Uuid::nil()),
             cursor: None,
         })
@@ -230,4 +235,15 @@ fn detaching_after_the_program_set_modes_resets_the_terminal() {
     let screen = tui.exit();
     server.join().expect("server");
     assert_restored(&screen, "detached from block");
+}
+
+#[test]
+fn a_server_offering_only_v3_checkpoints_is_refused() {
+    // An older server's RTCP v3 has no colour provenance; the client
+    // refuses it rather than restore its default colours baked in.
+    let (socket, _server) = serve(Features::CHECKPOINT_V3, true, End::Open);
+    let tui = Tui::start(&socket);
+    let screen = tui.exit();
+    let text = String::from_utf8_lossy(&screen);
+    assert!(text.contains("cannot send checkpoints"), "{text:?}");
 }

@@ -8,11 +8,11 @@ use common::{Client, block_for, new_block, start_server, window_for};
 use rusty_mux_core::{BlockId, ClientId, EntityId, Event, MAX_NAME, SessionId};
 use rusty_mux_proto::{Code, Entry, Features, Message};
 
-const LABELS: Features = Features::CHECKPOINT_V3
+const LABELS: Features = Features::CHECKPOINT_V4
     .union(Features::EVENT_SEQ)
     .union(Features::INSPECT)
     .union(Features::LABELS);
-const PLAIN: Features = Features::CHECKPOINT_V3
+const PLAIN: Features = Features::CHECKPOINT_V4
     .union(Features::EVENT_SEQ)
     .union(Features::INSPECT);
 

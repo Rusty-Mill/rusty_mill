@@ -15,5 +15,9 @@ changelog: rusty_term recolours text in the default colours when OSC 10/11 chang
   They are outside `ATTR_MASK`. `Cell::blank()` is unchanged (explicit
   built-in colours).
 - **Changed:** the RTSN snapshot is version 2: its header carries the default
-  fg/bg. Version 1 still decodes, with every colour explicit as written. RTCP
-  stays v3 with the same layout; its cell flags now carry the two bits.
+  fg/bg. Version 1 still decodes, with every colour explicit as written.
+- **Changed:** the RTCP checkpoint is version 4, negotiated by the new mux
+  capability `CHECKPOINT_V4` (bit 16); `CHECKPOINT_V3` (bit 3) is reserved. v4
+  keeps v3's layout, but its flags mean something new, so v3 checkpoints and
+  v3-only mux peers are refused in both directions rather than restored with
+  their default colours baked in.

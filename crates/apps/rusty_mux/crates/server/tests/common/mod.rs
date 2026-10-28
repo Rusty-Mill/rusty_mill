@@ -105,13 +105,15 @@ pub struct Client {
     pub parse: bool,
     /// Where the Welcome said this client's event stream starts.
     pub cursor: Option<Cursor>,
+    /// The features the Welcome granted.
+    pub features: Features,
     /// Every event received, with its number.
     pub events: Vec<(Option<u64>, Event)>,
 }
 
 impl Client {
     pub fn connect(path: &Path) -> Self {
-        Self::connect_with(path, Features::CHECKPOINT_V3, None)
+        Self::connect_with(path, Features::CHECKPOINT_V4, None)
     }
 
     pub fn connect_with(path: &Path, features: Features, resume: Option<Cursor>) -> Self {
@@ -128,13 +130,16 @@ impl Client {
             ready: HashMap::new(),
             parse: true,
             cursor: None,
+            features: Features::NONE,
             events: Vec::new(),
         };
         client.send(&Message::Hello { features, resume });
         match client.recv() {
             Message::Welcome {
-                client: id, cursor, ..
-            } => (client.id, client.cursor) = (id, cursor),
+                client: id,
+                cursor,
+                features: granted,
+            } => (client.id, client.cursor, client.features) = (id, cursor, granted),
             other => panic!("expected Welcome, got {other:?}"),
         }
         client

@@ -2245,6 +2245,21 @@ fn checkpoint_keeps_colour_provenance() {
 }
 
 #[test]
+fn checkpoint_rejects_rtcp_v3_and_other_versions() {
+    // v3 has v4's layout but no colour provenance, so restoring it would
+    // bake its default colours in; it fails closed instead.
+    let (g, p) = (Grid::new(4, 1), AnsiParser::new());
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    assert_eq!(&bytes[..5], b"RTCP\x04");
+    assert!(crate::checkpoint::decode(&bytes).is_ok());
+    for version in [3u8, 5] {
+        let mut other = bytes.clone();
+        other[4] = version;
+        assert!(crate::checkpoint::decode(&other).is_err(), "v{version}");
+    }
+}
+
+#[test]
 fn osc_color_resets_on_ris() {
     // A default background set via OSC 11 must not survive a full reset.
     let mut g = Grid::new(80, 24);

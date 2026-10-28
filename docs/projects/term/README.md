@@ -14,4 +14,4 @@ Elsewhere:
 - Crate usage, features and runtime requirements: [crate README](../../../crates/libs/ui/rusty_term/README.md)
 - Perf backlog (the row numbers HANDOFF.md cites): [RUSTY-TERM-PERF-BACKLOG.md](../../research/RUSTY-TERM-PERF-BACKLOG.md)
 - Fidelity gate and oracle harness: [rusty-term-perf/](../../research/rusty-term-perf/FIDELITY.md)
-- Mux-side engine docs stay in [../mux/](../mux/CHARTER.md): incremental attach ([DELTA.md](../mux/DELTA.md)) and RTCP v3 checkpoints ([REPLAY.md](../mux/REPLAY.md))
+- Mux-side engine docs stay in [../mux/](../mux/CHARTER.md): incremental attach ([DELTA.md](../mux/DELTA.md)) and RTCP v4 checkpoints ([REPLAY.md](../mux/REPLAY.md))

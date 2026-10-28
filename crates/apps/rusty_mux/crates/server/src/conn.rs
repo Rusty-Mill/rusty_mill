@@ -139,7 +139,7 @@ mod regression {
             let (peer, server) = UnixStream::pair().unwrap();
             peer.write_all(
                 &encode(&Message::Hello {
-                    features: Features::CHECKPOINT_V3,
+                    features: Features::CHECKPOINT_V4,
                     resume: None,
                 })
                 .unwrap(),

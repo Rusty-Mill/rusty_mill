@@ -12,7 +12,7 @@ use rusty_mux_core::BlockId;
 use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Code, Entry, Features, Message};
 
-const INSPECT: Features = Features::CHECKPOINT_V3
+const INSPECT: Features = Features::CHECKPOINT_V4
     .union(Features::INSPECT)
     .union(Features::BLOCK_CALL);
 

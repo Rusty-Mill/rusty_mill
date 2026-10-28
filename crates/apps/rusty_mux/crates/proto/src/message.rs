@@ -28,8 +28,8 @@ impl Features {
     /// Reserved: superseded fixed-width RTCP v2 checkpoint capability.
     pub const CHECKPOINT_V2: Self = Self(1 << 2);
 
-    /// RTCP v3 (run-encoded) headless checkpoints transferred in ordered
-    /// Checkpoint chunks.
+    /// Reserved: superseded RTCP v3 checkpoint capability (colours without
+    /// default/explicit provenance).
     pub const CHECKPOINT_V3: Self = Self(1 << 3);
 
     /// Numbered events and resuming the stream after a reconnect: a
@@ -74,6 +74,10 @@ impl Features {
     /// client without it). A window entry carries its layout regardless,
     /// since older decoders skip the fields.
     pub const LAYOUT: Self = Self(1 << 15);
+
+    /// RTCP v4 headless checkpoints (cell colours carry default/explicit
+    /// provenance) transferred in ordered Checkpoint chunks.
+    pub const CHECKPOINT_V4: Self = Self(1 << 16);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -329,7 +333,7 @@ pub enum Message {
         block: BlockId,
         data: Vec<u8>,
     },
-    /// A chunk of RTCP v3, negotiated with CHECKPOINT_V3. Offsets must be
+    /// A chunk of RTCP v4, negotiated with CHECKPOINT_V4. Offsets must be
     /// contiguous from zero and total is constant throughout one transfer.
     Checkpoint {
         block: BlockId,
