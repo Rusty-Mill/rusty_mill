@@ -29,7 +29,8 @@ use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
 use rusty_mill_board::mcp;
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::settings::{
-    Files, GithubFile, Settings, load_github, load_roles, open_credentials, projects_sink,
+    Files, GithubFile, ServerInfo, Settings, load_github, load_roles, open_credentials,
+    projects_sink,
 };
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
@@ -353,7 +354,21 @@ fn run(cli: Cli) -> Result<(), String> {
         (None, None) => Auth::Open,
     };
     check_bind(addr, &auth, cli.accept_unauthenticated_public)?;
-    let settings = Arc::new(Settings::new(board.clone(), files, creds, syncer, github));
+    let server_info = ServerInfo {
+        tick: cli.tick_url.clone(),
+        issuer: oauth.as_ref().map(|(issuer, _)| issuer.as_str().to_owned()),
+        hosts: allowed_hosts
+            .iter()
+            .fold(Vec::new(), |mut seen: Vec<String>, h| {
+                if !seen.contains(h) {
+                    seen.push(h.clone());
+                }
+                seen
+            }),
+    };
+    let settings = Arc::new(
+        Settings::new(board.clone(), files, creds, syncer, github).with_server(server_info),
+    );
     let mut web = Web::new(
         board.clone(),
         HttpHandler::new(server, config),

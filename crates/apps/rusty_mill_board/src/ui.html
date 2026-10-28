@@ -262,9 +262,8 @@ async function poll(){
   }catch(e){}
   setTimeout(poll,1500);
 }
-/* ---- Settings: agents, repositories and projects, roles, GitHub. Each tab edits one thing and sends
-   the whole of it; the server validates, writes its file, and applies it. ---- */
-const CAPS=["triage","build","qa","review","merge","close","project","admin"];
+/* ---- Settings: agents, repositories and projects, roles, GitHub, signed-in apps, and the server (read-only).
+   Each tab edits one thing and sends the whole of it; the server validates, writes its file, and applies it. ---- */
 let cfg=null,secret=null,tab="agents";
 async function setting(op,args){return api(op,{...who(),...args})}
 async function openSettings(){
@@ -275,10 +274,10 @@ async function openSettings(){
 function drawSettings(){
   const d=$("settings"),box=el("div");
   const tabs=el("div",null,"tabs");
-  for(const [id,label] of [["agents","Agents"],["repos","Repositories"],["roles","Roles"],["github","GitHub"]]){
+  for(const [id,label] of [["agents","Agents"],["repos","Repositories"],["roles","Roles"],["github","GitHub"],["apps","Apps"],["server","Server"]]){
     const b=el("button",label,tab===id?"on":"");b.type="button";b.onclick=()=>{tab=id;secret=null;reposDraft=null;drawSettings()};tabs.append(b)}
   const close=el("button","Close");close.type="button";close.onclick=()=>d.close();close.style.marginLeft="auto";tabs.append(close);
-  box.append(tabs,{agents:agentsTab,repos:reposTab,roles:rolesTab,github:githubTab}[tab]());
+  box.append(tabs,{agents:agentsTab,repos:reposTab,roles:rolesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
   d.replaceChildren(box);
 }
 /* After a change: re-read the settings, the board's roles and projects, and redraw. */
@@ -366,8 +365,9 @@ function reposTab(){
 function rolesTab(){
   const t=el("div"),err=el("div",null,"err");
   if(!cfg.files.roles)t.append(unwritable("--roles FILE"));
+  const CAPS=cfg.capabilities,about=cfg.capability_about||{};
   const draft=JSON.parse(JSON.stringify(cfg.roles)),tbl=el("table"),head=el("tr");
-  head.append(el("th","Role"));CAPS.forEach(c=>head.append(el("th",c)));head.append(el("th",""));tbl.append(head);
+  head.append(el("th","Role"));CAPS.forEach(c=>{const th=el("th",c);th.title=about[c]||"";head.append(th)});head.append(el("th",""));tbl.append(head);
   for(const r of Object.keys(draft)){
     const tr=el("tr");tr.append(el("td",r));
     CAPS.forEach(c=>{const b=field("input",{type:"checkbox",checked:draft[r].includes(c)});b.onchange=()=>{draft[r]=CAPS.filter(x=>x===c?b.checked:draft[r].includes(x))};const td=el("td");td.append(b);tr.append(td)});
@@ -378,7 +378,38 @@ function rolesTab(){
   add.onclick=guard(err,async()=>{const n=nm.value.trim();await setting("settings_roles_set",{roles:{...draft,[n]:[]}})});
   const save=el("button","Save roles");save.type="button";save.onclick=guard(err,()=>setting("settings_roles_set",{roles:draft}));
   const row=el("div",null,"row");row.append(nm,add);
-  t.append(tbl,row,save,err,el("p","admin lets a role change these settings. At least one agent must keep a role with admin.","note"));
+  const help=el("table");for(const c of CAPS){const tr=el("tr");tr.append(el("td",c),el("td",about[c]||""));help.append(tr)}
+  t.append(tbl,row,save,err,help,el("p","At least one agent must keep a role with admin.","note"));
+  return t;
+}
+
+/* Apps signed in through OAuth (e.g. a claude.ai connector). Revoking one drops its tokens; it can sign in again. */
+function appsTab(){
+  const t=el("div"),err=el("div",null,"err");
+  if(!cfg.apps){t.append(el("p","OAuth sign-in is off. Start the board with --issuer URL to let apps such as claude.ai sign in.","note"));return t}
+  if(!cfg.apps.length){t.append(el("p","No app has signed in.","note"));return t}
+  const tbl=el("table"),head=el("tr");["App","Registered","Tokens",""].forEach(h=>head.append(el("th",h)));tbl.append(head);
+  for(const a of cfg.apps){
+    const tr=el("tr"),when=a.client_id_issued_at?new Date(a.client_id_issued_at*1000).toLocaleString():"";
+    const name=el("td");name.append(el("div",a.client_name||"(unnamed)"),el("code",a.client_id));
+    const rv=el("button","Revoke");rv.type="button";
+    rv.onclick=guard(err,async()=>{if(!confirm("Sign "+(a.client_name||a.client_id)+" out? It must sign in again."))return;await setting("settings_app_revoke",{client_id:a.client_id})});
+    const td=el("td");td.append(rv);tr.append(name,el("td",when),el("td",a.access_tokens+" access, "+a.refresh_tokens+" refresh"),td);tbl.append(tr);
+  }
+  t.append(tbl,err,el("p","Removing an agent also stops the apps it signed in.","note"));
+  return t;
+}
+
+/* How the server was started. Changed with its flags or board.env, then a restart. */
+function serverTab(){
+  const t=el("div"),s=cfg.server||{},p=cfg.paths||{},tbl=el("table");
+  const row=(k,v)=>{const tr=el("tr");tr.append(el("td",k),el("td",v));tbl.append(tr)};
+  row("Cards",s.tick?"rusty_tick at "+s.tick:"in memory (lost on restart)");
+  row("OAuth sign-in",s.issuer||"off");
+  row("Accepted hosts",(s.hosts||[]).join(", "));
+  for(const [k,label] of [["agents","Agents file"],["projects","Projects file"],["roles","Roles file"],["github","GitHub file"]])
+    row(label,p[k]||"none (read-only here)");
+  t.append(tbl,el("p","These come from the server's flags or its environment file and change with a restart.","note"));
   return t;
 }
 

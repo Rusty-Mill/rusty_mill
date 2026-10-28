@@ -12,11 +12,15 @@ use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::identities::Credentials;
 use rusty_mill_board::mcp;
 use rusty_mill_board::projects::Projects;
-use rusty_mill_board::settings::{Files, Settings, load_github, load_roles, open_credentials};
+use rusty_mill_board::settings::{
+    Files, ServerInfo, Settings, load_github, load_roles, open_credentials,
+};
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
 use rusty_mill_board::web::{Auth, Web};
 use serde_json::{Value, json};
+
+const ISSUER: &str = "http://localhost:8787";
 
 struct Fixture {
     addr: SocketAddr,
@@ -32,6 +36,11 @@ impl Drop for Fixture {
 
 /// A board wired as `main` wires it, settings kept in a fresh directory.
 fn start(name: &str) -> Fixture {
+    start_with(name, false)
+}
+
+/// [`start`], with OAuth sign-in on when `oauth`, its grants beside the settings.
+fn start_with(name: &str, oauth: bool) -> Fixture {
     let dir = std::env::temp_dir().join(format!("mill_settings_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let files = Files::in_dir(&dir);
@@ -51,13 +60,20 @@ fn start(name: &str) -> Fixture {
     )
     .expect("credentials");
     let creds = creds.shared();
-    let settings = Arc::new(Settings::new(
-        board.clone(),
-        files,
-        Some(Arc::clone(&creds)),
-        Syncer::new(board.clone()),
-        None,
-    ));
+    let settings = Arc::new(
+        Settings::new(
+            board.clone(),
+            files,
+            Some(Arc::clone(&creds)),
+            Syncer::new(board.clone()),
+            None,
+        )
+        .with_server(ServerInfo {
+            tick: None,
+            issuer: oauth.then(|| ISSUER.to_owned()),
+            hosts: vec!["127.0.0.1".into()],
+        }),
+    );
     let config = HttpConfig {
         allowed_hosts: vec!["127.0.0.1".into()],
         ..HttpConfig::default()
@@ -72,6 +88,13 @@ fn start(name: &str) -> Fixture {
         Auth::Credentials(creds),
     )
     .with_settings(settings);
+    let web = if oauth {
+        let issuer = rusty_oauth_server::validate_issuer(ISSUER).expect("issuer");
+        web.with_oauth(issuer, dir.join("oauth.json"))
+            .expect("oauth")
+    } else {
+        web
+    };
     let server =
         rusty_serve::Server::bind_shared("127.0.0.1:0".parse().expect("addr"), web).expect("bind");
     let addr = server.local_addr().expect("addr");
@@ -580,4 +603,91 @@ fn everything_survives_a_restart() {
     let projects = Projects::load(&f.file("projects.json")).expect("projects");
     let creds = Credentials::load(&f.file("identities.json"), &roles, &projects).expect("creds");
     assert!(roles.0.contains_key("tester") && projects.contains("rl") && creds.contains("claude"));
+}
+
+/// POST `body` to `path` with no credential (OAuth's own endpoints): the status and JSON.
+fn post_open(addr: SocketAddr, path: &str, body: &str) -> (u16, Value) {
+    let raw = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let mut sock = TcpStream::connect(addr).expect("connect");
+    sock.write_all(raw.as_bytes()).expect("write");
+    let mut out = String::new();
+    sock.read_to_string(&mut out).expect("read");
+    let status = out
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .expect("status");
+    let text = out.split("\r\n\r\n").nth(1).unwrap_or("");
+    (status, serde_json::from_str(text).unwrap_or(Value::Null))
+}
+
+#[test]
+fn settings_describe_each_capability_and_the_server() {
+    let f = start("about");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    for cap in out["capabilities"].as_array().expect("caps") {
+        let about = out["capability_about"][cap.as_str().expect("name")]
+            .as_str()
+            .unwrap_or("");
+        assert!(!about.is_empty(), "{cap} is described");
+    }
+    assert_eq!(out["server"]["tick"], Value::Null);
+    assert_eq!(out["server"]["issuer"], Value::Null);
+    assert_eq!(out["server"]["hosts"], json!(["127.0.0.1"]));
+    assert!(
+        out["paths"]["roles"]
+            .as_str()
+            .is_some_and(|p| p.ends_with("roles.json"))
+    );
+}
+
+#[test]
+fn with_oauth_off_there_are_no_apps_to_revoke() {
+    let f = start("apps_off");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    assert_eq!(out["apps"], Value::Null);
+    let (status, _, text) = f.admin("settings_app_revoke", &json!({"client_id": "x"}));
+    assert_eq!(status, 422, "{text}");
+    assert!(text.contains("--issuer"), "{text}");
+}
+
+#[test]
+fn an_admin_lists_and_revokes_signed_in_apps() {
+    let f = start_with("apps", true);
+    let (status, client) = post_open(
+        f.addr,
+        "/register",
+        r#"{"client_name":"claude.ai","redirect_uris":["https://claude.ai/cb"]}"#,
+    );
+    assert_eq!(status, 201, "{client}");
+    let id = client["client_id"].as_str().expect("id").to_owned();
+
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    assert_eq!(out["server"]["issuer"], ISSUER);
+    let apps = out["apps"].as_array().expect("apps");
+    assert_eq!(apps.len(), 1);
+    assert_eq!(
+        (&apps[0]["client_id"], &apps[0]["client_name"]),
+        (&json!(id), &json!("claude.ai"))
+    );
+
+    let token = f.add_agent("gemini", "builder");
+    let (status, _, _) = call(
+        f.addr,
+        &token,
+        "settings_app_revoke",
+        &json!({"client_id": id}),
+    );
+    assert_eq!(status, 403, "revoking needs admin");
+
+    let (status, gone, text) = f.admin("settings_app_revoke", &json!({"client_id": id}));
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(gone["client_id"], json!(id));
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    assert_eq!(out["apps"], json!([]));
+    let (status, _, _) = f.admin("settings_app_revoke", &json!({"client_id": id}));
+    assert_eq!(status, 422, "an unknown app is refused");
 }

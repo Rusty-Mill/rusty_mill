@@ -104,6 +104,8 @@ pub struct Web {
     in_flight: Arc<InFlight>,
     /// OAuth's endpoints, when an issuer is set.
     oauth: Option<Endpoints>,
+    /// Their provider, which the settings list and revoke apps through.
+    provider: Option<Arc<Provider>>,
 }
 
 impl Web {
@@ -126,6 +128,7 @@ impl Web {
             auth,
             in_flight: Arc::default(),
             oauth: None,
+            provider: None,
         }
     }
 
@@ -166,8 +169,10 @@ impl Web {
         };
         let store = StateStore::bound(state_file, issuer.as_str())
             .map_err(|e| format!("OAuth state: {e}"))?;
-        let provider = Provider::new(verify, store);
-        self.oauth = Some(Endpoints::new(Arc::new(provider), issuer, BRANDING));
+        let provider = Arc::new(Provider::new(verify, store));
+        self.settings.attach_oauth(Arc::clone(&provider));
+        self.oauth = Some(Endpoints::new(Arc::clone(&provider), issuer, BRANDING));
+        self.provider = Some(provider);
         Ok(self)
     }
 
@@ -187,6 +192,9 @@ impl Web {
     /// Serve `/api/settings_*` from `settings` (read-only settings by default).
     #[must_use]
     pub fn with_settings(mut self, settings: Arc<Settings>) -> Self {
+        if let Some(provider) = &self.provider {
+            settings.attach_oauth(Arc::clone(provider));
+        }
         self.settings = settings;
         self
     }
