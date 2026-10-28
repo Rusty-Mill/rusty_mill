@@ -32,9 +32,9 @@ impl Default for Roles {
         Self(BTreeMap::from([
             (
                 "human".into(),
-                role(&[Triage, Build, Qa, Review, Merge, Admin]),
+                role(&[Triage, Build, Qa, Review, Merge, Close, Admin]),
             ),
-            ("builder".into(), role(&[Build])),
+            ("builder".into(), role(&[Build, Close])),
             ("qa".into(), role(&[Qa])),
             ("reviewer".into(), role(&[Review, Merge])),
         ]))

@@ -681,7 +681,7 @@ mod tests {
                 me["actor"].clone(),
                 me["capabilities"].clone()
             ),
-            (json!(true), json!("claude"), json!(["build"]))
+            (json!(true), json!("claude"), json!(["build", "close"]))
         );
         let anon = call_as(&board, None, "board_whoami", json!({})).expect("whoami");
         assert_eq!(anon["authenticated"], json!(false));

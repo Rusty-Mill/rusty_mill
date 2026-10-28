@@ -15,8 +15,10 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 [deploy/README.md](deploy/README.md#signing-in-from-claudeai-oauth).
 
 - **Columns:** backlog, ready, building, qa, review, done, blocked.
-- **Rules:** each move needs a capability (triage, build, qa, review, merge); leaving
-  building/qa/review needs your claim. A role is a set of capabilities; roles are
+- **Rules:** each move needs a capability (triage, build, qa, review, merge, close); leaving
+  building/qa/review needs your claim. `close` moves a card from building or qa straight to done when
+  its work already merged on the forge (bookkeeping, not a review: it never makes a card someone's work in
+  `card_take`). The default `builder` role holds it. A role is a set of capabilities; roles are
   defined by the caller, `Roles::default()` is a starting set. `actor`/`role` are
   trusted as given: this is a workflow guard between cooperating agents, and the
   bearer token is the authentication.
