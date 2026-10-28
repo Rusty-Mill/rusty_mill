@@ -1,7 +1,13 @@
-//! Throwaway Phase 1 client for rusty_mux. It attaches the local terminal
-//! to one block: the attach checkpoint's grid is painted once, then the
-//! block's raw output goes straight to the local terminal, which does the
-//! parsing. Phase 2 replaces it with real clients.
+//! The attach client for rusty_mux. It shows a block's window as the
+//! server lays it out: one connection per visible block, each block's
+//! output parsed into a local grid. A window showing one block passes its
+//! raw output straight to the local terminal, which keeps every mode the
+//! program sets; one showing several is composed into one screen
+//! ([`screen`]) and redrawn where it changed. [`keys`] turns the keyboard
+//! into input and prefix commands.
+
+pub mod keys;
+pub mod screen;
 
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};

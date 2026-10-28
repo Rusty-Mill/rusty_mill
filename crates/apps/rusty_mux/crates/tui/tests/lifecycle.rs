@@ -1,7 +1,8 @@
 //! The client leaves the local terminal usable however the attach ends:
 //! the block closing, the server going away (with no lease, so no key would
-//! notice), or Ctrl-] after the block's program set terminal modes. Each
-//! runs the real binary on a pty against a scripted server.
+//! notice), or Ctrl-] d after the block's program set terminal modes; and
+//! it draws a window of several blocks side by side. Each runs the real
+//! binary on a pty against a scripted server.
 
 #![cfg(target_os = "linux")]
 
@@ -16,8 +17,8 @@ use platform::process::{Child, Command};
 use platform::pty::PtyMaster;
 use platform::term::WinSize;
 use platform_linux::{LinuxPty, LinuxPtyMaster};
-use rusty_mux_core::{BlockId, ClientId, Event};
-use rusty_mux_proto::{Features, Message};
+use rusty_mux_core::{BlockId, ClientId, Event, Layout, Size, WindowId};
+use rusty_mux_proto::{Entry, Features, Message};
 use rusty_mux_tui::{Conn, RESTORE};
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_uuid::Uuid;
@@ -39,62 +40,88 @@ enum End {
     Open,
 }
 
-/// A server that welcomes one client, attaches it to [`BLOCK`] with an
-/// empty checkpoint and [`REMOTE`] as output, then ends as `end` says.
-fn scripted_server(lease: bool, end: End) -> (PathBuf, JoinHandle<()>) {
+type Stream = std::os::unix::net::UnixStream;
+
+fn listen() -> (PathBuf, UnixListener) {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("rusty-mux-tui-{}-{n}.sock", std::process::id()));
     let listener = UnixListener::bind(&path).expect("bind");
+    (path, listener)
+}
+
+/// Accepts the next client and welcomes it with `features`.
+fn welcome(listener: &UnixListener, features: Features) -> Conn<Stream> {
+    let (stream, _) = listener.accept().expect("accept");
+    let mut conn = Conn::new(stream);
+    assert!(matches!(conn.recv().expect("hello"), Message::Hello { .. }));
+    conn.send(&Message::Welcome {
+        features,
+        client: ClientId::from_uuid(Uuid::nil()),
+        cursor: None,
+    })
+    .expect("welcome");
+    conn
+}
+
+/// A server without layouts: it welcomes the client's control connection,
+/// then attaches its block connection to [`BLOCK`] with an empty
+/// checkpoint and [`REMOTE`] as output, and ends as `end` says once the
+/// client asks for the lease.
+fn scripted_server(lease: bool, end: End) -> (PathBuf, JoinHandle<()>) {
+    let (path, listener) = listen();
     let server = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().expect("accept");
-        let mut conn = Conn::new(stream);
-        let block = BlockId::from_uuid(BLOCK.parse().expect("uuid"));
-        assert!(matches!(conn.recv().expect("hello"), Message::Hello { .. }));
-        conn.send(&Message::Welcome {
-            features: Features::CHECKPOINT_V3,
-            client: ClientId::from_uuid(Uuid::nil()),
-            cursor: None,
-        })
-        .expect("welcome");
-        while let Ok(message) = conn.recv() {
-            match message {
-                Message::Attach { req, .. } => {
-                    conn.send(&Message::Done { req, created: None })
-                        .expect("done");
-                    attach(&mut conn, block);
-                }
-                Message::AcquireLease { req, .. } if !lease => {
-                    conn.send(&Message::Failed {
-                        req,
-                        reason: "held by another client".into(),
-                        code: None,
-                    })
-                    .expect("failed");
-                    if finish(&mut conn, block, end) {
-                        return;
-                    }
-                }
-                Message::AcquireLease { req, .. } => {
-                    conn.send(&Message::Done { req, created: None })
-                        .expect("done");
-                }
-                Message::Resize { req, .. } => {
-                    conn.send(&Message::Done { req, created: None })
-                        .expect("done");
-                    if finish(&mut conn, block, end) {
-                        return;
-                    }
-                }
-                _ => {}
-            }
-        }
+        let _control = welcome(&listener, Features::CHECKPOINT_V3);
+        let pane = welcome(&listener, Features::CHECKPOINT_V3);
+        serve_block(pane, |_| REMOTE.to_vec(), lease, end, &Mutex::default());
     });
     (path, server)
 }
 
-/// The checkpoint of a blank 80x24 terminal, Ready, then [`REMOTE`].
-fn attach(conn: &mut Conn<std::os::unix::net::UnixStream>, block: BlockId) {
+/// Serves one block connection; `output` is what the block prints after
+/// attaching. Resizes are noted in `resized`.
+fn serve_block(
+    mut conn: Conn<Stream>,
+    output: impl Fn(BlockId) -> Vec<u8>,
+    lease: bool,
+    end: End,
+    resized: &Mutex<Vec<(BlockId, Size)>>,
+) {
+    let mut attached = None;
+    while let Ok(message) = conn.recv() {
+        match message {
+            Message::Attach { req, block } => {
+                conn.send(&Message::Done { req, created: None })
+                    .expect("done");
+                attach(&mut conn, block, &output(block));
+                attached = Some(block);
+            }
+            Message::AcquireLease { req, block } => {
+                let answer = match lease {
+                    true => Message::Done { req, created: None },
+                    false => Message::Failed {
+                        req,
+                        reason: "held by another client".into(),
+                        code: None,
+                    },
+                };
+                conn.send(&answer).expect("lease");
+                if finish(&mut conn, attached.unwrap_or(block), end) {
+                    return;
+                }
+            }
+            Message::Resize { req, block, size } => {
+                resized.lock().expect("lock").push((block, size));
+                conn.send(&Message::Done { req, created: None })
+                    .expect("done");
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The checkpoint of a blank 80x24 terminal, Ready, then `output`.
+fn attach(conn: &mut Conn<Stream>, block: BlockId, output: &[u8]) {
     let data = rusty_term_core::checkpoint::encode(&Grid::new(80, 24), &AnsiParser::new())
         .expect("encode");
     let total = data.len() as u64;
@@ -110,13 +137,13 @@ fn attach(conn: &mut Conn<std::os::unix::net::UnixStream>, block: BlockId) {
     conn.send(&Message::Ready { block }).expect("ready");
     conn.send(&Message::Output {
         block,
-        data: REMOTE.to_vec(),
+        data: output.to_vec(),
     })
     .expect("output");
 }
 
 /// Ends the attach; true when the server should stop reading.
-fn finish(conn: &mut Conn<std::os::unix::net::UnixStream>, block: BlockId, end: End) -> bool {
+fn finish(conn: &mut Conn<Stream>, block: BlockId, end: End) -> bool {
     match end {
         End::Eof => true,
         End::Closed => {
@@ -140,9 +167,13 @@ struct Tui {
 
 impl Tui {
     fn start(socket: &Path) -> Self {
+        Self::attach(socket, BLOCK)
+    }
+
+    fn attach(socket: &Path, block: &str) -> Self {
         let cmd = Command::new(env!("CARGO_BIN_EXE_rusty-mux"), "/")
             .arg(socket.as_os_str())
-            .arg(BLOCK);
+            .arg(block);
         let (master, child) = LinuxPty
             .spawn_concrete(&cmd, WinSize { rows: 24, cols: 80 })
             .expect("spawn");
@@ -226,8 +257,91 @@ fn detaching_after_the_program_set_modes_resets_the_terminal() {
     let (socket, server) = scripted_server(true, End::Open);
     let tui = Tui::start(&socket);
     tui.wait_for(b"REMOTE");
-    tui.master.write(&[0x1d]).expect("ctrl-]");
+    tui.master.write(b"\x1dd").expect("ctrl-] d");
     let screen = tui.exit();
     server.join().expect("server");
     assert_restored(&screen, "detached from block");
+}
+
+const OTHER: &str = "0b5e2a7c-9d14-4f36-8e21-7a6c3b9d0e4f";
+
+/// A server with layouts whose window holds [`BLOCK`] and [`OTHER`] side
+/// by side; each block prints its name. Returns what the client resized.
+fn layout_server() -> (PathBuf, JoinHandle<Vec<(BlockId, Size)>>) {
+    let (path, listener) = listen();
+    let server = std::thread::spawn(move || {
+        let features = Features::CHECKPOINT_V3
+            .union(Features::INSPECT)
+            .union(Features::LAYOUT);
+        let mut control = welcome(&listener, features);
+        let (left, right) = (id(BLOCK), id(OTHER));
+        let window = WindowId::from_uuid(Uuid::nil());
+        let Message::List { req } = control.recv().expect("list") else {
+            panic!("expected List");
+        };
+        let layout: Layout = format!("cols50({left},{right})").parse().expect("layout");
+        for entry in [
+            Entry::Block {
+                block: left,
+                window,
+                size: Size::new(80, 24).expect("size"),
+                holder: None,
+                title: String::new(),
+                name: String::new(),
+            },
+            Entry::Window {
+                window,
+                session: rusty_mux_core::SessionId::from_uuid(Uuid::nil()),
+                name: "main".into(),
+                layout: Some(layout),
+                zoomed: None,
+            },
+        ] {
+            control.send(&Message::Entry { req, entry }).expect("entry");
+        }
+        control
+            .send(&Message::Done { req, created: None })
+            .expect("done");
+        let resized = Arc::new(Mutex::new(Vec::new()));
+        let panes: Vec<_> = (0..2)
+            .map(|_| {
+                let conn = welcome(&listener, Features::CHECKPOINT_V3);
+                let resized = resized.clone();
+                std::thread::spawn(move || {
+                    let name = |b: BlockId| match b == left {
+                        true => b"LEFT".to_vec(),
+                        false => b"RIGHT".to_vec(),
+                    };
+                    serve_block(conn, name, true, End::Open, &resized);
+                })
+            })
+            .collect();
+        panes.into_iter().for_each(|p| p.join().expect("pane"));
+        resized.lock().expect("lock").clone()
+    });
+    (path, server)
+}
+
+fn id(text: &str) -> BlockId {
+    BlockId::from_uuid(text.parse().expect("uuid"))
+}
+
+#[test]
+fn a_window_of_two_blocks_is_drawn_side_by_side() {
+    let (socket, server) = layout_server();
+    let tui = Tui::start(&socket);
+    tui.wait_for(b"LEFT");
+    tui.wait_for(b"RIGHT");
+    tui.wait_for("│".as_bytes());
+    tui.master.write(b"\x1dd").expect("ctrl-] d");
+    let screen = tui.exit();
+    let resized = server.join().expect("server");
+    // Only the focused block, which holds the lease, fits its half.
+    assert_eq!(resized, vec![(id(BLOCK), Size::new(40, 24).expect("size"))]);
+    let text = String::from_utf8_lossy(&screen);
+    let find = |needle: &[u8]| screen.windows(needle.len()).rposition(|w| w == needle);
+    let alternate = find(b"\x1b[?1049h").unwrap_or_else(|| panic!("no alternate screen: {text:?}"));
+    let restore = find(RESTORE).unwrap_or_else(|| panic!("terminal not reset: {text:?}"));
+    let said = find(b"detached from block").unwrap_or_else(|| panic!("no detach: {text:?}"));
+    assert!(alternate < restore && restore < said, "{text:?}");
 }

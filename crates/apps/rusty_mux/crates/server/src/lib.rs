@@ -33,6 +33,7 @@ mod process;
 mod pty;
 #[cfg(any(target_os = "linux", windows))]
 mod state;
+pub mod style;
 #[cfg(any(target_os = "linux", windows))]
 mod terminal;
 

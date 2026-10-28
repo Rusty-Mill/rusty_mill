@@ -1,6 +1,9 @@
-//! `rusty-mux <socket> [block]`: attach this terminal to a rusty_mux block.
-//! Without a block id it creates a session, window and block first. Ctrl-]
-//! detaches; the block keeps running and its id is printed for reattaching.
+//! `rusty-mux <socket> [block]`: show a rusty_mux block's window on this
+//! terminal, starting with that block focused. Without a block id it
+//! creates a session, window and block first. Ctrl-] then `d` detaches;
+//! the blocks keep running and the focused one's id is printed for
+//! reattaching. The other Ctrl-] commands are listed in
+//! `rusty_mux_tui::keys`.
 
 use std::process::ExitCode;
 
@@ -28,14 +31,17 @@ mod client {
 
 #[cfg(any(target_os = "linux", windows))]
 mod client {
+    use std::collections::HashMap;
     use std::ffi::OsString;
     use std::io::Write;
     use std::net::Shutdown;
     #[cfg(unix)]
     use std::os::unix::net::UnixStream;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{Receiver as Inbox, RecvTimeoutError, Sender};
+    use std::thread::JoinHandle;
     use std::time::Duration;
 
     use platform::term::Terminal;
@@ -43,26 +49,45 @@ mod client {
     use platform_linux::LinuxTerminal as Term;
     #[cfg(windows)]
     use platform_windows::{WindowsTerminal as Term, WindowsUnixStream as UnixStream};
-    use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
-    use rusty_mux_proto::{Features, Launch, Message};
+    use rusty_mux_core::{BlockId, Event, Layout, Rect, SessionId, Side, Size, WindowId};
+    use rusty_mux_proto::{Entry, Features, Launch, Message};
     use rusty_mux_server::checkpoint::Receiver;
+    use rusty_mux_tui::keys::{Action, Keys};
+    use rusty_mux_tui::screen::{self, Frame, View};
     use rusty_mux_tui::{Conn, RESTORE, paint};
+    use rusty_term_core::{AnsiParser, Grid};
     use rusty_uuid::Uuid;
 
-    /// Ctrl-]: detach.
-    const DETACH: u8 = 0x1d;
-
-    /// How often the input loop checks whether the output side has ended.
+    /// How often the loop wakes with nothing to do, to notice the local
+    /// terminal changing size.
     const TICK: Duration = Duration::from_millis(100);
 
-    /// Why the output side stopped.
+    /// What the control connection asks for; a server without `LAYOUT`
+    /// shows only the block asked for.
+    const CONTROL: Features = Features::CHECKPOINT_V3
+        .union(Features::INSPECT)
+        .union(Features::LAYOUT);
+
+    /// Something for the main loop.
+    enum Input {
+        Keys(Vec<u8>),
+        Control(Message),
+        Pane(BlockId, Message),
+        /// A connection ended: the server's control one (`None`), or a
+        /// block's.
+        Ended(Option<BlockId>),
+    }
+
+    /// Why the client stopped.
     enum Ended {
-        /// The block's program exited or the block was closed.
+        Detached,
+        /// The window's last block closed, or the window did.
         Closed,
-        /// The server went away, or the stream was shut down on detach.
+        /// The server went away.
         Disconnected,
         /// The local terminal stopped taking output.
         Stdout,
+        Failed(String),
     }
 
     #[cfg(unix)]
@@ -75,78 +100,128 @@ mod client {
         UnixStream::connect(path).map_err(|e| format!("connecting: {e:?}"))
     }
 
-    pub fn run(args: &[OsString]) -> Result<(), String> {
-        let stream = connect(Path::new(&args[0]))?;
-        let mut conn = Conn::new(stream.try_clone().map_err(|e| e.to_string())?);
-        let mut term = Term::new();
-        let win = term
-            .window_size()
-            .map_err(|e| format!("terminal size: {e:?}"))?;
-        // A pty nobody sized reports 0x0; fall back to the classic 80x24.
-        let size = Size::new(win.cols, win.rows)
-            .or_else(|_| Size::new(80, 24))
-            .map_err(|e| e.to_string())?;
+    fn clone(stream: &UnixStream) -> Result<UnixStream, String> {
+        stream.try_clone().map_err(|e| e.to_string())
+    }
 
+    pub fn run(args: &[OsString]) -> Result<(), String> {
+        let socket = PathBuf::from(&args[0]);
+        let stream = connect(&socket)?;
+        let mut conn = Conn::new(clone(&stream)?);
+        let mut term = Term::new();
+        let classic = Size::new(80, 24).map_err(|e| e.to_string())?;
+        let area = window_size(&term, classic);
         conn.send(&Message::Hello {
-            features: Features::CHECKPOINT_V3,
+            features: CONTROL,
             resume: None,
         })
         .map_err(|e| e.to_string())?;
         let mut req = Requests {
             conn: &mut conn,
             next: 1,
-            held: Vec::new(),
         };
-        req.welcome()?;
+        let features = req.welcome()?;
         let block = match args.get(1) {
             Some(id) => BlockId::from_uuid(parse_uuid(id)?),
-            None => req.create(size)?,
+            None => req.create(area)?,
         };
-        req.call(|req| Message::Attach { req, block })?;
-        let writer = req.call(|req| Message::AcquireLease { req, block }).is_ok();
-        if writer && let Err(err) = req.call(|req| Message::Resize { req, block, size }) {
-            eprintln!("rusty-mux: keeping the block's size: {err}");
-        }
+        let (window, layout, zoomed) = match features.contains(Features::INSPECT) {
+            true => req.place(block)?,
+            false => (None, Layout::Block(block), None),
+        };
+        let next = req.next;
 
-        let held = std::mem::take(&mut req.held);
-        let input = stream.try_clone().map_err(|e| e.to_string())?;
-        term.enter_raw().map_err(|e| format!("raw mode: {e:?}"))?;
-        let done = Arc::new(AtomicBool::new(false));
-        let output = {
-            let done = done.clone();
-            std::thread::spawn(move || {
-                let ended = show(conn, held, block);
-                done.store(true, Ordering::Release);
-                ended
-            })
+        let (tx, inbox) = std::sync::mpsc::channel();
+        let control = {
+            let tx = tx.clone();
+            std::thread::spawn(move || read(conn, &tx, Input::Control, None))
         };
-        let result = forward(&term, input, block, writer, &done);
-        // Stop the output side before touching the terminal, so nothing the
-        // block prints lands after the restore. Shutting the socket ends
+        term.enter_raw().map_err(|e| format!("raw mode: {e:?}"))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let keyboard = keyboard(tx.clone(), stop.clone());
+        let mut app = App {
+            socket,
+            tx,
+            control: Conn::new(clone(&stream)?),
+            next,
+            layouts: features.contains(Features::LAYOUT),
+            window,
+            layout: Some(layout),
+            zoomed,
+            focus: block,
+            panes: HashMap::new(),
+            keys: Keys::default(),
+            area,
+            shown: Shown::Nothing,
+            split: None,
+            arriving: None,
+            ended: None,
+        };
+        app.sync();
+        let ended = app.serve(&term, &inbox);
+        let focus = app.focus;
+        // Stop every reader before touching the terminal, so nothing a
+        // block prints lands after the restore. Shutting a socket ends
         // its read; an error only means the server already closed it.
+        stop.store(true, Ordering::Release);
         let _ = stream.shutdown(Shutdown::Both);
-        let ended = output.join();
+        app.panes.values().for_each(Pane::hang_up);
+        drop(app);
+        let _ = (control.join(), keyboard.join());
         restore(&mut term);
-        match (ended, &result) {
-            (Ok(Ended::Closed), _) => println!("\r\nrusty-mux: block {block} closed"),
-            (Ok(_), Ok(Stop::Detached)) => {
-                println!("\r\nrusty-mux: detached from block {block}")
+        match ended {
+            Ended::Closed => println!("\r\nrusty-mux: block {focus} closed"),
+            Ended::Detached => println!("\r\nrusty-mux: detached from block {focus}"),
+            Ended::Disconnected => {
+                println!("\r\nrusty-mux: lost the server; block {focus} may still be running")
             }
-            (Ok(Ended::Disconnected), _) => {
-                println!("\r\nrusty-mux: lost the server; block {block} may still be running")
-            }
-            (Ok(Ended::Stdout), _) => eprintln!("rusty-mux: the terminal stopped taking output"),
-            (Err(_), _) => eprintln!("rusty-mux: the output thread panicked"),
+            Ended::Stdout => eprintln!("rusty-mux: the terminal stopped taking output"),
+            Ended::Failed(why) => return Err(why),
         }
-        result.map(|_| ())
+        Ok(())
     }
 
-    /// Why the input loop stopped.
-    enum Stop {
-        /// Ctrl-], end of keyboard input, or the server refused input.
-        Detached,
-        /// The output side ended first.
-        OutputEnded,
+    /// The local terminal's size, or `fallback` when it has none: a pty
+    /// nobody sized reports 0x0.
+    fn window_size(term: &Term, fallback: Size) -> Size {
+        term.window_size()
+            .ok()
+            .and_then(|w| Size::new(w.cols, w.rows).ok())
+            .unwrap_or(fallback)
+    }
+
+    /// Reads messages from `conn` into the main loop until it ends.
+    fn read(
+        mut conn: Conn<UnixStream>,
+        tx: &Sender<Input>,
+        wrap: impl Fn(Message) -> Input,
+        pane: Option<BlockId>,
+    ) {
+        while let Ok(message) = conn.recv() {
+            if tx.send(wrap(message)).is_err() {
+                return;
+            }
+        }
+        let _ = tx.send(Input::Ended(pane));
+    }
+
+    /// Reads the keyboard into the main loop until `stop`; an empty read
+    /// means the keyboard is gone.
+    fn keyboard(tx: Sender<Input>, stop: Arc<AtomicBool>) -> JoinHandle<()> {
+        std::thread::spawn(move || {
+            let term = Term::new();
+            let mut buf = [0u8; 4096];
+            while !stop.load(Ordering::Acquire) {
+                let n = match term.poll_readable(Some(TICK)) {
+                    Ok(false) => continue,
+                    Ok(true) => term.read_chunk(&mut buf).unwrap_or(0),
+                    Err(_) => 0,
+                };
+                if tx.send(Input::Keys(buf[..n].to_vec())).is_err() || n == 0 {
+                    return;
+                }
+            }
+        })
     }
 
     /// Undoes the modes a block's program may have set on this terminal,
@@ -161,168 +236,656 @@ mod client {
         }
     }
 
+    /// Requests answered before the main loop starts.
     struct Requests<'a> {
         conn: &'a mut Conn<UnixStream>,
         next: u64,
-        /// Messages that arrived while waiting for a reply, such as the
-        /// checkpoint that follows an attach, kept for [`show`].
-        held: Vec<Message>,
     }
 
     impl Requests<'_> {
-        fn welcome(&mut self) -> Result<(), String> {
+        fn welcome(&mut self) -> Result<Features, String> {
             match self.conn.recv().map_err(|e| e.to_string())? {
                 Message::Welcome { features, .. } if features.contains(Features::CHECKPOINT_V3) => {
-                    Ok(())
+                    Ok(features)
                 }
                 Message::Welcome { .. } => Err("the server cannot send checkpoints".into()),
                 other => Err(format!("expected Welcome, got {other:?}")),
             }
         }
 
-        /// Sends a request and waits for its reply, skipping everything else.
-        fn call(&mut self, make: impl FnOnce(u64) -> Message) -> Result<Option<Uuid>, String> {
+        /// Sends a request and returns its answer, every message of it,
+        /// skipping all else; `Err` if it failed.
+        fn call(&mut self, make: impl FnOnce(u64) -> Message) -> Result<Vec<Message>, String> {
             let req = self.next;
             self.next += 1;
             self.conn.send(&make(req)).map_err(|e| e.to_string())?;
+            let mut answer = Vec::new();
             loop {
-                match self.conn.recv().map_err(|e| e.to_string())? {
-                    Message::Done { req: r, created } if r == req => return Ok(created),
+                let message = self.conn.recv().map_err(|e| e.to_string())?;
+                match message {
                     Message::Failed { req: r, reason, .. } if r == req => return Err(reason),
-                    other => self.held.push(other),
+                    Message::Done { req: r, .. } if r == req => {
+                        answer.push(message);
+                        return Ok(answer);
+                    }
+                    Message::Entry { req: r, .. } if r == req => answer.push(message),
+                    _ => {}
                 }
             }
         }
 
+        fn create_id(&mut self, make: impl FnOnce(u64) -> Message) -> Result<Uuid, String> {
+            match self.call(make)?.last() {
+                Some(Message::Done {
+                    created: Some(id), ..
+                }) => Ok(*id),
+                _ => Err("the server did not return an id".into()),
+            }
+        }
+
         fn create(&mut self, size: Size) -> Result<BlockId, String> {
-            let missing = || "the server did not return an id".to_string();
-            let session = SessionId::from_uuid(
-                self.call(|req| Message::CreateSession {
-                    req,
-                    name: "main".into(),
-                })?
-                .ok_or_else(missing)?,
-            );
-            let window = WindowId::from_uuid(
-                self.call(|req| Message::CreateWindow {
-                    req,
-                    session,
-                    name: "main".into(),
-                })?
-                .ok_or_else(missing)?,
-            );
-            let block = self
-                .call(|req| Message::CreateBlock {
-                    req,
-                    window,
-                    size,
-                    launch: Launch::default(),
-                })?
-                .ok_or_else(missing)?;
+            let session = SessionId::from_uuid(self.create_id(|req| Message::CreateSession {
+                req,
+                name: "main".into(),
+            })?);
+            let window = WindowId::from_uuid(self.create_id(|req| Message::CreateWindow {
+                req,
+                session,
+                name: "main".into(),
+            })?);
+            let block = self.create_id(|req| Message::CreateBlock {
+                req,
+                window,
+                size,
+                launch: Launch::default(),
+            })?;
             Ok(BlockId::from_uuid(block))
+        }
+
+        /// The window `block` is in, its layout and its zoomed block.
+        fn place(
+            &mut self,
+            block: BlockId,
+        ) -> Result<(Option<WindowId>, Layout, Option<BlockId>), String> {
+            let entries = self.call(|req| Message::List { req })?;
+            let window = entries
+                .iter()
+                .find_map(|m| match m {
+                    Message::Entry {
+                        entry:
+                            Entry::Block {
+                                block: b, window, ..
+                            },
+                        ..
+                    } if *b == block => Some(*window),
+                    _ => None,
+                })
+                .ok_or_else(|| format!("unknown block {block}"))?;
+            let (layout, zoomed) = entries
+                .into_iter()
+                .find_map(|m| match m {
+                    Message::Entry {
+                        entry:
+                            Entry::Window {
+                                window: w,
+                                layout,
+                                zoomed,
+                                ..
+                            },
+                        ..
+                    } if w == window => Some((layout, zoomed)),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            Ok((Some(window), layout.unwrap_or(Layout::Block(block)), zoomed))
         }
     }
 
-    /// Server to screen: assemble the checkpoint and paint its grid at
-    /// Ready, then pass raw output through until the block closes or the
-    /// connection ends.
-    fn show(mut conn: Conn<UnixStream>, held: Vec<Message>, block: BlockId) -> Ended {
-        // Locked per write: the main thread prints the detach line when it is done.
-        let mut stdout = std::io::stdout();
-        let mut held = held.into_iter();
-        let mut receiver = Some(Receiver::default());
-        while let Some(message) = held.next().or_else(|| conn.recv().ok()) {
-            let bytes = match message {
+    /// One block's connection and its local copy of the block's terminal.
+    struct Pane {
+        stream: UnixStream,
+        conn: Conn<UnixStream>,
+        next: u64,
+        attach: u64,
+        /// Assembles the attach checkpoint until Ready.
+        receiver: Option<Receiver>,
+        term: Option<(Grid, AnsiParser)>,
+        /// The pending lease request, if any.
+        asking: Option<u64>,
+        leased: bool,
+        /// The size last asked for, until the block reports a resize.
+        sizing: Option<Size>,
+        reader: Option<JoinHandle<()>>,
+    }
+
+    impl Pane {
+        fn send(&mut self, make: impl FnOnce(u64) -> Message) -> u64 {
+            let req = self.next;
+            self.next += 1;
+            // A failed send ends the reader too, which reports it.
+            let _ = self.conn.send(&make(req));
+            req
+        }
+
+        /// Applies a message from the block's connection.
+        fn take(&mut self, block: BlockId, message: Message) -> Result<Change, String> {
+            match message {
                 Message::Checkpoint {
                     block: b,
                     offset,
                     total,
                     data,
-                } if b == block => match receiver.as_mut().map(|r| r.push(offset, total, &data)) {
-                    Some(Ok(())) => continue,
-                    Some(Err(err)) => fail(&format!("bad checkpoint: {err}")),
-                    None => fail("checkpoint after ready"),
-                },
-                Message::Ready { block: b } if b == block => {
-                    match receiver.take().map(Receiver::finish) {
-                        Some(Ok((grid, _parser))) => paint(&grid),
-                        Some(Err(err)) => fail(&format!("bad checkpoint: {err}")),
-                        None => fail("ready twice"),
-                    }
+                } if b == block => {
+                    let receiver = self.receiver.as_mut().ok_or("checkpoint after ready")?;
+                    receiver
+                        .push(offset, total, &data)
+                        .map_err(|e| format!("bad checkpoint: {e}"))?;
                 }
-                Message::Output { block: b, data } if b == block => data,
+                Message::Ready { block: b } if b == block => {
+                    let receiver = self.receiver.take().ok_or("ready twice")?;
+                    let term = receiver
+                        .finish()
+                        .map_err(|e| format!("bad checkpoint: {e}"))?;
+                    self.term = Some(term);
+                    return Ok(Change::Ready);
+                }
+                Message::Output { block: b, data } if b == block => {
+                    if let Some((grid, parser)) = self.term.as_mut() {
+                        parser.advance(grid, &data);
+                    }
+                    return Ok(Change::Output(data));
+                }
                 Message::Event {
-                    event: rusty_mux_core::Event::BlockClosed { block: b },
+                    event: Event::BlockResized { block: b, size },
                     ..
                 } if b == block => {
-                    return Ended::Closed;
+                    if let Some((grid, _)) = self.term.as_mut() {
+                        grid.resize(size.cols().into(), size.rows().into());
+                    }
+                    self.sizing = None;
                 }
-                _ => continue,
-            };
-            if stdout
-                .write_all(&bytes)
-                .and_then(|()| stdout.flush())
-                .is_err()
-            {
-                return Ended::Stdout;
+                Message::Event {
+                    event: Event::BlockClosed { block: b },
+                    ..
+                } if b == block => return Ok(Change::Closed),
+                Message::Done { req, .. } if self.asking == Some(req) => {
+                    self.asking = None;
+                    self.leased = true;
+                    return Ok(Change::Leased);
+                }
+                Message::Failed { req, reason, .. } if req == self.attach => {
+                    return Ok(Change::Refused(reason));
+                }
+                Message::Failed { req, .. } => {
+                    // A refused lease, or input after losing it.
+                    if self.asking == Some(req) {
+                        self.asking = None;
+                    }
+                    self.leased = false;
+                }
+                _ => {}
             }
+            Ok(Change::None)
         }
-        Ended::Disconnected
+
+        fn hang_up(&self) {
+            let _ = self.stream.shutdown(Shutdown::Both);
+        }
+
+        fn size(&self) -> Option<Size> {
+            let (grid, _) = self.term.as_ref()?;
+            Size::new(
+                u16::try_from(grid.cols).ok()?,
+                u16::try_from(grid.rows).ok()?,
+            )
+            .ok()
+        }
     }
 
-    /// Keyboard to server, until Ctrl-], the end of keyboard input, or the
-    /// output side ending (`done`), which it checks every [`TICK`].
-    fn forward(
-        term: &Term,
-        stream: UnixStream,
-        block: BlockId,
-        writer: bool,
-        done: &AtomicBool,
-    ) -> Result<Stop, String> {
-        let mut conn = Conn::new(stream);
-        let mut buf = [0u8; 4096];
-        let mut req = 1_000_000;
-        loop {
-            if done.load(Ordering::Acquire) {
-                return Ok(Stop::OutputEnded);
+    /// What a block's message changed, for the screen.
+    enum Change {
+        None,
+        /// The attach checkpoint is in: the block can be drawn.
+        Ready,
+        Output(Vec<u8>),
+        Leased,
+        /// The block closed; told on its own connection after its last
+        /// output, so that output is shown first.
+        Closed,
+        /// The server would not attach the block.
+        Refused(String),
+    }
+
+    /// What the local terminal shows.
+    #[derive(PartialEq)]
+    enum Shown {
+        Nothing,
+        /// One block's raw output.
+        Passing(BlockId),
+        /// Several blocks, composed; the last frame drawn.
+        Composed(Option<Frame>),
+    }
+
+    struct App {
+        socket: PathBuf,
+        tx: Sender<Input>,
+        control: Conn<UnixStream>,
+        next: u64,
+        /// Whether the server keeps layouts; without, only the first block
+        /// shows.
+        layouts: bool,
+        window: Option<WindowId>,
+        layout: Option<Layout>,
+        zoomed: Option<BlockId>,
+        focus: BlockId,
+        panes: HashMap<BlockId, Pane>,
+        keys: Keys,
+        area: Size,
+        shown: Shown,
+        /// The pending split, whose new block takes the focus.
+        split: Option<u64>,
+        /// The split's new block, until the layout shows it.
+        arriving: Option<BlockId>,
+        ended: Option<Ended>,
+    }
+
+    impl App {
+        /// The main loop: until something ends it, take keys and server
+        /// messages and redraw.
+        fn serve(&mut self, term: &Term, inbox: &Inbox<Input>) -> Ended {
+            loop {
+                match inbox.recv_timeout(TICK) {
+                    Ok(input) => self.take(input),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return Ended::Disconnected,
+                }
+                while let Ok(input) = inbox.try_recv() {
+                    self.take(input);
+                }
+                let area = window_size(term, self.area);
+                if area != self.area {
+                    self.area = area;
+                    self.sync();
+                }
+                self.draw();
+                if let Some(ended) = self.ended.take() {
+                    return ended;
+                }
             }
-            let ready = term
-                .poll_readable(Some(TICK))
-                .map_err(|e| format!("waiting for the keyboard: {e:?}"))?;
-            if !ready {
-                continue;
+        }
+
+        fn take(&mut self, input: Input) {
+            match input {
+                Input::Keys(bytes) if bytes.is_empty() => self.end(Ended::Detached),
+                Input::Keys(bytes) => {
+                    for action in self.keys.feed(&bytes) {
+                        self.act(action);
+                    }
+                }
+                Input::Control(message) => self.on_control(message),
+                Input::Pane(block, message) => self.on_pane(block, message),
+                // The server closes every connection when it goes; a
+                // block's own is left to report it, after its last output.
+                Input::Ended(None) if !self.panes.is_empty() => {}
+                Input::Ended(None) => self.end(Ended::Disconnected),
+                // A block this client still shows lost its connection.
+                Input::Ended(Some(block)) if self.panes.contains_key(&block) => {
+                    self.end(Ended::Disconnected)
+                }
+                Input::Ended(Some(_)) => {}
             }
-            let n = term
-                .read_chunk(&mut buf)
-                .map_err(|e| format!("reading the keyboard: {e:?}"))?;
-            if n == 0 {
-                return Ok(Stop::Detached);
+        }
+
+        /// Keeps the first reason the client stops.
+        fn end(&mut self, ended: Ended) {
+            self.ended.get_or_insert(ended);
+        }
+
+        fn request(&mut self, make: impl FnOnce(u64) -> Message) -> u64 {
+            let req = self.next;
+            self.next += 1;
+            if self.control.send(&make(req)).is_err() {
+                self.end(Ended::Disconnected);
             }
-            let keys = &buf[..n];
-            let (keys, detach) = match keys.iter().position(|&b| b == DETACH) {
-                Some(at) => (&keys[..at], true),
-                None => (keys, false),
-            };
-            if writer && !keys.is_empty() {
-                req += 1;
-                let input = Message::Input {
+            req
+        }
+
+        fn act(&mut self, action: Action) {
+            let focus = self.focus;
+            match action {
+                Action::Input(data) => {
+                    if let Some(pane) = self.panes.get_mut(&focus).filter(|p| p.leased) {
+                        pane.send(|req| Message::Input {
+                            req,
+                            block: focus,
+                            data,
+                        });
+                    }
+                }
+                Action::Detach => self.end(Ended::Detached),
+                Action::Focus(dir) => {
+                    match screen::neighbor(&self.visible(), focus, dir) {
+                        Some(block) => self.focus = block,
+                        None => bell(),
+                    }
+                    self.sync();
+                }
+                Action::ToggleZoom if !self.layouts => bell(),
+                Action::ToggleZoom => match (self.zoomed, self.window) {
+                    (None, _) => {
+                        self.request(|req| Message::Zoom { req, block: focus });
+                    }
+                    (Some(_), Some(window)) => {
+                        self.request(|req| Message::Unzoom { req, window });
+                    }
+                    (Some(_), None) => bell(),
+                },
+                Action::Split { .. } if !self.layouts => bell(),
+                Action::Split { beside } => {
+                    let side = if beside { Side::Right } else { Side::Down };
+                    let req = self.request(|req| Message::Split {
+                        req,
+                        block: focus,
+                        side,
+                        launch: Launch::default(),
+                    });
+                    self.split = Some(req);
+                }
+                Action::Close => {
+                    self.request(|req| Message::CloseBlock { req, block: focus });
+                }
+                Action::Unknown => bell(),
+            }
+        }
+
+        fn on_control(&mut self, message: Message) {
+            match message {
+                Message::Event { event, .. } => self.on_event(event),
+                Message::Done {
                     req,
-                    block,
-                    data: keys.to_vec(),
-                };
-                if conn.send(&input).is_err() {
-                    return Ok(Stop::Detached);
+                    created: Some(id),
+                } if self.split == Some(req) => {
+                    self.split = None;
+                    self.arriving = Some(BlockId::from_uuid(id));
+                    self.sync();
+                }
+                Message::Failed { .. } => bell(),
+                _ => {}
+            }
+        }
+
+        fn on_event(&mut self, event: Event) {
+            match event {
+                Event::LayoutChanged {
+                    window,
+                    layout,
+                    zoomed,
+                } if Some(window) == self.window => {
+                    self.layout = layout;
+                    self.zoomed = zoomed;
+                    self.sync();
+                }
+                Event::WindowClosed { window } if Some(window) == self.window => {
+                    self.end(Ended::Closed)
+                }
+                // Without layouts the only block shown is the first.
+                Event::BlockClosed { block }
+                    if !self.layouts && self.layout == Some(Layout::Block(block)) =>
+                {
+                    self.layout = None;
+                    self.sync();
+                }
+                _ => {}
+            }
+        }
+
+        fn on_pane(&mut self, block: BlockId, message: Message) {
+            let Some(pane) = self.panes.get_mut(&block) else {
+                return;
+            };
+            match pane.take(block, message) {
+                Ok(Change::None) => {}
+                Ok(Change::Ready) => {
+                    if self.shown == Shown::Passing(block) {
+                        let painted = self.panes.get(&block).and_then(|p| p.term.as_ref());
+                        if let Some((grid, _)) = painted {
+                            write(&paint(grid), &mut self.ended);
+                        }
+                    }
+                    self.fit();
+                }
+                Ok(Change::Output(data)) => {
+                    if self.shown == Shown::Passing(block) {
+                        write(&data, &mut self.ended);
+                    }
+                }
+                Ok(Change::Leased) => self.fit(),
+                Ok(Change::Closed) => self.on_event(Event::BlockClosed { block }),
+                // Only the block asked for is worth stopping over; any
+                // other is closing, and the layout will drop it.
+                Ok(Change::Refused(reason)) if self.panes.len() == 1 => {
+                    self.end(Ended::Failed(reason))
+                }
+                Ok(Change::Refused(_)) => {}
+                Err(why) => self.end(Ended::Failed(why)),
+            }
+        }
+
+        /// The blocks shown and where: the zoomed block over everything,
+        /// else every block with room in the layout.
+        fn visible(&self) -> Vec<(BlockId, Rect)> {
+            let Some(layout) = &self.layout else {
+                return Vec::new();
+            };
+            let whole = Rect {
+                x: 0,
+                y: 0,
+                size: self.area,
+            };
+            match self.zoomed {
+                Some(block) if layout.blocks().contains(&block) => vec![(block, whole)],
+                _ => layout.rects(self.area),
+            }
+        }
+
+        /// Brings connections, leases and the screen in line with the
+        /// layout, the zoom, the focus and the terminal's size.
+        fn sync(&mut self) {
+            let visible = self.visible();
+            let Some(&(first, _)) = visible.first() else {
+                self.end(Ended::Closed);
+                return;
+            };
+            let shows = |block: BlockId| visible.iter().any(|(b, _)| *b == block);
+            if let Some(block) = self.arriving.filter(|b| shows(*b)) {
+                self.focus = block;
+                self.arriving = None;
+            }
+            if !shows(self.focus) {
+                self.focus = first;
+            }
+            let gone: Vec<BlockId> = self.panes.keys().filter(|b| !shows(**b)).copied().collect();
+            for block in gone {
+                if let Some(pane) = self.panes.remove(&block) {
+                    pane.hang_up();
                 }
             }
-            if detach {
-                return Ok(Stop::Detached);
+            for (block, _) in &visible {
+                if !self.panes.contains_key(block) {
+                    match self.open(*block) {
+                        Ok(pane) => {
+                            self.panes.insert(*block, pane);
+                        }
+                        Err(why) => self.end(Ended::Failed(why)),
+                    }
+                }
+            }
+            self.lease();
+            self.fit();
+            let shown = match visible.as_slice() {
+                [(only, _)] => Shown::Passing(*only),
+                _ => Shown::Composed(None),
+            };
+            if shown != self.shown || matches!(shown, Shown::Composed(_)) {
+                self.show(shown);
+            }
+        }
+
+        /// Holds the focused block's input lease and no other, so other
+        /// clients and agents may type into the blocks not in focus.
+        fn lease(&mut self) {
+            let focus = self.focus;
+            for (block, pane) in &mut self.panes {
+                match *block == focus {
+                    true if !pane.leased && pane.asking.is_none() => {
+                        let block = *block;
+                        pane.asking = Some(pane.send(|req| Message::AcquireLease { req, block }));
+                    }
+                    false if pane.leased => {
+                        let block = *block;
+                        pane.send(|req| Message::ReleaseLease { req, block });
+                        pane.leased = false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        /// Resizes the focused block to its place, if it holds the lease
+        /// and is a different size.
+        fn fit(&mut self) {
+            let focus = self.focus;
+            let Some((_, rect)) = self.visible().into_iter().find(|(b, _)| *b == focus) else {
+                return;
+            };
+            let Some(pane) = self.panes.get_mut(&focus) else {
+                return;
+            };
+            let size = rect.size;
+            if pane.leased && pane.sizing != Some(size) && pane.size().is_some_and(|s| s != size) {
+                pane.sizing = Some(size);
+                pane.send(|req| Message::Resize {
+                    req,
+                    block: focus,
+                    size,
+                });
+            }
+        }
+
+        /// Connects to the server for `block` and attaches to it.
+        fn open(&self, block: BlockId) -> Result<Pane, String> {
+            let stream = connect(&self.socket)?;
+            let mut conn = Conn::new(clone(&stream)?);
+            conn.send(&Message::Hello {
+                features: Features::CHECKPOINT_V3,
+                resume: None,
+            })
+            .map_err(|e| e.to_string())?;
+            match conn.recv().map_err(|e| e.to_string())? {
+                Message::Welcome { .. } => {}
+                other => return Err(format!("expected Welcome, got {other:?}")),
+            }
+            let tx = self.tx.clone();
+            let reader = std::thread::spawn(move || {
+                read(
+                    conn,
+                    &tx,
+                    move |message| Input::Pane(block, message),
+                    Some(block),
+                )
+            });
+            let mut pane = Pane {
+                conn: Conn::new(clone(&stream)?),
+                stream,
+                next: 1,
+                attach: 0,
+                receiver: Some(Receiver::default()),
+                term: None,
+                asking: None,
+                leased: false,
+                sizing: None,
+                reader: Some(reader),
+            };
+            pane.attach = pane.send(|req| Message::Attach { req, block });
+            Ok(pane)
+        }
+
+        /// Switches what the terminal shows: one block's own output, or
+        /// several composed on the alternate screen.
+        fn show(&mut self, shown: Shown) {
+            let bytes = match &shown {
+                Shown::Passing(block) => {
+                    let mut bytes = b"\x1b[?1049l".to_vec();
+                    if let Some((grid, _)) = self.panes.get(block).and_then(|p| p.term.as_ref()) {
+                        bytes.extend(paint(grid));
+                    }
+                    bytes
+                }
+                Shown::Composed(_) => match self.shown {
+                    Shown::Composed(_) => Vec::new(),
+                    // Undo the modes the passed-through program set, then
+                    // draw where the shell's screen is kept.
+                    _ => [RESTORE, b"\x1b[?1049h"].concat(),
+                },
+                Shown::Nothing => Vec::new(),
+            };
+            write(&bytes, &mut self.ended);
+            self.shown = shown;
+        }
+
+        /// Redraws the composed screen where it changed.
+        fn draw(&mut self) {
+            let Shown::Composed(last) = &self.shown else {
+                return;
+            };
+            let visible = self.visible();
+            let views: Vec<View<'_>> = visible
+                .iter()
+                .map(|(block, rect)| View {
+                    block: *block,
+                    rect: *rect,
+                    grid: self
+                        .panes
+                        .get(block)
+                        .and_then(|p| p.term.as_ref())
+                        .map(|(g, _)| g),
+                })
+                .collect();
+            let frame = screen::compose(self.area, &views, self.focus);
+            let bytes = screen::render(last.as_ref(), &frame);
+            write(&bytes, &mut self.ended);
+            self.shown = Shown::Composed(Some(frame));
+        }
+    }
+
+    impl Drop for Pane {
+        fn drop(&mut self) {
+            self.hang_up();
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
             }
         }
     }
 
-    /// A line for the user about a broken attach.
-    fn fail(why: &str) -> Vec<u8> {
-        format!("\r\nrusty-mux: {why}\r\n").into_bytes()
+    /// Writes to the terminal; a terminal that stops taking output ends
+    /// the client.
+    fn write(bytes: &[u8], ended: &mut Option<Ended>) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut stdout = std::io::stdout();
+        if stdout
+            .write_all(bytes)
+            .and_then(|()| stdout.flush())
+            .is_err()
+        {
+            ended.get_or_insert(Ended::Stdout);
+        }
+    }
+
+    fn bell() {
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(b"\x07").and_then(|()| stdout.flush());
     }
 
     fn parse_uuid(text: &OsString) -> Result<Uuid, String> {
