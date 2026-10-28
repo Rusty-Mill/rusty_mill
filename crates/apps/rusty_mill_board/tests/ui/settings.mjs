@@ -67,6 +67,27 @@ await dialog.getByRole("button", { name: "Close" }).click();
 await page.locator("#nav1 .item", { hasText: "rusty_mill" }).waitFor({ timeout: 3000 }).catch(() => {});
 check((await page.locator("#nav1 .item", { hasText: "rusty_mill" }).count()) >= 1, "and appears in the side panel at once");
 
+// A credential limited to some projects sees each repository with just those: a repository's one visible
+// project that is not its own stays in the Projects list, and cards added under it land there.
+check((await api(TOKEN, "settings_projects_set", { repos: { rusty_mill: { rocket_league: ["crates/apps/rocket_league"] }, super_board: { skills: ["skills"] } } })).status === 200, "(setup) two repositories");
+const scoped = await api(TOKEN, "settings_agent_add", { agent: { name: "scoped", role: "builder", projects: ["rocket_league", "skills"] } });
+check(scoped.status === 200, "(setup) an agent limited to rocket_league and skills");
+const limited = await browser.newPage({ viewport: { width: 1300, height: 900 } });
+limited.on("pageerror", (e) => errors.push(String(e)));
+await limited.goto(`${BASE}/#token=${scoped.body.token}`);
+await limited.waitForFunction(() => document.querySelector("#actor").value === "scoped" && document.querySelectorAll("#nav1 .item").length > 0);
+const sideItems = async () => (await limited.locator("#nav1 .item").allInnerTexts()).map((t) => t.split("\n")[0].trim());
+const sideItem = (name) => limited.locator("#nav1 .item").filter({ hasText: new RegExp(`^${name}\\d`) });
+check(JSON.stringify(await sideItems()) === JSON.stringify(["All repositories", "rusty_mill", "super_board", "rocket_league", "skills"]), `a limited agent sees its projects listed (${await sideItems()})`);
+await sideItem("super_board").click();
+check(JSON.stringify((await sideItems()).slice(3)) === '["skills"]', "choosing a repository keeps its one visible project");
+await sideItem("skills").click();
+await limited.fill("#title", "scoped card");
+await limited.click("#add");
+await limited.locator(".card", { hasText: "scoped card" }).waitFor();
+check((await api(scoped.body.token, "board_list", { project: "skills" })).body.cards.some((c) => c.title === "scoped card"), "and a card added under it lands in that project");
+await limited.close();
+
 // Roles.
 await page.click("#gear");
 await dialog.getByRole("button", { name: "Roles" }).click();
