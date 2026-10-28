@@ -26,17 +26,4 @@ jobs:
           ref: main
           fetch-depth: 1
       - name: Tag main with the next libs tag of this month
-        run: |
-          set -euo pipefail
-          git fetch --quiet origin 'refs/tags/libs-*:refs/tags/libs-*'
-          month="$(date -u +%Y.%m)"
-          last="$(git tag --list "libs-${month}.*" | sed "s/^libs-${month}\.//" | sort -n | tail -1)"
-          tag="libs-${month}.$(( ${last:--1} + 1 ))"
-          head="$(git rev-parse HEAD)"
-          if git tag --points-at "$head" | grep -q '^libs-'; then
-            echo "main ($head) already has $(git tag --points-at "$head" | grep '^libs-' | head -1)"
-            exit 0
-          fi
-          git tag "$tag" "$head"
-          git push origin "refs/tags/$tag"
-          echo "Tagged $head as $tag" >> "$GITHUB_STEP_SUMMARY"
+        run: bash .github/scripts/libs_tag.sh
