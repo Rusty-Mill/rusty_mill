@@ -308,10 +308,10 @@ async function openSettings(){
 function drawSettings(){
   const d=$("settings"),box=el("div");
   const tabs=el("div",null,"tabs");
-  for(const [id,label] of [["agents","Agents"],["repos","Repositories"],["roles","Roles"],["github","GitHub"],["apps","Apps"],["server","Server"]]){
+  for(const [id,label] of [["agents","Agents"],["repos","Repositories"],["roles","Roles"],["rules","Rules"],["github","GitHub"],["apps","Apps"],["server","Server"]]){
     const b=el("button",label,tab===id?"on":"");b.type="button";b.onclick=()=>{tab=id;secret=null;reposDraft=null;drawSettings()};tabs.append(b)}
   const close=el("button","Close");close.type="button";close.onclick=()=>d.close();close.style.marginLeft="auto";tabs.append(close);
-  box.append(tabs,{agents:agentsTab,repos:reposTab,roles:rolesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
+  box.append(tabs,{agents:agentsTab,repos:reposTab,roles:rolesTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
   d.replaceChildren(box);
 }
 /* After a change: re-read the settings, the board's roles and projects, and redraw. */
@@ -417,6 +417,20 @@ function rolesTab(){
   return t;
 }
 
+/* Card movement rules: on, moves follow the column table and each role's capabilities; off, any move but out of Done. */
+function rulesTab(){
+  const t=el("div"),err=el("div",null,"err");
+  if(!cfg.files.rules)t.append(unwritable("--settings-dir DIR"));
+  const on=(cfg.rules||{}).movement!=="open";
+  const box=field("input",{type:"checkbox",checked:on,disabled:!cfg.files.rules});
+  box.onchange=guard(err,()=>setting("settings_rules_set",{movement:box.checked?"enforced":"open"}));
+  const l=el("label");l.append(box," Enforce card movement rules");
+  t.append(l,err,el("p",on
+    ?"On: a card moves only along the column table, by a role holding that move's capability, and leaving Building, QA or Review needs the claim."
+    :"Off: anyone signed in with any capability may move any card to any column, except out of Done. Each such move is logged.","note"));
+  return t;
+}
+
 /* Apps signed in through OAuth (e.g. a claude.ai connector). Revoking one drops its tokens; it can sign in again. */
 function appsTab(){
   const t=el("div"),err=el("div",null,"err");
@@ -441,7 +455,7 @@ function serverTab(){
   row("Cards",s.tick?"rusty_tick at "+s.tick:"in memory (lost on restart)");
   row("OAuth sign-in",s.issuer||"off");
   row("Accepted hosts",(s.hosts||[]).join(", "));
-  for(const [k,label] of [["agents","Agents file"],["projects","Projects file"],["roles","Roles file"],["github","GitHub file"]])
+  for(const [k,label] of [["agents","Agents file"],["projects","Projects file"],["roles","Roles file"],["rules","Rules file"],["github","GitHub file"]])
     row(label,p[k]||"none (read-only here)");
   t.append(tbl,el("p","These come from the server's flags or its environment file and change with a restart.","note"));
   return t;

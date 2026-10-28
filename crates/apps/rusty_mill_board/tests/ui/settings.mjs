@@ -81,6 +81,17 @@ await page.waitForTimeout(400);
 check(JSON.stringify((await api(rotated, "board_roles")).body.roles.tester) === '["qa"]', "its capabilities are saved");
 check((await dialog.innerText()).includes("Verify built work"), "each capability is explained");
 
+// Rules: turning movement rules off and on is saved at once.
+await dialog.getByRole("button", { name: "Rules" }).click();
+const enforce = dialog.getByLabel("Enforce card movement rules");
+check(await enforce.isChecked(), "movement rules start on");
+await enforce.uncheck();
+await page.waitForFunction(() => document.querySelector("#settings")?.innerText.includes("except out of Done"));
+check((await api(TOKEN, "settings_get")).body.rules.movement === "open", "unticking turns them off");
+await dialog.getByLabel("Enforce card movement rules").check();
+await page.waitForFunction(() => document.querySelector("#settings")?.innerText.includes("along the column table"));
+check((await api(TOKEN, "settings_get")).body.rules.movement === "enforced", "ticking turns them back on");
+
 // Apps and Server: read-only views of sign-in and how the board was started.
 await dialog.getByRole("button", { name: "Apps" }).click();
 check((await dialog.innerText()).includes("OAuth sign-in is off"), "the Apps tab says when sign-in is off");

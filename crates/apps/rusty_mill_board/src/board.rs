@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind, ExecutionLink,
-    WORK_QUEUES, actionable, entry_column, import_id, text_hash,
+    MoveRules, WORK_QUEUES, actionable, entry_column, import_id, text_hash,
 };
 use crate::projects::Projects;
 use crate::store::Store;
@@ -69,6 +69,7 @@ pub type ProjectsSink = Box<dyn Fn(&Projects) -> Result<(), String> + Send + Syn
 pub struct Board<S> {
     store: S,
     roles: RwLock<Roles>,
+    rules: RwLock<MoveRules>,
     projects: RwLock<Projects>,
     projects_sink: Option<ProjectsSink>,
     clock: fn() -> i64,
@@ -98,6 +99,7 @@ impl<S: Store> Board<S> {
         Self {
             store,
             roles: RwLock::new(roles),
+            rules: RwLock::new(MoveRules::default()),
             projects: RwLock::new(Projects::default()),
             projects_sink: None,
             clock,
@@ -111,6 +113,13 @@ impl<S: Store> Board<S> {
             .projects
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = projects;
+        self
+    }
+
+    /// Start with these movement rules instead of [`MoveRules::Enforced`].
+    #[must_use]
+    pub fn with_move_rules(self, rules: MoveRules) -> Self {
+        self.set_move_rules(rules);
         self
     }
 
@@ -223,6 +232,19 @@ impl<S: Store> Board<S> {
             .roles
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = roles;
+    }
+
+    /// The movement rules in force.
+    pub fn move_rules(&self) -> MoveRules {
+        read(&self.rules)
+    }
+
+    /// Turn the movement rules on or off. The caller checks the actor may.
+    pub fn set_move_rules(&self, rules: MoveRules) {
+        *self
+            .rules
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = rules;
     }
 
     /// All cards, optionally one column only.
@@ -585,12 +607,24 @@ impl<S: Store> Board<S> {
         Err(BoardError::Conflict)
     }
 
-    /// Move a card.
+    /// Move a card, under the movement rules in force. A move made with the rules off is
+    /// logged, so what bypassed the table can be traced.
     ///
     /// # Errors
-    /// See [`Card::move_to`].
+    /// See [`Card::move_to`], or [`Card::move_freely`] when the rules are off.
     pub fn move_card(&self, id: Uuid, to: Column, by: &Actor) -> Result<Card, BoardError> {
-        self.apply(id, by, EventKind::Moved, |c, now| c.move_to(to, by, now))
+        match self.move_rules() {
+            MoveRules::Enforced => {
+                self.apply(id, by, EventKind::Moved, |c, now| c.move_to(to, by, now))
+            }
+            MoveRules::Open => {
+                let card = self.apply(id, by, EventKind::Moved, |c, now| {
+                    c.move_freely(to, by, now)
+                })?;
+                rusty_log::info!(card = %id, actor = %by.name, to = ?to, "card moved with movement rules off");
+                Ok(card)
+            }
+        }
     }
 
     /// Move a card to another project. Needs `Triage` or `Project`, and both projects in

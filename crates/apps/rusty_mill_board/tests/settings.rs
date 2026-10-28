@@ -9,11 +9,12 @@ use std::sync::Arc;
 use rusty_mcp_server::{HttpConfig, HttpHandler};
 use rusty_mill_board::api::Shared;
 use rusty_mill_board::board::{Board, Roles};
+use rusty_mill_board::domain::MoveRules;
 use rusty_mill_board::identities::Credentials;
 use rusty_mill_board::mcp;
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::settings::{
-    Files, ServerInfo, Settings, load_github, load_roles, open_credentials,
+    Files, ServerInfo, Settings, load_github, load_roles, load_rules, open_credentials,
 };
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
@@ -192,6 +193,7 @@ fn only_an_admin_may_change_settings() {
         "settings_roles_set",
         "settings_github_set",
         "settings_github_clear",
+        "settings_rules_set",
     ] {
         let (status, _, text) = call(f.addr, &builder, op, &json!({}));
         assert_eq!(status, 403, "{op}: {text}");
@@ -557,7 +559,7 @@ fn without_files_settings_can_be_read_but_not_changed() {
         .expect("ok");
     assert_eq!(
         get["files"],
-        json!({"agents": false, "projects": false, "roles": false, "github": false})
+        json!({"agents": false, "projects": false, "roles": false, "github": false, "rules": false})
     );
     for (op, body) in [
         (
@@ -567,6 +569,7 @@ fn without_files_settings_can_be_read_but_not_changed() {
         ("settings_projects_set", json!({"repos": {}})),
         ("settings_roles_set", json!({"roles": {"human": ["admin"]}})),
         ("settings_github_set", json!({"repo": "o/n", "token": "t"})),
+        ("settings_rules_set", json!({"movement": "open"})),
     ] {
         let err = settings
             .call(op, Some(&human), body)
@@ -582,6 +585,42 @@ fn without_files_settings_can_be_read_but_not_changed() {
             .call("board_list", Some(&human), json!({}))
             .is_none(),
         "other operations are not its"
+    );
+}
+
+#[test]
+fn an_admin_turns_movement_rules_off_and_on_and_the_choice_is_kept() {
+    let f = start("rules");
+    let builder = f.add_agent("claude-cloud", "builder");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    assert_eq!(out["rules"], json!({"movement": "enforced"}));
+    let (_, card, _) = call(f.addr, &builder, "card_add", &json!({"title": "t"}));
+    let id = card["card"]["id"].as_str().expect("id").to_owned();
+    let to = |column: &str| json!({"id": id, "to": column});
+    // Enforced: a builder may not move into Ready, and Backlog -> Done is no move at all.
+    assert_eq!(call(f.addr, &builder, "card_move", &to("ready")).0, 403);
+    assert_eq!(call(f.addr, &f.admin, "card_move", &to("done")).0, 422);
+
+    let (status, _, text) = f.admin("settings_rules_set", &json!({"movement": "open"}));
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(load_rules(&f.file("rules.json")), Ok(MoveRules::Open));
+    let (status, moved, text) = call(f.addr, &builder, "card_move", &to("ready"));
+    assert_eq!(
+        (status, moved["card"]["column"].as_str()),
+        (200, Some("ready")),
+        "{text}"
+    );
+    let (status, _, text) = call(f.addr, &builder, "card_move", &to("review"));
+    assert_eq!(status, 200, "{text}");
+
+    f.admin("settings_rules_set", &json!({"movement": "enforced"}));
+    assert_eq!(load_rules(&f.file("rules.json")), Ok(MoveRules::Enforced));
+    assert_eq!(call(f.addr, &builder, "card_move", &to("backlog")).0, 422);
+    assert_eq!(
+        f.admin("settings_rules_set", &json!({"movement": "sometimes"}))
+            .0,
+        422,
+        "an unknown setting is refused"
     );
 }
 
