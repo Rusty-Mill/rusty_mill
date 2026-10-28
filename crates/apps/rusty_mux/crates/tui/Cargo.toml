@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
-description = "Throwaway Phase 1 terminal client for rusty_mux: attaches the local terminal to one block over a Unix socket."
+description = "Terminal client for rusty_mux: shows a block's window on the local terminal over a Unix socket, drawing its split layout."
 repository = "https://github.com/Rusty-Mill/rusty_mill"
 publish = false
 
