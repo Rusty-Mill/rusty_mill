@@ -71,26 +71,27 @@ the next datagram.
 
 ## Predictive echo hook
 
-Transport-independent, but an ack alone is not causal: input written to the PTY before
-some output was read does not mean that output reflects it. Buffered output from before
-the keystroke, or a program's own output, could arrive first. So, as mosh does, the ack
-only bounds *when to check*, and the screen decides:
+Transport-independent, and **only a heuristic**: no ack proves that some output reflects
+some input. This section records the open problem; step 3 must design exact causality,
+epochs and suppression, and have them reviewed, before any implementation.
 
-- **Ack.** With a feature bit, the server stamps output with `echo_ack`: the newest
-  `Input` `req` written to the PTY at least a grace period (mosh uses 50 ms) before that
-  output was read. It means "an echo of this input, if any, has had time to arrive", not
-  "this output is the echo".
-- **Check.** The client keeps each prediction with the `req` of its keystroke. Once an
-  output carries `echo_ack >= req`, it compares the predicted cell with its grid after
-  applying that output: a match confirms the prediction, a mismatch drops every pending
-  prediction and lowers its confidence. Output with a smaller ack never clears a
-  prediction, so buffered or unrelated output cannot.
-- **Order and resume.** `req` is per connection and the ack only grows on it, so
-  reordering cannot happen inside one TCP stream; on the UDP transport the ack travels
-  with the state the datagram carries. On a reconnect or resume all predictions are
-  dropped and the attach snapshot repaints; the new connection's acks start afresh.
-- **Not covered.** A program that does not echo (a password prompt) never confirms, so
-  predictions stay underlined and expire; full rules belong in step 3's own design.
+- **Ack, as mosh has it.** With a feature bit, the server stamps output with `echo_ack`:
+  the newest `Input` `req` written to the PTY at least a grace period (mosh uses 50 ms)
+  before that output was read. It says the echo, if there is one, has *probably* had time
+  to arrive. It does not say this output is the echo.
+- **Check against the screen.** Once an output carries `echo_ack >= req`, the client
+  compares each prediction for that keystroke with its grid. A match confirms it; a
+  mismatch drops the pending predictions and lowers confidence.
+- **This can be wrong both ways.** Input written at t=0, then unrelated output read at
+  t=60 ms, carries that input's ack before any echo: the check rejects a correct
+  prediction (a false rejection), or a cell that happens to hold the predicted character
+  confirms a wrong one (a false confirmation). A slow program's echo after the grace
+  period gives the same false rejection. Resetting predictions on a reconnect or resume
+  limits the damage but does not fix this.
+- **Sensitive input.** A prediction draws the typed character before the program has
+  echoed it, so at a password prompt it would show the password, underlined or not, for
+  as long as it lasts. Step 3 must suppress predictions when the program has turned
+  echo off (on Unix the PTY's termios shows it; on Windows this is open), and test it.
 
 ## Tailnet
 
@@ -104,7 +105,7 @@ change without a reconnect. Unverified: it needs two nodes and a control server,
 1. Fix the `LocalRuntime` wake in `rusty_tokio`, with a latency test.
 2. Generic `conn::run`; TCP + `rusty_tls` listener behind an explicit flag, with client
    resume tokens and a heartbeat. Test: a client changes address and keeps its lease.
-3. Echo ack for predictive echo, with the causal rules above designed and reviewed
-   first; then the client's prediction display.
+3. Predictive echo: exact causality, epochs and password suppression designed and
+   reviewed first (above); then the echo ack and the client's prediction display.
 4. `rusty_mux_transport`: UDP datagrams keyed from the TLS session. Needs `rusty_tls` to
    expose `export_keying_material` (a `rusty_tls` change, an owner gate).
