@@ -414,8 +414,11 @@ mod tests {
             ForEach-Object { '{0} {1} {2} {3}' -f $_.IdentityReference.Value, \
             $_.AccessControlType, [int]$_.FileSystemRights, $_.IsInherited }";
         let powershell = |script: &str, path: &Path| {
+            // Windows PowerShell 5.1, run from PowerShell 7, would inherit
+            // 7's module path and fail to load `Get-Acl`.
             let out = std::process::Command::new("powershell")
                 .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .env_remove("PSModulePath")
                 .env("ACL_PATH", path)
                 .output()
                 .expect("powershell");
