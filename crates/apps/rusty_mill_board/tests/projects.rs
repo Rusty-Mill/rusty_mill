@@ -169,11 +169,25 @@ fn assign_needs_triage_and_clears_the_claim() {
     let dev = actor(&b, "claude", "builder", None);
     b.take(&dev, Some(id)).expect("take");
     assert_eq!(
-        b.assign(id, "orch", &dev),
+        b.assign(id, "orch", &actor(&b, "q", "qa", None)),
         Err(BoardError::Forbidden(
-            rusty_mill_board::domain::Capability::Triage
+            rusty_mill_board::domain::Capability::Project
         ))
     );
+    assert_eq!(
+        b.assign(id, "orch", &actor(&b, "gemini", "builder", None)),
+        Err(BoardError::Claimed("claude".into())),
+        "a builder does not take another's claimed card away"
+    );
+    let own = b
+        .assign(id, "orch", &dev)
+        .expect("a builder moves its own card");
+    assert_eq!((own.project.as_str(), own.claim), ("orch", None));
+    let unclaimed = ready_in(&b, "rl", "free");
+    b.assign(unclaimed, "orch", &actor(&b, "gemini", "builder", None))
+        .expect("or an unclaimed one");
+    b.assign(id, "rl", &actor(&b, "nano", "human", None))
+        .expect("back");
     let human = actor(&b, "nano", "human", None);
     assert_eq!(
         b.assign(id, "nope", &human),
@@ -449,4 +463,184 @@ fn a_failed_save_of_a_new_project_leaves_no_card_in_it_and_changes_nothing() {
         "live registry is the old one"
     );
     assert!(b.list(None).expect("list").is_empty(), "no orphan card");
+}
+
+#[test]
+fn a_builder_adds_a_project_but_never_changes_an_existing_one() {
+    let saved = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&saved);
+    let b = board().with_projects_sink(Box::new(move |p: &Projects| {
+        sink.lock().expect("lock").push(p.file_json()?);
+        Ok(())
+    }));
+    let dev = actor(&b, "claude", "builder", None);
+    let paths = |p: &[&str]| p.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+
+    let added = b
+        .add_project(
+            &dev,
+            "rusty_mill",
+            "term",
+            &paths(&["crates/libs/ui/rusty_term"]),
+        )
+        .expect("add");
+    assert_eq!(added.paths("term"), ["crates/libs/ui/rusty_term"]);
+    assert!(
+        b.projects().contains("rusty_mill"),
+        "a new repository has its own project"
+    );
+    assert_eq!(saved.lock().expect("lock").len(), 1);
+    b.add_in(&dev, "term", "a", "", vec![])
+        .expect("cards can go there");
+
+    for (repo, name, p, why) in [
+        ("default", "rl", "crates/x", "already exists"),
+        ("default", "rl2", "crates/apps/rocket_league", "overlaps"),
+        (
+            "default",
+            "rl3",
+            "crates/apps/rocket_league/sub",
+            "overlaps",
+        ),
+        ("default", "apps", "crates/apps", "overlaps"),
+        ("default", "up", "../escape", "inside the repository"),
+    ] {
+        match b.add_project(&dev, repo, name, &paths(&[p])) {
+            Err(BoardError::Refused(m)) => assert!(m.contains(why), "{name}: {m}"),
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    assert_eq!(
+        saved.lock().expect("lock").len(),
+        1,
+        "a refusal saves nothing"
+    );
+
+    let qa = actor(&b, "q", "qa", None);
+    assert_eq!(
+        b.add_project(&qa, "default", "x", &paths(&["x"]))
+            .map(|_| ()),
+        Err(BoardError::Forbidden(
+            rusty_mill_board::domain::Capability::Project
+        ))
+    );
+    let scoped = actor(&b, "s", "builder", Some(&["rl"]));
+    b.add_project(&scoped, "default", "y", &paths(&["y"]))
+        .expect("a scoped builder may add one");
+    assert!(
+        matches!(
+            b.add_in(&scoped, "y", "a", "", vec![]),
+            Err(BoardError::OutOfScope(_))
+        ),
+        "but adding it does not widen its scope"
+    );
+}
+
+#[test]
+fn a_board_without_a_projects_file_refuses_a_new_project() {
+    let b = board();
+    let dev = actor(&b, "claude", "builder", None);
+    assert!(matches!(
+        b.add_project(&dev, "default", "x", &["x".to_owned()]),
+        Err(BoardError::Refused(m)) if m.contains("no projects file")
+    ));
+}
+
+#[test]
+fn a_card_in_an_unregistered_project_does_not_block_an_unrelated_change() {
+    let store = MemStore::default();
+    let mut stray = Card::new("stray", "", vec![], 0).expect("card");
+    "gone".clone_into(&mut stray.project);
+    store
+        .insert(&stray, Event::of(&stray, EventKind::Created, "x"))
+        .expect("insert");
+    let b = Board::new(store, Roles::default()).with_projects(projects());
+    let more = projects()
+        .with_project("default", "extra", &["extra".to_owned()])
+        .expect("more");
+    b.set_projects(more, |_| Ok(()))
+        .expect("additive change is not blocked");
+}
+
+/// A persist step that signals `reached` and waits for `go` before it returns.
+fn gate() -> (
+    impl Fn(&Projects) -> Result<(), String> + Send + Sync + 'static,
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+) {
+    let (reached, at_persist) = mpsc::channel();
+    let (go, release) = mpsc::channel::<()>();
+    let (reached, release) = (Mutex::new(reached), Mutex::new(release));
+    let persist = move |_: &Projects| {
+        reached.lock().expect("lock").send(()).expect("send");
+        release.lock().expect("lock").recv().expect("go");
+        Ok(())
+    };
+    (persist, at_persist, go)
+}
+
+fn one(path: &str) -> Vec<String> {
+    vec![path.to_owned()]
+}
+
+#[test]
+fn concurrent_project_adds_both_survive() {
+    let (persist, at_persist, go) = gate();
+    let first = Arc::new(AtomicBool::new(true));
+    let b = Arc::new(board().with_projects_sink(Box::new(move |p: &Projects| {
+        if first.swap(false, Ordering::SeqCst) {
+            persist(p)?;
+        }
+        Ok(())
+    })));
+    let dev = actor(&b, "claude", "builder", None);
+    let a = {
+        let (b, dev) = (b.clone(), dev.clone());
+        thread::spawn(move || b.add_project(&dev, "default", "a", &one("a")).map(|_| ()))
+    };
+    at_persist.recv().expect("the first add is persisting");
+    let second = {
+        let (b, dev) = (b.clone(), dev.clone());
+        thread::spawn(move || b.add_project(&dev, "default", "c", &one("c")).map(|_| ()))
+    };
+    thread::sleep(SOON);
+    go.send(()).expect("go");
+    a.join().expect("join").expect("first add");
+    second.join().expect("join").expect("second add");
+    let projects = b.projects();
+    assert!(
+        projects.contains("a") && projects.contains("c"),
+        "{projects:?}"
+    );
+}
+
+#[test]
+fn a_project_add_keeps_an_administrators_concurrent_change() {
+    let (persist, at_persist, go) = gate();
+    let b = Arc::new(board().with_projects_sink(Box::new(|_: &Projects| Ok(()))));
+    let admin = {
+        let b = b.clone();
+        let next = projects()
+            .with_project("default", "admins", &one("admins"))
+            .expect("next");
+        thread::spawn(move || b.set_projects(next, persist))
+    };
+    at_persist.recv().expect("the admin change is persisting");
+    let dev = actor(&b, "claude", "builder", None);
+    let add = {
+        let b = b.clone();
+        thread::spawn(move || {
+            b.add_project(&dev, "default", "mine", &one("mine"))
+                .map(|_| ())
+        })
+    };
+    thread::sleep(SOON);
+    go.send(()).expect("go");
+    admin.join().expect("join").expect("admin change");
+    add.join().expect("join").expect("add");
+    let projects = b.projects();
+    assert!(
+        projects.contains("admins") && projects.contains("mine"),
+        "{projects:?}"
+    );
 }

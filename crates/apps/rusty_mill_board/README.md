@@ -15,8 +15,13 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 [deploy/README.md](deploy/README.md#signing-in-from-claudeai-oauth).
 
 - **Columns:** backlog, ready, building, qa, review, done, blocked.
-- **Rules:** each move needs a capability (triage, build, qa, review, merge); leaving
-  building/qa/review needs your claim. A role is a set of capabilities; roles are
+- **Rules:** each move needs a capability (triage, build, qa, review, merge, close); leaving
+  building/qa/review needs your claim. `close` moves a card from building or qa straight to done when
+  its work already merged on the forge, and lets `card_add` with `done: true` record merged work that never
+  had a card (bookkeeping, not a review: it never makes a card someone's work in `card_take`). The default
+  `builder` role holds it, and `project`: `project_add` adds a project (or a repository) whose paths overlap no
+  other project's. It never changes or removes one, so no credential's reach widens; it needs the board's
+  projects file (`--projects` or `--settings-dir`). A role is a set of capabilities; roles are
   defined by the caller, `Roles::default()` is a starting set. `actor`/`role` are
   trusted as given: this is a workflow guard between cooperating agents, and the
   bearer token is the authentication.
@@ -30,7 +35,7 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   (`{"rocket_league": ["crates/apps/rocket_league"]}`, or `{"repos": {"rusty_mill": {...}, "other": {...}}}`
   for several repositories; project names are unique across them). Every repository also has a project named
   like itself that owns the paths no other project of it does (a flat file is the repository `default`). A card belongs to one project (old cards to
-  `default`; `card_add` takes `project`, `card_assign` moves one and needs Triage). A credential in
+  `default`; `card_add` takes `project`, `card_assign` moves one and needs Triage, or `project` for a card nobody else has claimed). A credential in
   `--identities` may carry `"projects": [...]`: it then cannot see, take or change any other project's cards,
   checked inside every write's compare-and-swap, so a card re-assigned mid-call is still refused.
   `board_list` and `card_take` take a `project` filter. The UI has a two-pane side panel: repositories with card counts, and for the chosen one
@@ -41,7 +46,7 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   enforces the paths too: see its README. GitHub sync is project-blind (imported issues land in `default`);
   `board_events` carries no card text but does not hide other projects' event metadata.
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
-  `card_get`, `card_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_plan`, `card_comment`. The web API
+  `card_get`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_plan`, `card_comment`. The web API
   exposes the same table, so the two cannot drift.
 - **Settings.** The ⚙ button opens a view to add and remove agents (credentials: name, role, project limit; a
   token is shown once; "New token" replaces it), edit repositories and their projects, edit roles, and configure

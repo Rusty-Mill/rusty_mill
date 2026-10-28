@@ -83,6 +83,9 @@ pub struct NewTask {
     pub tags: Vec<String>,
     /// Where to put it; `None` appends to the end of the list.
     pub sort_order: Option<i64>,
+    /// Create it already closed (stamping `completed_ms`); `None` is open. One write, so a
+    /// caller recording finished work never leaves an open task behind.
+    pub status: Option<Status>,
 }
 
 /// `Option<Option<_>>` fields: outer `None` leaves the field alone,
@@ -335,6 +338,9 @@ impl Service {
         task.repeat_flag = clean_short(new.repeat_flag, "repeatFlag")?;
         task.items = clean_items(new.items)?;
         task.tags = self.clean_tags(new.tags)?;
+        if let Some(status) = new.status {
+            apply_status(&mut task, status, now);
+        }
         self.tasks.insert(task.clone())?;
         Ok(task)
     }
@@ -1093,6 +1099,23 @@ mod tests {
         assert!(utc_start <= now && now < utc_end);
         let (plus2_start, _) = day_bounds(now, 120);
         assert_eq!(plus2_start, utc_end - 2 * 3_600_000);
+    }
+
+    #[test]
+    fn a_task_can_be_created_closed_in_one_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = Service::open(dir.path(), Box::new(|| 5_i64)).unwrap();
+        let new = |status| NewTask {
+            list_id: INBOX_ID,
+            title: "t".into(),
+            status,
+            ..NewTask::default()
+        };
+        let done = service.create_task(new(Some(Status::Done))).unwrap();
+        assert_eq!((done.status, done.completed_ms), (Status::Done, Some(5)));
+        assert_eq!(service.task(done.id).unwrap().version, done.version);
+        let open = service.create_task(new(None)).unwrap();
+        assert_eq!((open.status, open.completed_ms), (Status::Open, None));
     }
 
     #[test]

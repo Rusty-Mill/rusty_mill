@@ -29,7 +29,7 @@ use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
 use rusty_mill_board::mcp;
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::settings::{
-    Files, GithubFile, Settings, load_github, load_roles, open_credentials,
+    Files, GithubFile, Settings, load_github, load_roles, open_credentials, projects_sink,
 };
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
@@ -280,8 +280,11 @@ fn run(cli: Cli) -> Result<(), String> {
         Some(path) if path.exists() => Projects::load(path)?,
         _ => Projects::default(),
     };
-    let board: Arc<Shared> =
-        Arc::new(Board::new(store, roles.clone()).with_projects(projects.clone()));
+    let mut board = Board::new(store, roles.clone()).with_projects(projects.clone());
+    if let Some(path) = &files.projects {
+        board = board.with_projects_sink(projects_sink(path.clone()));
+    }
+    let board: Arc<Shared> = Arc::new(board);
 
     // The GitHub sync starts from its file, else from the flags.
     let github = match files

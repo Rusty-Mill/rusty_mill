@@ -61,18 +61,25 @@ pub enum Capability {
     Review,
     /// Merge a reviewed card to Done.
     Merge,
+    /// Record as Done a card from Building or QA whose work already merged
+    /// outside the board's flow (the PR was reviewed and merged on the forge).
+    Close,
+    /// Add a project (never change or remove one).
+    Project,
     /// Change the board's settings: agents and their credentials, repositories, projects, roles.
     Admin,
 }
 
 impl Capability {
     /// Every capability, in display order.
-    pub const ALL: [Capability; 6] = [
+    pub const ALL: [Capability; 8] = [
         Capability::Triage,
         Capability::Build,
         Capability::Qa,
         Capability::Review,
         Capability::Merge,
+        Capability::Close,
+        Capability::Project,
         Capability::Admin,
     ];
 }
@@ -115,6 +122,7 @@ pub fn required_capability(from: Column, to: Column) -> Result<Option<Capability
         (Qa, Building) | (Qa, Review) => Ok(Some(Capability::Qa)),
         (Review, Building) => Ok(Some(Capability::Review)),
         (Review, Done) => Ok(Some(Capability::Merge)),
+        (Building, Done) | (Qa, Done) => Ok(Some(Capability::Close)),
         _ => Err(BoardError::NoSuchMove { from, to }),
     }
 }
@@ -130,11 +138,13 @@ pub fn entry_column(column: Column) -> Option<Column> {
 }
 
 /// Whether someone holding `caps` can move a card forward out of `column`
-/// (the test for "this card is for my role").
+/// (the test for "this card is for my role"). `Close` records work finished
+/// elsewhere, so it never makes a card someone's work.
 pub fn actionable(column: Column, caps: &BTreeSet<Capability>) -> bool {
     Column::ALL.iter().any(|to| {
         *to != Column::Blocked
-            && matches!(required_capability(column, *to), Ok(Some(cap)) if caps.contains(&cap))
+            && matches!(required_capability(column, *to),
+                Ok(Some(cap)) if cap != Capability::Close && caps.contains(&cap))
     })
 }
 
@@ -805,6 +815,48 @@ mod tests {
         );
         assert_eq!(entry_column(Column::Ready), Some(Column::Building));
         assert_eq!(entry_column(Column::Qa), None);
+        let closer = caps(&[Capability::Build, Capability::Close]);
+        assert!(
+            !actionable(Column::Qa, &closer),
+            "close does not make QA work a builder's"
+        );
+    }
+
+    #[test]
+    fn close_records_merged_work_as_done() {
+        let dev = actor("dev", &[Capability::Build]);
+        let closer = actor("closer", &[Capability::Build, Capability::Close]);
+        for from in [Column::Building, Column::Qa] {
+            let mut c = card();
+            c.column = from;
+            let held = c.claim(&dev, 1).expect("claim");
+            assert_eq!(
+                held.move_to(Column::Done, &dev, 2),
+                Err(BoardError::Forbidden(Capability::Close))
+            );
+            assert_eq!(
+                held.move_to(Column::Done, &closer, 2),
+                Err(BoardError::NotClaimant),
+                "close still needs the claim"
+            );
+            let c = c.claim(&closer, 1).expect("claim");
+            assert_eq!(
+                c.move_to(Column::Done, &closer, 2).expect("close").column,
+                Column::Done
+            );
+        }
+        for from in [Column::Backlog, Column::Ready, Column::Blocked] {
+            let mut c = card();
+            c.column = from;
+            assert_eq!(
+                c.move_to(Column::Done, &closer, 1),
+                Err(BoardError::NoSuchMove {
+                    from,
+                    to: Column::Done
+                }),
+                "only started work can be closed"
+            );
+        }
     }
 
     #[test]

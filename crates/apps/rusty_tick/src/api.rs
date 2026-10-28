@@ -539,6 +539,7 @@ fn route_tasks(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
                 items: input.items,
                 tags: input.tags,
                 sort_order: input.sort_order,
+                status: input.status,
             })?;
             Ok(Response::json(StatusCode::CREATED, &TaskDto::from(task)))
         }

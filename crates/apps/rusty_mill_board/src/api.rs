@@ -181,6 +181,19 @@ struct AssignArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct ProjectAddArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// Repository the project belongs to (see `board_projects`); a new name adds a repository.
+    repo: String,
+    /// Project name: 1-40 of a-z 0-9 _ -, unique across repositories.
+    name: String,
+    /// Repository paths the project's cards may change, e.g. `crates/libs/ui/rusty_term`. None
+    /// may overlap another project's path in that repository.
+    paths: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct PlanArgs {
     #[serde(flatten)]
     who: Who,
@@ -210,6 +223,8 @@ struct AddArgs {
     tags: Option<Vec<String>>,
     /// The project the card belongs to (default: `default`; see `board_projects`).
     project: Option<String>,
+    /// Create it straight in Done, to record work that already merged (needs `close`).
+    done: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -453,10 +468,16 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_add",
-            "Create a card in Backlog.",
+            "Create a card in Backlog, or with `done: true` straight in Done to record work that already merged (needs `close`; put the merged PR in the body).",
             |b, i, a: AddArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.add_in(
+                let add = if a.done == Some(true) {
+                    Board::add_done_in
+                } else {
+                    Board::add_in
+                };
+                card(add(
+                    b,
                     &who,
                     a.project.as_deref().unwrap_or(DEFAULT_PROJECT),
                     &a.title,
@@ -485,8 +506,17 @@ pub fn ops() -> Vec<Op> {
             },
         ),
         op(
+            "project_add",
+            "Add a project to a repository (needs `project`). Additive only: existing projects are never changed or removed, and a new project's paths may not overlap another's. Returns the projects as `board_projects` does.",
+            |b, i, a: ProjectAddArgs| {
+                let who = acting(b, i, &a.who)?;
+                let projects = b.add_project(&who, &a.repo, &a.name, &a.paths)?;
+                Ok(json!({ "repos": projects }))
+            },
+        ),
+        op(
             "card_assign",
-            "Move a card to another project (needs Triage). Drops any claim.",
+            "Move a card to another project (needs `triage`, or `project` for a card nobody else has claimed). Drops any claim.",
             |b, i, a: AssignArgs| {
                 let who = acting(b, i, &a.who)?;
                 card(b.assign(id(&a.id)?, &a.project, &who)?)
@@ -563,6 +593,7 @@ pub fn ops() -> Vec<Op> {
 mod tests {
     use super::*;
     use crate::board::Roles;
+    use crate::domain::Capability;
     use crate::store::MemStore;
 
     fn call(name: &str, args: Value) -> Result<Value, CallError> {
@@ -634,6 +665,36 @@ mod tests {
     }
 
     #[test]
+    fn card_add_done_records_merged_work_and_needs_close() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let added = call_as(
+            &board,
+            Some(&ident("claude", "builder")),
+            "card_add",
+            json!({"title": "shipped in #1", "done": true}),
+        )
+        .expect("add done");
+        assert_eq!(added["card"]["column"], "done");
+        assert!(matches!(
+            call_as(
+                &board,
+                Some(&ident("q", "qa")),
+                "card_add",
+                json!({"title": "t", "done": true})
+            ),
+            Err(CallError::Board(BoardError::Forbidden(Capability::Close)))
+        ));
+        let plain = call_as(
+            &board,
+            Some(&ident("q", "qa")),
+            "card_add",
+            json!({"title": "t", "done": false}),
+        )
+        .expect("add");
+        assert_eq!(plain["card"]["column"], "backlog");
+    }
+
+    #[test]
     fn a_credential_fixes_actor_and_role() {
         let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
         let dev = ident("claude", "builder");
@@ -681,7 +742,11 @@ mod tests {
                 me["actor"].clone(),
                 me["capabilities"].clone()
             ),
-            (json!(true), json!("claude"), json!(["build"]))
+            (
+                json!(true),
+                json!("claude"),
+                json!(["build", "close", "project"])
+            )
         );
         let anon = call_as(&board, None, "board_whoami", json!({})).expect("whoami");
         assert_eq!(anon["authenticated"], json!(false));
