@@ -58,6 +58,8 @@ check((await titles()).join() === "Skills card", "choosing a repository filters 
 await page.locator("#nav1 .item", { hasText: "rusty_mill" }).first().click();
 check((await titles()).join() === "Mill loose card,Orch card,RL card", "another repository, its three cards");
 check((await page.locator("#side nav").count()) === 1, "choosing a repository opens no second column");
+const listed = (await repoButtons()).slice(3, -2).join("|");
+check(listed === "orch 1|rl 1|rusty_mill 1", `and the Projects list narrows to that repository's projects (${listed})`);
 
 await project("rl").click();
 check((await titles()).join() === "RL card", "choosing a project narrows further");

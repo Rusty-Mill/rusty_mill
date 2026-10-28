@@ -206,9 +206,9 @@ function renderSide(){
   if(projects().length>1){
     n1.append(el("h2","Repositories"),item("All repositories",cards.length,!sel.repo,()=>pick("","")));
     for(const r of names)n1.append(item(r,count(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
-    // Every project in one list, so one project's cards are a click away. A repository's only project is
-    // left out: it is the repository, listed above.
-    const named=Object.values(repos).flatMap(ps=>ps.length>1?ps:[]).sort();
+    // The projects of the chosen repository, or of every repository, so one project's cards are a click
+    // away. A repository's only project is left out: it is the repository, listed above.
+    const named=Object.entries(repos).filter(([r])=>!sel.repo||r===sel.repo).flatMap(([,ps])=>ps.length>1?ps:[]).sort();
     if(named.length)n1.append(el("h2","Projects","sep"));
     for(const p of named)n1.append(item(p,count(k=>k.project===p),sel.project===p,()=>pick(repoOf(p),p)));
   }

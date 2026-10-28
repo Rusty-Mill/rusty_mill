@@ -6,4 +6,4 @@ changelog: Mill Board side panel drops the second column of a repository's proje
 
 - **Changed:** choosing a repository no longer opens a second column of its projects. The Projects list in the
   panel now names every project of a repository that has several, its own (loose) project included; a repository's
-  only project is the repository itself and is not repeated.
+  only project is the repository itself and is not repeated. With a repository chosen, the list shows only its projects.
