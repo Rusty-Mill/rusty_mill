@@ -64,7 +64,7 @@ Errors are `{"error":{"code","message"}}`: 400 malformed request, 401, 404,
 | GET, POST | `/api/v1/lists` | `{"name"}` |
 | GET, PATCH, DELETE | `/api/v1/lists/{id}` | PATCH `{"name","color","archived","viewMode","sortType","sortOrder"}` (`viewMode`: `list`, `kanban`, `timeline`, `matrix`); delete removes its tasks |
 | GET | `/api/v1/lists/{id}/tasks` | `?status=open\|done\|wontdo&sort=manual\|due` |
-| POST | `/api/v1/tasks` | `{"listId","title","notes","priority","startMs","dueMs","isAllDay","timeZone","reminders","repeatFlag","items","tags","parentId"}` |
+| POST | `/api/v1/tasks` | `{"listId","title","notes","priority","startMs","dueMs","isAllDay","timeZone","reminders","repeatFlag","items","tags","parentId","status"}`; `status` (default `open`) creates it closed in one write |
 | GET, PATCH, DELETE | `/api/v1/tasks/{id}` | PATCH: absent = keep, `"dueMs":null` = clear; delete removes subtasks |
 | POST | `/api/v1/tasks/{id}/complete`, `/reopen`, `/restore` | `DELETE /tasks/{id}` moves to the trash; `?purge=true` removes it for good |
 | DELETE | `/api/v1/trash` | empties the trash |

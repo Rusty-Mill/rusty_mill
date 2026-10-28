@@ -230,6 +230,7 @@ pub struct CreateTask {
     #[serde(default)]
     pub tags: Vec<String>,
     pub sort_order: Option<i64>,
+    pub status: Option<Status>,
 }
 
 #[derive(Deserialize)]

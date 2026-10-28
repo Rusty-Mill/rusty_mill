@@ -645,7 +645,7 @@ impl<T: TickApi> Store for TickStore<T> {
 
     fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         check_claim(card)?;
-        let body = json!({
+        let mut body = json!({
             "id": card.id,
             "listId": self.list_for(&card.project)?,
             "title": card.title,
@@ -653,6 +653,11 @@ impl<T: TickApi> Store for TickStore<T> {
             "priority": card.priority,
             "tags": task_tags(card),
         });
+        // A card recorded straight in Done is created closed, in the same request: never an
+        // open task left behind if a second write failed.
+        if card.column == Column::Done {
+            body["status"] = json!("done");
+        }
         let (status, _) = self
             .tick
             .send(&TickRequest::new("POST", "/tasks").body(body))?;
@@ -671,13 +676,6 @@ impl<T: TickApi> Store for TickStore<T> {
             1
         } else {
             self.put_doc(card, 1)?
-        };
-        // rusty_tick creates tasks open; a card recorded straight in Done closes its task
-        // (its `board:done` tag already reads as Done if this request is lost).
-        let version = if card.column == Column::Done {
-            self.patch_task(card.id, json!({"status": "done"}), version)?
-        } else {
-            version
         };
         self.record(event, version)
     }
