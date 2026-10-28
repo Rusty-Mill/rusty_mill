@@ -7,7 +7,7 @@ The board is the only state; it enforces who may move a card where.
 RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788                          # MCP over stdio
 RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.0.0.1:8787 --auth-token S
 rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone when it stops
-# UI: http://127.0.0.1:8787/#token=S   API: POST /api/<op>   MCP: /mcp
+# UI: http://127.0.0.1:8787 (asks for the token; #token=S also works)   API: POST /api/<op>   MCP: /mcp
 ```
 
 `--issuer https://board.example.com` adds OAuth sign-in for `/mcp`, so a claude.ai connector can

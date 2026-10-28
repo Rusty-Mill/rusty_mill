@@ -75,9 +75,13 @@ impl Features {
     /// since older decoders skip the fields.
     pub const LAYOUT: Self = Self(1 << 15);
 
-    /// RTCP v4 headless checkpoints (cell colours carry default/explicit
-    /// provenance) transferred in ordered Checkpoint chunks.
+    /// Reserved: superseded RTCP v4 checkpoint capability (no palette tags,
+    /// DECSC pen or theme-following status line).
     pub const CHECKPOINT_V4: Self = Self(1 << 16);
+
+    /// RTCP v5 headless checkpoints (cell colours carry default, palette or
+    /// explicit provenance) transferred in ordered Checkpoint chunks.
+    pub const CHECKPOINT_V5: Self = Self(1 << 17);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -333,7 +337,7 @@ pub enum Message {
         block: BlockId,
         data: Vec<u8>,
     },
-    /// A chunk of RTCP v4, negotiated with CHECKPOINT_V4. Offsets must be
+    /// A chunk of RTCP v5, negotiated with CHECKPOINT_V5. Offsets must be
     /// contiguous from zero and total is constant throughout one transfer.
     Checkpoint {
         block: BlockId,

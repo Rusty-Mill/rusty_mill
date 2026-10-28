@@ -169,7 +169,7 @@ fn only_writes_go_unanswered() {
 #[test]
 fn methods_need_the_features_their_messages_are_gated_by() {
     let needs = |name| method(name).expect(name).needs;
-    assert_eq!(needs("attach"), Features::CHECKPOINT_V4);
+    assert_eq!(needs("attach"), Features::CHECKPOINT_V5);
     assert_eq!(needs("sync"), Features::SYNC);
     assert_eq!(needs("terminal.format"), Features::BLOCK_CALL);
     assert_eq!(needs("list"), Features::INSPECT);

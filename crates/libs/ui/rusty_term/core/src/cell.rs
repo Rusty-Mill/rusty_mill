@@ -137,31 +137,71 @@ pub struct Pen {
     /// Underline color as `0xRRGGBB` (SGR 58). Only consulted when
     /// [`ATTR_UNDERLINE_COLOR`] is set; otherwise the underline follows `fg`.
     pub underline_color: u32,
+    /// [`Source::tag`] of the foreground: `1 + n` while it is palette entry
+    /// `n` (so OSC 4 recolours it), `0` otherwise.
+    pub fg_index: u16,
+    /// [`Source::tag`] of the background.
+    pub bg_index: u16,
+}
+
+/// Where a pen colour comes from: the terminal default (SGR 39/49), a
+/// palette entry (SGR 30-37, 90-97, `38;5;n` and their backgrounds), which
+/// OSC 4 can change, or RGB the child gave (`38;2`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Source {
+    Default,
+    Index(u8),
+    Rgb,
+}
+
+impl Source {
+    /// The colour's palette tag: `1 + n` for entry `n`, `0` otherwise.
+    pub(crate) fn tag(self) -> u16 {
+        match self {
+            Source::Index(n) => u16::from(n) + 1,
+            Source::Default | Source::Rgb => 0,
+        }
+    }
+
+    /// The palette entry a [`Source::tag`] names, if any.
+    pub(crate) fn entry(tag: u16) -> Option<u8> {
+        u8::try_from(tag.checked_sub(1)?).ok()
+    }
 }
 
 impl Pen {
     /// The reset pen in `fg`/`bg`, both flagged as the default colours.
     pub(crate) fn default_colors(fg: u32, bg: u32) -> Self {
         Pen {
-            fg,
-            bg,
             attrs: ATTR_DEFAULT_COLORS,
-            underline_color: fg,
+            ..Pen::rgb(fg, bg)
         }
     }
 
-    /// Set the foreground to `rgb`, as the default colour when `default`
-    /// (SGR 39) or as an explicit one otherwise.
-    pub(crate) fn set_fg(&mut self, rgb: u32, default: bool) {
-        self.fg = rgb;
-        self.attrs = flag(self.attrs, ATTR_FG_DEFAULT, default);
+    /// A pen in explicit `fg`/`bg` with no attributes.
+    fn rgb(fg: u32, bg: u32) -> Self {
+        Pen {
+            fg,
+            bg,
+            attrs: 0,
+            underline_color: fg,
+            fg_index: 0,
+            bg_index: 0,
+        }
     }
 
-    /// Set the background to `rgb`, as the default colour when `default`
-    /// (SGR 49) or as an explicit one otherwise.
-    pub(crate) fn set_bg(&mut self, rgb: u32, default: bool) {
+    /// Set the foreground to `rgb`, taken from `source`.
+    pub(crate) fn set_fg(&mut self, rgb: u32, source: Source) {
+        self.fg = rgb;
+        self.fg_index = source.tag();
+        self.attrs = flag(self.attrs, ATTR_FG_DEFAULT, source == Source::Default);
+    }
+
+    /// Set the background to `rgb`, taken from `source`.
+    pub(crate) fn set_bg(&mut self, rgb: u32, source: Source) {
         self.bg = rgb;
-        self.attrs = flag(self.attrs, ATTR_BG_DEFAULT, default);
+        self.bg_index = source.tag();
+        self.attrs = flag(self.attrs, ATTR_BG_DEFAULT, source == Source::Default);
     }
 
     /// Whether the foreground is the default colour rather than an explicit one.
@@ -183,12 +223,7 @@ fn flag(bits: u16, bit: u16, on: bool) -> u16 {
 impl Default for Pen {
     /// The reset pen: default colors and no attributes.
     fn default() -> Self {
-        Pen {
-            fg: DEFAULT_FG,
-            bg: DEFAULT_BG,
-            attrs: 0,
-            underline_color: DEFAULT_FG,
-        }
+        Pen::rgb(DEFAULT_FG, DEFAULT_BG)
     }
 }
 
@@ -379,5 +414,5 @@ impl PackedCell {
     }
 }
 
-crate::checkpoint::fields!(Pen, [fg, bg, attrs, underline_color]);
+crate::checkpoint::fields!(Pen, [fg, bg, attrs, underline_color, fg_index, bg_index]);
 crate::checkpoint::fields!(Cell, [ch, fg, bg, flags, link, cluster, underline_color]);

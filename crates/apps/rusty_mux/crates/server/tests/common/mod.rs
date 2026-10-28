@@ -113,7 +113,7 @@ pub struct Client {
 
 impl Client {
     pub fn connect(path: &Path) -> Self {
-        Self::connect_with(path, Features::CHECKPOINT_V4, None)
+        Self::connect_with(path, Features::CHECKPOINT_V5, None)
     }
 
     pub fn connect_with(path: &Path, features: Features, resume: Option<Cursor>) -> Self {

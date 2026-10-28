@@ -129,7 +129,7 @@ fn wait_until_listening(path: &Path) {
 #[test]
 fn a_program_that_exits_reports_its_code() {
     let path = start_server();
-    let wanted = Features::PROGRAM_EVENTS.union(Features::CHECKPOINT_V4);
+    let wanted = Features::PROGRAM_EVENTS.union(Features::CHECKPOINT_V5);
     let mut a = Client::connect_with(&path, wanted, None);
     let block = block_for(&mut a);
     a.input(block, b"exit 3\r");

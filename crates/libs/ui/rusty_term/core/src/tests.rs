@@ -2196,8 +2196,8 @@ fn osc_11_recolours_both_screens() {
 
 #[test]
 fn pen_keeps_colour_provenance_across_decsc_and_osc_11() {
-    // DECSC/DECRC save the position only; the live pen keeps its provenance
-    // through them and through OSC 11.
+    // DECSC saves the pen with its provenance; a saved default colour comes
+    // back as the default in force at DECRC.
     let mut g = Grid::new(4, 1);
     let mut p = AnsiParser::new();
     // An explicit black pen is not the default: OSC 11 does not move it.
@@ -2213,6 +2213,144 @@ fn pen_keeps_colour_provenance_across_decsc_and_osc_11() {
     );
     assert_eq!(colours(&g, 1, 0).1, 0x00FF00);
     assert_eq!(colours(&g, 0, 0).1, DEFAULT_BG, "explicit glyph stays");
+}
+
+#[test]
+fn decsc_saves_and_decrc_restores_the_rendition() {
+    let mut g = Grid::new(6, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[1;31m\x1b7\x1b[0m\x1b[5Ga\x1b8b");
+    let (a, b) = (g.row(0)[4], g.row(0)[0]);
+    assert_eq!(
+        (a.flags & ATTR_BOLD, a.fg),
+        (0, DEFAULT_FG),
+        "drawn after SGR 0"
+    );
+    assert_ne!(b.flags & ATTR_BOLD, 0, "bold restored");
+    assert_eq!(b.fg, 0x800000, "red restored");
+    // SCOSC / SCORC (`CSI s` / `CSI u`) do the same.
+    p.advance(&mut g, b"\x1b[0;32m\x1b[s\x1b[0m\x1b[uc");
+    assert_eq!(g.row(0)[1].fg, 0x008000);
+}
+
+#[test]
+fn decrc_without_a_save_restores_the_reset_rendition() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[1;31m\x1b8x");
+    let c = g.row(0)[0];
+    assert_eq!((c.flags & ATTR_BOLD, c.fg), (0, DEFAULT_FG));
+}
+
+#[test]
+fn decsc_saves_the_character_sets_and_protection() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    // DEC line drawing in G0 and DECSCA on, saved; both undone, restored.
+    p.advance(&mut g, b"\x1b(0\x1b[1\"q\x1b7\x1b(B\x1b[0\"q\x1b8q");
+    assert_eq!(g.row(0)[0].ch, '\u{2500}', "line drawing restored");
+    p.advance(&mut g, b"\x1b[1;1H\x1b[?2K");
+    assert_eq!(
+        g.row(0)[0].ch,
+        '\u{2500}',
+        "protection restored: DECSEL kept it"
+    );
+}
+
+#[test]
+fn mode_1049_saves_the_rendition_apart_from_the_alt_screens_own_decsc() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    // Red on entering; inside, the app saves and restores blue for itself.
+    p.advance(&mut g, b"\x1b[31m\x1b[?1049h\x1b[34m\x1b7\x1b[0m\x1b8a");
+    assert_eq!(g.row(0)[0].fg, 0x000080, "alt screen's own DECSC");
+    p.advance(&mut g, b"\x1b[0m\x1b[?1049lb");
+    assert_eq!(g.row(0)[0].fg, 0x800000, "1049 restored the primary's red");
+}
+
+/// The colour and column of the glyph `p` writes next at the cursor.
+fn next_glyph(g: &mut Grid, p: &mut AnsiParser) -> (u32, usize) {
+    let x = g.cursor.0;
+    p.advance(g, b"x");
+    (g.row(0)[x].fg, x)
+}
+
+#[test]
+fn mode_1049_keeps_the_primary_decsc_register() {
+    // A red save at column 1, then blue; 1049 in and out must leave the
+    // register as it was, as the grid does for the cursor.
+    let mut g = Grid::new(8, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[2G\x1b[31m\x1b7\x1b[5G\x1b[34m\x1b[?1049h\x1b[32m\x1b[?1049l",
+    );
+    assert_eq!(
+        next_glyph(&mut g, &mut p),
+        (0x000080, 4),
+        "1049 restored blue"
+    );
+    p.advance(&mut g, b"\x1b8");
+    assert_eq!(next_glyph(&mut g, &mut p), (0x800000, 1), "ESC 8 still red");
+}
+
+#[test]
+fn the_entry_mode_decides_the_restore_for_pen_and_cursor_alike() {
+    // Entered by 1049, left by 47: cursor and pen both come back.
+    let mut g = Grid::new(8, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[3G\x1b[31m\x1b[?1049h\x1b[6G\x1b[34m\x1b[?47l",
+    );
+    assert_eq!(next_glyph(&mut g, &mut p), (0x800000, 2));
+    // Entered by 47, left by 1049: neither comes back.
+    let mut g = Grid::new(8, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[3G\x1b[31m\x1b[?47h\x1b[6G\x1b[34m\x1b[?1049l",
+    );
+    assert_eq!(next_glyph(&mut g, &mut p), (0x000080, 5));
+}
+
+#[test]
+fn checkpoint_mid_alt_screen_keeps_the_1049_entry() {
+    let mut g = Grid::new(8, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[2G\x1b[31m\x1b7\x1b[4G\x1b[32m\x1b[?1049h\x1b[34m\x1b7",
+    );
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b[?1049l");
+    assert_eq!(next_glyph(&mut g, &mut p), (0x008000, 3), "entry state");
+    p.advance(&mut g, b"\x1b8");
+    assert_eq!(next_glyph(&mut g, &mut p), (0x800000, 1), "entry register");
+}
+
+#[test]
+fn decstr_and_ris_forget_the_saved_rendition() {
+    for reset in [&b"\x1b[!p"[..], b"\x1bc"] {
+        let mut g = Grid::new(4, 1);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, b"\x1b[31m\x1b7");
+        p.advance(&mut g, reset);
+        p.advance(&mut g, b"\x1b8x");
+        assert_eq!(g.row(0)[0].fg, DEFAULT_FG, "{reset:?}");
+    }
+}
+
+#[test]
+fn checkpoint_keeps_the_saved_rendition() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[31m\x1b7\x1b[0m");
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b8x");
+    assert_eq!(g.row(0)[0].fg, 0x800000);
 }
 
 #[test]
@@ -2244,15 +2382,83 @@ fn checkpoint_keeps_colour_provenance() {
     assert_eq!(colours(&g, 2, 0).1, DEFAULT_BG, "restored pen is default");
 }
 
+const GREEN: u32 = 0x00FF00;
+
 #[test]
-fn checkpoint_rejects_rtcp_v3_and_other_versions() {
-    // v3 has v4's layout but no colour provenance, so restoring it would
-    // bake its default colours in; it fails closed instead.
+fn osc_4_recolours_palette_cells_but_not_equal_rgb() {
+    let mut g = Grid::new(6, 2);
+    let mut p = AnsiParser::new();
+    // a: SGR 31 (entry 1); b: the same red as RGB; c: 38;5;200; then a BCE
+    // erase on SGR 44 (entry 4).
+    p.advance(
+        &mut g,
+        b"\x1b[31ma\x1b[38;2;128;0;0mb\x1b[38;5;200mc\x1b[44m\x1b[K",
+    );
+    let red = colours(&g, 0, 0).0;
+    assert_eq!(colours(&g, 1, 0).0, red, "equal before");
+    p.advance(
+        &mut g,
+        b"\x1b]4;1;rgb:00/ff/00;200;rgb:00/00/ff;4;rgb:00/ff/00\x1b\\",
+    );
+    assert_eq!(colours(&g, 0, 0).0, GREEN, "SGR 31 follows entry 1");
+    assert_eq!(colours(&g, 1, 0).0, red, "RGB stays");
+    assert_eq!(colours(&g, 2, 0).0, BLUE, "38;5;200 follows entry 200");
+    assert_eq!(colours(&g, 4, 0).1, GREEN, "BCE erase follows entry 4");
+    // The pen follows too: text and erases written next use the new entry.
+    p.advance(&mut g, b"\r\n\x1b[31mx\x1b[K");
+    assert_eq!(colours(&g, 0, 1), (GREEN, GREEN));
+    // OSC 104 restores the entries, and everything drawn in them.
+    p.advance(&mut g, b"\x1b]104\x1b\\");
+    assert_eq!(colours(&g, 0, 0).0, red);
+    assert_eq!(colours(&g, 0, 1).0, red);
+    assert_eq!(colours(&g, 3, 1).1, PALETTE_16[4], "erase restored");
+    assert_eq!(colours(&g, 1, 0).0, red);
+}
+
+#[test]
+fn osc_4_recolours_the_primary_screen_under_the_alt_screen() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[32ma\x1b[?1049h\x1b]4;2;rgb:00/00/ff\x1b\\\x1b[?1049l",
+    );
+    assert_eq!(colours(&g, 0, 0).0, BLUE);
+}
+
+#[test]
+fn decsc_restores_a_palette_colour_as_it_reads_now() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[33m\x1b7\x1b[0m\x1b]4;3;rgb:00/ff/00\x1b\\\x1b8x",
+    );
+    assert_eq!(colours(&g, 0, 0).0, GREEN);
+}
+
+#[test]
+fn checkpoint_keeps_palette_tags() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[31ma\x1b[38;2;128;0;0mb\x1b[31m");
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b]4;1;rgb:00/ff/00\x1b\\c");
+    assert_eq!(colours(&g, 0, 0).0, GREEN, "tag restored");
+    assert_eq!(colours(&g, 1, 0).0, PALETTE_16[1], "RGB stays");
+    assert_eq!(colours(&g, 2, 0).0, GREEN, "restored pen is entry 1");
+}
+
+#[test]
+fn checkpoint_rejects_rtcp_v3_v4_and_other_versions() {
+    // v3 has no colour provenance and v4 no palette tags, so restoring
+    // either would bake colours in; they fail closed instead.
     let (g, p) = (Grid::new(4, 1), AnsiParser::new());
     let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
-    assert_eq!(&bytes[..5], b"RTCP\x04");
+    assert_eq!(&bytes[..5], b"RTCP\x05");
     assert!(crate::checkpoint::decode(&bytes).is_ok());
-    for version in [3u8, 5] {
+    for version in [3u8, 4, 6] {
         let mut other = bytes.clone();
         other[4] = version;
         assert!(crate::checkpoint::decode(&other).is_err(), "v{version}");
@@ -5104,6 +5310,47 @@ fn retheme_preserves_truecolor_and_child_overrides() {
 }
 
 #[test]
+fn retheme_follows_palette_provenance_not_equal_rgb() {
+    // Old palette 0 equals the old default background; the new theme splits
+    // them. SGR 30 text, old and new, follows palette 0; RGB equal to it
+    // follows the background, as an explicit colour equal to it always has.
+    let mut old = test_theme();
+    old.palette16[0] = old.bg;
+    let mut g = Grid::new(8, 1);
+    g.apply_theme(&old);
+    let mut p = AnsiParser::with_theme(old);
+    p.advance(&mut g, b"\x1b[30ma\x1b[38;2;29;31;33mb\x1b[30m");
+    let mut new = Theme {
+        bg: 0x222222,
+        ..old
+    };
+    new.palette16[0] = 0x333333;
+    let was = p.retheme(new);
+    g.retheme(&was, &new);
+    p.advance(&mut g, b"c");
+    let fg: Vec<u32> = g.row(0)[..3].iter().map(|c| c.fg).collect();
+    assert_eq!(fg, [0x333333, 0x222222, 0x333333]);
+}
+
+#[test]
+fn retheme_remaps_saved_pens_like_the_live_one() {
+    let mut g = Grid::new(8, 1);
+    g.apply_theme(&test_theme());
+    let mut p = AnsiParser::with_theme(test_theme());
+    // An explicit RGB equal to the old red, saved; then palette red, saved
+    // by 1049 entry.
+    p.advance(&mut g, b"\x1b[38;2;204;102;102m\x1b7\x1b[31m\x1b[?1049h");
+    let mut new = test_theme();
+    new.palette16[1] = 0x333333;
+    let was = p.retheme(new);
+    g.retheme(&was, &new);
+    p.advance(&mut g, b"\x1b[?1049l");
+    assert_eq!(next_glyph(&mut g, &mut p).0, 0x333333, "1049 entry pen");
+    p.advance(&mut g, b"\x1b8");
+    assert_eq!(next_glyph(&mut g, &mut p).0, 0x333333, "DECSC pen");
+}
+
+#[test]
 fn retheme_recolors_scrollback() {
     let mut g = Grid::new(4, 2);
     g.apply_theme(&test_theme());
@@ -6942,11 +7189,14 @@ fn ascii_fast_path_matches_put_char_one_byte_at_a_time() {
     let style = "\x1b[1;31;44;4:3;58;2;1;2;3m";
     let link = "\x1b]8;;https://x.test\x07";
     let probe = cells(&parse(format!("{style}X").as_bytes(), 2, 1))[0];
+    // SGR 31 and 44: palette entries 1 and 4.
     let pen = Pen {
         fg: probe.fg,
         bg: probe.bg,
         attrs: probe.flags,
         underline_color: probe.underline_color,
+        fg_index: 2,
+        bg_index: 5,
     };
     for setup in setups {
         for x in 1..=9 {
@@ -6990,11 +7240,14 @@ fn text_fast_path_matches_put_char_one_scalar_at_a_time() {
     let style = "\x1b[1;31;44;4:3;58;2;1;2;3m";
     let link = "\x1b]8;;https://x.test\x07";
     let probe = cells(&parse(format!("{style}X").as_bytes(), 2, 1))[0];
+    // SGR 31 and 44: palette entries 1 and 4.
     let pen = Pen {
         fg: probe.fg,
         bg: probe.bg,
         attrs: probe.flags,
         underline_color: probe.underline_color,
+        fg_index: 2,
+        bg_index: 5,
     };
     for setup in setups {
         for x in 1..=9 {
@@ -7739,4 +7992,30 @@ fn a_long_osc_is_capped_however_it_is_chunked() {
         }
         assert_eq!(g.title.len(), 4096 - "2;".len(), "chunks of {size}");
     }
+}
+
+#[cfg(feature = "l13")]
+#[test]
+fn status_line_in_default_colours_follows_osc_10_and_11() {
+    let mut g = Grid::new(6, 2);
+    let mut p = AnsiParser::new();
+    g.set_status_line("ab".into(), None, Some(0x123456));
+    p.advance(
+        &mut g,
+        b"\x1b]10;rgb:00/00/ff\x1b\\\x1b]11;rgb:00/ff/00\x1b\\",
+    );
+    let row = g.status_row().expect("status line").to_vec();
+    // The unset foreground follows OSC 10; the explicit background stays.
+    assert_eq!((row[0].ch, row[0].fg, row[0].bg), ('a', 0x0000FF, 0x123456));
+    assert_eq!((row[5].fg, row[5].bg), (0x0000FF, 0x123456), "padding");
+    assert_eq!(row[0].flags, ATTR_FG_DEFAULT);
+    g.set_status_line("c".into(), None, None);
+    p.advance(&mut g, b"\x1b]111\x1b\\");
+    let row = g.status_row().expect("status line");
+    assert_eq!((row[0].fg, row[0].bg), (0x0000FF, DEFAULT_BG));
+    // It survives a checkpoint and keeps following the defaults.
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b]110\x1b\\");
+    assert_eq!(g.status_row().expect("status line")[0].fg, DEFAULT_FG);
 }
