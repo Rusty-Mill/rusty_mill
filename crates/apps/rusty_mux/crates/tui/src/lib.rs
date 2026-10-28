@@ -23,22 +23,95 @@ use rusty_term_core::{Grid, WIDE_TRAILER};
 pub const RESTORE: &[u8] = b"\x1b[?1049l\x1b[!p\x1b[?25h\x1b>\x1b[?2004l\
 \x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?9001l\x1b[0m";
 
-/// Turns win32-input-mode (DEC `?9001`) off. The client reads the keyboard
-/// itself, for its Ctrl-] commands, so the local terminal must send plain
-/// VT keys; a Windows server's pseudo console asks for the mode at start
-/// and takes plain VT input as well.
-const NO_WIN32_INPUT: &[u8] = b"\x1b[?9001l";
+/// The longest unfinished mode set [`NoWin32Input`] holds back; past it
+/// the bytes pass as they are, as no real program sends one so long.
+const HOLD_MAX: usize = 64;
 
-/// A block's raw `data` as written to the local terminal while it passes
-/// through: unchanged, then win32-input-mode turned back off if the
-/// program, `grid` having just parsed `data`, asked for it.
-pub fn passthrough(grid: &Grid, data: &[u8]) -> Vec<u8> {
-    let off = if grid.win32_input {
-        NO_WIN32_INPUT
-    } else {
-        b""
+/// Drops win32-input-mode (DEC `?9001`) from the mode sets in a block's
+/// raw output, so the local terminal keeps sending plain VT keys: the
+/// client reads the keyboard itself, for its Ctrl-] commands. A Windows
+/// server's pseudo console asks for the mode at start and takes plain VT
+/// input as well.
+///
+/// Chunk boundaries are not sequence boundaries: a mode set split across
+/// chunks is held back until it completes, and every other byte passes
+/// unchanged and in order.
+#[derive(Debug, Default)]
+pub struct NoWin32Input {
+    held: Vec<u8>,
+}
+
+impl NoWin32Input {
+    /// The next chunk of a block's raw output, as written to the local
+    /// terminal.
+    pub fn filter(&mut self, data: &[u8]) -> Vec<u8> {
+        let input = [std::mem::take(&mut self.held).as_slice(), data].concat();
+        let mut out = Vec::with_capacity(input.len());
+        let mut i = 0;
+        while let Some(at) = input[i..].iter().position(|&b| b == 0x1b) {
+            let start = i + at;
+            out.extend_from_slice(&input[i..start]);
+            match mode_set(&input[start..]) {
+                Scan::Set(len) => {
+                    out.extend(without_win32(&input[start..start + len]));
+                    i = start + len;
+                }
+                Scan::Unfinished if input.len() - start <= HOLD_MAX => {
+                    self.held = input[start..].to_vec();
+                    return out;
+                }
+                Scan::Unfinished | Scan::Other => {
+                    out.push(0x1b);
+                    i = start + 1;
+                }
+            }
+        }
+        out.extend_from_slice(&input[i..]);
+        out
+    }
+}
+
+/// What starts at an ESC.
+enum Scan {
+    /// A DEC private mode set, `ESC [ ? params h`, this many bytes long.
+    Set(usize),
+    /// What could still become one.
+    Unfinished,
+    Other,
+}
+
+fn mode_set(seq: &[u8]) -> Scan {
+    for (i, &b) in seq.iter().enumerate().skip(1) {
+        match (i, b) {
+            (1, b'[') | (2, b'?') | (3.., b'0'..=b'9' | b';') => {}
+            (3.., b'h') => return Scan::Set(i + 1),
+            _ => return Scan::Other,
+        }
+    }
+    Scan::Unfinished
+}
+
+/// A whole mode set `seq` without 9001: unchanged when it lacks it,
+/// nothing when 9001 was all it set.
+fn without_win32(seq: &[u8]) -> Vec<u8> {
+    let params = &seq[3..seq.len() - 1];
+    let is_win32 = |p: &&[u8]| {
+        std::str::from_utf8(p)
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            == Some(9001)
     };
-    [data, off].concat()
+    if !params.split(|&b| b == b';').any(|p| is_win32(&p)) {
+        return seq.to_vec();
+    }
+    let kept: Vec<&[u8]> = params
+        .split(|&b| b == b';')
+        .filter(|p| !is_win32(p))
+        .collect();
+    if kept.iter().all(|p| p.is_empty()) {
+        return Vec::new();
+    }
+    [b"\x1b[?", kept.join(&b';').as_slice(), b"h"].concat()
 }
 
 /// Repaints the local terminal from a restored grid: every visible row
@@ -94,7 +167,7 @@ pub fn pass(grid: &Grid) -> Vec<u8> {
 
 /// The input modes `grid`'s program set, each as a sequence that sets it on
 /// the local terminal or clears it: cursor and keypad keys, bracketed
-/// paste and alternate scroll; win32 input stays off (see [`passthrough`]).
+/// paste and alternate scroll; win32 input stays off (see [`NoWin32Input`]).
 /// With `whole` the block has the
 /// whole terminal, so its mouse and focus reports and its cursor's
 /// visibility go too; otherwise those are cleared, as screen coordinates
@@ -197,22 +270,54 @@ mod tests {
         assert!(!part.contains("?25"));
     }
 
+    /// Feeds `chunks` through one filter, joined.
+    fn filtered(chunks: &[&[u8]]) -> Vec<u8> {
+        let mut filter = NoWin32Input::default();
+        chunks.iter().flat_map(|c| filter.filter(c)).collect()
+    }
+
     #[test]
     fn win32_input_mode_never_reaches_the_local_terminal() {
-        let mut grid = Grid::new(20, 3);
-        let mut parser = AnsiParser::new();
-        assert_eq!(passthrough(&grid, b"hi"), b"hi");
         // What a Windows pseudo console writes when it starts.
-        let start = b"\x1b[?9001h\x1b[?1004h";
-        parser.advance(&mut grid, start);
-        assert!(grid.win32_input);
-        assert_eq!(
-            passthrough(&grid, start),
-            b"\x1b[?9001h\x1b[?1004h\x1b[?9001l"
-        );
-        let modes = String::from_utf8(modes(&grid, true)).unwrap();
+        assert_eq!(filtered(&[b"\x1b[?9001h\x1b[?1004hhi"]), b"\x1b[?1004hhi");
+        assert_eq!(filtered(&[b"\x1b[?1;9001;2004h"]), b"\x1b[?1;2004h");
+        assert_eq!(filtered(&[b"\x1b[?09001h\x1b[?9001l"]), b"\x1b[?9001l");
+        let modes = String::from_utf8(modes(&Grid::new(20, 3), true)).unwrap();
         assert!(modes.contains("\x1b[?9001l"), "{modes:?}");
         assert!(String::from_utf8_lossy(RESTORE).contains("\x1b[?9001l"));
+    }
+
+    #[test]
+    fn the_win32_filter_holds_a_mode_set_split_across_chunks() {
+        let mut filter = NoWin32Input::default();
+        assert_eq!(filter.filter(b"a\x1b[?90"), b"a");
+        assert_eq!(filter.filter(b"01"), b"");
+        assert_eq!(filter.filter(b"hb"), b"b");
+        // Every split of a stream mixing a mode request with other
+        // sequences and text gives the same bytes as the whole.
+        let stream =
+            "\x1b[?9001h\x1b[31mré\x1b]0;t\x07\x1bP1$r\x1b\\\x1b[?25;9001hx\x1b[?2004h".as_bytes();
+        let whole = filtered(&[stream]);
+        assert_eq!(
+            whole,
+            "\x1b[31mré\x1b]0;t\x07\x1bP1$r\x1b\\\x1b[?25hx\x1b[?2004h".as_bytes()
+        );
+        for at in 0..=stream.len() {
+            for to in at..=stream.len() {
+                let (a, rest) = stream.split_at(at);
+                let (b, c) = rest.split_at(to - at);
+                assert_eq!(filtered(&[a, b, c]), whole, "split at {at}, {to}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_win32_filter_passes_other_sequences_untouched() {
+        let stream: &[u8] = b"\x1b[?1\x1b[?2004l\x1b[?;h\x1b[?12$p\x1b";
+        assert_eq!(filtered(&[stream]), &stream[..stream.len() - 1]);
+        // A run too long to be a real mode set is not held for ever.
+        let long = [b"\x1b[?".as_slice(), &[b'1'; HOLD_MAX]].concat();
+        assert_eq!(filtered(&[&long]), long);
     }
 
     #[test]

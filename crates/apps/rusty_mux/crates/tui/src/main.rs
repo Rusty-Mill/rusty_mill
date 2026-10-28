@@ -56,7 +56,7 @@ mod client {
     use rusty_mux_server::checkpoint::Receiver;
     use rusty_mux_tui::keys::{Action, Keys};
     use rusty_mux_tui::screen::{self, Frame, View};
-    use rusty_mux_tui::{Conn, RESTORE, modes, pass, passthrough};
+    use rusty_mux_tui::{Conn, NoWin32Input, RESTORE, modes, pass};
     use rusty_term_core::{AnsiParser, Grid};
     use rusty_uuid::Uuid;
 
@@ -168,6 +168,7 @@ mod client {
             arriving: None,
             opened: 0,
             mirrored: None,
+            no_win32: NoWin32Input::default(),
             pending: None,
             ended: None,
         };
@@ -535,6 +536,8 @@ mod client {
         /// The input modes last mirrored from the focused block while
         /// composed.
         mirrored: Option<Vec<u8>>,
+        /// Filters the passing block's raw output.
+        no_win32: NoWin32Input,
         /// A layout change held back while blocks it drops drain.
         pending: Option<Pending>,
         ended: Option<Ended>,
@@ -796,10 +799,7 @@ mod client {
                 }
                 Ok(Change::Output(data)) => {
                     if self.shown == Shown::Passing(block) {
-                        let bytes = match pane.term.as_ref() {
-                            Some((grid, _)) => passthrough(grid, &data),
-                            None => data,
-                        };
+                        let bytes = self.no_win32.filter(&data);
                         write(&bytes, &mut self.ended);
                     }
                 }
@@ -978,6 +978,8 @@ mod client {
             let bytes = match &shown {
                 // A block not ready yet is passed on Ready.
                 Shown::Passing(block) => {
+                    // A new stream: what was held belongs to the last one.
+                    self.no_win32 = NoWin32Input::default();
                     match self.panes.get(block).and_then(|p| p.term.as_ref()) {
                         Some((grid, _)) => pass(grid),
                         None => b"\x1b[?1049l".to_vec(),

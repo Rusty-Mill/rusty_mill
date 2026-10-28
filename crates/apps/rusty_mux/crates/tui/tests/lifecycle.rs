@@ -30,6 +30,8 @@ const PATIENCE: Duration = Duration::from_secs(10);
 /// cursor, bracketed paste, mouse reporting, and the win32-input-mode a
 /// Windows pseudo console asks for.
 const REMOTE: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?9001hREMOTE";
+/// [`REMOTE`] as the client passes it on, without win32-input-mode.
+const SHOWN: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000hREMOTE";
 
 /// How the scripted server ends the attach.
 #[derive(Clone, Copy)]
@@ -245,7 +247,7 @@ impl Tui {
 fn assert_restored(screen: &[u8], line: &str) {
     let find = |needle: &[u8]| screen.windows(needle.len()).rposition(|w| w == needle);
     let text = String::from_utf8_lossy(screen);
-    let remote = find(REMOTE).unwrap_or_else(|| panic!("no remote output: {text:?}"));
+    let remote = find(SHOWN).unwrap_or_else(|| panic!("no remote output: {text:?}"));
     let restore = find(RESTORE).unwrap_or_else(|| panic!("terminal not reset: {text:?}"));
     let said = find(line.as_bytes()).unwrap_or_else(|| panic!("no {line:?}: {text:?}"));
     assert!(remote < restore && restore < said, "{text:?}");
@@ -281,16 +283,18 @@ fn detaching_after_the_program_set_modes_resets_the_terminal() {
 }
 
 /// The local terminal must keep sending plain keys, or Ctrl-] arrives
-/// win32-encoded and passes to the block: the client turns the mode off
-/// right after passing the program's request on.
+/// win32-encoded and passes to the block: the client drops the program's
+/// request for the mode.
 #[test]
-fn win32_input_mode_is_turned_off_after_the_program_asks() {
+fn win32_input_mode_never_reaches_the_local_terminal() {
     let (socket, server) = scripted_server(true, End::Open);
     let tui = Tui::start(&socket);
-    tui.wait_for(b"REMOTE\x1b[?9001l");
+    tui.wait_for(SHOWN);
     tui.master.write(b"\x1dd").expect("ctrl-] d");
-    tui.exit();
+    let screen = tui.exit();
     server.join().expect("server");
+    let asked = screen.windows(8).any(|w| w == b"\x1b[?9001h");
+    assert!(!asked, "{:?}", String::from_utf8_lossy(&screen));
 }
 
 #[test]
