@@ -75,6 +75,20 @@ impl Capability {
         Capability::Merge,
         Capability::Admin,
     ];
+
+    /// What holding this lets a role do, for the settings view.
+    pub fn about(self) -> &'static str {
+        match self {
+            Capability::Triage => {
+                "Approve cards into Ready, set priority and project, and take over others' claims."
+            }
+            Capability::Build => "Claim Ready cards and build them, then pass them to QA.",
+            Capability::Qa => "Verify built work: pass it to Review or send it back.",
+            Capability::Review => "Send reviewed work back to Building.",
+            Capability::Merge => "Move reviewed cards to Done.",
+            Capability::Admin => "Change these settings: agents, projects, roles, GitHub, apps.",
+        }
+    }
 }
 
 /// Who is acting, and what they may do.

@@ -49,7 +49,9 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `--settings-dir DIR`: it keeps `identities.json`, `projects.json`, `roles.json` and `github.json` there
   (secrets owner-only), changes take effect at once, and a first start creates an `admin` credential and
   prints its token once. Without files the view is read-only. A change that would lock everyone out, or drop a
-  project that still has cards, is refused. Not available over MCP. ADR-0004.
+  project that still has cards, is refused. Roles explain each capability. **Apps** lists the apps signed in
+  through OAuth (with `--issuer`) and revokes one (it can sign in again); **Server** shows, read-only, where
+  the cards live, the issuer, the accepted hosts and the settings files. Not available over MCP. ADR-0004.
 - **Models connect themselves.** Run one HTTP server with `--identities FILE` (a token per model, bound to an
   actor and role) and register `/mcp` in each model's own client; a model then pulls work with `card_take`,
   comments, and moves it on, using its own subscription session. See
