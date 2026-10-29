@@ -42,9 +42,9 @@ const repoButtons = () => items("#nav1");
 
 check((await titles()).length === 4, "all repositories show every card");
 const rows = await repoButtons();
-check(rows.slice(0, 3).join("|") === "All repositories 4|rusty_mill 3|super_board 1", `the panel lists repositories with counts (${rows.join("|")}); an empty default repository is hidden`);
-check(rows.slice(3, 8).join("|") === "orch 1|rl 1|rusty_mill 1|skills 1|super_board 0", `every project of a repository with several is listed (${rows.slice(3, 8).join("|")})`);
-check(rows.slice(8).join("|") === "Everyone 1|claude 1", `agents holding claims are listed with their counts (${rows.slice(8).join("|")})`);
+check(rows.slice(0, 4).join("|") === "All repositories 4|Inbox 0|rusty_mill 3|super_board 1", `the panel lists repositories with counts, the Inbox first even when empty (${rows.join("|")})`);
+check(rows.slice(4, 9).join("|") === "orch 1|rl 1|rusty_mill 1|skills 1|super_board 0", `every project of a repository with several is listed (${rows.slice(4, 9).join("|")})`);
+check(rows.slice(9).join("|") === "Everyone 1|claude 1", `agents holding claims are listed with their counts (${rows.slice(9).join("|")})`);
 check((await page.locator("#side nav").count()) === 1, "one panel: no second column of projects");
 
 const project = (name) => page.locator("#nav1 .item").filter({ hasText: new RegExp(`^${name}\\d`) });
@@ -53,12 +53,13 @@ check((await titles()).join() === "Skills card", "choosing a project shows only 
 await page.locator("#nav1 .item", { hasText: "All repositories" }).click();
 check((await titles()).length === 4, "All repositories clears it");
 
+
 await page.locator("#nav1 .item", { hasText: "super_board" }).first().click();
 check((await titles()).join() === "Skills card", "choosing a repository filters the board");
 await page.locator("#nav1 .item", { hasText: "rusty_mill" }).first().click();
 check((await titles()).join() === "Mill loose card,Orch card,RL card", "another repository, its three cards");
 check((await page.locator("#side nav").count()) === 1, "choosing a repository opens no second column");
-const listed = (await repoButtons()).slice(3, -2).join("|");
+const listed = (await repoButtons()).slice(4, -2).join("|");
 check(listed === "orch 1|rl 1|rusty_mill 1", `and the Projects list narrows to that repository's projects (${listed})`);
 
 await project("rl").click();
@@ -80,6 +81,7 @@ check((await page.locator(".card .tag.proj").count()) === 5, "chips name each ca
 
 await page.locator(".card", { hasText: "Added under rl" }).click();
 check((await page.locator("#dlg optgroup").count()) === 3, "the dialog groups projects by repository");
+check((await page.locator("#dlg option[value=default]").innerText()) === "Inbox", "the default project is offered as the Inbox");
 await page.locator("#dlg select").selectOption("skills");
 await sleep(600);
 const moved = (await api("board_list", { project: "skills" })).cards.map((c) => c.title);
@@ -125,6 +127,14 @@ const chips = await page.locator(".card", { hasText: "Migrated card" }).locator(
 check(chips.join() === "kept", `the migration marker is not shown as a chip (${chips.join()})`);
 
 check(!(await page.locator("#toast").isVisible()), "a normal load shows no error");
+
+// The Inbox: the default project, where a card that names none lands.
+await page.locator("#nav1 .item", { hasText: "Inbox" }).click();
+await page.fill("#title", "Unsorted idea");
+await page.click("#add");
+await page.waitForFunction(() => [...document.querySelectorAll(".card b")].map((b) => b.textContent).join() === "Unsorted idea");
+check((await api("board_list", { project: "default" })).cards.some((c) => c.title === "Unsorted idea"), "a card added in the Inbox has the default project");
+check((await page.locator("#nav1 .item.on", { hasText: "Inbox" }).innerText()).replace(/\s+/g, " ").trim() === "Inbox 1", "and the Inbox counts it");
 
 // A refused project list is said so, not shown as an empty panel.
 const refused = await browser.newPage({ viewport: { width: 1300, height: 700 } });

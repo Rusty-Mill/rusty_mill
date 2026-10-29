@@ -106,6 +106,8 @@ let tok=null;
 const $=id=>document.getElementById(id);
 let cards=[],cursor=null,dlg=null,repos={},sel={repo:"",project:"",agent:""};
 const projects=()=>Object.values(repos).flat();
+/* `default` is the Inbox: where a card that names no project lands (rusty_tick's Inbox list). Shown by that name only. */
+const INBOX="default",label=p=>p===INBOX?"Inbox":p;
 const repoOf=p=>Object.keys(repos).find(r=>repos[r].includes(p))||"";
 const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project)&&(!sel.agent||k.claim===sel.agent);
 const count=f=>cards.filter(f).length;
@@ -181,7 +183,7 @@ function render(){
     for(const k of cards.filter(k=>k.column===c&&shown(k))){
       const d=el("div",null,"card");d.draggable=true;d.append(el("b",k.title));
       const m=el("div",null,"meta");
-      if(projects().length>1&&!sel.project){const t=el("span",k.project,"tag proj");t.title=repoOf(k.project);m.append(t)}
+      if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");t.title=label(repoOf(k.project));m.append(t)}
       k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
       if(k.claim){
         d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
@@ -215,7 +217,7 @@ async function renderRoadmap(){
     map=await api("board_roadmap",{project});
   }catch(e){if(!stale()){b.classList.remove("roadmap");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
-  b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+map.project));
+  b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
   for(const l of map.lanes){
     const col=el("section",null,"col");col.dataset.lane=l.lane;
     const h=el("h2",l.lane+" · "+l.cards.length);h.title=LANE_HINT[l.lane];col.append(h);
@@ -237,8 +239,8 @@ async function renderRoadmap(){
 /* The side panel: repositories (and the agents holding claims) on the left; the chosen
    repository's projects in a second pane. Everything here only narrows what the board shows. */
 function renderSide(){
-  // An empty repository is listed (you may be about to add its first card); only the unused `default` hides.
-  const names=Object.keys(repos).filter(r=>Object.keys(repos).length===1||r!=="default"||count(k=>repoOf(k.project)===r)>0||r===sel.repo);
+  // Every repository is listed, an empty one too (you may be about to add its first card); the Inbox first.
+  const names=Object.keys(repos).sort((a,b)=>(b===INBOX)-(a===INBOX));
   $("shell").classList.toggle("noside",(projects().length<2&&!cards.some(k=>k.claim))||pref("side")==="0");
   const item=(label,n,on,fn,agent)=>{
     const b=el("button",null,"item"+(on?" on":""));b.type="button";
@@ -248,7 +250,7 @@ function renderSide(){
   const n1=$("nav1");n1.replaceChildren();
   if(projects().length>1){
     n1.append(el("h2","Repositories"),item("All repositories",cards.length,!sel.repo,()=>pick("","")));
-    for(const r of names)n1.append(item(r,count(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
+    for(const r of names)n1.append(item(label(r),count(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
     // The projects of the chosen repository, or of every repository, so one project's cards are a click
     // away. A repository whose only project is its own is left out: it is the repository, listed above.
     // (A credential limited to some projects may see a repository with one other project: that one stays.)
@@ -278,7 +280,7 @@ function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.g.value=s
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
   const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select")};
-  for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(p,p)));f.p.append(g)}
+  for(const r of Object.keys(repos)){const g=el("optgroup");g.label=label(r);repos[r].forEach(p=>g.append(new Option(label(p),p)));f.p.append(g)}
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
   f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
@@ -370,7 +372,7 @@ function projectPicker(current){
   const boxes={};
   for(const r of Object.keys(all))for(const p of Object.keys(all[r])){
     const c=field("input",{type:"checkbox",checked:!!current&&current.includes(p),disabled:!current});boxes[p]=c;
-    const l=el("label");l.append(c," "+p+"  ("+r+")");d.append(l)}
+    const l=el("label");l.append(c," "+label(p)+"  ("+label(r)+")");d.append(l)}
   const show=()=>{sum.textContent=none.checked?"all projects":Object.keys(boxes).filter(p=>boxes[p].checked).length+" project(s)"};
   none.onchange=()=>{for(const c of Object.values(boxes))c.disabled=none.checked;show()};
   d.addEventListener("change",show);show();
