@@ -2,7 +2,7 @@
 //! rusty_tick tasks tagged `agent`, so there is one task store.
 //!
 //! **Mapping.** A card is a task: title, notes (body), priority, sort order, and
-//! tags carrying the board's state (`board:<column>`, `claim:<actor>`) beside
+//! tags carrying the board's state (`board:<column>`, `claim:<actor>`, `number:<n>`) beside
 //! the card's own tags, which rusty_tick keeps lowercase. Its project is the
 //! task's list, named like the project; the Inbox is the `default` project. A
 //! closed task (done or won't do) is Done. The
@@ -276,6 +276,7 @@ fn task_tags(card: &Card) -> Vec<String> {
         .unwrap_or_default();
     let mut tags = vec![AGENT_TAG.to_owned(), format!("board:{column}")];
     tags.extend(card.claim.iter().map(|c| format!("claim:{c}")));
+    tags.extend(card.number.iter().map(|n| format!("number:{n}")));
     tags.extend(card.tags.iter().cloned());
     tags
 }
@@ -302,6 +303,11 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         .iter()
         .find_map(|t| t.strip_prefix("claim:"))
         .map(str::to_owned);
+    let number = task
+        .tags
+        .iter()
+        .find_map(|t| t.strip_prefix("number:"))
+        .and_then(|n| n.parse().ok());
     let tags = task
         .tags
         .iter()
@@ -311,6 +317,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
     let doc = doc.unwrap_or_default();
     Ok(Card {
         id: task.id,
+        number,
         rev,
         title: task.title,
         body: task.notes,

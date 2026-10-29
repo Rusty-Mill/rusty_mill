@@ -20,6 +20,7 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .col h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:2px 4px 8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px;margin-bottom:8px;cursor:grab}
 .card b{display:block}
+.num{float:right;margin-left:6px;color:var(--mute);font-size:12px}
 .meta{color:var(--mute);font-size:12px;margin-top:4px}
 .tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
 .tag.proj{border-color:var(--acc)}
@@ -168,6 +169,8 @@ async function act(op,args){
   catch(e){toast(e.message);if(e.status===409)await refresh().catch(()=>{});return null}
 }
 function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e}
+// A card's heading: its board number in the corner, if it has one, then its title.
+const heading=k=>[...(k.number?[el("span","#"+k.number,"num")]:[]),el("b",k.title)];
 
 function render(){
   if(view==="roadmap"){renderRoadmap();return}
@@ -179,7 +182,7 @@ function render(){
     col.ondragleave=()=>col.classList.remove("over");
     col.ondrop=e=>{e.preventDefault();col.classList.remove("over");act("card_move",{id:e.dataTransfer.getData("text"),to:c})};
     for(const k of cards.filter(k=>k.column===c&&shown(k))){
-      const d=el("div",null,"card");d.draggable=true;d.append(el("b",k.title));
+      const d=el("div",null,"card");d.draggable=true;d.append(...heading(k));
       const m=el("div",null,"meta");
       if(projects().length>1&&!sel.project){const t=el("span",k.project,"tag proj");t.title=repoOf(k.project);m.append(t)}
       k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
@@ -187,7 +190,7 @@ function render(){
         d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
         const t=el("span",null,"tag agent"+(RUNNING.includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);
       }
-      if(k.issue)m.append(el("span","#"+k.issue));
+      if(k.issue)m.append(el("span","issue #"+k.issue));
       if(k.comments.length)m.append(el("span"," · "+k.comments.length+" 💬"));
       d.append(m);
       d.ondragstart=e=>e.dataTransfer.setData("text",k.id);
@@ -220,7 +223,7 @@ async function renderRoadmap(){
     const col=el("section",null,"col");col.dataset.lane=l.lane;
     const h=el("h2",l.lane+" · "+l.cards.length);h.title=LANE_HINT[l.lane];col.append(h);
     for(const k of l.cards){
-      const d=el("div",null,"card");d.append(el("b",k.title));
+      const d=el("div",null,"card");d.append(...heading(k));
       const m=el("div",null,"meta");
       if(l.lane==="now")m.append(el("span",k.column,"tag"));
       k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
@@ -302,7 +305,7 @@ function syncDialog(){
   const k=cards.find(c=>c.id===dlg.id),f=dlg.f;
   if(!k){f.banner.textContent="This card no longer exists.";return}
   // Display-only parts follow the board; the inputs are never rebuilt.
-  f.meta.textContent=k.column+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
+  f.meta.textContent=(k.number?"#"+k.number+" · ":"")+k.column+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
   const theirs=snap(k);

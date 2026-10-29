@@ -55,6 +55,8 @@ impl Lane {
 pub struct RoadmapCard {
     /// Identity.
     pub id: Uuid,
+    /// Board-wide number, if assigned.
+    pub number: Option<u64>,
     /// Short title.
     pub title: String,
     /// Current column.
@@ -130,6 +132,7 @@ pub fn roadmap(cards: &[Card], project: &str, now_ms: i64) -> Roadmap {
 fn view(card: &Card, open: &BTreeSet<Uuid>) -> RoadmapCard {
     RoadmapCard {
         id: card.id,
+        number: card.number,
         title: card.title.clone(),
         column: card.column,
         priority: card.priority,

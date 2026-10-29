@@ -198,17 +198,20 @@ pub const PRIORITIES: [u8; 4] = [0, 1, 3, 5];
 pub const MAX_DEPS: usize = 32;
 
 /// Whether `tag` is one the board keeps for itself in rusty_tick (ADR-0012):
-/// `agent` puts a task on the board, `board:<column>` and `claim:<actor>` carry
-/// its state. Tags match case-insensitively there, so here too.
+/// `agent` puts a task on the board, `board:<column>`, `claim:<actor>` and
+/// `number:<n>` carry its state. Tags match case-insensitively there, so here too.
 pub fn reserved_tag(tag: &str) -> bool {
     let tag = tag.trim().to_lowercase();
-    tag == "agent" || tag.starts_with("board:") || tag.starts_with("claim:")
+    tag == "agent"
+        || tag.starts_with("board:")
+        || tag.starts_with("claim:")
+        || tag.starts_with("number:")
 }
 
 fn check_tags(tags: &[String]) -> Result<(), BoardError> {
     if tags.iter().any(|t| reserved_tag(t)) {
         return Err(BoardError::Invalid(
-            "tags `agent`, `board:…` and `claim:…` are the board's own",
+            "tags `agent`, `board:…`, `claim:…` and `number:…` are the board's own",
         ));
     }
     Ok(())
@@ -248,6 +251,10 @@ pub struct Comment {
 pub struct Card {
     /// Identity.
     pub id: Uuid,
+    /// Short board-wide number people use, shown as `#n`. The board assigns it in creation
+    /// order; `None` until then (a card made directly in rusty_tick, before the board numbers it).
+    #[serde(default)]
+    pub number: Option<u64>,
     /// Optimistic-concurrency revision; `0` for a new card.
     pub rev: u64,
     /// Short title.
@@ -418,6 +425,8 @@ pub enum EventKind {
     ExecutionRecovered,
     /// Moved to another project.
     Assigned,
+    /// Given its board-wide number.
+    Numbered,
 }
 
 /// One entry in the append-only log. `id` is a UUIDv7 assigned by the store
@@ -485,6 +494,7 @@ impl Card {
         check_tags(&tags)?;
         Ok(Self {
             id: Uuid::new_v4(),
+            number: None,
             rev: 0,
             title: title.to_owned(),
             body: body.to_owned(),
@@ -502,6 +512,21 @@ impl Card {
             created_ms: now_ms,
             updated_ms: now_ms,
             done_ms: None,
+        })
+    }
+
+    /// The card given its board-wide `number`. Not a change people make, so `updated_ms` stays.
+    ///
+    /// # Errors
+    /// If the card already has a number: a number never changes.
+    pub fn numbered(&self, number: u64) -> Result<Self, BoardError> {
+        if self.number.is_some() {
+            return Err(BoardError::Invalid("card is already numbered"));
+        }
+        Ok(Self {
+            number: Some(number),
+            rev: self.rev + 1,
+            ..self.clone()
         })
     }
 

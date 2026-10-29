@@ -294,6 +294,13 @@ fn run(cli: Cli) -> Result<(), String> {
         board = board.with_projects_sink(projects_sink(path.clone()));
     }
     let board: Arc<Shared> = Arc::new(board);
+    // Cards made before numbering, or directly in rusty_tick, get their numbers now. A store
+    // that is not up yet is not fatal: the next new card numbers them.
+    match board.number_cards() {
+        Ok(0) => {}
+        Ok(n) => rusty_log::info!(cards = n, "numbered cards"),
+        Err(e) => rusty_log::warn!(error = %e, "could not number cards"),
+    }
 
     // The GitHub sync starts from its file, else from the flags.
     let github = match files
