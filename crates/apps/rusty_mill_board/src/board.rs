@@ -25,6 +25,16 @@ const RETRIES: usize = 3;
 #[serde(transparent)]
 pub struct Roles(pub BTreeMap<String, BTreeSet<Capability>>);
 
+/// The capability, besides `Triage`, that re-files a card in `column`: closing work is what
+/// files a Done card, so `Close` re-files one.
+fn assign_capability(column: Column) -> Capability {
+    if column == Column::Done {
+        Capability::Close
+    } else {
+        Capability::Project
+    }
+}
+
 impl Default for Roles {
     fn default() -> Self {
         use Capability::*;
@@ -627,29 +637,33 @@ impl<S: Store> Board<S> {
         }
     }
 
-    /// Move a card to another project. Needs `Triage` or `Project`, and both projects in
-    /// scope; without `Triage`, not a card someone else has claimed.
+    /// Move a card to another project. Needs `Triage`, or else `Project` (`Close` for a Done
+    /// card, which stays Done), and both projects in scope; without `Triage`, not a card
+    /// someone else has claimed.
     ///
     /// # Errors
-    /// An unknown project, a missing capability, an out-of-scope project, a card claimed by
-    /// someone else (without `Triage`), or a Done card.
+    /// An unknown project, a missing capability, an out-of-scope project, or a card claimed
+    /// by someone else (without `Triage`).
     pub fn assign(&self, id: Uuid, project: &str, by: &Actor) -> Result<Card, BoardError> {
         let registry = self.registry();
         if !registry.contains(project) {
             return Err(BoardError::Invalid("unknown project"));
         }
-        let triage = by.caps.contains(&Capability::Triage);
-        if !triage && !by.caps.contains(&Capability::Project) {
-            return Err(BoardError::Forbidden(Capability::Project));
-        }
         if !by.may_work_in(project) {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
-        let card = self.apply(id, by, EventKind::Assigned, |c, now| match &c.claim {
-            Some(holder) if !triage && *holder != by.name => {
-                Err(BoardError::Claimed(holder.clone()))
+        let triage = by.caps.contains(&Capability::Triage);
+        let card = self.apply(id, by, EventKind::Assigned, |c, now| {
+            let needed = assign_capability(c.column);
+            if !triage && !by.caps.contains(&needed) {
+                return Err(BoardError::Forbidden(needed));
             }
-            _ => c.assign(project, now),
+            match &c.claim {
+                Some(holder) if !triage && *holder != by.name => {
+                    Err(BoardError::Claimed(holder.clone()))
+                }
+                _ => Ok(c.assign(project, now)),
+            }
         });
         drop(registry);
         card

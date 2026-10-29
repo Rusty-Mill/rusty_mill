@@ -35,7 +35,7 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   (`{"rocket_league": ["crates/apps/rocket_league"]}`, or `{"repos": {"rusty_mill": {...}, "other": {...}}}`
   for several repositories; project names are unique across them). Every repository also has a project named
   like itself that owns the paths no other project of it does (a flat file is the repository `default`). A card belongs to one project (old cards to
-  `default`; `card_add` takes `project`, `card_assign` moves one and needs Triage, or `project` for a card nobody else has claimed). A credential in
+  `default`; `card_add` takes `project`, `card_assign` moves one and needs Triage, or `project` for a card nobody else has claimed; a Done card stays Done and needs Triage or `close`). A credential in
   `--identities` may carry `"projects": [...]`: it then cannot see, take or change any other project's cards,
   checked inside every write's compare-and-swap, so a card re-assigned mid-call is still refused.
   `board_list` and `card_take` take a `project` filter. The UI's side panel lists repositories and then every project

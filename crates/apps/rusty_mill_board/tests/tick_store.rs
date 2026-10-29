@@ -144,6 +144,21 @@ fn the_default_project_is_the_inbox_and_a_project_is_a_list() {
 }
 
 #[test]
+fn a_done_card_moves_to_another_list_and_its_task_stays_closed() {
+    let (board, tick) = board();
+    let builder = board.roles().actor("claude", "builder").expect("role");
+    let card = board
+        .add_done_in(&builder, "default", "shipped", "", vec![])
+        .expect("add done");
+    let inbox = tick.task(card.id)["listId"].clone();
+    board.assign(card.id, "orch", &builder).expect("assign");
+    assert_ne!(tick.task(card.id)["listId"], inbox);
+    assert_eq!(tick.task(card.id)["status"], "done");
+    let read = board.get(card.id).expect("get");
+    assert_eq!((read.project.as_str(), read.column), ("orch", Column::Done));
+}
+
+#[test]
 fn deps_and_comments_are_rusty_tick_documents() {
     let (board, tick) = board();
     let human = board.roles().actor("nano", "human").expect("role");
