@@ -269,6 +269,13 @@ fn reset_event(event: &OwnedWinHandle) -> Result<()> {
     Ok(())
 }
 
+/// Milliseconds left until `deadline`, rounded up and kept below `INFINITE`.
+fn timeout_ms(deadline: Instant) -> u32 {
+    let left = deadline.saturating_duration_since(Instant::now());
+    let ms = left.as_micros().div_ceil(1000);
+    ms.min(u128::from(w::INFINITE - 1)) as u32
+}
+
 fn is_signalled(h: w::HANDLE) -> bool {
     // SAFETY: callers pass a handle they hold open for the call.
     unsafe { w::WaitForSingleObject(h, 0) == w::WAIT_OBJECT_0 }
@@ -521,20 +528,23 @@ impl Server {
         if let Some(h) = exit {
             handles.push(h.as_raw());
         }
-        let ms = deadline.map_or(w::INFINITE, |d| {
-            let left = d.saturating_duration_since(Instant::now());
-            // Round up, so the wait never ends just before the deadline.
-            let ms = left.as_micros().div_ceil(1000);
-            ms.min(u128::from(w::INFINITE - 1)) as u32
-        });
-        // SAFETY: `handles` holds at most three open handles, borrowed from
-        // `waker`, the slot and `exit` for the duration of the call.
-        let r = unsafe { w::WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, ms) };
-        if r == w::WAIT_FAILED {
-            return Err(errmap::last_win32_err(
-                "WaitForMultipleObjects",
-                OsStr::new(""),
-            ));
+        // The wait's timer is coarser than `Instant` and can expire a tick
+        // early, so wait again until the deadline has really passed.
+        loop {
+            let ms = deadline.map_or(w::INFINITE, timeout_ms);
+            // SAFETY: `handles` holds at most three open handles, borrowed
+            // from `waker`, the slot and `exit` for the duration of the call.
+            let r =
+                unsafe { w::WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, ms) };
+            if r == w::WAIT_FAILED {
+                return Err(errmap::last_win32_err(
+                    "WaitForMultipleObjects",
+                    OsStr::new(""),
+                ));
+            }
+            if r != w::WAIT_TIMEOUT || deadline.map_or(true, |d| Instant::now() >= d) {
+                break;
+            }
         }
         let io = self.take_completion()?;
         let exited = exit.is_some_and(|h| is_signalled(h.as_raw()));
