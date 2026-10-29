@@ -384,6 +384,11 @@ impl Client {
             .join("\n")
     }
 
+    /// Whether any checkpoint for `block` has arrived.
+    pub fn has_checkpoint(&self, block: BlockId) -> bool {
+        self.ready.contains_key(&block)
+    }
+
     /// Reads until `block`'s checkpoint is in and ready.
     pub fn wait_ready(&mut self, block: BlockId) {
         while self.ready.get(&block) != Some(&true) {

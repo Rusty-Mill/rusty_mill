@@ -89,6 +89,33 @@ fn a_wrong_or_used_token_starts_a_new_client() {
 }
 
 #[test]
+fn a_takeover_with_other_features_starts_a_new_client() {
+    let path = start_server();
+    let mut old = Client::connect_with(&path, TAKEOVER, None);
+    let block = block_for(&mut old);
+    let token = takeover_of(&old);
+
+    // Without `CHECKPOINT_V6` it could not take a checkpoint of `block`.
+    let fewer = Features::INSPECT
+        .union(Features::LABELS)
+        .union(Features::TAKEOVER);
+    let mut downgraded = Client::taking_over(&path, fewer, None, Some(token));
+    assert_ne!(downgraded.id(), old.id());
+    downgraded.answer(|req| Message::List { req });
+    assert!(
+        !downgraded.has_checkpoint(block),
+        "no checkpoint it can't read"
+    );
+
+    // The original keeps its connection, lease and token.
+    run_and_wait(&mut old, block, 1);
+    let mut new = Client::taking_over(&path, TAKEOVER, None, Some(token));
+    assert_eq!(new.id(), old.id());
+    new.wait_ready(block);
+    run_and_wait(&mut new, block, 2);
+}
+
+#[test]
 fn without_the_feature_there_is_no_token_and_no_takeover() {
     let path = start_server();
     let first = Client::connect_with(&path, TAKEOVER, None);

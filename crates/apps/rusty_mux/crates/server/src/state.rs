@@ -142,9 +142,7 @@ impl State {
         takeover: Option<Takeover>,
     ) -> ClientId {
         let features = theirs.intersection(OFFERED);
-        let continued = takeover
-            .filter(|_| features.contains(Features::TAKEOVER))
-            .and_then(|t| self.takes_over(t));
+        let continued = takeover.and_then(|t| self.takes_over(t, features));
         let client = continued.unwrap_or_else(|| self.mux.connect());
         self.clients.insert(client, outbox);
         self.features.insert(client, features);
@@ -196,13 +194,17 @@ impl State {
         (from, messages)
     }
 
-    /// The client `takeover` names, if it is connected and the token is its
-    /// current one.
-    fn takes_over(&self, takeover: Takeover) -> Option<ClientId> {
+    /// The client `takeover` names, if it is connected, the token is its
+    /// current one, and the new connection negotiated exactly its features.
+    /// Only `TAKEOVER` clients hold a token. Equal features keep what the
+    /// client is already attached to and subscribed for (a checkpoint
+    /// version, event numbering) valid on the new connection.
+    fn takes_over(&self, takeover: Takeover, features: Features) -> Option<ClientId> {
         let current = self.tokens.get(&takeover.client)?;
         let valid =
             rusty_crypto_key::constant_time_eq(current.as_bytes(), takeover.token.as_bytes());
-        (valid && self.clients.contains_key(&takeover.client)).then_some(takeover.client)
+        let same = self.features.get(&takeover.client) == Some(&features);
+        (valid && same && self.clients.contains_key(&takeover.client)).then_some(takeover.client)
     }
 
     /// Forgets a client whose connection, the one owning `cancel`, ended. A
