@@ -215,7 +215,9 @@ fn format_prints_the_screen_and_list_the_tree() {
     ok(&socket, &chain);
     let capture = ["terminal.format", "--block", &block, "--history", "0"];
     let deadline = std::time::Instant::now() + PATIENCE;
-    while !ok(&socket, &capture).lines().any(|l| l == "HI42") {
+    // A prompt printed after the echo can share the output's line.
+    let shown = |screen: String, text: &str| screen.lines().any(|l| l.ends_with(text));
+    while !shown(ok(&socket, &capture), "HI42") {
         assert!(std::time::Instant::now() < deadline, "no HI42 on screen");
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -225,7 +227,7 @@ fn format_prints_the_screen_and_list_the_tree() {
     assert_eq!(rows(&capture), 24);
     let trimmed = [&capture[..], &["--trim"]].concat();
     assert!(rows(&trimmed) < 24);
-    assert!(ok(&socket, &trimmed).lines().any(|l| l == "HI42"));
+    assert!(shown(ok(&socket, &trimmed), "HI42"));
 
     // The same command, typed as keys; only its output says KEY42.
     let typed = if cfg!(windows) {
@@ -254,7 +256,7 @@ fn format_prints_the_screen_and_list_the_tree() {
     .concat();
     ok(&socket, &pressed);
     let deadline = std::time::Instant::now() + PATIENCE;
-    while !ok(&socket, &capture).lines().any(|l| l == "KEY42") {
+    while !shown(ok(&socket, &capture), "KEY42") {
         assert!(std::time::Instant::now() < deadline, "no KEY42 on screen");
         std::thread::sleep(Duration::from_millis(20));
     }
