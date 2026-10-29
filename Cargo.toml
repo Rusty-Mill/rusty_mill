@@ -457,7 +457,6 @@ rush = { path = "crates/apps/rush" }
 rusty-db = { path = "crates/libs/storage/rusty_db/rusty_db" }
 rusty-whisper = { path = "crates/libs/ai/rusty_whisper" }
 rusty_audio = { path = "crates/libs/ui/rusty_audio" }
-rusty_conhost = { path = "crates/libs/ui/rusty_conhost" }
 rusty_base64 = { path = "crates/foundation/rusty_base64" }
 rusty_dirs = { path = "crates/foundation/rusty_dirs" }
 rusty_hex = { path = "crates/foundation/rusty_hex" }
