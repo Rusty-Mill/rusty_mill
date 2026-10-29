@@ -509,18 +509,13 @@ impl Card {
     }
 
     /// Move the card to `project`, dropping any claim (the claimant may not be in scope there).
-    ///
-    /// # Errors
-    /// If the card is Done.
-    pub fn assign(&self, project: &str, now_ms: i64) -> Result<Self, BoardError> {
-        if self.column == Column::Done {
-            return Err(BoardError::Terminal);
-        }
-        Ok(Self {
+    /// Only the project changes: the column stays, so a Done card is re-filed, never reopened.
+    pub fn assign(&self, project: &str, now_ms: i64) -> Self {
+        Self {
             project: project.to_owned(),
             claim: None,
             ..self.next(now_ms)
-        })
+        }
     }
 
     /// Take the claim.

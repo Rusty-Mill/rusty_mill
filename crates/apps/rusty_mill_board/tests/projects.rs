@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{
-    Actor, BoardError, Card, Column, DEFAULT_PROJECT, Event, EventKind,
+    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind,
 };
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::store::{MemStore, Store};
@@ -170,9 +170,7 @@ fn assign_needs_triage_and_clears_the_claim() {
     b.take(&dev, Some(id)).expect("take");
     assert_eq!(
         b.assign(id, "orch", &actor(&b, "q", "qa", None)),
-        Err(BoardError::Forbidden(
-            rusty_mill_board::domain::Capability::Project
-        ))
+        Err(BoardError::Forbidden(Capability::Project))
     );
     assert_eq!(
         b.assign(id, "orch", &actor(&b, "gemini", "builder", None)),
@@ -210,15 +208,52 @@ fn assign_needs_triage_and_clears_the_claim() {
     assert_eq!(b.get(other).expect("card").project, "rl");
 }
 
-#[test]
-fn a_done_card_cannot_change_project() {
-    let b = board();
-    let human = actor(&b, "nano", "human", None);
-    let id = ready_in(&b, "rl", "x");
+/// A Done card in `rl`, moved there by an unrestricted human.
+fn done_in_rl(b: &Board<impl Store>) -> Uuid {
+    let human = actor(b, "nano", "human", None);
+    let id = ready_in(b, "rl", "x");
     for to in [Column::Building, Column::Qa, Column::Review, Column::Done] {
         b.move_card(id, to, &human).expect("move");
     }
-    assert_eq!(b.assign(id, "orch", &human), Err(BoardError::Terminal));
+    id
+}
+
+#[test]
+fn a_done_card_changes_project_and_stays_done() {
+    let b = board();
+    let id = done_in_rl(&b);
+    let builder = actor(&b, "claude", "builder", None);
+    let moved = b.assign(id, "orch", &builder).expect("re-file a Done card");
+    assert_eq!(
+        (moved.project.as_str(), moved.column),
+        ("orch", Column::Done)
+    );
+    let human = actor(&b, "nano", "human", None);
+    assert_eq!(
+        b.move_card(id, Column::Ready, &human),
+        Err(BoardError::Terminal)
+    );
+    let events = b.events(None, 1000).expect("events");
+    let last = events.last().expect("an event");
+    assert_eq!((last.kind, last.card), (EventKind::Assigned, id));
+}
+
+#[test]
+fn re_filing_a_done_card_needs_close_or_triage() {
+    let b = board();
+    let id = done_in_rl(&b);
+    let filer = Actor {
+        name: "filer".into(),
+        caps: BTreeSet::from([Capability::Project]),
+        projects: None,
+    };
+    assert_eq!(
+        b.assign(id, "orch", &filer),
+        Err(BoardError::Forbidden(Capability::Close))
+    );
+    assert_eq!(b.get(id).expect("card").project, "rl");
+    b.assign(id, "orch", &actor(&b, "nano", "human", None))
+        .expect("triage re-files it");
 }
 
 /// A store that moves the first card it is asked for to another project right after
@@ -233,7 +268,7 @@ impl Store for ReassignAfterGet {
     fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
         let seen = self.inner.get(id)?;
         if self.armed.swap(false, Ordering::SeqCst) {
-            let moved = seen.as_ref().expect("card").assign(&self.to, 1)?;
+            let moved = seen.as_ref().expect("card").assign(&self.to, 1);
             self.inner
                 .replace(&moved, Event::of(&moved, EventKind::Assigned, "nano"))?;
         }
@@ -520,9 +555,7 @@ fn a_builder_adds_a_project_but_never_changes_an_existing_one() {
     assert_eq!(
         b.add_project(&qa, "default", "x", &paths(&["x"]))
             .map(|_| ()),
-        Err(BoardError::Forbidden(
-            rusty_mill_board::domain::Capability::Project
-        ))
+        Err(BoardError::Forbidden(Capability::Project))
     );
     let scoped = actor(&b, "s", "builder", Some(&["rl"]));
     b.add_project(&scoped, "default", "y", &paths(&["y"]))
