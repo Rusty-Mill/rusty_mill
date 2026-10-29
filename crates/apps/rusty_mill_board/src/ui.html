@@ -252,7 +252,8 @@ function renderSide(){
   if(projects().length>1){
     n1.append(el("h2","Repositories"),item("All repositories",cards.length,!sel.repo,()=>pick("","")));
     // The Inbox is a project, not a repository: it shows and counts only cards with no other project.
-    n1.append(item("Inbox",count(k=>k.project===INBOX),sel.project===INBOX,()=>pick(repoOf(INBOX),INBOX)));
+    // Listed only when this credential may see it, like every other entry here.
+    if(projects().includes(INBOX))n1.append(item("Inbox",count(k=>k.project===INBOX),sel.project===INBOX,()=>pick(repoOf(INBOX),INBOX)));
     for(const r of names)n1.append(item(r,count(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
     // The projects of the chosen repository, or of every repository, so one project's cards are a click
     // away. A repository whose only project is its own is left out: it is the repository, listed above.
