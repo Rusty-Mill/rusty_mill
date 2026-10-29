@@ -37,7 +37,9 @@ fn sleep_fires_on_a_tokio_thread() {
     install_fallback().expect("fallback");
     let started = Instant::now();
 
-    on_tokio(rusty_tokio::time::sleep(Duration::from_millis(50)));
+    // Built inside the tokio task, so the timer is looked up on a tokio
+    // thread rather than on this bare test thread.
+    on_tokio(async { rusty_tokio::time::sleep(Duration::from_millis(50)).await });
 
     assert!(started.elapsed() >= Duration::from_millis(50));
 }
@@ -46,10 +48,9 @@ fn sleep_fires_on_a_tokio_thread() {
 fn timeout_elapses_on_a_tokio_thread() {
     install_fallback().expect("fallback");
 
-    let outcome = on_tokio(rusty_tokio::time::timeout(
-        Duration::from_millis(20),
-        std::future::pending::<()>(),
-    ));
+    let outcome = on_tokio(async {
+        rusty_tokio::time::timeout(Duration::from_millis(20), std::future::pending::<()>()).await
+    });
 
     assert!(outcome.is_err());
 }
@@ -58,11 +59,11 @@ fn timeout_elapses_on_a_tokio_thread() {
 fn spawned_tasks_run_on_the_fallback_worker() {
     install_fallback().expect("fallback");
 
-    let name = on_tokio(rusty_tokio::spawn(async {
-        std::thread::current().name().map(str::to_owned)
-    }))
+    let name = on_tokio(async {
+        rusty_tokio::spawn(async { std::thread::current().name().map(str::to_owned) }).await
+    })
     .expect("join");
-    let blocking = on_tokio(rusty_tokio::spawn_blocking(|| 6 * 7)).expect("join");
+    let blocking = on_tokio(async { rusty_tokio::spawn_blocking(|| 6 * 7).await }).expect("join");
 
     assert_eq!(name.as_deref(), Some("rusty-tokio-fallback"));
     assert_eq!(blocking, 42);
@@ -86,6 +87,17 @@ fn a_rusty_tokio_runtime_keeps_its_own_tasks() {
         .expect("join");
 
     assert_eq!(name.as_deref(), Some("own-runtime"));
+}
+
+#[test]
+fn work_built_on_a_bare_thread_also_uses_the_fallback() {
+    install_fallback().expect("fallback");
+    let sleep = rusty_tokio::time::sleep(Duration::from_millis(10));
+    let task = rusty_tokio::spawn(async { 7 });
+
+    on_tokio(sleep);
+
+    assert_eq!(on_tokio(task).expect("join"), 7);
 }
 
 #[test]

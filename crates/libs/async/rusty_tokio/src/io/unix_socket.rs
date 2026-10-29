@@ -225,7 +225,8 @@ impl UnixListener {
     /// already in use.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = PlatformUnixListener::bind(path.as_ref()).map_err(from_platform_err)?;
@@ -239,7 +240,8 @@ impl UnixListener {
     /// with the reactor. Unix-only (std has no Windows `AF_UNIX` type).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     #[cfg(unix)]
     pub fn from_std(listener: std::os::unix::net::UnixListener) -> io::Result<UnixListener> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
@@ -259,7 +261,8 @@ impl UnixListener {
     /// stale file behind in the first place.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     #[cfg(unix)]
     pub fn bind_addr(addr: &UnixSocketAddr) -> io::Result<UnixListener> {
         let fd = socket::new_unix_socket()?;
@@ -286,7 +289,8 @@ impl UnixListener {
     /// `bind`/`platform_windows` can't express) needs.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     ///
     /// # Errors
     /// Fails with `InvalidInput` if `addr` is the unnamed address --
@@ -478,7 +482,8 @@ impl UnixSocket {
     /// `listen(2)`).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     ///
     /// # Errors
     /// Fails if this socket was created via
@@ -504,7 +509,8 @@ impl UnixSocket {
     /// Connects, turning this into an ordinary [`UnixStream`].
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     ///
     /// # Errors
     /// Fails if this socket was created via
@@ -533,7 +539,8 @@ impl UnixSocket {
     /// Converts into an ordinary [`super::UnixDatagram`].
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     ///
     /// # Errors
     /// Fails if this socket was created via
@@ -623,7 +630,8 @@ impl UnixStream {
     }
 
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     #[cfg(unix)]
     pub async fn connect<P: AsRef<Path>>(path: P) -> io::Result<UnixStream> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
@@ -656,7 +664,8 @@ impl UnixStream {
     /// rather than genuinely blocking for a meaningful duration.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     #[cfg(windows)]
     pub async fn connect<P: AsRef<Path>>(path: P) -> io::Result<UnixStream> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
@@ -677,7 +686,8 @@ impl UnixStream {
     /// path.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     #[cfg(unix)]
     pub async fn connect_addr(addr: &UnixSocketAddr) -> io::Result<UnixStream> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
@@ -698,7 +708,8 @@ impl UnixStream {
     /// path unwrapped from `addr`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     ///
     /// # Errors
     /// Fails with `InvalidInput` if `addr` is the unnamed address.
@@ -722,7 +733,8 @@ impl UnixStream {
     /// the OS level at all (not a rustils gap -- a real absence).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     #[cfg(unix)]
     pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
@@ -737,7 +749,8 @@ impl UnixStream {
     /// the reactor. Unix-only (std has no Windows `AF_UNIX` type).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     #[cfg(unix)]
     pub fn from_std(stream: std::os::unix::net::UnixStream) -> io::Result<UnixStream> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();

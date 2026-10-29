@@ -74,7 +74,8 @@ impl TcpListener {
     /// `std::net::TcpListener` and adopt it with [`from_std`](Self::from_std).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<TcpListener> {
         super::addr::first_ok(addr, TcpListener::bind_addr).await
     }
@@ -125,7 +126,8 @@ impl TcpListener {
     /// syscalls.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn from_std(listener: std::net::TcpListener) -> io::Result<TcpListener> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = PlatformTcpListener::from(OwnedIo::from(listener));
@@ -288,7 +290,8 @@ impl TcpStream {
     /// failed.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn connect(addr: impl ToSocketAddrs) -> io::Result<TcpStream> {
         let addrs = addr.to_socket_addrs().await?;
         let mut last_err = None;
@@ -311,7 +314,8 @@ impl TcpStream {
     /// skip resolution/the multi-address fallback loop entirely.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn connect_addr(addr: SocketAddr) -> io::Result<TcpStream> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let fd = socket::new_tcp_socket(addr)?;
@@ -338,7 +342,8 @@ impl TcpStream {
     /// the connect syscall.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn from_std(stream: std::net::TcpStream) -> io::Result<TcpStream> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = PlatformTcpStream::from(OwnedIo::from(stream));
@@ -1114,7 +1119,8 @@ impl TcpSocket {
     /// `listen(2)`).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn listen(self, backlog: u32) -> io::Result<TcpListener> {
         socket::listen(self.fd.as_raw_io(), backlog)?;
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
@@ -1131,7 +1137,8 @@ impl TcpSocket {
     /// Connects, turning this into an ordinary [`TcpStream`].
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn connect(self, addr: SocketAddr) -> io::Result<TcpStream> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let outcome = socket::connect(self.fd.as_raw_io(), addr)?;

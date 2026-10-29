@@ -31,8 +31,14 @@ static INIT: Mutex<()> = Mutex::new(());
 /// again returns the same handle.
 ///
 /// # Errors
-/// Returns the error from building the runtime, e.g. when a thread can't be
-/// spawned. A later call tries again.
+/// Returns the error from creating the I/O reactor (the epoll, kqueue,
+/// io_uring or IOCP instance). Nothing has started at that point, and a
+/// later call tries again.
+///
+/// # Panics
+/// Panics if the OS refuses to spawn one of the runtime's threads, as
+/// [`Builder::build`] does. Threads started before that keep running, and
+/// a later call starts a new runtime rather than reusing or stopping them.
 pub fn install_fallback() -> io::Result<Handle> {
     if let Some(handle) = FALLBACK.get() {
         return Ok(handle.clone());

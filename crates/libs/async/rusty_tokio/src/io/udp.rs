@@ -68,7 +68,8 @@ impl UdpSocket {
     /// `async` and how to bind synchronously ([`from_std`](Self::from_std)).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<UdpSocket> {
         super::addr::first_ok(addr, UdpSocket::bind_addr).await
     }
@@ -515,7 +516,8 @@ impl UdpSocket {
     /// syscall.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn from_std(socket: std::net::UdpSocket) -> io::Result<UdpSocket> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = PlatformUdpSocket::from(OwnedIo::from(socket));

@@ -73,7 +73,8 @@ pub struct Stdin {
 ///
 /// # Panics
 /// Reading from the returned handle panics if there's no running
-/// [`crate::Runtime`] -- construction itself doesn't need one.
+/// [`crate::Runtime`] and no [fallback](crate::runtime::install_fallback) is installed --
+/// construction itself doesn't need one.
 pub fn stdin() -> Stdin {
     Stdin { state: State::Idle }
 }
@@ -125,7 +126,8 @@ pub struct Stdout {
 ///
 /// # Panics
 /// Writing to the returned handle panics if there's no running
-/// [`crate::Runtime`] -- construction itself doesn't need one.
+/// [`crate::Runtime`] and no [fallback](crate::runtime::install_fallback) is installed --
+/// construction itself doesn't need one.
 pub fn stdout() -> Stdout {
     Stdout { op: None }
 }
@@ -171,7 +173,8 @@ pub struct Stderr {
 ///
 /// # Panics
 /// Writing to the returned handle panics if there's no running
-/// [`crate::Runtime`] -- construction itself doesn't need one.
+/// [`crate::Runtime`] and no [fallback](crate::runtime::install_fallback) is installed --
+/// construction itself doesn't need one.
 pub fn stderr() -> Stderr {
     Stderr { op: None }
 }

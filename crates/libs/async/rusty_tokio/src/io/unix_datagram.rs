@@ -44,7 +44,8 @@ impl UnixDatagram {
     /// `connect` to fix one default peer for `send`/`recv`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixDatagram> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = std::os::unix::net::UnixDatagram::bind(path)?;
@@ -59,7 +60,8 @@ impl UnixDatagram {
     /// via `send_to` unless it's bound first.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn unbound() -> io::Result<UnixDatagram> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = std::os::unix::net::UnixDatagram::unbound()?;
@@ -74,7 +76,8 @@ impl UnixDatagram {
     /// the reactor.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub(crate) fn from_owned_fd(fd: std::os::fd::OwnedFd) -> io::Result<UnixDatagram> {
         let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = std::os::unix::net::UnixDatagram::from(fd);

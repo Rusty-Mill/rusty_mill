@@ -15,3 +15,8 @@ changelog: rusty_tokio's `runtime::install_fallback()` lets its I/O, timers and 
   names `install_fallback()`. `Handle::current` and `Handle::try_current`
   are unchanged, and `block_in_place`, `time::pause`, `resume` and
   `advance` still need the thread's own runtime.
+- **Changed:** the `# Panics` notes on I/O, fs, process, signal and spawn
+  entry points now say they panic only when there is no runtime and no
+  fallback installed. `install_fallback` documents that it returns an error
+  only when creating the reactor fails, and panics, as `Builder::build`
+  does, when a thread can't be spawned.
