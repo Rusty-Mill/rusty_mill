@@ -53,6 +53,21 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = WORKFLOW.read_text(encoding="utf-8")
 
+    def test_every_job_has_a_timeout_inside_the_queue_check_timeout(self) -> None:
+        # A hung job must fail itself, not hold a merge-queue entry until the
+        # queue's 180-minute check timeout drops it (ADR-0009).
+        jobs = self.workflow[self.workflow.index("\njobs:\n"):]
+        blocks = re.split(r"\n  (?=[A-Za-z0-9_-]+:\n)", jobs)[1:]
+        self.assertGreater(len(blocks), 30)
+        for block in blocks:
+            name = block.split(":", 1)[0]
+            with self.subTest(job=name):
+                limit = re.search(r"\n    timeout-minutes: (\d+)\n", block)
+                self.assertIsNotNone(limit)
+                self.assertLessEqual(int(limit.group(1)), 60)
+        gate = self.workflow[self.workflow.index("  required-gate:\n"):]
+        self.assertIn("\n    timeout-minutes: 5\n", gate)
+
     def test_win32_cross_check_needs_no_native_compiler_and_stays_gated(self) -> None:
         start = self.workflow.index("  win32-cross-compile-check:\n")
         end = self.workflow.index("\n  rusty-rand-platforms:", start)
