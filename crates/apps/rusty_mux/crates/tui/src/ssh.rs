@@ -9,6 +9,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -17,39 +18,63 @@ use std::time::{Duration, Instant};
 /// How often [`Forward::wait_ready`] tries the local socket.
 const RETRY: Duration = Duration::from_millis(50);
 
+/// The options that keep the forward owned by the `ssh` this client starts
+/// and reaps. A user's config may share a master connection or fork after
+/// login, either of which would leave the listener with a process `Drop`
+/// never stops. Options given with `-o` win over the config, whose host,
+/// user, key and jump settings still apply. `ForkAfterAuthentication`
+/// needs OpenSSH 8.7 or later.
+const OWNED: [&str; 6] = [
+    "ControlMaster=no",
+    "ControlPath=none",
+    "ControlPersist=no",
+    "ForkAfterAuthentication=no",
+    "ExitOnForwardFailure=yes",
+    "StreamLocalBindUnlink=yes",
+];
+
 /// The arguments for `ssh` that forward `local` to `remote` on `host` and
 /// do nothing else. `--` keeps a host that starts with `-` from reading as
-/// an option. `ssh -L` splits its argument at `:`, so neither path may
-/// hold one.
+/// an option. Both paths must be absolute: ssh refuses a bare name, and
+/// would resolve a relative one on the server against a directory the
+/// user does not choose.
 pub fn args(host: &str, local: &Path, remote: &Path) -> Result<Vec<OsString>, String> {
     if host.is_empty() {
         return Err("--ssh needs a host".into());
     }
     for path in [local, remote] {
-        if path.as_os_str().as_encoded_bytes().contains(&b':') {
+        if !path.is_absolute() {
             return Err(format!(
-                "{}: ssh cannot forward a path with `:`",
+                "{}: --ssh needs an absolute socket path",
                 path.display()
             ));
         }
     }
-    let mut forward = local.as_os_str().to_owned();
-    forward.push(":");
-    forward.push(remote);
-    let mut args: Vec<OsString> = [
-        "-N",
-        "-T",
-        "-o",
-        "ExitOnForwardFailure=yes",
-        "-o",
-        "StreamLocalBindUnlink=yes",
-        "-L",
-    ]
-    .map(OsString::from)
-    .into();
-    args.push(forward);
+    let mut forward = escape(local);
+    forward.push(b':');
+    forward.extend(escape(remote));
+    let mut args = vec![OsString::from("-N"), OsString::from("-T")];
+    for option in OWNED {
+        args.extend(["-o", option].map(OsString::from));
+    }
+    args.push("-L".into());
+    args.push(OsString::from_vec(forward));
     args.extend(["--", host].map(OsString::from));
     Ok(args)
+}
+
+/// `path` as one field of `ssh -L`, which would otherwise split it at `:`,
+/// drop each `\`, and expand `%` tokens such as `%h`.
+fn escape(path: &Path) -> Vec<u8> {
+    let mut field = Vec::new();
+    for &byte in path.as_os_str().as_bytes() {
+        match byte {
+            b'\\' | b':' => field.extend([b'\\', byte]),
+            b'%' => field.extend(b"%%"),
+            _ => field.push(byte),
+        }
+    }
+    field
 }
 
 /// A running `ssh` forward and the private directory of its local socket.
@@ -129,7 +154,10 @@ fn private_dir() -> io::Result<PathBuf> {
         std::process::id(),
         rusty_uuid::Uuid::new_v4().simple()
     );
-    let dir = std::env::temp_dir().join(name);
+    // The forward needs an absolute path, and TMPDIR may be relative.
+    let dir = std::env::current_dir()?
+        .join(std::env::temp_dir())
+        .join(name);
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
     Ok(dir)
 }
@@ -138,15 +166,26 @@ fn private_dir() -> io::Result<PathBuf> {
 mod tests {
     use super::*;
 
+    fn strings(args: &[OsString]) -> Vec<&str> {
+        args.iter().map(|a| a.to_str().unwrap()).collect()
+    }
+
     #[test]
     fn the_forward_is_all_ssh_does() {
         let args = args("box", Path::new("/tmp/d/s"), Path::new("/run/mux.sock")).unwrap();
-        let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
-            args,
+            strings(&args),
             [
                 "-N",
                 "-T",
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
+                "-o",
+                "ControlPersist=no",
+                "-o",
+                "ForkAfterAuthentication=no",
                 "-o",
                 "ExitOnForwardFailure=yes",
                 "-o",
@@ -167,10 +206,95 @@ mod tests {
     }
 
     #[test]
-    fn paths_with_a_colon_and_an_empty_host_are_refused() {
-        assert!(args("box", Path::new("/l"), Path::new("/a:b")).is_err());
-        assert!(args("box", Path::new("/l:x"), Path::new("/r")).is_err());
+    fn paths_ssh_would_rewrite_are_escaped() {
+        let args = args("box", Path::new("/l:\\"), Path::new("/a%h:b\\c")).unwrap();
+        let forward = args[args.len() - 3].to_str().unwrap();
+        assert_eq!(forward, r"/l\:\\:/a%%h\:b\\c");
+    }
+
+    #[test]
+    fn relative_paths_and_an_empty_host_are_refused() {
+        assert!(args("box", Path::new("/l"), Path::new("mux.sock")).is_err());
+        assert!(args("box", Path::new("/l"), Path::new("./mux.sock")).is_err());
+        assert!(args("box", Path::new("l"), Path::new("/r")).is_err());
         assert!(args("", Path::new("/l"), Path::new("/r")).is_err());
+    }
+
+    /// Asks the real OpenSSH (`ssh -G` resolves the options and connects to
+    /// nothing) what the arguments mean under a config that multiplexes and
+    /// forks after login, with paths its `-L` grammar would rewrite. Runs
+    /// only where `ssh` is installed.
+    #[test]
+    fn real_ssh_reads_one_owned_forward_of_the_exact_paths() {
+        let Some(ssh) = installed_ssh() else {
+            eprintln!("no ssh on PATH; skipping the OpenSSH check");
+            return;
+        };
+        let dir = private_dir().unwrap();
+        let config = dir.join("config");
+        std::fs::write(
+            &config,
+            "Host box\n ControlMaster auto\n ControlPath /tmp/cm-%C\n \
+             ControlPersist yes\n ForkAfterAuthentication yes\n",
+        )
+        .unwrap();
+        let (local, remote) = (dir.join(r"a:b\c%h[d"), Path::new(r"/run/m\x:y%%z"));
+        let mut cmd = Command::new(ssh);
+        cmd.arg("-F").arg(&config).arg("-G");
+        cmd.args(args("box", &local, remote).unwrap());
+        let out = cmd.stdin(Stdio::null()).output().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        for want in [
+            "controlmaster false",
+            "controlpersist no",
+            "forkafterauthentication no",
+        ] {
+            assert!(lines.contains(&want), "no {want:?} in {text}");
+        }
+        assert!(
+            !lines.iter().any(|l| l.starts_with("controlpath ")),
+            "{text}"
+        );
+        let forward = format!("localforward {} {}", local.display(), remote.display());
+        assert!(
+            lines.contains(&forward.as_str()),
+            "no {forward:?} in {text}"
+        );
+    }
+
+    fn installed_ssh() -> Option<PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("ssh"))
+            .find(|ssh| ssh.is_file())
+    }
+
+    /// An `ssh` that exits at once (a refused login, a bad option) fails
+    /// the wait, and the directory still goes with the forward.
+    #[test]
+    fn an_ssh_that_exits_before_the_forward_fails_and_cleans_up() {
+        let mut forward = Forward::start(OsStr::new("false"), "box", Path::new("/r")).unwrap();
+        let err = forward.wait_ready(Duration::from_secs(10)).unwrap_err();
+        assert!(err.contains("ssh exited"), "{err}");
+        let dir = forward.dir.clone();
+        drop(forward);
+        assert!(!dir.exists(), "{} was left behind", dir.display());
+    }
+
+    #[test]
+    fn a_missing_ssh_is_reported() {
+        let program = OsStr::new("/nonexistent/rusty-mux-test-ssh");
+        let err = Forward::start(program, "box", Path::new("/r"))
+            .err()
+            .unwrap();
+        assert!(err.contains("starting /nonexistent"), "{err}");
     }
 
     #[test]
@@ -180,6 +304,7 @@ mod tests {
             &std::fs::metadata(&dir).unwrap().permissions(),
         );
         std::fs::remove_dir(&dir).unwrap();
+        assert!(dir.is_absolute(), "{}", dir.display());
         assert_eq!(mode & 0o777, 0o700, "{mode:o}");
     }
 }

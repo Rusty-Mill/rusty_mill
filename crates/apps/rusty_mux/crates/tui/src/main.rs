@@ -1,11 +1,11 @@
 //! `rusty-mux [--ssh HOST] <socket> [block]`: show a rusty_mux block's
 //! window on this terminal, starting with that block focused. With `--ssh`
-//! the socket is the server's on HOST, reached through one OpenSSH forward
-//! (Unix only; `RUSTY_MUX_SSH` names another `ssh` program); the client
-//! asks for nothing until the forward is up, so a password prompt works.
-//! Without a block id it creates a session, window and block first. Ctrl-] then `d` detaches;
-//! the blocks keep running and the focused one's id is printed for
-//! reattaching. The other Ctrl-] commands are listed in
+//! the socket is the server's absolute path on HOST, reached through one
+//! OpenSSH (8.7 or later) forward (Unix only; `RUSTY_MUX_SSH` names another
+//! `ssh` program); the client asks for nothing until the forward is up, so
+//! a password prompt works. Without a block id it creates a session, window
+//! and block first. Ctrl-] then `d` detaches; the blocks keep running and
+//! the focused one's id is printed for reattaching. The other Ctrl-] commands are listed in
 //! `rusty_mux_tui::keys`. With `RUSTY_MUX_KEYLOG` set to a new file's path,
 //! every keyboard read is written to it as one line of hex, to see what a
 //! terminal really sends. That is everything typed, passwords included:
