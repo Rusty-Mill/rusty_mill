@@ -116,7 +116,7 @@ impl State {
         }))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn has_client(&self, client: ClientId) -> bool {
         self.clients.contains_key(&client)
     }
