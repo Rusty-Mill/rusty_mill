@@ -116,14 +116,16 @@ fn capture_reads_the_screen_after_the_history_asked_for() {
     let screen = capture(&mut client, block, 0);
     assert_eq!(screen.lines().count(), 24, "{screen}");
     assert!(screen.contains("\n160\n") && screen.contains("DONE2"));
-    assert!(!screen.lines().any(|l| l == "101"));
+    // A prompt printed after the echo can share the first number's line.
+    let first = |l: &str| l.ends_with("101");
+    assert!(!screen.lines().any(first));
 
     let more = capture(&mut client, block, 5);
     assert_eq!(more.lines().count(), 29);
     assert!(more.ends_with(&screen));
 
     let all = capture(&mut client, block, u32::MAX);
-    assert!(all.lines().any(|l| l == "101"), "{all}");
+    assert!(all.lines().any(first), "{all}");
     assert!(all.ends_with(&screen));
 }
 
@@ -201,8 +203,11 @@ fn terminal_process_lists_the_foreground_and_its_ancestors() {
     loop {
         let now = text(&mut client, block, "terminal.process", &[]);
         let rows: Vec<Vec<&str>> = now.lines().map(|l| l.split('\t').collect()).collect();
-        if let [job, last] = rows.as_slice() {
-            assert_eq!(job[1..], ["sleep", "sleep 30"], "{now}");
+        // Until `exec` finishes, the job can show as a forked `sh` or a
+        // `sleep` with no command line yet.
+        if let [job, last] = rows.as_slice()
+            && job[1..] == ["sleep", "sleep 30"]
+        {
             assert_eq!(*last, shell, "{now}");
             break;
         }
@@ -348,8 +353,9 @@ fn keys_reach_the_program_in_its_cursor_mode() {
     let mut client = Client::connect_with(&path, INSPECT, None);
     let block = block_for(&mut client);
     // `cat -v` shows what it reads; DECCKM on turns Up into SS3 A.
-    client.input(block, b"printf '\\033[?1h'; cat -v\r");
-    client.wait_for(block, "cat -v\r\n");
+    // The marker shows the server has parsed DECCKM before keys are encoded.
+    client.input(block, b"printf '\\033[?1h'; echo ON$((1+1)); cat -v\r");
+    client.wait_for(block, "ON2");
     let pressed = send_keys(block, &["up", "ctrl+a", "x", "enter", "ctrl+d"]);
     client.send(&pressed(99));
     client.wait_for(block, "^[OA^Ax\r\n");

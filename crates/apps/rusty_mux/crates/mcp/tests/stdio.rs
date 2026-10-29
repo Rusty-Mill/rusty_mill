@@ -291,7 +291,8 @@ fn an_agent_builds_a_block_types_into_it_and_reads_it_back_by_name() {
             "terminal.format",
             r#"{"block": "agents/work/1", "history": 0}"#,
         );
-        if screen.lines().any(|l| l == "HI2") {
+        // A prompt printed after the echo can share the output's line.
+        if screen.lines().any(|l| l.ends_with("HI2")) {
             break;
         }
         assert!(Instant::now() < deadline, "never saw the output: {screen}");
