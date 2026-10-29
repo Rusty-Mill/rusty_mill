@@ -570,13 +570,10 @@ mod tests {
     ///
     /// The pipe read is a blocking `ReadFile`, so the reads happen on a
     /// detached thread and the deadline is enforced by polling the shared
-    /// buffer; a hung read can never wedge the test harness.
-    /// ConPTY child attach silently fails on Insider build 26200.8737: conhost
-    /// runs (its `?9001h`/`?1004h` mode requests arrive) but the spawned
-    /// child's output never does. Believed an OS regression, not ours — see
-    /// docs/research/conpty-attach-2026-07.md. Run with `--ignored` to recheck.
+    /// buffer; a hung read can never wedge the test harness. It fails without
+    /// `STARTF_USESTDHANDLES` in `spawn_shell` whenever the test runner's own
+    /// std handles are redirected (docs/research/conpty-attach-2026-07.md).
     #[test]
-    #[ignore = "ConPTY attach broken on Insider 26200.8737; see docs/research/conpty-attach-2026-07.md"]
     fn conpty_child_output_reaches_the_reader() {
         use crate::backend::Backend as _;
         use std::sync::{Arc, Mutex};
@@ -613,7 +610,6 @@ mod tests {
     /// round-trips through cmd.exe.
     #[cfg(feature = "gui")]
     #[test]
-    #[ignore = "ConPTY attach broken on Insider 26200.8737; see docs/research/conpty-attach-2026-07.md"]
     fn win32_input_records_round_trip_through_a_real_conpty_child() {
         use crate::backend::{Backend as _, BackendHandle};
         use crate::gui::input::encode_win32;
