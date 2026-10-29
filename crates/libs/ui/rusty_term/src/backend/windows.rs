@@ -29,8 +29,8 @@ use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetExitCodeProcess, InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-    PROCESS_INFORMATION, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject,
+    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 /// Unit type implementing [`Backend`](crate::backend::Backend) for Windows.
@@ -122,6 +122,12 @@ impl Backend for WindowsBackend {
             // Build STARTUPINFOEXW carrying the pseudoconsole attribute.
             let mut si: STARTUPINFOEXW = std::mem::zeroed();
             si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+            // Without this, a parent whose own std handles are redirected
+            // (any `cargo test` or CI run) has them duplicated into the
+            // child, which then writes there instead of the pseudo console.
+            // Null std handles plus this flag stop that; platform-windows'
+            // `sys::pty::spawn_attached` carries the full history.
+            si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
             let mut attr_size: usize = 0;
             // First call "fails" by design, only to report the required size.
             InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut attr_size);
