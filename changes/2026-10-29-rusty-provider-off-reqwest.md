@@ -10,6 +10,9 @@ changelog: rp-router and rp-providers send on rusty_request instead of reqwest; 
   unchanged: the per-provider timeout still bounds the whole exchange,
   streamed body included, the 16 MiB body cap and error classification
   stay, and errors never echo the request URL (Gemini's API key).
+  Webhook delivery is still classified on the status line alone: the
+  receiver's body is never read, so a stalled or truncated body after a
+  2xx or 4xx doesn't trigger a retry.
 - **Changed:** a host that calls them from a tokio runtime must call
   `rusty_tokio::runtime::install_fallback()` once; `rp-server` already
   does (#1231), and its test harness now does too.

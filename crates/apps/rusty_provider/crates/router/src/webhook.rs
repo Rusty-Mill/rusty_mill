@@ -211,7 +211,10 @@ impl WebhookNotifier {
                     }
                 };
 
-                let retryable = match req.send().await {
+                // Status only: the receiver's body is never read, so a stalled
+                // or truncated body can't turn an acknowledged delivery into
+                // a retry.
+                let retryable = match req.send_streaming().await {
                     Ok(resp) if resp.status().is_success() => return,
                     Ok(resp) => {
                         let status = resp.status();

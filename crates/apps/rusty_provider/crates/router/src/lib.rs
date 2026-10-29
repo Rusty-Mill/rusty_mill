@@ -4267,6 +4267,80 @@ mod tests {
         server.verify().await;
     }
 
+    /// A one-shot-per-connection raw TCP receiver: answers every connection
+    /// with `head` (status line, headers and the start of a body shorter
+    /// than its declared `Content-Length`), then holds the connection for
+    /// `hold` before closing it. Returns the URL and a count of
+    /// connections, one per delivery attempt.
+    fn partial_body_receiver(
+        head: &'static str,
+        hold: std::time::Duration,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 8192];
+                    let _ = std::io::Read::read(&mut stream, &mut buf);
+                    let _ = std::io::Write::write_all(&mut stream, head.as_bytes());
+                    std::thread::sleep(hold);
+                });
+            }
+        });
+        (url, attempts)
+    }
+
+    /// Fires one budget-reset webhook at `url` (1s timeout, up to 3 quick
+    /// retries) and waits `settle` for any retries to land.
+    async fn fire_one_webhook(url: String, settle: std::time::Duration) {
+        let router = router_with_budgeted_client(10.0, BudgetPeriod::Total);
+        let router = Router {
+            webhook: Some(Arc::new(WebhookNotifier::new(
+                url,
+                None,
+                1,
+                None,
+                RetryPolicy::for_test(10, 3),
+            ))),
+            ..router
+        };
+        assert!(router.reset_client_spend("acme"));
+        tokio::time::sleep(settle).await;
+    }
+
+    #[tokio::test]
+    async fn webhook_does_not_retry_a_200_whose_body_stalls() {
+        crate::http::install_fallback_for_test();
+        let head = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nok";
+        let (url, attempts) = partial_body_receiver(head, std::time::Duration::from_secs(3));
+        // Past the 1s timeout, so reading the body would have timed out and retried.
+        fire_one_webhook(url, std::time::Duration::from_millis(1500)).await;
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn webhook_does_not_retry_a_200_whose_body_is_truncated() {
+        crate::http::install_fallback_for_test();
+        let head = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nok";
+        let (url, attempts) = partial_body_receiver(head, std::time::Duration::ZERO);
+        fire_one_webhook(url, std::time::Duration::from_millis(300)).await;
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn webhook_does_not_retry_a_400_whose_body_is_truncated() {
+        crate::http::install_fallback_for_test();
+        let head = "HTTP/1.1 400 Bad Request\r\nContent-Length: 100\r\n\r\nno";
+        let (url, attempts) = partial_body_receiver(head, std::time::Duration::ZERO);
+        fire_one_webhook(url, std::time::Duration::from_millis(300)).await;
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     // --- client daily usage history -----------------------------------------------
 
     #[tokio::test]
