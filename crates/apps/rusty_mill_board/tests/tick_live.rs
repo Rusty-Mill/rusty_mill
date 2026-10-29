@@ -74,5 +74,11 @@ fn a_card_round_trips_through_a_real_rusty_tick() {
         (planned.priority, planned.deps.clone(), planned.tags.clone()),
         (3, vec![dep.id], vec!["live".to_owned()])
     );
+    let (d, c) = (
+        dep.number.expect("numbered"),
+        card.number.expect("numbered"),
+    );
+    assert!(c > d, "numbers are reserved in creation order");
+    assert_eq!(board.get_number(c).expect("by number").id, card.id);
     println!("cards {} and {} round-tripped", card.id, dep.id);
 }

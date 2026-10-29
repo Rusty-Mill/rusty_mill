@@ -39,7 +39,7 @@ rusty_mcp_server = { git = "https://github.com/Rusty-Mill/rusty_mill", tag = "li
   PR there and let its CI decide. A fix a consumer needs in a monorepo crate
   lands here first, by PR, then a new tag is cut.
 - **`[patch.crates-io]` does not carry through git dependencies.** A consumer
-  that builds a patched crate (today `aws-sigv4`, `jsonwebtoken`) copies the
+  that builds a patched crate (today `jsonwebtoken`) copies the
   patch and its `vendor/` directory.
 - **Published tags are never moved or deleted.** A bad tag is followed by a
   newer one.

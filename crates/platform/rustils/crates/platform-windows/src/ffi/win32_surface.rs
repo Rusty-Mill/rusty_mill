@@ -299,3 +299,32 @@ pub use windows_sys::Win32::Storage::FileSystem::{
 };
 pub use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 pub use windows_sys::Win32::System::Threading::OpenProcessToken;
+
+// Console host surface (`sys::condrv`, #1222 PR 1; design
+// `docs/projects/term/conhost/design.md` §11.1). Our own host serves the
+// console driver (ConDrv) directly instead of going through ConPTY:
+// - `LoadLibraryExW` with `LOAD_LIBRARY_SEARCH_SYSTEM32` and
+//   `GetProcAddress` resolve the undocumented `user32!ConsoleControl` at
+//   runtime, from System32 only, so a build without it degrades to
+//   `ErrorKind::Unsupported` instead of failing to load. It is never
+//   linked statically.
+// - The server handle is asynchronous: every IOCTL on it is overlapped
+//   (`OVERLAPPED`, `GetOverlappedResult`), each with its own event
+//   (`CreateEventW`, `ResetEvent`), and `CancelIoEx` requests
+//   cancellation of the one in-flight READ_IO. `SetEvent` drives the
+//   waker and the input-available event clients wait on.
+// - `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` limits what the attached child
+//   inherits to its three std handles.
+// - The `ERROR_*` and `WAIT_FAILED` constants are those calls' documented
+//   results: a pending overlapped call, a cancelled one, and a driver
+//   that has dropped the server.
+pub use windows_sys::Win32::Foundation::{
+    ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, ERROR_PIPE_NOT_CONNECTED, FARPROC, WAIT_FAILED,
+};
+pub use windows_sys::Win32::System::LibraryLoader::{
+    GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+};
+pub use windows_sys::Win32::System::Threading::{
+    CreateEventW, ResetEvent, SetEvent, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+};
+pub use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};

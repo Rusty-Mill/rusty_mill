@@ -13,7 +13,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 /// The document kinds the API accepts.
-pub const KINDS: [&str; 13] = [
+pub const KINDS: [&str; 14] = [
     "habit",
     "habit_checkin",
     "focus",
@@ -27,10 +27,14 @@ pub const KINDS: [&str; 13] = [
     "subscription",
     "import_alias",
     BOARD_KIND,
+    BOARD_NUMBER_KIND,
 ];
 /// Mill Board's per-task document (ADR-0012): its id is the task's id, and it
 /// goes when the task is purged.
 pub const BOARD_KIND: &str = "board";
+/// Mill Board's reservation of one card number: created once with `If-None-Match: *` and
+/// never fenced, purged or reused, so two boards never hand out the same number.
+pub const BOARD_NUMBER_KIND: &str = "board_number";
 /// Largest accepted body, in bytes.
 pub const MAX_DOC_BYTES: usize = 64 * 1024;
 

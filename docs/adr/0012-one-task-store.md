@@ -55,7 +55,8 @@ one `board` document per task, with its own compare-and-swap (below).
 | `body` | `notes` | |
 | `column` | tag `board:<column>` | `Done` also sets status `done`. Same label scheme the GitHub sync already uses |
 | `claim` | tag `claim:<actor>` | tags are case-insensitive, so actor names must be lowercase (validated at the identities boundary) |
-| `tags` | `tags` | `agent`, `board:` and `claim:` are reserved; `card_update` refuses them. rusty_tick keeps tags lowercase, so they read back lowercase |
+| `number` | tag `number:<n>` | board-wide, on the task so it lands in the creating `POST`. Each number is first reserved as a `board_number` doc (id derived from the number, `If-None-Match: *`), never released: unique across boards sharing the store and across untag, trash and restore. A lookup by number that finds two cards (a tag copied by hand) is refused |
+| `tags` | `tags` | `agent`, `board:`, `claim:` and `number:` are reserved; `card_update` refuses them. rusty_tick keeps tags lowercase, so they read back lowercase |
 | `project` | `listId` | the list's name is the project, and a project's list is created on first use. The Inbox is the `default` project |
 | `comments` | tick `comment` docs | existing shape `{v, taskId, text, createdMs}` plus `by`, so the tick UI shows who wrote it |
 | `issue`, `synced_text`, `execution` | tick `board` doc, id = task id | written with its own `If-Match` (below) |

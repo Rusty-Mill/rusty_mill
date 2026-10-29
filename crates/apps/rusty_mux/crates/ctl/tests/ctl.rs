@@ -1409,3 +1409,54 @@ fn wait_for_an_event_whose_fields_match() {
         assert_eq!(ctl(&socket, args).status.code(), Some(2), "{args:?}");
     }
 }
+
+/// What a client running `ssh host rusty-mux-ctl bridge` sees: its frames
+/// reach the server through stdin and the answers come back on stdout. The
+/// end of stdin ends the bridge.
+#[test]
+fn bridge_carries_the_protocol_over_stdin_and_stdout() {
+    use rusty_mux_proto::{Features, Message, decode, encode};
+
+    let socket = start_server();
+    let mut bridge = ctl_command(&socket, &["bridge"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("run rusty-mux-ctl bridge");
+    let mut input = bridge.stdin.take().expect("stdin");
+    let hello = Message::Hello {
+        features: Features::SYNC,
+        resume: None,
+        takeover: None,
+    };
+    let sync = Message::Sync { req: 1 };
+    for message in [&hello, &sync] {
+        input.write_all(&encode(message).expect("encode")).unwrap();
+    }
+    input.flush().unwrap();
+
+    let mut output = bridge.stdout.take().expect("stdout");
+    let (mut buf, mut got) = (Vec::new(), Vec::new());
+    while !matches!(got.last(), Some(Message::Done { req: 1, .. })) {
+        if let Some((message, used)) = decode(&buf).expect("decode") {
+            buf.drain(..used);
+            got.push(message);
+            continue;
+        }
+        let mut chunk = [0u8; 4096];
+        let n = output.read(&mut chunk).expect("read");
+        assert!(n > 0, "the bridge ended early");
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    assert!(matches!(got[0], Message::Welcome { .. }), "{got:?}");
+
+    drop(input);
+    let status = bridge.wait().expect("wait");
+    assert!(status.success(), "{status}");
+}
+
+#[test]
+fn bridge_to_no_server_is_unreachable() {
+    let output = ctl(&socket_path("bridge-none"), &["bridge"]);
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+}

@@ -17,6 +17,6 @@ fn main() -> ExitCode {
         }
     };
     let env = Env::from_process();
-    let exit = rusty_mux_ctl::run(&args, &env, &mut std::io::stdout(), &mut std::io::stderr());
+    let exit = rusty_mux_ctl::run_process(&args, &env);
     ExitCode::from(exit.code())
 }

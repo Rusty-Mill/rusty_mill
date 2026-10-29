@@ -32,8 +32,9 @@ pub struct WindowsPty;
 /// Serializes `CreatePseudoConsole` + `CreateProcessW` across threads.
 /// This crate's own tests saw one console's output reach another when
 /// consoles were created concurrently; creating them one at a time costs
-/// nothing a caller would notice.
-static SPAWN: Mutex<()> = Mutex::new(());
+/// nothing a caller would notice. [`crate::condrv::spawn_attached`] takes
+/// it too, so our own host's spawns and ConPTY's never interleave.
+pub(crate) static SPAWN: Mutex<()> = Mutex::new(());
 
 impl WindowsPty {
     /// [`Pty::spawn`] with the concrete types, for callers that need

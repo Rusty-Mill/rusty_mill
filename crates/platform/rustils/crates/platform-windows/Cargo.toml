@@ -15,11 +15,13 @@ platform.workspace = true
 winargv.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# `Win32_Security_Authorization` (SDDL and SID strings) is not in the
-# workspace's windows-sys feature list; naming it here keeps
-# `-p platform-windows` building on its own.
+# `Win32_Security_Authorization` (SDDL and SID strings) and
+# `Win32_System_LibraryLoader` (`sys::condrv`'s runtime lookup of
+# `user32!ConsoleControl`) are not in the workspace's windows-sys feature
+# list; naming them here keeps `-p platform-windows` building on its own.
 windows-sys = { workspace = true, features = [
     "Win32_Security_Authorization",
+    "Win32_System_LibraryLoader",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
 # D-15: rusty_win32 is the Track W backend, feature-gated behind

@@ -19,6 +19,7 @@ fn scenario<S: Store>(board: &Board<S>) {
     let card = board
         .add(&human, "ship it", "body", vec!["x".into()])
         .expect("add");
+    assert_eq!(card.number, Some(1));
     assert_eq!(board.list(Some(Column::Backlog)).expect("list").len(), 1);
     board
         .move_card(card.id, Column::Ready, &human)
@@ -38,6 +39,7 @@ fn scenario<S: Store>(board: &Board<S>) {
         (now.column, now.claim.as_deref(), now.comments.len()),
         (Column::Building, Some("dev"), 1)
     );
+    assert_eq!(now.number, Some(1), "the number survives every write");
 
     let events = board.events(None, 100).expect("events");
     let kinds: Vec<_> = events.iter().map(|e| e.kind).collect();
@@ -78,7 +80,7 @@ fn tick_store() {
     let task = tick.task(card.id);
     assert_eq!(
         task["tags"],
-        serde_json::json!(["agent", "board:building", "claim:dev", "x"])
+        serde_json::json!(["agent", "board:building", "claim:dev", "number:1", "x"])
     );
 }
 
