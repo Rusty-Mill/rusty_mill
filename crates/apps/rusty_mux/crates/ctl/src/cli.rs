@@ -44,6 +44,9 @@ pub enum Command {
     Run(Run),
     /// Installs, checks or removes agent setup, or runs its hook.
     Agent(AgentCommand),
+    /// Joins stdin and stdout to the socket, for a client that runs this
+    /// over SSH.
+    Bridge,
 }
 
 /// `agent`: each verb but `hook` works in `--dir`, else the agent's usual
@@ -198,6 +201,8 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "wait" => wait(rest).map(Command::Wait),
         "run" => run(rest, defaults).map(Command::Run),
         "agent" => agent(rest).map(Command::Agent),
+        "bridge" if rest.is_empty() => Ok(Command::Bridge),
+        "bridge" => Err("bridge takes no arguments".into()),
         _ => args
             .split(|a| a == "+")
             .map(|args| call(args, defaults))
@@ -570,6 +575,10 @@ pub fn usage(method: Option<&Method>) -> String {
                 "  agent            Set up Claude Code to use rusty_mux: a skill and a session-start\n\
                  \x20                  hook in $CLAUDE_CONFIG_DIR or ~/.claude: agent setup|status|remove\n\
                  \x20                  [--dir DIR]; status exits 0 only when both are current\n",
+            );
+            text.push_str(
+                "  bridge           Join stdin and stdout to the socket, for a client that runs\n\
+                 \x20                  `ssh HOST rusty-mux-ctl bridge`\n",
             );
             text.push_str("  api              List methods, or describe one as JSON: api list | api describe METHOD\n");
             text.push_str("  help             Show a command's flags: help COMMAND\n");

@@ -19,6 +19,10 @@
 //! `agent setup|status|remove` installs, checks and removes a skill and a
 //! session-start hook for Claude Code.
 //!
+//! `bridge` joins stdin and stdout to the socket, byte for byte, so a client
+//! on another machine reaches the server with `ssh host rusty-mux-ctl
+//! bridge`.
+//!
 //! `wait --block B` blocks until the block's program exits and exits with
 //! its status; `wait --event KIND --FIELD VALUE` until a matching event.
 //! `run -- COMMAND ARG...` starts a program in a new block, in ctl's
@@ -35,6 +39,8 @@
 
 mod agent;
 mod api;
+#[cfg(any(unix, windows))]
+mod bridge;
 pub mod cli;
 mod config;
 mod conn;
@@ -235,7 +241,8 @@ pub fn run_until(
         | Command::Events { .. }
         | Command::Watch { .. }
         | Command::Wait(_)
-        | Command::Run(_) => {}
+        | Command::Run(_)
+        | Command::Bridge => {}
     }
     let Some(socket) = invocation.socket.clone().or_else(|| env.socket.clone()) else {
         return report(
@@ -244,6 +251,9 @@ pub fn run_until(
             "no socket: pass --socket or set RUSTY_MUX_SOCKET",
         );
     };
+    if let Command::Bridge = invocation.command {
+        return finish(bridge(&socket), &socket, err);
+    }
     if let Command::Watch { after } = invocation.command {
         return run_watch(after, &socket, env, invocation.json, stop, out, err);
     }
@@ -428,8 +438,21 @@ fn execute(
         | Command::Do { .. }
         | Command::Config(_)
         | Command::Agent(_)
-        | Command::Watch { .. } => Ok(Exit::Ok),
+        | Command::Watch { .. }
+        | Command::Bridge => Ok(Exit::Ok),
     }
+}
+
+/// `bridge`: until the server closes the connection.
+#[cfg(any(unix, windows))]
+fn bridge(socket: &Path) -> Result<Exit, Failure> {
+    bridge::run(socket)?;
+    Ok(Exit::Ok)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn bridge(_: &Path) -> Result<Exit, Failure> {
+    Err(unsupported())
 }
 
 /// What [`follow`] follows, and how it prints.

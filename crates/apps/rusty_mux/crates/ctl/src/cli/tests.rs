@@ -362,3 +362,11 @@ fn agent_verbs_take_an_optional_dir() {
         assert!(agent(bad).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn bridge_takes_only_the_socket() {
+    let parsed = parse(&args("--socket /tmp/s bridge")).unwrap();
+    assert_eq!(parsed.command, Command::Bridge);
+    assert_eq!(parsed.socket, Some("/tmp/s".into()));
+    assert!(parse(&args("bridge now")).is_err());
+}
