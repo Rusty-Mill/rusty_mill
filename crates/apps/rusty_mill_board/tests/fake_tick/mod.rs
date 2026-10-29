@@ -58,6 +58,16 @@ fn version(task: &Value) -> u64 {
 fn bump(task: &mut Value, now: i64) {
     task["etag"] = json!((version(task) + 1).to_string());
     task["updatedMs"] = json!(now);
+    stamp_completed(task, now);
+}
+
+/// As rusty_tick does: a task is stamped once when it closes (done or won't-do), cleared on reopen.
+fn stamp_completed(task: &mut Value, now: i64) {
+    if task["status"] == "open" {
+        task["completedMs"] = Value::Null;
+    } else if task["completedMs"].is_null() {
+        task["completedMs"] = json!(now);
+    }
 }
 
 fn lower_tags(tags: &Value) -> Value {
@@ -166,7 +176,7 @@ impl FakeTick {
                 if state.tasks.contains_key(&id) {
                     return (409, json!({ "error": { "message": "task exists" } }));
                 }
-                let task = json!({
+                let mut task = json!({
                     "id": id,
                     "listId": body.get("listId").cloned().unwrap_or(json!(INBOX)),
                     "title": body["title"],
@@ -180,6 +190,7 @@ impl FakeTick {
                     "deletedMs": null,
                     "etag": "1",
                 });
+                stamp_completed(&mut task, now);
                 state.tasks.insert(id, task.clone());
                 (201, task)
             }

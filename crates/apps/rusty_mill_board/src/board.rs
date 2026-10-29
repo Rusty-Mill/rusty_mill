@@ -14,6 +14,7 @@ use crate::domain::{
     MoveRules, WORK_QUEUES, actionable, entry_column, import_id, text_hash,
 };
 use crate::projects::Projects;
+use crate::roadmap::{Roadmap, roadmap};
 use crate::store::Store;
 
 /// Attempts per operation when another writer wins the revision race.
@@ -257,6 +258,14 @@ impl<S: Store> Board<S> {
         Ok(cards)
     }
 
+    /// The roadmap of `project` as of now (see [`roadmap`](crate::roadmap::roadmap)).
+    ///
+    /// # Errors
+    /// If the store fails.
+    pub fn roadmap(&self, project: &str) -> Result<Roadmap, BoardError> {
+        Ok(roadmap(&self.store.list()?, project, (self.clock)()))
+    }
+
     /// One card.
     ///
     /// # Errors
@@ -342,6 +351,7 @@ impl<S: Store> Board<S> {
             project,
             Card {
                 column: Column::Done,
+                done_ms: Some(card.created_ms),
                 ..card
             },
         )

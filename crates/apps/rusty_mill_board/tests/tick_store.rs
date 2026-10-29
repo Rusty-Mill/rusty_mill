@@ -96,10 +96,15 @@ fn done_closes_the_task_and_a_task_closed_in_rusty_tick_is_done() {
         .move_card(card.id, Column::Done, &human)
         .expect("done");
     assert_eq!(tick.task(card.id)["status"], "done");
+    let shipped = tick.task(card.id)["completedMs"].as_i64();
+    assert!(shipped.is_some());
+    assert_eq!(board.get(card.id).expect("get").done_ms, shipped);
 
     let other = board.add(&human, "b", "", vec![]).expect("add");
     tick.owner_edit(other.id, |t| t["status"] = json!("wontdo"));
-    assert_eq!(board.get(other.id).expect("get").column, Column::Done);
+    let closed = board.get(other.id).expect("get");
+    assert_eq!(closed.column, Column::Done);
+    assert_eq!(closed.done_ms, None, "won't-do is closed, not shipped");
 }
 
 #[test]

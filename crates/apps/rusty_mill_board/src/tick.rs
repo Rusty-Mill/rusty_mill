@@ -173,6 +173,8 @@ struct Task {
     sort_order: i64,
     created_ms: i64,
     updated_ms: i64,
+    #[serde(default)]
+    completed_ms: Option<i64>,
     deleted_ms: Option<i64>,
     etag: String,
 }
@@ -325,6 +327,8 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         execution: doc.execution,
         created_ms: task.created_ms,
         updated_ms: task.updated_ms,
+        // Only shipped work has a ship date; won't-do is closed but never shipped.
+        done_ms: task.completed_ms.filter(|_| task.status == "done"),
     })
 }
 

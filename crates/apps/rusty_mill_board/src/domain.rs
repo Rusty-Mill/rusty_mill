@@ -290,6 +290,10 @@ pub struct Card {
     pub created_ms: i64,
     /// Last change, Unix ms.
     pub updated_ms: i64,
+    /// When the card was completed (reached Done as shipped work), Unix ms. `None` while open,
+    /// and for work closed without shipping (rusty_tick's won't-do).
+    #[serde(default)]
+    pub done_ms: Option<i64>,
 }
 
 /// Stable cross-component ids for the one logical execution a card may own.
@@ -497,6 +501,7 @@ impl Card {
             execution: None,
             created_ms: now_ms,
             updated_ms: now_ms,
+            done_ms: None,
         })
     }
 
@@ -578,6 +583,7 @@ impl Card {
         Ok(Self {
             column: to,
             claim: None,
+            done_ms: (to == Column::Done).then_some(now_ms),
             ..self.next(now_ms)
         })
     }
@@ -600,6 +606,7 @@ impl Card {
         Ok(Self {
             column: to,
             claim: None,
+            done_ms: (to == Column::Done).then_some(now_ms),
             ..self.next(now_ms)
         })
     }
@@ -776,6 +783,15 @@ mod tests {
 
     fn card() -> Card {
         Card::new("t", "", vec![], 0).expect("valid")
+    }
+
+    #[test]
+    fn reaching_done_stamps_the_ship_time() {
+        let human = actor("nano", &[Capability::Triage, Capability::Merge]);
+        let c = card().move_to(Column::Ready, &human, 1).expect("triage");
+        assert_eq!(c.done_ms, None);
+        let c = c.move_freely(Column::Done, &human, 7).expect("done");
+        assert_eq!(c.done_ms, Some(7));
     }
 
     #[test]
