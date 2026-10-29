@@ -143,8 +143,14 @@ fn unsupported(what: &'static str) -> PlatformError {
 /// a child that ignores it too. The caller's own policy is never changed.
 /// Returns once `CreateProcessW` succeeds, so
 /// the child's CONNECT is the first packet [`ConsoleServer::wait`]
-/// reports. `GroupSpec::JoinGroup` gives `InvalidInput`. On failure every
-/// handle is closed and no child is left running.
+/// reports. `GroupSpec::JoinGroup` gives `InvalidInput`.
+///
+/// On a failure before the child is created, every handle is closed. On
+/// one after, the child is terminated and the error returned once it has
+/// exited, every handle closed. If its exit can't be confirmed within 5 s,
+/// or `TerminateProcess` fails while it runs, that cleanup error is
+/// returned instead (`TimedOut`, or the OS error), and the child's process
+/// handle and console stay open on a background thread until it exits.
 pub fn spawn_attached(cmd: &Command) -> Result<Attached> {
     if matches!(cmd.group, GroupSpec::JoinGroup(_)) {
         return Err(PlatformError::new(
@@ -162,26 +168,35 @@ pub fn spawn_attached(cmd: &Command) -> Result<Attached> {
         .unwrap_or_else(PoisonError::into_inner);
     let server = sys::Server::create()?;
     let (process, pid) = sys::spawn(&server, &line, &cmd.cwd, &cmd.env)?;
-    finish_spawn(server, process, pid, |p| handle::duplicate(p, false))
+    finish_spawn(
+        server,
+        process,
+        pid,
+        |p| handle::duplicate(p, false),
+        |p| terminate_and_reap(p, crate::sys::proc::terminate_process, REAP_GRACE),
+    )
 }
 
-/// The child is running: finish the remaining fallible setup, or
-/// terminate and reap the child before returning setup's error. Taking
-/// every handle by value means an error drops them all here.
+/// The child is running: finish the remaining fallible setup, or roll the
+/// child back. When `rollback` confirms the child has exited, setup's
+/// error is returned and every handle is closed here. When it can't, its
+/// own error is returned instead, and the child's process handle and
+/// console are kept open until the child exits.
 fn finish_spawn(
     server: sys::Server,
     process: OwnedWinHandle,
     pid: u32,
     duplicate: impl FnOnce(&OwnedWinHandle) -> Result<OwnedWinHandle>,
+    rollback: impl FnOnce(&OwnedWinHandle) -> Result<()>,
 ) -> Result<Attached> {
     let wait = match duplicate(&process) {
         Ok(wait) => wait,
-        Err(e) => {
-            // Setup's error is the one worth reporting; a failure to
-            // terminate a child we just created would only hide it.
-            let _ = crate::sys::proc::terminate_process(&process);
-            let _ = crate::sys::proc::wait_many(&[process.as_raw()], Some(REAP_GRACE));
-            return Err(e);
+        Err(setup) => {
+            if let Err(cleanup) = rollback(&process) {
+                keep_until_exit(process, server);
+                return Err(cleanup);
+            }
+            return Err(setup);
         }
     };
     Ok(Attached {
@@ -189,6 +204,46 @@ fn finish_spawn(
         child: WindowsChild::from_parts(process, None, pid),
         wait,
     })
+}
+
+/// Terminate `process` with `terminate` and wait up to `grace` for it to
+/// exit. `Ok(())` only once it has exited. A failed `terminate` on a
+/// process that has already exited counts as exited; otherwise its error
+/// is returned. A process still running after `grace` (termination is
+/// asynchronous) gives `TimedOut`.
+fn terminate_and_reap(
+    process: &OwnedWinHandle,
+    terminate: impl FnOnce(&OwnedWinHandle) -> Result<()>,
+    grace: Duration,
+) -> Result<()> {
+    if let Err(e) = terminate(process) {
+        if crate::sys::proc::try_wait(process)?.is_some() {
+            return Ok(());
+        }
+        return Err(e);
+    }
+    match crate::sys::proc::wait_many(&[process.as_raw()], Some(grace))? {
+        Some(_) => Ok(()),
+        None => Err(PlatformError::new(
+            ErrorKind::TimedOut,
+            OsCode::None,
+            "condrv::spawn_attached: the rolled-back child had not exited",
+        )),
+    }
+}
+
+/// Hold a child's process handle and console on a thread of their own
+/// until the child exits, so nothing it may still use is closed under
+/// it. Should the thread fail to start, they are closed now.
+fn keep_until_exit(process: OwnedWinHandle, server: sys::Server) {
+    let _ = std::thread::Builder::new()
+        .name("condrv-rollback".into())
+        .spawn(move || {
+            // An infinite wait on a handle we own fails only if the handle
+            // is invalid, and then there is nothing left to wait for.
+            let _ = crate::sys::proc::wait(&process);
+            drop(server);
+        });
 }
 
 /// Ask Windows to deliver `event` to `pid` through
@@ -323,12 +378,13 @@ impl ConsoleServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sys::proc;
     use platform::process::ExitStatus;
 
-    /// Failure injected at the one fallible step after `CreateProcessW`:
-    /// the child must be terminated and reaped, and setup's error kept.
-    #[test]
-    fn a_setup_failure_after_create_terminates_the_child() {
+    /// A child attached to a server nobody serves: `ping -n 30` blocks in
+    /// its CONNECT, so it runs until terminated. Returns the server, the
+    /// child's process handle and pid, and a second handle to watch it.
+    fn running_child() -> (sys::Server, OwnedWinHandle, u32, OwnedWinHandle) {
         let cwd = std::env::current_dir().expect("current_dir");
         let mut cmd = Command::new("ping.exe", cwd);
         cmd.argv = ["-n", "30", "127.0.0.1"].iter().map(Into::into).collect();
@@ -337,22 +393,96 @@ mod tests {
             .expect("resolve");
         let args: Vec<&OsStr> = cmd.argv.iter().map(OsString::as_os_str).collect();
         let line = crate::winargv::build_command_line(&resolved, &args).expect("command line");
-
         let server = sys::Server::create().expect("Server::create");
         let (process, pid) = sys::spawn(&server, &line, &cmd.cwd, &cmd.env).expect("spawn");
         let probe = handle::duplicate(&process, false).expect("probe handle");
-        assert_eq!(crate::sys::proc::try_wait(&probe).expect("try_wait"), None);
+        assert_eq!(proc::try_wait(&probe).expect("try_wait"), None);
+        (server, process, pid, probe)
+    }
 
-        let injected = PlatformError::new(ErrorKind::Other, OsCode::None, "injected");
-        let Err(e) = finish_spawn(server, process, pid, |_| Err(injected)) else {
+    fn injected(kind: ErrorKind, op: &'static str) -> PlatformError {
+        PlatformError::new(kind, OsCode::None, op)
+    }
+
+    fn production_rollback(p: &OwnedWinHandle) -> Result<()> {
+        terminate_and_reap(p, proc::terminate_process, REAP_GRACE)
+    }
+
+    /// Failure injected at the one fallible step after `CreateProcessW`:
+    /// the child is terminated and reaped, and setup's error kept.
+    #[test]
+    fn a_setup_failure_after_create_terminates_the_child() {
+        let (server, process, pid, probe) = running_child();
+        let Err(e) = finish_spawn(
+            server,
+            process,
+            pid,
+            |_| Err(injected(ErrorKind::Other, "setup")),
+            production_rollback,
+        ) else {
             panic!("finish_spawn succeeded despite the injected failure");
         };
-        assert_eq!((e.kind, e.op), (ErrorKind::Other, "injected"));
+        assert_eq!((e.kind, e.op), (ErrorKind::Other, "setup"));
         // Already reaped: no wait is needed to see the exit.
         assert_eq!(
-            crate::sys::proc::try_wait(&probe).expect("try_wait"),
+            proc::try_wait(&probe).expect("try_wait"),
             Some(ExitStatus::Code(1)),
             "the child outlived the failed spawn"
         );
+    }
+
+    /// A rollback that can't confirm the exit reports its own error, not
+    /// setup's, and the child is left to the keeper thread, not released.
+    #[test]
+    fn an_unconfirmed_rollback_reports_the_cleanup_error() {
+        let (server, process, pid, probe) = running_child();
+        let Err(e) = finish_spawn(
+            server,
+            process,
+            pid,
+            |_| Err(injected(ErrorKind::Other, "setup")),
+            |_| Err(injected(ErrorKind::TimedOut, "cleanup")),
+        ) else {
+            panic!("finish_spawn succeeded despite the injected failure");
+        };
+        assert_eq!((e.kind, e.op), (ErrorKind::TimedOut, "cleanup"));
+        assert_eq!(proc::try_wait(&probe).expect("try_wait"), None);
+        // The keeper thread holds the child until it exits; end it here.
+        proc::terminate_process(&probe).expect("terminate");
+        proc::wait(&probe).expect("wait");
+    }
+
+    /// `terminate_and_reap`'s outcomes, each forced deterministically.
+    #[test]
+    fn terminate_and_reap_confirms_or_reports() {
+        // Terminated, then not exited within the grace: `TimedOut`. The
+        // injected terminate does nothing, so the child keeps running.
+        let (_server, process, _, probe) = running_child();
+        let e = terminate_and_reap(&process, |_| Ok(()), Duration::from_millis(100))
+            .expect_err("a running child was reported reaped");
+        assert_eq!(e.kind, ErrorKind::TimedOut);
+
+        // A failed terminate while it still runs: that error.
+        let e = terminate_and_reap(
+            &process,
+            |_| Err(injected(ErrorKind::PermissionDenied, "terminate")),
+            REAP_GRACE,
+        )
+        .expect_err("a failed terminate was reported as a reap");
+        assert_eq!((e.kind, e.op), (ErrorKind::PermissionDenied, "terminate"));
+
+        // A failed terminate on a child that has already exited: reaped.
+        proc::terminate_process(&probe).expect("terminate");
+        proc::wait(&probe).expect("wait");
+        terminate_and_reap(
+            &process,
+            |_| Err(injected(ErrorKind::PermissionDenied, "terminate")),
+            REAP_GRACE,
+        )
+        .expect("an exited child counts as reaped");
+
+        // And the real path on an exited child.
+        terminate_and_reap(&process, proc::terminate_process, REAP_GRACE)
+            .expect("terminating an exited child");
     }
 }

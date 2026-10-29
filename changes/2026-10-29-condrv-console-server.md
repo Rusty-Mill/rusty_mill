@@ -14,8 +14,10 @@ changelog: platform-windows can serve the Windows console driver directly (`cond
 - **Corrected:** spawning no longer changes the embedding process's
   process-wide Ctrl+C policy. Isolated helper tests cover successful and
   failed spawns from a Ctrl+C-ignoring parent, while retaining delivery
-  coverage from an enabled parent. A failure after process creation now
-  terminates and waits for the child before releasing its handles.
+  coverage from an enabled parent. A failure after process creation
+  terminates the child and returns once it has exited; if that can't be
+  confirmed within 5 s, the cleanup error is returned and the child's
+  handles stay open on a background thread until it exits.
 - **Admissions:** windows-sys `Win32_System_LibraryLoader` in
   platform-windows' own feature list; `LoadLibraryExW`, `GetProcAddress`,
   events, overlapped results and `CancelIoEx` in `win32_surface`; a second
