@@ -189,11 +189,28 @@ impl Stream {
     }
 }
 
+/// A child that is killed, with its children where it has a job, if the
+/// test fails before it exits, so a failing test leaves nothing running.
+struct Reaped(WindowsChild);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        use platform::process::Signal;
+        if matches!(self.0.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        // The tree too, where there is a job: cmd's own children.
+        if self.0.kill_tree(Signal::Kill).is_err() {
+            let _ = self.0.kill_single(Signal::Kill);
+        }
+    }
+}
+
 /// Wait for `child` to exit within the budget.
-fn exit_of(mut child: WindowsChild) -> ExitStatus {
+fn exit_of(child: &mut Reaped) -> ExitStatus {
     let deadline = Instant::now() + BUDGET;
     loop {
-        if let Some(status) = child.try_wait().expect("try_wait") {
+        if let Some(status) = child.0.try_wait().expect("try_wait") {
             return status;
         }
         assert!(Instant::now() < deadline, "no exit within the budget");
@@ -205,13 +222,14 @@ fn exit_of(mut child: WindowsChild) -> ExitStatus {
 fn interactive_cmd_runs_typed_lines() {
     let _g = lock();
     let (master, child) = own(&command("cmd.exe", &["/d", "/q"]));
+    let mut child = Reaped(child);
     let master = Arc::new(master);
     let mut stream = Stream::new(Arc::clone(&master));
     // Both lines at once: the second waits on the handle for cmd's next
     // read. The caret keeps the echoed line from matching the output.
     master.write(b"echo ho^ld\rexit 7\r").expect("write");
     stream.until("hold");
-    assert_eq!(exit_of(child), ExitStatus::Code(7));
+    assert_eq!(exit_of(&mut child), ExitStatus::Code(7));
 }
 
 /// Clear this test process's "ignore Ctrl+C" flag, which children
@@ -231,6 +249,7 @@ fn ctrl_c_stops_the_running_command_not_the_shell() {
     let _g = lock();
     accept_ctrl_c();
     let (master, child) = own(&command("cmd.exe", &["/d", "/q"]));
+    let mut child = Reaped(child);
     let master = Arc::new(master);
     let mut stream = Stream::new(Arc::clone(&master));
     master.write(b"ping -n 60 127.0.0.1\r").expect("write");
@@ -238,7 +257,7 @@ fn ctrl_c_stops_the_running_command_not_the_shell() {
     master.write(b"\x03").expect("Ctrl+C");
     stream.until("Control-C");
     master.write(b"exit 3\r").expect("write");
-    assert_eq!(exit_of(child), ExitStatus::Code(3));
+    assert_eq!(exit_of(&mut child), ExitStatus::Code(3));
 }
 
 /// Answers that differ from ConPTY by design (§5.10), as (probe, ours).
