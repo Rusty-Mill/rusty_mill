@@ -19,13 +19,13 @@ use rp_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::http::map_reqwest_error;
+use crate::http::map_error_response;
 use crate::util::{chat_stream, effort_thinking_budget, gen_id, now};
 
 pub struct GeminiProvider {
     base_url: String,
     api_key: String,
-    client: reqwest::Client,
+    client: crate::http::HttpClient,
 }
 
 impl GeminiProvider {
@@ -33,7 +33,7 @@ impl GeminiProvider {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
-            client: crate::http::build_client(crate::http::DEFAULT_TIMEOUT),
+            client: crate::http::HttpClient::new(crate::http::DEFAULT_TIMEOUT),
         }
     }
 
@@ -41,7 +41,7 @@ impl GeminiProvider {
     /// `http::DEFAULT_TIMEOUT`) -- used by `rp-router` to apply
     /// `[[providers]].timeout_secs`.
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
-        self.client = crate::http::build_client(timeout);
+        self.client = crate::http::HttpClient::new(timeout);
         self
     }
 
@@ -545,17 +545,19 @@ impl Provider for GeminiProvider {
         api_key_override: Option<&str>,
     ) -> Result<ChatResponse, ProviderError> {
         let body = build_request(req);
+        let key = api_key_override.unwrap_or(self.api_key.as_str());
         let resp = self
             .client
-            .post(self.endpoint(model, "generateContent"))
-            .query(&[("key", api_key_override.unwrap_or(self.api_key.as_str()))])
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            .post_json(
+                &self.endpoint(model, "generateContent"),
+                &[("key", key)],
+                &[],
+                &body,
+            )
+            .await?;
 
-        if !resp.status().is_success() {
-            return Err(crate::http::map_error_response(resp).await);
+        if !resp.is_success() {
+            return Err(map_error_response(resp).await);
         }
 
         let body = crate::http::read_capped_body(resp).await?;
@@ -615,24 +617,23 @@ impl Provider for GeminiProvider {
         api_key_override: Option<&str>,
     ) -> Result<ChatStream, ProviderError> {
         let body = build_request(req);
+        let key = api_key_override.unwrap_or(self.api_key.as_str());
         let resp = self
             .client
-            .post(self.endpoint(model, "streamGenerateContent"))
-            .query(&[
-                ("key", api_key_override.unwrap_or(self.api_key.as_str())),
-                ("alt", "sse"),
-            ])
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            .post_json(
+                &self.endpoint(model, "streamGenerateContent"),
+                &[("key", key), ("alt", "sse")],
+                &[],
+                &body,
+            )
+            .await?;
 
-        if !resp.status().is_success() {
-            return Err(crate::http::map_error_response(resp).await);
+        if !resp.is_success() {
+            return Err(map_error_response(resp).await);
         }
 
         let full_model = format!("gemini/{model}");
-        let stream = resp.bytes_stream().eventsource().filter_map(move |ev| {
+        let stream = resp.into_byte_stream().eventsource().filter_map(move |ev| {
             let full_model = full_model.clone();
             async move {
                 let ev = match ev {
@@ -712,17 +713,19 @@ impl Provider for GeminiProvider {
             })
             .collect();
 
+        let key = api_key_override.unwrap_or(self.api_key.as_str());
         let resp = self
             .client
-            .post(self.endpoint(model, "batchEmbedContents"))
-            .query(&[("key", api_key_override.unwrap_or(self.api_key.as_str()))])
-            .json(&WireBatchEmbedRequest { requests })
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            .post_json(
+                &self.endpoint(model, "batchEmbedContents"),
+                &[("key", key)],
+                &[],
+                &WireBatchEmbedRequest { requests },
+            )
+            .await?;
 
-        if !resp.status().is_success() {
-            return Err(crate::http::map_error_response(resp).await);
+        if !resp.is_success() {
+            return Err(map_error_response(resp).await);
         }
 
         let body = crate::http::read_capped_body(resp).await?;

@@ -6,6 +6,7 @@ mod error;
 mod fifo;
 mod free_tiers;
 mod guardrails;
+mod http;
 mod metrics;
 mod moderation;
 mod persistence;
@@ -3879,6 +3880,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_fires_budget_exceeded_on_the_crossing_request() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -3904,6 +3906,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_does_not_refire_once_already_over_budget() {
+        crate::http::install_fallback_for_test();
         // `.expect(1)` on the mock means a second delivery would fail
         // verification -- proving the second, already-over-budget request
         // doesn't fire another event.
@@ -3942,6 +3945,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_sends_the_configured_authorization_header() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -3986,6 +3990,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_fires_budget_warning_on_the_crossing_request() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4012,6 +4017,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_does_not_refire_budget_warning_once_already_over_threshold() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4055,6 +4061,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_client_spend_fires_budget_reset() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4105,6 +4112,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_carries_a_valid_hmac_signature_when_signing_secret_is_configured() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         let expected_body =
             br#"{"event":"budget_reset","client":"acme","budget_usd":10.0,"period":"total"}"#;
@@ -4144,6 +4152,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_sends_no_signature_header_when_signing_secret_is_unset() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4165,6 +4174,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_retries_after_a_5xx_and_succeeds() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         // First attempt 500s, second succeeds -- `.up_to_n_times` sequences
         // two distinct responses across the retry.
@@ -4203,6 +4213,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_gives_up_after_exhausting_max_retries() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4230,6 +4241,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_does_not_retry_a_4xx_response() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4760,6 +4772,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_moderation_blocks_and_records_a_metric_per_flagged_category() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/moderations"))
@@ -4791,6 +4804,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_moderation_allows_the_request_through_when_the_backend_is_unreachable() {
+        crate::http::install_fallback_for_test();
         let mut router = test_router(vec![], vec![], vec![], vec![], vec![]);
         // Port 0 never accepts connections -- a real, unrecoverable
         // network failure, not just a non-2xx response.
@@ -4854,6 +4868,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_web_search_prepends_results_to_the_last_user_message_and_records_a_metric() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/res/v1/web/search"))
@@ -4892,6 +4907,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_web_search_leaves_the_message_unchanged_when_there_are_no_results() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
@@ -4915,6 +4931,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_web_search_leaves_the_request_unmodified_when_the_backend_is_unreachable() {
+        crate::http::install_fallback_for_test();
         let mut router = test_router(vec![], vec![], vec![], vec![], vec![]);
         // Port 0 never accepts connections -- a real, unrecoverable
         // network failure, not just a non-2xx response.

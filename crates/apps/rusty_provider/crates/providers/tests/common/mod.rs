@@ -259,3 +259,9 @@ pub fn oversized_content_length_server(
     });
     (addr, handle)
 }
+
+/// The providers send on `rusty_request`, which runs on `rusty_tokio`;
+/// these tests stay on `#[tokio::test]` because wiremock needs tokio.
+pub fn install_fallback() {
+    rusty_tokio::runtime::install_fallback().expect("rusty_tokio fallback runtime should start");
+}
