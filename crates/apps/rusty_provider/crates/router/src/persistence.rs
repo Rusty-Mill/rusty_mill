@@ -442,7 +442,7 @@ impl SqliteBackend {
 
     async fn load_all(&self) -> Result<HashMap<String, UsageStats>, PersistenceError> {
         let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
+        rusty_tokio::task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
             sqlite_read_all(&conn)
         })
@@ -482,7 +482,7 @@ impl SqliteBackend {
     ) -> Result<Option<(i64, f64)>, PersistenceError> {
         let path = self.path.clone();
         let client_name = client_name.to_string();
-        tokio::task::spawn_blocking(move || {
+        rusty_tokio::task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
             conn.query_row(
                 "SELECT period_key, spent_usd FROM client_spend WHERE client_name = ?1",
@@ -498,7 +498,7 @@ impl SqliteBackend {
 
     async fn ping(&self) -> Result<(), PersistenceError> {
         let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
+        rusty_tokio::task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
             conn.query_row("SELECT 1", [], |_| Ok(()))
         })
@@ -535,7 +535,7 @@ impl SqliteBackend {
     ) -> Result<Vec<DailyClientUsage>, PersistenceError> {
         let path = self.path.clone();
         let client_name = client_name.to_string();
-        tokio::task::spawn_blocking(move || {
+        rusty_tokio::task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
             let mut stmt = conn.prepare(
                 "SELECT day, requests, prompt_tokens, completion_tokens, cost_usd
@@ -630,6 +630,9 @@ impl PostgresBackend {
         <T::TlsConnect as tokio_postgres::tls::TlsConnect<tokio_postgres::Socket>>::Future: Send,
     {
         let (client, connection) = config.connect(tls).await?;
+        // The connection does tokio I/O, so it alone runs on the caller's
+        // tokio runtime; queries through `client` are channel sends and can
+        // be awaited from any executor, so the writes below use rusty_tokio.
         tokio::spawn(async move {
             if let Err(e) = connection.await {
                 rusty_log::error!("postgres persistence connection closed with an error: {e}");
@@ -663,7 +666,7 @@ impl PostgresBackend {
             usage.completion_tokens as i64,
             cost_usd.unwrap_or(0.0),
         );
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             let result = client
                 .execute(
                     "INSERT INTO usage_stats (key, requests, prompt_tokens, completion_tokens, cost_usd)
@@ -708,7 +711,7 @@ impl PostgresBackend {
     fn record_client_spend(&self, client_name: &str, period_key: i64, cost_usd: f64) {
         let client = self.client.clone();
         let client_name = client_name.to_string();
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             let result = client
                 .execute(
                     "INSERT INTO client_spend (client_name, period_key, spent_usd)
@@ -728,7 +731,7 @@ impl PostgresBackend {
     fn reset_client_spend(&self, client_name: &str, period_key: i64) {
         let client = self.client.clone();
         let client_name = client_name.to_string();
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             let result = client
                 .execute(
                     "INSERT INTO client_spend (client_name, period_key, spent_usd)
@@ -778,7 +781,7 @@ impl PostgresBackend {
             usage.completion_tokens as i64,
             cost_usd.unwrap_or(0.0),
         );
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             let result = client
                 .execute(
                     "INSERT INTO client_daily_usage (client_name, day, requests, prompt_tokens, completion_tokens, cost_usd)
@@ -873,6 +876,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_creates_the_file_and_an_empty_table() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("open");
         let persistence = open_sqlite(&path).await;
         assert!(path.exists());
@@ -881,6 +885,7 @@ mod tests {
 
     #[tokio::test]
     async fn ping_succeeds_against_a_reachable_sqlite_file() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("ping");
         let persistence = open_sqlite(&path).await;
         persistence.ping().await.unwrap();
@@ -888,6 +893,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_persists_a_new_key() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("record_new");
         let persistence = open_sqlite(&path).await;
 
@@ -914,6 +920,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_accumulates_across_multiple_calls() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("record_accumulate");
         let persistence = open_sqlite(&path).await;
 
@@ -938,6 +945,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_with_no_cost_leaves_cost_usd_at_zero() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("record_no_cost");
         let persistence = open_sqlite(&path).await;
 
@@ -960,6 +968,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_keys_are_independent() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("record_independent");
         let persistence = open_sqlite(&path).await;
         let usage = Usage {
@@ -982,6 +991,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_fresh_process_reopening_the_same_file_sees_prior_writes() {
+        crate::http::install_fallback_for_test();
         // Simulates a restart (or a second process): a brand new
         // Persistence handle pointed at the same file must see everything
         // the first handle wrote, without that handle needing to still be
@@ -1011,6 +1021,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_reflects_the_same_data_as_load_all() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("snapshot");
         let persistence = open_sqlite(&path).await;
         persistence.record(
@@ -1047,6 +1058,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_spend_is_none_for_an_unrecorded_client() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("client_spend_none");
         let persistence = open_sqlite(&path).await;
         assert_eq!(persistence.client_spend("acme").await.unwrap(), None);
@@ -1054,6 +1066,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_persists_a_new_client() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("client_spend_new");
         let persistence = open_sqlite(&path).await;
         persistence.record_client_spend("acme", 100, 5.0);
@@ -1066,6 +1079,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_accumulates_within_the_same_period() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("client_spend_accumulate");
         let persistence = open_sqlite(&path).await;
         persistence.record_client_spend("acme", 100, 5.0);
@@ -1079,6 +1093,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_resets_on_a_new_period_key() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("client_spend_rollover");
         let persistence = open_sqlite(&path).await;
         persistence.record_client_spend("acme", 100, 5.0);
@@ -1092,6 +1107,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_spend_is_independent_per_client() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("client_spend_independent");
         let persistence = open_sqlite(&path).await;
         persistence.record_client_spend("acme", 100, 5.0);
@@ -1109,6 +1125,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_client_spend_zeroes_an_existing_balance() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("client_spend_reset");
         let persistence = open_sqlite(&path).await;
         persistence.record_client_spend("acme", 100, 5.0);
@@ -1123,6 +1140,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_client_spend_creates_a_zeroed_row_for_an_unrecorded_client() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("client_spend_reset_new");
         let persistence = open_sqlite(&path).await;
         persistence.reset_client_spend("acme", 100);
@@ -1135,6 +1153,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_client_spend_does_not_affect_other_clients() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("client_spend_reset_independent");
         let persistence = open_sqlite(&path).await;
         persistence.record_client_spend("acme", 100, 5.0);
@@ -1162,6 +1181,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_usage_history_is_empty_for_an_unrecorded_client() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("daily_usage_none");
         let persistence = open_sqlite(&path).await;
         assert!(persistence
@@ -1173,6 +1193,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_daily_client_usage_persists_a_new_day() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("daily_usage_new");
         let persistence = open_sqlite(&path).await;
         persistence.record_daily_client_usage("acme", 19_723, &usage(100, 50), Some(0.5));
@@ -1196,6 +1217,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_daily_client_usage_accumulates_within_the_same_day() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("daily_usage_accumulate");
         let persistence = open_sqlite(&path).await;
         persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(0.1));
@@ -1215,6 +1237,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_daily_client_usage_keeps_separate_days_separate() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("daily_usage_separate_days");
         let persistence = open_sqlite(&path).await;
         persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(1.0));
@@ -1232,6 +1255,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_usage_history_excludes_days_before_since_day() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("daily_usage_since_day");
         let persistence = open_sqlite(&path).await;
         persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(1.0));
@@ -1256,6 +1280,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_daily_client_usage_is_independent_per_client() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("daily_usage_independent_clients");
         let persistence = open_sqlite(&path).await;
         persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(1.0));
@@ -1272,6 +1297,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_daily_client_usage_with_no_cost_leaves_cost_usd_at_zero() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_path("daily_usage_no_cost");
         let persistence = open_sqlite(&path).await;
         persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), None);

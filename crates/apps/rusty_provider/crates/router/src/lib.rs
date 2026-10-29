@@ -967,7 +967,7 @@ where
             break;
         }
         retries += 1;
-        tokio::time::sleep(SAME_PROVIDER_RETRY_BACKOFF).await;
+        rusty_tokio::time::sleep(SAME_PROVIDER_RETRY_BACKOFF).await;
         result = attempt().await;
     }
     result
@@ -1533,7 +1533,7 @@ impl Router {
             if let Some(webhook) = self.webhook.clone() {
                 let persistence = persistence.clone();
                 let client_name = client_name.to_string();
-                tokio::spawn(async move {
+                rusty_tokio::spawn(async move {
                     if let Ok(Some((period_key, spent_usd))) =
                         persistence.client_spend(&client_name).await
                     {
@@ -2659,7 +2659,7 @@ impl Router {
             let api_key_override = self.byok_key_for(req, &provider_name).map(str::to_string);
             let timeout = fusion.timeout;
             futures.push(async move {
-                let result = tokio::time::timeout(
+                let result = rusty_tokio::time::timeout(
                     timeout,
                     retry_same_provider(|| {
                         provider.chat(&req_clone, &model_name, api_key_override.as_deref())
@@ -3598,7 +3598,7 @@ mod tests {
         ) -> Result<ChatResponse, ProviderError> {
             self.seen_requests.lock().unwrap().push(req.clone());
             if let Some(delay) = self.delay {
-                tokio::time::sleep(delay).await;
+                rusty_tokio::time::sleep(delay).await;
             }
             let message = if self.with_tool_calls {
                 ChatMessage {
@@ -3706,6 +3706,7 @@ mod tests {
 
     #[tokio::test]
     async fn from_config_opens_persistence_when_configured() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_db_path("opens");
         let config = Config::from_toml_str(&format!(
             "providers = {{}}\n\n[persistence]\nsqlite_path = {:?}\n",
@@ -4388,6 +4389,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_daily_usage_and_client_usage_history_round_trip() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_db_path("daily_usage_round_trip");
         let config = Config::from_toml_str(&format!(
             "providers = {{}}\n\n[persistence]\nsqlite_path = {:?}\n",
@@ -4424,6 +4426,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_daily_usage_applies_even_without_a_configured_budget() {
+        crate::http::install_fallback_for_test();
         // Distinct from record_client_spend, which no-ops for a client
         // with no budget_usd set -- historical usage tracking applies to
         // every named client, budgeted or not.
@@ -4459,6 +4462,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_usage_history_days_parameter_bounds_how_far_back_it_looks() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_db_path("daily_usage_days_bound");
         let config = Config::from_toml_str(&format!(
             "providers = {{}}\n\n[persistence]\nsqlite_path = {:?}\n",
@@ -4488,6 +4492,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_budget_is_persisted_and_shared_across_two_router_instances_sqlite() {
+        crate::http::install_fallback_for_test();
         // Same shape as the usage-sharing test below, but for client spend
         // budgets: router_a records spend against "acme"; router_b, a
         // separate Router pointed at the same SQLite file, must see it via
@@ -4588,6 +4593,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_router_instances_sharing_a_persistence_file_see_each_others_usage() {
+        crate::http::install_fallback_for_test();
         // Simulates two processes (or a restart): router_a dispatches and
         // persists a request; router_b, an entirely separate Router that
         // never dispatched anything itself, is pointed at the same SQLite
@@ -4649,6 +4655,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_readiness_is_ok_against_a_reachable_persistence_file() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_db_path("readiness_ok");
         let router = test_router(vec![], vec![], vec![], vec![], vec![]);
         let router = Router {
@@ -7030,6 +7037,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_records_uptime_of_zero_on_retryable_failure_and_falls_through() {
+        crate::http::install_fallback_for_test();
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
         let failing = Arc::new(MockProvider {
@@ -8469,7 +8477,7 @@ mod tests {
         assert_eq!(trace.fallback_attempts, 1);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_traced_counts_every_candidate_tried_when_the_chain_falls_through() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let a = Arc::new(MockProvider {
@@ -8506,6 +8514,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_traced_reports_fusion_strategy_with_the_panel_size_as_attempts() {
+        crate::http::install_fallback_for_test();
         let a = Arc::new(FusionCandidateProvider::new("a", "answer A"));
         let b = Arc::new(FusionCandidateProvider::new("b", "answer B"));
         let judge = Arc::new(FusionCandidateProvider::new("j", "synthesized"));
@@ -8600,6 +8609,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_stream_traced_reports_the_winning_candidate_before_any_chunk_is_read() {
+        crate::http::install_fallback_for_test();
         let calls_a = Arc::new(AtomicUsize::new(0));
         let a = Arc::new(MockProvider {
             name: "a".to_string(),
@@ -9070,7 +9080,7 @@ mod tests {
         assert_eq!(resp.model, "openai/text-embedding-3-small");
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn embeddings_falls_back_to_the_next_candidate_on_a_retryable_error() {
         // Anthropic has no embeddings API -- UnsupportedFeature is
         // retryable, so a chain naming it alongside a real embeddings
@@ -9338,7 +9348,7 @@ mod tests {
         assert!(metrics.contains(r#"model="m1""#));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_falls_back_to_next_candidate_on_retryable_error() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
@@ -9374,7 +9384,7 @@ mod tests {
         assert_eq!(calls_b.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_retries_the_same_provider_and_succeeds_without_falling_through() {
         // The retry actually rescues the candidate -- not just delays an
         // inevitable fall-through to the next one, which the call-count
@@ -9416,7 +9426,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_does_not_retry_a_retryable_but_non_transient_error() {
         // UnsupportedFeature is retryable (the chain should move on to a
         // candidate that might support it) but not transient -- retrying
@@ -9456,7 +9466,7 @@ mod tests {
         assert_eq!(calls_b.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_falls_back_across_an_ad_hoc_models_list_with_no_configured_route() {
         // No `[[routes]]` alias at all -- the chain comes entirely from
         // `model` + `req.models`, proving the ad-hoc list is honored even
@@ -9535,6 +9545,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_returns_last_error_when_every_candidate_fails() {
+        crate::http::install_fallback_for_test();
         let a = Arc::new(MockProvider {
             name: "anthropic".to_string(),
             behavior: MockBehavior::FailRetryable,
@@ -9744,7 +9755,7 @@ mod tests {
         assert!(matches!(err, RouterError::InvalidModel(m) if m == "smart"));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_exhausts_a_longer_chain_trying_every_candidate_before_failing() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
@@ -9799,7 +9810,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_final_error_reflects_the_last_candidate_even_when_its_kind_differs() {
         // "a" is configured and fails retryably; "b" isn't registered at
         // all. The chain still runs to exhaustion and returns whichever
@@ -9829,7 +9840,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_stops_on_a_fatal_error_without_trying_remaining_candidates() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
@@ -9880,7 +9891,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_stream_falls_back_to_next_candidate_on_retryable_error() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
@@ -9958,6 +9969,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_stream_returns_last_error_when_every_candidate_fails() {
+        crate::http::install_fallback_for_test();
         let a = Arc::new(MockProvider {
             name: "anthropic".to_string(),
             behavior: MockBehavior::FailRetryable,
@@ -10049,6 +10061,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_fusion_synthesizes_from_the_full_panel() {
+        crate::http::install_fallback_for_test();
         let a = Arc::new(FusionCandidateProvider::new("a", "answer A"));
         let b = Arc::new(FusionCandidateProvider::new("b", "answer B"));
         let judge = Arc::new(ReqCapturingProvider {
@@ -10124,7 +10137,7 @@ mod tests {
         assert_eq!(usage.total_tokens, 15 + 15 + 30);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_fusion_a_slow_panel_member_does_not_block_past_the_timeout() {
         let fast = Arc::new(FusionCandidateProvider::new("fast", "fast answer"));
         let slow = Arc::new(
@@ -10173,7 +10186,7 @@ mod tests {
         let _ = resp;
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_fusion_fails_only_when_every_candidate_fails() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let a = Arc::new(MockProvider {
@@ -10207,6 +10220,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_fusion_returns_a_panel_members_response_directly_when_it_carries_tool_calls()
     {
+        crate::http::install_fallback_for_test();
         // Defense in depth: even though `dispatch_uncached` already keeps a
         // tool-calling *request* out of fusion entirely, a panel member
         // could in principle still emit tool_calls unprompted. A judge
@@ -10300,6 +10314,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_fusion_accounts_cost_and_usage_for_every_contributor() {
+        crate::http::install_fallback_for_test();
         let a = Arc::new(FusionCandidateProvider::new("a", "answer A"));
         let b = Arc::new(FusionCandidateProvider::new("b", "answer B"));
         let judge = Arc::new(FusionCandidateProvider::new("j", "synthesized"));

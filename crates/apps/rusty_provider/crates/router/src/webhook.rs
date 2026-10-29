@@ -193,7 +193,7 @@ impl WebhookNotifier {
             jitter: 0.0,
         };
 
-        tokio::spawn(async move {
+        rusty_tokio::spawn(async move {
             let mut attempt = 0u32;
             loop {
                 let req = match build_request(
@@ -232,7 +232,7 @@ impl WebhookNotifier {
                 if !retryable || attempt >= policy.max_retries {
                     return;
                 }
-                tokio::time::sleep(backoff.delay_for(attempt)).await;
+                rusty_tokio::time::sleep(backoff.delay_for(attempt)).await;
                 attempt += 1;
             }
         });

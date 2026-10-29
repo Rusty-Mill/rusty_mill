@@ -16,17 +16,11 @@ rusty_mcp_server = { workspace = true }
 rusty-mcp-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Runtime-free; safe on the caller's tokio runtime.
 rusty_tokio.workspace = true
-# Stays (#910): the native tools block on rp-router (reqwest, tokio) on the
-# tokio runtime `build` is called from (rp-server's main). Moves when rp-router
-# leaves reqwest (#687).
-tokio.workspace = true
 rusty_log = { workspace = true }
 anyhow.workspace = true
 thiserror = "2"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full", "test-util"] }
 rusty_mcp_server = { workspace = true, features = ["http"] }
 rusty_serve = { workspace = true }
