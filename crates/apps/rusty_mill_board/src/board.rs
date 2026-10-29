@@ -3,7 +3,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{RwLock, RwLockReadGuard};
+use std::sync::{Mutex, PoisonError, RwLock, RwLockReadGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,9 @@ use crate::store::Store;
 
 /// Attempts per operation when another writer wins the revision race.
 const RETRIES: usize = 3;
+
+/// The actor named on the events that number cards.
+const NUMBERER: &str = "board";
 
 /// Role name -> capabilities. The board enforces roles; defining them is
 /// the caller's job (orch), so [`Roles::default`] is only a starting set.
@@ -83,6 +86,9 @@ pub struct Board<S> {
     rules: RwLock<MoveRules>,
     projects: RwLock<Projects>,
     projects_sink: Option<ProjectsSink>,
+    /// Held while numbers are handed out, so this process does not race itself for them.
+    /// Uniqueness does not rest on it: the store reserves each number (`Store::reserve_number`).
+    numbering: Mutex<()>,
     clock: fn() -> i64,
 }
 
@@ -113,6 +119,7 @@ impl<S: Store> Board<S> {
             rules: RwLock::new(MoveRules::default()),
             projects: RwLock::new(Projects::default()),
             projects_sink: None,
+            numbering: Mutex::new(()),
             clock,
         }
     }
@@ -284,6 +291,78 @@ impl<S: Store> Board<S> {
         self.store.get(id)?.ok_or(BoardError::NotFound(id))
     }
 
+    /// The card numbered `number`.
+    ///
+    /// # Errors
+    /// If no card has that number, if more than one has (a number tag edited by hand in
+    /// rusty_tick): never a guess at which was meant. Or on storage failure.
+    pub fn get_number(&self, number: u64) -> Result<Card, BoardError> {
+        let mut found = self
+            .store
+            .list()?
+            .into_iter()
+            .filter(|c| c.number == Some(number));
+        match (found.next(), found.next()) {
+            (Some(card), None) => Ok(card),
+            (None, _) => Err(BoardError::Invalid("no card has that number")),
+            (Some(_), Some(_)) => Err(BoardError::Invalid(
+                "more than one card has that number; name it by id",
+            )),
+        }
+    }
+
+    /// Number every card that has none yet (made before numbering, or directly in rusty_tick),
+    /// oldest first. Returns how many were numbered.
+    ///
+    /// # Errors
+    /// On storage failure; cards numbered before it keep their numbers.
+    pub fn number_cards(&self) -> Result<usize, BoardError> {
+        let _numbering = self
+            .numbering
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.number_strays().map(|(numbered, _)| numbered)
+    }
+
+    /// Number the cards that have none, each with a number the store reserves; returns how many
+    /// it numbered and the highest number on the board. The caller holds `numbering`.
+    fn number_strays(&self) -> Result<(usize, u64), BoardError> {
+        let numberer = Actor {
+            name: NUMBERER.into(),
+            caps: BTreeSet::new(),
+            projects: None,
+        };
+        let cards = self.store.list()?;
+        let mut highest = cards.iter().filter_map(|c| c.number).max().unwrap_or(0);
+        let strays: Vec<Uuid> = cards
+            .iter()
+            .filter(|c| c.number.is_none())
+            .map(|c| c.id)
+            .collect();
+        for id in &strays {
+            highest = self.store.reserve_number(*id, highest)?;
+            // Another board may number the card first; then this reservation goes unused.
+            self.apply(*id, &numberer, EventKind::Numbered, |c, _| {
+                Ok(c.numbered(highest))
+            })?;
+        }
+        Ok((strays.len(), highest))
+    }
+
+    /// Commit a new card under a newly reserved number.
+    fn insert_numbered(&self, by: &Actor, mut card: Card) -> Result<Card, BoardError> {
+        let _numbering = self
+            .numbering
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let highest = self.number_strays()?.1;
+        card.number = Some(self.store.reserve_number(card.id, highest)?);
+        card.rev = self
+            .store
+            .insert(&card, Event::of(&card, EventKind::Created, &by.name))?;
+        Ok(card)
+    }
+
     /// Events after the cursor.
     ///
     /// # Errors
@@ -376,9 +455,7 @@ impl<S: Store> Board<S> {
             return Err(BoardError::OutOfScope(project.to_owned()));
         }
         project.clone_into(&mut card.project);
-        card.rev = self
-            .store
-            .insert(&card, Event::of(&card, EventKind::Created, &by.name))?;
+        let card = self.insert_numbered(by, card)?;
         drop(registry);
         Ok(card)
     }
@@ -399,10 +476,7 @@ impl<S: Store> Board<S> {
         card.id = import_id(issue);
         card.issue = Some(issue);
         card.synced_text = Some(text_hash(&card.title, &card.body));
-        card.rev = self
-            .store
-            .insert(&card, Event::of(&card, EventKind::Created, &by.name))?;
-        Ok(card)
+        self.insert_numbered(by, card)
     }
 
     /// Record the forge issue a card is synced with, and the text hash both

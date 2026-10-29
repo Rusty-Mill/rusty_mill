@@ -2,7 +2,7 @@
 //! rusty_tick tasks tagged `agent`, so there is one task store.
 //!
 //! **Mapping.** A card is a task: title, notes (body), priority, sort order, and
-//! tags carrying the board's state (`board:<column>`, `claim:<actor>`) beside
+//! tags carrying the board's state (`board:<column>`, `claim:<actor>`, `number:<n>`) beside
 //! the card's own tags, which rusty_tick keeps lowercase. Its project is the
 //! task's list, named like the project; the Inbox is the `default` project. A
 //! closed task (done or won't do) is Done. The
@@ -55,6 +55,20 @@ const TICK_ACTOR: &str = "tick";
 
 /// Reads of one card before giving up on a task that keeps moving under it.
 const READ_ATTEMPTS: usize = 8;
+
+/// Document kind of a card-number reservation (one per number, id from [`number_doc`]).
+const NUMBER_KIND: &str = "board_number";
+
+/// Numbers tried past the highest reservation seen before giving up; each miss is another
+/// board reserving at the same moment.
+const RESERVE_ATTEMPTS: u64 = 64;
+
+/// The id of number `n`'s reservation: the same on every board, so `If-None-Match: *` lets
+/// exactly one reserve it.
+fn number_doc(n: u64) -> Uuid {
+    const NAMESPACE: Uuid = Uuid::from_u128(0x6d69_6c6c_2d62_6f61_7264_2d6e_756d_6265);
+    Uuid::new_v5(&NAMESPACE, &n.to_be_bytes())
+}
 
 /// The rusty_tick HTTP API, as this adapter needs it: one request under
 /// `/api/v1` (or `/health`), answered with its status and JSON body
@@ -276,6 +290,7 @@ fn task_tags(card: &Card) -> Vec<String> {
         .unwrap_or_default();
     let mut tags = vec![AGENT_TAG.to_owned(), format!("board:{column}")];
     tags.extend(card.claim.iter().map(|c| format!("claim:{c}")));
+    tags.extend(card.number.iter().map(|n| format!("number:{n}")));
     tags.extend(card.tags.iter().cloned());
     tags
 }
@@ -302,6 +317,11 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         .iter()
         .find_map(|t| t.strip_prefix("claim:"))
         .map(str::to_owned);
+    let number = task
+        .tags
+        .iter()
+        .find_map(|t| t.strip_prefix("number:"))
+        .and_then(|n| n.parse().ok());
     let tags = task
         .tags
         .iter()
@@ -311,6 +331,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
     let doc = doc.unwrap_or_default();
     Ok(Card {
         id: task.id,
+        number,
         rev,
         title: task.title,
         body: task.notes,
@@ -743,6 +764,37 @@ impl<T: TickApi> Store for TickStore<T> {
             .log
             .last()
             .map(|e| e.id))
+    }
+
+    /// Reservations are `board_number` documents, created with `If-None-Match: *` and kept
+    /// whatever happens to the task, so a number never comes back.
+    fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+        let docs: Vec<Doc> = Self::decode(
+            self.call(TickRequest::new("GET", format!("/docs/{NUMBER_KIND}")), 200)?,
+            "docs",
+        )?;
+        let reserved = docs
+            .iter()
+            .filter_map(|d| d.body["number"].as_u64())
+            .max()
+            .unwrap_or(0);
+        let first = reserved.max(floor) + 1;
+        for n in first..first + RESERVE_ATTEMPTS {
+            let mut request =
+                TickRequest::new("PUT", format!("/docs/{NUMBER_KIND}/{}", number_doc(n)))
+                    .body(json!({ "v": 1, "number": n, "taskId": card }));
+            request.if_absent = true;
+            match self.tick.send(&request)?.0 {
+                200 => return Ok(n),
+                412 => continue,
+                status => {
+                    return Err(BoardError::Storage(format!(
+                        "rusty_tick answered {status} reserving card number {n}"
+                    )));
+                }
+            }
+        }
+        Err(BoardError::Conflict)
     }
 
     fn health(&self) -> Result<(), BoardError> {

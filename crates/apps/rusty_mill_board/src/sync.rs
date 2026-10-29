@@ -583,6 +583,9 @@ mod tests {
         fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
             self.inner.last_event_id()
         }
+        fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+            self.inner.reserve_number(card, floor)
+        }
     }
 
     #[test]
@@ -1151,6 +1154,9 @@ mod tests {
         }
         fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
             self.inner.last_event_id()
+        }
+        fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+            self.inner.reserve_number(card, floor)
         }
     }
 
