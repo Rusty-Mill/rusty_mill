@@ -17479,7 +17479,3 @@ dependencies = [
  "syn 3.0.4",
  "winnow 1.0.4",
 ]
-
-[[patch.unused]]
-name = "aws-sigv4"
-version = "1.6.0"

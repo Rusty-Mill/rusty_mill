@@ -1,10 +1,14 @@
 # Temporary RustCrypto migrations for RUSTSEC-2026-0387
 
-These are source patches to **aws-sigv4 1.6.0** and **jsonwebtoken 11.0.0**,
-not new releases. Their upstream package versions remain unchanged. Cargo's
-root `[patch.crates-io]` selects these checked-in paths, whose exact content
-is pinned by the reviewed repository commit. They are excluded from workspace
-membership: they remain third-party code with their upstream licenses intact.
+This is a source patch to **jsonwebtoken 11.0.0**, not a new release. Its
+upstream package version remains unchanged. Cargo's root `[patch.crates-io]`
+selects this checked-in path, whose exact content is pinned by the reviewed
+repository commit. It is excluded from workspace membership: it remains
+third-party code with its upstream license intact.
+
+The **aws-sigv4 1.6.0** patch was removed on 2026-10-29: its only consumer,
+remind-me's `aws-sdk-s3`, left this repository with #1213 and Cargo listed the
+patch as unused. Rusty-Mill/rusty-remind-me carries its own copy.
 
 The owner approved temporary maintained patches on 2026-10-24. Scope: remove
 the affected bigint graph while retaining SigV4a and JWT's pure-Rust backend,
@@ -14,7 +18,6 @@ algorithms and key formats. No advisory exception or security-policy change.
 
 | Crate | Upstream source revision | Published archive SHA-256 |
 | --- | --- | --- |
-| aws-sigv4 1.6.0 | [aws-sdk-rust dd4d62780ee72db9adae16134e5dac47a9b6393e](https://github.com/awslabs/aws-sdk-rust/tree/dd4d62780ee72db9adae16134e5dac47a9b6393e/sdk/aws-sigv4) | `2312577f088c9fbf4206dfdb884cf1de9407b43e1a923cbed5237775116fc24b` |
 | jsonwebtoken 11.0.0 | [jsonwebtoken 900010fb1be550ec2cfa8c32038eb154f9ef56d7](https://github.com/Keats/jsonwebtoken/tree/900010fb1be550ec2cfa8c32038eb154f9ef56d7) | `881733cbc631fc9e472e24447ce32a64bedf2da498d6d8570b08edc87de71f65` |
 
 `sources.json` records exact immutable archive URLs, the checksums from the
@@ -35,10 +38,6 @@ from lockfile churn and the unchanged imported source.
 
 ## Compatibility boundary
 
-- AWS: only the two manifests and standalone lock change. `sigv4a` still enables
-  P-256 ECDSA and key derivation; its existing `U256` operations compile unchanged
-  against **crypto-bigint =0.7.6**. P-256 moves to published 0.14.0. No request,
-  canonicalization, signing, key-generation or public-API source is rewritten.
 - JWT: P-256/P-384 move to published 0.14.0. `signature` 2 stays the public
   provider interface and the RSA/Ed25519/HMAC interface. A feature-gated
   `signature-v3` alias bridges only ECDSA verification errors. Recoverable
@@ -52,8 +51,8 @@ from lockfile churn and the unchanged imported source.
   0.13, with SEC1 conversion names updated. The scalar reduction, affine wire
   coordinates, PAKE transcript and SIEC backend are unchanged.
 - Root `Cargo.lock` pins the complete shipping graph. The vendored standalone
-  locks pin each upstream test harness; always run them with `--locked`.
-  AWS's existing MSRV is 1.94.1; JWT and Croc retain 1.88. The selected bigint
+  lock pins the upstream test harness; always run it with `--locked`.
+  JWT and Croc retain MSRV 1.88. The selected bigint
   requires 1.87, below the workspace's pinned Rust 1.98.1.
 
 ## Validation and maintenance
@@ -62,7 +61,6 @@ Run from the repository root with its pinned Rust toolchain:
 
 ```sh
 python3 vendor/verify.py
-cargo test --locked --manifest-path vendor/aws-sigv4/Cargo.toml --all-features
 cargo test --locked --manifest-path vendor/jsonwebtoken/Cargo.toml --no-default-features --features rust_crypto,use_pem
 cargo test --locked --manifest-path vendor/jsonwebtoken/Cargo.toml --no-default-features --features rust_crypto
 cargo test --locked -p agentgateway-auth
