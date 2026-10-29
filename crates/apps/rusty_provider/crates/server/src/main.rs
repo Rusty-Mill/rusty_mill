@@ -6,6 +6,9 @@ use rp_server::state::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // rp-mcp's gateway fetches OAuth tokens with rusty_request, which runs on
+    // rusty_tokio; on this tokio runtime it needs the fallback runtime.
+    rusty_tokio::runtime::install_fallback()?;
     rusty_log::tracing_subscriber::fmt()
         .with_env_filter(
             rusty_log::tracing_subscriber::EnvFilter::from_default_env()

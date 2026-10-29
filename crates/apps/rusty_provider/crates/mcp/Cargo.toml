@@ -13,8 +13,7 @@ rusty_retry = { workspace = true }
 rp-core.workspace = true
 rp-router.workspace = true
 rusty_mcp_server = { workspace = true }
-# `tokio`: the gateway's OAuth token fetch runs on the tokio runtime below.
-rusty-mcp-client = { workspace = true, features = ["tokio"] }
+rusty-mcp-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # Runtime-free; safe on the caller's tokio runtime.
