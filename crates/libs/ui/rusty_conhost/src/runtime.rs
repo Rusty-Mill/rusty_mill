@@ -5,6 +5,9 @@
 //! `write`, `resize`, `hang_up`, Drop) only touch [`Shared`]: the input
 //! lane, the control lane, the output queue and the latches. No lock in
 //! `Shared` is held across an OS call or across [`Console::handle`].
+//!
+//! A second thread, the ctrl worker, delivers Ctrl events: delivery can
+//! block on the target's handler, so it never runs on the engine thread.
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -16,10 +19,13 @@ use std::time::{Duration, Instant};
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::term::WinSize;
 use platform_windows::WindowsChild;
-use platform_windows::condrv::{Attached, ConsoleServer, IoComplete, IoDescriptor, Waker};
+use platform_windows::condrv::{
+    self, Attached, ConsoleServer, CtrlEvent, IoComplete, IoDescriptor, Waker,
+};
 use platform_windows::sys::handle::OwnedWinHandle;
 
-use crate::console::{Console, Effect, Event, OutputQueue, Packet, Reply};
+use crate::console::{Console, Effect, Event, OutputQueue, PREAMBLE, Packet, Reply};
+use crate::ctrl::{self, Ctrl, Pushed};
 use crate::fixture::{self, FIXTURE_CAP};
 use crate::msg::STATUS_UNSUCCESSFUL;
 use crate::sched::{self, Control, PACKET_INPUT_CAP, View};
@@ -226,13 +232,13 @@ impl Shared {
         (lanes.control.take(), lanes.input.len())
     }
 
-    /// Drop up to `n` bytes of terminal input: there is no input path
-    /// until PR 3.
-    fn discard_input(&self, n: usize) {
+    /// Take up to `n` bytes of terminal input.
+    fn take_input(&self, n: usize) -> Vec<u8> {
         let mut lanes = lock(&self.lanes);
         let n = n.min(lanes.input.len());
-        lanes.input.drain(..n);
+        let bytes = lanes.input.drain(..n).collect();
         self.input_room.notify_all();
+        bytes
     }
 
     fn output_len(&self) -> usize {
@@ -270,6 +276,82 @@ impl Shared {
     }
 }
 
+/// The ctrl worker's queue (§7.2): the engine pushes, the worker pops
+/// and delivers. Closed when the engine's [`CtrlSender`] drops.
+#[derive(Default)]
+struct CtrlLane {
+    state: Mutex<CtrlState>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct CtrlState {
+    queue: ctrl::Queue,
+    closed: bool,
+    /// A full queue was logged once already.
+    dropped_logged: bool,
+}
+
+impl CtrlLane {
+    /// Deliver queued events until the lane closes; queued events are
+    /// dropped then, as their clients are gone.
+    fn run(&self) {
+        loop {
+            let mut state = lock(&self.state);
+            let next = loop {
+                if state.closed {
+                    return;
+                }
+                if let Some(next) = state.queue.pop() {
+                    break next;
+                }
+                state = self
+                    .ready
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+            };
+            drop(state);
+            let (pid, event) = next;
+            if let Err(e) = condrv::send_ctrl(pid, ctrl_event(event)) {
+                crate::diag::log(&format!("Ctrl delivery to {pid} failed: {e}"));
+            }
+        }
+    }
+}
+
+fn ctrl_event(event: Ctrl) -> CtrlEvent {
+    match event {
+        Ctrl::C => CtrlEvent::C,
+        Ctrl::Break => CtrlEvent::Break,
+    }
+}
+
+/// The engine's end of the [`CtrlLane`]; dropping it stops the worker,
+/// also when the engine never runs.
+struct CtrlSender(Arc<CtrlLane>);
+
+impl CtrlSender {
+    fn push(&self, pid: u32, event: Ctrl) {
+        let mut state = lock(&self.0.state);
+        match state.queue.push(pid, event) {
+            Pushed::Queued => self.0.ready.notify_one(),
+            Pushed::Coalesced => {}
+            Pushed::Dropped if state.dropped_logged => {}
+            Pushed::Dropped => {
+                state.dropped_logged = true;
+                crate::diag::log("the Ctrl queue is full; dropping events");
+            }
+        }
+    }
+}
+
+impl Drop for CtrlSender {
+    fn drop(&mut self) {
+        lock(&self.0.state).closed = true;
+        self.0.ready.notify_all();
+    }
+}
+
 /// A started engine thread waiting for its console. Everything that can
 /// fail is done by [`prepare`], before the child exists; the handoff in
 /// [`Starter::start`] cannot fail, so the caller always owns the child.
@@ -278,12 +360,12 @@ pub(crate) struct Starter {
     tx: mpsc::Sender<(ConsoleServer, OwnedWinHandle)>,
 }
 
-/// Create the shared state and start the engine thread, before any child
-/// exists.
+/// Create the shared state and start the ctrl worker and the engine
+/// thread, before any child exists.
 pub(crate) fn prepare(size: WinSize) -> Result<Starter> {
-    prepare_with(size, |run| {
+    prepare_with(size, |name, run| {
         std::thread::Builder::new()
-            .name("rusty_conhost-engine".into())
+            .name(name.into())
             .spawn(run)
             .map(drop)
     })
@@ -291,11 +373,17 @@ pub(crate) fn prepare(size: WinSize) -> Result<Starter> {
 
 /// [`prepare`] with the thread spawn supplied, so tests can make it fail
 /// or lose the thread.
-fn prepare_with<S>(size: WinSize, spawn: S) -> Result<Starter>
+fn prepare_with<S>(size: WinSize, mut spawn: S) -> Result<Starter>
 where
-    S: FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+    S: FnMut(&'static str, Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
 {
     let shared = Arc::new(Shared::new(Waker::new()?));
+    let lane = Arc::new(CtrlLane::default());
+    let worker = Arc::clone(&lane);
+    spawn("rusty_conhost-ctrl", Box::new(move || worker.run()))
+        .map_err(|_| not_started("rusty_conhost: the ctrl worker could not start"))?;
+    // From here the worker stops when `ctrl` drops, run or not.
+    let ctrl = CtrlSender(lane);
     let (tx, rx) = mpsc::channel::<(ConsoleServer, OwnedWinHandle)>();
     let engine_shared = Arc::clone(&shared);
     let run = Box::new(move || {
@@ -303,16 +391,16 @@ where
         let Ok((server, wait)) = rx.recv() else {
             return;
         };
-        Engine::new(Console::new(size), server, wait, engine_shared).run();
+        let console = Console::new(size, condrv::key_for);
+        Engine::new(console, server, wait, engine_shared, ctrl).run();
     });
-    spawn(run).map_err(|_| {
-        PlatformError::new(
-            ErrorKind::Other,
-            OsCode::None,
-            "rusty_conhost: the engine thread could not start",
-        )
-    })?;
+    spawn("rusty_conhost-engine", run)
+        .map_err(|_| not_started("rusty_conhost: the engine thread could not start"))?;
     Ok(Starter { shared, tx })
+}
+
+fn not_started(op: &'static str) -> PlatformError {
+    PlatformError::new(ErrorKind::Other, OsCode::None, op)
 }
 
 impl Starter {
@@ -341,6 +429,7 @@ struct Engine {
     server: Option<ConsoleServer>,
     wait: OwnedWinHandle,
     shared: Arc<Shared>,
+    ctrl: CtrlSender,
     /// The console's output for the current `handle` call.
     out: OutputQueue,
     read_in_flight: bool,
@@ -362,12 +451,14 @@ impl Engine {
         server: ConsoleServer,
         wait: OwnedWinHandle,
         shared: Arc<Shared>,
+        ctrl: CtrlSender,
     ) -> Engine {
         Engine {
             console,
             server: Some(server),
             wait,
             shared,
+            ctrl,
             out: OutputQueue::default(),
             read_in_flight: false,
             reply: None,
@@ -380,6 +471,7 @@ impl Engine {
     }
 
     fn run(mut self) {
+        self.shared.push_output(PREAMBLE.to_vec());
         while self.server.is_some() {
             if let Err(e) = self.turn() {
                 crate::diag::log(&format!("engine stopped: {e}"));
@@ -416,8 +508,8 @@ impl Engine {
             self.handle(Event::ChildExited);
         }
         if plan.input > 0 {
-            self.shared.discard_input(plan.input);
-            self.handle(Event::Input);
+            let bytes = self.shared.take_input(plan.input);
+            self.handle(Event::Input(&bytes));
         }
         let Some(server) = self.server.as_mut() else {
             return Ok(());
@@ -547,9 +639,22 @@ impl Engine {
                 self.pending.retain(|id| *id != r.id);
                 self.complete(r);
             }
+            Effect::SetInputAvailable(on) => self.set_input_available(on),
+            Effect::Ctrl { pid, event } => self.ctrl.push(pid, event),
             Effect::CloseServer => self.teardown(),
             Effect::Eof => self.shared.set_eof(),
             Effect::Log(d) => crate::diag::log(&d.to_string()),
+        }
+    }
+
+    /// Signal or reset the input-available event, best effort: a failure
+    /// only leaves a waiting client unwoken.
+    fn set_input_available(&mut self, on: bool) {
+        let Some(server) = self.server.as_mut() else {
+            return;
+        };
+        if let Err(e) = server.set_input_available(on) {
+            crate::diag::log(&format!("set_input_available failed: {e}"));
         }
     }
 
@@ -646,12 +751,10 @@ impl Reply {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use platform::process::{Child, Command, Signal};
-    use platform_windows::condrv;
-
     use super::*;
     use crate::console::PANIC_FOR_TEST;
     use crate::msg;
+    use platform::process::{Child, Command, Signal};
 
     #[test]
     fn a_panicking_console_fails_its_calls_and_closes() {
@@ -665,10 +768,11 @@ mod tests {
             cols: 120,
         };
         let mut engine = Engine::new(
-            Console::new(size),
+            Console::new(size, condrv::key_for),
             attached.server,
             attached.wait,
             Arc::clone(&shared),
+            CtrlSender(Arc::default()),
         );
         // A call the console held, as a parked WriteConsole would be.
         engine.pending.push([9; 8]);
@@ -709,20 +813,50 @@ mod tests {
     #[test]
     fn an_engine_that_cannot_start_fails_before_any_child_exists() {
         let spawned = AtomicBool::new(false);
-        let failed = prepare_with(SIZE, |_| {
+        let failed = prepare_with(SIZE, |_, _| {
             spawned.store(true, Ordering::Relaxed);
             Err(std::io::Error::other("no threads"))
         });
         let err = failed.err().expect("prepare fails");
         assert!(spawned.load(Ordering::Relaxed));
-        assert_eq!(err.op, "rusty_conhost: the engine thread could not start");
+        assert_eq!(err.op, "rusty_conhost: the ctrl worker could not start");
         // OwnPty::spawn_concrete calls spawn_attached only after this.
+    }
+
+    #[test]
+    fn the_ctrl_worker_stops_when_the_engine_cannot_start() {
+        let mut worker = None;
+        let failed = prepare_with(SIZE, |name, run| {
+            if name != "rusty_conhost-ctrl" {
+                return Err(std::io::Error::other("no threads"));
+            }
+            worker = Some(std::thread::spawn(run));
+            Ok(())
+        });
+        let err = failed.err().expect("prepare fails");
+        assert_eq!(err.op, "rusty_conhost: the engine thread could not start");
+        worker
+            .expect("the worker was started")
+            .join()
+            .expect("the worker returns once the engine is gone");
+    }
+
+    #[test]
+    fn a_full_ctrl_queue_drops_new_events() {
+        let lane = Arc::new(CtrlLane::default());
+        let sender = CtrlSender(Arc::clone(&lane));
+        for pid in 0..ctrl::MAX_QUEUED as u32 + 5 {
+            sender.push(pid, Ctrl::C);
+        }
+        let state = lock(&lane.state);
+        assert!(state.dropped_logged);
+        assert_eq!(state.queue.len(), ctrl::MAX_QUEUED);
     }
 
     #[test]
     fn a_lost_engine_closes_the_console_and_leaves_the_child_with_the_caller() {
         // The engine closure is dropped unrun, as if its thread had died.
-        let starter = prepare_with(SIZE, |run| {
+        let starter = prepare_with(SIZE, |_, run| {
             drop(run);
             Ok(())
         })

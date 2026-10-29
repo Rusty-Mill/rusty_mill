@@ -3,10 +3,11 @@
 //! order. It makes no OS call. VT for the terminal goes straight into the
 //! [`OutputQueue`], so output order is the order calls were handled.
 //!
-//! PR 2 covers connection and objects, the output-only APIs and stubs of
-//! Appendix A, and the output caps of §7.4. Terminal input is discarded
-//! (logged once) until PR 3, and the server closes at once on hang-up or
-//! child exit until PR 8 brings CTRL_CLOSE and its grace period.
+//! It covers connection and objects, the output APIs and stubs of
+//! Appendix A, the output caps of §7.4, and input (PR 3, the `read`
+//! child module): terminal input, the input APIs, waiting reads and Ctrl
+//! events. The server closes at once on hang-up or child exit until PR 8
+//! brings CTRL_CLOSE and its grace period.
 //!
 //! Behaviour follows microsoft/terminal's conhost (commit 09beddc6,
 //! `src/server/IoDispatchers.cpp`, `ApiDispatchers.cpp`,
@@ -21,8 +22,17 @@ use std::fmt;
 
 use platform::term::WinSize;
 
+use crate::ctrl::Ctrl;
+use crate::input::{self, KeyFor};
 use crate::msg::{self, ApiMsg, api};
 use crate::sched::{MAX_RETAINED_PER_CALL, PACKET_INPUT_CAP, WRITE_BACK_CAP};
+
+mod read;
+
+/// What the host sends the terminal before anything else (§5.5):
+/// win32-input-mode, for exact key records and Ctrl+Break, and focus
+/// reports, as inbox conhost asks for them.
+pub(crate) const PREAMBLE: &[u8] = b"\x1b[?9001h\x1b[?1004h";
 
 /// A call that produces VT is admitted only while the output queue holds
 /// at most this much (§7.4).
@@ -103,8 +113,8 @@ pub(crate) struct Packet<'a> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Event<'a> {
     Packet(Packet<'a>),
-    /// VT bytes arrived from the terminal; this release discards them.
-    Input,
+    /// VT bytes from the terminal.
+    Input(&'a [u8]),
     Resize(WinSize),
     /// The reader took bytes out of the output queue.
     OutputDrained,
@@ -148,6 +158,14 @@ pub(crate) enum Effect {
     Reply(Reply),
     /// A held call finishes now, with COMPLETE_IO.
     Complete(Reply),
+    /// Set or reset ConDrv's input-available event: it is set while the
+    /// input queue holds records.
+    SetInputAvailable(bool),
+    /// Deliver a Ctrl event to a client process, off the engine thread.
+    Ctrl {
+        pid: u32,
+        event: Ctrl,
+    },
     /// Disconnect every client.
     CloseServer,
     /// The reader gets `Ok(0)` once the queue drains.
@@ -162,7 +180,7 @@ pub(crate) enum Effect {
 pub(crate) enum Diag {
     UnknownApi { pid: u32, number: u32 },
     UnknownFunction(u32),
-    InputDiscarded,
+    InputDropped,
     TooManyClients,
     Suppressed,
 }
@@ -178,9 +196,11 @@ impl fmt::Display for Diag {
                 write!(f, "pid {pid}: API {number:#010X} is not implemented")
             }
             Diag::UnknownFunction(n) => write!(f, "ConDrv function {n} is not implemented"),
-            Diag::InputDiscarded => {
-                write!(f, "terminal input is discarded until input support lands")
-            }
+            Diag::InputDropped => write!(
+                f,
+                "the input queue holds {} records: the oldest are dropped",
+                input::MAX_RECORDS
+            ),
             Diag::TooManyClients => write!(f, "a client was refused: {MAX_CLIENTS} are connected"),
             Diag::Suppressed => write!(f, "{MAX_LOGGED} diagnostics logged; the rest are dropped"),
         }
@@ -225,6 +245,8 @@ enum Kind {
 
 struct Client {
     pid: u32,
+    /// CONNECT's `ProcessGroupId`.
+    group: u32,
     /// The input and output objects CONNECT opened, which DISCONNECT
     /// closes.
     own: [usize; 2],
@@ -272,6 +294,10 @@ struct Object {
     /// The client cookie that opened it.
     owner: usize,
     access: Access,
+    /// What a cooked read on this input handle returned beyond its
+    /// client's buffer, for the next read (conhost
+    /// `INPUT_READ_HANDLE_DATA`).
+    pending: Vec<u16>,
 }
 
 /// What a handle counts towards its object's sharing. Only the literal
@@ -417,10 +443,22 @@ pub(crate) struct Console {
     closed: bool,
     /// At most [`MAX_LOGGED`] entries, plus `Suppressed` once full.
     logged: HashSet<Diag>,
+    key_for: KeyFor,
+    decoder: input::Decoder,
+    input: input::Queue,
+    /// The last value of the input-available event.
+    input_available: bool,
+    /// Reads waiting for input, in arrival order.
+    reads: VecDeque<read::Read>,
+    /// UTF-8 bytes of a character an ANSI read could not fit, for the
+    /// next ANSI read (conhost `_cachedTextReaderA`).
+    cached_text: VecDeque<u8>,
+    /// Records an ANSI GetConsoleInput expanded beyond what it asked for.
+    cached_records: VecDeque<input::Record>,
 }
 
 impl Console {
-    pub(crate) fn new(size: WinSize) -> Console {
+    pub(crate) fn new(size: WinSize, key_for: KeyFor) -> Console {
         Console {
             size,
             clients: HashMap::new(),
@@ -437,12 +475,19 @@ impl Console {
             connected_once: false,
             closed: false,
             logged: HashSet::new(),
+            key_for,
+            decoder: input::Decoder::default(),
+            input: input::Queue::default(),
+            input_available: false,
+            reads: VecDeque::new(),
+            cached_text: VecDeque::new(),
+            cached_records: VecDeque::new(),
         }
     }
 
-    /// Calls held without a reply.
+    /// Calls held without a reply: parked writes and waiting reads.
     pub(crate) fn waiting(&self) -> usize {
-        self.writes.len()
+        self.writes.len() + self.reads.len()
     }
 
     /// Payload bytes those calls retain.
@@ -462,12 +507,22 @@ impl Console {
         let mut fx = Vec::new();
         match ev {
             Event::Packet(p) => self.packet(p, out, &mut fx),
-            Event::Input => self.log(Diag::InputDiscarded, &mut fx),
+            Event::Input(bytes) => self.terminal_input(bytes, out, &mut fx),
             Event::Resize(size) => self.size = size,
             Event::OutputDrained => self.pump(None, out, &mut fx),
             Event::ChildExited | Event::HangUp => self.close(&mut fx),
         }
+        self.sync_input_available(&mut fx);
         fx
+    }
+
+    /// Emit the input-available event's new value when it changed.
+    fn sync_input_available(&mut self, fx: &mut Vec<Effect>) {
+        let available = !self.closed && !self.input.is_empty();
+        if available != self.input_available {
+            self.input_available = available;
+            fx.push(Effect::SetInputAvailable(available));
+        }
     }
 
     fn log(&mut self, d: Diag, fx: &mut Vec<Effect>) {
@@ -489,6 +544,7 @@ impl Console {
         self.closed = true;
         // Their clients are about to be disconnected.
         self.writes.clear();
+        self.reads.clear();
         self.parked = 0;
         fx.push(Effect::CloseServer);
         fx.push(Effect::Eof);
@@ -509,6 +565,11 @@ impl Console {
         let reply = match p.function {
             msg::CONNECT => self.connect(&p, fx),
             msg::DISCONNECT => {
+                self.end_reads(
+                    |r| r.process == p.process,
+                    msg::STATUS_THREAD_IS_TERMINATING,
+                    fx,
+                );
                 fx.push(Effect::Reply(self.disconnect(&p)));
                 if self.clients.is_empty() {
                     // The last client is gone: nothing will use the console.
@@ -517,13 +578,17 @@ impl Console {
                 return;
             }
             msg::CREATE_OBJECT => self.create_object(&p),
-            msg::CLOSE_OBJECT => self.close_object(&p),
+            msg::CLOSE_OBJECT => {
+                self.end_reads(|r| r.object == p.object, msg::STATUS_ALERTED, fx);
+                self.close_object(&p)
+            }
             msg::RAW_WRITE => {
                 let mut reply = Reply::ok(p.id);
                 reply.information = p.payload.len();
                 return self.write(reply, Text::Bytes(p.payload.to_vec()), out, fx);
             }
-            msg::RAW_FLUSH => Reply::ok(p.id),
+            msg::RAW_READ => return self.read_console(&p, None, Vec::new(), out, fx),
+            msg::RAW_FLUSH => self.flush_input(&p),
             // The fixed struct is written back, so it must fit the
             // client's output; ConDrv refuses a larger write-back.
             msg::USER_DEFINED => match msg::api_msg(p.payload) {
@@ -533,7 +598,6 @@ impl Console {
                 _ => Reply::status(p.id, msg::STATUS_ILLEGAL_FUNCTION),
             },
             f => {
-                // RAW_READ (6) is input, PR 3.
                 self.log(Diag::UnknownFunction(f), fx);
                 Reply::status(p.id, msg::STATUS_UNSUCCESSFUL)
             }
@@ -552,8 +616,8 @@ impl Console {
         if (p.output_size as usize) < msg::CONNECTION_INFORMATION_LEN {
             return Reply::status(p.id, msg::STATUS_INVALID_BUFFER_SIZE);
         }
-        let title = match msg::server_msg_title(p.payload) {
-            Ok(title) => title,
+        let info = match msg::server_msg_info(p.payload) {
+            Ok(info) => info,
             Err(status) => return Reply::status(p.id, status),
         };
         if self.clients.len() >= MAX_CLIENTS || self.objects.len() + 2 > MAX_ALL_OBJECTS {
@@ -565,8 +629,8 @@ impl Console {
         }
         if !self.connected_once {
             self.connected_once = true;
-            self.original_title = title.clone();
-            self.title = title;
+            self.original_title = info.title.clone();
+            self.title = info.title;
         }
         let process = self.cookie();
         let input = self.cookie();
@@ -576,6 +640,7 @@ impl Console {
             Client {
                 // On CONNECT, Process carries the client's pid.
                 pid: p.process as u32,
+                group: info.group,
                 own: [input, output],
                 objects: 0,
             },
@@ -651,6 +716,7 @@ impl Console {
                 kind,
                 owner,
                 access,
+                pending: Vec::new(),
             },
         );
     }
@@ -679,6 +745,19 @@ impl Console {
             api::GET_MODE => self.get_mode(p.object, &mut fixed),
             api::SET_MODE => return self.set_mode(p, fixed, out, fx),
             api::GET_LANG_ID => get_lang_id(),
+            api::GET_NUMBER_OF_INPUT_EVENTS => {
+                self.get_number_of_input_events(p.object, &mut fixed)
+            }
+            api::FLUSH_INPUT_BUFFER => match self.input_object(p.object, true) {
+                Ok(()) => {
+                    self.clear_input();
+                    msg::STATUS_SUCCESS
+                }
+                Err(status) => status,
+            },
+            api::GENERATE_CTRL_EVENT => self.generate_ctrl_event(&fixed, fx),
+            api::GET_CONSOLE_INPUT => return self.get_console_input(p, m, fixed, fx),
+            api::READ_CONSOLE => return self.read_console(p, Some(m), fixed, out, fx),
             api::WRITE_CONSOLE => return self.write_console(p, m, fixed, out, fx),
             api::SET_TITLE => return self.set_title(p, m, fixed, out, fx),
             #[cfg(test)]
@@ -1034,20 +1113,20 @@ mod tests {
 
     /// Drives a console as the engine would, with the shared output
     /// queue modelled by a byte count nobody reads until `drain`.
-    struct Host {
-        c: Console,
+    pub(super) struct Host {
+        pub(super) c: Console,
         queued: usize,
         high_water: usize,
-        vt: Vec<u8>,
+        pub(super) vt: Vec<u8>,
         next_id: u64,
         /// Each packet's output size, to check its write-back fits.
         output_sizes: HashMap<[u8; 8], u32>,
     }
 
     impl Host {
-        fn new() -> Host {
+        pub(super) fn new() -> Host {
             Host {
-                c: Console::new(WinSize { rows: 24, cols: 80 }),
+                c: Console::new(WinSize { rows: 24, cols: 80 }, input::us_key_for),
                 queued: 0,
                 high_water: 0,
                 vt: Vec::new(),
@@ -1056,7 +1135,7 @@ mod tests {
             }
         }
 
-        fn ev(&mut self, ev: Event<'_>) -> Vec<Effect> {
+        pub(super) fn ev(&mut self, ev: Event<'_>) -> Vec<Effect> {
             let mut out = OutputQueue::default();
             out.set_held(self.queued);
             let fx = self.c.handle(ev, &mut out);
@@ -1075,12 +1154,12 @@ mod tests {
         }
 
         /// The reader takes everything queued.
-        fn drain(&mut self) -> Vec<Effect> {
+        pub(super) fn drain(&mut self) -> Vec<Effect> {
             self.queued = 0;
             self.ev(Event::OutputDrained)
         }
 
-        fn packet(
+        pub(super) fn packet(
             &mut self,
             function: u32,
             process: usize,
@@ -1111,7 +1190,7 @@ mod tests {
             (reply, fx)
         }
 
-        fn call(
+        pub(super) fn call(
             &mut self,
             object: usize,
             number: u32,
@@ -1130,7 +1209,7 @@ mod tests {
         }
 
         /// CONNECT as `pid`: the (process, input, output) cookies.
-        fn connect(&mut self, pid: usize, title: &str) -> [usize; 3] {
+        pub(super) fn connect(&mut self, pid: usize, title: &str) -> [usize; 3] {
             let info = msg::CONNECTION_INFORMATION_LEN as u32;
             let (r, _) = self.packet(msg::CONNECT, pid, 0, &msg::server_msg(title), info);
             assert_eq!(r.status, msg::STATUS_SUCCESS);
@@ -1141,7 +1220,7 @@ mod tests {
             [cookie(0), cookie(1), cookie(2)]
         }
 
-        fn create(&mut self, process: usize, object_type: u32, access: u32) -> Reply {
+        pub(super) fn create(&mut self, process: usize, object_type: u32, access: u32) -> Reply {
             self.create_shared(process, object_type, access, 3)
         }
 
@@ -1159,13 +1238,13 @@ mod tests {
             self.packet(msg::CREATE_OBJECT, process, 0, &info, 0).0
         }
 
-        fn mode(&mut self, object: usize) -> u32 {
+        pub(super) fn mode(&mut self, object: usize) -> u32 {
             let r = self.call(object, api::GET_MODE, &[0; 4], &[], 0);
             assert_eq!(r.status, msg::STATUS_SUCCESS);
             msg::u32_at(&r.write_back, 0).expect("Mode")
         }
 
-        fn set_mode(&mut self, object: usize, mode: u32) -> i32 {
+        pub(super) fn set_mode(&mut self, object: usize, mode: u32) -> i32 {
             self.call(object, api::SET_MODE, &mode.to_le_bytes(), &[], 0)
                 .status
         }
@@ -1187,11 +1266,11 @@ mod tests {
         }
     }
 
-    fn units(s: &str) -> Vec<u16> {
+    pub(super) fn units(s: &str) -> Vec<u16> {
         s.encode_utf16().collect()
     }
 
-    fn logs(fx: &[Effect]) -> usize {
+    pub(super) fn logs(fx: &[Effect]) -> usize {
         fx.iter().filter(|e| matches!(e, Effect::Log(_))).count()
     }
 
@@ -1427,12 +1506,15 @@ mod tests {
     #[test]
     fn raw_write_passes_bytes_through() {
         let mut h = Host::new();
-        let [_, _, output] = h.connect(1, "");
+        let [_, input, output] = h.connect(1, "");
         let (r, _) = h.packet(msg::RAW_WRITE, 1, output, b"\x1b[1mhi", 0);
         assert_eq!(r.information, 6);
         assert!(r.write_back.is_empty());
         assert_eq!(h.vt, b"\x1b[1mhi");
+        // RAW_FLUSH flushes the input buffer, so it needs the input handle.
         let (r, _) = h.packet(msg::RAW_FLUSH, 1, output, &[], 0);
+        assert_eq!(r.status, msg::STATUS_FROM_HANDLE);
+        let (r, _) = h.packet(msg::RAW_FLUSH, 1, input, &[], 0);
         assert_eq!(r.status, msg::STATUS_SUCCESS);
     }
 
@@ -1770,7 +1852,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_records_the_size_and_input_is_discarded_once() {
+    fn resize_records_the_size() {
         let mut h = Host::new();
         let size = WinSize {
             rows: 50,
@@ -1778,7 +1860,5 @@ mod tests {
         };
         assert!(h.ev(Event::Resize(size)).is_empty());
         assert_eq!(h.c.size(), size);
-        assert_eq!(h.ev(Event::Input), [Effect::Log(Diag::InputDiscarded)]);
-        assert!(h.ev(Event::Input).is_empty());
     }
 }
