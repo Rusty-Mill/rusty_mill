@@ -214,9 +214,22 @@ fn interactive_cmd_runs_typed_lines() {
     assert_eq!(exit_of(child), ExitStatus::Code(7));
 }
 
+/// Clear this test process's "ignore Ctrl+C" flag, which children
+/// inherit: nextest and the CI runner start tests with it set. The host
+/// leaves the caller's policy alone, as `spawn_attached` does, so a
+/// caller that wants its children to see Ctrl+C opts in itself.
+#[allow(unsafe_code)]
+fn accept_ctrl_c() {
+    use platform_windows::ffi::win32_surface as w;
+    // SAFETY: a null handler only sets this process's Ctrl+C flag.
+    let ok = unsafe { w::SetConsoleCtrlHandler(None, 0) };
+    assert_ne!(ok, 0, "SetConsoleCtrlHandler(NULL, FALSE)");
+}
+
 #[test]
 fn ctrl_c_stops_the_running_command_not_the_shell() {
     let _g = lock();
+    accept_ctrl_c();
     let (master, child) = own(&command("cmd.exe", &["/d", "/q"]));
     let master = Arc::new(master);
     let mut stream = Stream::new(Arc::clone(&master));
