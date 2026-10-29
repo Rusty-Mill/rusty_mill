@@ -135,7 +135,10 @@ fn unsupported(what: &'static str) -> PlatformError {
 /// The program is resolved and quoted exactly as
 /// [`crate::WindowsPty::spawn_concrete`] does, under the same spawn lock.
 /// The child gets the server's `\Input` and `\Output` as its std handles,
-/// and inherits nothing else. Returns once `CreateProcessW` succeeds, so
+/// and inherits nothing else. It always starts with Ctrl+C enabled: the
+/// "ignore Ctrl+C" flag an ancestor's `CREATE_NEW_PROCESS_GROUP` leaves
+/// on this process is cleared, process-wide, before the spawn, as for a
+/// fresh console. Returns once `CreateProcessW` succeeds, so
 /// the child's CONNECT is the first packet [`ConsoleServer::wait`]
 /// reports. `GroupSpec::JoinGroup` gives `InvalidInput`. On failure every
 /// handle is closed and no child is left running.

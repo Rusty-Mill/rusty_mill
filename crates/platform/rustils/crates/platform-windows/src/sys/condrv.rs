@@ -780,11 +780,28 @@ impl Drop for Server {
     }
 }
 
+/// Clear this process's inherited "ignore Ctrl+C" flag, which children
+/// copy at `CreateProcessW`. An ancestor started with
+/// `CREATE_NEW_PROCESS_GROUP` (a test runner, Git Bash) sets it, and a
+/// child of a fresh console must still see Ctrl+C. Process-wide and
+/// one-way: no getter exists to restore it. Needs no console.
+fn enable_ctrl_c_for_children() -> Result<()> {
+    // SAFETY: a null handler only flips the process's Ctrl+C flag.
+    let ok = unsafe { w::SetConsoleCtrlHandler(None, 0) };
+    if ok == 0 {
+        return Err(errmap::last_win32_err(
+            "SetConsoleCtrlHandler",
+            OsStr::new(""),
+        ));
+    }
+    Ok(())
+}
+
 /// Spawn `command_line` attached to `server`: the console reference
 /// attribute, plus a handle list holding only the three std handles,
 /// which are inheritable duplicates of `\Input`, `\Output`, `\Output`
-/// closed again once `CreateProcessW` returns. Returns the process handle
-/// and pid.
+/// closed again once `CreateProcessW` returns. Clears the inherited
+/// "ignore Ctrl+C" flag first. Returns the process handle and pid.
 pub fn spawn(
     server: &Server,
     command_line: &[u16],
@@ -836,6 +853,7 @@ pub fn spawn(
     let env_ptr = block
         .as_ref()
         .map_or(std::ptr::null(), |b| b.as_ptr().cast::<c_void>());
+    enable_ctrl_c_for_children()?;
     // SAFETY: PROCESS_INFORMATION is plain-old-data, overwritten on success.
     let mut pi: w::PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     let si_ptr = (&siex as *const w::STARTUPINFOEXW).cast::<w::STARTUPINFOW>();
