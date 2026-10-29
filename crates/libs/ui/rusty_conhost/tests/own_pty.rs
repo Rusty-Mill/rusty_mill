@@ -42,7 +42,11 @@ fn probe() -> String {
     let exe = std::env::current_exe().expect("current_exe");
     let dir = exe.parent().and_then(|d| d.parent()).expect("target dir");
     let path: PathBuf = dir.join("examples").join("conhost_probe.exe");
-    assert!(path.exists(), "build the conhost_probe example: {}", path.display());
+    assert!(
+        path.exists(),
+        "build the conhost_probe example: {}",
+        path.display()
+    );
     path.to_string_lossy().into_owned()
 }
 
