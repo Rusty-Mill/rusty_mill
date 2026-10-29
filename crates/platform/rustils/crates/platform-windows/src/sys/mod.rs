@@ -1,6 +1,7 @@
 //! Safe wrappers over the ffi layer. All `unsafe` in this crate lives in
 //! this module tree, one documented invariant per block.
 
+pub(crate) mod condrv;
 pub mod console;
 pub mod csignals;
 pub mod errmap;
