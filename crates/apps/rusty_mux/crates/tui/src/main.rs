@@ -734,10 +734,10 @@ mod client {
         })
     }
 
-    /// The next message on `conn`, due `by`; waits in steps of [`TICK`] so
-    /// `cancel` is seen soon. A wait that times out keeps what arrived of
-    /// a message, so the next one goes on from there; a connection handed
-    /// on waits without a deadline again.
+    /// The next message on `conn`, due `by`. Each read waits at most
+    /// [`TICK`] and returns whatever came, so `by` and `cancel` are checked
+    /// between reads, however slowly a message trickles in; what came of
+    /// it is kept. A connection handed on waits without a deadline again.
     fn answer(
         conn: &mut Conn<UnixStream>,
         by: Instant,
@@ -755,12 +755,13 @@ mod client {
             conn.get_ref()
                 .set_read_timeout(Some(wait))
                 .map_err(|e| e.to_string())?;
-            let got = conn.recv();
+            let got = conn.try_recv();
             conn.get_ref()
                 .set_read_timeout(None)
                 .map_err(|e| e.to_string())?;
             match got {
-                Ok(message) => return Ok(message),
+                Ok(Some(message)) => return Ok(message),
+                Ok(None) => {}
                 Err(e)
                     if matches!(
                         e.kind(),

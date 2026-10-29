@@ -822,6 +822,9 @@ fn real_server() -> PathBuf {
 /// - `hold`: accepts connections but passes nothing on, either way.
 /// - `stall C F`: relays, but passes only the first `F` of the server's
 ///   messages on its `C`th connection (from 0), and holds the rest.
+/// - `trickle C`: relays, but on its `C`th connection sends the client,
+///   in place of the server's messages, a message that never ends: its
+///   length, then a byte every 20 ms.
 ///
 /// SIGUSR1 cuts every connection on the client's side only, so the client
 /// sees them end while the server keeps its clients.
@@ -832,7 +835,7 @@ fn relaying_ssh(name: &str, plan: &[&str]) -> PathBuf {
     std::fs::write(work.join("plan"), plan.join("\n")).expect("plan");
     let script = format!(
         r#"#!/usr/bin/env python3
-import os, signal, socket, sys, threading
+import os, signal, socket, sys, threading, time
 args = sys.argv[1:]
 with open("{log}", "a") as log:
     log.write(" ".join([str(os.getpid())] + args) + "\n")
@@ -844,6 +847,7 @@ mode = (plans[start] if start < len(plans) else "relay").split()
 if mode[0] == "fail":
     sys.exit(255)
 stall = (int(mode[1]), int(mode[2])) if mode[0] == "stall" else None
+trickle = int(mode[1]) if mode[0] == "trickle" else None
 local, remote = args[args.index("-L") + 1].split(":", 1)
 listener = socket.socket(socket.AF_UNIX)
 listener.bind(local)
@@ -859,6 +863,14 @@ def on_cut(*_):
         except OSError:
             pass
 signal.signal(signal.SIGUSR1, on_cut)
+def drip(near):
+    try:
+        near.sendall((60000).to_bytes(4, "big"))
+        while True:
+            near.sendall(b"\0")
+            time.sleep(0.02)
+    except OSError:
+        pass
 def pump(a, b, frames=None):
     held = b""
     try:
@@ -895,6 +907,10 @@ while True:
         continue
     far = socket.socket(socket.AF_UNIX)
     far.connect(remote)
+    if trickle == len(nears) - 1:
+        threading.Thread(target=drip, args=(near,), daemon=True).start()
+        threading.Thread(target=pump, args=(near, far), daemon=True).start()
+        continue
     frames = stall[1] if stall and stall[0] == len(nears) - 1 else None
     threading.Thread(target=pump, args=(near, far), daemon=True).start()
     threading.Thread(target=pump, args=(far, near, frames), daemon=True).start()
@@ -1208,6 +1224,54 @@ fn a_split_window_stays_on_screen_while_the_path_is_down() {
     }
     assert!(shown(&tui), "{}", screen_text(&tui.since(0)));
     let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
+    let seen = logins(&work);
+    assert!(seen.iter().all(|(pid, _)| !running(*pid)), "{seen:?}");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// A fresh path that sends a message slower than it could ever end, a
+/// byte at a time, is still given up on within the handshake's bound and
+/// tried again.
+#[test]
+fn a_trickling_answer_is_given_up_in_time() {
+    let socket = real_server();
+    let work = relaying_ssh("trickle", &["relay", "trickle 0"]);
+    let tui = ssh_client(&work, &socket);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    cut(&work);
+    let trickling = wait_logins(&work, 2, PATIENCE)[1].0;
+    let asked = Instant::now();
+    // 10 s for the answers, then 2 s before trying again.
+    let seen = wait_logins(&work, 3, Duration::from_secs(20));
+    assert!(
+        asked.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        asked.elapsed()
+    );
+    assert!(!running(trickling), "the trickling ssh was kept");
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
+    assert!(seen.iter().all(|(pid, _)| !running(*pid)), "{seen:?}");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// Ctrl-] d detaches at once while an answer trickles in, and both
+/// `ssh`s go with the client.
+#[test]
+fn detaching_while_an_answer_trickles_is_prompt() {
+    let socket = real_server();
+    let work = relaying_ssh("trickle-detach", &["relay", "trickle 0"]);
+    let tui = ssh_client(&work, &socket);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    cut(&work);
+    wait_logins(&work, 2, PATIENCE);
+    std::thread::sleep(Duration::from_secs(1));
+    let asked = Instant::now();
+    tui.master.write(b"\x1dd").expect("ctrl-] d");
+    let screen = tui.exit_within(Duration::from_secs(3));
+    assert!(asked.elapsed() < Duration::from_secs(3));
+    let text = String::from_utf8_lossy(&screen);
     assert!(text.contains("detached from block"), "{text:?}");
     let seen = logins(&work);
     assert!(seen.iter().all(|(pid, _)| !running(*pid)), "{seen:?}");
