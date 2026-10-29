@@ -36,21 +36,21 @@ type Received = Arc<Mutex<Vec<Push>>>;
 /// The body is parsed as JSON, so the tests can look at real structure rather
 /// than scan bytes for a string.
 async fn spawn_collector(received: Received, status: u16) -> SocketAddr {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use rusty_tokio::io::AsyncWriteExt as _;
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = rusty_tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind collector");
     let addr = listener.local_addr().expect("addr");
 
-    tokio::spawn(async move {
+    rusty_tokio::spawn(async move {
         loop {
             let Ok((mut socket, _)) = listener.accept().await else {
                 return;
             };
             let received = Arc::clone(&received);
 
-            tokio::spawn(async move {
+            rusty_tokio::spawn(async move {
                 let mut raw = Vec::new();
                 let mut buf = vec![0u8; 16 * 1024];
                 // Read until the head and the whole `Content-Length` body are in.
@@ -199,7 +199,7 @@ fn record(metrics: &McpMetrics, status: StatusCode, method: &str, name: Option<&
     metrics.start(Some(method), name).finish(status);
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn instruments_reach_the_collector_after_a_flush() {
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let addr = spawn_collector(Arc::clone(&received), 200).await;
@@ -231,7 +231,7 @@ async fn instruments_reach_the_collector_after_a_flush() {
     assert!(saw(&received, "rusty-mcp"), "the scope name is missing");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn a_request_is_recorded_with_its_tool_name() {
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let addr = spawn_collector(Arc::clone(&received), 200).await;
@@ -251,7 +251,7 @@ async fn a_request_is_recorded_with_its_tool_name() {
     assert!(saw(&received, "add"), "the tool name label is missing");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn an_unknown_tool_name_never_reaches_the_collector() {
     // The cardinality guarantee, proven on the wire rather than in a unit test.
     // Anyone who can reach the endpoint can call a tool that does not exist; if
@@ -289,7 +289,7 @@ async fn an_unknown_tool_name_never_reaches_the_collector() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn an_unknown_method_never_reaches_the_collector() {
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let addr = spawn_collector(Arc::clone(&received), 200).await;
@@ -317,7 +317,7 @@ async fn an_unknown_method_never_reaches_the_collector() {
     assert!(saw(&received, "other"), "it should be bucketed as `other`");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn a_rejected_request_is_still_counted() {
     // A caller records outside authorization precisely so this counts. A
     // flood of rejected tokens must not look like no traffic at all.
@@ -339,7 +339,7 @@ async fn a_rejected_request_is_still_counted() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn task_outcomes_are_counted() {
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let addr = spawn_collector(Arc::clone(&received), 200).await;
@@ -371,7 +371,7 @@ async fn task_outcomes_are_counted() {
     assert_eq!(abandoned.as_deref(), Some("3"));
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn metrics_can_be_turned_off() {
     let (guard, _layer) = rusty_mcp_middleware::otel::pipeline(
         OtelConfig::new("test-server")
@@ -387,7 +387,7 @@ async fn metrics_can_be_turned_off() {
     guard.shutdown();
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn values_are_cumulative_across_pushes() {
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let addr = spawn_collector(Arc::clone(&received), 200).await;
@@ -411,7 +411,7 @@ async fn values_are_cumulative_across_pushes() {
     guard.shutdown();
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn nothing_is_pushed_until_something_is_recorded() {
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let addr = spawn_collector(Arc::clone(&received), 200).await;
@@ -423,7 +423,7 @@ async fn nothing_is_pushed_until_something_is_recorded() {
     assert_eq!(pushes(&received), 0, "an empty registry should stay quiet");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn metrics_are_pushed_on_the_timer_without_a_flush() {
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let addr = spawn_collector(Arc::clone(&received), 200).await;
@@ -438,14 +438,14 @@ async fn metrics_are_pushed_on_the_timer_without_a_flush() {
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while pushes(&received) == 0 && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(pushes(&received) > 0, "the timer never pushed");
 
     guard.shutdown();
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn a_collector_that_rejects_the_push_does_not_break_anything() {
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let addr = spawn_collector(Arc::clone(&received), 500).await;
@@ -460,7 +460,7 @@ async fn a_collector_that_rejects_the_push_does_not_break_anything() {
     assert_eq!(pushes(&received), 2, "the flush and the final push");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn a_metrics_endpoint_that_is_not_http_is_refused_at_start() {
     let result = rusty_mcp_middleware::otel::pipeline(
         OtelConfig::new("test-server")
@@ -476,7 +476,7 @@ async fn a_metrics_endpoint_that_is_not_http_is_refused_at_start() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn an_unreachable_collector_does_not_break_request_handling() {
     // Telemetry is not load-bearing.
     let (guard, _layer) = rusty_mcp_middleware::otel::pipeline(

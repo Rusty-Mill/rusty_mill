@@ -24,12 +24,10 @@ unwrap_used = "warn"
 
 [dependencies]
 # The client is `rusty_mcp_client_native` (the HTTP transport is on `rusty_request`
-# and `rusty_tls`). `rusty_request` is also used here for the OAuth token fetch;
-# its `tokio` feature makes it run on the caller's tokio runtime. That stays until
-# the consumers (adk-mcp, rk-mcp, rp-mcp) leave tokio: `rusty_tokio`'s I/O needs
-# its own runtime (#906).
+# and `rusty_tls`). `rusty_request` is also used here for the OAuth token fetch,
+# on the caller's `rusty_tokio` runtime, or on tokio with the `tokio` feature.
 rusty_mcp_client_native = { workspace = true, features = ["http"] }
-rusty_request = { workspace = true, features = ["tokio"] }
+rusty_request = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"
 thiserror = "2"
@@ -40,5 +38,8 @@ toml = "1.1"
 rusty_mcp_server = { workspace = true, features = ["http"] }
 rusty_serve = { workspace = true }
 rusty_tokio = { workspace = true }
-# Only the OAuth token-fetch tests: that fetch runs on the caller's tokio runtime (#906).
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
+
+[features]
+# Lets a caller still on a tokio runtime fetch OAuth tokens: `rusty_tokio`'s I/O
+# panics inside one (#906). adk-mcp, rk-mcp and rp-mcp turn it on until they move.
+tokio = ["rusty_request/tokio"]

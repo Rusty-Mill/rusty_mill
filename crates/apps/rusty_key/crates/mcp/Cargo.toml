@@ -33,7 +33,7 @@ fake = []
 # The MCP transport adapter (ADR-0029), over `rusty-mcp-client` (first-party
 # native client). Off by default so the offline core builds without the SDK;
 # CI/release builds enable it. The feature keeps its `rmcp` name.
-rmcp = ["dep:rusty-mcp-client"]
+rmcp = ["dep:rusty-mcp-client", "rusty-mcp-client/tokio"]
 
 # De-inherited from rusty_key's own former `[workspace.lints]`: this
 # workspace root's `[workspace.lints]` is rustils' (`unsafe_code = "warn"`),

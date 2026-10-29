@@ -106,7 +106,7 @@ async fn validator_for(keys: &TestKeys) -> JwtValidator {
         .expect("build validator")
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn accepts_a_correctly_signed_token() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -134,7 +134,7 @@ async fn accepts_a_correctly_signed_token() {
     assert!(!verified.audience_verified);
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_an_expired_token() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -155,7 +155,7 @@ async fn rejects_an_expired_token() {
     ));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_a_token_from_the_wrong_issuer() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -176,7 +176,7 @@ async fn rejects_a_token_from_the_wrong_issuer() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_a_token_signed_by_an_unknown_key() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -200,7 +200,7 @@ async fn rejects_a_token_signed_by_an_unknown_key() {
     ));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_an_unsigned_token() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -224,7 +224,7 @@ async fn rejects_an_unsigned_token() {
     ));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_a_token_with_no_kid() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -245,7 +245,7 @@ async fn rejects_a_token_with_no_kid() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_unreachable_jwks_is_unavailable_not_invalid() {
     // A 503 keeps the client's good token from being blamed for a server-side
     // outage — the layer turns `Unavailable` into 503, not 401.
@@ -308,16 +308,16 @@ fn fetch_test_claims() -> Value {
 /// closed. Replies that advertise keep-alive let a client believe the
 /// connection can be reused after the server has already hung up.
 async fn serve_raw_replies(reply: String) -> String {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use rusty_tokio::io::AsyncWriteExt;
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = rusty_tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
+    rusty_tokio::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {
             let reply = reply.clone();
-            tokio::spawn(async move {
+            rusty_tokio::spawn(async move {
                 let mut request = [0u8; 4096];
                 let _ = socket.read(&mut request).await;
                 let _ = socket.write_all(reply.as_bytes()).await;
@@ -352,7 +352,7 @@ fn jwks_padded_to(keys: &TestKeys, target: usize) -> Value {
     json!({"keys": Value::Array(all)})
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_jwks_larger_than_rusty_requests_default_cap_is_still_read() {
     // Bot Framework's key set is about 910 KB today; this one is 1.5 MiB, over
     // the 1 MiB default, and the real key inside it must still be usable.
@@ -370,7 +370,7 @@ async fn a_jwks_larger_than_rusty_requests_default_cap_is_still_read() {
     assert_eq!(verified.subject.as_deref(), Some("user-1"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_jwks_over_the_validators_own_cap_is_unavailable() {
     // The cap is 4 MiB, so this is refused, not read without bound.
     let keys = keys();
@@ -382,7 +382,7 @@ async fn a_jwks_over_the_validators_own_cap_is_unavailable() {
     assert!(why.contains("maximum allowed size"), "{why}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_failing_jwks_endpoint_is_unavailable_and_says_why() {
     let uri = serve_raw(StatusCode::SERVICE_UNAVAILABLE, "down").await;
     let validator = JwtValidator::builder(ISSUER, uri).build().expect("build");
@@ -392,7 +392,7 @@ async fn a_failing_jwks_endpoint_is_unavailable_and_says_why() {
     assert!(why.contains("503"), "{why}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_jwks_server_that_closes_its_keepalive_connection_is_still_reachable() {
     // The server says keep-alive and then hangs up, as an idle timeout would.
     // Reusing that connection fails with no retry, and a failed fetch would
@@ -414,11 +414,11 @@ async fn a_jwks_server_that_closes_its_keepalive_connection_is_still_reachable()
         let outcome = validator.validate(&sign(&keys, fetch_test_claims())).await;
         assert!(outcome.is_ok(), "fetch {round} failed: {outcome:?}");
         // Give the server's close time to reach the client.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        rusty_tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_jwks_response_preceded_by_an_informational_one_is_read() {
     // `103 Early Hints` before the final response is legal HTTP/1.1; the final
     // `200` is the answer, and arriving in the same packet must not lose it.
@@ -437,7 +437,7 @@ async fn a_jwks_response_preceded_by_an_informational_one_is_read() {
     assert!(outcome.is_ok(), "{outcome:?}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_malformed_jwks_is_unavailable_not_invalid() {
     let uri = serve_raw(StatusCode::OK, "this is not json").await;
     let validator = JwtValidator::builder(ISSUER, uri).build().expect("build");
@@ -447,7 +447,7 @@ async fn a_malformed_jwks_is_unavailable_not_invalid() {
     assert!(why.contains("malformed JWKS"), "{why}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_malformed_jwks_uri_is_unavailable_not_a_panic() {
     let validator = JwtValidator::builder(ISSUER, "not a url")
         .build()
@@ -458,14 +458,14 @@ async fn a_malformed_jwks_uri_is_unavailable_not_a_panic() {
     assert!(why.contains("JWKS fetch failed"), "{why}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_jwks_server_that_never_answers_is_cut_off_by_the_request_timeout() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = rusty_tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let addr = listener.local_addr().expect("addr");
     // Accept connections and hold them open without ever replying.
-    tokio::spawn(async move {
+    rusty_tokio::spawn(async move {
         let mut held = Vec::new();
         while let Ok((socket, _)) = listener.accept().await {
             held.push(socket);
@@ -476,7 +476,7 @@ async fn a_jwks_server_that_never_answers_is_cut_off_by_the_request_timeout() {
         .build()
         .expect("build");
 
-    let outcome = tokio::time::timeout(
+    let outcome = rusty_tokio::time::timeout(
         Duration::from_secs(10),
         validator.validate(&token_needing_a_key()),
     )
@@ -513,7 +513,7 @@ fn hex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn accepts_an_es256_token() {
     // A fixed P-256 test key, used only here. `rusty_oauth` can sign ES256,
     // so this path needs no second JWT library.
@@ -536,7 +536,7 @@ async fn accepts_an_es256_token() {
     assert_eq!(verified.subject.as_deref(), Some("user-1"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_an_hs256_token_keyed_with_the_rsa_public_key() {
     // The classic algorithm-confusion forgery: an HMAC token "signed" with the
     // public key as the secret. The algorithm is refused before any key is read.
@@ -549,7 +549,7 @@ async fn rejects_an_hs256_token_keyed_with_the_rsa_public_key() {
     assert!(rejection(&validator, &token).await.contains("not accepted"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_an_algorithm_the_validator_was_not_given() {
     let keys = keys();
     let validator = JwtValidator::builder(ISSUER, serve_jwks(keys.jwks.clone()).await)
@@ -562,7 +562,7 @@ async fn rejects_an_algorithm_the_validator_was_not_given() {
     assert!(rejection(&validator, &token).await.contains("not accepted"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_an_rsa_key_presented_for_an_es256_token() {
     // A genuine RS256 signature under a header that now claims ES256: the RSA
     // key is never reinterpreted for the other algorithm.
@@ -580,7 +580,7 @@ async fn rejects_an_rsa_key_presented_for_an_es256_token() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_a_tampered_payload() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -599,7 +599,7 @@ async fn rejects_a_tampered_payload() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_a_garbled_or_truncated_signature() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -627,7 +627,7 @@ async fn rejects_a_garbled_or_truncated_signature() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_a_token_that_is_not_yet_valid() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -644,7 +644,7 @@ async fn rejects_a_token_that_is_not_yet_valid() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn accepts_a_token_that_expired_inside_the_leeway() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -653,7 +653,7 @@ async fn accepts_a_token_that_expired_inside_the_leeway() {
     assert!(validator.validate(&sign(&keys, claims)).await.is_ok());
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_a_token_with_no_expiry() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -666,7 +666,7 @@ async fn rejects_a_token_with_no_expiry() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_malformed_tokens_without_panicking() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -681,7 +681,7 @@ async fn rejects_malformed_tokens_without_panicking() {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_a_header_with_no_algorithm_or_no_kid() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -694,7 +694,7 @@ async fn rejects_a_header_with_no_algorithm_or_no_kid() {
     assert!(rejection(&validator, &token).await.contains("no `kid`"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rejects_deeply_nested_json_in_a_token() {
     // Header and payload are read before the caller is authenticated, so a
     // pathological nesting depth must be refused, not recursed into.
@@ -716,7 +716,7 @@ async fn rejects_deeply_nested_json_in_a_token() {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_duplicated_kid_in_the_jwks_matches_no_key() {
     // Two keys claiming one `kid` is ambiguous, and picking one would be the
     // wrong way to fail a security-relevant lookup.
@@ -736,7 +736,7 @@ async fn a_duplicated_kid_in_the_jwks_matches_no_key() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn refuses_rsa_keys_outside_the_size_bounds_without_using_them() {
     // 8192 bits would make every verification expensive; 1024 is too weak.
     for modulus_bytes in [1024, 128] {
@@ -756,7 +756,7 @@ async fn refuses_rsa_keys_outside_the_size_bounds_without_using_them() {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn reads_an_array_audience_and_array_scopes() {
     let keys = keys();
     let jwks_uri = serve_jwks(keys.jwks.clone()).await;
@@ -780,7 +780,7 @@ async fn reads_an_array_audience_and_array_scopes() {
     assert!(verified.scopes.contains("mcp:write"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn signed_numeric_dates_preserve_valid_forms_and_fail_closed() {
     let keys = keys();
     let validator = validator_for(&keys).await;
@@ -844,7 +844,7 @@ async fn signed_numeric_dates_preserve_valid_forms_and_fail_closed() {
     ));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn verifies_independent_openssl_es256_and_rejects_bad_scalars_and_keys() {
     // Uses the key from rusty_oauth::jwt::es256::tests, but a new signature
     // because MCP requires kid. Generated independently with OpenSSL:

@@ -61,17 +61,23 @@ fn server(observed: Observed) -> SocketAddr {
 }
 
 /// POST a stateless `tools/call` of `tool` with `body`.
-async fn post(addr: SocketAddr, tool: &str, body: String) -> reqwest::Response {
-    reqwest::Client::builder()
+async fn post(addr: SocketAddr, tool: &str, body: String) -> rusty_request::Response {
+    let headers = [
+        ("Content-Type", "application/json"),
+        ("Accept", "application/json, text/event-stream"),
+        ("MCP-Protocol-Version", "2026-07-28"),
+        ("Mcp-Method", "tools/call"),
+        ("Mcp-Name", tool),
+    ];
+    let mut request = rusty_request::Client::builder()
         .no_proxy()
         .build()
-        .unwrap()
-        .post(format!("http://{addr}{PATH}"))
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json, text/event-stream")
-        .header("MCP-Protocol-Version", "2026-07-28")
-        .header("Mcp-Method", "tools/call")
-        .header("Mcp-Name", tool)
+        .post(&format!("http://{addr}{PATH}"))
+        .unwrap();
+    for (name, value) in headers {
+        request = request.header(name, value).unwrap();
+    }
+    request
         .body(body)
         .send()
         .await
@@ -114,7 +120,7 @@ async fn round_trip(
     seen.expect("the tool should have run")
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_server_sees_the_clients_trace_context() {
     let seen = round_trip(Some(TRACEPARENT), Some(TRACESTATE), Some(BAGGAGE))
         .await
@@ -128,13 +134,13 @@ async fn the_server_sees_the_clients_trace_context() {
     assert_eq!(seen.baggage().get("tier"), Some("gold"));
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_request_without_trace_context_is_fine() {
     // Untraced clients must keep working; trace context is optional.
     assert!(round_trip(None, None, None).await.is_none());
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_malformed_traceparent_is_treated_as_absent() {
     // W3C says start a fresh trace rather than propagate something unparseable.
     // Critically, the call still succeeds — a broken upstream must not be able
@@ -146,7 +152,7 @@ async fn a_malformed_traceparent_is_treated_as_absent() {
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn tracestate_without_a_valid_traceparent_is_ignored() {
     // `tracestate` is only meaningful alongside a valid `traceparent`.
     assert!(

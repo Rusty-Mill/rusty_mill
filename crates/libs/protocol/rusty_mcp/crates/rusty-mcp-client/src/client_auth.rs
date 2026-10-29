@@ -3,8 +3,10 @@
 //! [`resolve`] converts [`McpAuth`] into authorization and custom headers.
 //! API keys and bearer tokens support inline values or environment indirection.
 //! OAuth client credentials fetch a token with `rusty_request` under
-//! [`DEFAULT_OAUTH_TIMEOUT`]. The resolver does not manage refresh tokens,
-//! interactive authorization, or application credential storage.
+//! [`DEFAULT_OAUTH_TIMEOUT`], on the caller's `rusty_tokio` runtime; a caller
+//! on a tokio runtime turns on this crate's `tokio` feature. The resolver does
+//! not manage refresh tokens, interactive authorization, or application
+//! credential storage.
 //!
 //! Host applications may deserialize these declarations into their own
 //! configuration format; this module does not load configuration files.

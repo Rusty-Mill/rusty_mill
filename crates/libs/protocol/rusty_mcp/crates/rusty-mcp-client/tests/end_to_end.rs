@@ -130,14 +130,11 @@ async fn calls_from_many_tasks_share_one_client() {
     stop.shutdown();
 }
 
-/// The OAuth client-credentials fetch runs on the caller's tokio runtime
-/// (via `rusty_request`'s `tokio` feature) against a raw token endpoint, so
-/// these tests stay on tokio while the rest of the file runs on `rusty_tokio`.
+/// The OAuth client-credentials fetch against a raw token endpoint.
 mod oauth {
     use rusty_mcp_client::client_auth::{AuthError, McpAuth, McpAuthSecret, resolve};
     use rusty_mcp_client::client_auth::{ClientIdSecret, ClientSecretSecret};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use rusty_tokio::net::TcpListener;
 
     fn declaration(url: String) -> McpAuth {
         McpAuth::OauthClientCredentials {
@@ -152,16 +149,40 @@ mod oauth {
         }
     }
 
+    /// Whether `raw` holds the whole head and its `Content-Length` body.
+    fn is_complete(raw: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(raw);
+        let Some((head, body)) = text.split_once("\r\n\r\n") else {
+            return false;
+        };
+        let length = head
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        body.len() >= length
+    }
+
     /// Serve one canned response and report the request.
-    async fn token_endpoint(status: &str, body: &str) -> (String, tokio::task::JoinHandle<String>) {
+    async fn token_endpoint(
+        status: &str,
+        body: &str,
+    ) -> (String, rusty_tokio::task::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/token", listener.local_addr().unwrap());
         let (status, body) = (status.to_owned(), body.to_owned());
-        let seen = tokio::spawn(async move {
-            let (mut s, _) = listener.accept().await.unwrap();
+        let seen = rusty_tokio::spawn(async move {
+            let (s, _) = listener.accept().await.unwrap();
+            // The head and the form body may arrive in separate reads.
+            let mut raw = Vec::new();
             let mut buf = vec![0u8; 8192];
-            let n = s.read(&mut buf).await.unwrap();
-            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+            while !is_complete(&raw) {
+                let n = s.read(&mut buf).await.unwrap();
+                assert!(n > 0, "the client hung up mid-request");
+                raw.extend_from_slice(&buf[..n]);
+            }
+            let request = String::from_utf8_lossy(&raw).into_owned();
             let reply = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -172,7 +193,7 @@ mod oauth {
         (url, seen)
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_token_is_fetched_with_basic_auth_and_a_form_body() {
         let (url, seen) =
             token_endpoint("200 OK", r#"{"access_token":"tok","token_type":"Bearer"}"#).await;
@@ -195,7 +216,7 @@ mod oauth {
         );
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn a_refused_or_malformed_token_is_an_auth_error() {
         let (url, _) = token_endpoint("401 Unauthorized", r#"{"error":"invalid_client"}"#).await;
         let err = resolve(&declaration(url)).await.unwrap_err();
@@ -215,7 +236,7 @@ mod oauth {
         ));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn inline_secrets_still_resolve_without_io() {
         let auth = McpAuth::Bearer {
             token: McpAuthSecret::Inline {

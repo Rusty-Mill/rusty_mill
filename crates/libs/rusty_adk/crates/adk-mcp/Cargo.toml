@@ -17,7 +17,7 @@ stdio = ["tokio/io-std", "tokio/io-util", "tokio/sync"]
 # Serve tools over streamable HTTP.
 http = ["dep:rusty_axum", "dep:rusty_tokio", "rusty_mcp_server/rusty-axum", "tokio/sync"]
 # Consume tools from an external MCP server launched as a subprocess.
-client = ["dep:rusty-mcp-client", "tokio/sync"]
+client = ["dep:rusty-mcp-client", "rusty-mcp-client/tokio", "tokio/sync"]
 
 [dependencies]
 adk-core.workspace = true
