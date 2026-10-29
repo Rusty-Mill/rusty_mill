@@ -17,10 +17,11 @@
 # data in the scratch home), sampled once settled, then killed.
 #
 # Not measured: Tauri desktop apps (inventory-tauri, sessionmgr-desktop,
-# the nexus and rusty_key shells: they need system WebKit); mill-term and
-# nexus-tui (need a real tty); rusty_voice (needs a display); rusty-keys
-# and rp-server (need a model or config file to start); dev and test
-# helpers (xtask, harnesses, examples); rusty-remind-me, which moved to
+# the rusty_key shell: they need system WebKit); mill-term (needs a real
+# tty); rusty_voice (needs a display); rusty-keys and rp-server (need a
+# model or config file to start); dev and test helpers (xtask, harnesses,
+# examples); the frozen Nexus apps, outside the workspace
+# (crates/apps/nexus/FROZEN.md); rusty-remind-me, which moved to
 # Rusty-Mill/rusty-remind-me. A unit test resolves every row against
 # `cargo metadata`.
 
@@ -33,7 +34,6 @@ skillopt-cli          skillopt             exit  --help
 rusty-croc            rusty-croc           exit  --help
 rp-cli                rp-cli               exit  --help
 sessionmgr-daemon     sessionmgr           exit  --help
-nexus-cli             nexus                exit  --help
 rusty-meshed-cli      meshed               exit  --help
 rusty_homelab_mcp     rusty_homelab_mcp    exit  --help
 rusty_fedora_agent    rusty_fedora_agent   exit  @platform=linux  --help
@@ -46,6 +46,5 @@ ts-daemon             ts-daemon            exit  @unsupported=windows @expect-ex
 
 # Servers and daemons
 rusty_tick                     rusty_tick           idle  RUSTY_TICK_TOKEN=baseline-dummy-token
-nexus-memory-hub               nexus-memory-hub     idle  --secret baseline-dummy
 rusty-meshed-registry          meshed_registry      idle
 rusty_multimodal_db:server     memory_server        idle  127.0.0.1:0
