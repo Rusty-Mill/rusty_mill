@@ -9,7 +9,7 @@
 //! duplicating two dozen fields here.
 //!
 //! The server's handlers are blocking, so each one runs the router's async
-//! call on the tokio runtime it was registered with ([`register`]); call
+//! call on the rusty_tokio runtime it was registered with ([`register`]); call
 //! them from a thread that is not itself a runtime worker (the HTTP and
 //! stdio transports use threads of their own).
 
@@ -21,8 +21,8 @@ use rusty_mcp_server::proto::{
     CallToolParams, CallToolResult, ContentBlock, ErrorCode, ErrorData, Tool,
 };
 use rusty_mcp_server::ServerBuilder;
+use rusty_tokio::runtime::Handle;
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Handle;
 
 /// One chat message, the minimal shape a tool caller needs to supply --
 /// converted into a full `rp_core::ChatMessage` via JSON deserialization.

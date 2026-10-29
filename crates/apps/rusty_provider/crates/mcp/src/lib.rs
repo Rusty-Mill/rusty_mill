@@ -25,15 +25,21 @@ pub use gateway::{GatewayError, GatewaySource, McpGateway};
 /// A connection that later drops is reconnected with backoff in the
 /// background -- see `gateway`'s module doc.
 ///
-/// Must run inside a tokio runtime: the server's blocking handlers drive the
-/// router and the upstream clients on it, so serve the result from threads
-/// that are not that runtime's workers (`spawn_blocking`, or the transports'
-/// own threads).
+/// The server's blocking handlers drive the router and the upstream clients
+/// on the calling task's rusty_tokio runtime, or, called from another
+/// executor (rp-server's tokio `main`), on rusty_tokio's fallback runtime,
+/// which this starts if the host has not. Serve the result from threads that
+/// are not that runtime's workers (`spawn_blocking`, or the transports' own
+/// threads).
 ///
 /// # Errors
-/// If the server description is invalid (a bug: the built-in tools are fixed).
+/// If the fallback runtime cannot start, or the server description is
+/// invalid (a bug: the built-in tools are fixed).
 pub async fn build(config: &McpConfig, router: Arc<Router>) -> anyhow::Result<Arc<Server>> {
-    let rt = tokio::runtime::Handle::current();
+    let rt = match rusty_tokio::runtime::Handle::try_current() {
+        Some(rt) => rt,
+        None => rusty_tokio::runtime::install_fallback()?,
+    };
     let gateway = Arc::new(McpGateway::connect(&config.upstreams, config).await);
     let builder = Server::builder(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
         .instructions(

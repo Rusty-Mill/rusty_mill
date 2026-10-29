@@ -26,6 +26,11 @@ rusty_sqlite.workspace = true
 rusty_retry.workspace = true
 # ANSI stripping (the RTK pipeline's first stage): CSI, OSC and two-byte escapes.
 rusty_ansi.workspace = true
+# Timers, spawns and spawn_blocking; callers on tokio install its fallback
+# runtime (rp-server does).
+rusty_tokio.workspace = true
+# Only for the tokio-postgres connection task, spawned on the caller's tokio
+# runtime when Postgres persistence connects.
 tokio.workspace = true
 tokio-postgres.workspace = true
 tokio-postgres-rustls.workspace = true
@@ -36,7 +41,6 @@ regex.workspace = true
 ring.workspace = true
 
 [dev-dependencies]
-rusty_tokio.workspace = true
 async-trait.workspace = true
 wiremock.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
