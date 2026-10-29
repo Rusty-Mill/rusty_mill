@@ -15,9 +15,11 @@ changelog: platform-windows can serve the Windows console driver directly (`cond
   process-wide Ctrl+C policy. Isolated helper tests cover successful and
   failed spawns from a Ctrl+C-ignoring parent, while retaining delivery
   coverage from an enabled parent. A failure after process creation
-  terminates the child and returns once it has exited; if that can't be
-  confirmed within 5 s, the cleanup error is returned and the child's
-  handles stay open on a background thread until it exits.
+  terminates the child and returns once it has exited. Each spawn first
+  reserves one of 8 cleanup slots, and fails with `WouldBlock`, creating
+  nothing, when none is free. If the exit can't be confirmed within 5 s,
+  the cleanup error is returned and the slot keeps the child's handles
+  until its exit is confirmed.
 - **Admissions:** windows-sys `Win32_System_LibraryLoader` in
   platform-windows' own feature list; `LoadLibraryExW`, `GetProcAddress`,
   events, overlapped results and `CancelIoEx` in `win32_surface`; a second

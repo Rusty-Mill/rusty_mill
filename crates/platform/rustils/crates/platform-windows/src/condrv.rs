@@ -27,6 +27,8 @@ use crate::process::WindowsChild;
 use crate::sys::condrv as sys;
 use crate::sys::handle::{self, OwnedWinHandle};
 
+mod cleanup;
+
 /// `CTRL_C_EVENT`, `CTRL_BREAK_EVENT`, `CTRL_CLOSE_EVENT` (wincon.h).
 const CTRL_C_EVENT: u32 = 0;
 const CTRL_BREAK_EVENT: u32 = 1;
@@ -145,12 +147,17 @@ fn unsupported(what: &'static str) -> PlatformError {
 /// the child's CONNECT is the first packet [`ConsoleServer::wait`]
 /// reports. `GroupSpec::JoinGroup` gives `InvalidInput`.
 ///
-/// On a failure before the child is created, every handle is closed. On
-/// one after, the child is terminated and the error returned once it has
-/// exited, every handle closed. If its exit can't be confirmed within 5 s,
-/// or `TerminateProcess` fails while it runs, that cleanup error is
-/// returned instead (`TimedOut`, or the OS error), and the child's process
-/// handle and console stay open on a background thread until it exits.
+/// Before `CreateProcessW`, a slot is reserved in a process-wide pool
+/// of 8 for a child whose rollback can't be confirmed. With every slot
+/// held, this fails with `WouldBlock` and creates nothing; a failure
+/// before the child exists closes every handle.
+///
+/// On a failure after, the child is terminated and the error returned once
+/// it has exited, every handle closed. If its exit can't be confirmed
+/// within 5 s, or `TerminateProcess` fails while it runs, that cleanup
+/// error is returned instead (`TimedOut`, or the OS error), and the
+/// reserved slot keeps the child's process handle and console open until
+/// it has exited. Nothing here waits longer than that.
 pub fn spawn_attached(cmd: &Command) -> Result<Attached> {
     if matches!(cmd.group, GroupSpec::JoinGroup(_)) {
         return Err(PlatformError::new(
@@ -166,34 +173,37 @@ pub fn spawn_attached(cmd: &Command) -> Result<Attached> {
     let _serial = crate::pty::SPAWN
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let server = sys::Server::create()?;
-    let (process, pid) = sys::spawn(&server, &line, &cmd.cwd, &cmd.env)?;
-    finish_spawn(
-        server,
-        process,
-        pid,
+    attach(
+        &cleanup::global()?,
+        || {
+            let server = sys::Server::create()?;
+            let (process, pid) = sys::spawn(&server, &line, &cmd.cwd, &cmd.env)?;
+            Ok((server, process, pid))
+        },
         |p| handle::duplicate(p, false),
         |p| terminate_and_reap(p, crate::sys::proc::terminate_process, REAP_GRACE),
     )
 }
 
-/// The child is running: finish the remaining fallible setup, or roll the
-/// child back. When `rollback` confirms the child has exited, setup's
-/// error is returned and every handle is closed here. When it can't, its
-/// own error is returned instead, and the child's process handle and
-/// console are kept open until the child exits.
-fn finish_spawn(
-    server: sys::Server,
-    process: OwnedWinHandle,
-    pid: u32,
+/// Reserve a cleanup slot, `create` the child, then finish the remaining
+/// fallible setup or roll the child back. Without a slot nothing is
+/// created. When `rollback` confirms the child has exited, setup's error
+/// is returned and every handle is closed here. When it can't, its own
+/// error is returned instead, and the slot takes the child's process
+/// handle and console until the child exits.
+fn attach(
+    pool: &cleanup::Pool,
+    create: impl FnOnce() -> Result<(sys::Server, OwnedWinHandle, u32)>,
     duplicate: impl FnOnce(&OwnedWinHandle) -> Result<OwnedWinHandle>,
     rollback: impl FnOnce(&OwnedWinHandle) -> Result<()>,
 ) -> Result<Attached> {
+    let slot = pool.reserve()?;
+    let (server, process, pid) = create()?;
     let wait = match duplicate(&process) {
         Ok(wait) => wait,
         Err(setup) => {
             if let Err(cleanup) = rollback(&process) {
-                keep_until_exit(process, server);
+                slot.hand_off(process, server);
                 return Err(cleanup);
             }
             return Err(setup);
@@ -230,20 +240,6 @@ fn terminate_and_reap(
             "condrv::spawn_attached: the rolled-back child had not exited",
         )),
     }
-}
-
-/// Hold a child's process handle and console on a thread of their own
-/// until the child exits, so nothing it may still use is closed under
-/// it. Should the thread fail to start, they are closed now.
-fn keep_until_exit(process: OwnedWinHandle, server: sys::Server) {
-    let _ = std::thread::Builder::new()
-        .name("condrv-rollback".into())
-        .spawn(move || {
-            // An infinite wait on a handle we own fails only if the handle
-            // is invalid, and then there is nothing left to wait for.
-            let _ = crate::sys::proc::wait(&process);
-            drop(server);
-        });
 }
 
 /// Ask Windows to deliver `event` to `pid` through
@@ -408,19 +404,96 @@ mod tests {
         terminate_and_reap(p, proc::terminate_process, REAP_GRACE)
     }
 
+    /// A pool with a real worker thread, which ends with the pool.
+    fn pool(capacity: usize) -> cleanup::Pool {
+        cleanup::Pool::start(
+            capacity,
+            Box::new(|w| std::thread::Builder::new().spawn(w).map(drop)),
+        )
+        .expect("cleanup pool")
+    }
+
+    type Child = Result<(sys::Server, OwnedWinHandle, u32)>;
+
+    /// A `create` that records whether it ran, and must not.
+    fn must_not_create(ran: &std::cell::Cell<bool>) -> impl FnOnce() -> Child + '_ {
+        move || {
+            ran.set(true);
+            Err(injected(ErrorKind::Other, "created"))
+        }
+    }
+
+    fn setup_fails(_: &OwnedWinHandle) -> Result<OwnedWinHandle> {
+        Err(injected(ErrorKind::Other, "setup"))
+    }
+
+    fn unconfirmed(_: &OwnedWinHandle) -> Result<()> {
+        Err(injected(ErrorKind::TimedOut, "cleanup"))
+    }
+
+    fn end(probe: &OwnedWinHandle) {
+        proc::terminate_process(probe).expect("terminate");
+        proc::wait(probe).expect("wait");
+    }
+
+    /// Without a slot, from a full pool or a stopped worker, nothing is
+    /// created.
+    #[test]
+    fn no_slot_means_no_child() {
+        let full = pool(1);
+        let _taken = full.reserve().expect("the only slot");
+        let ran = std::cell::Cell::new(false);
+        let e = attach(&full, must_not_create(&ran), setup_fails, unconfirmed)
+            .err()
+            .expect("an attach without a slot");
+        assert_eq!(e.kind, ErrorKind::WouldBlock);
+        assert!(!ran.get(), "a child was created without a slot");
+
+        let stopped = cleanup::Pool::start(
+            1,
+            Box::new(|w| {
+                drop(w);
+                Ok(())
+            }),
+        )
+        .expect("pool");
+        let e = attach(&stopped, must_not_create(&ran), setup_fails, unconfirmed)
+            .err()
+            .expect("an attach with a stopped worker");
+        assert_eq!(e.kind, ErrorKind::Other);
+        assert!(!ran.get(), "a child was created with a stopped worker");
+    }
+
+    /// A successful spawn gives its slot back.
+    #[test]
+    fn a_successful_attach_releases_its_slot() {
+        let slots = pool(1);
+        let (server, process, pid, probe) = running_child();
+        let attached = attach(
+            &slots,
+            move || Ok((server, process, pid)),
+            |p| handle::duplicate(p, false),
+            |_| panic!("rolled back a successful spawn"),
+        );
+        assert!(attached.is_ok(), "attach failed");
+        assert_eq!(slots.reserved(), 0);
+        end(&probe);
+    }
+
     /// Failure injected at the one fallible step after `CreateProcessW`:
-    /// the child is terminated and reaped, and setup's error kept.
+    /// the child is terminated and reaped, setup's error kept, and the
+    /// slot given back.
     #[test]
     fn a_setup_failure_after_create_terminates_the_child() {
+        let slots = pool(1);
         let (server, process, pid, probe) = running_child();
-        let Err(e) = finish_spawn(
-            server,
-            process,
-            pid,
-            |_| Err(injected(ErrorKind::Other, "setup")),
+        let Err(e) = attach(
+            &slots,
+            move || Ok((server, process, pid)),
+            setup_fails,
             production_rollback,
         ) else {
-            panic!("finish_spawn succeeded despite the injected failure");
+            panic!("attach succeeded despite the injected failure");
         };
         assert_eq!((e.kind, e.op), (ErrorKind::Other, "setup"));
         // Already reaped: no wait is needed to see the exit.
@@ -429,27 +502,76 @@ mod tests {
             Some(ExitStatus::Code(1)),
             "the child outlived the failed spawn"
         );
+        assert_eq!(slots.reserved(), 0);
     }
 
-    /// A rollback that can't confirm the exit reports its own error, not
-    /// setup's, and the child is left to the keeper thread, not released.
+    /// A rollback that can't confirm the exit reports its own error, and
+    /// the child goes to its reserved slot, which stays taken until the
+    /// child exits. A stuck child per slot stops further spawns before
+    /// they create anything.
     #[test]
-    fn an_unconfirmed_rollback_reports_the_cleanup_error() {
+    fn an_unconfirmed_rollback_hands_the_child_to_its_slot() {
+        let slots = pool(1);
         let (server, process, pid, probe) = running_child();
-        let Err(e) = finish_spawn(
-            server,
-            process,
-            pid,
-            |_| Err(injected(ErrorKind::Other, "setup")),
-            |_| Err(injected(ErrorKind::TimedOut, "cleanup")),
+        let Err(e) = attach(
+            &slots,
+            move || Ok((server, process, pid)),
+            setup_fails,
+            unconfirmed,
         ) else {
-            panic!("finish_spawn succeeded despite the injected failure");
+            panic!("attach succeeded despite the injected failure");
         };
         assert_eq!((e.kind, e.op), (ErrorKind::TimedOut, "cleanup"));
+        assert_eq!((slots.held(), slots.reserved()), (1, 1));
         assert_eq!(proc::try_wait(&probe).expect("try_wait"), None);
-        // The keeper thread holds the child until it exits; end it here.
-        proc::terminate_process(&probe).expect("terminate");
-        proc::wait(&probe).expect("wait");
+
+        let ran = std::cell::Cell::new(false);
+        for _ in 0..3 {
+            let e = attach(&slots, must_not_create(&ran), setup_fails, unconfirmed)
+                .err()
+                .expect("an attach past capacity");
+            assert_eq!(e.kind, ErrorKind::WouldBlock);
+        }
+        assert!(!ran.get(), "a child was created past capacity");
+
+        end(&probe);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while slots.reserved() != 0 {
+            assert!(Instant::now() < deadline, "the exited child kept its slot");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(slots.held(), 0);
+        slots.reserve().expect("the freed slot");
+    }
+
+    /// A worker that stops after a hand-off keeps the child's handles:
+    /// nothing is released while the child still runs.
+    #[test]
+    fn a_stopped_worker_keeps_a_handed_off_child() {
+        let worker = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let park = std::sync::Arc::clone(&worker);
+        let slots = cleanup::Pool::start(
+            1,
+            Box::new(move |w| {
+                *park.lock().expect("park") = Some(w);
+                Ok(())
+            }),
+        )
+        .expect("pool");
+        let (server, process, pid, probe) = running_child();
+        let e = attach(
+            &slots,
+            move || Ok((server, process, pid)),
+            setup_fails,
+            unconfirmed,
+        )
+        .err()
+        .expect("an unconfirmed rollback");
+        assert_eq!(e.kind, ErrorKind::TimedOut);
+        drop(worker.lock().expect("park").take());
+        assert_eq!((slots.held(), slots.reserved()), (1, 1));
+        assert_eq!(proc::try_wait(&probe).expect("try_wait"), None);
+        end(&probe);
     }
 
     /// `terminate_and_reap`'s outcomes, each forced deterministically.
