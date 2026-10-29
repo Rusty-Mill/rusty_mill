@@ -181,6 +181,7 @@ pub(crate) enum Diag {
     UnknownApi { pid: u32, number: u32 },
     UnknownFunction(u32),
     InputDropped,
+    PendingDropped,
     TooManyClients,
     Suppressed,
 }
@@ -200,6 +201,11 @@ impl fmt::Display for Diag {
                 f,
                 "the input queue holds {} records: the oldest are dropped",
                 input::MAX_RECORDS
+            ),
+            Diag::PendingDropped => write!(
+                f,
+                "handles keep {} units of read lines: a line's rest was dropped",
+                read::MAX_PENDING_UNITS
             ),
             Diag::TooManyClients => write!(f, "a client was refused: {MAX_CLIENTS} are connected"),
             Diag::Suppressed => write!(f, "{MAX_LOGGED} diagnostics logged; the rest are dropped"),

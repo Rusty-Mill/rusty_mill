@@ -474,6 +474,8 @@ This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd,
 | V4 | Startup code page | OEM (e.g. 437) | 65001 | consumers are UTF-8 |
 | V5 | GetConsoleWindow | a hidden pseudo-window | NULL | add a message-only window if a program in the census needs it |
 | V6 | Multiple screen buffers (CREATE_OBJECT type 3, SetConsoleActiveScreenBuffer) | supported | STATUS_NOT_IMPLEMENTED | no target program uses them (edit.exe uses `?1049h`); build when the unknown-API log shows a real caller |
+| V7 | GenerateConsoleCtrlEvent for a group no client is in | falls back to the caller's parent process | `E_INVALIDARG`, nothing sent | the fallback serves console-less callers; our clients always carry their group |
+| V8 | Synthesized key records (plain VT input, not win32-input-mode) | scan codes from the layout; mouse reports become mouse records | scan code 0; mouse reports reach VT-input clients only | no target program reads scan codes or mouse records from a VT terminal; win32-input-mode carries both exactly |
 
 The parity suite (§8) treats each of these as an expected difference.
 
@@ -606,13 +608,17 @@ Effects are applied after each `handle` call, in the order the core returned the
 | Input lane (terminal input) | 64 KiB of pending bytes | `PtyMaster::write` blocks until the engine drains it, as a pty write blocks when the child stops reading |
 | Control lane | fixed size: four flags and one `WinSize` | never full: setting a flag that is already set is a no-op |
 | Input records | 4,096 | oldest dropped, logged once (unchanged) |
+| Unfinished input escape sequence | 4,096 bytes | given up as an unknown sequence and dropped |
+| Cooked line | 8,192 UTF-16 units, or the read's initial data if longer. **Reserved** in the parked payload when the read starts waiting, so it is within the 64 KiB per call | further typing is ignored |
+| Rest of finished lines kept per handle for the next read | 512 Ki units (1 MiB) across all handles | the rest of the line that would pass it is dropped, logged once |
+| ANSI read caches (a split UTF-8 character, records expanded past the count) | one character: 3 bytes, 2 records | never full: each read empties them before refilling |
 | Waiting calls (reads and parked writes together) | 64 | READ_IO is submitted only while fewer than 64 calls wait, so further calls wait in the kernel and cost the host nothing |
 | Payload retained by parked calls | 1 MiB in total, **reserved before a packet is accepted** | READ_IO is submitted only while `parked + 64 KiB ≤ 1 MiB`, 64 KiB being the most variable input one packet can bring. A packet that then arrives always fits, so the cap is never overshot |
 | Variable input read per packet | 64 KiB | `STATUS_INVALID_PARAMETER` |
 | Read reply | the read's declared capacity, up to 1 MiB | a waiting read holds only its descriptor. Its reply is built when it completes, one at a time, and freed once written |
 | Ctrl queue | 256 entries | coalescing: an entry equal to one already queued is dropped, and a queued `Close` for a pid drops later `C` or `Break` for it. Past 256 the new entry is dropped and logged once. Pushing never blocks the engine. Teardown doesn't depend on queued entries, because the engine closes the server at the deadline (§7.3) |
 
-The output queue therefore never exceeds 64 + 16 + 64 = 144 KiB. The named buffers above total at most 2,400 KiB, about 2.3 MiB, per console: 144 KiB of output, 64 KiB of input lane, 80 KiB of input records (4,096 × 20 B), 1 MiB of parked payload, one 64 KiB packet read and one 1 MiB read reply; the Ctrl queue adds about 2 KiB. That figure covers only these buffers. The stores in the next table have their own limits and aren't in it.
+The output queue therefore never exceeds 64 + 16 + 64 = 144 KiB. The named buffers above total at most 2,400 KiB, about 2.3 MiB, per console: 144 KiB of output, 64 KiB of input lane, 80 KiB of input records (4,096 × 20 B), 1 MiB of parked payload, one 64 KiB packet read and one 1 MiB read reply; the Ctrl queue adds about 2 KiB, and kept line rests at most 1 MiB more, 3.3 MiB in all. That figure covers only these buffers. The stores in the next table have their own limits and aren't in it.
 
 **Other client-controlled stores and their limits:**
 
@@ -714,12 +720,12 @@ Each PR includes one change fragment and is reviewed by Dottius. Line counts inc
 |---|---|---|---|
 | 1 | `condrv`. Covers: rootless Server open (the admitted `NtCreateFile`, its admission comment extended), relative opens through `sys::nt::open_relative`, the 5 IOCTLs through the admitted `DeviceIoControl`, `spawn_attached`, `send_ctrl` via `GetProcAddress`, `probe()`. Integration tests: open the server, spawn the probe, CONNECT/DISCONNECT round trip, Ctrl+C observed by the probe's exit code, `Unsupported` path. Acceptance: Windows run log | 450 | 2–3 |
 | 2 | `rusty_conhost` core plus runtime, output only. Covers: `msg`, `console`, output APIs and stubs (Appendix A), the engine loop with `sched`'s fairness tests (§7.2), the two lanes and the §7.4 caps with their stalled-reader and backpressure tests, panic path, `OwnPty`/`OwnPtyMaster`, the rusty_term key parsed but undocumented, the probe example, `cmd /c` fixtures. Interim: input is discarded with one log line, resize only updates the size, Drop closes the server and kills the child after 2 s | 1,150 | 6–8 |
-| 3 | Input. Covers: VT/win32-input-mode parser, raw passthrough, reply filter, waiting reads, input event, cooked ReadConsole, Ctrl+C/Break, process groups, GenerateConsoleCtrlEvent, 65001-only code pages. Interactive cmd works | 700 | 3–4 |
+| 3 | Input. Covers: VT/win32-input-mode parser, raw passthrough, reply filter, waiting reads, input event, cooked ReadConsole, Ctrl+C/Break, process groups, GenerateConsoleCtrlEvent, 65001-only code pages. Interactive cmd works. As built: the ctrl worker and its queue land here, since Ctrl+C needs them; cooked editing is typing, Backspace, Escape and Enter, with the cursor keys, history and popups later | 700 | 3–4 |
 | 4 | Screen over Grid. Covers: rusty_term_core additions (§4.3, flagged), cursor/attribute/cursor-info APIs, SBI from the Grid, output-mode table, query routing (§5.6), resize (§5.7) with the V3 regression tests. pwsh/PSReadLine and edit.exe start work | 700 | 3–4 |
 | 5 | rusty_term `OwnBackend` (§4.5), key documented. **Milestone** | 300 | 1–2 |
 | 6 | FillConsoleOutput, ScrollConsoleScreenBuffer. Clear-Host works | 450 | 2 |
 | 7 | Read/WriteConsoleOutput family, SBIEx, window/buffer size calls | 550 | 2–3 |
-| 8 | Lifetime: CTRL_CLOSE, ctrl worker and its bounded, coalescing queue, absolute grace deadline, `hang_up`, the §7.3 tests (§5.8). Needs S1 | 350 | 1–2 |
+| 8 | Lifetime: CTRL_CLOSE (the ctrl worker and its queue are in PR 3), absolute grace deadline, `hang_up`, the §7.3 tests (§5.8). Needs S1 | 350 | 1–2 |
 | 9 | Code pages via `codec` (§5.9) | 250 | 1–2 |
 | 10 | (reserved for issues found at the milestone) | — | 2 |
 | 11 | rusty_mux server: local host choice, `RUSTY_CONSOLE_HOST`, Config field and sites | 250 | 1–2 |

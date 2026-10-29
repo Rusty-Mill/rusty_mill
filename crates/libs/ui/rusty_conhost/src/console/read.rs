@@ -30,6 +30,9 @@ const READ_NOWAIT: u16 = 0x2;
 const READ_CONSOLE_LEN: usize = 20;
 const CONTROL_KEY_STATE_AT: usize = 12;
 const NUM_BYTES_AT: usize = 16;
+/// UTF-16 units of finished lines that all handles together keep for
+/// their next read (§7.4); a line's rest past it is dropped.
+pub(super) const MAX_PENDING_UNITS: usize = 512 * 1024;
 /// Ctrl+Z, which ends a RAW_READ's data under PROCESSED_INPUT.
 const CTRL_Z: u8 = 0x1a;
 
@@ -386,7 +389,7 @@ impl Console {
             fx.push(reply(msg::STATUS_BUFFER_TOO_SMALL));
             return;
         }
-        match self.attempt(read, out) {
+        match self.attempt(read, out, fx) {
             Attempt::Done(reply) => fx.push(Effect::Reply(reply)),
             Attempt::Wait(read) => self.wait(read),
         }
@@ -407,7 +410,7 @@ impl Console {
         let mut kept = std::collections::VecDeque::new();
         for r in std::mem::take(&mut self.reads) {
             let retained = r.retained;
-            match self.attempt(r, out) {
+            match self.attempt(r, out, fx) {
                 Attempt::Done(reply) => {
                     self.parked -= retained;
                     fx.push(Effect::Complete(reply));
@@ -420,7 +423,7 @@ impl Console {
 
     /// Read what is there: the reply when the read is done, the read back
     /// when it must wait.
-    fn attempt(&mut self, mut r: Read, out: &mut OutputQueue) -> Attempt {
+    fn attempt(&mut self, mut r: Read, out: &mut OutputQueue, fx: &mut Vec<Effect>) -> Attempt {
         match &mut r.kind {
             ReadKind::Records { count, unicode } => {
                 let records = self.read_records(*count, *unicode, false);
@@ -466,7 +469,7 @@ impl Console {
                 let ReadKind::Line { line, .. } = kind else {
                     return Attempt::Wait(r);
                 };
-                Attempt::Done(self.finish_line(r, line, unicode, ctrl_z, out))
+                Attempt::Done(self.finish_line(r, line, unicode, ctrl_z, out, fx))
             }
         }
     }
@@ -480,6 +483,7 @@ impl Console {
         unicode: bool,
         ctrl_z: bool,
         out: &mut OutputQueue,
+        fx: &mut Vec<Effect>,
     ) -> Reply {
         let processed = self.input_mode & mode::PROCESSED_INPUT != 0;
         let wakeup = line.done() == Some(Done::Wakeup);
@@ -489,7 +493,13 @@ impl Console {
             out.push(&newline);
         }
         let data = self.consume(unicode, &text, r.capacity);
-        self.keep_pending(r.object, &text[data.units..]);
+        let rest = &text[data.units..];
+        let held: usize = self.objects.values().map(|o| o.pending.len()).sum();
+        if held + rest.len() > MAX_PENDING_UNITS {
+            self.log(Diag::PendingDropped, fx);
+        } else {
+            self.keep_pending(r.object, rest);
+        }
         chars_reply(r, data.bytes, keys, ctrl_z)
     }
 
@@ -874,6 +884,21 @@ mod tests {
         let done = completes(&fx);
         assert_eq!(wide(done[0]), "dir\r\n");
         assert_eq!(h.vt, b"dirx\x08 \x08\r\n");
+    }
+
+    #[test]
+    fn a_line_rest_past_the_pending_cap_is_dropped_and_logged() {
+        let mut h = Host::new();
+        let [_, input, output] = h.connect(1, "");
+        let other = h.c.objects.get_mut(&output).expect("output object");
+        other.pending = vec![u16::from(b'z'); MAX_PENDING_UNITS - 1];
+        let r = read_w(&mut h, input, 2);
+        let fx = h.ev(Event::Input(b"ab\r"));
+        assert_eq!(wide(completes(&fx)[0]), "a");
+        assert!(fx.contains(&Effect::Log(Diag::PendingDropped)));
+        assert!(held(&r));
+        let r = read_w(&mut h, input, 2);
+        assert!(held(&r), "nothing was kept for the next read");
     }
 
     #[test]
