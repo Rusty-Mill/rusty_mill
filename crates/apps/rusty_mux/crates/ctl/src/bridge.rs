@@ -19,7 +19,8 @@ const CHUNK: usize = 64 * 1024;
 pub(crate) fn run(socket: &Path) -> io::Result<()> {
     let stream = conn::connect(socket, &Stop::default())?;
     let writer = stream.try_clone()?;
-    // Stays blocked on stdin when the server ends first; exiting ends it.
+    // Stays blocked on stdin, holding its lock, when the server ends first;
+    // the process exiting ends it, which is why only the program bridges.
     std::thread::spawn(move || {
         let mut writer = writer;
         // A failed write means the server is gone, which the read below

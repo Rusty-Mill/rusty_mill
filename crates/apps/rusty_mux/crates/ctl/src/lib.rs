@@ -201,10 +201,39 @@ impl From<Miss> for Failure {
     }
 }
 
+/// Why [`run`] refuses `bridge`.
+const BRIDGE_ONLY: &str =
+    "bridge runs only as the rusty-mux-ctl program: it takes over the process's stdin and stdout";
+
 /// Runs a command line (without the program name) in `env`; output goes to
-/// `out`, diagnostics to `err`.
+/// `out`, diagnostics to `err`. `bridge` is refused: see [`run_process`].
 pub fn run(args: &[String], env: &Env, out: &mut dyn Write, err: &mut dyn Write) -> Exit {
     run_until(args, env, &Stop::default(), out, err)
+}
+
+/// [`run`] as the `rusty-mux-ctl` program, with this process's stdout and
+/// stderr; it alone runs `bridge`, which joins this process's stdin and
+/// stdout to the server's socket until the server closes it, and is
+/// bounded by nothing but that.
+pub fn run_process(args: &[String], env: &Env) -> Exit {
+    let mut err = io::stderr();
+    let bridged = match cli::parse(args, &env.here) {
+        Ok(invocation) if matches!(invocation.command, Command::Bridge) => invocation,
+        _ => return run(args, env, &mut io::stdout(), &mut err),
+    };
+    match socket(&bridged, env) {
+        Ok(socket) => finish(bridge(&socket), &socket, &mut err),
+        Err(reason) => report(&mut err, Exit::Usage, reason),
+    }
+}
+
+/// The socket `invocation` names, else `$RUSTY_MUX_SOCKET`.
+fn socket(invocation: &Invocation, env: &Env) -> Result<PathBuf, &'static str> {
+    invocation
+        .socket
+        .clone()
+        .or_else(|| env.socket.clone())
+        .ok_or("no socket: pass --socket or set RUSTY_MUX_SOCKET")
 }
 
 /// [`run`], giving up on the server once `stop` says so (past its deadline,
@@ -237,23 +266,19 @@ pub fn run_until(
             Ok(calls) => invocation.command = Command::Calls(calls),
             Err((exit, reason)) => return report(err, exit, &reason),
         },
+        // Unbounded, and on the process's own stdin and stdout, so never
+        // through `stop` and `out`.
+        Command::Bridge => return report(err, Exit::Usage, BRIDGE_ONLY),
         Command::Calls(_)
         | Command::Events { .. }
         | Command::Watch { .. }
         | Command::Wait(_)
-        | Command::Run(_)
-        | Command::Bridge => {}
+        | Command::Run(_) => {}
     }
-    let Some(socket) = invocation.socket.clone().or_else(|| env.socket.clone()) else {
-        return report(
-            err,
-            Exit::Usage,
-            "no socket: pass --socket or set RUSTY_MUX_SOCKET",
-        );
+    let socket = match socket(&invocation, env) {
+        Ok(socket) => socket,
+        Err(reason) => return report(err, Exit::Usage, reason),
     };
-    if let Command::Bridge = invocation.command {
-        return finish(bridge(&socket), &socket, err);
-    }
     if let Command::Watch { after } = invocation.command {
         return run_watch(after, &socket, env, invocation.json, stop, out, err);
     }
@@ -443,7 +468,8 @@ fn execute(
     }
 }
 
-/// `bridge`: until the server closes the connection.
+/// `bridge`, for [`run_process`] only: until the server closes the
+/// connection.
 #[cfg(any(unix, windows))]
 fn bridge(socket: &Path) -> Result<Exit, Failure> {
     bridge::run(socket)?;
@@ -801,6 +827,35 @@ mod tests {
             }) => calls.remove(0),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// `bridge` would ignore `stop` and `out` and take over the process's
+    /// stdin, so the library refuses it before connecting, even with a
+    /// stop already passed and a server that would never answer.
+    #[cfg(unix)]
+    #[test]
+    fn the_library_refuses_bridge_without_connecting() {
+        let socket =
+            std::env::temp_dir().join(format!("rusty-mux-ctl-silent-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let env = Env {
+            socket: Some(socket.clone()),
+            here: Defaults::default(),
+            config: None,
+            agent_dir: None,
+            ctl: None,
+        };
+        let stop = Stop::after(std::time::Duration::ZERO);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let exit = run_until(&["bridge".to_owned()], &env, &stop, &mut out, &mut err);
+        let connected = listener.accept().is_ok();
+        std::fs::remove_file(&socket).unwrap();
+        assert_eq!(exit, Exit::Usage);
+        assert!(out.is_empty(), "{out:?}");
+        assert!(String::from_utf8_lossy(&err).contains("only as the rusty-mux-ctl program"));
+        assert!(!connected, "the library connected for bridge");
     }
 
     #[test]
