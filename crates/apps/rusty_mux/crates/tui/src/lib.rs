@@ -257,6 +257,11 @@ impl<S: Read + Write> Conn<S> {
         }
     }
 
+    /// The stream, to set its options.
+    pub fn get_ref(&self) -> &S {
+        &self.stream
+    }
+
     pub fn send(&mut self, message: &Message) -> io::Result<()> {
         let frame = encode(message).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         self.stream.write_all(&frame)

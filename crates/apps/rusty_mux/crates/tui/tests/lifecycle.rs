@@ -241,8 +241,12 @@ impl Tui {
 
     /// Waits, bounded, for the client to exit on its own, and returns all
     /// it wrote.
-    fn exit(mut self) -> Vec<u8> {
-        let deadline = Instant::now() + PATIENCE;
+    fn exit(self) -> Vec<u8> {
+        self.exit_within(PATIENCE)
+    }
+
+    fn exit_within(mut self, patience: Duration) -> Vec<u8> {
+        let deadline = Instant::now() + patience;
         while self.child.try_wait().expect("try_wait").is_none() {
             assert!(Instant::now() < deadline, "the client did not exit");
             std::thread::sleep(Duration::from_millis(20));
@@ -811,43 +815,92 @@ fn real_server() -> PathBuf {
 }
 
 /// A work directory holding a stand-in `ssh` that logs `pid args...` to
-/// `log` and relays the `-L` local socket to the remote one.
-fn relaying_ssh(name: &str) -> PathBuf {
+/// `log` and relays the `-L` local socket to the remote one. Its `n`th
+/// start (from 0) follows line `n` of `plan`, if there is one:
+///
+/// - `fail`: exits at once, as a refused login does.
+/// - `hold`: accepts connections but passes nothing on, either way.
+/// - `stall C F`: relays, but passes only the first `F` of the server's
+///   messages on its `C`th connection (from 0), and holds the rest.
+///
+/// SIGUSR1 cuts every connection on the client's side only, so the client
+/// sees them end while the server keeps its clients.
+fn relaying_ssh(name: &str, plan: &[&str]) -> PathBuf {
     let work = std::env::temp_dir().join(format!("rusty-mux-relay-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir(&work).expect("work dir");
+    std::fs::write(work.join("plan"), plan.join("\n")).expect("plan");
     let script = format!(
         r#"#!/usr/bin/env python3
-import os, socket, sys, threading
+import os, signal, socket, sys, threading
 args = sys.argv[1:]
 with open("{log}", "a") as log:
     log.write(" ".join([str(os.getpid())] + args) + "\n")
+with open("{log}") as log:
+    start = len(log.read().splitlines()) - 1
+with open("{plan}") as plan:
+    plans = plan.read().splitlines()
+mode = (plans[start] if start < len(plans) else "relay").split()
+if mode[0] == "fail":
+    sys.exit(255)
+stall = (int(mode[1]), int(mode[2])) if mode[0] == "stall" else None
 local, remote = args[args.index("-L") + 1].split(":", 1)
 listener = socket.socket(socket.AF_UNIX)
 listener.bind(local)
 listener.listen()
-def pump(a, b):
+nears = []
+cut = False
+def on_cut(*_):
+    global cut
+    cut = True
+    for near in nears:
+        try:
+            near.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+signal.signal(signal.SIGUSR1, on_cut)
+def pump(a, b, frames=None):
+    held = b""
     try:
         while True:
             data = a.recv(65536)
             if not data:
                 break
-            b.sendall(data)
+            if frames is None:
+                b.sendall(data)
+                continue
+            held += data
+            while frames > 0 and len(held) >= 4:
+                end = 4 + int.from_bytes(held[:4], "big")
+                if len(held) < end:
+                    break
+                b.sendall(held[:end])
+                held = held[end:]
+                frames -= 1
     except OSError:
         pass
     for end in (a, b):
+        if cut and end not in nears:
+            continue
         try:
             end.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
+held = []
 while True:
     near, _ = listener.accept()
+    nears.append(near)
+    if mode[0] == "hold":
+        held.append(near)
+        continue
     far = socket.socket(socket.AF_UNIX)
     far.connect(remote)
+    frames = stall[1] if stall and stall[0] == len(nears) - 1 else None
     threading.Thread(target=pump, args=(near, far), daemon=True).start()
-    threading.Thread(target=pump, args=(far, near), daemon=True).start()
+    threading.Thread(target=pump, args=(far, near, frames), daemon=True).start()
 "#,
-        log = work.join("log").display()
+        log = work.join("log").display(),
+        plan = work.join("plan").display(),
     );
     let ssh = work.join("ssh");
     std::fs::write(&ssh, script).expect("stand-in ssh");
@@ -928,7 +981,7 @@ fn type_until(tui: &Tui, command: &[u8], needle: &[u8]) {
 #[test]
 fn a_frozen_path_is_brought_back_with_the_screen_and_the_lease() {
     let socket = real_server();
-    let work = relaying_ssh("frozen");
+    let work = relaying_ssh("frozen", &[]);
     let tui = ssh_client(&work, &socket);
     type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
     let first = wait_logins(&work, 1, PATIENCE)[0].0;
@@ -970,7 +1023,7 @@ fn a_frozen_path_is_brought_back_with_the_screen_and_the_lease() {
 #[test]
 fn a_client_the_server_let_go_is_not_brought_back() {
     let socket = real_server();
-    let work = relaying_ssh("dropped");
+    let work = relaying_ssh("dropped", &[]);
     let tui = ssh_client(&work, &socket);
     type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
     disconnect_everyone(&socket);
@@ -1023,4 +1076,140 @@ fn disconnect_everyone(socket: &Path) {
             }
         }
     }
+}
+
+/// What the client's output leaves on an 80x24 terminal, row by row.
+fn screen_text(output: &[u8]) -> String {
+    let mut grid = Grid::new(80, 24);
+    AnsiParser::new().advance(&mut grid, output);
+    (0..grid.rows)
+        .map(|y| grid.row_cells(y).map(|cell| cell.ch).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Loses the path at once: the first stand-in cuts the client's side of
+/// every connection, and the server keeps the clients.
+fn cut(work: &Path) {
+    signal(wait_logins(work, 1, PATIENCE)[0].0, "-USR1");
+}
+
+/// A fresh path that comes up but never answers is given up on within
+/// the handshake's bound, its `ssh` stopped, and tried again; the next
+/// one brings the block back with its lease.
+#[test]
+fn a_fresh_path_that_never_answers_is_given_up_and_tried_again() {
+    let socket = real_server();
+    let work = relaying_ssh("hold", &["relay", "hold"]);
+    let tui = ssh_client(&work, &socket);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    cut(&work);
+    let held = wait_logins(&work, 2, PATIENCE)[1].0;
+    let from = tui.written();
+    // 10 s for the answers, then 2 s before trying again.
+    let seen = wait_logins(&work, 3, Duration::from_secs(20));
+    assert!(!running(held), "the silent ssh was kept");
+    let deadline = Instant::now() + PATIENCE;
+    while !tui.since(from).windows(5).any(|w| w == b"one-1") {
+        assert!(Instant::now() < deadline, "the screen did not come back");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let from = tui.written();
+    tui.master.write(b"echo two-$((1+1))\r").expect("type");
+    tui.wait_for(b"two-2");
+    assert!(tui.since(from).windows(5).any(|w| w == b"two-2"));
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
+    assert!(seen.iter().all(|(pid, _)| !running(*pid)), "{seen:?}");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// Once the control connection's client is taken over, a fresh path that
+/// stops answering (here, before the layout) cannot be given up on and
+/// tried again, since hanging it up ends that client: the client stops
+/// within the handshake's bound and says why, and both `ssh`s go.
+#[test]
+fn a_takeover_that_stalls_midway_stops_the_client_in_time() {
+    let socket = real_server();
+    let work = relaying_ssh("stall-list", &["relay", "stall 0 1"]);
+    let tui = ssh_client(&work, &socket);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    cut(&work);
+    wait_logins(&work, 2, PATIENCE);
+    let screen = tui.exit_within(Duration::from_secs(20));
+    let text = String::from_utf8_lossy(&screen);
+    assert!(text.contains("reconnecting: "), "{text:?}");
+    let seen = logins(&work);
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(seen.iter().all(|(pid, _)| !running(*pid)), "{seen:?}");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// Ctrl-] d detaches at once while a block's takeover waits on an answer
+/// that never comes, well before the handshake's bound, and both `ssh`s
+/// go with the client.
+#[test]
+fn detaching_while_a_takeover_stalls_is_prompt() {
+    let socket = real_server();
+    let work = relaying_ssh("stall-pane", &["relay", "stall 1 0"]);
+    let tui = ssh_client(&work, &socket);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    cut(&work);
+    wait_logins(&work, 2, PATIENCE);
+    // Past the login and the control connection's takeover.
+    std::thread::sleep(Duration::from_secs(1));
+    let asked = Instant::now();
+    tui.master.write(b"\x1dd").expect("ctrl-] d");
+    let screen = tui.exit_within(Duration::from_secs(3));
+    assert!(asked.elapsed() < Duration::from_secs(3));
+    let text = String::from_utf8_lossy(&screen);
+    assert!(text.contains("detached from block"), "{text:?}");
+    let seen = logins(&work);
+    assert!(seen.iter().all(|(pid, _)| !running(*pid)), "{seen:?}");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// A split window stays on screen while the path is down and a login
+/// fails, and both blocks are drawn again once it is back.
+#[test]
+fn a_split_window_stays_on_screen_while_the_path_is_down() {
+    let socket = real_server();
+    let work = relaying_ssh("split", &["relay", "fail"]);
+    let tui = ssh_client(&work, &socket);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    tui.master.write(b"\x1d|").expect("ctrl-] |");
+    type_until(&tui, b"echo two-$((1+1))\r", b"two-2");
+    let shown = |tui: &Tui| {
+        let text = screen_text(&tui.since(0));
+        text.contains("one-1") && text.contains("two-2")
+    };
+    let deadline = Instant::now() + PATIENCE;
+    while !shown(&tui) {
+        assert!(Instant::now() < deadline, "the split did not show both");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    cut(&work);
+    // The failed login, then 2 s before the next.
+    wait_logins(&work, 2, PATIENCE);
+    std::thread::sleep(Duration::from_millis(500));
+    let text = screen_text(&tui.since(0));
+    assert!(text.contains("one-1") && text.contains("two-2"), "{text}");
+
+    wait_logins(&work, 3, PATIENCE);
+    let from = tui.written();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let again = String::from_utf8_lossy(&tui.since(from)).into_owned();
+        if again.contains("one-1") && again.contains("two-2") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "not drawn again: {again:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(shown(&tui), "{}", screen_text(&tui.since(0)));
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
+    let seen = logins(&work);
+    assert!(seen.iter().all(|(pid, _)| !running(*pid)), "{seen:?}");
+    std::fs::remove_dir_all(&work).expect("cleanup");
 }
