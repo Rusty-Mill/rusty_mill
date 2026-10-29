@@ -247,10 +247,9 @@ pub fn oversized_content_length_server(
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let handle = std::thread::spawn(move || {
-        use std::io::{Read, Write};
+        use std::io::Write;
         let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 8192];
-        let _ = stream.read(&mut buf);
+        read_request(&mut stream);
         let oversized_len = MAX_RESPONSE_BODY_BYTES + 1;
         let response = format!(
             "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {oversized_len}\r\n\r\n"
@@ -258,6 +257,33 @@ pub fn oversized_content_length_server(
         let _ = stream.write_all(response.as_bytes());
     });
     (addr, handle)
+}
+
+/// Reads one whole HTTP/1.1 request (headers plus a `Content-Length`
+/// body) off `stream`. A server that closes with request bytes still
+/// unread makes Windows reset the connection, which can discard the
+/// response before the client reads it.
+pub fn read_request(stream: &mut std::net::TcpStream) {
+    use std::io::Read;
+    let mut request = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+            let body_len: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            if request.len() >= end + 4 + body_len {
+                return;
+            }
+        }
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => request.extend_from_slice(&buf[..n]),
+        }
+    }
 }
 
 /// The providers send on `rusty_request`, which runs on `rusty_tokio`;

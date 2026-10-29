@@ -4267,6 +4267,33 @@ mod tests {
         server.verify().await;
     }
 
+    /// Reads one whole HTTP/1.1 request (headers plus a `Content-Length`
+    /// body) off `stream`. A server that closes with request bytes still
+    /// unread makes Windows reset the connection, which can discard the
+    /// response before the client reads it.
+    fn read_request(stream: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let mut request = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let body_len: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + body_len {
+                    return;
+                }
+            }
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => request.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+
     /// A one-shot-per-connection raw TCP receiver: answers every connection
     /// with `head` (status line, headers and the start of a body shorter
     /// than its declared `Content-Length`), then holds the connection for
@@ -4285,8 +4312,7 @@ mod tests {
                 let Ok(mut stream) = stream else { return };
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 std::thread::spawn(move || {
-                    let mut buf = [0u8; 8192];
-                    let _ = std::io::Read::read(&mut stream, &mut buf);
+                    read_request(&mut stream);
                     let _ = std::io::Write::write_all(&mut stream, head.as_bytes());
                     std::thread::sleep(hold);
                 });
