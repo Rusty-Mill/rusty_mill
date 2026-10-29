@@ -692,6 +692,11 @@ S2's verified runner result at PR 1 head `208a5b5c` was Windows Server
 WOW64 observations are author-reported rather than independently verified.
 The older-machine check remains owed, as does a conclusive Ctrl+Break probe.
 
+WOW64 (author-reported on Beast): 32-bit clients send the same 64-bit
+packet layouts, so there is no 32-bit path. 32-bit kernelbase leaves
+garbage in OUT fields, though, so the host always overwrites an OUT field
+and never reads one. `rusty_conhost`'s `console` follows that from PR 2.
+
 ### 9.2 Phases
 - **Phase A:** `own` is opt-in from PR 5.
 - **Phase B:** `own` becomes the default once all of these hold:

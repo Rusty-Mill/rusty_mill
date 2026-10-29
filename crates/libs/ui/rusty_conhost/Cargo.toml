@@ -1,0 +1,22 @@
+[package]
+name = "rusty_conhost"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Our own Windows console host: a sans-I/O console engine over ConDrv, with a pty-shaped front end."
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+platform.workspace = true
+# Bounds-checked decoding of the client's packets.
+rusty_wire.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+platform-windows.workspace = true
+
+[lints]
+workspace = true

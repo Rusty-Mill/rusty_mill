@@ -101,6 +101,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | libs | rusty_bbp | rusty_bbp | Blackboard Protocol core: records, rules, lifecycle for multi-vendor agents collaborating on one software task. Pure, no I/O. |
 | libs | rusty_bot | rusty_bot | Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary |
 | libs | rusty_channel | rusty_channel | Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack, Microsoft Teams and SMS (Twilio) adapters |
+| libs | rusty_conhost | rusty_conhost | Our own Windows console host: a sans-I/O console engine over ConDrv, with a pty-shaped front end. |
 | libs | rusty_db | rusty-db | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core |
 | libs | rusty_db | rusty-db-core | Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of rusty_db) |
 | libs | rusty_db | rusty-db-derive | #[derive(Mapped)] macro for rusty_db: maps a struct to a table |
