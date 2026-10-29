@@ -27,7 +27,7 @@ pub(crate) enum ModerationError {
 }
 
 pub(crate) struct ModerationClient {
-    client: reqwest::Client,
+    client: rusty_request::Client,
     base_url: String,
     api_key: String,
     model: String,
@@ -47,10 +47,7 @@ struct ModerationResult {
 impl ModerationClient {
     pub(crate) fn new(config: &ModerationConfig, api_key: String) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(config.timeout_secs))
-                .build()
-                .expect("reqwest client should build with a timeout configured"),
+            client: crate::http::client(Duration::from_secs(config.timeout_secs)),
             base_url: config.base_url.trim_end_matches('/').to_string(),
             api_key,
             model: config.model.clone(),
@@ -68,11 +65,14 @@ impl ModerationClient {
             return Ok(());
         }
 
+        let body = serde_json::json!({ "model": self.model, "input": text }).to_string();
         let resp = self
             .client
-            .post(format!("{}/moderations", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(&serde_json::json!({ "model": self.model, "input": text }))
+            .post(&format!("{}/moderations", self.base_url))
+            .and_then(|r| r.bearer_auth(&self.api_key))
+            .and_then(|r| r.header("Content-Type", "application/json"))
+            .map_err(|e| ModerationError::RequestFailed(e.to_string()))?
+            .body(body)
             .send()
             .await
             .map_err(|e| ModerationError::RequestFailed(e.to_string()))?;
@@ -84,10 +84,8 @@ impl ModerationClient {
             )));
         }
 
-        let body: ModerationResponse = resp
-            .json()
-            .await
-            .map_err(|e| ModerationError::RequestFailed(e.to_string()))?;
+        let body: ModerationResponse =
+            crate::http::json(&resp).map_err(ModerationError::RequestFailed)?;
 
         let flagged_categories: Vec<String> = body
             .results
@@ -189,6 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_is_ok_when_nothing_is_flagged() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/moderations"))
@@ -208,6 +207,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_returns_flagged_categories_when_the_backend_flags_it() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/moderations"))
@@ -249,6 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_fails_with_requestfailed_on_a_non_success_status() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/moderations"))
@@ -263,6 +264,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_fails_with_requestfailed_when_the_endpoint_is_unreachable() {
+        crate::http::install_fallback_for_test();
         // Port 0 never accepts connections -- proves a network-level
         // failure (not just a non-2xx) also maps to RequestFailed.
         let client = ModerationClient::new(&config("http://127.0.0.1:0"), "test-key".to_string());
@@ -272,6 +274,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_fails_with_requestfailed_when_the_backend_outlasts_timeout_secs() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/moderations"))

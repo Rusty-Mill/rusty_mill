@@ -31,11 +31,12 @@ tokio-postgres.workspace = true
 tokio-postgres-rustls.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
-reqwest.workspace = true
+rusty_request.workspace = true
 regex.workspace = true
 ring.workspace = true
 
 [dev-dependencies]
+rusty_tokio.workspace = true
 async-trait.workspace = true
 wiremock.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

@@ -39,6 +39,9 @@ fn server_runtime() -> &'static rusty_tokio::runtime::Runtime {
 /// `main` does. Returns the base URL to hit with a plain HTTP client. The
 /// test's own (multi-threaded) tokio runtime is the handlers' tokio.
 async fn spawn_app(config_toml: &str) -> String {
+    // As `main` does: the providers send on rusty_request, which runs on
+    // rusty_tokio, and the MCP tools call them from blocking threads.
+    rusty_tokio::runtime::install_fallback().expect("rusty_tokio fallback runtime should start");
     let config = Config::from_toml_str(config_toml).expect("valid test config");
     let router = Arc::new(ProviderRouter::from_config(&config).await);
 

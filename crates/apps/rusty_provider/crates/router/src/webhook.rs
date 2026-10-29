@@ -93,6 +93,27 @@ fn sign_hex(secret: &str, body: &[u8]) -> String {
     tag.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The webhook POST for one delivery attempt.
+fn build_request(
+    client: &rusty_request::Client,
+    url: &str,
+    body: &[u8],
+    auth_header: Option<&str>,
+    signature: Option<&str>,
+) -> rusty_request::Result<rusty_request::RequestBuilder> {
+    let mut req = client
+        .post(url)?
+        .header("Content-Type", "application/json")?
+        .body(body);
+    if let Some(auth) = auth_header {
+        req = req.header("Authorization", auth)?;
+    }
+    if let Some(sig) = signature {
+        req = req.header("X-RP-Signature", sig)?;
+    }
+    Ok(req)
+}
+
 /// Fires `[webhook]`-configured POSTs on budget events. Delivery is
 /// fire-and-forget (spawned, not awaited) so a slow or unreachable
 /// receiver never adds latency to the request that triggered the event --
@@ -100,7 +121,7 @@ fn sign_hex(secret: &str, body: &[u8]) -> String {
 /// delivery failure (after exhausting `retry_policy`) is only logged,
 /// never surfaced to the client.
 pub(crate) struct WebhookNotifier {
-    client: reqwest::Client,
+    client: rusty_request::Client,
     url: String,
     /// The exact value to send as this POST's `Authorization` header
     /// (e.g. `"Bearer <token>"`), so the receiver can verify the request
@@ -121,10 +142,7 @@ impl WebhookNotifier {
         retry_policy: RetryPolicy,
     ) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(timeout_secs))
-                .build()
-                .expect("reqwest client should build with a timeout configured"),
+            client: crate::http::client(Duration::from_secs(timeout_secs)),
             url,
             auth_header,
             signing_secret,
@@ -178,18 +196,25 @@ impl WebhookNotifier {
         tokio::spawn(async move {
             let mut attempt = 0u32;
             loop {
-                let mut req = client
-                    .post(&url)
-                    .header(reqwest::header::CONTENT_TYPE, "application/json")
-                    .body(body.clone());
-                if let Some(auth) = &auth_header {
-                    req = req.header(reqwest::header::AUTHORIZATION, auth.clone());
-                }
-                if let Some(sig) = &signature {
-                    req = req.header("X-RP-Signature", sig.clone());
-                }
+                let req = match build_request(
+                    &client,
+                    &url,
+                    &body,
+                    auth_header.as_deref(),
+                    signature.as_deref(),
+                ) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        // A bad URL or header value won't fix itself on retry.
+                        rusty_log::warn!(%url, error = %e, "webhook request is invalid; not sending");
+                        return;
+                    }
+                };
 
-                let retryable = match req.send().await {
+                // Status only: the receiver's body is never read, so a stalled
+                // or truncated body can't turn an acknowledged delivery into
+                // a retry.
+                let retryable = match req.send_streaming().await {
                     Ok(resp) if resp.status().is_success() => return,
                     Ok(resp) => {
                         let status = resp.status();

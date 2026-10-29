@@ -14,14 +14,14 @@ use rp_core::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::http::{map_error_response, map_reqwest_error};
+use crate::http::map_error_response;
 use crate::util::{chat_stream, gen_id, now};
 
 pub struct OpenAiCompatibleProvider {
     name: String,
     base_url: String,
     api_key: String,
-    client: reqwest::Client,
+    client: crate::http::HttpClient,
 }
 
 impl OpenAiCompatibleProvider {
@@ -34,7 +34,7 @@ impl OpenAiCompatibleProvider {
             name: name.into(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
-            client: crate::http::build_client(crate::http::DEFAULT_TIMEOUT),
+            client: crate::http::HttpClient::new(crate::http::DEFAULT_TIMEOUT),
         }
     }
 
@@ -42,7 +42,7 @@ impl OpenAiCompatibleProvider {
     /// `http::DEFAULT_TIMEOUT`) -- used by `rp-router` to apply
     /// `[[providers]].timeout_secs`.
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
-        self.client = crate::http::build_client(timeout);
+        self.client = crate::http::HttpClient::new(timeout);
         self
     }
 
@@ -318,16 +318,13 @@ impl Provider for OpenAiCompatibleProvider {
         api_key_override: Option<&str>,
     ) -> Result<ChatResponse, ProviderError> {
         let body = WireRequest::from_core(req, model, false);
+        let auth = format!("Bearer {}", api_key_override.unwrap_or(&self.api_key));
         let resp = self
             .client
-            .post(self.endpoint())
-            .bearer_auth(api_key_override.unwrap_or(&self.api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            .post_json(&self.endpoint(), &[], &[("Authorization", &auth)], &body)
+            .await?;
 
-        if !resp.status().is_success() {
+        if !resp.is_success() {
             return Err(map_error_response(resp).await);
         }
 
@@ -380,16 +377,13 @@ impl Provider for OpenAiCompatibleProvider {
         api_key_override: Option<&str>,
     ) -> Result<ChatStream, ProviderError> {
         let body = WireRequest::from_core(req, model, true);
+        let auth = format!("Bearer {}", api_key_override.unwrap_or(&self.api_key));
         let resp = self
             .client
-            .post(self.endpoint())
-            .bearer_auth(api_key_override.unwrap_or(&self.api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            .post_json(&self.endpoint(), &[], &[("Authorization", &auth)], &body)
+            .await?;
 
-        if !resp.status().is_success() {
+        if !resp.is_success() {
             return Err(map_error_response(resp).await);
         }
 
@@ -399,7 +393,7 @@ impl Provider for OpenAiCompatibleProvider {
             .as_ref()
             .and_then(|r| r.exclude)
             .unwrap_or(false);
-        let stream = resp.bytes_stream().eventsource().filter_map(move |ev| {
+        let stream = resp.into_byte_stream().eventsource().filter_map(move |ev| {
             let full_model = full_model.clone();
             async move {
                 let ev = match ev {
@@ -458,16 +452,18 @@ impl Provider for OpenAiCompatibleProvider {
             encoding_format: req.encoding_format.as_deref(),
             dimensions: req.dimensions,
         };
+        let auth = format!("Bearer {}", api_key_override.unwrap_or(&self.api_key));
         let resp = self
             .client
-            .post(self.embeddings_endpoint())
-            .bearer_auth(api_key_override.unwrap_or(&self.api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            .post_json(
+                &self.embeddings_endpoint(),
+                &[],
+                &[("Authorization", &auth)],
+                &body,
+            )
+            .await?;
 
-        if !resp.status().is_success() {
+        if !resp.is_success() {
             return Err(map_error_response(resp).await);
         }
 

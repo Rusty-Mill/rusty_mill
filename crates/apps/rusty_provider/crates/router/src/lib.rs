@@ -6,6 +6,7 @@ mod error;
 mod fifo;
 mod free_tiers;
 mod guardrails;
+mod http;
 mod metrics;
 mod moderation;
 mod persistence;
@@ -3879,6 +3880,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_fires_budget_exceeded_on_the_crossing_request() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -3904,6 +3906,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_does_not_refire_once_already_over_budget() {
+        crate::http::install_fallback_for_test();
         // `.expect(1)` on the mock means a second delivery would fail
         // verification -- proving the second, already-over-budget request
         // doesn't fire another event.
@@ -3942,6 +3945,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_sends_the_configured_authorization_header() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -3986,6 +3990,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_fires_budget_warning_on_the_crossing_request() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4012,6 +4017,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_does_not_refire_budget_warning_once_already_over_threshold() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4055,6 +4061,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_client_spend_fires_budget_reset() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4105,6 +4112,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_carries_a_valid_hmac_signature_when_signing_secret_is_configured() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         let expected_body =
             br#"{"event":"budget_reset","client":"acme","budget_usd":10.0,"period":"total"}"#;
@@ -4144,6 +4152,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_sends_no_signature_header_when_signing_secret_is_unset() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4165,6 +4174,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_retries_after_a_5xx_and_succeeds() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         // First attempt 500s, second succeeds -- `.up_to_n_times` sequences
         // two distinct responses across the retry.
@@ -4203,6 +4213,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_gives_up_after_exhausting_max_retries() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4230,6 +4241,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_does_not_retry_a_4xx_response() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4253,6 +4265,106 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         server.verify().await;
+    }
+
+    /// Reads one whole HTTP/1.1 request (headers plus a `Content-Length`
+    /// body) off `stream`. A server that closes with request bytes still
+    /// unread makes Windows reset the connection, which can discard the
+    /// response before the client reads it.
+    fn read_request(stream: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let mut request = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let body_len: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + body_len {
+                    return;
+                }
+            }
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => request.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+
+    /// A one-shot-per-connection raw TCP receiver: answers every connection
+    /// with `head` (status line, headers and the start of a body shorter
+    /// than its declared `Content-Length`), then holds the connection for
+    /// `hold` before closing it. Returns the URL and a count of
+    /// connections, one per delivery attempt.
+    fn partial_body_receiver(
+        head: &'static str,
+        hold: std::time::Duration,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    read_request(&mut stream);
+                    let _ = std::io::Write::write_all(&mut stream, head.as_bytes());
+                    std::thread::sleep(hold);
+                });
+            }
+        });
+        (url, attempts)
+    }
+
+    /// Fires one budget-reset webhook at `url` (1s timeout, up to 3 quick
+    /// retries) and waits `settle` for any retries to land.
+    async fn fire_one_webhook(url: String, settle: std::time::Duration) {
+        let router = router_with_budgeted_client(10.0, BudgetPeriod::Total);
+        let router = Router {
+            webhook: Some(Arc::new(WebhookNotifier::new(
+                url,
+                None,
+                1,
+                None,
+                RetryPolicy::for_test(10, 3),
+            ))),
+            ..router
+        };
+        assert!(router.reset_client_spend("acme"));
+        tokio::time::sleep(settle).await;
+    }
+
+    #[tokio::test]
+    async fn webhook_does_not_retry_a_200_whose_body_stalls() {
+        crate::http::install_fallback_for_test();
+        let head = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nok";
+        let (url, attempts) = partial_body_receiver(head, std::time::Duration::from_secs(3));
+        // Past the 1s timeout, so reading the body would have timed out and retried.
+        fire_one_webhook(url, std::time::Duration::from_millis(1500)).await;
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn webhook_does_not_retry_a_200_whose_body_is_truncated() {
+        crate::http::install_fallback_for_test();
+        let head = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nok";
+        let (url, attempts) = partial_body_receiver(head, std::time::Duration::ZERO);
+        fire_one_webhook(url, std::time::Duration::from_millis(300)).await;
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn webhook_does_not_retry_a_400_whose_body_is_truncated() {
+        crate::http::install_fallback_for_test();
+        let head = "HTTP/1.1 400 Bad Request\r\nContent-Length: 100\r\n\r\nno";
+        let (url, attempts) = partial_body_receiver(head, std::time::Duration::ZERO);
+        fire_one_webhook(url, std::time::Duration::from_millis(300)).await;
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     // --- client daily usage history -----------------------------------------------
@@ -4760,6 +4872,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_moderation_blocks_and_records_a_metric_per_flagged_category() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/moderations"))
@@ -4791,6 +4904,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_moderation_allows_the_request_through_when_the_backend_is_unreachable() {
+        crate::http::install_fallback_for_test();
         let mut router = test_router(vec![], vec![], vec![], vec![], vec![]);
         // Port 0 never accepts connections -- a real, unrecoverable
         // network failure, not just a non-2xx response.
@@ -4854,6 +4968,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_web_search_prepends_results_to_the_last_user_message_and_records_a_metric() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/res/v1/web/search"))
@@ -4892,6 +5007,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_web_search_leaves_the_message_unchanged_when_there_are_no_results() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
@@ -4915,6 +5031,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_web_search_leaves_the_request_unmodified_when_the_backend_is_unreachable() {
+        crate::http::install_fallback_for_test();
         let mut router = test_router(vec![], vec![], vec![], vec![], vec![]);
         // Port 0 never accepts connections -- a real, unrecoverable
         // network failure, not just a non-2xx response.

@@ -13,11 +13,13 @@ rp-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
-reqwest.workspace = true
+rusty_request.workspace = true
+# Per-exchange deadline (`time::timeout_at`) over a streamed response body.
+rusty_tokio.workspace = true
 futures-util.workspace = true
-# `Compat`: reqwest's SSE body is a `futures` stream; `ChatStream` is `rusty_stream`.
+# `Compat`: the SSE decoder (eventsource-stream) yields a `futures` stream;
+# `ChatStream` is `rusty_stream`.
 rusty_stream = { workspace = true, features = ["futures-core"] }
-bytes.workspace = true
 eventsource-stream.workspace = true
 percent-encoding = "2"
 
