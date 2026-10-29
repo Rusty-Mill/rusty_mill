@@ -14,11 +14,14 @@
 //! `rusty_conhost`.
 
 #![cfg(windows)]
+#![allow(unsafe_code)] // accept_ctrl_c below: one raw SetConsoleCtrlHandler call, its own SAFETY comment.
 
 use std::time::{Duration, Instant};
 
 use platform::error::ErrorKind;
-use platform::process::{Child, Command, ExitStatus, GroupSpec};
+use std::os::windows::process::CommandExt;
+
+use platform::process::{Child, Command, ExitStatus, GroupSpec, Signal};
 use platform_windows::condrv::{
     self, Attached, ConsoleServer, CtrlEvent, IoComplete, IoDescriptor, Ready, Waker,
 };
@@ -122,14 +125,24 @@ fn answer(
     }
 }
 
-/// Serve `attached` until its child exits and `until` holds, or the
-/// budget runs out. `tick` runs after every wait, with the child's pid.
+/// Serve `attached` until its child exits and disconnects, or [`BUDGET`]
+/// runs out. `tick` runs after every wait, with the child's pid.
 fn serve(
     attached: &mut Attached,
     waker: &Waker,
+    tick: impl FnMut(&Seen, u32),
+) -> (Seen, Option<ExitStatus>) {
+    serve_for(attached, waker, BUDGET, tick)
+}
+
+/// [`serve`] with a budget of `budget`.
+fn serve_for(
+    attached: &mut Attached,
+    waker: &Waker,
+    budget: Duration,
     mut tick: impl FnMut(&Seen, u32),
 ) -> (Seen, Option<ExitStatus>) {
-    let deadline = Instant::now() + BUDGET;
+    let deadline = Instant::now() + budget;
     let pid = attached.child.id();
     let mut seen = Seen::default();
     let mut next_object = 0x100;
@@ -362,15 +375,26 @@ fn deadline_waker_and_cancellation() {
     attached.server.close();
 }
 
-#[test]
-fn ctrl_c_reaches_an_attached_child() {
-    let _serial = lock();
+/// Clear this test process's "ignore Ctrl+C" flag. nextest starts each
+/// test in a new process group, which sets it, and children inherit it;
+/// `spawn_attached` deliberately leaves the caller's policy alone, so a
+/// caller that wants its children to see Ctrl+C opts in itself.
+fn accept_ctrl_c() {
+    // SAFETY: a null handler only sets this process's Ctrl+C flag.
+    let ok = unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0) };
+    assert_ne!(ok, 0, "SetConsoleCtrlHandler(NULL, FALSE)");
+}
+
+/// Attach `ping -n 30`, send it Ctrl+C after 1.5 s, and serve it for
+/// `budget`. Returns its status when serving stopped: `None` if it was
+/// still running, in which case it has been killed.
+fn ping_after_ctrl_c(budget: Duration) -> Option<ExitStatus> {
     let mut attached = condrv::spawn_attached(&command("ping.exe", &["-n", "30", "127.0.0.1"]))
         .expect("spawn_attached");
     let waker = Waker::new().expect("Waker::new");
     let started = Instant::now();
     let mut sent = false;
-    let (_, status) = serve(&mut attached, &waker, |seen, pid| {
+    let (_, status) = serve_for(&mut attached, &waker, budget, |seen, pid| {
         if sent || seen.connect_pids.is_empty() || started.elapsed() < Duration::from_millis(1500) {
             return;
         }
@@ -380,6 +404,18 @@ fn ctrl_c_reaches_an_attached_child() {
         std::thread::spawn(move || condrv::send_ctrl(pid, CtrlEvent::C).expect("send_ctrl"));
     });
     assert!(sent, "ping exited before Ctrl+C was sent");
+    if status.is_none() {
+        attached.child.kill_single(Signal::Kill).expect("kill ping");
+    }
+    status
+}
+
+#[test]
+fn ctrl_c_reaches_an_attached_child() {
+    let _serial = lock();
+    accept_ctrl_c();
+    let started = Instant::now();
+    let status = ping_after_ctrl_c(BUDGET);
     assert!(
         status.is_some(),
         "ping was still running {BUDGET:?} after Ctrl+C"
@@ -387,5 +423,67 @@ fn ctrl_c_reaches_an_attached_child() {
     assert!(
         started.elapsed() < Duration::from_secs(14),
         "ping ran its course instead of stopping"
+    );
+}
+
+/// Set in the helper process that [`the_callers_ctrl_c_policy_is_kept`]
+/// starts.
+const POLICY_HELPER: &str = "PLATFORM_WINDOWS_CONDRV_POLICY_HELPER";
+
+/// A caller that ignores Ctrl+C still ignores it after a failed and a
+/// successful `spawn_attached`, so a later child inherits the same
+/// policy. Run in a helper started with `CREATE_NEW_PROCESS_GROUP`, so it
+/// begins with Ctrl+C ignored whatever the runner does.
+#[test]
+fn the_callers_ctrl_c_policy_is_kept() {
+    if std::env::var_os(POLICY_HELPER).is_some() {
+        policy_helper();
+        return;
+    }
+    let _serial = lock();
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    let exe = std::env::current_exe().expect("current_exe");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "the_callers_ctrl_c_policy_is_kept",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(POLICY_HELPER, "1")
+        .creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .output()
+        .expect("start the helper");
+    assert!(
+        out.status.success(),
+        "helper failed ({:?}):\n{}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn policy_helper() {
+    // A spawn that fails at CreateProcessW: the directory doesn't exist.
+    let missing = std::env::temp_dir().join("platform-windows-condrv-no-such-dir");
+    let mut bad = command("cmd.exe", &["/c", "exit", "0"]);
+    bad.cwd = missing.into();
+    assert!(
+        condrv::spawn_attached(&bad).is_err(),
+        "spawn in a missing directory"
+    );
+
+    // A spawn that succeeds and runs to completion.
+    let mut ok =
+        condrv::spawn_attached(&command("cmd.exe", &["/c", "exit", "0"])).expect("spawn_attached");
+    let waker = Waker::new().expect("Waker::new");
+    let (_, status) = serve(&mut ok, &waker, |_, _| {});
+    assert_eq!(status, Some(ExitStatus::Code(0)));
+
+    // A later child inherits the caller's policy, so it ignores Ctrl+C.
+    let status = ping_after_ctrl_c(Duration::from_millis(4500));
+    assert_eq!(
+        status, None,
+        "Ctrl+C stopped ping: the caller's policy changed"
     );
 }

@@ -18,7 +18,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::sync::PoisonError;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::process::{Command, GroupSpec, Spawner};
@@ -35,6 +35,8 @@ const CTRL_CLOSE_EVENT: u32 = 2;
 const CONSOLE_CTRL_C_FLAG: u32 = 0x1;
 const CONSOLE_CTRL_BREAK_FLAG: u32 = 0x2;
 const CONSOLE_CTRL_CLOSE_FLAG: u32 = 0x4;
+/// How long a failed [`spawn_attached`] waits for the child it terminated.
+const REAP_GRACE: Duration = Duration::from_secs(5);
 
 /// A console server: the driver's server object, its client objects, the
 /// input-available event, and the storage of the one in-flight READ_IO.
@@ -135,10 +137,11 @@ fn unsupported(what: &'static str) -> PlatformError {
 /// The program is resolved and quoted exactly as
 /// [`crate::WindowsPty::spawn_concrete`] does, under the same spawn lock.
 /// The child gets the server's `\Input` and `\Output` as its std handles,
-/// and inherits nothing else. It always starts with Ctrl+C enabled: the
-/// "ignore Ctrl+C" flag an ancestor's `CREATE_NEW_PROCESS_GROUP` leaves
-/// on this process is cleared, process-wide, before the spawn, as for a
-/// fresh console. Returns once `CreateProcessW` succeeds, so
+/// and inherits nothing else, except, as with any `CreateProcessW`, this
+/// process's "ignore Ctrl+C" flag: a caller that ignores Ctrl+C (one
+/// started with `CREATE_NEW_PROCESS_GROUP`, or below such a process) has
+/// a child that ignores it too. The caller's own policy is never changed.
+/// Returns once `CreateProcessW` succeeds, so
 /// the child's CONNECT is the first packet [`ConsoleServer::wait`]
 /// reports. `GroupSpec::JoinGroup` gives `InvalidInput`. On failure every
 /// handle is closed and no child is left running.
@@ -159,7 +162,28 @@ pub fn spawn_attached(cmd: &Command) -> Result<Attached> {
         .unwrap_or_else(PoisonError::into_inner);
     let server = sys::Server::create()?;
     let (process, pid) = sys::spawn(&server, &line, &cmd.cwd, &cmd.env)?;
-    let wait = handle::duplicate(&process, false)?;
+    finish_spawn(server, process, pid, |p| handle::duplicate(p, false))
+}
+
+/// The child is running: finish the remaining fallible setup, or
+/// terminate and reap the child before returning setup's error. Taking
+/// every handle by value means an error drops them all here.
+fn finish_spawn(
+    server: sys::Server,
+    process: OwnedWinHandle,
+    pid: u32,
+    duplicate: impl FnOnce(&OwnedWinHandle) -> Result<OwnedWinHandle>,
+) -> Result<Attached> {
+    let wait = match duplicate(&process) {
+        Ok(wait) => wait,
+        Err(e) => {
+            // Setup's error is the one worth reporting; a failure to
+            // terminate a child we just created would only hide it.
+            let _ = crate::sys::proc::terminate_process(&process);
+            let _ = crate::sys::proc::wait_many(&[process.as_raw()], Some(REAP_GRACE));
+            return Err(e);
+        }
+    };
     Ok(Attached {
         server: ConsoleServer { inner: server },
         child: WindowsChild::from_parts(process, None, pid),
@@ -229,8 +253,9 @@ impl ConsoleServer {
     /// short by a wake never extends it. A [`Ready`] with neither field
     /// set means the waker or the deadline ended the wait. A read that
     /// completed with an error is returned as that error, and the read is
-    /// no longer in flight: `Interrupted` after [`ConsoleServer::cancel_read`],
-    /// `BrokenPipe` once the driver has dropped the server. `exit` stays
+    /// no longer in flight: `Interrupted` when [`ConsoleServer::cancel_read`]
+    /// stopped it (a cancel can lose the race, and the read then completes
+    /// normally), `BrokenPipe` once the driver has dropped the server. `exit` stays
     /// signalled, so the next call reports it again; stop passing it once
     /// it has been handled.
     pub fn wait(
@@ -292,5 +317,42 @@ impl ConsoleServer {
     /// client. The same happens on drop.
     pub fn close(self) {
         drop(self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use platform::process::ExitStatus;
+
+    /// Failure injected at the one fallible step after `CreateProcessW`:
+    /// the child must be terminated and reaped, and setup's error kept.
+    #[test]
+    fn a_setup_failure_after_create_terminates_the_child() {
+        let cwd = std::env::current_dir().expect("current_dir");
+        let mut cmd = Command::new("ping.exe", cwd);
+        cmd.argv = ["-n", "30", "127.0.0.1"].iter().map(Into::into).collect();
+        let resolved = crate::WindowsSpawner
+            .resolve(&cmd.program)
+            .expect("resolve");
+        let args: Vec<&OsStr> = cmd.argv.iter().map(OsString::as_os_str).collect();
+        let line = crate::winargv::build_command_line(&resolved, &args).expect("command line");
+
+        let server = sys::Server::create().expect("Server::create");
+        let (process, pid) = sys::spawn(&server, &line, &cmd.cwd, &cmd.env).expect("spawn");
+        let probe = handle::duplicate(&process, false).expect("probe handle");
+        assert_eq!(crate::sys::proc::try_wait(&probe).expect("try_wait"), None);
+
+        let injected = PlatformError::new(ErrorKind::Other, OsCode::None, "injected");
+        let Err(e) = finish_spawn(server, process, pid, |_| Err(injected)) else {
+            panic!("finish_spawn succeeded despite the injected failure");
+        };
+        assert_eq!((e.kind, e.op), (ErrorKind::Other, "injected"));
+        // Already reaped: no wait is needed to see the exit.
+        assert_eq!(
+            crate::sys::proc::try_wait(&probe).expect("try_wait"),
+            Some(ExitStatus::Code(1)),
+            "the child outlived the failed spawn"
+        );
     }
 }
