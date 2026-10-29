@@ -80,17 +80,13 @@
 //! Everything else is deliberately deferred -- see the README's backlog
 //! section and the repository's issue tracker.
 //!
-//! # Running on real tokio too
+//! # Running on another executor
 //!
-//! The optional, **additive** `tokio` feature compiles in a real
-//! crates.io `tokio` backend alongside the default `rusty_tokio` one;
-//! each request then uses whichever runtime the calling task is actually
-//! running on, detected per call (see `src/rt.rs`) rather than picked at
-//! compile time. So a consumer on `rusty_tokio` is unaffected when Cargo
-//! feature unification turns the feature on for it via some other crate
-//! in the same build, and a consumer on real tokio gets real tokio's
-//! sockets, timers, and blocking pool with no second runtime. The
-//! feature also adds `Body::streaming_tokio` for real-tokio readers.
+//! Requests run on `rusty_tokio`. A program whose tasks run on another
+//! executor (a tokio runtime, say) calls
+//! `rusty_tokio::runtime::install_fallback()` once at startup; requests
+//! made from those tasks then use the fallback runtime's sockets, timers
+//! and blocking pool.
 //!
 //! # Example
 //!
@@ -113,12 +109,9 @@ mod rand;
 mod request;
 mod response;
 mod retry;
-mod rt;
 mod stream;
 mod streaming;
 mod tls;
-#[cfg(feature = "tokio")]
-mod tokio_compat;
 
 pub use body::Body;
 pub use client::{Client, ClientBuilder, RequestBuilder};
