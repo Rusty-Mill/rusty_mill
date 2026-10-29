@@ -310,6 +310,27 @@ mod tests {
         assert_eq!((pool.held(), pool.reserved()), (0, 0));
     }
 
+    /// `wait_any` reports a fired event as itself, by index, and queries
+    /// nothing about it: the worker's wait set mixes events and processes.
+    #[test]
+    fn wait_any_reports_which_handle_fired() {
+        let a = sys::auto_reset_event().expect("event");
+        let b = sys::auto_reset_event().expect("event");
+        let set = [a.as_raw(), b.as_raw()];
+        assert_eq!(sys::wait_any(&set, Duration::ZERO).expect("poll"), None);
+        sys::set_event(&b).expect("set");
+        assert_eq!(sys::wait_any(&set, RESCAN).expect("wait"), Some(1));
+        // Auto-reset: the wait consumed it.
+        assert!(!sys::signalled(&b).expect("signalled"));
+        sys::set_event(&a).expect("set");
+        assert!(sys::signalled(&a).expect("signalled"));
+
+        for bad in [Vec::new(), vec![a.as_raw(); 65]] {
+            let e = sys::wait_any(&bad, Duration::ZERO).expect_err("a bad set");
+            assert_eq!(e.kind, ErrorKind::InvalidInput);
+        }
+    }
+
     /// Waking the worker is not an error, whatever backend `proc` uses:
     /// its wait set mixes the wake event with process handles.
     #[test]
