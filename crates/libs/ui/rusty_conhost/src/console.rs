@@ -156,14 +156,20 @@ pub(crate) enum Effect {
 }
 
 /// Something worth one log line. Each kind is logged once per console,
-/// or once per (client, API) for unknown APIs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// or once per (client, API) for unknown APIs, up to [`MAX_LOGGED`]
+/// distinct lines; then one [`Diag::Suppressed`] and silence.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Diag {
     UnknownApi { pid: u32, number: u32 },
     UnknownFunction(u32),
     InputDiscarded,
     TooManyClients,
+    Suppressed,
 }
+
+/// Distinct diagnostics a console remembers. Clients choose the API
+/// numbers, so the set is capped rather than grown per client.
+pub(crate) const MAX_LOGGED: usize = 64;
 
 impl fmt::Display for Diag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -176,6 +182,7 @@ impl fmt::Display for Diag {
                 write!(f, "terminal input is discarded until input support lands")
             }
             Diag::TooManyClients => write!(f, "a client was refused: {MAX_CLIENTS} are connected"),
+            Diag::Suppressed => write!(f, "{MAX_LOGGED} diagnostics logged; the rest are dropped"),
         }
     }
 }
@@ -408,13 +415,8 @@ pub(crate) struct Console {
     parked: usize,
     connected_once: bool,
     closed: bool,
+    /// At most [`MAX_LOGGED`] entries, plus `Suppressed` once full.
     logged: HashSet<Diag>,
-}
-
-impl std::hash::Hash for Diag {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.to_string().hash(state);
-    }
 }
 
 impl Console {
@@ -469,6 +471,12 @@ impl Console {
     }
 
     fn log(&mut self, d: Diag, fx: &mut Vec<Effect>) {
+        if self.logged.len() >= MAX_LOGGED {
+            if self.logged.insert(Diag::Suppressed) {
+                fx.push(Effect::Log(Diag::Suppressed));
+            }
+            return;
+        }
         if self.logged.insert(d.clone()) {
             fx.push(Effect::Log(d));
         }
@@ -1534,6 +1542,40 @@ mod tests {
         let (r, fx) = h.packet(42, p2, 0, &[], 0);
         assert_eq!(r.status, msg::STATUS_UNSUCCESSFUL, "an unknown function");
         assert_eq!(logs(&fx), 1);
+    }
+
+    fn unknown_api(h: &mut Host, process: usize, number: u32) -> Vec<Effect> {
+        let mut payload = number.to_le_bytes().to_vec();
+        payload.extend(0u32.to_le_bytes());
+        let (r, fx) = h.packet(msg::USER_DEFINED, process, 0, &payload, 0);
+        assert_eq!(r.status, msg::STATUS_ILLEGAL_FUNCTION);
+        fx
+    }
+
+    #[test]
+    fn many_unknown_apis_log_a_bounded_set_then_one_summary() {
+        let mut h = Host::new();
+        h.connect(1, "");
+        let total: usize = (0..10_000)
+            .map(|n| logs(&unknown_api(&mut h, 1, 0x0300_0000 + n)))
+            .sum();
+        assert_eq!(total, MAX_LOGGED + 1);
+        assert_eq!(h.c.logged.len(), MAX_LOGGED + 1);
+        assert!(h.c.logged.contains(&Diag::Suppressed));
+        assert_eq!(logs(&unknown_api(&mut h, 1, 0x0300_0000)), 0);
+    }
+
+    #[test]
+    fn client_churn_does_not_grow_the_log_set() {
+        let mut h = Host::new();
+        h.connect(1, "");
+        for pid in 2..2_000 {
+            let [process, ..] = h.connect(pid, "");
+            unknown_api(&mut h, process, 0x0300_0042);
+            let (r, _) = h.packet(msg::DISCONNECT, process, 0, &[], 0);
+            assert_eq!(r.status, msg::STATUS_SUCCESS);
+        }
+        assert_eq!(h.c.logged.len(), MAX_LOGGED + 1);
     }
 
     #[test]
