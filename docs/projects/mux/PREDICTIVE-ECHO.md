@@ -1,6 +1,7 @@
 # Predictive echo: design for review
 
-Status: proposed 2026-10-29, not built. Phase 3 step 3 (C13). The owner's
+Status: proposed 2026-10-29, not built. The owner answered its open
+questions on 2026-10-29; the design awaits review. Phase 3 step 3 (C13). The owner's
 order (DECISIONS 2026-10-28) is to design causality, epochs and password
 suppression and have them reviewed before any code. Nothing here changes a
 wire format yet. [SPIKE-4-ROAMING.md](SPIKE-4-ROAMING.md) states the open
@@ -130,15 +131,14 @@ other two cover what it does not.
 2. **`Hidden` mode.** While the latest `EchoMode` is `Hidden`, the client
    makes no predictions at all, confirmed epoch or not. This covers a
    program that turns echo off in the middle of a line.
-3. **`Unknown` mode.** Without termios (Windows), predictions stay off
-   unless the owner decides otherwise (open question 2), since layer 2 is
-   missing.
+3. **`Unknown` mode.** Without termios (Windows), predictions stay off,
+   since layer 2 is missing (owner decision 2).
 
 What stays possible: a program in `Program` mode that draws its own masked
 field (`*` per key) mid-line, without a control key first, after an epoch
 on the same line was confirmed. The first masked key fails the check, so at
-most one character shows, underlined, for one round trip. Open question 3
-asks whether that is acceptable.
+most one character shows, underlined, for one round trip. The owner accepted
+this (decision 3).
 
 ## Display
 
@@ -189,17 +189,17 @@ plus `G` past its key.
   the client writes to its terminal. Resize, reconnect and focus moves
   clear predictions.
 
-## Open questions for review
+## Decided by the owner
 
-1. Grace `G`: 50 ms as mosh, or adaptive (a multiple of the program's
-   measured echo delay in this epoch)?
-2. `Unknown` mode (Windows): predictions off by default, as proposed, or on
-   with only the epoch layer?
-3. Is one underlined character for one round trip acceptable in the masked
-   field case above, or should `Program` mode also need a fresh epoch per
-   word?
-4. Should predictions be switchable off by the user, by environment variable
-   or flag, in the first version?
+Nano agreed with all four proposed answers on #1245 (2026-10-29 20:51Z):
+
+1. Grace `G` is a fixed 50 ms in the first version. An adaptive grace can
+   follow if measurements call for it.
+2. `Unknown` mode (Windows): predictions are off.
+3. In the masked-field case above, one underlined character for one round
+   trip is accepted. `Program` mode gets no extra rule.
+4. The user can turn predictions off. The first version has a switch; the
+   build PRs name it.
 
 ## Build order, once approved
 
