@@ -171,6 +171,7 @@ function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.te
 
 function render(){
   if(view==="roadmap"){renderRoadmap();return}
+  mapSeq++;   // drop any roadmap still loading
   const b=$("board");b.classList.remove("roadmap");b.replaceChildren();
   for(const c of COLS){
     const col=el("section",null,"col");col.dataset.col=c;col.append(el("h2",c));
@@ -203,12 +204,17 @@ function render(){
 let view=pref("view")==="roadmap"?"roadmap":"board",mapSeq=0;
 const LANE_HINT={now:"building, qa, review",next:"ready",later:"backlog",blocked:"blocked",shipped:"done, last 30 days"};
 function setView(v){view=v;pref("view",v);$("view").setAttribute("aria-pressed",v==="roadmap");render()}
+// The chosen project, else the chosen repository's own, else `default`, else the first this credential may see.
+const roadmapProject=()=>[sel.project,sel.repo,"default",...projects()].find(p=>p&&projects().includes(p));
 async function renderRoadmap(){
-  const project=sel.project||sel.repo||"default",seq=++mapSeq,b=$("board");
+  const project=roadmapProject(),seq=++mapSeq,b=$("board");
+  const stale=()=>seq!==mapSeq||view!=="roadmap";   // a newer render, or the board, won
   let map;
-  try{map=await api("board_roadmap",{project})}
-  catch(e){if(seq===mapSeq){b.replaceChildren(el("p",e.message,"meta"))}return}
-  if(seq!==mapSeq||view!=="roadmap")return;   // a newer render won
+  try{
+    if(!project)throw new Error("No project to show a roadmap for.");
+    map=await api("board_roadmap",{project});
+  }catch(e){if(!stale()){b.classList.remove("roadmap");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  if(stale())return;
   b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+map.project));
   for(const l of map.lanes){
     const col=el("section",null,"col");col.dataset.lane=l.lane;

@@ -50,6 +50,15 @@ check(true, "the roadmap view is remembered across reloads");
 await page.click("#view");
 await page.waitForSelector("[data-col=backlog]");
 check((await page.locator(".roadmap").count()) === 0, "toggling back shows the board");
+
+// A roadmap request that fails after the user went back to the board must not replace it.
+await page.route("**/api/board_roadmap", async (route) => { await sleep(800); await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "late failure" }) }); });
+await page.click("#view");
+await page.click("#view");
+await sleep(1500);
+check((await page.locator("[data-col=backlog]").count()) === 1 && !(await page.locator("#board").innerText()).includes("late failure"), "a late roadmap failure leaves the board alone");
+await page.unroute("**/api/board_roadmap");
 check(errors.length === 0, `no page errors (${errors.join("; ")})`);
 await browser.close();
 if (failures.length) { console.error(`${failures.length} failed`); process.exit(1); }
+console.log("all browser checks passed");
