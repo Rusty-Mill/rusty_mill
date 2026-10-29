@@ -3,12 +3,12 @@
 //! run it under ConPTY and under our host and compare the lines.
 //!
 //! ```text
-//! probe host <program> [args...]   run a program on our host, output to stdout
-//! probe modes                      GetConsoleMode on stdin and stdout
-//! probe set-mode <in|out> <hex>    SetConsoleMode, then GetConsoleMode
-//! probe cp                         GetConsoleCP
-//! probe set-cp <code page>         SetConsoleCP, then GetConsoleCP
-//! probe write <bytes>              write that many `x`s to stdout
+//! conhost_probe host <program> [args...]   run a program on our host, output to stdout
+//! conhost_probe modes                      GetConsoleMode on stdin and stdout
+//! conhost_probe set-mode <in|out> <hex>    SetConsoleMode, then GetConsoleMode
+//! conhost_probe cp                         GetConsoleCP
+//! conhost_probe set-cp <code page>         SetConsoleCP, then GetConsoleCP
+//! conhost_probe write <bytes>              write that many `x`s to stdout
 //! ```
 //!
 //! `host` is also how fixtures are recorded: run it with
@@ -20,7 +20,7 @@ fn main() {
     let code = match probe::run(&args) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("probe: {e}");
+            eprintln!("conhost_probe: {e}");
             2
         }
     };
@@ -29,7 +29,7 @@ fn main() {
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("probe: the console probes run on Windows only");
+    eprintln!("conhost_probe: the console probes run on Windows only");
     std::process::exit(2);
 }
 

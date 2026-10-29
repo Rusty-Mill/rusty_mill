@@ -35,12 +35,14 @@ fn command(program: &str, args: &[&str]) -> Command {
     cmd
 }
 
-/// The probe example, which `cargo test` builds next to this binary.
+/// The `conhost_probe` example, which `cargo test` builds next to this
+/// binary. Example names share one directory across the workspace, hence
+/// the prefix.
 fn probe() -> String {
     let exe = std::env::current_exe().expect("current_exe");
     let dir = exe.parent().and_then(|d| d.parent()).expect("target dir");
-    let path: PathBuf = dir.join("examples").join("probe.exe");
-    assert!(path.exists(), "build the probe example: {}", path.display());
+    let path: PathBuf = dir.join("examples").join("conhost_probe.exe");
+    assert!(path.exists(), "build the conhost_probe example: {}", path.display());
     path.to_string_lossy().into_owned()
 }
 
