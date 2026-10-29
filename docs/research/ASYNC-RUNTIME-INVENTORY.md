@@ -188,6 +188,17 @@ tokio and reqwest. `rusty-mcp-client` no longer turns on `rusty_request`'s
 on a tokio runtime (`adk-mcp`'s `client`, `rk-mcp`'s `rmcp`, `rp-mcp`) turn it
 on until they move. Its OAuth tests run on `rusty_tokio`.
 
+Runtime boundary, opt-in fallback (2026-10-29): `rusty_tokio::runtime::install_fallback()`
+starts one process-wide `rusty_tokio` runtime. After it runs, I/O, timers,
+`spawn` and `spawn_blocking` on a thread with no `rusty_tokio` runtime (a tokio
+worker, say) use the fallback runtime instead of panicking. A tokio application
+that calls it at startup can depend on crates that moved to `rusty_tokio`, so
+the boundary above no longer forces a library to wait for its consumers.
+`Handle::current`/`try_current` are unchanged, so `rusty_request`'s per-call
+backend choice still works. The next steps are to drop `rusty_request`'s
+`tokio` backend and `rusty-mcp-client`'s `tokio` feature (#906), once their
+tokio consumers call it.
+
 ## 4. Per-crate table
 
 Deps: `t` tokio, `f` futures, `fu` futures-util, `as` async-stream, `tu`

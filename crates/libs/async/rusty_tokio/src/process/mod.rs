@@ -205,7 +205,8 @@ impl Command {
     /// long).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`] *and* any
+    /// Panics if called outside a running [`crate::Runtime`], with no
+    /// [fallback](crate::runtime::install_fallback) installed, *and* any
     /// of `stdin`/`stdout`/`stderr` was set to [`Stdio::piped`] --
     /// adopting a piped fd needs the ambient reactor. Spawning with every
     /// stream left at its default (inherited) needs no runtime at all.
@@ -234,7 +235,8 @@ impl Command {
     /// for `self.spawn()?.wait().await`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn status(&mut self) -> io::Result<ExitStatus> {
         self.spawn()?.wait().await
     }
@@ -246,7 +248,8 @@ impl Command {
     /// self.stderr(Stdio::piped()); self.spawn()?.wait_with_output().await`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn output(&mut self) -> io::Result<Output> {
         self.stdout(Stdio::piped());
         self.stderr(Stdio::piped());
@@ -332,7 +335,8 @@ impl Child {
     /// `std::process::Child::wait`'s own docs carry.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn wait(&mut self) -> io::Result<ExitStatus> {
         if let Some(status) = self.status {
             return Ok(status);
@@ -363,7 +367,8 @@ impl Child {
     /// the same thing `std::process::Child::wait_with_output` does.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn wait_with_output(mut self) -> io::Result<Output> {
         drop(self.stdin.take());
         // Taken out into locals rather than borrowed from `self`
@@ -449,7 +454,7 @@ struct PipeIo {
 #[cfg(unix)]
 impl PipeIo {
     fn adopt(fd: OwnedFd) -> io::Result<PipeIo> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         socket::set_nonblocking(fd.as_raw_fd(), true)?;
         let io = reactor.register(fd.as_raw_fd())?;
         Ok(PipeIo { fd, io, reactor })

@@ -35,6 +35,26 @@ impl Handle {
         CURRENT.with(|c| c.borrow().clone())
     }
 
+    /// The thread's own runtime, else the one [`install_fallback`] started:
+    /// what I/O registration, timers and `spawn` use, so they also work on a
+    /// thread another executor drives.
+    ///
+    /// [`install_fallback`]: super::install_fallback
+    ///
+    /// # Panics
+    /// Panics if there is neither.
+    #[track_caller]
+    pub(crate) fn current_or_fallback() -> Handle {
+        if let Some(handle) = Self::try_current().or_else(super::fallback::get) {
+            return handle;
+        }
+        panic!(
+            "there is no rusty_tokio runtime running on this thread -- \
+             call this from within Runtime::block_on or a spawned task, or \
+             call rusty_tokio::runtime::install_fallback() first"
+        )
+    }
+
     /// Like [`try_current`](Self::try_current), but `None` instead of a
     /// panic once this thread's thread-locals are being torn down --
     /// for `time::Instant::now`, which falls back to real time without

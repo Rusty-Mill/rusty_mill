@@ -88,7 +88,8 @@ impl<T: AsRawFd> AsyncFd<T> {
     /// narrow that down.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn new(inner: T) -> io::Result<Self> {
         Self::with_interest(inner, Interest::READABLE | Interest::WRITABLE)
     }
@@ -105,7 +106,8 @@ impl<T: AsRawFd> AsyncFd<T> {
     /// for readiness it never declared wanting), same as real tokio.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn with_interest(inner: T, interest: Interest) -> io::Result<Self> {
         Self::try_register(inner, interest).map_err(|(_, e)| e)
     }
@@ -119,7 +121,8 @@ impl<T: AsRawFd> AsyncFd<T> {
     /// dropped, [`into_inner`](Self::into_inner)ed or forgotten.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub unsafe fn register(inner: T) -> Result<Self, AsyncFdRegisterError<T>> {
         // SAFETY: the caller upholds this function's contract, which is
         // `register_with_interest`'s.
@@ -133,7 +136,8 @@ impl<T: AsRawFd> AsyncFd<T> {
     /// As [`register`](Self::register).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub unsafe fn register_with_interest(
         inner: T,
         interest: Interest,
@@ -144,7 +148,7 @@ impl<T: AsRawFd> AsyncFd<T> {
 
     fn try_register(inner: T, interest: Interest) -> Result<Self, (T, io::Error)> {
         let fd = inner.as_raw_fd();
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let io = match reactor.register(fd) {
             Ok(io) => io,
             Err(e) => return Err((inner, e)),
@@ -235,7 +239,7 @@ impl<T: AsRawFd> AsyncFd<T> {
     /// # Panics
     /// Panics if this `AsyncFd` wasn't constructed with
     /// [`Interest::READABLE`], or if called outside a running
-    /// [`crate::Runtime`].
+    /// [`crate::Runtime`] with no [fallback](crate::runtime::install_fallback) installed.
     pub async fn readable(&self) -> io::Result<AsyncFdReadyGuard<'_, T>> {
         std::future::poll_fn(|cx| self.poll_read_ready(cx)).await
     }
@@ -247,7 +251,7 @@ impl<T: AsRawFd> AsyncFd<T> {
     /// # Panics
     /// Panics if this `AsyncFd` wasn't constructed with
     /// [`Interest::WRITABLE`], or if called outside a running
-    /// [`crate::Runtime`].
+    /// [`crate::Runtime`] with no [fallback](crate::runtime::install_fallback) installed.
     pub async fn writable(&self) -> io::Result<AsyncFdReadyGuard<'_, T>> {
         std::future::poll_fn(|cx| self.poll_write_ready(cx)).await
     }

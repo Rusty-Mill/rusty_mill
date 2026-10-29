@@ -23,6 +23,7 @@
 mod blocking;
 mod context;
 mod current_thread;
+mod fallback;
 mod id;
 mod metrics;
 #[cfg(feature = "thread-per-core")]
@@ -30,6 +31,7 @@ mod thread_per_core;
 mod worker;
 
 pub use context::{EnterGuard, Handle, TryCurrentError};
+pub use fallback::install_fallback;
 pub use id::Id;
 pub use metrics::RuntimeMetrics;
 
