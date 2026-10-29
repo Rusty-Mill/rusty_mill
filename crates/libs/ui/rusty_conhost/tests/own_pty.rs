@@ -147,6 +147,11 @@ fn cmd_c_echo_prints_and_reaches_eof_once() {
     assert_eq!(master.read(&mut buf).expect("read after EOF"), 0);
 }
 
+/// Answers that differ from ConPTY by design (§5.10), as (probe, ours).
+/// V4: only 65001 until code pages land, where ConPTY reports the OEM
+/// code page.
+const DIVERGENCES: &[(&[&str], &str)] = &[(&["cp"], "cp in=65001")];
+
 #[test]
 fn probes_agree_with_conpty() {
     let _g = lock();
@@ -164,7 +169,9 @@ fn probes_agree_with_conpty() {
         .filter_map(|args| {
             let conpty = probe_line(Host::ConPty, args);
             let ours = probe_line(Host::Own, args);
-            (conpty != ours).then(|| format!("{args:?}: ConPTY {conpty:?}, ours {ours:?}"))
+            let diverges = DIVERGENCES.contains(&(args, ours.as_str()));
+            (conpty != ours && !diverges)
+                .then(|| format!("{args:?}: ConPTY {conpty:?}, ours {ours:?}"))
         })
         .collect();
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));

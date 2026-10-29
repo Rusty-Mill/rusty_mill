@@ -60,7 +60,7 @@ fn packet_line(p: &Packet<'_>) -> String {
         p.object,
         p.input_size,
         p.output_size,
-        hex(&sanitise(p))
+        hex_or_dash(&sanitise(p))
     )
 }
 
@@ -101,6 +101,15 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
         })
 }
 
+/// Hex, or `-` for no bytes, so every field is one word.
+fn hex_or_dash(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        "-".to_owned()
+    } else {
+        hex(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -131,13 +140,6 @@ mod tests {
         }
     }
 
-    fn hex_or_dash(bytes: &[u8]) -> String {
-        if bytes.is_empty() {
-            "-".to_owned()
-        } else {
-            hex(bytes)
-        }
-    }
     fn unhex(s: &str) -> Option<Vec<u8>> {
         if s == "-" {
             return Some(Vec::new());

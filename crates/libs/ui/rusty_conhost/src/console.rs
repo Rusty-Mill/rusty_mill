@@ -78,8 +78,10 @@ const OUTPUT_MODES: u32 = 0x1F;
 /// `INPUT_BUFFER_DEFAULT_INPUT_MODE`: LINE, PROCESSED, ECHO and MOUSE.
 const DEFAULT_INPUT_MODE: u32 =
     mode::LINE_INPUT | mode::PROCESSED_INPUT | mode::ECHO_INPUT | mode::MOUSE_INPUT;
-/// `SCREEN_INFORMATION::OutputMode`: PROCESSED and WRAP_AT_EOL.
-const DEFAULT_OUTPUT_MODE: u32 = 0x3;
+/// PROCESSED, WRAP_AT_EOL and VIRTUAL_TERMINAL_PROCESSING: what ConPTY
+/// reports (Beast, build 26300). Inbox conhost's own default
+/// (`SCREEN_INFORMATION::OutputMode`) lacks the VT bit; ConPTY turns it on.
+const DEFAULT_OUTPUT_MODE: u32 = 0x7;
 
 /// One packet, its variable input already read (capped, §7.4).
 #[derive(Clone, Copy, Debug)]
@@ -1319,7 +1321,7 @@ mod tests {
         let mut h = Host::new();
         let [_, input, output] = h.connect(1, "");
         assert_eq!(h.mode(input), 0x1F7);
-        assert_eq!(h.mode(output), 0x3);
+        assert_eq!(h.mode(output), 0x7);
         let stranger = h.call(12345, api::GET_MODE, &[0; 4], &[], 0);
         assert_eq!(stranger.status, msg::STATUS_INVALID_HANDLE);
     }
@@ -1350,7 +1352,7 @@ mod tests {
         let mut h = Host::new();
         let [_, _, output] = h.connect(1, "");
         assert_eq!(h.set_mode(output, 0x20), msg::STATUS_FROM_INVALIDARG);
-        assert_eq!(h.mode(output), 0x3);
+        assert_eq!(h.mode(output), 0x7);
         assert_eq!(h.set_mode(output, 0x1F), msg::STATUS_SUCCESS);
         assert!(h.vt.is_empty(), "WRAP did not change");
         assert_eq!(h.set_mode(output, 0x1D), msg::STATUS_SUCCESS);
