@@ -5,6 +5,7 @@
 //! - [`board`]: the service: roles, clock, commit with retry.
 //! - [`projects`]: the applications one board serves, and the paths each may change.
 //! - [`domain`]: pure cards, columns, capabilities and the transition table.
+//! - [`roadmap`]: a project's roadmap lanes, derived from its cards.
 //! - [`store`]: the storage port and an in-memory adapter.
 //! - [`mcp`], [`web`]: the two surfaces over [`api`].
 //! - [`github`]: the GitHub issues adapter.
@@ -22,6 +23,7 @@ pub mod http;
 pub mod identities;
 pub mod mcp;
 pub mod projects;
+pub mod roadmap;
 pub mod settings;
 pub mod store;
 pub mod sync;

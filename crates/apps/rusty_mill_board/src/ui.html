@@ -23,6 +23,11 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .meta{color:var(--mute);font-size:12px;margin-top:4px}
 .tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
 .tag.proj{border-color:var(--acc)}
+#view[aria-pressed=true]{background:var(--acc);color:#fff}
+main.roadmap{grid-auto-flow:row;grid-template-columns:repeat(5,minmax(190px,1fr));align-content:start}
+.roadmap h3{grid-column:1/-1;margin:0;font-size:15px}
+@media (max-width:640px){main.roadmap{grid-template-columns:minmax(0,1fr)}}
+.roadmap .card{cursor:pointer}
 :root{--al:40%}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){--al:66%}}
 .card.claimed{border-left:4px solid var(--ag);background:color-mix(in srgb,var(--ag) 9%,var(--card))}
@@ -75,6 +80,7 @@ dialog form{display:grid;gap:8px}
 <header>
   <button id="toggle" aria-label="toggle repositories panel" title="Repositories">&#9776;</button>
   <h1>Mill Board</h1>
+  <button id="view" aria-pressed="false" title="Show the chosen project's roadmap">Roadmap</button>
   <input id="actor" placeholder="your name" size="12" aria-label="actor name">
   <select id="role" aria-label="role"></select>
   <input id="title" placeholder="New card title" size="26" aria-label="new card title">
@@ -164,7 +170,9 @@ async function act(op,args){
 function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e}
 
 function render(){
-  const b=$("board");b.replaceChildren();
+  if(view==="roadmap"){renderRoadmap();return}
+  mapSeq++;   // drop any roadmap still loading
+  const b=$("board");b.classList.remove("roadmap");b.replaceChildren();
   for(const c of COLS){
     const col=el("section",null,"col");col.dataset.col=c;col.append(el("h2",c));
     col.ondragover=e=>{e.preventDefault();col.classList.add("over")};
@@ -185,6 +193,41 @@ function render(){
       d.ondragstart=e=>e.dataTransfer.setData("text",k.id);
       d.onclick=()=>show(k.id);
       col.append(d);
+    }
+    b.append(col);
+  }
+  renderSide();syncDialog();
+}
+
+/* The roadmap: the chosen project's cards in lanes (now, next, later, blocked, shipped), laid out
+   by the server's board_roadmap so the rules live in one place. Re-read whenever the board is. */
+let view=pref("view")==="roadmap"?"roadmap":"board",mapSeq=0;
+const LANE_HINT={now:"building, qa, review",next:"ready",later:"backlog",blocked:"blocked",shipped:"done, last 30 days"};
+function setView(v){view=v;pref("view",v);$("view").setAttribute("aria-pressed",v==="roadmap");render()}
+// The chosen project, else the chosen repository's own, else `default`, else the first this credential may see.
+const roadmapProject=()=>[sel.project,sel.repo,"default",...projects()].find(p=>p&&projects().includes(p));
+async function renderRoadmap(){
+  const project=roadmapProject(),seq=++mapSeq,b=$("board");
+  const stale=()=>seq!==mapSeq||view!=="roadmap";   // a newer render, or the board, won
+  let map;
+  try{
+    if(!project)throw new Error("No project to show a roadmap for.");
+    map=await api("board_roadmap",{project});
+  }catch(e){if(!stale()){b.classList.remove("roadmap");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  if(stale())return;
+  b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+map.project));
+  for(const l of map.lanes){
+    const col=el("section",null,"col");col.dataset.lane=l.lane;
+    const h=el("h2",l.lane+" · "+l.cards.length);h.title=LANE_HINT[l.lane];col.append(h);
+    for(const k of l.cards){
+      const d=el("div",null,"card");d.append(el("b",k.title));
+      const m=el("div",null,"meta");
+      if(l.lane==="now")m.append(el("span",k.column,"tag"));
+      k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
+      if(k.claim)m.append(el("span",k.claim,"tag"));
+      if(k.waits_on.length)m.append(el("span","waits on "+k.waits_on.length));
+      if(k.done_ms)m.append(el("span","shipped "+new Date(k.done_ms).toLocaleDateString()));
+      d.append(m);d.onclick=()=>show(k.id);col.append(d);
     }
     b.append(col);
   }
@@ -510,6 +553,7 @@ async function loadMeta(){
   if(r in repos&&(!p||repos[r].includes(p)))sel={repo:r,project:p||"",agent:""};
   $("actor").onchange=()=>pref("actor",$("actor").value);$("role").onchange=()=>pref("role",$("role").value);
   $("gear").onclick=openSettings;
+  $("view").onclick=()=>setView(view==="roadmap"?"board":"roadmap");$("view").setAttribute("aria-pressed",view==="roadmap");
   $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
   $("toggle").onclick=()=>{pref("side",pref("side")==="0"?"1":"0");renderSide()};
   // New cards go to the chosen project, else to the chosen repository's own project.

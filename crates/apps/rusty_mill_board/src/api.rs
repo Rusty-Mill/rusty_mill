@@ -163,6 +163,12 @@ struct ListArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct RoadmapArgs {
+    /// The project (see `board_projects`).
+    project: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct OwnsArgs {
     /// The project (see `board_projects`).
     project: String,
@@ -399,6 +405,14 @@ pub fn ops() -> Vec<Op> {
                     "default": DEFAULT_PROJECT,
                     "count": b.projects().names().count(),
                 }))
+            },
+        ),
+        op(
+            "board_roadmap",
+            "A project's roadmap, derived from its cards: lanes now (building, qa, review), next (ready), later (backlog), blocked, and shipped (done in the last 30 days, newest first). Each lane is ordered as card_take orders work; `waits_on` lists dependencies not yet done. {project, lanes: [{lane, cards}]}.",
+            |b, i, a: RoadmapArgs| {
+                checked_project(b, scope(i), Some(&a.project))?;
+                to_json(b.roadmap(&a.project)?)
             },
         ),
         op(
@@ -978,5 +992,73 @@ mod tests {
             listed["repos"]["default"]["rl"],
             json!(["crates/apps/rocket_league"])
         );
+    }
+
+    #[test]
+    fn roadmap_lanes_a_project_and_respects_scope() {
+        use crate::projects::Projects;
+        let projects = Projects::parse(r#"{"rl": ["a"], "orch": ["b"]}"#).expect("projects");
+        let board: Shared = Board::new(
+            Box::new(MemStore::default()) as Box<dyn Store>,
+            Roles::default(),
+        )
+        .with_projects(projects);
+        let human = ident("nano", "human");
+        let out = call_as(
+            &board,
+            Some(&human),
+            "card_add",
+            json!({"title": "next up", "project": "rl"}),
+        )
+        .expect("add");
+        let id = out["card"]["id"].as_str().expect("id").to_owned();
+        call_as(
+            &board,
+            Some(&human),
+            "card_move",
+            json!({"id": id, "to": "ready"}),
+        )
+        .expect("ready");
+
+        let map = call_as(
+            &board,
+            Some(&human),
+            "board_roadmap",
+            json!({"project": "rl"}),
+        )
+        .expect("roadmap");
+        let lanes: Vec<&str> = map["lanes"]
+            .as_array()
+            .expect("lanes")
+            .iter()
+            .map(|l| l["lane"].as_str().expect("lane"))
+            .collect();
+        assert_eq!(lanes, ["now", "next", "later", "blocked", "shipped"]);
+        assert_eq!(map["lanes"][1]["cards"][0]["title"], "next up");
+        assert!(
+            map["lanes"][1]["cards"][0].get("body").is_none(),
+            "trimmed card"
+        );
+
+        assert!(matches!(
+            call_as(
+                &board,
+                Some(&human),
+                "board_roadmap",
+                json!({"project": "nope"})
+            ),
+            Err(CallError::Board(BoardError::Invalid("unknown project")))
+        ));
+        let mut dev = ident("claude", "builder");
+        dev.projects = Some(vec!["orch".into()]);
+        assert!(matches!(
+            call_as(
+                &board,
+                Some(&dev),
+                "board_roadmap",
+                json!({"project": "rl"})
+            ),
+            Err(CallError::Board(BoardError::OutOfScope(_)))
+        ));
     }
 }
