@@ -103,17 +103,36 @@ at the cursor, and Backspace over a character predicted in the same epoch.
   It becomes confirmed when the first of its predictions passes the check
   below. Only then are its predictions, and later keys of the same epoch,
   drawn ahead of the server.
-- **The check.** When `EchoAck { req }` arrives, the client has already
-  applied every Output before it to its copy of the block's grid. For each
-  prediction of key `<= req`, the cell it predicted must now hold the
-  predicted character, and for the newest such key the cursor must be just
-  after it. All pass: they are confirmed and dropped (the real screen now
-  shows them). Any fails: the epoch's predictions are all dropped and erased,
-  and a new tentative epoch starts.
+- **The overlay.** An epoch's predictions are kept as the edit they make to
+  one row, not as a list of keys: for each cell it touched, the content the
+  epoch expects there once all its keys so far are applied, and the newest
+  key that touched it. A printable key writes its character at the
+  predicted cursor and moves it right. Backspace moves it left and expects
+  the cell to hold what the server's screen showed there before the epoch
+  touched it, so `a` then Backspace leaves that cell expecting its old
+  content, touched last by the Backspace.
+- **The check.** An ack is a watermark, not a snapshot of the screen at one
+  key: by the time it arrives, the screen may already show the echoes of
+  later keys. So when `EchoAck { req }` arrives (after every Output before
+  it is applied to the client's copy of the grid), the client checks only
+  the **settled** cells, those whose newest touching key is `<= req`. Each
+  must hold what the overlay expects. Cells touched by a later key are left
+  for a later ack, whatever they show now. The cursor is not compared with
+  a position (later echoes may have moved it on), only required to still be
+  on the predicted row, as the epoch rule above already demands. All
+  settled cells pass: they leave the overlay, since the screen now shows
+  them, and the epoch is confirmed. Any fails: the whole epoch is dropped
+  and erased, and a new tentative epoch starts.
 - **Confidence.** Two failed checks within ten keys turn predictions off for
-  the block until the next Enter. Predictions are drawn only while the
-  smoothed time from `Input` to its `EchoAck` is above 30 ms, and stop below
-  20 ms, so a fast path looks as it does today.
+  the block until the next Enter.
+- **Latency gate.** Predictions are drawn only on a slow path. The time from
+  `Input` to `EchoAck` cannot measure that, since it always includes `G`.
+  The client measures the path itself: it sends `Sync` on the block's
+  connection with the first key after at least a second without a sample,
+  and times the answer (`Done`), which the server sends at once. It keeps a
+  smoothed round trip (each sample weighted 1/8, as TCP's SRTT), starts
+  drawing above 30 ms and stops below 20 ms. A fresh connection starts with
+  drawing off until the first sample.
 
 A predicted character is drawn underlined until confirmed, so a guess never
 passes for the screen. A prediction is never drawn past the right margin
@@ -121,24 +140,47 @@ or over a wide character.
 
 ## Password suppression
 
-Three layers. The first alone already keeps a password off the screen; the
-other two cover what it does not.
+Three layers, each with what it guarantees and what it does not.
 
-1. **Epochs.** Every way into a password prompt goes through Enter or a
-   control key (running `sudo`, answering `ssh`), and that starts a
-   tentative epoch, whose predictions are never drawn. A prompt that never
-   echoes never confirms the epoch, so nothing typed into it is ever drawn.
-2. **`Hidden` mode.** While the latest `EchoMode` is `Hidden`, the client
-   makes no predictions at all, confirmed epoch or not. This covers a
-   program that turns echo off in the middle of a line.
+1. **Epochs.** A prompt reached after an epoch break (Enter to run `sudo`,
+   Enter after a username) starts in a tentative epoch, whose predictions
+   are never drawn. A prompt that never echoes never confirms it, so
+   nothing typed there is drawn. This is exact for prompts reached that
+   way, which are the common ones. It does not cover a prompt that appears
+   with no epoch break in between, for example one a program opens by
+   itself while the user is typing on a confirmed line.
+2. **`Hidden` mode.** While the latest `EchoMode` the client has received is
+   `Hidden`, it makes no predictions and erases any drawn ones. The
+   notification travels like any message, so keys typed while it is in
+   flight (up to one path round trip) may already have been drawn; this
+   layer stops further ones, it cannot take back the first.
 3. **`Unknown` mode.** Without termios (Windows), predictions stay off,
    since layer 2 is missing (owner decision 2).
 
-What stays possible: a program in `Program` mode that draws its own masked
-field (`*` per key) mid-line, without a control key first, after an epoch
-on the same line was confirmed. The first masked key fails the check, so at
-most one character shows, underlined, for one round trip. The owner accepted
-this (decision 3).
+**What stays possible**, then, is one case: on a line whose epoch is
+already confirmed, the program, with no epoch-breaking key in between,
+starts reading a secret, either drawing its own masked field (`*` per key)
+in `Program` mode or turning echo off. Until the first rejecting ack or the
+`Hidden` notification arrives, every key typed is drawn, underlined. That
+is all keys typed within one path round trip plus `G`, not one character:
+at 200 ms and 8 keys a second, about two.
+
+How far to bound this is back with the owner (decision 3, reopened): the
+earlier answer accepted "one character", which the design did not enforce.
+The options:
+
+- **A. Lead cap of one.** Outside `Kernel` mode, at most one prediction is
+  drawn and not yet settled at any time; the next key's prediction waits,
+  undrawn, until the previous one is confirmed. This enforces one
+  character, since the first masked key or a `Hidden` change fails or
+  stops the epoch before a second is drawn. The cost: typing faster than
+  one key per round trip shows each key late, so on the slow links that
+  predictions are for, most keys gain little.
+- **B. No cap.** Exposure is bounded by one round trip plus `G` of typing,
+  as above, as in mosh. Predictions keep their full use while typing fast.
+
+`Kernel` mode needs neither: the kernel echoes every key there, so a masked
+field cannot exist, and a switch to `Hidden` is caught by layer 2.
 
 ## Display
 
@@ -181,8 +223,25 @@ plus `G` past its key.
   `read -s` gives `Hidden`. An ack arrives for a key with no echo.
 - **Client, pure.** The epoch machine is plain data in, decisions out, with
   no I/O, and is tested on its own: which keys start epochs, tentative
-  epochs never draw, a failed check drops the whole epoch, Backspace,
-  confidence, and the margin.
+  epochs never draw, a failed check drops the whole epoch, confidence, and
+  the margin. Deterministic cases for the check:
+  - coalesced typing: `a` (r1) and `b` (r2) both echoed before `EchoAck
+    { r1 }`: the ack passes, `b`'s cell is left for `EchoAck { r2 }`, which
+    also passes;
+  - coalesced Backspace: `a` then Backspace, both settled by one ack, pass
+    against the cell's old content; the same pair with only `a` settled
+    leaves the cell unchecked;
+  - a partial watermark: three keys, an ack settling two, the third checked
+    by the next ack;
+  - a masked field: several keys typed on a confirmed line before the first
+    ack, and the program drawing `*` for each. With the chosen option, the
+    drawn characters before the rejecting ack are at most one (A) or the
+    keys typed so far (B), and none after it;
+  - a `Hidden` change in flight while keys are typed: no prediction is drawn
+    after it arrives, and drawn ones are erased.
+- **Latency gate.** With a stand-in path of about 2 ms and `G` at 50 ms,
+  predictions stay off; raising the path delay to 100 ms turns them on
+  after the first samples, and lowering it to 10 ms turns them off again.
 - **End to end**, with the stand-in ssh delaying every message by 200 ms:
   typing at a shell shows the characters before the echo, underlined, then
   plain. After `read -s` the typed characters never appear in anything
@@ -196,8 +255,10 @@ Nano agreed with all four proposed answers on #1245 (2026-10-29 20:51Z):
 1. Grace `G` is a fixed 50 ms in the first version. An adaptive grace can
    follow if measurements call for it.
 2. `Unknown` mode (Windows): predictions are off.
-3. In the masked-field case above, one underlined character for one round
-   trip is accepted. `Program` mode gets no extra rule.
+3. *(Reopened after review.)* The answer accepted one underlined character
+   for one round trip in the masked-field case, but the design did not
+   enforce that bound: it allowed every key typed within a round trip. See
+   options A and B under Password suppression.
 4. The user can turn predictions off. The first version has a switch; the
    build PRs name it.
 
