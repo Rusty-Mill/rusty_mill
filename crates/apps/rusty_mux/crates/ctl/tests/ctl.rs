@@ -725,6 +725,7 @@ fn legacy_server() -> (PathBuf, std::sync::mpsc::Receiver<usize>) {
                         features: Features::CHECKPOINT_V6,
                         client: ClientId::from_uuid(rusty_uuid::Uuid::nil()),
                         cursor: None,
+                        token: None,
                     };
                     stream
                         .write_all(&encode(&welcome).expect("encode"))
@@ -1132,6 +1133,7 @@ fn events_server(features: rusty_mux_proto::Features) -> PathBuf {
                 epoch: rusty_uuid::Uuid::nil(),
                 seq: 0,
             }),
+            token: None,
         };
         stream
             .write_all(&encode(&welcome).expect("encode"))

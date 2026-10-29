@@ -77,6 +77,11 @@ struct Transfer {
 }
 
 impl Outbox {
+    /// Whether this is the outbox of the connection that owns `cancel`.
+    pub(crate) fn belongs_to(&self, cancel: &Rc<Notify>) -> bool {
+        Rc::ptr_eq(&self.cancel, cancel)
+    }
+
     pub(crate) fn attaching(&self) -> bool {
         self.attaching.get()
     }

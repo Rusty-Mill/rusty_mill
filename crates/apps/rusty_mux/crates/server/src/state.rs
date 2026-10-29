@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Mux, Side, Size, WindowId};
 use rusty_mux_proto::schema::{self, CallError, Value};
-use rusty_mux_proto::{Code, Cursor, Entry, Features, Launch, Message, encode};
+use rusty_mux_proto::{Code, Cursor, Entry, Features, Launch, Message, Takeover, encode};
 use rusty_mux_status::Records;
 use rusty_term_core::{AnsiParser, Grid};
+use rusty_tokio::sync::Notify;
 use rusty_tokio::task::JoinHandle;
 use rusty_uuid::Uuid;
 
@@ -53,7 +54,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::PROCESS)
     .union(Features::CAPTURE)
     .union(Features::LABELS)
-    .union(Features::LAYOUT);
+    .union(Features::LAYOUT)
+    .union(Features::TAKEOVER);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
@@ -95,6 +97,8 @@ pub(crate) struct State {
     blocks: HashMap<BlockId, BlockRt>,
     clients: HashMap<ClientId, Outbox>,
     features: HashMap<ClientId, Features>,
+    /// Each `TAKEOVER` client's current token, from its last Welcome.
+    tokens: HashMap<ClientId, Uuid>,
     history: History,
 }
 
@@ -107,26 +111,46 @@ impl State {
             blocks: HashMap::new(),
             clients: HashMap::new(),
             features: HashMap::new(),
+            tokens: HashMap::new(),
             history: History::new(Uuid::new_v4(), HISTORY),
         }))
     }
 
+    #[cfg(all(test, unix))]
     pub(crate) fn has_client(&self, client: ClientId) -> bool {
         self.clients.contains_key(&client)
     }
 
+    /// Whether `client` is still served by the connection owning `cancel`,
+    /// and not dropped or taken over.
+    pub(crate) fn served_by(&self, client: ClientId, cancel: &Rc<Notify>) -> bool {
+        self.clients
+            .get(&client)
+            .is_some_and(|out| out.belongs_to(cancel))
+    }
+
     /// Registers a client, negotiates features and, with `EVENT_SEQ`,
     /// replays the events after `resume` when they are all still held.
+    /// With `TAKEOVER` and a valid `takeover`, the connection continues
+    /// that client instead: its id, name, attachment and lease stay, and
+    /// replacing its outbox closes the old connection.
     pub(crate) fn connect(
         &mut self,
         outbox: Outbox,
         theirs: Features,
         resume: Option<Cursor>,
+        takeover: Option<Takeover>,
     ) -> ClientId {
-        let client = self.mux.connect();
-        self.clients.insert(client, outbox);
         let features = theirs.intersection(OFFERED);
+        let continued = takeover.and_then(|t| self.takes_over(t, features));
+        let client = continued.unwrap_or_else(|| self.mux.connect());
+        self.clients.insert(client, outbox);
         self.features.insert(client, features);
+        let token = features.contains(Features::TAKEOVER).then(Uuid::new_v4);
+        match token {
+            Some(token) => self.tokens.insert(client, token),
+            None => self.tokens.remove(&client),
+        };
         let (cursor, missed) = if features.contains(Features::EVENT_SEQ) {
             let (cursor, missed) = self.missed(resume, features);
             (Some(cursor), missed)
@@ -139,9 +163,15 @@ impl State {
                 features,
                 client,
                 cursor,
+                token,
             },
         );
         missed.iter().for_each(|m| self.send(client, m));
+        // A taken-over client may still be attached; its new connection has
+        // no screen yet, so it gets one before any live output.
+        if let Some(block) = continued.and_then(|c| self.mux.client(c)?.attached()) {
+            self.send_snapshot(client, block);
+        }
         self.flush();
         client
     }
@@ -164,9 +194,27 @@ impl State {
         (from, messages)
     }
 
-    /// Forgets a client whose connection ended. A client the server already
-    /// dropped for exceeding its budget is gone from both maps.
-    pub(crate) fn disconnect(&mut self, client: ClientId) {
+    /// The client `takeover` names, if it is connected, the token is its
+    /// current one, and the new connection negotiated exactly its features.
+    /// Only `TAKEOVER` clients hold a token. Equal features keep what the
+    /// client is already attached to and subscribed for (a checkpoint
+    /// version, event numbering) valid on the new connection.
+    fn takes_over(&self, takeover: Takeover, features: Features) -> Option<ClientId> {
+        let current = self.tokens.get(&takeover.client)?;
+        let valid =
+            rusty_crypto_key::constant_time_eq(current.as_bytes(), takeover.token.as_bytes());
+        let same = self.features.get(&takeover.client) == Some(&features);
+        (valid && same && self.clients.contains_key(&takeover.client)).then_some(takeover.client)
+    }
+
+    /// Forgets a client whose connection, the one owning `cancel`, ended. A
+    /// client the server already dropped for exceeding its budget is gone
+    /// from every map; one another connection took over is not this
+    /// connection's to forget.
+    pub(crate) fn disconnect(&mut self, client: ClientId, cancel: &Rc<Notify>) {
+        if !self.served_by(client, cancel) {
+            return;
+        }
         self.drop_client(client);
         self.flush();
     }
@@ -176,6 +224,7 @@ impl State {
             return;
         }
         self.features.remove(&client);
+        self.tokens.remove(&client);
         if let Err(err) = self.mux.disconnect(client) {
             eprintln!("rusty-mux-server: model out of step on disconnect: {err}");
         }
@@ -1046,7 +1095,7 @@ mod regression {
         );
         let (out, inbox, _) = outbox();
         let mut state = shared.borrow_mut();
-        let client = state.connect(out, Features::CHECKPOINT_V6, None);
+        let client = state.connect(out, Features::CHECKPOINT_V6, None, None);
         let session = state.mux.create_session("s").unwrap();
         let window = state.mux.create_window(session, "w").unwrap();
         let Outcome::Done(Some(id)) = state

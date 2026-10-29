@@ -514,7 +514,11 @@ impl<S: io::Read + Write> Session<'_, S> {
         features: Features,
         resume: Option<Cursor>,
     ) -> Result<(Features, Option<Cursor>), Failure> {
-        self.conn.send(&Message::Hello { features, resume })?;
+        self.conn.send(&Message::Hello {
+            features,
+            resume,
+            takeover: None,
+        })?;
         match self.conn.recv()? {
             Message::Welcome {
                 features, cursor, ..

@@ -1,12 +1,14 @@
 //! One client connection: handshake, then requests in, frames out.
 
 use std::io;
+use std::rc::Rc;
 
 use rusty_mux_core::ClientId;
 use rusty_mux_proto::{Message, decode};
 use rusty_tokio::io::{
     AsyncReadExt, AsyncWriteExt, OwnedUnixReadHalf, OwnedUnixWriteHalf, UnixStream,
 };
+use rusty_tokio::sync::Notify;
 
 use crate::outbox::{Inbox, outbox};
 use crate::state::{Shared, State};
@@ -17,37 +19,43 @@ pub(crate) async fn run(state: Shared, stream: UnixStream) {
     let (mut rd, wr) = stream.into_split();
     let mut frames = Frames::default();
 
-    let (features, resume) = match frames.next(&mut rd).await {
-        Ok(Some(Message::Hello { features, resume })) => (features, resume),
+    let (features, resume, takeover) = match frames.next(&mut rd).await {
+        Ok(Some(Message::Hello {
+            features,
+            resume,
+            takeover,
+        })) => (features, resume, takeover),
         Ok(Some(other)) => return eprintln!("rusty-mux-server: expected Hello, got {other:?}"),
         Ok(None) => return,
         Err(err) => return eprintln!("rusty-mux-server: handshake: {err}"),
     };
     let (out, inbox, cancel) = outbox();
-    let client = state.borrow_mut().connect(out, features, resume);
+    let client = state.borrow_mut().connect(out, features, resume, takeover);
     // One owning future races both halves and eviction. Dropping the losing
     // futures closes both socket halves and discards the receiver/backlog,
     // including a writer currently blocked inside write_all.
     rusty_tokio::select! {
         _ = cancel.notified() => {},
-        result = serve(&state, client, &mut rd, &mut frames) => {
+        result = serve(&state, client, &cancel, &mut rd, &mut frames) => {
             if let Err(err) = result {
                 eprintln!("rusty-mux-server: client {client}: {err}");
             }
         },
         _ = write_frames(inbox, wr) => {},
     }
-    state.borrow_mut().disconnect(client);
+    // A connection that took this client over owns it now; leave it be.
+    state.borrow_mut().disconnect(client, &cancel);
 }
 
 async fn serve(
     state: &Shared,
     client: ClientId,
+    cancel: &Rc<Notify>,
     rd: &mut OwnedUnixReadHalf,
     frames: &mut Frames,
 ) -> io::Result<()> {
     while let Some(message) = frames.next(rd).await? {
-        if !state.borrow().has_client(client) {
+        if !state.borrow().served_by(client, cancel) {
             return Ok(());
         }
         if let Some((pty, data)) = State::request(state, client, message) {
@@ -141,6 +149,7 @@ mod regression {
                 &encode(&Message::Hello {
                     features: Features::CHECKPOINT_V6,
                     resume: None,
+                    takeover: None,
                 })
                 .unwrap(),
             )

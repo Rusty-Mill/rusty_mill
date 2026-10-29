@@ -71,6 +71,7 @@ fn handshake(stream: Stream, features: Features) -> Conn<Stream> {
         features,
         client: ClientId::from_uuid(Uuid::nil()),
         cursor: None,
+        token: None,
     })
     .expect("welcome");
     conn

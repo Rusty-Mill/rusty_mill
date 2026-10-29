@@ -126,6 +126,7 @@ mod client {
         conn.send(&Message::Hello {
             features: CONTROL,
             resume: None,
+            takeover: None,
         })
         .map_err(|e| e.to_string())?;
         let mut req = Requests {
@@ -943,6 +944,7 @@ mod client {
             conn.send(&Message::Hello {
                 features: Features::CHECKPOINT_V6,
                 resume: None,
+                takeover: None,
             })
             .map_err(|e| e.to_string())?;
             match conn.recv().map_err(|e| e.to_string())? {
