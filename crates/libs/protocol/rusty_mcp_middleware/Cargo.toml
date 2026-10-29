@@ -35,9 +35,8 @@ rusty_log = { workspace = true, features = ["subscriber"] }
 rusty_url = { workspace = true }
 # JWT signature and claim verification (RS256, ES256).
 rusty_oauth = { workspace = true, optional = true }
-# JWKS fetch. The `tokio` feature makes each request run on the caller's own tokio
-# runtime (detected per call), so no second runtime is started.
-rusty_request = { workspace = true, features = ["tokio"], optional = true }
+# JWKS fetch, on the caller's `rusty_tokio` runtime: every consumer runs one (#906).
+rusty_request = { workspace = true, optional = true }
 rusty_percent = { workspace = true }
 # Optional (feature `otel`): the export thread runs `rusty_request` on a small `rusty_tokio` runtime.
 # (Feature `jwt`): the JWKS cache sits behind its `RwLock`, which needs no runtime.
@@ -49,7 +48,6 @@ rusty_rand = { workspace = true, optional = true }
 
 [dev-dependencies]
 rand = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rusty_mcp_server = { workspace = true, features = ["http"] }
 # The blocking server for `tests/trace_context.rs`'s MCP handler and
 # `tests/jwt_validator.rs`'s mock JWKS endpoint.
@@ -58,8 +56,8 @@ rsa = "0.9"
 # Signs the RS256 test tokens: `rusty_oauth` only verifies RSA signatures.
 # `rust_crypto` keeps the build pure-Rust.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
-# The test clients (`reqwest`) and the raw-socket mocks run on tokio (#906).
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
+# The test client and the raw-socket mocks.
+rusty_request = { workspace = true }
 rusty_tokio = { workspace = true }
 
 [features]

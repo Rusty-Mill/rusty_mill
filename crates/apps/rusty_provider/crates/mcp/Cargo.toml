@@ -13,14 +13,15 @@ rusty_retry = { workspace = true }
 rp-core.workspace = true
 rp-router.workspace = true
 rusty_mcp_server = { workspace = true }
-rusty-mcp-client.workspace = true
+# `tokio`: the gateway's OAuth token fetch runs on the tokio runtime below.
+rusty-mcp-client = { workspace = true, features = ["tokio"] }
 serde.workspace = true
 serde_json.workspace = true
 # Runtime-free; safe on the caller's tokio runtime.
 rusty_tokio.workspace = true
-# Stays (#910): the native tools block on rp-router (reqwest, tokio) and the
-# gateway drives rusty-mcp-client's tokio-backed transport, both on the tokio
-# runtime `build` is called from (rp-server's main). Moves with T7/#906.
+# Stays (#910): the native tools block on rp-router (reqwest, tokio) on the
+# tokio runtime `build` is called from (rp-server's main). Moves when rp-router
+# leaves reqwest (#687).
 tokio.workspace = true
 rusty_log = { workspace = true }
 anyhow.workspace = true

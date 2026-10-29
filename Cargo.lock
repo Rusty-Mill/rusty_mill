@@ -10414,7 +10414,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
  "toml 1.1.4+spec-1.1.0",
 ]
 
@@ -11271,7 +11270,6 @@ version = "0.13.0"
 dependencies = [
  "jsonwebtoken 11.0.0",
  "rand 0.8.8",
- "reqwest 0.13.4",
  "rsa",
  "rusty_base64",
  "rusty_http",
@@ -11285,7 +11283,6 @@ dependencies = [
  "rusty_serve",
  "rusty_tokio",
  "rusty_url",
- "tokio",
 ]
 
 [[package]]
