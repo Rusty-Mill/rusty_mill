@@ -10945,6 +10945,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_conhost"
+version = "0.1.0"
+dependencies = [
+ "platform",
+ "platform-windows",
+ "rusty_wire",
+]
+
+[[package]]
 name = "rusty_crdt"
 version = "0.1.0"
 dependencies = [
