@@ -60,6 +60,8 @@
 
 pub mod close_guard;
 #[cfg(windows)]
+pub mod condrv;
+#[cfg(windows)]
 pub mod ffi;
 #[cfg(windows)]
 pub mod fs;

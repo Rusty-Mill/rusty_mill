@@ -9,6 +9,15 @@
 //! names it explicitly as the legitimate ntdll admission for this crate.
 //! This is the only API admitted here; each further ntdll export is its own
 //! reviewed decision with its own rationale.
+//!
+//! A second *use* of `NtCreateFile`, with no new export (#1222, our own
+//! console host, `sys::condrv`): the console driver's server object is
+//! opened by its full NT path, `\Device\ConDrv\Server`, with no root
+//! handle (`sys::nt::open_absolute`), and its `\Reference`, `\Input` and
+//! `\Output` client objects relative to that server handle
+//! (`sys::nt::open_relative`). Win32 can't open a device object relative
+//! to a handle, and ConDrv's client objects exist only relative to the
+//! server handle, so the same primitive is what this needs too.
 
 pub use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 pub use windows_sys::Wdk::Storage::FileSystem::{
