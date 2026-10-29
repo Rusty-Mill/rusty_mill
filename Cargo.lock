@@ -11458,6 +11458,7 @@ dependencies = [
  "platform",
  "platform-linux",
  "platform-windows",
+ "rusty_crypto_key",
  "rusty_libc",
  "rusty_mux_core",
  "rusty_mux_proto",

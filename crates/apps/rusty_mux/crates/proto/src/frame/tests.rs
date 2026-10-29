@@ -8,7 +8,7 @@ use rusty_wire::Writer;
 use super::*;
 use crate::field::Out;
 use crate::schema::Value;
-use crate::{Code, Cursor, Entry, Features, Launch, Program};
+use crate::{Code, Cursor, Entry, Features, Launch, Program, Takeover};
 
 const REQ_ID: u32 = 1;
 
@@ -49,12 +49,17 @@ fn every_message_round_trips() {
         Message::Hello {
             features: Features::from_bits(0b101),
             resume: None,
+            takeover: None,
         },
         Message::Hello {
             features: Features::EVENT_SEQ,
             resume: Some(Cursor {
                 epoch: block.uuid(),
                 seq: u64::MAX,
+            }),
+            takeover: Some(Takeover {
+                client,
+                token: block.uuid(),
             }),
         },
         Message::CreateSession {
@@ -242,6 +247,7 @@ fn every_message_round_trips() {
             features: Features::NONE,
             client,
             cursor: None,
+            token: None,
         },
         Message::Welcome {
             features: Features::EVENT_SEQ,
@@ -250,6 +256,7 @@ fn every_message_round_trips() {
                 epoch: client.uuid(),
                 seq: 0,
             }),
+            token: Some(block.uuid()),
         },
         Message::Done {
             req: 11,
@@ -464,6 +471,7 @@ fn decode_state_is_bounded_by_ids_not_by_field_count() {
         Message::Hello {
             features: Features::NONE,
             resume: None,
+            takeover: None,
         }
     );
     // A known id repeated: the last occurrence wins.
@@ -477,6 +485,7 @@ fn decode_state_is_bounded_by_ids_not_by_field_count() {
         Message::Hello {
             features: Features::from_bits(REPEATS),
             resume: None,
+            takeover: None,
         }
     );
 }
@@ -701,6 +710,7 @@ fn near_limit_unknown_and_duplicate_fields_decode_last_value() {
                 Message::Hello {
                     features: Features::from_bits(42),
                     resume: None,
+                    takeover: None,
                 },
                 frame.len()
             )))

@@ -88,6 +88,11 @@ impl Features {
     /// Checkpoint chunks.
     pub const CHECKPOINT_V6: Self = Self(1 << 18);
 
+    /// A [`Takeover`] token in Welcome, and taking over a client with one in
+    /// Hello: a client that reconnects keeps its id, name, attachment and
+    /// input lease, and its old connection is closed.
+    pub const TAKEOVER: Self = Self(1 << 19);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -117,6 +122,14 @@ impl Features {
 pub struct Cursor {
     pub epoch: Uuid,
     pub seq: u64,
+}
+
+/// Proof, in a Hello, that this connection continues `client`: the `token`
+/// the server last gave that client in its Welcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Takeover {
+    pub client: ClientId,
+    pub token: Uuid,
 }
 
 /// What kind of failure a [`Message::Failed`] reports, for callers that act
@@ -196,6 +209,8 @@ pub enum Message {
         /// With [`Features::EVENT_SEQ`]: the last event this client saw
         /// before reconnecting, to continue from there.
         resume: Option<Cursor>,
+        /// With [`Features::TAKEOVER`]: the client this connection continues.
+        takeover: Option<Takeover>,
     },
     CreateSession {
         req: u64,
@@ -310,6 +325,9 @@ pub enum Message {
         features: Features,
         client: ClientId,
         cursor: Option<Cursor>,
+        /// With [`Features::TAKEOVER`]: the secret a later connection
+        /// presents to take this client over. Each Welcome replaces it.
+        token: Option<Uuid>,
     },
     /// The request succeeded; `created` is the new entity's id, if it made one.
     Done {
@@ -403,8 +421,10 @@ const SIDE: u32 = 33;
 /// A [`Layout`] in its text form; empty for none.
 const LAYOUT: u32 = 34;
 const ZOOMED: u32 = 35;
-// IDs 1..=ZOOMED are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = ZOOMED as usize;
+// Hello and Welcome, with `Features::TAKEOVER`.
+const TOKEN: u32 = 36;
+// IDs 1..=TOKEN are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = TOKEN as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -443,8 +463,15 @@ impl Message {
     pub(crate) fn encode_body(&self, out: &mut Out) -> u8 {
         use Message as M;
         match self {
-            M::Hello { features, resume } => {
+            M::Hello {
+                features,
+                resume,
+                takeover,
+            } => {
                 put_cursor(out.varint(FEATURES, features.bits()), *resume);
+                if let Some(Takeover { client, token }) = takeover {
+                    out.uuid(CLIENT, client.uuid()).uuid(TOKEN, *token);
+                }
                 ty::HELLO
             }
             M::CreateSession { req, name } => {
@@ -536,10 +563,14 @@ impl Message {
                 features,
                 client,
                 cursor,
+                token,
             } => {
                 let out = out
                     .varint(FEATURES, features.bits())
                     .uuid(CLIENT, client.uuid());
+                if let Some(token) = token {
+                    out.uuid(TOKEN, *token);
+                }
                 put_cursor(out, *cursor);
                 ty::WELCOME
             }
@@ -606,6 +637,7 @@ impl Message {
             ty::HELLO => M::Hello {
                 features: Features(f.varint(FEATURES)?),
                 resume: get_cursor(&f)?,
+                takeover: get_takeover(&f)?,
             },
             ty::CREATE_SESSION => M::CreateSession {
                 req: f.varint(REQ)?,
@@ -690,6 +722,7 @@ impl Message {
                 features: Features(f.varint(FEATURES)?),
                 client: client(&f, CLIENT)?,
                 cursor: get_cursor(&f)?,
+                token: f.opt(TOKEN, In::uuid)?,
             },
             ty::DONE => M::Done {
                 req: f.varint(REQ)?,
@@ -805,6 +838,17 @@ fn get_cursor(f: &In<'_>) -> Result<Option<Cursor>, Error> {
     Ok(Some(Cursor {
         epoch: f.uuid(EPOCH)?,
         seq: f.varint(SEQ)?,
+    }))
+}
+
+/// Both takeover fields or neither.
+fn get_takeover(f: &In<'_>) -> Result<Option<Takeover>, Error> {
+    if f.opt(CLIENT, In::uuid)?.is_none() && f.opt(TOKEN, In::uuid)?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(Takeover {
+        client: client(f, CLIENT)?,
+        token: f.uuid(TOKEN)?,
     }))
 }
 

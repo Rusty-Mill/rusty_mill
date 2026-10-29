@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use platform_windows::WindowsUnixStream as UnixStream;
 use rusty_mux_core::{BlockId, ClientId, Event, SessionId, Size, WindowId};
-use rusty_mux_proto::{Cursor, Features, Launch, Message, decode, encode};
+use rusty_mux_proto::{Cursor, Features, Launch, Message, Takeover, decode, encode};
 use rusty_mux_server::{Config, serve};
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::io::UnixListener;
@@ -109,6 +109,8 @@ pub struct Client {
     pub features: Features,
     /// Every event received, with its number.
     pub events: Vec<(Option<u64>, Event)>,
+    /// The takeover token the Welcome gave, with `TAKEOVER`.
+    pub token: Option<rusty_uuid::Uuid>,
 }
 
 impl Client {
@@ -117,6 +119,16 @@ impl Client {
     }
 
     pub fn connect_with(path: &Path, features: Features, resume: Option<Cursor>) -> Self {
+        Self::taking_over(path, features, resume, None)
+    }
+
+    /// Connects, presenting `takeover` in the Hello.
+    pub fn taking_over(
+        path: &Path,
+        features: Features,
+        resume: Option<Cursor>,
+        takeover: Option<Takeover>,
+    ) -> Self {
         let stream = connect(path).expect("connect");
         stream.set_read_timeout(Some(PATIENCE)).expect("timeout");
         let mut client = Self {
@@ -132,14 +144,23 @@ impl Client {
             cursor: None,
             features: Features::NONE,
             events: Vec::new(),
+            token: None,
         };
-        client.send(&Message::Hello { features, resume });
+        client.send(&Message::Hello {
+            features,
+            resume,
+            takeover,
+        });
         match client.recv() {
             Message::Welcome {
                 client: id,
                 cursor,
                 features: granted,
-            } => (client.id, client.cursor, client.features) = (id, cursor, granted),
+                token,
+            } => {
+                (client.id, client.cursor, client.features) = (id, cursor, granted);
+                client.token = token;
+            }
             other => panic!("expected Welcome, got {other:?}"),
         }
         client
@@ -350,6 +371,22 @@ impl Client {
                 Instant::now() < deadline,
                 "timed out waiting for {key:?} and a number"
             );
+            self.recv();
+        }
+    }
+
+    /// Every line of `block`'s terminal as text.
+    pub fn text(&self, block: BlockId) -> String {
+        let grid = &self.terms[&block].0;
+        (0..)
+            .map_while(|n| grid.line_text(n))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Reads until `block`'s checkpoint is in and ready.
+    pub fn wait_ready(&mut self, block: BlockId) {
+        while self.ready.get(&block) != Some(&true) {
             self.recv();
         }
     }
