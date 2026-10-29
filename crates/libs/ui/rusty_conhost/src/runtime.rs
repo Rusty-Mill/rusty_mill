@@ -10,12 +10,14 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
+use platform::process::{Child, Signal};
 use platform::term::WinSize;
-use platform_windows::condrv::{ConsoleServer, IoComplete, IoDescriptor, Waker};
+use platform_windows::WindowsChild;
+use platform_windows::condrv::{Attached, ConsoleServer, IoComplete, IoDescriptor, Waker};
 use platform_windows::sys::handle::OwnedWinHandle;
 
 use crate::console::{Console, Effect, Event, OutputQueue, Packet, Reply};
@@ -262,26 +264,109 @@ impl Shared {
     }
 }
 
-/// Start the engine thread for an attached child. On failure the server
-/// is closed here and the caller still holds the child.
-pub(crate) fn start(
-    server: ConsoleServer,
-    wait: OwnedWinHandle,
-    size: WinSize,
-) -> Result<Arc<Shared>> {
+/// How long a failed start waits to confirm the child it terminated.
+const RECLAIM_GRACE: Duration = Duration::from_secs(5);
+
+/// A started engine thread waiting for its console. Everything that can
+/// fail without a child is done by [`prepare`], so the child, once
+/// created, always ends up with an owner: the caller on success, or a
+/// confirmed termination when the engine is gone.
+pub(crate) struct Starter {
+    shared: Arc<Shared>,
+    tx: mpsc::Sender<(ConsoleServer, OwnedWinHandle)>,
+}
+
+/// Create the shared state and start the engine thread, before any child
+/// exists.
+pub(crate) fn prepare(size: WinSize) -> Result<Starter> {
+    prepare_with(size, |run| {
+        std::thread::Builder::new()
+            .name("rusty_conhost-engine".into())
+            .spawn(run)
+            .map(drop)
+    })
+}
+
+/// [`prepare`] with the thread spawn supplied, so tests can make it fail
+/// or lose the thread.
+fn prepare_with<S>(size: WinSize, spawn: S) -> Result<Starter>
+where
+    S: FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+{
     let shared = Arc::new(Shared::new(Waker::new()?));
-    let engine = Engine::new(Console::new(size), server, wait, Arc::clone(&shared));
-    std::thread::Builder::new()
-        .name("rusty_conhost-engine".into())
-        .spawn(move || engine.run())
-        .map_err(|_| {
-            PlatformError::new(
-                ErrorKind::Other,
-                OsCode::None,
-                "rusty_conhost: the engine thread could not start",
-            )
-        })?;
-    Ok(shared)
+    let (tx, rx) = mpsc::channel::<(ConsoleServer, OwnedWinHandle)>();
+    let engine_shared = Arc::clone(&shared);
+    let run = Box::new(move || {
+        // No console means the spawn failed: nothing to serve.
+        let Ok((server, wait)) = rx.recv() else {
+            return;
+        };
+        Engine::new(Console::new(size), server, wait, engine_shared).run();
+    });
+    spawn(run).map_err(|_| {
+        PlatformError::new(
+            ErrorKind::Other,
+            OsCode::None,
+            "rusty_conhost: the engine thread could not start",
+        )
+    })?;
+    Ok(Starter { shared, tx })
+}
+
+impl Starter {
+    /// Hand the attached console to the engine and the child to the
+    /// caller. If the engine thread is gone, the child is terminated and
+    /// its exit confirmed (or reported unconfirmed) before failing.
+    pub(crate) fn start(self, attached: Attached) -> Result<(Arc<Shared>, WindowsChild)> {
+        let Attached {
+            server,
+            child,
+            wait,
+        } = attached;
+        if self.tx.send((server, wait)).is_err() {
+            // The unsent server is dropped, which closes it.
+            return Err(reclaim(child));
+        }
+        Ok((self.shared, child))
+    }
+}
+
+/// Terminate a child nobody will serve and wait, up to [`RECLAIM_GRACE`],
+/// to see it exit. The error says which of those happened.
+fn reclaim(mut child: WindowsChild) -> PlatformError {
+    let gone = |op: &'static str, os: OsCode| PlatformError::new(ErrorKind::Other, os, op);
+    if let Err(e) = child.kill_single(Signal::Kill) {
+        return gone(
+            "rusty_conhost: the engine thread is gone and terminating the child failed",
+            e.os,
+        );
+    }
+    let deadline = Instant::now() + RECLAIM_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return gone(
+                    "rusty_conhost: the engine thread is gone; the child was terminated",
+                    OsCode::None,
+                );
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                return gone(
+                    "rusty_conhost: the engine thread is gone; the child's exit is unconfirmed",
+                    OsCode::None,
+                );
+            }
+            Err(e) => {
+                return gone(
+                    "rusty_conhost: the engine thread is gone; the child's exit could not be checked",
+                    e.os,
+                );
+            }
+        }
+    }
 }
 
 struct Engine {
@@ -374,17 +459,14 @@ impl Engine {
             return Ok(());
         };
         if plan.submit_read {
-            let reply = self.reply.take();
+            let reply = self.reply.take().map(|r| deliverable(server, r));
             let complete = reply.as_ref().map(Reply::as_complete);
-            if let Some(r) = &reply {
-                write_payload(server, r)?;
-            }
             server.submit_read(complete.as_ref())?;
             self.read_in_flight = true;
         } else if let Some(r) = self.reply.take() {
             // No READ_IO goes out this turn, so the reply can't ride on
             // one: complete it on its own rather than hold the client.
-            write_payload(server, &r)?;
+            let r = deliverable(server, r);
             server.complete_io(&r.as_complete())?;
         }
         let until = plan.poll.then(Instant::now);
@@ -494,12 +576,12 @@ impl Engine {
         match e {
             Effect::Reply(r) => {
                 if let Some(old) = self.reply.replace(r) {
-                    self.complete(&old);
+                    self.complete(old);
                 }
             }
             Effect::Complete(r) => {
                 self.pending.retain(|id| *id != r.id);
-                self.complete(&r);
+                self.complete(r);
             }
             Effect::CloseServer => self.teardown(),
             Effect::Eof => self.shared.set_eof(),
@@ -509,12 +591,12 @@ impl Engine {
 
     /// Complete one call now, best effort: a failure only means its client
     /// is gone.
-    fn complete(&mut self, r: &Reply) {
+    fn complete(&mut self, r: Reply) {
         let Some(server) = self.server.as_mut() else {
             return;
         };
-        if let Err(e) = write_payload(server, r).and_then(|()| server.complete_io(&r.as_complete()))
-        {
+        let r = deliverable(server, r);
+        if let Err(e) = server.complete_io(&r.as_complete()) {
             crate::diag::log(&format!("COMPLETE_IO failed: {e}"));
         }
     }
@@ -525,7 +607,7 @@ impl Engine {
         self.dead = true;
         let ids: Vec<[u8; 8]> = self.pending.drain(..).chain(packet).collect();
         for id in ids {
-            self.complete(&Reply::status(id, STATUS_UNSUCCESSFUL));
+            self.complete(Reply::status(id, STATUS_UNSUCCESSFUL));
         }
         self.teardown();
         self.shared.set_eof();
@@ -535,7 +617,7 @@ impl Engine {
     /// the in-flight read, then close.
     fn teardown(&mut self) {
         if let Some(r) = self.reply.take() {
-            self.complete(&r);
+            self.complete(r);
         }
         let Some(mut server) = self.server.take() else {
             return;
@@ -569,12 +651,20 @@ fn drain_cancelled(server: &mut ConsoleServer, waker: &Waker) {
     }
 }
 
-/// Write a reply's variable output, if any, at its offset.
-fn write_payload(server: &mut ConsoleServer, r: &Reply) -> Result<()> {
+/// The reply to complete once its variable output, if any, is written at
+/// its offset. Output ConDrv refuses, such as more than the client's
+/// buffer holds, fails that one call; it never closes the console.
+fn deliverable(server: &mut ConsoleServer, r: Reply) -> Reply {
     if r.output.is_empty() {
-        return Ok(());
+        return r;
     }
-    server.write_output(r.id, r.output_at, &r.output)
+    match server.write_output(r.id, r.output_at, &r.output) {
+        Ok(()) => r,
+        Err(e) => {
+            crate::diag::log(&format!("WRITE_OUTPUT failed: {e}"));
+            Reply::status(r.id, STATUS_UNSUCCESSFUL)
+        }
+    }
 }
 
 impl Reply {
@@ -590,7 +680,9 @@ impl Reply {
 
 #[cfg(test)]
 mod tests {
-    use platform::process::{Child, Command, Signal};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use platform::process::Command;
     use platform_windows::condrv;
 
     use super::*;
@@ -635,6 +727,63 @@ mod tests {
         assert_eq!(err.kind, ErrorKind::BrokenPipe);
         // Later events no longer reach the console.
         engine.handle(Event::HangUp);
+        let _ = attached.child.kill_single(Signal::Kill);
+    }
+
+    fn ping_for_a_while() -> Command {
+        let cwd = std::env::current_dir().expect("current_dir");
+        let mut cmd = Command::new("cmd.exe", cwd);
+        cmd.argv = vec!["/c".into(), "ping -n 30 127.0.0.1".into()];
+        cmd
+    }
+
+    const SIZE: WinSize = WinSize {
+        rows: 30,
+        cols: 120,
+    };
+
+    #[test]
+    fn an_engine_that_cannot_start_fails_before_any_child_exists() {
+        let spawned = AtomicBool::new(false);
+        let failed = prepare_with(SIZE, |_| {
+            spawned.store(true, Ordering::Relaxed);
+            Err(std::io::Error::other("no threads"))
+        });
+        let err = failed.err().expect("prepare fails");
+        assert!(spawned.load(Ordering::Relaxed));
+        assert_eq!(err.op, "rusty_conhost: the engine thread could not start");
+        // OwnPty::spawn_concrete calls spawn_attached only after this.
+    }
+
+    #[test]
+    fn a_lost_engine_terminates_the_child_and_says_so() {
+        // The engine closure is dropped unrun, as if its thread had died.
+        let starter = prepare_with(SIZE, |run| {
+            drop(run);
+            Ok(())
+        })
+        .expect("prepare");
+        let attached = condrv::spawn_attached(&ping_for_a_while()).expect("spawn_attached");
+        let pid = attached.child.id();
+        let err = starter.start(attached).err().expect("the handoff fails");
+        assert_eq!(
+            err.op, "rusty_conhost: the engine thread is gone; the child was terminated",
+            "pid {pid}"
+        );
+    }
+
+    #[test]
+    fn refused_reply_output_fails_only_that_call() {
+        let attached = condrv::spawn_attached(&ping_for_a_while()).expect("spawn_attached");
+        let mut server = attached.server;
+        // No packet has this id, so ConDrv refuses the output.
+        let mut r = Reply::status([0xEE; 8], msg::STATUS_SUCCESS);
+        r.output = vec![b'x'; 8];
+        r.output_at = 8;
+        let r = deliverable(&mut server, r);
+        assert_eq!(r.status, STATUS_UNSUCCESSFUL);
+        assert!(r.output.is_empty());
+        server.close();
         let _ = attached.child.kill_single(Signal::Kill);
     }
 }

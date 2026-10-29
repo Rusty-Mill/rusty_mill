@@ -21,6 +21,12 @@ pub(crate) const MAX_WAITING: usize = 64;
 pub(crate) const PARKED_CAP: usize = 1024 * 1024;
 /// Variable input read from one packet.
 pub(crate) const PACKET_INPUT_CAP: usize = 64 * 1024;
+/// The most of an API's fixed descriptor a reply writes back: every
+/// struct served fits, so an oversized descriptor costs nothing parked.
+pub(crate) const WRITE_BACK_CAP: usize = 16;
+/// The most one held call retains: its text, at most the packet's input
+/// (a title's OSC is capped well below it), plus its write-back.
+pub(crate) const MAX_RETAINED_PER_CALL: usize = PACKET_INPUT_CAP + WRITE_BACK_CAP;
 
 /// The control lane: coalesced flags that never need capacity. Setting a
 /// flag that is already set changes nothing; the latest size wins.
@@ -88,10 +94,10 @@ pub(crate) fn turn(v: &View) -> Turn {
 }
 
 /// Whether another packet may be accepted: fewer than [`MAX_WAITING`]
-/// calls wait, and the most variable input one packet can bring still
+/// calls wait, and the most one call can retain ([`MAX_RETAINED_PER_CALL`]) still
 /// fits under [`PARKED_CAP`]. A packet that then arrives always fits.
 pub(crate) fn admits_read(waiting: usize, parked: usize) -> bool {
-    waiting < MAX_WAITING && parked + PACKET_INPUT_CAP <= PARKED_CAP
+    waiting < MAX_WAITING && parked + MAX_RETAINED_PER_CALL <= PARKED_CAP
 }
 
 #[cfg(test)]
@@ -215,8 +221,8 @@ mod tests {
     fn admission_holds_reads_back_at_the_waiting_and_parked_caps() {
         assert!(admits_read(MAX_WAITING - 1, 0));
         assert!(!admits_read(MAX_WAITING, 0));
-        assert!(admits_read(0, PARKED_CAP - PACKET_INPUT_CAP));
-        assert!(!admits_read(0, PARKED_CAP - PACKET_INPUT_CAP + 1));
+        assert!(admits_read(0, PARKED_CAP - MAX_RETAINED_PER_CALL));
+        assert!(!admits_read(0, PARKED_CAP - MAX_RETAINED_PER_CALL + 1));
 
         let v = View {
             waiting: MAX_WAITING,

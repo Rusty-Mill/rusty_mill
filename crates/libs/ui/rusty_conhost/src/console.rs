@@ -22,7 +22,7 @@ use std::fmt;
 use platform::term::WinSize;
 
 use crate::msg::{self, ApiMsg, api};
-use crate::sched::PACKET_INPUT_CAP;
+use crate::sched::{MAX_RETAINED_PER_CALL, PACKET_INPUT_CAP, WRITE_BACK_CAP};
 
 /// A call that produces VT is admitted only while the output queue holds
 /// at most this much (§7.4).
@@ -43,6 +43,11 @@ const MAX_ALL_OBJECTS: usize = MAX_CLIENTS * MAX_OBJECTS;
 /// path's tests.
 #[cfg(test)]
 pub(crate) const PANIC_FOR_TEST: u32 = 0xFFFF_FFFF;
+
+/// Title units mirrored to the terminal as OSC 0 (§7.4). The stored
+/// title is not capped, as in conhost; this keeps a title's OSC far
+/// below one packet's input when it parks.
+const MAX_OSC_TITLE: usize = 4096;
 
 /// The only code page until PR 9 (§5.9, V4).
 const UTF8: u32 = 65001;
@@ -380,6 +385,8 @@ struct Write {
     reply: Reply,
     text: Text,
     at: usize,
+    /// Bytes this call holds while queued: text and reply buffers.
+    retained: usize,
 }
 
 pub(crate) struct Console {
@@ -648,7 +655,8 @@ impl Console {
     }
 
     fn api(&mut self, p: &Packet<'_>, m: ApiMsg<'_>, out: &mut OutputQueue, fx: &mut Vec<Effect>) {
-        let mut fixed = m.fixed.to_vec();
+        // Only the served struct goes back, however large the descriptor.
+        let mut fixed = m.fixed[..m.fixed.len().min(WRITE_BACK_CAP)].to_vec();
         let status = match m.number {
             api::GET_CP => self.get_cp(&mut fixed),
             api::SET_CP => set_cp(&fixed),
@@ -834,8 +842,8 @@ impl Console {
         };
         let mut osc = b"\x1b]0;".to_vec();
         // Controls would end or escape the OSC; the terminal never sees them.
-        let shown: String = String::from_utf16_lossy(&title)
-            .chars()
+        let shown: String = char::decode_utf16(title.iter().copied().take(MAX_OSC_TITLE))
+            .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
             .filter(|c| !c.is_control())
             .collect();
         osc.extend(shown.bytes());
@@ -880,8 +888,18 @@ impl Console {
     /// with COMPLETE_IO once the reader makes room otherwise.
     fn write(&mut self, reply: Reply, text: Text, out: &mut OutputQueue, fx: &mut Vec<Effect>) {
         let id = reply.id;
-        self.parked += text.retained();
-        self.writes.push_back(Write { reply, text, at: 0 });
+        let retained = text.retained() + reply.write_back.len() + reply.output.len();
+        debug_assert!(
+            retained <= MAX_RETAINED_PER_CALL,
+            "a call retains {retained} bytes"
+        );
+        self.parked += retained;
+        self.writes.push_back(Write {
+            reply,
+            text,
+            at: 0,
+            retained,
+        });
         self.pump(Some(id), out, fx);
     }
 
@@ -902,7 +920,7 @@ impl Console {
             let Some(done) = self.writes.pop_front() else {
                 return;
             };
-            self.parked -= done.text.retained();
+            self.parked -= done.retained;
             if Some(done.reply.id) == current {
                 fx.push(Effect::Reply(done.reply));
             } else {
@@ -946,23 +964,25 @@ fn title_w(title: &[u16], size: usize) -> TitleOut {
     }
 }
 
-/// The legacy A rules. A buffer shorter than the title gets one NUL,
+/// The legacy A rules. No buffer gets nothing. A nonempty buffer shorter
+/// than the title gets one NUL,
 /// Information 1 and TitleLength 0. Otherwise it gets the title and a
 /// NUL if there is room, the title's last byte in place of the NUL if
 /// there is not, and Information counts the NUL.
 fn title_a(title: &[u8], size: usize) -> TitleOut {
-    if size < title.len() {
-        return TitleOut {
-            needed: 0,
-            information: 1,
-            output: vec![0],
-        };
-    }
+    // No buffer: nothing is written, whatever the title.
     if size == 0 {
         return TitleOut {
             needed: 0,
             information: 0,
             output: Vec::new(),
+        };
+    }
+    if size < title.len() {
+        return TitleOut {
+            needed: 0,
+            information: 1,
+            output: vec![0],
         };
     }
     let mut output = title.to_vec();
@@ -1445,6 +1465,27 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_capacity_title_query_writes_nothing() {
+        assert_eq!(
+            title_a(b"abcd", 0),
+            TitleOut {
+                needed: 0,
+                information: 0,
+                output: Vec::new()
+            }
+        );
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "a title");
+        for unicode in [false, true] {
+            let r = h.get_title(unicode, false, 0);
+            assert_eq!(r.status, msg::STATUS_SUCCESS);
+            assert_eq!((r.information, r.output.len()), (0, 0));
+        }
+        // The console is still serving.
+        assert_eq!(h.mode(output), DEFAULT_OUTPUT_MODE);
+    }
+
+    #[test]
     fn title_a_follows_the_legacy_rules() {
         let fits = title_a(b"abcd", 10);
         assert_eq!((fits.needed, fits.information), (4, 5));
@@ -1551,6 +1592,63 @@ mod tests {
         assert_eq!(completed, parked);
         assert_eq!((h.c.waiting(), h.c.parked()), (0, 0));
         assert_eq!(h.vt.len(), 16 * PACKET_INPUT_CAP);
+    }
+
+    /// Fill the queue past the client budget so the next writes park.
+    fn stall(h: &mut Host, output: usize) {
+        let chunk = vec![b'q'; PACKET_INPUT_CAP];
+        h.packet(msg::RAW_WRITE, 1, output, &chunk, 0);
+        h.packet(msg::RAW_WRITE, 1, output, &chunk, 0);
+        assert_eq!(h.c.waiting(), 0);
+        assert!(h.queued > CLIENT_BUDGET);
+    }
+
+    #[test]
+    fn an_oversized_descriptor_is_not_retained_while_parked() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        stall(&mut h, output);
+        // A descriptor that fills the packet, and one byte of text.
+        let fixed = vec![0u8; PACKET_INPUT_CAP - 64];
+        for _ in 0..crate::sched::MAX_WAITING {
+            let r = h.call(output, api::WRITE_CONSOLE, &fixed, b"x", 0);
+            assert_eq!(r.status, i32::MIN, "parked");
+        }
+        let calls = crate::sched::MAX_WAITING;
+        assert_eq!(h.c.parked(), calls * (WRITE_BACK_CAP + 1));
+        assert!(h.c.parked() <= crate::sched::PARKED_CAP);
+        for _ in 0..4 {
+            for e in h.drain() {
+                if let Effect::Complete(r) = e {
+                    assert_eq!(r.write_back.len(), WRITE_BACK_CAP);
+                    assert_eq!(msg::u32_at(&r.write_back, 0), Some(1));
+                }
+            }
+        }
+        assert_eq!((h.c.waiting(), h.c.parked()), (0, 0));
+    }
+
+    #[test]
+    fn a_parked_title_retains_at_most_one_call_reservation() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        stall(&mut h, output);
+        // The largest W title a packet carries, every unit 3 bytes in UTF-8.
+        // 8 bytes of CONSOLE_MSG_HEADER and the 1-byte descriptor.
+        let units = (PACKET_INPUT_CAP - 8 - 1) / 2;
+        let bytes: Vec<u8> = std::iter::repeat_n(0x0800u16, units)
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let r = h.call(output, api::SET_TITLE, &[1], &bytes, 0);
+        assert_eq!(r.status, i32::MIN, "parked");
+        let osc = 4 + 3 * MAX_OSC_TITLE + 1;
+        assert_eq!(h.c.parked(), osc + 1);
+        assert!(h.c.parked() <= MAX_RETAINED_PER_CALL);
+        assert_eq!(h.c.title.len(), units, "the stored title is whole");
+        h.drain();
+        h.drain();
+        assert_eq!(h.c.parked(), 0);
+        assert!(h.vt.ends_with(b"\x07"));
     }
 
     #[test]
