@@ -3,9 +3,13 @@
 //! the socket is the server's absolute path on HOST, reached through one
 //! OpenSSH (8.7 or later) forward (Unix only; `RUSTY_MUX_SSH` names another
 //! `ssh` program); the client asks for nothing until the forward is up, so
-//! a password prompt works. Without a block id it creates a session, window
-//! and block first. Ctrl-] then `d` detaches; the blocks keep running and
-//! the focused one's id is printed for reattaching. The other Ctrl-] commands are listed in
+//! a password prompt works. If the path to HOST is lost (a silent
+//! heartbeat or a dropped forward), the client logs in again without
+//! prompting, with backoff, and takes its clients over, keeping the
+//! screen and the input lease; it stops if the server let them go.
+//! Without a block id it creates a session, window and block first.
+//! Ctrl-] then `d` detaches; the blocks keep running and the focused one's
+//! id is printed for reattaching. The other Ctrl-] commands are listed in
 //! `rusty_mux_tui::keys`. With `RUSTY_MUX_KEYLOG` set to a new file's path,
 //! every keyboard read is written to it as one line of hex, to see what a
 //! terminal really sends. That is everything typed, passwords included:
@@ -51,7 +55,7 @@ mod client {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc::{Receiver as Inbox, RecvTimeoutError, Sender};
+    use std::sync::mpsc::{Receiver as Inbox, RecvTimeoutError, Sender, channel};
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
@@ -61,7 +65,7 @@ mod client {
     #[cfg(windows)]
     use platform_windows::{WindowsTerminal as Term, WindowsUnixStream as UnixStream};
     use rusty_mux_core::{BlockId, Event, Layout, Rect, SessionId, Side, Size, WindowId};
-    use rusty_mux_proto::{Entry, Features, Launch, Message};
+    use rusty_mux_proto::{Entry, Features, Launch, Message, Takeover};
     use rusty_mux_server::checkpoint::Receiver;
     use rusty_mux_tui::keys::{Action, Keys};
     use rusty_mux_tui::screen::{self, Frame, View};
@@ -77,7 +81,20 @@ mod client {
     /// shows only the block asked for.
     const CONTROL: Features = Features::CHECKPOINT_V6
         .union(Features::INSPECT)
-        .union(Features::LAYOUT);
+        .union(Features::LAYOUT)
+        .union(Features::SYNC)
+        .union(Features::TAKEOVER);
+
+    /// What a block's connection asks for.
+    const PANE: Features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
+
+    /// How often a client that can reconnect asks the server for a sign of
+    /// life, and how long without one counts as a lost path.
+    const BEAT: Duration = Duration::from_secs(5);
+    const DEAD: Duration = Duration::from_secs(15);
+
+    /// The longest wait between attempts to bring the path back.
+    const BACKOFF: Duration = Duration::from_secs(30);
 
     /// How long a layout change that drops shown blocks waits for their own
     /// close, so their last output shows first.
@@ -90,11 +107,124 @@ mod client {
     /// Something for the main loop.
     enum Input {
         Keys(Vec<u8>),
-        Control(Message),
+        /// A message on the control connection opened `n`th.
+        Control(u64, Message),
+        /// The control connection opened `n`th ended.
+        ControlEnded(u64),
         Pane(Tag, Message),
-        /// A connection ended: the server's control one (`None`), or a
-        /// block's.
-        Ended(Option<Tag>),
+        PaneEnded(Tag),
+        /// The path to the server came back, at this socket, or did not.
+        Rejoined(Result<PathBuf, String>),
+    }
+
+    /// Brings back a lost path to the server, make before break: a fresh
+    /// path comes up beside the old one, which may still hold the server's
+    /// connections, and so its clients, open until they are taken over.
+    trait Rejoin: Send {
+        /// Brings up a fresh path; returns the socket to connect to.
+        fn fresh(&mut self) -> Result<PathBuf, String>;
+        /// The clients are taken over: stops the old path.
+        fn settle(&mut self);
+    }
+
+    /// What the main loop asks of a [`Rejoiner`].
+    enum Ask {
+        Fresh,
+        Settle,
+    }
+
+    /// Runs a [`Rejoin`] on its own thread, so the keys stay live while it
+    /// logs in; each fresh path comes back as [`Input::Rejoined`]. Dropping
+    /// it waits for the attempt under way, then drops the [`Rejoin`].
+    struct Rejoiner {
+        ask: Option<Sender<Ask>>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl Rejoiner {
+        fn spawn(mut rejoin: Box<dyn Rejoin>, tx: Sender<Input>) -> Self {
+            let (ask, asked) = channel();
+            let thread = std::thread::spawn(move || {
+                while let Ok(ask) = asked.recv() {
+                    match ask {
+                        Ask::Fresh => {
+                            if tx.send(Input::Rejoined(rejoin.fresh())).is_err() {
+                                return;
+                            }
+                        }
+                        Ask::Settle => rejoin.settle(),
+                    }
+                }
+            });
+            Self {
+                ask: Some(ask),
+                thread: Some(thread),
+            }
+        }
+
+        fn ask(&self, ask: Ask) {
+            if let Some(sender) = &self.ask {
+                // The thread only stops when this is dropped.
+                let _ = sender.send(ask);
+            }
+        }
+    }
+
+    impl Drop for Rejoiner {
+        fn drop(&mut self) {
+            drop(self.ask.take());
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// The connections of a lost path, kept open until their clients are
+    /// taken over: hanging up could reach the server first, and end them.
+    /// The control connection's stream stays the app's until then; its
+    /// reader is joined once that stream is shut, and each block's
+    /// connection is hung up as it drops.
+    struct Abandoned {
+        reader: Option<JoinHandle<()>>,
+        panes: Vec<Pane>,
+    }
+
+    impl Drop for Abandoned {
+        fn drop(&mut self) {
+            self.panes.clear();
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
+        }
+    }
+
+    /// What the client knows of the server's answer to its Hello.
+    struct Welcomed {
+        features: Features,
+        /// How to take this connection's client over later, if the server
+        /// allows it.
+        takeover: Option<Takeover>,
+    }
+
+    /// The path to the server is down.
+    struct Lost {
+        /// Failed attempts to bring it back, and why the last one failed.
+        tries: u32,
+        why: Option<String>,
+        /// When to try again; `None` while an attempt is under way.
+        retry: Option<Instant>,
+    }
+
+    /// How to continue a block's connection after the path comes back.
+    struct Resume {
+        takeover: Takeover,
+        leased: bool,
+    }
+
+    /// When the client last asked for and had a sign of life.
+    struct Beat {
+        asked: Instant,
+        heard: Instant,
     }
 
     /// Why the client stopped.
@@ -104,6 +234,8 @@ mod client {
         Closed,
         /// The server went away.
         Disconnected,
+        /// The path came back, but the server had let this client go.
+        Dropped,
         /// The local terminal stopped taking output.
         Stdout,
         Failed(String),
@@ -124,27 +256,77 @@ mod client {
     }
 
     /// How long the client waits for an SSH forward to come up, the login
-    /// included.
+    /// included: a first login may wait on a password, a later one may not.
     #[cfg(unix)]
     const LOGIN: Duration = Duration::from_secs(120);
+    #[cfg(unix)]
+    const RELOGIN: Duration = Duration::from_secs(10);
 
     /// Attaches to the server at `args[0]`, through a forward to `ssh`'s
     /// host when given, which stops when the client does.
     pub fn run(ssh: Option<&OsStr>, args: &[OsString]) -> Result<(), String> {
         match ssh {
             Some(host) => remote(host, Path::new(&args[0]), args.get(1)),
-            None => attach(PathBuf::from(&args[0]), args.get(1)),
+            None => attach(PathBuf::from(&args[0]), args.get(1), None),
         }
     }
 
     /// Attaches through a forward to `socket` on `host`, stopped on return.
+    /// A lost path is brought back with a fresh forward ([`SshPath`]) that
+    /// may not ask for anything, since the client is reading the terminal.
     #[cfg(unix)]
     fn remote(host: &OsStr, socket: &Path, block: Option<&OsString>) -> Result<(), String> {
-        let host = host.to_str().ok_or("--ssh: the host is not UTF-8")?;
+        use rusty_mux_tui::ssh::{Forward, Login};
+
+        let host = host
+            .to_str()
+            .ok_or("--ssh: the host is not UTF-8")?
+            .to_owned();
+        let remote = socket.to_owned();
         let program = std::env::var_os("RUSTY_MUX_SSH").unwrap_or_else(|| "ssh".into());
-        let mut forward = rusty_mux_tui::ssh::Forward::start(&program, host, socket)?;
-        forward.wait_ready(LOGIN)?;
-        attach(forward.socket().to_owned(), block)
+        let mut first = Forward::start(&program, &host, &remote, Login::Interactive)?;
+        first.wait_ready(LOGIN)?;
+        let local = first.socket().to_owned();
+        let path = SshPath {
+            program,
+            host,
+            remote,
+            current: first,
+            previous: None,
+        };
+        attach(local, block, Some(Box::new(path)))
+    }
+
+    /// The forwards to the server: the one in use, and the one it replaced
+    /// until the clients are taken over.
+    #[cfg(unix)]
+    struct SshPath {
+        program: OsString,
+        host: String,
+        remote: PathBuf,
+        current: rusty_mux_tui::ssh::Forward,
+        previous: Option<rusty_mux_tui::ssh::Forward>,
+    }
+
+    #[cfg(unix)]
+    impl Rejoin for SshPath {
+        fn fresh(&mut self) -> Result<PathBuf, String> {
+            use rusty_mux_tui::ssh::{Forward, Login};
+
+            let mut next = Forward::start(&self.program, &self.host, &self.remote, Login::Batch)?;
+            next.wait_ready(RELOGIN)?;
+            let local = next.socket().to_owned();
+            // A forward from a failed takeover attempt, if any, is no use.
+            drop(
+                self.previous
+                    .replace(std::mem::replace(&mut self.current, next)),
+            );
+            Ok(local)
+        }
+
+        fn settle(&mut self) {
+            drop(self.previous.take());
+        }
     }
 
     #[cfg(windows)]
@@ -152,7 +334,13 @@ mod client {
         Err("--ssh is supported on Unix only for now".into())
     }
 
-    fn attach(socket: PathBuf, block: Option<&OsString>) -> Result<(), String> {
+    /// Shows `block` (or a new one) from the server at `socket` until the
+    /// client stops; `rejoin`, if given, brings back a lost path.
+    fn attach(
+        socket: PathBuf,
+        block: Option<&OsString>,
+        rejoin: Option<Box<dyn Rejoin>>,
+    ) -> Result<(), String> {
         let stream = connect(&socket)?;
         let mut conn = Conn::new(clone(&stream)?);
         let mut term = Term::new();
@@ -168,7 +356,7 @@ mod client {
             conn: &mut conn,
             next: 1,
         };
-        let features = req.welcome()?;
+        let Welcomed { features, takeover } = req.welcome()?;
         let block = match block {
             Some(id) => BlockId::from_uuid(parse_uuid(id)?),
             None => req.create(area)?,
@@ -179,20 +367,45 @@ mod client {
         };
         let next = req.next;
 
-        let (tx, inbox) = std::sync::mpsc::channel();
-        let control = {
+        let (tx, inbox) = channel();
+        let control = Conn::new(clone(&stream)?);
+        let reader = {
             let tx = tx.clone();
-            std::thread::spawn(move || read(conn, &tx, Input::Control, None))
+            std::thread::spawn(move || {
+                read(conn, &tx, |m| Input::Control(0, m), Input::ControlEnded(0))
+            })
         };
         let keylog = keylog()?;
         term.enter_raw().map_err(|e| format!("raw mode: {e:?}"))?;
         let stop = Arc::new(AtomicBool::new(false));
         let keyboard = keyboard(tx.clone(), stop.clone(), keylog);
+        // Without a sign of life to ask for, or a client to take over, a
+        // lost path cannot be told or brought back.
+        let rejoins = features.contains(Features::SYNC) && takeover.is_some();
+        // Kept to the end either way: it owns the forward in use.
+        let (rejoiner, kept) = match rejoin {
+            Some(rejoin) if rejoins => (Some(Rejoiner::spawn(rejoin, tx.clone())), None),
+            other => (None, other),
+        };
+        let now = Instant::now();
         let mut app = App {
             socket,
+            beat: rejoiner.as_ref().map(|_| Beat {
+                asked: now,
+                heard: now,
+            }),
+            rejoiner,
+            me: takeover,
+            lost: None,
+            abandoned: None,
+            resumes: HashMap::new(),
             tx,
-            control: Conn::new(clone(&stream)?),
+            control_stream: stream,
+            control,
+            reader: Some(reader),
+            joined: 0,
             next,
+            inspect: features.contains(Features::INSPECT),
             layouts: features.contains(Features::LAYOUT),
             window,
             layout: Some(layout),
@@ -213,21 +426,34 @@ mod client {
         app.sync();
         let ended = app.serve(&term, &inbox);
         let focus = app.focus;
+        let down = app.lost.as_ref().map(|lost| lost.why.clone());
         // Stop every reader before touching the terminal, so nothing a
         // block prints lands after the restore. Shutting a socket ends
         // its read; an error only means the server already closed it.
         stop.store(true, Ordering::Release);
-        let _ = stream.shutdown(Shutdown::Both);
+        let _ = app.control_stream.shutdown(Shutdown::Both);
         app.panes.values().for_each(Pane::hang_up);
+        let reader = app.reader.take();
+        // Also stops the forward, once any login under way gives up.
         drop(app);
-        let _ = (control.join(), keyboard.join());
+        drop(kept);
+        let _ = (reader.map(JoinHandle::join), keyboard.join());
         restore(&mut term);
+        match down {
+            Some(Some(why)) => eprintln!("\r\nrusty-mux: the path to the server was down: {why}"),
+            Some(None) => eprintln!("\r\nrusty-mux: the path to the server was down"),
+            None => {}
+        }
         match ended {
             Ended::Closed => println!("\r\nrusty-mux: block {focus} closed"),
             Ended::Detached => println!("\r\nrusty-mux: detached from block {focus}"),
             Ended::Disconnected => {
                 println!("\r\nrusty-mux: lost the server; block {focus} may still be running")
             }
+            Ended::Dropped => println!(
+                "\r\nrusty-mux: the server let this client go while the path was down; \
+                 block {focus} may still be running"
+            ),
             Ended::Stdout => eprintln!("rusty-mux: the terminal stopped taking output"),
             Ended::Failed(why) => return Err(why),
         }
@@ -243,19 +469,20 @@ mod client {
             .unwrap_or(fallback)
     }
 
-    /// Reads messages from `conn` into the main loop until it ends.
+    /// Reads messages from `conn` into the main loop until it ends, then
+    /// sends `ended`.
     fn read(
         mut conn: Conn<UnixStream>,
         tx: &Sender<Input>,
         wrap: impl Fn(Message) -> Input,
-        pane: Option<Tag>,
+        ended: Input,
     ) {
         while let Ok(message) = conn.recv() {
             if tx.send(wrap(message)).is_err() {
                 return;
             }
         }
-        let _ = tx.send(Input::Ended(pane));
+        let _ = tx.send(ended);
     }
 
     /// The file `RUSTY_MUX_KEYLOG` names, created for the log; `None` when
@@ -324,13 +551,11 @@ mod client {
     }
 
     impl Requests<'_> {
-        fn welcome(&mut self) -> Result<Features, String> {
-            match self.conn.recv().map_err(|e| e.to_string())? {
-                Message::Welcome { features, .. } if features.contains(Features::CHECKPOINT_V6) => {
-                    Ok(features)
-                }
-                Message::Welcome { .. } => Err("the server cannot send checkpoints".into()),
-                other => Err(format!("expected Welcome, got {other:?}")),
+        fn welcome(&mut self) -> Result<Welcomed, String> {
+            let welcomed = welcomed(self.conn.recv().map_err(|e| e.to_string())?)?;
+            match welcomed.features.contains(Features::CHECKPOINT_V6) {
+                true => Ok(welcomed),
+                false => Err("the server cannot send checkpoints".into()),
             }
         }
 
@@ -402,23 +627,45 @@ mod client {
                     _ => None,
                 })
                 .ok_or_else(|| format!("unknown block {block}"))?;
-            let (layout, zoomed) = entries
-                .into_iter()
-                .find_map(|m| match m {
-                    Message::Entry {
-                        entry:
-                            Entry::Window {
-                                window: w,
-                                layout,
-                                zoomed,
-                                ..
-                            },
-                        ..
-                    } if w == window => Some((layout, zoomed)),
-                    _ => None,
-                })
-                .unwrap_or_default();
+            let (layout, zoomed) = layout_of(entries, window).unwrap_or_default();
             Ok((Some(window), layout.unwrap_or(Layout::Block(block)), zoomed))
+        }
+    }
+
+    /// `window`'s layout and zoomed block in a List's `entries`; `None`
+    /// when the window is gone.
+    fn layout_of(
+        entries: Vec<Message>,
+        window: WindowId,
+    ) -> Option<(Option<Layout>, Option<BlockId>)> {
+        entries.into_iter().find_map(|m| match m {
+            Message::Entry {
+                entry:
+                    Entry::Window {
+                        window: w,
+                        layout,
+                        zoomed,
+                        ..
+                    },
+                ..
+            } if w == window => Some((layout, zoomed)),
+            _ => None,
+        })
+    }
+
+    /// What a Welcome tells, or why `message` is not one.
+    fn welcomed(message: Message) -> Result<Welcomed, String> {
+        match message {
+            Message::Welcome {
+                features,
+                client,
+                token,
+                ..
+            } => Ok(Welcomed {
+                features,
+                takeover: token.map(|token| Takeover { client, token }),
+            }),
+            other => Err(format!("expected Welcome, got {other:?}")),
         }
     }
 
@@ -426,6 +673,9 @@ mod client {
     struct Pane {
         /// Which connection to its block this is.
         generation: u64,
+        block: BlockId,
+        /// How to take this connection's client over after a lost path.
+        takeover: Option<Takeover>,
         /// The block's close came on this connection, after its last output.
         closed: bool,
         stream: UnixStream,
@@ -553,9 +803,28 @@ mod client {
 
     struct App {
         socket: PathBuf,
+        /// Brings back a lost path, when the client can.
+        rejoiner: Option<Rejoiner>,
+        /// Asks for signs of life, when the client can bring a path back.
+        beat: Option<Beat>,
+        /// How to take the control connection's client over.
+        me: Option<Takeover>,
+        lost: Option<Lost>,
+        /// The lost path's connections, until their clients are taken over.
+        abandoned: Option<Abandoned>,
+        /// The blocks' connections to take over once the path is back.
+        resumes: HashMap<BlockId, Resume>,
         tx: Sender<Input>,
+        control_stream: UnixStream,
         control: Conn<UnixStream>,
+        /// Reads the control connection.
+        reader: Option<JoinHandle<()>>,
+        /// Control connections opened after the first, to tell a stale
+        /// one's messages apart.
+        joined: u64,
         next: u64,
+        /// Whether the server answers List.
+        inspect: bool,
         /// Whether the server keeps layouts; without, only the first block
         /// shows.
         layouts: bool,
@@ -614,6 +883,7 @@ mod client {
                     self.sync();
                 }
                 self.draw();
+                self.beat();
                 if self
                     .pending
                     .as_ref()
@@ -635,13 +905,30 @@ mod client {
                         self.act(action);
                     }
                 }
-                Input::Control(message) => self.on_control(message),
-                Input::Pane(tag, message) => self.on_pane(tag, message),
+                // From a control connection given up on.
+                Input::Control(..) | Input::ControlEnded(_) if self.lost.is_some() => {}
+                Input::Control(joined, message) if joined == self.joined => {
+                    if let Some(beat) = self.beat.as_mut() {
+                        beat.heard = Instant::now();
+                    }
+                    self.on_control(message)
+                }
+                Input::Control(..) => {}
                 // The server closes every connection when it goes; a
                 // block's own is left to report it, after its last output.
-                Input::Ended(None) if !self.panes.is_empty() => {}
-                Input::Ended(None) => self.end(Ended::Disconnected),
-                Input::Ended(Some(tag)) if self.current(tag) => {
+                Input::ControlEnded(joined) if joined != self.joined => {}
+                Input::ControlEnded(_) if !self.panes.is_empty() => {}
+                Input::ControlEnded(_) => self.broke(Ended::Disconnected),
+                Input::Pane(tag, message) => self.on_pane(tag, message),
+                // Only asked for while lost.
+                Input::Rejoined(_) if self.lost.is_none() => {}
+                Input::Rejoined(Ok(socket)) => {
+                    if let Err(ended) = self.rejoined(socket) {
+                        self.end(ended);
+                    }
+                }
+                Input::Rejoined(Err(why)) => self.retry(why),
+                Input::PaneEnded(tag) if self.current(tag) => {
                     let block = tag.0;
                     let leaving = self
                         .pending
@@ -651,12 +938,155 @@ mod client {
                     match leaving || closed {
                         true => self.drained(block),
                         // A block this client still shows lost its connection.
-                        false => self.end(Ended::Disconnected),
+                        false => self.broke(Ended::Disconnected),
                     }
                 }
                 // A connection this client already hung up on.
-                Input::Ended(Some(_)) => {}
+                Input::PaneEnded(_) => {}
             }
+        }
+
+        /// A connection failed: the path is lost if the client can bring
+        /// it back, else the client stops with `ended`.
+        fn broke(&mut self, ended: Ended) {
+            match self.rejoiner.is_some() {
+                true => self.lose(),
+                false => self.end(ended),
+            }
+        }
+
+        /// Asks for a sign of life every [`BEAT`], and counts the path lost
+        /// after [`DEAD`] without one; brings a lost one back when due.
+        fn beat(&mut self) {
+            let now = Instant::now();
+            if let Some(lost) = self.lost.as_mut() {
+                if lost.retry.is_some_and(|at| now >= at) {
+                    lost.retry = None;
+                    if let Some(rejoiner) = &self.rejoiner {
+                        rejoiner.ask(Ask::Fresh);
+                    }
+                }
+                return;
+            }
+            let Some(beat) = self.beat.as_mut() else {
+                return;
+            };
+            if now.duration_since(beat.heard) >= DEAD {
+                self.lose();
+            } else if now.duration_since(beat.asked) >= BEAT {
+                beat.asked = now;
+                self.request(|req| Message::Sync { req });
+            }
+        }
+
+        /// Stops listening to every connection, keeping what it takes to
+        /// continue each, and asks for the path back.
+        fn lose(&mut self) {
+            if self.lost.is_some() {
+                return;
+            }
+            let panes: Vec<Pane> = self.panes.drain().map(|(_, pane)| pane).collect();
+            self.resumes = panes
+                .iter()
+                .filter_map(|pane| {
+                    let takeover = pane.takeover?;
+                    let leased = pane.leased;
+                    Some((pane.block, Resume { takeover, leased }))
+                })
+                .collect();
+            self.abandoned = Some(Abandoned {
+                reader: self.reader.take(),
+                panes,
+            });
+            // The layout is asked for again once the path is back.
+            self.pending = None;
+            self.lost = Some(Lost {
+                tries: 0,
+                why: None,
+                retry: None,
+            });
+            if let Some(rejoiner) = &self.rejoiner {
+                rejoiner.ask(Ask::Fresh);
+            }
+        }
+
+        /// An attempt to bring the path back failed: try again later, at
+        /// most [`BACKOFF`] apart. Ctrl-] d still detaches meanwhile.
+        fn retry(&mut self, why: String) {
+            let Some(lost) = self.lost.as_mut() else {
+                return;
+            };
+            lost.tries += 1;
+            let wait = Duration::from_secs(1 << lost.tries.min(5)).min(BACKOFF);
+            lost.retry = Some(Instant::now() + wait);
+            // Told if the client stops before the path is back: the
+            // terminal shows a block until then.
+            lost.why = Some(why);
+        }
+
+        /// The path is back at `socket`: takes the control connection's
+        /// client over, asks for the layout again and reopens the blocks,
+        /// each taking its own client over. Once the path is up, a failure
+        /// stops the client rather than trying again.
+        fn rejoined(&mut self, socket: PathBuf) -> Result<(), Ended> {
+            let me = self.me.ok_or(Ended::Dropped)?;
+            let lost = |e: String| Ended::Failed(format!("reconnecting: {e}"));
+            let stream = connect(&socket).map_err(lost)?;
+            let mut conn = Conn::new(clone(&stream).map_err(lost)?);
+            let control = Conn::new(clone(&stream).map_err(lost)?);
+            conn.send(&Message::Hello {
+                features: CONTROL,
+                resume: None,
+                takeover: Some(me),
+            })
+            .map_err(|_| Ended::Disconnected)?;
+            let mut req = Requests {
+                conn: &mut conn,
+                next: self.next,
+            };
+            let welcomed = req.welcome().map_err(|_| Ended::Disconnected)?;
+            match welcomed.takeover {
+                Some(takeover) if takeover.client == me.client => self.me = Some(takeover),
+                _ => return Err(Ended::Dropped),
+            }
+            if let Some(window) = self.window.filter(|_| self.inspect) {
+                let entries = req.call(|req| Message::List { req }).map_err(lost)?;
+                (self.layout, self.zoomed) = layout_of(entries, window).unwrap_or_default();
+            }
+            self.next = req.next;
+            self.joined += 1;
+            let joined = self.joined;
+            let tx = self.tx.clone();
+            let reader = std::thread::spawn(move || {
+                read(
+                    conn,
+                    &tx,
+                    move |m| Input::Control(joined, m),
+                    Input::ControlEnded(joined),
+                )
+            });
+            self.reader = Some(reader);
+            let old = std::mem::replace(&mut self.control_stream, stream);
+            self.control = control;
+            self.socket = socket;
+            self.lost = None;
+            let now = Instant::now();
+            self.beat = Some(Beat {
+                asked: now,
+                heard: now,
+            });
+            // Each block's screen comes again with its takeover.
+            self.shown = Shown::Nothing;
+            self.sync();
+            self.resumes.clear();
+            // Taken over: the old path's connections, and then the path
+            // itself, can go.
+            let _ = old.shutdown(Shutdown::Both);
+            drop(self.abandoned.take());
+            if let Some(rejoiner) = &self.rejoiner {
+                rejoiner.ask(Ask::Settle);
+            }
+            Ok(())
         }
 
         /// Whether `tag` is the open connection to its block.
@@ -726,10 +1156,14 @@ mod client {
         }
 
         fn request(&mut self, make: impl FnOnce(u64) -> Message) -> u64 {
+            if self.lost.is_some() {
+                bell();
+                return 0;
+            }
             let req = self.next;
             self.next += 1;
             if self.control.send(&make(req)).is_err() {
-                self.end(Ended::Disconnected);
+                self.broke(Ended::Disconnected);
             }
             req
         }
@@ -889,6 +1323,11 @@ mod client {
         /// Brings connections, leases and the screen in line with the
         /// layout, the zoom, the focus and the terminal's size.
         fn sync(&mut self) {
+            // The path is down: nothing to open, lease or show until it is
+            // back, when this runs again.
+            if self.lost.is_some() {
+                return;
+            }
             let visible = self.visible();
             let Some(&(first, _)) = visible.first() else {
                 self.end(Ended::Closed);
@@ -914,7 +1353,10 @@ mod client {
                         Ok(pane) => {
                             self.panes.insert(*block, pane);
                         }
-                        Err(why) => self.end(Ended::Failed(why)),
+                        Err(ended) => {
+                            self.end(ended);
+                            return;
+                        }
                     }
                 }
             }
@@ -970,46 +1412,58 @@ mod client {
             }
         }
 
-        /// Connects to the server for `block` and attaches to it.
-        fn open(&mut self, block: BlockId) -> Result<Pane, String> {
+        /// Connects to the server for `block` and attaches to it, or, after
+        /// a lost path, takes the block's client over: it is still attached
+        /// and leased as it was, and the server sends the screen again.
+        fn open(&mut self, block: BlockId) -> Result<Pane, Ended> {
+            let failed = |e: String| Ended::Failed(e);
             self.opened += 1;
             let tag = (block, self.opened);
-            let stream = connect(&self.socket)?;
-            let mut conn = Conn::new(clone(&stream)?);
+            let resume = self.resumes.remove(&block);
+            let stream = connect(&self.socket).map_err(failed)?;
+            let mut conn = Conn::new(clone(&stream).map_err(failed)?);
+            let writer = Conn::new(clone(&stream).map_err(failed)?);
             conn.send(&Message::Hello {
-                features: Features::CHECKPOINT_V6,
+                features: PANE,
                 resume: None,
-                takeover: None,
+                takeover: resume.as_ref().map(|r| r.takeover),
             })
-            .map_err(|e| e.to_string())?;
-            match conn.recv().map_err(|e| e.to_string())? {
-                Message::Welcome { .. } => {}
-                other => return Err(format!("expected Welcome, got {other:?}")),
-            }
+            .map_err(|e| failed(e.to_string()))?;
+            let welcomed =
+                welcomed(conn.recv().map_err(|e| failed(e.to_string()))?).map_err(failed)?;
+            let resumed = match (&resume, welcomed.takeover) {
+                (None, _) => false,
+                (Some(r), Some(t)) if t.client == r.takeover.client => true,
+                (Some(_), _) => return Err(Ended::Dropped),
+            };
             let tx = self.tx.clone();
             let reader = std::thread::spawn(move || {
                 read(
                     conn,
                     &tx,
                     move |message| Input::Pane(tag, message),
-                    Some(tag),
+                    Input::PaneEnded(tag),
                 )
             });
             let mut pane = Pane {
                 generation: tag.1,
+                block,
+                takeover: welcomed.takeover,
                 closed: false,
-                conn: Conn::new(clone(&stream)?),
+                conn: writer,
                 stream,
                 next: 1,
                 attach: 0,
                 receiver: Some(Receiver::default()),
                 term: None,
                 asking: None,
-                leased: false,
+                leased: resume.is_some_and(|r| r.leased),
                 sizing: None,
                 reader: Some(reader),
             };
-            pane.attach = pane.send(|req| Message::Attach { req, block });
+            if !resumed {
+                pane.attach = pane.send(|req| Message::Attach { req, block });
+            }
             Ok(pane)
         }
 

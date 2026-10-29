@@ -11484,6 +11484,7 @@ dependencies = [
  "rusty_mux_proto",
  "rusty_mux_server",
  "rusty_term_core",
+ "rusty_tokio",
  "rusty_uuid",
 ]
 

@@ -2,7 +2,8 @@
 //! the block closing, the server going away (with no lease, so no key would
 //! notice), or Ctrl-] d after the block's program set terminal modes; and
 //! it draws a window of several blocks side by side. Each runs the real
-//! binary on a pty against a scripted server.
+//! binary on a pty against a scripted server; the reconnect tests, at the
+//! end, run it against a real one through a stand-in `ssh`.
 
 #![cfg(target_os = "linux")]
 
@@ -768,4 +769,258 @@ fn a_server_offering_only_v3_checkpoints_is_refused() {
     drop(server.join().expect("server"));
     let text = String::from_utf8_lossy(&screen);
     assert!(text.contains("cannot send checkpoints"), "{text:?}");
+}
+
+// Reconnecting after a lost path, against a real server reached through a
+// stand-in `ssh` that forwards like OpenSSH: it relays each connection to
+// the local socket on to the server's, so stopping it freezes the path as
+// a dead network does, and killing it ends every connection.
+
+/// A real server on a new socket, with `/bin/sh` for each block.
+fn real_server() -> PathBuf {
+    use rusty_mux_server::{Config, serve};
+    use rusty_tokio::io::UnixListener;
+    use rusty_tokio::{Builder, LocalOptions};
+
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "rusty-mux-tui-real-{}-{n}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let bind = path.clone();
+    std::thread::spawn(move || {
+        let runtime = Builder::new_current_thread()
+            .build_local(&LocalOptions::default())
+            .expect("runtime");
+        runtime.block_on(async move {
+            let listener = UnixListener::bind(&bind).expect("bind");
+            ready_tx.send(()).expect("ready");
+            let config = Config {
+                program: "/bin/sh".into(),
+                args: Vec::new(),
+                cwd: "/".into(),
+            };
+            serve(listener, config).await.expect("serve");
+        });
+    });
+    ready_rx.recv_timeout(PATIENCE).expect("server bound");
+    path
+}
+
+/// A work directory holding a stand-in `ssh` that logs `pid args...` to
+/// `log` and relays the `-L` local socket to the remote one.
+fn relaying_ssh(name: &str) -> PathBuf {
+    let work = std::env::temp_dir().join(format!("rusty-mux-relay-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir(&work).expect("work dir");
+    let script = format!(
+        r#"#!/usr/bin/env python3
+import os, socket, sys, threading
+args = sys.argv[1:]
+with open("{log}", "a") as log:
+    log.write(" ".join([str(os.getpid())] + args) + "\n")
+local, remote = args[args.index("-L") + 1].split(":", 1)
+listener = socket.socket(socket.AF_UNIX)
+listener.bind(local)
+listener.listen()
+def pump(a, b):
+    try:
+        while True:
+            data = a.recv(65536)
+            if not data:
+                break
+            b.sendall(data)
+    except OSError:
+        pass
+    for end in (a, b):
+        try:
+            end.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+while True:
+    near, _ = listener.accept()
+    far = socket.socket(socket.AF_UNIX)
+    far.connect(remote)
+    threading.Thread(target=pump, args=(near, far), daemon=True).start()
+    threading.Thread(target=pump, args=(far, near), daemon=True).start()
+"#,
+        log = work.join("log").display()
+    );
+    let ssh = work.join("ssh");
+    std::fs::write(&ssh, script).expect("stand-in ssh");
+    std::fs::set_permissions(&ssh, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+        .expect("chmod");
+    work
+}
+
+/// Each start of the stand-in so far: its pid and arguments.
+fn logins(work: &Path) -> Vec<(u32, String)> {
+    let log = std::fs::read_to_string(work.join("log")).unwrap_or_default();
+    log.lines()
+        .filter_map(|line| {
+            let (pid, args) = line.split_once(' ')?;
+            Some((pid.parse().ok()?, args.to_owned()))
+        })
+        .collect()
+}
+
+/// Waits, up to `patience`, for the stand-in's `n`th start.
+fn wait_logins(work: &Path, n: usize, patience: Duration) -> Vec<(u32, String)> {
+    let deadline = Instant::now() + patience;
+    loop {
+        let seen = logins(work);
+        if seen.len() >= n {
+            return seen;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "only {} logins: {seen:?}",
+            seen.len()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn signal(pid: u32, signal: &str) {
+    let status = std::process::Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .status()
+        .expect("kill");
+    assert!(status.success(), "kill {signal} {pid}");
+}
+
+fn running(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+/// The client through the stand-in in `work` to the server at `socket`,
+/// on a new block.
+fn ssh_client(work: &Path, socket: &Path) -> Tui {
+    let mut env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
+    env.insert("RUSTY_MUX_SSH".into(), work.join("ssh").into_os_string());
+    let args = [OsStr::new("--ssh"), OsStr::new("box"), socket.as_os_str()];
+    Tui::run(&args, EnvSpec::Explicit(env))
+}
+
+/// Types `command` until `needle` shows: keys typed before the client
+/// holds the block's lease are not the block's.
+fn type_until(tui: &Tui, command: &[u8], needle: &[u8]) {
+    let deadline = Instant::now() + PATIENCE;
+    while !tui.saw(needle) {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {needle:?}"
+        );
+        tui.master.write(command).expect("type");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// A path that goes silent, as on a network change, is noticed by the
+/// heartbeat and brought back with a second login that may not prompt;
+/// the client takes its clients over, so the block's screen comes back
+/// and typing reaches it without asking for the lease again. The frozen
+/// first `ssh` is stopped only after the takeover, and nothing is left
+/// once the client detaches.
+#[test]
+fn a_frozen_path_is_brought_back_with_the_screen_and_the_lease() {
+    let socket = real_server();
+    let work = relaying_ssh("frozen");
+    let tui = ssh_client(&work, &socket);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    let first = wait_logins(&work, 1, PATIENCE)[0].0;
+    signal(first, "-STOP");
+    let frozen = tui.written();
+
+    // Noticed after 15 s without a sign of life, then logged in again.
+    let seen = wait_logins(&work, 2, Duration::from_secs(30));
+    assert!(!seen[0].1.contains("BatchMode"), "{seen:?}");
+    assert!(seen[1].1.contains("BatchMode=yes"), "{seen:?}");
+    // The takeover sends the block's screen again; keys typed before it
+    // are dropped, since the path is still down.
+    let deadline = Instant::now() + PATIENCE;
+    while !tui.since(frozen).windows(5).any(|w| w == b"one-1") {
+        assert!(Instant::now() < deadline, "the screen did not come back");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Typed once: the lease came along, so the first keys count.
+    let from = tui.written();
+    tui.master.write(b"echo two-$((1+1))\r").expect("type");
+    tui.wait_for(b"two-2");
+    let echoed = tui.since(from);
+    let twice = echoed.windows(5).filter(|w| *w == b"two-2").count();
+    assert_eq!(twice, 1, "{:?}", String::from_utf8_lossy(&echoed));
+    assert!(!running(first), "the frozen ssh outlived the takeover");
+
+    tui.master.write(b"\x1dd").expect("ctrl-] d");
+    let screen = tui.exit();
+    let text = String::from_utf8_lossy(&screen);
+    assert!(text.contains("detached from block"), "{text:?}");
+    assert!(!text.contains("path to the server was down"), "{text:?}");
+    assert!(!running(seen[1].0), "the second ssh outlived the client");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// Reconnecting only ever continues the clients the server still has: one
+/// the server let go meanwhile (here, ended by another client) is not
+/// replaced by a new one, and the client stops and says so.
+#[test]
+fn a_client_the_server_let_go_is_not_brought_back() {
+    let socket = real_server();
+    let work = relaying_ssh("dropped");
+    let tui = ssh_client(&work, &socket);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    disconnect_everyone(&socket);
+
+    let screen = tui.exit();
+    let text = String::from_utf8_lossy(&screen);
+    assert!(text.contains("the server let this client go"), "{text:?}");
+    let seen = logins(&work);
+    assert_eq!(seen.len(), 2, "one login to try again: {seen:?}");
+    assert!(seen.iter().all(|(pid, _)| !running(*pid)), "{seen:?}");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// Ends every other client of the server at `socket`, as Disconnect does.
+fn disconnect_everyone(socket: &Path) {
+    let mut conn = Conn::new(Stream::connect(socket).expect("connect"));
+    conn.send(&Message::Hello {
+        features: Features::CHECKPOINT_V6
+            .union(Features::INSPECT)
+            .union(Features::LABELS),
+        resume: None,
+        takeover: None,
+    })
+    .expect("hello");
+    let me = match conn.recv().expect("welcome") {
+        Message::Welcome { client, .. } => client,
+        other => panic!("expected Welcome, got {other:?}"),
+    };
+    conn.send(&Message::List { req: 1 }).expect("list");
+    let mut others = Vec::new();
+    loop {
+        match conn.recv().expect("list answer") {
+            Message::Entry {
+                entry: Entry::Client { client, .. },
+                ..
+            } if client != me => others.push(client),
+            Message::Done { req: 1, .. } => break,
+            _ => {}
+        }
+    }
+    assert!(!others.is_empty(), "no clients to end");
+    for (req, client) in (2..).zip(others) {
+        conn.send(&Message::Disconnect { req, client })
+            .expect("disconnect");
+        loop {
+            match conn.recv().expect("disconnect answer") {
+                Message::Done { req: r, .. } if r == req => break,
+                Message::Failed { req: r, reason, .. } if r == req => panic!("{reason}"),
+                _ => {}
+            }
+        }
+    }
 }
