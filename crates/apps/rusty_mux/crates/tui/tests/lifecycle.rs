@@ -6,6 +6,7 @@
 
 #![cfg(target_os = "linux")]
 
+use std::ffi::OsStr;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -180,9 +181,16 @@ impl Tui {
     }
 
     fn spawn(socket: &Path, block: &str, env: EnvSpec) -> Self {
-        let cmd = Command::new(env!("CARGO_BIN_EXE_rusty-mux"), "/")
-            .arg(socket.as_os_str())
-            .arg(block)
+        Self::run(&[socket.as_os_str(), block.as_ref()], env)
+    }
+
+    fn run(args: &[&OsStr], env: EnvSpec) -> Self {
+        let cmd = args
+            .iter()
+            .fold(
+                Command::new(env!("CARGO_BIN_EXE_rusty-mux"), "/"),
+                |cmd, arg| cmd.arg(arg),
+            )
             .env(env);
         let (master, child) = LinuxPty
             .spawn_concrete(&cmd, WinSize { rows: 24, cols: 80 })
@@ -330,6 +338,56 @@ fn the_keylog_refuses_an_existing_file() {
     assert!(text.contains("RUSTY_MUX_KEYLOG"), "{text:?}");
     assert_eq!(std::fs::read_to_string(&log).expect("log"), "kept\n");
     std::fs::remove_file(&log).expect("cleanup");
+}
+
+/// `--ssh` runs the forward, connects through it, and on detach stops it
+/// and removes its socket's directory. The stand-in `ssh` records its
+/// arguments and pid, then "forwards" by linking the local path to the
+/// server's socket.
+#[test]
+fn an_ssh_attach_goes_through_the_forward_and_cleans_up() {
+    let work = std::env::temp_dir().join(format!("rusty-mux-fake-ssh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir(&work).expect("work dir");
+    let fake = work.join("ssh");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > {w}/args\necho $$ > {w}/pid\n\
+         while [ \"$1\" != -L ]; do shift; done\n\
+         ln -s \"${{2#*:}}\" \"${{2%%:*}}\"\nexec sleep 600\n",
+        w = work.display()
+    );
+    std::fs::write(&fake, script).expect("fake ssh");
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+        .expect("chmod");
+    let mut env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
+    env.insert("RUSTY_MUX_SSH".into(), fake.into_os_string());
+
+    let (socket, server) = scripted_server(true, End::Open);
+    let args = [
+        OsStr::new("--ssh"),
+        OsStr::new("box"),
+        socket.as_os_str(),
+        BLOCK.as_ref(),
+    ];
+    let tui = Tui::run(&args, EnvSpec::Explicit(env));
+    tui.wait_for(b"REMOTE");
+    tui.master.write(b"\x1dd").expect("ctrl-] d");
+    let screen = tui.exit();
+    server.join().expect("server");
+    assert_restored(&screen, "detached from block");
+
+    let args = std::fs::read_to_string(work.join("args")).expect("args");
+    let args: Vec<&str> = args.lines().collect();
+    assert_eq!(args[args.len() - 2..], ["--", "box"], "{args:?}");
+    let forward = args.iter().find(|a| a.contains(':')).expect("-L argument");
+    let (local, remote) = forward.split_once(':').expect("local:remote");
+    assert_eq!(Path::new(remote), socket);
+    let dir = Path::new(local).parent().expect("socket dir");
+    assert!(!dir.exists(), "{} was left behind", dir.display());
+    let pid = std::fs::read_to_string(work.join("pid")).expect("pid");
+    let proc = Path::new("/proc").join(pid.trim());
+    assert!(!proc.exists(), "ssh {} still runs", pid.trim());
+    std::fs::remove_dir_all(&work).expect("cleanup");
 }
 
 fn keylog_path(name: &str) -> PathBuf {

@@ -1,6 +1,9 @@
-//! `rusty-mux <socket> [block]`: show a rusty_mux block's window on this
-//! terminal, starting with that block focused. Without a block id it
-//! creates a session, window and block first. Ctrl-] then `d` detaches;
+//! `rusty-mux [--ssh HOST] <socket> [block]`: show a rusty_mux block's
+//! window on this terminal, starting with that block focused. With `--ssh`
+//! the socket is the server's on HOST, reached through one OpenSSH forward
+//! (Unix only; `RUSTY_MUX_SSH` names another `ssh` program); the client
+//! asks for nothing until the forward is up, so a password prompt works.
+//! Without a block id it creates a session, window and block first. Ctrl-] then `d` detaches;
 //! the blocks keep running and the focused one's id is printed for
 //! reattaching. The other Ctrl-] commands are listed in
 //! `rusty_mux_tui::keys`. With `RUSTY_MUX_KEYLOG` set to a new file's path,
@@ -13,11 +16,15 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.is_empty() || args.len() > 2 {
-        eprintln!("usage: rusty-mux <socket> [block]");
+    let (ssh, rest) = match args.as_slice() {
+        [flag, host, rest @ ..] if flag == "--ssh" => (Some(host.as_os_str()), rest),
+        rest => (None, rest),
+    };
+    if rest.is_empty() || rest.len() > 2 {
+        eprintln!("usage: rusty-mux [--ssh HOST] <socket> [block]");
         return ExitCode::from(2);
     }
-    match client::run(&args) {
+    match client::run(ssh, rest) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("rusty-mux: {err}");
@@ -28,7 +35,7 @@ fn main() -> ExitCode {
 
 #[cfg(not(any(target_os = "linux", windows)))]
 mod client {
-    pub fn run(_args: &[std::ffi::OsString]) -> Result<(), String> {
+    pub fn run(_ssh: Option<&std::ffi::OsStr>, _args: &[std::ffi::OsString]) -> Result<(), String> {
         Err("the client runs on Linux and Windows only".into())
     }
 }
@@ -36,7 +43,7 @@ mod client {
 #[cfg(any(target_os = "linux", windows))]
 mod client {
     use std::collections::HashMap;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::io::Write;
     use std::net::Shutdown;
     #[cfg(unix)]
@@ -116,8 +123,36 @@ mod client {
         stream.try_clone().map_err(|e| e.to_string())
     }
 
-    pub fn run(args: &[OsString]) -> Result<(), String> {
-        let socket = PathBuf::from(&args[0]);
+    /// How long the client waits for an SSH forward to come up, the login
+    /// included.
+    #[cfg(unix)]
+    const LOGIN: Duration = Duration::from_secs(120);
+
+    /// Attaches to the server at `args[0]`, through a forward to `ssh`'s
+    /// host when given, which stops when the client does.
+    pub fn run(ssh: Option<&OsStr>, args: &[OsString]) -> Result<(), String> {
+        match ssh {
+            Some(host) => remote(host, Path::new(&args[0]), args.get(1)),
+            None => attach(PathBuf::from(&args[0]), args.get(1)),
+        }
+    }
+
+    /// Attaches through a forward to `socket` on `host`, stopped on return.
+    #[cfg(unix)]
+    fn remote(host: &OsStr, socket: &Path, block: Option<&OsString>) -> Result<(), String> {
+        let host = host.to_str().ok_or("--ssh: the host is not UTF-8")?;
+        let program = std::env::var_os("RUSTY_MUX_SSH").unwrap_or_else(|| "ssh".into());
+        let mut forward = rusty_mux_tui::ssh::Forward::start(&program, host, socket)?;
+        forward.wait_ready(LOGIN)?;
+        attach(forward.socket().to_owned(), block)
+    }
+
+    #[cfg(windows)]
+    fn remote(_: &OsStr, _: &Path, _: Option<&OsString>) -> Result<(), String> {
+        Err("--ssh is supported on Unix only for now".into())
+    }
+
+    fn attach(socket: PathBuf, block: Option<&OsString>) -> Result<(), String> {
         let stream = connect(&socket)?;
         let mut conn = Conn::new(clone(&stream)?);
         let mut term = Term::new();
@@ -134,7 +169,7 @@ mod client {
             next: 1,
         };
         let features = req.welcome()?;
-        let block = match args.get(1) {
+        let block = match block {
             Some(id) => BlockId::from_uuid(parse_uuid(id)?),
             None => req.create(area)?,
         };
