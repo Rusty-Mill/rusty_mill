@@ -686,6 +686,12 @@ PR CI runs Linux plus Windows clippy only (`.github/workflows/ci.yml:41-43`). Wi
 | S2 | ConDrv and ConsoleControl on a GitHub `windows-latest` runner (build number), WOW64 layouts, and the oldest machine available | runner via `workflow_dispatch`, Beast | PR 1 acceptance | 0.5 days |
 | S3 | How visible is V3, the resize divergence (§5.7), with cmd, PSReadLine and edit.exe? Does a repaint after resize remove it? | Beast | Phase B | 0.5 days |
 
+S2's verified runner result at PR 1 head `208a5b5c` was Windows Server
+2025, build 10.0.26100, on image `windows-2025-vs2026` version
+`20261021.278.1`; the ConDrv tests and Windows gates passed. The Beast and
+WOW64 observations are author-reported rather than independently verified.
+The older-machine check remains owed, as does a conclusive Ctrl+Break probe.
+
 ### 9.2 Phases
 - **Phase A:** `own` is opt-in from PR 5.
 - **Phase B:** `own` becomes the default once all of these hold:
