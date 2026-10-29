@@ -1,15 +1,20 @@
 //! Taking a client over from a new connection: a reconnecting client keeps
-//! its id, attachment and input lease, and the old connection is closed.
+//! its id, name, attachment and input lease, and the old connection is
+//! closed.
 
 #![cfg(any(target_os = "linux", windows))]
 
 mod common;
 
 use common::{Client, block_for, run_and_wait, start_server};
-use rusty_mux_proto::{Features, Takeover};
+use rusty_mux_core::EntityId;
+use rusty_mux_proto::{Entry, Features, Message, Takeover};
 use rusty_uuid::Uuid;
 
-const TAKEOVER: Features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
+const TAKEOVER: Features = Features::CHECKPOINT_V6
+    .union(Features::INSPECT)
+    .union(Features::LABELS)
+    .union(Features::TAKEOVER);
 
 fn takeover_of(client: &Client) -> Takeover {
     Takeover {
@@ -24,6 +29,12 @@ fn a_reconnect_keeps_the_client_its_screen_and_its_lease() {
     let mut old = Client::connect_with(&path, TAKEOVER, None);
     let block = block_for(&mut old);
     let seen = run_and_wait(&mut old, block, 1);
+    let target = EntityId::Client(old.id());
+    old.request(|req| Message::Rename {
+        req,
+        target,
+        name: "laptop".into(),
+    });
 
     // The old path is still open, as after a network change with no FIN.
     let mut new = Client::taking_over(&path, TAKEOVER, None, Some(takeover_of(&old)));
@@ -33,6 +44,22 @@ fn a_reconnect_keeps_the_client_its_screen_and_its_lease() {
     assert!(new.text(block).contains(&seen), "the screen came along");
 
     old.wait_closed();
+    let names: Vec<_> = new
+        .answer(|req| Message::List { req })
+        .into_iter()
+        .filter_map(|m| match m {
+            Message::Entry {
+                entry: Entry::Client { client, name, .. },
+                ..
+            } => Some((client, name)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [(new.id(), "laptop".to_owned())],
+        "one client, named"
+    );
     // Typing needs the lease: it was kept, and the old connection's end did
     // not drop the client.
     run_and_wait(&mut new, block, 2);
