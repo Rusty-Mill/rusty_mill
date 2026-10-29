@@ -515,19 +515,18 @@ impl Card {
         })
     }
 
-    /// The card given its board-wide `number`. Not a change people make, so `updated_ms` stays.
-    ///
-    /// # Errors
-    /// If the card already has a number: a number never changes.
-    pub fn numbered(&self, number: u64) -> Result<Self, BoardError> {
+    /// The card given its board-wide `number`, or unchanged if it has one already: a number
+    /// never changes. Not a change people make, so `updated_ms` stays.
+    #[must_use]
+    pub fn numbered(&self, number: u64) -> Self {
         if self.number.is_some() {
-            return Err(BoardError::Invalid("card is already numbered"));
+            return self.clone();
         }
-        Ok(Self {
+        Self {
             number: Some(number),
             rev: self.rev + 1,
             ..self.clone()
-        })
+        }
     }
 
     fn next(&self, now_ms: i64) -> Self {

@@ -1170,6 +1170,27 @@ fn a_task_can_be_created_at_an_explicit_position() {
 }
 
 #[test]
+fn a_board_number_is_reserved_once() {
+    let (_d, mut h) = harness();
+    let path = format!("/api/v1/docs/board_number/{}", uuid::Uuid::now_v7());
+    let create = Conditions {
+        if_none_match: Some("*"),
+        ..Conditions::default()
+    };
+    let body = r#"{"v":1,"number":1}"#;
+    let (s, doc) = h.send_conditional(Method::Put, &path, body, Some(TOKEN), create);
+    assert_eq!(s, 200, "{doc:?}");
+    let again = Conditions {
+        if_none_match: Some("*"),
+        ..Conditions::default()
+    };
+    let (s, _) = h.send_conditional(Method::Put, &path, body, Some(TOKEN), again);
+    assert_eq!(s, 412, "a reserved number is not reserved twice");
+    let (s, v) = h.call(Method::Get, "/api/v1/docs/board_number", "");
+    assert_eq!((s, v["docs"].as_array().map(Vec::len)), (200, Some(1)));
+}
+
+#[test]
 fn a_board_document_is_fenced_by_its_task_and_moves_it() {
     let (_d, mut h) = harness();
     let list = h.list("L");

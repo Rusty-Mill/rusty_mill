@@ -56,6 +56,20 @@ const TICK_ACTOR: &str = "tick";
 /// Reads of one card before giving up on a task that keeps moving under it.
 const READ_ATTEMPTS: usize = 8;
 
+/// Document kind of a card-number reservation (one per number, id from [`number_doc`]).
+const NUMBER_KIND: &str = "board_number";
+
+/// Numbers tried past the highest reservation seen before giving up; each miss is another
+/// board reserving at the same moment.
+const RESERVE_ATTEMPTS: u64 = 64;
+
+/// The id of number `n`'s reservation: the same on every board, so `If-None-Match: *` lets
+/// exactly one reserve it.
+fn number_doc(n: u64) -> Uuid {
+    const NAMESPACE: Uuid = Uuid::from_u128(0x6d69_6c6c_2d62_6f61_7264_2d6e_756d_6265);
+    Uuid::new_v5(&NAMESPACE, &n.to_be_bytes())
+}
+
 /// The rusty_tick HTTP API, as this adapter needs it: one request under
 /// `/api/v1` (or `/health`), answered with its status and JSON body
 /// (`Value::Null` when empty), whatever the status.
@@ -750,6 +764,37 @@ impl<T: TickApi> Store for TickStore<T> {
             .log
             .last()
             .map(|e| e.id))
+    }
+
+    /// Reservations are `board_number` documents, created with `If-None-Match: *` and kept
+    /// whatever happens to the task, so a number never comes back.
+    fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+        let docs: Vec<Doc> = Self::decode(
+            self.call(TickRequest::new("GET", format!("/docs/{NUMBER_KIND}")), 200)?,
+            "docs",
+        )?;
+        let reserved = docs
+            .iter()
+            .filter_map(|d| d.body["number"].as_u64())
+            .max()
+            .unwrap_or(0);
+        let first = reserved.max(floor) + 1;
+        for n in first..first + RESERVE_ATTEMPTS {
+            let mut request =
+                TickRequest::new("PUT", format!("/docs/{NUMBER_KIND}/{}", number_doc(n)))
+                    .body(json!({ "v": 1, "number": n, "taskId": card }));
+            request.if_absent = true;
+            match self.tick.send(&request)?.0 {
+                200 => return Ok(n),
+                412 => continue,
+                status => {
+                    return Err(BoardError::Storage(format!(
+                        "rusty_tick answered {status} reserving card number {n}"
+                    )));
+                }
+            }
+        }
+        Err(BoardError::Conflict)
     }
 
     fn health(&self) -> Result<(), BoardError> {

@@ -12,5 +12,10 @@ changelog: Mill Board cards get a short board-wide number (#42), shown on the ca
   `#42` or `42`, including `card_take` and `card_plan` dependencies. Cards without a number
   (older cards, or tasks tagged `agent` directly in rusty_tick) are numbered oldest first when
   the board starts and before the next new card.
-- **Known limitations:** if the highest-numbered card is deleted in rusty_tick, its number can
-  be handed out again. `number:` is now a reserved tag that `card_update` refuses.
+- **Added:** rusty_tick accepts a `board_number` document kind. The board reserves each number
+  there with `If-None-Match: *` before using it and never releases it, so two boards sharing a
+  rusty_tick never hand out the same number, and a card that is untagged, trashed or restored
+  keeps its number to itself. A lookup by a number two cards carry is refused, not guessed.
+- **Known limitations:** numbers can have gaps (a reservation whose card was never written).
+  `number:` is now a reserved tag that `card_update` refuses. rusty_tick must be deployed
+  before the board: an older rusty_tick refuses the reservation and the board cannot add cards.

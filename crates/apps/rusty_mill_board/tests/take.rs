@@ -267,6 +267,9 @@ impl Store for RivalAfterGet {
     fn last_event_id(&self) -> Result<Option<uuid::Uuid>, BoardError> {
         self.inner.last_event_id()
     }
+    fn reserve_number(&self, card: uuid::Uuid, floor: u64) -> Result<u64, BoardError> {
+        self.inner.reserve_number(card, floor)
+    }
 }
 
 #[test]
@@ -438,6 +441,9 @@ impl Store for HookAfterGet {
     }
     fn last_event_id(&self) -> Result<Option<uuid::Uuid>, BoardError> {
         self.inner.last_event_id()
+    }
+    fn reserve_number(&self, card: uuid::Uuid, floor: u64) -> Result<u64, BoardError> {
+        self.inner.reserve_number(card, floor)
     }
 }
 

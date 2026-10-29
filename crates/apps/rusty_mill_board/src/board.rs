@@ -86,7 +86,8 @@ pub struct Board<S> {
     rules: RwLock<MoveRules>,
     projects: RwLock<Projects>,
     projects_sink: Option<ProjectsSink>,
-    /// Held while numbers are handed out, so two new cards never get the same one.
+    /// Held while numbers are handed out, so this process does not race itself for them.
+    /// Uniqueness does not rest on it: the store reserves each number (`Store::reserve_number`).
     numbering: Mutex<()>,
     clock: fn() -> i64,
 }
@@ -293,13 +294,21 @@ impl<S: Store> Board<S> {
     /// The card numbered `number`.
     ///
     /// # Errors
-    /// If no card has that number, or on storage failure.
+    /// If no card has that number, if more than one has (a number tag edited by hand in
+    /// rusty_tick): never a guess at which was meant. Or on storage failure.
     pub fn get_number(&self, number: u64) -> Result<Card, BoardError> {
-        self.store
+        let mut found = self
+            .store
             .list()?
             .into_iter()
-            .find(|c| c.number == Some(number))
-            .ok_or(BoardError::Invalid("no card has that number"))
+            .filter(|c| c.number == Some(number));
+        match (found.next(), found.next()) {
+            (Some(card), None) => Ok(card),
+            (None, _) => Err(BoardError::Invalid("no card has that number")),
+            (Some(_), Some(_)) => Err(BoardError::Invalid(
+                "more than one card has that number; name it by id",
+            )),
+        }
     }
 
     /// Number every card that has none yet (made before numbering, or directly in rusty_tick),
@@ -315,8 +324,8 @@ impl<S: Store> Board<S> {
         self.number_strays().map(|(numbered, _)| numbered)
     }
 
-    /// Number the cards that have none, after the highest number in use; returns how many it
-    /// numbered and the next free number. The caller holds `numbering`.
+    /// Number the cards that have none, each with a number the store reserves; returns how many
+    /// it numbered and the highest number on the board. The caller holds `numbering`.
     fn number_strays(&self) -> Result<(usize, u64), BoardError> {
         let numberer = Actor {
             name: NUMBERER.into(),
@@ -324,30 +333,30 @@ impl<S: Store> Board<S> {
             projects: None,
         };
         let cards = self.store.list()?;
-        let mut next = cards
-            .iter()
-            .filter_map(|c| c.number)
-            .max()
-            .map_or(1, |n| n + 1);
+        let mut highest = cards.iter().filter_map(|c| c.number).max().unwrap_or(0);
         let strays: Vec<Uuid> = cards
             .iter()
             .filter(|c| c.number.is_none())
             .map(|c| c.id)
             .collect();
         for id in &strays {
-            self.apply(*id, &numberer, EventKind::Numbered, |c, _| c.numbered(next))?;
-            next += 1;
+            highest = self.store.reserve_number(*id, highest)?;
+            // Another board may number the card first; then this reservation goes unused.
+            self.apply(*id, &numberer, EventKind::Numbered, |c, _| {
+                Ok(c.numbered(highest))
+            })?;
         }
-        Ok((strays.len(), next))
+        Ok((strays.len(), highest))
     }
 
-    /// Commit a new card under the next free number.
+    /// Commit a new card under a newly reserved number.
     fn insert_numbered(&self, by: &Actor, mut card: Card) -> Result<Card, BoardError> {
         let _numbering = self
             .numbering
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        card.number = Some(self.number_strays()?.1);
+        let highest = self.number_strays()?.1;
+        card.number = Some(self.store.reserve_number(card.id, highest)?);
         card.rev = self
             .store
             .insert(&card, Event::of(&card, EventKind::Created, &by.name))?;

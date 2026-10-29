@@ -1,5 +1,8 @@
-//! Board-wide card numbers: handed out in creation order, never changed, and given to cards that
-//! came without one.
+//! Board-wide card numbers: reserved in the store so no two cards ever share one, across boards
+//! sharing a rusty_tick and across cards leaving and rejoining the board; lookups never guess.
+
+use std::sync::Arc;
+use std::thread;
 
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{BoardError, Card, Event, EventKind};
@@ -7,6 +10,7 @@ use rusty_mill_board::projects::Projects;
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::tick::TickStore;
 use serde_json::json;
+use uuid::Uuid;
 
 mod fake_tick;
 use fake_tick::FakeTick;
@@ -17,6 +21,10 @@ fn clock() -> i64 {
 
 fn projects() -> Projects {
     Projects::parse(r#"{"orch": ["crates/apps/rusty_orch"]}"#).expect("projects")
+}
+
+fn tick_board(tick: &FakeTick) -> Board<TickStore<FakeTick>> {
+    Board::with_clock(TickStore::new(tick.clone()), Roles::default(), clock)
 }
 
 #[test]
@@ -83,19 +91,20 @@ fn unnumbered_cards_are_numbered_oldest_first_after_the_highest() {
 #[test]
 fn a_number_never_changes_and_is_not_a_tag_people_set() {
     let card = Card::new("a", "", vec![], 0).expect("card");
-    let numbered = card.numbered(3).expect("number");
+    let numbered = card.numbered(3);
     assert_eq!((numbered.number, numbered.rev), (Some(3), card.rev + 1));
     assert_eq!(
         numbered.numbered(4),
-        Err(BoardError::Invalid("card is already numbered"))
+        numbered,
+        "a numbered card keeps its number"
     );
     assert!(Card::new("a", "", vec!["Number:9".into()], 0).is_err());
 }
 
 #[test]
-fn a_task_made_in_rusty_tick_gets_the_next_number_with_the_next_card() {
+fn a_task_made_in_rusty_tick_gets_a_number_with_the_next_card() {
     let tick = FakeTick::default();
-    let board = Board::with_clock(TickStore::new(tick.clone()), Roles::default(), clock);
+    let board = tick_board(&tick);
     let human = board.roles().actor("nano", "human").expect("role");
     let first = board.add(&human, "first", "", vec![]).expect("add");
     assert_eq!(
@@ -109,7 +118,98 @@ fn a_task_made_in_rusty_tick_gets_the_next_number_with_the_next_card() {
     assert_eq!(board.get(stray.id).expect("get").number, None);
 
     let next = board.add(&human, "next", "", vec![]).expect("add");
-    assert_eq!(board.get(stray.id).expect("get").number, Some(2));
-    assert_eq!(next.number, Some(3));
-    assert_eq!(board.get_number(3).expect("by number").id, next.id);
+    // #2 stays reserved for the stray's first life; numbers are never handed out twice.
+    assert_eq!(board.get(stray.id).expect("get").number, Some(3));
+    assert_eq!(next.number, Some(4));
+    assert_eq!(board.get_number(4).expect("by number").id, next.id);
+}
+
+#[test]
+fn two_boards_that_both_read_the_same_highest_number_still_reserve_different_ones() {
+    let tick = FakeTick::default();
+    let (one, two) = (TickStore::new(tick.clone()), TickStore::new(tick.clone()));
+    // Both boards listed the cards and saw no number yet: the same floor.
+    let a = one.reserve_number(Uuid::now_v7(), 0).expect("reserve");
+    let b = two.reserve_number(Uuid::now_v7(), 0).expect("reserve");
+    assert_eq!((a, b), (1, 2));
+    assert_eq!(one.reserve_number(Uuid::now_v7(), 0), Ok(3));
+    assert_eq!(tick.docs("board_number").len(), 3);
+}
+
+#[test]
+fn two_boards_adding_at_once_never_share_a_number() {
+    let tick = FakeTick::default();
+    let boards = [Arc::new(tick_board(&tick)), Arc::new(tick_board(&tick))];
+    let writers: Vec<_> = boards
+        .iter()
+        .flat_map(|b| [Arc::clone(b), Arc::clone(b)])
+        .enumerate()
+        .map(|(w, board)| {
+            thread::spawn(move || {
+                let human = board.roles().actor("nano", "human").expect("role");
+                for i in 0..10 {
+                    board
+                        .add(&human, &format!("w{w}-{i}"), "", vec![])
+                        .expect("add");
+                }
+            })
+        })
+        .collect();
+    for w in writers {
+        w.join().expect("writer");
+    }
+    let mut numbers: Vec<_> = boards[0]
+        .list(None)
+        .expect("list")
+        .iter()
+        .map(|c| c.number.expect("numbered"))
+        .collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    assert_eq!(numbers.len(), 40, "every card has its own number");
+}
+
+#[test]
+fn a_card_that_leaves_the_board_keeps_its_number_to_itself() {
+    let tick = FakeTick::default();
+    let board = tick_board(&tick);
+    let human = board.roles().actor("nano", "human").expect("role");
+    let a = board.add(&human, "a", "", vec![]).expect("add");
+
+    // Untagged in rusty_tick (the owner's switch), then a new card, then tagged again.
+    tick.owner_edit(a.id, |t| t["tags"] = json!(["board:backlog", "number:1"]));
+    let b = board.add(&human, "b", "", vec![]).expect("add");
+    tick.owner_edit(a.id, |t| {
+        t["tags"] = json!(["agent", "board:backlog", "number:1"]);
+    });
+    assert_eq!(b.number, Some(2));
+    assert_eq!(board.get_number(1).expect("a").id, a.id);
+    assert_eq!(board.get_number(2).expect("b").id, b.id);
+
+    // Trashed, a new card on a fresh board (a restart), then restored.
+    tick.owner_edit(b.id, |t| t["deletedMs"] = json!(43));
+    let restarted = tick_board(&tick);
+    let c = restarted.add(&human, "c", "", vec![]).expect("add");
+    tick.owner_edit(b.id, |t| t["deletedMs"] = json!(null));
+    assert_eq!(c.number, Some(3));
+    assert_eq!(restarted.get_number(2).expect("b").id, b.id);
+}
+
+#[test]
+fn a_number_two_cards_carry_is_refused_rather_than_guessed() {
+    let tick = FakeTick::default();
+    let board = tick_board(&tick);
+    let human = board.roles().actor("nano", "human").expect("role");
+    board.add(&human, "a", "", vec![]).expect("add");
+    let b = board.add(&human, "b", "", vec![]).expect("add");
+    // A number tag copied by hand in rusty_tick.
+    tick.owner_edit(b.id, |t| {
+        t["tags"] = json!(["agent", "board:backlog", "number:1"]);
+    });
+    assert_eq!(
+        board.get_number(1),
+        Err(BoardError::Invalid(
+            "more than one card has that number; name it by id"
+        ))
+    );
 }

@@ -36,6 +36,10 @@ pub trait Store: Send + Sync {
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError>;
     /// The id of the newest committed event: a cursor that has seen everything so far.
     fn last_event_id(&self) -> Result<Option<Uuid>, BoardError>;
+    /// Reserve a card number for `card`: the lowest above `floor` and above every number
+    /// reserved before. A reservation is durable and never released, so no two cards get the
+    /// same number, whichever boards share the store and whatever leaves the board meanwhile.
+    fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError>;
     /// `Err` once the store can no longer commit and must be reopened.
     ///
     /// # Errors
@@ -51,6 +55,8 @@ pub trait Store: Send + Sync {
 struct Log {
     cards: BTreeMap<Uuid, Card>,
     events: Vec<Event>,
+    /// The highest card number reserved.
+    numbers: u64,
 }
 
 impl Log {
@@ -148,6 +154,12 @@ impl Store for MemStore {
     fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
         Ok(self.log.lock().map_err(poisoned)?.last_id())
     }
+
+    fn reserve_number(&self, _card: Uuid, floor: u64) -> Result<u64, BoardError> {
+        let mut log = self.log.lock().map_err(poisoned)?;
+        log.numbers = log.numbers.max(floor) + 1;
+        Ok(log.numbers)
+    }
 }
 
 impl<T: Store + ?Sized> Store for Box<T> {
@@ -168,6 +180,9 @@ impl<T: Store + ?Sized> Store for Box<T> {
     }
     fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
         (**self).last_event_id()
+    }
+    fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+        (**self).reserve_number(card, floor)
     }
     fn health(&self) -> Result<(), BoardError> {
         (**self).health()
