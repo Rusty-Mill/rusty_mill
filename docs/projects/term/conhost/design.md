@@ -3,7 +3,7 @@
 - **Issue:** #1222
 - **Date:** 2026-10-29
 - **Authors:** Claude, for Nano (owner) and Dottius (reviewer)
-- **Status:** draft 6 answers Dottius's re-review of draft 5 on #1229 (round 4, Appendix B); draft 5 answered round 3. D1, D2, D4, D5 and D6 are decided. D3 awaits Dottius on the three groups round 4 left open (§7.2, §7.3–§7.4, §5.7). Earlier drafts went through two Elephant Goldfish rounds (independent AI reviewers, one aspect each):
+- **Status:** draft 6 answers Dottius's re-review of draft 5 on #1229 (round 4, Appendix B); draft 5 answered round 3. D1 to D6 are all decided. Dottius accepted D3 at the design-contract level on draft 6 (`a3290ce6`); implementation reviews still check the bounds, tests, S1–S3 and D4 runs. Earlier drafts went through two Elephant Goldfish rounds (independent AI reviewers, one aspect each):
   - **Round 1:** one combined pass found 1 P0 and 12 P1.
   - **Round 2:** seven parallel reviewers on draft 2 found no P0. Their P1s are resolved, as Appendix B shows.
 - **Evidence,** all in this folder (`docs/projects/term/conhost/`):
@@ -21,7 +21,7 @@ We'll replace conhost, the Windows console host behind ConPTY, with our own host
 |---|---|---|---|---|---|
 | D1 | Build option C: our own host, in-process. This supersedes the "don't roll our own ConDrv" position in `rusty_term/docs/research/conpty-attach-2026-07.md:206-210` | Nano | §1.2 | Approved | Author-reported: Nano in the project thread, 2026-10-29 ("D1. Approved."), recorded on #1222 |
 | D2 | Approve the dependency, feature, lockfile and admission changes | Nano / Dottius | §11.1 | Approved by Nano, and co-signed by Dottius for exactly the scope §11.1 enumerates at `a6a98ee7`. It covers nothing beyond that list, and implementation still needs source review and validation. Draft 6 changes no §11.1 row except PR 5's wording | Nano: author-reported, as for D1. Dottius: #1229 re-review comment |
-| D3 | Approve the public API additions | Dottius | §11.2 | Partly accepted: §11.2.3 (the colour accessors) is accepted. Pending for `wait`'s fairness and deadline, the control lane and memory contract, and resize (round 4), changed in §7, §5.7 and §11.2.1 | #1229 re-review comment |
+| D3 | Approve the public API additions | Dottius | §11.2 | Accepted at the design-contract level at `a3290ce6`: §11.2 with §7's fairness, control-lane and memory contracts and §5.7's V3. It isn't approval of an implementation; each implementation PR is reviewed against these contracts, and the Ctrl overflow policy and V3 stay explicit limitations | #1229 round-4 and draft-6 review comments |
 | D4 | How Windows tests run before review | Dottius | §8.3 | A **successful** run of the existing manual Windows workflow on the exact head of each implementation PR before review. Merge-queue checks are unchanged | #1222 answer relayed by Nano; restated in the #1229 review |
 | D5 | Phase B criteria for making our host the default | Nano | §9 | Approved as written in §9.2 | Author-reported, as for D1 |
 | D6 | Add `STARTF_USESTDHANDLES` to rusty_term's ConPTY spawn | Nano | §1.1 | Merged as #1227. Both ConPTY tests run again | Verifiable: #1227, and its merge-queue run |
@@ -260,7 +260,7 @@ pub struct Attached {
     pub wait: OwnedWinHandle,       // a duplicate of the child's process handle, for the engine's wait
 }
 pub struct Waker { /* an auto-reset event */ }
-pub struct Ready { pub io: Option<IoDescriptor>, pub exited: bool }  // a snapshot; both empty = deadline passed
+pub struct Ready { pub io: Option<IoDescriptor>, pub exited: bool }  // a snapshot; both empty = the waker or the deadline ended the wait
 pub struct IoDescriptor { pub id: [u8; 8], pub process: usize, pub object: usize,
                           pub function: u32, pub input_size: u32, pub output_size: u32 }
 pub struct IoComplete<'a> { pub id: [u8; 8], pub status: i32, pub information: usize,
@@ -1021,3 +1021,5 @@ D2 was co-signed for the §11.1 scope at `a6a98ee7`, and the §11.2.3 colour acc
 | Stale `cancel` row | Removed; `spawn_attached` now refers to `wait` (§11.2.1) |
 | PR 5 lockfile wording | "No additional package changes beyond that named dependency-list change" (§11.1) |
 | PR body | Refreshed to draft 6 |
+
+Dottius accepted D3 at the design-contract level on `a3290ce6`, keeping the D2 co-sign in force. The one wording note, that an empty `Ready` means the waker *or* the deadline ended the wait and never by itself means expiry, is applied in §4.1.
