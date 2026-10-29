@@ -142,6 +142,9 @@ pub(crate) fn server_msg_title(payload: &[u8]) -> Result<Vec<u16>, i32> {
     Ok(strings.swap_remove(0))
 }
 
+/// Bytes in a `CD_CONNECTION_INFORMATION`.
+pub(crate) const CONNECTION_INFORMATION_LEN: usize = 24;
+
 /// `CD_CONNECTION_INFORMATION { Process, Input, Output }`, the cookies
 /// ConDrv echoes back in later descriptors.
 pub(crate) fn connection_information(process: usize, input: usize, output: usize) -> Vec<u8> {

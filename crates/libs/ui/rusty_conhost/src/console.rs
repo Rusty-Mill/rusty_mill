@@ -524,9 +524,13 @@ impl Console {
                 return self.write(reply, Text::Bytes(p.payload.to_vec()), out, fx);
             }
             msg::RAW_FLUSH => Reply::ok(p.id),
+            // The fixed struct is written back, so it must fit the
+            // client's output; ConDrv refuses a larger write-back.
             msg::USER_DEFINED => match msg::api_msg(p.payload) {
-                Some(m) => return self.api(&p, m, out, fx),
-                None => Reply::status(p.id, msg::STATUS_ILLEGAL_FUNCTION),
+                Some(m) if m.fixed.len() <= p.output_size as usize => {
+                    return self.api(&p, m, out, fx);
+                }
+                _ => Reply::status(p.id, msg::STATUS_ILLEGAL_FUNCTION),
             },
             f => {
                 // RAW_READ (6) is input, PR 3.
@@ -544,6 +548,10 @@ impl Console {
 
     /// CONNECT: the first client's title becomes the console's.
     fn connect(&mut self, p: &Packet<'_>, fx: &mut Vec<Effect>) -> Reply {
+        // The cookies are written back, so the client must have room.
+        if (p.output_size as usize) < msg::CONNECTION_INFORMATION_LEN {
+            return Reply::status(p.id, msg::STATUS_INVALID_BUFFER_SIZE);
+        }
         let title = match msg::server_msg_title(p.payload) {
             Ok(title) => title,
             Err(status) => return Reply::status(p.id, status),
@@ -1032,6 +1040,8 @@ mod tests {
         high_water: usize,
         vt: Vec<u8>,
         next_id: u64,
+        /// Each packet's output size, to check its write-back fits.
+        output_sizes: HashMap<[u8; 8], u32>,
     }
 
     impl Host {
@@ -1042,6 +1052,7 @@ mod tests {
                 high_water: 0,
                 vt: Vec::new(),
                 next_id: 0,
+                output_sizes: HashMap::new(),
             }
         }
 
@@ -1053,6 +1064,13 @@ mod tests {
             self.queued += new.len();
             self.high_water = self.high_water.max(self.queued);
             self.vt.extend(new);
+            // ConDrv refuses a write-back larger than the client's output.
+            for e in &fx {
+                if let Effect::Reply(r) | Effect::Complete(r) = e {
+                    let room = self.output_sizes.get(&r.id).copied().unwrap_or(0);
+                    assert!(r.write_back.len() <= room as usize, "{r:?}");
+                }
+            }
             fx
         }
 
@@ -1072,6 +1090,7 @@ mod tests {
         ) -> (Reply, Vec<Effect>) {
             self.next_id += 1;
             let id = self.next_id.to_le_bytes();
+            self.output_sizes.insert(id, output_size);
             let fx = self.ev(Event::Packet(Packet {
                 id,
                 process,
@@ -1112,7 +1131,8 @@ mod tests {
 
         /// CONNECT as `pid`: the (process, input, output) cookies.
         fn connect(&mut self, pid: usize, title: &str) -> [usize; 3] {
-            let (r, _) = self.packet(msg::CONNECT, pid, 0, &msg::server_msg(title), 0);
+            let info = msg::CONNECTION_INFORMATION_LEN as u32;
+            let (r, _) = self.packet(msg::CONNECT, pid, 0, &msg::server_msg(title), info);
             assert_eq!(r.status, msg::STATUS_SUCCESS);
             let cookie = |i: usize| {
                 let bytes: [u8; 8] = r.write_back[i * 8..i * 8 + 8].try_into().expect("8 bytes");
@@ -1190,7 +1210,7 @@ mod tests {
     #[test]
     fn connect_reply_carries_the_connection_information() {
         let mut h = Host::new();
-        let (r, _) = h.packet(msg::CONNECT, 7, 0, &msg::server_msg(""), 0);
+        let (r, _) = h.packet(msg::CONNECT, 7, 0, &msg::server_msg(""), 24);
         assert_eq!(r.information, 24);
         assert_eq!(r.write_back.len(), 24);
     }
@@ -1201,10 +1221,10 @@ mod tests {
         for pid in 0..MAX_CLIENTS {
             h.connect(pid, "");
         }
-        let (r, fx) = h.packet(msg::CONNECT, 999, 0, &msg::server_msg(""), 0);
+        let (r, fx) = h.packet(msg::CONNECT, 999, 0, &msg::server_msg(""), 24);
         assert_eq!(r.status, msg::STATUS_NO_MEMORY);
         assert!(fx.contains(&Effect::Log(Diag::TooManyClients)));
-        let (_, fx) = h.packet(msg::CONNECT, 1000, 0, &msg::server_msg(""), 0);
+        let (_, fx) = h.packet(msg::CONNECT, 1000, 0, &msg::server_msg(""), 24);
         assert_eq!(logs(&fx), 0);
     }
 
@@ -1330,7 +1350,7 @@ mod tests {
         let [a, ..] = h.connect(1, "");
         let (r, fx) = h.packet(msg::DISCONNECT, a, 0, &[], 0);
         assert_eq!(fx, [Effect::Reply(r), Effect::CloseServer, Effect::Eof]);
-        let (r, _) = h.packet(msg::CONNECT, 2, 0, &msg::server_msg(""), 0);
+        let (r, _) = h.packet(msg::CONNECT, 2, 0, &msg::server_msg(""), 24);
         assert_eq!(r.status, msg::STATUS_UNSUCCESSFUL);
         assert!(h.ev(Event::HangUp).is_empty(), "closing is idempotent");
     }
@@ -1542,6 +1562,32 @@ mod tests {
         let (r, fx) = h.packet(42, p2, 0, &[], 0);
         assert_eq!(r.status, msg::STATUS_UNSUCCESSFUL, "an unknown function");
         assert_eq!(logs(&fx), 1);
+    }
+
+    #[test]
+    fn a_fixed_struct_larger_than_the_output_fails_only_that_call() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        let mut payload = api::GET_MODE.to_le_bytes().to_vec();
+        payload.extend(4u32.to_le_bytes());
+        payload.extend([0; 4]);
+        let (r, _) = h.packet(msg::USER_DEFINED, 1, output, &payload, 0);
+        assert_eq!(r.status, msg::STATUS_ILLEGAL_FUNCTION);
+        assert!(r.write_back.is_empty());
+        let r = h.call(output, api::GET_MODE, &[0; 4], &[], 0);
+        assert_eq!(r.status, msg::STATUS_SUCCESS, "the console still serves");
+        assert_eq!(msg::u32_at(&r.write_back, 0), Some(DEFAULT_OUTPUT_MODE));
+    }
+
+    #[test]
+    fn a_connect_without_room_for_the_cookies_is_refused_and_changes_nothing() {
+        let mut h = Host::new();
+        let (r, _) = h.packet(msg::CONNECT, 1, 0, &msg::server_msg("x"), 23);
+        assert_eq!(r.status, msg::STATUS_INVALID_BUFFER_SIZE);
+        assert!(r.write_back.is_empty());
+        assert!(h.c.clients.is_empty() && h.c.objects.is_empty());
+        h.connect(2, "cmd.exe");
+        assert_eq!(h.c.title, units("cmd.exe"), "the first real client's title");
     }
 
     fn unknown_api(h: &mut Host, process: usize, number: u32) -> Vec<Effect> {

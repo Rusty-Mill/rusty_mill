@@ -14,7 +14,6 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
-use platform::process::{Child, Signal};
 use platform::term::WinSize;
 use platform_windows::WindowsChild;
 use platform_windows::condrv::{Attached, ConsoleServer, IoComplete, IoDescriptor, Waker};
@@ -262,15 +261,18 @@ impl Shared {
         lock(&self.lanes).closed = true;
         self.input_room.notify_all();
     }
+
+    /// The console is gone: `read` reaches EOF, waiters wake, writes fail.
+    fn close(&self) {
+        self.set_eof();
+        self.set_exited();
+        self.close_lanes();
+    }
 }
 
-/// How long a failed start waits to confirm the child it terminated.
-const RECLAIM_GRACE: Duration = Duration::from_secs(5);
-
 /// A started engine thread waiting for its console. Everything that can
-/// fail without a child is done by [`prepare`], so the child, once
-/// created, always ends up with an owner: the caller on success, or a
-/// confirmed termination when the engine is gone.
+/// fail is done by [`prepare`], before the child exists; the handoff in
+/// [`Starter::start`] cannot fail, so the caller always owns the child.
 pub(crate) struct Starter {
     shared: Arc<Shared>,
     tx: mpsc::Sender<(ConsoleServer, OwnedWinHandle)>,
@@ -315,57 +317,21 @@ where
 
 impl Starter {
     /// Hand the attached console to the engine and the child to the
-    /// caller. If the engine thread is gone, the child is terminated and
-    /// its exit confirmed (or reported unconfirmed) before failing.
-    pub(crate) fn start(self, attached: Attached) -> Result<(Arc<Shared>, WindowsChild)> {
+    /// caller. If the engine thread is gone, the console closes at once,
+    /// as after a panic (§6.2): `read` reaches EOF and the caller cleans
+    /// up the child as for any closed console.
+    pub(crate) fn start(self, attached: Attached) -> (Arc<Shared>, WindowsChild) {
         let Attached {
             server,
             child,
             wait,
         } = attached;
-        if self.tx.send((server, wait)).is_err() {
-            // The unsent server is dropped, which closes it.
-            return Err(reclaim(child));
+        if let Err(mpsc::SendError((server, _wait))) = self.tx.send((server, wait)) {
+            crate::diag::log("the engine thread is gone; closing the console");
+            server.close();
+            self.shared.close();
         }
-        Ok((self.shared, child))
-    }
-}
-
-/// Terminate a child nobody will serve and wait, up to [`RECLAIM_GRACE`],
-/// to see it exit. The error says which of those happened.
-fn reclaim(mut child: WindowsChild) -> PlatformError {
-    let gone = |op: &'static str, os: OsCode| PlatformError::new(ErrorKind::Other, os, op);
-    if let Err(e) = child.kill_single(Signal::Kill) {
-        return gone(
-            "rusty_conhost: the engine thread is gone and terminating the child failed",
-            e.os,
-        );
-    }
-    let deadline = Instant::now() + RECLAIM_GRACE;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                return gone(
-                    "rusty_conhost: the engine thread is gone; the child was terminated",
-                    OsCode::None,
-                );
-            }
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) => {
-                return gone(
-                    "rusty_conhost: the engine thread is gone; the child's exit is unconfirmed",
-                    OsCode::None,
-                );
-            }
-            Err(e) => {
-                return gone(
-                    "rusty_conhost: the engine thread is gone; the child's exit could not be checked",
-                    e.os,
-                );
-            }
-        }
+        (self.shared, child)
     }
 }
 
@@ -420,9 +386,7 @@ impl Engine {
                 self.teardown();
             }
         }
-        self.shared.set_eof();
-        self.shared.set_exited();
-        self.shared.close_lanes();
+        self.shared.close();
     }
 
     /// One turn of design §7.2's loop.
@@ -682,7 +646,7 @@ impl Reply {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use platform::process::Command;
+    use platform::process::{Child, Command, Signal};
     use platform_windows::condrv;
 
     use super::*;
@@ -756,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_engine_terminates_the_child_and_says_so() {
+    fn a_lost_engine_closes_the_console_and_leaves_the_child_with_the_caller() {
         // The engine closure is dropped unrun, as if its thread had died.
         let starter = prepare_with(SIZE, |run| {
             drop(run);
@@ -764,12 +728,17 @@ mod tests {
         })
         .expect("prepare");
         let attached = condrv::spawn_attached(&ping_for_a_while()).expect("spawn_attached");
-        let pid = attached.child.id();
-        let err = starter.start(attached).err().expect("the handoff fails");
-        assert_eq!(
-            err.op, "rusty_conhost: the engine thread is gone; the child was terminated",
-            "pid {pid}"
-        );
+        let (shared, child) = starter.start(attached);
+        let mut buf = [0u8; 8];
+        assert_eq!(shared.read(&mut buf).expect("read at EOF"), 0);
+        let err = shared.write(b"x").expect_err("write after close");
+        assert_eq!(err.kind, ErrorKind::BrokenPipe);
+        shared.wait_exit();
+        // The caller still holds the child and cleans it up as usual.
+        let _ = child.kill_single(Signal::Kill);
+        Box::new(child)
+            .wait()
+            .expect("the caller can reap the child");
     }
 
     #[test]

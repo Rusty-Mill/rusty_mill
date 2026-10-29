@@ -40,11 +40,11 @@ impl OwnPty {
                 "OwnPty::spawn: this Windows has no usable ConDrv",
             )
         })?;
-        // The engine starts first: past this point only the handoff can
-        // fail, and it terminates the child it can't hand over.
+        // The engine starts first, so once the child exists nothing can
+        // fail and the caller always owns it.
         let starter = runtime::prepare(size)?;
         let attached = condrv::spawn_attached(cmd)?;
-        let (shared, child) = starter.start(attached)?;
+        let (shared, child) = starter.start(attached);
         Ok((OwnPtyMaster { shared }, child))
     }
 }
