@@ -16,7 +16,6 @@ use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 
 use crate::sys::condrv as sys;
 use crate::sys::handle::OwnedWinHandle;
-use crate::sys::proc;
 
 /// Children the process-wide pool holds at once.
 const CAPACITY: usize = 8;
@@ -205,7 +204,7 @@ fn work(alive: AliveGuard) {
         };
         // Only this thread removes held children, so every handle stays
         // open for the wait.
-        if let Err(e) = proc::wait_many(&handles, Some(RESCAN)) {
+        if let Err(e) = sys::wait_any(&handles, RESCAN) {
             shared.lock().last_error = Some(e);
             std::thread::sleep(RESCAN);
         }
@@ -215,7 +214,7 @@ fn work(alive: AliveGuard) {
 
 /// A process handle is signalled only once the process has exited.
 fn has_exited(process: &OwnedWinHandle) -> Result<bool> {
-    Ok(proc::wait_many(&[process.as_raw()], Some(Duration::ZERO))?.is_some())
+    sys::signalled(process)
 }
 
 /// Release the held children `exited` confirms have exited. One whose
@@ -309,6 +308,22 @@ mod tests {
 
         release_exited(&pool.shared, |_| Ok(true));
         assert_eq!((pool.held(), pool.reserved()), (0, 0));
+    }
+
+    /// Waking the worker is not an error, whatever backend `proc` uses:
+    /// its wait set mixes the wake event with process handles.
+    #[test]
+    fn a_wake_is_not_a_failed_wait() {
+        let pool = Pool::start(1, Box::new(os_thread)).expect("start");
+        let (process, server) = stand_in();
+        pool.reserve().expect("slot").hand_off(process, server);
+        for _ in 0..3 {
+            sys::set_event(&pool.shared.wake).expect("wake");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let last = pool.shared.lock().last_error.as_ref().map(|e| e.op);
+        assert_eq!(last, None);
+        assert_eq!((pool.held(), pool.reserved()), (1, 1));
     }
 
     /// A worker that stops keeps what it holds and refuses new slots.

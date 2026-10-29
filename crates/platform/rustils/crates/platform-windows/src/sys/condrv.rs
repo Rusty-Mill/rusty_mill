@@ -34,7 +34,7 @@
 use std::collections::HashMap;
 use std::ffi::{c_void, OsStr};
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::process::EnvSpec;
@@ -279,6 +279,44 @@ fn timeout_ms(deadline: Instant) -> u32 {
 fn is_signalled(h: w::HANDLE) -> bool {
     // SAFETY: callers pass a handle they hold open for the call.
     unsafe { w::WaitForSingleObject(h, 0) == w::WAIT_OBJECT_0 }
+}
+
+/// Wait up to `timeout` for any of `raw`, which may mix events and
+/// processes: `Some(index)` of a signalled handle, `None` on timeout.
+/// Unlike `proc::wait_many`, nothing is queried about the handle that
+/// fired. Callers hold every handle open for the call.
+pub fn wait_any(raw: &[w::HANDLE], timeout: Duration) -> Result<Option<usize>> {
+    if raw.is_empty() || raw.len() > 64 {
+        return Err(PlatformError::new(
+            ErrorKind::InvalidInput,
+            OsCode::None,
+            "WaitForMultipleObjects: 1 to 64 handles",
+        ));
+    }
+    let ms = timeout.as_millis().min(u128::from(w::INFINITE - 1)) as u32;
+    // SAFETY: `raw` holds 1 to 64 handles the caller keeps open for the
+    // call.
+    let r = unsafe { w::WaitForMultipleObjects(raw.len() as u32, raw.as_ptr(), 0, ms) };
+    let index = r.wrapping_sub(w::WAIT_OBJECT_0) as usize;
+    match r {
+        w::WAIT_TIMEOUT => Ok(None),
+        w::WAIT_FAILED => Err(errmap::last_win32_err(
+            "WaitForMultipleObjects",
+            OsStr::new(""),
+        )),
+        _ if index < raw.len() => Ok(Some(index)),
+        _ => Err(PlatformError::new(
+            ErrorKind::Other,
+            OsCode::Win32(r),
+            "WaitForMultipleObjects: unexpected result",
+        )),
+    }
+}
+
+/// Whether `handle` is signalled now. A failed check is an error, not
+/// `false`.
+pub fn signalled(handle: &OwnedWinHandle) -> Result<bool> {
+    Ok(wait_any(&[handle.as_raw()], Duration::ZERO)?.is_some())
 }
 
 /// Classify a failed ConDrv IOCTL: a driver that has dropped the server
