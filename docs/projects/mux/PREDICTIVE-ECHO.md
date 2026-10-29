@@ -103,26 +103,40 @@ at the cursor, and Backspace over a character predicted in the same epoch.
   It becomes confirmed when the first of its predictions passes the check
   below. Only then are its predictions, and later keys of the same epoch,
   drawn ahead of the server.
+- **Only the blank tail.** A key is predicted only when the predicted cursor
+  cell and every cell to its right on the row are blank on the client's
+  copy of the screen, as when typing at the end of a command line. Typing
+  in the middle of a line may insert or overwrite depending on the program,
+  so a key whose cell or any cell right of it is not blank is not
+  predicted, and starts a new tentative epoch.
 - **The overlay.** An epoch's predictions are kept as the edit they make to
-  one row, not as a list of keys: for each cell it touched, the content the
-  epoch expects there once all its keys so far are applied, and the newest
-  key that touched it. A printable key writes its character at the
-  predicted cursor and moves it right. Backspace moves it left and expects
-  the cell to hold what the server's screen showed there before the epoch
-  touched it, so `a` then Backspace leaves that cell expecting its old
-  content, touched last by the Backspace.
+  that blank tail, not as a list of keys: for each cell, the character the
+  epoch expects there and the key that wrote it. A printable key writes its
+  character at the predicted cursor and moves it right.
+- **Backspace** is predicted only over a character this epoch predicted and
+  that is not yet settled (see the check): it removes that cell from the
+  overlay, which leaves it blank and unchecked, and moves the predicted
+  cursor left. Backspace over anything else (a confirmed or real character,
+  or the start of the epoch) is not predicted and starts a new tentative
+  epoch, since what erasing does there is the program's business.
 - **The check.** An ack is a watermark, not a snapshot of the screen at one
   key: by the time it arrives, the screen may already show the echoes of
   later keys. So when `EchoAck { req }` arrives (after every Output before
   it is applied to the client's copy of the grid), the client checks only
-  the **settled** cells, those whose newest touching key is `<= req`. Each
-  must hold what the overlay expects. Cells touched by a later key are left
-  for a later ack, whatever they show now. The cursor is not compared with
-  a position (later echoes may have moved it on), only required to still be
-  on the predicted row, as the epoch rule above already demands. All
-  settled cells pass: they leave the overlay, since the screen now shows
-  them, and the epoch is confirmed. Any fails: the whole epoch is dropped
-  and erased, and a new tentative epoch starts.
+  the **settled** cells, those in the overlay whose key is `<= req`. Each
+  must hold the character the overlay expects. Cells written by a later key
+  are left for a later ack, whatever they show now. The cursor is not
+  compared with a position (later echoes may have moved it on), only
+  required to still be on the predicted row, as the epoch rule above
+  already demands.
+  - Any settled cell fails: the whole epoch is dropped and erased, and a
+    new tentative epoch starts.
+  - All pass and there was at least one: they leave the overlay, since the
+    screen now shows them, and the epoch is confirmed.
+  - No settled cells (an ack for keys whose predictions a Backspace already
+    removed, or for no predicted key at all): nothing is learned, and the
+    epoch stays as it was. A tentative epoch is confirmed only by a
+    character actually found on the screen.
 - **Confidence.** Two failed checks within ten keys turn predictions off for
   the block until the next Enter.
 - **Latency gate.** Predictions are drawn only on a slow path. The time from
@@ -160,27 +174,29 @@ Three layers, each with what it guarantees and what it does not.
 **What stays possible**, then, is one case: on a line whose epoch is
 already confirmed, the program, with no epoch-breaking key in between,
 starts reading a secret, either drawing its own masked field (`*` per key)
-in `Program` mode or turning echo off. Until the first rejecting ack or the
-`Hidden` notification arrives, every key typed is drawn, underlined. That
-is all keys typed within one path round trip plus `G`, not one character:
-at 200 ms and 8 keys a second, about two.
+or turning echo off. The client only knows the last mode it received, so
+this includes a program that turns echo off while the client still shows
+`Kernel` or `Program`: no mode is exempt. Until the first rejecting ack or
+the `Hidden` notification arrives, keys typed are drawn, underlined.
 
 How far to bound this is back with the owner (decision 3, reopened): the
 earlier answer accepted "one character", which the design did not enforce.
-The options:
+The options, with what each guarantees:
 
-- **A. Lead cap of one.** Outside `Kernel` mode, at most one prediction is
-  drawn and not yet settled at any time; the next key's prediction waits,
-  undrawn, until the previous one is confirmed. This enforces one
-  character, since the first masked key or a `Hidden` change fails or
-  stops the epoch before a second is drawn. The cost: typing faster than
-  one key per round trip shows each key late, so on the slow links that
-  predictions are for, most keys gain little.
-- **B. No cap.** Exposure is bounded by one round trip plus `G` of typing,
-  as above, as in mosh. Predictions keep their full use while typing fast.
-
-`Kernel` mode needs neither: the kernel echoes every key there, so a masked
-field cannot exist, and a switch to `Hidden` is caught by layer 2.
+- **A. Lead cap of one, in every mode.** At most one drawn prediction is
+  unsettled at any time; the next key's prediction waits, undrawn, until
+  the previous one is confirmed. So while a secret is being read, at most
+  one typed character is drawn before the first rejecting ack or the
+  `Hidden` notification stops the epoch. One exception: a typed character
+  equal to the mask character (typing `*` into a field that draws `*`)
+  passes its check falsely, and the next key may then be drawn too; each
+  such coincidence lets one more character show. The cost: typing faster
+  than one key per round trip shows each key late, so on the slow links
+  that predictions are for, most keys gain little.
+- **B. No cap.** Every key typed within one path round trip plus `G` of the
+  secret starting may be drawn, about two at 200 ms and 8 keys a second;
+  more on a slower path or with faster typing. Predictions keep their full
+  use while typing fast. This is what mosh does.
 
 ## Display
 
@@ -228,17 +244,24 @@ plus `G` past its key.
   - coalesced typing: `a` (r1) and `b` (r2) both echoed before `EchoAck
     { r1 }`: the ack passes, `b`'s cell is left for `EchoAck { r2 }`, which
     also passes;
-  - coalesced Backspace: `a` then Backspace, both settled by one ack, pass
-    against the cell's old content; the same pair with only `a` settled
-    leaves the cell unchecked;
+  - coalesced Backspace: `a` (r1) then Backspace (r2) before `EchoAck
+    { r1 }`. The Backspace removed `a`'s cell from the overlay, so the ack
+    settles nothing, and a tentative epoch stays tentative: nothing typed
+    after it is drawn until a character is found on the screen;
+  - Backspace over a character already confirmed, or over text that was
+    there before the epoch: not predicted, and a new tentative epoch;
+  - typing with a non-blank cell at or right of the cursor (in the middle
+    of a line): not predicted, and a new tentative epoch;
   - a partial watermark: three keys, an ack settling two, the third checked
     by the next ack;
   - a masked field: several keys typed on a confirmed line before the first
     ack, and the program drawing `*` for each. With the chosen option, the
     drawn characters before the rejecting ack are at most one (A) or the
-    keys typed so far (B), and none after it;
-  - a `Hidden` change in flight while keys are typed: no prediction is drawn
-    after it arrives, and drawn ones are erased.
+    keys typed so far (B), and none after it; with A, a typed `*` among
+    them lets exactly one more show;
+  - a `Hidden` change in flight while keys are typed, with the client still
+    in `Kernel` mode and in `Program` mode: the same bound as the masked
+    field, no prediction drawn after it arrives, and drawn ones erased.
 - **Latency gate.** With a stand-in path of about 2 ms and `G` at 50 ms,
   predictions stay off; raising the path delay to 100 ms turns them on
   after the first samples, and lowering it to 10 ms turns them off again.
