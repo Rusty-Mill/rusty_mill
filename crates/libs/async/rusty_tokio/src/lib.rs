@@ -401,14 +401,16 @@ use std::future::Future;
 ///
 /// # Panics
 /// Panics if called from a thread with no ambient runtime -- i.e.
-/// outside a `Runtime::block_on` call or a task already running on one.
+/// outside a `Runtime::block_on` call or a task already running on one --
+/// unless [`runtime::install_fallback`] has run, in which case the task
+/// goes to the fallback runtime.
 #[track_caller]
 pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    Handle::current().spawn(future)
+    Handle::current_or_fallback().spawn(future)
 }
 
 /// Run a genuinely blocking closure (a blocking syscall, heavy CPU work,
@@ -423,12 +425,13 @@ where
 /// blocking syscall, only to stop waiting for it.
 ///
 /// # Panics
-/// Panics if called from a thread with no ambient runtime.
+/// Panics if called from a thread with no ambient runtime and no
+/// [`runtime::install_fallback`].
 #[track_caller]
 pub fn spawn_blocking<F, T>(f: F) -> JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    Handle::current().spawn_blocking(f)
+    Handle::current_or_fallback().spawn_blocking(f)
 }

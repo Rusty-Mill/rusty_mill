@@ -11864,6 +11864,7 @@ dependencies = [
  "platform-windows",
  "rusty_log",
  "rusty_tokio-macros",
+ "tokio",
  "windows-sys 0.59.0",
 ]
 

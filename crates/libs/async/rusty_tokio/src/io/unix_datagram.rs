@@ -46,7 +46,7 @@ impl UnixDatagram {
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
     pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixDatagram> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = std::os::unix::net::UnixDatagram::bind(path)?;
         inner.set_nonblocking(true)?;
         let io = reactor.register(inner.as_raw_fd())?;
@@ -61,7 +61,7 @@ impl UnixDatagram {
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
     pub fn unbound() -> io::Result<UnixDatagram> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = std::os::unix::net::UnixDatagram::unbound()?;
         inner.set_nonblocking(true)?;
         let io = reactor.register(inner.as_raw_fd())?;
@@ -76,7 +76,7 @@ impl UnixDatagram {
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
     pub(crate) fn from_owned_fd(fd: std::os::fd::OwnedFd) -> io::Result<UnixDatagram> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = std::os::unix::net::UnixDatagram::from(fd);
         inner.set_nonblocking(true)?;
         let io = reactor.register(inner.as_raw_fd())?;

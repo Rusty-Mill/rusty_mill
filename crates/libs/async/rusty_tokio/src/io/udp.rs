@@ -75,7 +75,7 @@ impl UdpSocket {
 
     /// Binds one concrete address, synchronously.
     fn bind_addr(addr: SocketAddr) -> io::Result<UdpSocket> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = PlatformUdpSocket::bind(addr).map_err(from_platform_err)?;
         inner.set_nonblocking(true).map_err(from_platform_err)?;
         let io = reactor.register(inner.as_raw_io())?;
@@ -517,7 +517,7 @@ impl UdpSocket {
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
     pub fn from_std(socket: std::net::UdpSocket) -> io::Result<UdpSocket> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = PlatformUdpSocket::from(OwnedIo::from(socket));
         inner.set_nonblocking(true).map_err(from_platform_err)?;
         let io = reactor.register(inner.as_raw_io())?;

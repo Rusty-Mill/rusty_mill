@@ -56,7 +56,7 @@ impl<'a> Builder<'a> {
         F::Output: Send + 'static,
     {
         let name = self.name.map(Arc::from);
-        let handle = Handle::current();
+        let handle = Handle::current_or_fallback();
         super::spawn_named(&handle.shared, future, name)
     }
 }

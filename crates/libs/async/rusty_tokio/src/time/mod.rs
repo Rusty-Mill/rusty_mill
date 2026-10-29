@@ -327,7 +327,7 @@ mod tests {
 /// every place in this module that needs it but doesn't already have a
 /// `TimerDriver` reference at hand the way [`Sleep`] does.
 fn current_time() -> StdInstant {
-    Handle::current().shared.timer.now()
+    Handle::current_or_fallback().shared.timer.now()
 }
 
 /// [`Instant::now`]'s source: the current runtime's clock when there is
@@ -412,7 +412,7 @@ pub struct Sleep {
 
 impl Sleep {
     fn at(deadline: StdInstant) -> Self {
-        let timer = Handle::current().shared.timer.clone();
+        let timer = Handle::current_or_fallback().shared.timer.clone();
         Sleep {
             deadline,
             timer,
@@ -473,7 +473,7 @@ impl Drop for Sleep {
 
 /// Resolves after `duration` elapses.
 pub fn sleep(duration: Duration) -> Sleep {
-    let timer = Handle::current().shared.timer.clone();
+    let timer = Handle::current_or_fallback().shared.timer.clone();
     let deadline = timer.now() + duration;
     Sleep {
         deadline,

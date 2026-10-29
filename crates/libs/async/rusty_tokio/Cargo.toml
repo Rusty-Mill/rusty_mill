@@ -211,6 +211,9 @@ futures-io = "0.3"
 # even though `required-features` below skips the test target unless
 # the `tracing` feature is enabled.
 rusty_log = { workspace = true }
+# Oracle for `tests/fallback.rs`: rusty_tokio I/O and timers polled by a real
+# tokio runtime, the case `runtime::install_fallback` exists for.
+tokio = { version = "1", default-features = false, features = ["rt"] }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 # `tests/signal_windows.rs` calls `GenerateConsoleCtrlEvent` directly to

@@ -314,7 +314,7 @@ fn dispatch(signum: c_int) {
 #[cfg(unix)]
 fn global() -> io::Result<&'static Global> {
     let result = GLOBAL.get_or_init(|| -> io::Result<Global> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let (read_fd, write_fd) = make_pipe()?;
         PIPE_WRITE_FD.store(write_fd.as_raw_fd(), Ordering::Relaxed);
         let io = reactor.register(read_fd.as_raw_fd())?;
@@ -690,7 +690,7 @@ fn dispatch(ctrl_type: u32) {
 #[cfg(windows)]
 fn global() -> io::Result<&'static WindowsGlobal> {
     let result = WINDOWS_GLOBAL.get_or_init(|| -> io::Result<WindowsGlobal> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let (read_sock, write_sock) = windows_socket_pair()?;
         PIPE_WRITE_SOCKET.store(write_sock.as_raw_socket(), Ordering::Relaxed);
         read_sock

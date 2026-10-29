@@ -449,7 +449,7 @@ struct PipeIo {
 #[cfg(unix)]
 impl PipeIo {
     fn adopt(fd: OwnedFd) -> io::Result<PipeIo> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         socket::set_nonblocking(fd.as_raw_fd(), true)?;
         let io = reactor.register(fd.as_raw_fd())?;
         Ok(PipeIo { fd, io, reactor })

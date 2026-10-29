@@ -144,7 +144,7 @@ impl<T: AsRawFd> AsyncFd<T> {
 
     fn try_register(inner: T, interest: Interest) -> Result<Self, (T, io::Error)> {
         let fd = inner.as_raw_fd();
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let io = match reactor.register(fd) {
             Ok(io) => io,
             Err(e) => return Err((inner, e)),

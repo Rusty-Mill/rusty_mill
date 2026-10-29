@@ -275,7 +275,7 @@ impl PipeSender {
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
     pub fn from_file_unchecked(file: File) -> io::Result<PipeSender> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let io = reactor.register(file.as_raw_fd())?;
         Ok(PipeSender { file, io, reactor })
     }
@@ -452,7 +452,7 @@ impl PipeReceiver {
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
     pub fn from_file_unchecked(file: File) -> io::Result<PipeReceiver> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let io = reactor.register(file.as_raw_fd())?;
         Ok(PipeReceiver { file, io, reactor })
     }

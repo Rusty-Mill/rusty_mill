@@ -227,7 +227,7 @@ impl UnixListener {
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
     pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = PlatformUnixListener::bind(path.as_ref()).map_err(from_platform_err)?;
         inner.set_nonblocking(true).map_err(from_platform_err)?;
         let io = reactor.register(inner.as_raw_io())?;
@@ -242,7 +242,7 @@ impl UnixListener {
     /// Panics if called outside a running [`crate::Runtime`].
     #[cfg(unix)]
     pub fn from_std(listener: std::os::unix::net::UnixListener) -> io::Result<UnixListener> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = PlatformUnixListener::from(std::os::fd::OwnedFd::from(listener));
         inner.set_nonblocking(true).map_err(from_platform_err)?;
         let io = reactor.register(inner.as_raw_io())?;
@@ -270,7 +270,7 @@ impl UnixListener {
         // -- only `UnixSocket::listen`'s own explicit `backlog` parameter
         // exposes this as a choice at all).
         socket::listen(fd.as_raw_fd(), 1024)?;
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = PlatformUnixListener::from(fd);
         inner.set_nonblocking(true).map_err(from_platform_err)?;
         let io = reactor.register(inner.as_raw_io())?;
@@ -391,7 +391,7 @@ impl std::os::fd::FromRawFd for UnixListener {
         inner
             .set_nonblocking(true)
             .expect("failed to set the adopted fd non-blocking");
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let io = reactor
             .register(inner.as_raw_io())
             .expect("failed to register raw fd with the reactor");
@@ -491,7 +491,7 @@ impl UnixSocket {
             ));
         }
         socket::listen(self.fd.as_raw_fd(), backlog)?;
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = PlatformUnixListener::from(self.fd);
         // Already non-blocking from `socket::new_unix_socket` -- kept
         // for the same belt-and-suspenders reason `TcpSocket::listen`
@@ -516,7 +516,7 @@ impl UnixSocket {
                 "connect cannot be called on a datagram socket",
             ));
         }
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let outcome = socket::unix_connect(self.fd.as_raw_fd(), path.as_ref())?;
         let io =
             reactor.register_with(self.fd.as_raw_fd(), InitialReadiness::for_connect(outcome))?;
@@ -626,7 +626,7 @@ impl UnixStream {
     /// Panics if called outside a running [`crate::Runtime`].
     #[cfg(unix)]
     pub async fn connect<P: AsRef<Path>>(path: P) -> io::Result<UnixStream> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let fd = socket::new_unix_socket()?;
         let outcome = socket::unix_connect(fd.as_raw_fd(), path.as_ref())?;
         let io = reactor.register_with(fd.as_raw_fd(), InitialReadiness::for_connect(outcome))?;
@@ -659,7 +659,7 @@ impl UnixStream {
     /// Panics if called outside a running [`crate::Runtime`].
     #[cfg(windows)]
     pub async fn connect<P: AsRef<Path>>(path: P) -> io::Result<UnixStream> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let path = path.as_ref().to_path_buf();
         let inner = crate::spawn_blocking(move || PlatformUnixStream::connect(&path))
             .await
@@ -680,7 +680,7 @@ impl UnixStream {
     /// Panics if called outside a running [`crate::Runtime`].
     #[cfg(unix)]
     pub async fn connect_addr(addr: &UnixSocketAddr) -> io::Result<UnixStream> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let fd = socket::new_unix_socket()?;
         let outcome = socket::unix_connect_addr(fd.as_raw_fd(), &addr.0)?;
         let io = reactor.register_with(fd.as_raw_fd(), InitialReadiness::for_connect(outcome))?;
@@ -725,7 +725,7 @@ impl UnixStream {
     /// Panics if called outside a running [`crate::Runtime`].
     #[cfg(unix)]
     pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let (fd_a, fd_b) = socket::unix_socketpair()?;
         let a = UnixStream::from_accepted(PlatformUnixStream::from(fd_a), reactor.clone())?;
         let b = UnixStream::from_accepted(PlatformUnixStream::from(fd_b), reactor)?;
@@ -740,7 +740,7 @@ impl UnixStream {
     /// Panics if called outside a running [`crate::Runtime`].
     #[cfg(unix)]
     pub fn from_std(stream: std::os::unix::net::UnixStream) -> io::Result<UnixStream> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = PlatformUnixStream::from(std::os::fd::OwnedFd::from(stream));
         inner.set_nonblocking(true).map_err(from_platform_err)?;
         UnixStream::from_accepted(inner, reactor)
@@ -978,7 +978,7 @@ impl std::os::fd::FromRawFd for UnixStream {
         inner
             .set_nonblocking(true)
             .expect("failed to set the adopted fd non-blocking");
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         UnixStream::from_accepted(inner, reactor)
             .expect("failed to register raw fd with the reactor")
     }
