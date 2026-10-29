@@ -104,6 +104,8 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 UI: the card dialog is kept in step with the board without touching unsaved text; a change to the text under an
 unsaved edit raises a conflict (keep mine / take theirs), and `card_update` takes the `rev` you last saw and refuses a
 stale one. `tests/ui/drafts.mjs` checks this in a real browser (Playwright; see the file's header).
+Cards show their priority (High 5, Medium 3, Low 1; none shows nothing), sort highest first in each column, and
+the dialog sets it through `card_plan` (`tests/ui/priority.mjs`).
 
 Layout: `domain` (pure) / `store` + `tick` (port and adapters) / `board` (service) /
 `api` (operation table) / `mcp` + `web` (surfaces) / `sync` (forge port + reconcile) +
