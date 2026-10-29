@@ -13,6 +13,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// How often [`Forward::wait_ready`] tries the local socket.
@@ -33,12 +34,27 @@ const OWNED: [&str; 6] = [
     "StreamLocalBindUnlink=yes",
 ];
 
+/// How `ssh` may log in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Login {
+    /// It may ask on the terminal, for a password or a host key.
+    Interactive,
+    /// It must not ask (`BatchMode=yes`): a reconnect, while the client
+    /// reads the terminal, logs in with a key or an agent or fails.
+    Batch,
+}
+
 /// The arguments for `ssh` that forward `local` to `remote` on `host` and
 /// do nothing else. `--` keeps a host that starts with `-` from reading as
 /// an option. Both paths must be absolute: ssh refuses a bare name, and
 /// would resolve a relative one on the server against a directory the
 /// user does not choose.
-pub fn args(host: &str, local: &Path, remote: &Path) -> Result<Vec<OsString>, String> {
+pub fn args(
+    host: &str,
+    local: &Path,
+    remote: &Path,
+    login: Login,
+) -> Result<Vec<OsString>, String> {
     if host.is_empty() {
         return Err("--ssh needs a host".into());
     }
@@ -56,6 +72,9 @@ pub fn args(host: &str, local: &Path, remote: &Path) -> Result<Vec<OsString>, St
     let mut args = vec![OsString::from("-N"), OsString::from("-T")];
     for option in OWNED {
         args.extend(["-o", option].map(OsString::from));
+    }
+    if login == Login::Batch {
+        args.extend(["-o", "BatchMode=yes"].map(OsString::from));
     }
     args.push("-L".into());
     args.push(OsString::from_vec(forward));
@@ -86,12 +105,12 @@ pub struct Forward {
 
 impl Forward {
     /// Starts `program` (OpenSSH's `ssh`, or a stand-in) forwarding a new
-    /// local socket to `remote` on `host`. Its stderr stays this process's,
-    /// for a password prompt or a refusal.
-    pub fn start(program: &OsStr, host: &str, remote: &Path) -> Result<Self, String> {
+    /// local socket to `remote` on `host`, logging in as `login` allows.
+    /// Its stderr stays this process's, for a password prompt or a refusal.
+    pub fn start(program: &OsStr, host: &str, remote: &Path, login: Login) -> Result<Self, String> {
         let dir = private_dir().map_err(|e| format!("making the forward's directory: {e}"))?;
         let socket = dir.join("s");
-        let spawned = args(host, &socket, remote).and_then(|args| {
+        let spawned = args(host, &socket, remote, login).and_then(|args| {
             Command::new(program)
                 .args(args)
                 .stdin(Stdio::null())
@@ -118,11 +137,15 @@ impl Forward {
     /// after logging in, failing if it exits first or `patience` runs out.
     /// A login can take a while: the user may be typing a password. The
     /// socket is not probed, since each connection to it reaches the server.
-    pub fn wait_ready(&mut self, patience: Duration) -> Result<(), String> {
+    /// Gives up as soon as `cancel` is set.
+    pub fn wait_ready(&mut self, patience: Duration, cancel: &AtomicBool) -> Result<(), String> {
         let deadline = Instant::now() + patience;
         loop {
             if self.socket.exists() {
                 return Ok(());
+            }
+            if cancel.load(Ordering::Acquire) {
+                return Err("cancelled".into());
             }
             if let Some(status) = self.child.try_wait().map_err(|e| e.to_string())? {
                 return Err(format!("ssh exited ({status}) before the forward was up"));
@@ -172,7 +195,13 @@ mod tests {
 
     #[test]
     fn the_forward_is_all_ssh_does() {
-        let args = args("box", Path::new("/tmp/d/s"), Path::new("/run/mux.sock")).unwrap();
+        let args = args(
+            "box",
+            Path::new("/tmp/d/s"),
+            Path::new("/run/mux.sock"),
+            Login::Interactive,
+        )
+        .unwrap();
         assert_eq!(
             strings(&args),
             [
@@ -199,25 +228,62 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_login_never_asks() {
+        let args = args("box", Path::new("/l"), Path::new("/r"), Login::Batch).unwrap();
+        let args = strings(&args);
+        let at = args.iter().position(|a| *a == "BatchMode=yes").unwrap();
+        assert_eq!(args[at - 1], "-o");
+        assert!(at < args.iter().position(|a| *a == "-L").unwrap());
+    }
+
+    #[test]
     fn a_host_that_looks_like_an_option_stays_a_host() {
-        let args = args("-oProxyCommand=x", Path::new("/l"), Path::new("/r")).unwrap();
+        let args = args(
+            "-oProxyCommand=x",
+            Path::new("/l"),
+            Path::new("/r"),
+            Login::Interactive,
+        )
+        .unwrap();
         let end = &args[args.len() - 2..];
         assert_eq!(end, ["--", "-oProxyCommand=x"]);
     }
 
     #[test]
     fn paths_ssh_would_rewrite_are_escaped() {
-        let args = args("box", Path::new("/l:\\"), Path::new("/a%h:b\\c")).unwrap();
+        let args = args(
+            "box",
+            Path::new("/l:\\"),
+            Path::new("/a%h:b\\c"),
+            Login::Interactive,
+        )
+        .unwrap();
         let forward = args[args.len() - 3].to_str().unwrap();
         assert_eq!(forward, r"/l\:\\:/a%%h\:b\\c");
     }
 
     #[test]
     fn relative_paths_and_an_empty_host_are_refused() {
-        assert!(args("box", Path::new("/l"), Path::new("mux.sock")).is_err());
-        assert!(args("box", Path::new("/l"), Path::new("./mux.sock")).is_err());
-        assert!(args("box", Path::new("l"), Path::new("/r")).is_err());
-        assert!(args("", Path::new("/l"), Path::new("/r")).is_err());
+        assert!(
+            args(
+                "box",
+                Path::new("/l"),
+                Path::new("mux.sock"),
+                Login::Interactive
+            )
+            .is_err()
+        );
+        assert!(
+            args(
+                "box",
+                Path::new("/l"),
+                Path::new("./mux.sock"),
+                Login::Interactive
+            )
+            .is_err()
+        );
+        assert!(args("box", Path::new("l"), Path::new("/r"), Login::Interactive).is_err());
+        assert!(args("", Path::new("/l"), Path::new("/r"), Login::Interactive).is_err());
     }
 
     /// Asks the real OpenSSH (`ssh -G` resolves the options and connects to
@@ -241,7 +307,7 @@ mod tests {
         let (local, remote) = (dir.join(r"a:b\c%h[d"), Path::new(r"/run/m\x:y%%z"));
         let mut cmd = Command::new(ssh);
         cmd.arg("-F").arg(&config).arg("-G");
-        cmd.args(args("box", &local, remote).unwrap());
+        cmd.args(args("box", &local, remote, Login::Interactive).unwrap());
         let out = cmd.stdin(Stdio::null()).output().unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
@@ -280,18 +346,35 @@ mod tests {
     /// the wait, and the directory still goes with the forward.
     #[test]
     fn an_ssh_that_exits_before_the_forward_fails_and_cleans_up() {
-        let mut forward = Forward::start(OsStr::new("false"), "box", Path::new("/r")).unwrap();
-        let err = forward.wait_ready(Duration::from_secs(10)).unwrap_err();
+        let mut forward =
+            Forward::start(OsStr::new("false"), "box", Path::new("/r"), Login::Batch).unwrap();
+        let err = forward
+            .wait_ready(Duration::from_secs(10), &AtomicBool::new(false))
+            .unwrap_err();
         assert!(err.contains("ssh exited"), "{err}");
         let dir = forward.dir.clone();
         drop(forward);
         assert!(!dir.exists(), "{} was left behind", dir.display());
     }
 
+    /// A cancelled wait gives up before the forward comes up, and the
+    /// forward still cleans up.
+    #[test]
+    fn a_cancelled_wait_gives_up_at_once() {
+        let mut forward =
+            Forward::start(OsStr::new("sleep"), "box", Path::new("/r"), Login::Batch).unwrap();
+        let started = Instant::now();
+        let err = forward
+            .wait_ready(Duration::from_secs(10), &AtomicBool::new(true))
+            .unwrap_err();
+        assert_eq!(err, "cancelled");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
     #[test]
     fn a_missing_ssh_is_reported() {
         let program = OsStr::new("/nonexistent/rusty-mux-test-ssh");
-        let err = Forward::start(program, "box", Path::new("/r"))
+        let err = Forward::start(program, "box", Path::new("/r"), Login::Batch)
             .err()
             .unwrap();
         assert!(err.contains("starting /nonexistent"), "{err}");

@@ -29,3 +29,8 @@ platform-linux = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 platform-windows = { workspace = true }
+
+[dev-dependencies]
+# Runs a real server in-process for the reconnect tests, as rusty_mux_ctl's
+# tests do.
+rusty_tokio = { workspace = true }
