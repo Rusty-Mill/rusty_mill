@@ -176,8 +176,13 @@ already confirmed, the program, with no epoch-breaking key in between,
 starts reading a secret, either drawing its own masked field (`*` per key)
 or turning echo off. The client only knows the last mode it received, so
 this includes a program that turns echo off while the client still shows
-`Kernel` or `Program`: no mode is exempt. Until the first rejecting ack or
-the `Hidden` notification arrives, keys typed are drawn, underlined.
+`Kernel` or `Program`: no mode is exempt. Keys typed are drawn,
+underlined, until the client sees a `Hidden` notification, an epoch break,
+or the first check that actually fails. That is not a deadline counted from
+when the secret starts: a typed character equal to the mask (typing `*`
+into a field that draws `*`) passes its check falsely and keeps the epoch
+confirmed, so drawing goes on past it, and a run of such characters can put
+off the first failing check indefinitely.
 
 How far to bound this went back to the owner (decision 3, reopened), since
 the earlier answer accepted "one character", which the design did not
@@ -194,10 +199,16 @@ each guarantees:
   such coincidence lets one more character show. The cost: typing faster
   than one key per round trip shows each key late, so on the slow links
   that predictions are for, most keys gain little.
-- **B. No cap.** Every key typed within one path round trip plus `G` of the
-  secret starting may be drawn, about two at 200 ms and 8 keys a second;
-  more on a slower path or with faster typing. Predictions keep their full
-  use while typing fast. This is what mosh does.
+- **B. No cap.** Every key typed before the first failing check or the
+  `Hidden` notification may be drawn. On a responsive path that comes one
+  path round trip plus `G` after the first key that does not match, about
+  two keys at 200 ms and 8 keys a second, more on a slower path or with
+  faster typing; it is a per-mismatch delay, not a total from when the
+  secret started. The same false-confirmation exception as A applies: a
+  typed character equal to the mask passes, the epoch stays confirmed, and
+  later keys, however much later, may be drawn until a key that does not
+  match the mask or the `Hidden` notification ends it. Predictions keep
+  their full use while typing fast. This is what mosh does.
 
 ## Display
 
@@ -259,6 +270,12 @@ plus `G` past its key.
     ack, and the program drawing `*` for each. With the chosen option, the
     drawn characters before the rejecting ack are the keys typed so far
     (option B, chosen), and none after it;
+  - a spaced masked character: on a confirmed line, a program drawing `*`
+    for each key; the user types `*`, its ack passes (a false
+    confirmation), and a second later types another character. That
+    character is drawn (the documented B behaviour), and its ack, which
+    finds `*` instead, drops and erases the epoch; nothing after it is
+    drawn;
   - a `Hidden` change in flight while keys are typed, with the client still
     in `Kernel` mode and in `Program` mode: the same bound as the masked
     field, no prediction drawn after it arrives, and drawn ones erased.
@@ -281,9 +298,13 @@ Nano agreed with all four proposed answers on #1245 (2026-10-29 20:51Z):
 3. *(Reopened after review, then decided.)* The first answer accepted one
    underlined character in the masked-field case, which the design did not
    enforce. Asked again with the options under Password suppression, the
-   owner chose B on 2026-10-29 22:24Z: no lead cap, so every key typed
-   within one path round trip plus `G` of a secret starting mid-line may be
-   drawn, underlined, as in mosh.
+   owner chose B on 2026-10-29 22:24Z (and confirmed it on #1245): no lead
+   cap. When a secret starts mid-line on a confirmed epoch, keys typed are
+   drawn, underlined, until a `Hidden` notification, an epoch break or the
+   first failing check, as in mosh. On a responsive path the first failing
+   check comes one round trip plus `G` after the first key that does not
+   match the mask; typed characters equal to the mask pass falsely and do
+   not end it.
 4. The user can turn predictions off. The first version has a switch; the
    build PRs name it.
 
