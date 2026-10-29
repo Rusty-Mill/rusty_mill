@@ -179,9 +179,10 @@ this includes a program that turns echo off while the client still shows
 `Kernel` or `Program`: no mode is exempt. Until the first rejecting ack or
 the `Hidden` notification arrives, keys typed are drawn, underlined.
 
-How far to bound this is back with the owner (decision 3, reopened): the
-earlier answer accepted "one character", which the design did not enforce.
-The options, with what each guarantees:
+How far to bound this went back to the owner (decision 3, reopened), since
+the earlier answer accepted "one character", which the design did not
+enforce. The owner chose **B** (2026-10-29 22:24Z). The options, with what
+each guarantees:
 
 - **A. Lead cap of one, in every mode.** At most one drawn prediction is
   unsettled at any time; the next key's prediction waits, undrawn, until
@@ -256,9 +257,8 @@ plus `G` past its key.
     by the next ack;
   - a masked field: several keys typed on a confirmed line before the first
     ack, and the program drawing `*` for each. With the chosen option, the
-    drawn characters before the rejecting ack are at most one (A) or the
-    keys typed so far (B), and none after it; with A, a typed `*` among
-    them lets exactly one more show;
+    drawn characters before the rejecting ack are the keys typed so far
+    (option B, chosen), and none after it;
   - a `Hidden` change in flight while keys are typed, with the client still
     in `Kernel` mode and in `Program` mode: the same bound as the masked
     field, no prediction drawn after it arrives, and drawn ones erased.
@@ -278,10 +278,12 @@ Nano agreed with all four proposed answers on #1245 (2026-10-29 20:51Z):
 1. Grace `G` is a fixed 50 ms in the first version. An adaptive grace can
    follow if measurements call for it.
 2. `Unknown` mode (Windows): predictions are off.
-3. *(Reopened after review.)* The answer accepted one underlined character
-   for one round trip in the masked-field case, but the design did not
-   enforce that bound: it allowed every key typed within a round trip. See
-   options A and B under Password suppression.
+3. *(Reopened after review, then decided.)* The first answer accepted one
+   underlined character in the masked-field case, which the design did not
+   enforce. Asked again with the options under Password suppression, the
+   owner chose B on 2026-10-29 22:24Z: no lead cap, so every key typed
+   within one path round trip plus `G` of a secret starting mid-line may be
+   drawn, underlined, as in mosh.
 4. The user can turn predictions off. The first version has a switch; the
    build PRs name it.
 
