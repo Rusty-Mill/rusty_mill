@@ -1,6 +1,12 @@
 # ConPTY child-attach failure on Windows 11 Insider 26200 (July 2026)
 
-**Status: open — blocks all ConPTY e2e verification on this machine.**
+**Status: resolved 2026-10-29. It was ours, not the OS.** `spawn_shell`
+never set `STARTF_USESTDHANDLES`, so a parent with redirected std handles
+(`cargo test`) had them duplicated into the child, which then wrote there
+instead of the pseudo console. Setting the flag (the same fix
+platform-windows' `sys::pty::spawn_attached` carries) makes both e2e tests
+pass on `beast`; without it both still time out. The analysis below is kept
+as written; its "not a rusty_term bug" conclusion is wrong.
 
 While verifying G10 (win32-input-mode) against a real ConPTY child, both new
 backend e2e tests failed the same way and initially wedged the whole test

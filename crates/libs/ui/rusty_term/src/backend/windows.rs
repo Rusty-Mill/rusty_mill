@@ -29,8 +29,8 @@ use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetExitCodeProcess, InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-    PROCESS_INFORMATION, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject,
+    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 /// Unit type implementing [`Backend`](crate::backend::Backend) for Windows.
@@ -122,6 +122,12 @@ impl Backend for WindowsBackend {
             // Build STARTUPINFOEXW carrying the pseudoconsole attribute.
             let mut si: STARTUPINFOEXW = std::mem::zeroed();
             si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+            // Without this, a parent whose own std handles are redirected
+            // (any `cargo test` or CI run) has them duplicated into the
+            // child, which then writes there instead of the pseudo console.
+            // Null std handles plus this flag stop that; platform-windows'
+            // `sys::pty::spawn_attached` carries the full history.
+            si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
             let mut attr_size: usize = 0;
             // First call "fails" by design, only to report the required size.
             InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut attr_size);
@@ -564,13 +570,10 @@ mod tests {
     ///
     /// The pipe read is a blocking `ReadFile`, so the reads happen on a
     /// detached thread and the deadline is enforced by polling the shared
-    /// buffer; a hung read can never wedge the test harness.
-    /// ConPTY child attach silently fails on Insider build 26200.8737: conhost
-    /// runs (its `?9001h`/`?1004h` mode requests arrive) but the spawned
-    /// child's output never does. Believed an OS regression, not ours — see
-    /// docs/research/conpty-attach-2026-07.md. Run with `--ignored` to recheck.
+    /// buffer; a hung read can never wedge the test harness. It fails without
+    /// `STARTF_USESTDHANDLES` in `spawn_shell` whenever the test runner's own
+    /// std handles are redirected (docs/research/conpty-attach-2026-07.md).
     #[test]
-    #[ignore = "ConPTY attach broken on Insider 26200.8737; see docs/research/conpty-attach-2026-07.md"]
     fn conpty_child_output_reaches_the_reader() {
         use crate::backend::Backend as _;
         use std::sync::{Arc, Mutex};
@@ -607,7 +610,6 @@ mod tests {
     /// round-trips through cmd.exe.
     #[cfg(feature = "gui")]
     #[test]
-    #[ignore = "ConPTY attach broken on Insider 26200.8737; see docs/research/conpty-attach-2026-07.md"]
     fn win32_input_records_round_trip_through_a_real_conpty_child() {
         use crate::backend::{Backend as _, BackendHandle};
         use crate::gui::input::encode_win32;
