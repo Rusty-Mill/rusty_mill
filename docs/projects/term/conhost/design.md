@@ -1,9 +1,9 @@
-# rusty_conhost: our own Windows console host (design, draft 5)
+# rusty_conhost: our own Windows console host (design, draft 6)
 
 - **Issue:** #1222
 - **Date:** 2026-10-29
 - **Authors:** Claude, for Nano (owner) and Dottius (reviewer)
-- **Status:** draft 5 answers Dottius's review of draft 4 on #1229 (round 3, Appendix B). D1, D5 and D6 are decided, and so is D4. D2 and D3 await Dottius on the exact forms in §11. Earlier drafts went through two Elephant Goldfish rounds (independent AI reviewers, one aspect each):
+- **Status:** draft 6 answers Dottius's re-review of draft 5 on #1229 (round 4, Appendix B); draft 5 answered round 3. D1, D2, D4, D5 and D6 are decided. D3 awaits Dottius on the three groups round 4 left open (§7.2, §7.3–§7.4, §5.7). Earlier drafts went through two Elephant Goldfish rounds (independent AI reviewers, one aspect each):
   - **Round 1:** one combined pass found 1 P0 and 12 P1.
   - **Round 2:** seven parallel reviewers on draft 2 found no P0. Their P1s are resolved, as Appendix B shows.
 - **Evidence,** all in this folder (`docs/projects/term/conhost/`):
@@ -20,8 +20,8 @@ We'll replace conhost, the Windows console host behind ConPTY, with our own host
 | # | Decision | Who | Where | Outcome | Source |
 |---|---|---|---|---|---|
 | D1 | Build option C: our own host, in-process. This supersedes the "don't roll our own ConDrv" position in `rusty_term/docs/research/conpty-attach-2026-07.md:206-210` | Nano | §1.2 | Approved | Author-reported: Nano in the project thread, 2026-10-29 ("D1. Approved."), recorded on #1222 |
-| D2 | Approve the dependency, feature, lockfile and admission changes | Nano / Dottius | §11.1 | Nano approved. Dottius accepts the direction and withholds the exact co-sign until round 3 item 1 is reconciled, which §11.1 now does | Nano: author-reported, as for D1. Dottius: #1229 review comment |
-| D3 | Approve the public API additions | Dottius | §11.2 | Pending: changes required by round 3, made in §11.2 | #1229 review comment |
+| D2 | Approve the dependency, feature, lockfile and admission changes | Nano / Dottius | §11.1 | Approved by Nano, and co-signed by Dottius for exactly the scope §11.1 enumerates at `a6a98ee7`. It covers nothing beyond that list, and implementation still needs source review and validation. Draft 6 changes no §11.1 row except PR 5's wording | Nano: author-reported, as for D1. Dottius: #1229 re-review comment |
+| D3 | Approve the public API additions | Dottius | §11.2 | Partly accepted: §11.2.3 (the colour accessors) is accepted. Pending for `wait`'s fairness and deadline, the control lane and memory contract, and resize (round 4), changed in §7, §5.7 and §11.2.1 | #1229 re-review comment |
 | D4 | How Windows tests run before review | Dottius | §8.3 | A **successful** run of the existing manual Windows workflow on the exact head of each implementation PR before review. Merge-queue checks are unchanged | #1222 answer relayed by Nano; restated in the #1229 review |
 | D5 | Phase B criteria for making our host the default | Nano | §9 | Approved as written in §9.2 | Author-reported, as for D1 |
 | D6 | Add `STARTF_USESTDHANDLES` to rusty_term's ConPTY spawn | Nano | §1.1 | Merged as #1227. Both ConPTY tests run again | Verifiable: #1227, and its merge-queue run |
@@ -211,17 +211,17 @@ pub enum Effect {
 
 ```text
  terminal (rusty_term)                                   clients (cmd, pwsh, ...)
-  write(VT) --> command queue (64 KiB, blocks when full) --+       |  console API calls
-  resize()  --> command queue                              |       v
-  hang_up() --> command queue + waker -------------------->+   ConDrv (kernel)
+  write(VT) --> input lane (64 KiB, blocks when full) -----+       |  console API calls
+  resize()  --> control lane (flags, latest size wins)     |       v
+  hang_up() --> control lane + waker --------------------->+   ConDrv (kernel)
   read()    <-- OutputQueue (cap §7.4) <---- [engine thread] <--> overlapped READ_IO / COMPLETE_IO
-                                              | owns Console + ConsoleServer + child wait handle
-                                              +--> [ctrl worker] FIFO --> ConsoleControl
+            --> control lane: OutputDrained   | owns Console + ConsoleServer + child wait handle
+                                              +--> [ctrl worker] bounded, coalesced queue --> ConsoleControl
 ```
 
-- **Engine thread.** Owns the console. It waits on three things at once: READ_IO completion, the waker and the child's process handle, with the grace deadline as a timeout (§7.2).
-- **Caller threads.** `write`, `resize` and `hang_up` push a command and wake the engine. `read` takes bytes from the output queue and, when it frees space, pushes `OutputDrained`.
-- **Ctrl worker.** Delivers Ctrl events in FIFO order, off the engine thread (§7.2).
+- **Engine thread.** Owns the console. It waits on three things at once: READ_IO completion, the waker and the child's process handle, until the absolute grace deadline (§7.2). Every turn of its loop checks the deadline, the control lane and child exit before it serves one packet and one bounded slice of input.
+- **Caller threads.** `write` appends to the input lane and wakes the engine. `resize`, `hang_up` and the reader's `OutputDrained` only set flags in the control lane, which never needs free capacity and is never paused by backpressure (§7.4).
+- **Ctrl worker.** Delivers Ctrl events in order from a bounded, coalescing queue, off the engine thread (§7.2, §7.4).
 - There is no separate exit-watcher thread: the engine itself waits on the child's handle.
 
 A slow reader therefore stalls clients, as a full ConPTY pipe does, within the caps in §7.4. The mux's contract is "an unread pty blocks the child" (`rusty_mux/crates/server/src/pty/windows.rs:31-33`, `QUEUE = 4` chunks), and this holds that contract.
@@ -236,6 +236,7 @@ A slow reader therefore stalls clients, as a full ConPTY pipe does, within the c
 | `cooked` | ReadConsole line discipline | readconsole.rs (120) |
 | `screen` | Screen over `rusty_term_core::Grid` (scrollback 0) and `AnsiParser`, attribute mapping, read-back | screen.rs (122) |
 | `ctrl` | Which pids get which event | ctrl.rs (71) |
+| `sched` | The engine's turn order and admission arithmetic as pure functions: what to serve next given the lanes, the readiness snapshot and the clock (§7.2, §7.4). Runs on Linux in tests | new |
 | `runtime` (windows) | Engine loop, ctrl worker, admission, panic path, grace deadline (§7) | main.rs (208) |
 | `pty` (windows) | `OwnPty`, `OwnPtyMaster` (§4) | new |
 
@@ -259,7 +260,7 @@ pub struct Attached {
     pub wait: OwnedWinHandle,       // a duplicate of the child's process handle, for the engine's wait
 }
 pub struct Waker { /* an auto-reset event */ }
-pub enum Wait { Io(IoDescriptor), Woken, Exited, TimedOut }
+pub struct Ready { pub io: Option<IoDescriptor>, pub exited: bool }  // a snapshot; both empty = deadline passed
 pub struct IoDescriptor { pub id: [u8; 8], pub process: usize, pub object: usize,
                           pub function: u32, pub input_size: u32, pub output_size: u32 }
 pub struct IoComplete<'a> { pub id: [u8; 8], pub status: i32, pub information: usize,
@@ -277,7 +278,7 @@ impl Waker {
 impl ConsoleServer {
     pub fn submit_read(&mut self, reply: Option<&IoComplete<'_>>) -> Result<()> { todo!() }
     pub fn wait(&mut self, waker: &Waker, exit: Option<&OwnedWinHandle>,
-                timeout: Option<Duration>) -> Result<Wait> { todo!() }
+                deadline: Option<Instant>) -> Result<Ready> { todo!() }
     pub fn cancel_read(&mut self) { todo!() }
     pub fn complete_io(&mut self, c: &IoComplete<'_>) -> Result<()> { todo!() }
     pub fn read_input(&mut self, id: [u8; 8], offset: u32, buf: &mut [u8]) -> Result<usize> { todo!() }
@@ -305,7 +306,7 @@ impl OwnPty {
 }
 impl platform::pty::Pty for OwnPty { /* boxes spawn_concrete */ }
 
-pub struct OwnPtyMaster { /* Arc<Shared>: command queue, waker, output state, exit latch */ }
+pub struct OwnPtyMaster { /* Arc<Shared>: input lane, control lane, waker, output state, exit latch */ }
 impl platform::pty::PtyMaster for OwnPtyMaster { /* read, write, resize */ }
 impl OwnPtyMaster {
     pub fn hang_up(&self) { todo!() }                  // non-blocking, §7.3
@@ -426,10 +427,29 @@ DA1/DA2, XTVERSION, DECRQM and the OSC 4/10/11 queries go to the terminal, which
 A key sequence with the same bytes is ambiguous, as it is in conhost. This covers what edit.exe needs: CPR and DA1 replies, and OSC colour replies.
 
 ### 5.7 Resize
-- The host calls the existing `Grid::resize` on its own Grid (scrollback 0) and emits nothing to the terminal. That is the same reflow rusty_term's terminal applies to its own view, because both use rusty_term_core. So the host's model and the terminal's screen stay the same, and conhost also reflows on resize. Lines the reflow pushes off the top are dropped from the host's model, while the terminal keeps them in its own scrollback.
-- Alternate-screen handling, the stashed primary screen, saved cursors, tab stops, margins and wrap state all follow `Grid::resize`'s existing, tested behaviour (`core/src/grid.rs:3656-3760`). No new resize code goes into rusty_term_core.
+- The host calls the existing `Grid::resize` on its own Grid (scrollback 0) and emits nothing to the terminal. No new resize API goes into rusty_term_core; draft 4's `resize_clip` stays dropped.
+- Alternate-screen handling, the stashed primary screen, saved cursors, tab stops, margins and wrap state follow `Grid::resize`'s existing, tested behaviour (`core/src/grid.rs:3656-3760`).
 - The host queues a WINDOW_BUFFER_SIZE_EVENT for clients that enabled WINDOW_INPUT.
-- Draft 4's `resize_clip` and divergence V3 are both dropped.
+
+**The two screens can diverge (V3).** The same algorithm on different histories gives different results. `reflow_history` flattens scrollback plus screen (`core/src/grid.rs:1094-1110`) and drops lines past `scrollback_max` (`grid.rs:1261-1282`). The terminal keeps history and the host keeps none, so a shrink followed by a grow restores lines only on the terminal's side. Dottius's trace:
+
+| Step | Terminal (with scrollback) | Host (scrollback 0) |
+|---|---|---|
+| 4×3, print `A\r\nB\r\nC` | A / B / C, cursor row 2 | A / B / C, cursor row 2 |
+| shrink to 4×2 | B / C (A in scrollback) | B / C (A dropped) |
+| grow to 4×3 | A / B / C, cursor row 2 | B / C / blank, cursor row 1 |
+
+After that, the content and the cursor row differ until the screen is redrawn:
+- Output the host passes through as VT (text, newlines, relative moves) lands at the terminal's own cursor, so it still looks right on screen.
+- Absolute positioning doesn't. SetConsoleCursorPosition(0, 2) followed by WriteConsole("D") makes the host emit `CSI 3;1H D`. The terminal then shows A / B / D, while the host's model, and so ReadConsoleOutput and GetConsoleScreenBufferInfo, say B / C / D.
+- Narrowing and widening a wrapped line diverges the same way, because the terminal can rejoin rows from its history and the host can't.
+
+This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd, PSReadLine and edit.exe, and is part of the Phase B gate. A synchronization strategy, such as repainting the host's screen to the terminal after every resize, would need its own validation and a design update before this document claims the screens match.
+
+**Regression tests (PR 4, Linux, core level).** Each test runs the same VT through a host Grid (scrollback 0) and a terminal-side Grid (with scrollback), resizes both and asserts the documented result for each, so V3 is pinned as an expected difference rather than discovered later:
+- shrink then grow, using the trace above;
+- narrow then widen with a wrapped line, primary and alternate screen;
+- each of those followed by a cursor-positioned write (SetConsoleCursorPosition, then WriteConsole) and a relative write, asserting the host model, the VT emitted and the terminal-side result.
 
 ### 5.8 Lifetime
 **EOF** comes when the direct child exits and the queue drains. That matches today's `spawn_exit_watcher` (`platform-windows/src/sys/pty.rs:624-643`). Grandchildren (`start /b`) don't keep the console alive.
@@ -450,7 +470,7 @@ A key sequence with the same bytes is ambiguous, as it is in conhost. This cover
 |---|---|---|---|---|
 | V1 | Buffer larger than window | allowed (e.g. 9001 rows) | window size only | scrollback belongs to the terminal; ConPTY does the same |
 | V2 | SetConsoleScreenBufferInfoEx colours | changes the palette | no-op | no target program needs it |
-| V3 | (dropped in draft 5: the host reflows like conhost, §5.7) | | | |
+| V3 | Content and cursor after resize | one buffer, so one history | the host's model and the terminal's screen can differ after a shrink then grow, or a narrow then widen, until a redraw; absolute positioning then lands on different rows (§5.7) | the host keeps no scrollback, the terminal does; S3 measures it before Phase B |
 | V4 | Startup code page | OEM (e.g. 437) | 65001 | consumers are UTF-8 |
 | V5 | GetConsoleWindow | a hidden pseudo-window | NULL | add a message-only window if a program in the census needs it |
 | V6 | Multiple screen buffers (CREATE_OBJECT type 3, SetConsoleActiveScreenBuffer) | supported | STATUS_NOT_IMPLEMENTED | no target program uses them (edit.exe uses `?1049h`); build when the unknown-API log shows a real caller |
@@ -472,8 +492,8 @@ The parity suite (§8) treats each of these as an expected difference.
 
 | Limit | Value | Where it comes from | On breach |
 |---|---|---|---|
-| Variable input read per packet | 64 KiB. Read APIs may go to their declared capacity, up to 1 MiB | the spike's largest real request was 16,404 bytes (cmd ReadConsole) | STATUS_INVALID_PARAMETER |
-| Output queue, command queue, waiting calls, parked payload | §7.4 | the mux's 4-chunk contract | §7.4 |
+| Variable input read per packet | 64 KiB for every API. A read API's reply may use its declared output capacity, up to 1 MiB (§7.4) | the spike's largest real request was 16,404 bytes (cmd ReadConsole) | STATUS_INVALID_PARAMETER |
+| Output queue, input lane, waiting calls, parked payload, Ctrl queue, client and object tables, title | §7.4 | the mux's 4-chunk contract; the spike's census | §7.4 |
 | Input queue | 4,096 records | about 1 s of fast typing or paste at 4K keys/s | oldest dropped, logged once |
 
 Further robustness points:
@@ -490,37 +510,58 @@ Further robustness points:
 
 ## 7. Concurrency, shutdown and memory
 
-This section is normative for PRs 2, 3 and 8. It replaces draft 4's "mutex, then run effects after unlocking" rule, which let two threads apply `SetInputAvailable` out of order (round 3, item 2).
+This section is normative for PRs 2, 3 and 8. Draft 6 adds the fair turn order and absolute deadline (§7.2), the control lane and the bounded Ctrl queue (§7.3–§7.4), answering round 4. Draft 5 replaced draft 4's "mutex, then run effects after unlocking" rule, which let two threads apply `SetInputAvailable` out of order (round 3, item 2).
 
 ### 7.1 Ownership
 
 | Owner | Holds | Never touches |
 |---|---|---|
 | **Engine thread**, one per console | `Console`, the `ConsoleServer` (by value, in an `Option`), the in-flight READ_IO storage inside it, the child's wait handle, the grace deadline | caller-thread stacks |
-| **Ctrl worker**, one per console | the receiving end of a FIFO of `(pid, CtrlEvent)` | `Console`, `ConsoleServer`, any handle |
-| **Caller threads** (`read`, `write`, `resize`, `hang_up`, Drop) | an `Arc<Shared>`: the command queue, the `Waker`, the output state and its `Condvar`, the exit latch | `Console`, `ConsoleServer` |
+| **Ctrl worker**, one per console | the receiving end of the bounded Ctrl queue of `(pid, CtrlEvent)` (§7.4) | `Console`, `ConsoleServer`, any handle |
+| **Caller threads** (`read`, `write`, `resize`, `hang_up`, Drop) | an `Arc<Shared>`: the input lane, the control lane, the `Waker`, the output state and its `Condvar`, the exit latch | `Console`, `ConsoleServer` |
 
 - `Console::handle` runs only on the engine thread, so there is no `Mutex<Console>`.
 - `Shared`'s locks are held only to push or pop. No OS call runs under any of them.
+- **Two lanes.** The *input lane* holds terminal VT bytes, up to 64 KiB, and `write` blocks when it's full. The *control lane* is a fixed-size struct of coalesced flags: `hang_up`, `detached`, `output_drained`, and `resize: Option<WinSize>` (the latest size wins). Setting a flag never needs free capacity and never waits, and nothing pauses the control lane.
 
 ### 7.2 The engine loop and effect order
 
+The loop's order is a pure function in `sched`, so the tests below run on Linux with a fake clock. `deadline` is an absolute `Instant`, armed once, and no wake or event moves it.
+
 ```text
 loop {
-    if no READ_IO is in flight and admission allows (§7.4): server.submit_read(pending_reply)
-    match server.wait(&waker, child_wait, grace_deadline) {
-        Io(desc)  => read_input (capped), handle(Event::Packet), apply effects
-        Woken     => drain the command queue: handle each Cmd as its Event, apply effects after each
-        Exited    => handle(Event::ChildExited), apply effects
-        TimedOut  => handle(Event::GraceExpired), apply effects
-    }
+    now = Instant::now()
+    1. if deadline is armed and now >= deadline: handle(GraceExpired), disarm
+    2. take every control flag set since the last turn:
+         hang_up → handle(HangUp); resize → handle(Resize); output_drained → handle(OutputDrained)
+    3. if exited and not yet handled: handle(ChildExited)
+    4. if the output queue is ≤ 80 KiB (§7.4): take at most 16 KiB from the input lane, handle(Input)
+    5. if no READ_IO is in flight and admission allows (§7.4): server.submit_read(pending_reply)
+    6. ready = server.wait(&waker, exit_unless_handled, until)
+         until = now when steps 2–4 left work they could still do, otherwise the deadline
+    7. if ready.exited: note it for step 3
+    8. if let Some(desc) = ready.io: read_input (capped), handle(Packet), apply effects
 }
 ```
+
+Effects are applied after each `handle` call, in the order the core returned them.
+
+**Fairness.** `wait` has no priority order. It returns a snapshot of everything ready when it wakes: the completed read and whether the child has exited (§11.2.1). The loop then serves sources in a fixed order on every turn:
+- **One packet per turn.** Steps 1–3 run between any two packets, so an always-ready stream of client calls can't starve them.
+- **Bounded input per turn.** Continuous terminal input can't starve packets or control, because each turn takes at most 16 KiB.
+- **Bounded turn length.** A turn handles at most one packet, emitting at most one 64 KiB slice (§7.4), plus 16 KiB of input and the constant-size control lane. So `hang_up`, a resize, child exit and the grace deadline are each served within one turn of becoming true, whatever the clients and the terminal are doing.
+- **Wake-ups.** The waker only ends a `wait`. The engine reads the control lane on every turn, so a wake that lands while the engine is busy isn't lost.
 
 - **One executor.** The engine applies the effects of one `handle` call, in the order the core returned them, before it calls `handle` again. `SetInputAvailable` values therefore reach the OS in the order the core produced them. The last value applied is always the core's current truth. Draft 4's false→true reordering, and the lost wakeup when the order is reversed, cannot happen.
 - **No-op skipping.** The engine remembers the last value it applied and skips an identical one.
 - **Stale effects.** The core completes each request id exactly once. That is a core invariant with its own test. After `CloseServer`, the engine drops any later `Reply` or `Complete`, counting them in one debug log line, because their clients are already disconnected.
-- **Ctrl delivery is never on the engine thread.** `Effect::Ctrl` is pushed onto the ctrl worker's FIFO, which never blocks the engine. The worker calls `condrv::send_ctrl` in FIFO order. While it does, the engine keeps serving the driver, so a handler's own WriteConsole is answered. That removes the deadlock without holding any lock across delivery. Ctrl effects can reach the OS after later driver effects. That is intended, and safe: a Ctrl event carries no state the driver needs.
+- **Ctrl delivery is never on the engine thread.** `Effect::Ctrl` is pushed onto the ctrl worker's queue, which is bounded and coalescing (§7.4) and never blocks the engine. The worker calls `condrv::send_ctrl` in queue order. While it does, the engine keeps serving the driver, so a handler's own WriteConsole is answered. That removes the deadlock without holding any lock across delivery. Ctrl effects can reach the OS after later driver effects. That is intended, and safe: a Ctrl event carries no state the driver needs.
+
+**Tests (deterministic, Linux, `sched` with a fake clock and a scripted readiness source):**
+- **always-ready IO:** every `wait` returns a packet. `hang_up` set at turn *k* is handled at turn *k*. Child exit reported at turn *k* is handled by turn *k* + 1. The grace deadline expires on the first turn at or after it, while packets keep arriving.
+- **continuous commands:** the input lane is refilled to 64 KiB before every turn. Each turn still serves one packet and the control lane, and takes at most 16 KiB of input.
+- **both at once:** always-ready IO and continuous input together, with the same three progress assertions.
+- **deadline is absolute:** wakes and packets arriving every millisecond during the grace don't delay `GraceExpired` past the first turn at or after the deadline.
 
 **Tests (deterministic, Linux, core level).** Each interleaving is an ordering of `Event`s, because the engine serialises them. After every event the test asserts the invariant: the last `SetInputAvailable` emitted equals "the input queue is non-empty". It runs:
 - enqueue then drain, and drain then enqueue, each with a waiting read before, during and after;
@@ -532,9 +573,9 @@ loop {
 
 ### 7.3 Shutdown and cancellation
 
-- **`hang_up`** sets a `hung_up` latch (a second call returns at once), pushes `Cmd::HangUp`, wakes the engine and returns. It takes no lock that is held across an OS call, so it never waits on a client handler.
+- **`hang_up`** sets the control lane's `hang_up` flag (a second call finds it set and returns at once), wakes the engine and returns. It needs no input-lane capacity. It takes no lock that is held across an OS call, so it never waits on a client handler.
 - **Drop of the last `OwnPtyMaster`** does the same, and also marks the console detached. The engine then tears down, frees its own state and exits. Drop never joins a thread.
-- **Engine on `HangUp` or `ChildExited`.** The core emits `Ctrl{Close}` for every client (onto the worker FIFO), and the engine arms a 2 s deadline. During the grace the engine keeps serving the driver.
+- **Engine on `HangUp` or `ChildExited`.** The core emits `Ctrl{Close}` for every client (onto the Ctrl queue), and the engine arms the deadline at `now + 2 s` once. A later `HangUp` or `ChildExited` doesn't move it. During the grace the engine keeps serving the driver.
 - **Engine on the last DISCONNECT or on `GraceExpired`.** The core emits `CloseServer`, and the engine then:
   1. calls `cancel_read` if a READ_IO is in flight;
   2. keeps calling `wait` until that read's completion arrives, whatever it is: success, cancelled or error. CancelIoEx only requests cancellation, and the OVERLAPPED block and buffer can't be freed or reused before completion. A descriptor that completed successfully in the race is answered `STATUS_UNSUCCESSFUL` with `complete_io`, best effort;
@@ -543,7 +584,7 @@ loop {
 - **Bounded teardown.** If the cancelled read hasn't completed within 1 s, the engine leaks that read's storage on purpose, logs it once and closes the handle. It never frees memory the kernel may still write. ConDrv completes cancelled reads at once in the spike, so this path is a guard, not an expected case.
 - **A stalled Ctrl worker** can't delay teardown. The deadline belongs to the engine, and the worker owns no handles, only pids. If `ConsoleControl` hangs, the worker is abandoned and exits once its call returns and it sees the closed channel.
 - **No guarantee of `Interrupted`.** A cancelled read may complete with success, `STATUS_CANCELLED` or another error. The engine handles every outcome the same way.
-- **EOF exactly once.** `Eof` sets a latch in the output state, and only the engine sets it. Once the queue is empty and the latch is set, every `read` returns `Ok(0)`, repeatedly. The exit latch that `ExitWaiter` waits on is set exactly once, by `Wait::Exited` or by the engine's own exit, whichever comes first.
+- **EOF exactly once.** `Eof` sets a latch in the output state, and only the engine sets it. Once the queue is empty and the latch is set, every `read` returns `Ok(0)`, repeatedly. The exit latch that `ExitWaiter` waits on is set exactly once, by the first `Ready::exited` or by the engine's own exit, whichever comes first.
 
 **Tests:**
 - cancel with no read in flight (a no-op);
@@ -555,20 +596,34 @@ loop {
 
 ### 7.4 Memory bound
 
-Every byte the host keeps for a console is under one of these caps:
+**Named buffers.** Each buffer below has a cap and an admission rule. Together they bound the bytes that client calls and terminal input can make the host hold:
 
 | Store | Cap | Admission when full |
 |---|---|---|
 | Output queue, client output | 64 KiB | a call that produces VT (WriteConsole, RAW_WRITE, WriteConsoleOutput(+String), FillConsoleOutput, ScrollConsoleScreenBuffer, SetConsoleCursorPosition, SetConsoleTextAttribute) is admitted only while the queue is ≤ 64 KiB; otherwise it is parked |
-| Output queue, host reserve | 16 KiB above that | host-originated output (cooked-read echo, `^C`, the startup preamble) may use it. Past 80 KiB the engine stops taking terminal input from the command queue, so echo stops |
+| Output queue, host reserve | 16 KiB above that | host-originated output (cooked-read echo, `^C`, the startup preamble) may use it. Past 80 KiB the engine stops taking bytes from the input lane (§7.2 step 4), so echo stops. The control lane is still served |
 | One emission step | 64 KiB | a call whose output would be larger (a 64 KiB WriteConsole whose ESC bytes expand to U+2190, or a full-screen WriteConsoleOutput) emits in slices of at most 64 KiB, and is parked with its progress between slices. It completes only when fully emitted |
-| Command queue (terminal input) | 64 KiB of pending bytes | `PtyMaster::write` blocks until the engine drains it, as a pty write blocks when the child stops reading |
+| Input lane (terminal input) | 64 KiB of pending bytes | `PtyMaster::write` blocks until the engine drains it, as a pty write blocks when the child stops reading |
+| Control lane | fixed size: four flags and one `WinSize` | never full: setting a flag that is already set is a no-op |
 | Input records | 4,096 | oldest dropped, logged once (unchanged) |
-| Waiting calls (reads and parked writes together) | 64 | the engine stops submitting READ_IO until one completes, so further calls wait in the kernel and cost the host nothing |
-| Payload retained by parked calls | 1 MiB in total | as above |
-| Variable input read per packet | 64 KiB (read APIs: declared capacity, up to 1 MiB, allocated only as data arrives) | `STATUS_INVALID_PARAMETER` |
+| Waiting calls (reads and parked writes together) | 64 | READ_IO is submitted only while fewer than 64 calls wait, so further calls wait in the kernel and cost the host nothing |
+| Payload retained by parked calls | 1 MiB in total, **reserved before a packet is accepted** | READ_IO is submitted only while `parked + 64 KiB ≤ 1 MiB`, 64 KiB being the most variable input one packet can bring. A packet that then arrives always fits, so the cap is never overshot |
+| Variable input read per packet | 64 KiB | `STATUS_INVALID_PARAMETER` |
+| Read reply | the read's declared capacity, up to 1 MiB | a waiting read holds only its descriptor. Its reply is built when it completes, one at a time, and freed once written |
+| Ctrl queue | 256 entries | coalescing: an entry equal to one already queued is dropped, and a queued `Close` for a pid drops later `C` or `Break` for it. Past 256 the new entry is dropped and logged once. Pushing never blocks the engine. Teardown doesn't depend on queued entries, because the engine closes the server at the deadline (§7.3) |
 
-So the output queue never exceeds 64 + 16 + 64 = 144 KiB, and a console's worst case is about 1.3 MiB. That figure is the parked-payload cap plus the queue, the command queue and the input records.
+The output queue therefore never exceeds 64 + 16 + 64 = 144 KiB. The named buffers above total at most 2,400 KiB, about 2.3 MiB, per console: 144 KiB of output, 64 KiB of input lane, 80 KiB of input records (4,096 × 20 B), 1 MiB of parked payload, one 64 KiB packet read and one 1 MiB read reply; the Ctrl queue adds about 2 KiB. That figure covers only these buffers. The stores in the next table have their own limits and aren't in it.
+
+**Other client-controlled stores and their limits:**
+
+| Store | Limit | On breach |
+|---|---|---|
+| Screen (`Grid` and `AnsiParser`) | the terminal's window size, scrollback 0. Only `resize` from the terminal changes it. Clients can't grow it, because the buffer is the window (V1), and SetConsoleScreenBufferSize to any other size fails | `STATUS_INVALID_PARAMETER` |
+| Connected clients | 256 | CONNECT fails with `STATUS_NO_MEMORY`, logged once |
+| Objects per client | 64 | CREATE_OBJECT fails with `STATUS_NO_MEMORY` |
+| Title | 4,096 UTF-16 units | truncated, as conhost does |
+
+Any store a later PR adds names its cap in one of these tables in the same PR.
 
 **Tests (stalled reader).** For WriteConsole, RAW_WRITE, FillConsoleOutput, ScrollConsoleScreenBuffer, WriteConsoleOutput, WriteConsoleOutputString, and cooked echo under sustained terminal input, the test never reads. It asserts:
 - the output queue's high-water mark is ≤ 144 KiB;
@@ -576,6 +631,11 @@ So the output queue never exceeds 64 + 16 + 64 = 144 KiB, and a console's worst 
 - READ_IO submission stops once the waiting-call cap is reached;
 - draining the reader completes every parked call in order.
 
+**Tests (backpressure and control):**
+- **input and output full together:** the input lane is at 64 KiB with `write` blocked, and the output queue is past 80 KiB. `hang_up` is still handled on the next turn, and teardown reaches `Eof`. In a second run the reader drains instead: `OutputDrained` is handled on the next turn, input resumes, and the blocked `write` returns.
+- **drain or `HangUp` behind queued input:** each control flag set while 64 KiB of input is queued is handled before any of that input.
+- **repeated Ctrl with a stalled worker:** the worker blocks forever, and clients send 10,000 GenerateConsoleCtrlEvent calls plus input Ctrl+C. The queue stays ≤ 256 entries, duplicates coalesce, the engine keeps serving packets, and teardown completes at the deadline.
+- **capacity-boundary packets:** parked payload at exactly 1 MiB − 64 KiB, then a 64 KiB packet: accepted, and the next READ_IO is held back. 63 waiting calls, then one more: accepted, then held back. A packet one byte over the per-packet limit gets `STATUS_INVALID_PARAMETER`. The 257th client and the 65th object fail as the table says.
 
 ## 8. Testing
 
@@ -624,7 +684,7 @@ PR CI runs Linux plus Windows clippy only (`.github/workflows/ci.yml:41-43`). Wi
 |---|---|---|---|---|
 | S1 | Do CTRL_CLOSE and Ctrl+Break work through ConsoleControl? What do clients do when the server closes? | Beast | PR 8 | 0.5 days |
 | S2 | ConDrv and ConsoleControl on a GitHub `windows-latest` runner (build number), WOW64 layouts, and the oldest machine available | runner via `workflow_dispatch`, Beast | PR 1 acceptance | 0.5 days |
-| S3 | How visible is V3 (§5.7) with cmd, PSReadLine and edit.exe? | Beast | Phase B | 0.5 days |
+| S3 | How visible is V3, the resize divergence (§5.7), with cmd, PSReadLine and edit.exe? Does a repaint after resize remove it? | Beast | Phase B | 0.5 days |
 
 ### 9.2 Phases
 - **Phase A:** `own` is opt-in from PR 5.
@@ -642,20 +702,20 @@ Each PR includes one change fragment and is reviewed by Dottius. Line counts inc
 | PR | Scope | Lines | Days |
 |---|---|---|---|
 | 1 | `condrv`. Covers: rootless Server open (the admitted `NtCreateFile`, its admission comment extended), relative opens through `sys::nt::open_relative`, the 5 IOCTLs through the admitted `DeviceIoControl`, `spawn_attached`, `send_ctrl` via `GetProcAddress`, `probe()`. Integration tests: open the server, spawn the probe, CONNECT/DISCONNECT round trip, Ctrl+C observed by the probe's exit code, `Unsupported` path. Acceptance: Windows run log | 450 | 2–3 |
-| 2 | `rusty_conhost` core plus runtime, output only. Covers: `msg`, `console`, output APIs and stubs (Appendix A), the engine loop and the §7.4 caps with their stalled-reader tests, panic path, `OwnPty`/`OwnPtyMaster`, the rusty_term key parsed but undocumented, the probe example, `cmd /c` fixtures. Interim: input is discarded with one log line, resize only updates the size, Drop closes the server and kills the child after 2 s | 1,000 | 6–8 |
+| 2 | `rusty_conhost` core plus runtime, output only. Covers: `msg`, `console`, output APIs and stubs (Appendix A), the engine loop with `sched`'s fairness tests (§7.2), the two lanes and the §7.4 caps with their stalled-reader and backpressure tests, panic path, `OwnPty`/`OwnPtyMaster`, the rusty_term key parsed but undocumented, the probe example, `cmd /c` fixtures. Interim: input is discarded with one log line, resize only updates the size, Drop closes the server and kills the child after 2 s | 1,150 | 6–8 |
 | 3 | Input. Covers: VT/win32-input-mode parser, raw passthrough, reply filter, waiting reads, input event, cooked ReadConsole, Ctrl+C/Break, process groups, GenerateConsoleCtrlEvent, 65001-only code pages. Interactive cmd works | 700 | 3–4 |
-| 4 | Screen over Grid. Covers: rusty_term_core additions (§4.3, flagged), cursor/attribute/cursor-info APIs, SBI from the Grid, output-mode table, query routing (§5.6), resize (§5.7). pwsh/PSReadLine and edit.exe start work | 650 | 3–4 |
+| 4 | Screen over Grid. Covers: rusty_term_core additions (§4.3, flagged), cursor/attribute/cursor-info APIs, SBI from the Grid, output-mode table, query routing (§5.6), resize (§5.7) with the V3 regression tests. pwsh/PSReadLine and edit.exe start work | 700 | 3–4 |
 | 5 | rusty_term `OwnBackend` (§4.5), key documented. **Milestone** | 300 | 1–2 |
 | 6 | FillConsoleOutput, ScrollConsoleScreenBuffer. Clear-Host works | 450 | 2 |
 | 7 | Read/WriteConsoleOutput family, SBIEx, window/buffer size calls | 550 | 2–3 |
-| 8 | Lifetime: CTRL_CLOSE, ctrl worker FIFO, grace deadline, `hang_up`, the §7.3 tests (§5.8). Needs S1 | 350 | 1–2 |
+| 8 | Lifetime: CTRL_CLOSE, ctrl worker and its bounded, coalescing queue, absolute grace deadline, `hang_up`, the §7.3 tests (§5.8). Needs S1 | 350 | 1–2 |
 | 9 | Code pages via `codec` (§5.9) | 250 | 1–2 |
 | 10 | (reserved for issues found at the milestone) | — | 2 |
 | 11 | rusty_mux server: local host choice, `RUSTY_CONSOLE_HOST`, Config field and sites | 250 | 1–2 |
 | 12 | yirp `sessionmgr-pty`: `PtyOptions::console_host`, Send/Sync justification (`sessionmgr-pty/src/lib.rs:99-113, 302-305`) | 150 | 1 |
 | 13 | Fuzz crate `rusty_conhost/fuzz` plus a nightly job modelled on `rusty-tls-fuzz` (`ci.yml:1673-1714`) | 200 | 1–2 |
 | 14 | Windows end-to-end bench and Phase B gate | 250 | 1–2 |
-| | **Total** | **~5.6k** | **27–39** focused days |
+| | **Total** | **~5.8k** | **27–39** focused days |
 | | Plus S1–S3 | | 1.5 |
 | | Plus the D4 Windows run, about 0.5 day for each of the 13 PRs that change code | | 6.5 |
 | | **Total with overheads** | | **35–47** |
@@ -698,7 +758,7 @@ No **shipping** third-party dependency is added or upgraded anywhere in the plan
 | Generated | `docs/WORKSPACE-MAP.md` regenerated with `generate_workspace_map.py`. |
 | Licence | `crates/libs/ui/rusty_conhost/THIRD_PARTY_NOTICES.md` carries the microsoft/terminal MIT notice, the same pattern as `rusty_bullet/THIRD_PARTY_NOTICES.md`. The same notice goes at the top of every file with transcribed layouts or ported logic, including `sys::condrv` in PR 1. |
 
-**PR 5: rusty_term.** Add three direct, Windows-only dependencies under `[target.'cfg(windows)'.dependencies]`: `platform.workspace = true` (`Command`, `WinSize`, the `PtyMaster` trait), `platform-windows.workspace = true` (to name `WindowsChild`) and `rusty_conhost.workspace = true`. rusty_term has none of them today. There are no re-exports. `Cargo.lock`: rusty_term's `dependencies` list gains exactly three names: `platform`, `platform-windows` and `rusty_conhost`. Cargo records them there even though they're target-specific. No `[[package]]` entry is added or changed.
+**PR 5: rusty_term.** Add three direct, Windows-only dependencies under `[target.'cfg(windows)'.dependencies]`: `platform.workspace = true` (`Command`, `WinSize`, the `PtyMaster` trait), `platform-windows.workspace = true` (to name `WindowsChild`) and `rusty_conhost.workspace = true`. rusty_term has none of them today. There are no re-exports. `Cargo.lock`: rusty_term's `dependencies` list gains exactly three names: `platform`, `platform-windows` and `rusty_conhost`. Cargo records them there even though they're target-specific. There are no additional package changes beyond that named dependency-list change.
 
 **PR 9: platform-windows.** Add `"Win32_Globalization"` to platform-windows' local feature list, and admit `MultiByteToWideChar`, `WideCharToMultiByte` and `IsValidCodePage`. No lockfile change.
 
@@ -744,7 +804,7 @@ pub enum CtrlEvent { C, Break, Close }
 
 pub struct Waker { /* private */ }                 // Send + Sync
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Wait { Io(IoDescriptor), Woken, Exited, TimedOut }
+pub struct Ready { pub io: Option<IoDescriptor>, pub exited: bool }
 
 pub fn probe() -> Result<()>;
 pub fn spawn_attached(cmd: &Command) -> Result<Attached>;
@@ -756,7 +816,7 @@ impl Waker {
 }
 impl ConsoleServer {
     pub fn submit_read(&mut self, reply: Option<&IoComplete<'_>>) -> Result<()>;
-    pub fn wait(&mut self, waker: &Waker, exit: Option<&OwnedWinHandle>, timeout: Option<Duration>) -> Result<Wait>;
+    pub fn wait(&mut self, waker: &Waker, exit: Option<&OwnedWinHandle>, deadline: Option<Instant>) -> Result<Ready>;
     pub fn cancel_read(&mut self);
     pub fn complete_io(&mut self, c: &IoComplete<'_>) -> Result<()>;
     pub fn read_input(&mut self, id: [u8; 8], offset: u32, buf: &mut [u8]) -> Result<usize>;
@@ -776,16 +836,15 @@ pub fn encode(cp: u32, text: &str) -> Result<Vec<u8>>;
 | Item | Behaviour |
 |---|---|
 | `probe` | Opens and closes a server handle, then resolves `ConsoleControl`. `Ok(())` when both work. `Unsupported` when the device or the export is missing. Any other OS error is mapped by `sys::errmap`. It has no other side effects and can be called any number of times. |
-| `spawn_attached` | Resolves and quotes the program exactly as `WindowsPty::spawn_concrete` does, under the same `SPAWN` lock. It opens the server and its `\Reference`, `\Input` and `\Output`. The child is created with `PROC_THREAD_ATTRIBUTE_CONSOLE_REFERENCE` plus a `HANDLE_LIST` of only the three std handles, `STARTF_USESTDHANDLES`, and `bInheritHandles = TRUE` (the list limits what is inherited). The call returns once `CreateProcessW` succeeds, so the child's CONNECT is the first packet `read_io` returns. `GroupSpec::JoinGroup` gives `InvalidInput`, matching `WindowsPty`. On any failure every handle is closed and no child is left running. Draft 3's `size` parameter is dropped: the size belongs to the engine, not the driver. |
+| `spawn_attached` | Resolves and quotes the program exactly as `WindowsPty::spawn_concrete` does, under the same `SPAWN` lock. It opens the server and its `\Reference`, `\Input` and `\Output`. The child is created with `PROC_THREAD_ATTRIBUTE_CONSOLE_REFERENCE` plus a `HANDLE_LIST` of only the three std handles, `STARTF_USESTDHANDLES`, and `bInheritHandles = TRUE` (the list limits what is inherited). The call returns once `CreateProcessW` succeeds, so the child's CONNECT is the first packet `wait` reports. `GroupSpec::JoinGroup` gives `InvalidInput`, matching `WindowsPty`. On any failure every handle is closed and no child is left running. Draft 3's `size` parameter is dropped: the size belongs to the engine, not the driver. |
 | `send_ctrl` | Calls `ConsoleControl(ConsoleEndTask, {pid, hwnd: 0, event, flags})`, where `event` is CTRL_C, CTRL_BREAK or CTRL_CLOSE. `Ok(())` means the call was made, not that the signal arrived: the driver reports success even for a pid that isn't attached to us, and Windows then drops it. `Unsupported` when the export is missing. It may block; rusty_conhost calls it only from the ctrl worker, never from the engine thread or a caller thread (§7.2). |
-| `Waker` | An auto-reset event. `wake` is non-blocking and may be called from any thread; several wakes before a `wait` collapse into one `Woken`. |
+| `Waker` | An auto-reset event. `wake` is non-blocking and may be called from any thread; several wakes before a `wait` collapse into one. A wake only ends a `wait`; it isn't reported in `Ready`, because the engine reads its lanes on every turn (§7.2). |
 | `submit_read` | Starts an overlapped READ_IO, completing `reply` in the same IOCTL when given. Returns at once. A read already in flight gives `WouldBlock` and nothing is sent. The OVERLAPPED block and buffer live inside the `ConsoleServer` at a stable address until that read completes. `BrokenPipe` once the driver has dropped the server. |
-| `wait` | Blocks until the in-flight read completes (`Io`), `waker` fires (`Woken`), `exit` is signalled (`Exited`), or `timeout` passes (`TimedOut`). When several are ready, the order is `Io`, `Exited`, `Woken`, then `TimedOut`, so a completion is never starved. A read that completed with an error is returned as that error, and the read is no longer in flight. `exit` stays signalled, so callers stop passing it after the first `Exited`. |
+| `wait` | Blocks until the in-flight read completes, `waker` fires, `exit` is signalled, or the absolute `deadline` passes; `None` waits without limit, and a deadline already past makes it a non-blocking poll. It then returns a snapshot with no priority between sources: `io` holds the completed read if it has completed, and `exited` is `true` if `exit` is signalled, both checked after the wait ends. Both empty means only the waker or the deadline ended it. The deadline is the caller's `Instant`, so a call cut short by a wake never extends it. A read that completed with an error is returned as that error, and the read is no longer in flight; `exit` stays signalled, so the next call still reports it. Callers stop passing `exit` once they've handled it. |
 | `cancel_read` | `CancelIoEx` on the in-flight read, or a no-op when none is. It does not wait. The read's completion, whatever its status (success, cancelled or another error), still arrives through `wait`. No outcome is promised. |
 | `complete_io` | Completes one packet without reading the next. It's used for replies that were held back, such as a `ReadConsole` waiting for input. `write_back` longer than the packet's `output_size` gives `InvalidInput`, and nothing is sent. |
 | `read_input` / `write_output` | Copy the packet's input payload from `offset`, or write the reply payload at `offset`. They return `InvalidInput` past `input_size` or `output_size`, and `NotFound` if the packet is already complete. `read_input` returns the byte count, which is short only at the end of the payload. |
 | `set_input_available` | Sets or resets the manual-reset input-available event that clients wait on. It is idempotent. The engine resets it when the input queue drains (§7.2). |
-| `cancel` | `CancelIoEx` on the pending `read_io`. It's a no-op when none is pending, and callable from any thread. |
 | `close` / `Drop` | If a read is still in flight, cancels it and waits up to 1 s for its completion. Past that it leaks the read's storage rather than free memory the kernel may still write, logging once. Then it closes the server handle, and the driver disconnects every client, whose pending console calls fail. The engine always drains its read before calling `close` (§7.3), so the bounded wait is a guard. |
 | `key_for` | `VkKeyScanW`: `Some((vk, state))`, where `state` holds `SHIFT_PRESSED`, `LEFT_CTRL_PRESSED` and `LEFT_ALT_PRESSED` as `dwControlKeyState` bits. `None` when the active layout has no key for `ch`. |
 | `is_valid_code_page` | `IsValidCodePage`. |
@@ -814,10 +873,10 @@ impl ExitWaiter { pub fn wait(self); }
 | Item | Behaviour |
 |---|---|
 | `spawn_concrete` | Fails with `Unsupported` when `condrv::probe` fails. There's no silent ConPTY fallback (§4.4). `JoinGroup` gives `InvalidInput`. Otherwise it starts the engine thread and the ctrl worker (§7.1) and returns. `size` is the initial window and buffer size; 0 columns or rows gives `InvalidInput`. |
-| `read` | Blocks until output is queued, then returns up to `buf.len()` bytes. It returns `Ok(0)` once the direct child has exited and the queue is drained, which is `PtyMaster::read`'s contract and what `WindowsPtyMaster` does. Concurrent readers are serialized. |
-| `write` | Queues VT input bytes from the terminal and returns `buf.len()`. It blocks only while 64 KiB of earlier input is still waiting for the engine (§7.4), as a pty write blocks when the child stops reading. It never waits on a client handler. It returns `BrokenPipe` after `hang_up` or once the server is closed. |
-| `resize` | Queues the resize. The engine applies `Grid::resize` (§5.7), updates the size that `GetConsoleScreenBufferInfo` reports, and queues a `WINDOW_BUFFER_SIZE_EVENT` when the input mode asks for one. 0 columns or rows gives `InvalidInput`. `BrokenPipe` once closed. |
-| `hang_up` | Pushes `HangUp`, wakes the engine and returns. It calls no OS function except `Waker::wake`. The engine sends CTRL_CLOSE through the ctrl worker and closes the server after a 2 s deadline (§7.3). It is idempotent. |
+| `read` | Blocks until output is queued, then returns up to `buf.len()` bytes, and sets the control lane's `output_drained` flag when it frees space. It returns `Ok(0)` once the direct child has exited and the queue is drained, which is `PtyMaster::read`'s contract and what `WindowsPtyMaster` does. Concurrent readers are serialized. |
+| `write` | Appends VT input bytes from the terminal to the input lane and returns `buf.len()`. It blocks only while 64 KiB of earlier input is still waiting for the engine (§7.4), as a pty write blocks when the child stops reading. It never waits on a client handler. It returns `BrokenPipe` after `hang_up` or once the server is closed. |
+| `resize` | Sets the control lane's resize flag; the latest size wins. It never blocks. The engine applies `Grid::resize` (§5.7, including divergence V3), updates the size that `GetConsoleScreenBufferInfo` reports, and queues a `WINDOW_BUFFER_SIZE_EVENT` when the input mode asks for one. 0 columns or rows gives `InvalidInput`. `BrokenPipe` once closed. |
+| `hang_up` | Sets the control lane's `hang_up` flag, wakes the engine and returns. It needs no input-lane capacity and calls no OS function except `Waker::wake`. The engine handles it within one turn (§7.2), sends CTRL_CLOSE through the ctrl worker and closes the server at an absolute 2 s deadline (§7.3). It is idempotent. |
 | `output_ready` | `true` when a `read` would return without blocking: the queue holds bytes, or the EOF latch is set. |
 | `exit_waiter` / `ExitWaiter::wait` | `wait` blocks until the direct child has exited or the console has been torn down, whichever comes first, and returns at once if that already happened. Any number of waiters may exist. |
 | `Drop` | Calls `hang_up` and marks the console detached. The engine tears down and exits on its own (§7.3). Drop never joins a thread or waits on a client. |
@@ -949,3 +1008,16 @@ Round 1's disposition table is in `egm-review-1.md`, in this folder. Every round
 | D4 wording | "Successful" run, implementation PRs, a skipped Windows job doesn't count (§8.3) |
 | Owner decisions vs verified evidence | Source column in the decision table. The clean-room owner exception is quoted with its date and place (§3.5) |
 | §6.8 / §7 references and §10 arithmetic | §6 renumbered, §7 written, references fixed. §10 recomputed: 27–39 focused days, 35–47 with overheads, milestone about 18–24 days |
+
+### Round 4: Dottius's re-review of draft 5 (#1229)
+
+D2 was co-signed for the §11.1 scope at `a6a98ee7`, and the §11.2.3 colour accessors were accepted. Draft 6 answers the three groups that remained:
+
+| Item | Resolution in draft 6 |
+|---|---|
+| 1. Engine fairness and deadline | `wait` returns a `Ready` snapshot with no priority, and takes an absolute `deadline: Option<Instant>`. Every loop turn checks the deadline, the control lane and child exit, then serves one packet and at most 16 KiB of input, so each is served within one turn. The turn order is a pure `sched` function with always-ready-IO, continuous-input and absolute-deadline tests (§7.2, §11.2.1) |
+| 2. Control under backpressure; bounded stores | A fixed-size control lane of coalesced flags (`hang_up`, `detached`, `output_drained`, latest `resize`) is separate from the 64 KiB input lane, is never paused and needs no capacity. The Ctrl queue is capped at 256 entries and coalescing, drops and logs past the cap, and never blocks the engine. Parked bytes are reserved before READ_IO is submitted. The memory figure is scoped to the named buffers, and the screen, client and object tables and title have their own limits. New tests: input and output full together, control behind queued input, Ctrl with a stalled worker, capacity boundaries (§7.1, §7.4) |
+| 3. Resize | `Grid::resize` stays, with no new API. The "stay the same" claim is removed, and V3 is restored as a history-dependent content and cursor divergence, using Dottius's trace. S3 measures it and gates Phase B. Shrink/grow and narrow/widen regressions with cursor-positioned and relative writes follow (§5.7, §5.10, §9.1) |
+| Stale `cancel` row | Removed; `spawn_attached` now refers to `wait` (§11.2.1) |
+| PR 5 lockfile wording | "No additional package changes beyond that named dependency-list change" (§11.1) |
+| PR body | Refreshed to draft 6 |
