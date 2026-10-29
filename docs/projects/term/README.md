@@ -8,6 +8,7 @@ VT engine `rusty_term_core` (`core/`). Moved out of `docs/projects/mux/` on
 |---|---|
 | [HANDOFF.md](HANDOFF.md) | Remaining work, roadmap, rules and validation as of the 2026-10-23 handoff |
 | [NOTES.md](NOTES.md) | Decision log and design context from the 2026-10-21 to 10-23 perf session |
+| [conhost/design.md](conhost/design.md) | Our own Windows console host, replacing ConPTY's conhost (#1222): design, decisions D1–D6, PR plan; spike evidence and review rounds alongside |
 
 Elsewhere:
 
