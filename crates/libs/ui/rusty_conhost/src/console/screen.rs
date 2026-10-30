@@ -76,6 +76,9 @@ pub(super) struct Screen {
     /// A UTF-8 lead 0xC2 held without PROCESSED_OUTPUT: the next byte
     /// decides whether it starts a C1 control.
     c2: bool,
+    /// Inside a DEC private CSI too long to hold, forwarded as it came:
+    /// its final byte decides whether the input modes are reasserted.
+    long: bool,
 }
 
 impl Screen {
@@ -88,6 +91,7 @@ impl Screen {
             held: Vec::new(),
             after_cr: false,
             c2: false,
+            long: false,
         }
     }
 
@@ -96,6 +100,8 @@ impl Screen {
     pub(super) fn host(&mut self, vt: &[u8], out: &mut OutputQueue) {
         self.flush(out);
         self.after_cr = false;
+        // Whatever the client's unfinished sequence was, this ends it.
+        self.long = false;
         self.forward(vt, out);
     }
 
@@ -147,6 +153,7 @@ impl Screen {
         let held = vt.len();
         // The ESC of the sequence the bytes are in, while it may be watched.
         let mut esc = (held > 0).then_some(0);
+        let mut long = self.long;
         let mut added = 0;
         let mut consumed = 0;
         for &b in text {
@@ -159,10 +166,16 @@ impl Screen {
             let mut adds = 0;
             // A parameter byte only lengthens the prefix: the sequence is
             // matched once, at its start and at its final byte.
-            let param = vt.len() - start == 1 && matches!(b, b'0'..=b'9' | b';');
+            let param = vt.len() - start == 1 && is_param(b);
+            if long && !param {
+                long = false;
+                if b == b'l' {
+                    adds = PREAMBLE.len();
+                }
+            }
             if let Some(e) = esc.filter(|&e| !param || vt.len() - e <= 3) {
                 match watched_at(&vt[e..]) {
-                    Watched::Prefix => {}
+                    Watched::Prefix | Watched::Long => {}
                     Watched::Whole(_, Action::Reassert(modes)) => (adds, esc) = (modes.len(), None),
                     Watched::Whole(..) | Watched::No => esc = None,
                 }
@@ -231,6 +244,19 @@ impl Screen {
 
     /// Forward `vt`, acting on the watched sequences in it.
     fn route_vt(&mut self, vt: &[u8], out: &mut OutputQueue, replies: &mut Vec<u8>) {
+        if self.long {
+            let Some(end) = vt.iter().position(|&b| !is_param(b)) else {
+                return self.forward(vt, out);
+            };
+            self.long = false;
+            // An ESC ends it unfinished, and starts a sequence of its own.
+            let fin = usize::from(vt[end] != 0x1b);
+            self.forward(&vt[..end + fin], out);
+            if vt[end] == b'l' {
+                self.forward(PREAMBLE, out);
+            }
+            return self.route_vt(&vt[end + fin..], out, replies);
+        }
         let mut start = 0;
         let mut at = 0;
         while let Some(off) = vt[at..].iter().position(|&b| b == 0x1b) {
@@ -249,6 +275,11 @@ impl Screen {
                 Watched::Prefix => {
                     self.forward(&vt[start..esc], out);
                     self.held = vt[esc..].to_vec();
+                    return;
+                }
+                Watched::Long => {
+                    self.forward(&vt[start..], out);
+                    self.long = true;
                     return;
                 }
                 Watched::No => {
@@ -352,6 +383,9 @@ enum Watched {
     Whole(usize, Action),
     /// A strict prefix of one: the next bytes decide.
     Prefix,
+    /// A DEC private CSI's parameters, too long to hold: forward them and
+    /// decide at the final byte.
+    Long,
     No,
 }
 
@@ -373,17 +407,22 @@ fn watched_csi(rest: &[u8]) -> Watched {
     let first = if private { 3 } else { 2 };
     let Some(end) = rest[first.min(rest.len())..]
         .iter()
-        .position(|&b| !matches!(b, b'0'..=b'9' | b';'))
+        .position(|&b| !is_param(b))
         .map(|i| first + i)
     else {
-        return if rest.len() < WATCHED_MAX {
-            Watched::Prefix
-        } else {
-            Watched::No
+        return match (rest.len() < WATCHED_MAX, private) {
+            (true, _) => Watched::Prefix,
+            (false, true) => Watched::Long,
+            (false, false) => Watched::No,
         };
     };
     if end >= WATCHED_MAX {
-        return Watched::No;
+        // rusty_term_core applies the parameters it stored, the first 256
+        // bytes, which may name either mode: reassert both.
+        return match (private, rest[end]) {
+            (true, b'l') => Watched::Whole(end + 1, Action::Reassert(PREAMBLE)),
+            _ => Watched::No,
+        };
     }
     let params: Vec<u32> = rest[first..end]
         .split(|&b| b == b';')
@@ -405,6 +444,11 @@ fn watched_csi(rest: &[u8]) -> Watched {
         _ => return Watched::No,
     };
     Watched::Whole(end + 1, action)
+}
+
+/// A CSI parameter byte, as the watcher reads them.
+fn is_param(b: u8) -> bool {
+    matches!(b, b'0'..=b'9' | b';')
 }
 
 /// What one client byte becomes.
@@ -726,8 +770,32 @@ mod tests {
         assert!(max.len() <= WATCHED_MAX);
         let (vt, _) = client(&mut s, &max, VT);
         assert!(vt.ends_with(b"1004l\x1b[?1004h"), "{} bytes", max.len());
-        let past = [&b"\x1b[?"[..], &b"0;".repeat(130), b"1004l"].concat();
-        assert_eq!(client(&mut s, &past, VT).0, past, "past the parser's cap");
+        // Past the parser's cap it still applies the parameters it kept,
+        // wherever 1004 is, so both modes are reasserted.
+        for past in [
+            [&b"\x1b[?"[..], &b"0;".repeat(130), b"1004l"].concat(),
+            [&b"\x1b[?1004;"[..], &b"0;".repeat(130), b"l"].concat(),
+        ] {
+            assert!(past.len() > WATCHED_MAX);
+            assert_eq!(client(&mut s, &past, VT).0, [&past[..], PREAMBLE].concat());
+        }
+        // Split past the cap: forwarded as it comes, decided at its end.
+        let head = [&b"\x1b[?1004;"[..], &b"0;".repeat(130)].concat();
+        assert_eq!(client(&mut s, &head, VT).0, head, "not held");
+        assert_eq!(client(&mut s, b"0;0", VT).0, b"0;0");
+        assert_eq!(
+            client(&mut s, b"lz", VT).0,
+            [&b"l"[..], PREAMBLE, b"z"].concat()
+        );
+        // A long set, or a sequence an ESC cuts short, reasserts nothing.
+        let set = [&b"\x1b[?1004;"[..], &b"0;".repeat(130)].concat();
+        client(&mut s, &set, VT);
+        assert_eq!(client(&mut s, b"h", VT).0, b"h");
+        client(&mut s, &set, VT);
+        assert_eq!(
+            client(&mut s, b"\x1b[?1004l", VT).0,
+            [&b"\x1b[?1004l"[..], b"\x1b[?1004h"].concat()
+        );
     }
 
     #[test]
