@@ -108,7 +108,10 @@ pub enum GroupSpec {
 /// Built with [`Command`], executed by a [`Spawner`]. `argv` is a list of
 /// discrete arguments end to end; any joining or quoting an OS requires is
 /// backend-internal and never caller-visible (the Windows backend's quoting
-/// module is the security boundary here — RFC v2 §5.4).
+/// module is the security boundary here — RFC v2 §5.4). The one exception
+/// is [`Command::raw_args`], whose text passes that boundary unescaped:
+/// set it only to a command line the caller means the program to read,
+/// never one with untrusted input spliced in.
 ///
 /// Not `Clone`, unlike most builder types: a [`Stdio::File`] slot owns an
 /// open OS handle with no honest "clone for a log/re-spawn" meaning (see
