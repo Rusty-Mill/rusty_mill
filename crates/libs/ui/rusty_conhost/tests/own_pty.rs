@@ -310,6 +310,7 @@ fn a_reader_that_stalls_holds_the_writer_back() {
 fn hang_up_closes_the_console_and_releases_waiters() {
     let _g = lock();
     let (master, child) = own(&command("cmd.exe", &["/c", "ping -n 60 127.0.0.1"]));
+    let mut child = Reaped(child);
     let waiter = master.exit_waiter();
     let started = Instant::now();
     master.hang_up();
@@ -319,7 +320,102 @@ fn hang_up_closes_the_console_and_releases_waiters() {
     assert!(started.elapsed() < Duration::from_secs(5));
     let err = master.write(b"x").expect_err("write after hang_up");
     assert_eq!(err.kind, ErrorKind::BrokenPipe);
-    let _ = child.kill_single(platform::process::Signal::Kill);
+    // CTRL_CLOSE ended cmd and ping before the deadline.
+    assert_ne!(exit_of(&mut child), ExitStatus::Code(0));
+}
+
+/// The grace (§7.3): 2 s from hang-up to the server closing.
+const GRACE: Duration = Duration::from_secs(2);
+
+/// Spawn the `ctrl-hold` probe on our host and wait for it to be ready.
+fn holding(ms: u64) -> (Arc<OwnPtyMaster>, Stream, Reaped) {
+    let (master, child) = own(&command(&probe(), &["ctrl-hold", &ms.to_string()]));
+    let master = Arc::new(master);
+    let mut stream = Stream::new(Arc::clone(&master));
+    stream.until("ready");
+    (master, stream, Reaped(child))
+}
+
+#[test]
+fn hang_up_sends_ctrl_close_and_serves_the_handler_until_it_exits() {
+    let _g = lock();
+    let (master, mut stream, mut child) = holding(300);
+    let started = Instant::now();
+    master.hang_up();
+    // The handler's own write is served while the console closes.
+    stream.until("ctrl-close");
+    assert_ne!(exit_of(&mut child), ExitStatus::Code(0));
+    let err = master.write(b"x").expect_err("write after hang_up");
+    assert_eq!(err.kind, ErrorKind::BrokenPipe);
+    master.exit_waiter().wait();
+    assert!(started.elapsed() < BUDGET);
+}
+
+#[test]
+fn a_client_that_holds_ctrl_close_is_cut_off_at_the_deadline() {
+    let _g = lock();
+    let (master, mut stream, _child) = holding(60_000);
+    let started = Instant::now();
+    master.hang_up();
+    stream.until("ctrl-close");
+    // EOF comes at the deadline, not when the handler returns.
+    let deadline = Instant::now() + BUDGET;
+    while stream.rx.recv_timeout(deadline - Instant::now()).is_ok() {}
+    let took = started.elapsed();
+    assert!(took >= GRACE, "closed after {took:?}, before the grace");
+    assert!(
+        took < GRACE + Duration::from_secs(3),
+        "closed after {took:?}"
+    );
+    let mut buf = [0u8; 8];
+    assert_eq!(master.read(&mut buf).expect("EOF"), 0);
+    assert_eq!(master.read(&mut buf).expect("EOF again"), 0);
+}
+
+#[test]
+fn eof_comes_once_to_readers_on_two_threads() {
+    let _g = lock();
+    let (master, _stream, _child) = holding(60_000);
+    let readers: Vec<_> = (0..2)
+        .map(|_| {
+            let master = Arc::clone(&master);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 64];
+                while master.read(&mut buf).expect("read") > 0 {}
+                master.read(&mut buf).expect("read after EOF")
+            })
+        })
+        .collect();
+    master.hang_up();
+    for r in readers {
+        assert_eq!(r.join().expect("reader"), 0);
+    }
+}
+
+#[test]
+fn drop_during_the_grace_returns_at_once_and_the_console_closes() {
+    let _g = lock();
+    let (master, child) = own(&command(&probe(), &["ctrl-hold", "60000"]));
+    let _child = Reaped(child);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !plain_lines(&out).iter().any(|l| l == "ready") {
+        let n = master.read(&mut buf).expect("read");
+        assert!(n > 0, "EOF before ready");
+        out.extend_from_slice(&buf[..n]);
+    }
+    let waiter = master.exit_waiter();
+    master.hang_up();
+    let started = Instant::now();
+    // The last master: Drop detaches, as during the grace.
+    drop(master);
+    assert!(started.elapsed() < Duration::from_millis(500));
+    waiter.wait();
+    let took = started.elapsed();
+    assert!(
+        took < GRACE + Duration::from_secs(3),
+        "torn down after {took:?}"
+    );
 }
 
 #[test]

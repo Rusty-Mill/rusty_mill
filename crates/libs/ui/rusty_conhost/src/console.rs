@@ -6,8 +6,9 @@
 //! It covers connection and objects, the output APIs and stubs of
 //! Appendix A, the output caps of §7.4, and input (PR 3, the `read`
 //! child module): terminal input, the input APIs, waiting reads and Ctrl
-//! events. The server closes at once on hang-up or child exit until PR 8
-//! brings CTRL_CLOSE and its grace period.
+//! events. Hang-up or child exit starts the close (§7.3): every client
+//! gets CTRL_CLOSE and the console keeps serving them until the last one
+//! disconnects or the engine's grace deadline passes.
 //!
 //! Behaviour follows microsoft/terminal's conhost (commit 09beddc6,
 //! `src/server/IoDispatchers.cpp`, `ApiDispatchers.cpp`,
@@ -43,6 +44,8 @@ pub(crate) const SLICE: usize = 64 * 1024;
 const WIDE_SLICE: usize = SLICE / 3;
 /// Connected clients.
 pub(crate) const MAX_CLIENTS: usize = 256;
+// Every client's CTRL_CLOSE fits the Ctrl queue.
+const _: () = assert!(MAX_CLIENTS <= crate::ctrl::MAX_QUEUED);
 /// Objects per client, the two from CONNECT included.
 pub(crate) const MAX_OBJECTS: usize = 64;
 /// Objects in all. Objects a client opened outlive its DISCONNECT until
@@ -126,6 +129,8 @@ pub(crate) enum Event<'a> {
     OutputDrained,
     ChildExited,
     HangUp,
+    /// The CTRL_CLOSE grace deadline passed (§7.3).
+    GraceExpired,
 }
 
 /// The answer to one call.
@@ -452,6 +457,8 @@ pub(crate) struct Console {
     /// Payload bytes `writes` retain.
     parked: usize,
     connected_once: bool,
+    /// Hang-up or child exit was seen: clients have been sent CTRL_CLOSE.
+    closing: bool,
     closed: bool,
     /// At most [`MAX_LOGGED`] entries, plus `Suppressed` once full.
     logged: HashSet<Diag>,
@@ -500,6 +507,7 @@ impl Console {
             writes: VecDeque::new(),
             parked: 0,
             connected_once: false,
+            closing: false,
             closed: false,
             logged: HashSet::new(),
             key_for,
@@ -554,7 +562,8 @@ impl Console {
                 // Cooked reads held back by their echo go on.
                 self.serve_reads(out, &mut fx);
             }
-            Event::ChildExited | Event::HangUp => self.close(&mut fx),
+            Event::ChildExited | Event::HangUp => self.start_close(&mut fx),
+            Event::GraceExpired => self.close(&mut fx),
         }
         self.sync_input_available(&mut fx);
         fx
@@ -579,6 +588,21 @@ impl Console {
         if self.logged.insert(d.clone()) {
             fx.push(Effect::Log(d));
         }
+    }
+
+    /// Send every client CTRL_CLOSE, once. The console keeps serving them
+    /// while their handlers run; it closes on the last DISCONNECT or at
+    /// the engine's deadline. With no client it closes now.
+    fn start_close(&mut self, fx: &mut Vec<Effect>) {
+        if self.closing || self.closed {
+            return;
+        }
+        self.closing = true;
+        if self.clients.is_empty() {
+            self.close(fx);
+            return;
+        }
+        self.ctrl_event(Ctrl::Close, 0, fx);
     }
 
     fn close(&mut self, fx: &mut Vec<Effect>) {
@@ -693,6 +717,14 @@ impl Console {
         );
         for (cookie, kind) in [(input, Kind::Input), (output, Kind::Output)] {
             self.add_object(cookie, kind, process, Access::CONNECT);
+        }
+        if self.closing {
+            // A late client is told too, or it would hold the console
+            // open until the deadline.
+            fx.push(Effect::Ctrl {
+                pid: p.process as u32,
+                event: Ctrl::Close,
+            });
         }
         let mut reply = Reply::ok(p.id);
         reply.write_back = msg::connection_information(process, input, output);
@@ -1482,13 +1514,84 @@ pub(crate) mod tests {
         assert!(h.ev(Event::HangUp).is_empty(), "closing is idempotent");
     }
 
+    fn close_to(pid: u32) -> Effect {
+        Effect::Ctrl {
+            pid,
+            event: Ctrl::Close,
+        }
+    }
+
     #[test]
-    fn hang_up_and_child_exit_close_at_once() {
+    fn hang_up_and_child_exit_send_ctrl_close_once_then_the_grace_closes() {
         for ev in [Event::HangUp, Event::ChildExited] {
             let mut h = Host::new();
             h.connect(1, "");
-            assert_eq!(h.ev(ev), [Effect::CloseServer, Effect::Eof]);
+            h.connect(2, "");
+            assert_eq!(h.ev(ev), [close_to(1), close_to(2)]);
+            assert!(h.ev(Event::HangUp).is_empty(), "sent once");
+            assert!(h.ev(Event::ChildExited).is_empty());
+            assert_eq!(
+                h.ev(Event::GraceExpired),
+                [Effect::CloseServer, Effect::Eof]
+            );
+            assert!(h.ev(Event::GraceExpired).is_empty(), "closes once");
         }
+    }
+
+    #[test]
+    fn the_console_serves_handlers_during_the_grace_and_closes_on_the_last_disconnect() {
+        let mut h = Host::new();
+        let [a, _, a_out] = h.connect(1, "");
+        let [b, ..] = h.connect(2, "");
+        h.ev(Event::HangUp);
+        // A handler's WriteConsole is answered while the console closes.
+        let r = h.write_w(a_out, "bye");
+        assert_eq!(r.status, msg::STATUS_SUCCESS);
+        assert!(h.vt.ends_with(b"bye"));
+        let (_, fx) = h.packet(msg::DISCONNECT, a, 0, &[], 0);
+        assert!(!fx.contains(&Effect::CloseServer), "client 2 remains");
+        let (r, fx) = h.packet(msg::DISCONNECT, b, 0, &[], 0);
+        assert_eq!(fx, [Effect::Reply(r), Effect::CloseServer, Effect::Eof]);
+        assert!(h.ev(Event::GraceExpired).is_empty(), "already closed");
+    }
+
+    #[test]
+    fn a_client_connecting_during_the_grace_gets_ctrl_close() {
+        let mut h = Host::new();
+        h.connect(1, "");
+        h.ev(Event::ChildExited);
+        let info = msg::CONNECTION_INFORMATION_LEN as u32;
+        let (r, fx) = h.packet(msg::CONNECT, 7, 0, &msg::server_msg(""), info);
+        assert_eq!(r.status, msg::STATUS_SUCCESS);
+        assert_eq!(fx, [close_to(7), Effect::Reply(r)]);
+    }
+
+    #[test]
+    fn hang_up_with_no_client_closes_at_once() {
+        for ev in [Event::HangUp, Event::ChildExited] {
+            let mut h = Host::new();
+            assert_eq!(h.ev(ev), [Effect::CloseServer, Effect::Eof]);
+            assert!(h.ev(Event::GraceExpired).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_hang_up_between_a_packet_and_its_completion_keeps_the_call() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        let chunk = vec![b'z'; PACKET_INPUT_CAP];
+        for _ in 0..4 {
+            h.packet(msg::RAW_WRITE, 1, output, &chunk, 0);
+        }
+        let parked = h.c.waiting();
+        assert!(parked > 0);
+        h.ev(Event::HangUp);
+        assert_eq!(h.c.waiting(), parked, "parked writes go on in the grace");
+        let fx = h.drain();
+        assert!(
+            fx.iter().any(|e| matches!(e, Effect::Complete(_))),
+            "a drain completes them as before"
+        );
     }
 
     #[test]
@@ -1910,6 +2013,7 @@ pub(crate) mod tests {
         }
         assert!(h.c.waiting() > 0);
         h.ev(Event::HangUp);
+        h.ev(Event::GraceExpired);
         assert_eq!((h.c.waiting(), h.c.parked()), (0, 0));
         assert!(h.drain().is_empty());
     }

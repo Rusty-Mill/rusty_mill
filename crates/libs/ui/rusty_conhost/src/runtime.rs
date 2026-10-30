@@ -28,7 +28,7 @@ use crate::console::{Console, Effect, Event, OutputQueue, PREAMBLE, Packet, Repl
 use crate::ctrl::{self, Ctrl, Pushed};
 use crate::fixture::{self, FIXTURE_CAP};
 use crate::msg::STATUS_UNSUCCESSFUL;
-use crate::sched::{self, Control, PACKET_INPUT_CAP, View};
+use crate::sched::{self, Control, Grace, PACKET_INPUT_CAP, View};
 
 /// Terminal input waiting for the engine; `write` blocks past this.
 const INPUT_LANE_CAP: usize = 64 * 1024;
@@ -106,6 +106,9 @@ struct Lanes {
     /// queued byte.
     esc_ends: VecDeque<u64>,
     control: Control,
+    /// Set by the first `hang_up`, and kept once the engine takes the
+    /// control flag: `write` fails from then on.
+    hung_up: bool,
     /// Set once the server is closed: `write` and `resize` fail.
     closed: bool,
 }
@@ -113,6 +116,9 @@ struct Lanes {
 struct Output {
     queue: VecDeque<u8>,
     eof: bool,
+    /// The master is gone: nobody reads, so output is discarded rather
+    /// than left to stall clients' handlers during the grace.
+    detached: bool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -132,12 +138,14 @@ impl Shared {
                 taken: 0,
                 esc_ends: VecDeque::new(),
                 control: Control::default(),
+                hung_up: false,
                 closed: false,
             }),
             input_room: Condvar::new(),
             output: Mutex::new(Output {
                 queue: VecDeque::new(),
                 eof: false,
+                detached: false,
             }),
             output_ready: Condvar::new(),
             exited: Mutex::new(false),
@@ -153,7 +161,7 @@ impl Shared {
         let mut lanes = lock(&self.lanes);
         lanes.writing += 1;
         while !rest.is_empty() {
-            if lanes.closed || lanes.control.hang_up {
+            if lanes.closed || lanes.hung_up {
                 lanes.writing -= 1;
                 return Err(broken_pipe("OwnPtyMaster::write"));
             }
@@ -194,16 +202,32 @@ impl Shared {
         Ok(())
     }
 
-    /// Set the control lane's hang-up flag and wake the engine. Never
-    /// blocks beyond the lane's lock; idempotent.
+    /// Set the control lane's hang-up flag and wake the engine, which
+    /// sends CTRL_CLOSE and closes the server by its grace deadline
+    /// (§7.3). Never blocks beyond the lane's lock; idempotent.
     pub(crate) fn hang_up(&self) {
         let mut lanes = lock(&self.lanes);
-        if lanes.closed || lanes.control.hang_up {
+        if lanes.closed || lanes.hung_up {
             return;
         }
+        lanes.hung_up = true;
         lanes.control.hang_up = true;
         // A blocked writer now fails instead of waiting for room.
         self.input_room.notify_all();
+        self.waker.wake();
+    }
+
+    /// The master is gone (§7.3): drop queued output and discard what
+    /// follows, so writes parked on the reader complete, then hang up.
+    pub(crate) fn detach(&self) {
+        {
+            let mut out = lock(&self.output);
+            out.detached = true;
+            out.queue.clear();
+        }
+        lock(&self.lanes).control.output_drained = true;
+        self.hang_up();
+        // Wakes the engine for the drain even when it is hung up already.
         self.waker.wake();
     }
 
@@ -291,7 +315,12 @@ impl Shared {
         if bytes.is_empty() {
             return;
         }
-        lock(&self.output).queue.extend(bytes);
+        let mut out = lock(&self.output);
+        if out.detached {
+            return;
+        }
+        out.queue.extend(bytes);
+        drop(out);
         self.output_ready.notify_all();
     }
 
@@ -365,6 +394,7 @@ fn ctrl_event(event: Ctrl) -> CtrlEvent {
     match event {
         Ctrl::C => CtrlEvent::C,
         Ctrl::Break => CtrlEvent::Break,
+        Ctrl::Close => CtrlEvent::Close,
     }
 }
 
@@ -480,6 +510,8 @@ struct Engine {
     /// A wait reported the child's exit.
     exited: bool,
     exit_handled: bool,
+    /// The CTRL_CLOSE deadline, armed by the first hang-up or child exit.
+    grace: Grace,
     /// Calls the console holds without a reply yet, for the panic path.
     pending: Vec<[u8; 8]>,
     /// `handle` panicked; nothing more reaches the console.
@@ -506,6 +538,7 @@ impl Engine {
             reply: None,
             exited: false,
             exit_handled: false,
+            grace: Grace::default(),
             pending: Vec::new(),
             dead: false,
             recorder: Recorder::from_env(),
@@ -527,7 +560,7 @@ impl Engine {
     fn turn(&mut self) -> Result<()> {
         self.work()?;
         // Decided on what the turn's events left, not on its plan.
-        let until = self.must_poll().then(Instant::now);
+        let until = self.grace.until(self.must_poll(), Instant::now());
         let Some(server) = self.server.as_mut() else {
             return Ok(());
         };
@@ -556,10 +589,15 @@ impl Engine {
     /// The turn up to its wait: plan, handle the events in order, and
     /// submit the next READ_IO or complete the held reply.
     fn work(&mut self) -> Result<()> {
+        let now = Instant::now();
+        if self.grace.expire(now) {
+            self.handle(Event::GraceExpired);
+        }
         let (control, input) = self.shared.take_control();
         let plan = sched::turn(&self.view(control, input));
         if plan.control.hang_up {
             self.handle(Event::HangUp);
+            self.arm_grace(now);
         }
         if let Some(size) = plan.control.resize {
             self.handle(Event::Resize(size));
@@ -570,6 +608,7 @@ impl Engine {
         if plan.child_exited {
             self.exit_handled = true;
             self.handle(Event::ChildExited);
+            self.arm_grace(now);
         }
         if plan.serve_reads {
             self.handle(Event::ServeReads);
@@ -597,6 +636,14 @@ impl Engine {
             server.complete_io(&r.as_complete())?;
         }
         Ok(())
+    }
+
+    /// Start the grace once the console has sent CTRL_CLOSE; a console
+    /// with no client closed at once, and needs none.
+    fn arm_grace(&mut self, now: Instant) {
+        if self.server.is_some() {
+            self.grace.arm(now);
+        }
     }
 
     /// Whether work is left that the next turn can do at once, so the

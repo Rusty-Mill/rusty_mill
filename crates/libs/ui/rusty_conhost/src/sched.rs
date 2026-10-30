@@ -6,9 +6,16 @@
 //! slice of terminal input, submit a READ_IO if admission allows, then
 //! wait. The wait reports at most one packet, because only one READ_IO is
 //! ever in flight. So between any two packets the control lane and the
-//! child's exit are served, and input never starves either.
+//! child's exit are served, and input never starves either. The CTRL_CLOSE
+//! grace deadline (§7.3) is checked first on every turn, so it is served
+//! on the first turn at or after it, whatever else is ready.
+
+use std::time::{Duration, Instant};
 
 use platform::term::WinSize;
+
+/// How long clients have to exit after CTRL_CLOSE before the server closes.
+pub(crate) const GRACE: Duration = Duration::from_secs(2);
 
 /// Terminal input taken per turn.
 pub(crate) const INPUT_SLICE: usize = 16 * 1024;
@@ -115,6 +122,47 @@ pub(crate) fn must_poll(v: &View) -> bool {
 /// fits under [`PARKED_CAP`]. A packet that then arrives always fits.
 pub(crate) fn admits_read(waiting: usize, parked: usize) -> bool {
     waiting < MAX_WAITING && parked + MAX_RETAINED_PER_CALL <= PARKED_CAP
+}
+
+/// The CTRL_CLOSE grace deadline: absolute, armed at most once, and never
+/// moved by a later hang-up, child exit, wake or packet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Grace {
+    #[default]
+    Unarmed,
+    Armed(Instant),
+    /// The deadline passed and was served.
+    Spent,
+}
+
+impl Grace {
+    /// Arm the deadline at `now` + [`GRACE`], unless it was armed before.
+    pub fn arm(&mut self, now: Instant) {
+        if *self == Grace::Unarmed {
+            *self = Grace::Armed(now + GRACE);
+        }
+    }
+
+    /// Whether the deadline passed by `now`; true on one call only.
+    pub fn expire(&mut self, now: Instant) -> bool {
+        match *self {
+            Grace::Armed(deadline) if now >= deadline => {
+                *self = Grace::Spent;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// When the engine's wait must return: at once when work is left
+    /// (`poll`), else at the deadline, if one is armed.
+    pub fn until(&self, poll: bool, now: Instant) -> Option<Instant> {
+        match *self {
+            _ if poll => Some(now),
+            Grace::Armed(deadline) => Some(deadline),
+            Grace::Unarmed | Grace::Spent => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -353,5 +401,51 @@ mod tests {
         });
         assert!(!t.serve_reads);
         assert_eq!(t.input, 100);
+    }
+
+    #[test]
+    fn the_grace_expires_on_the_first_turn_at_or_after_it_under_always_ready_io() {
+        let start = Instant::now();
+        let mut sim = Sim::new();
+        let mut grace = Grace::default();
+        let mut expired_at = None;
+        // A turn every millisecond, each serving a packet, hang-ups and
+        // child exits re-arriving throughout.
+        for ms in 0..3_000u64 {
+            let now = start + Duration::from_millis(ms);
+            if grace.expire(now) {
+                assert!(expired_at.is_none(), "expires once");
+                expired_at = Some(ms);
+            }
+            sim.view.control.hang_up = ms % 7 == 0;
+            sim.view.exited = ms % 11 == 0;
+            let t = sim.step(true);
+            if t.control.hang_up || t.child_exited {
+                grace.arm(now);
+            }
+            assert!(t.submit_read, "{ms} ms: one packet per turn");
+        }
+        assert_eq!(expired_at, Some(2_000), "armed at 0 ms, never moved");
+        assert_eq!(grace, Grace::Spent);
+        grace.arm(start + Duration::from_secs(5));
+        assert_eq!(grace, Grace::Spent, "a spent deadline is not re-armed");
+    }
+
+    #[test]
+    fn the_grace_bounds_an_idle_wait_and_polling_comes_first() {
+        let now = Instant::now();
+        let mut grace = Grace::default();
+        assert_eq!(grace.until(false, now), None, "nothing to wait for");
+        assert_eq!(grace.until(true, now), Some(now));
+        grace.arm(now);
+        let deadline = now + GRACE;
+        assert_eq!(grace.until(false, now), Some(deadline));
+        assert_eq!(grace.until(true, now), Some(now), "work left: poll");
+        let late = now + Duration::from_millis(1_500);
+        grace.arm(late);
+        assert_eq!(grace.until(false, late), Some(deadline), "absolute");
+        assert!(!grace.expire(deadline - Duration::from_nanos(1)));
+        assert!(grace.expire(deadline + Duration::from_secs(9)));
+        assert_eq!(grace.until(false, deadline), None);
     }
 }

@@ -169,7 +169,7 @@ impl Console {
     }
 
     /// Queue `event` for the clients of `group` (0: every client).
-    fn ctrl_event(&mut self, event: Ctrl, group: u32, fx: &mut Vec<Effect>) {
+    pub(super) fn ctrl_event(&mut self, event: Ctrl, group: u32, fx: &mut Vec<Effect>) {
         let mut clients: Vec<(&usize, &super::Client)> = self.clients.iter().collect();
         clients.sort_by_key(|(cookie, _)| **cookie);
         let pids = ctrl::recipients(clients.into_iter().map(|(_, c)| (c.pid, c.group)), group);
@@ -1141,7 +1141,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn reads_behind_the_budget_keep_their_order_and_a_hang_up_ends_them() {
+    fn reads_behind_the_budget_keep_their_order_and_closing_ends_them() {
         let mut h = Host::new();
         let [_, input, _] = h.connect(1, "");
         large_reads(&mut h, input, 4, 1 << 20);
@@ -1150,12 +1150,13 @@ pub(crate) mod tests {
         let r = get_input(&mut h, input, READ_NOWAIT, true, 8);
         assert_eq!(r.information, 0);
         h.ev(Event::HangUp);
+        h.ev(Event::GraceExpired);
         assert_eq!(h.c.waiting(), 0);
         assert!(!h.c.reads_ready(), "nothing is left to serve");
     }
 
     #[test]
-    fn a_hang_up_ends_reads_held_back_by_their_echo() {
+    fn closing_ends_reads_held_back_by_their_echo() {
         let mut h = Host::new();
         let [_, input, _] = h.connect(1, "");
         let initial: Vec<u8> = [b'a', 0].repeat(crate::cooked::MAX_LINE);
@@ -1177,6 +1178,7 @@ pub(crate) mod tests {
         h.ev(Event::Input(&keys));
         assert!(h.c.waiting() > 0, "held back by the stalled reader");
         h.ev(Event::HangUp);
+        h.ev(Event::GraceExpired);
         assert_eq!(h.c.waiting(), 0);
     }
 
