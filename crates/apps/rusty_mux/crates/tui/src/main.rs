@@ -23,15 +23,23 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let (ssh, rest) = match args.as_slice() {
-        [flag, host, rest @ ..] if flag == "--ssh" => (Some(host.as_os_str()), rest),
-        rest => (None, rest),
-    };
-    if rest.is_empty() || rest.len() > 2 {
-        eprintln!("usage: rusty-mux [--ssh HOST] <socket> [block]");
+    let (mut ssh, mut udp_host, mut rest) = (None, None, args.as_slice());
+    loop {
+        match rest {
+            [flag, host, tail @ ..] if flag == "--ssh" => {
+                (ssh, rest) = (Some(host.as_os_str()), tail)
+            }
+            [flag, host, tail @ ..] if flag == "--udp-host" => {
+                (udp_host, rest) = (Some(host.as_os_str()), tail)
+            }
+            _ => break,
+        }
+    }
+    if rest.is_empty() || rest.len() > 2 || (udp_host.is_some() && ssh.is_none()) {
+        eprintln!("usage: rusty-mux [--ssh HOST [--udp-host HOST]] <socket> [block]");
         return ExitCode::from(2);
     }
-    match client::run(ssh, rest) {
+    match client::run(ssh, udp_host, rest) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("rusty-mux: {err}");
@@ -42,7 +50,11 @@ fn main() -> ExitCode {
 
 #[cfg(not(any(target_os = "linux", windows)))]
 mod client {
-    pub fn run(_ssh: Option<&std::ffi::OsStr>, _args: &[std::ffi::OsString]) -> Result<(), String> {
+    pub fn run(
+        _ssh: Option<&std::ffi::OsStr>,
+        _udp_host: Option<&std::ffi::OsStr>,
+        _args: &[std::ffi::OsString],
+    ) -> Result<(), String> {
         Err("the client runs on Linux and Windows only".into())
     }
 }
@@ -84,6 +96,7 @@ mod client {
     /// What the control connection asks for; a server without `LAYOUT`
     /// shows only the block asked for.
     const CONTROL: Features = Features::CHECKPOINT_V6
+        .union(Features::DATAGRAM)
         .union(Features::INSPECT)
         .union(Features::LAYOUT)
         .union(Features::SYNC)
@@ -148,6 +161,10 @@ mod client {
         fn settle(&mut self);
         /// The fresh path failed: it stops, and the old one stays.
         fn discard(&mut self);
+        /// Brings up association `id` under `key` on the server's UDP
+        /// `port` as a fresh path, once it answers a probe; returns the
+        /// socket to connect to.
+        fn datagram(&mut self, port: u16, id: [u8; 8], key: [u8; 32]) -> Result<PathBuf, String>;
     }
 
     /// What the main loop asks of a [`Rejoiner`].
@@ -339,10 +356,15 @@ mod client {
     const RELOGIN: Duration = Duration::from_secs(10);
 
     /// Attaches to the server at `args[0]`, through a forward to `ssh`'s
-    /// host when given, which stops when the client does.
-    pub fn run(ssh: Option<&OsStr>, args: &[OsString]) -> Result<(), String> {
+    /// host when given, which stops when the client does. A server that
+    /// offers UDP is reached on `udp_host`, or on the host `ssh` resolves.
+    pub fn run(
+        ssh: Option<&OsStr>,
+        udp_host: Option<&OsStr>,
+        args: &[OsString],
+    ) -> Result<(), String> {
         match ssh {
-            Some(host) => remote(host, Path::new(&args[0]), args.get(1)),
+            Some(host) => remote(host, udp_host, Path::new(&args[0]), args.get(1)),
             None => attach(PathBuf::from(&args[0]), args.get(1), None),
         }
     }
@@ -351,13 +373,22 @@ mod client {
     /// A lost path is brought back with a fresh forward ([`SshPath`]) that
     /// may not ask for anything, since the client is reading the terminal.
     #[cfg(unix)]
-    fn remote(host: &OsStr, socket: &Path, block: Option<&OsString>) -> Result<(), String> {
+    fn remote(
+        host: &OsStr,
+        udp_host: Option<&OsStr>,
+        socket: &Path,
+        block: Option<&OsString>,
+    ) -> Result<(), String> {
         use rusty_mux_tui::ssh::{Forward, Login};
 
         let host = host
             .to_str()
             .ok_or("--ssh: the host is not UTF-8")?
             .to_owned();
+        let udp_host = udp_host
+            .map(|h| h.to_str().ok_or("--udp-host: the host is not UTF-8"))
+            .transpose()?
+            .map(str::to_owned);
         let remote = socket.to_owned();
         let program = std::env::var_os("RUSTY_MUX_SSH").unwrap_or_else(|| "ssh".into());
         let mut first = Forward::start(&program, &host, &remote, Login::Interactive)?;
@@ -366,34 +397,57 @@ mod client {
         let path = SshPath {
             program,
             host,
+            udp_host,
             remote,
-            current: first,
+            current: Route::Ssh(first),
             fresh: None,
         };
         attach(local, block, Some(Box::new(path)))
     }
 
-    /// The forwards to the server: the one in use, and a fresh one until
+    /// How long the server has to answer a UDP probe before the client
+    /// stays on, or goes back to, SSH.
+    #[cfg(unix)]
+    const PROBE: Duration = Duration::from_secs(2);
+
+    /// One way to the server: an SSH forward, or a UDP association.
+    #[cfg(unix)]
+    enum Route {
+        // Held for its `Drop`, which stops the forward.
+        Ssh(#[expect(dead_code)] rusty_mux_tui::ssh::Forward),
+        Udp(rusty_mux_tui::udp::Relay),
+    }
+
+    /// The routes to the server: the one in use, and a fresh one until
     /// the clients are taken over on it.
     #[cfg(unix)]
     struct SshPath {
         program: OsString,
         host: String,
+        /// Where to send UDP, if not to the host `ssh` resolves.
+        udp_host: Option<String>,
         remote: PathBuf,
-        current: rusty_mux_tui::ssh::Forward,
-        fresh: Option<rusty_mux_tui::ssh::Forward>,
+        current: Route,
+        fresh: Option<Route>,
     }
 
     #[cfg(unix)]
     impl Rejoin for SshPath {
+        /// The association in use, if it answers a probe; otherwise a new
+        /// SSH forward.
         fn fresh(&mut self, cancel: &AtomicBool) -> Result<PathBuf, String> {
             use rusty_mux_tui::ssh::{Forward, Login};
 
             self.fresh = None;
+            if let Route::Udp(relay) = &self.current
+                && relay.probe(PROBE)
+            {
+                return Ok(relay.socket().to_owned());
+            }
             let mut next = Forward::start(&self.program, &self.host, &self.remote, Login::Batch)?;
             next.wait_ready(RELOGIN, cancel)?;
             let local = next.socket().to_owned();
-            self.fresh = Some(next);
+            self.fresh = Some(Route::Ssh(next));
             Ok(local)
         }
 
@@ -407,10 +461,34 @@ mod client {
         fn discard(&mut self) {
             self.fresh = None;
         }
+
+        fn datagram(&mut self, port: u16, id: [u8; 8], key: [u8; 32]) -> Result<PathBuf, String> {
+            use std::net::ToSocketAddrs;
+
+            use rusty_mux_tui::udp::{Relay, any_for};
+
+            self.fresh = None;
+            let host = match &self.udp_host {
+                Some(host) => host.clone(),
+                None => rusty_mux_tui::ssh::hostname(&self.program, &self.host)?,
+            };
+            let server = (host.as_str(), port)
+                .to_socket_addrs()
+                .map_err(|e| format!("resolving {host}: {e}"))?
+                .next()
+                .ok_or_else(|| format!("{host} has no address"))?;
+            let relay = Relay::start(any_for(server), server, id, &key)?;
+            if !relay.probe(PROBE) {
+                return Err(format!("no answer on UDP from {server}"));
+            }
+            let local = relay.socket().to_owned();
+            self.fresh = Some(Route::Udp(relay));
+            Ok(local)
+        }
     }
 
     #[cfg(windows)]
-    fn remote(_: &OsStr, _: &Path, _: Option<&OsString>) -> Result<(), String> {
+    fn remote(_: &OsStr, _: Option<&OsStr>, _: &Path, _: Option<&OsString>) -> Result<(), String> {
         Err("--ssh is supported on Unix only for now".into())
     }
 
@@ -419,7 +497,7 @@ mod client {
     fn attach(
         socket: PathBuf,
         block: Option<&OsString>,
-        rejoin: Option<Box<dyn Rejoin>>,
+        mut rejoin: Option<Box<dyn Rejoin>>,
     ) -> Result<(), String> {
         let stream = connect(&socket)?;
         let mut conn = Conn::new(clone(&stream)?);
@@ -447,7 +525,16 @@ mod client {
             true => req.place(block)?,
             false => (None, Layout::Block(block), None),
         };
-        let next = req.next;
+        let mut next = req.next;
+        let (mut socket, mut stream, mut conn, mut takeover) = (socket, stream, conn, takeover);
+        if let (Some(rejoin), Some(me)) = (rejoin.as_mut(), takeover)
+            && features.contains(Features::DATAGRAM)
+            && udp_wanted()
+            && let Some(back) = upgrade(rejoin.as_mut(), &socket, &mut conn, me, next)?
+        {
+            (socket, stream, conn) = (back.socket, back.stream, back.conn);
+            (takeover, next) = (Some(back.me), back.next);
+        }
 
         let (tx, inbox) = channel();
         let control = Conn::new(clone(&stream)?);
@@ -551,6 +638,67 @@ mod client {
             Ended::Failed(why) => return Err(why),
         }
         Ok(())
+    }
+
+    /// Whether to try UDP: unless `RUSTY_MUX_UDP=off`.
+    fn udp_wanted() -> bool {
+        std::env::var_os("RUSTY_MUX_UDP").is_none_or(|v| v != "off")
+    }
+
+    /// Moves the control connection, the only one so far, from the SSH
+    /// forward at `ssh` onto a UDP association, once the association
+    /// answers a probe; the forward then stops (UDP-TRANSPORT.md). Until
+    /// then nothing has moved, and a failure keeps the client on SSH, said
+    /// once. If the move itself fails, its Hello may have taken the client
+    /// over already, so the client takes it back over SSH. `Err` only when
+    /// that fails too.
+    fn upgrade(
+        rejoin: &mut dyn Rejoin,
+        ssh: &Path,
+        conn: &mut Conn<UnixStream>,
+        me: Takeover,
+        next: u64,
+    ) -> Result<Option<Back>, String> {
+        let mut req = Requests {
+            conn,
+            next,
+            by: Some(Instant::now() + HANDSHAKE),
+            cancel: &NEVER,
+        };
+        let offered = req.open_datagram();
+        let next = req.next;
+        let plan = || Plan {
+            me,
+            next,
+            window: None,
+            resumes: Vec::new(),
+        };
+        let socket = match offered.and_then(|(port, id, key)| rejoin.datagram(port, id, key)) {
+            Ok(socket) => socket,
+            Err(why) => {
+                rejoin.discard();
+                eprintln!("rusty-mux: staying on SSH: {why}");
+                return Ok(None);
+            }
+        };
+        let missed = match take_over(socket, plan(), &NEVER) {
+            Ok(back) => {
+                rejoin.settle();
+                return Ok(Some(back));
+            }
+            Err(missed) => missed,
+        };
+        rejoin.discard();
+        let why = match missed {
+            Missed::Retry(why) | Missed::Broken(why) => why,
+            Missed::Dropped => return Err("the server let this client go".into()),
+        };
+        eprintln!("rusty-mux: staying on SSH: {why}");
+        match take_over(ssh.to_owned(), plan(), &NEVER) {
+            Ok(back) => Ok(Some(back)),
+            Err(Missed::Dropped) => Err("the server let this client go".into()),
+            Err(Missed::Retry(why) | Missed::Broken(why)) => Err(why),
+        }
     }
 
     /// The local terminal's size, or `fallback` when it has none: a pty
@@ -689,6 +837,26 @@ mod client {
                         return Ok(answer);
                     }
                     Message::Entry { req: r, .. } if r == req => answer.push(message),
+                    _ => {}
+                }
+            }
+        }
+
+        /// Asks for a UDP association: the server's port, its id and key.
+        fn open_datagram(&mut self) -> Result<(u16, [u8; 8], [u8; 32]), String> {
+            let req = self.next;
+            self.next += 1;
+            let ask = Message::OpenDatagram { req };
+            self.conn.send(&ask).map_err(|e| e.to_string())?;
+            loop {
+                match self.recv()? {
+                    Message::Datagram {
+                        req: r,
+                        port,
+                        id,
+                        key,
+                    } if r == req => return Ok((port, id, key.0)),
+                    Message::Failed { req: r, reason, .. } if r == req => return Err(reason),
                     _ => {}
                 }
             }
