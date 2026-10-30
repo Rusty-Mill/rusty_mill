@@ -190,9 +190,9 @@ stream, through the existing takeover, resume and attach path.
   differs from a socket today.** An over-budget socket client is dropped from
   every map (`State::disconnect`), lease and all. An over-budget stream's
   client instead becomes an orphan, as a `TAKEOVER` client whose connection
-  ends does now, and it is marked **stale**. It waits out its grace: 30 s
-  under option A, `--udp-idle` under option B. Sockets keep today's
-  behaviour.
+  ends does now, and it is marked **stale**. It waits out its grace of
+  `--udp-idle` (24 h by default; see Session lifetime), and its lease is
+  released after 30 s. Sockets keep today's behaviour.
 - When the client returns, it opens a new stream and takes its client over
   with its token. Its Hello carries its event cursor. If that cursor is still
   in the server's recent history, the missed events are replayed. If it is
@@ -227,7 +227,7 @@ stream, through the existing takeover, resume and attach path.
     blocking `Read + Write` handle for each stream. Where the client opens a
     connection today (`reach`), it opens a stream once the move is done.
 
-## Session lifetime (open question 1)
+## Session lifetime (decided: B)
 
 Today a `TAKEOVER` client whose connection ends is kept for 30 s
 (`ORPHAN_GRACE`), lease included, and then dropped. Over UDP nothing tells
@@ -235,17 +235,17 @@ the server that a connection has ended. Silence is the only signal, and a
 laptop that sleeps for an hour is silent too. A stream's `Close`, or the
 association's `Close`, ends its connections as a socket close does.
 
-- **A, as today.** After 30 s of silence the association's streams count as
-  ended, the usual 30 s grace follows, and then the association is dropped.
-  After that the client must log in again over SSH, as `--ssh` reconnect
-  already does (BatchMode, so it needs an agent or key).
-- **B, as mosh does (proposed).** The association, and its clients (live or
-  orphaned after an overflow), survive silence for up to 24 h, set with
-  `--udp-idle`. The **lease** is released after the existing 30 s, so other
-  clients can type. On return the client carries on with no SSH, retakes the
-  lease if it is free, and catches up as described under Overflow and
-  catch-up. The 8 MiB budget is unchanged under either option. The longer
-  retention keeps the client record and the association, not the output.
+- **B, as mosh does (chosen by the owner).** The association, and its
+  clients (live, or orphaned after an overflow), survive silence for up to
+  24 h, set with `--udp-idle`. The **lease** is released after 30 s of
+  silence, so other clients can type. On return the client carries on with
+  no SSH, retakes the lease if it is free, and catches up as described under
+  Overflow and catch-up. The 8 MiB budget is unchanged. The longer retention
+  keeps the client record and the association, not the output. Once
+  `--udp-idle` passes, the association and its clients are dropped, and the
+  client must log in again over SSH, as `--ssh` reconnect already does.
+- *A, not chosen:* would have treated 30 s of silence as the end of each
+  connection, followed by the usual 30 s grace and then a new SSH login.
 
 ## Tests (when built)
 
@@ -271,7 +271,9 @@ association's `Close`, ends its connections as a socket close does.
     evicted, the client stays, and on return the client resumes on a new
     stream with the current screen.
   - A captured trace contains no typed plaintext.
-  - Silence beyond the lifetime chosen in question 1 ends the association.
+  - Silence past 30 s releases the lease but keeps the client; silence past
+    `--udp-idle` (shortened in the test) ends the association and its
+    clients.
 - **Over a real local sshd,** as in #1236 and #1239: bootstrap, SSH stops
   after UDP is up, and a roam.
 
