@@ -476,6 +476,8 @@ This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd,
 | V6 | Multiple screen buffers (CREATE_OBJECT type 3, SetConsoleActiveScreenBuffer) | supported | STATUS_NOT_IMPLEMENTED | no target program uses them (edit.exe uses `?1049h`); build when the unknown-API log shows a real caller |
 | V7 | GenerateConsoleCtrlEvent for a group no client is in | falls back to the caller's parent process | `E_INVALIDARG`, nothing sent | the fallback serves console-less callers; our clients always carry their group |
 | V8 | Synthesized key records (plain VT input, not win32-input-mode) | scan codes from the layout; mouse reports become mouse records | scan code 0; mouse reports reach VT-input clients only | no target program reads scan codes or mouse records from a VT terminal; win32-input-mode carries both exactly |
+| V9 | Closing after CTRL_CLOSE | no host deadline: serves until the last DISCONNECT; Windows ends a handler at about 5 s | the server closes at the last DISCONNECT or 2 s after the first hang-up or child exit (§7.3), so a handler taking 2–5 s loses its console | teardown stays bounded, matching today's 2 s Drop drain (§5.8); a client that ignores the closed console's errors can't hold it open (S1) |
+| V10 | A client connecting during the close | CTRL_CLOSE is sent once (`_closeEventSent`), so a late client gets none | a late client gets CTRL_CLOSE once its CONNECT reply has gone out | without it a late `ping -t`-like client outlives the console (S1) |
 
 The parity suite (§8) treats each of these as an expected difference.
 
@@ -577,7 +579,7 @@ Effects are applied after each `handle` call, in the order the core returned the
 
 - **`hang_up`** sets the control lane's `hang_up` flag (a second call finds it set and returns at once), wakes the engine and returns. It needs no input-lane capacity. It takes no lock that is held across an OS call, so it never waits on a client handler.
 - **Drop of the last `OwnPtyMaster`** does the same, and also marks the console detached. The engine then tears down, frees its own state and exits. Drop never joins a thread.
-- **Engine on `HangUp` or `ChildExited`.** The core emits `Ctrl{Close}` for every client (onto the Ctrl queue), and the engine arms the deadline at `now + 2 s` once. A later `HangUp` or `ChildExited` doesn't move it. During the grace the engine keeps serving the driver.
+- **Engine on `HangUp` or `ChildExited`.** The core emits `Ctrl{Close}` for every client, newest first as Windows dispatches them (onto the Ctrl queue; a Ctrl effect that comes with a reply is queued once that reply is sent), and the engine arms the deadline at `now + 2 s` once. A later `HangUp` or `ChildExited` doesn't move it. During the grace the engine keeps serving the driver.
 - **Engine on the last DISCONNECT or on `GraceExpired`.** The core emits `CloseServer`, and the engine then:
   1. calls `cancel_read` if a READ_IO is in flight;
   2. keeps calling `wait` until that read's completion arrives, whatever it is: success, cancelled or error. CancelIoEx only requests cancellation, and the OVERLAPPED block and buffer can't be freed or reused before completion. A descriptor that completed successfully in the race is answered `STATUS_UNSUCCESSFUL` with `complete_io`, best effort;
@@ -698,6 +700,28 @@ S2's verified runner result at PR 1 head `208a5b5c` was Windows Server
 WOW64 observations are author-reported rather than independently verified.
 The older-machine check remains owed, as does a conclusive Ctrl+Break probe.
 
+S1 ran on Beast (Windows 10.0.26300.9818) on 2026-10-30, at main
+`1a0a328b`, with clients hosted by `OwnPty` and `send_ctrl` called off the
+serving thread. Results are author-reported:
+- **CTRL_CLOSE works.** The handler runs and its WriteConsole is served
+  while it runs. Windows ends the process about 3 ms after the handler
+  returns, even when it returns TRUE (exit `0xC000013A`), and ends a
+  handler still running at about 5 s, though we, not csrss, sent the
+  event. `send_ctrl` blocks for as long as the handler runs. cmd idle at
+  its prompt exits in 2 ms; `ping` prints its statistics, then exits.
+- **Ctrl+Break works.** A handler sees event 1 and keeps running;
+  `ping -t` prints its statistics and goes on. A client ignoring Ctrl+C
+  still gets Break.
+- **On server close** no Ctrl event is delivered and every console call
+  fails with error 233 (ERROR_PIPE_NOT_CONNECTED). cmd exits, but a
+  client that ignores the error (`ping -t`) runs on indefinitely.
+- **So PR 8** sends CTRL_CLOSE before closing, keeps serving until the
+  last DISCONNECT (closing on the direct child's exit cut off a
+  grandchild's last output in S1), and its ctrl worker still delivers
+  queued CTRL_CLOSE after the server closes, leaving Windows' 5 s rule to
+  end slow handlers. The host kills no client: that needs a process
+  handle the host doesn't own.
+
 WOW64 (author-reported on Beast): 32-bit clients send the same 64-bit
 packet layouts, so there is no 32-bit path. 32-bit kernelbase leaves
 garbage in OUT fields, though, so the host always overwrites an OUT field
@@ -725,7 +749,7 @@ Each PR includes one change fragment and is reviewed by Dottius. Line counts inc
 | 5 | rusty_term `OwnBackend` (§4.5), key documented. **Milestone** | 300 | 1–2 |
 | 6 | FillConsoleOutput, ScrollConsoleScreenBuffer. Clear-Host works | 450 | 2 |
 | 7 | Read/WriteConsoleOutput family, SBIEx, window/buffer size calls | 550 | 2–3 |
-| 8 | Lifetime: CTRL_CLOSE (the ctrl worker and its queue are in PR 3), absolute grace deadline, `hang_up`, the §7.3 tests (§5.8). Needs S1 | 350 | 1–2 |
+| 8 | Lifetime: CTRL_CLOSE (the ctrl worker and its queue are in PR 3), absolute grace deadline, `hang_up`, the §7.3 tests (§5.8). Needs S1. As built: CTRL_CLOSE supersedes queued Ctrl+C/Break and is still delivered after the server closes; a client connecting during the grace gets it; Drop discards output nobody reads | 350 | 1–2 |
 | 9 | Code pages via `codec` (§5.9) | 250 | 1–2 |
 | 10 | (reserved for issues found at the milestone) | — | 2 |
 | 11 | rusty_mux server: local host choice, `RUSTY_CONSOLE_HOST`, Config field and sites | 250 | 1–2 |

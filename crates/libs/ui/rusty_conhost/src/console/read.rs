@@ -168,10 +168,12 @@ impl Console {
         alt && k.vk == vk::ESCAPE
     }
 
-    /// Queue `event` for the clients of `group` (0: every client).
-    fn ctrl_event(&mut self, event: Ctrl, group: u32, fx: &mut Vec<Effect>) {
+    /// Queue `event` for the clients of `group` (0: every client), newest
+    /// first, as Windows has always dispatched them (conhost
+    /// `ProcessList.cpp`): a child's handler runs before its parent's.
+    pub(super) fn ctrl_event(&mut self, event: Ctrl, group: u32, fx: &mut Vec<Effect>) {
         let mut clients: Vec<(&usize, &super::Client)> = self.clients.iter().collect();
-        clients.sort_by_key(|(cookie, _)| **cookie);
+        clients.sort_by_key(|(cookie, _)| std::cmp::Reverse(**cookie));
         let pids = ctrl::recipients(clients.into_iter().map(|(_, c)| (c.pid, c.group)), group);
         fx.extend(pids.into_iter().map(|pid| Effect::Ctrl { pid, event }));
     }
@@ -1141,7 +1143,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn reads_behind_the_budget_keep_their_order_and_a_hang_up_ends_them() {
+    fn reads_behind_the_budget_keep_their_order_and_closing_ends_them() {
         let mut h = Host::new();
         let [_, input, _] = h.connect(1, "");
         large_reads(&mut h, input, 4, 1 << 20);
@@ -1150,13 +1152,14 @@ pub(crate) mod tests {
         let r = get_input(&mut h, input, READ_NOWAIT, true, 8);
         assert_eq!(r.information, 0);
         h.ev(Event::HangUp);
+        h.ev(Event::GraceExpired);
         assert_eq!(h.c.waiting(), 0);
         assert!(!h.c.reads_ready(), "nothing is left to serve");
     }
 
-    #[test]
-    fn a_hang_up_ends_reads_held_back_by_their_echo() {
-        let mut h = Host::new();
+    /// Cooked reads whose input is queued, held back because their echo
+    /// waits for the reader.
+    fn hold_reads_on_their_echo(h: &mut Host) {
         let [_, input, _] = h.connect(1, "");
         let initial: Vec<u8> = [b'a', 0].repeat(crate::cooked::MAX_LINE);
         let msg = read_msg(true, initial.len() as u32, 0);
@@ -1175,8 +1178,26 @@ pub(crate) mod tests {
             keys.push(b'\r');
         }
         h.ev(Event::Input(&keys));
-        assert!(h.c.waiting() > 0, "held back by the stalled reader");
+        assert!(
+            h.c.waiting() > 0 && h.c.echo_held,
+            "held back by the stalled reader"
+        );
+    }
+
+    /// A console whose cooked reads wait on their echo's output.
+    #[cfg(windows)]
+    pub(crate) fn echo_held_reads() -> Console {
+        let mut h = Host::new();
+        hold_reads_on_their_echo(&mut h);
+        h.c
+    }
+
+    #[test]
+    fn closing_ends_reads_held_back_by_their_echo() {
+        let mut h = Host::new();
+        hold_reads_on_their_echo(&mut h);
         h.ev(Event::HangUp);
+        h.ev(Event::GraceExpired);
         assert_eq!(h.c.waiting(), 0);
     }
 
@@ -1303,7 +1324,7 @@ pub(crate) mod tests {
         let r = read_w(&mut h, input, 64);
         h.ev(Event::Input(b"ab"));
         let fx = h.ev(Event::Input(b"\x03"));
-        assert_eq!(ctrls(&fx), [(10, Ctrl::C), (11, Ctrl::C)]);
+        assert_eq!(ctrls(&fx), [(11, Ctrl::C), (10, Ctrl::C)], "newest first");
         let done = completes(&fx);
         assert_eq!((done[0].id, done[0].status), (r.id, msg::STATUS_ALERTED));
         // Only the key-up is queued.
@@ -1360,7 +1381,7 @@ pub(crate) mod tests {
         };
         let (r, fx) = ctrl(&mut h, 1, 10);
         assert_eq!(r.status, msg::STATUS_SUCCESS);
-        assert_eq!(ctrls(&fx), [(10, Ctrl::Break), (11, Ctrl::Break)]);
+        assert_eq!(ctrls(&fx), [(11, Ctrl::Break), (10, Ctrl::Break)]);
         let (_, fx) = ctrl(&mut h, 0, 0);
         assert_eq!(ctrls(&fx).len(), 3);
         let (r, fx) = ctrl(&mut h, 0, 99);
