@@ -24,6 +24,7 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .meta{color:var(--mute);font-size:12px;margin-top:4px}
 .tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
 .tag.proj{border-color:var(--acc)}
+.tag.p5{border-color:var(--err);color:var(--err)}.tag.p3{border-color:var(--acc);color:var(--acc)}
 #view[aria-pressed=true]{background:var(--acc);color:#fff}
 main.roadmap{grid-auto-flow:row;grid-template-columns:repeat(5,minmax(190px,1fr));align-content:start}
 .roadmap h3{grid-column:1/-1;margin:0;font-size:15px}
@@ -173,6 +174,9 @@ async function act(op,args){
 function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e}
 // A card's heading: its board number in the corner, if it has one, then its title.
 const heading=k=>[...(k.number?[el("span","#"+k.number,"num")]:[]),el("b",k.title)];
+// rusty_tick's priority scale; 0 (none) shows no badge.
+const PRIORITY={5:"High",3:"Medium",1:"Low",0:"None"};
+const priorityTag=k=>k.priority?[el("span",PRIORITY[k.priority],"tag p"+k.priority)]:[];
 
 function render(){
   if(view==="roadmap"){renderRoadmap();return}
@@ -187,6 +191,7 @@ function render(){
       const d=el("div",null,"card");d.draggable=true;d.append(...heading(k));
       const m=el("div",null,"meta");
       if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");t.title=repoOf(k.project);m.append(t)}
+      m.append(...priorityTag(k));
       k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
       if(k.claim){
         d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
@@ -228,6 +233,7 @@ async function renderRoadmap(){
       const d=el("div",null,"card");d.append(...heading(k));
       const m=el("div",null,"meta");
       if(l.lane==="now")m.append(el("span",k.column,"tag"));
+      m.append(...priorityTag(k));
       k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
       if(k.claim)m.append(el("span",k.claim,"tag"));
       if(k.waits_on.length)m.append(el("span","waits on "+k.waits_on.length));
@@ -286,10 +292,13 @@ function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.g.value=s
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select")};
+  const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select")};
   for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(label(p),p)));f.p.append(g)}
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
+  [5,3,1,0].forEach(v=>f.pr.append(new Option("Priority: "+PRIORITY[v],v)));
+  f.pr.setAttribute("aria-label","priority");f.pr.value=k.priority;
+  f.pr.onchange=()=>act("card_plan",{id,priority:+f.pr.value});
   f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
   dlg={id,base:snap(k),f};setFields(dlg.base);
   const row=el("div");
@@ -297,7 +306,7 @@ function show(id){
   btn("Save",save);btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
   btn("Close",()=>$("dlg").close());
   f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
-  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,...(projects().length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
+  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,f.pr,...(projects().length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
@@ -315,6 +324,7 @@ function syncDialog(){
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
   const theirs=snap(k);
+  if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
   if(theirs.rev===dlg.base.rev){f.banner.replaceChildren();return}
   const dirty=!sameText(typed(),dlg.base);
   if(!dirty){dlg.base=theirs;setFields(theirs);f.banner.replaceChildren()}      // nothing typed: follow the board
@@ -333,10 +343,12 @@ $("dlg").onclose=()=>{dlg=null};
 /* Read the cursor first, then the cards: anything committed in between is in the list
    AND comes back from the next poll (a harmless extra refresh); nothing can be skipped.
    Both reads must succeed before either is kept. */
+// Highest priority first in each column, as card_take takes them; stable, so the store's order follows.
+const byPriority=list=>list.sort((a,b)=>b.priority-a.priority);
 async function snapshot(){
   const at=(await api("board_events",{tail:true})).cursor;
   const list=(await api("board_list")).cards;
-  cursor=at;cards=list;
+  cursor=at;cards=byPriority(list);
 }
 async function refresh(){await snapshot();render()}
 async function poll(){
@@ -344,7 +356,7 @@ async function poll(){
     const r=await api("board_events",{after:cursor,limit:1000});
     if(r.events.length){
       const list=(await api("board_list")).cards;   // if this throws, the cursor stays put and the events are retried
-      cursor=r.cursor;cards=list;render();
+      cursor=r.cursor;cards=byPriority(list);render();
     }
   }catch(e){}
   setTimeout(poll,1500);

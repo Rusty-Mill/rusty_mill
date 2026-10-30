@@ -82,7 +82,7 @@ check((await page.locator(".card .tag.proj").count()) === 5, "chips name each ca
 await page.locator(".card", { hasText: "Added under rl" }).click();
 check((await page.locator("#dlg optgroup").count()) === 3, "the dialog groups projects by repository");
 check((await page.locator("#dlg option[value=default]").innerText()) === "Inbox", "the default project is offered as the Inbox");
-await page.locator("#dlg select").selectOption("skills");
+await page.locator('#dlg select[aria-label="project"]').selectOption("skills");
 await sleep(600);
 const moved = (await api("board_list", { project: "skills" })).cards.map((c) => c.title);
 check(moved.includes("Added under rl"), "the dialog moves a card to a project of another repository");
