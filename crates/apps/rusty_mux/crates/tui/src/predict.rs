@@ -119,21 +119,17 @@ impl Predictor {
     /// Applies the block's output `data` to `grid` through `parser`:
     /// leaving the predicted row or switching screens ends the epoch, even
     /// for a moment within `data`. So while an epoch has a row, `data` is
-    /// parsed in steps, each up to and including a C0 control byte (ESC
-    /// among them), and checked after each: only those bytes, and a wrap
-    /// at the margin, move the cursor off its row or switch screens.
+    /// parsed a byte at a time and checked after each, since a sequence
+    /// ends on a byte that could as well be text. That lasts only while
+    /// the cursor stays on the row: once the epoch ends, the rest of `data`
+    /// is parsed in one step.
     pub fn output(&mut self, parser: &mut AnsiParser, grid: &mut Grid, data: &[u8]) {
         let mut rest = data;
-        while self.epoch.at.is_some() && !rest.is_empty() {
-            let end = rest
-                .iter()
-                .position(|b| *b < 0x20)
-                .map_or(rest.len(), |i| i + 1);
-            parser.advance(grid, &rest[..end]);
+        while let Some((byte, after)) = rest.split_first().filter(|_| self.epoch.at.is_some()) {
+            parser.advance(grid, std::slice::from_ref(byte));
             self.follow(grid);
-            rest = &rest[end..];
+            rest = after;
         }
-        // Without a row to leave, the rest goes in one step.
         parser.advance(grid, rest);
         self.follow(grid);
     }
@@ -567,6 +563,29 @@ mod tests {
         let mut shell = Shell::confirmed(Echo::Kernel);
         shell.echo("\x1b[0m\x1b[K");
         assert!(shell.p.epoch.confirmed, "staying on the row");
+        // Off the row by a sequence, back by wrapping text: no C0 byte
+        // between them to stop at.
+        let mut shell = Shell::new(Echo::Kernel);
+        shell.echo("\r\n$ ");
+        let a = shell.key("a");
+        shell.echo("a");
+        shell.ack(a);
+        assert!(shell.p.epoch.confirmed);
+        shell.echo("\x1b[1;1H0123456789abc");
+        assert_eq!(shell.grid.cursor, (3, 1));
+        assert!(!shell.p.epoch.confirmed, "a wrap back to the row");
+        shell.key("q");
+        assert_eq!(shell.p.overlay(), None);
+    }
+
+    #[test]
+    fn output_parsed_a_byte_at_a_time_keeps_multibyte_characters() {
+        let mut shell = Shell::confirmed(Echo::Kernel);
+        let e = shell.key("é");
+        shell.echo("é");
+        shell.ack(e);
+        assert!(shell.p.epoch.confirmed && shell.p.epoch.guesses.is_empty());
+        assert_eq!(shell.grid.row_cells(0).nth(3).map(|c| c.ch), Some('é'));
     }
 
     #[test]

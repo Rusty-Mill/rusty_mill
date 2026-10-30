@@ -111,8 +111,8 @@ at the cursor, and Backspace over a character predicted in the same epoch.
   to another block, the lease lost, a reconnect or takeover (the screen is
   sent again), the alternate screen entered or left, an `EchoMode` change,
   output that moves the cursor off the row being predicted, and a
-  prediction that fails its check. As built, output is checked after each C0
-  control byte while an epoch has a row, so a moment off the row or on the
+  prediction that fails its check. As built, output is parsed and checked a byte
+  at a time while an epoch has a row, so a moment off the row or on the
   alternate screen within one Output frame counts too.
 - **An epoch starts tentative.** Its predictions are kept but **not drawn**.
   It becomes confirmed when the first of its predictions passes the check
