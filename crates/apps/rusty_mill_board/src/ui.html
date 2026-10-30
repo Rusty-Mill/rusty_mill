@@ -343,10 +343,12 @@ $("dlg").onclose=()=>{dlg=null};
 /* Read the cursor first, then the cards: anything committed in between is in the list
    AND comes back from the next poll (a harmless extra refresh); nothing can be skipped.
    Both reads must succeed before either is kept. */
+// Highest priority first in each column, as card_take takes them; stable, so the store's order follows.
+const byPriority=list=>list.sort((a,b)=>b.priority-a.priority);
 async function snapshot(){
   const at=(await api("board_events",{tail:true})).cursor;
   const list=(await api("board_list")).cards;
-  cursor=at;cards=list.sort((a,b)=>b.priority-a.priority);   // highest first in each column, as card_take
+  cursor=at;cards=byPriority(list);
 }
 async function refresh(){await snapshot();render()}
 async function poll(){
@@ -354,7 +356,7 @@ async function poll(){
     const r=await api("board_events",{after:cursor,limit:1000});
     if(r.events.length){
       const list=(await api("board_list")).cards;   // if this throws, the cursor stays put and the events are retried
-      cursor=r.cursor;cards=list;render();
+      cursor=r.cursor;cards=byPriority(list);render();
     }
   }catch(e){}
   setTimeout(poll,1500);

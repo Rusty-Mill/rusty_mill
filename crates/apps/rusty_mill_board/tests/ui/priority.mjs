@@ -36,6 +36,11 @@ check((await backlog.allInnerTexts())[0] === "Urgent card", "the high-priority c
 check(await page.locator(".card", { hasText: "Urgent card" }).locator(".tag.p5", { hasText: "High" }).count() === 1, "it shows a High badge");
 check(await page.locator(".card", { hasText: "Plain card" }).locator(".tag.p5, .tag.p3, .tag.p1").count() === 0, "a card with no priority shows no badge");
 
+// The order survives a poll: an unrelated card arriving re-reads the board.
+await api("card_add", { title: "Later card" });
+await sleep(3500);   // > two polls
+check((await backlog.allInnerTexts())[0] === "Urgent card", "the high-priority card stays first after a poll");
+
 // 2. The dialog sets it, and the board follows.
 await page.locator(".card", { hasText: "Plain card" }).click();
 const pick = page.locator('#dlg select[aria-label="priority"]');
