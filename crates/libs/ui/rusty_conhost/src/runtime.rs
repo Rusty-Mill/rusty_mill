@@ -626,7 +626,7 @@ impl Engine {
         if let Some(size) = plan.control.resize {
             self.handle(Event::Resize(size));
         }
-        if plan.control.output_drained {
+        if plan.control.output_drained || plan.pump_writes {
             self.handle(Event::OutputDrained);
         }
         if plan.child_exited {
@@ -706,6 +706,7 @@ impl Engine {
             parked: self.console.parked(),
             closed: false,
             reads_ready: self.console.reads_ready(),
+            writes_ready: self.console.writes_ready(),
         }
     }
 

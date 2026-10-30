@@ -29,8 +29,9 @@ pub(crate) const PARKED_CAP: usize = 1024 * 1024;
 /// Variable input read from one packet.
 pub(crate) const PACKET_INPUT_CAP: usize = 64 * 1024;
 /// The most of an API's fixed descriptor a reply writes back: every
-/// struct served fits, so an oversized descriptor costs nothing parked.
-pub(crate) const WRITE_BACK_CAP: usize = 20;
+/// struct served fits (the largest is `CONSOLE_SCREENBUFFERINFO_MSG`), so
+/// an oversized descriptor costs nothing parked.
+pub(crate) const WRITE_BACK_CAP: usize = 92;
 /// The most one held call retains: its text, at most the packet's input
 /// (a title's OSC is capped well below it), plus its write-back.
 pub(crate) const MAX_RETAINED_PER_CALL: usize = PACKET_INPUT_CAP + WRITE_BACK_CAP;
@@ -71,6 +72,8 @@ pub(crate) struct View {
     pub closed: bool,
     /// Waiting reads stopped at a call's reply budget with input left.
     pub reads_ready: bool,
+    /// Parked writes stopped at the budget on the host's own answers.
+    pub writes_ready: bool,
 }
 
 /// What one turn does, in this order.
@@ -83,6 +86,8 @@ pub(crate) struct Turn {
     /// Bytes to take from the input lane and hand to the console.
     pub input: usize,
     pub submit_read: bool,
+    /// Go on with the parked writes the last pump left, as a drain would.
+    pub pump_writes: bool,
 }
 
 /// Plan one turn.
@@ -99,6 +104,7 @@ pub(crate) fn turn(v: &View) -> Turn {
         serve_reads: v.reads_ready,
         input,
         submit_read: read_admitted(v),
+        pump_writes: v.writes_ready,
     }
 }
 
@@ -114,7 +120,10 @@ fn read_admitted(v: &View) -> bool {
 /// that ended in ESC with input left, or complete calls and so reopen
 /// admission with no READ_IO armed; no wake announces any of them.
 pub(crate) fn must_poll(v: &View) -> bool {
-    v.reads_ready || (v.input > 0 && v.output <= INPUT_PAUSE_ABOVE) || read_admitted(v)
+    v.reads_ready
+        || v.writes_ready
+        || (v.input > 0 && v.output <= INPUT_PAUSE_ABOVE)
+        || read_admitted(v)
 }
 
 /// Whether another packet may be accepted: fewer than [`MAX_WAITING`]
@@ -379,6 +388,21 @@ mod tests {
             read_in_flight: true,
             ..parked
         }));
+    }
+
+    #[test]
+    fn writes_cut_on_answers_pump_again_without_a_wake() {
+        let cut = View {
+            writes_ready: true,
+            read_in_flight: true,
+            ..View::default()
+        };
+        assert!(turn(&cut).pump_writes && must_poll(&cut));
+        let idle = View {
+            writes_ready: false,
+            ..cut
+        };
+        assert!(!turn(&idle).pump_writes && !must_poll(&idle));
     }
 
     #[test]

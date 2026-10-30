@@ -14,6 +14,8 @@ layer = "libs"
 platform.workspace = true
 # Bounds-checked decoding of the client's packets.
 rusty_wire.workspace = true
+# The host's screen model (design §4.3, D2).
+rusty_term_core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 platform-windows.workspace = true
