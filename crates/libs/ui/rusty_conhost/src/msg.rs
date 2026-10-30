@@ -72,8 +72,15 @@ pub(crate) mod api {
     pub(crate) const GENERATE_CTRL_EVENT: u32 = 0x0200_0001;
     pub(crate) const FLUSH_INPUT_BUFFER: u32 = 0x0200_0003;
     pub(crate) const SET_CP: u32 = 0x0200_0004;
+    pub(crate) const GET_CURSOR_INFO: u32 = 0x0200_0005;
+    pub(crate) const SET_CURSOR_INFO: u32 = 0x0200_0006;
+    pub(crate) const GET_SCREEN_BUFFER_INFO: u32 = 0x0200_0007;
+    pub(crate) const SET_CURSOR_POSITION: u32 = 0x0200_000A;
+    pub(crate) const SET_TEXT_ATTRIBUTE: u32 = 0x0200_000D;
     pub(crate) const GET_TITLE: u32 = 0x0200_0014;
     pub(crate) const SET_TITLE: u32 = 0x0200_0015;
+    pub(crate) const GET_CURRENT_FONT: u32 = 0x0300_0004;
+    pub(crate) const GET_CONSOLE_WINDOW: u32 = 0x0300_001F;
 }
 
 /// `CD_IO_OBJECT_TYPE_*`.
@@ -192,6 +199,17 @@ pub(crate) fn u32_at(fixed: &[u8], at: usize) -> Option<u32> {
 /// Read a BOOLEAN at `at` of a fixed struct.
 pub(crate) fn bool_at(fixed: &[u8], at: usize) -> Option<bool> {
     fixed.get(at).map(|b| *b != 0)
+}
+
+/// Read a little-endian USHORT (or COORD half) at `at` of a fixed struct.
+pub(crate) fn u16_at(fixed: &[u8], at: usize) -> Option<u16> {
+    let bytes = fixed.get(at..at + 2)?;
+    Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+/// Overwrite the USHORT at `at`. The caller has checked the length.
+pub(crate) fn put_u16(fixed: &mut [u8], at: usize, v: u16) {
+    fixed[at..at + 2].copy_from_slice(&v.to_le_bytes());
 }
 
 /// Overwrite the ULONG at `at`. The caller has checked the length.

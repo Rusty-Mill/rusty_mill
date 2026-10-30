@@ -10949,6 +10949,7 @@ version = "0.1.0"
 dependencies = [
  "platform",
  "platform-windows",
+ "rusty_term_core",
  "rusty_wire",
 ]
 

@@ -111,6 +111,11 @@ impl KeyEvent {
 pub(crate) enum Record {
     Key(KeyEvent),
     Focus(bool),
+    /// WINDOW_BUFFER_SIZE_EVENT: the buffer's new size.
+    BufferSize {
+        cols: u16,
+        rows: u16,
+    },
 }
 
 impl Record {
@@ -130,6 +135,11 @@ impl Record {
             Record::Focus(on) => {
                 b[0..2].copy_from_slice(&0x10u16.to_le_bytes());
                 b[4..8].copy_from_slice(&u32::from(*on).to_le_bytes());
+            }
+            Record::BufferSize { cols, rows } => {
+                b[0..2].copy_from_slice(&4u16.to_le_bytes());
+                b[4..6].copy_from_slice(&cols.to_le_bytes());
+                b[6..8].copy_from_slice(&rows.to_le_bytes());
             }
         }
         b
@@ -1030,6 +1040,14 @@ mod tests {
         assert_eq!(
             &Record::Focus(true).encode()[..8],
             &[0x10, 0, 0, 0, 1, 0, 0, 0]
+        );
+        assert_eq!(
+            &Record::BufferSize {
+                cols: 80,
+                rows: 300
+            }
+            .encode()[..8],
+            &[4, 0, 0, 0, 80, 0, 0x2C, 1]
         );
     }
 

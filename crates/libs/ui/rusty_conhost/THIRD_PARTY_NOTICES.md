@@ -31,6 +31,11 @@ MIT-licensed, at commit `09beddc6`:
   `src/host/input.cpp`, `inputBuffer.cpp`, `stream.cpp`,
   `directio.cpp`, `readDataRaw.cpp`, `readDataDirect.cpp`,
   `readDataCooked.cpp`).
+- `src/console/screen.rs` and `src/console/output.rs`: the output-mode
+  handling, legacy attributes and their SGR, and the cursor, attribute,
+  screen buffer info, font and window APIs (`src/host/getset.cpp`,
+  `_stream.cpp`, `src/server/ApiDispatchers.cpp`, `conattrs.hpp`,
+  `conmsgl2.h`, `conmsgl3.h`).
 
 Those files carry the notice below at their top.
 

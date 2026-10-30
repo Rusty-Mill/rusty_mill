@@ -22,8 +22,9 @@ pub(crate) const PARKED_CAP: usize = 1024 * 1024;
 /// Variable input read from one packet.
 pub(crate) const PACKET_INPUT_CAP: usize = 64 * 1024;
 /// The most of an API's fixed descriptor a reply writes back: every
-/// struct served fits, so an oversized descriptor costs nothing parked.
-pub(crate) const WRITE_BACK_CAP: usize = 20;
+/// struct served fits (the largest is `CONSOLE_SCREENBUFFERINFO_MSG`), so
+/// an oversized descriptor costs nothing parked.
+pub(crate) const WRITE_BACK_CAP: usize = 92;
 /// The most one held call retains: its text, at most the packet's input
 /// (a title's OSC is capped well below it), plus its write-back.
 pub(crate) const MAX_RETAINED_PER_CALL: usize = PACKET_INPUT_CAP + WRITE_BACK_CAP;

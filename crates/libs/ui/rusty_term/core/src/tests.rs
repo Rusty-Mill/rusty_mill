@@ -8263,7 +8263,10 @@ fn pen_colors_report_sgr_provenance() {
     assert_ne!(c.flags & ATTR_REVERSE, 0);
     p.advance(&mut g, b"\x1b[0;38;5;200;48;2;1;2;3m");
     let c = p.pen_colors();
-    assert_eq!((c.fg, c.bg), (ColorRef::Palette(200), ColorRef::Rgb(0x010203)));
+    assert_eq!(
+        (c.fg, c.bg),
+        (ColorRef::Palette(200), ColorRef::Rgb(0x010203))
+    );
     assert_eq!(c.flags & (ATTR_UNDERLINE | ATTR_REVERSE), 0);
 }
 

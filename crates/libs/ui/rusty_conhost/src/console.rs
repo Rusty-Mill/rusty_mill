@@ -7,7 +7,9 @@
 //! Appendix A, the output caps of §7.4, and input (PR 3, the `read`
 //! child module): terminal input, the input APIs, waiting reads and Ctrl
 //! events. The server closes at once on hang-up or child exit until PR 8
-//! brings CTRL_CLOSE and its grace period.
+//! brings CTRL_CLOSE and its grace period. Every byte for the terminal
+//! passes through the `screen` child module's Grid (PR 4), which the
+//! screen APIs in `output` read.
 //!
 //! Behaviour follows microsoft/terminal's conhost (commit 09beddc6,
 //! `src/server/IoDispatchers.cpp`, `ApiDispatchers.cpp`,
@@ -27,7 +29,12 @@ use crate::input::{self, KeyFor};
 use crate::msg::{self, ApiMsg, api};
 use crate::sched::{MAX_RETAINED_PER_CALL, PACKET_INPUT_CAP, WRITE_BACK_CAP};
 
+mod output;
 mod read;
+mod screen;
+
+use output::get_console_window;
+use screen::Screen;
 
 /// What the host sends the terminal before anything else (§5.5):
 /// win32-input-mode, for exact key records and Ctrl+Break, and focus
@@ -74,7 +81,7 @@ mod mode {
     pub(super) const EXTENDED_FLAGS: u32 = 0x80;
     pub(super) const AUTO_POSITION: u32 = 0x100;
     pub(super) const VIRTUAL_TERMINAL_INPUT: u32 = 0x200;
-    pub(super) const WRAP_AT_EOL_OUTPUT: u32 = 0x2;
+    pub(super) use super::screen::WRAP_AT_EOL_OUTPUT;
 }
 
 /// Input modes the input buffer stores.
@@ -400,14 +407,25 @@ impl Text {
         }
     }
 
-    /// Emit up to one slice from `at`; returns the new position.
-    fn emit(&self, at: usize, out: &mut OutputQueue) -> usize {
+    /// Emit up to one slice from `at` through `screen`; returns the new
+    /// position. A slice's VT is at most [`SLICE`] bytes.
+    fn emit(
+        &self,
+        at: usize,
+        origin: Origin,
+        screen: &mut Screen,
+        out: &mut OutputQueue,
+        replies: &mut Vec<u8>,
+    ) -> usize {
         match self {
-            Text::Bytes(bytes) => {
-                let end = bytes.len().min(at + SLICE);
-                out.push(&bytes[at..end]);
-                end
-            }
+            Text::Bytes(bytes) => match origin {
+                Origin::Client(mode) => at + screen.client(&bytes[at..], mode, SLICE, out, replies),
+                Origin::Host => {
+                    let end = bytes.len().min(at + SLICE);
+                    screen.host(&bytes[at..end], out);
+                    end
+                }
+            },
             Text::Wide(units) => {
                 let mut end = units.len().min(at + WIDE_SLICE);
                 // Keep a surrogate pair in one slice.
@@ -417,11 +435,27 @@ impl Text {
                 let text: String = char::decode_utf16(units[at..end].iter().copied())
                     .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
                     .collect();
-                out.push(text.as_bytes());
+                // Each unit is at most 3 bytes transformed, so all fit.
+                match origin {
+                    Origin::Client(mode) => {
+                        let n = screen.client(text.as_bytes(), mode, SLICE, out, replies);
+                        debug_assert_eq!(n, text.len(), "a wide slice fits");
+                    }
+                    Origin::Host => screen.host(text.as_bytes(), out),
+                }
                 end
             }
         }
     }
+}
+
+/// Who made a write's text, which decides how it is emitted.
+#[derive(Clone, Copy, Debug)]
+enum Origin {
+    /// Client text, under the output mode when it was written (§5.4).
+    Client(u32),
+    /// VT the host made, forwarded as it is.
+    Host,
 }
 
 /// A call whose VT is being emitted, with its reply ready for when it is
@@ -429,13 +463,17 @@ impl Text {
 struct Write {
     reply: Reply,
     text: Text,
+    origin: Origin,
     at: usize,
     /// Bytes this call holds while queued: text and reply buffers.
     retained: usize,
 }
 
 pub(crate) struct Console {
-    size: WinSize,
+    /// The Grid every byte to the terminal passes through (§5).
+    screen: Screen,
+    /// SetConsoleCursorInfo's size, in percent of the cell.
+    cursor_size: u32,
     clients: HashMap<usize, Client>,
     objects: HashMap<usize, Object>,
     /// Sharing of the input buffer and the screen buffer.
@@ -487,7 +525,8 @@ pub(crate) struct Console {
 impl Console {
     pub(crate) fn new(size: WinSize, key_for: KeyFor) -> Console {
         Console {
-            size,
+            screen: Screen::new(size),
+            cursor_size: output::DEFAULT_CURSOR_SIZE,
             clients: HashMap::new(),
             objects: HashMap::new(),
             shares: [Share::default(); 2],
@@ -534,10 +573,10 @@ impl Console {
     }
 
     /// The window and buffer size, which GetConsoleScreenBufferInfo
-    /// reports from PR 4.
+    /// reports.
     #[cfg(test)]
     pub(crate) fn size(&self) -> WinSize {
-        self.size
+        self.screen.size()
     }
 
     /// Handle one event. Pure: every effect is returned.
@@ -547,7 +586,7 @@ impl Console {
             Event::Packet(p) => self.packet(p, out, &mut fx),
             Event::Input(bytes) => self.terminal_input(bytes, true, out, &mut fx),
             Event::InputMore(bytes) => self.terminal_input(bytes, false, out, &mut fx),
-            Event::Resize(size) => self.size = size,
+            Event::Resize(size) => self.resize(size, out, &mut fx),
             Event::ServeReads => self.serve_reads(out, &mut fx),
             Event::OutputDrained => {
                 self.pump(None, out, &mut fx);
@@ -631,7 +670,8 @@ impl Console {
             msg::RAW_WRITE => {
                 let mut reply = Reply::ok(p.id);
                 reply.information = p.payload.len();
-                return self.write(reply, Text::Bytes(p.payload.to_vec()), out, fx);
+                let text = Text::Bytes(p.payload.to_vec());
+                return self.write(reply, text, Origin::Client(self.output_mode), out, fx);
             }
             msg::RAW_READ => return self.read_console(&p, None, Vec::new(), out, fx),
             msg::RAW_FLUSH => self.flush_input(&p),
@@ -806,6 +846,13 @@ impl Console {
             api::READ_CONSOLE => return self.read_console(p, Some(m), fixed, out, fx),
             api::WRITE_CONSOLE => return self.write_console(p, m, fixed, out, fx),
             api::SET_TITLE => return self.set_title(p, m, fixed, out, fx),
+            api::GET_CURSOR_INFO => self.get_cursor_info(p.object, &mut fixed),
+            api::SET_CURSOR_INFO => return self.set_cursor_info(p, fixed, out, fx),
+            api::GET_SCREEN_BUFFER_INFO => self.get_screen_buffer_info(p.object, &mut fixed),
+            api::SET_CURSOR_POSITION => return self.set_cursor_position(p, fixed, out, fx),
+            api::SET_TEXT_ATTRIBUTE => return self.set_text_attribute(p, fixed, out, fx),
+            api::GET_CURRENT_FONT => self.get_current_font(p.object, &mut fixed),
+            api::GET_CONSOLE_WINDOW => get_console_window(&mut fixed),
             #[cfg(test)]
             PANIC_FOR_TEST => panic!("a test asked the console to panic"),
             api::GET_TITLE => {
@@ -870,7 +917,7 @@ impl Console {
         let mut reply = Reply::status(p.id, status);
         reply.write_back = fixed;
         match vt {
-            Some(vt) => self.write(reply, Text::Bytes(vt), out, fx),
+            Some(vt) => self.write(reply, Text::Bytes(vt), Origin::Host, out, fx),
             None => fx.push(Effect::Reply(reply)),
         }
     }
@@ -955,7 +1002,7 @@ impl Console {
             // 65001 is the only code page (§5.9): the bytes are UTF-8.
             Text::Bytes(m.variable.to_vec())
         };
-        self.write(reply, text, out, fx);
+        self.write(reply, text, Origin::Client(self.output_mode), out, fx);
     }
 
     /// `CONSOLE_SETTITLE_MSG { IN Unicode }`, the title in the variable
@@ -992,7 +1039,7 @@ impl Console {
         self.title = title;
         let mut reply = Reply::ok(p.id);
         reply.write_back = fixed;
-        self.write(reply, Text::Bytes(osc), out, fx);
+        self.write(reply, Text::Bytes(osc), Origin::Host, out, fx);
     }
 
     /// `CONSOLE_GETTITLE_MSG { OUT TitleLength; IN Unicode; IN Original }`,
@@ -1027,7 +1074,14 @@ impl Console {
     /// Queue a write behind any parked ones and emit what the budget
     /// allows. It completes in the next READ_IO if it finishes now, and
     /// with COMPLETE_IO once the reader makes room otherwise.
-    fn write(&mut self, reply: Reply, text: Text, out: &mut OutputQueue, fx: &mut Vec<Effect>) {
+    fn write(
+        &mut self,
+        reply: Reply,
+        text: Text,
+        origin: Origin,
+        out: &mut OutputQueue,
+        fx: &mut Vec<Effect>,
+    ) {
         let id = reply.id;
         let retained = text.retained() + reply.write_back.len() + reply.output.len();
         debug_assert!(
@@ -1038,6 +1092,7 @@ impl Console {
         self.writes.push_back(Write {
             reply,
             text,
+            origin,
             at: 0,
             retained,
         });
@@ -1045,15 +1100,28 @@ impl Console {
     }
 
     /// Emit from the front write while the output queue is within the
-    /// client budget. `current` is the packet being handled, whose reply
-    /// rides on the next READ_IO.
+    /// client budget, then queue the answers to the host's own queries.
     fn pump(&mut self, current: Option<[u8; 8]>, out: &mut OutputQueue, fx: &mut Vec<Effect>) {
+        let mut replies = Vec::new();
+        self.emit_writes(current, out, fx, &mut replies);
+        self.host_replies(&replies, out, fx);
+    }
+
+    /// `current` is the packet being handled, whose reply rides on the
+    /// next READ_IO.
+    fn emit_writes(
+        &mut self,
+        current: Option<[u8; 8]>,
+        out: &mut OutputQueue,
+        fx: &mut Vec<Effect>,
+        replies: &mut Vec<u8>,
+    ) {
         while let Some(w) = self.writes.front_mut() {
             if w.at < w.text.len() {
                 if out.len() > CLIENT_BUDGET {
                     return;
                 }
-                w.at = w.text.emit(w.at, out);
+                w.at = w.text.emit(w.at, w.origin, &mut self.screen, out, replies);
             }
             if w.at < w.text.len() {
                 continue;
@@ -1173,8 +1241,12 @@ pub(crate) mod tests {
 
     impl Host {
         pub(super) fn new() -> Host {
+            Host::sized(WinSize { rows: 24, cols: 80 })
+        }
+
+        pub(super) fn sized(size: WinSize) -> Host {
             Host {
-                c: Console::new(WinSize { rows: 24, cols: 80 }, input::us_key_for),
+                c: Console::new(size, input::us_key_for),
                 queued: 0,
                 high_water: 0,
                 vt: Vec::new(),
@@ -1297,7 +1369,7 @@ pub(crate) mod tests {
                 .status
         }
 
-        fn write_w(&mut self, output: usize, text: &str) -> Reply {
+        pub(super) fn write_w(&mut self, output: usize, text: &str) -> Reply {
             let bytes: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
             self.call(
                 output,
@@ -1733,12 +1805,12 @@ pub(crate) mod tests {
         let mut h = Host::new();
         h.connect(1, "");
         let total: usize = (0..10_000)
-            .map(|n| logs(&unknown_api(&mut h, 1, 0x0300_0000 + n)))
+            .map(|n| logs(&unknown_api(&mut h, 1, 0x0700_0000 + n)))
             .sum();
         assert_eq!(total, MAX_LOGGED + 1);
         assert_eq!(h.c.logged.len(), MAX_LOGGED + 1);
         assert!(h.c.logged.contains(&Diag::Suppressed));
-        assert_eq!(logs(&unknown_api(&mut h, 1, 0x0300_0000)), 0);
+        assert_eq!(logs(&unknown_api(&mut h, 1, 0x0700_0000)), 0);
     }
 
     #[test]

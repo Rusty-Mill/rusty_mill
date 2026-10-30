@@ -136,7 +136,24 @@ impl Console {
         }
     }
 
-    fn store(&mut self, r: Record, fx: &mut Vec<Effect>) {
+    /// The host's answers to DSR 5 and CPR (§5.6): input for a VT
+    /// client, dropped otherwise.
+    pub(super) fn host_replies(
+        &mut self,
+        replies: &[u8],
+        out: &mut OutputQueue,
+        fx: &mut Vec<Effect>,
+    ) {
+        if replies.is_empty() || self.input_mode & mode::VIRTUAL_TERMINAL_INPUT == 0 {
+            return;
+        }
+        for k in input::text_events(replies, self.key_for) {
+            self.store(Record::Key(k), fx);
+        }
+        self.serve_reads(out, fx);
+    }
+
+    pub(super) fn store(&mut self, r: Record, fx: &mut Vec<Effect>) {
         if self.input.push(r) {
             self.log(Diag::InputDropped, fx);
         }
@@ -508,7 +525,7 @@ impl Console {
                     // Echo uses the host reserve and no more (§7.4): the
                     // read goes on once the reader drains.
                     if echoing && out.len() + echo.len() > ECHO_ABOVE {
-                        out.push(&echo);
+                        self.screen.host(&echo, out);
                         return Attempt::Held(r);
                     }
                     if line.erasing() {
@@ -527,7 +544,7 @@ impl Console {
                     }
                 }
                 if echoing {
-                    out.push(&echo);
+                    self.screen.host(&echo, out);
                 }
                 if line.done().is_none() {
                     return Attempt::Wait(r);
@@ -557,7 +574,7 @@ impl Console {
         let mut newline = Vec::new();
         let (text, keys) = line.finish(processed, &mut newline);
         if !wakeup {
-            out.push(&newline);
+            self.screen.host(&newline, out);
         }
         let data = self.consume(unicode, &text, r.capacity);
         let rest = &text[data.units..];
