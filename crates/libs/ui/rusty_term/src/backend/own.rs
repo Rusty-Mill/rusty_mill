@@ -173,31 +173,36 @@ fn exited_within(child: &mut WindowsChild, grace: Duration) -> Option<ExitStatus
 /// Where `CreateProcessW` finds `program` before it searches PATH, as a
 /// full path. A name with a directory part is looked up from our current
 /// directory; a bare name in rusty_term's own directory, the current
-/// directory, System32, then the Windows directory. Each place is tried as
-/// given, then with `.exe` added when the name has no extension. `None`
-/// leaves the name to `Command`'s PATH search.
+/// directory, System32, then the Windows directory. A name with no
+/// extension gets `.exe`, and is never tried bare, as in `CreateProcessW`:
+/// an extensionless file must not hide the program on PATH. `None` leaves
+/// the name to `Command`'s PATH search.
 fn locate(program: &str) -> Option<PathBuf> {
-    let path = Path::new(program);
     let bare = !program.contains(['\\', '/', ':']);
     let dirs = if bare {
         search_dirs()
     } else {
         vec![PathBuf::new()]
     };
+    locate_in(program, &dirs)
+}
+
+/// [`locate`] over the given places.
+fn locate_in(program: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
     dirs.iter()
-        .flat_map(|dir| with_exe(dir.join(path)))
+        .map(|dir| with_exe(dir.join(program)))
         .find(|candidate| candidate.is_file())
         .and_then(|found| std::path::absolute(found).ok())
 }
 
-/// `path`, then `path.exe` when it has no extension.
-fn with_exe(path: PathBuf) -> impl Iterator<Item = PathBuf> {
-    let exe = path.extension().is_none().then(|| {
-        let mut name = path.clone().into_os_string();
-        name.push(OsStr::new(".exe"));
-        PathBuf::from(name)
-    });
-    std::iter::once(path).chain(exe)
+/// `path`, with `.exe` added when it has no extension.
+fn with_exe(path: PathBuf) -> PathBuf {
+    if path.extension().is_some() {
+        return path;
+    }
+    let mut name = path.into_os_string();
+    name.push(OsStr::new(".exe"));
+    PathBuf::from(name)
 }
 
 /// The places `CreateProcessW` searches for a bare name before PATH.
@@ -351,6 +356,29 @@ mod tests {
                 .ends_with(r"\cmd.exe")
         );
         assert!(super::locate("no-such-program-rusty").is_none());
+    }
+
+    /// An extensionless file doesn't hide the program of that name further
+    /// on, by bare name or by path; `name.exe` beside it does win.
+    #[test]
+    fn an_extensionless_file_does_not_hide_the_program() {
+        let dir = std::env::temp_dir().join("rusty_term_own_locate");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("cmd"), "not a program").expect("sentinel");
+        let _ = std::fs::remove_file(dir.join("cmd.exe"));
+        let system = super::locate("cmd").expect("System32 cmd");
+        let dirs = [
+            dir.clone(),
+            system.parent().expect("System32").to_path_buf(),
+        ];
+        let found = super::locate_in("cmd", &dirs);
+        let by_path = super::locate(&dir.join("cmd").to_string_lossy());
+        std::fs::copy(&system, dir.join("cmd.exe")).expect("copy");
+        let beside = super::locate_in("cmd", &dirs);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found.as_ref(), Some(&system), "the sentinel is skipped");
+        assert_eq!(by_path, None, "a path is tried with .exe only");
+        assert_eq!(beside, Some(dir.join("cmd.exe")), "the first place wins");
     }
 
     /// A clone owns no child: no exit token, no status.
