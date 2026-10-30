@@ -208,3 +208,32 @@ fn a_takeover_whose_welcome_was_lost_can_be_retried_with_the_old_token() {
     retry.wait_ready(block);
     run_and_wait(&mut retry, block, 1);
 }
+
+#[test]
+fn a_lost_welcome_after_an_idle_takeover_can_be_retried_with_its_token() {
+    let path = start_server();
+    let mut first = Client::connect_with(&path, TAKEOVER, None);
+    let block = block_for(&mut first);
+    let oldest = takeover_of(&first);
+
+    // A resumed client may sit idle, sending nothing on its new connection.
+    let idle = Client::taking_over(&path, TAKEOVER, None, Some(oldest));
+    assert_eq!(idle.id(), oldest.client);
+    let presented = takeover_of(&idle);
+    // The next takeover's Welcome is lost.
+    let lost = Client::taking_over(&path, TAKEOVER, None, Some(presented));
+    assert_eq!(lost.id(), oldest.client);
+    drop((first, idle, lost));
+
+    let mut retry = Client::taking_over(&path, TAKEOVER, None, Some(presented));
+    assert_eq!(retry.id(), oldest.client, "the presented token still works");
+    retry.wait_ready(block);
+    // Attached and leased still: typing needs the lease.
+    run_and_wait(&mut retry, block, 1);
+    // Proving the newest token retired the older ones.
+    for used in [oldest, presented] {
+        let replay = Client::taking_over(&path, TAKEOVER, None, Some(used));
+        assert_ne!(replay.id(), oldest.client, "{used:?} still works");
+    }
+    run_and_wait(&mut retry, block, 2);
+}

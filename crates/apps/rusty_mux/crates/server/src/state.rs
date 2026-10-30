@@ -156,9 +156,9 @@ impl State {
         self.clients.insert(client, outbox);
         self.features.insert(client, features);
         let token = features.contains(Features::TAKEOVER).then(Uuid::new_v4);
-        let confirmed = continued
-            .and_then(|c| self.tokens.get(&c))
-            .and_then(|t| t.confirmed);
+        // Presenting a valid token proves the client holds it, so it stays
+        // good until the new one is proven; the token before it retires.
+        let confirmed = continued.and(takeover).map(|t| t.token);
         match token {
             Some(current) => self.tokens.insert(client, Tokens { current, confirmed }),
             None => self.tokens.remove(&client),
@@ -950,11 +950,11 @@ fn event_frame(seq: Option<u64>, event: &Event) -> Option<Vec<u8>> {
 }
 
 /// A `TAKEOVER` client's tokens. `current` is the one its last Welcome
-/// carried, and `confirmed` the one it last proved it holds by sending a
-/// request after the Welcome. A takeover whose Welcome never arrived
-/// leaves the client holding only `confirmed`, so both are accepted;
-/// once the client sends a request on a new connection, the older token
-/// stops working.
+/// carried, and `confirmed` the one it last proved it holds, by presenting
+/// it in a takeover or by sending a request after the Welcome that carried
+/// it. A takeover whose Welcome never arrived leaves the client holding
+/// only `confirmed`, so both are accepted; once the client proves
+/// `current`, the older token stops working.
 #[derive(Debug, Clone, Copy)]
 struct Tokens {
     current: Uuid,

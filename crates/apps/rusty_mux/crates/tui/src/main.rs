@@ -1564,8 +1564,12 @@ mod client {
                 self.focus = first;
             }
             let gone: Vec<BlockId> = self.panes.keys().filter(|b| !shows(**b)).copied().collect();
+            // Left on purpose, so detached first: a server keeps a client
+            // whose connection just ends, lease and all, for a reconnect,
+            // and the block's next client could not lease it meanwhile.
             for block in gone {
-                if let Some(pane) = self.panes.remove(&block) {
+                if let Some(mut pane) = self.panes.remove(&block) {
+                    pane.send(|req| Message::Detach { req });
                     pane.hang_up();
                 }
             }
