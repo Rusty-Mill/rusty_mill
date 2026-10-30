@@ -138,7 +138,15 @@ impl Line {
             .next()
             .and_then(Result::ok)
             .unwrap_or(char::REPLACEMENT_CHARACTER);
-        for _ in 0..rusty_term_core::char_width(ch) {
+        // Tabs advance the cursor despite having Unicode width zero.
+        // Preserve the existing one-column erase until the full tab and
+        // wrapped-line layout work (#1256), rather than erasing nothing.
+        let width = if ch == '\t' {
+            1
+        } else {
+            rusty_term_core::char_width(ch)
+        };
+        for _ in 0..width {
             echo.extend_from_slice(b"\x08 \x08");
         }
     }

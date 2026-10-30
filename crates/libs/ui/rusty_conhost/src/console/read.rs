@@ -215,9 +215,17 @@ impl Console {
         let alt = k.state & state::ALT != 0;
         if ctrl && !alt {
             if k.vk == vk::C && self.input_mode & mode::PROCESSED_INPUT != 0 {
-                if self.echo_held {
-                    // This queue belongs to the held cooked read. Its
-                    // cancelled suffix must not go to a later read.
+                let cooked_owns_input = self.echo_held
+                    || (self.reads_cut
+                        && self
+                            .reads
+                            .front()
+                            .is_some_and(|r| matches!(r.kind, ReadKind::Line { .. })));
+                if cooked_owns_input {
+                    // Echo or the reply budget can defer a cooked read
+                    // before it consumes its prefix. Discard that prefix
+                    // on cancellation, but preserve input owed to a raw
+                    // or record read at the front of a budget cut.
                     self.clear_input(false);
                 }
                 self.ctrl_event(Ctrl::C, 0, fx);
@@ -1094,6 +1102,78 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn cancellation_at_the_reply_cap_discards_only_the_cooked_readers_prefix() {
+        for successor in ["cooked", "raw", "records"] {
+            let mut h = Host::new();
+            let [_, input, _] = h.connect(1, "");
+            h.set_mode(input, RAW);
+            let raw = read_w(&mut h, input, READ_REPLY_CAP as u32);
+            let kept = match successor {
+                "raw" => Some(read_w(&mut h, input, 512)),
+                "records" => Some(get_input(&mut h, input, 0, true, 64)),
+                _ => None,
+            };
+            h.set_mode(
+                input,
+                mode::LINE_INPUT | mode::ECHO_INPUT | mode::PROCESSED_INPUT,
+            );
+            let cooked = read_w(&mut h, input, 512);
+            let mut bytes = b"\x1b[65;0;97;1;0;65535_".repeat(8);
+            bytes.extend(b"\x1b[65;0;97;1;0;8_del x\x03");
+            let fx = h.ev(Event::Input(&bytes));
+            assert_eq!(reply_bytes(&fx), READ_REPLY_CAP);
+            let done = completes(&fx);
+            let raw_done = done
+                .iter()
+                .find(|r| r.id == raw.id)
+                .expect("original raw read completed");
+            assert_eq!(raw_done.status, msg::STATUS_SUCCESS);
+            assert_eq!(raw_done.output.len(), READ_REPLY_CAP);
+            assert!(
+                msg::utf16_units(&raw_done.output)
+                    .iter()
+                    .all(|&u| u == u16::from(b'a'))
+            );
+            let cancelled = done
+                .iter()
+                .find(|r| r.id == cooked.id)
+                .expect("cooked read cancelled");
+            assert_eq!(cancelled.status, msg::STATUS_ALERTED);
+            assert!(cancelled.output.is_empty());
+            let resumed = h.ev(Event::ServeReads);
+            if let Some(kept) = kept {
+                let done = completes(&resumed);
+                let kept_done = done
+                    .iter()
+                    .find(|r| r.id == kept.id)
+                    .expect("unrelated reader resumed");
+                assert_eq!(kept_done.status, msg::STATUS_SUCCESS);
+                if successor == "raw" {
+                    assert_eq!(wide(kept_done), "del x");
+                } else {
+                    let chars: Vec<u16> = kept_done
+                        .output
+                        .as_chunks::<{ input::RECORD_LEN }>()
+                        .0
+                        .iter()
+                        .map(|r| u16::from_le_bytes([r[14], r[15]]))
+                        .filter(|&ch| ch != 0)
+                        .collect();
+                    assert_eq!(String::from_utf16_lossy(&chars), "del x");
+                }
+            }
+            let next = read_w(&mut h, input, 512);
+            assert!(held(&next));
+            let fx = h.ev(Event::Input(b"\r"));
+            assert!(reply_bytes(&fx) <= READ_REPLY_CAP);
+            let done = completes(&fx);
+            assert_eq!(done.len(), 1);
+            assert_eq!(done[0].id, next.id);
+            assert_eq!(wide(done[0]), "\r\n");
+        }
+    }
+
+    #[test]
     fn ctrl_break_flushes_preceding_input_but_keeps_later_same_slice_text() {
         let mut h = Host::new();
         let [_, input, _] = h.connect(1, "");
@@ -1169,6 +1249,22 @@ pub(crate) mod tests {
         let fx = h.ev(Event::Input("界\x08\r".as_bytes()));
         assert_eq!(wide(completes(&fx)[0]), "\r\n");
         assert_eq!(h.vt, "界\x08 \x08\x08 \x08\r\n".as_bytes());
+    }
+
+    #[test]
+    fn tab_erase_keeps_the_existing_one_column_behavior_before_a_tab_stop() {
+        for erase in *b"\x08\x1b" {
+            let mut h = Host::new();
+            let [_, input, output] = h.connect(1, "");
+            h.write_w(output, "       ");
+            assert_eq!(h.c.screen.cursor().0, 7);
+            read_w(&mut h, input, 512);
+            let fx = h.ev(Event::Input(&[b'\t', erase]));
+            assert!(completes(&fx).is_empty());
+            assert_eq!(h.c.screen.cursor().0, 7);
+            assert_eq!(h.vt, b"       \t\x08 \x08");
+            assert_eq!(wide(completes(&h.ev(Event::Input(b"\r")))[0]), "\r\n");
+        }
     }
 
     #[test]
