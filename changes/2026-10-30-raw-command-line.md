@@ -14,4 +14,5 @@ changelog: On our own console host, rusty_term passes the shell's arguments to i
 - **Fixed:** with `[console] host = "own"`, rusty_term splits only the
   program off `shell` and passes the rest verbatim, so
   `cmd /c echo a"b c"d` reaches cmd as written instead of requoted as
-  `/c echo "ab cd"`.
+  `/c echo "ab cd"`. A batch-file shell with arguments runs through
+  `cmd.exe /c` exactly as `CreateProcessW` runs it.

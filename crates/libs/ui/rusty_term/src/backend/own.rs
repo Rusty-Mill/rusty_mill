@@ -8,8 +8,9 @@
 //!
 //! This module is only compiled on Windows (gated in `backend/mod.rs`).
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
+use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,7 +23,7 @@ use platform_windows::WindowsChild;
 use rusty_conhost::{OwnPty, OwnPtyMaster};
 
 use crate::backend::cmdline::split_program;
-use crate::backend::windows::{WindowsBackend, shell_or_default};
+use crate::backend::windows::{WindowsBackend, push_quoted_arg, shell_or_default};
 use crate::backend::{Backend, BackendHandle};
 
 /// How long the child gets to exit after a hang-up, or to report its exit
@@ -45,26 +46,11 @@ impl Backend for OwnBackend {
         args: &[String],
         cwd: Option<&Path>,
     ) -> Result<Box<dyn BackendHandle>, io::Error> {
-        let shell = shell_or_default(shell);
-        let Some((word, rest)) = split_program(&shell, |p| locate(p).is_some()) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("rusty_term: no program in the shell `{shell}`"),
-            ));
-        };
-        // `Command`'s own search is PATH only; what CreateProcessW finds
-        // before PATH is passed as a full path.
-        let program = locate(word).map_or_else(|| word.into(), PathBuf::into_os_string);
         let cwd = match cwd {
             Some(dir) => dir.to_path_buf(),
             None => std::env::current_dir()?,
         };
-        // The shell's own arguments go on verbatim, as ConPTY's would;
-        // only the trailing `args` are quoted.
-        let mut cmd = Command::new(program, cwd.into_os_string()).args(args);
-        if !rest.is_empty() {
-            cmd = cmd.raw_args(rest);
-        }
+        let cmd = shell_command(&shell_or_default(shell), args, cwd.into_os_string())?;
         let (master, child) = OwnPty
             .spawn_concrete(&cmd, WinSize { rows, cols })
             .map_err(to_io)?;
@@ -187,6 +173,70 @@ fn locate(program: &str) -> Option<PathBuf> {
         vec![PathBuf::new()]
     };
     locate_in(program, &dirs)
+}
+
+/// The `Command` that runs `shell` and then `args` as `CreateProcessW`
+/// would. The shell's own arguments go on verbatim, as ConPTY's would;
+/// only the trailing `args` are quoted.
+fn shell_command(shell: &str, args: &[String], cwd: OsString) -> io::Result<Command> {
+    let Some((word, rest)) = split_program(shell, |p| locate(p).is_some()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("rusty_term: no program in the shell `{shell}`"),
+        ));
+    };
+    if is_batch(word) {
+        return Ok(Command::new(cmd_exe()?, cwd).raw_args(batch_line(shell, args)));
+    }
+    // `Command`'s own search is PATH only; what CreateProcessW finds
+    // before PATH is passed as a full path.
+    let program = locate(word).map_or_else(|| word.into(), PathBuf::into_os_string);
+    let cmd = Command::new(program, cwd).args(args);
+    Ok(if rest.is_empty() {
+        cmd
+    } else {
+        cmd.raw_args(rest)
+    })
+}
+
+/// Whether `program` names a batch file, which `CreateProcessW` runs
+/// through cmd.exe.
+fn is_batch(program: &str) -> bool {
+    Path::new(program)
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("bat") || ext.eq_ignore_ascii_case("cmd"))
+}
+
+/// The cmd.exe `CreateProcessW` runs a batch file with.
+fn cmd_exe() -> io::Result<OsString> {
+    let root = std::env::var_os("SystemRoot").ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "rusty_term: SystemRoot is not set")
+    })?;
+    Ok(PathBuf::from(root)
+        .join(r"System32\cmd.exe")
+        .into_os_string())
+}
+
+/// What `CreateProcessW` hands cmd.exe for the batch `shell` and `args`:
+/// `/c `, then the whole line, wrapped in one more pair of quotes when it
+/// starts with one (measured on Windows).
+fn batch_line(shell: &str, args: &[String]) -> OsString {
+    let mut line: Vec<u16> = shell
+        .trim_start_matches([' ', '\t'])
+        .encode_utf16()
+        .collect();
+    for arg in args {
+        line.push(u16::from(b' '));
+        push_quoted_arg(arg, &mut line);
+    }
+    let quote = u16::from(b'"');
+    let wrap = line.first() == Some(&quote);
+    let mut out: Vec<u16> = "/c ".encode_utf16().collect();
+    out.extend(wrap.then_some(quote));
+    out.extend(line);
+    out.extend(wrap.then_some(quote));
+    OsString::from_wide(&out)
 }
 
 /// [`locate`] over the given places.
@@ -359,6 +409,48 @@ mod tests {
         assert_eq!(h.reap_exit_status(), Some(4));
         drop(h);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A batch file runs through cmd.exe as CreateProcessW runs it: its
+    /// arguments reach `%*` as written, trailing arguments quoted.
+    #[test]
+    fn a_batch_shell_with_arguments_runs_through_cmd() {
+        let dir = std::env::temp_dir().join("rusty term own batch");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let script = dir.join("t.cmd");
+        std::fs::write(&script, "@echo ARGS=[%*]\r\n").expect("script");
+        let shell = format!(r#""{}" -x "a b""#, script.display());
+        let args = ["tail one".to_owned()];
+        let mut h = OwnBackend
+            .spawn_shell(80, 24, Some(&shell), &args, None)
+            .expect("spawn a batch shell");
+        let out = drain(h.as_ref());
+        wait_for(
+            &out,
+            br#"ARGS=[-x "a b" "tail one"]"#,
+            "the batch file's %*",
+        );
+        h.exit_token().expect("exit token")();
+        assert_eq!(h.reap_exit_status(), Some(0));
+        drop(h);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_batch_line_is_wrapped_only_when_it_starts_with_a_quote() {
+        let line = |shell: &str, args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+            super::batch_line(shell, &args)
+                .into_string()
+                .expect("utf-8")
+        };
+        assert_eq!(line(r"C:\t.cmd -x", &[]), r"/c C:\t.cmd -x");
+        assert_eq!(
+            line(r#""C:\a b\t.cmd" -x"#, &["c d"]),
+            r#"/c ""C:\a b\t.cmd" -x "c d"""#
+        );
+        assert!(super::is_batch("x.CMD") && super::is_batch(r"C:\a\x.bat"));
+        assert!(!super::is_batch("cmd.exe") && !super::is_batch("cmd"));
     }
 
     #[test]

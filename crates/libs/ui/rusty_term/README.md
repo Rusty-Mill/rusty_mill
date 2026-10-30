@@ -182,7 +182,9 @@ own console host. It is read at launch. If `own` can't start (an older
 Windows without a usable ConDrv, for example), the error is shown and the
 terminal does not fall back to ConPTY. With `own`, the program is found in
 `shell` by the rules `CreateProcessW` uses, and the rest of the line reaches
-it as written, as under ConPTY. The web bridge always uses ConPTY.
+it as written, as under ConPTY. Only the program token differs: the child
+sees it as a quoted full path, followed by one space (cmd's `%CMDCMDLINE%`
+shows this). A batch file runs through cmd.exe `/c`, as `CreateProcessW` runs it. The web bridge always uses ConPTY.
 
 The `[colors]` theme is what every reset path (`RIS`, `DECSTR`, OSC
 104/110/111/112) restores, so a configured look survives a `reset` exactly

@@ -542,7 +542,9 @@ implementation convenience.
 - **Linux**: `Unsupported` from `LinuxSpawner` and `LinuxPty`. A Unix
   process receives a vector of arguments and has no command line to put
   raw text on. The mocks model no command line and ignore it, as they do
-  `detach`.
+  `detach`, so a consumer's tests against them never see the NUL or
+  batch-file refusals; those are pinned by the Windows backend's own
+  tests.
 - **OS limitation**: `CreateProcessW` takes one string the child parses
   itself; `posix_spawn` takes the vector.
 - **Pinning tests**: `raw_args_follow_the_program_verbatim`

@@ -293,7 +293,7 @@ pub(super) fn shell_or_default(shell: Option<&str>) -> String {
 /// MSVCRT/`CreateProcessW` argument rules — backslashes only escape when
 /// immediately followed by a quote — so the child's argv parser splits it
 /// back out unchanged. Mirrors the algorithm Windows itself documents.
-fn push_quoted_arg(arg: &str, out: &mut Vec<u16>) {
+pub(super) fn push_quoted_arg(arg: &str, out: &mut Vec<u16>) {
     use std::os::windows::ffi::OsStrExt;
     let needs_quotes = arg.is_empty() || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"');
     if !needs_quotes {
