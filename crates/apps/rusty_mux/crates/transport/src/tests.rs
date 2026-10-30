@@ -561,3 +561,71 @@ fn closes_after_acks_that_fill_a_datagram_wait_for_the_next() {
     assert!(sizes.len() > 1, "{sizes:?}");
     assert!(sizes.iter().all(|&n| n <= MAX_DATAGRAM), "{sizes:?}");
 }
+
+/// The close replies in what `server` sends next.
+fn close_replies(server: &mut Association, client: &mut Sealer, now: Instant) -> Vec<StreamId> {
+    let mut replies = Vec::new();
+    while let Some((_, datagram)) = server.transmit(now) {
+        let (_, plain) = client.open(&datagram).unwrap();
+        for chunk in Chunk::decode_all(&plain).unwrap() {
+            if let Chunk::Close {
+                stream,
+                reply: true,
+            } = chunk
+            {
+                replies.push(stream);
+            }
+        }
+    }
+    replies
+}
+
+#[test]
+fn a_far_ahead_close_stays_recorded_as_the_numbers_catch_up() {
+    let now = Instant::now();
+    let later = now + Duration::from_secs(1);
+    let mut server = Association::new(Side::Server, ID, &KEY, now, None);
+    let mut client = Sealer::new(Side::Client, ID, &KEY);
+    let far = MAX_STREAMS as u64 + 1;
+    // Too far to pass as gaps, so recorded apart, and confirmed.
+    assert!(server.datagram(now, addr(1), &forged(&mut client, &[close(far)])));
+    assert_eq!(close_replies(&mut server, &mut client, later), [far]);
+    // The numbers catch up; the closed one never opens.
+    assert!(server.datagram(now, addr(1), &forged(&mut client, &[data(0)])));
+    assert_eq!(server.accept(), Some(0));
+    assert!(server.datagram(now, addr(1), &forged(&mut client, &[data(far)])));
+    assert_eq!(server.accept(), None);
+    // Passing it on the way to a higher number leaves no gap for it.
+    let next = forged(&mut client, &[data(far + 1)]);
+    assert!(server.datagram(now, addr(1), &next));
+    assert_eq!(server.accept(), Some(far + 1));
+    assert!(server.datagram(now, addr(1), &forged(&mut client, &[data(far)])));
+    assert_eq!(server.accept(), None);
+}
+
+#[test]
+fn a_far_ahead_close_with_no_room_to_record_is_not_confirmed() {
+    let now = Instant::now();
+    let later = now + Duration::from_secs(1);
+    let mut server = Association::new(Side::Server, ID, &KEY, now, None);
+    let mut client = Sealer::new(Side::Client, ID, &KEY);
+    let base = 2 * MAX_STREAMS as u64;
+    let room: Vec<Chunk> = (base..base + MAX_STREAMS as u64).map(close).collect();
+    assert!(server.datagram(now, addr(1), &forged(&mut client, &room)));
+    assert_eq!(
+        close_replies(&mut server, &mut client, later).len(),
+        MAX_STREAMS
+    );
+    let over = base + MAX_STREAMS as u64;
+    assert!(server.datagram(now, addr(1), &forged(&mut client, &[close(over)])));
+    assert_eq!(close_replies(&mut server, &mut client, later), []);
+    // Once the numbers pass them they are plain retired numbers, and
+    // the room comes back.
+    for id in (0..base).chain([over + 1]) {
+        assert!(server.datagram(now, addr(1), &forged(&mut client, &[data(id), close(id)])));
+    }
+    close_replies(&mut server, &mut client, later);
+    let farther = over + 2 * MAX_STREAMS as u64;
+    assert!(server.datagram(now, addr(1), &forged(&mut client, &[close(farther)])));
+    assert_eq!(close_replies(&mut server, &mut client, later), [farther]);
+}

@@ -65,6 +65,9 @@ pub struct Association {
     /// Numbers below `next_stream` not seen yet: their first bytes may
     /// still be on the way (server).
     gaps: BTreeSet<StreamId>,
+    /// Numbers at or past `next_stream` whose close came before any of
+    /// their bytes: closed for good, at most [`MAX_STREAMS`] (server).
+    ahead: BTreeSet<StreamId>,
     accepted: VecDeque<StreamId>,
     peer_closed: VecDeque<StreamId>,
     closing: BTreeMap<StreamId, Closing>,
@@ -106,6 +109,7 @@ impl Association {
             streams: BTreeMap::new(),
             next_stream: 0,
             gaps: BTreeSet::new(),
+            ahead: BTreeSet::new(),
             accepted: VecDeque::new(),
             peer_closed: VecDeque::new(),
             closing: BTreeMap::new(),
@@ -236,19 +240,25 @@ impl Association {
     /// Moves the highest number seen to `id`, keeping those skipped as
     /// gaps: at most [`MAX_STREAMS`] of them in all, so a peer cannot grow
     /// them by skipping again and again. Whether it moved.
+    /// Numbers closed ahead are passed as retired, not kept as gaps.
     fn pass(&mut self, id: StreamId) -> bool {
-        let skipped = id - self.next_stream;
+        let closed = self.ahead.range(self.next_stream..id).count() as u64;
+        let skipped = id - self.next_stream - closed;
         if skipped > (MAX_STREAMS - self.gaps.len()) as u64 {
             return false;
         }
-        self.gaps.extend(self.next_stream..id);
+        let ahead = &self.ahead;
+        let gaps = (self.next_stream..id).filter(|n| !ahead.contains(n));
+        self.gaps.extend(gaps.collect::<Vec<_>>());
+        self.ahead = self.ahead.split_off(&id);
         self.next_stream = id + 1;
         true
     }
 
     /// Whether `id` was open once and is closed now, on either side.
     fn retired(&self, id: StreamId) -> bool {
-        id < self.next_stream && !self.streams.contains_key(&id) && !self.gaps.contains(&id)
+        let passed = id < self.next_stream && !self.gaps.contains(&id);
+        (passed && !self.streams.contains_key(&id)) || self.ahead.contains(&id)
     }
 
     /// The peer still uses a stream closed here, so it missed every close:
@@ -304,11 +314,16 @@ impl Association {
             self.peer_closed.push_back(id);
         }
         // A stream closed before its first bytes arrived never opens,
-        // whether it was skipped or not seen at all.
+        // whether it was skipped or not seen at all. A close is confirmed
+        // only once that is recorded; with no room, the peer tries again.
         let unseen = self.side == Side::Server && id >= self.next_stream;
-        if !self.gaps.remove(&id) && unseen {
-            // Past the bound on gaps it could never open anyway.
-            self.pass(id);
+        let recorded = self.gaps.remove(&id)
+            || !unseen
+            || self.ahead.contains(&id)
+            || self.pass(id)
+            || (self.ahead.len() < MAX_STREAMS && self.ahead.insert(id));
+        if !recorded {
+            return;
         }
         // Retried closes are already pending; the rest wait their turn.
         if self.replies.len() < MAX_STREAMS && !self.replies.contains(&id) {
