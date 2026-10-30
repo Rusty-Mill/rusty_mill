@@ -45,9 +45,10 @@ use std::task::{Context, Poll, Waker};
 /// filled in later once `poll` actually runs.
 struct WaiterState {
     woken: AtomicBool,
-    /// Set with `woken` when the wakeup was meant for one waiter
-    /// (`notify_one`, `notify_last` or a permit), so dropping this waiter
-    /// unresolved passes it on.
+    /// Set, under the queue lock as the waiter leaves the queue, when its
+    /// wakeup is meant for it alone (`notify_one`, `notify_last` or a
+    /// permit), so dropping it unresolved passes the wakeup on, even
+    /// before `fire` has run.
     single: AtomicBool,
     waker: Mutex<Option<Waker>>,
 }
@@ -100,8 +101,9 @@ impl Notify {
     pub fn notify_one(&self) {
         let mut guard = self.inner.lock().unwrap();
         if let Some(state) = guard.waiters.pop_front() {
+            state.single.store(true, Ordering::Relaxed);
             drop(guard);
-            Self::fire(&state, true);
+            Self::fire(&state);
         } else {
             guard.permits += 1;
         }
@@ -114,8 +116,9 @@ impl Notify {
     pub fn notify_last(&self) {
         let mut guard = self.inner.lock().unwrap();
         if let Some(state) = guard.waiters.pop_back() {
+            state.single.store(true, Ordering::Relaxed);
             drop(guard);
-            Self::fire(&state, true);
+            Self::fire(&state);
         } else {
             guard.permits += 1;
         }
@@ -132,7 +135,7 @@ impl Notify {
         let waiters = std::mem::take(&mut guard.waiters);
         drop(guard);
         for state in waiters {
-            Self::fire(&state, false);
+            Self::fire(&state);
         }
     }
 
@@ -142,8 +145,7 @@ impl Notify {
     /// real waker) yet, in which case there's nothing to wake: the next
     /// poll will see `woken` already set and return `Ready` immediately
     /// without ever needing a wakeup delivered.
-    fn fire(state: &Arc<WaiterState>, single: bool) {
-        state.single.store(single, Ordering::Relaxed);
+    fn fire(state: &Arc<WaiterState>) {
         state.woken.store(true, Ordering::Release);
         if let Some(waker) = state.waker.lock().unwrap().take() {
             waker.wake();
@@ -279,14 +281,15 @@ fn release(notify: &Notify, registered: bool, done: bool, state: &Arc<WaiterStat
         guard.waiters.remove(at);
         return;
     }
-    // Not queued: something already fired it.
+    // Not queued: something took it out to fire it, perhaps not yet.
     if !state.single.load(Ordering::Relaxed) {
         return;
     }
     match guard.waiters.pop_front() {
         Some(next) => {
+            next.single.store(true, Ordering::Relaxed);
             drop(guard);
-            Notify::fire(&next, true);
+            Notify::fire(&next);
         }
         None => guard.permits += 1,
     }
@@ -433,5 +436,29 @@ mod tests {
             notify.notify_waiters();
         }
         assert!(poll(pin!(notify.notified())).is_pending());
+    }
+
+    /// Dropping the first waiter while `notify_one` has taken it out of
+    /// the queue but not yet fired it still passes the wakeup on.
+    #[test]
+    fn a_drop_racing_a_notify_one_never_loses_it() {
+        for _ in 0..2_000 {
+            let notify = Arc::new(Notify::new());
+            let mut first = Box::pin(notify.notified_owned());
+            let mut second = Box::pin(notify.notified_owned());
+            assert!(!first.as_mut().enable());
+            assert!(!second.as_mut().enable());
+            let notifier = Arc::clone(&notify);
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let go = Arc::clone(&barrier);
+            let fired = std::thread::spawn(move || {
+                go.wait();
+                notifier.notify_one();
+            });
+            barrier.wait();
+            drop(first);
+            fired.join().expect("notifier");
+            assert!(poll(second.as_mut()).is_ready(), "the wakeup was lost");
+        }
     }
 }
