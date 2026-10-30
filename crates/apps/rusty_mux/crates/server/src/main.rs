@@ -1,5 +1,12 @@
-//! `rusty-mux-server <socket>`: serves rusty_mux on a Unix socket. Each new
-//! block runs `$SHELL` (or `/bin/sh`) in `$HOME` (or `/`).
+//! `rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] <socket>`: serves
+//! rusty_mux on a Unix socket. Each new block runs `$SHELL` (or `/bin/sh`)
+//! in `$HOME` (or `/`).
+//!
+//! With `--udp` the server also listens for UDP on `ADDR`, port 60001 unless
+//! given, and offers each client an association there to move its
+//! connections onto (docs/projects/mux/UDP-TRANSPORT.md). A silent
+//! association, and its clients, last `--udp-idle` seconds (a day unless
+//! given).
 //!
 //! On Windows (10 1809 or later, for ConPTY; AF_UNIX alone needs 1803)
 //! each block runs `%COMSPEC%` (or `cmd.exe`) in `%USERPROFILE%` (or `C:\`)
@@ -8,20 +15,38 @@
 //! file to the current user.
 
 use std::ffi::OsString;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
-use rusty_mux_server::{Config, serve};
-use rusty_tokio::io::UnixListener;
+use rusty_mux_server::{Config, Udp, serve, serve_udp};
+use rusty_tokio::io::{UdpSocket, UnixListener};
 use rusty_tokio::{Builder, LocalOptions};
 
+const USAGE: &str = "usage: rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] <socket>";
+/// The UDP port when `--udp` names an address only.
+const UDP_PORT: u16 = 60001;
+/// How long a silent association lasts unless `--udp-idle` says.
+const UDP_IDLE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The command line, checked.
+#[derive(Debug, PartialEq, Eq)]
+struct Args {
+    socket: PathBuf,
+    udp: Option<SocketAddr>,
+    idle: Duration,
+}
+
 fn main() -> ExitCode {
-    let mut args = std::env::args_os().skip(1);
-    let (Some(socket), None) = (args.next(), args.next()) else {
-        eprintln!("usage: rusty-mux-server <socket>");
-        return ExitCode::from(2);
+    let args = match parse(std::env::args_os().skip(1)) {
+        Ok(args) => args,
+        Err(err) => {
+            eprintln!("rusty-mux-server: {err}\n{USAGE}");
+            return ExitCode::from(2);
+        }
     };
-    match run(PathBuf::from(socket)) {
+    match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("rusty-mux-server: {err}");
@@ -30,8 +55,49 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(socket: PathBuf) -> std::io::Result<()> {
+fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
+    let (mut socket, mut udp, mut idle) = (None, None, UDP_IDLE);
+    while let Some(arg) = args.next() {
+        let mut value = |flag: &str| {
+            args.next()
+                .and_then(|v| v.into_string().ok())
+                .ok_or(format!("{flag} needs a value"))
+        };
+        match arg.to_str() {
+            Some("--udp") => udp = Some(udp_addr(&value("--udp")?)?),
+            Some("--udp-idle") => {
+                let secs = value("--udp-idle")?;
+                let secs = secs
+                    .parse()
+                    .ok()
+                    .filter(|s| *s > 0)
+                    .ok_or(format!("--udp-idle {secs}: not a whole number of seconds"))?;
+                idle = Duration::from_secs(secs);
+            }
+            _ if socket.is_some() => return Err("one socket only".into()),
+            _ => socket = Some(PathBuf::from(arg)),
+        }
+    }
+    let socket = socket.ok_or("no socket given")?;
+    Ok(Args { socket, udp, idle })
+}
+
+/// `ADDR:PORT`, or `ADDR` alone for [`UDP_PORT`]; an IPv6 address with a
+/// port goes in brackets.
+fn udp_addr(value: &str) -> Result<SocketAddr, String> {
+    value
+        .parse::<SocketAddr>()
+        .or_else(|_| {
+            value
+                .parse::<IpAddr>()
+                .map(|ip| SocketAddr::new(ip, UDP_PORT))
+        })
+        .map_err(|_| format!("--udp {value}: not an address"))
+}
+
+fn run(args: Args) -> std::io::Result<()> {
     let config = default_config();
+    let socket = args.socket;
     let runtime = Builder::new_current_thread().build_local(&LocalOptions::default())?;
     runtime.block_on(async {
         let listener = UnixListener::bind(&socket)?;
@@ -46,7 +112,12 @@ fn run(socket: PathBuf) -> std::io::Result<()> {
         platform_windows::fs::restrict_to_owner(&socket).map_err(|e| {
             std::io::Error::other(format!("restricting {}: {e:?}", socket.display()))
         })?;
-        serve(listener, config).await
+        let Some(addr) = args.udp else {
+            return serve(listener, config).await;
+        };
+        let socket = UdpSocket::bind(addr).await?;
+        let idle = args.idle;
+        serve_udp(listener, config, Udp { socket, idle }).await
     })
 }
 
@@ -65,5 +136,41 @@ fn default_config() -> Config {
         program: std::env::var_os("COMSPEC").unwrap_or_else(|| OsString::from("cmd.exe")),
         args: Vec::new(),
         cwd: std::env::var_os("USERPROFILE").unwrap_or_else(|| OsString::from("C:\\")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_str(args: &[&str]) -> Result<Args, String> {
+        parse(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn udp_is_off_unless_asked_and_the_port_defaults() {
+        let plain = parse_str(&["s.sock"]).unwrap();
+        assert_eq!(plain.udp, None);
+        assert_eq!(plain.idle, UDP_IDLE);
+        let addr = parse_str(&["--udp", "0.0.0.0", "s.sock"]).unwrap();
+        assert_eq!(addr.udp, Some("0.0.0.0:60001".parse().unwrap()));
+        let v6 = parse_str(&["s.sock", "--udp", "[::1]:7000", "--udp-idle", "90"]).unwrap();
+        assert_eq!(v6.udp, Some("[::1]:7000".parse().unwrap()));
+        assert_eq!(v6.idle, Duration::from_secs(90));
+        assert_eq!(v6.socket, PathBuf::from("s.sock"));
+    }
+
+    #[test]
+    fn a_bad_command_line_is_refused() {
+        for bad in [
+            &[][..],
+            &["a", "b"],
+            &["--udp"],
+            &["--udp", "nowhere", "s"],
+            &["--udp-idle", "0", "s"],
+            &["--udp-idle", "1h", "s"],
+        ] {
+            assert!(parse_str(bad).is_err(), "{bad:?}");
+        }
     }
 }

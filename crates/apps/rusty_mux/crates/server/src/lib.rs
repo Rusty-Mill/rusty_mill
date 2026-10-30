@@ -22,6 +22,8 @@ pub mod checkpoint;
 #[cfg(any(target_os = "linux", windows))]
 mod conn;
 #[cfg(any(target_os = "linux", windows))]
+mod datagram;
+#[cfg(any(target_os = "linux", windows))]
 mod echo;
 #[cfg(any(target_os = "linux", windows))]
 mod history;
@@ -41,10 +43,11 @@ mod terminal;
 
 use std::ffi::OsString;
 use std::io;
+use std::time::Duration;
 
-use rusty_tokio::io::UnixListener;
 #[cfg(any(target_os = "linux", windows))]
 use rusty_tokio::io::UnixStream;
+use rusty_tokio::io::{UdpSocket, UnixListener};
 
 /// How the server starts each block's program.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +60,13 @@ pub struct Config {
     pub cwd: OsString,
 }
 
+/// The server's UDP side (`--udp`): one socket for every association.
+pub struct Udp {
+    pub socket: UdpSocket,
+    /// How long an association, and the clients on it, outlive silence.
+    pub idle: Duration,
+}
+
 /// Accepts clients on `listener` until accepting fails. Must run inside a
 /// `rusty_tokio` `LocalRuntime`, because connection and PTY tasks are
 /// spawned with `spawn_local`.
@@ -67,7 +77,15 @@ pub struct Config {
 /// whatever the socket file's permissions are.
 #[cfg(any(target_os = "linux", windows))]
 pub async fn serve(listener: UnixListener, config: Config) -> io::Result<()> {
-    serve_for(listener, config, peer_check).await
+    serve_for(listener, config, None, peer_check).await
+}
+
+/// [`serve`], and offers clients `DATAGRAM`: each may then move its
+/// connections onto an association on `udp`. Ends when accepting or
+/// receiving fails.
+#[cfg(any(target_os = "linux", windows))]
+pub async fn serve_udp(listener: UnixListener, config: Config, udp: Udp) -> io::Result<()> {
+    serve_for(listener, config, Some(udp), peer_check).await
 }
 
 /// Whether a connection's peer may be served.
@@ -110,6 +128,7 @@ fn peer_check(stream: &UnixStream) -> io::Result<Peer> {
 async fn serve_for(
     listener: UnixListener,
     config: Config,
+    udp: Option<Udp>,
     allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
 ) -> io::Result<()> {
     let socket = listener
@@ -119,11 +138,30 @@ async fn serve_for(
         .and_then(Result::ok);
     let state = state::State::shared(config, socket);
     rusty_tokio::task::spawn_local(state::watch_processes(std::rc::Rc::downgrade(&state)));
+    let Some(udp) = udp else {
+        return accept(listener, state, allowed).await;
+    };
+    let registry = datagram::Registry::new(udp.socket.local_addr()?.port());
+    state.borrow_mut().offer_datagrams(registry.clone());
+    let socket = std::rc::Rc::new(udp.socket);
+    rusty_tokio::select! {
+        result = accept(listener, state.clone(), allowed) => result,
+        result = datagram::serve(socket, registry, state, udp.idle) => result,
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+async fn accept(
+    listener: UnixListener,
+    state: state::Shared,
+    allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
+) -> io::Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         match allowed(&stream) {
             Ok(Peer::Allowed) => {
-                rusty_tokio::task::spawn_local(conn::run(state.clone(), stream));
+                let (rd, wr) = stream.into_split();
+                rusty_tokio::task::spawn_local(conn::run(state.clone(), rd, wr));
             }
             Ok(Peer::Refused(who)) => eprintln!("rusty-mux-server: refusing a client of {who}"),
             Err(err) => eprintln!("rusty-mux-server: reading a client's credentials: {err}"),
@@ -136,8 +174,18 @@ mod tests;
 
 #[cfg(not(any(target_os = "linux", windows)))]
 pub async fn serve(_listener: UnixListener, _config: Config) -> io::Result<()> {
-    Err(io::Error::new(
+    Err(unsupported())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub async fn serve_udp(_listener: UnixListener, _config: Config, _udp: Udp) -> io::Result<()> {
+    Err(unsupported())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn unsupported() -> io::Error {
+    io::Error::new(
         io::ErrorKind::Unsupported,
         "rusty_mux_server hosts PTYs on Linux and Windows only",
-    ))
+    )
 }

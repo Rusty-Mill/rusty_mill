@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Mux, Side, Size, WindowId};
 use rusty_mux_proto::schema::{self, CallError, Value};
-use rusty_mux_proto::{Code, Cursor, Echo, Entry, Features, Launch, Message, Takeover, encode};
+use rusty_mux_proto::{
+    Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Takeover, encode,
+};
 use rusty_mux_status::Records;
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::sync::Notify;
@@ -18,6 +20,7 @@ use rusty_uuid::Uuid;
 
 use crate::Config;
 use crate::checkpoint::validate_size;
+use crate::datagram::Registry;
 use crate::echo::Waiting;
 use crate::history::History;
 use crate::keys;
@@ -122,6 +125,8 @@ pub(crate) struct State {
     /// that connection's cancel, so only its own expiry drops it.
     orphans: HashMap<ClientId, Rc<Notify>>,
     history: History,
+    /// With `--udp`: the associations, offered with `DATAGRAM`.
+    datagrams: Option<Registry>,
 }
 
 impl State {
@@ -136,10 +141,25 @@ impl State {
             tokens: HashMap::new(),
             orphans: HashMap::new(),
             history: History::new(Uuid::new_v4(), HISTORY),
+            datagrams: None,
         }))
     }
 
-    #[cfg(all(test, unix))]
+    /// Offers `DATAGRAM` from now on, handing out associations of
+    /// `registry`.
+    pub(crate) fn offer_datagrams(&mut self, registry: Registry) {
+        self.datagrams = Some(registry);
+    }
+
+    /// What this server offers: [`OFFERED`], and `DATAGRAM` with `--udp`.
+    fn offered(&self) -> Features {
+        match self.datagrams {
+            Some(_) => OFFERED.union(Features::DATAGRAM),
+            None => OFFERED,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn has_client(&self, client: ClientId) -> bool {
         self.clients.contains_key(&client)
     }
@@ -164,7 +184,7 @@ impl State {
         resume: Option<Cursor>,
         takeover: Option<Takeover>,
     ) -> ClientId {
-        let features = theirs.intersection(OFFERED);
+        let features = theirs.intersection(self.offered());
         let continued = takeover.and_then(|t| self.takes_over(t, features));
         let client = continued.unwrap_or_else(|| self.mux.connect());
         // The new connection numbers its requests afresh.
@@ -456,8 +476,29 @@ impl State {
                 self.require(client, Features::LABELS, "disconnect")
                     .and_then(|()| self.disconnect_other(client, target)),
             ),
+            M::OpenDatagram { req } => (
+                req,
+                self.require(client, Features::DATAGRAM, "a datagram association")
+                    .and_then(|()| self.open_datagram(req)),
+            ),
             other => (0, Err(format!("not a client request: {other:?}").into())),
         }
+    }
+
+    /// A new association for the client to move its connections onto. The
+    /// key travels only in this reply, inside the client's connection.
+    fn open_datagram(&self, req: u64) -> Result<Outcome, Refusal> {
+        let registry = self.datagrams.as_ref().ok_or("no UDP listener")?;
+        let (port, id, key) = registry.offer(Instant::now())?;
+        reply(
+            "open datagram",
+            &[Message::Datagram {
+                req,
+                port,
+                id,
+                key: DatagramKey(key),
+            }],
+        )
     }
 
     /// Fails unless `client` negotiated `feature`, which `what` needs.
