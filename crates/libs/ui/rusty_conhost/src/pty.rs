@@ -58,14 +58,16 @@ impl Pty for OwnPty {
 
 /// The terminal's side of a console we host. `Send + Sync`.
 ///
-/// Dropping it hangs up: the console closes on its own, and Drop never
-/// waits on the engine or a client.
+/// Dropping it hangs up: the console closes on its own within its 2 s
+/// grace, and Drop never waits on the engine or a client.
 pub struct OwnPtyMaster {
     shared: Arc<Shared>,
 }
 
 impl OwnPtyMaster {
-    /// Ask the console to close. Returns at once; idempotent.
+    /// Ask the console to close: every client gets CTRL_CLOSE, and the
+    /// server closes on the last disconnect or 2 s later. Returns at
+    /// once; idempotent.
     pub fn hang_up(&self) {
         self.shared.hang_up();
     }
@@ -107,8 +109,10 @@ impl PtyMaster for OwnPtyMaster {
 }
 
 impl Drop for OwnPtyMaster {
+    /// Hang up and detach: the console sends CTRL_CLOSE, discards the
+    /// output nobody will read, and closes by its grace deadline.
     fn drop(&mut self) {
-        self.shared.hang_up();
+        self.shared.detach();
     }
 }
 

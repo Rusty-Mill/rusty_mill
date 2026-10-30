@@ -1,7 +1,9 @@
 # Predictive echo: design for review
 
-Status: proposed 2026-10-29, not built. The owner answered its open
-questions on 2026-10-29; the design awaits review. Phase 3 step 3 (C13). The owner's
+Status: proposed 2026-10-29; the owner answered its open questions on
+2026-10-29 and it was approved in #1245. Build PR 1, the protocol and
+server, merged in #1247; build PR 2 adds the client's epochs and the
+split-window display. Phase 3 step 3 (C13). The owner's
 order (DECISIONS 2026-10-28) is to design causality, epochs and password
 suppression and have them reviewed before any code. Nothing here changes a
 wire format yet. [SPIKE-4-ROAMING.md](SPIKE-4-ROAMING.md) states the open
@@ -56,7 +58,7 @@ So the ack below means: *every byte that reached the PTY master by at least
 your echo*. Only the client's screen comparison decides that, and it can
 still be wrong (see Residual errors).
 
-## Protocol (when built)
+## Protocol (built)
 
 One feature bit, `ECHO_ACK`, asked for on a block's connection. With it:
 
@@ -67,12 +69,17 @@ One feature bit, `ECHO_ACK`, asked for on a block's connection. With it:
   sends it from a timer too, so a key with no echo at all (a password)
   still gets its ack and the client can stop waiting.
 - **`EchoMode { block, mode }`**, server to client, on the block's
-  connection, whenever the mode changes and once after attach:
-  - `Kernel`: `ICANON` and `ECHO` on.
+  connection, whenever the mode changes and once after an attach or a
+  takeover that keeps one:
+  - `Kernel`: `ICANON` and `ECHO` on. As built, `ECHO` on with `ICANON`
+    off (`stty -icanon`) is `Kernel` too, since the line discipline still
+    echoes.
   - `Hidden`: `ICANON` on, `ECHO` off. This is `getpass`, `sudo`, `ssh`,
     `read -s`.
   - `Program`: `ICANON` off and `ECHO` off. The program draws its own echo.
   - `Unknown`: no termios to read (Windows ConPTY), or the read failed.
+    A Windows server still acks, but its drain only means the reader
+    thread has handed over nothing yet; no client predicts there.
 
   The server reads the slave's termios through the master (`tcgetattr`
   on the master fd; the same probe showed the master reporting the
@@ -80,6 +87,12 @@ One feature bit, `ECHO_ACK`, asked for on a block's connection. With it:
   before each `Input` write, and sends `EchoMode` ahead of that drain's
   Output frames when it changed. So a program that turns echo off and then
   prints its prompt has its mode change in the stream before the prompt.
+
+As built, the server reads the mode before forwarding each read, which
+covers every drain, and also on its 500 ms process poll, so a
+program that turns echo off and prints nothing (`read -s` with no prompt)
+is announced before the user types, not only before the first key's
+write.
 
 Nothing else changes: `Input` already carries a `req`, and only the client
 holding the block's lease can send it, so this client's keys are the only
@@ -98,7 +111,9 @@ at the cursor, and Backspace over a character predicted in the same epoch.
   to another block, the lease lost, a reconnect or takeover (the screen is
   sent again), the alternate screen entered or left, an `EchoMode` change,
   output that moves the cursor off the row being predicted, and a
-  prediction that fails its check.
+  prediction that fails its check. As built, output is parsed and checked a byte
+  at a time while an epoch has a row, so a moment off the row or on the
+  alternate screen within one Output frame counts too.
 - **An epoch starts tentative.** Its predictions are kept but **not drawn**.
   It becomes confirmed when the first of its predictions passes the check
   below. Only then are its predictions, and later keys of the same epoch,
@@ -119,6 +134,10 @@ at the cursor, and Backspace over a character predicted in the same epoch.
   cursor left. Backspace over anything else (a confirmed or real character,
   or the start of the epoch) is not predicted and starts a new tentative
   epoch, since what erasing does there is the program's business.
+  As built, the removed cell stays in the overlay as a blank, keyed by the
+  Backspace, until that key settles, so an echo of the erased character
+  that already arrived does not show again meanwhile. A settled blank is
+  not compared, and never confirms an epoch.
 - **The check.** An ack is a watermark, not a snapshot of the screen at one
   key: by the time it arrives, the screen may already show the echoes of
   later keys. So when `EchoAck { req }` arrives (after every Output before
@@ -214,7 +233,8 @@ each guarantees:
 
 - **Composed** (a split window): predictions are one more layer in
   `screen::compose`, drawn over the block's cells. Erasing one is a normal
-  redraw.
+  redraw. As built, only the focused block's predictions are drawn, and
+  the cursor is drawn after them while it fits in the block.
 - **Passing** (one block, raw output): the client draws a prediction with
   an absolute cursor move to its cell, the underline and the character,
   then moves the cursor back and restores the rendition from its copy of
@@ -306,7 +326,9 @@ Nano agreed with all four proposed answers on #1245 (2026-10-29 20:51Z):
    match the mask; typed characters equal to the mask pass falsely and do
    not end it.
 4. The user can turn predictions off. The first version has a switch; the
-   build PRs name it.
+   build PRs name it. As built, `RUSTY_MUX_PREDICT=off` in the client's
+   environment turns them off (`on`, the default, leaves them on; any
+   other value is refused at start).
 
 ## Build order, once approved
 

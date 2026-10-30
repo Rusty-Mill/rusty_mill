@@ -9,6 +9,8 @@
 //! conhost_probe cp                         GetConsoleCP
 //! conhost_probe set-cp <code page>         SetConsoleCP, then GetConsoleCP
 //! conhost_probe write <bytes>              write that many `x`s to stdout
+//! conhost_probe ctrl-hold <ms>             print `ready`, then wait; on CTRL_CLOSE
+//!                                          print `ctrl-close` and hold the handler <ms>
 //! ```
 //!
 //! `host` is also how fixtures are recorded: run it with
@@ -81,6 +83,14 @@ mod probe {
                 out.flush().map_err(|e| e.to_string())?;
                 Ok(0)
             }
+            "ctrl-hold" => {
+                let ms = arg(1)?.parse().map_err(|_| "milliseconds")?;
+                console::hold_ctrl_close(ms).map_err(|e| format!("error={e}"))?;
+                println!("ready");
+                loop {
+                    std::thread::park();
+                }
+            }
             other => Err(format!("unknown probe {other:?}")),
         }
     }
@@ -132,7 +142,38 @@ mod probe {
     /// Each returns the Win32 error on failure.
     #[allow(unsafe_code)]
     mod console {
+        use std::io::Write as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::Duration;
+
         use platform_windows::ffi::win32_surface as w;
+
+        /// How long [`on_ctrl`] holds a CTRL_CLOSE.
+        static HOLD_MS: AtomicU64 = AtomicU64::new(0);
+
+        /// Announce CTRL_CLOSE through the console, then hold the handler,
+        /// as a client that cleans up slowly does.
+        extern "system" fn on_ctrl(event: u32) -> i32 {
+            if event != w::CTRL_CLOSE_EVENT {
+                return 0;
+            }
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "ctrl-close");
+            let _ = out.flush();
+            drop(out);
+            std::thread::sleep(Duration::from_millis(HOLD_MS.load(Ordering::Relaxed)));
+            1
+        }
+
+        pub(crate) fn hold_ctrl_close(ms: u64) -> Result<(), i32> {
+            HOLD_MS.store(ms, Ordering::Relaxed);
+            // SAFETY: `on_ctrl` is a safe `extern "system"` fn of the
+            // handler's signature; it touches only stdout and an atomic.
+            if unsafe { w::SetConsoleCtrlHandler(Some(on_ctrl), 1) } == 0 {
+                return Err(last_error());
+            }
+            Ok(())
+        }
 
         fn last_error() -> i32 {
             std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)

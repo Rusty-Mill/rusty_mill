@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Mux, Side, Size, WindowId};
 use rusty_mux_proto::schema::{self, CallError, Value};
-use rusty_mux_proto::{Code, Cursor, Entry, Features, Launch, Message, Takeover, encode};
+use rusty_mux_proto::{Code, Cursor, Echo, Entry, Features, Launch, Message, Takeover, encode};
 use rusty_mux_status::Records;
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::sync::Notify;
@@ -18,6 +18,7 @@ use rusty_uuid::Uuid;
 
 use crate::Config;
 use crate::checkpoint::validate_size;
+use crate::echo::Waiting;
 use crate::history::History;
 use crate::keys;
 use crate::outbox::Outbox;
@@ -37,9 +38,14 @@ const REPLY_MAX: usize = crate::outbox::BUDGET / 2;
 /// Events kept for clients that reconnect.
 const HISTORY: usize = 4096;
 
-/// How often every block's foreground process group is checked, to see a
-/// job start that writes nothing; output checks its own block at once.
+/// How often every block's foreground process group and echo mode are
+/// checked, to see a job start or echo turned off that writes nothing;
+/// output checks its own block at once.
 const PROCESS_POLL: Duration = Duration::from_millis(500);
+
+/// How long a client that can be taken over outlives its connection, so a
+/// reconnect finds it, attachment, lease and all.
+pub(crate) const ORPHAN_GRACE: Duration = Duration::from_secs(30);
 
 /// What the server offers; a client gets the intersection with its own.
 const OFFERED: Features = Features::CHECKPOINT_V6
@@ -55,10 +61,17 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::CAPTURE)
     .union(Features::LABELS)
     .union(Features::LAYOUT)
-    .union(Features::TAKEOVER);
+    .union(Features::TAKEOVER)
+    .union(Features::ECHO_ACK);
 
 /// Input to write to a PTY once the state is no longer borrowed.
-pub(crate) type PtyWrite = (Rc<Pty>, Vec<u8>);
+pub(crate) struct PtyWrite {
+    pub(crate) pty: Rc<Pty>,
+    pub(crate) data: Vec<u8>,
+    /// With [`Features::ECHO_ACK`]: the block and `Input` request to
+    /// [`State::written`] once the write returns.
+    pub(crate) key: Option<(BlockId, u64)>,
+}
 
 struct BlockRt {
     pty: Rc<Pty>,
@@ -72,6 +85,12 @@ struct BlockRt {
     /// The foreground process group last announced, at first the program's;
     /// `None` where the platform tells none.
     foreground: Option<process::Foreground>,
+    /// Who echoes typing, as last announced.
+    echo: Echo,
+    /// Keys awaiting their echo ack.
+    waiting: Waiting,
+    /// Tells the reader a key was written, so it drains when its grace ends.
+    wake: Rc<Notify>,
     reader: JoinHandle<()>,
 }
 
@@ -97,8 +116,11 @@ pub(crate) struct State {
     blocks: HashMap<BlockId, BlockRt>,
     clients: HashMap<ClientId, Outbox>,
     features: HashMap<ClientId, Features>,
-    /// Each `TAKEOVER` client's current token, from its last Welcome.
-    tokens: HashMap<ClientId, Uuid>,
+    /// Each `TAKEOVER` client's tokens.
+    tokens: HashMap<ClientId, Tokens>,
+    /// Clients whose connection ended within [`ORPHAN_GRACE`], each with
+    /// that connection's cancel, so only its own expiry drops it.
+    orphans: HashMap<ClientId, Rc<Notify>>,
     history: History,
 }
 
@@ -112,6 +134,7 @@ impl State {
             clients: HashMap::new(),
             features: HashMap::new(),
             tokens: HashMap::new(),
+            orphans: HashMap::new(),
             history: History::new(Uuid::new_v4(), HISTORY),
         }))
     }
@@ -144,11 +167,17 @@ impl State {
         let features = theirs.intersection(OFFERED);
         let continued = takeover.and_then(|t| self.takes_over(t, features));
         let client = continued.unwrap_or_else(|| self.mux.connect());
+        // The new connection numbers its requests afresh.
+        self.forget_keys(client);
+        self.orphans.remove(&client);
         self.clients.insert(client, outbox);
         self.features.insert(client, features);
         let token = features.contains(Features::TAKEOVER).then(Uuid::new_v4);
+        // Presenting a valid token proves the client holds it, so it stays
+        // good until the new one is proven; the token before it retires.
+        let confirmed = continued.and(takeover).map(|t| t.token);
         match token {
-            Some(token) => self.tokens.insert(client, token),
+            Some(current) => self.tokens.insert(client, Tokens { current, confirmed }),
             None => self.tokens.remove(&client),
         };
         let (cursor, missed) = if features.contains(Features::EVENT_SEQ) {
@@ -169,8 +198,12 @@ impl State {
         missed.iter().for_each(|m| self.send(client, m));
         // A taken-over client may still be attached; its new connection has
         // no screen yet, so it gets one before any live output.
+        // It also learns who echoes there, as on an attach.
         if let Some(block) = continued.and_then(|c| self.mux.client(c)?.attached()) {
             self.send_snapshot(client, block);
+            if !self.check_echo(block) {
+                self.send_echo(client, block);
+            }
         }
         self.flush();
         client
@@ -194,25 +227,53 @@ impl State {
         (from, messages)
     }
 
-    /// The client `takeover` names, if it is connected, the token is its
-    /// current one, and the new connection negotiated exactly its features.
+    /// The client `takeover` names, if it is connected or kept for a
+    /// reconnect, the token is its current or confirmed one, and the new
+    /// connection negotiated exactly its features.
     /// Only `TAKEOVER` clients hold a token. Equal features keep what the
     /// client is already attached to and subscribed for (a checkpoint
     /// version, event numbering) valid on the new connection.
     fn takes_over(&self, takeover: Takeover, features: Features) -> Option<ClientId> {
-        let current = self.tokens.get(&takeover.client)?;
-        let valid =
-            rusty_crypto_key::constant_time_eq(current.as_bytes(), takeover.token.as_bytes());
+        let tokens = self.tokens.get(&takeover.client)?;
+        let matches = |token: &Uuid| {
+            rusty_crypto_key::constant_time_eq(token.as_bytes(), takeover.token.as_bytes())
+        };
+        let valid = matches(&tokens.current) | tokens.confirmed.as_ref().is_some_and(matches);
         let same = self.features.get(&takeover.client) == Some(&features);
-        (valid && same && self.clients.contains_key(&takeover.client)).then_some(takeover.client)
+        let known = self.clients.contains_key(&takeover.client)
+            || self.orphans.contains_key(&takeover.client);
+        (valid && same && known).then_some(takeover.client)
     }
 
     /// Forgets a client whose connection, the one owning `cancel`, ended. A
     /// client the server already dropped for exceeding its budget is gone
     /// from every map; one another connection took over is not this
-    /// connection's to forget.
-    pub(crate) fn disconnect(&mut self, client: ClientId, cancel: &Rc<Notify>) {
+    /// connection's to forget. A client that can be taken over is kept
+    /// instead, for [`ORPHAN_GRACE`], with its attachment and lease;
+    /// whether it was, so the caller calls [`Self::expire`] after the
+    /// grace. A client that means to leave detaches first.
+    pub(crate) fn disconnect(&mut self, client: ClientId, cancel: &Rc<Notify>) -> bool {
         if !self.served_by(client, cancel) {
+            return false;
+        }
+        if self.tokens.contains_key(&client) {
+            self.clients.remove(&client);
+            self.orphans.insert(client, cancel.clone());
+            return true;
+        }
+        self.drop_client(client);
+        self.flush();
+        false
+    }
+
+    /// The grace of the connection owning `cancel` ended: drops `client`
+    /// unless another connection took it over meanwhile.
+    pub(crate) fn expire(&mut self, client: ClientId, cancel: &Rc<Notify>) {
+        if !self
+            .orphans
+            .get(&client)
+            .is_some_and(|ended| Rc::ptr_eq(ended, cancel))
+        {
             return;
         }
         self.drop_client(client);
@@ -220,11 +281,13 @@ impl State {
     }
 
     fn drop_client(&mut self, client: ClientId) {
-        if self.clients.remove(&client).is_none() {
+        let orphan = self.orphans.remove(&client).is_some();
+        if self.clients.remove(&client).is_none() && !orphan {
             return;
         }
         self.features.remove(&client);
         self.tokens.remove(&client);
+        self.forget_keys(client);
         if let Err(err) = self.mux.disconnect(client) {
             eprintln!("rusty-mux-server: model out of step on disconnect: {err}");
         }
@@ -234,6 +297,11 @@ impl State {
     /// after releasing the borrow.
     pub(crate) fn request(shared: &Shared, client: ClientId, message: Message) -> Option<PtyWrite> {
         let mut this = shared.borrow_mut();
+        // A request proves the client got this connection's Welcome, and
+        // with it the current token.
+        if let Some(tokens) = this.tokens.get_mut(&client) {
+            tokens.confirmed = Some(tokens.current);
+        }
         let (req, outcome) = this.apply(shared, client, message);
         let write = match outcome {
             Ok(Outcome::Done(created)) => {
@@ -243,6 +311,9 @@ impl State {
             Ok(Outcome::Attached(block)) => {
                 this.send(client, &Message::Done { req, created: None });
                 this.send_snapshot(client, block);
+                if !this.check_echo(block) {
+                    this.send_echo(client, block);
+                }
                 None
             }
             Ok(Outcome::Reply(frames)) => {
@@ -353,7 +424,7 @@ impl State {
             M::Detach { req } => (req, done(self.mux.detach(client))),
             M::AcquireLease { req, block } => (req, done(self.mux.acquire_lease(client, block))),
             M::ReleaseLease { req, block } => (req, done(self.mux.release_lease(client, block))),
-            M::Input { req, block, data } => (req, self.input(client, block, data)),
+            M::Input { req, block, data } => (req, self.input(client, req, block, data)),
             M::Resize { req, block, size } => (req, self.resize(client, block, size)),
             M::CloseBlock { req, block } => (req, done(self.mux.close_block(block))),
             M::Sync { req } => (req, Ok(Outcome::Done(None))),
@@ -452,7 +523,11 @@ impl State {
                 };
                 let data = keys::encode(keys, rt.grid.app_cursor_keys)
                     .map_err(|e| format!("{method}: {e}"))?;
-                return Ok(Outcome::Write((rt.pty.clone(), data)));
+                return Ok(Outcome::Write(PtyWrite {
+                    pty: rt.pty.clone(),
+                    data,
+                    key: None,
+                }));
             }
             "terminal.pwd" => terminal::pwd(&rt.grid, rt.process.pid())
                 .ok_or("the program's working directory is unknown")?,
@@ -475,7 +550,7 @@ impl State {
         if target == client {
             return Err("a client cannot disconnect itself; close the connection instead".into());
         }
-        if !self.clients.contains_key(&target) {
+        if !self.clients.contains_key(&target) && !self.orphans.contains_key(&target) {
             return Err(rusty_mux_core::Error::UnknownClient(target).into());
         }
         self.drop_client(target);
@@ -588,7 +663,10 @@ impl State {
             None => self.mux.add_block(block, window, size)?,
             Some((target, side)) => self.mux.split_block(block, target, side, size)?,
         }
-        let reader = rusty_tokio::task::spawn_local(pump(shared.clone(), block, pty.clone()));
+        let wake = Rc::new(Notify::new());
+        let reader =
+            rusty_tokio::task::spawn_local(pump(shared.clone(), block, pty.clone(), wake.clone()));
+        let echo = pty.echo();
         let mut grid = crate::checkpoint::grid(size);
         grid.collect_program_status = true;
         self.blocks.insert(
@@ -601,6 +679,9 @@ impl State {
                 status: Records::default(),
                 seen: terminal::Seen::default(),
                 foreground,
+                echo,
+                waiting: Waiting::default(),
+                wake,
                 reader,
             },
         );
@@ -625,20 +706,117 @@ impl State {
         env
     }
 
+    /// Input for the PTY, after announcing an echo mode change, which then
+    /// precedes anything the input makes the program print.
     fn input(
         &mut self,
         client: ClientId,
+        req: u64,
         block: BlockId,
         data: Vec<u8>,
     ) -> Result<Outcome, Refusal> {
         self.mux
             .authorize_input(client, block)
             .map_err(Refusal::from)?;
-        let rt = self
+        let pty = self
             .blocks
             .get(&block)
-            .ok_or_else(|| format!("block {block} has no PTY"))?;
-        Ok(Outcome::Write((rt.pty.clone(), data)))
+            .ok_or_else(|| format!("block {block} has no PTY"))?
+            .pty
+            .clone();
+        self.check_echo(block);
+        let key = self.echoes(client).then_some((block, req));
+        Ok(Outcome::Write(PtyWrite { pty, data, key }))
+    }
+
+    /// Whether `client` negotiated [`Features::ECHO_ACK`].
+    fn echoes(&self, client: ClientId) -> bool {
+        self.features
+            .get(&client)
+            .is_some_and(|f| f.contains(Features::ECHO_ACK))
+    }
+
+    /// `client`'s input `req` to `block`, sent on the connection owning
+    /// `cancel`, was written at `at`: its ack is due a grace later, at a
+    /// drain or from the reader's timer. Not if another connection took
+    /// the client over while the write was under way: request numbers
+    /// start afresh there, so the ack would claim a request it never sent.
+    pub(crate) fn written(
+        &mut self,
+        client: ClientId,
+        cancel: &Rc<Notify>,
+        (block, req): (BlockId, u64),
+        at: Instant,
+    ) {
+        if !self.served_by(client, cancel) {
+            return;
+        }
+        let Some(rt) = self.blocks.get_mut(&block) else {
+            return;
+        };
+        rt.waiting.written(client, req, at);
+        rt.wake.notify_one();
+    }
+
+    /// When the reader should next drain `block` for an ack.
+    fn echo_due(&self, block: BlockId) -> Option<Instant> {
+        self.blocks.get(&block)?.waiting.due()
+    }
+
+    /// A read of `block` at `at` found nothing: acks the keys whose grace
+    /// ended by then, after every Output frame read before it.
+    fn drained(&mut self, block: BlockId, at: Instant) {
+        self.check_echo(block);
+        let Some(rt) = self.blocks.get_mut(&block) else {
+            return;
+        };
+        for (client, req) in rt.waiting.drained(at) {
+            self.send(client, &Message::EchoAck { block, req });
+        }
+    }
+
+    /// Reads who echoes on `block`'s terminal and, if that changed, tells
+    /// every attached client with [`Features::ECHO_ACK`]. Whether it changed.
+    fn check_echo(&mut self, block: BlockId) -> bool {
+        let Some(rt) = self.blocks.get_mut(&block) else {
+            return false;
+        };
+        let mode = rt.pty.echo();
+        if std::mem::replace(&mut rt.echo, mode) == mode {
+            return false;
+        }
+        for client in self.attached(block) {
+            self.send_echo(client, block);
+        }
+        true
+    }
+
+    /// Tells `client`, if it negotiated [`Features::ECHO_ACK`], who echoes
+    /// on `block`'s terminal.
+    fn send_echo(&mut self, client: ClientId, block: BlockId) {
+        let Some(rt) = self.blocks.get(&block) else {
+            return;
+        };
+        let mode = rt.echo;
+        if self.echoes(client) {
+            self.send(client, &Message::EchoMode { block, mode });
+        }
+    }
+
+    /// Drops `client`'s keys on every block.
+    fn forget_keys(&mut self, client: ClientId) {
+        self.blocks
+            .values_mut()
+            .for_each(|rt| rt.waiting.forget(client));
+    }
+
+    /// The clients attached to `block`.
+    fn attached(&self, block: BlockId) -> Vec<ClientId> {
+        self.clients
+            .keys()
+            .copied()
+            .filter(|&c| self.mux.client(c).and_then(|c| c.attached()) == Some(block))
+            .collect()
     }
 
     fn resize(&mut self, client: ClientId, block: BlockId, size: Size) -> Result<Outcome, Refusal> {
@@ -667,6 +845,9 @@ impl State {
     /// Feeds PTY output to the block's grid and tees it to attached clients.
     /// Returns the terminal's replies to queries, for the PTY.
     fn output(&mut self, block: BlockId, data: &[u8]) -> Vec<u8> {
+        // A mode change, such as echo turned off before a password prompt,
+        // goes ahead of the output printed after it.
+        self.check_echo(block);
         let Some(rt) = self.blocks.get_mut(&block) else {
             return Vec::new();
         };
@@ -702,12 +883,7 @@ impl State {
             block,
             data: data.to_vec(),
         });
-        let attached: Vec<ClientId> = self
-            .clients
-            .keys()
-            .copied()
-            .filter(|&c| self.mux.client(c).and_then(|c| c.attached()) == Some(block))
-            .collect();
+        let attached = self.attached(block);
         match frame {
             Ok(frame) => attached
                 .into_iter()
@@ -735,11 +911,14 @@ impl State {
         in_step("process", self.mux.note_process(block, pid, name));
     }
 
-    /// [`Self::check_process`] for every block, names refreshed, then
-    /// broadcasts.
+    /// [`Self::check_process`], names refreshed, and [`Self::check_echo`]
+    /// for every block, then broadcasts.
     fn check_processes(&mut self) {
         let blocks: Vec<BlockId> = self.blocks.keys().copied().collect();
-        blocks.into_iter().for_each(|b| self.check_process(b, true));
+        for block in blocks {
+            self.check_process(block, true);
+            self.check_echo(block);
+        }
         self.flush();
     }
 
@@ -903,6 +1082,18 @@ fn event_frame(seq: Option<u64>, event: &Event) -> Option<Vec<u8>> {
         .ok()
 }
 
+/// A `TAKEOVER` client's tokens. `current` is the one its last Welcome
+/// carried, and `confirmed` the one it last proved it holds, by presenting
+/// it in a takeover or by sending a request after the Welcome that carried
+/// it. A takeover whose Welcome never arrived leaves the client holding
+/// only `confirmed`, so both are accepted; once the client proves
+/// `current`, the older token stops working.
+#[derive(Debug, Clone, Copy)]
+struct Tokens {
+    current: Uuid,
+    confirmed: Option<Uuid>,
+}
+
 /// Why a request was refused, sent back as [`Message::Failed`].
 #[derive(Debug)]
 struct Refusal {
@@ -986,9 +1177,9 @@ fn reply(what: &str, messages: &[Message]) -> Result<Outcome, Refusal> {
     Ok(Outcome::Reply(frames))
 }
 
-/// Checks every block's foreground process group each [`PROCESS_POLL`],
-/// until the server's state is dropped. Holding it weakly, the poll never
-/// keeps a stopped server's state alive.
+/// Checks every block's foreground process group and echo mode each
+/// [`PROCESS_POLL`], until the server's state is dropped. Holding it
+/// weakly, the poll never keeps a stopped server's state alive.
 pub(crate) async fn watch_processes(state: Weak<RefCell<State>>) {
     loop {
         rusty_tokio::time::sleep(PROCESS_POLL).await;
@@ -999,28 +1190,54 @@ pub(crate) async fn watch_processes(state: Weak<RefCell<State>>) {
     }
 }
 
-/// Reads a block's PTY until its program exits.
-async fn pump(shared: Shared, block: BlockId, pty: Rc<Pty>) {
+/// Reads a block's PTY until its program exits. After output arrives, or
+/// when a key's echo grace ends, it reads until the PTY is empty, then acks
+/// the keys whose grace that covers.
+async fn pump(shared: Shared, block: BlockId, pty: Rc<Pty>, wake: Rc<Notify>) {
     let mut buf = vec![0; CHUNK];
-    loop {
-        let n = match pty.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(err) => {
-                eprintln!("rusty-mux-server: reading block {block}: {err}");
-                break;
+    // One waiter, kept across turns and renewed once it fires: a
+    // `Notified` dropped unfired stays queued in `rusty_tokio`, and a
+    // notification could go to it instead.
+    let mut keyed = std::pin::pin!(wake.notified());
+    'run: loop {
+        let due = shared.borrow().echo_due(block);
+        let grace = async {
+            match due {
+                Some(due) => {
+                    rusty_tokio::time::sleep_until(rusty_tokio::time::Instant::from_std(due)).await;
+                }
+                None => std::future::pending().await,
             }
         };
-        let replies = shared.borrow_mut().output(block, &buf[..n]);
-        if !replies.is_empty()
-            && let Err(err) = pty.write_all(&replies).await
+        let (read, fired) = rusty_tokio::select! {
+            biased;
+            read = pty.read(&mut buf) => (Some(read), false),
+            () = keyed.as_mut() => (None, true),
+            () = grace => (None, false),
+        };
+        if fired {
+            keyed.set(wake.notified());
+        }
+        if let Some(read) = read
+            && !forward(&shared, block, &pty, read, &buf).await
         {
-            eprintln!("rusty-mux-server: answering block {block}: {err}");
             break;
         }
-        // A flooding PTY is always readable; yield so input and client
-        // writes get their turn between chunks.
-        rusty_tokio::task::yield_now().await;
+        loop {
+            let at = Instant::now();
+            let read = match pty.try_read(&mut buf) {
+                Ok(Some(n)) => Ok(n),
+                Ok(None) => {
+                    shared.borrow_mut().drained(block, at);
+                    break;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => Err(err),
+            };
+            if !forward(&shared, block, &pty, read, &buf).await {
+                break 'run;
+            }
+        }
     }
     let process = shared.borrow_mut().hang_up(block);
     let status = match process {
@@ -1028,6 +1245,37 @@ async fn pump(shared: Shared, block: BlockId, pty: Rc<Pty>) {
         None => None,
     };
     shared.borrow_mut().exited(block, status);
+}
+
+/// Feeds one read's output to the block and writes the terminal's replies
+/// to queries back. Whether to go on reading: not at the end of the output
+/// or after an error.
+async fn forward(
+    shared: &Shared,
+    block: BlockId,
+    pty: &Pty,
+    read: std::io::Result<usize>,
+    buf: &[u8],
+) -> bool {
+    let n = match read {
+        Ok(0) => return false,
+        Ok(n) => n,
+        Err(err) => {
+            eprintln!("rusty-mux-server: reading block {block}: {err}");
+            return false;
+        }
+    };
+    let replies = shared.borrow_mut().output(block, &buf[..n]);
+    if !replies.is_empty()
+        && let Err(err) = pty.write_all(&replies).await
+    {
+        eprintln!("rusty-mux-server: answering block {block}: {err}");
+        return false;
+    }
+    // A flooding PTY is always readable; yield so input and client writes
+    // get their turn between chunks.
+    rusty_tokio::task::yield_now().await;
+    true
 }
 
 #[cfg(all(test, unix))]
@@ -1112,6 +1360,31 @@ mod regression {
         };
         drop(state);
         (shared, client, BlockId::from_uuid(id), inbox)
+    }
+
+    /// A PTY write that finishes after a takeover belongs to the old
+    /// connection, whose request numbers mean nothing on the new one.
+    #[test]
+    fn a_write_finishing_after_a_takeover_is_not_acked() {
+        runtime().block_on(async {
+            let (shared, _, block, _inbox) = fixture();
+            let features = Features::CHECKPOINT_V6
+                .union(Features::TAKEOVER)
+                .union(Features::ECHO_ACK);
+            let (out, _old_inbox, old) = outbox();
+            let client = shared.borrow_mut().connect(out, features, None, None);
+            let token = shared.borrow().tokens[&client].current;
+            let (out, _new_inbox, new) = outbox();
+            let takeover = Some(Takeover { client, token });
+            let taken = shared.borrow_mut().connect(out, features, None, takeover);
+            assert_eq!(taken, client);
+
+            let now = Instant::now();
+            shared.borrow_mut().written(client, &old, (block, 7), now);
+            assert_eq!(shared.borrow().echo_due(block), None, "the old key");
+            shared.borrow_mut().written(client, &new, (block, 1), now);
+            assert!(shared.borrow().echo_due(block).is_some(), "the new key");
+        });
     }
 
     #[test]
@@ -1412,6 +1685,40 @@ mod regression {
             }
             shared.borrow_mut().mux.detach(client).unwrap();
             State::request(&shared, client, Message::CloseBlock { req: 99, block });
+        });
+    }
+
+    #[test]
+    fn an_orphan_expires_only_by_its_own_connection() {
+        runtime().block_on(async {
+            let shared = State::shared(
+                Config {
+                    program: "/bin/sh".into(),
+                    args: vec![],
+                    cwd: "/".into(),
+                },
+                None,
+            );
+            let mut state = shared.borrow_mut();
+            let (out, _inbox, cancel) = outbox();
+            let client = state.connect(out, Features::TAKEOVER, None, None);
+            assert!(state.disconnect(client, &cancel), "kept for a reconnect");
+            assert!(state.mux.client(client).is_some());
+
+            // A later connection's expiry is not this one's.
+            let (_, _, other) = outbox();
+            state.expire(client, &other);
+            assert!(state.mux.client(client).is_some());
+            state.expire(client, &cancel);
+            assert!(
+                state.mux.client(client).is_none(),
+                "dropped after the grace"
+            );
+
+            let (out, _inbox, cancel) = outbox();
+            let plain = state.connect(out, Features::NONE, None, None);
+            assert!(!state.disconnect(plain, &cancel), "no token, no grace");
+            assert!(state.mux.client(plain).is_none());
         });
     }
 

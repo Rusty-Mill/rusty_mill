@@ -15,6 +15,9 @@
 //! terminal really sends. That is everything typed, passwords included:
 //! the file is created the owner's alone (mode 0600 on Unix, an
 //! owner-only DACL on Windows), and an existing file is refused.
+//! Over a slow path, typing at a prompt shows underlined ahead of the
+//! server's echo (`rusty_mux_tui::predict`), in a split window for now;
+//! `RUSTY_MUX_PREDICT=off` turns that off.
 
 use std::process::ExitCode;
 
@@ -68,6 +71,7 @@ mod client {
     use rusty_mux_proto::{Entry, Features, Launch, Message, Takeover};
     use rusty_mux_server::checkpoint::Receiver;
     use rusty_mux_tui::keys::{Action, Keys};
+    use rusty_mux_tui::predict::{Gate, Overlay, Predictor};
     use rusty_mux_tui::screen::{self, Frame, View};
     use rusty_mux_tui::{Conn, NoWin32Input, RESTORE, create_private, modes, pass};
     use rusty_term_core::{AnsiParser, Grid};
@@ -86,7 +90,14 @@ mod client {
         .union(Features::TAKEOVER);
 
     /// What a block's connection asks for.
-    const PANE: Features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
+    const PANE: Features = Features::CHECKPOINT_V6
+        .union(Features::TAKEOVER)
+        .union(Features::ECHO_ACK)
+        .union(Features::SYNC);
+
+    /// What a block's connection needs for predictive echo: acks to check
+    /// guesses by and round trips to time the path with.
+    const PREDICT: Features = Features::ECHO_ACK.union(Features::SYNC);
 
     /// How often a client that can reconnect asks the server for a sign of
     /// life, and how long without one counts as a lost path.
@@ -447,6 +458,7 @@ mod client {
             })
         };
         let keylog = keylog()?;
+        let predicting = predicting()?;
         term.enter_raw().map_err(|e| format!("raw mode: {e:?}"))?;
         let stop = Arc::new(AtomicBool::new(false));
         let keyboard = keyboard(tx.clone(), stop.clone(), keylog);
@@ -475,6 +487,7 @@ mod client {
             control,
             reader: Some(reader),
             joined: 0,
+            predicting,
             next,
             inspect: features.contains(Features::INSPECT),
             layouts: features.contains(Features::LAYOUT),
@@ -502,6 +515,14 @@ mod client {
         // block prints lands after the restore. Shutting a socket ends
         // its read; an error only means the server already closed it.
         stop.store(true, Ordering::Release);
+        // Detached, a server drops each block's client at once; one whose
+        // connection just ends is kept a while for a reconnect, lease and
+        // all. Shutting the socket below still delivers this first.
+        if app.lost.is_none() {
+            for pane in app.panes.values_mut() {
+                pane.send(|req| Message::Detach { req });
+            }
+        }
         let _ = app.control_stream.shutdown(Shutdown::Both);
         app.panes.values().for_each(Pane::hang_up);
         let reader = app.reader.take();
@@ -558,6 +579,17 @@ mod client {
 
     /// The file `RUSTY_MUX_KEYLOG` names, created for the log; `None` when
     /// it is unset. See [`create_private`].
+    /// Whether `RUSTY_MUX_PREDICT` leaves predictive echo on: unset or
+    /// `on`, and `off` turns it off.
+    fn predicting() -> Result<bool, String> {
+        match std::env::var_os("RUSTY_MUX_PREDICT") {
+            None => Ok(true),
+            Some(v) if v == "on" => Ok(true),
+            Some(v) if v == "off" => Ok(false),
+            Some(v) => Err(format!("RUSTY_MUX_PREDICT is {v:?}, not on or off")),
+        }
+    }
+
     fn keylog() -> Result<Option<std::fs::File>, String> {
         let Some(path) = std::env::var_os("RUSTY_MUX_KEYLOG") else {
             return Ok(None);
@@ -839,6 +871,7 @@ mod client {
         takeover: Option<Takeover>,
         /// The client taken over, if this continues one.
         resumed: Option<Resume>,
+        features: Features,
     }
 
     /// Connects to `socket` for `block`, taking `resume`'s client over if
@@ -873,6 +906,7 @@ mod client {
             writer,
             takeover: welcomed.takeover,
             resumed: resume,
+            features: welcomed.features,
         })
     }
 
@@ -914,6 +948,9 @@ mod client {
         /// The size last asked for, until the block reports a resize.
         sizing: Option<Size>,
         reader: Option<JoinHandle<()>>,
+        /// Guesses typed keys' echo, when the connection can check them.
+        predict: Option<Predictor>,
+        gate: Gate,
     }
 
     impl Pane {
@@ -923,6 +960,29 @@ mod client {
             // A failed send ends the reader too, which reports it.
             let _ = self.conn.send(&make(req));
             req
+        }
+
+        /// Sends typed `data` to the block and predicts its echo, timing
+        /// the path with a `Sync` when one is due.
+        fn type_in(&mut self, data: Vec<u8>) {
+            let block = self.block;
+            let now = Instant::now();
+            if self.predict.is_some() && self.gate.due(now) {
+                let req = self.send(|req| Message::Sync { req });
+                self.gate.sent(req, now);
+            }
+            let req = self.next;
+            if let (Some(predict), Some((grid, _))) = (self.predict.as_mut(), self.term.as_ref()) {
+                predict.key(req, &data, grid);
+            }
+            self.send(|req| Message::Input { req, block, data });
+        }
+
+        /// Drops the predictions: the block's screen, size or lease changed.
+        fn unpredict(&mut self) {
+            if let Some(predict) = self.predict.as_mut() {
+                predict.reset();
+            }
         }
 
         /// Applies a message from the block's connection.
@@ -945,13 +1005,27 @@ mod client {
                         .finish()
                         .map_err(|e| format!("bad checkpoint: {e}"))?;
                     self.term = Some(term);
+                    self.unpredict();
                     return Ok(Change::Ready);
                 }
                 Message::Output { block: b, data } if b == block => {
                     if let Some((grid, parser)) = self.term.as_mut() {
-                        parser.advance(grid, &data);
+                        match self.predict.as_mut() {
+                            Some(predict) => predict.output(parser, grid, &data),
+                            None => parser.advance(grid, &data),
+                        }
                     }
                     return Ok(Change::Output(data));
+                }
+                Message::EchoAck { block: b, req } if b == block => {
+                    if let (Some(predict), Some((grid, _))) = (self.predict.as_mut(), &self.term) {
+                        predict.ack(req, grid);
+                    }
+                }
+                Message::EchoMode { block: b, mode } if b == block => {
+                    if let Some(predict) = self.predict.as_mut() {
+                        predict.mode(mode);
+                    }
                 }
                 Message::Event {
                     event: Event::BlockResized { block: b, size },
@@ -961,11 +1035,15 @@ mod client {
                         grid.resize(size.cols().into(), size.rows().into());
                     }
                     self.sizing = None;
+                    self.unpredict();
                 }
                 Message::Event {
                     event: Event::BlockClosed { block: b },
                     ..
                 } if b == block => return Ok(Change::Closed),
+                Message::Done { req, .. } if self.gate.awaits(req) => {
+                    self.gate.answered(Instant::now());
+                }
                 Message::Done { req, .. } if self.asking == Some(req) => {
                     self.asking = None;
                     self.leased = true;
@@ -980,6 +1058,7 @@ mod client {
                         self.asking = None;
                     }
                     self.leased = false;
+                    self.unpredict();
                 }
                 _ => {}
             }
@@ -1045,6 +1124,8 @@ mod client {
         /// Control connections opened after the first, to tell a stale
         /// one's messages apart.
         joined: u64,
+        /// Whether typed keys' echo may be predicted: `RUSTY_MUX_PREDICT`.
+        predicting: bool,
         next: u64,
         /// Whether the server answers List.
         inspect: bool,
@@ -1387,11 +1468,7 @@ mod client {
             match action {
                 Action::Input(data) => {
                     if let Some(pane) = self.panes.get_mut(&focus).filter(|p| p.leased) {
-                        pane.send(|req| Message::Input {
-                            req,
-                            block: focus,
-                            data,
-                        });
+                        pane.type_in(data);
                     }
                 }
                 Action::Detach => self.end(Ended::Detached),
@@ -1556,8 +1633,12 @@ mod client {
                 self.focus = first;
             }
             let gone: Vec<BlockId> = self.panes.keys().filter(|b| !shows(**b)).copied().collect();
+            // Left on purpose, so detached first: a server keeps a client
+            // whose connection just ends, lease and all, for a reconnect,
+            // and the block's next client could not lease it meanwhile.
             for block in gone {
-                if let Some(pane) = self.panes.remove(&block) {
+                if let Some(mut pane) = self.panes.remove(&block) {
+                    pane.send(|req| Message::Detach { req });
                     pane.hang_up();
                 }
             }
@@ -1599,6 +1680,7 @@ mod client {
                         let block = *block;
                         pane.send(|req| Message::ReleaseLease { req, block });
                         pane.leased = false;
+                        pane.unpredict();
                     }
                     _ => {}
                 }
@@ -1669,6 +1751,9 @@ mod client {
                 leased: opened.resumed.is_some_and(|r| r.leased),
                 sizing: None,
                 reader: Some(reader),
+                predict: (self.predicting && opened.features.contains(PREDICT))
+                    .then(Predictor::default),
+                gate: Gate::default(),
             };
             if opened.resumed.is_none() {
                 pane.attach = pane.send(|req| Message::Attach { req, block });
@@ -1711,6 +1796,16 @@ mod client {
             pane.term.as_ref().map(|(grid, _)| grid)
         }
 
+        /// The predictions to draw over `block`: the focused block's, on a
+        /// slow path.
+        fn overlay(&self, block: BlockId) -> Option<Overlay> {
+            let pane = self.panes.get(&block).filter(|_| block == self.focus)?;
+            pane.predict
+                .as_ref()
+                .filter(|_| pane.gate.slow())?
+                .overlay()
+        }
+
         /// Redraws the composed screen where it changed.
         fn draw(&mut self) {
             let Shown::Composed(last) = &self.shown else {
@@ -1723,6 +1818,7 @@ mod client {
                     block: *block,
                     rect: *rect,
                     grid: self.grid(*block),
+                    overlay: self.overlay(*block),
                 })
                 .collect();
             let frame = screen::compose(self.area, &views, self.focus);

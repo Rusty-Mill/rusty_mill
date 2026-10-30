@@ -50,6 +50,7 @@ pub(crate) fn event_line(ev: &Event<'_>, held: usize) -> String {
         Event::ServeReads => "serve-reads".to_owned(),
         Event::ChildExited => "exited".to_owned(),
         Event::HangUp => "hangup".to_owned(),
+        Event::GraceExpired => "grace-expired".to_owned(),
     };
     if held > 0 {
         let _ = write!(line, " held={held}");
@@ -141,6 +142,8 @@ mod tests {
             Effect::Complete(r) => Some(reply("complete", r)),
             Effect::SetInputAvailable(on) => Some(format!("input-available {on}")),
             Effect::Ctrl { pid, event } => Some(format!("ctrl {pid} {event:?}")),
+            // Ctrl-queue bookkeeping, not a driver effect.
+            Effect::CtrlGone { .. } => None,
             Effect::CloseServer => Some("close".to_owned()),
             Effect::Eof => Some("eof".to_owned()),
             Effect::Log(_) => None,
@@ -208,6 +211,7 @@ mod tests {
             "drained" => Event::OutputDrained,
             "serve-reads" => Event::ServeReads,
             "hangup" => Event::HangUp,
+            "grace-expired" => Event::GraceExpired,
             "exited" => Event::ChildExited,
             other => panic!("unknown step {other:?}"),
         };

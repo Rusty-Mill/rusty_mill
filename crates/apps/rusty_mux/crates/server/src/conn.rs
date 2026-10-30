@@ -44,7 +44,11 @@ pub(crate) async fn run(state: Shared, stream: UnixStream) {
         _ = write_frames(inbox, wr) => {},
     }
     // A connection that took this client over owns it now; leave it be.
-    state.borrow_mut().disconnect(client, &cancel);
+    let orphaned = state.borrow_mut().disconnect(client, &cancel);
+    if orphaned {
+        rusty_tokio::time::sleep(crate::state::ORPHAN_GRACE).await;
+        state.borrow_mut().expire(client, &cancel);
+    }
 }
 
 async fn serve(
@@ -58,8 +62,13 @@ async fn serve(
         if !state.borrow().served_by(client, cancel) {
             return Ok(());
         }
-        if let Some((pty, data)) = State::request(state, client, message) {
-            pty.write_all(&data).await?;
+        let Some(write) = State::request(state, client, message) else {
+            continue;
+        };
+        write.pty.write_all(&write.data).await?;
+        if let Some(key) = write.key {
+            let now = std::time::Instant::now();
+            state.borrow_mut().written(client, cancel, key, now);
         }
     }
     Ok(())

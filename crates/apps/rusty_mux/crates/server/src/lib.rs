@@ -22,6 +22,8 @@ pub mod checkpoint;
 #[cfg(any(target_os = "linux", windows))]
 mod conn;
 #[cfg(any(target_os = "linux", windows))]
+mod echo;
+#[cfg(any(target_os = "linux", windows))]
 mod history;
 #[cfg(any(target_os = "linux", windows))]
 mod keys;
