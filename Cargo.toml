@@ -937,6 +937,8 @@ rusty_mux_server = { path = "crates/apps/rusty_mux/crates/server" }
 rusty_mux_status = { path = "crates/apps/rusty_mux/crates/status" }
 # rusty_term's headless engine, for consumers that must not link its tokio front end.
 rusty_term_core = { path = "crates/libs/ui/rusty_term/core" }
+# Our own Windows console host (docs/projects/term/conhost/).
+rusty_conhost = { path = "crates/libs/ui/rusty_conhost" }
 tracing-appender = "0.2"
 # Markdown parsing
 comrak = { version = "0.52", default-features = false, features = [] }

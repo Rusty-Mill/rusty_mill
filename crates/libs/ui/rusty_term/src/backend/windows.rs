@@ -158,18 +158,13 @@ impl Backend for WindowsBackend {
                 return Err(e);
             }
 
-            // The configured shell wins; else honor %COMSPEC%, default cmd.exe.
             // Bare names (`powershell`, `pwsh`, `wsl`) resolve through the
             // standard CreateProcessW search path, and arguments pass through
             // (`wsl -d Ubuntu`, `cmd /K ...`). An unquoted path containing
             // spaces is ambiguous to CreateProcessW (it would try
             // `C:\Program.exe` first), so when the whole string names an
             // existing file we quote it.
-            let shell = shell
-                .map(str::to_owned)
-                .or_else(|| std::env::var("COMSPEC").ok())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "cmd.exe".to_string());
+            let shell = shell_or_default(shell);
             let shell = if shell.contains(' ')
                 && !shell.starts_with('"')
                 && std::path::Path::new(&shell).is_file()
@@ -282,6 +277,16 @@ impl Backend for WindowsBackend {
             }
         }
     }
+}
+
+/// The configured shell, else `%COMSPEC%`, else `cmd.exe`. Shared with the
+/// own-host backend.
+pub(super) fn shell_or_default(shell: Option<&str>) -> String {
+    shell
+        .map(str::to_owned)
+        .or_else(|| std::env::var("COMSPEC").ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "cmd.exe".to_string())
 }
 
 /// Appends `arg` to `out` (a wide command-line buffer), quoted per the

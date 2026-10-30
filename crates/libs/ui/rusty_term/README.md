@@ -145,6 +145,9 @@ path (quoted automatically if it contains spaces) and trailing arguments
 ```toml
 shell = "pwsh"           # or "wsl", "powershell", "C:\\tools\\nu.exe", ...
 
+[console]                # Windows only
+host = "own"             # conpty (default) | own
+
 [window]                 # windowed (--gui) front-end only
 cols = 120               # initial size in cells; default 80x24
 rows = 40
@@ -172,6 +175,16 @@ cursor = "#aeafad"
 color0 = "#282a2e"       # ANSI palette, color0..color15
 color1 = "#cc6666"
 ```
+
+On Windows, `[console] host` chooses who serves the shell's console:
+`"conpty"` (the default) is Windows' ConPTY, and `"own"` is rusty_conhost, our
+own console host. It is read at launch. If `own` can't start (an older
+Windows without a usable ConDrv, for example), the error is shown and the
+terminal does not fall back to ConPTY. With `own`, `shell` is split into a
+program and arguments by the rules `CreateProcessW` reads them with, and each
+argument is quoted again for the child. Programs that read their command line
+raw, cmd.exe above all, can see different quoting: `cmd /c echo a"b c"d`
+reaches cmd as `/c echo "ab cd"`. The web bridge always uses ConPTY.
 
 The `[colors]` theme is what every reset path (`RIS`, `DECSTR`, OSC
 104/110/111/112) restores, so a configured look survives a `reset` exactly

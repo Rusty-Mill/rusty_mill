@@ -43,6 +43,6 @@ expect input-available true
 expect vt 0d0a
 packet 2 1 0 0 0 -
 expect reply 00000000 0 - 0 -
+expect input-available false
 expect close
 expect eof
-expect input-available false
