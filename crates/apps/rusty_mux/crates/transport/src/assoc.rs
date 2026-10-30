@@ -71,6 +71,9 @@ pub struct Association {
     accepted: VecDeque<StreamId>,
     peer_closed: VecDeque<StreamId>,
     closing: BTreeMap<StreamId, Closing>,
+    /// What streams the peer closed had received and not yet been read:
+    /// readable until drained.
+    left: BTreeMap<StreamId, Recv>,
     replies: Vec<StreamId>,
     rtt: Rtt,
     window: Window,
@@ -113,6 +116,7 @@ impl Association {
             accepted: VecDeque::new(),
             peer_closed: VecDeque::new(),
             closing: BTreeMap::new(),
+            left: BTreeMap::new(),
             replies: Vec::new(),
             rtt: Rtt::default(),
             window: Window::default(),
@@ -310,7 +314,10 @@ impl Association {
             self.closing.remove(&id);
             return;
         }
-        if self.streams.remove(&id).is_some() {
+        if let Some(stream) = self.streams.remove(&id) {
+            if stream.recv.readable() > 0 {
+                self.left.insert(id, stream.recv);
+            }
             self.peer_closed.push_back(id);
         }
         // A stream closed before its first bytes arrived never opens,
@@ -363,8 +370,16 @@ impl Association {
         self.streams.get(&id).map_or(0, |s| s.send.queued())
     }
 
-    /// Reads bytes of `id` in order into `buf`; returns how many.
+    /// Reads bytes of `id` in order into `buf`; returns how many. What a
+    /// stream received before the peer closed it stays readable.
     pub fn read(&mut self, id: StreamId, buf: &mut [u8]) -> usize {
+        if let Some(left) = self.left.get_mut(&id) {
+            let n = left.read(buf);
+            if left.readable() == 0 {
+                self.left.remove(&id);
+            }
+            return n;
+        }
         let Some(stream) = self.streams.get_mut(&id) else {
             return 0;
         };
@@ -380,17 +395,23 @@ impl Association {
 
     /// Bytes of `id` ready to read.
     pub fn readable(&self, id: StreamId) -> usize {
-        self.streams.get(&id).map_or(0, |s| s.recv.readable())
+        match self.left.get(&id) {
+            Some(left) => left.readable(),
+            None => self.streams.get(&id).map_or(0, |s| s.recv.readable()),
+        }
     }
 
-    /// Whether `id` is open.
+    /// Whether `id` is open; a stream the peer closed may still be
+    /// [`Self::readable`].
     pub fn is_open(&self, id: StreamId) -> bool {
         self.streams.contains_key(&id)
     }
 
-    /// Closes `id`, dropping what it still had to send, and tells the peer
-    /// until it confirms.
+    /// Closes `id`, dropping what it still had to send or to read, and
+    /// tells the peer until it confirms. To end a stream without losing
+    /// what was written, wait for [`Self::queued`] to reach 0 first.
     pub fn close(&mut self, now: Instant, id: StreamId) {
+        self.left.remove(&id);
         if self.streams.remove(&id).is_some() {
             self.closing.insert(id, Closing { due: now, tries: 0 });
         }

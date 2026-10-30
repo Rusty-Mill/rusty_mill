@@ -629,3 +629,35 @@ fn a_far_ahead_close_with_no_room_to_record_is_not_confirmed() {
     assert!(server.datagram(now, addr(1), &forged(&mut client, &[close(farther)])));
     assert_eq!(close_replies(&mut server, &mut client, later), [farther]);
 }
+
+#[test]
+fn bytes_received_before_the_peer_closes_stay_readable() {
+    let mut net = Net::new(CLEAN, 9);
+    let id = net.client.open().unwrap();
+    net.client.write(id, b"hello");
+    while net.server.accept().is_none() {
+        net.step();
+    }
+    // The server answers, waits for the ack, then closes, as an adapter
+    // ending a stream gracefully does; the client has not read yet.
+    net.server.write(id, b"last words");
+    while net.server.queued(id) > 0 {
+        net.step();
+    }
+    net.server.close(net.now, id);
+    while net.client.is_open(id) {
+        net.step();
+    }
+    assert_eq!(net.client.readable(id), 10);
+    let mut buf = [0; 4];
+    let mut got = Vec::new();
+    loop {
+        let n = net.client.read(id, &mut buf);
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(got, b"last words");
+    assert_eq!(net.client.readable(id), 0);
+}
