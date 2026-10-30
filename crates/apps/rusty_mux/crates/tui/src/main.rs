@@ -1825,8 +1825,7 @@ mod client {
             let Some((grid, parser)) = self.panes.get(&block).and_then(|p| p.term.as_ref()) else {
                 return;
             };
-            let drawable = parser.plain() && grid.plain_cursor() && grid.cursor.0 < grid.cols;
-            if !drawable {
+            if !screen::passable(grid, parser) {
                 return;
             }
             let wanted = self.overlay(block);

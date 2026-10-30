@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use rusty_mux_core::{BlockId, Rect, Size};
 use rusty_mux_server::style::Style;
-use rusty_term_core::{ATTR_UNDERLINE, Cell, Grid, WIDE_TRAILER};
+use rusty_term_core::{ATTR_UNDERLINE, AnsiParser, Cell, Grid, WIDE_TRAILER};
 
 use crate::keys::Dir;
 use crate::predict::Overlay;
@@ -328,13 +328,20 @@ impl Passed {
     }
 }
 
+/// Whether predictions may be drawn over a passed-through block now, as
+/// its `parser` and `grid` copy the terminal: the parser is
+/// [`plain`](AnsiParser::plain) and the cursor
+/// [`plain_cursor`](Grid::plain_cursor) and inside the screen, so `SGR 0`
+/// restores the rendition exactly, the moves land where they say, and
+/// nothing is written inside an unfinished sequence.
+pub fn passable(grid: &Grid, parser: &AnsiParser) -> bool {
+    parser.plain() && grid.plain_cursor() && grid.cursor.0 < grid.cols
+}
+
 /// Draws `overlay` over a passed-through block whose screen `grid` copies:
 /// each cell with an absolute move, characters underlined, then the
-/// cursor back home and `SGR 0`. Only for a grid whose parser is
-/// [`plain`](rusty_term_core::AnsiParser::plain) and whose cursor is
-/// [`plain_cursor`](Grid::plain_cursor) and inside the screen, as
-/// `SGR 0` then restores the rendition exactly and the move lands where
-/// it says; never `DECSC`, whose one slot the program may be using.
+/// cursor back home and `SGR 0`. Only while [`passable`]; never `DECSC`,
+/// whose one slot the program may be using.
 pub fn pass_ahead(grid: &Grid, overlay: &Overlay) -> (Vec<u8>, Passed) {
     let row = overlay.row;
     let cells: Vec<Cell> = grid.row_cells(row).collect();
@@ -401,7 +408,6 @@ fn place<'a>(
 #[cfg(test)]
 mod tests {
     use rusty_mux_core::Layout;
-    use rusty_term_core::AnsiParser;
     use rusty_uuid::Uuid;
 
     use super::*;
@@ -617,6 +623,55 @@ mod tests {
             String::from_utf8(passed.erase()).unwrap(),
             "\x1b[0m\x1b[1;4H"
         );
+    }
+
+    /// Passes `chunks` through to a stand-in terminal as the client does:
+    /// each chunk after erasing the predictions drawn, then `overlay`
+    /// drawn again while [`passable`]. Returns the terminal's grid and the
+    /// block's copy.
+    fn pass_through(cols: usize, chunks: &[&[u8]], overlay: &Overlay) -> (Grid, Grid) {
+        let (mut copy, mut copier) = (Grid::new(cols, 1), AnsiParser::new());
+        let (mut term, mut terminal) = (Grid::new(cols, 1), AnsiParser::new());
+        let mut passed: Option<Passed> = None;
+        for chunk in chunks {
+            if let Some(p) = passed.take() {
+                terminal.advance(&mut term, &p.erase());
+            }
+            copier.advance(&mut copy, chunk);
+            terminal.advance(&mut term, chunk);
+            if passable(&copy, &copier) {
+                let (bytes, p) = pass_ahead(&copy, overlay);
+                terminal.advance(&mut term, &bytes);
+                passed = Some(p);
+            }
+        }
+        if let Some(p) = passed {
+            terminal.advance(&mut term, &p.erase());
+        }
+        (term, copy)
+    }
+
+    #[test]
+    fn passing_predictions_leave_the_terminal_as_its_copy_across_split_and_insert_output() {
+        let overlay = |x: usize, ch: char| Overlay {
+            row: 0,
+            cells: vec![(x, Some(ch))],
+            cursor: x + 1,
+        };
+        // A frame ending inside a CSI, a UTF-8 character or a string, then
+        // insert mode with the real echo arriving while `b` is predicted.
+        let cases: [(&[&[u8]], Overlay); 4] = [
+            (&[b"$ ", b"\x1b[3", b"1mx\x1b[0m"], overlay(2, 'x')),
+            (&[b"$ ", b"\xc3", b"\xa9"], overlay(2, '\u{e9}')),
+            (&[b"$ ", b"\x1b]0;ti", b"tle\x07x"], overlay(2, 'x')),
+            (&[b"$ a\x1b[4h", b"b", b"c\x1b[4l"], overlay(3, 'b')),
+        ];
+        for (chunks, overlay) in cases {
+            let (term, copy) = pass_through(10, chunks, &overlay);
+            let cells = |g: &Grid| g.row_cells(0).collect::<Vec<_>>();
+            assert_eq!(cells(&term), cells(&copy), "{chunks:?}");
+            assert_eq!(term.cursor, copy.cursor, "{chunks:?}");
+        }
     }
 
     #[test]
