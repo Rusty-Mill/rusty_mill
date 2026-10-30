@@ -544,6 +544,13 @@ impl Console {
         self.writes.len() + self.reads.len()
     }
 
+    /// Calls wait on the output queue draining: parked writes, or
+    /// cooked reads held back by their echo. Reads waiting for input
+    /// don't count.
+    pub(crate) fn output_blocked(&self) -> bool {
+        !self.writes.is_empty() || self.echo_held
+    }
+
     /// Payload bytes those calls retain.
     pub(crate) fn parked(&self) -> usize {
         self.parked
@@ -1206,7 +1213,7 @@ fn get_lang_id() -> i32 {
 #[cfg(test)]
 pub(crate) mod tests {
     #[cfg(windows)]
-    pub(crate) use super::read::tests::{holding_raw_reads, owing_large_reads};
+    pub(crate) use super::read::tests::{echo_held_reads, holding_raw_reads, owing_large_reads};
     use super::*;
 
     /// Drives a console as the engine would, with the shared output

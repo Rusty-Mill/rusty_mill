@@ -690,9 +690,9 @@ impl Engine {
             || sched::must_poll(&self.view(Control::default(), self.shared.input_len()))
     }
 
-    /// Writes are parked on output that nobody will read.
+    /// Calls wait on output that nobody will read.
     fn drains_itself(&self) -> bool {
-        self.console.parked() > 0 && self.shared.detached()
+        self.console.output_blocked() && self.shared.detached()
     }
 
     fn view(&self, control: Control, input: usize) -> View {
@@ -1180,6 +1180,38 @@ mod tests {
         turns_without_another_wake(&mut engine);
         assert_eq!(engine.console.waiting(), 0, "every write completed");
         assert_eq!(engine.shared.output_len(), 0, "the output was discarded");
+        engine.teardown();
+        let _ = child.kill_single(Signal::Kill);
+    }
+
+    #[test]
+    fn a_detached_master_releases_reads_held_by_their_echo() {
+        let (mut engine, child) = engine_on(crate::console::tests::echo_held_reads());
+        assert!(engine.console.output_blocked());
+        engine.shared.detach();
+        turns_without_another_wake(&mut engine);
+        assert!(!engine.console.output_blocked(), "the echo went out");
+        engine.teardown();
+        let _ = child.kill_single(Signal::Kill);
+    }
+
+    #[test]
+    fn a_detached_master_with_an_idle_read_waits_for_the_grace_not_a_poll() {
+        let (mut engine, child) = engine_on(crate::console::tests::holding_raw_reads(1, 8));
+        engine.shared.detach();
+        engine.work().expect("turn");
+        assert_eq!(
+            engine.console.waiting(),
+            1,
+            "the read still waits for input"
+        );
+        assert!(!engine.drains_itself());
+        let now = Instant::now();
+        let Some(until) = engine.grace.until(engine.must_poll(), now) else {
+            panic!("the grace deadline bounds the wait");
+        };
+        assert!(until > now, "no immediate poll");
+        assert!(until <= now + sched::GRACE);
         engine.teardown();
         let _ = child.kill_single(Signal::Kill);
     }

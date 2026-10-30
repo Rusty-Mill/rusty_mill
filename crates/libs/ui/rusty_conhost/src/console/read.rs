@@ -1157,9 +1157,9 @@ pub(crate) mod tests {
         assert!(!h.c.reads_ready(), "nothing is left to serve");
     }
 
-    #[test]
-    fn closing_ends_reads_held_back_by_their_echo() {
-        let mut h = Host::new();
+    /// Cooked reads whose input is queued, held back because their echo
+    /// waits for the reader.
+    fn hold_reads_on_their_echo(h: &mut Host) {
         let [_, input, _] = h.connect(1, "");
         let initial: Vec<u8> = [b'a', 0].repeat(crate::cooked::MAX_LINE);
         let msg = read_msg(true, initial.len() as u32, 0);
@@ -1178,7 +1178,24 @@ pub(crate) mod tests {
             keys.push(b'\r');
         }
         h.ev(Event::Input(&keys));
-        assert!(h.c.waiting() > 0, "held back by the stalled reader");
+        assert!(
+            h.c.waiting() > 0 && h.c.echo_held,
+            "held back by the stalled reader"
+        );
+    }
+
+    /// A console whose cooked reads wait on their echo's output.
+    #[cfg(windows)]
+    pub(crate) fn echo_held_reads() -> Console {
+        let mut h = Host::new();
+        hold_reads_on_their_echo(&mut h);
+        h.c
+    }
+
+    #[test]
+    fn closing_ends_reads_held_back_by_their_echo() {
+        let mut h = Host::new();
+        hold_reads_on_their_echo(&mut h);
         h.ev(Event::HangUp);
         h.ev(Event::GraceExpired);
         assert_eq!(h.c.waiting(), 0);
