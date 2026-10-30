@@ -419,7 +419,9 @@ impl Text {
     ) -> usize {
         match self {
             Text::Bytes(bytes) => match origin {
-                Origin::Client(mode) => at + screen.client(&bytes[at..], mode, SLICE, out, replies),
+                Origin::Client(mode) => {
+                    at + screen.client(&bytes[at..], mode, SLICE, at == 0, out, replies)
+                }
                 Origin::Host => {
                     let end = bytes.len().min(at + SLICE);
                     screen.host(&bytes[at..end], out);
@@ -438,7 +440,7 @@ impl Text {
                 // Each unit is at most 3 bytes transformed, so all fit.
                 match origin {
                     Origin::Client(mode) => {
-                        let n = screen.client(text.as_bytes(), mode, SLICE, out, replies);
+                        let n = screen.client(text.as_bytes(), mode, SLICE, at == 0, out, replies);
                         debug_assert_eq!(n, text.len(), "a wide slice fits");
                     }
                     Origin::Host => screen.host(text.as_bytes(), out),
@@ -593,7 +595,11 @@ impl Console {
                 // Cooked reads held back by their echo go on.
                 self.serve_reads(out, &mut fx);
             }
-            Event::ChildExited | Event::HangUp => self.close(&mut fx),
+            Event::ChildExited | Event::HangUp => {
+                // Bytes held for a query that never finished still go out.
+                self.screen.flush(out);
+                self.close(&mut fx);
+            }
         }
         self.sync_input_available(&mut fx);
         fx
@@ -1118,7 +1124,9 @@ impl Console {
     ) {
         while let Some(w) = self.writes.front_mut() {
             if w.at < w.text.len() {
-                if out.len() > CLIENT_BUDGET {
+                // Answers count too: a write of queries alone adds
+                // nothing to the queue (§7.4).
+                if out.len() + replies.len() > CLIENT_BUDGET {
                     return;
                 }
                 w.at = w.text.emit(w.at, w.origin, &mut self.screen, out, replies);

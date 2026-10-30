@@ -18,6 +18,11 @@ use crate::msg;
 
 /// conhost's default cursor size, in percent of the cell.
 pub(super) const DEFAULT_CURSOR_SIZE: u32 = 25;
+/// `CONSOLE_GETCURSORINFO_MSG` and `CONSOLE_SETCURSORINFO_MSG`: a ULONG
+/// and a BOOLEAN, padded.
+const CURSOR_INFO_LEN: usize = 8;
+/// `CONSOLE_GETCONSOLEWINDOW_MSG`: one HWND.
+const CONSOLE_WINDOW_LEN: usize = 8;
 /// `CONSOLE_SCREENBUFFERINFO_MSG`: four COORDs and a USHORT around the
 /// window sizes, then the colour table at 28.
 const SBI_LEN: usize = 92;
@@ -53,7 +58,7 @@ impl Console {
 
     /// `CONSOLE_GETCURSORINFO_MSG { OUT CursorSize; OUT Visible }`.
     pub(super) fn get_cursor_info(&self, object: usize, fixed: &mut [u8]) -> i32 {
-        if fixed.len() < 5 {
+        if fixed.len() < CURSOR_INFO_LEN {
             return msg::STATUS_ILLEGAL_FUNCTION;
         }
         if let Err(status) = self.output_object(object, true) {
@@ -73,7 +78,11 @@ impl Console {
         out: &mut OutputQueue,
         fx: &mut Vec<Effect>,
     ) {
-        let (Some(size), Some(visible)) = (msg::u32_at(&fixed, 0), msg::bool_at(&fixed, 4)) else {
+        let (Some(size), Some(visible), true) = (
+            msg::u32_at(&fixed, 0),
+            msg::bool_at(&fixed, 4),
+            fixed.len() >= CURSOR_INFO_LEN,
+        ) else {
             return reply(p, msg::STATUS_ILLEGAL_FUNCTION, fixed, fx);
         };
         if let Err(status) = self.output_object(p.object, true) {
@@ -171,7 +180,8 @@ impl Console {
     }
 
     /// `CONSOLE_CURRENTFONT_MSG { IN MaximumWindow; OUT FontIndex,
-    /// FontSize, FontFamily, FontWeight, FaceName }`.
+    /// FontSize, FontFamily, FontWeight, FaceName }`. For the maximum
+    /// window, conhost reports that window's size in cells as FontSize.
     pub(super) fn get_current_font(&self, object: usize, fixed: &mut [u8]) -> i32 {
         if fixed.len() < FONT_LEN {
             return msg::STATUS_ILLEGAL_FUNCTION;
@@ -179,9 +189,15 @@ impl Console {
         if let Err(status) = self.output_object(object, false) {
             return status;
         }
+        let (x, y) = if fixed[0] != 0 {
+            let size = self.screen.size();
+            (size.cols, size.rows)
+        } else {
+            FONT_SIZE
+        };
         msg::put_u32(fixed, 4, 0);
-        msg::put_u16(fixed, 8, FONT_SIZE.0);
-        msg::put_u16(fixed, 10, FONT_SIZE.1);
+        msg::put_u16(fixed, 8, x);
+        msg::put_u16(fixed, 10, y);
         msg::put_u32(fixed, 12, FONT_FAMILY);
         msg::put_u32(fixed, 16, FONT_WEIGHT);
         let face = FONT_FACE_NAME.encode_utf16().chain(std::iter::repeat(0));
@@ -227,6 +243,9 @@ impl Console {
 
 /// `CONSOLE_GETCONSOLEWINDOW_MSG { OUT HWND }`: there is no window (V5).
 pub(super) fn get_console_window(fixed: &mut [u8]) -> i32 {
+    if fixed.len() < CONSOLE_WINDOW_LEN {
+        return msg::STATUS_ILLEGAL_FUNCTION;
+    }
     fixed.fill(0);
     msg::STATUS_SUCCESS
 }
@@ -406,6 +425,68 @@ mod tests {
     }
 
     #[test]
+    fn answered_queries_count_against_the_output_budget() {
+        let mut h = Host::new();
+        let [_, input, output] = h.connect(1, "");
+        let on = h.mode(input) | mode::VIRTUAL_TERMINAL_INPUT;
+        assert_eq!(h.set_mode(input, on), msg::STATUS_SUCCESS);
+        let fill = vec![b'x'; crate::sched::PACKET_INPUT_CAP];
+        h.packet(msg::RAW_WRITE, 1, output, &fill, 0);
+        h.packet(msg::RAW_WRITE, 1, output, &fill, 0);
+        let queries = b"\x1b[?6n".repeat(crate::sched::PACKET_INPUT_CAP / 5);
+        for _ in 0..15 {
+            h.packet(msg::RAW_WRITE, 1, output, &queries, 0);
+        }
+        let before = h.c.waiting();
+        h.drain();
+        assert!(h.c.waiting() > 0, "one drain does not run every write");
+        assert!(
+            before - h.c.waiting() < 4,
+            "{} writes ran",
+            before - h.c.waiting()
+        );
+    }
+
+    #[test]
+    fn an_lf_after_a_cursor_move_gains_its_cr() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        h.write_w(output, "ab\r");
+        set_cursor(&mut h, output, 5, 3);
+        let (_, vt) = emitted(&mut h, |h| h.write_w(output, "\n"));
+        assert_eq!(vt, b"\r\n");
+        assert_eq!(h.c.screen.cursor(), (0, 4));
+    }
+
+    #[test]
+    fn a_held_prefix_goes_out_at_hang_up() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        let (_, vt) = emitted(&mut h, |h| h.write_w(output, "x\x1b"));
+        assert_eq!(vt, b"x");
+        h.ev(Event::HangUp);
+        assert!(h.vt.ends_with(b"x\x1b"));
+    }
+
+    #[test]
+    fn short_descriptors_are_refused() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        let r = h.call(output, api::GET_CURSOR_INFO, &[0; 7], &[], 0);
+        assert_eq!(r.status, msg::STATUS_ILLEGAL_FUNCTION);
+        let r = h.call(
+            output,
+            api::SET_CURSOR_INFO,
+            &[25, 0, 0, 0, 1, 0, 0],
+            &[],
+            0,
+        );
+        assert_eq!(r.status, msg::STATUS_ILLEGAL_FUNCTION);
+        let r = h.call(output, api::GET_CONSOLE_WINDOW, &[0; 4], &[], 0);
+        assert_eq!(r.status, msg::STATUS_ILLEGAL_FUNCTION);
+    }
+
+    #[test]
     fn current_font_and_console_window() {
         let mut h = Host::new();
         let [_, _, output] = h.connect(1, "");
@@ -415,6 +496,10 @@ mod tests {
         assert_eq!(msg::u32_at(&r.write_back, 12), Some(FONT_FAMILY));
         let face = msg::utf16_units(&r.write_back[FONT_FACE..]);
         assert_eq!(String::from_utf16_lossy(&face[..9]), "Consolas\0");
+        let mut maximum = [0u8; FONT_LEN];
+        maximum[0] = 1;
+        let r = h.call(output, api::GET_CURRENT_FONT, &maximum, &[], 0);
+        assert_eq!(u16s(&r, &[8, 10]), [80, 24], "the maximum window, in cells");
         let r = h.call(output, api::GET_CONSOLE_WINDOW, &[0xAA; 8], &[], 0);
         assert_eq!((r.status, r.write_back), (msg::STATUS_SUCCESS, vec![0; 8]));
     }

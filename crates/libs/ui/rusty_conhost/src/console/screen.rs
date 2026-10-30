@@ -5,18 +5,23 @@
 //!
 //! Client text first takes the output-mode table (§5.4). Under VT
 //! processing, DSR 5 and CPR queries are answered from the Grid and
-//! dropped from the forwarded VT (§5.6); every other query goes to the
-//! terminal and the parser's answer is discarded.
+//! dropped from the forwarded VT (§5.6, V11); every other query goes to
+//! the terminal and the parser's answer is discarded. A client turning
+//! off win32-input-mode or focus reports, or resetting the terminal, has
+//! them turned back on, as conhost does: the host needs both (§5.5).
+//! Without VT processing, a write that fills the last column wraps at
+//! once with CR LF, as conhost's legacy path does.
 //!
 //! Behaviour follows microsoft/terminal's conhost (commit 09beddc6,
-//! `src/host/getset.cpp`, `_stream.cpp`; see THIRD_PARTY_NOTICES.md):
+//! `src/host/getset.cpp`, `_stream.cpp`, `src/host/VtIo.cpp`,
+//! `src/terminal/adapter/adaptDispatch.cpp`; see THIRD_PARTY_NOTICES.md):
 //!
 //! Copyright (c) Microsoft Corporation. Licensed under the MIT license.
 
 use platform::term::WinSize;
 use rusty_term_core::{ATTR_REVERSE, ATTR_UNDERLINE, AnsiParser, CellColors, ColorRef, Grid};
 
-use super::OutputQueue;
+use super::{OutputQueue, PREAMBLE};
 
 /// `ENABLE_*` output mode bits.
 pub(super) const PROCESSED_OUTPUT: u32 = 0x1;
@@ -31,9 +36,27 @@ const LVB_UNDERSCORE: u16 = 0x8000;
 /// `BG_ATTRS` and `META_ATTRS`): all but 0x2000.
 pub(super) const VALID_ATTRIBUTES: u16 = !0x2000;
 
-/// Queries the host answers from its own Grid (§5.6): DSR 5, CPR and
-/// DECXCPR.
-const QUERIES: [&[u8]; 3] = [b"\x1b[5n", b"\x1b[6n", b"\x1b[?6n"];
+/// What the host does with a sequence it watches for in client VT.
+#[derive(Clone, Copy)]
+enum Action {
+    /// A query answered from the host's Grid and kept from the terminal
+    /// (§5.6).
+    Answer,
+    /// Forwarded, then followed by this, so the modes the host relies on
+    /// stay on (conhost `_stream.cpp`, `adaptDispatch.cpp`): a nested
+    /// ConPTY turns both off when it exits.
+    Reassert(&'static [u8]),
+}
+
+/// DSR 5, CPR and DECXCPR; win32-input-mode off, focus reports off, RIS.
+const WATCHED: [(&[u8], Action); 6] = [
+    (b"\x1b[5n", Action::Answer),
+    (b"\x1b[6n", Action::Answer),
+    (b"\x1b[?6n", Action::Answer),
+    (b"\x1b[?9001l", Action::Reassert(b"\x1b[?9001h")),
+    (b"\x1b[?1004l", Action::Reassert(b"\x1b[?1004h")),
+    (b"\x1bc", Action::Reassert(PREAMBLE)),
+];
 
 /// The CP437 glyphs conhost shows for C0 controls it does not act on.
 const CP437_C0: [char; 32] = [
@@ -44,11 +67,15 @@ const CP437_C0: [char; 32] = [
 pub(super) struct Screen {
     parser: AnsiParser,
     grid: Grid,
-    /// The start of a possible query at the end of the last client text,
-    /// kept until the next bytes decide it; shorter than any query.
+    /// The start of a watched sequence at the end of the last client
+    /// text, kept until the next bytes decide it; shorter than any of
+    /// them.
     held: Vec<u8>,
-    /// The last client byte was CR, so an LF after it adds none.
+    /// The last byte of this write was CR, so an LF after it adds none.
     after_cr: bool,
+    /// A UTF-8 lead 0xC2 held without PROCESSED_OUTPUT: the next byte
+    /// decides whether it starts a C1 control.
+    c2: bool,
 }
 
 impl Screen {
@@ -60,72 +87,118 @@ impl Screen {
             grid,
             held: Vec::new(),
             after_cr: false,
+            c2: false,
         }
     }
 
     /// VT the host made itself (echo, cursor moves, modes): forwarded as
-    /// it is. Held query bytes go first, so output keeps its order.
+    /// it is. Held client bytes go first, so output keeps its order.
     pub(super) fn host(&mut self, vt: &[u8], out: &mut OutputQueue) {
-        let held = std::mem::take(&mut self.held);
-        self.forward(&held, out);
+        self.flush(out);
+        self.after_cr = false;
         self.forward(vt, out);
     }
 
+    /// Forward whatever client bytes are held, as they are: no more
+    /// output follows, or host VT goes next.
+    pub(super) fn flush(&mut self, out: &mut OutputQueue) {
+        if std::mem::take(&mut self.c2) {
+            self.held.push(0xC2);
+        }
+        let held = std::mem::take(&mut self.held);
+        self.forward(&held, out);
+    }
+
     /// Client text under output `mode`, transformed (§5.4) while its
-    /// result fits in `room` bytes. Returns the bytes consumed; answers
-    /// to the host's own queries are added to `replies`.
+    /// result fits in `room` bytes; `first` when it starts a write.
+    /// Returns the bytes consumed; answers to the host's own queries are
+    /// added to `replies`.
     pub(super) fn client(
         &mut self,
         text: &[u8],
         mode: u32,
         room: usize,
+        first: bool,
         out: &mut OutputQueue,
         replies: &mut Vec<u8>,
     ) -> usize {
+        if first {
+            // conhost adds an LF's CR afresh in every write.
+            self.after_cr = false;
+        }
         let mut vt = std::mem::take(&mut self.held);
         let held = vt.len();
         let mut consumed = 0;
         for &b in text {
-            let mut one = [0u8; 4];
-            let n = transform(b, mode, self.after_cr, &mut one);
-            if vt.len() - held + n > room {
+            let step = transform(b, mode, self.after_cr, self.c2);
+            if vt.len() - held + step.len > room {
                 break;
             }
-            vt.extend_from_slice(&one[..n]);
+            vt.extend_from_slice(&step.bytes[..step.len]);
             self.after_cr = b == b'\r';
+            self.c2 = step.c2;
             consumed += 1;
         }
         if mode & VIRTUAL_TERMINAL_PROCESSING != 0 && mode & PROCESSED_OUTPUT != 0 {
-            self.route_queries(&vt, out, replies);
+            self.route_vt(&vt, out, replies);
         } else {
-            self.forward(&vt, out);
+            self.forward_legacy(&vt, mode & WRAP_AT_EOL_OUTPUT != 0, out);
         }
         consumed
     }
 
-    /// Forward `vt` with DSR 5 and CPR taken out and answered.
-    fn route_queries(&mut self, vt: &[u8], out: &mut OutputQueue, replies: &mut Vec<u8>) {
+    /// Forward `vt`, acting on the watched sequences in it.
+    fn route_vt(&mut self, vt: &[u8], out: &mut OutputQueue, replies: &mut Vec<u8>) {
         let mut start = 0;
         let mut at = 0;
         while let Some(off) = vt[at..].iter().position(|&b| b == 0x1b) {
             let esc = at + off;
-            match query_at(&vt[esc..]) {
-                Query::Whole(len) => {
+            match watched_at(&vt[esc..]) {
+                Watched::Whole(len, Action::Answer) => {
                     self.forward(&vt[start..esc], out);
                     self.parser.advance(&mut self.grid, &vt[esc..esc + len]);
                     replies.extend(self.parser.take_responses());
                     start = esc + len;
-                    at = start;
                 }
-                Query::Prefix => {
+                Watched::Whole(len, Action::Reassert(modes)) => {
+                    self.forward(&vt[start..esc + len], out);
+                    self.forward(modes, out);
+                    start = esc + len;
+                }
+                Watched::Prefix => {
                     self.forward(&vt[start..esc], out);
                     self.held = vt[esc..].to_vec();
                     return;
                 }
-                Query::No => at = esc + 1,
+                Watched::No => {
+                    at = esc + 1;
+                    continue;
+                }
             }
+            at = start;
         }
         self.forward(&vt[start..], out);
+    }
+
+    /// Forward legacy output. Under WRAP_AT_EOL_OUTPUT a glyph in the last
+    /// column wraps at once, with CR LF, rather than waiting for the next
+    /// glyph (conhost `WriteCharsLegacy`). Each piece is short enough
+    /// that it cannot pass the margin: a byte moves the cursor at most
+    /// two columns.
+    fn forward_legacy(&mut self, vt: &[u8], wrap: bool, out: &mut OutputQueue) {
+        if !wrap {
+            return self.forward(vt, out);
+        }
+        let mut rest = vt;
+        while !rest.is_empty() {
+            let room = self.grid.cols.saturating_sub(self.grid.cursor.0 + 1) / 2;
+            let (piece, tail) = rest.split_at(room.clamp(1, rest.len()));
+            self.forward(piece, out);
+            if self.grid.cursor.0 >= self.grid.cols {
+                self.forward(b"\r\n", out);
+            }
+            rest = tail;
+        }
     }
 
     /// Send `vt` to the terminal and the Grid; the Grid's own answers to
@@ -190,48 +263,86 @@ impl Screen {
     }
 }
 
-/// How the bytes at an ESC relate to the host's queries.
-enum Query {
-    Whole(usize),
-    /// A strict prefix of a query: the next bytes decide.
+/// How the bytes at an ESC relate to the watched sequences.
+enum Watched {
+    Whole(usize, Action),
+    /// A strict prefix of one: the next bytes decide.
     Prefix,
     No,
 }
 
-fn query_at(rest: &[u8]) -> Query {
-    for q in QUERIES {
-        if rest.starts_with(q) {
-            return Query::Whole(q.len());
+fn watched_at(rest: &[u8]) -> Watched {
+    for (seq, action) in WATCHED {
+        if rest.starts_with(seq) {
+            return Watched::Whole(seq.len(), action);
         }
-        if q.starts_with(rest) {
-            return Query::Prefix;
+        if seq.starts_with(rest) {
+            return Watched::Prefix;
         }
     }
-    Query::No
+    Watched::No
 }
 
-/// One client byte under output `mode` (§5.4), written to `out`; returns
-/// its length, at most 3. Only C0 bytes change, so UTF-8 passes through
-/// whole however it is sliced. An LF gains a CR unless one came just
-/// before it (`after_cr`).
-fn transform(b: u8, mode: u32, after_cr: bool, out: &mut [u8; 4]) -> usize {
-    let processed = mode & PROCESSED_OUTPUT != 0;
-    let kept = match b {
-        0x20.. => true,
-        _ if !processed => false,
-        b'\n' if mode & DISABLE_NEWLINE_AUTO_RETURN == 0 && !after_cr => {
-            out[..2].copy_from_slice(b"\r\n");
-            return 2;
-        }
-        _ if mode & VIRTUAL_TERMINAL_PROCESSING != 0 => true,
-        0x07 | 0x08 | b'\t' | b'\n' | b'\r' => true,
-        _ => false,
-    };
-    if kept {
-        out[0] = b;
-        return 1;
+/// What one client byte becomes.
+struct Step {
+    bytes: [u8; 4],
+    len: usize,
+    /// The byte is a 0xC2 held for the next one.
+    c2: bool,
+}
+
+impl Step {
+    fn of(bytes: &[u8]) -> Step {
+        let mut step = Step {
+            bytes: [0; 4],
+            len: bytes.len(),
+            c2: false,
+        };
+        step.bytes[..bytes.len()].copy_from_slice(bytes);
+        step
     }
-    CP437_C0[usize::from(b)].encode_utf8(out).len()
+}
+
+/// One client byte under output `mode` (§5.4), at most 4 bytes out.
+/// Only C0, DEL and, without PROCESSED_OUTPUT, the C1 controls change
+/// (conhost `SanitizeUCS2`), so UTF-8 passes through whole however it
+/// is sliced. An LF gains a CR unless one came just before it in this
+/// write (`after_cr`). `c2` is a held 0xC2 lead, which a C1 control
+/// replaces and anything else follows.
+fn transform(b: u8, mode: u32, after_cr: bool, c2: bool) -> Step {
+    let processed = mode & PROCESSED_OUTPUT != 0;
+    let vt = processed && mode & VIRTUAL_TERMINAL_PROCESSING != 0;
+    if c2 && (0x80..0xA0).contains(&b) {
+        return Step::of(b"?");
+    }
+    let mut step = match b {
+        0xC2 if !processed => Step {
+            c2: true,
+            ..Step::of(&[])
+        },
+        0x7F if !vt => Step::of("⌂".as_bytes()),
+        0x20.. => Step::of(&[b]),
+        _ if !processed => glyph(b),
+        b'\n' if mode & DISABLE_NEWLINE_AUTO_RETURN == 0 && !after_cr => Step::of(b"\r\n"),
+        _ if vt => Step::of(&[b]),
+        0x07 | 0x08 | b'\t' | b'\n' | b'\r' => Step::of(&[b]),
+        _ => glyph(b),
+    };
+    if c2 {
+        // The held lead goes first; the byte after it is never 0xC2's
+        // partner, so it takes at most 3 bytes.
+        step.bytes.copy_within(..3, 1);
+        step.bytes[0] = 0xC2;
+        step.len += 1;
+    }
+    step
+}
+
+/// The CP437 glyph of C0 control `b`.
+fn glyph(b: u8) -> Step {
+    let mut bytes = [0u8; 4];
+    let len = CP437_C0[usize::from(b)].encode_utf8(&mut bytes).len();
+    Step::of(&bytes[..len])
 }
 
 /// ANSI index `n` (bit 0 red, bit 2 blue) as a Win32 colour nibble (bit 0
@@ -291,6 +402,10 @@ pub(super) fn sgr(attr: u16) -> Vec<u8> {
     let fg = swap((attr & 0xF) as u8);
     let bg = swap((attr >> 4 & 0xF) as u8);
     let mut params = vec!["0".to_string()];
+    // conhost's order (`VtIo` `formatAttributes`): reverse, then colours.
+    if attr & LVB_REVERSE_VIDEO != 0 {
+        params.push("7".into());
+    }
     if fg != 7 {
         params.push(color_param(fg, 30, 90));
     }
@@ -299,9 +414,6 @@ pub(super) fn sgr(attr: u16) -> Vec<u8> {
     }
     if attr & LVB_UNDERSCORE != 0 {
         params.push("4".into());
-    }
-    if attr & LVB_REVERSE_VIDEO != 0 {
-        params.push("7".into());
     }
     format!("\x1b[{}m", params.join(";")).into_bytes()
 }
@@ -330,7 +442,7 @@ mod tests {
         let mut out = OutputQueue::default();
         let mut replies = Vec::new();
         assert_eq!(
-            s.client(text, mode, usize::MAX, &mut out, &mut replies),
+            s.client(text, mode, usize::MAX, true, &mut out, &mut replies),
             text.len()
         );
         (out.take(), replies)
@@ -345,11 +457,8 @@ mod tests {
         let mut s = screen();
         let (vt, _) = client(&mut s, b"a\x1b[31mb\nc\r", VT);
         assert_eq!(vt, b"a\x1b[31mb\r\nc\r");
-        let (vt, _) = client(&mut s, b"\n\n", VT);
-        assert_eq!(
-            vt, b"\n\r\n",
-            "a CR just before, even in the last call, is enough"
-        );
+        let (vt, _) = client(&mut s, b"\n\r\n", VT);
+        assert_eq!(vt, b"\r\n\r\n", "only a CR in the same write counts");
         client(&mut s, b"\x1b[2;1H", VT);
         assert_eq!(row(&s, 1), "c         ");
         let (vt, _) = client(&mut s, b"\n", VT | DISABLE_NEWLINE_AUTO_RETURN);
@@ -385,7 +494,14 @@ mod tests {
         let mut s = screen();
         let mut out = OutputQueue::default();
         let mut replies = Vec::new();
-        let n = s.client(b"ab\x1bc", PROCESSED_OUTPUT, 4, &mut out, &mut replies);
+        let n = s.client(
+            b"ab\x1bc",
+            PROCESSED_OUTPUT,
+            4,
+            true,
+            &mut out,
+            &mut replies,
+        );
         assert_eq!(n, 2, "the ESC's three bytes would not fit");
         assert_eq!(out.take(), b"ab");
     }
@@ -437,6 +553,63 @@ mod tests {
     }
 
     #[test]
+    fn input_modes_the_host_needs_are_turned_back_on() {
+        let mut s = screen();
+        let (vt, _) = client(&mut s, b"\x1b[?9001l\x1b[?1004l", VT);
+        assert_eq!(vt, b"\x1b[?9001l\x1b[?9001h\x1b[?1004l\x1b[?1004h");
+        let (vt, _) = client(&mut s, b"x\x1bc", VT);
+        assert_eq!(vt, [&b"x\x1bc"[..], PREAMBLE].concat());
+        // Split across writes, it still counts.
+        assert_eq!(client(&mut s, b"\x1b[?90", VT).0, b"");
+        assert_eq!(client(&mut s, b"01l", VT).0, b"\x1b[?9001l\x1b[?9001h");
+    }
+
+    #[test]
+    fn legacy_output_wraps_at_once_at_the_margin() {
+        let mut s = screen();
+        let legacy = PROCESSED_OUTPUT | WRAP_AT_EOL_OUTPUT;
+        let (vt, _) = client(&mut s, b"0123456789ab", legacy);
+        assert_eq!(vt, b"0123456789\r\nab");
+        assert_eq!(s.cursor(), (2, 1));
+        let (vt, _) = client(&mut s, "\r漢字漢字漢".as_bytes(), legacy);
+        assert_eq!(vt, "\r漢字漢字漢\r\n".as_bytes());
+        assert_eq!(s.cursor(), (0, 2));
+        // VT output keeps the delayed wrap, and WRAP off never wraps.
+        let (vt, _) = client(&mut s, b"0123456789", VT);
+        assert_eq!((vt.as_slice(), s.cursor()), (&b"0123456789"[..], (9, 2)));
+        let (vt, _) = client(&mut s, b"\r0123456789ab", PROCESSED_OUTPUT);
+        assert_eq!(vt, b"\r0123456789ab");
+    }
+
+    #[test]
+    fn del_and_c1_show_as_glyphs_without_processing() {
+        let mut s = screen();
+        let (vt, _) = client(&mut s, "\u{7f}\u{9b}é".as_bytes(), 0);
+        assert_eq!(vt, "⌂?é".as_bytes());
+        // A C1 control split across writes, and DEL in each mode.
+        assert_eq!(client(&mut s, b"\xc2", 0).0, b"");
+        assert_eq!(client(&mut s, b"\x9b", 0).0, b"?");
+        assert_eq!(client(&mut s, b"\x7f", PROCESSED_OUTPUT).0, "⌂".as_bytes());
+        assert_eq!(client(&mut s, b"\x7f", VT).0, b"\x7f");
+        assert_eq!(
+            client(&mut s, "\u{9b}".as_bytes(), VT).0,
+            "\u{9b}".as_bytes()
+        );
+    }
+
+    #[test]
+    fn host_vt_and_flush_send_held_bytes_first() {
+        let mut s = screen();
+        client(&mut s, b"\xc2", 0);
+        let mut out = OutputQueue::default();
+        s.flush(&mut out);
+        assert_eq!(out.take(), b"\xc2");
+        client(&mut s, b"\x1b[", VT);
+        s.flush(&mut out);
+        assert_eq!(out.take(), b"\x1b[");
+    }
+
+    #[test]
     fn swap_is_its_own_inverse_for_all_16() {
         for n in 0..16 {
             assert_eq!(swap(swap(n)), n);
@@ -480,6 +653,8 @@ mod tests {
         }
         assert_eq!(sgr(0x07), b"\x1b[0m");
         assert_eq!(sgr(0x4E), b"\x1b[0;93;41m");
+        // conhost's own order: VtIoTests::SetConsoleTextAttribute.
+        assert_eq!(sgr(0x2D | LVB_REVERSE_VIDEO), b"\x1b[0;7;95;42m");
     }
 
     #[test]

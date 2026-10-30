@@ -392,8 +392,11 @@ Mode names drop the `ENABLE_` prefix. The classes are exclusive, and each row is
 | PROCESSED_OUTPUT off (VIRTUAL_TERMINAL_PROCESSING ignored) | any C0 control | its CP437 glyph |
 
 Two rules apply on top of the table:
-1. When PROCESSED_OUTPUT is on and DISABLE_NEWLINE_AUTO_RETURN is off, LF is emitted as CR LF.
+1. When PROCESSED_OUTPUT is on and DISABLE_NEWLINE_AUTO_RETURN is off, LF is emitted as CR LF, unless a CR came just before it in the same write.
 2. A change to WRAP_AT_EOL_OUTPUT emits `CSI ?7h` or `CSI ?7l`.
+3. Without VT processing (either legacy row), WRAP_AT_EOL_OUTPUT wraps as soon as the last column is written, and the host emits CR LF, as conhost's legacy path does. VT output keeps the delayed wrap.
+4. Without VT processing, DEL shows as `⌂`. With PROCESSED_OUTPUT off, the C1 controls also show as `?` (conhost `SanitizeUCS2`).
+5. Under VT processing, a client's `CSI ?9001l`, `CSI ?1004l` or RIS (`ESC c`) is forwarded and followed by `CSI ?9001h`, `CSI ?1004h` or both, as conhost does, so a nested ConPTY that exits can't turn off the input modes the host needs (§5.5).
 
 ### 5.5 Input and Ctrl events
 At startup the host emits `CSI ?9001h CSI ?1004h`, as inbox conhost does. This turns on win32-input-mode and focus reports, so Ctrl+Break and exact key records arrive from the terminal.
@@ -472,10 +475,11 @@ This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd,
 | V2 | SetConsoleScreenBufferInfoEx colours | changes the palette | no-op | no target program needs it |
 | V3 | Content and cursor after resize | one buffer, so one history | the host's model and the terminal's screen can differ after a shrink then grow, or a narrow then widen, until a redraw; absolute positioning then lands on different rows (§5.7) | the host keeps no scrollback, the terminal does; S3 measures it before Phase B |
 | V4 | Startup code page | OEM (e.g. 437) | 65001 | consumers are UTF-8 |
-| V5 | GetConsoleWindow | a hidden pseudo-window | NULL | add a message-only window if a program in the census needs it |
+| V5 | GetConsoleWindow | a hidden pseudo-window | NULL | add a message-only window if a program in the census needs it; conhost's source names cygwin, which fails silently on NULL, so cygwin and MSYS2 (git-bash tools) are in the census |
 | V6 | Multiple screen buffers (CREATE_OBJECT type 3, SetConsoleActiveScreenBuffer) | supported | STATUS_NOT_IMPLEMENTED | no target program uses them (edit.exe uses `?1049h`); build when the unknown-API log shows a real caller |
 | V7 | GenerateConsoleCtrlEvent for a group no client is in | falls back to the caller's parent process | `E_INVALIDARG`, nothing sent | the fallback serves console-less callers; our clients always carry their group |
 | V8 | Synthesized key records (plain VT input, not win32-input-mode) | scan codes from the layout; mouse reports become mouse records | scan code 0; mouse reports reach VT-input clients only | no target program reads scan codes or mouse records from a VT terminal; win32-input-mode carries both exactly |
+| V11 | DSR 5, CPR and DECXCPR from a client (§5.6) | under ConPTY never answered: the query goes to the terminal, whose CPR comes back as input | answered from the host's Grid, and the query is kept from the terminal | the answer then agrees with GetConsoleScreenBufferInfo even after a resize (V3), and a CPR never has to be told apart from a modified F3 key on input |
 
 The parity suite (§8) treats each of these as an expected difference.
 
@@ -615,6 +619,7 @@ Effects are applied after each `handle` call, in the order the core returned the
 | Waiting calls (reads and parked writes together) | 64 | READ_IO is submitted only while fewer than 64 calls wait, so further calls wait in the kernel and cost the host nothing |
 | Payload retained by parked calls | 1 MiB in total, **reserved before a packet is accepted** | READ_IO is submitted only while `parked + 64 KiB ≤ 1 MiB`, 64 KiB being the most variable input one packet can bring. A packet that then arrives always fits, so the cap is never overshot |
 | Variable input read per packet | 64 KiB | `STATUS_INVALID_PARAMETER` |
+| Answers to the host's own queries (§5.6) | they count against the 64 KiB client budget, so one turn builds at most 64 KiB plus one emission step's answers (64 KiB of 5-byte queries, 11-byte answers: about 141 KiB) | the next write waits for the reader to drain, as if its answers were output |
 | Read reply | the read's declared capacity, up to 1 MiB, and 1 MiB across the replies one call builds | a waiting read holds only its descriptor. Its reply is built when it completes and freed once written. A call that reaches the 1 MiB stops serving waiting reads; the next turns serve the rest before taking new input, without waiting for more |
 | Ctrl queue | 256 entries | coalescing: an entry equal to one already queued is dropped, and a queued `Close` for a pid drops later `C` or `Break` for it. Past 256 the new entry is dropped and logged once. Pushing never blocks the engine. Teardown doesn't depend on queued entries, because the engine closes the server at the deadline (§7.3) |
 
@@ -721,7 +726,7 @@ Each PR includes one change fragment and is reviewed by Dottius. Line counts inc
 | 1 | `condrv`. Covers: rootless Server open (the admitted `NtCreateFile`, its admission comment extended), relative opens through `sys::nt::open_relative`, the 5 IOCTLs through the admitted `DeviceIoControl`, `spawn_attached`, `send_ctrl` via `GetProcAddress`, `probe()`. Integration tests: open the server, spawn the probe, CONNECT/DISCONNECT round trip, Ctrl+C observed by the probe's exit code, `Unsupported` path. Acceptance: Windows run log | 450 | 2–3 |
 | 2 | `rusty_conhost` core plus runtime, output only. Covers: `msg`, `console`, output APIs and stubs (Appendix A), the engine loop with `sched`'s fairness tests (§7.2), the two lanes and the §7.4 caps with their stalled-reader and backpressure tests, panic path, `OwnPty`/`OwnPtyMaster`, the rusty_term key parsed but undocumented, the probe example, `cmd /c` fixtures. Interim: input is discarded with one log line, resize only updates the size, Drop closes the server and kills the child after 2 s | 1,150 | 6–8 |
 | 3 | Input. Covers: VT/win32-input-mode parser, raw passthrough, reply filter, waiting reads, input event, cooked ReadConsole, Ctrl+C/Break, process groups, GenerateConsoleCtrlEvent, 65001-only code pages. Interactive cmd works. As built: the ctrl worker and its queue land here, since Ctrl+C needs them; cooked editing is typing, Backspace, Escape and Enter, with the cursor keys, history and popups later | 700 | 3–4 |
-| 4 | Screen over Grid. Covers: rusty_term_core additions (§4.3, flagged), cursor/attribute/cursor-info APIs, SBI from the Grid, output-mode table, query routing (§5.6), resize (§5.7) with the V3 regression tests. pwsh/PSReadLine and edit.exe start work. As built: with VT processing off and PROCESSED_OUTPUT on, C0 controls other than the five keep their CP437 glyph; an LF right after a CR gains no second CR; DECXCPR (`CSI ? 6 n`) is answered with CPR; the start of a query at the end of a write is held for the next bytes; on the alternate screen the V3 tests show no divergence, since neither side keeps history there | 700 | 3–4 |
+| 4 | Screen over Grid. Covers: rusty_term_core additions (§4.3, flagged), cursor/attribute/cursor-info APIs, SBI from the Grid, output-mode table, query routing (§5.6), resize (§5.7) with the V3 regression tests. pwsh/PSReadLine and edit.exe start work. As built: with VT processing off and PROCESSED_OUTPUT on, C0 controls other than the five keep their CP437 glyph; §5.4 gained rules 3–5 from the conhost review (legacy wrap, DEL and C1, re-asserting the input modes); DECXCPR (`CSI ? 6 n`) is answered with CPR (V11); the start of a watched sequence at the end of a write is held for the next bytes, and goes out before host VT or at hang-up; on the alternate screen the V3 tests show no divergence, since neither side keeps history there | 700 | 3–4 |
 | 5 | rusty_term `OwnBackend` (§4.5), key documented. **Milestone** | 300 | 1–2 |
 | 6 | FillConsoleOutput, ScrollConsoleScreenBuffer. Clear-Host works | 450 | 2 |
 | 7 | Read/WriteConsoleOutput family, SBIEx, window/buffer size calls | 550 | 2–3 |
