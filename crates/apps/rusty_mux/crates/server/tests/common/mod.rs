@@ -111,6 +111,9 @@ pub struct Client {
     pub events: Vec<(Option<u64>, Event)>,
     /// The takeover token the Welcome gave, with `TAKEOVER`.
     pub token: Option<rusty_uuid::Uuid>,
+    /// Every `EchoAck` and `EchoMode`, each with how many bytes of its
+    /// block's output since attach had arrived before it.
+    pub echoes: Vec<(usize, Message)>,
 }
 
 impl Client {
@@ -145,6 +148,7 @@ impl Client {
             features: Features::NONE,
             events: Vec::new(),
             token: None,
+            echoes: Vec::new(),
         };
         client.send(&Message::Hello {
             features,
@@ -242,6 +246,10 @@ impl Client {
                     .or_default()
                     .extend_from_slice(data);
             }
+            Message::EchoAck { block, .. } | Message::EchoMode { block, .. } => {
+                let at = self.output.get(block).map_or(0, Vec::len);
+                self.echoes.push((at, message.clone()));
+            }
             _ => {}
         }
     }
@@ -307,7 +315,8 @@ impl Client {
         }
     }
 
-    pub fn input(&mut self, block: BlockId, data: &[u8]) {
+    /// Sends input; its request number.
+    pub fn input(&mut self, block: BlockId, data: &[u8]) -> u64 {
         let req = self.next_req;
         self.next_req += 1;
         self.send(&Message::Input {
@@ -315,6 +324,15 @@ impl Client {
             block,
             data: data.to_vec(),
         });
+        req
+    }
+
+    /// `block`'s raw output since attach.
+    pub fn output(&self, block: BlockId) -> &[u8] {
+        self.output
+            .get(&block)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     /// Reads until `block`'s output since attach contains `needle`.

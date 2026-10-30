@@ -56,7 +56,7 @@ So the ack below means: *every byte that reached the PTY master by at least
 your echo*. Only the client's screen comparison decides that, and it can
 still be wrong (see Residual errors).
 
-## Protocol (when built)
+## Protocol (built)
 
 One feature bit, `ECHO_ACK`, asked for on a block's connection. With it:
 
@@ -67,12 +67,17 @@ One feature bit, `ECHO_ACK`, asked for on a block's connection. With it:
   sends it from a timer too, so a key with no echo at all (a password)
   still gets its ack and the client can stop waiting.
 - **`EchoMode { block, mode }`**, server to client, on the block's
-  connection, whenever the mode changes and once after attach:
-  - `Kernel`: `ICANON` and `ECHO` on.
+  connection, whenever the mode changes and once after an attach or a
+  takeover that keeps one:
+  - `Kernel`: `ICANON` and `ECHO` on. As built, `ECHO` on with `ICANON`
+    off (`stty -icanon`) is `Kernel` too, since the line discipline still
+    echoes.
   - `Hidden`: `ICANON` on, `ECHO` off. This is `getpass`, `sudo`, `ssh`,
     `read -s`.
   - `Program`: `ICANON` off and `ECHO` off. The program draws its own echo.
   - `Unknown`: no termios to read (Windows ConPTY), or the read failed.
+    A Windows server still acks, but its drain only means the reader
+    thread has handed over nothing yet; no client predicts there.
 
   The server reads the slave's termios through the master (`tcgetattr`
   on the master fd; the same probe showed the master reporting the
@@ -80,6 +85,12 @@ One feature bit, `ECHO_ACK`, asked for on a block's connection. With it:
   before each `Input` write, and sends `EchoMode` ahead of that drain's
   Output frames when it changed. So a program that turns echo off and then
   prints its prompt has its mode change in the stream before the prompt.
+
+As built, the server reads the mode before forwarding each read, which
+covers every drain, and also on its 500 ms process poll, so a
+program that turns echo off and prints nothing (`read -s` with no prompt)
+is announced before the user types, not only before the first key's
+write.
 
 Nothing else changes: `Input` already carries a `req`, and only the client
 holding the block's lease can send it, so this client's keys are the only

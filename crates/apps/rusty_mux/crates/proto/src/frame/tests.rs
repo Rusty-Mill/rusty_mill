@@ -8,7 +8,7 @@ use rusty_wire::Writer;
 use super::*;
 use crate::field::Out;
 use crate::schema::Value;
-use crate::{Code, Cursor, Entry, Features, Launch, Program, Takeover};
+use crate::{Code, Cursor, Echo, Entry, Features, Launch, Program, Takeover};
 
 const REQ_ID: u32 = 1;
 
@@ -289,6 +289,23 @@ fn every_message_round_trips() {
         Message::Output {
             block,
             data: Vec::new(),
+        },
+        Message::EchoAck { block, req: 14 },
+        Message::EchoMode {
+            block,
+            mode: Echo::Kernel,
+        },
+        Message::EchoMode {
+            block,
+            mode: Echo::Hidden,
+        },
+        Message::EchoMode {
+            block,
+            mode: Echo::Program,
+        },
+        Message::EchoMode {
+            block,
+            mode: Echo::Unknown,
         },
     ];
     for message in messages {
@@ -816,6 +833,8 @@ fn feature_bits_are_distinct() {
         Features::CHECKPOINT_V4,
         Features::CHECKPOINT_V5,
         Features::CHECKPOINT_V6,
+        Features::TAKEOVER,
+        Features::ECHO_ACK,
     ];
     let mut seen = 0u64;
     for feature in all {
@@ -1090,4 +1109,19 @@ fn a_window_entry_from_an_older_server_has_no_layout() {
             ..
         }
     ));
+}
+
+#[test]
+fn an_unknown_echo_mode_decodes_as_unknown() {
+    let block = Uuid::new_v4();
+    let frame = raw_frame(0x8c, |out| {
+        out.uuid(4, block).varint(37, 9);
+    });
+    assert_eq!(
+        decode(&frame).expect("decode").map(|(m, _)| m),
+        Some(Message::EchoMode {
+            block: BlockId::from_uuid(block),
+            mode: Echo::Unknown,
+        })
+    );
 }

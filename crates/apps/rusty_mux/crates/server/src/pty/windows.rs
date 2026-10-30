@@ -21,6 +21,7 @@ use platform::process::{Child, Signal};
 use platform::pty::PtyMaster;
 use platform_windows::{WindowsChild, WindowsPty, WindowsPtyMaster};
 use rusty_mux_core::{ExitStatus, Size};
+use rusty_mux_proto::Echo;
 use rusty_tokio::sync::{mpsc, oneshot};
 
 use super::{GRACE, POLL, command, exit_status, to_io, win_size};
@@ -49,6 +50,22 @@ pub(crate) struct Pty {
     /// how much of it has been served.
     rest: RefCell<(Vec<u8>, usize)>,
     writes: mpsc::UnboundedSender<Write>,
+}
+
+/// The output receiver while a read awaits it. Dropping it, when the read
+/// ends or is cancelled, hands the receiver back unless the block was
+/// released meanwhile, so a released block's receiver is dropped.
+struct Lent<'a> {
+    pty: &'a Pty,
+    output: Option<mpsc::Receiver<Chunk>>,
+}
+
+impl Drop for Lent<'_> {
+    fn drop(&mut self) {
+        if !self.pty.released.get() {
+            self.pty.output.set(self.output.take());
+        }
+    }
 }
 
 /// A block's program, owned until it is reaped.
@@ -205,32 +222,60 @@ impl Drop for Process {
 
 impl Pty {
     /// Reads output; `Ok(0)` means the pseudo console closed or the block
-    /// was released.
+    /// was released. Cancelling it loses nothing.
     pub(crate) async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         if let Some(n) = self.take_rest(buf) {
             return Ok(n);
         }
-        // Taken out for the await, so no borrow spans it. A dropped read
-        // future drops the receiver too, which releases the block.
-        let Some(mut output) = self.output.take() else {
+        // Taken out for the await, so no borrow spans it, and put back when
+        // the read ends or is cancelled.
+        let Some(output) = self.output.take() else {
             return Ok(0);
         };
-        let chunk = output.recv().await;
+        let mut lent = Lent {
+            pty: self,
+            output: Some(output),
+        };
+        let Some(output) = lent.output.as_mut() else {
+            return Ok(0);
+        };
+        match output.recv().await {
+            None => Ok(0),
+            Some(chunk) => self.serve(chunk, buf),
+        }
+    }
+
+    /// Reads output without waiting; `None` means the reader thread has
+    /// handed over nothing yet. That is weaker than a drained Linux master,
+    /// since the thread may be inside a read, but no client predicts echo
+    /// here: the mode is always [`Echo::Unknown`].
+    pub(crate) fn try_read(&self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        if let Some(n) = self.take_rest(buf) {
+            return Ok(Some(n));
+        }
+        let Some(mut output) = self.output.take() else {
+            return Ok(Some(0));
+        };
+        let chunk = output.try_recv();
         if !self.released.get() {
             self.output.set(Some(output));
         }
         match chunk {
-            None => Ok(0),
-            Some(Err(err)) => Err(err),
-            Some(Ok(data)) => {
-                let n = data.len().min(buf.len());
-                buf[..n].copy_from_slice(&data[..n]);
-                if n < data.len() {
-                    *self.rest.borrow_mut() = (data, n);
-                }
-                Ok(n)
-            }
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Ok(Some(0)),
+            Ok(chunk) => self.serve(chunk, buf).map(Some),
         }
+    }
+
+    /// Copies a chunk into `buf`, keeping what does not fit for the next read.
+    fn serve(&self, chunk: Chunk, buf: &mut [u8]) -> io::Result<usize> {
+        let data = chunk?;
+        let n = data.len().min(buf.len());
+        buf[..n].copy_from_slice(&data[..n]);
+        if n < data.len() {
+            *self.rest.borrow_mut() = (data, n);
+        }
+        Ok(n)
     }
 
     fn take_rest(&self, buf: &mut [u8]) -> Option<usize> {
@@ -268,6 +313,11 @@ impl Pty {
     /// Fails once the console is closed, or while it is closing.
     pub(crate) fn resize(&self, size: Size) -> io::Result<()> {
         self.master.resize(win_size(size)).map_err(to_io)
+    }
+
+    /// A pseudo console has no termios to tell.
+    pub(crate) fn echo(&self) -> Echo {
+        Echo::Unknown
     }
 
     /// Unknown: a pseudo console has no foreground process group.

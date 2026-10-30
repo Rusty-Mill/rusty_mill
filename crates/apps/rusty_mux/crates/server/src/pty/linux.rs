@@ -10,6 +10,7 @@ use platform::process::{Child, Signal};
 use platform::pty::PtyMaster;
 use platform_linux::{LinuxChild, LinuxPty, LinuxPtyMaster};
 use rusty_mux_core::{ExitStatus, Size};
+use rusty_mux_proto::Echo;
 use rusty_tokio::io::AsyncFd;
 
 use super::{GRACE, POLL, command, exit_status, to_io, win_size};
@@ -112,7 +113,8 @@ impl Drop for Process {
 }
 
 impl Pty {
-    /// Reads output; `Ok(0)` means the program exited.
+    /// Reads output; `Ok(0)` means the program exited. Cancelling it loses
+    /// nothing.
     pub(crate) async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             let mut ready = self.master.readable().await?;
@@ -121,6 +123,16 @@ impl Pty {
                 Ok(result) => return result,
                 Err(_would_block) => continue,
             }
+        }
+    }
+
+    /// Reads output without waiting; `None` means the master held none, so
+    /// every byte the program wrote before this call has been read.
+    pub(crate) fn try_read(&self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        match self.master.get_ref().read(buf).map_err(to_io) {
+            Ok(n) => Ok(Some(n)),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(err) => Err(err),
         }
     }
 
@@ -146,6 +158,21 @@ impl Pty {
         let fd = self.master.get_ref().as_raw_fd();
         let pgrp = rusty_libc::termios::tcgetpgrp(fd).ok()?;
         u32::try_from(pgrp).ok().filter(|&p| p > 0)
+    }
+
+    /// Who echoes typing, from the program side's termios, which the master
+    /// reports.
+    pub(crate) fn echo(&self) -> Echo {
+        use rusty_libc::termios::{ECHO, ICANON, tcgetattr};
+        let Ok(termios) = tcgetattr(self.master.get_ref().as_raw_fd()) else {
+            return Echo::Unknown;
+        };
+        let flags = termios.c_lflag;
+        match (flags & ECHO != 0, flags & ICANON != 0) {
+            (true, _) => Echo::Kernel,
+            (false, true) => Echo::Hidden,
+            (false, false) => Echo::Program,
+        }
     }
 
     /// Nothing to do on Linux: the fd closes with the last handle, and an

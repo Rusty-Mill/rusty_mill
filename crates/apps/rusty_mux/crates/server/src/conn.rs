@@ -62,8 +62,13 @@ async fn serve(
         if !state.borrow().served_by(client, cancel) {
             return Ok(());
         }
-        if let Some((pty, data)) = State::request(state, client, message) {
-            pty.write_all(&data).await?;
+        let Some(write) = State::request(state, client, message) else {
+            continue;
+        };
+        write.pty.write_all(&write.data).await?;
+        if let Some(key) = write.key {
+            let now = std::time::Instant::now();
+            state.borrow_mut().written(client, cancel, key, now);
         }
     }
     Ok(())
