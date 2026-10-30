@@ -12,19 +12,22 @@ use std::str::Chars;
 /// The words of `line`: the program, then each argument. Empty when `line`
 /// holds only whitespace.
 ///
-/// The program follows `CreateProcessW`'s rule: quoted up to the next
-/// quote, or else up to the first space or tab, with no escapes. The
-/// arguments follow the MSVC runtime's: `2n` backslashes before a quote
-/// give `n` backslashes and the quote toggles quoting; `2n + 1` give `n`
-/// and a literal quote; `""` inside quotes is a literal quote; other
-/// backslashes are literal.
-pub(crate) fn split_command_line(line: &str) -> Vec<String> {
-    let mut chars = line.chars().peekable();
-    skip_blanks(&mut chars);
-    let Some(program) = next_program(&mut chars) else {
+/// The program follows `CreateProcessW`'s rule. Quoted, it runs to the next
+/// quote, with no escapes. Unquoted, it is the shortest prefix ending at a
+/// space or tab (or the whole line) for which `is_program` holds, so
+/// `C:\Program Files\x.exe -a` finds `x.exe`; when none does, it is the first
+/// word. The arguments follow the MSVC runtime's rules: `2n` backslashes
+/// before a quote give `n` backslashes and the quote toggles quoting;
+/// `2n + 1` give `n` and a literal quote; `""` inside quotes is a literal
+/// quote; other backslashes are literal.
+pub(crate) fn split_command_line(line: &str, is_program: impl Fn(&str) -> bool) -> Vec<String> {
+    let line = line.trim_start_matches(is_blank);
+    if line.is_empty() {
         return Vec::new();
-    };
-    let mut words = vec![program];
+    }
+    let (program, rest) = split_program(line, is_program);
+    let mut words = vec![program.to_owned()];
+    let mut chars = rest.chars().peekable();
     loop {
         skip_blanks(&mut chars);
         if chars.peek().is_none() {
@@ -42,12 +45,22 @@ fn skip_blanks(chars: &mut Peekable<Chars>) {
     while chars.next_if(|&c| is_blank(c)).is_some() {}
 }
 
-fn next_program(chars: &mut Peekable<Chars>) -> Option<String> {
-    chars.peek()?;
-    if chars.next_if_eq(&'"').is_some() {
-        return Some(chars.by_ref().take_while(|&c| c != '"').collect());
+/// `line`, which starts with a non-blank, as (program, the rest).
+fn split_program(line: &str, is_program: impl Fn(&str) -> bool) -> (&str, &str) {
+    if let Some(quoted) = line.strip_prefix('"') {
+        return match quoted.find('"') {
+            Some(end) => (&quoted[..end], &quoted[end + 1..]),
+            None => (quoted, ""),
+        };
     }
-    Some(chars.by_ref().take_while(|&c| !is_blank(c)).collect())
+    let first = line.find(is_blank).unwrap_or(line.len());
+    let end = line
+        .match_indices(is_blank)
+        .map(|(i, _)| i)
+        .chain(std::iter::once(line.len()))
+        .find(|&i| is_program(&line[..i]))
+        .unwrap_or(first);
+    line.split_at(end)
 }
 
 fn next_arg(chars: &mut Peekable<Chars>) -> String {
@@ -85,7 +98,12 @@ fn push_backslashes(chars: &mut Peekable<Chars>, arg: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use super::split_command_line as split;
+    use super::split_command_line;
+
+    /// Split with no program on disk: the program is the first word.
+    fn split(line: &str) -> Vec<String> {
+        split_command_line(line, |_| false)
+    }
 
     #[test]
     fn a_bare_program_is_one_word() {
@@ -140,6 +158,31 @@ mod tests {
     fn an_unclosed_quote_runs_to_the_end() {
         assert_eq!(split(r#"x "a b"#), ["x", "a b"]);
         assert_eq!(split(r#""C:\a b"#), [r"C:\a b"]);
+    }
+
+    #[test]
+    fn an_unquoted_program_is_the_shortest_prefix_that_exists() {
+        let pwsh = r"C:\Program Files\PowerShell\7\pwsh.exe";
+        let exists = |p: &str| p == pwsh;
+        assert_eq!(
+            split_command_line(&format!("{pwsh} -NoLogo"), exists),
+            [pwsh, "-NoLogo"]
+        );
+        assert_eq!(split_command_line(pwsh, exists), [pwsh]);
+        // The shortest wins, as CreateProcessW tries `C:\Program` first.
+        let short = |p: &str| p == r"C:\Program" || p == pwsh;
+        assert_eq!(
+            split_command_line(&format!("{pwsh} -NoLogo"), short),
+            [r"C:\Program", r"Files\PowerShell\7\pwsh.exe", "-NoLogo"]
+        );
+    }
+
+    #[test]
+    fn with_no_program_found_the_first_word_is_the_program() {
+        assert_eq!(
+            split(r"C:\Program Files\x.exe -a"),
+            [r"C:\Program", r"Files\x.exe", "-a"]
+        );
     }
 
     #[test]

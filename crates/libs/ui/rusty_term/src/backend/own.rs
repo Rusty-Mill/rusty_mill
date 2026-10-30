@@ -8,7 +8,9 @@
 //!
 //! This module is only compiled on Windows (gated in `backend/mod.rs`).
 
+use std::ffi::OsStr;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -41,23 +43,20 @@ impl Backend for OwnBackend {
         rows: u16,
         shell: Option<&str>,
         args: &[String],
-        cwd: Option<&std::path::Path>,
+        cwd: Option<&Path>,
     ) -> Result<Box<dyn BackendHandle>, io::Error> {
         let shell = shell_or_default(shell);
-        // A path that names a file is the program whole, spaces and all, as
-        // in the ConPTY backend. Otherwise split it as CreateProcessW would.
-        let mut words = if std::path::Path::new(&shell).is_file() {
-            vec![shell.clone()]
-        } else {
-            split_command_line(&shell)
-        };
+        let mut words = split_command_line(&shell, |p| locate(p).is_some());
         if words.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("rusty_term: no program in the shell `{shell}`"),
             ));
         }
-        let program = words.remove(0);
+        let word = words.remove(0);
+        // `Command`'s own search is PATH only; what CreateProcessW finds
+        // before PATH is passed as a full path.
+        let program = locate(&word).map_or_else(|| word.into(), PathBuf::into_os_string);
         let cwd = match cwd {
             Some(dir) => dir.to_path_buf(),
             None => std::env::current_dir()?,
@@ -171,6 +170,49 @@ fn exited_within(child: &mut WindowsChild, grace: Duration) -> Option<ExitStatus
     }
 }
 
+/// Where `CreateProcessW` finds `program` before it searches PATH, as a
+/// full path. A name with a directory part is looked up from our current
+/// directory; a bare name in rusty_term's own directory, the current
+/// directory, System32, then the Windows directory. Each place is tried as
+/// given, then with `.exe` added when the name has no extension. `None`
+/// leaves the name to `Command`'s PATH search.
+fn locate(program: &str) -> Option<PathBuf> {
+    let path = Path::new(program);
+    let bare = !program.contains(['\\', '/', ':']);
+    let dirs = if bare {
+        search_dirs()
+    } else {
+        vec![PathBuf::new()]
+    };
+    dirs.iter()
+        .flat_map(|dir| with_exe(dir.join(path)))
+        .find(|candidate| candidate.is_file())
+        .and_then(|found| std::path::absolute(found).ok())
+}
+
+/// `path`, then `path.exe` when it has no extension.
+fn with_exe(path: PathBuf) -> impl Iterator<Item = PathBuf> {
+    let exe = path.extension().is_none().then(|| {
+        let mut name = path.clone().into_os_string();
+        name.push(OsStr::new(".exe"));
+        PathBuf::from(name)
+    });
+    std::iter::once(path).chain(exe)
+}
+
+/// The places `CreateProcessW` searches for a bare name before PATH.
+fn search_dirs() -> Vec<PathBuf> {
+    let own = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let windows = std::env::var_os("SystemRoot").map(PathBuf::from);
+    own.into_iter()
+        .chain(std::env::current_dir().ok())
+        .chain(windows.as_ref().map(|dir| dir.join("System32")))
+        .chain(windows)
+        .collect()
+}
+
 /// A platform error as an `io::Error`, keeping its message and the kinds
 /// the runtime tells apart.
 fn to_io(e: PlatformError) -> io::Error {
@@ -257,6 +299,58 @@ mod tests {
         h.write(b"exit 3\r").expect("write exit");
         h.exit_token().expect("exit token")();
         assert_eq!(h.reap_exit_status(), Some(3));
+    }
+
+    /// Dropping the original hangs up: a child still running gets
+    /// CTRL_CLOSE, or is killed after the grace, and Drop returns soon after.
+    #[test]
+    fn dropping_the_original_ends_a_running_child() {
+        let h = OwnBackend
+            .spawn_shell(80, 24, Some("ping.exe -n 60 127.0.0.1"), &[], None)
+            .expect("spawn");
+        let exited = h.exit_token().expect("exit token");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            exited();
+            let _ = tx.send(());
+        });
+        let start = Instant::now();
+        drop(h);
+        assert!(start.elapsed() < Duration::from_secs(5), "Drop is bounded");
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the child ended after the hang-up");
+    }
+
+    /// A program named by a full path with spaces, followed by arguments,
+    /// is found as CreateProcessW finds it.
+    #[test]
+    fn an_unquoted_path_with_spaces_runs() {
+        let windir = std::env::var("SystemRoot").expect("SystemRoot");
+        let dir = std::env::temp_dir().join("rusty term own host");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let cmd = dir.join("cmd copy.exe");
+        std::fs::copy(format!(r"{windir}\System32\cmd.exe"), &cmd).expect("copy cmd");
+        let shell = format!("{} /c exit 4", cmd.display());
+        let mut h = OwnBackend
+            .spawn_shell(80, 24, Some(&shell), &[], None)
+            .expect("spawn by an unquoted path with spaces");
+        h.exit_token().expect("exit token")();
+        assert_eq!(h.reap_exit_status(), Some(4));
+        drop(h);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn locate_finds_system_programs_and_adds_exe() {
+        let found = super::locate("cmd").expect("cmd is in System32");
+        assert!(found.is_absolute());
+        assert!(
+            found
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .ends_with(r"\cmd.exe")
+        );
+        assert!(super::locate("no-such-program-rusty").is_none());
     }
 
     /// A clone owns no child: no exit token, no status.

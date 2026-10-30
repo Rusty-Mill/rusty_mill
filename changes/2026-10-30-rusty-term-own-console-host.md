@@ -14,8 +14,8 @@ changelog: rusty_term can run Windows shells on our own console host, rusty_conh
   silent fallback to ConPTY.
 - **Known limitations:** with `own`, the `shell` string is split into a
   program and arguments by `CreateProcessW`'s rules, and each argument is
-  quoted again. A program that parses its command line in an unusual way
-  can see different quoting from what ConPTY would give it. The web bridge
+  quoted again. Programs that read their command line raw, cmd.exe above
+  all, can see different quoting from what ConPTY would give them. The web bridge
   always uses ConPTY. The console host does not yet serve
   FillConsoleOutput, ScrollConsoleScreenBuffer, the
   Read/WriteConsoleOutput family or code pages other than 65001 (§10 PRs 6,
