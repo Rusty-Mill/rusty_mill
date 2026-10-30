@@ -120,11 +120,22 @@ reach its own client record.
 
 ## Receiving and roaming
 
-- The server looks up `id`. An unknown `id`, a failed tag or a `seq` outside
-  the replay window means the datagram is dropped with no reply and only a
-  counter is kept. The replay window is a 1024-bit bitmap below the highest
-  `seq` seen. An unauthenticated sender therefore gets nothing back, so the
-  port cannot be used for amplification or as a scanner's oracle.
+- Each side checks, in this order, before any state changes:
+  1. **Direction.** The top bit of `seq` must be the incoming one: 0 at the
+     server, 1 at the client. Both directions share one key, so without this
+     check a server datagram reflected back to the server would open
+     correctly.
+  2. **`id`.** The server looks up the association; the client compares the
+     `id` with its own.
+  3. **Tag.**
+  4. **Replay window.** This is a 1024-bit bitmap below the highest `seq`
+     seen.
+
+  A datagram that fails any check is dropped with no reply, and only a
+  counter is kept. Only one that passes all four touches the replay window,
+  the peer address, acks or stream data. An unauthenticated sender therefore
+  gets nothing back, so the port cannot be used for amplification or as a
+  scanner's oracle.
 - The server sends to the source address of the authenticated datagram with
   the **highest** `seq` so far. A roam takes effect on the client's next
   datagram, and a late datagram from the old address cannot move the server
@@ -161,12 +172,33 @@ ordering, acks and flow control belong to each stream.
   write before reading the next request. Data already acknowledged is never
   dropped. While the window is closed, the sender probes it once per RTO.
 - **Send bounds:** on the server, bytes unacked or held back by a closed
-  window count against the outbox's existing 8 MiB budget. A client that
-  cannot keep up is dropped exactly as today, and it recovers from the
-  snapshot when it reattaches. On the client, a write blocks once 1 MiB is
-  queued on a stream, as a socket write blocks.
+  window count against the outbox's existing 8 MiB budget. On the client, a
+  write blocks once 1 MiB is queued on a stream, as a socket write blocks.
 - **Association bounds:** at most 64 open streams, and at most 1024
   associations per server. An `OpenDatagram` past that limit is refused.
+
+## Overflow and catch-up
+
+A stream is never resynchronized in place. Its bytes either arrive complete
+and in order, or the stream is closed. Catching up always happens on a new
+stream, through the existing takeover, resume and attach path.
+
+- When a stream's server-side bytes pass the 8 MiB budget, the server evicts
+  that stream's connection exactly as it evicts a socket connection today:
+  the stream is closed and its queued bytes are discarded. This happens, for
+  example, to a fast-printing block while the path is dead or the laptop
+  sleeps. The client record is not dropped. As with any `TAKEOVER` client
+  whose connection ends, it becomes an orphan and waits out its grace: 30 s
+  under option A, `--udp-idle` under option B.
+- When the client returns, it opens a new stream and takes its client over
+  with its token. Its Hello carries its event cursor. If that cursor is still
+  in the server's recent history, the missed events are replayed. If it is
+  not, the Welcome does not echo it, and the client refetches state as a new
+  client does today. Attaching re-sends each block's screen as a checkpoint,
+  so the screen is current whatever was discarded.
+- Silence without overflow behaves the same way, minus the eviction: the
+  stream survives, the server retransmits when the client is heard again,
+  and nothing is replayed.
 
 ## Where it lives
 
@@ -200,11 +232,13 @@ association's `Close`, ends its connections as a socket close does.
   ended, the usual 30 s grace follows, and then the association is dropped.
   After that the client must log in again over SSH, as `--ssh` reconnect
   already does (BatchMode, so it needs an agent or key).
-- **B, as mosh does (proposed).** The association, its streams and their
-  clients survive silence for up to 24 h, set with `--udp-idle`. The
-  **lease** is released after the existing 30 s, so other clients can type.
-  On return the client carries on with no SSH, retakes the lease if it is
-  free, and catches up from history or a snapshot.
+- **B, as mosh does (proposed).** The association, and its clients (live or
+  orphaned after an overflow), survive silence for up to 24 h, set with
+  `--udp-idle`. The **lease** is released after the existing 30 s, so other
+  clients can type. On return the client carries on with no SSH, retakes the
+  lease if it is free, and catches up as described under Overflow and
+  catch-up. The 8 MiB budget is unchanged under either option. The longer
+  retention keeps the client record and the association, not the output.
 
 ## Tests (when built)
 
@@ -213,8 +247,9 @@ association's `Close`, ends its connections as a socket close does.
   both directions. The tests also check:
   - a stalled reader in either direction closes the window, the sender's
     memory stays bounded, and nothing acknowledged is lost;
-  - a forged tag, a wrong `id` and a replayed `seq` are each dropped without
-    a reply;
+  - a forged tag, a wrong `id`, a replayed `seq` and a datagram reflected
+    back to its sender (wrong direction) are each dropped without a reply,
+    and leave the replay window, peer address and stream state unchanged;
   - the reply address follows the highest `seq`;
   - the RTO and window respond to loss.
 - **Server and client, end to end on loopback:**
@@ -225,6 +260,9 @@ association's `Close`, ends its connections as a socket close does.
     mid-move, or with the Welcome lost, the client ends with its own client
     record over UDP or a fresh SSH connection. A late Hello does the same.
   - After SSH has stopped, a split shows a new block on a new stream.
+  - A block that prints more than 8 MiB while the path is dead: its stream is
+    evicted, the client stays, and on return the client resumes on a new
+    stream with the current screen.
   - A captured trace contains no typed plaintext.
   - Silence beyond the lifetime chosen in question 1 ends the association.
 - **Over a real local sshd,** as in #1236 and #1239: bootstrap, SSH stops
