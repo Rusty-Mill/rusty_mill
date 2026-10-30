@@ -236,14 +236,13 @@ mod tests {
     fn malformed_plaintext_is_refused_whole() {
         let mut w = Writer::new();
         Chunk::Probe.encode(&mut w);
-        let mut bytes = w.into_vec();
+        let bytes = w.into_vec();
         for bad in [vec![0x7f], vec![DATA, 0, 0, 5, b'x'], vec![ACK, 0, 0, 0, 5]] {
             let mut plain = bytes.clone();
             plain.extend(bad);
             assert_eq!(Chunk::decode_all(&plain), None, "{plain:?}");
         }
         // Data whose end would pass u64::MAX.
-        bytes.clear();
         let mut w = Writer::new();
         Chunk::Data {
             stream: 0,
