@@ -25,11 +25,21 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
 .tag.proj{border-color:var(--acc)}
 .tag.p5{border-color:var(--err);color:var(--err)}.tag.p3{border-color:var(--acc);color:var(--acc)}
-#view[aria-pressed=true]{background:var(--acc);color:#fff}
+#view[aria-pressed=true],#metrics[aria-pressed=true]{background:var(--acc);color:#fff}
 main.roadmap{grid-auto-flow:row;grid-template-columns:repeat(5,minmax(190px,1fr));align-content:start}
 .roadmap h3{grid-column:1/-1;margin:0;font-size:15px}
 @media (max-width:640px){main.roadmap{grid-template-columns:minmax(0,1fr)}}
 .roadmap .card{cursor:pointer}
+main.metrics{grid-auto-flow:row;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));align-content:start}
+.metrics h3,.kpis{grid-column:1/-1;margin:0;font-size:15px}
+.kpis{display:flex;flex-wrap:wrap;gap:10px}
+.kpi{background:var(--panel);border-radius:8px;padding:8px 12px;min-width:120px;color:var(--mute);font-size:12px}
+.kpi b{display:block;color:var(--ink);font-size:22px;font-variant-numeric:tabular-nums}
+.bar{display:grid;grid-template-columns:minmax(0,8em) 1fr 2.5em;gap:6px;align-items:center;margin:4px}
+.bar>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar>span:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.bar i{display:block;height:10px;min-width:1px;border-radius:3px;background:var(--fill,var(--acc))}
+.metrics .card{cursor:pointer}
 :root{--al:40%}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){--al:66%}}
 .card.claimed{border-left:4px solid var(--ag);background:color-mix(in srgb,var(--ag) 9%,var(--card))}
@@ -83,6 +93,7 @@ dialog form{display:grid;gap:8px}
   <button id="toggle" aria-label="toggle repositories panel" title="Repositories">&#9776;</button>
   <h1>Mill Board</h1>
   <button id="view" aria-pressed="false" title="Show the chosen project's roadmap">Roadmap</button>
+  <button id="metrics" aria-pressed="false" title="Show metrics for the chosen repository or project, or the whole board">Metrics</button>
   <input id="actor" placeholder="your name" size="12" aria-label="actor name">
   <select id="role" aria-label="role"></select>
   <input id="title" placeholder="New card title" size="26" aria-label="new card title">
@@ -180,8 +191,9 @@ const priorityTag=k=>k.priority?[el("span",PRIORITY[k.priority],"tag p"+k.priori
 
 function render(){
   if(view==="roadmap"){renderRoadmap();return}
-  mapSeq++;   // drop any roadmap still loading
-  const b=$("board");b.classList.remove("roadmap");b.replaceChildren();
+  if(view==="metrics"){renderMetrics();return}
+  mapSeq++;   // drop any roadmap or metrics still loading
+  const b=$("board");b.classList.remove("roadmap","metrics");b.replaceChildren();
   for(const c of COLS){
     const col=el("section",null,"col");col.dataset.col=c;col.append(el("h2",c));
     col.ondragover=e=>{e.preventDefault();col.classList.add("over")};
@@ -211,9 +223,10 @@ function render(){
 
 /* The roadmap: the chosen project's cards in lanes (now, next, later, blocked, shipped), laid out
    by the server's board_roadmap so the rules live in one place. Re-read whenever the board is. */
-let view=pref("view")==="roadmap"?"roadmap":"board",mapSeq=0;
+let view=["roadmap","metrics"].includes(pref("view"))?pref("view"):"board",mapSeq=0;
 const LANE_HINT={now:"building, qa, review",next:"ready",later:"backlog",blocked:"blocked",shipped:"done, last 30 days"};
-function setView(v){view=v;pref("view",v);$("view").setAttribute("aria-pressed",v==="roadmap");render()}
+const pressed=()=>{$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics")};
+function setView(v){view=v;pref("view",v);pressed();render()}
 // The chosen project, else the chosen repository's own, else `default`, else the first this credential may see.
 const roadmapProject=()=>[sel.project,sel.repo,"default",...projects()].find(p=>p&&projects().includes(p));
 async function renderRoadmap(){
@@ -223,9 +236,9 @@ async function renderRoadmap(){
   try{
     if(!project)throw new Error("No project to show a roadmap for.");
     map=await api("board_roadmap",{project});
-  }catch(e){if(!stale()){b.classList.remove("roadmap");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  }catch(e){if(!stale()){b.classList.remove("roadmap","metrics");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
-  b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
+  b.classList.remove("metrics");b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
   for(const l of map.lanes){
     const col=el("section",null,"col");col.dataset.lane=l.lane;
     const h=el("h2",l.lane+" · "+l.cards.length);h.title=LANE_HINT[l.lane];col.append(h);
@@ -242,6 +255,54 @@ async function renderRoadmap(){
     }
     b.append(col);
   }
+  renderSide();syncDialog();
+}
+
+/* Metrics: counts, flow and lead time for the chosen project, else the chosen repository, else everything
+   this credential may see, computed by the server's board_metrics. Re-read whenever the board is. */
+const DAY=864e5,dur=ms=>ms==null?"–":ms<DAY?Math.round(ms/36e5)+"h":(ms/DAY).toFixed(ms<10*DAY?1:0)+"d";
+const day=ms=>new Date(ms).toLocaleDateString(undefined,{month:"short",day:"numeric"});
+// A panel of labelled bars: rows are {label, n, title?, fill?}; `max` lets two panels share a scale.
+function bars(title,rows,hint,max=Math.max(1,...rows.map(r=>r.n))){
+  const s=el("section",null,"col"),h=el("h2",title);if(hint)h.title=hint;s.append(h);
+  for(const r of rows){
+    const row=el("div",null,"bar"),f=el("i"),t=el("span");f.style.width=(r.n/max*100)+"%";
+    if(r.fill)f.style.setProperty("--fill",r.fill);if(r.title)row.title=r.title;
+    t.append(f);row.append(el("span",r.label),t,el("span",String(r.n)));s.append(row);
+  }
+  if(!rows.length)s.append(el("p","None.","meta"));
+  return s;
+}
+async function renderMetrics(){
+  const seq=++mapSeq,b=$("board"),stale=()=>seq!==mapSeq||view!=="metrics";
+  const args=sel.project?{project:sel.project}:sel.repo?{repo:sel.repo}:{};
+  let m;
+  try{m=await api("board_metrics",args)}
+  catch(e){if(!stale()){b.classList.remove("roadmap","metrics");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  if(stale())return;
+  const n=c=>m.by_column.find(t=>t.key===c)?.count??0,lt=m.lead_time;
+  const kpis=el("div",null,"kpis");
+  for(const [v,l,t] of [[m.open,"open"],[RUNNING.reduce((a,c)=>a+n(c),0),"in progress","building, qa, review"],[n("blocked"),"blocked"],
+    [lt.shipped,"shipped, 30 days"],[dur(lt.median_ms),"median lead time","created to shipped, last 30 days"],[dur(lt.p85_ms),"85% within","created to shipped, last 30 days"]]){
+    const k=el("div",null,"kpi");k.append(el("b",String(v)),l);if(t)k.title=t;kpis.append(k);
+  }
+  const wmax=Math.max(1,...m.weeks.flatMap(w=>[w.added,w.done]));
+  const idle=el("section",null,"col");idle.append(el("h2","idle longest"));
+  for(const k of m.idle){
+    const d=el("div",null,"card");d.append(...heading(k));
+    d.append(el("div",[k.column,"idle "+dur(k.idle_ms),...(k.claim?[k.claim]:[]),...(sel.project?[]:[label(k.project)])].join(" · "),"meta"));
+    d.onclick=()=>show(k.id);idle.append(d);
+  }
+  if(!m.idle.length)idle.append(el("p","Nothing past backlog is open.","meta"));
+  b.classList.remove("roadmap");b.classList.add("metrics");
+  b.replaceChildren(el("h3","Metrics · "+(sel.project?label(sel.project):sel.repo||"all projects")),kpis,
+    bars("added per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.added})),"cards created, the current week last",wmax),
+    bars("shipped per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.done})),"cards done, the current week last",wmax),
+    bars("open by column",m.by_column.map(t=>({label:t.key,n:t.count}))),
+    bars("open by priority",m.by_priority.map(t=>({label:PRIORITY[t.key],n:t.count}))),
+    ...(sel.project?[]:[bars("open by project",m.by_project.map(p=>({label:label(p.project),n:p.open,title:p.shipped+" shipped in 30 days"})))]),
+    bars("in progress by agent",m.by_claim.map(t=>({label:t.key,n:t.count,fill:agentColor(t.key)})),"claimed cards in building, qa or review"),
+    idle);
   renderSide();syncDialog();
 }
 
@@ -574,7 +635,8 @@ async function loadMeta(){
   if(r in repos&&(!p||repos[r].includes(p)))sel={repo:r,project:p||"",agent:""};
   $("actor").onchange=()=>pref("actor",$("actor").value);$("role").onchange=()=>pref("role",$("role").value);
   $("gear").onclick=openSettings;
-  $("view").onclick=()=>setView(view==="roadmap"?"board":"roadmap");$("view").setAttribute("aria-pressed",view==="roadmap");
+  $("view").onclick=()=>setView(view==="roadmap"?"board":"roadmap");
+  $("metrics").onclick=()=>setView(view==="metrics"?"board":"metrics");pressed();
   $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
   $("toggle").onclick=()=>{pref("side",pref("side")==="0"?"1":"0");renderSide()};
   // New cards go to the chosen project, else to the chosen repository's own project.

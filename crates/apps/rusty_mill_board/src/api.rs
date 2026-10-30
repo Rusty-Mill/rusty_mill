@@ -169,6 +169,14 @@ struct RoadmapArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct MetricsArgs {
+    /// Only this project (see `board_projects`).
+    project: Option<String>,
+    /// Only this repository's projects.
+    repo: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct OwnsArgs {
     /// The project (see `board_projects`).
     project: String,
@@ -423,6 +431,26 @@ pub fn ops() -> Vec<Op> {
             |b, i, a: RoadmapArgs| {
                 checked_project(b, scope(i), Some(&a.project))?;
                 to_json(b.roadmap(&a.project)?)
+            },
+        ),
+        op(
+            "board_metrics",
+            "Board metrics over the cards the caller may see, optionally one project or one repository's projects: open cards by column, project (with shipped in the last 30 days), priority and claimant (building, qa, review); cards added and shipped per week for 8 weeks, oldest first; created-to-shipped lead time (median, p85, ms) over the last 30 days; and the 5 open cards past backlog idle longest. {open, by_column, by_project, by_priority, by_claim, weeks, lead_time, idle}.",
+            |b, i, a: MetricsArgs| {
+                checked_project(b, scope(i), a.project.as_deref())?;
+                let projects = b.projects();
+                if let Some(r) = a.repo.as_deref()
+                    && !projects.repos().any(|(name, _)| name == r)
+                {
+                    return Err(BoardError::Invalid("unknown repository"));
+                }
+                to_json(b.metrics(|c| {
+                    in_scope(scope(i), &c.project)
+                        && a.project.as_deref().is_none_or(|p| c.project == p)
+                        && a.repo
+                            .as_deref()
+                            .is_none_or(|r| projects.repo_of(&c.project) == Some(r))
+                })?)
             },
         ),
         op(
@@ -1091,6 +1119,59 @@ mod tests {
                 json!({"project": "rl"})
             ),
             Err(CallError::Board(BoardError::OutOfScope(_)))
+        ));
+    }
+    #[test]
+    fn metrics_narrow_to_scope_project_and_repo() {
+        use crate::projects::Projects;
+        let projects =
+            Projects::parse(r#"{"repos": {"games": {"rl": ["a"]}, "tools": {"orch": ["b"]}}}"#)
+                .expect("projects");
+        let board: Shared = Board::new(
+            Box::new(MemStore::default()) as Box<dyn Store>,
+            Roles::default(),
+        )
+        .with_projects(projects);
+        let human = ident("nano", "human");
+        for project in ["rl", "rl", "orch"] {
+            call_as(
+                &board,
+                Some(&human),
+                "card_add",
+                json!({"title": "c", "project": project}),
+            )
+            .expect("add");
+        }
+        let open = |who: &Identity, args: Value| {
+            call_as(&board, Some(who), "board_metrics", args).expect("metrics")["open"].clone()
+        };
+        assert_eq!(open(&human, json!({})), 3);
+        assert_eq!(open(&human, json!({"project": "rl"})), 2);
+        assert_eq!(open(&human, json!({"repo": "games"})), 2);
+        let mut dev = ident("claude", "builder");
+        dev.projects = Some(vec!["orch".into()]);
+        assert_eq!(
+            open(&dev, json!({})),
+            1,
+            "out-of-scope cards are not counted"
+        );
+        assert!(matches!(
+            call_as(
+                &board,
+                Some(&dev),
+                "board_metrics",
+                json!({"project": "rl"})
+            ),
+            Err(CallError::Board(BoardError::OutOfScope(_)))
+        ));
+        assert!(matches!(
+            call_as(
+                &board,
+                Some(&human),
+                "board_metrics",
+                json!({"repo": "nope"})
+            ),
+            Err(CallError::Board(BoardError::Invalid("unknown repository")))
         ));
     }
 }

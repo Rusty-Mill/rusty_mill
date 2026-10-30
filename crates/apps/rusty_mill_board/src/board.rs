@@ -13,6 +13,7 @@ use crate::domain::{
     Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind, ExecutionLink,
     MoveRules, WORK_QUEUES, actionable, entry_column, import_id, text_hash,
 };
+use crate::metrics::{Metrics, metrics};
 use crate::projects::Projects;
 use crate::roadmap::{Roadmap, roadmap};
 use crate::store::Store;
@@ -281,6 +282,17 @@ impl<S: Store> Board<S> {
     /// If the store fails.
     pub fn roadmap(&self, project: &str) -> Result<Roadmap, BoardError> {
         Ok(roadmap(&self.store.list()?, project, (self.clock)()))
+    }
+
+    /// The metrics, as of now, of the cards `keep` selects (see
+    /// [`metrics`](crate::metrics::metrics)).
+    ///
+    /// # Errors
+    /// If the store fails.
+    pub fn metrics(&self, keep: impl Fn(&Card) -> bool) -> Result<Metrics, BoardError> {
+        let mut cards = self.store.list()?;
+        cards.retain(|c| keep(c));
+        Ok(metrics(&cards, (self.clock)()))
     }
 
     /// One card.
