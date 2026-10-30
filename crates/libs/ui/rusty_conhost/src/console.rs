@@ -699,6 +699,9 @@ impl Console {
         self.reads_cut = false;
         self.writes_cut = false;
         self.parked = 0;
+        // Reset the input-available event while the server can still be
+        // reached: after CloseServer the engine drops every effect.
+        self.sync_input_available(fx);
         fx.push(Effect::CloseServer);
         fx.push(Effect::Eof);
     }
@@ -1722,6 +1725,25 @@ pub(crate) mod tests {
         assert!(!fx.iter().any(|e| matches!(e, Effect::CtrlGone { .. })));
         let (_, fx) = h.packet(msg::DISCONNECT, b, 0, &[], 0);
         assert!(fx.contains(&Effect::CtrlGone { pid: 5 }));
+    }
+
+    #[test]
+    fn closing_with_unread_input_resets_the_event_before_closing() {
+        let mut h = Host::new();
+        let [a, ..] = h.connect(1, "");
+        assert_eq!(h.ev(Event::Input(b"x")), [Effect::SetInputAvailable(true)]);
+        let (r, fx) = h.packet(msg::DISCONNECT, a, 0, &[], 0);
+        assert_eq!(
+            fx,
+            [
+                Effect::CtrlGone { pid: 1 },
+                Effect::Reply(r),
+                Effect::SetInputAvailable(false),
+                Effect::CloseServer,
+                Effect::Eof
+            ],
+            "nothing follows CloseServer but Eof"
+        );
     }
 
     #[test]
