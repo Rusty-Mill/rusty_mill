@@ -135,7 +135,7 @@ fn draw(frame: &mut Frame, rect: Rect, grid: &Grid) {
     }
 }
 
-/// Draws `overlay`'s cells, underlined, into `rect` where they fit on a
+/// Draws `overlay`'s cells, characters underlined, into `rect` where they fit on a
 /// single-width cell of `grid`; returns the predicted cursor, if inside
 /// `rect`.
 fn predict(frame: &mut Frame, rect: Rect, grid: &Grid, overlay: &Overlay) -> Option<(u16, u16)> {
@@ -153,11 +153,16 @@ fn predict(frame: &mut Frame, rect: Rect, grid: &Grid, overlay: &Overlay) -> Opt
         }
         let i = frame.index(rect.x + x as u16, y);
         let style = frame.cells[i].style;
-        let style = Style {
-            attrs: style.attrs | ATTR_UNDERLINE,
-            ..style
+        frame.cells[i] = match ch {
+            Some(ch) => Glyph::plain(
+                ch,
+                Style {
+                    attrs: style.attrs | ATTR_UNDERLINE,
+                    ..style
+                },
+            ),
+            None => Glyph::plain(' ', style),
         };
-        frame.cells[i] = Glyph::plain(ch, style);
     }
     (overlay.cursor < cols).then(|| (rect.x + overlay.cursor as u16, y))
 }
@@ -435,7 +440,7 @@ mod tests {
             grid: Some(&typed),
             overlay: Some(Overlay {
                 row: 0,
-                cells: vec![(2, 'l'), (3, 's')],
+                cells: vec![(2, Some('l')), (3, Some('s'))],
                 cursor: 4,
             }),
         }];
@@ -448,7 +453,7 @@ mod tests {
         let views = [View {
             overlay: Some(Overlay {
                 row: 0,
-                cells: vec![(2, 'l')],
+                cells: vec![(2, Some('l')), (3, None)],
                 cursor: 3,
             }),
             ..views.into_iter().next().unwrap()
@@ -470,7 +475,7 @@ mod tests {
             grid: Some(&wide),
             overlay: Some(Overlay {
                 row: 0,
-                cells: vec![(2, 'x'), (3, 'y'), (5, 'z')],
+                cells: vec![(2, Some('x')), (3, Some('y')), (5, Some('z'))],
                 cursor: 6,
             }),
         }];

@@ -1010,9 +1010,9 @@ mod client {
                 }
                 Message::Output { block: b, data } if b == block => {
                     if let Some((grid, parser)) = self.term.as_mut() {
-                        parser.advance(grid, &data);
-                        if let Some(predict) = self.predict.as_mut() {
-                            predict.output(grid);
+                        match self.predict.as_mut() {
+                            Some(predict) => predict.output(parser, grid, &data),
+                            None => parser.advance(grid, &data),
                         }
                     }
                     return Ok(Change::Output(data));

@@ -6,17 +6,18 @@
 use std::time::{Duration, Instant};
 
 use rusty_mux_proto::Echo;
-use rusty_term_core::{Grid, WIDE_TRAILER, char_width};
+use rusty_term_core::{AnsiParser, Grid, WIDE_TRAILER, char_width};
 
 /// Failed checks this many keys apart, or closer, turn predictions off
 /// until the next Enter.
 const CONFIDENCE: u64 = 10;
 
-/// One predicted cell: what the key `key` should make column `x` show.
+/// One predicted cell: what the key `key` should make column `x` show,
+/// `None` for a blank left by Backspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Guess {
     x: usize,
-    ch: char,
+    ch: Option<char>,
     key: u64,
 }
 
@@ -28,16 +29,16 @@ struct Epoch {
     /// The row predicted on and the predicted cursor's column, from the
     /// epoch's first predicted key.
     at: Option<(usize, usize)>,
-    /// The guesses not yet checked, left to right.
+    /// The guesses not yet settled, at most one per column.
     guesses: Vec<Guess>,
 }
 
-/// What to draw over a block: its predicted cells, underlined, and the
-/// cursor after them.
+/// What to draw over a block: its predicted cells, characters underlined
+/// and `None` erased, and the cursor after them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Overlay {
     pub row: usize,
-    pub cells: Vec<(usize, char)>,
+    pub cells: Vec<(usize, Option<char>)>,
     pub cursor: usize,
 }
 
@@ -79,7 +80,7 @@ impl Predictor {
             self.off = false;
         }
         let modeled = match data {
-            [0x7f] | [0x08] => self.erase(),
+            [0x7f] | [0x08] => self.erase(req),
             _ => std::str::from_utf8(data).is_ok_and(|text| self.text(req, text, grid)),
         };
         if !modeled {
@@ -87,23 +88,24 @@ impl Predictor {
         }
     }
 
-    /// Checks the guesses `EchoAck { req }` settles against `grid`, once
-    /// every Output before the ack is applied to it.
+    /// Checks the characters `EchoAck { req }` settles against `grid`,
+    /// once every Output before the ack is applied to it. Settled blanks
+    /// leave unchecked: what erasing shows is the program's business, and
+    /// only a character found on the screen confirms the epoch.
     pub fn ack(&mut self, req: u64, grid: &Grid) {
         let Some((row, _)) = self.epoch.at else {
             return;
         };
         let (settled, later): (Vec<Guess>, Vec<Guess>) =
             self.epoch.guesses.iter().partition(|g| g.key <= req);
-        if settled.is_empty() {
-            return;
-        }
-        let shown = |g: &Guess| grid.row_cells(row).nth(g.x).is_some_and(|c| c.ch == g.ch);
-        if !settled.iter().all(shown) {
+        let typed: Vec<(usize, char)> = settled.iter().filter_map(|g| Some((g.x, g.ch?))).collect();
+        let shown =
+            |&(x, ch): &(usize, char)| grid.row_cells(row).nth(x).is_some_and(|c| c.ch == ch);
+        if !typed.iter().all(shown) {
             return self.fail();
         }
         self.epoch.guesses = later;
-        self.epoch.confirmed = true;
+        self.epoch.confirmed |= !typed.is_empty();
     }
 
     /// Takes the block's new echo mode.
@@ -114,9 +116,29 @@ impl Predictor {
         }
     }
 
-    /// Follows output just applied to `grid`: leaving the predicted row or
-    /// switching screens ends the epoch.
-    pub fn output(&mut self, grid: &Grid) {
+    /// Applies the block's output `data` to `grid` through `parser`:
+    /// leaving the predicted row or switching screens ends the epoch, even
+    /// for a moment within `data`. So while an epoch has a row, `data` is
+    /// parsed in steps, each up to and including a C0 control byte (ESC
+    /// among them), and checked after each: only those bytes, and a wrap
+    /// at the margin, move the cursor off its row or switch screens.
+    pub fn output(&mut self, parser: &mut AnsiParser, grid: &mut Grid, data: &[u8]) {
+        let mut rest = data;
+        while self.epoch.at.is_some() && !rest.is_empty() {
+            let end = rest
+                .iter()
+                .position(|b| *b < 0x20)
+                .map_or(rest.len(), |i| i + 1);
+            parser.advance(grid, &rest[..end]);
+            self.follow(grid);
+            rest = &rest[end..];
+        }
+        // Without a row to leave, the rest goes in one step.
+        parser.advance(grid, rest);
+        self.follow(grid);
+    }
+
+    fn follow(&mut self, grid: &Grid) {
         let alt = grid.in_alt_screen();
         let moved = self.epoch.at.is_some_and(|(row, _)| grid.cursor.1 != row);
         if alt != self.alt || moved {
@@ -137,7 +159,8 @@ impl Predictor {
         let drawing =
             self.epoch.confirmed && !self.off && matches!(self.mode, Echo::Kernel | Echo::Program);
         let (row, cursor) = self.epoch.at.filter(|_| drawing)?;
-        let cells: Vec<(usize, char)> = self.epoch.guesses.iter().map(|g| (g.x, g.ch)).collect();
+        let cells: Vec<(usize, Option<char>)> =
+            self.epoch.guesses.iter().map(|g| (g.x, g.ch)).collect();
         (!cells.is_empty()).then_some(Overlay { row, cells, cursor })
     }
 
@@ -148,33 +171,66 @@ impl Predictor {
             return false;
         }
         let (row, mut x) = self.epoch.at.unwrap_or((grid.cursor.1, grid.cursor.0));
-        let mut guesses = Vec::new();
+        let mut guesses = self.epoch.guesses.clone();
         for ch in text.chars() {
-            if ch.is_control() || char_width(ch) != 1 || !blank_tail(grid, row, x) {
+            if ch.is_control() || char_width(ch) != 1 || !self.blank_tail(grid, row, x) {
                 return false;
             }
-            guesses.push(Guess { x, ch, key: req });
+            // Over a blank Backspace left, which this replaces.
+            guesses.retain(|g| g.x != x);
+            guesses.push(Guess {
+                x,
+                ch: Some(ch),
+                key: req,
+            });
             x += 1;
         }
-        self.epoch.guesses.extend(guesses);
+        self.epoch.guesses = guesses;
         self.epoch.at = Some((row, x));
         true
     }
 
-    /// Backspace over this epoch's own unchecked guess just left of the
-    /// predicted cursor removes it; anything else is the program's business.
-    fn erase(&mut self) -> bool {
+    /// Backspace `req` over this epoch's own unsettled character just left
+    /// of the predicted cursor blanks it until `req` settles, so an echo of
+    /// the erased character does not show again meanwhile; anything else is
+    /// the program's business.
+    fn erase(&mut self, req: u64) -> bool {
         let Some((row, x)) = self.epoch.at else {
             return false;
         };
-        match self.epoch.guesses.last() {
-            Some(g) if g.x + 1 == x => {
-                self.epoch.guesses.pop();
-                self.epoch.at = Some((row, x - 1));
-                true
-            }
-            _ => false,
-        }
+        let left = x.checked_sub(1);
+        let Some(guess) = self
+            .epoch
+            .guesses
+            .iter_mut()
+            .find(|g| Some(g.x) == left && g.ch.is_some())
+        else {
+            return false;
+        };
+        // Its own ack no longer settles it: the screen may show it erased.
+        *guess = Guess {
+            ch: None,
+            key: req,
+            ..*guess
+        };
+        self.epoch.at = Some((row, x - 1));
+        true
+    }
+
+    /// Whether column `x` and everything right of it on `row` is blank,
+    /// on the grid or by this epoch's own erasing, with `x` inside the row.
+    fn blank_tail(&self, grid: &Grid, row: usize, x: usize) -> bool {
+        let erased = |at: usize| {
+            self.epoch
+                .guesses
+                .iter()
+                .any(|g| g.x == at && g.ch.is_none())
+        };
+        row < grid.rows
+            && x < grid.cols
+            && (grid.row_cells(row).enumerate().skip(x)).all(|(at, c)| {
+                erased(at) || (c.ch == ' ' && c.cluster == 0 && c.flags & WIDE_TRAILER == 0)
+            })
     }
 
     fn fail(&mut self) {
@@ -184,17 +240,6 @@ impl Predictor {
         }
         self.failed = Some(self.typed);
     }
-}
-
-/// Whether column `x` and everything right of it on `row` is blank, with
-/// `x` inside the row.
-fn blank_tail(grid: &Grid, row: usize, x: usize) -> bool {
-    row < grid.rows
-        && x < grid.cols
-        && grid
-            .row_cells(row)
-            .skip(x)
-            .all(|c| c.ch == ' ' && c.cluster == 0 && c.flags & WIDE_TRAILER == 0)
 }
 
 /// Start drawing above this smoothed round trip.
@@ -289,8 +334,7 @@ mod tests {
         }
 
         fn echo(&mut self, data: &str) {
-            self.parser.advance(&mut self.grid, data.as_bytes());
-            self.p.output(&self.grid);
+            (self.p).output(&mut self.parser, &mut self.grid, data.as_bytes());
         }
 
         fn ack(&mut self, req: u64) {
@@ -307,7 +351,11 @@ mod tests {
         }
 
         fn drawn(&self) -> Vec<(usize, char)> {
-            self.p.overlay().map(|o| o.cells).unwrap_or_default()
+            let cells = self.p.overlay().map(|o| o.cells).unwrap_or_default();
+            cells
+                .into_iter()
+                .map(|(x, ch)| (x, ch.unwrap_or('_')))
+                .collect()
         }
     }
 
@@ -329,7 +377,7 @@ mod tests {
             overlay,
             Some(Overlay {
                 row: 0,
-                cells: vec![(3, 'b'), (4, 'c')],
+                cells: vec![(3, Some('b')), (4, Some('c'))],
                 cursor: 5
             })
         );
@@ -366,13 +414,46 @@ mod tests {
     }
 
     #[test]
-    fn backspace_over_its_own_guess_takes_it_back() {
+    fn backspace_over_its_own_guess_blanks_it() {
         let mut shell = Shell::confirmed(Echo::Kernel);
         shell.key("b");
         shell.key("c");
         shell.key("\x08");
         let overlay = shell.p.overlay().map(|o| (o.cells, o.cursor));
-        assert_eq!(overlay, Some((vec![(3, 'b')], 4)));
+        assert_eq!(overlay, Some((vec![(3, Some('b')), (4, None)], 4)));
+    }
+
+    #[test]
+    fn an_erased_echo_stays_blank_until_the_backspace_settles() {
+        let mut shell = Shell::confirmed(Echo::Kernel);
+        let b = shell.key("b");
+        shell.echo("b");
+        let erase = shell.key("\x7f");
+        // `b` is on the grid, but erased ahead of the server.
+        assert_eq!(shell.drawn(), [(3, '_')]);
+        assert_eq!(shell.p.overlay().map(|o| o.cursor), Some(3));
+        shell.ack(b);
+        assert_eq!(shell.drawn(), [(3, '_')], "b's ack settles nothing now");
+        // Typed over the erased echo: predicted, replacing the blank.
+        let c = shell.key("c");
+        assert_eq!(shell.drawn(), [(3, 'c')]);
+        shell.echo("\x08 \x08c");
+        shell.ack(erase);
+        assert_eq!(shell.drawn(), [(3, 'c')]);
+        shell.ack(c);
+        assert_eq!(shell.p.overlay(), None);
+        assert!(shell.p.epoch.confirmed);
+    }
+
+    #[test]
+    fn a_settled_blank_alone_confirms_nothing() {
+        let mut shell = Shell::new(Echo::Kernel);
+        shell.key("a");
+        let erase = shell.key("\x7f");
+        shell.echo("a\x08 \x08");
+        shell.ack(erase);
+        assert!(!shell.p.epoch.confirmed);
+        assert!(shell.p.epoch.guesses.is_empty());
     }
 
     #[test]
@@ -473,6 +554,19 @@ mod tests {
             shell.key(key);
             assert!(!shell.p.epoch.confirmed, "{key:?}");
         }
+    }
+
+    #[test]
+    fn a_moment_off_the_row_or_screen_within_one_output_ends_the_epoch() {
+        let mut shell = Shell::confirmed(Echo::Kernel);
+        shell.echo("\x1b[3;1Hstatus\x1b[1;4H");
+        assert!(!shell.p.epoch.confirmed, "a cursor excursion");
+        let mut shell = Shell::confirmed(Echo::Kernel);
+        shell.echo("\x1b[?1049h\x1b[?1049l\x1b[1;4H");
+        assert!(!shell.p.epoch.confirmed, "the alternate screen and back");
+        let mut shell = Shell::confirmed(Echo::Kernel);
+        shell.echo("\x1b[0m\x1b[K");
+        assert!(shell.p.epoch.confirmed, "staying on the row");
     }
 
     #[test]

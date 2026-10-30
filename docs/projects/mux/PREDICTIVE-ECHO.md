@@ -111,7 +111,9 @@ at the cursor, and Backspace over a character predicted in the same epoch.
   to another block, the lease lost, a reconnect or takeover (the screen is
   sent again), the alternate screen entered or left, an `EchoMode` change,
   output that moves the cursor off the row being predicted, and a
-  prediction that fails its check.
+  prediction that fails its check. As built, output is checked after each C0
+  control byte while an epoch has a row, so a moment off the row or on the
+  alternate screen within one Output frame counts too.
 - **An epoch starts tentative.** Its predictions are kept but **not drawn**.
   It becomes confirmed when the first of its predictions passes the check
   below. Only then are its predictions, and later keys of the same epoch,
@@ -132,6 +134,10 @@ at the cursor, and Backspace over a character predicted in the same epoch.
   cursor left. Backspace over anything else (a confirmed or real character,
   or the start of the epoch) is not predicted and starts a new tentative
   epoch, since what erasing does there is the program's business.
+  As built, the removed cell stays in the overlay as a blank, keyed by the
+  Backspace, until that key settles, so an echo of the erased character
+  that already arrived does not show again meanwhile. A settled blank is
+  not compared, and never confirms an epoch.
 - **The check.** An ack is a watermark, not a snapshot of the screen at one
   key: by the time it arrives, the screen may already show the echoes of
   later keys. So when `EchoAck { req }` arrives (after every Output before
