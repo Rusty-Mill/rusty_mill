@@ -1,8 +1,9 @@
 # UDP transport: design for review
 
 Status: proposed 2026-10-30. This is Phase 3 step 4 (C13), and the owner said
-Go on 2026-10-30. Nothing here changes code or a wire format yet. Build PRs
-follow once the design is approved and its open questions are answered.
+Go on 2026-10-30, and answered its four open questions the same day (below).
+Nothing here changes code or a wire format yet. Build PRs follow once the
+design is approved.
 Background: [SPIKE-4-ROAMING.md](SPIKE-4-ROAMING.md) and the step 2 decision
 in [DECISIONS.md](DECISIONS.md) (SSH bootstrap, 2026-10-29).
 
@@ -274,21 +275,21 @@ association's `Close`, ends its connections as a socket close does.
 - **Over a real local sshd,** as in #1236 and #1239: bootstrap, SSH stops
   after UDP is up, and a roam.
 
-## Open questions for the owner
+## Decided by the owner
 
-1. **Session lifetime:** A or B above. Proposed: B, with 24 h by default and
-   the lease released after 30 s.
-2. **Port and opt-in:** the server listens for UDP only when started with
-   `--udp ADDR:PORT`. It uses one port for every association (proposed default
-   60001), so a firewall needs a single rule. Proposed: opt-in, with that
-   default port.
-3. **Client default:** when the server offers `DATAGRAM`, `--ssh` uses UDP
-   automatically and falls back after 2 s. `RUSTY_MUX_UDP=off` keeps it on
-   SSH, following the `RUSTY_MUX_PREDICT` switch. Proposed: automatic, with
-   that switch.
-4. **Dependencies:** this adds the first-party crates `rusty_aead` and
-   `rusty_rand` to the mux crates (lockfile lines only, nothing third-party).
-   Proposed: approve.
+Nano agreed with all four proposed answers on 2026-10-30 19:28Z:
+
+1. **Session lifetime: B.** An association and its clients survive silence
+   for up to 24 h by default (`--udp-idle`). A client's lease is released
+   after 30 s of silence.
+2. **Opt-in, one port.** The server listens for UDP only with `--udp
+   ADDR:PORT`, using one port for every association. The default port is
+   60001.
+3. **Client default: automatic.** `--ssh` uses UDP when the server offers
+   `DATAGRAM` and falls back to SSH after 2 s. `RUSTY_MUX_UDP=off` keeps it on
+   SSH.
+4. **Dependencies.** The mux crates may depend on the first-party crates
+   `rusty_aead` and `rusty_rand`; the lockfile changes by those lines only.
 
 ## Build order, once approved
 
