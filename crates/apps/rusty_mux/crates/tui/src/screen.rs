@@ -6,9 +6,10 @@ use std::fmt::Write as _;
 
 use rusty_mux_core::{BlockId, Rect, Size};
 use rusty_mux_server::style::Style;
-use rusty_term_core::{Cell, Grid, WIDE_TRAILER};
+use rusty_term_core::{ATTR_UNDERLINE, Cell, Grid, WIDE_TRAILER};
 
 use crate::keys::Dir;
+use crate::predict::Overlay;
 
 /// The colour of the dividers around the focused block.
 const FOCUS: u32 = 0x5f_d7_5f;
@@ -49,11 +50,13 @@ pub struct Frame {
     cursor: Option<(u16, u16)>,
 }
 
-/// One block to draw: its place and, once attached, its grid.
+/// One block to draw: its place and, once attached, its grid, with the
+/// echo predicted over it, if any.
 pub struct View<'a> {
     pub block: BlockId,
     pub rect: Rect,
     pub grid: Option<&'a Grid>,
+    pub overlay: Option<Overlay>,
 }
 
 impl Frame {
@@ -85,8 +88,12 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
         }
         if let Some(grid) = view.grid {
             draw(&mut frame, view.rect, grid);
+            let ahead =
+                (view.overlay.as_ref()).and_then(|o| predict(&mut frame, view.rect, grid, o));
             if view.block == focused {
-                frame.cursor = cursor(view.rect, grid);
+                // Shown only where the grid shows it, after the predictions.
+                let shown = cursor(view.rect, grid);
+                frame.cursor = shown.and(ahead).or(shown);
             }
         }
     }
@@ -126,6 +133,33 @@ fn draw(frame: &mut Frame, rect: Rect, grid: &Grid) {
             frame.cells[i] = glyph;
         }
     }
+}
+
+/// Draws `overlay`'s cells, underlined, into `rect` where they fit on a
+/// single-width cell of `grid`; returns the predicted cursor, if inside
+/// `rect`.
+fn predict(frame: &mut Frame, rect: Rect, grid: &Grid, overlay: &Overlay) -> Option<(u16, u16)> {
+    let (cols, rows) = (usize::from(rect.size.cols()), usize::from(rect.size.rows()));
+    if overlay.row >= rows {
+        return None;
+    }
+    let cells: Vec<Cell> = grid.row_cells(overlay.row).collect();
+    let trailer = |x: usize| cells.get(x).is_some_and(|c| c.flags & WIDE_TRAILER != 0);
+    // Both fit in u16: they are below the rect's size.
+    let y = rect.y + overlay.row as u16;
+    for &(x, ch) in &overlay.cells {
+        if x >= cols || trailer(x) || trailer(x + 1) {
+            continue;
+        }
+        let i = frame.index(rect.x + x as u16, y);
+        let style = frame.cells[i].style;
+        let style = Style {
+            attrs: style.attrs | ATTR_UNDERLINE,
+            ..style
+        };
+        frame.cells[i] = Glyph::plain(ch, style);
+    }
+    (overlay.cursor < cols).then(|| (rect.x + overlay.cursor as u16, y))
 }
 
 /// The grid's cursor on the screen, if it is visible and inside `rect`.
@@ -310,6 +344,7 @@ mod tests {
                 block,
                 rect,
                 grid: Some(grid),
+                overlay: None,
             })
             .collect();
         let frame = compose(size(9, 5), &views, id(2));
@@ -336,6 +371,7 @@ mod tests {
             block: id(1),
             rect,
             grid: Some(&wide),
+            overlay: None,
         }];
         assert_eq!(text(&compose(size(2, 1), &views, id(1)), 0), "a ");
         let whole = Rect {
@@ -346,6 +382,7 @@ mod tests {
             block: id(1),
             rect: whole,
             grid: Some(&wide),
+            overlay: None,
         }];
         assert_eq!(text(&compose(size(3, 1), &views, id(1)), 0), "a日");
     }
@@ -366,6 +403,7 @@ mod tests {
                     block: id(1),
                     rect,
                     grid: Some(g),
+                    overlay: None,
                 }],
                 id(1),
             )
@@ -381,6 +419,64 @@ mod tests {
         );
         assert!(delta.ends_with("\x1b[2;3H\x1b[?25h"), "{delta:?}");
         assert!(render(Some(&second), &second).is_empty());
+    }
+
+    #[test]
+    fn predictions_are_drawn_underlined_with_the_cursor_after_them() {
+        let typed = grid(4, 2, "$ ");
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            size: size(4, 2),
+        };
+        let views = [View {
+            block: id(1),
+            rect,
+            grid: Some(&typed),
+            overlay: Some(Overlay {
+                row: 0,
+                cells: vec![(2, 'l'), (3, 's')],
+                cursor: 4,
+            }),
+        }];
+        let frame = compose(size(4, 2), &views, id(1));
+        assert_eq!(text(&frame, 0), "$ ls");
+        let underlined = |x: usize| frame.row(0)[x].style.attrs & ATTR_UNDERLINE != 0;
+        assert!(!underlined(1) && underlined(2) && underlined(3));
+        // Past the margin: the cursor stays where the grid has it.
+        assert_eq!(frame.cursor, Some((2, 0)));
+        let views = [View {
+            overlay: Some(Overlay {
+                row: 0,
+                cells: vec![(2, 'l')],
+                cursor: 3,
+            }),
+            ..views.into_iter().next().unwrap()
+        }];
+        assert_eq!(compose(size(4, 2), &views, id(1)).cursor, Some((3, 0)));
+    }
+
+    #[test]
+    fn a_prediction_never_covers_a_wide_glyph_or_leaves_its_rect() {
+        let wide = grid(6, 1, "$ 日");
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            size: size(3, 1),
+        };
+        let views = [View {
+            block: id(1),
+            rect,
+            grid: Some(&wide),
+            overlay: Some(Overlay {
+                row: 0,
+                cells: vec![(2, 'x'), (3, 'y'), (5, 'z')],
+                cursor: 6,
+            }),
+        }];
+        let frame = compose(size(3, 1), &views, id(1));
+        // `日` is cut to a blank by the edge, and nothing lands on it.
+        assert_eq!(text(&frame, 0), "$  ");
     }
 
     #[test]

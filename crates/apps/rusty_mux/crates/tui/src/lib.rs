@@ -4,10 +4,12 @@
 //! raw output straight to the local terminal, which keeps every mode the
 //! program sets; one showing several is composed into one screen
 //! ([`screen`]) and redrawn where it changed. [`keys`] turns the keyboard
-//! into input and prefix commands. [`ssh`] reaches a server on another
+//! into input and prefix commands. [`predict`] guesses typed keys' echo
+//! ahead of a slow server. [`ssh`] reaches a server on another
 //! machine through an OpenSSH socket forward.
 
 pub mod keys;
+pub mod predict;
 pub mod screen;
 #[cfg(unix)]
 pub mod ssh;
