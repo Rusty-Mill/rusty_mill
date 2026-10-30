@@ -616,7 +616,13 @@ impl<T: TickApi> TickStore<T> {
         let version = result?;
         let rev = version.saturating_sub(1);
         event.rev = rev;
-        events.seen.insert(event.card, version);
+        // Same-card mutations are serialized by rusty_tick, but their callers can
+        // return here in reverse order. Never forget the newer mutation in that case.
+        events
+            .seen
+            .entry(event.card)
+            .and_modify(|seen| *seen = (*seen).max(version))
+            .or_insert(version);
         events.push(event);
         Ok(rev)
     }

@@ -5,11 +5,49 @@ use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{BoardError, Card, Column, Event, EventKind};
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::store::Store;
-use rusty_mill_board::tick::TickStore;
+use rusty_mill_board::tick::{TickApi, TickRequest, TickStore};
 use serde_json::json;
+use std::sync::{Arc, Barrier};
 
 mod fake_tick;
 use fake_tick::FakeTick;
+
+/// Lets the first task patch mutate rusty_tick, then holds its response so a
+/// later patch can finish recording first.
+#[derive(Clone)]
+struct ReverseFinishTick {
+    inner: FakeTick,
+    first_patch: Arc<std::sync::atomic::AtomicBool>,
+    mutated: Arc<Barrier>,
+    release: Arc<Barrier>,
+}
+
+impl ReverseFinishTick {
+    fn new(inner: FakeTick) -> Self {
+        Self {
+            inner,
+            first_patch: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            mutated: Arc::new(Barrier::new(2)),
+            release: Arc::new(Barrier::new(2)),
+        }
+    }
+}
+
+impl TickApi for ReverseFinishTick {
+    fn send(&self, request: &TickRequest<'_>) -> Result<(u16, serde_json::Value), BoardError> {
+        let result = self.inner.send(request);
+        if request.method == "PATCH"
+            && request.path.starts_with("/tasks/")
+            && self
+                .first_patch
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.mutated.wait();
+            self.release.wait();
+        }
+        result
+    }
+}
 
 fn clock() -> i64 {
     42
@@ -61,6 +99,70 @@ fn an_owner_edit_in_rusty_tick_is_read_next_and_shows_as_an_event() {
     assert_eq!(
         (moved.title.as_str(), moved.rev),
         ("renamed on the phone", 2)
+    );
+}
+
+#[test]
+fn reversed_same_card_write_finishes_keep_the_newest_seen_version() {
+    let tick = FakeTick::default();
+    let gated = ReverseFinishTick::new(tick.clone());
+    let store = Arc::new(TickStore::new(gated.clone()));
+    let card = Card::new("a", "", vec![], 0).expect("card");
+    store
+        .insert(&card, Event::of(&card, EventKind::Created, "insert"))
+        .expect("insert");
+    let cursor = store.last_event_id().expect("prime observations");
+
+    let first = card.edit(Some("first"), None, None, 1).expect("edit");
+    let first_store = Arc::clone(&store);
+    let first_write = std::thread::spawn(move || {
+        first_store
+            .replace(&first, Event::of(&first, EventKind::Edited, "first"))
+            .expect("first write")
+    });
+
+    gated.mutated.wait();
+    let after_first = store.get(card.id).expect("get").expect("card");
+    assert_eq!(
+        after_first.rev, 1,
+        "the first mutation landed before it finished"
+    );
+    let second = after_first
+        .edit(None, Some("second"), None, 2)
+        .expect("edit");
+    assert_eq!(
+        store
+            .replace(&second, Event::of(&second, EventKind::Edited, "second"),)
+            .expect("second write"),
+        2
+    );
+    gated.release.wait();
+    assert_eq!(first_write.join().expect("first thread"), 1);
+
+    let writes = store.events_since(cursor, 10).expect("events");
+    assert_eq!(
+        writes.len(),
+        2,
+        "no synthetic event follows the board writes"
+    );
+    assert_eq!(
+        writes
+            .iter()
+            .map(|event| event.actor.as_str())
+            .collect::<Vec<_>>(),
+        ["second", "first"],
+        "event ids follow finish/recording order"
+    );
+
+    let outside_cursor = writes.last().map(|event| event.id);
+    tick.owner_edit(card.id, |task| task["title"] = json!("outside"));
+    let outside = store
+        .events_since(outside_cursor, 10)
+        .expect("outside event");
+    assert_eq!(outside.len(), 1, "a later outside change is still observed");
+    assert_eq!(
+        (outside[0].kind, outside[0].actor.as_str()),
+        (EventKind::Edited, "tick")
     );
 }
 
