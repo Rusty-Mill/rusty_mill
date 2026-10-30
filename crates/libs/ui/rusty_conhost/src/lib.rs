@@ -9,7 +9,8 @@
 //! - on Windows, an engine thread over `platform_windows::condrv` and the
 //!   pty-shaped front end [`OwnPty`] / [`OwnPtyMaster`].
 //!
-//! This release serves output and input; a resize only records the size.
+//! It serves output, input, the cursor and attribute APIs, and resize;
+//! design §10 lists what is still to come.
 
 // Off Windows nothing drives the core but its tests.
 #[cfg_attr(not(windows), allow(dead_code))]

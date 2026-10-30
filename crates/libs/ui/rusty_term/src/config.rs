@@ -49,9 +49,8 @@ pub enum ClipboardPolicy {
     ReadWrite,
 }
 
-/// Which console host a Windows shell runs on (`[console] host`). Parsed
-/// but not yet acted on, and not yet documented: the `own` host arrives
-/// with the rusty_conhost backend.
+/// Which console host a Windows shell runs on (`[console] host`). Read at
+/// launch; ignored off Windows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ConsoleHost {
     /// Windows' ConPTY. Default.

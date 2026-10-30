@@ -127,6 +127,12 @@ windows-sys = { version = "0.59", features = [
 # scope), so this is a second Windows FFI layer for one function, not a
 # wholesale switch.
 rusty_win32 = { workspace = true, features = ["std"] }
+# `[console] host = "own"`: our own console host (backend/own.rs), with
+# the platform types its API speaks (`Command`, `WinSize`, `PtyMaster`,
+# `WindowsChild`). Design docs/projects/term/conhost/ §4.5, D2.
+platform.workspace = true
+platform-windows.workspace = true
+rusty_conhost.workspace = true
 
 [dev-dependencies]
 # The core test suite exercises the search's regex mode without the `gui`
