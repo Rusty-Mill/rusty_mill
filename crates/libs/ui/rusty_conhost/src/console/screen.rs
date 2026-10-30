@@ -299,11 +299,20 @@ impl Screen {
         )
     }
 
-    /// The region CUP is relative to while the client has origin mode
-    /// (DECOM) on, as (left, top, right, bottom); `None` with it off.
-    pub(super) fn origin_region(&self) -> Option<(u16, u16, u16, u16)> {
-        let (l, t, r, b) = self.grid.origin_region()?;
-        Some((l as u16, t as u16, r as u16, b as u16))
+    /// CUP to screen position (`x`, `y`), for the Grid as it is now. The
+    /// Win32 position is absolute, so under the client's origin mode
+    /// (DECOM) it is made relative to the region; a position outside the
+    /// region can't be reached with DECOM on, so origin mode goes off
+    /// first.
+    pub(super) fn absolute_cup(&self, x: u16, y: u16) -> Vec<u8> {
+        let (x, y) = (usize::from(x), usize::from(y));
+        let cup = |col: usize, row: usize| format!("\x1b[{};{}H", row + 1, col + 1);
+        match self.grid.origin_region() {
+            None => cup(x, y),
+            Some((l, t, r, b)) if (l..=r).contains(&x) && (t..=b).contains(&y) => cup(x - l, y - t),
+            Some(_) => format!("\x1b[?6l{}", cup(x, y)),
+        }
+        .into_bytes()
     }
 
     pub(super) fn cursor_visible(&self) -> bool {

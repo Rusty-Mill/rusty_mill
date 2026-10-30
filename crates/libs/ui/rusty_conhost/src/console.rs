@@ -390,6 +390,9 @@ impl Share {
 enum Text {
     Wide(Vec<u16>),
     Bytes(Vec<u8>),
+    /// SetConsoleCursorPosition's move, made into VT when it is emitted:
+    /// writes parked ahead of it may change the origin mode it depends on.
+    CursorTo(u16, u16),
 }
 
 impl Text {
@@ -397,6 +400,7 @@ impl Text {
         match self {
             Text::Wide(units) => units.len(),
             Text::Bytes(bytes) => bytes.len(),
+            Text::CursorTo(..) => 1,
         }
     }
 
@@ -405,6 +409,7 @@ impl Text {
         match self {
             Text::Wide(units) => units.len() * 2,
             Text::Bytes(bytes) => bytes.len(),
+            Text::CursorTo(..) => 0,
         }
     }
 
@@ -419,6 +424,11 @@ impl Text {
         replies: &mut Vec<u8>,
     ) -> usize {
         match self {
+            &Text::CursorTo(x, y) => {
+                let vt = screen.absolute_cup(x, y);
+                screen.host(&vt, out);
+                1
+            }
             Text::Bytes(bytes) => match origin {
                 Origin::Client(mode) => {
                     at + screen.client(&bytes[at..], mode, SLICE, at == 0, out, replies)

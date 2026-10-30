@@ -154,21 +154,9 @@ impl Console {
         if x >= size.cols || y >= size.rows || x > i16::MAX as u16 || y > i16::MAX as u16 {
             return reply(p, msg::STATUS_FROM_INVALIDARG, fixed, fx);
         }
-        self.write_host(p, fixed, self.absolute_cup(x, y), out, fx);
-    }
-
-    /// CUP to screen position (`x`, `y`). The Win32 position is absolute,
-    /// so under the client's origin mode (DECOM) it is made relative to the
-    /// region; a position outside the region can't be reached with DECOM
-    /// on, so origin mode is turned off first.
-    fn absolute_cup(&self, x: u16, y: u16) -> Vec<u8> {
-        let cup = |col: u16, row: u16| format!("\x1b[{};{}H", row + 1, col + 1);
-        match self.screen.origin_region() {
-            None => cup(x, y),
-            Some((l, t, r, b)) if (l..=r).contains(&x) && (t..=b).contains(&y) => cup(x - l, y - t),
-            Some(_) => format!("\x1b[?6l{}", cup(x, y)),
-        }
-        .into_bytes()
+        let mut reply = Reply::ok(p.id);
+        reply.write_back = fixed;
+        self.write(reply, Text::CursorTo(x, y), Origin::Host, out, fx);
     }
 
     /// `CONSOLE_SETTEXTATTRIBUTE_MSG { IN Attributes }`, mirrored to the
@@ -412,6 +400,30 @@ mod tests {
         let (_, vt) = emitted(&mut h, |h| set_cursor(h, output, 5, 6));
         assert_eq!(vt, b"\x1b[3;4H");
         assert_eq!(u16s(&sbi(&mut h, output), &[4, 6]), [5, 6]);
+    }
+
+    #[test]
+    fn a_parked_cursor_move_follows_the_origin_mode_ahead_of_it() {
+        let mut h = Host::new();
+        let [_, _, first] = h.connect(1, "");
+        let [_, _, second] = h.connect(2, "");
+        assert_eq!(h.set_mode(first, 0x5), msg::STATUS_SUCCESS);
+        let fill = vec![b'x'; crate::sched::PACKET_INPUT_CAP];
+        h.packet(msg::RAW_WRITE, 1, first, &fill, 0);
+        h.packet(msg::RAW_WRITE, 1, first, &fill, 0);
+        let (r, _) = h.packet(msg::RAW_WRITE, 1, first, b"\x1b[5;20r\x1b[?6h", 0);
+        assert_eq!(r.status, i32::MIN, "parked behind the budget");
+        let r = set_cursor(&mut h, second, 0, 0);
+        assert_eq!(r.status, i32::MIN, "parked behind it");
+        let mark = h.vt.len();
+        while h.c.waiting() > 0 {
+            h.drain();
+        }
+        assert!(
+            h.vt[mark..].ends_with(b"\x1b[?6h\x1b[?6l\x1b[1;1H"),
+            "made after DECOM"
+        );
+        assert_eq!(u16s(&sbi(&mut h, second), &[4, 6]), [0, 0]);
     }
 
     #[test]
