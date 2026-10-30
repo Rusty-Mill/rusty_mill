@@ -46,9 +46,10 @@ pub(crate) const PREAMBLE: &[u8] = b"\x1b[?9001h\x1b[?1004h";
 pub(crate) const CLIENT_BUDGET: usize = 64 * 1024;
 /// The most VT one emission step adds.
 pub(crate) const SLICE: usize = 64 * 1024;
-/// UTF-16 units per slice: a unit is at most 3 bytes of UTF-8, and
-/// emitting it adds at most [`screen::MAX_EXPANSION`] in all.
-const WIDE_SLICE: usize = SLICE / screen::MAX_EXPANSION;
+/// UTF-16 units per slice: a unit emits at most [`screen::MAX_EXPANSION`]
+/// bytes, and one watched sequence held from the last write may complete
+/// with its first unit, adding the modes it reasserts.
+const WIDE_SLICE: usize = (SLICE - PREAMBLE.len()) / screen::MAX_EXPANSION;
 /// Connected clients.
 pub(crate) const MAX_CLIENTS: usize = 256;
 /// Objects per client, the two from CONNECT included.
@@ -1915,6 +1916,32 @@ pub(crate) mod tests {
         assert_eq!(completed, parked);
         assert_eq!((h.c.waiting(), h.c.parked()), (0, 0));
         assert_eq!(h.vt.len(), 16 * PACKET_INPUT_CAP);
+    }
+
+    #[test]
+    fn a_wide_slice_fits_after_a_held_esc() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        assert_eq!(h.set_mode(output, 0x5), msg::STATUS_SUCCESS);
+        h.packet(msg::RAW_WRITE, 1, output, b"\x1b", 0);
+        let resets = (WIDE_SLICE - 1) / 2;
+        let mut text = format!("c{}", "\x1bc".repeat(resets));
+        if text.len() < WIDE_SLICE {
+            text.push('x');
+        }
+        assert_eq!(text.len(), WIDE_SLICE, "exactly one wide slice");
+        let mark = h.vt.len();
+        let r = h.write_w(output, &text);
+        assert_eq!(r.status, msg::STATUS_SUCCESS);
+        let emitted = &h.vt[mark..];
+        let ris = [&b"\x1bc"[..], PREAMBLE].concat();
+        let tail = text.len() - 1 - 2 * resets;
+        assert_eq!(
+            emitted.len(),
+            (resets + 1) * ris.len() + tail,
+            "every unit emitted"
+        );
+        assert!(emitted.starts_with(&ris), "the held ESC completed");
     }
 
     /// A console holding `writes` raw writes of one packet's input each,

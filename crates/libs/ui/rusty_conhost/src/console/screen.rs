@@ -48,9 +48,11 @@ enum Action {
     Reassert(&'static [u8]),
 }
 
-/// The longest CSI the host parses for a watched one; a longer CSI is
-/// forwarded unwatched, and a held prefix stays shorter than this.
-const WATCHED_MAX: usize = 32;
+/// The longest CSI the host parses for a watched one: the parameters
+/// rusty_term_core stores (its `CSI_PARAM_MAX`, 256 bytes), `ESC [ ?` and
+/// the final byte. A longer CSI is forwarded unwatched, and a held prefix
+/// stays shorter than this.
+pub(super) const WATCHED_MAX: usize = 256 + 4;
 /// The most bytes one client byte (or UTF-16 unit) can come to: RIS's
 /// two add the 16 of [`PREAMBLE`]. A legacy glyph is at most 3, and a
 /// wrap adds 2.
@@ -155,7 +157,10 @@ impl Screen {
                 esc = Some(start);
             }
             let mut adds = 0;
-            if let Some(e) = esc {
+            // A parameter byte only lengthens the prefix: the sequence is
+            // matched once, at its start and at its final byte.
+            let param = vt.len() - start == 1 && matches!(b, b'0'..=b'9' | b';');
+            if let Some(e) = esc.filter(|&e| !param || vt.len() - e <= 3) {
                 match watched_at(&vt[e..]) {
                     Watched::Prefix => {}
                     Watched::Whole(_, Action::Reassert(modes)) => (adds, esc) = (modes.len(), None),
@@ -709,6 +714,20 @@ mod tests {
             b"\x1b[?25l\x1b[?1004h"
         );
         assert_eq!(client(&mut s, b"\x1b[?10041l", VT).0, b"\x1b[?10041l");
+    }
+
+    #[test]
+    fn long_compound_resets_are_watched_up_to_the_parsers_cap() {
+        let mut s = screen();
+        let long = [&b"\x1b[?"[..], &b"25;".repeat(10), b"1004l"].concat();
+        let (vt, _) = client(&mut s, &long, VT);
+        assert_eq!(vt, [&long[..], b"\x1b[?1004h"].concat());
+        let max = [&b"\x1b[?"[..], &b"0;".repeat(125), b"1004l"].concat();
+        assert!(max.len() <= WATCHED_MAX);
+        let (vt, _) = client(&mut s, &max, VT);
+        assert!(vt.ends_with(b"1004l\x1b[?1004h"), "{} bytes", max.len());
+        let past = [&b"\x1b[?"[..], &b"0;".repeat(130), b"1004l"].concat();
+        assert_eq!(client(&mut s, &past, VT).0, past, "past the parser's cap");
     }
 
     #[test]
