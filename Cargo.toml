@@ -112,6 +112,7 @@ members = [
     "crates/apps/rusty_mux/crates/script",
     "crates/apps/rusty_mux/crates/server",
     "crates/apps/rusty_mux/crates/status",
+    "crates/apps/rusty_mux/crates/transport",
     "crates/apps/rusty_mux/crates/tui",
     "crates/apps/rusty_hister/crates/rusty-hister-core",
     "crates/apps/rusty_hister/crates/rusty-hister-model",
@@ -411,7 +412,6 @@ ignored = [
     "r2d2_sqlite",
     "regex-lite",
     "rush",
-    "rusty_aead",
     "rusty_bot",
     "rusty_pk",
     "rusty_routine",
@@ -935,6 +935,7 @@ rusty_mux_proto = { path = "crates/apps/rusty_mux/crates/proto" }
 rusty_mux_script = { path = "crates/apps/rusty_mux/crates/script" }
 rusty_mux_server = { path = "crates/apps/rusty_mux/crates/server" }
 rusty_mux_status = { path = "crates/apps/rusty_mux/crates/status" }
+rusty_mux_transport = { path = "crates/apps/rusty_mux/crates/transport" }
 # rusty_term's headless engine, for consumers that must not link its tokio front end.
 rusty_term_core = { path = "crates/libs/ui/rusty_term/core" }
 tracing-appender = "0.2"

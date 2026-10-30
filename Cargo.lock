@@ -11483,6 +11483,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_mux_transport"
+version = "0.1.0"
+dependencies = [
+ "rusty_aead",
+ "rusty_wire",
+]
+
+[[package]]
 name = "rusty_mux_tui"
 version = "0.1.0"
 dependencies = [

@@ -251,6 +251,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_mux | rusty_mux_script | rusty_mux actions and key bindings: named chains of catalog requests read from a JSON config, checked against the catalog. No I/O. |
 | apps | rusty_mux | rusty_mux_server | rusty_mux's server: owns the PTYs, keeps one terminal per block, and tees raw output to attached clients over a Unix socket. |
 | apps | rusty_mux | rusty_mux_status | rusty_mux program status: parses OSC 7501 (Program Status Protocol) reports and keeps a block's records. No I/O. |
+| apps | rusty_mux | rusty_mux_transport | rusty_mux's UDP transport: sealed datagrams carrying reliable ordered streams, with roaming. No I/O. |
 | apps | rusty_mux | rusty_mux_tui | Terminal client for rusty_mux: shows a block's window on the local terminal over a Unix socket, drawing its split layout. |
 | apps | rusty_orch | orch-bbp | TaskHost adapter over the existing BBP CLI and moderator |
 | apps | rusty_orch | orch-claude | Orchestrator adapter: Agent::Claude over the Claude Code CLI, read-only tools, prompt on stdin, one schema-constrained JSON object out. |
