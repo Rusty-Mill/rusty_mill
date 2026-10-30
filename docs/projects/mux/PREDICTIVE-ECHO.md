@@ -247,9 +247,9 @@ each guarantees:
   version.
 
   As built, `rusty_term_core` does not expose the rendition, but says
-  whether it is plain (`AnsiParser::plain`: the `SGR 0` pen, US-ASCII,
-  unprotected) and whether a cursor move is (`Grid::plain_cursor`: no
-  origin mode, no open hyperlink). Predictions are drawn only then, and
+  whether it is plain (`AnsiParser::plain`: between sequences, the `SGR 0`
+  pen, US-ASCII, unprotected) and whether a cursor move and its text are
+  (`Grid::plain_cursor`: no origin mode, no insert mode, no open hyperlink). Predictions are drawn only then, and
   only with the cursor inside the screen (not waiting to wrap), so `SGR 0`
   and a `CUP` home put the terminal back exactly. Covered cells are kept
   as the grid had them and put back before the block's next Output is

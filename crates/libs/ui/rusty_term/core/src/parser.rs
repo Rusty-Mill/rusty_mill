@@ -421,11 +421,13 @@ impl AnsiParser {
     }
 
     /// Whether the next character would be written as after `SGR 0` with
-    /// nothing else set: the reset rendition, US-ASCII in GL, unprotected.
-    /// A client drawing over a passed-through screen can then put the
-    /// rendition back exactly with `SGR 0`.
+    /// nothing else set: between sequences, with the reset rendition,
+    /// US-ASCII in GL, unprotected. A client drawing over a passed-through
+    /// screen can then put the rendition back exactly with `SGR 0`, and its
+    /// bytes cannot land inside an unfinished escape or UTF-8 sequence.
     pub fn plain(&self) -> bool {
-        self.pen == Pen::default_colors(self.palette.fg, self.palette.bg)
+        self.state == ParserState::Ground
+            && self.pen == Pen::default_colors(self.palette.fg, self.palette.bg)
             && !self.protected
             && self.charsets[self.gl] == Charset::Ascii
     }

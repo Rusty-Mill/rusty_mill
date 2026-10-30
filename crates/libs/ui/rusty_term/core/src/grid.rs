@@ -3845,11 +3845,11 @@ impl Grid {
         self.primary.as_ref().map(|p| p.mode)
     }
 
-    /// Whether a cursor move with `CUP` lands where its numbers say: origin
-    /// mode (DECOM) is off and no hyperlink (OSC 8) is open, so text written
-    /// there is not linked.
+    /// Whether a cursor move with `CUP` lands where its numbers say and text
+    /// written there replaces only the cells it covers: origin mode (DECOM)
+    /// and insert mode (IRM) are off, and no hyperlink (OSC 8) is open.
     pub fn plain_cursor(&self) -> bool {
-        !self.origin_mode && self.current_link == 0
+        !self.origin_mode && !self.insert_mode && self.current_link == 0
     }
 
     /// Whether the alternate screen buffer (`?47`/`?1047`/`?1049`) is active.

@@ -129,6 +129,12 @@ fn plain_tells_whether_sgr_0_alone_would_restore_the_rendition() {
         (b"\x0f", true),
         (b"\x1b[1\"q", false),
         (b"\x1b[0\"q", true),
+        (b"\x1b[3", false),
+        (b"1m", false),
+        (b"\x1b[0m\xc3", false),
+        (b"\xa9", true),
+        (b"\x1b]0;title", false),
+        (b"\x07", true),
     ] {
         p.advance(&mut g, input);
         assert_eq!(p.plain(), plain, "{input:?}");
@@ -136,7 +142,7 @@ fn plain_tells_whether_sgr_0_alone_would_restore_the_rendition() {
 }
 
 #[test]
-fn plain_cursor_needs_origin_mode_off_and_no_open_link() {
+fn plain_cursor_needs_origin_and_insert_mode_off_and_no_open_link() {
     let mut g = Grid::new(20, 4);
     let mut p = AnsiParser::new();
     assert!(g.plain_cursor());
@@ -145,6 +151,10 @@ fn plain_cursor_needs_origin_mode_off_and_no_open_link() {
     p.advance(&mut g, b"\x1b[?6l\x1b]8;;https://example.com\x1b\\");
     assert!(!g.plain_cursor());
     p.advance(&mut g, b"x\x1b]8;;\x1b\\");
+    assert!(g.plain_cursor());
+    p.advance(&mut g, b"\x1b[4h");
+    assert!(!g.plain_cursor());
+    p.advance(&mut g, b"\x1b[4l");
     assert!(g.plain_cursor());
 }
 
