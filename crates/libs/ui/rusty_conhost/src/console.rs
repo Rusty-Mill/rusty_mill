@@ -524,6 +524,12 @@ pub(crate) struct Console {
     logged: HashSet<Diag>,
     key_for: KeyFor,
     decoder: input::Decoder,
+    /// The remainder of the engine's one admitted input slice. No new
+    /// slice is admitted until this has been consumed.
+    input_bytes: VecDeque<u8>,
+    input_end: bool,
+    /// At most one decoded sequence, stopped between its key records.
+    input_keys: VecDeque<(input::KeyEvent, bool)>,
     input: input::Queue,
     /// The last value of the input-available event.
     input_available: bool,
@@ -534,6 +540,8 @@ pub(crate) struct Console {
     echo_held: bool,
     /// The last pass over waiting reads stopped at its reply budget.
     reads_cut: bool,
+    /// Reply bytes built across all read passes in this event.
+    read_built: usize,
     /// The last pump stopped at the budget on answers to the host's own
     /// queries, not on queued output: no drain will wake it (§7.4).
     writes_cut: bool,
@@ -545,7 +553,7 @@ pub(crate) struct Console {
     /// A unit taken from the queue but not yet read: the one after a high
     /// surrogate that turned out to be alone, or a high surrogate an ANSI
     /// read holds until its low half arrives.
-    held_unit: Option<u16>,
+    held_unit: Option<input::KeyEvent>,
     /// ANSI GetConsoleInput's surrogate halves waiting for their partner,
     /// for key-ups and key-downs apart.
     record_utf8: [input::Utf8Units; 2],
@@ -576,11 +584,15 @@ impl Console {
             logged: HashSet::new(),
             key_for,
             decoder: input::Decoder::default(),
+            input_bytes: VecDeque::new(),
+            input_end: false,
+            input_keys: VecDeque::new(),
             input: input::Queue::default(),
             input_available: false,
             reads: VecDeque::new(),
             echo_held: false,
             reads_cut: false,
+            read_built: 0,
             writes_cut: false,
             cached_text: VecDeque::new(),
             cached_records: VecDeque::new(),
@@ -593,7 +605,16 @@ impl Console {
     /// Waiting reads can go on at once: the last call stopped at its
     /// reply budget with input left.
     pub(crate) fn reads_ready(&self) -> bool {
-        self.reads_cut
+        self.reads_cut || (!self.echo_held && self.input_pending())
+    }
+
+    fn input_pending(&self) -> bool {
+        !self.input_bytes.is_empty() || !self.input_keys.is_empty() || self.input_end
+    }
+
+    /// Input already owed a read must not be displaced by a later slice.
+    pub(crate) fn input_paused(&self) -> bool {
+        self.echo_held || self.reads_cut || self.input_pending()
     }
 
     /// Parked writes stopped at the budget on the host's own answers,
@@ -629,16 +650,21 @@ impl Console {
     /// Handle one event. Pure: every effect is returned.
     pub(crate) fn handle(&mut self, ev: Event<'_>, out: &mut OutputQueue) -> Vec<Effect> {
         let mut fx = Vec::new();
+        self.read_built = 0;
         match ev {
             Event::Packet(p) => self.packet(p, out, &mut fx),
             Event::Input(bytes) => self.terminal_input(bytes, true, out, &mut fx),
             Event::InputMore(bytes) => self.terminal_input(bytes, false, out, &mut fx),
             Event::Resize(size) => self.resize(size, out, &mut fx),
-            Event::ServeReads => self.serve_reads(out, &mut fx),
+            Event::ServeReads => {
+                self.serve_reads(out, &mut fx);
+                self.resume_input(out, &mut fx);
+            }
             Event::OutputDrained => {
                 self.pump(None, out, &mut fx);
                 // Cooked reads held back by their echo go on.
                 self.serve_reads(out, &mut fx);
+                self.resume_input(out, &mut fx);
             }
             Event::ChildExited | Event::HangUp => {
                 // Bytes held for a query that never finished still go out.
@@ -653,7 +679,7 @@ impl Console {
 
     /// Emit the input-available event's new value when it changed.
     fn sync_input_available(&mut self, fx: &mut Vec<Effect>) {
-        let available = !self.closed && !self.input.is_empty();
+        let available = !self.closed && self.ready_records() > 0;
         if available != self.input_available {
             self.input_available = available;
             fx.push(Effect::SetInputAvailable(available));
@@ -698,6 +724,9 @@ impl Console {
         self.echo_held = false;
         self.reads_cut = false;
         self.writes_cut = false;
+        self.input_bytes.clear();
+        self.input_keys.clear();
+        self.input_end = false;
         self.parked = 0;
         // Reset the input-available event while the server can still be
         // reached: after CloseServer the engine drops every effect.
@@ -741,6 +770,8 @@ impl Console {
                     fx,
                 );
                 let reply = self.disconnect(&p, fx);
+                self.serve_reads(out, fx);
+                self.resume_input(out, fx);
                 fx.push(Effect::Reply(reply));
                 if self.clients.is_empty() {
                     // The last client is gone: nothing will use the console.
@@ -751,7 +782,10 @@ impl Console {
             msg::CREATE_OBJECT => self.create_object(&p),
             msg::CLOSE_OBJECT => {
                 self.end_reads(|r| r.object == p.object, msg::STATUS_ALERTED, fx);
-                self.close_object(&p)
+                let reply = self.close_object(&p);
+                self.serve_reads(out, fx);
+                self.resume_input(out, fx);
+                reply
             }
             msg::RAW_WRITE => {
                 let mut reply = Reply::ok(p.id);
@@ -925,7 +959,7 @@ impl Console {
             }
             api::FLUSH_INPUT_BUFFER => match self.input_object(p.object, true) {
                 Ok(()) => {
-                    self.clear_input();
+                    self.clear_input(true);
                     msg::STATUS_SUCCESS
                 }
                 Err(status) => status,
@@ -1325,7 +1359,7 @@ pub(crate) mod tests {
     /// queue modelled by a byte count nobody reads until `drain`.
     pub(super) struct Host {
         pub(super) c: Console,
-        queued: usize,
+        pub(super) queued: usize,
         pub(super) high_water: usize,
         pub(super) vt: Vec<u8>,
         next_id: u64,

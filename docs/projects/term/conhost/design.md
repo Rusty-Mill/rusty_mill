@@ -482,6 +482,7 @@ This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd,
 | V9 | Closing after CTRL_CLOSE | no host deadline: serves until the last DISCONNECT; Windows ends a handler at about 5 s | the server closes at the last DISCONNECT or 2 s after the first hang-up or child exit (§7.3), so a handler taking 2–5 s loses its console | teardown stays bounded, matching today's 2 s Drop drain (§5.8); a client that ignores the closed console's errors can't hold it open (S1) |
 | V10 | A client connecting during the close | CTRL_CLOSE is sent once (`_closeEventSent`), so a late client gets none | a late client gets CTRL_CLOSE once its CONNECT reply has gone out | without it a late `ping -t`-like client outlives the console (S1) |
 | V11 | DSR 5, CPR and DECXCPR from a client (§5.6) | under ConPTY never answered: the query goes to the terminal, whose CPR comes back as input | answered from the host's Grid, and the query is kept from the terminal | the answer then agrees with GetConsoleScreenBufferInfo even after a resize (V3), and a CPR never has to be told apart from a modified F3 key on input |
+| V12 | Input availability while an earlier read is held on echo or the 1 MiB reply budget | count describes buffered records | count, the input event and a NOWAIT peek report no available records until the owed reads resume | those records belong to the earlier reads; later readers must not take their input |
 
 The parity suite (§8) treats each of these as an expected difference.
 
@@ -612,6 +613,7 @@ Effects are applied after each `handle` call, in the order the core returned the
 | Output queue, host reserve | 16 KiB above that | host-originated output (cooked-read echo, `^C`, the startup preamble) may use it. Past 80 KiB the engine stops taking bytes from the input lane (§7.2 step 4). Echo is checked before every character, and Escape erases one character per step, so a cooked read stops there with its input still queued and goes on when the reader drains. The control lane is still served |
 | One emission step | 64 KiB | a call whose output would be larger (a 64 KiB WriteConsole whose ESC bytes expand to U+2190, or a full-screen WriteConsoleOutput) emits in slices of at most 64 KiB, and is parked with its progress between slices. It completes only when fully emitted |
 | Input lane (terminal input) | 64 KiB of pending bytes | `PtyMaster::write` blocks until the engine drains it, as a pty write blocks when the child stops reading |
+| Admitted terminal slice | 16 KiB of bytes, plus one decoded sequence (at most 4,097 raw bytes or a wrapped key's records) | no later slice is taken until this remainder is consumed. Decode incrementally and serve a waiting cooked read between records, before processing a later Ctrl+C. Echo and reply-budget holds retain the remainder instead of overflowing the record queue |
 | Control lane | fixed size: four flags and one `WinSize` | never full: setting a flag that is already set is a no-op |
 | Input records | 4,096 | oldest dropped, logged once (unchanged) |
 | Unfinished input escape sequence | 4,096 bytes | given up as an unknown sequence and dropped |

@@ -79,14 +79,14 @@ enum ReadKind {
 
 /// What `next_char` found.
 enum Got {
-    Char(u16, u32),
+    Char(KeyEvent),
     /// A cooked-read editing key, by VK.
     Vkey(u16),
 }
 
 impl Console {
-    /// Terminal input: decode, take out Ctrl+C and Ctrl+Break, store the
-    /// rest as the input mode says, then retry the waiting reads.
+    /// Admit one engine slice. Keep its unread bytes while echo or the
+    /// reply budget holds a read; the engine then stops taking input.
     pub(super) fn terminal_input(
         &mut self,
         bytes: &[u8],
@@ -94,35 +94,80 @@ impl Console {
         out: &mut OutputQueue,
         fx: &mut Vec<Effect>,
     ) {
-        let vt = self.input_mode & mode::VIRTUAL_TERMINAL_INPUT != 0;
-        for piece in self.decoder.feed(bytes, end) {
-            match (&piece.token, vt) {
-                (Token::Win32(k), _) => self.key(*k, vt, fx),
-                // Ctrl+C is the host's under PROCESSED_INPUT in either mode.
-                (Token::Control('\x03'), true) => {
-                    for k in input::key_events(&piece.token, self.key_for) {
-                        self.key(k, true, fx);
-                    }
+        debug_assert!(!self.input_pending(), "input slices must not overtake");
+        debug_assert!(bytes.len() <= crate::sched::INPUT_SLICE);
+        self.input_bytes.extend(bytes);
+        self.input_end = end;
+        self.resume_input(out, fx);
+    }
+
+    /// Decode a byte at a time so a long text token cannot fill the
+    /// record queue before its waiting read runs. Retain only one slice
+    /// and one decoded sequence, never an unbounded decoded paste.
+    pub(super) fn resume_input(&mut self, out: &mut OutputQueue, fx: &mut Vec<Effect>) {
+        while !self.reads_behind() {
+            if let Some((k, vt)) = self.input_keys.pop_front() {
+                self.key(k, vt, out, fx);
+                if self
+                    .reads
+                    .front()
+                    .is_some_and(|r| matches!(r.kind, ReadKind::Line { .. }))
+                    || self.input.len() >= input::MAX_RECORDS
+                {
+                    self.serve_reads(out, fx);
                 }
-                (_, true) => {
-                    for k in input::text_events(&piece.raw, self.key_for) {
-                        self.store(Record::Key(k), fx);
+                continue;
+            }
+            let vt = self.input_mode & mode::VIRTUAL_TERMINAL_INPUT != 0;
+            let byte = self.input_bytes.pop_front();
+            let end = self.input_bytes.is_empty() && self.input_end;
+            if byte.is_none() && !end {
+                break;
+            }
+            if end {
+                self.input_end = false;
+            }
+            for piece in self.decoder.feed(byte.as_slice(), end) {
+                match (&piece.token, vt) {
+                    (Token::Win32(k), _) => self.input_keys.push_back((*k, vt)),
+                    // Ctrl+C is the host's under PROCESSED_INPUT in either mode.
+                    (Token::Control('\x03'), true) => {
+                        for k in input::key_events(&piece.token, self.key_for) {
+                            self.input_keys.push_back((k, true));
+                        }
                     }
-                }
-                (Token::Focus(on), false) => self.store(Record::Focus(*on), fx),
-                (token, false) => {
-                    for k in input::key_events(token, self.key_for) {
-                        self.key(k, false, fx);
+                    (_, true) => {
+                        for k in input::text_events(&piece.raw, self.key_for) {
+                            self.input_keys.push_back((k, false));
+                        }
+                    }
+                    (Token::Focus(on), false) => self.store(Record::Focus(*on), fx),
+                    (token, false) => {
+                        for k in input::key_events(token, self.key_for) {
+                            self.input_keys.push_back((k, false));
+                        }
                     }
                 }
             }
         }
-        self.serve_reads(out, fx);
+        if !self.reads_behind() {
+            self.serve_reads(out, fx);
+        }
     }
 
     /// One key event: the host's own keys, or a record. A VT client gets
     /// the key as VT.
-    fn key(&mut self, k: KeyEvent, vt: bool, fx: &mut Vec<Effect>) {
+    fn key(&mut self, k: KeyEvent, vt: bool, out: &mut OutputQueue, fx: &mut Vec<Effect>) {
+        if k.down
+            && k.state & state::CTRL != 0
+            && k.state & state::ALT == 0
+            && (k.vk == vk::CANCEL
+                || (k.vk == vk::C && self.input_mode & mode::PROCESSED_INPUT != 0))
+        {
+            // Even when a raw read precedes the cooked one, earlier
+            // text must reach the waiting readers before cancellation.
+            self.serve_reads(out, fx);
+        }
         if self.intercept(&k, fx) {
             return;
         }
@@ -170,12 +215,25 @@ impl Console {
         let alt = k.state & state::ALT != 0;
         if ctrl && !alt {
             if k.vk == vk::C && self.input_mode & mode::PROCESSED_INPUT != 0 {
+                let cooked_owns_input = self.echo_held
+                    || (self.reads_cut
+                        && self
+                            .reads
+                            .front()
+                            .is_some_and(|r| matches!(r.kind, ReadKind::Line { .. })));
+                if cooked_owns_input {
+                    // Echo or the reply budget can defer a cooked read
+                    // before it consumes its prefix. Discard that prefix
+                    // on cancellation, but preserve input owed to a raw
+                    // or record read at the front of a budget cut.
+                    self.clear_input(false);
+                }
                 self.ctrl_event(Ctrl::C, 0, fx);
                 self.terminate_reads(Ctrl::C, fx);
                 return true;
             }
             if k.vk == vk::CANCEL {
-                self.clear_input();
+                self.clear_input(false);
                 self.ctrl_event(Ctrl::Break, 0, fx);
                 self.terminate_reads(Ctrl::Break, fx);
                 return true;
@@ -243,11 +301,25 @@ impl Console {
         self.echo_held || self.reads_cut
     }
 
-    pub(super) fn clear_input(&mut self) {
+    /// Records a new record read or peek may take now. Owed reads get
+    /// first claim; the event and count use the same availability rule.
+    pub(super) fn ready_records(&self) -> usize {
+        if self.reads_behind() {
+            return 0;
+        }
+        self.input.len() + self.cached_records.len() + usize::from(self.held_unit.is_some())
+    }
+
+    pub(super) fn clear_input(&mut self, discard_slice: bool) {
         self.echo_held = false;
         self.input.clear();
         self.cached_records.clear();
         self.held_unit = None;
+        if discard_slice {
+            self.input_bytes.clear();
+            self.input_keys.clear();
+            self.input_end = false;
+        }
         self.record_utf8 = [input::Utf8Units::default(); 2];
         self.vt_utf8.clear();
     }
@@ -272,7 +344,7 @@ impl Console {
     pub(super) fn flush_input(&mut self, p: &Packet<'_>) -> Reply {
         match self.input_object(p.object, true) {
             Ok(()) => {
-                self.clear_input();
+                self.clear_input(true);
                 Reply::ok(p.id)
             }
             Err(status) => Reply::status(p.id, status),
@@ -287,7 +359,7 @@ impl Console {
         if let Err(status) = self.input_object(object, false) {
             return status;
         }
-        msg::put_u32(fixed, 0, self.input.len() as u32);
+        msg::put_u32(fixed, 0, self.ready_records() as u32);
         msg::STATUS_SUCCESS
     }
 
@@ -470,23 +542,43 @@ impl Console {
         let mut reads = std::mem::take(&mut self.reads);
         self.echo_held = false;
         self.reads_cut = false;
-        let mut built = 0;
-        while let Some(r) = reads.pop_front() {
-            if built > 0 && built + r.capacity > READ_REPLY_CAP {
+        while let Some(mut r) = reads.pop_front() {
+            let remaining = READ_REPLY_CAP - self.read_built;
+            // Bound the actual reply, rather than postponing a large
+            // declared buffer after a tiny reply. Preserve its capacity
+            // if it has to wait instead of completing.
+            let unit = match &r.kind {
+                ReadKind::Records { .. } => input::RECORD_LEN,
+                ReadKind::Chars { unicode: true, .. } | ReadKind::Line { unicode: true, .. } => 2,
+                _ => 1,
+            };
+            if remaining < unit {
                 self.reads_cut = true;
                 kept.push_back(r);
                 kept.append(&mut reads);
                 break;
             }
+            let capacity = r.capacity;
+            r.capacity = r.capacity.min(remaining);
+            if let ReadKind::Records { count, .. } = &mut r.kind {
+                *count = r.capacity / input::RECORD_LEN;
+            }
             let retained = r.retained;
             match self.attempt(r, out, fx) {
                 Attempt::Done(reply) => {
                     self.parked -= retained;
-                    built += reply.output.len();
+                    self.read_built += reply.output.len();
                     fx.push(Effect::Complete(reply));
                 }
-                Attempt::Wait(r) => kept.push_back(r),
-                Attempt::Held(r) => {
+                Attempt::Wait(mut r) => {
+                    r.capacity = capacity;
+                    if let ReadKind::Records { count, .. } = &mut r.kind {
+                        *count = capacity / input::RECORD_LEN;
+                    }
+                    kept.push_back(r);
+                }
+                Attempt::Held(mut r) => {
+                    r.capacity = capacity;
                     self.echo_held = true;
                     kept.push_back(r);
                     kept.append(&mut reads);
@@ -535,9 +627,9 @@ impl Console {
                         continue;
                     }
                     match self.next_char(true) {
-                        Some(Got::Char(ch, keys)) => line.char(
-                            ch,
-                            keys,
+                        Some(Got::Char(k)) => line.char(
+                            k.ch,
+                            k.state,
                             self.input_mode & mode::PROCESSED_INPUT != 0,
                             &mut echo,
                         ),
@@ -574,7 +666,11 @@ impl Console {
         let processed = self.input_mode & mode::PROCESSED_INPUT != 0;
         let wakeup = line.done() == Some(Done::Wakeup);
         let mut newline = Vec::new();
-        let (text, keys) = line.finish(processed, &mut newline);
+        let (text, keys) = line.finish(
+            processed,
+            self.input_mode & mode::ECHO_INPUT != 0,
+            &mut newline,
+        );
         if !wakeup {
             self.screen.host(&newline, out);
         }
@@ -609,14 +705,14 @@ impl Console {
     /// arrives; a lone half reads as U+FFFD.
     fn next_text(&mut self, unicode: bool) -> Option<([u16; 2], usize)> {
         let first = self.next_unit()?;
-        if unicode || !input::is_high_surrogate(first) {
-            return Some(([first, 0], 1));
+        if unicode || !input::is_high_surrogate(first.ch) {
+            return Some(([first.ch, 0], 1));
         }
         match self.next_unit() {
-            Some(low) if input::is_low_surrogate(low) => Some(([first, low], 2)),
+            Some(low) if input::is_low_surrogate(low.ch) => Some(([first.ch, low.ch], 2)),
             Some(other) => {
                 self.held_unit = Some(other);
-                Some(([first, 0], 1))
+                Some(([first.ch, 0], 1))
             }
             None => {
                 self.held_unit = Some(first);
@@ -625,9 +721,9 @@ impl Console {
         }
     }
 
-    fn next_unit(&mut self) -> Option<u16> {
+    fn next_unit(&mut self) -> Option<KeyEvent> {
         match self.next_char(false)? {
-            Got::Char(ch, _) => Some(ch),
+            Got::Char(k) => Some(k),
             Got::Vkey(_) => None,
         }
     }
@@ -636,7 +732,7 @@ impl Console {
     /// cooked read an editing key. Records without either are consumed.
     fn next_char(&mut self, editing: bool) -> Option<Got> {
         if let Some(unit) = self.held_unit.take() {
-            return Some(Got::Char(unit, 0));
+            return Some(Got::Char(unit));
         }
         let vt = self.input_mode & mode::VIRTUAL_TERMINAL_INPUT != 0;
         loop {
@@ -647,10 +743,10 @@ impl Console {
             if k.ch != 0 && !edit {
                 // An Alt+numpad character arrives on the Alt key's release.
                 if !k.down && k.vk == vk::MENU {
-                    return Some(Got::Char(k.ch, k.state));
+                    return Some(Got::Char(k));
                 }
                 if k.down && (vt || (k.vk != vk::ESCAPE && k.ch != 0x0a)) {
-                    return Some(Got::Char(k.ch, k.state));
+                    return Some(Got::Char(k));
                 }
             }
             if !k.down {
@@ -660,7 +756,7 @@ impl Console {
                 return Some(Got::Vkey(k.vk));
             }
             if k.ch == 0 && self.types_nul(&k) {
-                return Some(Got::Char(0, k.state));
+                return Some(Got::Char(k));
             }
         }
     }
@@ -690,14 +786,22 @@ impl Console {
             let n = count.min(self.cached_records.len());
             self.cached_records.drain(..n).collect()
         };
+        // A raw ANSI read may have looked one UTF-16 unit ahead. It is
+        // still the next key, ahead of all records remaining in input.
+        let held = self.held_unit.map(Record::Key);
         let mut taken = 0;
+        let mut took_held = false;
         // A peek leaves the waiting surrogate halves as they are.
         let mut utf8 = self.record_utf8;
-        for r in self.input.iter() {
+        for (index, r) in held.iter().chain(self.input.iter()).enumerate() {
             if out.len() >= count {
                 break;
             }
-            taken += 1;
+            if index == 0 && held.is_some() {
+                took_held = true;
+            } else {
+                taken += 1;
+            }
             match r {
                 Record::Key(k) if !unicode => {
                     let mut bytes = Vec::new();
@@ -714,6 +818,9 @@ impl Console {
         }
         let extra = out.split_off(count.min(out.len()));
         if !peek {
+            if took_held {
+                self.held_unit = None;
+            }
             self.input.drain_front(taken);
             self.cached_records.extend(extra);
             self.record_utf8 = utf8;
@@ -770,6 +877,9 @@ impl Console {
     }
 
     fn keep_pending(&mut self, object: usize, rest: &[u16]) {
+        if rest.is_empty() {
+            return;
+        }
         if let Some(o) = self.objects.get_mut(&object) {
             o.pending = rest.to_vec();
         }
@@ -926,6 +1036,354 @@ pub(crate) mod tests {
 
     fn held(r: &Reply) -> bool {
         r.status == i32::MIN
+    }
+
+    #[test]
+    fn cancelled_same_slice_text_never_reaches_the_next_read() {
+        for split in [false, true] {
+            let mut h = Host::new();
+            let [_, input, _] = h.connect(1, "");
+            let cancelled = read_w(&mut h, input, 512);
+            let fx = if split {
+                h.ev(Event::Input(b"del x"));
+                h.ev(Event::Input(b"\x03"))
+            } else {
+                h.ev(Event::Input(b"del x\x03"))
+            };
+            let done = completes(&fx);
+            assert_eq!(done.len(), 1);
+            assert_eq!(done[0].id, cancelled.id);
+            assert_eq!(done[0].status, msg::STATUS_ALERTED);
+            assert!(done[0].output.is_empty());
+            let next = read_w(&mut h, input, 512);
+            let fx = h.ev(Event::Input(b"\r"));
+            let done = completes(&fx);
+            assert_eq!(done[0].id, next.id);
+            assert_eq!(wide(done[0]), "\r\n");
+        }
+    }
+
+    #[test]
+    fn cancellation_after_a_backpressure_pause_does_not_submit_the_cancelled_line() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.queued = ECHO_ABOVE - 2;
+        let cancelled = read_w(&mut h, input, 512);
+        assert!(completes(&h.ev(Event::Input(b"del x\x03"))).is_empty());
+        assert!(h.c.echo_held && h.c.input_paused());
+        let fx = h.drain();
+        let done = completes(&fx);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].id, cancelled.id);
+        assert_eq!(done[0].status, msg::STATUS_ALERTED);
+        read_w(&mut h, input, 512);
+        assert_eq!(wide(completes(&h.ev(Event::Input(b"\r")))[0]), "\r\n");
+    }
+
+    #[test]
+    fn cancellation_serves_text_even_when_a_raw_read_precedes_the_cooked_read() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.set_mode(input, RAW);
+        let raw = read_w(&mut h, input, 2);
+        h.set_mode(
+            input,
+            mode::LINE_INPUT | mode::ECHO_INPUT | mode::PROCESSED_INPUT,
+        );
+        let cooked = read_w(&mut h, input, 512);
+        let fx = h.ev(Event::Input(b"xdel x\x03"));
+        let done = completes(&fx);
+        assert_eq!(done[0].id, raw.id);
+        assert_eq!(wide(done[0]), "x");
+        assert_eq!(done[1].id, cooked.id);
+        assert_eq!(done[1].status, msg::STATUS_ALERTED);
+        read_w(&mut h, input, 512);
+        assert_eq!(wide(completes(&h.ev(Event::Input(b"\r")))[0]), "\r\n");
+    }
+
+    #[test]
+    fn cancellation_at_the_reply_cap_discards_only_the_cooked_readers_prefix() {
+        for successor in ["cooked", "raw", "records"] {
+            let mut h = Host::new();
+            let [_, input, _] = h.connect(1, "");
+            h.set_mode(input, RAW);
+            let raw = read_w(&mut h, input, READ_REPLY_CAP as u32);
+            let kept = match successor {
+                "raw" => Some(read_w(&mut h, input, 512)),
+                "records" => Some(get_input(&mut h, input, 0, true, 64)),
+                _ => None,
+            };
+            h.set_mode(
+                input,
+                mode::LINE_INPUT | mode::ECHO_INPUT | mode::PROCESSED_INPUT,
+            );
+            let cooked = read_w(&mut h, input, 512);
+            let mut bytes = b"\x1b[65;0;97;1;0;65535_".repeat(8);
+            bytes.extend(b"\x1b[65;0;97;1;0;8_del x\x03");
+            let fx = h.ev(Event::Input(&bytes));
+            assert_eq!(reply_bytes(&fx), READ_REPLY_CAP);
+            let done = completes(&fx);
+            let raw_done = done
+                .iter()
+                .find(|r| r.id == raw.id)
+                .expect("original raw read completed");
+            assert_eq!(raw_done.status, msg::STATUS_SUCCESS);
+            assert_eq!(raw_done.output.len(), READ_REPLY_CAP);
+            assert!(
+                msg::utf16_units(&raw_done.output)
+                    .iter()
+                    .all(|&u| u == u16::from(b'a'))
+            );
+            let cancelled = done
+                .iter()
+                .find(|r| r.id == cooked.id)
+                .expect("cooked read cancelled");
+            assert_eq!(cancelled.status, msg::STATUS_ALERTED);
+            assert!(cancelled.output.is_empty());
+            let resumed = h.ev(Event::ServeReads);
+            if let Some(kept) = kept {
+                let done = completes(&resumed);
+                let kept_done = done
+                    .iter()
+                    .find(|r| r.id == kept.id)
+                    .expect("unrelated reader resumed");
+                assert_eq!(kept_done.status, msg::STATUS_SUCCESS);
+                if successor == "raw" {
+                    assert_eq!(wide(kept_done), "del x");
+                } else {
+                    let chars: Vec<u16> = kept_done
+                        .output
+                        .as_chunks::<{ input::RECORD_LEN }>()
+                        .0
+                        .iter()
+                        .map(|r| u16::from_le_bytes([r[14], r[15]]))
+                        .filter(|&ch| ch != 0)
+                        .collect();
+                    assert_eq!(String::from_utf16_lossy(&chars), "del x");
+                }
+            }
+            let next = read_w(&mut h, input, 512);
+            assert!(held(&next));
+            let fx = h.ev(Event::Input(b"\r"));
+            assert!(reply_bytes(&fx) <= READ_REPLY_CAP);
+            let done = completes(&fx);
+            assert_eq!(done.len(), 1);
+            assert_eq!(done[0].id, next.id);
+            assert_eq!(wide(done[0]), "\r\n");
+        }
+    }
+
+    #[test]
+    fn ctrl_break_flushes_preceding_input_but_keeps_later_same_slice_text() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        read_w(&mut h, input, 512);
+        let mut bytes = b"cancel".to_vec();
+        bytes.extend(b"\x1b[3;0;0;1;8;1_");
+        bytes.extend(b"next");
+        h.ev(Event::Input(&bytes));
+        read_w(&mut h, input, 512);
+        assert_eq!(wide(completes(&h.ev(Event::Input(b"\r")))[0]), "next\r\n");
+    }
+
+    #[test]
+    fn flush_discards_the_remainder_of_a_held_slice() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.queued = ECHO_ABOVE + 1;
+        read_w(&mut h, input, 512);
+        h.ev(Event::Input(b"discard"));
+        assert!(h.c.input_pending());
+        h.call(input, api::FLUSH_INPUT_BUFFER, &[], &[], 0);
+        assert!(!h.c.input_pending());
+        assert!(completes(&h.drain()).is_empty());
+        assert_eq!(wide(completes(&h.ev(Event::Input(b"\r")))[0]), "\r\n");
+    }
+
+    #[test]
+    fn a_single_slice_paste_reaches_its_waiting_read_before_the_queue_cap() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        read_w(&mut h, input, 16_384);
+        let text = format!("{}\r", "a".repeat(6000));
+        let fx = h.ev(Event::Input(text.as_bytes()));
+        assert_eq!(wide(completes(&fx)[0]), format!("{}\r\n", "a".repeat(6000)));
+        assert!(!fx.contains(&Effect::Log(Diag::InputDropped)));
+        // With no reader the original drop-oldest cap still applies.
+        h.ev(Event::Input(&vec![b'x'; 6000]));
+        assert_eq!(h.c.input.len(), input::MAX_RECORDS);
+    }
+
+    #[test]
+    fn empty_rest_from_an_overlapping_read_keeps_the_first_reads_rest() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        read_w(&mut h, input, 4);
+        read_w(&mut h, input, 512);
+        let fx = h.ev(Event::Input(b"abcd\r\r"));
+        assert_eq!(completes(&fx).len(), 2);
+        assert_eq!(wide(&read_w(&mut h, input, 512)), "cd\r\n");
+    }
+
+    #[test]
+    fn echo_off_never_flushes_a_dangling_surrogate_to_the_terminal() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.set_mode(input, mode::LINE_INPUT | mode::PROCESSED_INPUT);
+        read_w(&mut h, input, 512);
+        let mut bytes = win32_down(0, 0xd83d);
+        bytes.push(b'\r');
+        let fx = h.ev(Event::Input(&bytes));
+        assert_eq!(
+            msg::utf16_units(&completes(&fx)[0].output),
+            [0xd83d, 13, 10]
+        );
+        assert_eq!(h.vt, b"\r\n");
+    }
+
+    #[test]
+    fn a_wide_backspace_erases_both_display_columns() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        read_w(&mut h, input, 512);
+        let fx = h.ev(Event::Input("界\x08\r".as_bytes()));
+        assert_eq!(wide(completes(&fx)[0]), "\r\n");
+        assert_eq!(h.vt, "界\x08 \x08\x08 \x08\r\n".as_bytes());
+    }
+
+    #[test]
+    fn tab_erase_keeps_the_existing_one_column_behavior_before_a_tab_stop() {
+        for erase in *b"\x08\x1b" {
+            let mut h = Host::new();
+            let [_, input, output] = h.connect(1, "");
+            h.write_w(output, "       ");
+            assert_eq!(h.c.screen.cursor().0, 7);
+            read_w(&mut h, input, 512);
+            let fx = h.ev(Event::Input(&[b'\t', erase]));
+            assert!(completes(&fx).is_empty());
+            assert_eq!(h.c.screen.cursor().0, 7);
+            assert_eq!(h.vt, b"       \t\x08 \x08");
+            assert_eq!(wide(completes(&h.ev(Event::Input(b"\r")))[0]), "\r\n");
+        }
+    }
+
+    #[test]
+    fn a_raw_ansi_lookahead_stays_available_to_record_reads() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.set_mode(input, RAW);
+        let mut bytes = win32_down(0, 0xd83d);
+        bytes.extend(b"\x1b[65;30;97;1;16;1_");
+        h.ev(Event::Input(&bytes));
+        let r = h.call(input, api::READ_CONSOLE, &read_msg(false, 0, 0), &[], 3);
+        assert_eq!(r.output, "�".as_bytes());
+        let count = h.call(input, api::GET_NUMBER_OF_INPUT_EVENTS, &[0; 4], &[], 0);
+        assert_eq!(msg::u32_at(&count.write_back, 0), Some(1));
+        assert!(h.c.input_available);
+        let peek = get_input(&mut h, input, READ_NOREMOVE | READ_NOWAIT, true, 1);
+        assert_eq!(&peek.output[14..16], &u16::from(b'a').to_le_bytes());
+        assert_eq!(&peek.output[10..12], &65u16.to_le_bytes());
+        assert_eq!(&peek.output[12..14], &30u16.to_le_bytes());
+        assert_eq!(&peek.output[16..20], &state::SHIFT.to_le_bytes());
+        let read = get_input(&mut h, input, 0, true, 1);
+        assert_eq!(read.output, peek.output);
+        h.ev(Event::Input(b"y"));
+        let read = get_input(&mut h, input, 0, true, 1);
+        assert_eq!(&read.output[14..16], &u16::from(b'y').to_le_bytes());
+    }
+
+    #[test]
+    fn tiny_then_large_declared_read_use_the_same_actual_reply_budget() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.set_mode(input, RAW);
+        read_w(&mut h, input, 2);
+        read_w(&mut h, input, READ_REPLY_CAP as u32);
+        let fx = h.ev(Event::Input(b"ab"));
+        assert_eq!(
+            completes(&fx).iter().map(|r| wide(r)).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(!h.c.reads_ready());
+    }
+
+    fn assert_peek_count_agree(h: &mut Host, input: usize) {
+        let count = h.call(input, api::GET_NUMBER_OF_INPUT_EVENTS, &[0; 4], &[], 0);
+        let peek = get_input(h, input, READ_NOREMOVE | READ_NOWAIT, true, 4096);
+        assert_eq!(
+            msg::u32_at(&count.write_back, 0),
+            msg::u32_at(&peek.write_back, 0)
+        );
+        assert_eq!(h.c.input_available, peek.information > 0);
+    }
+
+    #[test]
+    fn peek_count_and_event_agree_while_echo_or_reply_budget_owns_input() {
+        let mut h = Host::new();
+        hold_reads_on_their_echo(&mut h);
+        let input = h.c.reads.front().expect("held read").object;
+        assert_peek_count_agree(&mut h, input);
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        large_reads(&mut h, input, 4, READ_REPLY_CAP as u32);
+        assert_peek_count_agree(&mut h, input);
+    }
+
+    #[test]
+    fn a_held_slice_resumes_without_evicting_any_of_its_input() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.queued = ECHO_ABOVE - 500;
+        read_w(&mut h, input, 16_384);
+        let text = format!("{}{}\r", "a".repeat(4000), "b".repeat(3000));
+        let mut done: Vec<String> = completes(&h.ev(Event::Input(text.as_bytes())))
+            .iter()
+            .map(|r| wide(r))
+            .collect();
+        assert!(h.c.input_paused());
+        assert!(h.c.input.len() <= input::MAX_RECORDS);
+        // A small drain leaves echo held; no new input may be admitted.
+        h.queued -= 1024;
+        done.extend(
+            completes(&h.ev(Event::OutputDrained))
+                .iter()
+                .map(|r| wide(r)),
+        );
+        assert!(h.c.input_paused());
+        done.extend(completes(&h.drain()).iter().map(|r| wide(r)));
+        assert_eq!(done, [text.replace('\r', "\r\n")]);
+        assert!(!h.c.input_paused());
+    }
+
+    #[test]
+    fn closing_or_disconnecting_a_held_reader_resumes_the_successor_now() {
+        for disconnect in [false, true] {
+            let mut h = Host::new();
+            let [process, input, _] = h.connect(1, "");
+            let [process2, other, _] = h.connect(2, "");
+            h.queued = ECHO_ABOVE + 1;
+            read_w(&mut h, input, 512);
+            h.ev(Event::Input(b"abc"));
+            h.set_mode(other, RAW);
+            let mut payload = api::READ_CONSOLE.to_le_bytes().to_vec();
+            payload.extend(20u32.to_le_bytes());
+            payload.extend(read_msg(true, 0, 0));
+            let (successor, _) = h.packet(msg::USER_DEFINED, process2, other, &payload, 532);
+            assert!(held(&successor));
+            let (_, fx) = if disconnect {
+                h.packet(msg::DISCONNECT, process, 0, &[], 0)
+            } else {
+                h.packet(msg::CLOSE_OBJECT, process, input, &[], 0)
+            };
+            let done = completes(&fx);
+            let resumed = done
+                .iter()
+                .find(|r| r.id == successor.id)
+                .expect("successor completed in close call");
+            assert_eq!(wide(resumed), "abc");
+            assert_eq!(done.iter().filter(|r| r.id == successor.id).count(), 1);
+            assert!(completes(&h.drain()).is_empty());
+        }
     }
 
     #[test]

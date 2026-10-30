@@ -107,7 +107,7 @@ impl Line {
         self.erasing
     }
 
-    /// Erase one more character of the line, at most 3 bytes of echo.
+    /// Erase one more character of the line, at most 6 bytes of echo.
     pub(crate) fn erase_one(&mut self, echo: &mut Vec<u8>) {
         self.backspace(echo);
         self.erasing = self.erasing && !self.buffer.is_empty();
@@ -123,24 +123,48 @@ impl Line {
             self.utf8.clear();
             return;
         }
+        let mut units = [last, 0];
+        let mut n = 1;
         if (0xDC00..0xE000).contains(&last)
             && self
                 .buffer
                 .last()
                 .is_some_and(|u| (0xD800..0xDC00).contains(u))
         {
-            self.buffer.pop();
+            units = [self.buffer.pop().unwrap_or(last), last];
+            n = 2;
         }
-        echo.extend_from_slice(b"\x08 \x08");
+        let ch = char::decode_utf16(units[..n].iter().copied())
+            .next()
+            .and_then(Result::ok)
+            .unwrap_or(char::REPLACEMENT_CHARACTER);
+        // Tabs advance the cursor despite having Unicode width zero.
+        // Preserve the existing one-column erase until the full tab and
+        // wrapped-line layout work (#1256), rather than erasing nothing.
+        let width = if ch == '\t' {
+            1
+        } else {
+            rusty_term_core::char_width(ch)
+        };
+        for _ in 0..width {
+            echo.extend_from_slice(b"\x08 \x08");
+        }
     }
 
     /// The text the read returns, its ControlKeyState, and what to show
     /// for the end of the line (conhost `_handlePostCharInputLoop`): a
     /// line gets `\r\n` (only `\r` without PROCESSED_INPUT), shown even
     /// without echo.
-    pub(crate) fn finish(mut self, processed: bool, echo: &mut Vec<u8>) -> (Vec<u16>, u32) {
+    pub(crate) fn finish(
+        mut self,
+        processed: bool,
+        echoing: bool,
+        echo: &mut Vec<u8>,
+    ) -> (Vec<u16>, u32) {
         if self.done == Some(Done::Line) {
-            self.utf8.flush(echo);
+            if echoing {
+                self.utf8.flush(echo);
+            }
             let suffix: &[u16] = if processed { &[0x0d, 0x0a] } else { &[0x0d] };
             echo.extend(suffix.iter().map(|&u| u as u8));
             self.buffer.extend_from_slice(suffix);
@@ -165,7 +189,7 @@ mod tests {
         let mut line = Line::new(Vec::new(), 0);
         feed(&mut line, "dir\r", &mut echo);
         assert_eq!(line.done(), Some(Done::Line));
-        let (text, state) = line.finish(true, &mut echo);
+        let (text, state) = line.finish(true, true, &mut echo);
         assert_eq!(String::from_utf16_lossy(&text), "dir\r\n");
         assert_eq!(state, 0);
         assert_eq!(echo, b"dir\r\n");
@@ -208,7 +232,7 @@ mod tests {
         line.char(0xDE00, 0, true, &mut echo);
         line.char(0xD83D, 0, true, &mut echo);
         line.char(0x0d, 0, true, &mut echo);
-        let (text, _) = line.finish(true, &mut echo);
+        let (text, _) = line.finish(true, true, &mut echo);
         assert_eq!(echo, "😀\u{FFFD}\u{FFFD}\r\n".as_bytes());
         assert_eq!(text, [0xD83D, 0xDE00, 0xDE00, 0xD83D, 0x0d, 0x0a]);
     }
@@ -219,7 +243,7 @@ mod tests {
         let mut line = Line::new(Vec::new(), 0);
         line.char(0x08, 0, false, &mut echo);
         line.char(0x0d, 0, false, &mut echo);
-        let (text, _) = line.finish(false, &mut echo);
+        let (text, _) = line.finish(false, true, &mut echo);
         assert_eq!(text, [0x08, 0x0d]);
     }
 
@@ -230,7 +254,7 @@ mod tests {
         feed(&mut line, " p", &mut echo);
         line.char(0x09, 0x10, true, &mut echo);
         assert_eq!(line.done(), Some(Done::Wakeup));
-        let (text, state) = line.finish(true, &mut echo);
+        let (text, state) = line.finish(true, true, &mut echo);
         assert_eq!(String::from_utf16_lossy(&text), "cd p\t");
         assert_eq!(state, 0x10);
         assert_eq!(echo, b" p", "initial data isn't echoed, nor is the wakeup");

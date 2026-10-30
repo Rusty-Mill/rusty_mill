@@ -683,6 +683,7 @@ impl Queue {
         self.records.len()
     }
 
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
