@@ -1195,10 +1195,6 @@ pub(crate) async fn watch_processes(state: Weak<RefCell<State>>) {
 /// the keys whose grace that covers.
 async fn pump(shared: Shared, block: BlockId, pty: Rc<Pty>, wake: Rc<Notify>) {
     let mut buf = vec![0; CHUNK];
-    // One waiter, kept across turns and renewed once it fires: a
-    // `Notified` dropped unfired stays queued in `rusty_tokio`, and a
-    // notification could go to it instead.
-    let mut keyed = std::pin::pin!(wake.notified());
     'run: loop {
         let due = shared.borrow().echo_due(block);
         let grace = async {
@@ -1209,15 +1205,12 @@ async fn pump(shared: Shared, block: BlockId, pty: Rc<Pty>, wake: Rc<Notify>) {
                 None => std::future::pending().await,
             }
         };
-        let (read, fired) = rusty_tokio::select! {
+        let read = rusty_tokio::select! {
             biased;
-            read = pty.read(&mut buf) => (Some(read), false),
-            () = keyed.as_mut() => (None, true),
-            () = grace => (None, false),
+            read = pty.read(&mut buf) => Some(read),
+            () = wake.notified() => None,
+            () = grace => None,
         };
-        if fired {
-            keyed.set(wake.notified());
-        }
         if let Some(read) = read
             && !forward(&shared, block, &pty, read, &buf).await
         {
