@@ -46,7 +46,6 @@ mod webp;
 
 #[cfg(feature = "gui")]
 pub use bidi::mirrored as bidi_mirrored;
-#[cfg(feature = "gui")]
 pub use cell::char_width;
 pub use cell::{
     ATTR_BG_DEFAULT, ATTR_BLINK, ATTR_BOLD, ATTR_DEFAULT_COLORS, ATTR_DIM, ATTR_FG_DEFAULT,
