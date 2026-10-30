@@ -216,6 +216,59 @@ impl Pen {
     pub(crate) fn bg_is_default(&self) -> bool {
         self.attrs & ATTR_BG_DEFAULT != 0
     }
+
+    /// The pen's colours and attributes as a host reads them.
+    pub(crate) fn colors(&self) -> CellColors {
+        CellColors::new(self.fg, self.fg_index, self.bg, self.bg_index, self.attrs)
+    }
+}
+
+/// A colour as a pen or cell stores it, before reverse video and any
+/// rendering transform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorRef {
+    /// The terminal default: SGR 39 / 49, or a reset.
+    Default,
+    /// Palette entry `n`: SGR 30-37, 90-97, `38;5;n` and their backgrounds.
+    Palette(u8),
+    /// Explicit `0x00RRGGBB`: SGR `38;2`, or a colour whose palette
+    /// provenance a retheme or an RTSN restore dropped.
+    Rgb(u32),
+}
+
+impl ColorRef {
+    /// The colour `rgb` with palette tag `tag` ([`Source::tag`]), or the
+    /// default when `default`.
+    fn of(rgb: u32, tag: u16, default: bool) -> Self {
+        if default {
+            return ColorRef::Default;
+        }
+        Source::entry(tag).map_or(ColorRef::Rgb(rgb), ColorRef::Palette)
+    }
+}
+
+/// The colours and attributes of a pen or cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellColors {
+    /// Foreground.
+    pub fg: ColorRef,
+    /// Background.
+    pub bg: ColorRef,
+    /// The `ATTR_*` bits, without the layout bits ([`WIDE_TRAILER`],
+    /// DECSCA protection).
+    pub flags: u32,
+}
+
+impl CellColors {
+    /// Colours from stored `fg`/`bg` with their palette tags, and `attrs`
+    /// carrying the default-colour bits.
+    pub(crate) fn new(fg: u32, fg_index: u16, bg: u32, bg_index: u16, attrs: u32) -> Self {
+        CellColors {
+            fg: ColorRef::of(fg, fg_index, attrs & ATTR_FG_DEFAULT != 0),
+            bg: ColorRef::of(bg, bg_index, attrs & ATTR_BG_DEFAULT != 0),
+            flags: attrs & !(WIDE_TRAILER | ATTR_PROTECTED),
+        }
+    }
 }
 
 /// `bits` with `bit` set when `on`, cleared otherwise.

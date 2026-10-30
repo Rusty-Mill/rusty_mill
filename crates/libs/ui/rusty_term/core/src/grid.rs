@@ -9,8 +9,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use super::cell::{
-    ATTR_BG_DEFAULT, ATTR_DEFAULT_COLORS, ATTR_FG_DEFAULT, Cell, PackedCell, Pen, Source,
-    WIDE_TRAILER, char_width,
+    ATTR_BG_DEFAULT, ATTR_DEFAULT_COLORS, ATTR_FG_DEFAULT, Cell, CellColors, PackedCell, Pen,
+    Source, WIDE_TRAILER, char_width,
 };
 use super::style::{CellStyle, Defaults, StyleId, StyleTable};
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
@@ -1590,6 +1590,22 @@ impl Grid {
         }
         row[x] = cell;
         self.touch(y);
+    }
+
+    /// The colours and attributes of the live screen cell at (`col`, `row`),
+    /// row 0 at the top. A wide glyph's trailer reports its lead cell.
+    /// `None` off the screen.
+    pub fn cell_colors(&self, col: usize, row: usize) -> Option<CellColors> {
+        let line = self.screen.get(row).filter(|_| col < self.cols)?;
+        let lead = match line.cell(col) {
+            Some(cell) if cell.is_wide_trailer() && col > 0 => col - 1,
+            _ => col,
+        };
+        let style = line.cell(lead).map_or_else(
+            || CellStyle::of(&self.default_cell()),
+            |cell| self.styles.get(cell.style()),
+        );
+        Some(style.colors())
     }
 
     /// The cells of live screen row `y` (`cols` of them), collected; empty

@@ -8249,3 +8249,64 @@ fn mode_2027_joining_matches_uax29_segmentation() {
         assert_eq!(got, want, "{text:?}");
     }
 }
+
+#[test]
+fn pen_colors_report_sgr_provenance() {
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    let reset = p.pen_colors();
+    assert_eq!((reset.fg, reset.bg), (ColorRef::Default, ColorRef::Default));
+    p.advance(&mut g, b"\x1b[31;44;4;7m");
+    let c = p.pen_colors();
+    assert_eq!((c.fg, c.bg), (ColorRef::Palette(1), ColorRef::Palette(4)));
+    assert_ne!(c.flags & ATTR_UNDERLINE, 0);
+    assert_ne!(c.flags & ATTR_REVERSE, 0);
+    p.advance(&mut g, b"\x1b[0;38;5;200;48;2;1;2;3m");
+    let c = p.pen_colors();
+    assert_eq!((c.fg, c.bg), (ColorRef::Palette(200), ColorRef::Rgb(0x010203)));
+    assert_eq!(c.flags & (ATTR_UNDERLINE | ATTR_REVERSE), 0);
+}
+
+#[test]
+fn pen_colors_drop_the_protection_bit() {
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[1\"q");
+    assert_eq!(p.pen_colors().flags & WIDE_TRAILER, 0);
+    assert_eq!(p.pen_colors(), AnsiParser::new().pen_colors());
+}
+
+#[test]
+fn palette_follows_osc_4_and_104() {
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    let seed = *p.palette();
+    p.advance(&mut g, b"\x1b]4;1;rgb:00/00/ff\x1b\\");
+    assert_eq!(p.palette()[1], 0x0000FF);
+    p.advance(&mut g, b"\x1b]104;1\x1b\\");
+    assert_eq!(p.palette()[1], seed[1]);
+}
+
+#[test]
+fn cell_colors_read_the_stored_cell() {
+    let g = parse(b"a\x1b[93;41mb\x1b[38;2;9;8;7mc\x1b[0m\xe4\xb8\x80", 10, 2);
+    let at = |x| g.cell_colors(x, 0).map(|c| (c.fg, c.bg));
+    assert_eq!(at(0), Some((ColorRef::Default, ColorRef::Default)));
+    assert_eq!(at(1), Some((ColorRef::Palette(11), ColorRef::Palette(1))));
+    assert_eq!(at(2), Some((ColorRef::Rgb(0x090807), ColorRef::Palette(1))));
+    // The wide glyph at 3 and its trailer at 4 read alike.
+    assert_eq!(g.cell_colors(4, 0), g.cell_colors(3, 0));
+    assert_eq!(g.cell_colors(4, 0).map(|c| c.flags & WIDE_TRAILER), Some(0));
+    // Blank cells past the text, and off the screen.
+    assert_eq!(at(9), Some((ColorRef::Default, ColorRef::Default)));
+    assert_eq!(g.cell_colors(10, 0), None);
+    assert_eq!(g.cell_colors(0, 2), None);
+}
+
+#[test]
+fn cell_colors_keep_palette_cells_after_osc_4() {
+    let g = parse(b"\x1b[32mx\x1b]4;2;rgb:12/34/56\x1b\\", 10, 2);
+    let c = g.cell_colors(0, 0).map(|c| c.fg);
+    assert_eq!(c, Some(ColorRef::Palette(2)));
+    assert_eq!(cells(&g)[0].fg, 0x123456);
+}

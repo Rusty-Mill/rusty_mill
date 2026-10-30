@@ -51,7 +51,7 @@ pub use cell::char_width;
 pub use cell::{
     ATTR_BG_DEFAULT, ATTR_BLINK, ATTR_BOLD, ATTR_DEFAULT_COLORS, ATTR_DIM, ATTR_FG_DEFAULT,
     ATTR_HIDDEN, ATTR_ITALIC, ATTR_MASK, ATTR_OVERLINE, ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE,
-    ATTR_UNDERLINE_COLOR, Cell, UnderlineStyle, WIDE_TRAILER,
+    ATTR_UNDERLINE_COLOR, Cell, CellColors, ColorRef, UnderlineStyle, WIDE_TRAILER,
 };
 pub use color::Theme;
 #[cfg(feature = "gui")]

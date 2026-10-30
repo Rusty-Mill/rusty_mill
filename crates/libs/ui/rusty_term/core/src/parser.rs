@@ -9,7 +9,8 @@
 
 use super::cell::{
     ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_OVERLINE, ATTR_PROTECTED,
-    ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Pen, Source, UnderlineStyle,
+    ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, CellColors, Pen, Source,
+    UnderlineStyle,
 };
 use super::charset::Charset;
 use super::color::{Palette, Theme};
@@ -425,6 +426,17 @@ impl AnsiParser {
     /// calls this after `advance` and writes the result to the PTY master.
     pub fn take_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.responses)
+    }
+
+    /// The current SGR pen, the one the next printed character takes.
+    pub fn pen_colors(&self) -> CellColors {
+        self.pen.colors()
+    }
+
+    /// The live 256-entry palette as `0x00RRGGBB`, OSC 4 / 104 and theme
+    /// changes included.
+    pub fn palette(&self) -> &[u32; 256] {
+        self.palette.colors()
     }
 
     /// Live theme switch (config reload). Returns the previous seed theme so
@@ -1079,8 +1091,9 @@ impl AnsiParser {
     /// modes (mouse, focus, bracketed paste, and the Kitty keyboard / xterm
     /// modifyOtherKeys protocols) are *relayed* to the host terminal so it
     /// produces the corresponding input — see [`is_host_input_mode`].
-    /// Everything else (cursor visibility `25`, autowrap `7`, …) is consumed and
-    /// ignored so it never leaks as text.
+    /// Modes the grid keeps (cursor visibility `25`, autowrap `7`, origin `6`,
+    /// …) set grid state; everything else is consumed and ignored so it never
+    /// leaks as text.
     fn handle_private_csi(&mut self, cmd: u8, g: &mut Grid) {
         // DA2 (Secondary Device Attributes): `CSI > c`. Reply with a terminal
         // type (0), a firmware "version", and a ROM cartridge field (0) — the
