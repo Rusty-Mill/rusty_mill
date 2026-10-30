@@ -502,6 +502,14 @@ mod client {
         // block prints lands after the restore. Shutting a socket ends
         // its read; an error only means the server already closed it.
         stop.store(true, Ordering::Release);
+        // Detached, a server drops each block's client at once; one whose
+        // connection just ends is kept a while for a reconnect, lease and
+        // all. Shutting the socket below still delivers this first.
+        if app.lost.is_none() {
+            for pane in app.panes.values_mut() {
+                pane.send(|req| Message::Detach { req });
+            }
+        }
         let _ = app.control_stream.shutdown(Shutdown::Both);
         app.panes.values().for_each(Pane::hang_up);
         let reader = app.reader.take();
@@ -1556,8 +1564,12 @@ mod client {
                 self.focus = first;
             }
             let gone: Vec<BlockId> = self.panes.keys().filter(|b| !shows(**b)).copied().collect();
+            // Left on purpose, so detached first: a server keeps a client
+            // whose connection just ends, lease and all, for a reconnect,
+            // and the block's next client could not lease it meanwhile.
             for block in gone {
-                if let Some(pane) = self.panes.remove(&block) {
+                if let Some(mut pane) = self.panes.remove(&block) {
+                    pane.send(|req| Message::Detach { req });
                     pane.hang_up();
                 }
             }

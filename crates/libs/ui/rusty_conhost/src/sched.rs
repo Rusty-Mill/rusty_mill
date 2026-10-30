@@ -23,7 +23,7 @@ pub(crate) const PARKED_CAP: usize = 1024 * 1024;
 pub(crate) const PACKET_INPUT_CAP: usize = 64 * 1024;
 /// The most of an API's fixed descriptor a reply writes back: every
 /// struct served fits, so an oversized descriptor costs nothing parked.
-pub(crate) const WRITE_BACK_CAP: usize = 16;
+pub(crate) const WRITE_BACK_CAP: usize = 20;
 /// The most one held call retains: its text, at most the packet's input
 /// (a title's OSC is capped well below it), plus its write-back.
 pub(crate) const MAX_RETAINED_PER_CALL: usize = PACKET_INPUT_CAP + WRITE_BACK_CAP;
@@ -62,6 +62,8 @@ pub(crate) struct View {
     pub parked: usize,
     /// The server is closed: nothing more is read from the driver.
     pub closed: bool,
+    /// Waiting reads stopped at a call's reply budget with input left.
+    pub reads_ready: bool,
 }
 
 /// What one turn does, in this order.
@@ -69,17 +71,17 @@ pub(crate) struct View {
 pub(crate) struct Turn {
     pub control: Control,
     pub child_exited: bool,
+    /// Serve the waiting reads the last call left, before new input.
+    pub serve_reads: bool,
     /// Bytes to take from the input lane and hand to the console.
     pub input: usize,
     pub submit_read: bool,
-    /// Work is left that a later turn can do at once, so the wait must
-    /// not block.
-    pub poll: bool,
 }
 
 /// Plan one turn.
 pub(crate) fn turn(v: &View) -> Turn {
-    let input = if v.output <= INPUT_PAUSE_ABOVE {
+    // Reads owed queued input go first, so the queue stays bounded.
+    let input = if v.output <= INPUT_PAUSE_ABOVE && !v.reads_ready {
         v.input.min(INPUT_SLICE)
     } else {
         0
@@ -87,10 +89,25 @@ pub(crate) fn turn(v: &View) -> Turn {
     Turn {
         control: v.control,
         child_exited: v.exited,
+        serve_reads: v.reads_ready,
         input,
-        submit_read: !v.closed && !v.read_in_flight && admits_read(v.waiting, v.parked),
-        poll: input < v.input && v.output <= INPUT_PAUSE_ABOVE,
+        submit_read: read_admitted(v),
     }
+}
+
+/// Whether a READ_IO can be sent now: none is in flight and admission
+/// allows another packet.
+fn read_admitted(v: &View) -> bool {
+    !v.closed && !v.read_in_flight && admits_read(v.waiting, v.parked)
+}
+
+/// Whether the engine's wait must not block: work is left that the next
+/// turn can do at once. Asked of the state after the turn's events, not
+/// of its plan: an input slice can leave reads ready, stop at a write
+/// that ended in ESC with input left, or complete calls and so reopen
+/// admission with no READ_IO armed; no wake announces any of them.
+pub(crate) fn must_poll(v: &View) -> bool {
+    v.reads_ready || (v.input > 0 && v.output <= INPUT_PAUSE_ABOVE) || read_admitted(v)
 }
 
 /// Whether another packet may be accepted: fewer than [`MAX_WAITING`]
@@ -110,6 +127,8 @@ mod tests {
     struct Sim {
         view: View,
         packets: usize,
+        /// The last turn's wait was a poll.
+        polled: bool,
     }
 
     impl Sim {
@@ -117,6 +136,7 @@ mod tests {
             Sim {
                 view: View::default(),
                 packets: 0,
+                polled: false,
             }
         }
 
@@ -130,6 +150,7 @@ mod tests {
             if t.submit_read {
                 self.view.read_in_flight = true;
             }
+            self.polled = must_poll(&self.view);
             if ready_io && self.view.read_in_flight {
                 self.view.read_in_flight = false;
                 self.packets += 1;
@@ -167,7 +188,7 @@ mod tests {
             let t = sim.step(true);
             assert_eq!(t.input, INPUT_SLICE, "turn {k}");
             assert!(t.submit_read, "turn {k}");
-            assert!(t.poll, "turn {k}: input is left");
+            assert!(sim.polled, "turn {k}: input is left");
             assert_eq!(t.control.output_drained, k == 20, "turn {k}");
         }
         assert_eq!(sim.packets, 50);
@@ -204,7 +225,7 @@ mod tests {
         sim.view.control.hang_up = true;
         let t = sim.step(true);
         assert_eq!(t.input, 0);
-        assert!(!t.poll, "nothing can be done until the reader drains");
+        assert!(!sim.polled, "nothing can be done until the reader drains");
         assert!(t.control.hang_up, "control is never paused");
 
         sim.view.output = INPUT_PAUSE_ABOVE;
@@ -255,5 +276,82 @@ mod tests {
         assert!(taken.hang_up);
         assert_eq!(taken.resize, Some(WinSize { rows: 2, cols: 3 }));
         assert_eq!(lane, Control::default());
+    }
+
+    #[test]
+    fn the_wait_polls_on_what_the_turn_left_not_on_its_plan() {
+        // The planned slice took the whole lane: the plan saw no work left.
+        let before = View {
+            input: 10,
+            ..View::default()
+        };
+        assert_eq!(turn(&before).input, 10);
+        // Handling it left reads ready, or a cut at an ESC write end left
+        // input queued.
+        let after = View {
+            reads_ready: true,
+            ..View::default()
+        };
+        assert!(must_poll(&after));
+        assert!(must_poll(&View {
+            input: 1,
+            read_in_flight: true,
+            ..View::default()
+        }));
+        assert!(!must_poll(&View {
+            read_in_flight: true,
+            ..View::default()
+        }));
+    }
+
+    #[test]
+    fn the_wait_polls_when_admission_reopens_with_no_read_armed() {
+        let full = View {
+            waiting: MAX_WAITING,
+            ..View::default()
+        };
+        assert!(!turn(&full).submit_read && !must_poll(&full));
+        let freed = View {
+            waiting: MAX_WAITING - 1,
+            ..full
+        };
+        assert!(must_poll(&freed), "a call completed: arm the read");
+        let parked = View {
+            waiting: 1,
+            parked: PARKED_CAP - MAX_RETAINED_PER_CALL + 1,
+            ..View::default()
+        };
+        assert!(!must_poll(&parked));
+        let parked = View {
+            parked: PARKED_CAP - MAX_RETAINED_PER_CALL,
+            ..parked
+        };
+        assert!(must_poll(&parked), "parked bytes fell to the boundary");
+        assert!(!must_poll(&View {
+            read_in_flight: true,
+            ..parked
+        }));
+    }
+
+    #[test]
+    fn reads_owed_input_are_served_before_new_input_and_after_control() {
+        let v = View {
+            control: Control {
+                hang_up: true,
+                ..Control::default()
+            },
+            input: 100,
+            reads_ready: true,
+            ..View::default()
+        };
+        let t = turn(&v);
+        assert!(t.control.hang_up && t.serve_reads && must_poll(&v));
+        assert_eq!(t.input, 0, "input waits while reads are owed the queue");
+        let t = turn(&View {
+            reads_ready: false,
+            ..v
+        });
+        assert!(!t.serve_reads);
+        assert_eq!(t.input, 100);
     }
 }

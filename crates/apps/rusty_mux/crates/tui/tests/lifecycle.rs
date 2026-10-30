@@ -1211,8 +1211,12 @@ fn a_split_window_stays_on_screen_while_the_path_is_down() {
     let text = screen_text(&tui.since(0));
     assert!(text.contains("one-1") && text.contains("two-2"), "{text}");
 
-    wait_logins(&work, 3, PATIENCE);
+    // Start observing before the successful login can finish its takeover. The
+    // login is recorded before the client receives and paints the restored
+    // panes, and on a loaded runner that whole repaint can otherwise land in
+    // the gap between `wait_logins` returning and this cursor being sampled.
     let from = tui.written();
+    wait_logins(&work, 3, PATIENCE);
     let deadline = Instant::now() + PATIENCE;
     loop {
         let again = String::from_utf8_lossy(&tui.since(from)).into_owned();
@@ -1276,4 +1280,126 @@ fn detaching_while_an_answer_trickles_is_prompt() {
     let seen = logins(&work);
     assert!(seen.iter().all(|(pid, _)| !running(*pid)), "{seen:?}");
     std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// A block hidden by another client's zoom is left, not kept for a
+/// reconnect: once shown again, its new client gets the lease at once
+/// instead of waiting out the old one's grace.
+#[test]
+fn a_block_zoomed_away_and_back_is_leased_again_at_once() {
+    let socket = real_server();
+    let tui = Tui::run(&[socket.as_os_str()], EnvSpec::Inherit);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    tui.master.write(b"\x1d|").expect("ctrl-] |");
+    let mut other = control(&socket);
+    let (window, left, right) = split_of(&mut other);
+    let blocks = [left, right];
+    leased(&mut other, blocks, (false, true));
+    tui.master.write(b"\x1dh").expect("ctrl-] h");
+    leased(&mut other, blocks, (true, false));
+
+    // Zooming the right block hides the focused, leased left one.
+    let block = right;
+    ask(&mut other, 1, Message::Zoom { req: 1, block });
+    leased(&mut other, blocks, (false, true));
+    ask(&mut other, 2, Message::Unzoom { req: 2, window });
+    // Focusing left does nothing until the client has the unzoom.
+    let deadline = Instant::now() + PATIENCE;
+    while holders(&mut other, blocks) != (true, false) {
+        assert!(Instant::now() < deadline, "the left block was not leased");
+        tui.master.write(b"\x1dh").expect("ctrl-] h");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    type_until(&tui, b"echo two-$((1+1))\r", b"two-2");
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
+}
+
+/// A client of the server at `socket` that can change layouts.
+fn control(socket: &Path) -> Conn<Stream> {
+    let mut conn = Conn::new(Stream::connect(socket).expect("connect"));
+    conn.send(&Message::Hello {
+        features: Features::CHECKPOINT_V6
+            .union(Features::INSPECT)
+            .union(Features::LAYOUT),
+        resume: None,
+        takeover: None,
+    })
+    .expect("hello");
+    match conn.recv().expect("welcome") {
+        Message::Welcome { .. } => conn,
+        other => panic!("expected Welcome, got {other:?}"),
+    }
+}
+
+/// Sends `request`, numbered `req`, and waits for its Done.
+fn ask(conn: &mut Conn<Stream>, req: u64, request: Message) {
+    conn.send(&request).expect("request");
+    loop {
+        match conn.recv().expect("answer") {
+            Message::Done { req: r, .. } if r == req => return,
+            Message::Failed { req: r, reason, .. } if r == req => panic!("{reason}"),
+            _ => {}
+        }
+    }
+}
+
+/// The server's entries.
+fn list(conn: &mut Conn<Stream>) -> Vec<Entry> {
+    conn.send(&Message::List { req: 0 }).expect("list");
+    let mut entries = Vec::new();
+    loop {
+        match conn.recv().expect("list answer") {
+            Message::Entry { entry, .. } => entries.push(entry),
+            Message::Done { req: 0, .. } => return entries,
+            _ => {}
+        }
+    }
+}
+
+/// The only window and its two blocks, left then right, once it is split.
+fn split_of(conn: &mut Conn<Stream>) -> (WindowId, BlockId, BlockId) {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let split = list(conn).into_iter().find_map(|entry| match entry {
+            Entry::Window {
+                window,
+                layout: Some(layout),
+                ..
+            } => match layout.blocks().as_slice() {
+                [left, right] => Some((window, *left, *right)),
+                _ => None,
+            },
+            _ => None,
+        });
+        if let Some(split) = split {
+            return split;
+        }
+        assert!(Instant::now() < deadline, "not split");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Whether each of `blocks` is leased.
+fn holders(conn: &mut Conn<Stream>, [left, right]: [BlockId; 2]) -> (bool, bool) {
+    let entries = list(conn);
+    let held = |b: BlockId| {
+        entries
+            .iter()
+            .any(|e| matches!(e, Entry::Block { block, holder: Some(_), .. } if *block == b))
+    };
+    (held(left), held(right))
+}
+
+/// Waits until whether each of `blocks` is leased is `want`.
+fn leased(conn: &mut Conn<Stream>, blocks: [BlockId; 2], want: (bool, bool)) {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let now = holders(conn, blocks);
+        if now == want {
+            return;
+        }
+        assert!(Instant::now() < deadline, "leased {now:?}, not {want:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

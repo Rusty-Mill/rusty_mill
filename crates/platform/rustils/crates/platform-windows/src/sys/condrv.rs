@@ -1007,6 +1007,13 @@ fn console_control() -> Option<ConsoleControlFn> {
     })
 }
 
+/// `VkKeyScanW(ch)` on this thread's keyboard layout: the VK in the low
+/// byte, the shift state in the high byte, -1 when no key types `ch`.
+pub fn key_scan(ch: u16) -> i16 {
+    // SAFETY: no pointers; it reads this thread's keyboard layout.
+    unsafe { w::VkKeyScanW(ch) }
+}
+
 /// Whether `ConsoleControl` resolves.
 pub fn has_console_control() -> bool {
     console_control().is_some()

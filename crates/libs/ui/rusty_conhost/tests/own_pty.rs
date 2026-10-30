@@ -3,7 +3,7 @@
 #![cfg(windows)]
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use platform::error::ErrorKind;
@@ -151,6 +151,113 @@ fn cmd_c_echo_prints_and_reaches_eof_once() {
     assert_eq!(Box::new(child).wait().expect("wait"), ExitStatus::Code(0));
     let mut buf = [0u8; 16];
     assert_eq!(master.read(&mut buf).expect("read after EOF"), 0);
+}
+
+/// A console's output as it arrives, read on another thread.
+struct Stream {
+    rx: mpsc::Receiver<Vec<u8>>,
+    out: Vec<u8>,
+}
+
+impl Stream {
+    fn new(master: Arc<OwnPtyMaster>) -> Stream {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 16 * 1024];
+            while let Ok(n @ 1..) = master.read(&mut buf) {
+                if tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        Stream {
+            rx,
+            out: Vec::new(),
+        }
+    }
+
+    /// Read until a plain line contains `text`; panics past the budget.
+    fn until(&mut self, text: &str) {
+        let deadline = Instant::now() + BUDGET;
+        while !plain_lines(&self.out).iter().any(|l| l.contains(text)) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.rx.recv_timeout(left) {
+                Ok(chunk) => self.out.extend(chunk),
+                Err(_) => panic!("no {text:?} in {:?}", String::from_utf8_lossy(&self.out)),
+            }
+        }
+    }
+}
+
+/// A child that is killed, with its children where it has a job, if the
+/// test fails before it exits, so a failing test leaves nothing running.
+struct Reaped(WindowsChild);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        use platform::process::Signal;
+        if matches!(self.0.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        // The tree too, where there is a job: cmd's own children.
+        if self.0.kill_tree(Signal::Kill).is_err() {
+            let _ = self.0.kill_single(Signal::Kill);
+        }
+    }
+}
+
+/// Wait for `child` to exit within the budget.
+fn exit_of(child: &mut Reaped) -> ExitStatus {
+    let deadline = Instant::now() + BUDGET;
+    loop {
+        if let Some(status) = child.0.try_wait().expect("try_wait") {
+            return status;
+        }
+        assert!(Instant::now() < deadline, "no exit within the budget");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn interactive_cmd_runs_typed_lines() {
+    let _g = lock();
+    let (master, child) = own(&command("cmd.exe", &["/d", "/q"]));
+    let mut child = Reaped(child);
+    let master = Arc::new(master);
+    let mut stream = Stream::new(Arc::clone(&master));
+    // Both lines at once: the second waits on the handle for cmd's next
+    // read. The caret keeps the echoed line from matching the output.
+    master.write(b"echo ho^ld\rexit 7\r").expect("write");
+    stream.until("hold");
+    assert_eq!(exit_of(&mut child), ExitStatus::Code(7));
+}
+
+/// Clear this test process's "ignore Ctrl+C" flag, which children
+/// inherit: nextest and the CI runner start tests with it set. The host
+/// leaves the caller's policy alone, as `spawn_attached` does, so a
+/// caller that wants its children to see Ctrl+C opts in itself.
+#[allow(unsafe_code)]
+fn accept_ctrl_c() {
+    use platform_windows::ffi::win32_surface as w;
+    // SAFETY: a null handler only sets this process's Ctrl+C flag.
+    let ok = unsafe { w::SetConsoleCtrlHandler(None, 0) };
+    assert_ne!(ok, 0, "SetConsoleCtrlHandler(NULL, FALSE)");
+}
+
+#[test]
+fn ctrl_c_stops_the_running_command_not_the_shell() {
+    let _g = lock();
+    accept_ctrl_c();
+    let (master, child) = own(&command("cmd.exe", &["/d", "/q"]));
+    let mut child = Reaped(child);
+    let master = Arc::new(master);
+    let mut stream = Stream::new(Arc::clone(&master));
+    master.write(b"ping -n 60 127.0.0.1\r").expect("write");
+    stream.until("Reply from 127.0.0.1");
+    master.write(b"\x03").expect("Ctrl+C");
+    stream.until("Control-C");
+    master.write(b"exit 3\r").expect("write");
+    assert_eq!(exit_of(&mut child), ExitStatus::Code(3));
 }
 
 /// Answers that differ from ConPTY by design (§5.10), as (probe, ours).
