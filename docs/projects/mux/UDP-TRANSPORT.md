@@ -183,19 +183,25 @@ A stream is never resynchronized in place. Its bytes either arrive complete
 and in order, or the stream is closed. Catching up always happens on a new
 stream, through the existing takeover, resume and attach path.
 
-- When a stream's server-side bytes pass the 8 MiB budget, the server evicts
-  that stream's connection exactly as it evicts a socket connection today:
-  the stream is closed and its queued bytes are discarded. This happens, for
-  example, to a fast-printing block while the path is dead or the laptop
-  sleeps. The client record is not dropped. As with any `TAKEOVER` client
-  whose connection ends, it becomes an orphan and waits out its grace: 30 s
-  under option A, `--udp-idle` under option B.
+- When a stream's server-side bytes pass the 8 MiB budget, the server closes
+  that stream and discards its queued bytes. This happens, for example, to a
+  fast-printing block while the path is dead or the laptop sleeps. **This
+  differs from a socket today.** An over-budget socket client is dropped from
+  every map (`State::disconnect`), lease and all. An over-budget stream's
+  client instead becomes an orphan, as a `TAKEOVER` client whose connection
+  ends does now, and it is marked **stale**. It waits out its grace: 30 s
+  under option A, `--udp-idle` under option B. Sockets keep today's
+  behaviour.
 - When the client returns, it opens a new stream and takes its client over
   with its token. Its Hello carries its event cursor. If that cursor is still
   in the server's recent history, the missed events are replayed. If it is
   not, the Welcome does not echo it, and the client refetches state as a new
-  client does today. Attaching re-sends each block's screen as a checkpoint,
-  so the screen is current whatever was discarded.
+  client does today.
+- A takeover keeps the client's attachments, so on its own it would send no
+  new checkpoint. A **stale** client's takeover therefore re-sends each
+  attached block's screen as a checkpoint before any new output, as attach
+  does, and clears the mark. The screen is then current, whatever was
+  discarded.
 - Silence without overflow behaves the same way, minus the eviction: the
   stream survives, the server retransmits when the client is heard again,
   and nothing is replayed.
