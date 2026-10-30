@@ -8,7 +8,7 @@ use rusty_wire::Writer;
 use super::*;
 use crate::field::Out;
 use crate::schema::Value;
-use crate::{Code, Cursor, Echo, Entry, Features, Launch, Program, Takeover};
+use crate::{Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Program, Takeover};
 
 const REQ_ID: u32 = 1;
 
@@ -117,6 +117,13 @@ fn every_message_round_trips() {
         },
         Message::CloseBlock { req: 10, block },
         Message::Sync { req: 14 },
+        Message::OpenDatagram { req: 16 },
+        Message::Datagram {
+            req: 16,
+            port: u16::MAX,
+            id: [9; 8],
+            key: DatagramKey([0xa5; 32]),
+        },
         Message::BlockCall {
             req: 15,
             block,
@@ -1124,4 +1131,26 @@ fn an_unknown_echo_mode_decodes_as_unknown() {
             mode: Echo::Unknown,
         })
     );
+}
+
+#[test]
+fn a_datagram_key_never_shows_in_debug_and_a_short_one_is_refused() {
+    let message = Message::Datagram {
+        req: 1,
+        port: 60001,
+        id: [1; 8],
+        key: DatagramKey([0xab; 32]),
+    };
+    let shown = format!("{message:?}");
+    assert!(
+        shown.contains("DatagramKey(..)") && !shown.contains("171"),
+        "{shown}"
+    );
+    let short = raw_frame(0x8d, |out| {
+        out.varint(1, 1)
+            .varint(38, 60001)
+            .bytes(39, &[1; 8])
+            .bytes(40, &[0xab; 31]);
+    });
+    assert!(decode(&short).is_err());
 }

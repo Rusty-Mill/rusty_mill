@@ -97,6 +97,11 @@ impl Features {
     /// connection, for a client that predicts the echo of its typing.
     pub const ECHO_ACK: Self = Self(1 << 20);
 
+    /// [`Message::OpenDatagram`] and its [`Message::Datagram`] reply: a
+    /// server started with a UDP port hands out associations
+    /// (`docs/projects/mux/UDP-TRANSPORT.md`).
+    pub const DATAGRAM: Self = Self(1 << 21);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -126,6 +131,17 @@ impl Features {
 pub struct Cursor {
     pub epoch: Uuid,
     pub seq: u64,
+}
+
+/// An association's 32-byte key. Its `Debug` never shows the bytes, so a
+/// message logged whole does not leak it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct DatagramKey(pub [u8; 32]);
+
+impl std::fmt::Debug for DatagramKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DatagramKey(..)")
+    }
 }
 
 /// Proof, in a Hello, that this connection continues `client`: the `token`
@@ -279,6 +295,12 @@ pub enum Message {
     Sync {
         req: u64,
     },
+    /// Asks for a UDP association for this client process. Answered with
+    /// [`Message::Datagram`], or [`Message::Failed`] when the server has no
+    /// UDP port or no room. Negotiated with [`Features::DATAGRAM`].
+    OpenDatagram {
+        req: u64,
+    },
     /// Every session, window and block, then, with [`Features::LABELS`],
     /// every client. Answered with one [`Message::Entry`] per entity, each
     /// parent before its children, then [`Message::Done`]. Negotiated with [`Features::INSPECT`].
@@ -356,6 +378,15 @@ pub enum Message {
         req: u64,
         reason: String,
         code: Option<Code>,
+    },
+    /// The reply to [`Message::OpenDatagram`]: the server's UDP `port`,
+    /// the association's `id` and its `key`. Only ever sent over a channel
+    /// already authenticated and encrypted, such as an SSH forward.
+    Datagram {
+        req: u64,
+        port: u16,
+        id: [u8; 8],
+        key: DatagramKey,
     },
     /// The reply to [`Message::BlockCall`].
     Text {
@@ -463,8 +494,14 @@ const ZOOMED: u32 = 35;
 const TOKEN: u32 = 36;
 /// An [`Echo`]: 1 kernel, 2 hidden, 3 program, anything else unknown.
 const MODE: u32 = 37;
-// IDs 1..=MODE are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = MODE as usize;
+/// A UDP port.
+const PORT: u32 = 38;
+/// An association's id, 8 bytes.
+const ASSOCIATION: u32 = 39;
+/// An association's key, 32 bytes.
+const KEY: u32 = 40;
+// IDs 1..=KEY are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = KEY as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -487,6 +524,7 @@ mod ty {
     pub const SPLIT: u8 = 0x12;
     pub const ZOOM: u8 = 0x13;
     pub const UNZOOM: u8 = 0x14;
+    pub const OPEN_DATAGRAM: u8 = 0x15;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -499,6 +537,7 @@ mod ty {
     pub const ENTRY: u8 = 0x8a;
     pub const ECHO_ACK: u8 = 0x8b;
     pub const ECHO_MODE: u8 = 0x8c;
+    pub const DATAGRAM: u8 = 0x8d;
 }
 
 impl Message {
@@ -558,6 +597,17 @@ impl Message {
             M::Sync { req } => {
                 out.varint(REQ, *req);
                 ty::SYNC
+            }
+            M::OpenDatagram { req } => {
+                out.varint(REQ, *req);
+                ty::OPEN_DATAGRAM
+            }
+            M::Datagram { req, port, id, key } => {
+                out.varint(REQ, *req)
+                    .varint(PORT, (*port).into())
+                    .bytes(ASSOCIATION, id)
+                    .bytes(KEY, &key.0);
+                ty::DATAGRAM
             }
             M::List { req } => {
                 out.varint(REQ, *req);
@@ -731,6 +781,18 @@ impl Message {
             },
             ty::SYNC => M::Sync {
                 req: f.varint(REQ)?,
+            },
+            ty::OPEN_DATAGRAM => M::OpenDatagram {
+                req: f.varint(REQ)?,
+            },
+            ty::DATAGRAM => M::Datagram {
+                req: f.varint(REQ)?,
+                port: f.u16(PORT)?,
+                id: f
+                    .bytes(ASSOCIATION)?
+                    .try_into()
+                    .map_err(|_| f.invalid(ASSOCIATION))?,
+                key: DatagramKey(f.bytes(KEY)?.try_into().map_err(|_| f.invalid(KEY))?),
             },
             ty::CLOSE_BLOCK => M::CloseBlock {
                 req: f.varint(REQ)?,
