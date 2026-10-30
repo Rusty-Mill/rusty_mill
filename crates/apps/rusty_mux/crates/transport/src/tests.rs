@@ -661,3 +661,35 @@ fn bytes_received_before_the_peer_closes_stay_readable() {
     assert_eq!(got, b"last words");
     assert_eq!(net.client.readable(id), 0);
 }
+
+#[test]
+fn streams_closed_but_unread_count_against_the_stream_limit() {
+    let now = Instant::now();
+    let mut server = Association::new(Side::Server, ID, &KEY, now, None);
+    let mut client = Sealer::new(Side::Client, ID, &KEY);
+    let limit = MAX_STREAMS as u64;
+    // Each stream sends a byte and closes; the server reads none of it.
+    for id in 0..limit {
+        let datagram = forged(&mut client, &[data(id), close(id)]);
+        assert!(server.datagram(now, addr(1), &datagram));
+        assert_eq!(server.accept(), Some(id));
+        assert_eq!(server.closed(), Some(id));
+        assert_eq!(server.readable(id), 1);
+    }
+    let refused = forged(&mut client, &[data(limit)]);
+    assert!(server.datagram(now, addr(1), &refused));
+    assert_eq!(server.accept(), None, "no room while every buffer is held");
+    assert!(!server.is_open(limit));
+
+    // Reading one out, or abandoning another, frees room for one each.
+    assert_eq!(server.read(0, &mut [0; 4]), 1);
+    server.close(now, 1);
+    for id in [limit, limit + 1] {
+        let datagram = forged(&mut client, &[data(id)]);
+        assert!(server.datagram(now, addr(1), &datagram));
+        assert_eq!(server.accept(), Some(id));
+    }
+    let full = forged(&mut client, &[data(limit + 2)]);
+    assert!(server.datagram(now, addr(1), &full));
+    assert_eq!(server.accept(), None);
+}

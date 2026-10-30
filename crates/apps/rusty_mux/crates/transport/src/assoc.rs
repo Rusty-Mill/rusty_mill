@@ -222,11 +222,18 @@ impl Association {
         }
     }
 
+    /// Streams holding receive buffers: open ones, and closed ones not yet
+    /// read out. Both count against [`MAX_STREAMS`], so a peer that closes
+    /// streams faster than they are read cannot grow memory.
+    fn held(&self) -> usize {
+        self.streams.len() + self.left.len()
+    }
+
     /// A server takes a stream it has not seen if there is room: a number
     /// past the highest, or one skipped on the way there. A closed
     /// stream's number never comes back.
     fn accept_new(&mut self, id: StreamId) -> bool {
-        if self.side != Side::Server || self.streams.len() >= MAX_STREAMS {
+        if self.side != Side::Server || self.held() >= MAX_STREAMS {
             return false;
         }
         let taken = match id >= self.next_stream {
@@ -338,9 +345,10 @@ impl Association {
         }
     }
 
-    /// Opens a stream. Only a client opens them, at most [`MAX_STREAMS`].
+    /// Opens a stream. Only a client opens them, at most [`MAX_STREAMS`]
+    /// held at once.
     pub fn open(&mut self) -> Option<StreamId> {
-        if self.side != Side::Client || self.streams.len() >= MAX_STREAMS {
+        if self.side != Side::Client || self.held() >= MAX_STREAMS {
             return None;
         }
         let id = self.next_stream;
