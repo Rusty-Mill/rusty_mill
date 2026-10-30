@@ -4,9 +4,11 @@
 //! ```text
 //! # a comment
 //! packet <function> <process> <object> <input_size> <output_size> <payload hex> [held=<n>]
-//! input [held=<n>]
+//! input <bytes hex> [held=<n>]
+//! input-more <bytes hex> [held=<n>]
 //! resize <cols> <rows>
 //! drained [held=<n>]
+//! serve-reads [held=<n>]
 //! hangup
 //! exited
 //! expect <effect>
@@ -14,15 +16,16 @@
 //!
 //! `held` is how many bytes the output queue held when the engine
 //! handled the event, which decides what the §7.4 budget admits; it is 0
-//! when left out. `input` carries no bytes while input is discarded.
-//! Packets get their line number as their id. Each event is followed by the `expect` lines of its
+//! when left out. `input` carries the terminal's bytes up to the end of
+//! its write, `input-more` bytes of a write still going on. Packets get their
+//! line number as their id. Each event is followed by the `expect` lines of its
 //! effects, logs aside, then `expect vt <hex>` for any VT it produced.
 //!
 //! The engine records sessions in this format when `RUSTY_CONHOST_RECORD`
 //! names a file. Recording is sanitised: CONNECT's title, application
 //! name and directory are blanked, and SetConsoleTitle's text becomes
-//! `title`. Output text is kept, so review a recording before committing
-//! it. The test runner checks every file under `tests/fixtures/`, and
+//! `title`. Output text and terminal input are kept, typed passwords
+//! included, so review a recording before committing it. The test runner checks every file under `tests/fixtures/`, and
 //! with `RUSTY_CONHOST_BLESS` set rewrites their `expect` lines.
 
 use std::fmt::Write as _;
@@ -40,9 +43,11 @@ const SERVER_MSG_STRINGS_AT: usize = 34;
 pub(crate) fn event_line(ev: &Event<'_>, held: usize) -> String {
     let mut line = match ev {
         Event::Packet(p) => packet_line(p),
-        Event::Input => "input".to_owned(),
+        Event::Input(bytes) => format!("input {}", hex_or_dash(bytes)),
+        Event::InputMore(bytes) => format!("input-more {}", hex_or_dash(bytes)),
         Event::Resize(size) => format!("resize {} {}", size.cols, size.rows),
         Event::OutputDrained => "drained".to_owned(),
+        Event::ServeReads => "serve-reads".to_owned(),
         Event::ChildExited => "exited".to_owned(),
         Event::HangUp => "hangup".to_owned(),
     };
@@ -134,6 +139,8 @@ mod tests {
         match e {
             Effect::Reply(r) => Some(reply("reply", r)),
             Effect::Complete(r) => Some(reply("complete", r)),
+            Effect::SetInputAvailable(on) => Some(format!("input-available {on}")),
+            Effect::Ctrl { pid, event } => Some(format!("ctrl {pid} {event:?}")),
             Effect::CloseServer => Some("close".to_owned()),
             Effect::Eof => Some("eof".to_owned()),
             Effect::Log(_) => None,
@@ -186,12 +193,20 @@ mod tests {
                     payload,
                 })
             }
-            "input" => Event::Input,
+            "input" => {
+                *payload = unhex(words[1]).expect("input hex");
+                Event::Input(payload)
+            }
+            "input-more" => {
+                *payload = unhex(words[1]).expect("input hex");
+                Event::InputMore(payload)
+            }
             "resize" => Event::Resize(WinSize {
                 cols: num(1) as u16,
                 rows: num(2) as u16,
             }),
             "drained" => Event::OutputDrained,
+            "serve-reads" => Event::ServeReads,
             "hangup" => Event::HangUp,
             "exited" => Event::ChildExited,
             other => panic!("unknown step {other:?}"),
@@ -216,10 +231,11 @@ mod tests {
         if text.len() > FIXTURE_CAP {
             return Err(format!("{} bytes, over the {FIXTURE_CAP} cap", text.len()));
         }
-        let mut console = Console::new(WinSize {
+        let size = WinSize {
             rows: 30,
             cols: 120,
-        });
+        };
+        let mut console = Console::new(size, crate::input::us_key_for);
         let mut payload = Vec::new();
         let mut blessed = String::new();
         let mut expected: Vec<String> = Vec::new();
@@ -303,7 +319,7 @@ mod tests {
         let clean = sanitise(&p);
         assert_eq!(clean[16], 120, "the sizes stay");
         assert!(clean[SERVER_MSG_STRINGS_AT..].iter().all(|b| *b == 0));
-        assert!(msg::server_msg_title(&clean).is_ok_and(|t| t.is_empty()));
+        assert!(msg::server_msg_info(&clean).is_ok_and(|i| i.title.is_empty()));
 
         let mut set_title = api::SET_TITLE.to_le_bytes().to_vec();
         set_title.extend(1u32.to_le_bytes());

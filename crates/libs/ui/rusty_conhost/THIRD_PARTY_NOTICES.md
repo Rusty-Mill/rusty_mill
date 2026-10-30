@@ -18,6 +18,19 @@ MIT-licensed, at commit `09beddc6`:
   `ApiDispatchersInternal.cpp`, `ObjectHandle.cpp`, `ObjectHeader.cpp`,
   `src/host/getset.cpp`, `srvinit.cpp`, `inputBuffer.cpp`,
   `screenInfo.hpp`).
+- `src/input.rs`: the VT and win32-input-mode input decoder, the key
+  records synthesized for text and controls, and the input queue
+  (`src/terminal/parser/InputStateMachineEngine.cpp`,
+  `src/host/inputBuffer.cpp`, `src/terminal/input/terminalInput.cpp`).
+- `src/cooked.rs`: the cooked-read line discipline
+  (`src/host/readDataCooked.cpp`, `stream.cpp`).
+- `src/ctrl.rs`: Ctrl event recipients (`src/host/input.cpp`,
+  `src/server/ProcessList.cpp`, `ApiDispatchersInternal.cpp`).
+- `src/console/read.rs`: the read APIs, waiting reads and Ctrl handling
+  (`src/server/ApiDispatchers.cpp`, `IoSorter.cpp`, `ObjectHandle.cpp`,
+  `src/host/input.cpp`, `inputBuffer.cpp`, `stream.cpp`,
+  `directio.cpp`, `readDataRaw.cpp`, `readDataDirect.cpp`,
+  `readDataCooked.cpp`).
 
 Those files carry the notice below at their top.
 

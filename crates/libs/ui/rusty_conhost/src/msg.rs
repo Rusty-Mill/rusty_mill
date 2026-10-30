@@ -23,15 +23,21 @@ pub(crate) const DISCONNECT: u32 = 2;
 pub(crate) const CREATE_OBJECT: u32 = 3;
 pub(crate) const CLOSE_OBJECT: u32 = 4;
 pub(crate) const RAW_WRITE: u32 = 5;
+pub(crate) const RAW_READ: u32 = 6;
 pub(crate) const USER_DEFINED: u32 = 7;
 pub(crate) const RAW_FLUSH: u32 = 8;
 
 pub(crate) const STATUS_SUCCESS: i32 = 0;
+/// A read ended by Ctrl+C, Ctrl+Break or its handle closing.
+pub(crate) const STATUS_ALERTED: i32 = 0x0000_0101;
 pub(crate) const STATUS_UNSUCCESSFUL: i32 = 0xC000_0001_u32 as i32;
 pub(crate) const STATUS_NOT_IMPLEMENTED: i32 = 0xC000_0002_u32 as i32;
 pub(crate) const STATUS_INVALID_HANDLE: i32 = 0xC000_0008_u32 as i32;
 pub(crate) const STATUS_INVALID_PARAMETER: i32 = 0xC000_000D_u32 as i32;
 pub(crate) const STATUS_NO_MEMORY: i32 = 0xC000_0017_u32 as i32;
+pub(crate) const STATUS_BUFFER_TOO_SMALL: i32 = 0xC000_0023_u32 as i32;
+/// A read ended because its client disconnected.
+pub(crate) const STATUS_THREAD_IS_TERMINATING: i32 = 0xC000_004B_u32 as i32;
 pub(crate) const STATUS_ILLEGAL_FUNCTION: i32 = 0xC000_00AF_u32 as i32;
 pub(crate) const STATUS_NOT_SUPPORTED: i32 = 0xC000_00BB_u32 as i32;
 pub(crate) const STATUS_INVALID_BUFFER_SIZE: i32 = 0xC000_0206_u32 as i32;
@@ -48,14 +54,23 @@ pub(crate) const fn from_hresult(hr: u32) -> i32 {
 pub(crate) const STATUS_FROM_INVALIDARG: i32 = from_hresult(0x8007_0057);
 /// HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION).
 pub(crate) const STATUS_FROM_SHARING_VIOLATION: i32 = from_hresult(0x8007_0020);
+/// E_HANDLE: no such object, or not the kind the API needs.
+pub(crate) const STATUS_FROM_HANDLE: i32 = from_hresult(0x8007_0006);
+/// E_ACCESSDENIED: the handle lacks the access the API needs.
+pub(crate) const STATUS_FROM_ACCESS_DENIED: i32 = from_hresult(0x8007_0005);
 
 /// `CONSOLE_API_NUMBER_L1` / `_L2`: `layer << 24 | index`.
 pub(crate) mod api {
     pub(crate) const GET_CP: u32 = 0x0100_0000;
     pub(crate) const GET_MODE: u32 = 0x0100_0001;
     pub(crate) const SET_MODE: u32 = 0x0100_0002;
+    pub(crate) const GET_NUMBER_OF_INPUT_EVENTS: u32 = 0x0100_0003;
+    pub(crate) const GET_CONSOLE_INPUT: u32 = 0x0100_0004;
+    pub(crate) const READ_CONSOLE: u32 = 0x0100_0005;
     pub(crate) const WRITE_CONSOLE: u32 = 0x0100_0006;
     pub(crate) const GET_LANG_ID: u32 = 0x0100_0008;
+    pub(crate) const GENERATE_CTRL_EVENT: u32 = 0x0200_0001;
+    pub(crate) const FLUSH_INPUT_BUFFER: u32 = 0x0200_0003;
     pub(crate) const SET_CP: u32 = 0x0200_0004;
     pub(crate) const GET_TITLE: u32 = 0x0200_0014;
     pub(crate) const SET_TITLE: u32 = 0x0200_0015;
@@ -123,11 +138,22 @@ const SERVER_MSG_LEN: usize = 1340;
 const SERVER_MSG_STRINGS: [(usize, usize, usize); 3] =
     [(34, 36, 261), (558, 560, 128), (816, 818, 261)];
 
-/// The client's title from CONNECT's `CONSOLE_SERVER_MSG`. Like conhost,
-/// every counted string must fit its array with room for a NUL, and be
-/// NUL-terminated at its length; otherwise, or when the message is
-/// short, `STATUS_INVALID_BUFFER_SIZE`.
-pub(crate) fn server_msg_title(payload: &[u8]) -> Result<Vec<u16>, i32> {
+/// `ProcessGroupId` in `CONSOLE_SERVER_MSG`.
+const SERVER_MSG_GROUP_AT: usize = 28;
+
+/// What CONNECT's `CONSOLE_SERVER_MSG` tells the console.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ServerMsg {
+    pub title: Vec<u16>,
+    /// `ProcessGroupId`, which GenerateConsoleCtrlEvent targets.
+    pub group: u32,
+}
+
+/// Decode CONNECT's `CONSOLE_SERVER_MSG`. Like conhost, every counted
+/// string must fit its array with room for a NUL, and be NUL-terminated
+/// at its length; otherwise, or when the message is short,
+/// `STATUS_INVALID_BUFFER_SIZE`.
+pub(crate) fn server_msg_info(payload: &[u8]) -> Result<ServerMsg, i32> {
     let invalid = STATUS_INVALID_BUFFER_SIZE;
     let msg = payload.get(..SERVER_MSG_LEN).ok_or(invalid)?;
     let mut strings = Vec::with_capacity(3);
@@ -139,7 +165,10 @@ pub(crate) fn server_msg_title(payload: &[u8]) -> Result<Vec<u16>, i32> {
         }
         strings.push(array[..len / 2].to_vec());
     }
-    Ok(strings.swap_remove(0))
+    Ok(ServerMsg {
+        title: strings.swap_remove(0),
+        group: u32_at(msg, SERVER_MSG_GROUP_AT).unwrap_or(0),
+    })
 }
 
 /// Bytes in a `CD_CONNECTION_INFORMATION`.
@@ -179,7 +208,14 @@ pub(crate) fn utf16_units(bytes: &[u8]) -> Vec<u16> {
 #[cfg(test)]
 /// A CONSOLE_SERVER_MSG with `title` and empty other strings.
 pub(crate) fn server_msg(title: &str) -> Vec<u8> {
+    server_msg_in_group(title, 0)
+}
+
+#[cfg(test)]
+/// [`server_msg`] with a `ProcessGroupId`.
+pub(crate) fn server_msg_in_group(title: &str, group: u32) -> Vec<u8> {
     let mut m = vec![0; SERVER_MSG_LEN];
+    put_u32(&mut m, SERVER_MSG_GROUP_AT, group);
     let units: Vec<u16> = title.encode_utf16().collect();
     m[34..36].copy_from_slice(&((units.len() * 2) as u16).to_le_bytes());
     for (i, u) in units.iter().enumerate() {
@@ -239,11 +275,16 @@ mod tests {
     #[test]
     fn server_msg_title_reads_the_counted_title() {
         let title: Vec<u16> = "cmd.exe".encode_utf16().collect();
-        assert_eq!(server_msg_title(&server_msg("cmd.exe")), Ok(title));
-        assert_eq!(server_msg_title(&server_msg("")), Ok(Vec::new()));
+        let info = |m: &[u8]| server_msg_info(m).map(|i| i.title);
+        assert_eq!(info(&server_msg("cmd.exe")), Ok(title));
+        assert_eq!(info(&server_msg("")), Ok(Vec::new()));
+        assert_eq!(
+            server_msg_info(&server_msg_in_group("", 4242)).map(|i| i.group),
+            Ok(4242)
+        );
         let longest = "x".repeat(260);
         assert_eq!(
-            server_msg_title(&server_msg(&longest)).map(|t| t.len()),
+            server_msg_info(&server_msg(&longest)).map(|i| i.title.len()),
             Ok(260)
         );
     }
@@ -252,19 +293,19 @@ mod tests {
     fn server_msg_title_rejects_what_conhost_rejects() {
         let invalid = Err(STATUS_INVALID_BUFFER_SIZE);
         assert_eq!(
-            server_msg_title(&server_msg("x")[..SERVER_MSG_LEN - 1]),
+            server_msg_info(&server_msg("x")[..SERVER_MSG_LEN - 1]),
             invalid
         );
         let mut m = server_msg("abc");
         m[34..36].copy_from_slice(&4u16.to_le_bytes());
-        assert_eq!(server_msg_title(&m), invalid, "no NUL at the length");
+        assert_eq!(server_msg_info(&m), invalid, "no NUL at the length");
         let mut m = server_msg("");
         m[34..36].copy_from_slice(&522u16.to_le_bytes());
-        assert_eq!(server_msg_title(&m), invalid, "no room for the NUL");
+        assert_eq!(server_msg_info(&m), invalid, "no room for the NUL");
         let mut m = server_msg("");
         m[560] = b'a';
         assert_eq!(
-            server_msg_title(&m),
+            server_msg_info(&m),
             invalid,
             "ApplicationName is checked too"
         );

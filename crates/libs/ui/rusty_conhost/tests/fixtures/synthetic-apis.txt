@@ -50,7 +50,7 @@ expect reply c00700bb 0 00000000 0 -
 packet 7 1 3 8 0 4200000300000000
 expect reply c00000af 0 - 0 -
 packet 6 1 2 0 0 -
-expect reply c0000001 0 - 0 -
+expect reply c0000023 0 - 0 -
 packet 3 1 0 12 0 040000000300000000000040
 expect reply 00000000 4 - 0 -
 packet 7 1 4 29 8 0600000108000000000000000000000076696120434f4e4f5554240d0a
@@ -58,7 +58,7 @@ expect reply 00000000 13 0d00000000000000 0 -
 expect vt 76696120434f4e4f5554240d0a
 packet 4 1 4 0 0 -
 expect reply 00000000 0 - 0 -
-input
+input -
 resize 100 40
 packet 2 1 0 0 0 -
 expect reply 00000000 0 - 0 -
