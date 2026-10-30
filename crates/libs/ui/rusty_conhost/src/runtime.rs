@@ -364,28 +364,33 @@ struct CtrlState {
 }
 
 impl CtrlLane {
-    /// Deliver queued events until the lane closes; queued events are
-    /// dropped then, as their clients are gone.
+    /// Deliver queued events until the lane closes. Then only CTRL_CLOSE
+    /// still goes out: ConsoleControl doesn't need the server, and a
+    /// client the closed server cut off may never exit by itself (S1),
+    /// while Windows ends one that got CTRL_CLOSE within about 5 s.
     fn run(&self) {
-        loop {
-            let mut state = lock(&self.state);
-            let next = loop {
-                if state.closed {
-                    return;
-                }
-                if let Some(next) = state.queue.pop() {
-                    break next;
-                }
-                state = self
-                    .ready
-                    .wait(state)
-                    .unwrap_or_else(PoisonError::into_inner);
-            };
-            drop(state);
-            let (pid, event) = next;
+        while let Some((pid, event)) = self.next() {
             if let Err(e) = condrv::send_ctrl(pid, ctrl_event(event)) {
                 crate::diag::log(&format!("Ctrl delivery to {pid} failed: {e}"));
             }
+        }
+    }
+
+    /// The next delivery, waiting for one; `None` once the lane is closed
+    /// and no CTRL_CLOSE is left.
+    fn next(&self) -> Option<(u32, Ctrl)> {
+        let mut state = lock(&self.state);
+        loop {
+            if state.closed {
+                return std::iter::from_fn(|| state.queue.pop()).find(|&(_, e)| e == Ctrl::Close);
+            }
+            if let Some(next) = state.queue.pop() {
+                return Some(next);
+            }
+            state = self
+                .ready
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 }
@@ -1091,6 +1096,20 @@ mod tests {
         assert!(!end, "the writer has more");
         writer.join().expect("writer").expect("write");
         assert_eq!(shared.take_input(16), (b"[A".to_vec(), true));
+    }
+
+    #[test]
+    fn a_closed_lane_still_hands_out_its_ctrl_close() {
+        let lane = Arc::new(CtrlLane::default());
+        let sender = CtrlSender(Arc::clone(&lane));
+        sender.push(2, Ctrl::Close);
+        sender.push(4, Ctrl::Close);
+        // Typed during the grace, after the Close events.
+        sender.push(3, Ctrl::Break);
+        drop(sender);
+        assert_eq!(lane.next(), Some((2, Ctrl::Close)));
+        assert_eq!(lane.next(), Some((4, Ctrl::Close)));
+        assert_eq!(lane.next(), None, "Break is dropped once closed");
     }
 
     #[test]

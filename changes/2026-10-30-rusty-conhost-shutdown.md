@@ -17,7 +17,12 @@ changelog: rusty_conhost closes a console the way Windows does: hang-up or child
   discarded, so a handler's writes never stall on a reader that is gone.
   `write` fails with `BrokenPipe` from the first `hang_up` on.
 - **Changed:** a CTRL_CLOSE supersedes Ctrl+C and Ctrl+Break still waiting
-  in the ctrl queue, so every client's CTRL_CLOSE fits.
-- **Known limitations:** the host doesn't kill clients that outlive the
-  deadline; it closes the server and leaves their exit to Windows and the
-  caller (the mux's own kill, rusty_term's Drop).
+  in the ctrl queue, so every client's CTRL_CLOSE fits, and the ctrl
+  worker still delivers queued CTRL_CLOSE after the server has closed.
+- **Fixed:** the direct child exiting no longer closes the server under
+  clients still attached, which cut off a grandchild's last output
+  (spike S1, design §9.1).
+- **Known limitations:** the host kills no client. Windows ends a client
+  that got CTRL_CLOSE within about 5 s; one that ignores the closed
+  console's errors is left to the caller (the mux's own kill, rusty_term's
+  Drop).

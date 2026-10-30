@@ -698,6 +698,28 @@ S2's verified runner result at PR 1 head `208a5b5c` was Windows Server
 WOW64 observations are author-reported rather than independently verified.
 The older-machine check remains owed, as does a conclusive Ctrl+Break probe.
 
+S1 ran on Beast (Windows 10.0.26300.9818) on 2026-10-30, at main
+`1a0a328b`, with clients hosted by `OwnPty` and `send_ctrl` called off the
+serving thread. Results are author-reported:
+- **CTRL_CLOSE works.** The handler runs and its WriteConsole is served
+  while it runs. Windows ends the process about 3 ms after the handler
+  returns, even when it returns TRUE (exit `0xC000013A`), and ends a
+  handler still running at about 5 s, though we, not csrss, sent the
+  event. `send_ctrl` blocks for as long as the handler runs. cmd idle at
+  its prompt exits in 2 ms; `ping` prints its statistics, then exits.
+- **Ctrl+Break works.** A handler sees event 1 and keeps running;
+  `ping -t` prints its statistics and goes on. A client ignoring Ctrl+C
+  still gets Break.
+- **On server close** no Ctrl event is delivered and every console call
+  fails with error 233 (ERROR_PIPE_NOT_CONNECTED). cmd exits, but a
+  client that ignores the error (`ping -t`) runs on indefinitely.
+- **So PR 8** sends CTRL_CLOSE before closing, keeps serving until the
+  last DISCONNECT (closing on the direct child's exit cut off a
+  grandchild's last output in S1), and its ctrl worker still delivers
+  queued CTRL_CLOSE after the server closes, leaving Windows' 5 s rule to
+  end slow handlers. The host kills no client: that needs a process
+  handle the host doesn't own.
+
 WOW64 (author-reported on Beast): 32-bit clients send the same 64-bit
 packet layouts, so there is no 32-bit path. 32-bit kernelbase leaves
 garbage in OUT fields, though, so the host always overwrites an OUT field
@@ -725,7 +747,7 @@ Each PR includes one change fragment and is reviewed by Dottius. Line counts inc
 | 5 | rusty_term `OwnBackend` (§4.5), key documented. **Milestone** | 300 | 1–2 |
 | 6 | FillConsoleOutput, ScrollConsoleScreenBuffer. Clear-Host works | 450 | 2 |
 | 7 | Read/WriteConsoleOutput family, SBIEx, window/buffer size calls | 550 | 2–3 |
-| 8 | Lifetime: CTRL_CLOSE (the ctrl worker and its queue are in PR 3), absolute grace deadline, `hang_up`, the §7.3 tests (§5.8). Needs S1 | 350 | 1–2 |
+| 8 | Lifetime: CTRL_CLOSE (the ctrl worker and its queue are in PR 3), absolute grace deadline, `hang_up`, the §7.3 tests (§5.8). Needs S1. As built: CTRL_CLOSE supersedes queued Ctrl+C/Break and is still delivered after the server closes; a client connecting during the grace gets it; Drop discards output nobody reads | 350 | 1–2 |
 | 9 | Code pages via `codec` (§5.9) | 250 | 1–2 |
 | 10 | (reserved for issues found at the milestone) | — | 2 |
 | 11 | rusty_mux server: local host choice, `RUSTY_CONSOLE_HOST`, Config field and sites | 250 | 1–2 |
