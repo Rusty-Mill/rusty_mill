@@ -91,16 +91,23 @@ pub(crate) fn turn(v: &View) -> Turn {
         child_exited: v.exited,
         serve_reads: v.reads_ready,
         input,
-        submit_read: !v.closed && !v.read_in_flight && admits_read(v.waiting, v.parked),
+        submit_read: read_admitted(v),
     }
+}
+
+/// Whether a READ_IO can be sent now: none is in flight and admission
+/// allows another packet.
+fn read_admitted(v: &View) -> bool {
+    !v.closed && !v.read_in_flight && admits_read(v.waiting, v.parked)
 }
 
 /// Whether the engine's wait must not block: work is left that the next
 /// turn can do at once. Asked of the state after the turn's events, not
-/// of its plan: an input slice can leave reads ready, or stop at a write
-/// that ended in ESC with input left, and no wake announces either.
+/// of its plan: an input slice can leave reads ready, stop at a write
+/// that ended in ESC with input left, or complete calls and so reopen
+/// admission with no READ_IO armed; no wake announces any of them.
 pub(crate) fn must_poll(v: &View) -> bool {
-    v.reads_ready || (v.input > 0 && v.output <= INPUT_PAUSE_ABOVE)
+    v.reads_ready || (v.input > 0 && v.output <= INPUT_PAUSE_ABOVE) || read_admitted(v)
 }
 
 /// Whether another packet may be accepted: fewer than [`MAX_WAITING`]
@@ -120,6 +127,8 @@ mod tests {
     struct Sim {
         view: View,
         packets: usize,
+        /// The last turn's wait was a poll.
+        polled: bool,
     }
 
     impl Sim {
@@ -127,6 +136,7 @@ mod tests {
             Sim {
                 view: View::default(),
                 packets: 0,
+                polled: false,
             }
         }
 
@@ -140,6 +150,7 @@ mod tests {
             if t.submit_read {
                 self.view.read_in_flight = true;
             }
+            self.polled = must_poll(&self.view);
             if ready_io && self.view.read_in_flight {
                 self.view.read_in_flight = false;
                 self.packets += 1;
@@ -177,7 +188,7 @@ mod tests {
             let t = sim.step(true);
             assert_eq!(t.input, INPUT_SLICE, "turn {k}");
             assert!(t.submit_read, "turn {k}");
-            assert!(must_poll(&sim.view), "turn {k}: input is left");
+            assert!(sim.polled, "turn {k}: input is left");
             assert_eq!(t.control.output_drained, k == 20, "turn {k}");
         }
         assert_eq!(sim.packets, 50);
@@ -214,10 +225,7 @@ mod tests {
         sim.view.control.hang_up = true;
         let t = sim.step(true);
         assert_eq!(t.input, 0);
-        assert!(
-            !must_poll(&sim.view),
-            "nothing can be done until the reader drains"
-        );
+        assert!(!sim.polled, "nothing can be done until the reader drains");
         assert!(t.control.hang_up, "control is never paused");
 
         sim.view.output = INPUT_PAUSE_ABOVE;
@@ -287,9 +295,42 @@ mod tests {
         assert!(must_poll(&after));
         assert!(must_poll(&View {
             input: 1,
+            read_in_flight: true,
             ..View::default()
         }));
-        assert!(!must_poll(&View::default()));
+        assert!(!must_poll(&View {
+            read_in_flight: true,
+            ..View::default()
+        }));
+    }
+
+    #[test]
+    fn the_wait_polls_when_admission_reopens_with_no_read_armed() {
+        let full = View {
+            waiting: MAX_WAITING,
+            ..View::default()
+        };
+        assert!(!turn(&full).submit_read && !must_poll(&full));
+        let freed = View {
+            waiting: MAX_WAITING - 1,
+            ..full
+        };
+        assert!(must_poll(&freed), "a call completed: arm the read");
+        let parked = View {
+            waiting: 1,
+            parked: PARKED_CAP - MAX_RETAINED_PER_CALL + 1,
+            ..View::default()
+        };
+        assert!(!must_poll(&parked));
+        let parked = View {
+            parked: PARKED_CAP - MAX_RETAINED_PER_CALL,
+            ..parked
+        };
+        assert!(must_poll(&parked), "parked bytes fell to the boundary");
+        assert!(!must_poll(&View {
+            read_in_flight: true,
+            ..parked
+        }));
     }
 
     #[test]

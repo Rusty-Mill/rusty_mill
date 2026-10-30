@@ -1106,14 +1106,20 @@ pub(crate) mod tests {
         b"\x1b[65;0;97;1;0;65535_".repeat(513)
     }
 
+    /// A console holding `reads` raw reads of `declared` bytes each.
+    #[cfg(windows)]
+    pub(crate) fn holding_raw_reads(reads: usize, declared: u32) -> Console {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        hold_raw_reads(&mut h, input, reads, declared);
+        h.c
+    }
+
     /// A console holding `reads` raw reads of `declared` bytes each, and
     /// the input that completes the first and leaves the rest owed.
     #[cfg(windows)]
     pub(crate) fn owing_large_reads(reads: usize, declared: u32) -> (Console, Vec<u8>) {
-        let mut h = Host::new();
-        let [_, input, _] = h.connect(1, "");
-        hold_raw_reads(&mut h, input, reads, declared);
-        (h.c, large_input())
+        (holding_raw_reads(reads, declared), large_input())
     }
 
     #[test]

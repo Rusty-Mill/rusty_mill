@@ -1156,7 +1156,7 @@ fn get_lang_id() -> i32 {
 #[cfg(test)]
 pub(crate) mod tests {
     #[cfg(windows)]
-    pub(crate) use super::read::tests::owing_large_reads;
+    pub(crate) use super::read::tests::{holding_raw_reads, owing_large_reads};
     use super::*;
 
     /// Drives a console as the engine would, with the shared output
@@ -1810,6 +1810,21 @@ pub(crate) mod tests {
         assert_eq!(completed, parked);
         assert_eq!((h.c.waiting(), h.c.parked()), (0, 0));
         assert_eq!(h.vt.len(), 16 * PACKET_INPUT_CAP);
+    }
+
+    /// A console holding `writes` raw writes of one packet's input each,
+    /// parked behind a stalled reader.
+    #[cfg(windows)]
+    pub(crate) fn parking_writes(writes: usize) -> Console {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        stall(&mut h, output);
+        let chunk = vec![b'y'; PACKET_INPUT_CAP];
+        for _ in 0..writes {
+            h.packet(msg::RAW_WRITE, 1, output, &chunk, 0);
+        }
+        assert_eq!(h.c.waiting(), writes);
+        h.c
     }
 
     /// Fill the queue past the client budget so the next writes park.

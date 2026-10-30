@@ -969,6 +969,41 @@ mod tests {
     }
 
     #[test]
+    fn input_that_frees_a_waiting_slot_rearms_the_driver_read() {
+        // One unit each: every read takes one character.
+        let console = crate::console::tests::holding_raw_reads(sched::MAX_WAITING, 2);
+        let (mut engine, child) = engine_on(console);
+        assert!(!sched::admits_read(engine.console.waiting(), 0));
+        engine
+            .shared
+            .write(&[b'a'; sched::MAX_WAITING])
+            .expect("write");
+        turns_without_another_wake(&mut engine);
+        assert_eq!(engine.console.waiting(), 0, "every read was served");
+        assert!(engine.read_in_flight, "the driver read is armed again");
+        engine.teardown();
+        let _ = child.kill_single(Signal::Kill);
+    }
+
+    #[test]
+    fn a_drain_below_the_parked_cap_rearms_the_driver_read() {
+        let calls = sched::PARKED_CAP / sched::PACKET_INPUT_CAP - 1;
+        let console = crate::console::tests::parking_writes(calls);
+        let parked = console.parked();
+        assert!(!sched::admits_read(console.waiting(), parked));
+        let (mut engine, child) = engine_on(console);
+        lock(&engine.shared.lanes).control.output_drained = true;
+        turns_without_another_wake(&mut engine);
+        assert!(
+            engine.console.parked() < parked,
+            "the drain completed writes"
+        );
+        assert!(engine.read_in_flight, "the driver read is armed again");
+        engine.teardown();
+        let _ = child.kill_single(Signal::Kill);
+    }
+
+    #[test]
     fn a_write_ending_in_esc_stays_its_own_slice_when_writes_coalesce() {
         let shared = Arc::new(Shared::new(Waker::new().expect("Waker")));
         // Escape, then typing, both written before the engine drains.
