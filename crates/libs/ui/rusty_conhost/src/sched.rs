@@ -72,6 +72,8 @@ pub(crate) struct View {
     pub closed: bool,
     /// Waiting reads stopped at a call's reply budget with input left.
     pub reads_ready: bool,
+    /// A held echo or an unfinished admitted slice owns the input.
+    pub input_paused: bool,
     /// Parked writes stopped at the budget on the host's own answers.
     pub writes_ready: bool,
 }
@@ -93,7 +95,7 @@ pub(crate) struct Turn {
 /// Plan one turn.
 pub(crate) fn turn(v: &View) -> Turn {
     // Reads owed queued input go first, so the queue stays bounded.
-    let input = if v.output <= INPUT_PAUSE_ABOVE && !v.reads_ready {
+    let input = if v.output <= INPUT_PAUSE_ABOVE && !v.reads_ready && !v.input_paused {
         v.input.min(INPUT_SLICE)
     } else {
         0
@@ -122,7 +124,7 @@ fn read_admitted(v: &View) -> bool {
 pub(crate) fn must_poll(v: &View) -> bool {
     v.reads_ready
         || v.writes_ready
-        || (v.input > 0 && v.output <= INPUT_PAUSE_ABOVE)
+        || (v.input > 0 && v.output <= INPUT_PAUSE_ABOVE && !v.input_paused)
         || read_admitted(v)
 }
 
@@ -177,6 +179,33 @@ impl Grace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_echo_stops_new_input_without_spinning_but_control_and_packets_run() {
+        let v = View {
+            input: 3001,
+            output: INPUT_PAUSE_ABOVE - 1024,
+            input_paused: true,
+            read_in_flight: true,
+            control: Control {
+                hang_up: true,
+                output_drained: true,
+                ..Control::default()
+            },
+            ..View::default()
+        };
+        let t = turn(&v);
+        assert_eq!(t.input, 0);
+        assert!(!must_poll(&v));
+        assert!(t.control.hang_up && t.control.output_drained);
+        assert!(
+            turn(&View {
+                read_in_flight: false,
+                ..v
+            })
+            .submit_read
+        );
+    }
 
     /// A scripted engine: every turn follows [`turn`], the wait always
     /// returns a packet when one is in flight, and the console's side is

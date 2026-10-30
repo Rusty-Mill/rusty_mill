@@ -34,10 +34,6 @@ use crate::sched::{self, Control, Grace, PACKET_INPUT_CAP, View};
 const INPUT_LANE_CAP: usize = 64 * 1024;
 /// How long teardown waits for a cancelled READ_IO before closing anyway.
 const CANCEL_GRACE: Duration = Duration::from_secs(1);
-/// Readers wake the engine only when they free space it may be waiting
-/// for: the client budget (§7.4).
-const DRAIN_WAKE_ABOVE: usize = 64 * 1024;
-
 /// Names the file a console records its session to (design §8.2).
 const RECORD_ENV: &str = "RUSTY_CONHOST_RECORD";
 
@@ -250,7 +246,10 @@ impl Shared {
             *dst = src;
         }
         drop(out);
-        if before > DRAIN_WAKE_ABOVE && n > 0 {
+        // A console call can decide to hold echo against an earlier
+        // queue snapshot while this read drains it. Every real drain
+        // must leave a wake, including drains starting below 64 KiB.
+        if n > 0 {
             lock(&self.lanes).control.output_drained = true;
             self.waker.wake();
         }
@@ -706,6 +705,7 @@ impl Engine {
             parked: self.console.parked(),
             closed: false,
             reads_ready: self.console.reads_ready(),
+            input_paused: self.console.input_paused(),
             writes_ready: self.console.writes_ready(),
         }
     }
@@ -1194,6 +1194,19 @@ mod tests {
         assert!(!engine.console.output_blocked(), "the echo went out");
         engine.teardown();
         let _ = child.kill_single(Signal::Kill);
+    }
+
+    #[test]
+    fn a_drain_below_64k_leaves_a_wake_for_a_concurrent_echo_hold() {
+        let shared = Shared::new(Waker::new().expect("Waker"));
+        shared.push_output(vec![b'x'; 61_440]);
+        // A console call has already sampled 61,440. Draining during
+        // that call must leave a flag even though it starts below 64K.
+        let (control, _) = shared.take_control();
+        assert!(!control.output_drained);
+        assert_eq!(shared.read(&mut vec![0; 17_921]).expect("drain"), 17_921);
+        assert!(shared.take_control().0.output_drained);
+        assert!(!shared.take_control().0.output_drained, "coalesced once");
     }
 
     #[test]
