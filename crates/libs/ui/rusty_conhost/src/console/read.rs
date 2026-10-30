@@ -843,7 +843,7 @@ fn is_editing_key(k: &KeyEvent) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::tests::Host;
     use super::super::{Effect, Event};
     use super::*;
@@ -1089,12 +1089,31 @@ mod tests {
     /// Raw W reads of `declared` bytes each, then repeated win32 'a'
     /// records enough to fill them all.
     fn large_reads(h: &mut Host, input: usize, reads: usize, declared: u32) -> Vec<Effect> {
+        hold_raw_reads(h, input, reads, declared);
+        h.ev(Event::Input(&large_input()))
+    }
+
+    fn hold_raw_reads(h: &mut Host, input: usize, reads: usize, declared: u32) {
         h.set_mode(input, RAW);
         for _ in 0..reads {
             assert!(held(&read_w(h, input, declared)));
         }
-        let record = b"\x1b[65;0;97;1;0;65535_";
-        h.ev(Event::Input(&record.repeat(513)))
+    }
+
+    /// 513 win32-input-mode records repeating `a` 65535 times: more than
+    /// one reply budget, in well under one input slice.
+    fn large_input() -> Vec<u8> {
+        b"\x1b[65;0;97;1;0;65535_".repeat(513)
+    }
+
+    /// A console holding `reads` raw reads of `declared` bytes each, and
+    /// the input that completes the first and leaves the rest owed.
+    #[cfg(windows)]
+    pub(crate) fn owing_large_reads(reads: usize, declared: u32) -> (Console, Vec<u8>) {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        hold_raw_reads(&mut h, input, reads, declared);
+        (h.c, large_input())
     }
 
     #[test]

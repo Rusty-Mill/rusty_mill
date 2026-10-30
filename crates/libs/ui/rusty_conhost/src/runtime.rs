@@ -279,6 +279,10 @@ impl Shared {
         (bytes, end)
     }
 
+    fn input_len(&self) -> usize {
+        lock(&self.lanes).input.len()
+    }
+
     fn output_len(&self) -> usize {
         lock(&self.output).queue.len()
     }
@@ -521,18 +525,39 @@ impl Engine {
 
     /// One turn of design §7.2's loop.
     fn turn(&mut self) -> Result<()> {
+        self.work()?;
+        // Decided on what the turn's events left, not on its plan.
+        let until = self.must_poll().then(Instant::now);
+        let Some(server) = self.server.as_mut() else {
+            return Ok(());
+        };
+        let exit = (!self.exited).then_some(&self.wait);
+        let ready = server.wait(&self.shared.waker, exit, until);
+        let ready = match ready {
+            Ok(ready) => ready,
+            Err(e) => {
+                // A read that completed with an error is no longer in
+                // flight; `close` guards the other case.
+                self.read_in_flight = false;
+                return Err(e);
+            }
+        };
+        if ready.exited && !self.exited {
+            self.exited = true;
+            self.shared.set_exited();
+        }
+        if let Some(d) = ready.io {
+            self.read_in_flight = false;
+            self.serve(d)?;
+        }
+        Ok(())
+    }
+
+    /// The turn up to its wait: plan, handle the events in order, and
+    /// submit the next READ_IO or complete the held reply.
+    fn work(&mut self) -> Result<()> {
         let (control, input) = self.shared.take_control();
-        let plan = sched::turn(&View {
-            control,
-            exited: self.exited && !self.exit_handled,
-            output: self.shared.output_len(),
-            input,
-            read_in_flight: self.read_in_flight,
-            waiting: self.console.waiting(),
-            parked: self.console.parked(),
-            closed: false,
-            reads_ready: self.console.reads_ready(),
-        });
+        let plan = sched::turn(&self.view(control, input));
         if plan.control.hang_up {
             self.handle(Event::HangUp);
         }
@@ -571,27 +596,29 @@ impl Engine {
             let r = deliverable(server, r);
             server.complete_io(&r.as_complete())?;
         }
-        let until = plan.poll.then(Instant::now);
-        let exit = (!self.exited).then_some(&self.wait);
-        let ready = server.wait(&self.shared.waker, exit, until);
-        let ready = match ready {
-            Ok(ready) => ready,
-            Err(e) => {
-                // A read that completed with an error is no longer in
-                // flight; `close` guards the other case.
-                self.read_in_flight = false;
-                return Err(e);
-            }
-        };
-        if ready.exited && !self.exited {
-            self.exited = true;
-            self.shared.set_exited();
-        }
-        if let Some(d) = ready.io {
-            self.read_in_flight = false;
-            self.serve(d)?;
-        }
         Ok(())
+    }
+
+    /// Whether work is left that the next turn can do at once, so the
+    /// wait must not block. The waker is auto-reset and its wake may be
+    /// spent: neither reads left ready nor input left behind an ESC cut
+    /// signals it again.
+    fn must_poll(&self) -> bool {
+        sched::must_poll(&self.view(Control::default(), self.shared.input_len()))
+    }
+
+    fn view(&self, control: Control, input: usize) -> View {
+        View {
+            control,
+            exited: self.exited && !self.exit_handled,
+            output: self.shared.output_len(),
+            input,
+            read_in_flight: self.read_in_flight,
+            waiting: self.console.waiting(),
+            parked: self.console.parked(),
+            closed: false,
+            reads_ready: self.console.reads_ready(),
+        }
     }
 
     /// Read a packet's variable input, capped, and hand it to the console.
@@ -885,6 +912,60 @@ mod tests {
             .expect("the worker was started")
             .join()
             .expect("the worker returns once the engine is gone");
+    }
+
+    /// An engine on an attached `ping`, serving `console`.
+    fn engine_on(console: Console) -> (Engine, WindowsChild) {
+        let attached = condrv::spawn_attached(&ping_for_a_while()).expect("spawn_attached");
+        let shared = Arc::new(Shared::new(Waker::new().expect("Waker")));
+        let engine = Engine::new(
+            console,
+            attached.server,
+            attached.wait,
+            shared,
+            CtrlSender(Arc::default()),
+        );
+        (engine, attached.child)
+    }
+
+    /// Run turns as the engine does once the writers' one wake is spent:
+    /// after the first, a turn runs only if the last one's wait would not
+    /// block. Returns how many ran.
+    fn turns_without_another_wake(engine: &mut Engine) -> usize {
+        for turns in 1..=1000 {
+            engine.work().expect("turn");
+            if !engine.must_poll() {
+                return turns;
+            }
+        }
+        panic!("the engine never settles");
+    }
+
+    #[test]
+    fn reads_a_slice_leaves_ready_are_served_without_another_wake() {
+        let (console, input) = crate::console::tests::owing_large_reads(8, u32::MAX - 64);
+        assert!(input.len() <= sched::INPUT_SLICE, "one slice takes it all");
+        let (mut engine, child) = engine_on(console);
+        engine.shared.write(&input).expect("write");
+        let turns = turns_without_another_wake(&mut engine);
+        assert!(turns > 1, "the slice left reads ready");
+        assert_eq!(engine.shared.input_len(), 0);
+        assert!(!engine.console.reads_ready());
+        assert_eq!(engine.console.waiting(), 0, "every read was served");
+        engine.teardown();
+        let _ = child.kill_single(Signal::Kill);
+    }
+
+    #[test]
+    fn input_left_behind_an_esc_cut_is_taken_without_another_wake() {
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        engine.shared.write(b"\x1b").expect("write");
+        engine.shared.write(b"x").expect("write");
+        let turns = turns_without_another_wake(&mut engine);
+        assert_eq!(turns, 2, "Escape, then the typing after it");
+        assert_eq!(engine.shared.input_len(), 0);
+        engine.teardown();
+        let _ = child.kill_single(Signal::Kill);
     }
 
     #[test]

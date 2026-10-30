@@ -1154,7 +1154,9 @@ fn get_lang_id() -> i32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    #[cfg(windows)]
+    pub(crate) use super::read::tests::owing_large_reads;
     use super::*;
 
     /// Drives a console as the engine would, with the shared output

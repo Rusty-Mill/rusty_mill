@@ -76,9 +76,6 @@ pub(crate) struct Turn {
     /// Bytes to take from the input lane and hand to the console.
     pub input: usize,
     pub submit_read: bool,
-    /// Work is left that a later turn can do at once, so the wait must
-    /// not block.
-    pub poll: bool,
 }
 
 /// Plan one turn.
@@ -95,8 +92,15 @@ pub(crate) fn turn(v: &View) -> Turn {
         serve_reads: v.reads_ready,
         input,
         submit_read: !v.closed && !v.read_in_flight && admits_read(v.waiting, v.parked),
-        poll: v.reads_ready || (input < v.input && v.output <= INPUT_PAUSE_ABOVE),
     }
+}
+
+/// Whether the engine's wait must not block: work is left that the next
+/// turn can do at once. Asked of the state after the turn's events, not
+/// of its plan: an input slice can leave reads ready, or stop at a write
+/// that ended in ESC with input left, and no wake announces either.
+pub(crate) fn must_poll(v: &View) -> bool {
+    v.reads_ready || (v.input > 0 && v.output <= INPUT_PAUSE_ABOVE)
 }
 
 /// Whether another packet may be accepted: fewer than [`MAX_WAITING`]
@@ -173,7 +177,7 @@ mod tests {
             let t = sim.step(true);
             assert_eq!(t.input, INPUT_SLICE, "turn {k}");
             assert!(t.submit_read, "turn {k}");
-            assert!(t.poll, "turn {k}: input is left");
+            assert!(must_poll(&sim.view), "turn {k}: input is left");
             assert_eq!(t.control.output_drained, k == 20, "turn {k}");
         }
         assert_eq!(sim.packets, 50);
@@ -210,7 +214,10 @@ mod tests {
         sim.view.control.hang_up = true;
         let t = sim.step(true);
         assert_eq!(t.input, 0);
-        assert!(!t.poll, "nothing can be done until the reader drains");
+        assert!(
+            !must_poll(&sim.view),
+            "nothing can be done until the reader drains"
+        );
         assert!(t.control.hang_up, "control is never paused");
 
         sim.view.output = INPUT_PAUSE_ABOVE;
@@ -264,6 +271,28 @@ mod tests {
     }
 
     #[test]
+    fn the_wait_polls_on_what_the_turn_left_not_on_its_plan() {
+        // The planned slice took the whole lane: the plan saw no work left.
+        let before = View {
+            input: 10,
+            ..View::default()
+        };
+        assert_eq!(turn(&before).input, 10);
+        // Handling it left reads ready, or a cut at an ESC write end left
+        // input queued.
+        let after = View {
+            reads_ready: true,
+            ..View::default()
+        };
+        assert!(must_poll(&after));
+        assert!(must_poll(&View {
+            input: 1,
+            ..View::default()
+        }));
+        assert!(!must_poll(&View::default()));
+    }
+
+    #[test]
     fn reads_owed_input_are_served_before_new_input_and_after_control() {
         let v = View {
             control: Control {
@@ -275,7 +304,7 @@ mod tests {
             ..View::default()
         };
         let t = turn(&v);
-        assert!(t.control.hang_up && t.serve_reads && t.poll);
+        assert!(t.control.hang_up && t.serve_reads && must_poll(&v));
         assert_eq!(t.input, 0, "input waits while reads are owed the queue");
         let t = turn(&View {
             reads_ready: false,
