@@ -550,4 +550,5 @@ implementation convenience.
 - **Pinning tests**: `raw_args_follow_the_program_verbatim`
   (`crates/platform-windows/src/cmdline.rs`), `raw_args_are_unsupported`
   (`crates/platform-linux/src/process.rs`).
-- **Accepted**: pending owner sign-off on the PR that adds it.
+- **Accepted**: 2026-10-30, with the owner's approval of the exact
+  `Command::raw_args` form on PR #1276.
