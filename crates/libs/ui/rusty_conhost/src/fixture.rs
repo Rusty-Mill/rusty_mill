@@ -5,6 +5,7 @@
 //! # a comment
 //! packet <function> <process> <object> <input_size> <output_size> <payload hex> [held=<n>]
 //! input <bytes hex> [held=<n>]
+//! input-more <bytes hex> [held=<n>]
 //! resize <cols> <rows>
 //! drained [held=<n>]
 //! hangup
@@ -14,7 +15,8 @@
 //!
 //! `held` is how many bytes the output queue held when the engine
 //! handled the event, which decides what the §7.4 budget admits; it is 0
-//! when left out. `input` carries the terminal's bytes. Packets get their
+//! when left out. `input` carries the terminal's bytes up to the end of
+//! its write, `input-more` bytes of a write still going on. Packets get their
 //! line number as their id. Each event is followed by the `expect` lines of its
 //! effects, logs aside, then `expect vt <hex>` for any VT it produced.
 //!
@@ -41,6 +43,7 @@ pub(crate) fn event_line(ev: &Event<'_>, held: usize) -> String {
     let mut line = match ev {
         Event::Packet(p) => packet_line(p),
         Event::Input(bytes) => format!("input {}", hex_or_dash(bytes)),
+        Event::InputMore(bytes) => format!("input-more {}", hex_or_dash(bytes)),
         Event::Resize(size) => format!("resize {} {}", size.cols, size.rows),
         Event::OutputDrained => "drained".to_owned(),
         Event::ChildExited => "exited".to_owned(),
@@ -191,6 +194,10 @@ mod tests {
             "input" => {
                 *payload = unhex(words[1]).expect("input hex");
                 Event::Input(payload)
+            }
+            "input-more" => {
+                *payload = unhex(words[1]).expect("input hex");
+                Event::InputMore(payload)
             }
             "resize" => Event::Resize(WinSize {
                 cols: num(1) as u16,

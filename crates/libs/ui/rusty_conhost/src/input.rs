@@ -177,13 +177,16 @@ enum Parse {
 }
 
 impl Decoder {
-    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Vec<Piece> {
+    /// Decode `bytes`. `end` says the terminal's write ended with them: an
+    /// ESC at the very end is then the Escape key, while otherwise it is
+    /// kept, as the rest of a sequence may follow.
+    pub(crate) fn feed(&mut self, bytes: &[u8], end: bool) -> Vec<Piece> {
         let mut buf = std::mem::take(&mut self.pending);
         buf.extend_from_slice(bytes);
         let mut pieces = Vec::new();
         let mut at = 0;
         while at < buf.len() {
-            match parse(&buf[at..]) {
+            match parse(&buf[at..], end) {
                 Parse::Done(token, len) => {
                     pieces.push(Piece {
                         token,
@@ -206,9 +209,9 @@ impl Decoder {
     }
 }
 
-fn parse(b: &[u8]) -> Parse {
+fn parse(b: &[u8], end: bool) -> Parse {
     match b[0] {
-        0x1b => escape(b),
+        0x1b => escape(b, end),
         c @ (0x00..=0x1f | 0x7f) => Parse::Done(Token::Control(char::from(c)), 1),
         _ => text(b),
     }
@@ -234,11 +237,15 @@ fn text(b: &[u8]) -> Parse {
     Parse::Done(Token::Text(s), len)
 }
 
-fn escape(b: &[u8]) -> Parse {
-    // A lone ESC at the end of the input is the Escape key: nothing tells
-    // it apart from a sequence still on its way, and keys come whole.
+fn escape(b: &[u8], end: bool) -> Parse {
+    // A lone ESC where the terminal's write ended is the Escape key: a
+    // terminal writes a key's sequence whole. Anywhere else the rest of a
+    // sequence may still be on its way.
     let Some(&next) = b.get(1) else {
-        return Parse::Done(Token::Control('\x1b'), 1);
+        if end {
+            return Parse::Done(Token::Control('\x1b'), 1);
+        }
+        return Parse::Incomplete;
     };
     match next {
         b'[' => csi(b),
@@ -529,7 +536,7 @@ pub(crate) fn key_events(token: &Token, key_for: KeyFor) -> Vec<KeyEvent> {
 /// subset of conhost's `TerminalInput::HandleKey`: key-downs with text,
 /// and the cursor, editing and function keys with xterm modifiers.
 /// Key-ups and modifier keys produce nothing.
-pub(crate) fn vt_for(k: &KeyEvent) -> Vec<u8> {
+pub(crate) fn vt_for(k: &KeyEvent, utf8: &mut Utf8Units) -> Vec<u8> {
     if !k.down
         || matches!(
             k.vk,
@@ -541,16 +548,17 @@ pub(crate) fn vt_for(k: &KeyEvent) -> Vec<u8> {
     let alt = k.state & state::ALT != 0;
     let ctrl = k.state & state::CTRL != 0;
     let shift = k.state & state::SHIFT != 0;
+    let mut out = Vec::new();
     if k.ch != 0 {
-        let mut out = Vec::new();
-        // AltGr arrives as Ctrl+Alt and types its character plainly.
-        if alt && !ctrl {
+        // AltGr arrives as Ctrl+Alt and types its character plainly. A
+        // low surrogate's Alt went out with its high half.
+        if alt && !ctrl && !utf8.pending() {
             out.push(0x1b);
         }
-        let text = String::from_utf16_lossy(&[k.ch]);
-        out.extend(text.bytes());
+        utf8.push(k.ch, &mut out);
         return out;
     }
+    utf8.flush(&mut out);
     let m = 1 + u32::from(shift) + 2 * u32::from(alt) + 4 * u32::from(ctrl);
     let with = |base: &str, fin: char| {
         if m == 1 {
@@ -584,9 +592,74 @@ pub(crate) fn vt_for(k: &KeyEvent) -> Vec<u8> {
                 with(&n.to_string(), '~')
             }
         }
-        _ => return Vec::new(),
+        _ => return out,
     };
-    seq.into_bytes()
+    out.extend(seq.into_bytes());
+    out
+}
+
+/// UTF-16 units to UTF-8 one at a time, as records carry them: a high
+/// surrogate waits for its low half, and a lone surrogate becomes U+FFFD.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Utf8Units {
+    high: Option<u16>,
+}
+
+impl Utf8Units {
+    pub(crate) fn push(&mut self, unit: u16, out: &mut Vec<u8>) {
+        let high = self.high.take();
+        if is_low_surrogate(unit) {
+            let ch = high.map_or(char::REPLACEMENT_CHARACTER, |h| pair(h, unit));
+            push_char(out, ch);
+            return;
+        }
+        if high.is_some() {
+            push_char(out, char::REPLACEMENT_CHARACTER);
+        }
+        if is_high_surrogate(unit) {
+            self.high = Some(unit);
+            return;
+        }
+        push_char(
+            out,
+            char::from_u32(u32::from(unit)).unwrap_or(char::REPLACEMENT_CHARACTER),
+        );
+    }
+
+    /// A waiting high surrogate, given up as U+FFFD.
+    pub(crate) fn flush(&mut self, out: &mut Vec<u8>) {
+        if self.high.take().is_some() {
+            push_char(out, char::REPLACEMENT_CHARACTER);
+        }
+    }
+
+    /// Whether a high surrogate waits.
+    pub(crate) fn pending(&self) -> bool {
+        self.high.is_some()
+    }
+
+    /// Forget a waiting high surrogate.
+    pub(crate) fn clear(&mut self) {
+        self.high = None;
+    }
+}
+
+pub(crate) fn is_high_surrogate(u: u16) -> bool {
+    (0xD800..0xDC00).contains(&u)
+}
+
+pub(crate) fn is_low_surrogate(u: u16) -> bool {
+    (0xDC00..0xE000).contains(&u)
+}
+
+fn pair(high: u16, low: u16) -> char {
+    let c = 0x10000 + ((u32::from(high) - 0xD800) << 10) + (u32::from(low) - 0xDC00);
+    char::from_u32(c).unwrap_or(char::REPLACEMENT_CHARACTER)
+}
+
+fn push_char(out: &mut Vec<u8>, ch: char) {
+    let mut buf = [0u8; 4];
+    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
 }
 
 /// The INPUT_RECORD queue, capped at [`MAX_RECORDS`].
@@ -663,7 +736,7 @@ mod tests {
 
     fn tokens(bytes: &[u8]) -> Vec<Token> {
         Decoder::default()
-            .feed(bytes)
+            .feed(bytes, true)
             .into_iter()
             .map(|p| p.token)
             .collect()
@@ -671,7 +744,7 @@ mod tests {
 
     #[test]
     fn text_controls_and_keys_are_split_with_their_bytes() {
-        let pieces = Decoder::default().feed(b"hi\r\x1b[A\x1b[1;5C\x1bOP\x1b[3~\x1b[Z");
+        let pieces = Decoder::default().feed(b"hi\r\x1b[A\x1b[1;5C\x1bOP\x1b[3~\x1b[Z", true);
         let raw: Vec<&[u8]> = pieces.iter().map(|p| p.raw.as_slice()).collect();
         assert_eq!(
             raw,
@@ -774,9 +847,9 @@ mod tests {
     #[test]
     fn split_sequences_and_characters_wait_for_the_rest() {
         let mut d = Decoder::default();
-        assert!(d.feed(b"\x1b[1;").is_empty());
+        assert!(d.feed(b"\x1b[1;", true).is_empty());
         assert_eq!(
-            d.feed(b"2A")
+            d.feed(b"2A", true)
                 .into_iter()
                 .map(|p| p.token)
                 .collect::<Vec<_>>(),
@@ -786,10 +859,10 @@ mod tests {
             }]
         );
         let e = "é".as_bytes();
-        assert!(d.feed(&e[..1]).is_empty());
-        assert_eq!(d.feed(&e[1..])[0].token, Token::Text("é".into()));
+        assert!(d.feed(&e[..1], true).is_empty());
+        assert_eq!(d.feed(&e[1..], true)[0].token, Token::Text("é".into()));
         // A lone ESC at the end of the input is the Escape key.
-        assert_eq!(d.feed(b"\x1b")[0].token, Token::Control('\x1b'));
+        assert_eq!(d.feed(b"\x1b", true)[0].token, Token::Control('\x1b'));
     }
 
     #[test]
@@ -797,7 +870,7 @@ mod tests {
         let mut d = Decoder::default();
         let mut osc = b"\x1b]0;".to_vec();
         osc.extend(vec![b'x'; MAX_PENDING]);
-        let pieces = d.feed(&osc);
+        let pieces = d.feed(&osc, true);
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].token, Token::Unknown);
         assert!(d.pending.is_empty());
@@ -859,18 +932,83 @@ mod tests {
         assert_eq!((tab[1].vk, tab[1].ch), (vk::TAB, 9));
     }
 
+    fn vt_for_one(k: &KeyEvent) -> Vec<u8> {
+        vt_for(k, &mut Utf8Units::default())
+    }
+
+    #[test]
+    fn vt_for_keeps_a_surrogate_pair_across_records() {
+        let mut utf8 = Utf8Units::default();
+        let down = |ch| KeyEvent::key(true, 0, ch, 0);
+        let up = |ch| KeyEvent::key(false, 0, ch, 0);
+        assert!(vt_for(&down(0xD83D), &mut utf8).is_empty());
+        assert!(
+            vt_for(&up(0xD83D), &mut utf8).is_empty(),
+            "a key-up leaves it waiting"
+        );
+        assert_eq!(vt_for(&down(0xDE00), &mut utf8), "😀".as_bytes());
+        // Alt goes out once, with the high half.
+        let alt = |ch| KeyEvent::key(true, 0, ch, state::LEFT_ALT);
+        assert_eq!(vt_for(&alt(0xD83D), &mut utf8), b"\x1b");
+        assert_eq!(vt_for(&alt(0xDE00), &mut utf8), "😀".as_bytes());
+        // Lone halves become U+FFFD, a waiting one before the next key.
+        assert_eq!(vt_for(&down(0xDE00), &mut utf8), "\u{FFFD}".as_bytes());
+        assert!(vt_for(&down(0xD83D), &mut utf8).is_empty());
+        assert_eq!(
+            vt_for(&down(u16::from(b'a')), &mut utf8),
+            "\u{FFFD}a".as_bytes()
+        );
+        assert!(vt_for(&down(0xD83D), &mut utf8).is_empty());
+        let left = KeyEvent::key(true, vk::LEFT, 0, 0);
+        assert_eq!(vt_for(&left, &mut utf8), "\u{FFFD}\x1b[D".as_bytes());
+    }
+
+    #[test]
+    fn a_split_anywhere_decodes_as_the_whole() {
+        let inputs: [&[u8]; 4] = [
+            b"\x1b[A",
+            b"\x1b[27;1;27;1;0;1_",
+            b"\x1b]11;rgb:0000/0000/0000\x1b\\x",
+            "a\x1bOP😀\x1b[1;5C".as_bytes(),
+        ];
+        for input in inputs {
+            let whole = tokens(input);
+            for cut in 1..input.len() {
+                let mut d = Decoder::default();
+                let mut got: Vec<Token> = d
+                    .feed(&input[..cut], false)
+                    .into_iter()
+                    .map(|p| p.token)
+                    .collect();
+                got.extend(d.feed(&input[cut..], true).into_iter().map(|p| p.token));
+                assert_eq!(got, whole, "{input:?} cut at {cut}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_trailing_esc_is_the_escape_key_only_where_the_write_ended() {
+        let mut d = Decoder::default();
+        assert!(d.feed(b"\x1b", false).is_empty(), "kept: the write goes on");
+        assert_eq!(d.feed(b"[A", true)[0].token, tokens(b"\x1b[A")[0]);
+        assert_eq!(d.feed(b"\x1b", true)[0].token, Token::Control('\x1b'));
+    }
+
     #[test]
     fn vt_for_turns_records_back_into_vt() {
         let down = |vk, ch, state| KeyEvent::key(true, vk, ch, state);
-        assert_eq!(vt_for(&down(0x41, 97, 0)), b"a");
-        assert_eq!(vt_for(&down(0x41, 97, state::LEFT_ALT)), b"\x1ba");
-        assert_eq!(vt_for(&down(vk::UP, 0, state::ENHANCED_KEY)), b"\x1b[A");
-        assert_eq!(vt_for(&down(vk::LEFT, 0, state::LEFT_CTRL)), b"\x1b[1;5D");
-        assert_eq!(vt_for(&down(vk::DELETE, 0, state::SHIFT)), b"\x1b[3;2~");
-        assert_eq!(vt_for(&down(vk::F1, 0, 0)), b"\x1bOP");
-        assert_eq!(vt_for(&down(vk::F12, 0, 0)), b"\x1b[24~");
-        assert!(vt_for(&KeyEvent::key(false, 0x41, 97, 0)).is_empty());
-        assert!(vt_for(&down(vk::SHIFT, 0, state::SHIFT)).is_empty());
+        assert_eq!(vt_for_one(&down(0x41, 97, 0)), b"a");
+        assert_eq!(vt_for_one(&down(0x41, 97, state::LEFT_ALT)), b"\x1ba");
+        assert_eq!(vt_for_one(&down(vk::UP, 0, state::ENHANCED_KEY)), b"\x1b[A");
+        assert_eq!(
+            vt_for_one(&down(vk::LEFT, 0, state::LEFT_CTRL)),
+            b"\x1b[1;5D"
+        );
+        assert_eq!(vt_for_one(&down(vk::DELETE, 0, state::SHIFT)), b"\x1b[3;2~");
+        assert_eq!(vt_for_one(&down(vk::F1, 0, 0)), b"\x1bOP");
+        assert_eq!(vt_for_one(&down(vk::F12, 0, 0)), b"\x1b[24~");
+        assert!(vt_for_one(&KeyEvent::key(false, 0x41, 97, 0)).is_empty());
+        assert!(vt_for_one(&down(vk::SHIFT, 0, state::SHIFT)).is_empty());
     }
 
     #[test]

@@ -95,6 +95,9 @@ pub(crate) struct Shared {
 
 struct Lanes {
     input: VecDeque<u8>,
+    /// `write` calls part-way through their buffer: the input lane's
+    /// last bytes are not where a terminal's write ended.
+    writing: usize,
     control: Control,
     /// Set once the server is closed: `write` and `resize` fail.
     closed: bool,
@@ -118,6 +121,7 @@ impl Shared {
         Shared {
             lanes: Mutex::new(Lanes {
                 input: VecDeque::new(),
+                writing: 0,
                 control: Control::default(),
                 closed: false,
             }),
@@ -138,8 +142,10 @@ impl Shared {
     pub(crate) fn write(&self, buf: &[u8]) -> Result<usize> {
         let mut rest = buf;
         let mut lanes = lock(&self.lanes);
+        lanes.writing += 1;
         while !rest.is_empty() {
             if lanes.closed || lanes.control.hang_up {
+                lanes.writing -= 1;
                 return Err(broken_pipe("OwnPtyMaster::write"));
             }
             let room = INPUT_LANE_CAP.saturating_sub(lanes.input.len());
@@ -153,7 +159,13 @@ impl Shared {
             let (now, later) = rest.split_at(room.min(rest.len()));
             lanes.input.extend(now);
             rest = later;
+            if rest.is_empty() {
+                lanes.writing -= 1;
+            }
             self.waker.wake();
+        }
+        if buf.is_empty() {
+            lanes.writing -= 1;
         }
         Ok(buf.len())
     }
@@ -232,13 +244,16 @@ impl Shared {
         (lanes.control.take(), lanes.input.len())
     }
 
-    /// Take up to `n` bytes of terminal input.
-    fn take_input(&self, n: usize) -> Vec<u8> {
+    /// Take up to `n` bytes of terminal input, and whether they end
+    /// where a terminal's write ended: the lane is then empty and no
+    /// `write` is part-way through.
+    fn take_input(&self, n: usize) -> (Vec<u8>, bool) {
         let mut lanes = lock(&self.lanes);
         let n = n.min(lanes.input.len());
         let bytes = lanes.input.drain(..n).collect();
+        let end = lanes.input.is_empty() && lanes.writing == 0;
         self.input_room.notify_all();
-        bytes
+        (bytes, end)
     }
 
     fn output_len(&self) -> usize {
@@ -508,8 +523,12 @@ impl Engine {
             self.handle(Event::ChildExited);
         }
         if plan.input > 0 {
-            let bytes = self.shared.take_input(plan.input);
-            self.handle(Event::Input(&bytes));
+            let (bytes, end) = self.shared.take_input(plan.input);
+            if end {
+                self.handle(Event::Input(&bytes));
+            } else {
+                self.handle(Event::InputMore(&bytes));
+            }
         }
         let Some(server) = self.server.as_mut() else {
             return Ok(());
@@ -839,6 +858,34 @@ mod tests {
             .expect("the worker was started")
             .join()
             .expect("the worker returns once the engine is gone");
+    }
+
+    #[test]
+    fn input_ends_where_a_write_ended_not_where_the_engine_cut() {
+        let shared = Arc::new(Shared::new(Waker::new().expect("Waker")));
+        shared.write(b"ab\x1b").expect("write");
+        assert_eq!(
+            shared.take_input(2),
+            (b"ab".to_vec(), false),
+            "more is queued"
+        );
+        assert_eq!(shared.take_input(16), (b"\x1b".to_vec(), true));
+        // A write larger than the lane is still going on when the lane
+        // empties: its ESC at the cut is not the end of it.
+        let mut big = vec![b'x'; INPUT_LANE_CAP - 1];
+        big.extend(b"\x1b[A");
+        let writer = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || shared.write(&big))
+        };
+        while lock(&shared.lanes).input.len() < INPUT_LANE_CAP {
+            std::thread::yield_now();
+        }
+        let (first, end) = shared.take_input(INPUT_LANE_CAP);
+        assert_eq!(first.last(), Some(&0x1b));
+        assert!(!end, "the writer has more");
+        writer.join().expect("writer").expect("write");
+        assert_eq!(shared.take_input(16), (b"[A".to_vec(), true));
     }
 
     #[test]

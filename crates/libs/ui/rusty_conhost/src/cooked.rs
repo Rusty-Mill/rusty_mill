@@ -3,13 +3,17 @@
 //! ENABLE_ECHO_INPUT is on.
 //!
 //! This release edits at the end of the line only: characters append,
-//! Backspace deletes the last character, Escape clears the line. The
+//! Backspace deletes the last character, Escape clears the line one
+//! character at a time ([`Line::erase_one`]), so the caller can hold its
+//! echo to the output budget. Echo keeps surrogate pairs whole. The
 //! cursor keys, history and the F-key popups come later. Behaviour
 //! follows microsoft/terminal's conhost (commit 09beddc6,
 //! `src/host/readDataCooked.cpp`, `src/host/stream.cpp`; see
 //! THIRD_PARTY_NOTICES.md):
 //!
 //! Copyright (c) Microsoft Corporation. Licensed under the MIT license.
+
+use crate::input::Utf8Units;
 
 /// UTF-16 units one line holds (§7.4), or its initial data if that is
 /// longer; further typing is ignored.
@@ -31,6 +35,10 @@ pub(crate) struct Line {
     buffer: Vec<u16>,
     /// The most units `buffer` grows to.
     limit: usize,
+    /// Escape was pressed and the line is not yet erased.
+    erasing: bool,
+    /// The echo's UTF-8, holding a high surrogate for its low half.
+    utf8: Utf8Units,
     wakeup_mask: u32,
     control_key_state: u32,
     done: Option<Done>,
@@ -43,6 +51,8 @@ impl Line {
         Line {
             limit: initial.len().max(MAX_LINE),
             buffer: initial,
+            erasing: false,
+            utf8: Utf8Units::default(),
             wakeup_mask,
             control_key_state: 0,
             done: None,
@@ -77,20 +87,30 @@ impl Line {
             _ if self.buffer.len() >= self.limit => {}
             _ => {
                 self.buffer.push(ch);
-                push_units(echo, &[ch]);
+                self.utf8.push(ch, echo);
             }
         }
     }
 
     /// One editing key without a character (conhost `_handleVkey`).
-    /// Escape clears the line; the rest are not supported yet.
-    pub(crate) fn vkey(&mut self, vk: u16, echo: &mut Vec<u8>) {
+    /// Escape starts erasing the line; the rest are not supported yet.
+    pub(crate) fn vkey(&mut self, vk: u16) {
         if self.done.is_some() || vk != crate::input::vk::ESCAPE {
             return;
         }
-        while !self.buffer.is_empty() {
-            self.backspace(echo);
-        }
+        self.erasing = !self.buffer.is_empty();
+    }
+
+    /// Whether Escape's erasing is under way: the caller runs
+    /// [`Line::erase_one`] until it ends, before the next character.
+    pub(crate) fn erasing(&self) -> bool {
+        self.erasing
+    }
+
+    /// Erase one more character of the line, at most 3 bytes of echo.
+    pub(crate) fn erase_one(&mut self, echo: &mut Vec<u8>) {
+        self.backspace(echo);
+        self.erasing = self.erasing && !self.buffer.is_empty();
     }
 
     /// Delete the last character, a surrogate pair whole.
@@ -98,6 +118,11 @@ impl Line {
         let Some(last) = self.buffer.pop() else {
             return;
         };
+        if self.utf8.pending() {
+            // A high surrogate not yet shown: nothing to erase.
+            self.utf8.clear();
+            return;
+        }
         if (0xDC00..0xE000).contains(&last)
             && self
                 .buffer
@@ -115,16 +140,13 @@ impl Line {
     /// without echo.
     pub(crate) fn finish(mut self, processed: bool, echo: &mut Vec<u8>) -> (Vec<u16>, u32) {
         if self.done == Some(Done::Line) {
+            self.utf8.flush(echo);
             let suffix: &[u16] = if processed { &[0x0d, 0x0a] } else { &[0x0d] };
-            push_units(echo, suffix);
+            echo.extend(suffix.iter().map(|&u| u as u8));
             self.buffer.extend_from_slice(suffix);
         }
         (self.buffer, self.control_key_state)
     }
-}
-
-fn push_units(echo: &mut Vec<u8>, units: &[u16]) {
-    echo.extend(String::from_utf16_lossy(units).bytes());
 }
 
 #[cfg(test)]
@@ -157,9 +179,38 @@ mod tests {
         line.char(0x08, 0, true, &mut echo);
         assert_eq!(line.buffer, [u16::from(b'a')]);
         feed(&mut line, "bc", &mut echo);
-        line.vkey(crate::input::vk::ESCAPE, &mut echo);
+        line.vkey(crate::input::vk::ESCAPE);
+        let mut steps = 0;
+        while line.erasing() {
+            let before = echo.len();
+            line.erase_one(&mut echo);
+            assert!(echo.len() - before <= 3, "one step, one character");
+            steps += 1;
+        }
+        assert_eq!(steps, 3);
         assert!(line.buffer.is_empty());
         assert!(echo.ends_with(b"\x08 \x08\x08 \x08\x08 \x08"));
+    }
+
+    #[test]
+    fn echo_keeps_a_surrogate_pair_whole() {
+        let mut echo = Vec::new();
+        let mut line = Line::new(Vec::new(), 0);
+        line.char(0xD83D, 0, true, &mut echo);
+        assert!(echo.is_empty(), "the high half waits for its partner");
+        line.char(0xDE00, 0, true, &mut echo);
+        assert_eq!(echo, "😀".as_bytes());
+        // A high half erased before its partner shows nothing to erase.
+        line.char(0xD83D, 0, true, &mut echo);
+        line.char(0x08, 0, true, &mut echo);
+        assert_eq!(echo, "😀".as_bytes());
+        // A lone half is U+FFFD, a dangling one at Enter too.
+        line.char(0xDE00, 0, true, &mut echo);
+        line.char(0xD83D, 0, true, &mut echo);
+        line.char(0x0d, 0, true, &mut echo);
+        let (text, _) = line.finish(true, &mut echo);
+        assert_eq!(echo, "😀\u{FFFD}\u{FFFD}\r\n".as_bytes());
+        assert_eq!(text, [0xD83D, 0xDE00, 0xDE00, 0xD83D, 0x0d, 0x0a]);
     }
 
     #[test]

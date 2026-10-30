@@ -113,8 +113,11 @@ pub(crate) struct Packet<'a> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Event<'a> {
     Packet(Packet<'a>),
-    /// VT bytes from the terminal.
+    /// VT bytes from the terminal, ending where its write ended.
     Input(&'a [u8]),
+    /// VT bytes from the terminal that is still writing: more follow, so
+    /// an ESC at their end is not yet the Escape key.
+    InputMore(&'a [u8]),
     Resize(WinSize),
     /// The reader took bytes out of the output queue.
     OutputDrained,
@@ -456,11 +459,24 @@ pub(crate) struct Console {
     input_available: bool,
     /// Reads waiting for input, in arrival order.
     reads: VecDeque<read::Read>,
+    /// A cooked read's echo waits for the reader with input queued: reads
+    /// behind it wait too, so input keeps its order.
+    echo_held: bool,
     /// UTF-8 bytes of a character an ANSI read could not fit, for the
     /// next ANSI read (conhost `_cachedTextReaderA`).
     cached_text: VecDeque<u8>,
     /// Records an ANSI GetConsoleInput expanded beyond what it asked for.
     cached_records: VecDeque<input::Record>,
+    /// A unit taken from the queue but not yet read: the one after a high
+    /// surrogate that turned out to be alone, or a high surrogate an ANSI
+    /// read holds until its low half arrives.
+    held_unit: Option<u16>,
+    /// ANSI GetConsoleInput's surrogate halves waiting for their partner,
+    /// for key-ups and key-downs apart.
+    record_utf8: [input::Utf8Units; 2],
+    /// A win32-input-mode surrogate half waiting for its partner before
+    /// it goes to a VT client as UTF-8.
+    vt_utf8: input::Utf8Units,
 }
 
 impl Console {
@@ -486,8 +502,12 @@ impl Console {
             input: input::Queue::default(),
             input_available: false,
             reads: VecDeque::new(),
+            echo_held: false,
             cached_text: VecDeque::new(),
             cached_records: VecDeque::new(),
+            held_unit: None,
+            record_utf8: [input::Utf8Units::default(); 2],
+            vt_utf8: input::Utf8Units::default(),
         }
     }
 
@@ -513,9 +533,14 @@ impl Console {
         let mut fx = Vec::new();
         match ev {
             Event::Packet(p) => self.packet(p, out, &mut fx),
-            Event::Input(bytes) => self.terminal_input(bytes, out, &mut fx),
+            Event::Input(bytes) => self.terminal_input(bytes, true, out, &mut fx),
+            Event::InputMore(bytes) => self.terminal_input(bytes, false, out, &mut fx),
             Event::Resize(size) => self.size = size,
-            Event::OutputDrained => self.pump(None, out, &mut fx),
+            Event::OutputDrained => {
+                self.pump(None, out, &mut fx);
+                // Cooked reads held back by their echo go on.
+                self.serve_reads(out, &mut fx);
+            }
             Event::ChildExited | Event::HangUp => self.close(&mut fx),
         }
         self.sync_input_available(&mut fx);
@@ -1122,7 +1147,7 @@ mod tests {
     pub(super) struct Host {
         pub(super) c: Console,
         queued: usize,
-        high_water: usize,
+        pub(super) high_water: usize,
         pub(super) vt: Vec<u8>,
         next_id: u64,
         /// Each packet's output size, to check its write-back fits.

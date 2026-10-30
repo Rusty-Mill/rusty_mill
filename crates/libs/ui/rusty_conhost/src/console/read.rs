@@ -21,7 +21,7 @@ use crate::cooked::{Done, Line};
 use crate::ctrl::{self, Ctrl};
 use crate::input::{self, KeyEvent, Record, Token, state, vk};
 use crate::msg::{self, ApiMsg};
-use crate::sched::MAX_RETAINED_PER_CALL;
+use crate::sched::{INPUT_PAUSE_ABOVE as ECHO_ABOVE, MAX_RETAINED_PER_CALL};
 
 /// `CONSOLE_READ_NOREMOVE` and `CONSOLE_READ_NOWAIT`.
 const READ_NOREMOVE: u16 = 0x1;
@@ -41,6 +41,9 @@ enum Attempt {
     Done(Reply),
     /// Not enough input yet: the read, to wait.
     Wait(Read),
+    /// Input is queued but the read's echo waits for the reader: it and
+    /// every read behind it wait, so none takes its input.
+    Held(Read),
 }
 
 /// A read waiting for input (conhost's wait blocks).
@@ -84,11 +87,12 @@ impl Console {
     pub(super) fn terminal_input(
         &mut self,
         bytes: &[u8],
+        end: bool,
         out: &mut OutputQueue,
         fx: &mut Vec<Effect>,
     ) {
         let vt = self.input_mode & mode::VIRTUAL_TERMINAL_INPUT != 0;
-        for piece in self.decoder.feed(bytes) {
+        for piece in self.decoder.feed(bytes, end) {
             match (&piece.token, vt) {
                 (Token::Win32(k), _) => self.key(*k, vt, fx),
                 // Ctrl+C is the host's under PROCESSED_INPUT in either mode.
@@ -123,7 +127,8 @@ impl Console {
             self.store(Record::Key(k), fx);
             return;
         }
-        for k in input::text_events(&input::vt_for(&k), self.key_for) {
+        let vt = input::vt_for(&k, &mut self.vt_utf8);
+        for k in input::text_events(&vt, self.key_for) {
             self.store(Record::Key(k), fx);
         }
     }
@@ -203,11 +208,20 @@ impl Console {
             fx.push(Effect::Complete(reply));
         }
         self.reads = kept;
+        // Only a cooked read's echo holds the others back.
+        self.echo_held &= self
+            .reads
+            .iter()
+            .any(|r| matches!(r.kind, ReadKind::Line { .. }));
     }
 
     pub(super) fn clear_input(&mut self) {
+        self.echo_held = false;
         self.input.clear();
         self.cached_records.clear();
+        self.held_unit = None;
+        self.record_utf8 = [input::Utf8Units::default(); 2];
+        self.vt_utf8.clear();
     }
 
     /// conhost `GetInputBuffer`: the object exists, has the access, and
@@ -295,7 +309,8 @@ impl Console {
         }
         let at = m.fixed.len();
         let count = (p.output_size as usize).saturating_sub(at) / input::RECORD_LEN;
-        let records = if count == 0 {
+        // Behind a cooked read whose echo waits, the queue is its input.
+        let records = if count == 0 || self.echo_held {
             Vec::new()
         } else {
             self.read_records(count, unicode, flags & READ_NOREMOVE != 0)
@@ -389,9 +404,18 @@ impl Console {
             fx.push(reply(msg::STATUS_BUFFER_TOO_SMALL));
             return;
         }
+        if self.echo_held {
+            // Behind a read whose echo waits: it gets the input first.
+            self.wait(read);
+            return;
+        }
         match self.attempt(read, out, fx) {
             Attempt::Done(reply) => fx.push(Effect::Reply(reply)),
             Attempt::Wait(read) => self.wait(read),
+            Attempt::Held(read) => {
+                self.echo_held = true;
+                self.wait(read);
+            }
         }
     }
 
@@ -406,9 +430,11 @@ impl Console {
     }
 
     /// Retry every waiting read in order; those that finish complete now.
-    fn serve_reads(&mut self, out: &mut OutputQueue, fx: &mut Vec<Effect>) {
+    pub(super) fn serve_reads(&mut self, out: &mut OutputQueue, fx: &mut Vec<Effect>) {
         let mut kept = std::collections::VecDeque::new();
-        for r in std::mem::take(&mut self.reads) {
+        let mut reads = std::mem::take(&mut self.reads);
+        self.echo_held = false;
+        while let Some(r) = reads.pop_front() {
             let retained = r.retained;
             match self.attempt(r, out, fx) {
                 Attempt::Done(reply) => {
@@ -416,6 +442,11 @@ impl Console {
                     fx.push(Effect::Complete(reply));
                 }
                 Attempt::Wait(r) => kept.push_back(r),
+                Attempt::Held(r) => {
+                    self.echo_held = true;
+                    kept.push_back(r);
+                    kept.append(&mut reads);
+                }
             }
         }
         self.reads = kept;
@@ -446,8 +477,19 @@ impl Console {
                 ctrl_z,
             } => {
                 let (unicode, ctrl_z) = (*unicode, *ctrl_z);
+                let echoing = self.input_mode & mode::ECHO_INPUT != 0;
                 let mut echo = Vec::new();
                 while line.done().is_none() {
+                    // Echo uses the host reserve and no more (§7.4): the
+                    // read goes on once the reader drains.
+                    if echoing && out.len() + echo.len() > ECHO_ABOVE {
+                        out.push(&echo);
+                        return Attempt::Held(r);
+                    }
+                    if line.erasing() {
+                        line.erase_one(&mut echo);
+                        continue;
+                    }
                     match self.next_char(true) {
                         Some(Got::Char(ch, keys)) => line.char(
                             ch,
@@ -455,11 +497,11 @@ impl Console {
                             self.input_mode & mode::PROCESSED_INPUT != 0,
                             &mut echo,
                         ),
-                        Some(Got::Vkey(vk)) => line.vkey(vk, &mut echo),
+                        Some(Got::Vkey(vk)) => line.vkey(vk),
                         None => break,
                     }
                 }
-                if self.input_mode & mode::ECHO_INPUT != 0 {
+                if echoing {
                     out.push(&echo);
                 }
                 if line.done().is_none() {
@@ -509,18 +551,49 @@ impl Console {
         let char_size = if unicode { 2 } else { 1 };
         let mut out = self.consume_cached(unicode, capacity);
         while capacity - out.len() >= char_size {
-            let Some(Got::Char(ch, _)) = self.next_char(false) else {
+            let Some(units) = self.next_text(unicode) else {
                 break;
             };
-            let data = self.consume(unicode, &[ch], capacity - out.len());
+            let data = self.consume(unicode, &units, capacity - out.len());
             out.extend(data.bytes);
         }
         out
     }
 
+    /// The next character's units for a raw read. An ANSI read takes a
+    /// surrogate pair whole, holding a high half until its low half
+    /// arrives; a lone half reads as U+FFFD.
+    fn next_text(&mut self, unicode: bool) -> Option<Vec<u16>> {
+        let first = self.next_unit()?;
+        if unicode || !input::is_high_surrogate(first) {
+            return Some(vec![first]);
+        }
+        match self.next_unit() {
+            Some(low) if input::is_low_surrogate(low) => Some(vec![first, low]),
+            Some(other) => {
+                self.held_unit = Some(other);
+                Some(vec![first])
+            }
+            None => {
+                self.held_unit = Some(first);
+                None
+            }
+        }
+    }
+
+    fn next_unit(&mut self) -> Option<u16> {
+        match self.next_char(false)? {
+            Got::Char(ch, _) => Some(ch),
+            Got::Vkey(_) => None,
+        }
+    }
+
     /// conhost `GetChar`: the next character from the queue, or for a
     /// cooked read an editing key. Records without either are consumed.
     fn next_char(&mut self, editing: bool) -> Option<Got> {
+        if let Some(unit) = self.held_unit.take() {
+            return Some(Got::Char(unit, 0));
+        }
         let vt = self.input_mode & mode::VIRTUAL_TERMINAL_INPUT != 0;
         loop {
             let Record::Key(k) = self.input.pop_stream()? else {
@@ -564,6 +637,8 @@ impl Console {
     /// conhost `InputBuffer::Read` without streaming: up to `count`
     /// records. An ANSI read gets one record per UTF-8 byte of a key's
     /// character, and keeps what it expanded past `count` for the next.
+    /// A surrogate pair's UTF-8 comes with its low half's record, so the
+    /// high half's yields none; a lone half is U+FFFD.
     fn read_records(&mut self, count: usize, unicode: bool, peek: bool) -> Vec<Record> {
         let mut out: Vec<Record> = if peek {
             self.cached_records.iter().take(count).copied().collect()
@@ -572,6 +647,8 @@ impl Console {
             self.cached_records.drain(..n).collect()
         };
         let mut taken = 0;
+        // A peek leaves the waiting surrogate halves as they are.
+        let mut utf8 = self.record_utf8;
         for r in self.input.iter() {
             if out.len() >= count {
                 break;
@@ -579,8 +656,9 @@ impl Console {
             taken += 1;
             match r {
                 Record::Key(k) if !unicode => {
-                    let text = String::from_utf16_lossy(&[k.ch]);
-                    out.extend(text.bytes().map(|b| {
+                    let mut bytes = Vec::new();
+                    utf8[usize::from(k.down)].push(k.ch, &mut bytes);
+                    out.extend(bytes.into_iter().map(|b| {
                         Record::Key(KeyEvent {
                             ch: u16::from(b),
                             ..*k
@@ -594,6 +672,7 @@ impl Console {
         if !peek {
             self.input.drain_front(taken);
             self.cached_records.extend(extra);
+            self.record_utf8 = utf8;
         }
         out
     }
@@ -884,6 +963,205 @@ mod tests {
         let done = completes(&fx);
         assert_eq!(wide(done[0]), "dir\r\n");
         assert_eq!(h.vt, b"dirx\x08 \x08\r\n");
+    }
+
+    /// A win32-input-mode key-down record typing `ch`.
+    fn win32_down(vk: u16, ch: u16) -> Vec<u8> {
+        format!("\x1b[{vk};0;{ch};1;0;1_").into_bytes()
+    }
+
+    #[test]
+    fn cooked_echo_stays_within_the_host_reserve_and_resumes_on_drain() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        // 60 waiting cooked reads, each prefilled with 8,192 units.
+        let initial: Vec<u8> = [b'a', 0].repeat(crate::cooked::MAX_LINE);
+        let msg = read_msg(true, initial.len() as u32, 0);
+        let reads: Vec<Reply> = (0..60)
+            .map(|_| {
+                h.call(
+                    input,
+                    api::READ_CONSOLE,
+                    &msg,
+                    &initial,
+                    2 * initial.len() as u32,
+                )
+            })
+            .collect();
+        assert!(reads.iter().all(held));
+        // One slice: Escape then Enter for every read, 24 KiB of erase each.
+        let mut keys = Vec::new();
+        for _ in 0..60 {
+            keys.extend(win32_down(vk::ESCAPE, 0x1b));
+            keys.push(b'\r');
+        }
+        let mut done = completes(&h.ev(Event::Input(&keys))).len();
+        let reserve = ECHO_ABOVE + 16;
+        assert!(h.high_water <= reserve, "{} queued", h.high_water);
+        assert!(done < 60, "echo waits for the reader");
+        let mut drains = 0;
+        while done < 60 {
+            let fx = h.drain();
+            assert!(h.high_water <= reserve, "{} queued", h.high_water);
+            for r in completes(&fx) {
+                assert_eq!(wide(r), "\r\n", "the line was erased");
+            }
+            done += completes(&fx).len();
+            drains += 1;
+            assert!(drains < 200, "no progress");
+        }
+        assert_eq!(h.c.waiting(), 0);
+        assert_eq!(h.c.parked(), 0);
+    }
+
+    #[test]
+    fn a_read_behind_held_echo_does_not_take_its_input() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        let initial: Vec<u8> = [b'a', 0].repeat(crate::cooked::MAX_LINE);
+        let msg = read_msg(true, initial.len() as u32, 0);
+        for _ in 0..4 {
+            h.call(
+                input,
+                api::READ_CONSOLE,
+                &msg,
+                &initial,
+                2 * initial.len() as u32,
+            );
+        }
+        let mut keys = Vec::new();
+        for _ in 0..4 {
+            keys.extend(win32_down(vk::ESCAPE, 0x1b));
+            keys.extend(b"x\r");
+        }
+        let mut lines: Vec<String> = completes(&h.ev(Event::Input(&keys)))
+            .iter()
+            .map(|r| wide(r))
+            .collect();
+        assert!(lines.len() < 4, "held back by the stalled reader");
+        // GetConsoleInput now must not take the cooked reads' keys.
+        let r = get_input(&mut h, input, READ_NOWAIT, true, 64);
+        assert_eq!(r.information, 0, "the queue belongs to the held reads");
+        let r = read_w(&mut h, input, 64);
+        assert!(held(&r), "a raw read waits behind them");
+        for _ in 0..8 {
+            lines.extend(completes(&h.drain()).iter().map(|r| wide(r)));
+        }
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().all(|l| l == "x\r\n"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_hang_up_ends_reads_held_back_by_their_echo() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        let initial: Vec<u8> = [b'a', 0].repeat(crate::cooked::MAX_LINE);
+        let msg = read_msg(true, initial.len() as u32, 0);
+        for _ in 0..8 {
+            h.call(
+                input,
+                api::READ_CONSOLE,
+                &msg,
+                &initial,
+                2 * initial.len() as u32,
+            );
+        }
+        let mut keys = Vec::new();
+        for _ in 0..8 {
+            keys.extend(win32_down(vk::ESCAPE, 0x1b));
+            keys.push(b'\r');
+        }
+        h.ev(Event::Input(&keys));
+        assert!(h.c.waiting() > 0, "held back by the stalled reader");
+        h.ev(Event::HangUp);
+        assert_eq!(h.c.waiting(), 0);
+    }
+
+    #[test]
+    fn an_esc_at_a_slice_end_waits_for_the_rest_of_its_sequence() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        let r = read_w(&mut h, input, 64);
+        h.ev(Event::Input(b"ab"));
+        // The engine cut a cursor key after its ESC: not an Escape.
+        h.ev(Event::InputMore(b"\x1b"));
+        let fx = h.ev(Event::Input(b"[Ac\r"));
+        assert_eq!(wide(completes(&fx)[0]), "abc\r\n");
+        assert!(held(&r));
+        // Where the write ended, a lone ESC is the Escape key.
+        let r = read_w(&mut h, input, 64);
+        h.ev(Event::Input(b"xy"));
+        h.ev(Event::Input(b"\x1b"));
+        let done = h.ev(Event::Input(b"z\r"));
+        assert_eq!(wide(completes(&done)[0]), "z\r\n");
+        assert!(held(&r));
+    }
+
+    #[test]
+    fn ansi_raw_reads_keep_a_supplementary_character_whole() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.set_mode(input, RAW);
+        let read_a = |h: &mut Host, capacity| {
+            h.call(
+                input,
+                api::READ_CONSOLE,
+                &read_msg(false, 0, 0),
+                &[],
+                capacity,
+            )
+        };
+        h.ev(Event::Input("😀".as_bytes()));
+        // Two bytes at a time: the character is split, not replaced.
+        let first = read_a(&mut h, 2);
+        let second = read_a(&mut h, 2);
+        assert_eq!([first.output, second.output].concat(), "😀".as_bytes());
+        // Halves in separate records and separate inputs.
+        let r = read_a(&mut h, 8);
+        assert!(held(&r));
+        assert!(completes(&h.ev(Event::Input(&win32_down(0, 0xD83D)))).is_empty());
+        let fx = h.ev(Event::Input(&win32_down(0, 0xDE00)));
+        assert_eq!(completes(&fx)[0].output, "😀".as_bytes());
+        // A lone half is U+FFFD.
+        h.ev(Event::Input(&win32_down(0, 0xDE00)));
+        assert_eq!(read_a(&mut h, 8).output, "\u{FFFD}".as_bytes());
+        // A Unicode read gets the units as they are.
+        h.ev(Event::Input("😀".as_bytes()));
+        assert_eq!(wide(&read_w(&mut h, input, 8)), "😀");
+    }
+
+    #[test]
+    fn ansi_records_and_cooked_echo_keep_a_supplementary_character_whole() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.ev(Event::Input("😀".as_bytes()));
+        let r = get_input(&mut h, input, 0, false, 8);
+        let chars: Vec<u8> = r.output.chunks(input::RECORD_LEN).map(|c| c[14]).collect();
+        assert_eq!(chars, "😀".as_bytes());
+        // Cooked echo, the halves arriving in separate inputs.
+        let r = read_w(&mut h, input, 64);
+        h.vt.clear();
+        h.ev(Event::Input(&win32_down(0, 0xD83D)));
+        h.ev(Event::Input(&win32_down(0, 0xDE00)));
+        let done = h.ev(Event::Input(b"\r"));
+        assert_eq!(h.vt, "😀\r\n".as_bytes());
+        assert_eq!(wide(completes(&done)[0]), "😀\r\n");
+        assert!(held(&r));
+    }
+
+    #[test]
+    fn a_vt_client_gets_a_win32_surrogate_pair_as_one_character() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.set_mode(input, RAW | mode::VIRTUAL_TERMINAL_INPUT);
+        let up = |ch: u16| format!("\x1b[0;0;{ch};0;0;1_").into_bytes();
+        let mut keys = win32_down(0, 0xD83D);
+        keys.extend(up(0xD83D));
+        keys.extend(win32_down(0, 0xDE00));
+        keys.extend(up(0xDE00));
+        h.ev(Event::Input(&keys));
+        let r = h.call(input, api::READ_CONSOLE, &read_msg(false, 0, 0), &[], 8);
+        assert_eq!(r.output, "😀".as_bytes());
     }
 
     #[test]

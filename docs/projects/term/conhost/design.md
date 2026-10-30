@@ -603,7 +603,7 @@ Effects are applied after each `handle` call, in the order the core returned the
 | Store | Cap | Admission when full |
 |---|---|---|
 | Output queue, client output | 64 KiB | a call that produces VT (WriteConsole, RAW_WRITE, WriteConsoleOutput(+String), FillConsoleOutput, ScrollConsoleScreenBuffer, SetConsoleCursorPosition, SetConsoleTextAttribute) is admitted only while the queue is ≤ 64 KiB; otherwise it is parked |
-| Output queue, host reserve | 16 KiB above that | host-originated output (cooked-read echo, `^C`, the startup preamble) may use it. Past 80 KiB the engine stops taking bytes from the input lane (§7.2 step 4), so echo stops. The control lane is still served |
+| Output queue, host reserve | 16 KiB above that | host-originated output (cooked-read echo, `^C`, the startup preamble) may use it. Past 80 KiB the engine stops taking bytes from the input lane (§7.2 step 4). Echo is checked before every character, and Escape erases one character per step, so a cooked read stops there with its input still queued and goes on when the reader drains. The control lane is still served |
 | One emission step | 64 KiB | a call whose output would be larger (a 64 KiB WriteConsole whose ESC bytes expand to U+2190, or a full-screen WriteConsoleOutput) emits in slices of at most 64 KiB, and is parked with its progress between slices. It completes only when fully emitted |
 | Input lane (terminal input) | 64 KiB of pending bytes | `PtyMaster::write` blocks until the engine drains it, as a pty write blocks when the child stops reading |
 | Control lane | fixed size: four flags and one `WinSize` | never full: setting a flag that is already set is a no-op |
