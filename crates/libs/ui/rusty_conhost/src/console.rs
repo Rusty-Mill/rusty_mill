@@ -46,8 +46,9 @@ pub(crate) const PREAMBLE: &[u8] = b"\x1b[?9001h\x1b[?1004h";
 pub(crate) const CLIENT_BUDGET: usize = 64 * 1024;
 /// The most VT one emission step adds.
 pub(crate) const SLICE: usize = 64 * 1024;
-/// UTF-16 units per slice: each unit becomes at most 3 bytes of UTF-8.
-const WIDE_SLICE: usize = SLICE / 3;
+/// UTF-16 units per slice: a unit is at most 3 bytes of UTF-8, and
+/// emitting it adds at most [`screen::MAX_EXPANSION`] in all.
+const WIDE_SLICE: usize = SLICE / screen::MAX_EXPANSION;
 /// Connected clients.
 pub(crate) const MAX_CLIENTS: usize = 256;
 /// Objects per client, the two from CONNECT included.
@@ -437,7 +438,7 @@ impl Text {
                 let text: String = char::decode_utf16(units[at..end].iter().copied())
                     .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
                     .collect();
-                // Each unit is at most 3 bytes transformed, so all fit.
+                // Each unit emits at most MAX_EXPANSION bytes, so all fit.
                 match origin {
                     Origin::Client(mode) => {
                         let n = screen.client(text.as_bytes(), mode, SLICE, at == 0, out, replies);
@@ -507,6 +508,9 @@ pub(crate) struct Console {
     echo_held: bool,
     /// The last pass over waiting reads stopped at its reply budget.
     reads_cut: bool,
+    /// The last pump stopped at the budget on answers to the host's own
+    /// queries, not on queued output: no drain will wake it (§7.4).
+    writes_cut: bool,
     /// UTF-8 bytes of a character an ANSI read could not fit, for the
     /// next ANSI read (conhost `_cachedTextReaderA`).
     cached_text: VecDeque<u8>,
@@ -550,6 +554,7 @@ impl Console {
             reads: VecDeque::new(),
             echo_held: false,
             reads_cut: false,
+            writes_cut: false,
             cached_text: VecDeque::new(),
             cached_records: VecDeque::new(),
             held_unit: None,
@@ -562,6 +567,12 @@ impl Console {
     /// reply budget with input left.
     pub(crate) fn reads_ready(&self) -> bool {
         self.reads_cut
+    }
+
+    /// Parked writes stopped at the budget on the host's own answers,
+    /// with no output queued to drain: the next turn goes on with them.
+    pub(crate) fn writes_ready(&self) -> bool {
+        self.writes_cut
     }
 
     /// Calls held without a reply: parked writes and waiting reads.
@@ -636,6 +647,7 @@ impl Console {
         self.reads.clear();
         self.echo_held = false;
         self.reads_cut = false;
+        self.writes_cut = false;
         self.parked = 0;
         fx.push(Effect::CloseServer);
         fx.push(Effect::Eof);
@@ -1122,11 +1134,14 @@ impl Console {
         fx: &mut Vec<Effect>,
         replies: &mut Vec<u8>,
     ) {
+        self.writes_cut = false;
         while let Some(w) = self.writes.front_mut() {
             if w.at < w.text.len() {
                 // Answers count too: a write of queries alone adds
-                // nothing to the queue (§7.4).
+                // nothing to the queue (§7.4). Then no drain follows, so
+                // the next turn goes on.
                 if out.len() + replies.len() > CLIENT_BUDGET {
+                    self.writes_cut = out.len() <= CLIENT_BUDGET;
                     return;
                 }
                 w.at = w.text.emit(w.at, w.origin, &mut self.screen, out, replies);

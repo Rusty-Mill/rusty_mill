@@ -273,10 +273,11 @@ fn reply(p: &Packet<'_>, status: i32, fixed: Vec<u8>, fx: &mut Vec<Effect>) {
 mod tests {
     use rusty_term_core::{AnsiParser, Grid};
 
-    use super::super::Event;
     use super::super::tests::Host;
+    use super::super::{CLIENT_BUDGET, Event, PREAMBLE, SLICE};
     use super::*;
     use crate::msg::api;
+    use platform::term::WinSize;
 
     fn coord(x: u16, y: u16) -> Vec<u8> {
         [x.to_le_bytes(), y.to_le_bytes()].concat()
@@ -400,6 +401,74 @@ mod tests {
         assert_eq!(r.status, msg::STATUS_SUCCESS);
         assert_eq!(vt, b"\x1b[?6l\x1b[1;1H");
         assert_eq!(u16s(&sbi(&mut h, output), &[4, 6]), [0, 0]);
+        // Left and right margins move the origin's column too.
+        h.packet(
+            msg::RAW_WRITE,
+            1,
+            output,
+            b"\x1b[?69h\x1b[5;20r\x1b[3;40s\x1b[?6h",
+            0,
+        );
+        let (_, vt) = emitted(&mut h, |h| set_cursor(h, output, 5, 6));
+        assert_eq!(vt, b"\x1b[3;4H");
+        assert_eq!(u16s(&sbi(&mut h, output), &[4, 6]), [5, 6]);
+    }
+
+    #[test]
+    fn what_the_host_adds_stays_within_the_emission_bounds() {
+        let cap = CLIENT_BUDGET + SLICE + 16 * 1024;
+        let cases: [(u16, u32, &[u8], usize); 2] =
+            [(80, 0x5, b"\x1bc", 2 + PREAMBLE.len()), (1, 0x3, b"x", 3)];
+        for (cols, mode, unit, emits) in cases {
+            let mut h = Host::sized(WinSize { rows: 4, cols });
+            let [_, _, output] = h.connect(1, "");
+            assert_eq!(h.set_mode(output, mode), msg::STATUS_SUCCESS);
+            let mark = h.vt.len();
+            let chunk = unit.repeat(crate::sched::PACKET_INPUT_CAP / unit.len());
+            for _ in 0..8 {
+                h.packet(msg::RAW_WRITE, 1, output, &chunk, 0);
+                assert!(h.high_water <= cap, "{cols} cols: {}", h.high_water);
+            }
+            for _ in 0..1000 {
+                if h.c.waiting() == 0 {
+                    break;
+                }
+                h.drain();
+                assert!(h.high_water <= cap, "{cols} cols: {}", h.high_water);
+            }
+            assert_eq!(h.c.waiting(), 0);
+            let units = 8 * chunk.len() / unit.len();
+            assert_eq!(h.vt.len() - mark, units * emits, "{cols} cols");
+        }
+    }
+
+    #[test]
+    fn writes_cut_on_answers_alone_go_on_without_a_drain() {
+        let mut h = Host::new();
+        let [_, input, output] = h.connect(1, "");
+        let on = h.mode(input) | mode::VIRTUAL_TERMINAL_INPUT;
+        assert_eq!(h.set_mode(input, on), msg::STATUS_SUCCESS);
+        // Parked behind output, then the reader takes it all.
+        let fill = vec![b'x'; crate::sched::PACKET_INPUT_CAP];
+        h.packet(msg::RAW_WRITE, 1, output, &fill, 0);
+        h.packet(msg::RAW_WRITE, 1, output, &fill, 0);
+        let queries = b"\x1b[?6n".repeat(crate::sched::PACKET_INPUT_CAP / 5);
+        for _ in 0..15 {
+            h.packet(msg::RAW_WRITE, 1, output, &queries, 0);
+        }
+        h.drain();
+        assert!(
+            h.c.waiting() > 0 && h.c.writes_ready(),
+            "cut with no output to drain"
+        );
+        // What the engine does on `Turn::pump_writes`; nothing is read.
+        let mut turns = 0;
+        while h.c.writes_ready() {
+            h.ev(Event::OutputDrained);
+            turns += 1;
+            assert!(turns < 100, "the writes never finish");
+        }
+        assert_eq!(h.c.waiting(), 0, "every query writer completed");
     }
 
     #[test]

@@ -18,6 +18,10 @@ changelog: rusty_conhost keeps its own screen over rusty_term's Grid, so program
   `AnsiParser::pen_colors`, `AnsiParser::palette` and
   `Grid::cell_colors` and `Grid::origin_region` (design §4.3,
   §11.2.3). The wire formats are unchanged.
+- **Added:** a client's DECRST that turns off win32-input-mode or
+  focus reports among other modes is caught too, and what the host adds
+  to client output (modes after RIS, CR LF on a legacy wrap) counts
+  against the emission budget.
 - **Fixed:** rusty_term_core's CPR and DECXCPR report a pending wrap
   as the last column, as xterm does, instead of one past it.
 - **Known limitations:** after a resize, the host's screen and the

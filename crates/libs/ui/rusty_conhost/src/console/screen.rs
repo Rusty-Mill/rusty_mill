@@ -48,15 +48,13 @@ enum Action {
     Reassert(&'static [u8]),
 }
 
-/// DSR 5, CPR and DECXCPR; win32-input-mode off, focus reports off, RIS.
-const WATCHED: [(&[u8], Action); 6] = [
-    (b"\x1b[5n", Action::Answer),
-    (b"\x1b[6n", Action::Answer),
-    (b"\x1b[?6n", Action::Answer),
-    (b"\x1b[?9001l", Action::Reassert(b"\x1b[?9001h")),
-    (b"\x1b[?1004l", Action::Reassert(b"\x1b[?1004h")),
-    (b"\x1bc", Action::Reassert(PREAMBLE)),
-];
+/// The longest CSI the host parses for a watched one; a longer CSI is
+/// forwarded unwatched, and a held prefix stays shorter than this.
+const WATCHED_MAX: usize = 32;
+/// The most bytes one client byte (or UTF-16 unit) can come to: RIS's
+/// two add the 16 of [`PREAMBLE`]. A legacy glyph is at most 3, and a
+/// wrap adds 2.
+pub(super) const MAX_EXPANSION: usize = (2 + PREAMBLE.len()) / 2;
 
 /// The CP437 glyphs conhost shows for C0 controls it does not act on.
 const CP437_C0: [char; 32] = [
@@ -126,23 +124,102 @@ impl Screen {
             // conhost adds an LF's CR afresh in every write.
             self.after_cr = false;
         }
+        if mode & VIRTUAL_TERMINAL_PROCESSING != 0 && mode & PROCESSED_OUTPUT != 0 {
+            self.client_vt(text, mode, room, out, replies)
+        } else {
+            self.client_legacy(text, mode, room, out)
+        }
+    }
+
+    /// Client VT: transformed while it fits in `room` together with the
+    /// modes a watched reset adds after it, then routed.
+    fn client_vt(
+        &mut self,
+        text: &[u8],
+        mode: u32,
+        room: usize,
+        out: &mut OutputQueue,
+        replies: &mut Vec<u8>,
+    ) -> usize {
         let mut vt = std::mem::take(&mut self.held);
         let held = vt.len();
+        // The ESC of the sequence the bytes are in, while it may be watched.
+        let mut esc = (held > 0).then_some(0);
+        let mut added = 0;
         let mut consumed = 0;
         for &b in text {
             let step = transform(b, mode, self.after_cr, self.c2);
-            if vt.len() - held + step.len > room {
+            let start = vt.len();
+            vt.extend_from_slice(&step.bytes[..step.len]);
+            if b == 0x1b {
+                esc = Some(start);
+            }
+            let mut adds = 0;
+            if let Some(e) = esc {
+                match watched_at(&vt[e..]) {
+                    Watched::Prefix => {}
+                    Watched::Whole(_, Action::Reassert(modes)) => (adds, esc) = (modes.len(), None),
+                    Watched::Whole(..) | Watched::No => esc = None,
+                }
+            }
+            if vt.len() - held + added + adds > room {
+                vt.truncate(start);
                 break;
             }
-            vt.extend_from_slice(&step.bytes[..step.len]);
+            added += adds;
             self.after_cr = b == b'\r';
             self.c2 = step.c2;
             consumed += 1;
         }
-        if mode & VIRTUAL_TERMINAL_PROCESSING != 0 && mode & PROCESSED_OUTPUT != 0 {
-            self.route_vt(&vt, out, replies);
-        } else {
-            self.forward_legacy(&vt, mode & WRAP_AT_EOL_OUTPUT != 0, out);
+        self.route_vt(&vt, out, replies);
+        consumed
+    }
+
+    /// Legacy client text, forwarded a piece at a time so that the CR LF
+    /// a wrap adds counts against `room` too.
+    fn client_legacy(
+        &mut self,
+        text: &[u8],
+        mode: u32,
+        room: usize,
+        out: &mut OutputQueue,
+    ) -> usize {
+        let wrap = mode & WRAP_AT_EOL_OUTPUT != 0;
+        let reserve = if wrap { 2 } else { 0 };
+        let held = std::mem::take(&mut self.held);
+        self.forward(&held, out);
+        let mut emitted = 0;
+        let mut consumed = 0;
+        while consumed < text.len() {
+            let before = consumed;
+            // Each byte moves the cursor at most two columns, so a piece
+            // this long cannot pass the margin.
+            let piece = if wrap {
+                (self.grid.cols.saturating_sub(self.grid.cursor.0 + 1) / 2).max(1)
+            } else {
+                usize::MAX
+            };
+            let mut vt = Vec::new();
+            for &b in &text[consumed..] {
+                let step = transform(b, mode, self.after_cr, self.c2);
+                let fits = emitted + vt.len() + step.len + reserve <= room;
+                if !fits || (!vt.is_empty() && vt.len() + step.len > piece) {
+                    break;
+                }
+                vt.extend_from_slice(&step.bytes[..step.len]);
+                self.after_cr = b == b'\r';
+                self.c2 = step.c2;
+                consumed += 1;
+            }
+            if consumed == before {
+                break;
+            }
+            emitted += vt.len();
+            self.forward(&vt, out);
+            if wrap && self.grid.cursor.0 >= self.grid.cols {
+                self.forward(b"\r\n", out);
+                emitted += 2;
+            }
         }
         consumed
     }
@@ -177,27 +254,6 @@ impl Screen {
             at = start;
         }
         self.forward(&vt[start..], out);
-    }
-
-    /// Forward legacy output. Under WRAP_AT_EOL_OUTPUT a glyph in the last
-    /// column wraps at once, with CR LF, rather than waiting for the next
-    /// glyph (conhost `WriteCharsLegacy`). Each piece is short enough
-    /// that it cannot pass the margin: a byte moves the cursor at most
-    /// two columns.
-    fn forward_legacy(&mut self, vt: &[u8], wrap: bool, out: &mut OutputQueue) {
-        if !wrap {
-            return self.forward(vt, out);
-        }
-        let mut rest = vt;
-        while !rest.is_empty() {
-            let room = self.grid.cols.saturating_sub(self.grid.cursor.0 + 1) / 2;
-            let (piece, tail) = rest.split_at(room.clamp(1, rest.len()));
-            self.forward(piece, out);
-            if self.grid.cursor.0 >= self.grid.cols {
-                self.forward(b"\r\n", out);
-            }
-            rest = tail;
-        }
     }
 
     /// Send `vt` to the terminal and the Grid; the Grid's own answers to
@@ -285,16 +341,56 @@ enum Watched {
     No,
 }
 
+/// Match `rest`, which starts at an ESC, against the watched sequences:
+/// RIS; DSR 5, CPR and DECXCPR; a DEC private mode reset (DECRST) whose
+/// parameters include win32-input-mode (9001) or focus reports (1004),
+/// however many others it has.
 fn watched_at(rest: &[u8]) -> Watched {
-    for (seq, action) in WATCHED {
-        if rest.starts_with(seq) {
-            return Watched::Whole(seq.len(), action);
-        }
-        if seq.starts_with(rest) {
-            return Watched::Prefix;
-        }
+    match rest.get(1) {
+        None => Watched::Prefix,
+        Some(b'c') => Watched::Whole(2, Action::Reassert(PREAMBLE)),
+        Some(b'[') => watched_csi(rest),
+        Some(_) => Watched::No,
     }
-    Watched::No
+}
+
+fn watched_csi(rest: &[u8]) -> Watched {
+    let private = rest.get(2) == Some(&b'?');
+    let first = if private { 3 } else { 2 };
+    let Some(end) = rest[first.min(rest.len())..]
+        .iter()
+        .position(|&b| !matches!(b, b'0'..=b'9' | b';'))
+        .map(|i| first + i)
+    else {
+        return if rest.len() < WATCHED_MAX {
+            Watched::Prefix
+        } else {
+            Watched::No
+        };
+    };
+    if end >= WATCHED_MAX {
+        return Watched::No;
+    }
+    let params: Vec<u32> = rest[first..end]
+        .split(|&b| b == b';')
+        .map(|p| {
+            std::str::from_utf8(p)
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0)
+        })
+        .collect();
+    let action = match (private, rest[end], params.as_slice()) {
+        (false, b'n', [5 | 6]) | (true, b'n', [6]) => Action::Answer,
+        (true, b'l', _) => match (params.contains(&9001), params.contains(&1004)) {
+            (true, true) => Action::Reassert(PREAMBLE),
+            (true, false) => Action::Reassert(b"\x1b[?9001h"),
+            (false, true) => Action::Reassert(b"\x1b[?1004h"),
+            (false, false) => return Watched::No,
+        },
+        _ => return Watched::No,
+    };
+    Watched::Whole(end + 1, action)
 }
 
 /// What one client byte becomes.
@@ -561,8 +657,10 @@ mod tests {
     #[test]
     fn the_grids_own_relays_are_dropped() {
         let mut s = screen();
-        client(&mut s, b"\x07\x1b[?2004h\x1b]52;c;aGk=\x07", VT);
-        assert!(s.grid.take_host_out().is_empty());
+        for _ in 0..1000 {
+            client(&mut s, b"\x07\x1b[?2004h\x1b]52;c;aGk=\x07", VT);
+        }
+        assert!(s.grid.take_host_out().is_empty(), "nothing retained");
     }
 
     #[test]
@@ -583,6 +681,57 @@ mod tests {
         // Split across writes, it still counts.
         assert_eq!(client(&mut s, b"\x1b[?90", VT).0, b"");
         assert_eq!(client(&mut s, b"01l", VT).0, b"\x1b[?9001l\x1b[?9001h");
+    }
+
+    #[test]
+    fn compound_mode_resets_are_watched_too() {
+        let mut s = screen();
+        let (vt, _) = client(&mut s, b"\x1b[?1004;9001l", VT);
+        assert_eq!(vt, [&b"\x1b[?1004;9001l"[..], PREAMBLE].concat());
+        // The other parameters still take effect.
+        let (vt, _) = client(&mut s, b"\x1b[?25;1004l", VT);
+        assert_eq!(vt, b"\x1b[?25;1004l\x1b[?1004h");
+        assert!(!s.cursor_visible());
+        assert_eq!(client(&mut s, b"\x1b[?25;10", VT).0, b"");
+        assert_eq!(client(&mut s, b"04lz", VT).0, b"\x1b[?25;1004l\x1b[?1004hz");
+        // Resets without them, and sets, are not.
+        assert_eq!(
+            client(&mut s, b"\x1b[?25l\x1b[?1004h", VT).0,
+            b"\x1b[?25l\x1b[?1004h"
+        );
+        assert_eq!(client(&mut s, b"\x1b[?10041l", VT).0, b"\x1b[?10041l");
+    }
+
+    #[test]
+    fn room_counts_the_modes_a_reset_adds() {
+        let mut s = screen();
+        let mut out = OutputQueue::default();
+        let mut replies = Vec::new();
+        let n = s.client(
+            b"\x1bc\x1bc",
+            VT,
+            2 + PREAMBLE.len() + 1,
+            true,
+            &mut out,
+            &mut replies,
+        );
+        assert_eq!(n, 3, "the second RIS's c and its modes would not fit");
+        assert_eq!(
+            out.take(),
+            [&b"\x1bc"[..], PREAMBLE].concat(),
+            "its ESC is held"
+        );
+    }
+
+    #[test]
+    fn room_counts_the_cr_lf_a_legacy_wrap_adds() {
+        let mut s = Screen::new(WinSize { rows: 4, cols: 1 });
+        let mut out = OutputQueue::default();
+        let mut replies = Vec::new();
+        let legacy = PROCESSED_OUTPUT | WRAP_AT_EOL_OUTPUT;
+        let n = s.client(b"abc", legacy, 8, true, &mut out, &mut replies);
+        assert_eq!(n, 2, "a third glyph and its CR LF would not fit");
+        assert_eq!(out.take(), b"a\r\nb\r\n");
     }
 
     #[test]

@@ -1106,6 +1106,8 @@ fn cursor_reports_clamp_a_pending_wrap_to_the_last_column() {
     p.advance(&mut g, b"\x1b[6n\x1b[?6n");
     assert_eq!(p.take_responses(), b"\x1b[1;80R\x1b[?1;80;1R");
     assert_eq!(g.cursor.0, 80, "the report keeps the pending wrap");
+    p.advance(&mut g, b"y");
+    assert_eq!(g.cursor, (1, 1), "the next glyph still wraps");
 }
 
 #[test]

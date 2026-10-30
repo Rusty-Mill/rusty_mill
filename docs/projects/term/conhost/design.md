@@ -396,7 +396,7 @@ Two rules apply on top of the table:
 2. A change to WRAP_AT_EOL_OUTPUT emits `CSI ?7h` or `CSI ?7l`.
 3. Without VT processing (either legacy row), WRAP_AT_EOL_OUTPUT wraps as soon as the last column is written, and the host emits CR LF, as conhost's legacy path does. VT output keeps the delayed wrap.
 4. Without VT processing, DEL shows as `⌂`. With PROCESSED_OUTPUT off, the C1 controls also show as `?` (conhost `SanitizeUCS2`).
-5. Under VT processing, a client's `CSI ?9001l`, `CSI ?1004l` or RIS (`ESC c`) is forwarded and followed by `CSI ?9001h`, `CSI ?1004h` or both, as conhost does, so a nested ConPTY that exits can't turn off the input modes the host needs (§5.5).
+5. Under VT processing, a client's DECRST whose parameters include 9001 or 1004 (`CSI ?9001l`, `CSI ?25;1004l` and the like), or RIS (`ESC c`), is forwarded whole and followed by `CSI ?9001h`, `CSI ?1004h` or both, as conhost does. What it adds counts against the emission step's 64 KiB, as a legacy wrap's CR LF does, so a nested ConPTY that exits can't turn off the input modes the host needs (§5.5).
 
 ### 5.5 Input and Ctrl events
 At startup the host emits `CSI ?9001h CSI ?1004h`, as inbox conhost does. This turns on win32-input-mode and focus reports, so Ctrl+Break and exact key records arrive from the terminal.
@@ -619,7 +619,7 @@ Effects are applied after each `handle` call, in the order the core returned the
 | Waiting calls (reads and parked writes together) | 64 | READ_IO is submitted only while fewer than 64 calls wait, so further calls wait in the kernel and cost the host nothing |
 | Payload retained by parked calls | 1 MiB in total, **reserved before a packet is accepted** | READ_IO is submitted only while `parked + 64 KiB ≤ 1 MiB`, 64 KiB being the most variable input one packet can bring. A packet that then arrives always fits, so the cap is never overshot |
 | Variable input read per packet | 64 KiB | `STATUS_INVALID_PARAMETER` |
-| Answers to the host's own queries (§5.6) | they count against the 64 KiB client budget, so one turn builds at most 64 KiB plus one emission step's answers (64 KiB of 5-byte queries, 11-byte answers: about 141 KiB) | the next write waits for the reader to drain, as if its answers were output |
+| Answers to the host's own queries (§5.6) | they count against the 64 KiB client budget, so one turn builds at most 64 KiB plus one emission step's answers (64 KiB of 5-byte queries, 11-byte answers: about 141 KiB) | the next write waits for the reader to drain, as if its answers were output; when no output is queued to drain, the next engine turn goes on with it (`Turn::pump_writes`) |
 | Read reply | the read's declared capacity, up to 1 MiB, and 1 MiB across the replies one call builds | a waiting read holds only its descriptor. Its reply is built when it completes and freed once written. A call that reaches the 1 MiB stops serving waiting reads; the next turns serve the rest before taking new input, without waiting for more |
 | Ctrl queue | 256 entries | coalescing: an entry equal to one already queued is dropped, and a queued `Close` for a pid drops later `C` or `Break` for it. Past 256 the new entry is dropped and logged once. Pushing never blocks the engine. Teardown doesn't depend on queued entries, because the engine closes the server at the deadline (§7.3) |
 

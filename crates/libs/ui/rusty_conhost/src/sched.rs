@@ -65,6 +65,8 @@ pub(crate) struct View {
     pub closed: bool,
     /// Waiting reads stopped at a call's reply budget with input left.
     pub reads_ready: bool,
+    /// Parked writes stopped at the budget on the host's own answers.
+    pub writes_ready: bool,
 }
 
 /// What one turn does, in this order.
@@ -77,6 +79,8 @@ pub(crate) struct Turn {
     /// Bytes to take from the input lane and hand to the console.
     pub input: usize,
     pub submit_read: bool,
+    /// Go on with the parked writes the last pump left, as a drain would.
+    pub pump_writes: bool,
 }
 
 /// Plan one turn.
@@ -93,6 +97,7 @@ pub(crate) fn turn(v: &View) -> Turn {
         serve_reads: v.reads_ready,
         input,
         submit_read: read_admitted(v),
+        pump_writes: v.writes_ready,
     }
 }
 
@@ -108,7 +113,10 @@ fn read_admitted(v: &View) -> bool {
 /// that ended in ESC with input left, or complete calls and so reopen
 /// admission with no READ_IO armed; no wake announces any of them.
 pub(crate) fn must_poll(v: &View) -> bool {
-    v.reads_ready || (v.input > 0 && v.output <= INPUT_PAUSE_ABOVE) || read_admitted(v)
+    v.reads_ready
+        || v.writes_ready
+        || (v.input > 0 && v.output <= INPUT_PAUSE_ABOVE)
+        || read_admitted(v)
 }
 
 /// Whether another packet may be accepted: fewer than [`MAX_WAITING`]
@@ -332,6 +340,21 @@ mod tests {
             read_in_flight: true,
             ..parked
         }));
+    }
+
+    #[test]
+    fn writes_cut_on_answers_pump_again_without_a_wake() {
+        let cut = View {
+            writes_ready: true,
+            read_in_flight: true,
+            ..View::default()
+        };
+        assert!(turn(&cut).pump_writes && must_poll(&cut));
+        let idle = View {
+            writes_ready: false,
+            ..cut
+        };
+        assert!(!turn(&idle).pump_writes && !must_poll(&idle));
     }
 
     #[test]
