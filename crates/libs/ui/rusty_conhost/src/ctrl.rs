@@ -68,6 +68,11 @@ impl Queue {
         Pushed::Queued
     }
 
+    /// Drop every entry for `pid`, whose client has left.
+    pub(crate) fn forget(&mut self, pid: u32) {
+        self.entries.retain(|&(p, _)| p != pid);
+    }
+
     pub(crate) fn pop(&mut self) -> Option<(u32, Ctrl)> {
         self.entries.pop_front()
     }

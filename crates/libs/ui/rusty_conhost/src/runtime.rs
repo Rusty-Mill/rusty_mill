@@ -24,7 +24,7 @@ use platform_windows::condrv::{
 };
 use platform_windows::sys::handle::OwnedWinHandle;
 
-use crate::console::{Console, Effect, Event, OutputQueue, PREAMBLE, Packet, Reply};
+use crate::console::{Console, Effect, Event, OutputQueue, POSTAMBLE, PREAMBLE, Packet, Reply};
 use crate::ctrl::{self, Ctrl, Pushed};
 use crate::fixture::{self, FIXTURE_CAP};
 use crate::msg::STATUS_UNSUCCESSFUL;
@@ -422,6 +422,13 @@ impl CtrlSender {
     }
 }
 
+impl CtrlSender {
+    /// Drop what is still queued for `pid`, whose client has left.
+    fn forget(&self, pid: u32) {
+        lock(&self.0.state).queue.forget(pid);
+    }
+}
+
 impl Drop for CtrlSender {
     fn drop(&mut self) {
         lock(&self.0.state).closed = true;
@@ -512,6 +519,9 @@ struct Engine {
     read_in_flight: bool,
     /// The reply to send with the next READ_IO.
     reply: Option<Reply>,
+    /// Ctrl events that came with [`Engine::reply`]: queued once it is
+    /// sent, so a client hears CTRL_CLOSE only after its CONNECT returns.
+    after_reply: Vec<(u32, Ctrl)>,
     /// A wait reported the child's exit.
     exited: bool,
     exit_handled: bool,
@@ -541,6 +551,7 @@ impl Engine {
             out: OutputQueue::default(),
             read_in_flight: false,
             reply: None,
+            after_reply: Vec::new(),
             exited: false,
             exit_handled: false,
             grace: Grace::default(),
@@ -640,7 +651,18 @@ impl Engine {
             let r = deliverable(server, r);
             server.complete_io(&r.as_complete())?;
         }
+        self.release_ctrl();
         Ok(())
+    }
+
+    /// Queue the Ctrl events held behind a reply that has now gone out.
+    fn release_ctrl(&mut self) {
+        if self.reply.is_some() {
+            return;
+        }
+        for (pid, event) in self.after_reply.drain(..) {
+            self.ctrl.push(pid, event);
+        }
     }
 
     /// Start the grace once the console has sent CTRL_CLOSE; a console
@@ -765,7 +787,14 @@ impl Engine {
                 self.complete(r);
             }
             Effect::SetInputAvailable(on) => self.set_input_available(on),
+            Effect::Ctrl { pid, event } if self.reply.is_some() => {
+                self.after_reply.push((pid, event));
+            }
             Effect::Ctrl { pid, event } => self.ctrl.push(pid, event),
+            Effect::CtrlGone { pid } => {
+                self.after_reply.retain(|&(p, _)| p != pid);
+                self.ctrl.forget(pid);
+            }
             Effect::CloseServer => self.teardown(),
             Effect::Eof => self.shared.set_eof(),
             Effect::Log(d) => crate::diag::log(&d.to_string()),
@@ -813,6 +842,7 @@ impl Engine {
         if let Some(r) = self.reply.take() {
             self.complete(r);
         }
+        self.release_ctrl();
         let Some(mut server) = self.server.take() else {
             return;
         };
@@ -822,6 +852,7 @@ impl Engine {
             self.read_in_flight = false;
         }
         server.close();
+        self.shared.push_output(POSTAMBLE.to_vec());
         self.shared.close_lanes();
     }
 }
@@ -1009,6 +1040,29 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_events_behind_a_held_reply_are_queued_once_it_is_sent() {
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        // Serve until ping's CONNECT is answered but its reply not sent,
+        // then add a CTRL_CLOSE, as a late CONNECT leaves them.
+        while engine.reply.is_none() {
+            engine.turn().expect("turn");
+        }
+        engine.apply(Effect::Ctrl {
+            pid: 7,
+            event: Ctrl::Close,
+        });
+        assert_eq!(lock(&engine.ctrl.0.state).queue.len(), 0, "held");
+        engine.work().expect("turn");
+        assert!(engine.reply.is_none(), "the reply went out");
+        assert_eq!(
+            lock(&engine.ctrl.0.state).queue.pop(),
+            Some((7, Ctrl::Close))
+        );
+        engine.teardown();
+        let _ = child.kill_single(Signal::Kill);
+    }
+
+    #[test]
     fn input_left_behind_an_esc_cut_is_taken_without_another_wake() {
         let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
         engine.shared.write(b"\x1b").expect("write");
@@ -1055,6 +1109,45 @@ mod tests {
         let _ = child.kill_single(Signal::Kill);
     }
 
+    /// Design §7.3: closing while a client is calling, so the cancelled
+    /// READ_IO may complete successfully in the race. Teardown always
+    /// drains it and returns.
+    #[test]
+    fn teardown_while_a_client_calls_drains_the_cancelled_read_every_time() {
+        const ROUNDS: usize = 1_000;
+        let cwd = std::env::current_dir().expect("current_dir");
+        let mut cmd = Command::new("cmd.exe", cwd);
+        // Writes without end: a packet is always about to arrive.
+        cmd.argv = vec![
+            "/d".into(),
+            "/c".into(),
+            "for /l %i in (0,0,1) do @echo x".into(),
+        ];
+        for round in 0..ROUNDS {
+            let attached = condrv::spawn_attached(&cmd).expect("spawn_attached");
+            let shared = Arc::new(Shared::new(Waker::new().expect("Waker")));
+            let mut engine = Engine::new(
+                Console::new(SIZE, condrv::key_for),
+                attached.server,
+                attached.wait,
+                Arc::clone(&shared),
+                CtrlSender(Arc::default()),
+            );
+            // Vary the moment of the close across rounds.
+            for _ in 0..=round % 7 {
+                engine.turn().expect("turn");
+            }
+            let started = Instant::now();
+            engine.teardown();
+            assert!(
+                engine.server.is_none() && !engine.read_in_flight,
+                "round {round}"
+            );
+            assert!(started.elapsed() < CANCEL_GRACE * 2, "round {round}");
+            let _ = attached.child.kill_single(Signal::Kill);
+        }
+    }
+
     #[test]
     fn a_write_ending_in_esc_stays_its_own_slice_when_writes_coalesce() {
         let shared = Arc::new(Shared::new(Waker::new().expect("Waker")));
@@ -1096,6 +1189,25 @@ mod tests {
         assert!(!end, "the writer has more");
         writer.join().expect("writer").expect("write");
         assert_eq!(shared.take_input(16), (b"[A".to_vec(), true));
+    }
+
+    #[test]
+    fn departed_clients_free_their_ctrl_queue_entries_under_churn() {
+        let lane = Arc::new(CtrlLane::default());
+        let sender = CtrlSender(Arc::clone(&lane));
+        // The worker is stuck in one handler; clients come and go.
+        for pid in 0..ctrl::MAX_QUEUED as u32 {
+            sender.push(pid, Ctrl::Close);
+        }
+        for pid in 0..ctrl::MAX_QUEUED as u32 - 1 {
+            sender.forget(pid);
+        }
+        for pid in 1000..1000 + ctrl::MAX_QUEUED as u32 - 1 {
+            sender.push(pid, Ctrl::Close);
+        }
+        let state = lock(&lane.state);
+        assert!(!state.dropped_logged, "every live client's Close fits");
+        assert_eq!(state.queue.len(), ctrl::MAX_QUEUED);
     }
 
     #[test]

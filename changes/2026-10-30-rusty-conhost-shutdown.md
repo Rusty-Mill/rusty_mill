@@ -11,14 +11,20 @@ changelog: rusty_conhost closes a console the way Windows does: hang-up or child
   closing the server at once. The console keeps serving clients while
   their handlers run, and closes when the last one disconnects or at an
   absolute 2 s deadline, whichever comes first. A client that connects
-  during the grace gets CTRL_CLOSE too. A console with no client closes
-  at once.
+  during the grace gets CTRL_CLOSE too, once its CONNECT reply has gone
+  out (design §5.10 V9, V10). A console with no client closes at once,
+  and teardown sends `CSI ?1004l CSI ?9001l` to undo the startup
+  preamble.
 - **Added:** dropping the master detaches it: queued and later output is
   discarded, so a handler's writes never stall on a reader that is gone.
   `write` fails with `BrokenPipe` from the first `hang_up` on.
 - **Changed:** a CTRL_CLOSE supersedes Ctrl+C and Ctrl+Break still waiting
   in the ctrl queue, so every client's CTRL_CLOSE fits, and the ctrl
   worker still delivers queued CTRL_CLOSE after the server has closed.
+  A departing client's queued events are dropped, so churn can't crowd
+  out a later client's CTRL_CLOSE.
+- **Changed:** Ctrl events, Ctrl+C and Ctrl+Break included, go to the
+  newest client first, as Windows has always dispatched them.
 - **Fixed:** the direct child exiting no longer closes the server under
   clients still attached, which cut off a grandchild's last output
   (spike S1, design §9.1).

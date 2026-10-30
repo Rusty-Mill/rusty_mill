@@ -34,6 +34,9 @@ mod read;
 /// win32-input-mode, for exact key records and Ctrl+Break, and focus
 /// reports, as inbox conhost asks for them.
 pub(crate) const PREAMBLE: &[u8] = b"\x1b[?9001h\x1b[?1004h";
+/// What the host sends the terminal last, undoing [`PREAMBLE`], as
+/// conhost's `VtIo::Shutdown` does.
+pub(crate) const POSTAMBLE: &[u8] = b"\x1b[?1004l\x1b[?9001l";
 
 /// A call that produces VT is admitted only while the output queue holds
 /// at most this much (§7.4).
@@ -176,6 +179,11 @@ pub(crate) enum Effect {
     Ctrl {
         pid: u32,
         event: Ctrl,
+    },
+    /// A client process left: Ctrl events still queued for it are moot,
+    /// and dropping them keeps the queue within one entry per client.
+    CtrlGone {
+        pid: u32,
     },
     /// Disconnect every client.
     CloseServer,
@@ -633,14 +641,29 @@ impl Console {
             return;
         }
         let reply = match p.function {
-            msg::CONNECT => self.connect(&p, fx),
+            msg::CONNECT => {
+                let reply = self.connect(&p, fx);
+                let joined = reply.status == msg::STATUS_SUCCESS;
+                fx.push(Effect::Reply(reply));
+                if joined && self.closing {
+                    // A late client is told too, or it would hold the
+                    // console open until the deadline. After its reply:
+                    // a client still connecting doesn't react to it.
+                    fx.push(Effect::Ctrl {
+                        pid: p.process as u32,
+                        event: Ctrl::Close,
+                    });
+                }
+                return;
+            }
             msg::DISCONNECT => {
                 self.end_reads(
                     |r| r.process == p.process,
                     msg::STATUS_THREAD_IS_TERMINATING,
                     fx,
                 );
-                fx.push(Effect::Reply(self.disconnect(&p)));
+                let reply = self.disconnect(&p, fx);
+                fx.push(Effect::Reply(reply));
                 if self.clients.is_empty() {
                     // The last client is gone: nothing will use the console.
                     self.close(fx);
@@ -718,14 +741,6 @@ impl Console {
         for (cookie, kind) in [(input, Kind::Input), (output, Kind::Output)] {
             self.add_object(cookie, kind, process, Access::CONNECT);
         }
-        if self.closing {
-            // A late client is told too, or it would hold the console
-            // open until the deadline.
-            fx.push(Effect::Ctrl {
-                pid: p.process as u32,
-                event: Ctrl::Close,
-            });
-        }
         let mut reply = Reply::ok(p.id);
         reply.write_back = msg::connection_information(process, input, output);
         reply.information = reply.write_back.len();
@@ -735,10 +750,13 @@ impl Console {
     /// DISCONNECT closes the two objects CONNECT opened. Objects the
     /// client opened itself stay valid until their own CLOSE_OBJECT,
     /// which may arrive after this with Process 0.
-    fn disconnect(&mut self, p: &Packet<'_>) -> Reply {
+    fn disconnect(&mut self, p: &Packet<'_>, fx: &mut Vec<Effect>) -> Reply {
         if let Some(client) = self.clients.remove(&p.process) {
             for cookie in client.own {
                 self.remove_object(cookie);
+            }
+            if !self.clients.values().any(|c| c.pid == client.pid) {
+                fx.push(Effect::CtrlGone { pid: client.pid });
             }
         }
         Reply::ok(p.id)
@@ -1508,7 +1526,15 @@ pub(crate) mod tests {
         let mut h = Host::new();
         let [a, ..] = h.connect(1, "");
         let (r, fx) = h.packet(msg::DISCONNECT, a, 0, &[], 0);
-        assert_eq!(fx, [Effect::Reply(r), Effect::CloseServer, Effect::Eof]);
+        assert_eq!(
+            fx,
+            [
+                Effect::CtrlGone { pid: 1 },
+                Effect::Reply(r),
+                Effect::CloseServer,
+                Effect::Eof
+            ]
+        );
         let (r, _) = h.packet(msg::CONNECT, 2, 0, &msg::server_msg(""), 24);
         assert_eq!(r.status, msg::STATUS_UNSUCCESSFUL);
         assert!(h.ev(Event::HangUp).is_empty(), "closing is idempotent");
@@ -1527,7 +1553,7 @@ pub(crate) mod tests {
             let mut h = Host::new();
             h.connect(1, "");
             h.connect(2, "");
-            assert_eq!(h.ev(ev), [close_to(1), close_to(2)]);
+            assert_eq!(h.ev(ev), [close_to(2), close_to(1)], "newest first");
             assert!(h.ev(Event::HangUp).is_empty(), "sent once");
             assert!(h.ev(Event::ChildExited).is_empty());
             assert_eq!(
@@ -1551,7 +1577,15 @@ pub(crate) mod tests {
         let (_, fx) = h.packet(msg::DISCONNECT, a, 0, &[], 0);
         assert!(!fx.contains(&Effect::CloseServer), "client 2 remains");
         let (r, fx) = h.packet(msg::DISCONNECT, b, 0, &[], 0);
-        assert_eq!(fx, [Effect::Reply(r), Effect::CloseServer, Effect::Eof]);
+        assert_eq!(
+            fx,
+            [
+                Effect::CtrlGone { pid: 2 },
+                Effect::Reply(r),
+                Effect::CloseServer,
+                Effect::Eof
+            ]
+        );
         assert!(h.ev(Event::GraceExpired).is_empty(), "already closed");
     }
 
@@ -1563,7 +1597,18 @@ pub(crate) mod tests {
         let info = msg::CONNECTION_INFORMATION_LEN as u32;
         let (r, fx) = h.packet(msg::CONNECT, 7, 0, &msg::server_msg(""), info);
         assert_eq!(r.status, msg::STATUS_SUCCESS);
-        assert_eq!(fx, [close_to(7), Effect::Reply(r)]);
+        assert_eq!(fx, [Effect::Reply(r), close_to(7)], "after its reply");
+    }
+
+    #[test]
+    fn a_departing_client_forgets_its_ctrl_events_unless_its_pid_remains() {
+        let mut h = Host::new();
+        let [a, ..] = h.connect(5, "");
+        let [b, ..] = h.connect(5, "");
+        let (_, fx) = h.packet(msg::DISCONNECT, a, 0, &[], 0);
+        assert!(!fx.iter().any(|e| matches!(e, Effect::CtrlGone { .. })));
+        let (_, fx) = h.packet(msg::DISCONNECT, b, 0, &[], 0);
+        assert!(fx.contains(&Effect::CtrlGone { pid: 5 }));
     }
 
     #[test]

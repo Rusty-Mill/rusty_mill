@@ -168,10 +168,12 @@ impl Console {
         alt && k.vk == vk::ESCAPE
     }
 
-    /// Queue `event` for the clients of `group` (0: every client).
+    /// Queue `event` for the clients of `group` (0: every client), newest
+    /// first, as Windows has always dispatched them (conhost
+    /// `ProcessList.cpp`): a child's handler runs before its parent's.
     pub(super) fn ctrl_event(&mut self, event: Ctrl, group: u32, fx: &mut Vec<Effect>) {
         let mut clients: Vec<(&usize, &super::Client)> = self.clients.iter().collect();
-        clients.sort_by_key(|(cookie, _)| **cookie);
+        clients.sort_by_key(|(cookie, _)| std::cmp::Reverse(**cookie));
         let pids = ctrl::recipients(clients.into_iter().map(|(_, c)| (c.pid, c.group)), group);
         fx.extend(pids.into_iter().map(|pid| Effect::Ctrl { pid, event }));
     }
@@ -1305,7 +1307,7 @@ pub(crate) mod tests {
         let r = read_w(&mut h, input, 64);
         h.ev(Event::Input(b"ab"));
         let fx = h.ev(Event::Input(b"\x03"));
-        assert_eq!(ctrls(&fx), [(10, Ctrl::C), (11, Ctrl::C)]);
+        assert_eq!(ctrls(&fx), [(11, Ctrl::C), (10, Ctrl::C)], "newest first");
         let done = completes(&fx);
         assert_eq!((done[0].id, done[0].status), (r.id, msg::STATUS_ALERTED));
         // Only the key-up is queued.
@@ -1362,7 +1364,7 @@ pub(crate) mod tests {
         };
         let (r, fx) = ctrl(&mut h, 1, 10);
         assert_eq!(r.status, msg::STATUS_SUCCESS);
-        assert_eq!(ctrls(&fx), [(10, Ctrl::Break), (11, Ctrl::Break)]);
+        assert_eq!(ctrls(&fx), [(11, Ctrl::Break), (10, Ctrl::Break)]);
         let (_, fx) = ctrl(&mut h, 0, 0);
         assert_eq!(ctrls(&fx).len(), 3);
         let (r, fx) = ctrl(&mut h, 0, 99);

@@ -142,6 +142,8 @@ mod tests {
             Effect::Complete(r) => Some(reply("complete", r)),
             Effect::SetInputAvailable(on) => Some(format!("input-available {on}")),
             Effect::Ctrl { pid, event } => Some(format!("ctrl {pid} {event:?}")),
+            // Ctrl-queue bookkeeping, not a driver effect.
+            Effect::CtrlGone { .. } => None,
             Effect::CloseServer => Some("close".to_owned()),
             Effect::Eof => Some("eof".to_owned()),
             Effect::Log(_) => None,
