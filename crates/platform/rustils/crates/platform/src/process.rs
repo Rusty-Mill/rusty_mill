@@ -119,6 +119,8 @@ pub enum GroupSpec {
 pub struct Command {
     pub program: OsString,
     pub argv: Vec<OsString>,
+    /// Set by [`Command::raw_args`]. See that method's doc comment.
+    pub raw_args: Option<OsString>,
     /// Working directory for the child. Always explicit — there is no
     /// "inherit ambient cwd" variant, by design: consumers own their cwd
     /// policy (rush virtualizes it; RFC v2 §5.3 rationale).
@@ -138,6 +140,7 @@ impl Command {
         Self {
             program: program.into(),
             argv: Vec::new(),
+            raw_args: None,
             cwd: cwd.into(),
             env: EnvSpec::default(),
             stdin: Stdio::default(),
@@ -161,6 +164,23 @@ impl Command {
         S: Into<OsString>,
     {
         self.argv.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// Windows only: text placed on the command line verbatim, after the
+    /// quoted program and a space and before `argv`'s quoted arguments,
+    /// like std's `CommandExt::raw_arg`. For a program that reads its
+    /// command line itself instead of through the C runtime, `cmd.exe`
+    /// above all, where requoting an argument changes what it runs.
+    ///
+    /// Bypasses the quoting boundary, so the caller owns the text. Refused
+    /// at spawn time with `InvalidInput` when it holds a NUL or the
+    /// program is a batch file (whose arguments `cmd.exe` re-parses), and
+    /// with `Unsupported` on every non-Windows backend, which has no
+    /// command line to put it on (divergence 017).
+    #[must_use]
+    pub fn raw_args(mut self, text: impl Into<OsString>) -> Self {
+        self.raw_args = Some(text.into());
         self
     }
 

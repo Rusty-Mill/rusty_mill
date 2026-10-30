@@ -21,7 +21,7 @@ use platform::term::WinSize;
 use platform_windows::WindowsChild;
 use rusty_conhost::{OwnPty, OwnPtyMaster};
 
-use crate::backend::cmdline::split_command_line;
+use crate::backend::cmdline::split_program;
 use crate::backend::windows::{WindowsBackend, shell_or_default};
 use crate::backend::{Backend, BackendHandle};
 
@@ -46,23 +46,25 @@ impl Backend for OwnBackend {
         cwd: Option<&Path>,
     ) -> Result<Box<dyn BackendHandle>, io::Error> {
         let shell = shell_or_default(shell);
-        let mut words = split_command_line(&shell, |p| locate(p).is_some());
-        if words.is_empty() {
+        let Some((word, rest)) = split_program(&shell, |p| locate(p).is_some()) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("rusty_term: no program in the shell `{shell}`"),
             ));
-        }
-        let word = words.remove(0);
+        };
         // `Command`'s own search is PATH only; what CreateProcessW finds
         // before PATH is passed as a full path.
-        let program = locate(&word).map_or_else(|| word.into(), PathBuf::into_os_string);
+        let program = locate(word).map_or_else(|| word.into(), PathBuf::into_os_string);
         let cwd = match cwd {
             Some(dir) => dir.to_path_buf(),
             None => std::env::current_dir()?,
         };
-        let cmd = Command::new(program, cwd.into_os_string())
-            .args(words.into_iter().chain(args.iter().cloned()));
+        // The shell's own arguments go on verbatim, as ConPTY's would;
+        // only the trailing `args` are quoted.
+        let mut cmd = Command::new(program, cwd.into_os_string()).args(args);
+        if !rest.is_empty() {
+            cmd = cmd.raw_args(rest);
+        }
         let (master, child) = OwnPty
             .spawn_concrete(&cmd, WinSize { rows, cols })
             .map_err(to_io)?;
@@ -288,6 +290,20 @@ mod tests {
         let exited = h.exit_token().expect("the original has an exit token");
         exited();
         assert_eq!(h.reap_exit_status(), Some(7));
+    }
+
+    /// The shell's arguments reach cmd.exe as written, as under ConPTY;
+    /// trailing arguments follow them, quoted.
+    #[test]
+    fn cmd_reads_the_shell_arguments_verbatim() {
+        let args = ["tail one".to_owned()];
+        let mut h = OwnBackend
+            .spawn_shell(80, 24, Some(r#"cmd.exe /c echo a"b c"d"#), &args, None)
+            .expect("spawn on our own host");
+        let out = drain(h.as_ref());
+        wait_for(&out, br#"a"b c"d "tail one""#, "cmd's verbatim echo");
+        h.exit_token().expect("exit token")();
+        assert_eq!(h.reap_exit_status(), Some(0));
     }
 
     /// Input typed into the console reaches an interactive cmd.exe, and a

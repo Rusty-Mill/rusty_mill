@@ -27,6 +27,11 @@ assertions.
   or quoting an OS requires is backend-internal and never caller-visible;
   a backend that cannot represent an argument list faithfully must refuse
   to spawn, not approximate (the BatBadBut class — RFC v2 §5.4).
+- `Command.raw_args` is the one opt-out, Windows only: text placed
+  verbatim after the quoted program and before `argv`, for a program that
+  reads its own command line (`cmd.exe`). The caller owns that text. It is
+  refused (`InvalidInput`) with a NUL or a batch-file program, and
+  refused (`Unsupported`) by every non-Windows backend (divergence 017).
 - `cwd` is always explicit. There is no inherit-ambient-cwd variant;
   consumers own cwd policy.
 - `EnvSpec::Inherit` passes the parent environment unchanged;

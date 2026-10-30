@@ -180,11 +180,9 @@ On Windows, `[console] host` chooses who serves the shell's console:
 `"conpty"` (the default) is Windows' ConPTY, and `"own"` is rusty_conhost, our
 own console host. It is read at launch. If `own` can't start (an older
 Windows without a usable ConDrv, for example), the error is shown and the
-terminal does not fall back to ConPTY. With `own`, `shell` is split into a
-program and arguments by the rules `CreateProcessW` reads them with, and each
-argument is quoted again for the child. Programs that read their command line
-raw, cmd.exe above all, can see different quoting: `cmd /c echo a"b c"d`
-reaches cmd as `/c echo "ab cd"`. The web bridge always uses ConPTY.
+terminal does not fall back to ConPTY. With `own`, the program is found in
+`shell` by the rules `CreateProcessW` uses, and the rest of the line reaches
+it as written, as under ConPTY. The web bridge always uses ConPTY.
 
 The `[colors]` theme is what every reset path (`RIS`, `DECSTR`, OSC
 104/110/111/112) restores, so a configured look survives a `reset` exactly

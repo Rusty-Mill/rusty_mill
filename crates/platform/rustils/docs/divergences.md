@@ -529,3 +529,23 @@ implementation convenience.
   fix at this layer. Not filed as its own divergence entry: it's the
   same OS-level race as this entry, just a second symptom of it, not a
   distinct cross-backend difference in its own right.
+
+## 017 — a raw command line exists only on Windows
+
+- **Windows**: `Command::raw_args` puts its text on the `CreateProcessW`
+  command line verbatim, after the quoted program and before `argv`'s
+  quoted arguments. A program that reads its own command line, `cmd.exe`
+  above all, sees exactly that text; requoting it as `argv` changes what
+  `cmd /c echo a"b c"d` runs. Refused (`InvalidInput`) with a NUL, or
+  when the program is a `.bat`/`.cmd` file, whose arguments the batch
+  quoting boundary must keep.
+- **Linux**: `Unsupported` from `LinuxSpawner` and `LinuxPty`. A Unix
+  process receives a vector of arguments and has no command line to put
+  raw text on. The mocks model no command line and ignore it, as they do
+  `detach`.
+- **OS limitation**: `CreateProcessW` takes one string the child parses
+  itself; `posix_spawn` takes the vector.
+- **Pinning tests**: `raw_args_follow_the_program_verbatim`
+  (`crates/platform-windows/src/cmdline.rs`), `raw_args_are_unsupported`
+  (`crates/platform-linux/src/process.rs`).
+- **Accepted**: pending owner sign-off on the PR that adds it.

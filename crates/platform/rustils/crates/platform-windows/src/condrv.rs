@@ -16,12 +16,11 @@
 //! Layouts and constants are transcribed from microsoft/terminal (MIT);
 //! the notice is at the top of `sys::condrv`.
 
-use std::ffi::{OsStr, OsString};
 use std::sync::PoisonError;
 use std::time::{Duration, Instant};
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
-use platform::process::{Command, GroupSpec, Spawner};
+use platform::process::{Command, GroupSpec};
 
 use crate::process::WindowsChild;
 use crate::sys::condrv as sys;
@@ -166,9 +165,7 @@ pub fn spawn_attached(cmd: &Command) -> Result<Attached> {
             "condrv::spawn_attached: GroupSpec::JoinGroup is incompatible with a fresh console",
         ));
     }
-    let resolved = crate::WindowsSpawner.resolve(&cmd.program)?;
-    let args: Vec<&OsStr> = cmd.argv.iter().map(OsString::as_os_str).collect();
-    let line = crate::winargv::build_command_line(&resolved, &args)?;
+    let line = crate::cmdline::command_line(cmd)?;
 
     let _serial = crate::pty::SPAWN
         .lock()
@@ -409,11 +406,7 @@ mod tests {
         let cwd = std::env::current_dir().expect("current_dir");
         let mut cmd = Command::new("ping.exe", cwd);
         cmd.argv = ["-n", "30", "127.0.0.1"].iter().map(Into::into).collect();
-        let resolved = crate::WindowsSpawner
-            .resolve(&cmd.program)
-            .expect("resolve");
-        let args: Vec<&OsStr> = cmd.argv.iter().map(OsString::as_os_str).collect();
-        let line = crate::winargv::build_command_line(&resolved, &args).expect("command line");
+        let line = crate::cmdline::command_line(&cmd).expect("command line");
         let server = sys::Server::create().expect("Server::create");
         let (process, pid) = sys::spawn(&server, &line, &cmd.cwd, &cmd.env).expect("spawn");
         let probe = handle::duplicate(&process, false).expect("probe handle");

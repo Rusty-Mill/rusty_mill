@@ -59,6 +59,8 @@
 #![deny(unsafe_code)] // opted back in, narrowly, inside sys/ modules only
 
 pub mod close_guard;
+#[cfg(any(windows, test))]
+mod cmdline;
 #[cfg(windows)]
 pub mod condrv;
 #[cfg(windows)]
