@@ -1,6 +1,7 @@
 //! The UDP side against an in-process client association over loopback.
 
 use std::collections::HashMap;
+use std::future::poll_fn;
 
 use rusty_mux_core::ClientId;
 use rusty_mux_proto::{Features, Message, decode, encode};
@@ -254,4 +255,74 @@ fn offers_not_taken_up_expire() {
     let slots = registry.slots.borrow();
     assert!(!slots.contains_key(&first));
     assert!(slots.contains_key(&second));
+}
+
+/// A live link on loopback with no connections served, for driving a
+/// stream's halves by hand.
+async fn bare_link(peer: &mut Peer, server: Rc<UdpSocket>, registry: Registry) -> Rc<Link> {
+    peer.assoc.probe();
+    peer.until(|_| true).await;
+    let mut buf = [0; MAX_DATAGRAM];
+    let (n, from) = server.recv_from(&mut buf).await.expect("recv");
+    let Received::New(link) = registry.datagram(Instant::now(), from, &buf[..n]) else {
+        panic!("the probe should bring the offer alive");
+    };
+    rusty_tokio::task::spawn_local(drive(link.clone(), server.clone(), registry, PATIENCE));
+    let feed = link.clone();
+    rusty_tokio::task::spawn_local(async move {
+        let mut buf = [0; MAX_DATAGRAM];
+        while let Ok((n, from)) = server.recv_from(&mut buf).await {
+            feed.datagram(Instant::now(), from, &buf[..n]);
+        }
+    });
+    link
+}
+
+#[test]
+fn shutting_a_stream_down_delivers_everything_written_first() {
+    runtime().block_on(async {
+        let socket = Rc::new(bind().await);
+        let addr = socket.local_addr().expect("addr");
+        let registry = Registry::new(addr.port());
+        let mut peer = Peer::new(&registry, addr).await;
+        let link = bare_link(&mut peer, socket, registry).await;
+        let stream = peer.assoc.open().expect("a stream");
+        assert_eq!(peer.assoc.write(stream, b"hi"), 2);
+        peer.until(|a| a.queued(stream) == 0).await;
+        let id = link.accept().expect("the peer's stream");
+
+        let sent: Vec<u8> = (0..300_000u32).map(|i| i as u8).collect();
+        let mut wr = StreamWriter {
+            link: link.clone(),
+            id,
+        };
+        let bytes = sent.clone();
+        let writer = rusty_tokio::task::spawn_local(async move {
+            let mut rest = &bytes[..];
+            while !rest.is_empty() {
+                let n = poll_fn(|cx| Pin::new(&mut wr).poll_write(cx, rest)).await;
+                rest = &rest[n.expect("write")..];
+            }
+            poll_fn(|cx| Pin::new(&mut wr).poll_shutdown(cx))
+                .await
+                .expect("shutdown");
+        });
+
+        let mut received = Vec::new();
+        peer.until(|a| {
+            let mut chunk = [0; 4096];
+            loop {
+                let n = a.read(stream, &mut chunk);
+                if n == 0 {
+                    break;
+                }
+                received.extend_from_slice(&chunk[..n]);
+            }
+            !a.is_open(stream) && a.readable(stream) == 0
+        })
+        .await;
+        writer.await.expect("writer");
+        assert_eq!(received.len(), sent.len());
+        assert!(received == sent, "every byte, in order, before the close");
+    });
 }

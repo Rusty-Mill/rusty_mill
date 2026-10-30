@@ -316,8 +316,8 @@ impl AsyncRead for StreamReader {
 }
 
 /// A stream's outgoing bytes, as a connection's write half, holding at
-/// most the transport's window unacknowledged. Dropping it closes the
-/// stream.
+/// most the transport's window unacknowledged. Shutting it down closes the
+/// stream once all is acknowledged; dropping it closes the stream at once.
 pub(crate) struct StreamWriter {
     link: Rc<Link>,
     id: StreamId,
@@ -346,7 +346,15 @@ impl AsyncWrite for StreamWriter {
         Poll::Pending
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    /// Closes the stream once the peer has acknowledged every byte, so
+    /// the last frames written are not lost.
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let link = &self.link;
+        if link.open(self.id) && link.assoc.borrow().queued(self.id) > 0 {
+            let mut wakers = link.wakers.borrow_mut();
+            wakers.entry(self.id).or_default().write = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
         self.close();
         Poll::Ready(Ok(()))
     }
