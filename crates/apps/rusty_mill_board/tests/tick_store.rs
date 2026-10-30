@@ -326,6 +326,7 @@ fn a_plan_interrupted_between_its_two_writes_is_finished_by_planning_again() {
     let human = board.roles().actor("nano", "human").expect("role");
     let dep = board.add(&human, "dep", "", vec![]).expect("add");
     let card = board.add(&human, "card", "", vec![]).expect("add");
+    let cursor = board.cursor().expect("cursor");
     tick.fail_next("PUT", "/docs/board/");
     assert!(
         board
@@ -334,6 +335,13 @@ fn a_plan_interrupted_between_its_two_writes_is_finished_by_planning_again() {
     );
     let half = board.get(card.id).expect("get");
     assert_eq!((half.priority, half.deps.len()), (5, 0));
+    let outside = board.events(cursor, 10).expect("events after failed write");
+    assert_eq!(outside.len(), 1, "the partial task write is observed once");
+    assert_eq!(
+        (outside[0].card, outside[0].kind, outside[0].actor.as_str()),
+        (card.id, EventKind::Edited, "tick"),
+        "a failed board write removes its marker and remains a genuine change"
+    );
 
     let done = board
         .plan(card.id, &human, Some(5), Some(vec![dep.id]))
