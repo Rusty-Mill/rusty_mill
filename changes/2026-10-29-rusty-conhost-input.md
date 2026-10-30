@@ -21,3 +21,6 @@ changelog: rusty_conhost takes terminal input: input records, cooked and raw Rea
   Enter; the cursor keys, history and F-key popups come later. Scan
   codes are 0 and mouse reports aren't turned into records (§5.10 V8).
   Code pages other than 65001 still follow in PR 9.
+- **CI repair:** fixed the shared-workspace TickStore write/observe race that
+  could duplicate board events, and made the mux reconnect lifecycle check
+  observe the repaint from before the successful takeover completes.
