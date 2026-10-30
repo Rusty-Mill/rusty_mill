@@ -62,10 +62,9 @@ async fn serve(
             continue;
         };
         write.pty.write_all(&write.data).await?;
-        if let Some((block, req)) = write.key {
-            state
-                .borrow_mut()
-                .written(client, block, req, std::time::Instant::now());
+        if let Some(key) = write.key {
+            let now = std::time::Instant::now();
+            state.borrow_mut().written(client, cancel, key, now);
         }
     }
     Ok(())

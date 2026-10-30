@@ -67,7 +67,8 @@ One feature bit, `ECHO_ACK`, asked for on a block's connection. With it:
   sends it from a timer too, so a key with no echo at all (a password)
   still gets its ack and the client can stop waiting.
 - **`EchoMode { block, mode }`**, server to client, on the block's
-  connection, whenever the mode changes and once after attach:
+  connection, whenever the mode changes and once after an attach or a
+  takeover that keeps one:
   - `Kernel`: `ICANON` and `ECHO` on. As built, `ECHO` on with `ICANON`
     off (`stty -icanon`) is `Kernel` too, since the line discipline still
     echoes.

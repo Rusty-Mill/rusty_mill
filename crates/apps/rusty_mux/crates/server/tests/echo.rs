@@ -8,7 +8,7 @@ mod common;
 
 use common::{Client, PATIENCE, start_server, window_for};
 use rusty_mux_core::{BlockId, Size};
-use rusty_mux_proto::{Echo, Features, Launch, Message, Program};
+use rusty_mux_proto::{Echo, Features, Launch, Message, Program, Takeover};
 
 const ECHO: Features = Features::CHECKPOINT_V6
     .union(Features::LAUNCH)
@@ -210,4 +210,71 @@ fn a_client_without_the_feature_gets_neither() {
     // Anything already sent arrives before the reply to this.
     client.request(|req| Message::Detach { req });
     assert!(client.echoes.is_empty(), "{:?}", client.echoes);
+}
+
+/// The connection that takes `old` over, once it has `block`'s screen.
+fn take_over(path: &std::path::Path, old: &Client, block: BlockId) -> Client {
+    let takeover = Takeover {
+        client: old.id(),
+        token: old.token.expect("a token"),
+    };
+    let mut new = Client::taking_over(path, old.features, None, Some(takeover));
+    assert_eq!(new.id(), old.id(), "taken over");
+    new.wait_ready(block);
+    new
+}
+
+const TAKEOVER: Features = ECHO.union(Features::TAKEOVER);
+
+#[test]
+fn a_takeover_announces_the_mode_with_no_new_attach() {
+    let path = start_server();
+    for (script, want) in [
+        ("exec cat", Echo::Kernel),
+        ("stty -echo; printf READY; exec cat", Echo::Hidden),
+    ] {
+        let mut old = Client::connect_with(&path, TAKEOVER, None);
+        let block = running(&mut old, script);
+        mode(&mut old, want);
+        let mut new = take_over(&path, &old, block);
+        mode(&mut new, want);
+    }
+}
+
+#[test]
+fn a_takeover_announces_a_mode_changed_on_the_old_connection() {
+    let path = start_server();
+    let mut old = Client::connect_with(&path, TAKEOVER, None);
+    let block = running(&mut old, "printf READY; read go; stty -echo; exec cat");
+    wait_screen(&mut old, block, "READY");
+    mode(&mut old, Echo::Kernel);
+    old.input(block, b"\r");
+    mode(&mut old, Echo::Hidden);
+    let mut new = take_over(&path, &old, block);
+    mode(&mut new, Echo::Hidden);
+    assert!(
+        !new.echoes.iter().any(|(_, m)| matches!(
+            m,
+            Message::EchoMode {
+                mode: Echo::Kernel,
+                ..
+            }
+        )),
+        "the stale mode: {:?}",
+        new.echoes
+    );
+}
+
+#[test]
+fn a_takeover_without_the_feature_announces_no_mode() {
+    let path = start_server();
+    let plain = Features::CHECKPOINT_V6
+        .union(Features::LAUNCH)
+        .union(Features::TAKEOVER);
+    let mut old = Client::connect_with(&path, plain, None);
+    let block = running(&mut old, "exec cat");
+    let mut new = take_over(&path, &old, block);
+    // Anything already sent arrives before the reply to this.
+    new.request(|req| Message::Detach { req });
+    assert!(new.echoes.is_empty(), "{:?}", new.echoes);
 }

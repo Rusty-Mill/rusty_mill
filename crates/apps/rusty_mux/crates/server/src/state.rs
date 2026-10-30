@@ -186,8 +186,12 @@ impl State {
         missed.iter().for_each(|m| self.send(client, m));
         // A taken-over client may still be attached; its new connection has
         // no screen yet, so it gets one before any live output.
+        // It also learns who echoes there, as on an attach.
         if let Some(block) = continued.and_then(|c| self.mux.client(c)?.attached()) {
             self.send_snapshot(client, block);
+            if !self.check_echo(block) {
+                self.send_echo(client, block);
+            }
         }
         self.flush();
         client
@@ -686,9 +690,21 @@ impl State {
             .is_some_and(|f| f.contains(Features::ECHO_ACK))
     }
 
-    /// `client`'s input `req` to `block` was written at `at`: its ack is
-    /// due a grace later, at a drain or from the reader's timer.
-    pub(crate) fn written(&mut self, client: ClientId, block: BlockId, req: u64, at: Instant) {
+    /// `client`'s input `req` to `block`, sent on the connection owning
+    /// `cancel`, was written at `at`: its ack is due a grace later, at a
+    /// drain or from the reader's timer. Not if another connection took
+    /// the client over while the write was under way: request numbers
+    /// start afresh there, so the ack would claim a request it never sent.
+    pub(crate) fn written(
+        &mut self,
+        client: ClientId,
+        cancel: &Rc<Notify>,
+        (block, req): (BlockId, u64),
+        at: Instant,
+    ) {
+        if !self.served_by(client, cancel) {
+            return;
+        }
         let Some(rt) = self.blocks.get_mut(&block) else {
             return;
         };
@@ -1286,6 +1302,31 @@ mod regression {
         };
         drop(state);
         (shared, client, BlockId::from_uuid(id), inbox)
+    }
+
+    /// A PTY write that finishes after a takeover belongs to the old
+    /// connection, whose request numbers mean nothing on the new one.
+    #[test]
+    fn a_write_finishing_after_a_takeover_is_not_acked() {
+        runtime().block_on(async {
+            let (shared, _, block, _inbox) = fixture();
+            let features = Features::CHECKPOINT_V6
+                .union(Features::TAKEOVER)
+                .union(Features::ECHO_ACK);
+            let (out, _old_inbox, old) = outbox();
+            let client = shared.borrow_mut().connect(out, features, None, None);
+            let token = shared.borrow().tokens[&client];
+            let (out, _new_inbox, new) = outbox();
+            let takeover = Some(Takeover { client, token });
+            let taken = shared.borrow_mut().connect(out, features, None, takeover);
+            assert_eq!(taken, client);
+
+            let now = Instant::now();
+            shared.borrow_mut().written(client, &old, (block, 7), now);
+            assert_eq!(shared.borrow().echo_due(block), None, "the old key");
+            shared.borrow_mut().written(client, &new, (block, 1), now);
+            assert!(shared.borrow().echo_due(block).is_some(), "the new key");
+        });
     }
 
     #[test]
