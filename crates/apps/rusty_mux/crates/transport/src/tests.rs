@@ -86,6 +86,7 @@ impl Net {
     }
 
     fn put(&mut self, up: bool, bytes: Vec<u8>) {
+        assert!(bytes.len() <= MAX_DATAGRAM, "{} bytes", bytes.len());
         self.sent[usize::from(up)] += 1;
         let copies = if self.rng.chance(self.path.dup) { 2 } else { 1 };
         for _ in 0..copies {
@@ -417,6 +418,7 @@ fn skipped_stream_numbers_stay_bounded() {
     let first = forged(&mut client, &[data(skip), close(skip)]);
     assert!(server.datagram(now, addr(1), &first));
     assert_eq!(server.accept(), Some(skip));
+    assert_eq!(server.closed(), Some(skip));
     // Skipping as far again would hold twice as many gaps: refused.
     let again = forged(&mut client, &[data(2 * skip + 1)]);
     assert!(server.datagram(now, addr(1), &again));
@@ -464,6 +466,94 @@ fn closes_that_do_not_fit_one_datagram_wait_for_the_next() {
         let id = client.open().unwrap();
         client.close(now, id);
     }
+    let mut sizes = Vec::new();
+    while let Some((_, datagram)) = client.transmit(now) {
+        sizes.push(datagram.len());
+    }
+    assert!(sizes.len() > 1, "{sizes:?}");
+    assert!(sizes.iter().all(|&n| n <= MAX_DATAGRAM), "{sizes:?}");
+}
+
+#[test]
+fn streams_closed_before_any_bytes_leave_later_numbers_free() {
+    let now = Instant::now();
+    let mut server = Association::new(Side::Server, ID, &KEY, now, None);
+    let mut client = Sealer::new(Side::Client, ID, &KEY);
+    // Many more empty open/close cycles than streams fit at once.
+    for id in 0..4 * MAX_STREAMS as u64 {
+        assert!(server.datagram(now, addr(1), &forged(&mut client, &[close(id)])));
+    }
+    let next = 4 * MAX_STREAMS as u64;
+    let opened = forged(&mut client, &[data(next + 1), data(next)]);
+    assert!(server.datagram(now, addr(1), &opened));
+    assert_eq!(server.accept(), Some(next + 1));
+    assert_eq!(server.accept(), Some(next));
+    // None of the closed ones comes back.
+    let late = forged(&mut client, &[data(0), data(next - 1)]);
+    assert!(server.datagram(now, addr(1), &late));
+    assert_eq!(server.accept(), None);
+}
+
+#[test]
+fn acks_closes_and_data_together_stay_within_a_datagram() {
+    let mut net = Net::new(CLEAN, 8);
+    let ids: Vec<StreamId> = (0..MAX_STREAMS)
+        .map(|_| net.client.open().unwrap())
+        .collect();
+    for &id in &ids {
+        net.client.write(id, b"x");
+    }
+    let mut accepted = 0;
+    while accepted < ids.len() {
+        net.step();
+        while net.server.accept().is_some() {
+            accepted += 1;
+        }
+    }
+    // Every stream owes an ack, half close and the rest have data, all at
+    // once; `Net::put` checks each datagram's size.
+    let big = vec![7; 4000];
+    for &id in &ids {
+        net.client.write(id, b"y");
+        net.server.write(id, &big);
+    }
+    net.step();
+    for &id in &ids[..MAX_STREAMS / 2] {
+        net.server.close(net.now, id);
+    }
+    for _ in 0..200 {
+        net.step();
+    }
+    for &id in &ids[..MAX_STREAMS / 2] {
+        assert!(!net.client.is_open(id));
+    }
+}
+
+#[test]
+fn closes_after_acks_that_fill_a_datagram_wait_for_the_next() {
+    let now = Instant::now();
+    let mut client = Association::new(Side::Client, ID, &KEY, now, Some(addr(SERVER)));
+    let mut server = Sealer::new(Side::Server, ID, &KEY);
+    let ids: Vec<StreamId> = (0..MAX_STREAMS).map(|_| client.open().unwrap()).collect();
+    let (ranged, closed) = ids.split_at(36);
+    // Holes in each ranged stream: its ack carries four ranges with
+    // three-byte offsets, so the acks alone nearly fill one datagram.
+    for &stream in ranged {
+        let chunks: Vec<Chunk> = (0..5)
+            .map(|k| Chunk::Data {
+                stream,
+                offset: 100_000 + 2000 * k,
+                bytes: b"z".to_vec(),
+            })
+            .collect();
+        assert!(client.datagram(now, addr(SERVER), &forged(&mut server, &chunks)));
+    }
+    for &id in closed {
+        client.close(now, id);
+    }
+    // And the peer's own closes, each owed a reply.
+    let peer_closes: Vec<Chunk> = (1000..1000 + MAX_STREAMS as u64).map(close).collect();
+    assert!(client.datagram(now, addr(SERVER), &forged(&mut server, &peer_closes)));
     let mut sizes = Vec::new();
     while let Some((_, datagram)) = client.transmit(now) {
         sizes.push(datagram.len());

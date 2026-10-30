@@ -290,6 +290,33 @@ mod tests {
         std::iter::from_fn(|| send.next(segment)).collect()
     }
 
+    /// Bytes waiting to be read and bytes held early together stay
+    /// within the window, however the reader stalls.
+    fn held(recv: &Recv) -> u64 {
+        recv.readable() as u64 + recv.early.values().map(|b| b.len() as u64).sum::<u64>()
+    }
+
+    #[test]
+    fn a_stalled_reader_holds_at_most_a_window() {
+        let mut recv = Recv::default();
+        let chunk = vec![1; 1000];
+        let mut offset = 0;
+        while offset < 2 * WINDOW {
+            // In order and early, overlapping, past the limit too.
+            recv.data(offset, &chunk);
+            recv.data(offset + 500, &chunk);
+            recv.data(offset + 3000, &chunk);
+            offset += 1000;
+            assert!(held(&recv) <= WINDOW, "{} at {offset}", held(&recv));
+        }
+        // A segment crossing the limit is dropped whole.
+        assert!(recv.readable() as u64 > WINDOW - 1000, "the window filled");
+        let mut buf = vec![0; 4096];
+        recv.read(&mut buf);
+        recv.data(WINDOW, &chunk);
+        assert!(held(&recv) <= WINDOW);
+    }
+
     #[test]
     fn early_pieces_never_overlap_and_stay_few() {
         let mut recv = Recv::default();
