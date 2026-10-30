@@ -420,6 +420,16 @@ impl AnsiParser {
         }
     }
 
+    /// Whether the next character would be written as after `SGR 0` with
+    /// nothing else set: the reset rendition, US-ASCII in GL, unprotected.
+    /// A client drawing over a passed-through screen can then put the
+    /// rendition back exactly with `SGR 0`.
+    pub fn plain(&self) -> bool {
+        self.pen == Pen::default_colors(self.palette.fg, self.palette.bg)
+            && !self.protected
+            && self.charsets[self.gl] == Charset::Ascii
+    }
+
     /// Drain the bytes the parser owes the host in reply to queries (DA1/DA2/
     /// DSR). Returns an empty vector when there is nothing to send. The driver
     /// calls this after `advance` and writes the result to the PTY master.

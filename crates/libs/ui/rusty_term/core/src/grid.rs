@@ -3845,6 +3845,13 @@ impl Grid {
         self.primary.as_ref().map(|p| p.mode)
     }
 
+    /// Whether a cursor move with `CUP` lands where its numbers say: origin
+    /// mode (DECOM) is off and no hyperlink (OSC 8) is open, so text written
+    /// there is not linked.
+    pub fn plain_cursor(&self) -> bool {
+        !self.origin_mode && self.current_link == 0
+    }
+
     /// Whether the alternate screen buffer (`?47`/`?1047`/`?1049`) is active.
     pub fn in_alt_screen(&self) -> bool {
         self.primary.is_some()

@@ -299,6 +299,105 @@ pub fn neighbor(rects: &[(BlockId, Rect)], from: BlockId, dir: Dir) -> Option<Bl
         .map(|(_, b)| b)
 }
 
+/// Predictions drawn over a block whose raw output passes through, and
+/// the cells they cover, to put back before the block's next output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Passed {
+    overlay: Overlay,
+    /// Where the cursor was and is put back.
+    home: (usize, usize),
+    /// Each covered cell: its column, style and text.
+    under: Vec<(usize, Style, String)>,
+}
+
+impl Passed {
+    /// What it draws.
+    pub fn overlay(&self) -> &Overlay {
+        &self.overlay
+    }
+
+    /// Puts the covered cells back from the grid they were taken from,
+    /// then the cursor and the reset rendition, as [`pass_ahead`] left them.
+    pub fn erase(&self) -> Vec<u8> {
+        let row = self.overlay.row;
+        let cells = self
+            .under
+            .iter()
+            .map(|(x, style, text)| (*x, *style, text.as_str()));
+        place(row, cells, self.home)
+    }
+}
+
+/// Draws `overlay` over a passed-through block whose screen `grid` copies:
+/// each cell with an absolute move, characters underlined, then the
+/// cursor back home and `SGR 0`. Only for a grid whose parser is
+/// [`plain`](rusty_term_core::AnsiParser::plain) and whose cursor is
+/// [`plain_cursor`](Grid::plain_cursor) and inside the screen, as
+/// `SGR 0` then restores the rendition exactly and the move lands where
+/// it says; never `DECSC`, whose one slot the program may be using.
+pub fn pass_ahead(grid: &Grid, overlay: &Overlay) -> (Vec<u8>, Passed) {
+    let row = overlay.row;
+    let cells: Vec<Cell> = grid.row_cells(row).collect();
+    let trailer = |x: usize| cells.get(x).is_some_and(|c| c.flags & WIDE_TRAILER != 0);
+    let fits = |x: usize| x < cells.len() && !trailer(x) && !trailer(x + 1);
+    let mut drawn = Vec::new();
+    let mut under = Vec::new();
+    for &(x, ch) in overlay.cells.iter().filter(|(x, _)| fits(*x)) {
+        let cell = &cells[x];
+        let style = Style::of(cell);
+        let text: String = std::iter::once(cell.ch)
+            .chain(cluster(grid, cell).chars())
+            .collect();
+        let (ahead, look) = match ch {
+            Some(ch) => (
+                ch.to_string(),
+                Style {
+                    attrs: style.attrs | ATTR_UNDERLINE,
+                    ..style
+                },
+            ),
+            None => (" ".to_string(), style),
+        };
+        drawn.push((x, look, ahead));
+        under.push((x, style, text));
+    }
+    let home = grid.cursor;
+    let cells = drawn
+        .iter()
+        .map(|(x, style, text)| (*x, *style, text.as_str()));
+    let bytes = place(row, cells, home);
+    let passed = Passed {
+        overlay: overlay.clone(),
+        home,
+        under,
+    };
+    (bytes, passed)
+}
+
+/// A grapheme's continuation after `cell.ch`, if any.
+fn cluster<'g>(grid: &'g Grid, cell: &Cell) -> &'g str {
+    let i = usize::from(cell.cluster).checked_sub(1);
+    i.and_then(|i| grid.clusters.get(i))
+        .map_or("", String::as_str)
+}
+
+/// Each of `cells` at its column on `row`, then `SGR 0` and the cursor at
+/// `home`.
+fn place<'a>(
+    row: usize,
+    cells: impl Iterator<Item = (usize, Style, &'a str)>,
+    home: (usize, usize),
+) -> Vec<u8> {
+    let mut out = String::new();
+    for (x, style, text) in cells {
+        let _ = write!(out, "\x1b[{};{}H", row + 1, x + 1);
+        style.sgr(&mut out);
+        out.push_str(text);
+    }
+    let _ = write!(out, "\x1b[0m\x1b[{};{}H", home.1 + 1, home.0 + 1);
+    out.into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use rusty_mux_core::Layout;
@@ -482,6 +581,42 @@ mod tests {
         let frame = compose(size(3, 1), &views, id(1));
         // `日` is cut to a blank by the edge, and nothing lands on it.
         assert_eq!(text(&frame, 0), "$  ");
+    }
+
+    #[test]
+    fn passed_predictions_draw_underlined_then_put_back_what_they_covered() {
+        // `b` already echoed at column 3, under a blank Backspace left.
+        let typed = grid(10, 2, "$ ab\x08");
+        let overlay = Overlay {
+            row: 0,
+            cells: vec![(3, None), (4, Some('c'))],
+            cursor: 4,
+        };
+        let (bytes, passed) = pass_ahead(&typed, &overlay);
+        let drawn = String::from_utf8(bytes).unwrap();
+        assert_eq!(
+            drawn,
+            "\x1b[1;4H\x1b[0m \x1b[1;5H\x1b[0;4mc\x1b[0m\x1b[1;4H"
+        );
+        assert_eq!(passed.overlay(), &overlay);
+        let erased = String::from_utf8(passed.erase()).unwrap();
+        assert_eq!(erased, "\x1b[1;4H\x1b[0mb\x1b[1;5H\x1b[0m \x1b[0m\x1b[1;4H");
+    }
+
+    #[test]
+    fn passed_predictions_skip_wide_glyphs_and_the_margin() {
+        let wide = grid(4, 1, "$日");
+        let overlay = Overlay {
+            row: 0,
+            cells: vec![(1, Some('x')), (2, Some('y')), (4, Some('z'))],
+            cursor: 0,
+        };
+        let (bytes, passed) = pass_ahead(&wide, &overlay);
+        assert_eq!(String::from_utf8(bytes).unwrap(), "\x1b[0m\x1b[1;4H");
+        assert_eq!(
+            String::from_utf8(passed.erase()).unwrap(),
+            "\x1b[0m\x1b[1;4H"
+        );
     }
 
     #[test]

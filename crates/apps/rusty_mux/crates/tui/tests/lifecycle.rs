@@ -825,6 +825,8 @@ fn real_server() -> PathBuf {
 /// - `trickle C`: relays, but on its `C`th connection sends the client,
 ///   in place of the server's messages, a message that never ends: its
 ///   length, then a byte every 20 ms.
+/// - `delay MS`: relays, but holds everything it passes on, either way,
+///   for `MS` milliseconds, in order: a slow path.
 ///
 /// SIGUSR1 cuts every connection on the client's side only, so the client
 /// sees them end while the server keeps its clients.
@@ -835,7 +837,7 @@ fn relaying_ssh(name: &str, plan: &[&str]) -> PathBuf {
     std::fs::write(work.join("plan"), plan.join("\n")).expect("plan");
     let script = format!(
         r#"#!/usr/bin/env python3
-import os, signal, socket, sys, threading, time
+import os, queue, signal, socket, sys, threading, time
 args = sys.argv[1:]
 with open("{log}", "a") as log:
     log.write(" ".join([str(os.getpid())] + args) + "\n")
@@ -848,6 +850,7 @@ if mode[0] == "fail":
     sys.exit(255)
 stall = (int(mode[1]), int(mode[2])) if mode[0] == "stall" else None
 trickle = int(mode[1]) if mode[0] == "trickle" else None
+delay = int(mode[1]) / 1000 if mode[0] == "delay" else 0
 local, remote = args[args.index("-L") + 1].split(":", 1)
 listener = socket.socket(socket.AF_UNIX)
 listener.bind(local)
@@ -871,13 +874,30 @@ def drip(near):
             time.sleep(0.02)
     except OSError:
         pass
+def late(b, q):
+    try:
+        while True:
+            due, data = q.get()
+            time.sleep(max(0, due - time.monotonic()))
+            if data is None:
+                break
+            b.sendall(data)
+    except OSError:
+        pass
 def pump(a, b, frames=None):
     held = b""
+    q = queue.Queue()
+    sender = threading.Thread(target=late, args=(b, q), daemon=True)
+    if delay:
+        sender.start()
     try:
         while True:
             data = a.recv(65536)
             if not data:
                 break
+            if delay:
+                q.put((time.monotonic() + delay, data))
+                continue
             if frames is None:
                 b.sendall(data)
                 continue
@@ -891,6 +911,9 @@ def pump(a, b, frames=None):
                 frames -= 1
     except OSError:
         pass
+    if delay:
+        q.put((time.monotonic() + delay, None))
+        sender.join()
     for end in (a, b):
         if cut and end not in nears:
             continue
@@ -968,8 +991,16 @@ fn running(pid: u32) -> bool {
 /// The client through the stand-in in `work` to the server at `socket`,
 /// on a new block.
 fn ssh_client(work: &Path, socket: &Path) -> Tui {
+    ssh_client_with(work, socket, &[])
+}
+
+/// [`ssh_client`] with `extra` set in its environment.
+fn ssh_client_with(work: &Path, socket: &Path, extra: &[(&str, &str)]) -> Tui {
     let mut env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
     env.insert("RUSTY_MUX_SSH".into(), work.join("ssh").into_os_string());
+    for (key, value) in extra {
+        env.insert(key.into(), value.into());
+    }
     let args = [OsStr::new("--ssh"), OsStr::new("box"), socket.as_os_str()];
     Tui::run(&args, EnvSpec::Explicit(env))
 }
@@ -1401,5 +1432,75 @@ fn leased(conn: &mut Conn<Stream>, blocks: [BlockId; 2], want: (bool, bool)) {
         }
         assert!(Instant::now() < deadline, "leased {now:?}, not {want:?}");
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// How a predicted character is drawn ahead over a plain shell prompt:
+/// underlined, in the reset rendition.
+const AHEAD: &[u8] = b"\x1b[0;4m";
+
+/// Types `keys` one at a time, `gap` apart.
+fn type_slowly(tui: &Tui, keys: &[u8], gap: Duration) {
+    for key in keys {
+        tui.master.write(std::slice::from_ref(key)).expect("type");
+        std::thread::sleep(gap);
+    }
+}
+
+/// Detaches, then removes the stand-in's work directory.
+fn detach_ssh(tui: Tui, work: &Path) {
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
+    std::fs::remove_dir_all(work).expect("cleanup");
+}
+
+/// Over a path that holds every message 100 ms each way, typing at a
+/// shell prompt is drawn underlined ahead of its echo once the line's first
+/// key is found on the screen; at a prompt with echo off (`sh` has no
+/// `read -s`), nothing typed is ever written to the terminal.
+#[test]
+fn a_slow_path_draws_typing_ahead_but_never_a_secret() {
+    let socket = real_server();
+    let work = relaying_ssh("slow", &["delay 100"]);
+    let tui = ssh_client(&work, &socket);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    let gap = Duration::from_millis(600);
+    // `e` starts the line; once its echo and ack are in, `c` is drawn.
+    type_slowly(&tui, b"ec", gap);
+    tui.wait_for(&[AHEAD, b"c"].concat());
+    type_slowly(&tui, b"ho ok\r", gap);
+    tui.wait_for(b"ok\r\n");
+
+    tui.master.write(b"stty -echo; read s\r").expect("type");
+    std::thread::sleep(gap * 2);
+    let from = tui.written();
+    type_slowly(&tui, b"QJXV", gap);
+    std::thread::sleep(gap * 2);
+    let shown = tui.since(from);
+    assert!(
+        !shown.iter().any(|b| b"QJXV".contains(b)),
+        "{:?}",
+        String::from_utf8_lossy(&shown)
+    );
+    tui.master.write(b"\rstty echo\r").expect("end the read");
+    detach_ssh(tui, &work);
+}
+
+/// Over a fast path the latency gate keeps predictions off, and over a
+/// slow one `RUSTY_MUX_PREDICT=off` does.
+#[test]
+fn predictions_stay_off_on_a_fast_path_or_when_switched_off() {
+    let socket = real_server();
+    for (name, plan, extra) in [
+        ("fast", "relay", &[][..]),
+        ("off", "delay 100", &[("RUSTY_MUX_PREDICT", "off")][..]),
+    ] {
+        let work = relaying_ssh(name, &[plan]);
+        let tui = ssh_client_with(&work, &socket, extra);
+        type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+        type_slowly(&tui, b"echo ok\r", Duration::from_millis(600));
+        tui.wait_for(b"ok\r\n");
+        assert!(!tui.saw(AHEAD), "{name}: drew a prediction");
+        detach_ssh(tui, &work);
     }
 }
