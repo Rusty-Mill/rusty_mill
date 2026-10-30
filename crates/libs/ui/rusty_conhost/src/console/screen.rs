@@ -48,11 +48,10 @@ enum Action {
     Reassert(&'static [u8]),
 }
 
-/// The longest CSI the host parses for a watched one: the parameters
-/// rusty_term_core stores (its `CSI_PARAM_MAX`, 256 bytes), `ESC [ ?` and
-/// the final byte. A longer CSI is forwarded unwatched, and a held prefix
-/// stays shorter than this.
-pub(super) const WATCHED_MAX: usize = 256 + 4;
+/// The longest CSI prefix the host holds: the parameters rusty_term_core
+/// stores ([`CSI_PARAM_MAX`]), `ESC [ ?` and the final byte. A longer
+/// DEC private one is forwarded as it comes and decided at its end.
+pub(super) const WATCHED_MAX: usize = CSI_PARAM_MAX + 4;
 /// The most bytes one client byte (or UTF-16 unit) can come to: RIS's
 /// two add the 16 of [`PREAMBLE`]. A legacy glyph is at most 3, and a
 /// wrap adds 2.
@@ -166,14 +165,15 @@ impl Screen {
             let mut adds = 0;
             // A parameter byte only lengthens the prefix: the sequence is
             // matched once, at its start and at its final byte.
-            let param = vt.len() - start == 1 && is_param(b);
-            if long && !param {
+            let inside = csi_byte(b) == CsiByte::Inside;
+            if long && !inside {
                 long = false;
                 if b == b'l' {
                     adds = PREAMBLE.len();
                 }
             }
-            if let Some(e) = esc.filter(|&e| !param || vt.len() - e <= 3) {
+            let inside = inside && vt.len() - start == 1;
+            if let Some(e) = esc.filter(|&e| !inside || vt.len() - e <= 3) {
                 match watched_at(&vt[e..]) {
                     Watched::Prefix | Watched::Long => {}
                     Watched::Whole(_, Action::Reassert(modes)) => (adds, esc) = (modes.len(), None),
@@ -245,7 +245,7 @@ impl Screen {
     /// Forward `vt`, acting on the watched sequences in it.
     fn route_vt(&mut self, vt: &[u8], out: &mut OutputQueue, replies: &mut Vec<u8>) {
         if self.long {
-            let Some(end) = vt.iter().position(|&b| !is_param(b)) else {
+            let Some(end) = vt.iter().position(|&b| csi_byte(b) != CsiByte::Inside) else {
                 return self.forward(vt, out);
             };
             self.long = false;
@@ -405,11 +405,27 @@ fn watched_at(rest: &[u8]) -> Watched {
 fn watched_csi(rest: &[u8]) -> Watched {
     let private = rest.get(2) == Some(&b'?');
     let first = if private { 3 } else { 2 };
-    let Some(end) = rest[first.min(rest.len())..]
-        .iter()
-        .position(|&b| !is_param(b))
-        .map(|i| first + i)
-    else {
+    // The parameters as rusty_term_core keeps them, without the controls
+    // it runs in place.
+    let mut stored = Vec::new();
+    let mut plain = true;
+    let mut end = None;
+    for (i, &b) in rest.iter().enumerate().skip(first) {
+        match csi_byte(b) {
+            CsiByte::Inside if is_param(b) => {
+                if stored.len() < CSI_PARAM_MAX {
+                    stored.push(b);
+                }
+            }
+            CsiByte::Inside => plain = false,
+            CsiByte::Final => {
+                end = Some(i);
+                break;
+            }
+            CsiByte::Ends => return Watched::No,
+        }
+    }
+    let Some(end) = end else {
         return match (rest.len() < WATCHED_MAX, private) {
             (true, _) => Watched::Prefix,
             (false, true) => Watched::Long,
@@ -417,14 +433,14 @@ fn watched_csi(rest: &[u8]) -> Watched {
         };
     };
     if end >= WATCHED_MAX {
-        // rusty_term_core applies the parameters it stored, the first 256
-        // bytes, which may name either mode: reassert both.
+        // Past rusty_term_core's cap, and the terminal's may differ: either
+        // mode may be named in what it applies, so reassert both.
         return match (private, rest[end]) {
             (true, b'l') => Watched::Whole(end + 1, Action::Reassert(PREAMBLE)),
             _ => Watched::No,
         };
     }
-    let params: Vec<u32> = rest[first..end]
+    let params: Vec<u32> = stored
         .split(|&b| b == b';')
         .map(|p| {
             std::str::from_utf8(p)
@@ -434,7 +450,7 @@ fn watched_csi(rest: &[u8]) -> Watched {
         })
         .collect();
     let action = match (private, rest[end], params.as_slice()) {
-        (false, b'n', [5 | 6]) | (true, b'n', [6]) => Action::Answer,
+        (false, b'n', [5 | 6]) | (true, b'n', [6]) if plain => Action::Answer,
         (true, b'l', _) => match (params.contains(&9001), params.contains(&1004)) {
             (true, true) => Action::Reassert(PREAMBLE),
             (true, false) => Action::Reassert(b"\x1b[?9001h"),
@@ -446,9 +462,31 @@ fn watched_csi(rest: &[u8]) -> Watched {
     Watched::Whole(end + 1, action)
 }
 
-/// A CSI parameter byte, as the watcher reads them.
+/// rusty_term_core's `CSI_PARAM_MAX`: the parameter bytes it keeps.
+const CSI_PARAM_MAX: usize = 256;
+
+/// What a byte does inside a CSI, as rusty_term_core's parser reads it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CsiByte {
+    /// The CSI goes on: a parameter, marker or intermediate byte, DEL, or
+    /// a C0 control the parser runs in place.
+    Inside,
+    Final,
+    /// CAN, SUB, ESC or a byte past 0x7F: the CSI ends without dispatch.
+    Ends,
+}
+
+fn csi_byte(b: u8) -> CsiByte {
+    match b {
+        0x18 | 0x1a | 0x1b | 0x80.. => CsiByte::Ends,
+        0x40..=0x7e => CsiByte::Final,
+        _ => CsiByte::Inside,
+    }
+}
+
+/// A CSI parameter byte, as the parser stores them.
 fn is_param(b: u8) -> bool {
-    matches!(b, b'0'..=b'9' | b';')
+    matches!(b, b'0'..=b'9' | b';' | b':')
 }
 
 /// What one client byte becomes.
@@ -796,6 +834,23 @@ mod tests {
             client(&mut s, b"\x1b[?1004l", VT).0,
             [&b"\x1b[?1004l"[..], b"\x1b[?1004h"].concat()
         );
+    }
+
+    #[test]
+    fn controls_run_inside_a_csi_do_not_end_its_watch() {
+        let mut s = screen();
+        // Held within the cap: BEL runs in place, the reset still counts.
+        assert_eq!(client(&mut s, b"\x1b[?10\x07", VT).0, b"");
+        assert_eq!(client(&mut s, b"04l", VT).0, b"\x1b[?10\x0704l\x1b[?1004h");
+        // Past the cap, across writes.
+        let head = [&b"\x1b[?1004;"[..], &b"0;".repeat(130)].concat();
+        assert_eq!(client(&mut s, &head, VT).0, head);
+        assert_eq!(client(&mut s, b"\x07", VT).0, b"\x07");
+        assert_eq!(client(&mut s, b"l", VT).0, [&b"l"[..], PREAMBLE].concat());
+        // CAN cancels it, so its `l` is text.
+        client(&mut s, &head, VT);
+        assert_eq!(client(&mut s, b"\x18l", VT).0, b"\x18l");
+        assert_eq!(client(&mut s, b"\x1b[?1004\x18l", VT).0, b"\x1b[?1004\x18l");
     }
 
     #[test]
