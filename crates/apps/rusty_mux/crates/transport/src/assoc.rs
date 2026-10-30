@@ -27,6 +27,8 @@ const END_TRIES: u32 = 3;
 
 /// Plaintext room for chunks after the stamp and echo, at most 31 bytes.
 const PLAIN: usize = MAX_DATAGRAM - OVERHEAD - 31;
+/// The most bytes a close takes: a tag and a varint.
+const CLOSE_MAX: usize = 1 + 10;
 
 /// A stream's number. The client numbers them from 0, in order.
 pub type StreamId = u64;
@@ -181,7 +183,7 @@ impl Association {
                 stream,
                 offset,
                 bytes,
-            } => self.data(stream, offset, &bytes),
+            } => self.data(now, stream, offset, &bytes),
             Chunk::Ack {
                 stream,
                 cumulative,
@@ -199,7 +201,10 @@ impl Association {
         }
     }
 
-    fn data(&mut self, id: StreamId, offset: u64, bytes: &[u8]) {
+    fn data(&mut self, now: Instant, id: StreamId, offset: u64, bytes: &[u8]) {
+        if self.retired(id) {
+            return self.retell(now, id);
+        }
         if !self.streams.contains_key(&id) && !self.accept_new(id) {
             return;
         }
@@ -210,24 +215,50 @@ impl Association {
     }
 
     /// A server takes a stream it has not seen if there is room: a number
-    /// past the highest, at most [`MAX_STREAMS`] past it, or one skipped
-    /// on the way there. A closed stream's number never comes back.
+    /// past the highest, or one skipped on the way there. A closed
+    /// stream's number never comes back.
     fn accept_new(&mut self, id: StreamId) -> bool {
         if self.side != Side::Server || self.streams.len() >= MAX_STREAMS {
             return false;
         }
-        if id >= self.next_stream {
-            if id - self.next_stream >= MAX_STREAMS as u64 {
-                return false;
-            }
-            self.gaps.extend(self.next_stream..id);
-            self.next_stream = id + 1;
-        } else if !self.gaps.remove(&id) {
+        let taken = match id >= self.next_stream {
+            true => self.pass(id),
+            false => self.gaps.remove(&id),
+        };
+        if !taken {
             return false;
         }
         self.streams.insert(id, Stream::default());
         self.accepted.push_back(id);
         true
+    }
+
+    /// Moves the highest number seen to `id`, keeping those skipped as
+    /// gaps: at most [`MAX_STREAMS`] of them in all, so a peer cannot grow
+    /// them by skipping again and again. Whether it moved.
+    fn pass(&mut self, id: StreamId) -> bool {
+        let skipped = id - self.next_stream;
+        if skipped > (MAX_STREAMS - self.gaps.len()) as u64 {
+            return false;
+        }
+        self.gaps.extend(self.next_stream..id);
+        self.next_stream = id + 1;
+        true
+    }
+
+    /// Whether `id` was open once and is closed now, on either side.
+    fn retired(&self, id: StreamId) -> bool {
+        id < self.next_stream && !self.streams.contains_key(&id) && !self.gaps.contains(&id)
+    }
+
+    /// The peer still uses a stream closed here, so it missed every close:
+    /// tell it again, while the closes being retried stay bounded.
+    fn retell(&mut self, now: Instant, id: StreamId) {
+        if self.closing.len() < MAX_STREAMS {
+            self.closing
+                .entry(id)
+                .or_insert(Closing { due: now, tries: 0 });
+        }
     }
 
     fn ack(
@@ -238,6 +269,9 @@ impl Association {
         limit: u64,
         ranges: &[(u64, u64)],
     ) {
+        if self.retired(id) {
+            return self.retell(now, id);
+        }
         let Some(stream) = self.streams.get_mut(&id) else {
             return;
         };
@@ -269,9 +303,17 @@ impl Association {
         if self.streams.remove(&id).is_some() {
             self.peer_closed.push_back(id);
         }
-        // A stream closed before its first bytes arrived never opens.
-        self.gaps.remove(&id);
-        self.replies.push(id);
+        // A stream closed before its first bytes arrived never opens,
+        // whether it was skipped or not seen at all.
+        let unseen = self.side == Side::Server && id >= self.next_stream;
+        if !self.gaps.remove(&id) && unseen {
+            // Past the bound on gaps it could never open anyway.
+            self.pass(id);
+        }
+        // Retried closes are already pending; the rest wait their turn.
+        if self.replies.len() < MAX_STREAMS && !self.replies.contains(&id) {
+            self.replies.push(id);
+        }
     }
 
     /// Opens a stream. Only a client opens them, at most [`MAX_STREAMS`].
@@ -476,11 +518,15 @@ impl Association {
         put
     }
 
+    /// Puts the close replies and the closes due that fit; the rest wait
+    /// for the next datagram, their tries untouched.
     fn put_closes(&mut self, now: Instant, w: &mut Writer) -> (usize, bool) {
+        let fits = |w: &Writer| w.len() + CLOSE_MAX <= PLAIN;
         let mut put = 0;
-        for id in self.replies.drain(..) {
+        while fits(w) && !self.replies.is_empty() {
+            let stream = self.replies.remove(0);
             Chunk::Close {
-                stream: id,
+                stream,
                 reply: true,
             }
             .encode(w);
@@ -489,7 +535,7 @@ impl Association {
         let rto = self.rtt.rto(0);
         let mut eliciting = false;
         self.closing.retain(|&id, closing| {
-            if closing.due > now {
+            if closing.due > now || !fits(w) {
                 return true;
             }
             Chunk::Close {

@@ -5,7 +5,11 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use crate::{Association, KEEPALIVE, Side, StreamId, WINDOW};
+use rusty_wire::Writer;
+
+use crate::chunk::Chunk;
+use crate::seal::Sealer;
+use crate::{Association, KEEPALIVE, MAX_DATAGRAM, MAX_STREAMS, Side, StreamId, WINDOW};
 
 const KEY: [u8; 32] = [3; 32];
 const ID: [u8; 8] = [9; 8];
@@ -364,4 +368,106 @@ fn streams_whose_first_bytes_arrive_out_of_order_are_all_accepted() {
     let (_, datagram) = again.transmit(net.now).unwrap();
     net.server.datagram(net.now, net.from, &datagram);
     assert!(!net.server.is_open(0));
+}
+
+/// A client datagram carrying exactly `chunks`, for orders the client
+/// itself would never send.
+fn forged(sealer: &mut Sealer, chunks: &[Chunk]) -> Vec<u8> {
+    let mut w = Writer::new();
+    chunks.iter().for_each(|c| c.encode(&mut w));
+    sealer.seal(w.as_slice()).unwrap()
+}
+
+fn data(stream: StreamId) -> Chunk {
+    Chunk::Data {
+        stream,
+        offset: 0,
+        bytes: b"x".to_vec(),
+    }
+}
+
+fn close(stream: StreamId) -> Chunk {
+    Chunk::Close {
+        stream,
+        reply: false,
+    }
+}
+
+#[test]
+fn a_stream_closed_before_its_first_bytes_never_opens() {
+    let now = Instant::now();
+    let mut server = Association::new(Side::Server, ID, &KEY, now, None);
+    let mut client = Sealer::new(Side::Client, ID, &KEY);
+    let (late, early) = (
+        forged(&mut client, &[data(0)]),
+        forged(&mut client, &[close(0)]),
+    );
+    assert!(server.datagram(now, addr(1), &early));
+    assert!(server.datagram(now, addr(1), &late));
+    assert_eq!(server.accept(), None);
+    assert!(!server.is_open(0));
+}
+
+#[test]
+fn skipped_stream_numbers_stay_bounded() {
+    let now = Instant::now();
+    let mut server = Association::new(Side::Server, ID, &KEY, now, None);
+    let mut client = Sealer::new(Side::Client, ID, &KEY);
+    let skip = MAX_STREAMS as u64 - 1;
+    let first = forged(&mut client, &[data(skip), close(skip)]);
+    assert!(server.datagram(now, addr(1), &first));
+    assert_eq!(server.accept(), Some(skip));
+    // Skipping as far again would hold twice as many gaps: refused.
+    let again = forged(&mut client, &[data(2 * skip + 1)]);
+    assert!(server.datagram(now, addr(1), &again));
+    assert_eq!(server.accept(), None);
+    // A number already skipped still opens.
+    let filled = forged(&mut client, &[data(3)]);
+    assert!(server.datagram(now, addr(1), &filled));
+    assert_eq!(server.accept(), Some(3));
+}
+
+#[test]
+fn a_close_lost_to_an_outage_is_told_again_when_the_peer_speaks() {
+    let mut net = Net::new(CLEAN, 7);
+    let id = net.client.open().unwrap();
+    net.client.write(id, b"hello");
+    while net.server.accept().is_none() {
+        net.step();
+    }
+    net.path.loss = 100;
+    net.server.close(net.now, id);
+    let start = net.now;
+    // Long enough for every try of the close to be lost.
+    while net.now - start < 10 * KEEPALIVE {
+        net.step();
+    }
+    assert!(net.client.is_open(id));
+    net.path.loss = 0;
+    net.client.write(id, b" again");
+    let start = net.now;
+    while net.client.is_open(id) {
+        assert!(
+            net.now - start < 2 * KEEPALIVE,
+            "the close was not told again"
+        );
+        net.step();
+    }
+    assert_eq!(net.client.closed(), Some(id));
+}
+
+#[test]
+fn closes_that_do_not_fit_one_datagram_wait_for_the_next() {
+    let now = Instant::now();
+    let mut client = Association::new(Side::Client, ID, &KEY, now, Some(addr(SERVER)));
+    for _ in 0..1000 {
+        let id = client.open().unwrap();
+        client.close(now, id);
+    }
+    let mut sizes = Vec::new();
+    while let Some((_, datagram)) = client.transmit(now) {
+        sizes.push(datagram.len());
+    }
+    assert!(sizes.len() > 1, "{sizes:?}");
+    assert!(sizes.iter().all(|&n| n <= MAX_DATAGRAM), "{sizes:?}");
 }

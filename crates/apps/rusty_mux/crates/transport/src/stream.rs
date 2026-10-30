@@ -13,6 +13,9 @@ pub const WINDOW: u64 = 1 << 20;
 /// What the peer has acknowledged by bytes beyond a hole before the hole
 /// counts as lost: three datagrams' worth, as TCP's three duplicate acks.
 const REORDER: u64 = 3 * MSS;
+/// The most out-of-order pieces a stream holds: twice a window of full
+/// datagrams, so a sender of tiny segments cannot fill memory with them.
+const MAX_EARLY: usize = (2 * WINDOW / MSS) as usize;
 
 /// The sending half: bytes from the first unacknowledged one onward.
 #[derive(Debug)]
@@ -181,10 +184,9 @@ pub(crate) struct Recv {
     read: u64,
     /// Everything below has arrived.
     cumulative: u64,
-    /// Segments beyond `cumulative`, by offset.
+    /// Segments beyond `cumulative`, by offset, never overlapping, so they
+    /// hold at most [`WINDOW`] bytes in at most [`MAX_EARLY`] pieces.
     early: BTreeMap<u64, Vec<u8>>,
-    /// Bytes held in `early`.
-    early_len: u64,
 }
 
 impl Recv {
@@ -201,7 +203,7 @@ impl Recv {
     /// so memory stays within [`WINDOW`].
     pub(crate) fn data(&mut self, offset: u64, bytes: &[u8]) {
         let end = offset + bytes.len() as u64;
-        if end > self.limit() || end <= self.cumulative {
+        if bytes.is_empty() || end > self.limit() || end <= self.cumulative {
             return;
         }
         if offset > self.cumulative {
@@ -214,15 +216,22 @@ impl Recv {
         self.drain_early();
     }
 
+    /// Keeps the part of a segment no held one covers, up to the next held
+    /// one; the sender resends the rest, which the acks still show missing.
     fn keep_early(&mut self, offset: u64, bytes: &[u8]) {
-        if self.early.contains_key(&offset) {
+        let end = offset + bytes.len() as u64;
+        let before = self.early.range(..=offset).next_back();
+        let start = before.map_or(offset, |(&at, held)| offset.max(at + held.len() as u64));
+        let stop = self
+            .early
+            .range(start..)
+            .next()
+            .map_or(end, |(&at, _)| end.min(at));
+        if start >= stop || self.early.len() >= MAX_EARLY {
             return;
         }
-        if self.early_len + bytes.len() as u64 > WINDOW {
-            return;
-        }
-        self.early_len += bytes.len() as u64;
-        self.early.insert(offset, bytes.to_vec());
+        let piece = &bytes[(start - offset) as usize..(stop - offset) as usize];
+        self.early.insert(start, piece.to_vec());
     }
 
     fn drain_early(&mut self) {
@@ -232,7 +241,6 @@ impl Recv {
                 return;
             }
             let bytes = entry.remove();
-            self.early_len -= bytes.len() as u64;
             let end = offset + bytes.len() as u64;
             if end > self.cumulative {
                 self.ready
@@ -280,6 +288,32 @@ mod tests {
     fn sent(send: &mut Send, bytes: &[u8], segment: usize) -> Vec<(u64, Vec<u8>)> {
         send.write(bytes);
         std::iter::from_fn(|| send.next(segment)).collect()
+    }
+
+    #[test]
+    fn early_pieces_never_overlap_and_stay_few() {
+        let mut recv = Recv::default();
+        // Empty segments hold nothing.
+        for offset in 1..1000 {
+            recv.data(offset, b"");
+        }
+        assert!(recv.early.is_empty());
+        // Overlapping segments keep only what is new.
+        recv.data(10, b"klmnopqrst");
+        recv.data(5, b"fghijklmnopqrstuvwxy");
+        recv.data(12, b"mn");
+        let held: usize = recv.early.values().map(Vec::len).sum();
+        assert_eq!(held, 15, "{:?}", recv.early);
+        recv.data(0, b"abcde");
+        let mut buf = [0; 32];
+        let n = recv.read(&mut buf);
+        assert_eq!(&buf[..n], b"abcdefghijklmnopqrst");
+        assert_eq!(recv.cumulative(), 20, "the piece past the held one waits");
+        // Tiny distinct segments stop at the bound.
+        for i in 0..(MAX_EARLY as u64 + 100) {
+            recv.data(1000 + 2 * i, b"x");
+        }
+        assert_eq!(recv.early.len(), MAX_EARLY);
     }
 
     #[test]
