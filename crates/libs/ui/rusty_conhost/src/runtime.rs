@@ -945,8 +945,17 @@ mod tests {
         }));
         assert!(engine.dead && engine.server.is_none());
         assert!(engine.pending.is_empty());
+        // The teardown's postamble, then EOF.
+        let mut out = Vec::new();
         let mut buf = [0u8; 8];
-        assert_eq!(shared.read(&mut buf).expect("read at EOF"), 0);
+        loop {
+            let n = shared.read(&mut buf).expect("read");
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(out, crate::console::POSTAMBLE);
         let err = shared.write(b"x").expect_err("write after close");
         assert_eq!(err.kind, ErrorKind::BrokenPipe);
         // Later events no longer reach the console.
