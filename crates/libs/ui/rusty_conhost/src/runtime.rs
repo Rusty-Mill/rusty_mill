@@ -257,6 +257,11 @@ impl Shared {
         Ok(n)
     }
 
+    /// Whether the master is gone and output is discarded.
+    fn detached(&self) -> bool {
+        lock(&self.output).detached
+    }
+
     /// Whether a `read` would return without blocking.
     pub(crate) fn output_ready(&self) -> bool {
         let out = lock(&self.output);
@@ -609,7 +614,10 @@ impl Engine {
         if self.grace.expire(now) {
             self.handle(Event::GraceExpired);
         }
-        let (control, input) = self.shared.take_control();
+        let (mut control, input) = self.shared.take_control();
+        // Discarded output drains at once, but each drain releases only one
+        // client budget of parked writes and no reader announces the next.
+        control.output_drained |= self.drains_itself();
         let plan = sched::turn(&self.view(control, input));
         if plan.control.hang_up {
             self.handle(Event::HangUp);
@@ -678,7 +686,13 @@ impl Engine {
     /// spent: neither reads left ready nor input left behind an ESC cut
     /// signals it again.
     fn must_poll(&self) -> bool {
-        sched::must_poll(&self.view(Control::default(), self.shared.input_len()))
+        self.drains_itself()
+            || sched::must_poll(&self.view(Control::default(), self.shared.input_len()))
+    }
+
+    /// Writes are parked on output that nobody will read.
+    fn drains_itself(&self) -> bool {
+        self.console.parked() > 0 && self.shared.detached()
     }
 
     fn view(&self, control: Control, input: usize) -> View {
@@ -1155,6 +1169,19 @@ mod tests {
             assert!(started.elapsed() < CANCEL_GRACE * 2, "round {round}");
             let _ = attached.child.kill_single(Signal::Kill);
         }
+    }
+
+    #[test]
+    fn a_detached_master_releases_every_parked_write() {
+        // Several client budgets' worth: one drain releases only one.
+        let console = crate::console::tests::parking_writes(8);
+        let (mut engine, child) = engine_on(console);
+        engine.shared.detach();
+        turns_without_another_wake(&mut engine);
+        assert_eq!(engine.console.waiting(), 0, "every write completed");
+        assert_eq!(engine.shared.output_len(), 0, "the output was discarded");
+        engine.teardown();
+        let _ = child.kill_single(Signal::Kill);
     }
 
     #[test]
