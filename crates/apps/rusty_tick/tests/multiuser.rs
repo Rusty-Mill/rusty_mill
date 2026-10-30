@@ -77,6 +77,7 @@ fn send(
         if_match: None,
         if_none_match: None,
         if_task_match: None,
+        actor: None,
         body: body.as_bytes(),
     };
     let response = backend.handle(&request);
@@ -178,6 +179,7 @@ fn a_scheme_other_than_bearer_is_refused() {
         if_match: None,
         if_none_match: None,
         if_task_match: None,
+        actor: None,
         body: b"",
     };
     assert_eq!(backend.handle(&request).status.as_u16(), 401);

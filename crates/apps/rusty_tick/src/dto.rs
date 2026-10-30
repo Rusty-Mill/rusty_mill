@@ -3,6 +3,7 @@
 
 use crate::docs::Doc;
 use crate::lists::{TaskList, ViewMode};
+use crate::moves::Move;
 use crate::service::Snapshot;
 use crate::tags::Tag;
 use crate::task::{ChecklistItem, Status, Task, TaskKind};
@@ -200,6 +201,47 @@ pub struct Docs {
 #[derive(Serialize)]
 pub struct Purged {
     pub purged: usize,
+}
+
+/// One column move.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveDto {
+    pub seq: u64,
+    pub task_id: Uuid,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub at_ms: i64,
+    pub actor: String,
+}
+
+impl From<Move> for MoveDto {
+    fn from(m: Move) -> Self {
+        Self {
+            seq: m.seq,
+            task_id: m.task_id,
+            from: m.from,
+            to: m.to,
+            at_ms: m.at_ms,
+            actor: m.actor,
+        }
+    }
+}
+
+/// A page of moves; `next` is the `after` for the following page, `None` on the last.
+#[derive(Serialize)]
+pub struct Moves {
+    pub moves: Vec<MoveDto>,
+    pub next: Option<u64>,
+}
+
+impl Moves {
+    pub fn new(moves: Vec<Move>, next: Option<u64>) -> Self {
+        Self {
+            moves: moves.into_iter().map(MoveDto::from).collect(),
+            next,
+        }
+    }
 }
 
 // ---- requests ----------------------------------------------------------

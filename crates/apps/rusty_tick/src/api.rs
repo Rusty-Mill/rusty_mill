@@ -25,14 +25,17 @@
 //! | GET | `/smart/{today,next7,overdue}?utcOffsetMin=` | |
 //! | GET | `/docs/{kind}` | client-owned JSON: habits, focus records, prefs |
 //! | GET, PUT, DELETE | `/docs/{kind}/{id}` | PUT also takes `If-None-Match: *` (only if absent); a `board` document's PUT requires `If-Task-Match: <task etag>` |
+//! | GET | `/moves?since=<ms>&after=<seq>&limit=<n>` | board column history, oldest first; `next` is the following page's `after` |
+//! | GET | `/tasks/{id}/moves` | one task's column history, oldest first |
 //!
 //! Writes accept `If-Match: "<etag>"`; a stale one is refused with 412 and
-//! the current entity in `current`.
+//! the current entity in `current`. Task writes accept `X-Actor: <name>`, who
+//! any column move they make is recorded as ([`crate::moves`]).
 
 use crate::auth::{Authenticator, Denied};
 use crate::docs::{comment_owner, BOARD_KIND};
 use crate::dto::{
-    CreateList, CreateTag, CreateTask, DocDto, Docs, ListDto, Lists, PatchList, PatchTag,
+    CreateList, CreateTag, CreateTask, DocDto, Docs, ListDto, Lists, Moves, PatchList, PatchTag,
     PatchTask, Purged, RenameTag, SetOrder, SnapshotDto, TagDto, Tags, TaskDto, Tasks,
 };
 use crate::service::{
@@ -47,6 +50,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 pub use crate::auth::MIN_TOKEN_LEN;
+use crate::moves::MAX_PAGE;
 const MAX_UTC_OFFSET_MIN: i32 = 14 * 60;
 
 /// A parsed request, as the router sees it.
@@ -60,6 +64,8 @@ pub struct Request<'a> {
     pub if_none_match: Option<&'a str>,
     /// `If-Task-Match`: the version of the task a `board` document belongs to.
     pub if_task_match: Option<&'a str>,
+    /// `X-Actor`: who a task write's column move is recorded as.
+    pub actor: Option<&'a str>,
     pub body: &'a [u8],
 }
 
@@ -319,6 +325,7 @@ impl Api {
             if_match: request.if_match,
             if_none_match: request.if_none_match,
             if_task_match: request.if_task_match,
+            actor: request.actor,
         };
         match segments.as_slice() {
             ["api", "v1", rest @ ..] => route(service, &cx, rest),
@@ -352,9 +359,14 @@ struct Cx<'a> {
     if_match: Option<&'a str>,
     if_none_match: Option<&'a str>,
     if_task_match: Option<&'a str>,
+    actor: Option<&'a str>,
 }
 
 impl Cx<'_> {
+    fn actor(&self) -> Option<String> {
+        self.actor.map(str::to_string)
+    }
+
     fn body<T: for<'de> Deserialize<'de>>(&self) -> Result<T> {
         rusty_json::from_slice(self.body)
             .map_err(|e| ApiError::BadRequest(format!("invalid JSON body: {e}")))
@@ -421,6 +433,25 @@ fn route(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Response> 
         ["tasks", rest @ ..] => route_tasks(service, cx, rest),
         ["tags", rest @ ..] => route_tags(service, cx, rest),
         ["docs", rest @ ..] => route_docs(service, cx, rest),
+        ["moves"] if cx.method == &Method::Get => {
+            let since = query_number(cx.query, "since")?.unwrap_or(0);
+            let after = query_number(cx.query, "after")?.unwrap_or(0);
+            let limit = match query_number::<usize>(cx.query, "limit")? {
+                None => MAX_PAGE,
+                Some(n) if (1..=MAX_PAGE).contains(&n) => n,
+                Some(_) => {
+                    return Err(ApiError::BadRequest(format!(
+                        "limit must be 1 to {MAX_PAGE}"
+                    )))
+                }
+            };
+            let mut moves = service.moves(since, after, limit + 1);
+            let next = (moves.len() > limit).then(|| {
+                moves.truncate(limit);
+                moves.last().map_or(after, |m| m.seq)
+            });
+            Ok(Response::json(StatusCode::OK, &Moves::new(moves, next)))
+        }
         ["trash"] if cx.method == &Method::Delete => {
             let purged = service.empty_trash()?;
             Ok(Response::json(StatusCode::OK, &Purged { purged }))
@@ -540,6 +571,7 @@ fn route_tasks(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
                 tags: input.tags,
                 sort_order: input.sort_order,
                 status: input.status,
+                actor: cx.actor(),
             })?;
             Ok(Response::json(StatusCode::CREATED, &TaskDto::from(task)))
         }
@@ -553,7 +585,7 @@ fn route_tasks(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
                 return Ok(stale);
             }
             let input: PatchTask = cx.body()?;
-            let task = service.patch_task(id, task_patch(input)?)?;
+            let task = service.patch_task(id, task_patch(input, cx.actor())?)?;
             Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
         }
         (Method::Delete, [id]) => {
@@ -588,16 +620,20 @@ fn route_tasks(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
             Ok(Response::empty(StatusCode::NO_CONTENT))
         }
         (Method::Post, [id, "complete"]) => {
-            let task = service.set_status(parse_id(id)?, Status::Done)?;
+            let task = service.set_status(parse_id(id)?, Status::Done, cx.actor())?;
             Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
         }
         (Method::Post, [id, "reopen"]) => {
-            let task = service.set_status(parse_id(id)?, Status::Open)?;
+            let task = service.set_status(parse_id(id)?, Status::Open, cx.actor())?;
             Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
         }
         (Method::Post, [id, "restore"]) => {
             let task = service.restore_task(parse_id(id)?)?;
             Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
+        }
+        (Method::Get, [id, "moves"]) => {
+            let moves = service.task_moves(parse_id(id)?)?;
+            Ok(Response::json(StatusCode::OK, &Moves::new(moves, None)))
         }
         (Method::Put, [id, "order"]) => {
             let input: SetOrder = cx.body()?;
@@ -616,7 +652,7 @@ fn stale_task(service: &Service, cx: &Cx<'_>, id: Uuid) -> Result<Option<Respons
     }))
 }
 
-fn task_patch(input: PatchTask) -> Result<TaskPatch> {
+fn task_patch(input: PatchTask, actor: Option<String>) -> Result<TaskPatch> {
     Ok(TaskPatch {
         title: input.title,
         notes: input.notes,
@@ -634,6 +670,7 @@ fn task_patch(input: PatchTask) -> Result<TaskPatch> {
         tags: input.tags,
         list_id: input.list_id,
         sort_order: input.sort_order,
+        actor,
     })
 }
 
@@ -783,6 +820,17 @@ fn not_found() -> ApiError {
 
 fn parse_id(text: &str) -> Result<Uuid> {
     Uuid::parse_str(text).map_err(|_| ApiError::BadRequest("malformed id".into()))
+}
+
+/// An optional numeric query parameter.
+fn query_number<T: std::str::FromStr>(query: &Query, key: &str) -> Result<Option<T>> {
+    query
+        .get(key)
+        .map(|text| {
+            text.parse()
+                .map_err(|_| ApiError::BadRequest(format!("{key} must be a number")))
+        })
+        .transpose()
 }
 
 fn parse_priority(value: u8) -> Result<Priority> {

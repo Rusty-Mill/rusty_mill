@@ -6,6 +6,7 @@
 
 use crate::docs::{Doc, DocStore, BOARD_KIND, KINDS, MAX_DOC_BYTES};
 use crate::lists::{ListStore, TaskList, ViewMode, INBOX_ID};
+use crate::moves::{valid_actor, Move, MoveStore, DEFAULT_ACTOR, MAX_ACTOR_BYTES};
 use crate::store::{TaskStore, TickError, SORT_STEP};
 use crate::tags::{tag_name, Tag, TagStore};
 use crate::task::{ChecklistItem, Priority, Status, Task, TaskKind, NO_DUE};
@@ -86,6 +87,8 @@ pub struct NewTask {
     /// Create it already closed (stamping `completed_ms`); `None` is open. One write, so a
     /// caller recording finished work never leaves an open task behind.
     pub status: Option<Status>,
+    /// Who is writing, recorded on the column move this makes; `None` is [`DEFAULT_ACTOR`].
+    pub actor: Option<String>,
 }
 
 /// `Option<Option<_>>` fields: outer `None` leaves the field alone,
@@ -108,6 +111,8 @@ pub struct TaskPatch {
     pub tags: Option<Vec<String>>,
     pub list_id: Option<Uuid>,
     pub sort_order: Option<i64>,
+    /// Who is writing, recorded on the column move this makes; `None` is [`DEFAULT_ACTOR`].
+    pub actor: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -154,6 +159,7 @@ pub struct Service {
     lists: ListStore,
     tags: TagStore,
     docs: DocStore,
+    moves: MoveStore,
     clock: Clock,
 }
 
@@ -164,11 +170,13 @@ impl Service {
             lists: ListStore::open(dir)?,
             tags: TagStore::open(dir)?,
             docs: DocStore::open(dir)?,
+            moves: MoveStore::open(dir)?,
             clock,
         };
         service.ensure_inbox()?;
         service.realign_subtasks()?;
         service.sweep_orphan_docs()?;
+        service.moves.repair(&service.tasks.all())?;
         Ok(service)
     }
 
@@ -191,7 +199,7 @@ impl Service {
         for mut child in stray {
             if let Some(parent) = child.parent_id.and_then(|p| self.tasks.get(p)) {
                 child.list_id = parent.list_id;
-                self.save_task(child)?;
+                self.save_task(child, DEFAULT_ACTOR)?;
             }
         }
         Ok(())
@@ -296,7 +304,7 @@ impl Service {
         for mut task in self.tasks.in_list(id) {
             if !task.is_deleted() {
                 task.deleted_ms = Some(now);
-                self.save_task(task)?;
+                self.save_task(task, DEFAULT_ACTOR)?;
             }
         }
         self.lists.delete(id)?;
@@ -307,6 +315,7 @@ impl Service {
 
     pub fn create_task(&mut self, new: NewTask) -> Result<Task> {
         self.tasks.require_writable()?;
+        let actor = clean_actor(new.actor)?;
         self.live_list(new.list_id)?;
         if let Some(parent) = new.parent_id {
             let parent = self.task(parent)?;
@@ -342,6 +351,7 @@ impl Service {
             apply_status(&mut task, status, now);
         }
         self.tasks.insert(task.clone())?;
+        self.moves.record(None, &task, &actor)?;
         Ok(task)
     }
 
@@ -352,6 +362,7 @@ impl Service {
 
     pub fn patch_task(&mut self, id: Uuid, patch: TaskPatch) -> Result<Task> {
         self.tasks.require_writable()?;
+        let actor = clean_actor(patch.actor)?;
         let mut task = self.task(id)?;
         if let Some(title) = patch.title {
             task.title = clean_title(&title)?;
@@ -413,9 +424,9 @@ impl Service {
             }
             task.list_id = list;
             changed.push(task);
-            return self.save_batch(changed);
+            return self.save_batch(changed, &actor);
         }
-        self.save_task(task)
+        self.save_task(task, &actor)
     }
 
     fn children(&self, parent: &Task) -> Vec<Task> {
@@ -426,15 +437,19 @@ impl Service {
             .collect()
     }
 
-    fn save_task(&mut self, mut task: Task) -> Result<Task> {
+    /// Every task write goes through here or [`Service::save_batch`], which record
+    /// the column move it makes, if any, as `actor`, after the task is durable.
+    fn save_task(&mut self, mut task: Task, actor: &str) -> Result<Task> {
         task.updated_ms = self.now();
         task.version = task.version.wrapping_add(1);
+        let old = self.tasks.get(task.id);
         self.tasks.replace(task.clone())?;
+        self.moves.record(old.as_ref(), &task, actor)?;
         Ok(task)
     }
 
     /// Save a task and its children under the task store's durable redo seam.
-    fn save_batch(&mut self, mut tasks: Vec<Task>) -> Result<Task> {
+    fn save_batch(&mut self, mut tasks: Vec<Task>, actor: &str) -> Result<Task> {
         let now = self.now();
         for task in &mut tasks {
             task.updated_ms = now;
@@ -444,15 +459,20 @@ impl Service {
             .last()
             .cloned()
             .ok_or_else(|| ServiceError::Invalid("nothing to save".into()))?;
-        self.tasks.replace_batch(tasks)?;
+        let old: Vec<Option<Task>> = tasks.iter().map(|t| self.tasks.get(t.id)).collect();
+        self.tasks.replace_batch(tasks.clone())?;
+        for (old, new) in old.iter().zip(&tasks) {
+            self.moves.record(old.as_ref(), new, actor)?;
+        }
         Ok(result)
     }
 
-    pub fn set_status(&mut self, id: Uuid, status: Status) -> Result<Task> {
+    pub fn set_status(&mut self, id: Uuid, status: Status, actor: Option<String>) -> Result<Task> {
         self.patch_task(
             id,
             TaskPatch {
                 status: Some(status),
+                actor,
                 ..TaskPatch::default()
             },
         )
@@ -511,7 +531,7 @@ impl Service {
         }
         task.deleted_ms = None;
         changed.push(task);
-        self.save_batch(changed)
+        self.save_batch(changed, DEFAULT_ACTOR)
     }
 
     /// Delete a task and its subtasks for good.
@@ -542,11 +562,25 @@ impl Service {
         Ok(trashed.len())
     }
 
-    /// Delete the documents that belong to purged tasks: comments and board documents.
+    /// Delete what belongs to purged tasks: comments, board documents and column history.
     fn forget_docs_of(&mut self, gone: &[Uuid]) -> Result<()> {
         self.docs.delete_comments_of(gone)?;
         self.docs.delete_board_of(gone)?;
+        self.moves.delete_of(gone)?;
         Ok(())
+    }
+
+    // ---- column history ----------------------------------------------
+
+    /// Column moves at or after `since` and past seq `after`, oldest first, at most `limit`.
+    pub fn moves(&self, since: i64, after: u64, limit: usize) -> Vec<Move> {
+        self.moves.page(since, after, limit)
+    }
+
+    /// Every column move of task `id`, oldest first.
+    pub fn task_moves(&self, id: Uuid) -> Result<Vec<Move>> {
+        self.task(id)?;
+        Ok(self.moves.of_task(id))
     }
 
     /// Set a task's manual position. Rewrites one durable slot.
@@ -768,7 +802,7 @@ impl Service {
                 })
                 .filter(|g| seen.insert(g.clone()))
                 .collect();
-            self.save_task(task)?;
+            self.save_task(task, DEFAULT_ACTOR)?;
         }
         Ok(())
     }
@@ -865,7 +899,7 @@ impl Service {
             if task.is_deleted() {
                 return invalid("a document written for a task needs one that is not in the trash");
             }
-            self.save_task(task)?;
+            self.save_task(task, DEFAULT_ACTOR)?;
         }
         let now = self.now();
         let doc = Doc {
@@ -909,6 +943,17 @@ fn day_bounds(now_ms: i64, utc_offset_min: i32) -> (i64, i64) {
     let local = now_ms.saturating_add(offset);
     let start = local - local.rem_euclid(DAY_MS) - offset;
     (start, start + DAY_MS)
+}
+
+/// The writer a move is recorded as: `actor` if usable, else [`DEFAULT_ACTOR`] when absent.
+fn clean_actor(actor: Option<String>) -> Result<String> {
+    match actor {
+        None => Ok(DEFAULT_ACTOR.to_string()),
+        Some(a) if valid_actor(&a) => Ok(a),
+        Some(_) => invalid(format!(
+            "actor must be 1 to {MAX_ACTOR_BYTES} printable ASCII characters without spaces"
+        )),
+    }
 }
 
 fn check_kind(kind: &str) -> Result<()> {
@@ -1321,7 +1366,7 @@ mod tests {
             // The crash: the child's save landed, the parent's did not.
             let mut moved = svc.task(child.id).unwrap();
             moved.list_id = other.id;
-            svc.save_task(moved).unwrap();
+            svc.save_task(moved, DEFAULT_ACTOR).unwrap();
             (parent.id, child.id, other.id)
         };
         let svc = Service::open(dir.path(), clock()).unwrap();
