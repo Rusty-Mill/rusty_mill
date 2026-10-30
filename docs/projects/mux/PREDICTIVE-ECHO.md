@@ -2,8 +2,9 @@
 
 Status: proposed 2026-10-29; the owner answered its open questions on
 2026-10-29 and it was approved in #1245. Build PR 1, the protocol and
-server, merged in #1247; build PR 2 adds the client's epochs and the
-split-window display. Phase 3 step 3 (C13). The owner's
+server, merged in #1247; build PR 2, the client's epochs and the
+split-window display, merged in #1258; build PR 3 adds the single-block
+display and the end-to-end tests. Phase 3 step 3 (C13). The owner's
 order (DECISIONS 2026-10-28) is to design causality, epochs and password
 suppression and have them reviewed before any code. Nothing here changes a
 wire format yet. [SPIKE-4-ROAMING.md](SPIKE-4-ROAMING.md) states the open
@@ -244,6 +245,18 @@ each guarantees:
   cell. If the implementation finds that `rusty_term_core` does not expose
   the current rendition, passing mode shows no predictions in the first
   version.
+
+  As built, `rusty_term_core` does not expose the rendition, but says
+  whether it is plain (`AnsiParser::plain`: between sequences, the `SGR 0`
+  pen, US-ASCII, unprotected) and whether a cursor move and its text are
+  (`Grid::plain_cursor`: no origin mode, no insert mode, no open hyperlink). Predictions are drawn only then, and
+  only with the cursor inside the screen (not waiting to wrap), so `SGR 0`
+  and a `CUP` home put the terminal back exactly. Covered cells are kept
+  as the grid had them and put back before the block's next Output is
+  passed on, so the output always lands on the screen it was written for;
+  they are drawn again after it if they still apply. With any other
+  rendition, as when a program's prompt leaves colour set, nothing is
+  drawn until it is plain again.
 
 ## Residual errors
 

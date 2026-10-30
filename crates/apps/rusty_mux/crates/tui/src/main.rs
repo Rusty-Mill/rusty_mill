@@ -72,7 +72,7 @@ mod client {
     use rusty_mux_server::checkpoint::Receiver;
     use rusty_mux_tui::keys::{Action, Keys};
     use rusty_mux_tui::predict::{Gate, Overlay, Predictor};
-    use rusty_mux_tui::screen::{self, Frame, View};
+    use rusty_mux_tui::screen::{self, Frame, Passed, View};
     use rusty_mux_tui::{Conn, NoWin32Input, RESTORE, create_private, modes, pass};
     use rusty_term_core::{AnsiParser, Grid};
     use rusty_uuid::Uuid;
@@ -503,6 +503,7 @@ mod client {
             arriving: None,
             opened: 0,
             mirrored: None,
+            passed: None,
             no_win32: NoWin32Input::default(),
             pending: None,
             ended: None,
@@ -1149,6 +1150,8 @@ mod client {
         /// The input modes last mirrored from the focused block while
         /// composed.
         mirrored: Option<Vec<u8>>,
+        /// Predictions drawn over the passing block since its last output.
+        passed: Option<Passed>,
         /// Filters the passing block's raw output.
         no_win32: NoWin32Input,
         /// A layout change held back while blocks it drops drain.
@@ -1558,14 +1561,21 @@ mod client {
                         let painted = self.panes.get(&block).and_then(|p| p.term.as_ref());
                         if let Some((grid, _)) = painted {
                             write(&pass(grid), &mut self.ended);
+                            self.passed = None;
                         }
                     }
                     self.fit();
                 }
                 Ok(Change::Output(data)) => {
                     if self.shown == Shown::Passing(block) {
+                        // Put back what predictions cover first, so the
+                        // output lands on the screen it was written for.
+                        let erased = self.passed.take().map(|p| p.erase());
                         let bytes = self.no_win32.filter(&data);
-                        write(&bytes, &mut self.ended);
+                        write(
+                            &[erased.unwrap_or_default(), bytes].concat(),
+                            &mut self.ended,
+                        );
                     }
                 }
                 // The focus may have moved on while the lease was asked for.
@@ -1784,6 +1794,7 @@ mod client {
             };
             write(&bytes, &mut self.ended);
             self.mirrored = None;
+            self.passed = None;
             self.shown = shown;
         }
 
@@ -1806,8 +1817,36 @@ mod client {
                 .overlay()
         }
 
+        /// Brings the predictions drawn over the passing `block` in line
+        /// with its overlay. Drawn only where `SGR 0` and a plain cursor
+        /// move put the terminal back as the block left it; the last ones
+        /// drawn stay until its next output otherwise.
+        fn pass_ahead(&mut self, block: BlockId) {
+            let Some((grid, parser)) = self.panes.get(&block).and_then(|p| p.term.as_ref()) else {
+                return;
+            };
+            if !screen::passable(grid, parser) {
+                return;
+            }
+            let wanted = self.overlay(block);
+            if wanted.as_ref() == self.passed.as_ref().map(Passed::overlay) {
+                return;
+            }
+            let erased = self.passed.take().map(|p| p.erase()).unwrap_or_default();
+            let drawn = wanted.map(|o| screen::pass_ahead(grid, &o));
+            let (bytes, passed) = drawn.unzip();
+            self.passed = passed;
+            write(
+                &[erased, bytes.unwrap_or_default()].concat(),
+                &mut self.ended,
+            );
+        }
+
         /// Redraws the composed screen where it changed.
         fn draw(&mut self) {
+            if let Shown::Passing(block) = self.shown {
+                return self.pass_ahead(block);
+            }
             let Shown::Composed(last) = &self.shown else {
                 return;
             };

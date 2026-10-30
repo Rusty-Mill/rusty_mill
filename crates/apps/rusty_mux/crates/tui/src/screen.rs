@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use rusty_mux_core::{BlockId, Rect, Size};
 use rusty_mux_server::style::Style;
-use rusty_term_core::{ATTR_UNDERLINE, Cell, Grid, WIDE_TRAILER};
+use rusty_term_core::{ATTR_UNDERLINE, AnsiParser, Cell, Grid, WIDE_TRAILER};
 
 use crate::keys::Dir;
 use crate::predict::Overlay;
@@ -299,10 +299,115 @@ pub fn neighbor(rects: &[(BlockId, Rect)], from: BlockId, dir: Dir) -> Option<Bl
         .map(|(_, b)| b)
 }
 
+/// Predictions drawn over a block whose raw output passes through, and
+/// the cells they cover, to put back before the block's next output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Passed {
+    overlay: Overlay,
+    /// Where the cursor was and is put back.
+    home: (usize, usize),
+    /// Each covered cell: its column, style and text.
+    under: Vec<(usize, Style, String)>,
+}
+
+impl Passed {
+    /// What it draws.
+    pub fn overlay(&self) -> &Overlay {
+        &self.overlay
+    }
+
+    /// Puts the covered cells back from the grid they were taken from,
+    /// then the cursor and the reset rendition, as [`pass_ahead`] left them.
+    pub fn erase(&self) -> Vec<u8> {
+        let row = self.overlay.row;
+        let cells = self
+            .under
+            .iter()
+            .map(|(x, style, text)| (*x, *style, text.as_str()));
+        place(row, cells, self.home)
+    }
+}
+
+/// Whether predictions may be drawn over a passed-through block now, as
+/// its `parser` and `grid` copy the terminal: the parser is
+/// [`plain`](AnsiParser::plain) and the cursor
+/// [`plain_cursor`](Grid::plain_cursor) and inside the screen, so `SGR 0`
+/// restores the rendition exactly, the moves land where they say, and
+/// nothing is written inside an unfinished sequence.
+pub fn passable(grid: &Grid, parser: &AnsiParser) -> bool {
+    parser.plain() && grid.plain_cursor() && grid.cursor.0 < grid.cols
+}
+
+/// Draws `overlay` over a passed-through block whose screen `grid` copies:
+/// each cell with an absolute move, characters underlined, then the
+/// cursor back home and `SGR 0`. Only while [`passable`]; never `DECSC`,
+/// whose one slot the program may be using.
+pub fn pass_ahead(grid: &Grid, overlay: &Overlay) -> (Vec<u8>, Passed) {
+    let row = overlay.row;
+    let cells: Vec<Cell> = grid.row_cells(row).collect();
+    let trailer = |x: usize| cells.get(x).is_some_and(|c| c.flags & WIDE_TRAILER != 0);
+    let fits = |x: usize| x < cells.len() && !trailer(x) && !trailer(x + 1);
+    let mut drawn = Vec::new();
+    let mut under = Vec::new();
+    for &(x, ch) in overlay.cells.iter().filter(|(x, _)| fits(*x)) {
+        let cell = &cells[x];
+        let style = Style::of(cell);
+        let text: String = std::iter::once(cell.ch)
+            .chain(cluster(grid, cell).chars())
+            .collect();
+        let (ahead, look) = match ch {
+            Some(ch) => (
+                ch.to_string(),
+                Style {
+                    attrs: style.attrs | ATTR_UNDERLINE,
+                    ..style
+                },
+            ),
+            None => (" ".to_string(), style),
+        };
+        drawn.push((x, look, ahead));
+        under.push((x, style, text));
+    }
+    let home = grid.cursor;
+    let cells = drawn
+        .iter()
+        .map(|(x, style, text)| (*x, *style, text.as_str()));
+    let bytes = place(row, cells, home);
+    let passed = Passed {
+        overlay: overlay.clone(),
+        home,
+        under,
+    };
+    (bytes, passed)
+}
+
+/// A grapheme's continuation after `cell.ch`, if any.
+fn cluster<'g>(grid: &'g Grid, cell: &Cell) -> &'g str {
+    let i = usize::from(cell.cluster).checked_sub(1);
+    i.and_then(|i| grid.clusters.get(i))
+        .map_or("", String::as_str)
+}
+
+/// Each of `cells` at its column on `row`, then `SGR 0` and the cursor at
+/// `home`.
+fn place<'a>(
+    row: usize,
+    cells: impl Iterator<Item = (usize, Style, &'a str)>,
+    home: (usize, usize),
+) -> Vec<u8> {
+    let mut out = String::new();
+    for (x, style, text) in cells {
+        let _ = write!(out, "\x1b[{};{}H", row + 1, x + 1);
+        style.sgr(&mut out);
+        out.push_str(text);
+    }
+    let _ = write!(out, "\x1b[0m\x1b[{};{}H", home.1 + 1, home.0 + 1);
+    out.into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use rusty_mux_core::Layout;
-    use rusty_term_core::AnsiParser;
     use rusty_uuid::Uuid;
 
     use super::*;
@@ -482,6 +587,91 @@ mod tests {
         let frame = compose(size(3, 1), &views, id(1));
         // `日` is cut to a blank by the edge, and nothing lands on it.
         assert_eq!(text(&frame, 0), "$  ");
+    }
+
+    #[test]
+    fn passed_predictions_draw_underlined_then_put_back_what_they_covered() {
+        // `b` already echoed at column 3, under a blank Backspace left.
+        let typed = grid(10, 2, "$ ab\x08");
+        let overlay = Overlay {
+            row: 0,
+            cells: vec![(3, None), (4, Some('c'))],
+            cursor: 4,
+        };
+        let (bytes, passed) = pass_ahead(&typed, &overlay);
+        let drawn = String::from_utf8(bytes).unwrap();
+        assert_eq!(
+            drawn,
+            "\x1b[1;4H\x1b[0m \x1b[1;5H\x1b[0;4mc\x1b[0m\x1b[1;4H"
+        );
+        assert_eq!(passed.overlay(), &overlay);
+        let erased = String::from_utf8(passed.erase()).unwrap();
+        assert_eq!(erased, "\x1b[1;4H\x1b[0mb\x1b[1;5H\x1b[0m \x1b[0m\x1b[1;4H");
+    }
+
+    #[test]
+    fn passed_predictions_skip_wide_glyphs_and_the_margin() {
+        let wide = grid(4, 1, "$日");
+        let overlay = Overlay {
+            row: 0,
+            cells: vec![(1, Some('x')), (2, Some('y')), (4, Some('z'))],
+            cursor: 0,
+        };
+        let (bytes, passed) = pass_ahead(&wide, &overlay);
+        assert_eq!(String::from_utf8(bytes).unwrap(), "\x1b[0m\x1b[1;4H");
+        assert_eq!(
+            String::from_utf8(passed.erase()).unwrap(),
+            "\x1b[0m\x1b[1;4H"
+        );
+    }
+
+    /// Passes `chunks` through to a stand-in terminal as the client does:
+    /// each chunk after erasing the predictions drawn, then `overlay`
+    /// drawn again while [`passable`]. Returns the terminal's grid and the
+    /// block's copy.
+    fn pass_through(cols: usize, chunks: &[&[u8]], overlay: &Overlay) -> (Grid, Grid) {
+        let (mut copy, mut copier) = (Grid::new(cols, 1), AnsiParser::new());
+        let (mut term, mut terminal) = (Grid::new(cols, 1), AnsiParser::new());
+        let mut passed: Option<Passed> = None;
+        for chunk in chunks {
+            if let Some(p) = passed.take() {
+                terminal.advance(&mut term, &p.erase());
+            }
+            copier.advance(&mut copy, chunk);
+            terminal.advance(&mut term, chunk);
+            if passable(&copy, &copier) {
+                let (bytes, p) = pass_ahead(&copy, overlay);
+                terminal.advance(&mut term, &bytes);
+                passed = Some(p);
+            }
+        }
+        if let Some(p) = passed {
+            terminal.advance(&mut term, &p.erase());
+        }
+        (term, copy)
+    }
+
+    #[test]
+    fn passing_predictions_leave_the_terminal_as_its_copy_across_split_and_insert_output() {
+        let overlay = |x: usize, ch: char| Overlay {
+            row: 0,
+            cells: vec![(x, Some(ch))],
+            cursor: x + 1,
+        };
+        // A frame ending inside a CSI, a UTF-8 character or a string, then
+        // insert mode with the real echo arriving while `b` is predicted.
+        let cases: [(&[&[u8]], Overlay); 4] = [
+            (&[b"$ ", b"\x1b[3", b"1mx\x1b[0m"], overlay(2, 'x')),
+            (&[b"$ ", b"\xc3", b"\xa9"], overlay(2, '\u{e9}')),
+            (&[b"$ ", b"\x1b]0;ti", b"tle\x07x"], overlay(2, 'x')),
+            (&[b"$ a\x1b[4h", b"b", b"c\x1b[4l"], overlay(3, 'b')),
+        ];
+        for (chunks, overlay) in cases {
+            let (term, copy) = pass_through(10, chunks, &overlay);
+            let cells = |g: &Grid| g.row_cells(0).collect::<Vec<_>>();
+            assert_eq!(cells(&term), cells(&copy), "{chunks:?}");
+            assert_eq!(term.cursor, copy.cursor, "{chunks:?}");
+        }
     }
 
     #[test]
