@@ -8,6 +8,7 @@
 //! input-more <bytes hex> [held=<n>]
 //! resize <cols> <rows>
 //! drained [held=<n>]
+//! serve-reads [held=<n>]
 //! hangup
 //! exited
 //! expect <effect>
@@ -46,6 +47,7 @@ pub(crate) fn event_line(ev: &Event<'_>, held: usize) -> String {
         Event::InputMore(bytes) => format!("input-more {}", hex_or_dash(bytes)),
         Event::Resize(size) => format!("resize {} {}", size.cols, size.rows),
         Event::OutputDrained => "drained".to_owned(),
+        Event::ServeReads => "serve-reads".to_owned(),
         Event::ChildExited => "exited".to_owned(),
         Event::HangUp => "hangup".to_owned(),
     };
@@ -204,6 +206,7 @@ mod tests {
                 rows: num(2) as u16,
             }),
             "drained" => Event::OutputDrained,
+            "serve-reads" => Event::ServeReads,
             "hangup" => Event::HangUp,
             "exited" => Event::ChildExited,
             other => panic!("unknown step {other:?}"),

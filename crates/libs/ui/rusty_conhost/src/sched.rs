@@ -62,6 +62,8 @@ pub(crate) struct View {
     pub parked: usize,
     /// The server is closed: nothing more is read from the driver.
     pub closed: bool,
+    /// Waiting reads stopped at a call's reply budget with input left.
+    pub reads_ready: bool,
 }
 
 /// What one turn does, in this order.
@@ -69,6 +71,8 @@ pub(crate) struct View {
 pub(crate) struct Turn {
     pub control: Control,
     pub child_exited: bool,
+    /// Serve the waiting reads the last call left, before new input.
+    pub serve_reads: bool,
     /// Bytes to take from the input lane and hand to the console.
     pub input: usize,
     pub submit_read: bool,
@@ -79,7 +83,8 @@ pub(crate) struct Turn {
 
 /// Plan one turn.
 pub(crate) fn turn(v: &View) -> Turn {
-    let input = if v.output <= INPUT_PAUSE_ABOVE {
+    // Reads owed queued input go first, so the queue stays bounded.
+    let input = if v.output <= INPUT_PAUSE_ABOVE && !v.reads_ready {
         v.input.min(INPUT_SLICE)
     } else {
         0
@@ -87,9 +92,10 @@ pub(crate) fn turn(v: &View) -> Turn {
     Turn {
         control: v.control,
         child_exited: v.exited,
+        serve_reads: v.reads_ready,
         input,
         submit_read: !v.closed && !v.read_in_flight && admits_read(v.waiting, v.parked),
-        poll: input < v.input && v.output <= INPUT_PAUSE_ABOVE,
+        poll: v.reads_ready || (input < v.input && v.output <= INPUT_PAUSE_ABOVE),
     }
 }
 
@@ -255,5 +261,27 @@ mod tests {
         assert!(taken.hang_up);
         assert_eq!(taken.resize, Some(WinSize { rows: 2, cols: 3 }));
         assert_eq!(lane, Control::default());
+    }
+
+    #[test]
+    fn reads_owed_input_are_served_before_new_input_and_after_control() {
+        let v = View {
+            control: Control {
+                hang_up: true,
+                ..Control::default()
+            },
+            input: 100,
+            reads_ready: true,
+            ..View::default()
+        };
+        let t = turn(&v);
+        assert!(t.control.hang_up && t.serve_reads && t.poll);
+        assert_eq!(t.input, 0, "input waits while reads are owed the queue");
+        let t = turn(&View {
+            reads_ready: false,
+            ..v
+        });
+        assert!(!t.serve_reads);
+        assert_eq!(t.input, 100);
     }
 }

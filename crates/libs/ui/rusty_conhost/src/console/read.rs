@@ -30,6 +30,9 @@ const READ_NOWAIT: u16 = 0x2;
 const READ_CONSOLE_LEN: usize = 20;
 const CONTROL_KEY_STATE_AT: usize = 12;
 const NUM_BYTES_AT: usize = 16;
+/// Reply data one read returns, and one call builds across the reads it
+/// completes (§7.4); a read's buffer beyond it goes unused.
+pub(super) const READ_REPLY_CAP: usize = 1024 * 1024;
 /// UTF-16 units of finished lines that all handles together keep for
 /// their next read (§7.4); a line's rest past it is dropped.
 pub(super) const MAX_PENDING_UNITS: usize = 512 * 1024;
@@ -215,6 +218,12 @@ impl Console {
             .any(|r| matches!(r.kind, ReadKind::Line { .. }));
     }
 
+    /// Waiting reads are owed the queued input: a cooked read's echo
+    /// waits for the reader, or the last call stopped at its reply budget.
+    fn reads_behind(&self) -> bool {
+        self.echo_held || self.reads_cut
+    }
+
     pub(super) fn clear_input(&mut self) {
         self.echo_held = false;
         self.input.clear();
@@ -308,9 +317,12 @@ impl Console {
             return;
         }
         let at = m.fixed.len();
-        let count = (p.output_size as usize).saturating_sub(at) / input::RECORD_LEN;
-        // Behind a cooked read whose echo waits, the queue is its input.
-        let records = if count == 0 || self.echo_held {
+        let count = (p.output_size as usize)
+            .saturating_sub(at)
+            .min(READ_REPLY_CAP)
+            / input::RECORD_LEN;
+        // Behind reads still to be served, the queue is their input.
+        let records = if count == 0 || self.reads_behind() {
             Vec::new()
         } else {
             self.read_records(count, unicode, flags & READ_NOREMOVE != 0)
@@ -369,7 +381,9 @@ impl Console {
                 }
             }
         };
-        let capacity = (p.output_size as usize).saturating_sub(at);
+        let capacity = (p.output_size as usize)
+            .saturating_sub(at)
+            .min(READ_REPLY_CAP);
         let char_size = if unicode { 2 } else { 1 };
         if capacity < 1 {
             fx.push(reply(msg::STATUS_BUFFER_TOO_SMALL));
@@ -404,8 +418,8 @@ impl Console {
             fx.push(reply(msg::STATUS_BUFFER_TOO_SMALL));
             return;
         }
-        if self.echo_held {
-            // Behind a read whose echo waits: it gets the input first.
+        if self.reads_behind() {
+            // Behind reads still to be served: they get the input first.
             self.wait(read);
             return;
         }
@@ -430,15 +444,26 @@ impl Console {
     }
 
     /// Retry every waiting read in order; those that finish complete now.
+    /// At most [`READ_REPLY_CAP`] of reply data is built per call (§7.4):
+    /// the rest of the reads wait for [`Console::reads_ready`]'s turn.
     pub(super) fn serve_reads(&mut self, out: &mut OutputQueue, fx: &mut Vec<Effect>) {
         let mut kept = std::collections::VecDeque::new();
         let mut reads = std::mem::take(&mut self.reads);
         self.echo_held = false;
+        self.reads_cut = false;
+        let mut built = 0;
         while let Some(r) = reads.pop_front() {
+            if built > 0 && built + r.capacity > READ_REPLY_CAP {
+                self.reads_cut = true;
+                kept.push_back(r);
+                kept.append(&mut reads);
+                break;
+            }
             let retained = r.retained;
             match self.attempt(r, out, fx) {
                 Attempt::Done(reply) => {
                     self.parked -= retained;
+                    built += reply.output.len();
                     fx.push(Effect::Complete(reply));
                 }
                 Attempt::Wait(r) => kept.push_back(r),
@@ -551,10 +576,10 @@ impl Console {
         let char_size = if unicode { 2 } else { 1 };
         let mut out = self.consume_cached(unicode, capacity);
         while capacity - out.len() >= char_size {
-            let Some(units) = self.next_text(unicode) else {
+            let Some((units, n)) = self.next_text(unicode) else {
                 break;
             };
-            let data = self.consume(unicode, &units, capacity - out.len());
+            let data = self.consume(unicode, &units[..n], capacity - out.len());
             out.extend(data.bytes);
         }
         out
@@ -563,16 +588,16 @@ impl Console {
     /// The next character's units for a raw read. An ANSI read takes a
     /// surrogate pair whole, holding a high half until its low half
     /// arrives; a lone half reads as U+FFFD.
-    fn next_text(&mut self, unicode: bool) -> Option<Vec<u16>> {
+    fn next_text(&mut self, unicode: bool) -> Option<([u16; 2], usize)> {
         let first = self.next_unit()?;
         if unicode || !input::is_high_surrogate(first) {
-            return Some(vec![first]);
+            return Some(([first, 0], 1));
         }
         match self.next_unit() {
-            Some(low) if input::is_low_surrogate(low) => Some(vec![first, low]),
+            Some(low) if input::is_low_surrogate(low) => Some(([first, low], 2)),
             Some(other) => {
                 self.held_unit = Some(other);
-                Some(vec![first])
+                Some(([first, 0], 1))
             }
             None => {
                 self.held_unit = Some(first);
@@ -1049,6 +1074,59 @@ mod tests {
         }
         assert_eq!(lines.len(), 4);
         assert!(lines.iter().all(|l| l == "x\r\n"), "{lines:?}");
+    }
+
+    /// Built reply data in `fx`.
+    fn reply_bytes(fx: &[Effect]) -> usize {
+        fx.iter()
+            .map(|e| match e {
+                Effect::Reply(r) | Effect::Complete(r) => r.output.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Raw W reads of `declared` bytes each, then repeated win32 'a'
+    /// records enough to fill them all.
+    fn large_reads(h: &mut Host, input: usize, reads: usize, declared: u32) -> Vec<Effect> {
+        h.set_mode(input, RAW);
+        for _ in 0..reads {
+            assert!(held(&read_w(h, input, declared)));
+        }
+        let record = b"\x1b[65;0;97;1;0;65535_";
+        h.ev(Event::Input(&record.repeat(513)))
+    }
+
+    #[test]
+    fn one_call_builds_at_most_one_reply_budget_and_the_rest_follows() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        let reads = 8;
+        let fx = large_reads(&mut h, input, reads, u32::MAX - 64);
+        assert!(reply_bytes(&fx) <= READ_REPLY_CAP, "{}", reply_bytes(&fx));
+        let mut done = completes(&fx).len();
+        assert_eq!(done, 1, "the first read fills its capped buffer");
+        assert!(completes(&fx)[0].output.len() <= READ_REPLY_CAP);
+        while h.c.reads_ready() {
+            let fx = h.ev(Event::ServeReads);
+            assert!(reply_bytes(&fx) <= READ_REPLY_CAP, "{}", reply_bytes(&fx));
+            done += completes(&fx).len();
+        }
+        assert_eq!(done, reads, "every read is served without more input");
+    }
+
+    #[test]
+    fn reads_behind_the_budget_keep_their_order_and_a_hang_up_ends_them() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        large_reads(&mut h, input, 4, 1 << 20);
+        assert!(h.c.reads_ready());
+        // A new read queues behind the ones still owed input.
+        let r = get_input(&mut h, input, READ_NOWAIT, true, 8);
+        assert_eq!(r.information, 0);
+        h.ev(Event::HangUp);
+        assert_eq!(h.c.waiting(), 0);
+        assert!(!h.c.reads_ready(), "nothing is left to serve");
     }
 
     #[test]

@@ -118,6 +118,9 @@ pub(crate) enum Event<'a> {
     /// VT bytes from the terminal that is still writing: more follow, so
     /// an ESC at their end is not yet the Escape key.
     InputMore(&'a [u8]),
+    /// Serve the waiting reads the last call left at its reply budget
+    /// ([`Console::reads_ready`]).
+    ServeReads,
     Resize(WinSize),
     /// The reader took bytes out of the output queue.
     OutputDrained,
@@ -462,6 +465,8 @@ pub(crate) struct Console {
     /// A cooked read's echo waits for the reader with input queued: reads
     /// behind it wait too, so input keeps its order.
     echo_held: bool,
+    /// The last pass over waiting reads stopped at its reply budget.
+    reads_cut: bool,
     /// UTF-8 bytes of a character an ANSI read could not fit, for the
     /// next ANSI read (conhost `_cachedTextReaderA`).
     cached_text: VecDeque<u8>,
@@ -503,12 +508,19 @@ impl Console {
             input_available: false,
             reads: VecDeque::new(),
             echo_held: false,
+            reads_cut: false,
             cached_text: VecDeque::new(),
             cached_records: VecDeque::new(),
             held_unit: None,
             record_utf8: [input::Utf8Units::default(); 2],
             vt_utf8: input::Utf8Units::default(),
         }
+    }
+
+    /// Waiting reads can go on at once: the last call stopped at its
+    /// reply budget with input left.
+    pub(crate) fn reads_ready(&self) -> bool {
+        self.reads_cut
     }
 
     /// Calls held without a reply: parked writes and waiting reads.
@@ -536,6 +548,7 @@ impl Console {
             Event::Input(bytes) => self.terminal_input(bytes, true, out, &mut fx),
             Event::InputMore(bytes) => self.terminal_input(bytes, false, out, &mut fx),
             Event::Resize(size) => self.size = size,
+            Event::ServeReads => self.serve_reads(out, &mut fx),
             Event::OutputDrained => {
                 self.pump(None, out, &mut fx);
                 // Cooked reads held back by their echo go on.
@@ -576,6 +589,8 @@ impl Console {
         // Their clients are about to be disconnected.
         self.writes.clear();
         self.reads.clear();
+        self.echo_held = false;
+        self.reads_cut = false;
         self.parked = 0;
         fx.push(Effect::CloseServer);
         fx.push(Effect::Eof);

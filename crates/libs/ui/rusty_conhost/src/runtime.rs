@@ -98,6 +98,13 @@ struct Lanes {
     /// `write` calls part-way through their buffer: the input lane's
     /// last bytes are not where a terminal's write ended.
     writing: usize,
+    /// Bytes taken from the lane so far, to place `esc_ends`.
+    taken: u64,
+    /// Where writes that ended with ESC ended, as byte counts from the
+    /// lane's start: the engine cuts its slices there, so a write's last
+    /// ESC is the Escape key however writes coalesce. At most one per
+    /// queued byte.
+    esc_ends: VecDeque<u64>,
     control: Control,
     /// Set once the server is closed: `write` and `resize` fail.
     closed: bool,
@@ -122,6 +129,8 @@ impl Shared {
             lanes: Mutex::new(Lanes {
                 input: VecDeque::new(),
                 writing: 0,
+                taken: 0,
+                esc_ends: VecDeque::new(),
                 control: Control::default(),
                 closed: false,
             }),
@@ -161,6 +170,10 @@ impl Shared {
             rest = later;
             if rest.is_empty() {
                 lanes.writing -= 1;
+                if buf.last() == Some(&0x1b) {
+                    let end = lanes.taken + lanes.input.len() as u64;
+                    lanes.esc_ends.push_back(end);
+                }
             }
             self.waker.wake();
         }
@@ -245,13 +258,23 @@ impl Shared {
     }
 
     /// Take up to `n` bytes of terminal input, and whether they end
-    /// where a terminal's write ended: the lane is then empty and no
-    /// `write` is part-way through.
+    /// where a terminal's write ended: at the end of a write that ended
+    /// with ESC (the slice stops there), or with the lane empty and no
+    /// `write` part-way through.
     fn take_input(&self, n: usize) -> (Vec<u8>, bool) {
         let mut lanes = lock(&self.lanes);
-        let n = n.min(lanes.input.len());
-        let bytes = lanes.input.drain(..n).collect();
-        let end = lanes.input.is_empty() && lanes.writing == 0;
+        let mut n = n.min(lanes.input.len());
+        let mut end = false;
+        if let Some(&at) = lanes.esc_ends.front()
+            && at - lanes.taken <= n as u64
+        {
+            n = (at - lanes.taken) as usize;
+            end = true;
+            lanes.esc_ends.pop_front();
+        }
+        let bytes: Vec<u8> = lanes.input.drain(..n).collect();
+        lanes.taken += n as u64;
+        end |= lanes.input.is_empty() && lanes.writing == 0;
         self.input_room.notify_all();
         (bytes, end)
     }
@@ -508,6 +531,7 @@ impl Engine {
             waiting: self.console.waiting(),
             parked: self.console.parked(),
             closed: false,
+            reads_ready: self.console.reads_ready(),
         });
         if plan.control.hang_up {
             self.handle(Event::HangUp);
@@ -521,6 +545,9 @@ impl Engine {
         if plan.child_exited {
             self.exit_handled = true;
             self.handle(Event::ChildExited);
+        }
+        if plan.serve_reads {
+            self.handle(Event::ServeReads);
         }
         if plan.input > 0 {
             let (bytes, end) = self.shared.take_input(plan.input);
@@ -858,6 +885,21 @@ mod tests {
             .expect("the worker was started")
             .join()
             .expect("the worker returns once the engine is gone");
+    }
+
+    #[test]
+    fn a_write_ending_in_esc_stays_its_own_slice_when_writes_coalesce() {
+        let shared = Arc::new(Shared::new(Waker::new().expect("Waker")));
+        // Escape, then typing, both written before the engine drains.
+        shared.write(b"\x1b").expect("write");
+        shared.write(b"x").expect("write");
+        shared.write(b"\x1b[A").expect("write");
+        assert_eq!(shared.take_input(16), (b"\x1b".to_vec(), true));
+        assert_eq!(shared.take_input(16), (b"x\x1b[A".to_vec(), true));
+        // A write that only has an ESC inside is one slice.
+        shared.write(b"a\x1bb").expect("write");
+        shared.write(b"c\x1b").expect("write");
+        assert_eq!(shared.take_input(16), (b"a\x1bbc\x1b".to_vec(), true));
     }
 
     #[test]
