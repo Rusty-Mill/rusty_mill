@@ -25,6 +25,12 @@
 //! A `notify_one` with nobody currently waiting still banks a permit for
 //! the next `notified()` call, so a wakeup that "arrives early" (before
 //! the other side started waiting) isn't lost either.
+//!
+//! Dropping a `Notified` before it resolves takes it out of the queue,
+//! so a later `notify_one` reaches a live waiter instead of a dead one.
+//! If a `notify_one`/`notify_last` (or a banked permit) had already
+//! reached it, that wakeup passes on to the next waiter, or is banked
+//! again, as tokio does. A `notify_waiters` wakeup is not passed on.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -39,6 +45,11 @@ use std::task::{Context, Poll, Waker};
 /// filled in later once `poll` actually runs.
 struct WaiterState {
     woken: AtomicBool,
+    /// Set, under the queue lock as the waiter leaves the queue, when its
+    /// wakeup is meant for it alone (`notify_one`, `notify_last` or a
+    /// permit), so dropping it unresolved passes the wakeup on, even
+    /// before `fire` has run.
+    single: AtomicBool,
     waker: Mutex<Option<Waker>>,
 }
 
@@ -46,9 +57,17 @@ impl WaiterState {
     fn new() -> Arc<Self> {
         Arc::new(WaiterState {
             woken: AtomicBool::new(false),
+            single: AtomicBool::new(false),
             waker: Mutex::new(None),
         })
     }
+}
+
+/// Which waiter a single wakeup goes to.
+#[derive(Clone, Copy)]
+enum End {
+    Oldest,
+    Newest,
 }
 
 struct Inner {
@@ -87,12 +106,8 @@ impl Notify {
     /// Wakes one waiter, or -- if nobody is currently waiting -- banks a
     /// permit so the very next `notified().await` returns immediately.
     pub fn notify_one(&self) {
-        let mut guard = self.inner.lock().unwrap();
-        if let Some(state) = guard.waiters.pop_front() {
-            drop(guard);
+        if let Some(state) = self.take(End::Oldest) {
             Self::fire(&state);
-        } else {
-            guard.permits += 1;
         }
     }
 
@@ -101,13 +116,27 @@ impl Notify {
     /// Still just banks a permit, exactly like `notify_one`, if nobody
     /// is currently waiting.
     pub fn notify_last(&self) {
-        let mut guard = self.inner.lock().unwrap();
-        if let Some(state) = guard.waiters.pop_back() {
-            drop(guard);
+        if let Some(state) = self.take(End::Newest) {
             Self::fire(&state);
-        } else {
-            guard.permits += 1;
         }
+    }
+
+    /// Gives one wakeup, under the queue lock: takes the waiter at `end`
+    /// out of the queue and marks the wakeup its alone, for the caller to
+    /// fire once the lock is released, or banks a permit if none waits.
+    /// Marking it here, not in `fire`, means a waiter dropped before it
+    /// is fired still passes the wakeup on.
+    fn take(&self, end: End) -> Option<Arc<WaiterState>> {
+        let mut guard = self.inner.lock().unwrap();
+        let state = match end {
+            End::Oldest => guard.waiters.pop_front(),
+            End::Newest => guard.waiters.pop_back(),
+        };
+        match &state {
+            Some(state) => state.single.store(true, Ordering::Relaxed),
+            None => guard.permits += 1,
+        }
+        state
     }
 
     /// Wakes every task currently waiting -- each one's own `woken` flag
@@ -142,6 +171,7 @@ impl Notify {
         Notified {
             notify: self,
             registered: false,
+            done: false,
             state: WaiterState::new(),
         }
     }
@@ -154,6 +184,7 @@ impl Notify {
         OwnedNotified {
             notify: self.clone(),
             registered: false,
+            done: false,
             state: WaiterState::new(),
         }
     }
@@ -174,6 +205,18 @@ impl Default for Notify {
 /// Shared poll body for [`Notified`]/[`OwnedNotified`] -- identical
 /// either way, since both only ever need `&Notify`.
 fn poll_notified(
+    notify: &Notify,
+    registered: &mut bool,
+    done: &mut bool,
+    state: &Arc<WaiterState>,
+    cx: &mut Context<'_>,
+) -> Poll<()> {
+    let poll = poll_waiter(notify, registered, state, cx);
+    *done = poll.is_ready();
+    poll
+}
+
+fn poll_waiter(
     notify: &Notify,
     registered: &mut bool,
     state: &Arc<WaiterState>,
@@ -230,7 +273,10 @@ fn enable(notify: &Notify, registered: &mut bool, state: &Arc<WaiterState>) -> b
     let mut guard = notify.inner.lock().unwrap();
     if guard.permits > 0 {
         guard.permits -= 1;
+        state.single.store(true, Ordering::Relaxed);
         state.woken.store(true, Ordering::Release);
+        // It holds the permit now, so dropping it unresolved returns it.
+        *registered = true;
         return true;
     }
     guard.waiters.push_back(state.clone());
@@ -238,10 +284,38 @@ fn enable(notify: &Notify, registered: &mut bool, state: &Arc<WaiterState>) -> b
     false
 }
 
+/// Takes a waiter that never resolved out of `notify`'s queue, and
+/// passes on a single wakeup it had already received (see the module's
+/// docs).
+fn release(notify: &Notify, registered: bool, done: bool, state: &Arc<WaiterState>) {
+    if done || !registered {
+        return;
+    }
+    let mut guard = notify.inner.lock().unwrap();
+    if let Some(at) = guard.waiters.iter().position(|w| Arc::ptr_eq(w, state)) {
+        guard.waiters.remove(at);
+        return;
+    }
+    // Not queued: something took it out to fire it, perhaps not yet.
+    let single = state.single.load(Ordering::Relaxed);
+    drop(guard);
+    if single {
+        notify.notify_one();
+    }
+}
+
 pub struct Notified<'a> {
     notify: &'a Notify,
     registered: bool,
+    /// Whether `poll` returned `Ready`, which consumed the wakeup.
+    done: bool,
     state: Arc<WaiterState>,
+}
+
+impl Drop for Notified<'_> {
+    fn drop(&mut self) {
+        release(self.notify, self.registered, self.done, &self.state);
+    }
 }
 
 impl Notified<'_> {
@@ -260,7 +334,13 @@ impl Future for Notified<'_> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let this = &mut *self;
-        poll_notified(this.notify, &mut this.registered, &this.state, cx)
+        poll_notified(
+            this.notify,
+            &mut this.registered,
+            &mut this.done,
+            &this.state,
+            cx,
+        )
     }
 }
 
@@ -269,7 +349,15 @@ impl Future for Notified<'_> {
 pub struct OwnedNotified {
     notify: Arc<Notify>,
     registered: bool,
+    /// Whether `poll` returned `Ready`, which consumed the wakeup.
+    done: bool,
     state: Arc<WaiterState>,
+}
+
+impl Drop for OwnedNotified {
+    fn drop(&mut self) {
+        release(&self.notify, self.registered, self.done, &self.state);
+    }
 }
 
 impl OwnedNotified {
@@ -285,6 +373,139 @@ impl Future for OwnedNotified {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let this = &mut *self;
-        poll_notified(&this.notify, &mut this.registered, &this.state, cx)
+        poll_notified(
+            &this.notify,
+            &mut this.registered,
+            &mut this.done,
+            &this.state,
+            cx,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::pin::pin;
+    use std::task::Waker;
+
+    use super::*;
+
+    fn poll(future: Pin<&mut impl Future<Output = ()>>) -> Poll<()> {
+        future.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[test]
+    fn a_waiter_dropped_unfired_does_not_swallow_a_notify_one() {
+        let notify = Notify::new();
+        {
+            let mut stale = pin!(notify.notified());
+            assert!(poll(stale.as_mut()).is_pending());
+        }
+        let mut live = pin!(notify.notified());
+        assert!(poll(live.as_mut()).is_pending());
+        notify.notify_one();
+        assert!(poll(live.as_mut()).is_ready());
+    }
+
+    #[test]
+    fn a_notify_one_reaching_a_dropped_waiter_passes_to_the_next() {
+        let notify = Notify::new();
+        let mut first = Box::pin(notify.notified());
+        let mut second = pin!(notify.notified());
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(poll(second.as_mut()).is_pending());
+        notify.notify_one();
+        drop(first);
+        assert!(poll(second.as_mut()).is_ready());
+    }
+
+    #[test]
+    fn a_permit_taken_by_enable_and_dropped_is_banked_again() {
+        let notify = Notify::new();
+        notify.notify_one();
+        {
+            let enabled = pin!(notify.notified());
+            assert!(enabled.enable());
+        }
+        assert!(poll(pin!(notify.notified())).is_ready());
+    }
+
+    #[test]
+    fn a_consumed_wakeup_and_a_notify_waiters_one_are_not_passed_on() {
+        let notify = Notify::new();
+        {
+            let mut done = pin!(notify.notified());
+            assert!(poll(done.as_mut()).is_pending());
+            notify.notify_one();
+            assert!(poll(done.as_mut()).is_ready());
+        }
+        {
+            let mut broadcast = pin!(notify.notified());
+            assert!(poll(broadcast.as_mut()).is_pending());
+            notify.notify_waiters();
+        }
+        assert!(poll(pin!(notify.notified())).is_pending());
+    }
+
+    /// Two waiters, registered by `enable` as tokio's borrowed and owned
+    /// futures both allow.
+    fn two(notify: &Arc<Notify>) -> (Pin<Box<OwnedNotified>>, Pin<Box<Notified<'_>>>) {
+        let mut first = Box::pin(notify.notified_owned());
+        let mut second = Box::pin(notify.notified());
+        assert!(!first.as_mut().enable());
+        assert!(!second.as_mut().enable());
+        (first, second)
+    }
+
+    // Each case below drops a waiter in the window between `take` (under
+    // the lock) and `fire` (after it), as a racing thread could.
+
+    #[test]
+    fn a_waiter_dropped_before_notify_one_fires_it_passes_it_on() {
+        let notify = Arc::new(Notify::new());
+        let (first, mut second) = two(&notify);
+        let taken = notify.take(End::Oldest).expect("the first waiter");
+        drop(first);
+        Notify::fire(&taken);
+        assert!(poll(second.as_mut()).is_ready());
+    }
+
+    #[test]
+    fn a_waiter_dropped_before_notify_last_fires_it_passes_it_on() {
+        let notify = Arc::new(Notify::new());
+        let mut first = Box::pin(notify.notified());
+        let mut last = Box::pin(notify.notified_owned());
+        assert!(!first.as_mut().enable());
+        assert!(!last.as_mut().enable());
+        let taken = notify.take(End::Newest).expect("the last waiter");
+        drop(last);
+        Notify::fire(&taken);
+        assert!(poll(first.as_mut()).is_ready());
+    }
+
+    /// Passing a wakeup on goes through `notify_one`, so the window
+    /// above is covered for it too; a chain of drops passes it along.
+    #[test]
+    fn a_wakeup_passed_on_passes_on_again() {
+        let notify = Arc::new(Notify::new());
+        let (first, second) = two(&notify);
+        let mut third = Box::pin(notify.notified());
+        assert!(!third.as_mut().enable());
+        notify.notify_one();
+        drop(first);
+        drop(second);
+        assert!(poll(third.as_mut()).is_ready());
+    }
+
+    #[test]
+    fn the_only_waiter_dropped_before_its_wakeup_fires_banks_it() {
+        let notify = Notify::new();
+        let mut only = Box::pin(notify.notified());
+        assert!(!only.as_mut().enable());
+        let taken = notify.take(End::Oldest).expect("the waiter");
+        drop(only);
+        Notify::fire(&taken);
+        assert!(poll(pin!(notify.notified())).is_ready());
+        assert!(poll(pin!(notify.notified())).is_pending(), "banked once");
     }
 }
