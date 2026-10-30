@@ -1211,8 +1211,12 @@ fn a_split_window_stays_on_screen_while_the_path_is_down() {
     let text = screen_text(&tui.since(0));
     assert!(text.contains("one-1") && text.contains("two-2"), "{text}");
 
-    wait_logins(&work, 3, PATIENCE);
+    // Start observing before the successful login can finish its takeover. The
+    // login is recorded before the client receives and paints the restored
+    // panes, and on a loaded runner that whole repaint can otherwise land in
+    // the gap between `wait_logins` returning and this cursor being sampled.
     let from = tui.written();
+    wait_logins(&work, 3, PATIENCE);
     let deadline = Instant::now() + PATIENCE;
     loop {
         let again = String::from_utf8_lossy(&tui.since(from)).into_owned();

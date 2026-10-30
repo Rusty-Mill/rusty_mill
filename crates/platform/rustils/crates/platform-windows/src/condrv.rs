@@ -258,6 +258,31 @@ pub fn send_ctrl(pid: u32, event: CtrlEvent) -> Result<()> {
     sys::end_task(pid, code, flag)
 }
 
+/// The key that types `ch` on the active keyboard layout, as conhost
+/// synthesizes input records: `(vk, dwControlKeyState)`, the shift state
+/// as SHIFT_PRESSED, LEFT_CTRL_PRESSED and LEFT_ALT_PRESSED. `None` when
+/// no key types it, or it is outside the BMP. Wraps `VkKeyScanW`.
+pub fn key_for(ch: char) -> Option<(u16, u32)> {
+    let unit = u16::try_from(u32::from(ch)).ok()?;
+    let scan = u16::try_from(sys::key_scan(unit)).ok()?;
+    Some((scan & 0xff, key_state(scan >> 8)))
+}
+
+/// `VkKeyScanW`'s shift byte (1 Shift, 2 Ctrl, 4 Alt) as key state.
+fn key_state(shift: u16) -> u32 {
+    const SHIFT_PRESSED: u32 = 0x10;
+    const LEFT_CTRL_PRESSED: u32 = 0x08;
+    const LEFT_ALT_PRESSED: u32 = 0x02;
+    [
+        (1, SHIFT_PRESSED),
+        (2, LEFT_CTRL_PRESSED),
+        (4, LEFT_ALT_PRESSED),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| shift & bit != 0)
+    .fold(0, |state, (_, flag)| state | flag)
+}
+
 impl Waker {
     pub fn new() -> Result<Waker> {
         Ok(Waker {
@@ -394,6 +419,15 @@ mod tests {
         let probe = handle::duplicate(&process, false).expect("probe handle");
         assert_eq!(proc::try_wait(&probe).expect("try_wait"), None);
         (server, process, pid, probe)
+    }
+
+    #[test]
+    fn key_for_maps_the_shift_byte_and_refuses_what_no_key_types() {
+        assert_eq!(key_state(0), 0);
+        assert_eq!(key_state(1), 0x10);
+        assert_eq!(key_state(2 | 4), 0x08 | 0x02);
+        assert_eq!(key_for(' '), Some((0x20, 0)));
+        assert_eq!(key_for('\u{1F600}'), None);
     }
 
     fn injected(kind: ErrorKind, op: &'static str) -> PlatformError {
