@@ -1211,8 +1211,10 @@ fn a_split_window_stays_on_screen_while_the_path_is_down() {
     let text = screen_text(&tui.since(0));
     assert!(text.contains("one-1") && text.contains("two-2"), "{text}");
 
-    wait_logins(&work, 3, PATIENCE);
+    // Marked before the next login, whose redraw can finish before the
+    // login log is polled again.
     let from = tui.written();
+    wait_logins(&work, 3, PATIENCE);
     let deadline = Instant::now() + PATIENCE;
     loop {
         let again = String::from_utf8_lossy(&tui.since(from)).into_owned();

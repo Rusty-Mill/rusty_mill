@@ -502,6 +502,14 @@ mod client {
         // block prints lands after the restore. Shutting a socket ends
         // its read; an error only means the server already closed it.
         stop.store(true, Ordering::Release);
+        // Detached, a server drops each block's client at once; one whose
+        // connection just ends is kept a while for a reconnect, lease and
+        // all. Shutting the socket below still delivers this first.
+        if app.lost.is_none() {
+            for pane in app.panes.values_mut() {
+                pane.send(|req| Message::Detach { req });
+            }
+        }
         let _ = app.control_stream.shutdown(Shutdown::Both);
         app.panes.values().for_each(Pane::hang_up);
         let reader = app.reader.take();

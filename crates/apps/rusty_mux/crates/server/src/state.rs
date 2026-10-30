@@ -41,6 +41,10 @@ const HISTORY: usize = 4096;
 /// job start that writes nothing; output checks its own block at once.
 const PROCESS_POLL: Duration = Duration::from_millis(500);
 
+/// How long a client that can be taken over outlives its connection, so a
+/// reconnect finds it, attachment, lease and all.
+pub(crate) const ORPHAN_GRACE: Duration = Duration::from_secs(30);
+
 /// What the server offers; a client gets the intersection with its own.
 const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::EVENT_SEQ)
@@ -97,8 +101,11 @@ pub(crate) struct State {
     blocks: HashMap<BlockId, BlockRt>,
     clients: HashMap<ClientId, Outbox>,
     features: HashMap<ClientId, Features>,
-    /// Each `TAKEOVER` client's current token, from its last Welcome.
-    tokens: HashMap<ClientId, Uuid>,
+    /// Each `TAKEOVER` client's tokens.
+    tokens: HashMap<ClientId, Tokens>,
+    /// Clients whose connection ended within [`ORPHAN_GRACE`], each with
+    /// that connection's cancel, so only its own expiry drops it.
+    orphans: HashMap<ClientId, Rc<Notify>>,
     history: History,
 }
 
@@ -112,6 +119,7 @@ impl State {
             clients: HashMap::new(),
             features: HashMap::new(),
             tokens: HashMap::new(),
+            orphans: HashMap::new(),
             history: History::new(Uuid::new_v4(), HISTORY),
         }))
     }
@@ -144,11 +152,15 @@ impl State {
         let features = theirs.intersection(OFFERED);
         let continued = takeover.and_then(|t| self.takes_over(t, features));
         let client = continued.unwrap_or_else(|| self.mux.connect());
+        self.orphans.remove(&client);
         self.clients.insert(client, outbox);
         self.features.insert(client, features);
         let token = features.contains(Features::TAKEOVER).then(Uuid::new_v4);
+        let confirmed = continued
+            .and_then(|c| self.tokens.get(&c))
+            .and_then(|t| t.confirmed);
         match token {
-            Some(token) => self.tokens.insert(client, token),
+            Some(current) => self.tokens.insert(client, Tokens { current, confirmed }),
             None => self.tokens.remove(&client),
         };
         let (cursor, missed) = if features.contains(Features::EVENT_SEQ) {
@@ -194,25 +206,53 @@ impl State {
         (from, messages)
     }
 
-    /// The client `takeover` names, if it is connected, the token is its
-    /// current one, and the new connection negotiated exactly its features.
+    /// The client `takeover` names, if it is connected or kept for a
+    /// reconnect, the token is its current or confirmed one, and the new
+    /// connection negotiated exactly its features.
     /// Only `TAKEOVER` clients hold a token. Equal features keep what the
     /// client is already attached to and subscribed for (a checkpoint
     /// version, event numbering) valid on the new connection.
     fn takes_over(&self, takeover: Takeover, features: Features) -> Option<ClientId> {
-        let current = self.tokens.get(&takeover.client)?;
-        let valid =
-            rusty_crypto_key::constant_time_eq(current.as_bytes(), takeover.token.as_bytes());
+        let tokens = self.tokens.get(&takeover.client)?;
+        let matches = |token: &Uuid| {
+            rusty_crypto_key::constant_time_eq(token.as_bytes(), takeover.token.as_bytes())
+        };
+        let valid = matches(&tokens.current) | tokens.confirmed.as_ref().is_some_and(matches);
         let same = self.features.get(&takeover.client) == Some(&features);
-        (valid && same && self.clients.contains_key(&takeover.client)).then_some(takeover.client)
+        let known = self.clients.contains_key(&takeover.client)
+            || self.orphans.contains_key(&takeover.client);
+        (valid && same && known).then_some(takeover.client)
     }
 
     /// Forgets a client whose connection, the one owning `cancel`, ended. A
     /// client the server already dropped for exceeding its budget is gone
     /// from every map; one another connection took over is not this
-    /// connection's to forget.
-    pub(crate) fn disconnect(&mut self, client: ClientId, cancel: &Rc<Notify>) {
+    /// connection's to forget. A client that can be taken over is kept
+    /// instead, for [`ORPHAN_GRACE`], with its attachment and lease;
+    /// whether it was, so the caller calls [`Self::expire`] after the
+    /// grace. A client that means to leave detaches first.
+    pub(crate) fn disconnect(&mut self, client: ClientId, cancel: &Rc<Notify>) -> bool {
         if !self.served_by(client, cancel) {
+            return false;
+        }
+        if self.tokens.contains_key(&client) {
+            self.clients.remove(&client);
+            self.orphans.insert(client, cancel.clone());
+            return true;
+        }
+        self.drop_client(client);
+        self.flush();
+        false
+    }
+
+    /// The grace of the connection owning `cancel` ended: drops `client`
+    /// unless another connection took it over meanwhile.
+    pub(crate) fn expire(&mut self, client: ClientId, cancel: &Rc<Notify>) {
+        if !self
+            .orphans
+            .get(&client)
+            .is_some_and(|ended| Rc::ptr_eq(ended, cancel))
+        {
             return;
         }
         self.drop_client(client);
@@ -220,7 +260,8 @@ impl State {
     }
 
     fn drop_client(&mut self, client: ClientId) {
-        if self.clients.remove(&client).is_none() {
+        let orphan = self.orphans.remove(&client).is_some();
+        if self.clients.remove(&client).is_none() && !orphan {
             return;
         }
         self.features.remove(&client);
@@ -234,6 +275,11 @@ impl State {
     /// after releasing the borrow.
     pub(crate) fn request(shared: &Shared, client: ClientId, message: Message) -> Option<PtyWrite> {
         let mut this = shared.borrow_mut();
+        // A request proves the client got this connection's Welcome, and
+        // with it the current token.
+        if let Some(tokens) = this.tokens.get_mut(&client) {
+            tokens.confirmed = Some(tokens.current);
+        }
         let (req, outcome) = this.apply(shared, client, message);
         let write = match outcome {
             Ok(Outcome::Done(created)) => {
@@ -475,7 +521,7 @@ impl State {
         if target == client {
             return Err("a client cannot disconnect itself; close the connection instead".into());
         }
-        if !self.clients.contains_key(&target) {
+        if !self.clients.contains_key(&target) && !self.orphans.contains_key(&target) {
             return Err(rusty_mux_core::Error::UnknownClient(target).into());
         }
         self.drop_client(target);
@@ -901,6 +947,18 @@ fn event_frame(seq: Option<u64>, event: &Event) -> Option<Vec<u8>> {
     encode(&message)
         .map_err(|err| eprintln!("rusty-mux-server: encoding an event: {err}"))
         .ok()
+}
+
+/// A `TAKEOVER` client's tokens. `current` is the one its last Welcome
+/// carried, and `confirmed` the one it last proved it holds by sending a
+/// request after the Welcome. A takeover whose Welcome never arrived
+/// leaves the client holding only `confirmed`, so both are accepted;
+/// once the client sends a request on a new connection, the older token
+/// stops working.
+#[derive(Debug, Clone, Copy)]
+struct Tokens {
+    current: Uuid,
+    confirmed: Option<Uuid>,
 }
 
 /// Why a request was refused, sent back as [`Message::Failed`].
@@ -1412,6 +1470,40 @@ mod regression {
             }
             shared.borrow_mut().mux.detach(client).unwrap();
             State::request(&shared, client, Message::CloseBlock { req: 99, block });
+        });
+    }
+
+    #[test]
+    fn an_orphan_expires_only_by_its_own_connection() {
+        runtime().block_on(async {
+            let shared = State::shared(
+                Config {
+                    program: "/bin/sh".into(),
+                    args: vec![],
+                    cwd: "/".into(),
+                },
+                None,
+            );
+            let mut state = shared.borrow_mut();
+            let (out, _inbox, cancel) = outbox();
+            let client = state.connect(out, Features::TAKEOVER, None, None);
+            assert!(state.disconnect(client, &cancel), "kept for a reconnect");
+            assert!(state.mux.client(client).is_some());
+
+            // A later connection's expiry is not this one's.
+            let (_, _, other) = outbox();
+            state.expire(client, &other);
+            assert!(state.mux.client(client).is_some());
+            state.expire(client, &cancel);
+            assert!(
+                state.mux.client(client).is_none(),
+                "dropped after the grace"
+            );
+
+            let (out, _inbox, cancel) = outbox();
+            let plain = state.connect(out, Features::NONE, None, None);
+            assert!(!state.disconnect(plain, &cancel), "no token, no grace");
+            assert!(state.mux.client(plain).is_none());
         });
     }
 
