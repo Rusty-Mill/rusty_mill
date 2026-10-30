@@ -74,6 +74,8 @@ pub struct Association {
     ack_at: Option<Instant>,
     unacked: u32,
     probe: bool,
+    /// The peer probed: the next ack goes out even with no stream to ack.
+    answer: bool,
     echo: Option<(u64, Instant)>,
     last_sent: Instant,
     last_heard: Option<Instant>,
@@ -113,6 +115,7 @@ impl Association {
             ack_at: None,
             unacked: 0,
             probe: false,
+            answer: false,
             echo: None,
             last_sent: now,
             last_heard: None,
@@ -187,7 +190,10 @@ impl Association {
             } => self.ack(now, stream, cumulative, limit, &ranges),
             Chunk::Stamp(stamp) => self.echo = Some((stamp, now)),
             Chunk::Echo { stamp, held } => self.sample(now, stamp, held),
-            Chunk::Probe => self.streams.values_mut().for_each(|s| s.ack = true),
+            Chunk::Probe => {
+                self.answer = true;
+                self.streams.values_mut().for_each(|s| s.ack = true);
+            }
             Chunk::Close { stream, reply } => self.close_chunk(stream, reply),
             Chunk::End => self.ended = true,
         }
@@ -378,6 +384,9 @@ impl Association {
         let mut w = Writer::with_capacity(PLAIN);
         let mut chunks = 0;
         let mut eliciting = false;
+        // A probe's answer is an ack: due when acks are, and sent even when
+        // no stream has one, as a bare stamp.
+        let answering = self.ack_at.is_some_and(|at| at <= now) && std::mem::take(&mut self.answer);
         chunks += self.put_acks(now, &mut w);
         let (closes, closes_elicit) = self.put_closes(now, &mut w);
         chunks += closes;
@@ -391,7 +400,7 @@ impl Association {
         let data = self.put_data(&mut w);
         chunks += data;
         eliciting |= data > 0;
-        if chunks == 0 {
+        if chunks == 0 && !answering {
             return None;
         }
         if eliciting && self.rto_at.is_none() {

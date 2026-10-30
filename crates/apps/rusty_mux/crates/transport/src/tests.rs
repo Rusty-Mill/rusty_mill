@@ -250,12 +250,21 @@ fn a_datagram_reflected_back_to_the_server_changes_nothing() {
 #[test]
 fn a_probe_is_answered_before_any_stream_opens() {
     let mut net = Net::new(CLEAN, 5);
+    let start = net.now;
     net.client.probe();
-    for _ in 0..10 {
+    while net.client.last_heard().is_none() {
         net.step();
     }
-    assert!(net.client.last_heard().is_some());
+    // A round trip and the ack delay, not the peer's own keepalive.
+    let heard = net.client.last_heard().unwrap() - start;
+    assert!(heard < KEEPALIVE / 10, "answered after {heard:?}");
     assert_eq!(net.server.accept(), None);
+    // The answer asks for nothing back: the link goes quiet.
+    let sent = net.sent;
+    for _ in 0..5 {
+        net.step();
+    }
+    assert!(net.now - start >= KEEPALIVE || net.sent == sent);
 }
 
 #[test]
