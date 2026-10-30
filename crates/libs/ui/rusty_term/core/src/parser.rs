@@ -1176,7 +1176,7 @@ impl AnsiParser {
             match param {
                 996 => self.responses.extend_from_slice(&g.color_scheme_report()),
                 6 => {
-                    let (cx, cy) = g.cursor;
+                    let (cx, cy) = g.report_cursor();
                     self.responses
                         .extend_from_slice(format!("\x1b[?{};{};1R", cy + 1, cx + 1).as_bytes());
                 }
@@ -1685,7 +1685,7 @@ impl AnsiParser {
                 5 => self.responses.extend_from_slice(b"\x1b[0n"), // terminal OK
                 6 => {
                     // CPR — report the cursor position, 1-based row;col.
-                    let (cx, cy) = g.cursor;
+                    let (cx, cy) = g.report_cursor();
                     self.responses
                         .extend_from_slice(format!("\x1b[{};{}R", cy + 1, cx + 1).as_bytes());
                 }

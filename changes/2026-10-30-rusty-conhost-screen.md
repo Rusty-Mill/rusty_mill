@@ -16,8 +16,10 @@ changelog: rusty_conhost keeps its own screen over rusty_term's Grid, so program
   Grid and queues a WINDOW_BUFFER_SIZE_EVENT under WINDOW_INPUT.
 - **Added (public API):** `rusty_term_core::{ColorRef, CellColors}`,
   `AnsiParser::pen_colors`, `AnsiParser::palette` and
-  `Grid::cell_colors` (design §4.3, §11.2.3). The wire formats are
-  unchanged.
+  `Grid::cell_colors` and `Grid::origin_region` (design §4.3,
+  §11.2.3). The wire formats are unchanged.
+- **Fixed:** rusty_term_core's CPR and DECXCPR report a pending wrap
+  as the last column, as xterm does, instead of one past it.
 - **Known limitations:** after a resize, the host's screen and the
   terminal's can differ until a redraw (§5.7, V3). Regression tests pin
   this divergence. GetCurrentConsoleFont reports a fixed 8×16 Consolas

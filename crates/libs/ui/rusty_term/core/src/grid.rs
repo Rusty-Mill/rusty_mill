@@ -1933,6 +1933,30 @@ impl Grid {
     }
 
     /// Move the cursor to column 0 of the current row.
+    /// The cursor as a position report (CPR, DECXCPR) gives it: a pending
+    /// wrap reads as the last column, as in xterm.
+    pub(crate) fn report_cursor(&self) -> (usize, usize) {
+        (
+            self.cursor.0.min(self.cols.saturating_sub(1)),
+            self.cursor.1,
+        )
+    }
+
+    /// The region cursor addressing is relative to while origin mode
+    /// (DECOM) is on, as 0-based inclusive (left, top, right, bottom);
+    /// `None` with origin mode off.
+    pub fn origin_region(&self) -> Option<(usize, usize, usize, usize)> {
+        if !self.origin_mode {
+            return None;
+        }
+        let (left, right) = if self.side_margins_active() {
+            (self.left_margin, self.right_margin)
+        } else {
+            (0, self.cols.saturating_sub(1))
+        };
+        Some((left, self.scroll_top, right, self.scroll_bottom))
+    }
+
     /// Whether DECSLRM margins narrower than the full width are in effect —
     /// the guard on every margin-aware branch, so the common case pays one
     /// boolean test.

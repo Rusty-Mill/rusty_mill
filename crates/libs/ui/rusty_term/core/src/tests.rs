@@ -1098,6 +1098,30 @@ fn dsr_cursor_position_report_uses_one_based_coords() {
 }
 
 #[test]
+fn cursor_reports_clamp_a_pending_wrap_to_the_last_column() {
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, "x".repeat(80).as_bytes());
+    assert_eq!(g.cursor.0, 80, "pending wrap");
+    p.advance(&mut g, b"\x1b[6n\x1b[?6n");
+    assert_eq!(p.take_responses(), b"\x1b[1;80R\x1b[?1;80;1R");
+    assert_eq!(g.cursor.0, 80, "the report keeps the pending wrap");
+}
+
+#[test]
+fn origin_region_follows_decom_and_the_margins() {
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    assert_eq!(g.origin_region(), None);
+    p.advance(&mut g, b"\x1b[5;20r\x1b[?6h");
+    assert_eq!(g.origin_region(), Some((0, 4, 79, 19)));
+    p.advance(&mut g, b"\x1b[?69h\x1b[3;40s");
+    assert_eq!(g.origin_region(), Some((2, 4, 39, 19)));
+    p.advance(&mut g, b"\x1b[?6l");
+    assert_eq!(g.origin_region(), None);
+}
+
+#[test]
 fn decxcpr_private_form_is_answered_with_the_private_marker() {
     // `CSI ? 6 n` (DECXCPR) is the private-marker form of CPR; a program
     // that probes with it (rather than the plain `CSI 6 n` above) used to

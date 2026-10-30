@@ -156,8 +156,7 @@ impl Screen {
             match watched_at(&vt[esc..]) {
                 Watched::Whole(len, Action::Answer) => {
                     self.forward(&vt[start..esc], out);
-                    self.parser.advance(&mut self.grid, &vt[esc..esc + len]);
-                    replies.extend(self.parser.take_responses());
+                    replies.extend(self.feed(&vt[esc..esc + len]));
                     start = esc + len;
                 }
                 Watched::Whole(len, Action::Reassert(modes)) => {
@@ -208,8 +207,16 @@ impl Screen {
             return;
         }
         out.push(vt);
+        self.feed(vt);
+    }
+
+    /// Advance the Grid over `vt` and return its answers. What it relays
+    /// to its own host (OSC 52, BEL, input modes) is dropped: `vt` itself
+    /// already goes to the terminal, so keeping it would only grow.
+    fn feed(&mut self, vt: &[u8]) -> Vec<u8> {
         self.parser.advance(&mut self.grid, vt);
-        self.parser.take_responses();
+        self.grid.take_host_out();
+        self.parser.take_responses()
     }
 
     /// The terminal's new size (§5.7): nothing goes to the terminal.
@@ -234,6 +241,13 @@ impl Screen {
             x.min(last(self.grid.cols)) as u16,
             y.min(last(self.grid.rows)) as u16,
         )
+    }
+
+    /// The region CUP is relative to while the client has origin mode
+    /// (DECOM) on, as (left, top, right, bottom); `None` with it off.
+    pub(super) fn origin_region(&self) -> Option<(u16, u16, u16, u16)> {
+        let (l, t, r, b) = self.grid.origin_region()?;
+        Some((l as u16, t as u16, r as u16, b as u16))
     }
 
     pub(super) fn cursor_visible(&self) -> bool {
@@ -542,6 +556,13 @@ mod tests {
         let (vt, replies) = client(&mut s, b"\x1b[6n", PROCESSED_OUTPUT);
         assert_eq!(vt, "←[6n".as_bytes());
         assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn the_grids_own_relays_are_dropped() {
+        let mut s = screen();
+        client(&mut s, b"\x07\x1b[?2004h\x1b]52;c;aGk=\x07", VT);
+        assert!(s.grid.take_host_out().is_empty());
     }
 
     #[test]

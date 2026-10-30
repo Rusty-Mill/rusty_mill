@@ -154,8 +154,21 @@ impl Console {
         if x >= size.cols || y >= size.rows || x > i16::MAX as u16 || y > i16::MAX as u16 {
             return reply(p, msg::STATUS_FROM_INVALIDARG, fixed, fx);
         }
-        let vt = format!("\x1b[{};{}H", y + 1, x + 1).into_bytes();
-        self.write_host(p, fixed, vt, out, fx);
+        self.write_host(p, fixed, self.absolute_cup(x, y), out, fx);
+    }
+
+    /// CUP to screen position (`x`, `y`). The Win32 position is absolute,
+    /// so under the client's origin mode (DECOM) it is made relative to the
+    /// region; a position outside the region can't be reached with DECOM
+    /// on, so origin mode is turned off first.
+    fn absolute_cup(&self, x: u16, y: u16) -> Vec<u8> {
+        let cup = |col: u16, row: u16| format!("\x1b[{};{}H", row + 1, col + 1);
+        match self.screen.origin_region() {
+            None => cup(x, y),
+            Some((l, t, r, b)) if (l..=r).contains(&x) && (t..=b).contains(&y) => cup(x - l, y - t),
+            Some(_) => format!("\x1b[?6l{}", cup(x, y)),
+        }
+        .into_bytes()
     }
 
     /// `CONSOLE_SETTEXTATTRIBUTE_MSG { IN Attributes }`, mirrored to the
@@ -372,6 +385,21 @@ mod tests {
             assert_eq!(r.status, msg::STATUS_FROM_INVALIDARG, "({x}, {y})");
             assert!(vt.is_empty());
         }
+    }
+
+    #[test]
+    fn set_cursor_position_stays_absolute_under_origin_mode() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        assert_eq!(h.set_mode(output, 0x5), msg::STATUS_SUCCESS);
+        h.packet(msg::RAW_WRITE, 1, output, b"\x1b[5;20r\x1b[?6h", 0);
+        let (_, vt) = emitted(&mut h, |h| set_cursor(h, output, 3, 6));
+        assert_eq!(vt, b"\x1b[3;4H");
+        assert_eq!(u16s(&sbi(&mut h, output), &[4, 6]), [3, 6]);
+        let (r, vt) = emitted(&mut h, |h| set_cursor(h, output, 0, 0));
+        assert_eq!(r.status, msg::STATUS_SUCCESS);
+        assert_eq!(vt, b"\x1b[?6l\x1b[1;1H");
+        assert_eq!(u16s(&sbi(&mut h, output), &[4, 6]), [0, 0]);
     }
 
     #[test]
