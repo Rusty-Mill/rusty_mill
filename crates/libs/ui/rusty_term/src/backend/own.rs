@@ -214,7 +214,7 @@ fn cmd_exe() -> io::Result<OsString> {
         io::Error::new(io::ErrorKind::NotFound, "rusty_term: SystemRoot is not set")
     })?;
     Ok(PathBuf::from(root)
-        .join(r"System32\cmd.exe")
+        .join(r"system32\cmd.exe")
         .into_os_string())
 }
 
