@@ -374,12 +374,15 @@ fn a_client_that_holds_ctrl_close_is_cut_off_at_the_deadline() {
 
 /// `STATUS_CONTROL_C_EXIT`, the code CTRL_CLOSE ends a process with.
 const CONTROL_C_EXIT: i32 = 0xC000_013A_u32 as i32;
+/// When the host ends a client still attached at the close: 5 s from
+/// CTRL_CLOSE, Windows' own bound on a handler (#1259).
+const KILL_AFTER: Duration = Duration::from_secs(5);
+/// Slack on the host's and Windows' timing.
+const SLACK: Duration = Duration::from_millis(1500);
 
 #[test]
-fn a_client_still_attached_at_the_deadline_is_ended_there() {
+fn a_client_holding_ctrl_close_past_the_grace_is_ended_by_the_kill_bound() {
     let _g = lock();
-    // The handler would hold for 60 s, and Windows ends it only at about
-    // 5 s: an exit well before that is the host's doing (#1259).
     let (master, mut stream, mut child) = holding(60_000);
     let started = Instant::now();
     master.hang_up();
@@ -387,19 +390,16 @@ fn a_client_still_attached_at_the_deadline_is_ended_there() {
     let status = exit_of(&mut child);
     let took = started.elapsed();
     assert!(took >= GRACE, "ended after {took:?}, before the grace");
-    assert!(
-        took < GRACE + Duration::from_millis(1500),
-        "ended after {took:?}, not at the deadline"
-    );
+    assert!(took < KILL_AFTER + SLACK, "ended after {took:?}");
     assert_eq!(status, ExitStatus::Code(CONTROL_C_EXIT));
 }
 
-/// The pid in the probe's `ready pid=<pid>` line.
-fn ready_pid(stream: &Stream) -> u32 {
+/// Every `ready pid=<pid>` line so far.
+fn ready_pids(stream: &Stream) -> Vec<u32> {
     plain_lines(&stream.out)
         .iter()
-        .find_map(|l| l.strip_prefix("ready pid=")?.trim().parse().ok())
-        .expect("a ready pid line")
+        .filter_map(|l| l.strip_prefix("ready pid=")?.trim().parse().ok())
+        .collect()
 }
 
 /// A process by pid, opened while it is known to run and ended on drop
@@ -416,43 +416,55 @@ impl ReapedPid {
 
 impl Drop for ReapedPid {
     fn drop(&mut self) {
-        // Fails harmlessly once it has exited.
+        // A no-op once it has exited.
         let _ = self.1.terminate();
     }
 }
 
 #[test]
-fn a_grandchild_still_attached_at_the_deadline_is_ended_there() {
+fn grandchildren_still_attached_are_ended_together_at_the_kill_bound() {
     let _g = lock();
-    // cmd starts the probe on the same console, waits about a second so
-    // the probe's handler is in place, and exits: the console then
-    // closes on child exit with only the grandchild attached.
+    // cmd starts two probes on the same console, waits about a second so
+    // their handlers are in place, and exits. CTRL_CLOSE then reaches one
+    // probe, whose held handler blocks the delivery to the other until
+    // Windows ends it at about 5 s; the other would hold to about 10 s.
+    // The host ends both at 5 s (#1259).
     let probe = probe();
     assert!(
         !probe.contains(' '),
         "start needs an unquoted path: {probe}"
     );
-    let tail = format!("start /b {probe} ctrl-hold 60000 & ping -n 2 127.0.0.1 >nul");
+    let hold = format!("start /b {probe} ctrl-hold 60000");
+    let tail = format!("{hold} & {hold} & ping -n 2 127.0.0.1 >nul");
     let cmd = command("cmd.exe", &["/c", &tail]);
     let (master, child) = own(&cmd);
     let master = Arc::new(master);
     let mut stream = Stream::new(Arc::clone(&master));
     let mut child = Reaped(child);
-    stream.until("ready pid=");
-    // Opened while the probe waits for CTRL_CLOSE, so it is running.
-    let grandchild = ReapedPid::open(ready_pid(&stream));
+    let deadline = Instant::now() + BUDGET;
+    while ready_pids(&stream).len() < 2 {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let chunk = stream.rx.recv_timeout(left).expect("two ready probes");
+        stream.out.extend(chunk);
+    }
+    // Opened while the probes wait for CTRL_CLOSE, so they are running.
+    let probes: Vec<ReapedPid> = ready_pids(&stream)
+        .into_iter()
+        .map(ReapedPid::open)
+        .collect();
     exit_of(&mut child);
     let exited = Instant::now();
     let spawner = platform_windows::WindowsSpawner;
-    while spawner.is_alive(grandchild.0).expect("is_alive") {
-        assert!(exited.elapsed() < BUDGET, "the grandchild runs on");
-        std::thread::sleep(Duration::from_millis(50));
+    for p in &probes {
+        while spawner.is_alive(p.0).expect("is_alive") {
+            assert!(exited.elapsed() < BUDGET, "probe {} runs on", p.0);
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
-    // Windows would end its held handler only at about 5 s.
     let took = exited.elapsed();
     assert!(
-        took < GRACE + Duration::from_millis(1500),
-        "ended {took:?} after the child's exit, not at the deadline"
+        took < KILL_AFTER + SLACK,
+        "the last ended {took:?} after the child's exit, not at the kill bound"
     );
 }
 

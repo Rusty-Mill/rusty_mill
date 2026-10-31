@@ -105,8 +105,9 @@ pub use windows_sys::Win32::System::Threading::{
 // `TerminateProcess` (already admitted above) each require — no broader
 // access than the two calls this handle is actually used for.
 // `condrv::ClientProcess` (#1259) opens a console client by the pid its
-// CONNECT carries with `PROCESS_TERMINATE` alone, to end it at the close
-// grace deadline with `TerminateProcess`.
+// CONNECT carries with `PROCESS_TERMINATE | SYNCHRONIZE` (both admitted),
+// to end it after the close grace with `TerminateProcess` unless a
+// zero-timeout `WaitForSingleObject` shows it has already exited.
 pub use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
 };

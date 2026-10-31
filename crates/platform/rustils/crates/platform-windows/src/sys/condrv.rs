@@ -1014,15 +1014,23 @@ pub fn key_scan(ch: u16) -> i16 {
     unsafe { w::VkKeyScanW(ch) }
 }
 
-/// `OpenProcess(PROCESS_TERMINATE)` on a console client's pid.
+/// `OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE)` on a console client's
+/// pid: enough to end it and to see whether it has exited.
 pub fn open_process(pid: u32) -> Result<OwnedWinHandle> {
     // SAFETY: no pointers; a pid naming no process gives NULL, checked
     // below, not UB.
-    let raw = unsafe { w::OpenProcess(w::PROCESS_TERMINATE, 0, pid) };
+    let raw = unsafe { w::OpenProcess(w::PROCESS_TERMINATE | w::SYNCHRONIZE, 0, pid) };
     // SAFETY: `raw` is a failure sentinel or a fresh handle from the call
     // above that nothing else owns.
     unsafe { OwnedWinHandle::from_raw(raw) }
         .ok_or_else(|| errmap::last_win32_err("OpenProcess", OsStr::new("")))
+}
+
+/// Whether `process` (opened with `SYNCHRONIZE`) has exited: a zero
+/// timeout `WaitForSingleObject`.
+pub fn has_exited(process: &OwnedWinHandle) -> bool {
+    // SAFETY: `process` is an open handle for the life of the borrow.
+    unsafe { w::WaitForSingleObject(process.as_raw(), 0) == w::WAIT_OBJECT_0 }
 }
 
 /// `TerminateProcess(process, code)`. It starts the termination and

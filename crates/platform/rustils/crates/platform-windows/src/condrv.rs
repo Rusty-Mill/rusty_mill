@@ -262,7 +262,7 @@ const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
 
 /// A console client, held so the host can end it if it is still attached
 /// when the console closes (#1259, design §7.3). The handle has
-/// `PROCESS_TERMINATE` access and nothing else.
+/// `PROCESS_TERMINATE` and `SYNCHRONIZE` access and nothing else.
 pub struct ClientProcess {
     handle: OwnedWinHandle,
 }
@@ -276,10 +276,13 @@ impl ClientProcess {
         sys::open_process(pid).map(|handle| ClientProcess { handle })
     }
 
-    /// End the client with `STATUS_CONTROL_C_EXIT`. It doesn't wait for
-    /// the exit. Fails with the OS error, which Windows may also report
-    /// for a client that has already exited.
+    /// End the client with `STATUS_CONTROL_C_EXIT` if it is still
+    /// running; a client that has exited is left as it is, with `Ok`. It
+    /// doesn't wait for the exit. Fails with the OS error.
     pub fn terminate(&self) -> Result<()> {
+        if sys::has_exited(&self.handle) {
+            return Ok(());
+        }
         sys::terminate(&self.handle, STATUS_CONTROL_C_EXIT)
     }
 }

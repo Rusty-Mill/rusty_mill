@@ -202,7 +202,9 @@ pub(crate) enum Effect {
         pid: u32,
     },
     /// End a client process still attached when the console closes at
-    /// the grace deadline (#1259). Always before [`Effect::CloseServer`].
+    /// the grace deadline (#1259): the engine ends it 5 s after
+    /// CTRL_CLOSE, once the server has closed. Always before
+    /// [`Effect::CloseServer`].
     Kill {
         pid: u32,
     },
