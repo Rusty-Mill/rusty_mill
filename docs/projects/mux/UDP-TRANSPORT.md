@@ -4,10 +4,11 @@ Status: built. Proposed 2026-10-30 as Phase 3 step 4 (C13); the owner said
 Go on 2026-10-30 and answered its four open questions the same day (below).
 Built in #1270 (transport), #1280 (server) and #1283 (client), and checked
 by hand over a real sshd on 2026-10-31
-([UDP-MANUAL-CHECK-2026-10-31.md](UDP-MANUAL-CHECK-2026-10-31.md)). Not built
-yet, in its own step: moving back to UDP after a fallback to SSH. The
-lease release after 30 s of silence, the stale orphan on overflow and the
-6 s outage display are built (see Session lifetime, Overflow and Liveness).
+([UDP-MANUAL-CHECK-2026-10-31.md](UDP-MANUAL-CHECK-2026-10-31.md)). The
+four pieces the owner kept C13 open for are built too: the lease release
+after 30 s of silence, the stale orphan on overflow, the 6 s outage display
+and moving back to UDP after a fallback to SSH (see Session lifetime,
+Overflow and Liveness).
 Background: [SPIKE-4-ROAMING.md](SPIKE-4-ROAMING.md) and the step 2 decision
 in [DECISIONS.md](DECISIONS.md) (SSH bootstrap, 2026-10-29).
 
@@ -171,6 +172,14 @@ ordering, acks and flow control belong to each stream.
   dead SSH path. Built: the client's heartbeat also reads when the relay
   last heard the server, and loses a UDP path after 6 s of that silence;
   the 15 s missed sign of life still covers the SSH forward.
+- **Moving back:** when a lost UDP path is brought back over SSH, the client
+  keeps the association it gave up, which goes on sending keepalives. Once
+  that association hears the server again, within 6 s, the client probes
+  it and takes every client over on a new stream each, make before break
+  as for a lost path, and the SSH forward stops. A probe that fails leaves
+  the client on SSH, to try again 2 s later, doubling up to 30 s. A client
+  that stayed on SSH from the start, because UDP never answered, does not
+  try again.
 - **Flow control:** each stream's receive buffer holds at most 1 MiB in
   total: bytes in order but not yet read, plus bytes out of order. Every
   `Ack` sets `limit` to the cumulative offset plus the free space, and a

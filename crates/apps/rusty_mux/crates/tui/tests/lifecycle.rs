@@ -879,6 +879,10 @@ impl Wire {
     fn cut(&self) {
         self.0.store(true, Ordering::Relaxed);
     }
+
+    fn mend(&self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
 
 impl Drop for Wire {
@@ -1168,6 +1172,24 @@ fn an_ssh_attach_moves_to_udp_and_stops_the_forward() {
     std::fs::remove_dir_all(&work).expect("cleanup");
 }
 
+/// A client moved onto UDP through `wire`, whose forward stopped once
+/// the move was done.
+fn on_udp(work: &Path, socket: &Path) -> Tui {
+    let tui = ssh_client_with(work, socket, &[("STANDIN_HOSTNAME", "127.0.0.9")]);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    stopped(wait_logins(work, 1, PATIENCE)[0].0);
+    tui
+}
+
+/// Waits until the stand-in `pid` has stopped.
+fn stopped(pid: u32) {
+    let deadline = Instant::now() + PATIENCE;
+    while running(pid) {
+        assert!(Instant::now() < deadline, "ssh {pid} kept running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// A UDP path that goes silent is lost after 6 s without a datagram,
 /// two of the server's keepalives, not after the 15 s a forward needs:
 /// the probe of the dead association fails, a second login brings the
@@ -1177,14 +1199,7 @@ fn a_silent_udp_path_is_noticed_in_6_s() {
     let (socket, port) = real_udp_server();
     let wire = Wire::new(port);
     let work = relaying_ssh("udp-silent", &[]);
-    let tui = ssh_client_with(&work, &socket, &[("STANDIN_HOSTNAME", "127.0.0.9")]);
-    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
-    let forward = wait_logins(&work, 1, PATIENCE)[0].0;
-    let deadline = Instant::now() + PATIENCE;
-    while running(forward) {
-        assert!(Instant::now() < deadline, "the forward outlived the move");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let tui = on_udp(&work, &socket);
     wire.cut();
     let cut = Instant::now();
 
@@ -1199,6 +1214,31 @@ fn a_silent_udp_path_is_noticed_in_6_s() {
     type_until(&tui, b"echo two-$((1+1))\r", b"two-2");
     let text = detach(tui);
     assert!(text.contains("detached from block"), "{text:?}");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// After a fallback to SSH, the association given up is kept: once it is
+/// heard again the clients move back onto it, the second forward stops,
+/// and typing reaches the block with no third login.
+#[test]
+fn a_udp_path_heard_again_after_a_fallback_gets_the_clients_back() {
+    let (socket, port) = real_udp_server();
+    let wire = Wire::new(port);
+    let work = relaying_ssh("udp-back", &[]);
+    let tui = on_udp(&work, &socket);
+    wire.cut();
+    let second = wait_logins(&work, 2, Duration::from_secs(20))[1].0;
+    type_until(&tui, b"echo two-$((1+1))\r", b"two-2");
+    assert!(running(second), "the fallback forward stopped early");
+
+    // A keepalive within 3 s, the probe, then the takeover.
+    wire.mend();
+    stopped(second);
+    type_until(&tui, b"echo three-$((1+2))\r", b"three-3");
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
+    assert!(!text.contains("path to the server was down"), "{text:?}");
+    assert_eq!(logins(&work).len(), 2, "no third login");
     std::fs::remove_dir_all(&work).expect("cleanup");
 }
 

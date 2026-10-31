@@ -151,6 +151,9 @@ mod client {
         /// The path to the server came back, its clients taken over, or
         /// did not.
         Rejoined(Result<Back, Missed>),
+        /// The clients moved back onto UDP after a fallback to SSH, or
+        /// did not.
+        Moved(Result<Back, Missed>),
     }
 
     /// Brings back a lost path to the server, make before break: a fresh
@@ -160,9 +163,10 @@ mod client {
         /// Brings up a fresh path beside the one in use, giving up once
         /// `cancel` is set; returns the socket to connect to.
         fn fresh(&mut self, cancel: &AtomicBool) -> Result<PathBuf, String>;
-        /// The clients are taken over on the fresh path: its [`Pulse`] is
-        /// the one read from now on, before the main loop hears of it, so
-        /// the old path's silence cannot count against the fresh one.
+        /// The clients are taken over on the fresh path: the [`Pulses`] read
+        /// from now on are those it will settle to, set before the main
+        /// loop hears of it, so the old path's silence cannot count against
+        /// the fresh one.
         fn listen(&mut self);
         /// The clients are taken over: the fresh path is the one in use,
         /// and the old one stops.
@@ -173,9 +177,19 @@ mod client {
         /// `port` as a fresh path, once it answers a probe; returns the
         /// socket to connect to.
         fn datagram(&mut self, port: u16, id: [u8; 8], key: [u8; 32]) -> Result<PathBuf, String>;
-        /// When the path in use last heard the server, kept current as
-        /// paths change.
-        fn pulse(&self) -> Pulse;
+        /// Makes the UDP path kept since a fallback to SSH the fresh path,
+        /// once it answers a probe; returns the socket to connect to.
+        fn standby(&mut self) -> Result<PathBuf, String>;
+        /// When the path in use, and the UDP path kept since a fallback,
+        /// last heard the server, kept current as paths change.
+        fn pulses(&self) -> Pulses;
+    }
+
+    /// The [`Pulse`]s of the path in use and of the one kept in standby.
+    #[derive(Clone, Default)]
+    struct Pulses {
+        current: Pulse,
+        standby: Pulse,
     }
 
     /// When the path in use last heard the server, for a path that can
@@ -201,6 +215,8 @@ mod client {
     enum Ask {
         /// Bring up a fresh path and take these clients over on it.
         Fresh(Plan),
+        /// Move these clients back onto the UDP path kept in standby.
+        Move(Plan),
         Settle,
     }
 
@@ -257,17 +273,18 @@ mod client {
             let cancelled = cancel.clone();
             let thread = std::thread::spawn(move || {
                 while let Ok(ask) = asked.recv() {
-                    let plan = match ask {
-                        Ask::Fresh(plan) => plan,
+                    let (path, plan, tell): (_, _, fn(_) -> _) = match ask {
+                        Ask::Fresh(plan) => (rejoin.fresh(&cancelled), plan, Input::Rejoined),
+                        Ask::Move(plan) => (rejoin.standby(), plan, Input::Moved),
                         Ask::Settle => {
                             rejoin.settle();
                             continue;
                         }
                     };
-                    let back = bring_back(rejoin.as_mut(), &cancelled, |socket| {
+                    let back = bring_back(rejoin.as_mut(), path, |socket| {
                         take_over(socket, plan, &cancelled)
                     });
-                    if tx.send(Input::Rejoined(back)).is_err() {
+                    if tx.send(tell(back)).is_err() {
                         return;
                     }
                 }
@@ -287,16 +304,16 @@ mod client {
         }
     }
 
-    /// One attempt at a fresh path, its clients taken over by `take`. On
-    /// success the fresh path is listened to before the attempt returns,
-    /// so before the main loop can read the [`Pulse`] again; on failure it
-    /// is discarded.
+    /// Takes the clients over by `take` on `path`, a fresh path or the one
+    /// in standby. On success the path is listened to before the attempt
+    /// returns, so before the main loop can read the [`Pulses`] again; on
+    /// failure it is discarded.
     fn bring_back<T>(
         rejoin: &mut dyn Rejoin,
-        cancel: &AtomicBool,
+        path: Result<PathBuf, String>,
         take: impl FnOnce(PathBuf) -> Result<T, Missed>,
     ) -> Result<T, Missed> {
-        let back = rejoin.fresh(cancel).map_err(Missed::Retry).and_then(take);
+        let back = path.map_err(Missed::Retry).and_then(take);
         match &back {
             Ok(_) => rejoin.listen(),
             Err(_) => rejoin.discard(),
@@ -355,6 +372,20 @@ mod client {
     struct Resume {
         takeover: Takeover,
         leased: bool,
+    }
+
+    /// The UDP path given up for SSH, moved back onto once it is heard
+    /// again (UDP-TRANSPORT.md).
+    struct Standby {
+        /// When it last heard the server.
+        pulse: Pulse,
+        /// A move is under way: the old path's connections end as their
+        /// clients are taken over, and that is no loss.
+        moving: bool,
+        /// Failed moves since the last one that worked.
+        tries: u32,
+        /// No move before this.
+        next: Instant,
     }
 
     /// When the client last asked for and had a sign of life.
@@ -444,7 +475,9 @@ mod client {
             remote,
             current: Route::Ssh(first),
             fresh: None,
-            pulse: Pulse::default(),
+            standby: None,
+            onto_standby: false,
+            pulses: Pulses::default(),
         };
         attach(local, block, Some(Box::new(path)))
     }
@@ -462,8 +495,9 @@ mod client {
         Udp(rusty_mux_tui::udp::Relay),
     }
 
-    /// The routes to the server: the one in use, and a fresh one until
-    /// the clients are taken over on it.
+    /// The routes to the server: the one in use, a fresh one until the
+    /// clients are taken over on it, and the association given up for SSH,
+    /// kept to move back to once it is heard again.
     #[cfg(unix)]
     struct SshPath {
         program: OsString,
@@ -473,7 +507,10 @@ mod client {
         remote: PathBuf,
         current: Route,
         fresh: Option<Route>,
-        pulse: Pulse,
+        standby: Option<rusty_mux_tui::udp::Relay>,
+        /// The fresh path is the one in standby.
+        onto_standby: bool,
+        pulses: Pulses,
     }
 
     #[cfg(unix)]
@@ -483,7 +520,7 @@ mod client {
         fn fresh(&mut self, cancel: &AtomicBool) -> Result<PathBuf, String> {
             use rusty_mux_tui::ssh::{Forward, Login};
 
-            self.fresh = None;
+            self.discard();
             if let Route::Udp(relay) = &self.current
                 && relay.probe(PROBE)
             {
@@ -497,34 +534,55 @@ mod client {
         }
 
         fn listen(&mut self) {
-            let Some(fresh) = &self.fresh else {
-                return;
-            };
-            let heard = match fresh {
-                Route::Udp(relay) => {
-                    let heard = relay.heard();
-                    Some(Arc::new(move || heard.last()) as Heard)
-                }
-                Route::Ssh(_) => None,
-            };
-            self.pulse.set(heard);
+            use rusty_mux_tui::udp::Relay;
+
+            // The paths in use and in standby once settled; see `settle`.
+            let (current, standby): (Option<&Relay>, Option<&Relay>) =
+                match (self.onto_standby, &self.fresh, &self.current) {
+                    (true, _, _) => (self.standby.as_ref(), None),
+                    (false, None, _) => return,
+                    (false, Some(Route::Udp(relay)), _) => (Some(relay), None),
+                    (false, Some(Route::Ssh(_)), Route::Udp(relay)) => (None, Some(relay)),
+                    (false, Some(Route::Ssh(_)), Route::Ssh(_)) => (None, self.standby.as_ref()),
+                };
+            self.pulses.current.set(current.map(heard));
+            self.pulses.standby.set(standby.map(heard));
         }
 
         fn settle(&mut self) {
             self.listen();
+            if std::mem::take(&mut self.onto_standby) {
+                self.fresh = self.standby.take().map(Route::Udp);
+            }
             let Some(fresh) = self.fresh.take() else {
                 return;
             };
-            // Stops the old forward, or the old association.
-            self.current = fresh;
+            // Stops the old forward, or the old association unless it is
+            // given up for SSH: that one is kept to move back to.
+            match (std::mem::replace(&mut self.current, fresh), &self.current) {
+                (Route::Udp(relay), Route::Ssh(_)) => self.standby = Some(relay),
+                (_, Route::Udp(_)) => self.standby = None,
+                _ => {}
+            }
         }
 
-        fn pulse(&self) -> Pulse {
-            self.pulse.clone()
+        fn standby(&mut self) -> Result<PathBuf, String> {
+            self.discard();
+            let relay = self.standby.as_ref().ok_or("no UDP path in standby")?;
+            if !relay.probe(PROBE) {
+                return Err("the UDP path did not answer".into());
+            }
+            self.onto_standby = true;
+            Ok(relay.socket().to_owned())
+        }
+
+        fn pulses(&self) -> Pulses {
+            self.pulses.clone()
         }
 
         fn discard(&mut self) {
             self.fresh = None;
+            self.onto_standby = false;
         }
 
         fn datagram(&mut self, port: u16, id: [u8; 8], key: [u8; 32]) -> Result<PathBuf, String> {
@@ -545,6 +603,13 @@ mod client {
             self.fresh = Some(Route::Udp(relay));
             Ok(local)
         }
+    }
+
+    /// When `relay` last heard the server, for a [`Pulse`].
+    #[cfg(unix)]
+    fn heard(relay: &rusty_mux_tui::udp::Relay) -> Heard {
+        let heard = relay.heard();
+        Arc::new(move || heard.last())
     }
 
     #[cfg(windows)]
@@ -612,7 +677,7 @@ mod client {
         // Without a sign of life to ask for, or a client to take over, a
         // lost path cannot be told or brought back.
         let rejoins = features.contains(Features::SYNC) && takeover.is_some();
-        let pulse = rejoin.as_ref().map(|r| r.pulse()).unwrap_or_default();
+        let pulses = rejoin.as_ref().map(|r| r.pulses()).unwrap_or_default();
         // Kept to the end either way: it owns the forward in use.
         let (rejoiner, kept) = match rejoin {
             Some(rejoin) if rejoins => (Some(Rejoiner::spawn(rejoin, tx.clone())), None),
@@ -626,7 +691,13 @@ mod client {
                 heard: now,
             }),
             rejoiner,
-            pulse,
+            pulse: pulses.current,
+            standby: Standby {
+                pulse: pulses.standby,
+                moving: false,
+                tries: 0,
+                next: now,
+            },
             me: takeover,
             lost: None,
             abandoned: None,
@@ -1342,6 +1413,8 @@ mod client {
         beat: Option<Beat>,
         /// When a path that can tell last heard the server.
         pulse: Pulse,
+        /// Moving back onto the UDP path given up for SSH.
+        standby: Standby,
         /// How to take the control connection's client over.
         me: Option<Takeover>,
         lost: Option<Lost>,
@@ -1456,7 +1529,7 @@ mod client {
                 // The server closes every connection when it goes; a
                 // block's own is left to report it, after its last output.
                 Input::ControlEnded(joined) if joined != self.joined => {}
-                Input::ControlEnded(_) if !self.panes.is_empty() => {}
+                Input::ControlEnded(_) if !self.panes.is_empty() || self.standby.moving => {}
                 Input::ControlEnded(_) => self.broke(Ended::Disconnected),
                 Input::Pane(tag, message) => self.on_pane(tag, message),
                 // Only asked for while lost.
@@ -1467,6 +1540,7 @@ mod client {
                 Input::Rejoined(Err(Missed::Broken(why))) => {
                     self.end(Ended::Failed(format!("reconnecting: {why}")))
                 }
+                Input::Moved(moved) => self.moved(moved),
                 Input::PaneEnded(tag) if self.current(tag) => {
                     let block = tag.0;
                     let leaving = self
@@ -1476,6 +1550,8 @@ mod client {
                     let closed = self.panes.get(&block).is_some_and(|p| p.closed);
                     match leaving || closed {
                         true => self.drained(block),
+                        // Taken over by the move under way.
+                        false if self.standby.moving => {}
                         // A block this client still shows lost its connection.
                         false => self.broke(Ended::Disconnected),
                     }
@@ -1518,6 +1594,67 @@ mod client {
             } else if now.duration_since(beat.asked) >= BEAT {
                 beat.asked = now;
                 self.request(|req| Message::Sync { req });
+            } else {
+                self.move_back(now);
+            }
+        }
+
+        /// Moves every client back onto the UDP path given up for SSH,
+        /// once that path hears the server again, make before break as a
+        /// lost path is brought back; the SSH path stays in use until then.
+        fn move_back(&mut self, now: Instant) {
+            let standby = &mut self.standby;
+            let heard = standby
+                .pulse
+                .last()
+                .is_some_and(|heard| now.saturating_duration_since(heard) < SILENT);
+            if standby.moving || now < standby.next || !heard {
+                return;
+            }
+            let (Some(rejoiner), Some(me)) = (&self.rejoiner, self.me) else {
+                return;
+            };
+            let resumes: Option<Vec<_>> = self
+                .panes
+                .values()
+                .map(|pane| {
+                    let takeover = pane.takeover?;
+                    let leased = pane.leased;
+                    Some((pane.block, Resume { takeover, leased }))
+                })
+                .collect();
+            // A block that cannot be taken over would be left on SSH.
+            let Some(resumes) = resumes else {
+                return;
+            };
+            standby.moving = true;
+            rejoiner.ask(Ask::Move(Plan {
+                me,
+                next: self.next,
+                window: self.window.filter(|_| self.inspect),
+                resumes,
+            }));
+        }
+
+        /// A move back onto UDP is done or failed. Failing before any
+        /// client moved leaves the client on SSH, to try again later, at
+        /// most [`BACKOFF`] apart; failing after leaves it a lost path.
+        fn moved(&mut self, moved: Result<Back, Missed>) {
+            self.standby.moving = false;
+            match moved {
+                Ok(back) => {
+                    self.standby.tries = 0;
+                    self.rejoined(back);
+                }
+                // Nothing moved; the SSH path is still the one in use.
+                Err(Missed::Retry(_)) => {
+                    let standby = &mut self.standby;
+                    standby.tries += 1;
+                    let wait = Duration::from_secs(1 << standby.tries.min(5)).min(BACKOFF);
+                    standby.next = Instant::now() + wait;
+                }
+                Err(Missed::Broken(_)) => self.lose(),
+                Err(Missed::Dropped) => self.end(Ended::Dropped),
             }
         }
 
@@ -1584,7 +1721,8 @@ mod client {
         /// the old path's connections, and the old path, let go.
         fn rejoined(&mut self, back: Back) {
             self.me = Some(back.me);
-            self.next = back.next;
+            // Past any id the old path used meanwhile, as on a move.
+            self.next = self.next.max(back.next);
             if let Some((layout, zoomed)) = back.layout {
                 (self.layout, self.zoomed) = (layout, zoomed);
             }
@@ -2171,15 +2309,20 @@ mod client {
             fn datagram(&mut self, _: u16, _: [u8; 8], _: [u8; 32]) -> Result<PathBuf, String> {
                 unreachable!("not asked here")
             }
-            fn pulse(&self) -> Pulse {
-                Pulse::default()
+            fn standby(&mut self) -> Result<PathBuf, String> {
+                self.0.push("standby");
+                Ok(PathBuf::from("standby.sock"))
+            }
+            fn pulses(&self) -> Pulses {
+                Pulses::default()
             }
         }
 
         #[test]
         fn a_path_brought_back_is_listened_to_before_the_main_loop_hears() {
             let mut calls = Calls::default();
-            let back = bring_back(&mut calls, &AtomicBool::new(false), |_| Ok(()));
+            let path = calls.fresh(&AtomicBool::new(false));
+            let back = bring_back(&mut calls, path, |_| Ok(()));
             assert!(back.is_ok());
             // `settle` is left to the main loop; the pulse moved already.
             assert_eq!(calls.0, ["fresh", "listen"]);
@@ -2188,11 +2331,21 @@ mod client {
         #[test]
         fn a_path_not_brought_back_is_discarded_and_not_listened_to() {
             let mut calls = Calls::default();
-            let back = bring_back(&mut calls, &AtomicBool::new(false), |_| {
+            let path = calls.fresh(&AtomicBool::new(false));
+            let back = bring_back(&mut calls, path, |_| {
                 Err::<(), _>(Missed::Dropped)
             });
             assert!(matches!(back, Err(Missed::Dropped)));
             assert_eq!(calls.0, ["fresh", "discard"]);
+        }
+
+        #[test]
+        fn a_move_onto_standby_is_listened_to_before_the_main_loop_hears() {
+            let mut calls = Calls::default();
+            let path = calls.standby();
+            let back = bring_back(&mut calls, path, |_| Ok(()));
+            assert!(back.is_ok());
+            assert_eq!(calls.0, ["standby", "listen"]);
         }
     }
 }
