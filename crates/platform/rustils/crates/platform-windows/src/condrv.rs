@@ -274,7 +274,9 @@ impl ClientProcess {
     /// before this call may have freed its pid for another process
     /// (design §7.3). The thread is opened first and must belong to `pid`;
     /// its handle keeps the process from being freed until the process
-    /// handle is open, which then keeps the pid. Fails closed: an
+    /// handle is open, which then keeps the pid. That the thread is still
+    /// the CONNECT's own, not a reuse of its id, the caller proves by
+    /// delivering the CONNECT reply afterwards (design §7.3). Fails closed: an
     /// `InvalidInput` error when the thread is another process's, else the
     /// OS error, e.g. when the thread is gone or `PermissionDenied` for a
     /// protected process.
