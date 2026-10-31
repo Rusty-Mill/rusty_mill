@@ -3,85 +3,144 @@
 //! Closing an own-host pane hangs its console up, which ends the clients
 //! still attached 5 s later (#1259). Waiting for that in the handle's Drop
 //! would freeze whichever thread drops it, the GUI's event loop included.
-//! A [`Reaper`] runs each wait on its own thread instead, and its owner
-//! joins them all before the process exits, so the kill still happens.
+//! A [`Reaper`] runs each wait on a small, bounded pool of threads
+//! instead, and its owner joins them before the process exits, so the
+//! kill still happens.
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::thread::{self, JoinHandle};
+use std::collections::VecDeque;
+use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread;
 
-/// A shutdown handed to the reaper.
+/// A shutdown handed to the reaper. Each bounds its own wait.
 pub(crate) type Job = Box<dyn FnOnce() + Send>;
 
-/// Runs jobs on threads that [`join`](Self::join) waits for. Once joined,
-/// it runs any later job on the caller's thread, so nothing is left behind.
+/// Starts a worker thread running its argument.
+type Spawn = fn(Box<dyn FnOnce() + Send>) -> io::Result<()>;
+
+/// The most worker threads at once. A burst of closes queues behind
+/// them instead of starting a thread each (review of 0ce71b34).
+const MAX_WORKERS: usize = 8;
+
+/// Runs jobs off the caller's thread; [`join`](Self::join) waits for every
+/// job it accepted, wherever it runs. Once joined, it runs a later job on
+/// the caller's thread, so handles should be dropped before the joiner.
 pub(crate) struct Reaper {
-    /// The running jobs, or `None` once joined.
-    threads: Mutex<Option<Vec<JoinHandle<()>>>>,
+    state: Mutex<State>,
+    /// Signalled when `in_flight` reaches 0.
+    idle: Condvar,
+    spawn: Spawn,
+}
+
+#[derive(Default)]
+struct State {
+    queue: VecDeque<Job>,
+    /// Jobs accepted and not yet finished: queued or running.
+    in_flight: usize,
+    /// Workers taking from `queue`, at most [`MAX_WORKERS`].
+    workers: usize,
+    joined: bool,
 }
 
 impl Reaper {
     pub(crate) fn new() -> Self {
+        Self::with_spawn(spawn_thread)
+    }
+
+    fn with_spawn(spawn: Spawn) -> Self {
         Self {
-            threads: Mutex::new(Some(Vec::new())),
+            state: Mutex::new(State::default()),
+            idle: Condvar::new(),
+            spawn,
         }
     }
 
-    /// Runs `job` on its own thread, or here if the reaper has been joined
-    /// or no thread can start.
-    pub(crate) fn run(&self, job: Job) {
-        let mut guard = self.lock();
-        let Some(threads) = guard.as_mut() else {
-            drop(guard);
-            job();
+    /// Queues `job` for a worker, starting one if fewer than
+    /// [`MAX_WORKERS`] run. If none can start, this thread works the
+    /// queue, still counted, so `join` waits for it. Once joined, runs
+    /// `job` here.
+    pub(crate) fn run(self: &Arc<Self>, job: Job) {
+        let mut state = self.lock();
+        if state.joined {
+            drop(state);
+            run_logged(job);
             return;
-        };
-        threads.retain(|t| !t.is_finished());
-        let slot = Arc::new(Mutex::new(Some(job)));
-        let theirs = Arc::clone(&slot);
-        let spawned = thread::Builder::new()
-            .name("rusty_term-reaper".into())
-            .spawn(move || run_taken(&theirs));
-        match spawned {
-            Ok(thread) => threads.push(thread),
-            Err(e) => {
-                drop(guard);
-                eprintln!("rusty_term: no thread for a console shutdown ({e}); waiting here");
-                run_taken(&slot);
-            }
+        }
+        state.in_flight += 1;
+        state.queue.push_back(job);
+        if state.workers >= MAX_WORKERS {
+            return;
+        }
+        state.workers += 1;
+        drop(state);
+        let me = Arc::clone(self);
+        if let Err(e) = (self.spawn)(Box::new(move || me.work())) {
+            eprintln!("rusty_term: no thread for a console shutdown ({e}); waiting here");
+            self.work();
         }
     }
 
-    /// Waits for every running job; later jobs run on the caller's thread.
-    /// Each job bounds its own wait, so this is bounded too.
+    /// Waits until every accepted job has finished; later jobs run on the
+    /// caller's thread. Bounded, as each job bounds its own wait.
     pub(crate) fn join(&self) {
-        let threads = self.lock().take().unwrap_or_default();
-        for thread in threads {
-            if thread.join().is_err() {
-                eprintln!("rusty_term: a console shutdown panicked");
+        let mut state = self.lock();
+        state.joined = true;
+        while state.in_flight > 0 {
+            state = self
+                .idle
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// A worker: runs queued jobs until none is left.
+    fn work(&self) {
+        loop {
+            let job = {
+                let mut state = self.lock();
+                let Some(job) = state.queue.pop_front() else {
+                    state.workers -= 1;
+                    return;
+                };
+                job
+            };
+            run_logged(job);
+            let mut state = self.lock();
+            state.in_flight -= 1;
+            if state.in_flight == 0 {
+                self.idle.notify_all();
             }
         }
     }
 
-    /// The thread list, even if a job panicked while it was held (none
-    /// runs under the lock, so the list is still whole).
-    fn lock(&self) -> MutexGuard<'_, Option<Vec<JoinHandle<()>>>> {
-        self.threads.lock().unwrap_or_else(PoisonError::into_inner)
+    /// The state, even if a thread panicked while holding it (none runs
+    /// a job under the lock, so it is still whole).
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-/// Runs the job in `slot`, unless someone has taken it already.
-fn run_taken(slot: &Mutex<Option<Job>>) {
-    let job = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
-    if let Some(job) = job {
-        job();
+fn spawn_thread(work: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+    thread::Builder::new()
+        .name("rusty_term-reaper".into())
+        .spawn(work)
+        .map(drop)
+}
+
+/// Runs `job`, logging a panic rather than losing its count.
+fn run_logged(job: Job) {
+    if catch_unwind(AssertUnwindSafe(job)).is_err() {
+        eprintln!("rusty_term: a console shutdown panicked");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Reaper;
+    use super::{MAX_WORKERS, Reaper};
+    use std::io;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     const JOB: Duration = Duration::from_millis(300);
@@ -96,7 +155,7 @@ mod tests {
 
     #[test]
     fn a_job_runs_off_the_callers_thread_and_join_waits_for_it() {
-        let reaper = Reaper::new();
+        let reaper = Arc::new(Reaper::new());
         let done = Arc::new(AtomicBool::new(false));
         let start = Instant::now();
         reaper.run(slow_job(&done));
@@ -111,28 +170,70 @@ mod tests {
     }
 
     #[test]
-    fn join_waits_for_every_job() {
-        let reaper = Reaper::new();
-        let flags: Vec<_> = (0..3).map(|_| Arc::new(AtomicBool::new(false))).collect();
-        for done in &flags {
-            reaper.run(slow_job(done));
+    fn a_burst_runs_on_at_most_max_workers_and_join_waits_for_all() {
+        let reaper = Arc::new(Reaper::new());
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(AtomicUsize::new(0));
+        let jobs = 3 * MAX_WORKERS;
+        let start = Instant::now();
+        for _ in 0..jobs {
+            let (running, peak, finished) = (
+                Arc::clone(&running),
+                Arc::clone(&peak),
+                Arc::clone(&finished),
+            );
+            reaper.run(Box::new(move || {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(50));
+                running.fetch_sub(1, Ordering::SeqCst);
+                finished.fetch_add(1, Ordering::SeqCst);
+            }));
         }
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "no close waits"
+        );
         reaper.join();
-        assert!(flags.iter().all(|d| d.load(Ordering::SeqCst)));
+        assert_eq!(finished.load(Ordering::SeqCst), jobs);
+        assert!(peak.load(Ordering::SeqCst) <= MAX_WORKERS);
+        assert_eq!(reaper.lock().workers, 0, "the workers exit once idle");
     }
 
     #[test]
     fn a_job_after_join_runs_on_the_callers_thread() {
-        let reaper = Reaper::new();
+        let reaper = Arc::new(Reaper::new());
         reaper.join();
         let done = Arc::new(AtomicBool::new(false));
         reaper.run(slow_job(&done));
         assert!(done.load(Ordering::SeqCst), "it ran before run returned");
     }
 
+    /// With no thread to be had, the caller runs the job, and `join` on
+    /// another thread still waits for it (review of 0ce71b34).
+    #[test]
+    fn a_job_run_here_for_want_of_a_thread_is_still_joined() {
+        let reaper = Arc::new(Reaper::with_spawn(|_| Err(io::Error::other("no threads"))));
+        let done = Arc::new(AtomicBool::new(false));
+        let caller = {
+            let (reaper, done) = (Arc::clone(&reaper), Arc::clone(&done));
+            std::thread::spawn(move || reaper.run(slow_job(&done)))
+        };
+        while reaper.lock().in_flight == 0 {
+            std::thread::yield_now();
+        }
+        reaper.join();
+        assert!(
+            done.load(Ordering::SeqCst),
+            "join waited for the inline job"
+        );
+        caller.join().expect("caller");
+    }
+
     #[test]
     fn a_panicking_job_does_not_stop_join() {
-        let reaper = Reaper::new();
+        let reaper = Arc::new(Reaper::new());
         let done = Arc::new(AtomicBool::new(false));
         reaper.run(Box::new(|| panic!("a shutdown failed")));
         reaper.run(slow_job(&done));
