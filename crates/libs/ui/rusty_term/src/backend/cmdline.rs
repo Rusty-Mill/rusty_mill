@@ -37,11 +37,12 @@ pub(crate) enum Reader {
     Batch,
 }
 
-/// Who reads the command line of `program`, by its file name. A bare
-/// `cmd` is cmd.exe, as `CreateProcessW` adds `.exe`.
+/// Who reads the command line of `program`, by its file name: what
+/// follows the last `\\`, `/` or drive colon (`C:cmd.exe`). A bare `cmd`
+/// is cmd.exe, as `CreateProcessW` adds `.exe`.
 pub(crate) fn reader(program: &str) -> Reader {
     let name = program
-        .rsplit(['\\', '/'])
+        .rsplit(['\\', '/', ':'])
         .next()
         .unwrap_or(program)
         .to_ascii_lowercase();
@@ -138,7 +139,7 @@ fn has_switch(options: &[u16], letter: u8) -> bool {
 
 /// Whether cmd's `options` turn delayed expansion on: a `/v` that isn't
 /// `/v:off`.
-fn delayed_expansion(options: &[u16]) -> bool {
+pub(crate) fn delayed_expansion(options: &[u16]) -> bool {
     let off: Vec<u16> = ":off".encode_utf16().collect();
     options.windows(2).enumerate().any(|(i, w)| {
         w[0] == SLASH
@@ -369,6 +370,9 @@ mod tests {
         assert_eq!(reader("pwsh"), Reader::Crt);
         assert_eq!(reader(r"C:\cmd\x.exe"), Reader::Crt);
         assert_eq!(reader("cmd.com"), Reader::Crt);
+        // Drive-relative: the name follows the drive colon.
+        assert_eq!(reader("C:cmd.exe"), Reader::Cmd);
+        assert_eq!(reader("d:x.BAT"), Reader::Batch);
     }
 
     #[test]

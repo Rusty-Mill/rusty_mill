@@ -340,6 +340,24 @@ mod tests {
         }
     }
 
+    /// Delayed expansion turned on by a launcher argument still refuses
+    /// a `!` argument, on either backend.
+    #[test]
+    fn a_launcher_v_on_refuses_bang_on_either_backend() {
+        let backends: [&dyn Backend; 2] = [&OwnBackend, &WindowsBackend];
+        for backend in backends {
+            let args: Vec<String> = ["/v:on", "/c", "echo", "!PATH!"]
+                .iter()
+                .map(|a| (*a).to_owned())
+                .collect();
+            let err = backend
+                .spawn_shell(80, 24, Some("cmd"), &args, None)
+                .err()
+                .expect("refused");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
     /// `rusty_term -- cmd /c ...`: plain words stay bare, so cmd still
     /// finds its switch and command, and a quoted first word keeps its
     /// quotes through cmd's quote stripping.
@@ -464,6 +482,30 @@ mod tests {
             Some(std::io::ErrorKind::InvalidInput)
         );
         assert_eq!(line(r"C:\t.cmd", &["a\"b", "c"]), r#"/c C:\t.cmd "a""b" c"#);
+    }
+
+    /// The own host's command for `shell` and `args`: its raw text and argv.
+    fn own_command(shell: &str, args: &[&str]) -> std::io::Result<(String, usize)> {
+        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        let cmd = super::shell_command(shell, &args, std::env::temp_dir().into_os_string())?;
+        let raw = cmd
+            .raw_args
+            .unwrap_or_default()
+            .into_string()
+            .expect("utf-8");
+        Ok((raw, cmd.argv.len()))
+    }
+
+    /// Review of d21ea929: a drive-relative cmd is read as cmd (P1), and a
+    /// launcher `/v:on` refuses a `!` argument (P2), on the own host too.
+    #[test]
+    fn own_host_reads_drive_relative_cmd_and_launcher_options() {
+        let (raw, argv) =
+            own_command("C:cmd.exe /c echo", &[r#"x\" & calc & \"y"#]).expect("quoted");
+        assert_eq!(raw, r#"/c echo "x\"" & calc & \""y""#);
+        assert_eq!(argv, 0, "cmd's arguments go in the raw text");
+        let err = own_command("cmd", &["/v:on", "/c", "echo", "!SECRET!"]).expect_err("refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]

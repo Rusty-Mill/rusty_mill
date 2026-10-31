@@ -320,13 +320,17 @@ pub(super) fn push_launcher_args(
         }
         return Ok(());
     }
-    let rules = cmdline::cmd_rules(line, params, reader);
+    let mut rules = cmdline::cmd_rules(line, params, reader);
     let mut switched = rules.switched;
     for arg in args {
+        let wide: Vec<u16> = arg.encode_utf16().collect();
+        if !switched && reader == Reader::Cmd {
+            // An option before the switch is cmd's own, as `/v:on` is.
+            rules.delayed |= cmdline::delayed_expansion(&wide);
+        }
         if !switched && cmdline::is_command_switch(arg) {
             switched = true;
-        } else if !switched && cmdline::has_command_switch(&arg.encode_utf16().collect::<Vec<_>>())
-        {
+        } else if !switched && cmdline::has_command_switch(&wide) {
             return Err(cmd_refused(
                 arg,
                 &"it holds a switch that would start a command",
@@ -698,6 +702,20 @@ mod tests {
         assert_eq!(
             refused("cmd /v:on /c echo", &["a!PATH!b"]),
             Some(ErrorKind::InvalidInput)
+        );
+        // Options from the launcher count too (review of d21ea929, P2).
+        assert_eq!(
+            refused("cmd", &["/v:on", "/c", "echo", "!SECRET!"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            line("cmd", &["/v:off", "/c", "echo", "a!b"]).expect("off"),
+            r#"cmd /v:off /c echo "a!b""#
+        );
+        // A drive-relative cmd is cmd (review of d21ea929, P1).
+        assert_eq!(
+            line("C:cmd.exe /c echo", &[r#"x\" & calc & \"y"#]).expect("quoted"),
+            r#"C:cmd.exe /c echo "x\"" & calc & \""y""#
         );
     }
 
