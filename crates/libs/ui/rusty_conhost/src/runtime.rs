@@ -32,7 +32,7 @@ use crate::msg::STATUS_UNSUCCESSFUL;
 use crate::sched::{self, Control, Grace, KILL_AFTER, PACKET_INPUT_CAP, View};
 
 /// Code-page conversion by the OS (§5.9).
-const NATIVE_CODEC: Codec = Codec {
+pub(crate) const NATIVE_CODEC: Codec = Codec {
     valid: condrv::is_valid_code_page,
     decode: |cp, bytes| condrv::decode(cp, bytes).ok(),
     encode: |cp, text| condrv::encode(cp, text).ok(),

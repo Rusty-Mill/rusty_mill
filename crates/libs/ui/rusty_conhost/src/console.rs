@@ -1121,8 +1121,11 @@ impl Console {
             self.utf8_tail = text.split_off(text.len() - keep);
             return Text::Bytes(text);
         }
-        // conhost resets its UTF-8 state on a write in another code page.
-        self.utf8_tail.clear();
+        // conhost resets its UTF-8 state on any nonempty write in another
+        // code page, even one that emits nothing (a lone lead byte).
+        if !bytes.is_empty() {
+            self.utf8_tail.clear();
+        }
         let mut text = Vec::with_capacity(bytes.len() + 1);
         if let (Some(lead), Some(&first)) = (self.lead_byte, bytes.first())
             && first >= b' '
@@ -2341,6 +2344,69 @@ pub(crate) mod tests {
         );
     }
 
+    /// `bytes` written in `cp` through the OS codec, across several
+    /// slices and, when `parked`, from behind a stalled reader: the
+    /// terminal must show what one native decode of the whole write gives.
+    #[cfg(windows)]
+    fn native_write_matches_whole_decode(cp: u32, bytes: &[u8], parked: bool) {
+        use platform_windows::condrv;
+        let expected = condrv::decode(cp, bytes).expect("an installed code page");
+        assert!(
+            expected.encode_utf16().count() > 2 * WIDE_SLICE,
+            "several slices"
+        );
+        let mut h = Host::new();
+        h.c = Console::new(
+            WinSize { rows: 24, cols: 80 },
+            input::us_key_for,
+            crate::runtime::NATIVE_CODEC,
+        );
+        let [_, _, output] = h.connect(1, "");
+        h.set_cp(cp, true);
+        if parked {
+            stall(&mut h, output);
+        }
+        let before = h.vt.len();
+        let r = h.call(output, api::WRITE_CONSOLE, &[0; 8], bytes, 0);
+        assert_eq!(r.status == i32::MIN, parked, "{r:?}");
+        while h.c.waiting() > 0 {
+            h.drain();
+        }
+        assert_eq!(shown_text(&h.vt[before..]), expected, "cp {cp}");
+    }
+
+    /// GB18030: four-byte sequences (here U+10000, a surrogate pair) and
+    /// two-byte ones, odd-aligned so slices fall inside them.
+    #[cfg(windows)]
+    fn gb18030_text() -> Vec<u8> {
+        let mut bytes = b"a".to_vec();
+        for _ in 0..WIDE_SLICE * 3 / 4 {
+            bytes.extend(b"\x90\x30\x81\x30\xc4\xe3");
+        }
+        bytes
+    }
+
+    /// UTF-7: one long base64 run, whose state a split decode loses.
+    #[cfg(windows)]
+    fn utf7_text() -> Vec<u8> {
+        let text = format!("a{}", "日本".repeat(WIDE_SLICE * 5 / 4));
+        platform_windows::condrv::encode(codepage::UTF7, &text).expect("UTF-7")
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_gb18030_writes_decode_whole_across_slices() {
+        native_write_matches_whole_decode(54936, &gb18030_text(), false);
+        native_write_matches_whole_decode(54936, &gb18030_text(), true);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_utf7_writes_decode_whole_across_slices() {
+        native_write_matches_whole_decode(codepage::UTF7, &utf7_text(), false);
+        native_write_matches_whole_decode(codepage::UTF7, &utf7_text(), true);
+    }
+
     /// Text the terminal was sent, without the CR LF of wrapping.
     fn shown_text(vt: &[u8]) -> String {
         String::from_utf8_lossy(vt)
@@ -2367,6 +2433,51 @@ pub(crate) mod tests {
         h.set_cp(65001, true);
         h.write_a(output, b"\xa9");
         assert_eq!(h.vt, b"b\xa9");
+    }
+
+    /// 65001 `C3`, then 932 `82` (a lone lead byte, which emits nothing),
+    /// then 65001 `A9`: the ANSI write still resets the UTF-8 state.
+    fn utf8_then_lone_lead_then_utf8(h: &mut Host, output: usize, parked: bool) {
+        let write = |h: &mut Host, bytes: &[u8]| {
+            let r = h.call(output, api::WRITE_CONSOLE, &[0; 8], bytes, 0);
+            let held = r.status == i32::MIN;
+            assert!(held == parked || r.status == msg::STATUS_SUCCESS, "{r:?}");
+        };
+        write(h, b"\xc3");
+        h.set_cp(932, true);
+        write(h, b"\x82");
+        h.set_cp(65001, true);
+        write(h, b"\xa9");
+    }
+
+    #[test]
+    fn a_lone_lead_byte_write_still_resets_utf8() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        utf8_then_lone_lead_then_utf8(&mut h, output, false);
+        assert_eq!(h.vt, b"\xa9", "no é");
+        // An empty write in another code page resets nothing, as in conhost.
+        h.vt.clear();
+        h.write_a(output, b"\xc3");
+        h.set_cp(437, true);
+        h.write_a(output, b"");
+        h.set_cp(65001, true);
+        h.write_a(output, b"\xa9");
+        assert_eq!(h.vt, "é".as_bytes());
+    }
+
+    #[test]
+    fn a_lone_lead_byte_write_resets_utf8_while_parked() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        stall(&mut h, output);
+        let before = h.vt.len();
+        utf8_then_lone_lead_then_utf8(&mut h, output, true);
+        assert!(h.c.waiting() > 0, "the writes parked");
+        while h.c.waiting() > 0 {
+            h.drain();
+        }
+        assert_eq!(&h.vt[before..], b"\xa9", "no é once drained in order");
     }
 
     #[test]

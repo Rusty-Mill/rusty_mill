@@ -16,7 +16,7 @@
 /// UTF-8, the code page both start at (V4).
 pub(crate) const UTF8: u32 = 65001;
 /// UTF-7: its bytes are all ASCII, so it has no lead bytes to probe.
-const UTF7: u32 = 65000;
+pub(crate) const UTF7: u32 = 65000;
 
 /// Code-page conversion. `decode` and `encode` are `MultiByteToWideChar`
 /// and `WideCharToMultiByte` without `MB_ERR_INVALID_CHARS`: what a code
