@@ -93,6 +93,20 @@ pub(crate) fn keep_command_quotes(line: &mut Vec<u16>, params: usize) {
     }
 }
 
+/// Whether `text` holds a `/c`, `/k` or `/r` anywhere. cmd takes the first
+/// one in its parameters as the switch that starts its command, even inside
+/// quotes or glued to a word (`"x /c y"`, `x/c y`; measured on Windows).
+pub(crate) fn has_command_switch(text: &[u16]) -> bool {
+    command_start(text).is_some()
+}
+
+/// Whether `arg` is exactly a switch that starts cmd's command.
+pub(crate) fn is_command_switch(arg: &str) -> bool {
+    ["/c", "/k", "/r"]
+        .iter()
+        .any(|s| arg.eq_ignore_ascii_case(s))
+}
+
 /// Where the command starts in cmd's `params`: after its `/c`, `/k` or
 /// `/r` switch and any blanks.
 fn command_start(params: &[u16]) -> Option<usize> {
@@ -194,7 +208,10 @@ fn search_dirs() -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Reader, keep_command_quotes, plain_for_cmd, quotes_closed, reader, split_program};
+    use super::{
+        Reader, has_command_switch, is_command_switch, keep_command_quotes, plain_for_cmd,
+        quotes_closed, reader, split_program,
+    };
 
     /// Split with no program on disk: the program is the first word.
     fn split(line: &str) -> Option<(&str, &str)> {
@@ -321,5 +338,17 @@ mod tests {
         // A `/c` in the program's own path is not cmd's switch.
         let line = r#"C:/cmd/cmd.exe "a&b""#;
         assert_eq!(kept(line, 14), line);
+    }
+
+    #[test]
+    fn command_switches_are_found_anywhere() {
+        for text in ["/c", "x/C y", r#""a /k b""#, "/r"] {
+            assert!(has_command_switch(&wide(text)), "{text}");
+        }
+        for text in ["/d /q", "c:\\x", "-c"] {
+            assert!(!has_command_switch(&wide(text)), "{text}");
+        }
+        assert!(is_command_switch("/C") && is_command_switch("/k"));
+        assert!(!is_command_switch("/cdir") && !is_command_switch("x/c"));
     }
 }

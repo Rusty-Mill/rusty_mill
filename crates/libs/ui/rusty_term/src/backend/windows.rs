@@ -321,7 +321,19 @@ pub(super) fn push_launcher_args(
         return Ok(());
     }
     let closed = cmdline::quotes_closed(line);
+    // Until cmd has its `/c`, `/k` or `/r`, an argument can only be that
+    // switch itself: one holding it anywhere else would start a command.
+    let mut switched = reader == Reader::Batch || cmdline::has_command_switch(&line[params..]);
     for arg in args {
+        if !switched && cmdline::is_command_switch(arg) {
+            switched = true;
+        } else if !switched && cmdline::has_command_switch(&arg.encode_utf16().collect::<Vec<_>>())
+        {
+            return Err(cmd_refused(
+                arg,
+                &"it holds a switch that would start a command",
+            ));
+        }
         line.push(u16::from(b' '));
         push_cmd_arg(arg, closed, line)?;
     }
@@ -338,17 +350,19 @@ fn push_cmd_arg(arg: &str, closed: bool, out: &mut Vec<u16>) -> std::io::Result<
         out.extend(arg.encode_utf16());
         return Ok(());
     }
-    let refused = |why: &dyn std::fmt::Display| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("rusty_term: cmd.exe can't take the argument {arg:?} safely: {why}"),
-        )
-    };
     if !closed {
-        return Err(refused(&"the shell leaves a quote open"));
+        return Err(cmd_refused(arg, &"the shell leaves a quote open"));
     }
     let wide: Vec<u16> = arg.encode_utf16().collect();
-    winargv::quote_batch_arg_into(&wide, out).map_err(|e| refused(&e))
+    winargv::quote_batch_arg_into(&wide, out).map_err(|e| cmd_refused(arg, &e))
+}
+
+/// The error for an argument cmd.exe can't take safely.
+fn cmd_refused(arg: &str, why: &dyn std::fmt::Display) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("rusty_term: cmd.exe can't take the argument {arg:?} safely: {why}"),
+    )
 }
 
 /// Appends `arg` to `out` (a wide command-line buffer), quoted per the
@@ -645,6 +659,21 @@ mod tests {
         assert_eq!(
             line(r#"cmd /c echo ""#, &["ab"]).expect("plain"),
             r#"cmd /c echo " ab"#
+        );
+        // Before cmd's own switch, an argument holding one is refused, even
+        // quoted (cmd finds it there); the bare switch itself is taken.
+        assert_eq!(
+            refused("cmd", &["x /c calc"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        assert_eq!(refused("cmd /q", &["a/k"]), Some(ErrorKind::InvalidInput));
+        assert_eq!(
+            line("cmd", &["/K", "x/c"]).expect("after the switch"),
+            "cmd /K x/c"
+        );
+        assert_eq!(
+            line("cmd /c echo", &["a/c"]).expect("after it"),
+            "cmd /c echo a/c"
         );
     }
 
