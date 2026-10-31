@@ -606,6 +606,19 @@ mod tests {
         assert!(poll(second.as_mut()).is_pending());
     }
 
+    /// A future that took a permit and returned `Ready` stays `Ready`
+    /// when polled again, without taking a second permit.
+    #[test]
+    fn a_ready_waiter_repolled_does_not_take_another_permit() {
+        let notify = Notify::new();
+        let mut waiter = pin!(notify.notified());
+        notify.notify_one();
+        assert!(poll(waiter.as_mut()).is_ready());
+        notify.notify_one();
+        assert!(poll(waiter.as_mut()).is_ready());
+        assert!(poll(pin!(notify.notified())).is_ready(), "still banked");
+    }
+
     /// Passing a wakeup on goes through `give`, so the window above is
     /// covered for it too; a chain of drops passes it along.
     #[test]

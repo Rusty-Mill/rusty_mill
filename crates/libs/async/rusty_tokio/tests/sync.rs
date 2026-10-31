@@ -2335,6 +2335,27 @@ fn notify_last_reaching_a_dropped_waiter_passes_to_the_next_newest() {
     );
 }
 
+/// A waiter takes a permit and returns `Ready`, a second permit is banked
+/// and the waiter is polled again: is a fresh `notified()` still ready?
+macro_rules! repoll_after_permit {
+    ($notify:ty) => {{
+        let notify = <$notify>::new();
+        let mut waiter = Box::pin(notify.notified());
+        notify.notify_one();
+        assert!(is_ready(waiter.as_mut()));
+        notify.notify_one();
+        assert!(is_ready(waiter.as_mut()), "stays ready");
+        let ready = is_ready(std::pin::pin!(notify.notified()));
+        ready
+    }};
+}
+
+#[test]
+fn notify_ready_waiter_repolled_leaves_a_banked_permit() {
+    assert!(repoll_after_permit!(tokio::sync::Notify), "tokio");
+    assert!(repoll_after_permit!(Notify), "rusty_tokio");
+}
+
 /// One thread fires `notify_one` (or `notify_last`) while another drops the
 /// waiter it targets, `ROUNDS` times, so both orders and the window between
 /// them occur. Whatever the order, exactly one wakeup reaches the expected
