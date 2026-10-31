@@ -1222,6 +1222,26 @@ fn a_silent_udp_path_is_noticed_in_6_s() {
     std::fs::remove_dir_all(&work).expect("cleanup");
 }
 
+/// An idle UDP path that still works is not lost: with nothing typed or
+/// shown for longer than the 6 s of silence and the probe, the server's
+/// keepalives keep it, so there is no second login and typing still
+/// reaches the block over UDP.
+#[test]
+fn an_idle_udp_path_is_not_lost() {
+    let (socket, port) = real_udp_server();
+    let _wire = Wire::new(port);
+    let work = relaying_ssh("udp-idle", &[]);
+    let tui = on_udp(&work, &socket);
+    std::thread::sleep(Duration::from_secs(9));
+    assert_eq!(logins(&work).len(), 1, "an idle path was given up");
+    type_until(&tui, b"echo two-$((1+1))\r", b"two-2");
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
+    assert!(!text.contains("path to the server was down"), "{text:?}");
+    assert_eq!(logins(&work).len(), 1, "no second login");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
 /// After a fallback to SSH, the association given up is kept: once it is
 /// heard again the clients move back onto it, the second forward stops,
 /// and typing reaches the block with no third login.

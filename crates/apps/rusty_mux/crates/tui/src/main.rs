@@ -240,7 +240,7 @@ mod client {
         next: u64,
         /// The window to ask the layout of, when the server answers List.
         window: Option<WindowId>,
-        resumes: Vec<(BlockId, Resume)>,
+        resumes: Vec<(BlockId, Takeover)>,
     }
 
     /// A path brought back: its connections, past their Welcomes, with
@@ -392,13 +392,6 @@ mod client {
         /// after it took over the control client. Tried once, before a
         /// new login.
         keep: bool,
-    }
-
-    /// How to continue a block's connection after the path comes back.
-    #[derive(Clone, Copy)]
-    struct Resume {
-        takeover: Takeover,
-        leased: bool,
     }
 
     /// Getting onto UDP from SSH (UDP-TRANSPORT.md): back onto the path
@@ -1426,7 +1419,7 @@ mod client {
         writer: Conn<UnixStream>,
         takeover: Option<Takeover>,
         /// The client taken over, if this continues one.
-        resumed: Option<Resume>,
+        resumed: Option<Takeover>,
         features: Features,
     }
 
@@ -1435,7 +1428,7 @@ mod client {
     fn reach(
         socket: &Path,
         block: BlockId,
-        resume: Option<Resume>,
+        resume: Option<Takeover>,
         by: Instant,
         cancel: &AtomicBool,
     ) -> Result<Opened, Missed> {
@@ -1446,13 +1439,13 @@ mod client {
         conn.send(&Message::Hello {
             features: PANE,
             resume: None,
-            takeover: resume.map(|r| r.takeover),
+            takeover: resume,
         })
         .map_err(|e| retry(e.to_string()))?;
         let welcomed = welcomed(answer(&mut conn, by, cancel).map_err(retry)?).map_err(retry)?;
         match (resume, welcomed.takeover) {
             (None, _) => {}
-            (Some(r), Some(t)) if t.client == r.takeover.client => {}
+            (Some(r), Some(t)) if t.client == r.client => {}
             (Some(_), _) => return Err(Missed::Dropped),
         }
         Ok(Opened {
@@ -1703,7 +1696,7 @@ mod client {
         /// The lost path's connections, until their clients are taken over.
         abandoned: Option<Abandoned>,
         /// The blocks' connections to take over once the path is back.
-        resumes: HashMap<BlockId, Resume>,
+        resumes: HashMap<BlockId, Takeover>,
         tx: Sender<Input>,
         control_stream: UnixStream,
         control: Conn<UnixStream>,
@@ -1965,11 +1958,7 @@ mod client {
             let resumes: Option<Vec<_>> = self
                 .panes
                 .values()
-                .map(|pane| {
-                    let takeover = pane.takeover?;
-                    let leased = pane.leased;
-                    Some((pane.block, Resume { takeover, leased }))
-                })
+                .map(|pane| Some((pane.block, pane.takeover?)))
                 .collect();
             let (Some(resumes), Some(rejoiner), Some(me)) = (resumes, &self.rejoiner, self.me)
             else {
@@ -2084,11 +2073,7 @@ mod client {
             let panes: Vec<Pane> = self.panes.drain().map(|(_, pane)| pane).collect();
             self.resumes = panes
                 .iter()
-                .filter_map(|pane| {
-                    let takeover = pane.takeover?;
-                    let leased = pane.leased;
-                    Some((pane.block, Resume { takeover, leased }))
-                })
+                .filter_map(|pane| Some((pane.block, pane.takeover?)))
                 .collect();
             self.abandoned = Some(Abandoned {
                 reader: self.reader.take(),
@@ -2605,8 +2590,8 @@ mod client {
         }
 
         /// Listens to a block's connection. One that continues a client is
-        /// still attached and leased as it was, and the server sends the
-        /// screen again; any other attaches.
+        /// still attached as it was, and the server sends the screen again;
+        /// any other attaches. Either asks for the lease when in focus.
         fn pane(&mut self, opened: Opened) -> Pane {
             let block = opened.block;
             self.opened += 1;
@@ -2634,7 +2619,9 @@ mod client {
                 term: None,
                 asking: None,
                 waiting: Vec::new(),
-                leased: opened.resumed.is_some_and(|r| r.leased),
+                // Asked for again even on a takeover: silence may have
+                // released the lease meanwhile (UDP-TRANSPORT.md).
+                leased: false,
                 sizing: None,
                 reader: Some(reader),
                 predict: (self.predicting && opened.features.contains(PREDICT))
@@ -3011,7 +2998,7 @@ mod client {
         }
 
         #[cfg(unix)]
-        fn plan(me: Takeover, window: Option<WindowId>, resumes: Vec<(BlockId, Resume)>) -> Plan {
+        fn plan(me: Takeover, window: Option<WindowId>, resumes: Vec<(BlockId, Takeover)>) -> Plan {
             Plan {
                 me,
                 next: 1,
@@ -3061,22 +3048,7 @@ mod client {
                 drop(listener.accept().expect("accept"));
                 std::thread::sleep(Duration::from_millis(200));
             });
-            let resumes = vec![
-                (
-                    block(2),
-                    Resume {
-                        takeover: first,
-                        leased: true,
-                    },
-                ),
-                (
-                    block(3),
-                    Resume {
-                        takeover: second,
-                        leased: false,
-                    },
-                ),
-            ];
+            let resumes = vec![(block(2), first), (block(3), second)];
             let missed = take_over(socket, plan(old, None, resumes), &NEVER).err();
             assert!(
                 matches!(missed, Some(Missed::Broken(_, me)) if me == new),
@@ -3093,7 +3065,7 @@ mod client {
 
         /// A block's connection past its Welcome, continuing `who`.
         #[cfg(unix)]
-        fn opened(block: BlockId, who: Takeover, leased: bool) -> (Opened, UnixStream) {
+        fn opened(block: BlockId, who: Takeover) -> (Opened, UnixStream) {
             let (near, far) = ends();
             let opened = Opened {
                 block,
@@ -3101,10 +3073,7 @@ mod client {
                 writer: Conn::new(near.try_clone().expect("clone")),
                 stream: near,
                 takeover: Some(who),
-                resumed: Some(Resume {
-                    takeover: who,
-                    leased,
-                }),
+                resumed: Some(who),
                 features: PANE,
             };
             (opened, far)
@@ -3131,12 +3100,12 @@ mod client {
                 .collect()
         }
 
-        /// The path back, with blocks A (leased) and B (not) taken over.
+        /// The path back, with blocks A and B taken over.
         #[cfg(unix)]
         fn back(me: Takeover) -> (Back, UnixStream, UnixStream, UnixStream) {
             let (stream, control) = ends();
-            let (a, a_far) = opened(block(1), takeover(11), true);
-            let (b, b_far) = opened(block(2), takeover(12), false);
+            let (a, a_far) = opened(block(1), takeover(11));
+            let (b, b_far) = opened(block(2), takeover(12));
             let back = Back {
                 socket: PathBuf::from("udp.sock"),
                 conn: Conn::new(stream.try_clone().expect("clone")),
@@ -3201,27 +3170,28 @@ mod client {
                 detaching: None,
                 ended: None,
             };
-            let (a_open, a_far) = opened(a, takeover(11), true);
-            let (b_open, b_far) = opened(b, takeover(12), false);
+            let (a_open, a_far) = opened(a, takeover(11));
+            let (b_open, b_far) = opened(b, takeover(12));
             for opened in [a_open, b_open] {
                 let pane = app.pane(opened);
                 app.panes.insert(pane.block, pane);
             }
+            app.panes.get_mut(&a).expect("A").leased = true;
             (app, inbox, [control, a_far, b_far])
         }
 
-        /// Answers B's lease request on its fresh connection, as the server
-        /// would, and hands the answer to the client.
+        /// Answers a block's lease request on its fresh connection, as the
+        /// server would, and hands the answer to the client.
         #[cfg(unix)]
-        fn grant(app: &mut App, inbox: &Inbox<Input>, b_far: &UnixStream, asked: &[Message]) {
+        fn grant(app: &mut App, inbox: &Inbox<Input>, far: &UnixStream, asked: &[Message]) {
             let req = asked
                 .iter()
                 .find_map(|m| match m {
                     Message::AcquireLease { req, .. } => Some(*req),
                     _ => None,
                 })
-                .expect("B's lease asked for");
-            let mut server = Conn::new(b_far.try_clone().expect("clone"));
+                .expect("the lease asked for");
+            let mut server = Conn::new(far.try_clone().expect("clone"));
             server
                 .send(&Message::Done { req, created: None })
                 .expect("done");
@@ -3235,9 +3205,10 @@ mod client {
         }
 
         /// Keys for A, a move of the focus to B, then keys for B, all typed
-        /// while every client moves onto UDP: once it has, A gets its keys
-        /// and gives up its lease, and B gets its keys once its lease is
-        /// held, each exactly once; nothing went to the old connections.
+        /// while every client moves onto UDP: once it has, each block asks
+        /// for its lease again; A gets its keys once it holds it, then gives
+        /// it up, and B gets its keys once its lease is held, each exactly
+        /// once; nothing went to the old connections.
         #[cfg(unix)]
         #[test]
         fn typing_and_focus_during_a_move_reach_their_blocks_once_it_is_done() {
@@ -3252,6 +3223,9 @@ mod client {
             let (back, _control, a_new, b_new) = back(takeover(1));
             app.take(Input::Moved(Ok(back)));
             assert!(typed_in(&sent(&a_old)).is_empty() && typed_in(&sent(&b_old)).is_empty());
+            let asked = sent(&a_new);
+            assert!(typed_in(&asked).is_empty(), "not before A holds the lease");
+            grant(&mut app, &inbox, &a_new, &asked);
             let at_a = sent(&a_new);
             assert_eq!(typed_in(&at_a), [b"for-a".to_vec()]);
             assert!(
@@ -3263,6 +3237,74 @@ mod client {
             grant(&mut app, &inbox, &b_new, &at_b);
             assert_eq!(typed_in(&sent(&b_new)), [b"for-b".to_vec()]);
             assert_eq!(app.focus, block(2));
+        }
+
+        /// The lease asked for on `asked`'s connection.
+        #[cfg(unix)]
+        fn lease_asked(asked: &[Message]) -> Option<u64> {
+            asked.iter().find_map(|m| match m {
+                Message::AcquireLease { req, .. } => Some(*req),
+                _ => None,
+            })
+        }
+
+        /// A block taken over on a path back asks for its lease again,
+        /// as silence may have released it on the server meanwhile; keys
+        /// typed until it holds it are kept, not refused by the server.
+        #[cfg(unix)]
+        #[test]
+        fn a_block_taken_over_asks_for_its_lease_again() {
+            let (mut app, inbox, [_control, a_old, _b_old]) = app(Some(Box::new(Never)));
+            sent(&a_old);
+            app.lose(false);
+            let (back, _control, a_new, b_new) = back(takeover(1));
+            app.take(Input::Rejoined(Ok(back)));
+            app.typed(input(b"typed"));
+            let asked = sent(&a_new);
+            assert!(
+                lease_asked(&asked).is_some(),
+                "the focused block asks again"
+            );
+            assert!(typed_in(&asked).is_empty(), "not before it holds the lease");
+            assert!(
+                lease_asked(&sent(&b_new)).is_none(),
+                "not a block out of focus"
+            );
+            grant(&mut app, &inbox, &a_new, &asked);
+            assert_eq!(typed_in(&sent(&a_new)), [b"typed".to_vec()]);
+        }
+
+        /// A lease taken by another client while the path was away is
+        /// refused on the takeover: the keys kept for it are dropped, never
+        /// sent for the server to refuse.
+        #[cfg(unix)]
+        #[test]
+        fn a_lease_taken_meanwhile_drops_the_keys_kept_for_it() {
+            let (mut app, inbox, [_control, a_old, _b_old]) = app(Some(Box::new(Never)));
+            sent(&a_old);
+            app.lose(false);
+            let (back, _control, a_new, _b_new) = back(takeover(1));
+            app.take(Input::Rejoined(Ok(back)));
+            app.typed(input(b"typed"));
+            let req = lease_asked(&sent(&a_new)).expect("the lease asked for");
+            let mut server = Conn::new(a_new.try_clone().expect("clone"));
+            server
+                .send(&Message::Failed {
+                    req,
+                    reason: "lease held".into(),
+                    code: None,
+                })
+                .expect("failed");
+            loop {
+                if let input @ Input::Pane(..) =
+                    inbox.recv_timeout(Duration::from_secs(5)).expect("answer")
+                {
+                    break app.take(input);
+                }
+            }
+            app.typed(input(b"more"));
+            assert!(typed_in(&sent(&a_new)).is_empty());
+            assert!(app.ended.is_none());
         }
 
         /// A [`Rejoin`] that never brings a path back by itself.
@@ -3314,6 +3356,9 @@ mod client {
             let (back, _control, a_new, b_new) = back(new);
             app.take(Input::Rejoined(Ok(back)));
             assert!(typed_in(&sent(&a_old)).is_empty());
+            let asked = sent(&a_new);
+            assert!(typed_in(&asked).is_empty(), "not before A holds the lease");
+            grant(&mut app, &inbox, &a_new, &asked);
             assert_eq!(typed_in(&sent(&a_new)), [b"kept".to_vec()]);
             let at_b = sent(&b_new);
             assert!(typed_in(&at_b).is_empty(), "not before B holds the lease");
@@ -3775,7 +3820,7 @@ mod client {
         #[cfg(unix)]
         #[test]
         fn keys_typed_after_a_detach_during_a_move_are_not_sent() {
-            let (mut app, _inbox, [_control, a_old, _b_old]) = app(None);
+            let (mut app, inbox, [_control, a_old, _b_old]) = app(None);
             sent(&a_old);
             app.standby.moving = Moving::Taking(Taking::default());
             app.typed(input(b"before"));
@@ -3783,6 +3828,9 @@ mod client {
             app.typed(input(b"after"));
             let (back, _control, a_new, _b_new) = back(takeover(1));
             app.take(Input::Moved(Ok(back)));
+            let asked = sent(&a_new);
+            assert!(app.ended.is_none(), "the detach waits for the lease");
+            grant(&mut app, &inbox, &a_new, &asked);
             assert_eq!(typed_in(&sent(&a_new)), [b"before".to_vec()]);
             assert!(matches!(app.ended, Some(Ended::Detached)));
 
