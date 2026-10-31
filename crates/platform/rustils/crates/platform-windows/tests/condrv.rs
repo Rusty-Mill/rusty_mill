@@ -342,6 +342,43 @@ fn a_connect_whose_client_died_unread_is_not_delivered() {
     );
 }
 
+/// What completing a CONNECT does once its client has died after the
+/// host read it (#1259): a probe for whether a successful reply proves the
+/// client's thread was alive when the host opened it. Run on Windows.
+#[test]
+fn a_connect_reply_to_a_client_that_died_after_the_read_fails() {
+    let _serial = lock();
+    let mut attached = condrv::spawn_attached(&command("ping.exe", &["-n", "30", "127.0.0.1"]))
+        .expect("spawn_attached");
+    let waker = Waker::new().expect("Waker::new");
+    attached.server.submit_read(None).expect("submit_read");
+    let deadline = Instant::now() + BUDGET;
+    let connect = loop {
+        let ready = attached
+            .server
+            .wait(&waker, None, Some(deadline))
+            .expect("wait");
+        if let Some(d) = ready.io {
+            break d;
+        }
+        assert!(Instant::now() < deadline, "no CONNECT");
+    };
+    assert_eq!(connect.function, CONNECT);
+    let _payload = read_all(&mut attached.server, &connect);
+    attached.child.kill_single(Signal::Kill).expect("kill");
+    let _ = Box::new(attached.child).wait().expect("wait");
+    std::thread::sleep(Duration::from_millis(200));
+    let info = connection_information();
+    let done = attached.server.complete_io(&IoComplete {
+        id: connect.id,
+        status: STATUS_SUCCESS,
+        information: info.len(),
+        write_back: &info,
+    });
+    let err = done.err().expect("the reply to a dead client fails");
+    eprintln!("dead-client CONNECT reply: {err:?}");
+}
+
 #[test]
 fn packet_bounds_and_completion_are_checked() {
     let _serial = lock();
