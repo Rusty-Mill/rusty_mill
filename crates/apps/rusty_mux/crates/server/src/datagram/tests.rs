@@ -639,38 +639,49 @@ fn a_stream_over_budget_leaves_a_stale_orphan_that_a_takeover_resumes() {
 #[cfg(unix)]
 #[test]
 fn a_stale_orphan_not_taken_over_goes_after_idle() {
-    runtime().block_on(async {
-        let (lease, idle) = (Duration::from_millis(300), Duration::from_millis(900));
-        let (state, registry, addr) = server_with("127.0.0.1:0", shell(), PATIENCE, lease).await;
-        state
-            .borrow_mut()
-            .test_lifetimes(crate::state::Lifetimes { idle, lease });
-        let features = Features::DATAGRAM
-            .union(Features::TAKEOVER)
-            .union(Features::CHECKPOINT_V6);
-        let mut peer = Peer::new(&registry, addr).await;
-        peer.probe().await;
-        let (stream, me) = peer.hello(features, None).await;
-        let block = leased_block(&mut peer, stream).await;
-        let data = b"head -c 30000000 /dev/zero | tr '\\0' x\n".to_vec();
-        let input = Message::Input {
-            req: 9,
-            block,
-            data,
-        };
-        let frame = encode(&input).expect("encode");
-        assert_eq!(peer.assoc.write(stream, &frame), frame.len());
-        peer.until(|a| a.queued(stream) == 0).await;
-        let deadline = Instant::now() + PATIENCE;
-        while !state.borrow().is_stale(me.client) {
-            assert!(Instant::now() < deadline, "never over budget");
-            rusty_tokio::time::sleep(TICK).await;
-        }
-        rusty_tokio::time::sleep(idle * 2).await;
-        assert!(!state.borrow().is_stale(me.client));
-        assert!(!state.borrow().has_client(me.client));
-        // The token no longer takes anything over.
-        let (_, fresh) = peer.hello(features, Some(me)).await;
-        assert_ne!(fresh.client, me.client);
-    });
+    let (lease, idle) = (Duration::from_millis(300), Duration::from_millis(900));
+    runtime().block_on(stale_orphan_goes_after_idle(lease, idle));
+}
+
+/// An idle shorter than the lease time still ends the orphan on time.
+#[cfg(unix)]
+#[test]
+fn a_stale_orphan_goes_after_idle_even_before_its_lease_time() {
+    let (lease, idle) = (Duration::from_secs(5), Duration::from_millis(300));
+    runtime().block_on(stale_orphan_goes_after_idle(lease, idle));
+}
+
+#[cfg(unix)]
+async fn stale_orphan_goes_after_idle(lease: Duration, idle: Duration) {
+    let (state, registry, addr) = server_with("127.0.0.1:0", shell(), PATIENCE, lease).await;
+    state
+        .borrow_mut()
+        .test_lifetimes(crate::state::Lifetimes { idle, lease });
+    let features = Features::DATAGRAM
+        .union(Features::TAKEOVER)
+        .union(Features::CHECKPOINT_V6);
+    let mut peer = Peer::new(&registry, addr).await;
+    peer.probe().await;
+    let (stream, me) = peer.hello(features, None).await;
+    let block = leased_block(&mut peer, stream).await;
+    let data = b"head -c 30000000 /dev/zero | tr '\\0' x\n".to_vec();
+    let input = Message::Input {
+        req: 9,
+        block,
+        data,
+    };
+    let frame = encode(&input).expect("encode");
+    assert_eq!(peer.assoc.write(stream, &frame), frame.len());
+    peer.until(|a| a.queued(stream) == 0).await;
+    let deadline = Instant::now() + PATIENCE;
+    while !state.borrow().is_stale(me.client) {
+        assert!(Instant::now() < deadline, "never over budget");
+        rusty_tokio::time::sleep(TICK).await;
+    }
+    rusty_tokio::time::sleep(idle * 2).await;
+    assert!(!state.borrow().is_stale(me.client));
+    assert!(!state.borrow().has_client(me.client));
+    // The token no longer takes anything over.
+    let (_, fresh) = peer.hello(features, Some(me)).await;
+    assert_ne!(fresh.client, me.client);
 }

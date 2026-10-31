@@ -57,17 +57,47 @@ pub(crate) async fn run<R, W>(
     }
     // A connection that took this client over owns it now; leave it be.
     let kept = state.borrow_mut().disconnect(client, &cancel);
-    match kept {
+    // Kept for a takeover, maybe for a day: the read half and its buffer
+    // are not needed for that.
+    drop((rd, frames));
+    let wait = match kept {
         Kept::Gone => return,
-        Kept::Orphan => rusty_tokio::time::sleep(crate::state::ORPHAN_GRACE).await,
-        Kept::Stale(lifetimes) => {
-            rusty_tokio::time::sleep(lifetimes.lease).await;
-            state.borrow_mut().release_stale(client, &cancel);
-            let rest = lifetimes.idle.saturating_sub(lifetimes.lease);
-            rusty_tokio::time::sleep(rest).await;
+        Kept::Orphan => Wait::Idle(crate::state::ORPHAN_GRACE),
+        Kept::Stale(lifetimes) if lifetimes.lease < lifetimes.idle => Wait::Lease(lifetimes),
+        Kept::Stale(lifetimes) => Wait::Idle(lifetimes.idle),
+    };
+    let mut retained = std::pin::pin!(retain(&state, client, &cancel, wait));
+    loop {
+        rusty_tokio::select! {
+            _ = &mut retained => break,
+            // A takeover ends the wait; anything else woke it by mistake.
+            _ = cancel.notified() => {
+                if !state.borrow().orphaned_by(client, &cancel) {
+                    return;
+                }
+            },
         }
     }
     state.borrow_mut().expire(client, &cancel);
+}
+
+/// How long an orphan is kept for a takeover.
+enum Wait {
+    Idle(std::time::Duration),
+    /// A stale orphan whose lease goes before it does.
+    Lease(crate::state::Lifetimes),
+}
+
+/// Keeps an orphan for `wait`, releasing a stale one's lease when due.
+async fn retain(state: &Shared, client: ClientId, cancel: &Rc<Notify>, wait: Wait) {
+    match wait {
+        Wait::Idle(idle) => rusty_tokio::time::sleep(idle).await,
+        Wait::Lease(lifetimes) => {
+            rusty_tokio::time::sleep(lifetimes.lease).await;
+            state.borrow_mut().release_stale(client, cancel);
+            rusty_tokio::time::sleep(lifetimes.idle - lifetimes.lease).await;
+        }
+    }
 }
 
 async fn serve(
@@ -251,4 +281,73 @@ mod regression {
     }
 
     use std::rc::Rc;
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    use rusty_mux_proto::{Features, Takeover, encode};
+    use rusty_tokio::io::UnixStream;
+    use rusty_tokio::{Builder, LocalOptions};
+
+    use super::*;
+    use crate::Config;
+    use crate::outbox::outbox;
+
+    /// An orphan's connection waits out its grace holding nothing, and
+    /// stops waiting once the client is taken over, rather than for the
+    /// whole grace (a day, for a stale UDP client).
+    #[test]
+    fn a_takeover_ends_the_orphans_wait() {
+        let runtime = Builder::new_current_thread()
+            .build_local(&LocalOptions::default())
+            .expect("runtime");
+        runtime.block_on(async {
+            let config = Config {
+                program: "/bin/sh".into(),
+                args: Vec::new(),
+                cwd: "/".into(),
+            };
+            let state = State::shared(config, None);
+            let (theirs, ours) = UnixStream::pair().expect("pair");
+            let (rd, wr) = ours.into_split();
+            let served = Rc::new(Cell::new(None));
+            let seen = served.clone();
+            let task = rusty_tokio::task::spawn_local(run(state.clone(), rd, wr, move |c, _| {
+                seen.set(Some(c));
+            }));
+            let features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
+            let hello = Message::Hello {
+                features,
+                resume: None,
+                takeover: None,
+            };
+            theirs
+                .write_all(&encode(&hello).expect("encode"))
+                .await
+                .expect("hello");
+            let client = loop {
+                if let Some(client) = served.get() {
+                    break client;
+                }
+                rusty_tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            // The connection ends: an orphan, kept for ORPHAN_GRACE.
+            drop(theirs);
+            rusty_tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(!task.is_finished());
+
+            let token = state.borrow().test_token(client);
+            let (out, _inbox, _) = outbox();
+            let takeover = Some(Takeover { client, token });
+            state.borrow_mut().connect(out, features, None, takeover);
+            rusty_tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .expect("the wait outlived the takeover")
+                .expect("join");
+            assert!(state.borrow().has_client(client));
+        });
+    }
 }

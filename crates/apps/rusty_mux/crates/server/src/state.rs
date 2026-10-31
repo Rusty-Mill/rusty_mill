@@ -137,6 +137,9 @@ pub(crate) struct State {
     /// block whose lease was released after [`Lifetimes::lease`], to give
     /// back on takeover.
     stale: HashMap<ClientId, Option<BlockId>>,
+    /// Leases silence released, each with its block and the connection
+    /// that served the client then, until heard again or taken over.
+    silenced: HashMap<ClientId, (BlockId, Rc<Notify>)>,
 }
 
 /// How long a UDP client outlives silence or an overflow: its lease for
@@ -176,6 +179,7 @@ impl State {
                 lease: ORPHAN_GRACE,
             },
             stale: HashMap::new(),
+            silenced: HashMap::new(),
         }))
     }
 
@@ -251,7 +255,11 @@ impl State {
         let client = continued.unwrap_or_else(|| self.mux.connect());
         // The new connection numbers its requests afresh.
         self.forget_keys(client);
-        self.orphans.remove(&client);
+        // Waiting out an orphan's grace ends at its takeover.
+        if let Some(ended) = self.orphans.remove(&client) {
+            ended.notify_one();
+        }
+        self.silenced.remove(&client);
         let released = self.stale.remove(&client).flatten();
         self.clients.insert(client, outbox);
         self.features.insert(client, features);
@@ -358,7 +366,7 @@ impl State {
     }
 
     /// Whether `client` is an orphan of the connection owning `cancel`.
-    fn orphaned_by(&self, client: ClientId, cancel: &Rc<Notify>) -> bool {
+    pub(crate) fn orphaned_by(&self, client: ClientId, cancel: &Rc<Notify>) -> bool {
         self.orphans
             .get(&client)
             .is_some_and(|ended| Rc::ptr_eq(ended, cancel))
@@ -372,8 +380,15 @@ impl State {
             return;
         };
         eprintln!("rusty-mux-server: client {client}: UDP output over budget, kept for a takeover");
-        self.orphans.insert(client, out.cancel().clone());
-        self.stale.insert(client, None);
+        let cancel = out.cancel().clone();
+        // A lease silence released on this connection comes back on the
+        // takeover, as a stale one does.
+        let released = self.silenced.get(&client);
+        let held = released
+            .filter(|(_, by)| Rc::ptr_eq(by, &cancel))
+            .map(|(b, _)| *b);
+        self.orphans.insert(client, cancel);
+        self.stale.insert(client, held);
     }
 
     /// A stale orphan's lease time is up: releases its lease, kept for its
@@ -408,10 +423,11 @@ impl State {
             leased.then(|| (*client, block, cancel.clone()))
         };
         let released: Vec<_> = clients.iter().filter_map(held).collect();
-        for &(client, block, _) in &released {
-            if let Err(err) = self.mux.release_lease(client, block) {
+        for (client, block, cancel) in &released {
+            if let Err(err) = self.mux.release_lease(*client, *block) {
                 eprintln!("rusty-mux-server: model out of step on a silent lease: {err}");
             }
+            self.silenced.insert(*client, (*block, cancel.clone()));
         }
         self.flush();
         released
@@ -420,18 +436,19 @@ impl State {
     /// Gives each client the lease silence released, where the same
     /// connection still serves it, it is still attached there and the
     /// lease is still free. A client that went stale on that connection
-    /// since gets it back on its takeover; one taken over meanwhile is
-    /// its new connection's to lease.
+    /// since got the lease recorded for its takeover; one taken over
+    /// meanwhile is its new connection's to lease.
     pub(crate) fn regain(&mut self, released: &[Released]) {
         for (client, block, cancel) in released {
+            let ours = self
+                .silenced
+                .get(client)
+                .is_some_and(|(_, by)| Rc::ptr_eq(by, cancel));
+            if ours {
+                self.silenced.remove(client);
+            }
             if self.served_by(*client, cancel) {
                 self.regain_lease(*client, *block);
-            } else if self.orphaned_by(*client, cancel)
-                && let Some(held) = self.stale.get_mut(client)
-            {
-                // Gone stale on that connection since: the takeover that
-                // resumes it gets the lease back.
-                *held = Some(*block);
             }
         }
         self.flush();
@@ -460,6 +477,7 @@ impl State {
     fn drop_client(&mut self, client: ClientId) {
         let orphan = self.orphans.remove(&client).is_some();
         self.stale.remove(&client);
+        self.silenced.remove(&client);
         if self.clients.remove(&client).is_none() && !orphan {
             return;
         }
@@ -1478,6 +1496,9 @@ impl State {
     pub(crate) fn test_client(&self) -> ClientId {
         *self.clients.keys().next().unwrap()
     }
+    pub(crate) fn test_token(&self, client: ClientId) -> Uuid {
+        self.tokens[&client].current
+    }
     pub(crate) fn test_checkpoint(&self, client: ClientId, data: Vec<u8>) {
         assert!(self.clients[&client].checkpoint(BlockId::from_uuid(Uuid::nil()), data));
     }
@@ -1579,6 +1600,31 @@ mod regression {
             assert_eq!(shared.borrow().echo_due(block), None, "the old key");
             shared.borrow_mut().written(client, &new, (block, 1), now);
             assert!(shared.borrow().echo_due(block).is_some(), "the new key");
+        });
+    }
+
+    /// A lease silence released goes with the client when it then goes
+    /// stale on the same connection, so a takeover from anywhere gives it
+    /// back, not only one on the silent association.
+    #[test]
+    fn a_lease_released_by_silence_comes_back_on_a_stale_takeover() {
+        runtime().block_on(async {
+            let (shared, _, block, _inbox) = fixture();
+            let features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
+            let (out, _old_inbox, old) = outbox();
+            let mut state = shared.borrow_mut();
+            let client = state.connect(out, features, None, None);
+            state.mux.attach(client, block).unwrap();
+            state.mux.acquire_lease(client, block).unwrap();
+            let token = state.tokens[&client].current;
+
+            state.release_silent(&[(client, old.clone())]);
+            assert_eq!(state.lease_of(block), None);
+            state.go_stale(client);
+            let (out, _new_inbox, _) = outbox();
+            let takeover = Some(Takeover { client, token });
+            assert_eq!(state.connect(out, features, None, takeover), client);
+            assert_eq!(state.lease_of(block), Some(client));
         });
     }
 
