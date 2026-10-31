@@ -298,11 +298,14 @@ impl Semaphore {
     }
 
     /// Like [`new`](Self::new), but usable in a `const` context (e.g. a
-    /// `static Semaphore`) -- skips the `MAX_PERMITS` assertion `new`
-    /// makes, since panicking isn't available at const-eval time here;
-    /// a `permits` value this crate itself would never construct is the
-    /// caller's own responsibility to avoid.
+    /// `static Semaphore`). It makes the same `MAX_PERMITS` assertion, as
+    /// tokio's `const_new` does: in a `static` an out-of-range count is a
+    /// compile error, and at run time it panics.
     pub const fn const_new(permits: usize) -> Self {
+        assert!(
+            permits <= Self::MAX_PERMITS,
+            "a Semaphore cannot be created with more than Semaphore::MAX_PERMITS permits"
+        );
         Semaphore {
             state: StdMutex::new(State {
                 permits,
@@ -544,9 +547,8 @@ impl Semaphore {
 
 /// Dropping it returns its permits. As in tokio, that panics if the
 /// semaphore's available count would pass [`Semaphore::MAX_PERMITS`],
-/// which takes [`Semaphore::add_permits`] beyond the capacity in use (or
-/// a [`Semaphore::const_new`] count past the bound); the permits are then
-/// not returned.
+/// which takes [`Semaphore::add_permits`] beyond the capacity in use;
+/// the permits are then not returned.
 pub struct SemaphorePermit<'a> {
     semaphore: &'a Semaphore,
     permits: usize,
@@ -568,9 +570,8 @@ impl Drop for SemaphorePermit<'_> {
 
 /// Dropping it returns its permits. As in tokio, that panics if the
 /// semaphore's available count would pass [`Semaphore::MAX_PERMITS`],
-/// which takes [`Semaphore::add_permits`] beyond the capacity in use (or
-/// a [`Semaphore::const_new`] count past the bound); the permits are then
-/// not returned.
+/// which takes [`Semaphore::add_permits`] beyond the capacity in use;
+/// the permits are then not returned.
 pub struct OwnedSemaphorePermit {
     semaphore: Arc<Semaphore>,
     permits: usize,

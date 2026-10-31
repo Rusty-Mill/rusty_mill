@@ -596,6 +596,20 @@ fn semaphore_const_new_is_usable_in_a_static() {
     });
 }
 
+/// #1305 follow-up: `const_new` makes `new`'s `MAX_PERMITS` assertion, as
+/// tokio's does, instead of accepting a count every later permit drop
+/// would panic on.
+#[test]
+fn semaphore_const_new_past_max_permits_panics() {
+    let over = Semaphore::MAX_PERMITS + 1;
+    let result = std::panic::catch_unwind(|| Semaphore::const_new(over));
+    assert!(result.is_err(), "const_new above MAX_PERMITS must panic");
+    assert_eq!(
+        Semaphore::const_new(Semaphore::MAX_PERMITS).available_permits(),
+        Semaphore::MAX_PERMITS
+    );
+}
+
 #[test]
 fn semaphore_max_permits_is_usize_max_shifted_by_three() {
     assert_eq!(Semaphore::MAX_PERMITS, usize::MAX >> 3);
