@@ -160,6 +160,10 @@ mod client {
         /// Brings up a fresh path beside the one in use, giving up once
         /// `cancel` is set; returns the socket to connect to.
         fn fresh(&mut self, cancel: &AtomicBool) -> Result<PathBuf, String>;
+        /// The clients are taken over on the fresh path: its [`Pulse`] is
+        /// the one read from now on, before the main loop hears of it, so
+        /// the old path's silence cannot count against the fresh one.
+        fn listen(&mut self);
         /// The clients are taken over: the fresh path is the one in use,
         /// and the old one stops.
         fn settle(&mut self);
@@ -260,13 +264,9 @@ mod client {
                             continue;
                         }
                     };
-                    let back = rejoin
-                        .fresh(&cancelled)
-                        .map_err(Missed::Retry)
-                        .and_then(|socket| take_over(socket, plan, &cancelled));
-                    if back.is_err() {
-                        rejoin.discard();
-                    }
+                    let back = bring_back(rejoin.as_mut(), &cancelled, |socket| {
+                        take_over(socket, plan, &cancelled)
+                    });
                     if tx.send(Input::Rejoined(back)).is_err() {
                         return;
                     }
@@ -285,6 +285,23 @@ mod client {
                 let _ = sender.send(ask);
             }
         }
+    }
+
+    /// One attempt at a fresh path, its clients taken over by `take`. On
+    /// success the fresh path is listened to before the attempt returns,
+    /// so before the main loop can read the [`Pulse`] again; on failure it
+    /// is discarded.
+    fn bring_back<T>(
+        rejoin: &mut dyn Rejoin,
+        cancel: &AtomicBool,
+        take: impl FnOnce(PathBuf) -> Result<T, Missed>,
+    ) -> Result<T, Missed> {
+        let back = rejoin.fresh(cancel).map_err(Missed::Retry).and_then(take);
+        match &back {
+            Ok(_) => rejoin.listen(),
+            Err(_) => rejoin.discard(),
+        }
+        back
     }
 
     impl Drop for Rejoiner {
@@ -479,11 +496,11 @@ mod client {
             Ok(local)
         }
 
-        fn settle(&mut self) {
-            let Some(fresh) = self.fresh.take() else {
+        fn listen(&mut self) {
+            let Some(fresh) = &self.fresh else {
                 return;
             };
-            let heard = match &fresh {
+            let heard = match fresh {
                 Route::Udp(relay) => {
                     let heard = relay.heard();
                     Some(Arc::new(move || heard.last()) as Heard)
@@ -491,6 +508,13 @@ mod client {
                 Route::Ssh(_) => None,
             };
             self.pulse.set(heard);
+        }
+
+        fn settle(&mut self) {
+            self.listen();
+            let Some(fresh) = self.fresh.take() else {
+                return;
+            };
             // Stops the old forward, or the old association.
             self.current = fresh;
         }
@@ -2120,5 +2144,55 @@ mod client {
     fn parse_uuid(text: &OsString) -> Result<Uuid, String> {
         let text = text.to_str().ok_or("block id is not UTF-8")?;
         text.parse().map_err(|e| format!("block id: {e}"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Records what a [`Rejoin`] is asked, in order.
+        #[derive(Default)]
+        struct Calls(Vec<&'static str>);
+
+        impl Rejoin for Calls {
+            fn fresh(&mut self, _: &AtomicBool) -> Result<PathBuf, String> {
+                self.0.push("fresh");
+                Ok(PathBuf::from("fresh.sock"))
+            }
+            fn listen(&mut self) {
+                self.0.push("listen");
+            }
+            fn settle(&mut self) {
+                self.0.push("settle");
+            }
+            fn discard(&mut self) {
+                self.0.push("discard");
+            }
+            fn datagram(&mut self, _: u16, _: [u8; 8], _: [u8; 32]) -> Result<PathBuf, String> {
+                unreachable!("not asked here")
+            }
+            fn pulse(&self) -> Pulse {
+                Pulse::default()
+            }
+        }
+
+        #[test]
+        fn a_path_brought_back_is_listened_to_before_the_main_loop_hears() {
+            let mut calls = Calls::default();
+            let back = bring_back(&mut calls, &AtomicBool::new(false), |_| Ok(()));
+            assert!(back.is_ok());
+            // `settle` is left to the main loop; the pulse moved already.
+            assert_eq!(calls.0, ["fresh", "listen"]);
+        }
+
+        #[test]
+        fn a_path_not_brought_back_is_discarded_and_not_listened_to() {
+            let mut calls = Calls::default();
+            let back = bring_back(&mut calls, &AtomicBool::new(false), |_| {
+                Err::<(), _>(Missed::Dropped)
+            });
+            assert!(matches!(back, Err(Missed::Dropped)));
+            assert_eq!(calls.0, ["fresh", "discard"]);
+        }
     }
 }
