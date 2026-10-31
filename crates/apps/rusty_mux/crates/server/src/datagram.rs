@@ -30,8 +30,11 @@ pub(crate) type Key = [u8; KEY_LEN];
 /// How long an offered association waits for its first datagram.
 const OFFER_TTL: Duration = Duration::from_secs(60);
 
-/// The largest UDP payload over IPv4 (65535 less the IP and UDP headers).
-const UDP_MAX: usize = 65_507;
+/// Room for any UDP payload, over IPv4 or IPv6: a UDP length is 16 bits.
+const UDP_MAX: usize = 1 << 16;
+
+/// Winsock's WSAEMSGSIZE: a datagram larger than the receive buffer.
+const WSAEMSGSIZE: i32 = 10040;
 
 /// The most associations, offered or live, a server holds at once.
 const MAX_ASSOCIATIONS: usize = 1024;
@@ -158,6 +161,8 @@ pub(crate) async fn serve(
             Ok(received) => received,
             // Windows reports an earlier send's ICMP unreachable here.
             Err(err) if err.kind() == io::ErrorKind::ConnectionReset => continue,
+            // Cannot happen with this buffer; never worth ending the server.
+            Err(err) if cfg!(windows) && err.raw_os_error() == Some(WSAEMSGSIZE) => continue,
             Err(err) => return Err(err),
         };
         if n > MAX_DATAGRAM {

@@ -25,6 +25,11 @@ fn runtime() -> rusty_tokio::LocalRuntime {
 /// A state offering `DATAGRAM` and a UDP side on loopback, silent
 /// associations ending after `idle`.
 async fn server(idle: Duration) -> (Shared, Registry, SocketAddr) {
+    server_on("127.0.0.1:0", idle).await
+}
+
+/// [`server`], its UDP side bound to `bind`.
+async fn server_on(bind: &str, idle: Duration) -> (Shared, Registry, SocketAddr) {
     let state = State::shared(
         Config {
             program: "unused".into(),
@@ -33,7 +38,7 @@ async fn server(idle: Duration) -> (Shared, Registry, SocketAddr) {
         },
         None,
     );
-    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+    let socket = UdpSocket::bind(bind).await.expect("bind");
     let addr = socket.local_addr().expect("addr");
     let registry = Registry::new(addr.port());
     state.borrow_mut().offer_datagrams(registry.clone());
@@ -58,7 +63,7 @@ impl Peer {
         assert_eq!(port, server.port());
         let assoc = Association::new(Side::Client, id, &key, Instant::now(), Some(server));
         Self {
-            socket: bind().await,
+            socket: bind_for(server).await,
             assoc,
             received: HashMap::new(),
         }
@@ -145,6 +150,16 @@ impl Peer {
 
 async fn bind() -> UdpSocket {
     UdpSocket::bind("127.0.0.1:0").await.expect("bind")
+}
+
+/// A loopback socket of `server`'s address family.
+async fn bind_for(server: SocketAddr) -> UdpSocket {
+    let any = if server.is_ipv6() {
+        "[::1]:0"
+    } else {
+        "127.0.0.1:0"
+    };
+    UdpSocket::bind(any).await.expect("bind")
 }
 
 #[test]
@@ -362,4 +377,21 @@ fn offers_stop_at_the_association_limit_until_one_expires() {
 
 fn addr_of(port: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
+}
+
+#[test]
+fn the_largest_ipv6_datagram_is_dropped_and_the_server_goes_on() {
+    runtime().block_on(async {
+        // Skipped where the host has no IPv6 loopback.
+        if std::net::UdpSocket::bind("[::1]:0").is_err() {
+            return;
+        }
+        let (_state, registry, addr) = server_on("[::1]:0", PATIENCE).await;
+        let mut peer = Peer::new(&registry, addr).await;
+        // The largest IPv6 UDP payload: past any IPv4 one.
+        let oversized = vec![0xee; 65_527];
+        peer.socket.send_to(&oversized, addr).await.expect("send");
+        peer.probe().await;
+        assert_eq!(registry.live(), 1);
+    });
 }
