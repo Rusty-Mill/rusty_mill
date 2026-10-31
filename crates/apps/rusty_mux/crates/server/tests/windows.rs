@@ -1,7 +1,8 @@
-//! How blocks end on Windows: a close reaches every program on the pseudo
+//! How blocks end on Windows: a close reaches every program on the
 //! console, a flooding block closes without stalling the server, and a
 //! server that dies takes its blocks with it. A program that exits by
 //! itself reports its exit code, and `terminal.process` names its pid.
+//! Each runs on ConPTY and on our own console host.
 
 #![cfg(windows)]
 
@@ -11,15 +12,51 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{Client, PATIENCE, block_for, connect, run_and_wait, start_server};
+use common::{Client, PATIENCE, block_for, connect, run_and_wait, start_server_on};
 use rusty_mux_core::{BlockId, Event, ExitStatus};
 use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Features, Message};
+use rusty_mux_server::ConsoleHost;
 
 /// Prints the block's shell pid as `SHELL=<n>`: powershell's parent.
 const SHELL_PID: &[u8] = b"powershell -NoProfile -c \"'SHELL=' + (Get-CimInstance Win32_Process -Filter ('ProcessId=' + $PID)).ParentProcessId\"\r";
 /// Starts a ping attached to the block's console and prints its pid.
 const PING: &[u8] = b"powershell -NoProfile -c \"$p = Start-Process ping -ArgumentList '-n','1000','127.0.0.1' -NoNewWindow -PassThru; 'PING=' + $p.Id\"\r";
+
+/// Runs each scenario, a function of the host, once per host.
+macro_rules! on_both_hosts {
+    ($($scenario:ident),* $(,)?) => {$(
+        mod $scenario {
+            use super::ConsoleHost;
+
+            #[test]
+            fn conpty() {
+                super::$scenario(ConsoleHost::ConPty);
+            }
+
+            #[test]
+            fn own() {
+                super::$scenario(ConsoleHost::Own);
+            }
+        }
+    )*};
+}
+
+on_both_hosts!(
+    closing_a_block_ends_every_program_on_its_console,
+    closing_a_flooding_block_leaves_the_server_responsive,
+    a_killed_server_takes_its_blocks_with_it,
+    a_program_that_exits_reports_its_code,
+    terminal_process_names_the_programs_pid
+);
+
+/// The `RUSTY_CONSOLE_HOST` value that names `host`.
+fn console_host_name(host: ConsoleHost) -> &'static str {
+    match host {
+        ConsoleHost::ConPty => "conpty",
+        ConsoleHost::Own => "own",
+    }
+}
 
 fn shell_pid(client: &mut Client, block: BlockId) -> u32 {
     client.input(block, SHELL_PID);
@@ -49,9 +86,8 @@ fn assert_gone_within(pid: u32, what: &str, budget: Duration) {
     }
 }
 
-#[test]
-fn closing_a_block_ends_every_program_on_its_console() {
-    let path = start_server();
+fn closing_a_block_ends_every_program_on_its_console(host: ConsoleHost) {
+    let path = start_server_on(host);
     let mut a = Client::connect(&path);
     let block = block_for(&mut a);
     let shell = shell_pid(&mut a, block);
@@ -65,9 +101,8 @@ fn closing_a_block_ends_every_program_on_its_console() {
     assert_gone_within(ping, "the ping", Duration::from_secs(7));
 }
 
-#[test]
-fn closing_a_flooding_block_leaves_the_server_responsive() {
-    let path = start_server();
+fn closing_a_flooding_block_leaves_the_server_responsive(host: ConsoleHost) {
+    let path = start_server_on(host);
     let mut a = Client::connect(&path);
     a.parse = false;
     let flooding = block_for(&mut a);
@@ -96,15 +131,18 @@ fn closing_a_flooding_block_leaves_the_server_responsive() {
     b.request(|req| Message::CloseBlock { req, block: other });
 }
 
-#[test]
-fn a_killed_server_takes_its_blocks_with_it() {
-    let path = std::env::temp_dir().join(format!("rusty-mux-killed-{}.sock", std::process::id()));
+fn a_killed_server_takes_its_blocks_with_it(host: ConsoleHost) {
+    let name = format!("rusty-mux-killed-{}-{host:?}.sock", std::process::id());
+    let path = std::env::temp_dir().join(name);
     let _ = std::fs::remove_file(&path);
-    let mut server = Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"))
-        .arg(&path)
-        .stdin(Stdio::null())
-        .spawn()
-        .expect("start the server");
+    let mut server = KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"))
+            .arg(&path)
+            .env(ConsoleHost::ENV, console_host_name(host))
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("start the server"),
+    );
     wait_until_listening(&path);
 
     let mut a = Client::connect(&path);
@@ -112,10 +150,21 @@ fn a_killed_server_takes_its_blocks_with_it() {
     let shell = shell_pid(&mut a, block);
     assert!(alive(shell), "shell {shell}");
 
-    server.kill().expect("kill the server");
-    server.wait().expect("reap the server");
+    server.0.kill().expect("kill the server");
+    server.0.wait().expect("reap the server");
     assert_gone_within(shell, "the dead server's shell", Duration::from_secs(7));
     let _ = std::fs::remove_file(&path);
+}
+
+/// A server process that a failing test still ends.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        // Both fail harmlessly once the test has killed and reaped it.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 fn wait_until_listening(path: &Path) {
@@ -126,9 +175,8 @@ fn wait_until_listening(path: &Path) {
     }
 }
 
-#[test]
-fn a_program_that_exits_reports_its_code() {
-    let path = start_server();
+fn a_program_that_exits_reports_its_code(host: ConsoleHost) {
+    let path = start_server_on(host);
     let wanted = Features::PROGRAM_EVENTS.union(Features::CHECKPOINT_V6);
     let mut a = Client::connect_with(&path, wanted, None);
     let block = block_for(&mut a);
@@ -148,9 +196,8 @@ fn a_program_that_exits_reports_its_code() {
 
 /// Windows has no foreground process group, so `terminal.process` lists
 /// only the block's own program, by pid alone.
-#[test]
-fn terminal_process_names_the_programs_pid() {
-    let path = start_server();
+fn terminal_process_names_the_programs_pid(host: ConsoleHost) {
+    let path = start_server_on(host);
     let wanted = Features::CHECKPOINT_V6.union(Features::BLOCK_CALL);
     let mut a = Client::connect_with(&path, wanted, None);
     let block = block_for(&mut a);

@@ -1,14 +1,18 @@
-//! Windows: a block's pseudo console and the program running on it.
+//! Windows: a block's console and the program running on it.
 //!
-//! ConPTY's master is two anonymous pipes that no reactor can watch, so each
-//! block gets a reader thread and a writer thread. Neither uses the runtime's
-//! blocking pool: a read blocks until the program prints, which would pin a
-//! pool thread for the block's whole life.
+//! The console is ConPTY's pseudo console, or one we host ourselves
+//! (`rusty_conhost`), as [`Config::console_host`] says. Neither master can
+//! be watched by a reactor (ConPTY's is two anonymous pipes, ours a
+//! blocking queue), so each block gets a reader thread and a writer
+//! thread. Neither uses the runtime's blocking pool: a read blocks until
+//! the program prints, which would pin a pool thread for the block's whole
+//! life.
 //!
-//! The reader drains the output pipe for as long as the pseudo console
-//! exists, discarding once the block is released, so `ClosePseudoConsole`
-//! never blocks on a full pipe. Every close runs on a thread of its own,
-//! under the master's close guard, never on the server's thread.
+//! The reader drains the output for as long as the console exists,
+//! discarding once the block is released, so `ClosePseudoConsole` never
+//! blocks on a full pipe and our host never stalls its clients. A ConPTY
+//! close runs on a thread of its own, under the master's close guard,
+//! never on the server's thread; our host's hang-up returns at once.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
@@ -17,15 +21,18 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
+use platform::error::Result as PlatformResult;
 use platform::process::{Child, Signal};
 use platform::pty::PtyMaster;
+use platform::term::WinSize;
 use platform_windows::{WindowsChild, WindowsPty, WindowsPtyMaster};
+use rusty_conhost::{OwnPty, OwnPtyMaster};
 use rusty_mux_core::{ExitStatus, Size};
 use rusty_mux_proto::Echo;
 use rusty_tokio::sync::{mpsc, oneshot};
 
 use super::{GRACE, POLL, command, exit_status, to_io, win_size};
-use crate::Config;
+use crate::{Config, ConsoleHost};
 
 /// Bytes per read from the output pipe.
 const CHUNK: usize = 16 << 10;
@@ -38,10 +45,39 @@ const STACK: usize = 64 << 10;
 type Chunk = io::Result<Vec<u8>>;
 type Write = (Vec<u8>, oneshot::Sender<io::Result<()>>);
 
-/// The master side of a block's pseudo console. Shared by the reader and by
+/// The terminal's side of a block's console, on whichever host runs it.
+enum Master {
+    ConPty(WindowsPtyMaster),
+    Own(OwnPtyMaster),
+}
+
+impl Master {
+    fn read(&self, buf: &mut [u8]) -> PlatformResult<usize> {
+        match self {
+            Self::ConPty(m) => m.read(buf),
+            Self::Own(m) => m.read(buf),
+        }
+    }
+
+    fn write(&self, buf: &[u8]) -> PlatformResult<usize> {
+        match self {
+            Self::ConPty(m) => m.write(buf),
+            Self::Own(m) => m.write(buf),
+        }
+    }
+
+    fn resize(&self, size: WinSize) -> PlatformResult<()> {
+        match self {
+            Self::ConPty(m) => m.resize(size),
+            Self::Own(m) => m.resize(size),
+        }
+    }
+}
+
+/// The master side of a block's console. Shared by the reader and by
 /// writers on the server's thread.
 pub(crate) struct Pty {
-    master: Arc<WindowsPtyMaster>,
+    master: Arc<Master>,
     /// Output from the reader thread; `None` while a read awaits it and
     /// once released.
     output: Cell<Option<mpsc::Receiver<Chunk>>>,
@@ -71,20 +107,30 @@ impl Drop for Lent<'_> {
 /// A block's program, owned until it is reaped.
 pub(crate) struct Process {
     child: Option<WindowsChild>,
-    master: Arc<WindowsPtyMaster>,
+    master: Arc<Master>,
 }
 
-/// Starts `config`'s program on a new pseudo console of `size`, with this
-/// process's environment plus `env`.
+/// Starts `config`'s program on a new console of `size`, on the host
+/// `config` names, with this process's environment plus `env`. Our host
+/// failing (`Unsupported` on a Windows without a usable ConDrv) is an
+/// error, never a fall back to ConPTY.
 pub(crate) fn spawn(
     config: &Config,
     size: Size,
     env: &[(&str, OsString)],
 ) -> io::Result<(Pty, Process)> {
     let cmd = command(config, env);
-    let (master, child) = WindowsPty
-        .spawn_concrete(&cmd, win_size(size))
-        .map_err(to_io)?;
+    let size = win_size(size);
+    let (master, child) = match config.console_host {
+        ConsoleHost::ConPty => {
+            let (master, child) = WindowsPty.spawn_concrete(&cmd, size).map_err(to_io)?;
+            (Master::ConPty(master), child)
+        }
+        ConsoleHost::Own => {
+            let (master, child) = OwnPty.spawn_concrete(&cmd, size).map_err(to_io)?;
+            (Master::Own(master), child)
+        }
+    };
     let master = Arc::new(master);
     // Owned before anything else can fail, so an error below still ends it.
     let process = Process {
@@ -115,9 +161,9 @@ fn start(name: &str, body: impl FnOnce() + Send + 'static) -> io::Result<()> {
         .map(drop)
 }
 
-/// Forwards output until the pseudo console closes; once the receiver is
+/// Forwards output until the console closes; once the receiver is
 /// gone, keeps reading and discards.
-fn read_loop(master: &WindowsPtyMaster, chunks: &mpsc::Sender<Chunk>) {
+fn read_loop(master: &Master, chunks: &mpsc::Sender<Chunk>) {
     let mut buf = vec![0; CHUNK];
     let mut forwarding = true;
     loop {
@@ -137,14 +183,14 @@ fn read_loop(master: &WindowsPtyMaster, chunks: &mpsc::Sender<Chunk>) {
 }
 
 /// Writes each queued input until every sender is gone.
-fn write_loop(master: &WindowsPtyMaster, mut queue: mpsc::UnboundedReceiver<Write>) {
+fn write_loop(master: &Master, mut queue: mpsc::UnboundedReceiver<Write>) {
     while let Some((data, done)) = queue.blocking_recv() {
         // A refused result means the writer stopped waiting for it.
         let _ = done.send(write_all(master, &data));
     }
 }
 
-fn write_all(master: &WindowsPtyMaster, mut data: &[u8]) -> io::Result<()> {
+fn write_all(master: &Master, mut data: &[u8]) -> io::Result<()> {
     while !data.is_empty() {
         match master.write(data).map_err(to_io)? {
             0 => return Err(io::ErrorKind::WriteZero.into()),
@@ -154,12 +200,23 @@ fn write_all(master: &WindowsPtyMaster, mut data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Closes the pseudo console on a thread of its own: the close can block
-/// until the reader has drained conhost's last output.
-fn hang_up(master: &Arc<WindowsPtyMaster>) {
-    let master = Arc::clone(master);
-    if let Err(err) = start("rusty-mux-pty-close", move || master.hang_up()) {
-        eprintln!("rusty-mux-server: starting a hang-up thread: {err}");
+/// Closes the console. ConPTY's close runs on a thread of its own, since it
+/// can block until the reader has drained conhost's last output; ours
+/// returns at once, and the host closes by its own grace deadline.
+fn hang_up(master: &Arc<Master>) {
+    match &**master {
+        Master::Own(own) => own.hang_up(),
+        Master::ConPty(_) => {
+            let master = Arc::clone(master);
+            let close = move || {
+                if let Master::ConPty(conpty) = &*master {
+                    conpty.hang_up();
+                }
+            };
+            if let Err(err) = start("rusty-mux-pty-close", close) {
+                eprintln!("rusty-mux-server: starting a hang-up thread: {err}");
+            }
+        }
     }
 }
 
@@ -175,10 +232,11 @@ impl Process {
         self.child.as_ref().map(|child| child.id())
     }
 
-    /// Closes the pseudo console, which sends every program attached to it
+    /// Closes the console, which sends every program attached to it
     /// Windows' console-close notification, and waits for the program to
-    /// exit, terminating it after [`GRACE`]. Runs as its own task so the
-    /// server keeps serving meanwhile.
+    /// exit, terminating it after [`GRACE`]. Our host also ends any other
+    /// program still attached 5 s after the notification. Runs as its own
+    /// task so the server keeps serving meanwhile.
     /// How it ended, or `None` if that can't be known.
     pub(crate) async fn reap(mut self) -> Option<ExitStatus> {
         let child = self.child.as_mut()?;
@@ -221,7 +279,7 @@ impl Drop for Process {
 }
 
 impl Pty {
-    /// Reads output; `Ok(0)` means the pseudo console closed or the block
+    /// Reads output; `Ok(0)` means the console closed or the block
     /// was released. Cancelling it loses nothing.
     pub(crate) async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         if let Some(n) = self.take_rest(buf) {
@@ -315,12 +373,12 @@ impl Pty {
         self.master.resize(win_size(size)).map_err(to_io)
     }
 
-    /// A pseudo console has no termios to tell.
+    /// A Windows console has no termios to tell.
     pub(crate) fn echo(&self) -> Echo {
         Echo::Unknown
     }
 
-    /// Unknown: a pseudo console has no foreground process group.
+    /// Unknown: a Windows console has no foreground process group.
     pub(crate) fn foreground(&self) -> Option<u32> {
         None
     }

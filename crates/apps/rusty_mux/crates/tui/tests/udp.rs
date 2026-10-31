@@ -25,7 +25,7 @@ const FEATURES: Features = Features::CHECKPOINT_V6
 
 /// A real server on a fresh socket and a UDP port on 127.0.0.1.
 fn udp_server() -> (PathBuf, SocketAddr) {
-    use rusty_mux_server::{Config, Udp, serve_udp};
+    use rusty_mux_server::{Config, ConsoleHost, Udp, serve_udp};
     use rusty_tokio::io::{UdpSocket, UnixListener};
     use rusty_tokio::{Builder, LocalOptions};
 
@@ -52,6 +52,7 @@ fn udp_server() -> (PathBuf, SocketAddr) {
                 program: "/bin/sh".into(),
                 args: Vec::new(),
                 cwd: "/".into(),
+                console_host: ConsoleHost::default(),
             };
             let udp = Udp {
                 socket,

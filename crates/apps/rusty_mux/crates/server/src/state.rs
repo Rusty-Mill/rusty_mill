@@ -1532,6 +1532,7 @@ impl State {
 #[cfg(all(test, unix))]
 mod regression {
     use super::*;
+    use crate::ConsoleHost;
     use crate::checkpoint::Receiver;
     use crate::outbox::{Inbox, outbox};
     use rusty_tokio::{Builder, LocalOptions};
@@ -1551,6 +1552,7 @@ mod regression {
                     program: "/bin/sh".into(),
                     args: vec![],
                     cwd: "/".into(),
+                    console_host: ConsoleHost::default(),
                 },
                 None,
             );
@@ -1572,6 +1574,7 @@ mod regression {
                 program: "/bin/sh".into(),
                 args: vec![],
                 cwd: "/".into(),
+                console_host: ConsoleHost::default(),
             },
             None,
         );
@@ -1955,6 +1958,7 @@ mod regression {
                     program: "/bin/sh".into(),
                     args: vec![],
                     cwd: "/".into(),
+                    console_host: ConsoleHost::default(),
                 },
                 None,
             );
