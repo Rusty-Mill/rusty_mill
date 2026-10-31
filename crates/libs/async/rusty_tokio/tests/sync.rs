@@ -689,6 +689,43 @@ fn semaphore_rejected_add_permits_leaves_queued_waiters_queued() {
     ));
 }
 
+/// #1305: the bound is checked in the same critical section as the
+/// update, so two releases that each fit alone but not together cannot
+/// both pass it. Four threads behind a barrier each add just over half
+/// of `MAX_PERMITS`: exactly one may succeed (more than two contenders
+/// make a release build hit the window far more often). Not comparable with the base,
+/// which has no bound at all; it guards against checking under one lock
+/// and updating under another (a mutant that does so goes red here).
+/// From the #1305 review's probe.
+#[test]
+fn semaphore_concurrent_add_permits_cannot_both_pass_the_bound() {
+    let half = Semaphore::MAX_PERMITS / 2 + 1;
+    const THREADS: usize = 4;
+    for _ in 0..2000 {
+        let semaphore = Arc::new(Semaphore::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let (semaphore, barrier) = (semaphore.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        semaphore.add_permits(half)
+                    }))
+                    .is_ok()
+                })
+            })
+            .collect();
+        let passed = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|&ok| ok)
+            .count();
+        assert_eq!(passed, 1, "exactly one release may pass the bound");
+        assert_eq!(semaphore.available_permits(), half);
+    }
+}
+
 /// #1305: a dropped permit returns its permits through the same check,
 /// as tokio's does. Base: the count silently passes `MAX_PERMITS`.
 #[test]

@@ -174,7 +174,9 @@ fn lock(state: &StdMutex<State>) -> StdGuard<'_, State> {
 
 /// Fails a release that [`State::release`] rejected, given the permits
 /// left over once waiters were granted. Called with `state` unlocked;
-/// the messages are tokio's `add_permits_locked`.
+/// the messages are tokio's `add_permits_locked`. `#[track_caller]` here,
+/// on `Semaphore::release` and on `add_permits` puts the panic at the
+/// caller of `add_permits`; a permit's drop reports its `Drop` impl.
 #[cold]
 #[track_caller]
 fn overflow(rest: usize) -> ! {
@@ -221,8 +223,10 @@ impl Drop for Claim<'_> {
         };
         drop(state);
         drop(removed);
-        let woken = woken.unwrap_or_else(|rest| overflow(rest));
-        wake_all(woken);
+        match woken {
+            Ok(woken) => wake_all(woken),
+            Err(rest) => overflow(rest),
+        }
     }
 }
 
@@ -337,6 +341,7 @@ impl Semaphore {
     /// have granted waiters or added the permits when it panics, the
     /// semaphore is then unchanged: no permit is added and no waiter is
     /// granted.
+    #[track_caller]
     pub fn add_permits(&self, n: usize) {
         Self::release(&self.state, n);
     }
@@ -522,6 +527,7 @@ impl Semaphore {
     /// `state` is unlocked. Adding none does nothing, as in tokio.
     ///
     /// [`add_permits`]: Self::add_permits
+    #[track_caller]
     fn release(state: &StdMutex<State>, n: usize) {
         if n == 0 {
             return;
@@ -529,8 +535,10 @@ impl Semaphore {
         let mut guard = lock(state);
         let woken = guard.release(n);
         drop(guard);
-        let woken = woken.unwrap_or_else(|rest| overflow(rest));
-        wake_all(woken);
+        match woken {
+            Ok(woken) => wake_all(woken),
+            Err(rest) => overflow(rest),
+        }
     }
 }
 
