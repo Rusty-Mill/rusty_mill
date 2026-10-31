@@ -19,7 +19,9 @@ changelog: rusty_conhost has coverage-guided fuzzing of hostile ConDrv packets, 
   that joined and haven't left, and each pid is killed at most once. The
   script names the cookies the console handed out, can expire the grace
   deadline mid-traffic, detach the reader, and send headers that lie about
-  their fixed size. Every script ends with a hang-up and the grace
+  their fixed size. It runs on the test code-page tables (437, 850 and
+  part of 932), and half its SET_CP calls name one of those, so scripts
+  reach the lead-byte and DBCS paths. Every script ends with a hang-up and the grace
   deadline, and the console must then close.
 - **Added:** a `rusty-conhost-fuzz` CI job runs both targets for 30 s each
   on the daily sweep and on manual runs only, never on PRs or in the
@@ -28,4 +30,4 @@ changelog: rusty_conhost has coverage-guided fuzzing of hostile ConDrv packets, 
   `fuzz` feature that only the fuzz crate turns on. The crate's own tests
   run it on 300 seeded scripts, plus targeted cases (the 257th client,
   the 65th object, grace expiry with calls in flight, a lying header, a
-  detached reader), so every PR exercises it on stable.
+  detached reader, a DBCS pair split across writes), so every PR exercises it on stable.

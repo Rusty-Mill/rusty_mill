@@ -56,6 +56,9 @@ const APIS: [u32; 20] = [
     api::GET_CONSOLE_WINDOW,
 ];
 
+/// Code pages the driver's codec (`codepage::table`) knows.
+const CODE_PAGES: [u32; 4] = [437, 850, 932, 65001];
+
 /// Run every packet decoder on `data`; panics if one breaks its contract.
 pub fn decode(data: &[u8]) {
     if let Some(m) = msg::api_msg(data) {
@@ -224,7 +227,11 @@ struct Engine {
 impl Engine {
     fn new(size: WinSize) -> Engine {
         Engine {
-            c: Console::new(size, crate::input::us_key_for),
+            c: Console::new(
+                size,
+                crate::input::us_key_for,
+                crate::codepage::table::CODEC,
+            ),
             queued: 0,
             lane: Vec::new(),
             control: Control::default(),
@@ -357,6 +364,14 @@ impl Engine {
         payload.extend(s.bytes(fixed));
         payload.resize(8 + fixed, 0);
         payload.extend(s.blob(variable));
+        // Half the time a SET_CP names a code page the codec knows, so
+        // scripts reach the DBCS and lead-byte paths.
+        if number == api::SET_CP
+            && fixed >= 4
+            && let Some(cp) = CODE_PAGES.get(usize::from(payload[8] % 8))
+        {
+            payload[8..12].copy_from_slice(&cp.to_le_bytes());
+        }
         self.send(msg::USER_DEFINED, process, object, &payload, output);
     }
 
@@ -772,6 +787,26 @@ mod tests {
         let mut e = engine();
         let id = deferred_read(&mut e);
         e.answer(&reply(id, 21));
+    }
+
+    #[test]
+    fn a_dbcs_pair_split_across_writes_stays_within_limits() {
+        let mut e = engine();
+        let [process, _, output] = connect(&mut e, 7).expect("connects");
+        let mut fixed = 932u32.to_le_bytes().to_vec();
+        fixed.extend([1, 0, 0, 0]);
+        e.send(
+            msg::USER_DEFINED,
+            process,
+            output,
+            &api_payload(api::SET_CP, &fixed),
+            8,
+        );
+        assert_eq!(e.last_status, msg::STATUS_SUCCESS);
+        e.send(msg::RAW_WRITE, process, output, b"a\x82", 0);
+        e.send(msg::RAW_WRITE, process, output, b"\xa0b", 0);
+        assert_eq!(e.last_status, msg::STATUS_SUCCESS);
+        e.finish();
     }
 
     #[test]
