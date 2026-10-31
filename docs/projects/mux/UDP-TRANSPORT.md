@@ -305,4 +305,4 @@ One PR each:
    streams, and the generic `conn::run`.
 3. Client: probe, moving every connection, fallback, stopping SSH, new
    streams for new blocks, outage display, and the end-to-end roam test.
-4. ROADMAP and CAPABILITIES (C13 done), and the manual check over a real sshd.
+4. ROADMAP and CAPABILITIES (C13 done; the owner kept it in progress on 2026-10-31 until the unbuilt pieces land), and the manual check over a real sshd.
