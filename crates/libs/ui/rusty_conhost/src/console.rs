@@ -2362,10 +2362,11 @@ pub(crate) mod tests {
             crate::runtime::NATIVE_CODEC,
         );
         let [_, _, output] = h.connect(1, "");
-        h.set_cp(cp, true);
+        // Stall in UTF-8, whose raw writes stall() is sized for.
         if parked {
             stall(&mut h, output);
         }
+        h.set_cp(cp, true);
         let before = h.vt.len();
         let r = h.call(output, api::WRITE_CONSOLE, &[0; 8], bytes, 0);
         assert_eq!(r.status == i32::MIN, parked, "{r:?}");
