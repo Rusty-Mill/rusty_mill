@@ -240,7 +240,11 @@ mod tests {
             rows: 30,
             cols: 120,
         };
-        let mut console = Console::new(size, crate::input::us_key_for);
+        let mut console = Console::new(
+            size,
+            crate::input::us_key_for,
+            crate::codepage::table::CODEC,
+        );
         let mut payload = Vec::new();
         let mut blessed = String::new();
         let mut expected: Vec<String> = Vec::new();

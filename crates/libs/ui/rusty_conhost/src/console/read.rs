@@ -17,6 +17,7 @@
 //! Copyright (c) Microsoft Corporation. Licensed under the MIT license.
 
 use super::{Console, Diag, Effect, Kind, OutputQueue, Packet, Reply, mode};
+use crate::codepage;
 use crate::cooked::{Done, Line};
 use crate::ctrl::{self, Ctrl};
 use crate::input::{self, KeyEvent, Record, Token, state, vk};
@@ -775,8 +776,10 @@ impl Console {
     }
 
     /// conhost `InputBuffer::Read` without streaming: up to `count`
-    /// records. An ANSI read gets one record per UTF-8 byte of a key's
-    /// character, and keeps what it expanded past `count` for the next.
+    /// records. An ANSI read gets one record per byte of a key's
+    /// character in the input code page (two for a DBCS character, up to
+    /// four under UTF-8), and keeps what it expanded past `count` for the
+    /// next.
     /// A surrogate pair's UTF-8 comes with its low half's record, so the
     /// high half's yields none; a lone half is U+FFFD.
     fn read_records(&mut self, count: usize, unicode: bool, peek: bool) -> Vec<Record> {
@@ -806,6 +809,10 @@ impl Console {
                 Record::Key(k) if !unicode => {
                     let mut bytes = Vec::new();
                     utf8[usize::from(k.down)].push(k.ch, &mut bytes);
+                    let bytes = match std::str::from_utf8(&bytes) {
+                        Ok(text) => self.ansi(text),
+                        Err(_) => bytes,
+                    };
                     out.extend(bytes.into_iter().map(|b| {
                         Record::Key(KeyEvent {
                             ch: u16::from(b),
@@ -840,8 +847,8 @@ impl Console {
     }
 
     /// conhost `InputBuffer::Consume`: `units` into at most `capacity`
-    /// bytes, as UTF-16 or as UTF-8 (the only code page, §5.9). An ANSI
-    /// character that doesn't fit is split, the rest cached.
+    /// bytes, as UTF-16 or in the input code page. An ANSI character
+    /// that doesn't fit is split, the rest cached.
     fn consume(&mut self, unicode: bool, units: &[u16], capacity: usize) -> Consumed {
         let mut bytes = self.consume_cached(unicode, capacity);
         let mut used = 0;
@@ -863,12 +870,17 @@ impl Console {
             let ch = c.as_ref().map_or(char::REPLACEMENT_CHARACTER, |ch| *ch);
             used += c.as_ref().map_or(1, |ch| ch.len_utf16());
             let mut buf = [0u8; 4];
-            let enc = ch.encode_utf8(&mut buf).as_bytes();
+            let enc = self.ansi(ch.encode_utf8(&mut buf));
             let fit = enc.len().min(room);
             bytes.extend_from_slice(&enc[..fit]);
             self.cached_text.extend(&enc[fit..]);
         }
         Consumed { bytes, units: used }
+    }
+
+    /// `text` in the input code page, as an ANSI read returns it.
+    fn ansi(&self, text: &str) -> Vec<u8> {
+        codepage::encode(&self.codec, self.input_cp.cp, text)
     }
 
     fn take_pending(&mut self, object: usize) -> Option<Vec<u16>> {
@@ -1939,6 +1951,49 @@ pub(crate) mod tests {
             |h: &mut Host, cap| h.call(input, api::READ_CONSOLE, &read_msg(false, 0, 0), &[], cap);
         assert_eq!(read_a(&mut h, 1).output, [0xC3]);
         assert_eq!(read_a(&mut h, 4).output, [0xA9], "the cached byte");
+    }
+
+    #[test]
+    fn ansi_reads_use_the_input_code_page() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.set_mode(input, RAW);
+        h.set_cp(850, false);
+        h.ev(Event::Input("ø€".as_bytes()));
+        let read_a =
+            |h: &mut Host, cap| h.call(input, api::READ_CONSOLE, &read_msg(false, 0, 0), &[], cap);
+        assert_eq!(
+            read_a(&mut h, 8).output,
+            b"\x9b?",
+            "unmapped is the default char"
+        );
+        // A DBCS character that doesn't fit is split like a UTF-8 one.
+        h.set_cp(932, false);
+        h.ev(Event::Input("あ".as_bytes()));
+        assert_eq!(read_a(&mut h, 1).output, [0x82]);
+        assert_eq!(read_a(&mut h, 4).output, [0xA0], "the cached byte");
+        // A raw read is ANSI too.
+        h.set_cp(437, false);
+        h.ev(Event::Input("░".as_bytes()));
+        let (r, _) = h.packet(msg::RAW_READ, 1, input, &[], 16);
+        assert_eq!(r.output, [0xB0]);
+    }
+
+    #[test]
+    fn an_ansi_record_read_gets_a_record_per_code_page_byte() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.set_cp(932, false);
+        h.ev(Event::Input("あ😀".as_bytes()));
+        let r = get_input(&mut h, input, READ_NOWAIT, false, 8);
+        let chars: Vec<u8> = r
+            .output
+            .chunks(input::RECORD_LEN)
+            .map(|rec| rec[14])
+            .collect();
+        // Key-downs only: あ is two records, and the pair is one `?` on its
+        // low half's record.
+        assert_eq!(chars, [0x82, 0xA0, b'?']);
     }
 
     #[test]

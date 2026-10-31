@@ -25,6 +25,7 @@ use std::fmt;
 
 use platform::term::WinSize;
 
+use crate::codepage::{self, CodePage, Codec};
 use crate::ctrl::Ctrl;
 use crate::input::{self, KeyFor};
 use crate::msg::{self, ApiMsg, api};
@@ -54,6 +55,10 @@ pub(crate) const SLICE: usize = 64 * 1024;
 /// bytes, and one watched sequence held from the last write may complete
 /// with its first unit, adding the modes it reasserts.
 const WIDE_SLICE: usize = (SLICE - PREAMBLE.len()) / screen::MAX_EXPANSION;
+/// Code-page bytes per slice: a byte decodes to at most two units (a
+/// four-byte GB 18030 character to a surrogate pair), so they fit
+/// [`WIDE_SLICE`].
+const CODED_SLICE: usize = WIDE_SLICE / 2;
 /// Connected clients.
 pub(crate) const MAX_CLIENTS: usize = 256;
 // Every client's CTRL_CLOSE fits the Ctrl queue.
@@ -73,9 +78,6 @@ pub(crate) const PANIC_FOR_TEST: u32 = 0xFFFF_FFFF;
 /// title is not capped, as in conhost; this keeps a title's OSC far
 /// below one packet's input when it parks.
 const MAX_OSC_TITLE: usize = 4096;
-
-/// The only code page until PR 9 (§5.9, V4).
-const UTF8: u32 = 65001;
 
 /// `ENABLE_*` input mode bits.
 mod mode {
@@ -421,6 +423,10 @@ impl Share {
 enum Text {
     Wide(Vec<u16>),
     Bytes(Vec<u8>),
+    /// `A` text in an output code page other than UTF-8, decoded a
+    /// slice at a time so a parked write retains only its bytes. The
+    /// code page is the one in force when it was written.
+    Coded(Vec<u8>, CodePage),
     /// SetConsoleCursorPosition's move, made into VT when it is emitted:
     /// writes parked ahead of it may change the origin mode it depends on.
     CursorTo(u16, u16),
@@ -430,7 +436,7 @@ impl Text {
     fn len(&self) -> usize {
         match self {
             Text::Wide(units) => units.len(),
-            Text::Bytes(bytes) => bytes.len(),
+            Text::Bytes(bytes) | Text::Coded(bytes, _) => bytes.len(),
             Text::CursorTo(..) => 1,
         }
     }
@@ -439,7 +445,7 @@ impl Text {
     fn retained(&self) -> usize {
         match self {
             Text::Wide(units) => units.len() * 2,
-            Text::Bytes(bytes) => bytes.len(),
+            Text::Bytes(bytes) | Text::Coded(bytes, _) => bytes.len(),
             Text::CursorTo(..) => 0,
         }
     }
@@ -450,6 +456,7 @@ impl Text {
         &self,
         at: usize,
         origin: Origin,
+        codec: &Codec,
         screen: &mut Screen,
         out: &mut OutputQueue,
         replies: &mut Vec<u8>,
@@ -479,17 +486,35 @@ impl Text {
                 let text: String = char::decode_utf16(units[at..end].iter().copied())
                     .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
                     .collect();
-                // Each unit emits at most MAX_EXPANSION bytes, so all fit.
-                match origin {
-                    Origin::Client(mode) => {
-                        let n = screen.client(text.as_bytes(), mode, SLICE, at == 0, out, replies);
-                        debug_assert_eq!(n, text.len(), "a wide slice fits");
-                    }
-                    Origin::Host => screen.host(text.as_bytes(), out),
-                }
+                emit_str(&text, at == 0, origin, screen, out, replies);
+                end
+            }
+            Text::Coded(bytes, cp) => {
+                let end = cp.boundary(bytes, at, CODED_SLICE);
+                let text = codepage::decode(codec, cp.cp, &bytes[at..end]);
+                emit_str(&text, at == 0, origin, screen, out, replies);
                 end
             }
         }
+    }
+}
+
+/// Emit decoded text of at most [`WIDE_SLICE`] units, which all fit.
+fn emit_str(
+    text: &str,
+    first: bool,
+    origin: Origin,
+    screen: &mut Screen,
+    out: &mut OutputQueue,
+    replies: &mut Vec<u8>,
+) {
+    debug_assert!(text.encode_utf16().count() <= WIDE_SLICE);
+    match origin {
+        Origin::Client(mode) => {
+            let n = screen.client(text.as_bytes(), mode, SLICE, first, out, replies);
+            debug_assert_eq!(n, text.len(), "a wide slice fits");
+        }
+        Origin::Host => screen.host(text.as_bytes(), out),
     }
 }
 
@@ -540,6 +565,14 @@ pub(crate) struct Console {
     /// At most [`MAX_LOGGED`] entries, plus `Suppressed` once full.
     logged: HashSet<Diag>,
     key_for: KeyFor,
+    codec: Codec,
+    /// `SetConsoleCP`: ANSI reads and the `A` title calls.
+    input_cp: CodePage,
+    /// `SetConsoleOutputCP`: `WriteConsoleA` and raw writes.
+    output_cp: CodePage,
+    /// A DBCS lead byte that ended the last `A` write, for the next one
+    /// (conhost `WriteConsoleDbcsLeadByte`).
+    lead_byte: Option<u8>,
     decoder: input::Decoder,
     /// The remainder of the engine's one admitted input slice. No new
     /// slice is admitted until this has been consumed.
@@ -562,8 +595,8 @@ pub(crate) struct Console {
     /// The last pump stopped at the budget on answers to the host's own
     /// queries, not on queued output: no drain will wake it (§7.4).
     writes_cut: bool,
-    /// UTF-8 bytes of a character an ANSI read could not fit, for the
-    /// next ANSI read (conhost `_cachedTextReaderA`).
+    /// Input-code-page bytes of a character an ANSI read could not fit,
+    /// for the next ANSI read (conhost `_cachedTextReaderA`).
     cached_text: VecDeque<u8>,
     /// Records an ANSI GetConsoleInput expanded beyond what it asked for.
     cached_records: VecDeque<input::Record>,
@@ -580,7 +613,7 @@ pub(crate) struct Console {
 }
 
 impl Console {
-    pub(crate) fn new(size: WinSize, key_for: KeyFor) -> Console {
+    pub(crate) fn new(size: WinSize, key_for: KeyFor, codec: Codec) -> Console {
         Console {
             screen: Screen::new(size),
             cursor_size: output::DEFAULT_CURSOR_SIZE,
@@ -600,6 +633,10 @@ impl Console {
             closed: false,
             logged: HashSet::new(),
             key_for,
+            codec,
+            input_cp: CodePage::UTF8,
+            output_cp: CodePage::UTF8,
+            lead_byte: None,
             decoder: input::Decoder::default(),
             input_bytes: VecDeque::new(),
             input_end: false,
@@ -818,7 +855,8 @@ impl Console {
             msg::RAW_WRITE => {
                 let mut reply = Reply::ok(p.id);
                 reply.information = p.payload.len();
-                let text = Text::Bytes(p.payload.to_vec());
+                // conhost serves a raw write as WriteConsoleA.
+                let text = self.ansi_text(p.payload);
                 return self.write(reply, text, Origin::Client(self.output_mode), out, fx);
             }
             msg::RAW_READ => return self.read_console(&p, None, Vec::new(), out, fx),
@@ -978,7 +1016,7 @@ impl Console {
         let mut fixed = m.fixed[..m.fixed.len().min(WRITE_BACK_CAP)].to_vec();
         let status = match m.number {
             api::GET_CP => self.get_cp(&mut fixed),
-            api::SET_CP => set_cp(&fixed),
+            api::SET_CP => self.set_cp(&fixed),
             api::GET_MODE => self.get_mode(p.object, &mut fixed),
             api::SET_MODE => return self.set_mode(p, fixed, out, fx),
             api::GET_LANG_ID => get_lang_id(),
@@ -1024,11 +1062,66 @@ impl Console {
 
     /// `CONSOLE_GETCP_MSG { OUT CodePage; IN Output }`.
     fn get_cp(&self, fixed: &mut [u8]) -> i32 {
-        if fixed.len() < 4 {
+        let Some(output) = msg::bool_at(fixed, 4) else {
             return msg::STATUS_ILLEGAL_FUNCTION;
-        }
-        msg::put_u32(fixed, 0, UTF8);
+        };
+        let cp = if output {
+            self.output_cp
+        } else {
+            self.input_cp
+        };
+        msg::put_u32(fixed, 0, cp.cp);
         msg::STATUS_SUCCESS
+    }
+
+    /// `CONSOLE_SETCP_MSG { IN CodePage; IN Output }`: any installed code
+    /// page, else E_INVALIDARG, as conhost checks with `IsValidCodePage`.
+    fn set_cp(&mut self, fixed: &[u8]) -> i32 {
+        let (Some(cp), Some(output)) = (msg::u32_at(fixed, 0), msg::bool_at(fixed, 4)) else {
+            return msg::STATUS_ILLEGAL_FUNCTION;
+        };
+        let Some(cp) = CodePage::new(cp, &self.codec) else {
+            return msg::STATUS_FROM_INVALIDARG;
+        };
+        if !output {
+            self.input_cp = cp;
+        } else if cp != self.output_cp {
+            // A lead byte kept under the old code page would pair with a
+            // byte of the new one.
+            self.lead_byte = None;
+            self.output_cp = cp;
+        }
+        msg::STATUS_SUCCESS
+    }
+
+    /// `WriteConsoleA` text in the output code page. Under UTF-8 the
+    /// bytes go to the screen as they are, which keeps a split sequence
+    /// for the next write. Otherwise a lead byte that ended the last
+    /// write pairs with this one's first byte when that is not a
+    /// control, else it is dropped; a lead byte ending this write waits
+    /// for the next (conhost `WriteConsoleAImpl`).
+    fn ansi_text(&mut self, bytes: &[u8]) -> Text {
+        let cp = self.output_cp;
+        if cp.is_utf8() {
+            return Text::Bytes(bytes.to_vec());
+        }
+        let mut text = Vec::with_capacity(bytes.len() + 1);
+        if let (Some(lead), Some(&first)) = (self.lead_byte, bytes.first())
+            && first >= b' '
+        {
+            text.push(lead);
+        }
+        if !bytes.is_empty() {
+            self.lead_byte = None;
+        }
+        text.extend_from_slice(bytes);
+        // The kept lead byte pairs with the first byte, so the scan
+        // starts after that pair.
+        let start = if text.len() > bytes.len() { 2 } else { 0 };
+        if cp.ends_in_lead(&text[start.min(text.len())..]) {
+            self.lead_byte = text.pop();
+        }
+        Text::Coded(text, cp)
     }
 
     /// `CONSOLE_MODE_MSG { IN OUT Mode }`. On input, the console-wide
@@ -1150,8 +1243,7 @@ impl Console {
         let text = if unicode {
             Text::Wide(msg::utf16_units(m.variable))
         } else {
-            // 65001 is the only code page (§5.9): the bytes are UTF-8.
-            Text::Bytes(m.variable.to_vec())
+            self.ansi_text(m.variable)
         };
         self.write(reply, text, Origin::Client(self.output_mode), out, fx);
     }
@@ -1177,7 +1269,9 @@ impl Console {
         let title: Vec<u16> = if unicode {
             msg::utf16_units(m.variable)
         } else {
-            String::from_utf8_lossy(m.variable).encode_utf16().collect()
+            codepage::decode(&self.codec, self.input_cp.cp, m.variable)
+                .encode_utf16()
+                .collect()
         };
         let mut osc = b"\x1b]0;".to_vec();
         // Controls would end or escape the OSC; the terminal never sees them.
@@ -1211,7 +1305,11 @@ impl Console {
         let t = if unicode {
             title_w(title, capacity / 2)
         } else {
-            title_a(String::from_utf16_lossy(title).as_bytes(), capacity)
+            let text = String::from_utf16_lossy(title);
+            title_a(
+                &codepage::encode(&self.codec, self.input_cp.cp, &text),
+                capacity,
+            )
         };
         msg::put_u32(&mut fixed, 0, t.needed as u32);
         let mut reply = Reply::ok(p.id);
@@ -1277,7 +1375,9 @@ impl Console {
                     self.writes_cut = out.len() <= CLIENT_BUDGET;
                     return;
                 }
-                w.at = w.text.emit(w.at, w.origin, &mut self.screen, out, replies);
+                w.at = w
+                    .text
+                    .emit(w.at, w.origin, &self.codec, &mut self.screen, out, replies);
             }
             if w.at < w.text.len() {
                 continue;
@@ -1361,18 +1461,10 @@ fn title_a(title: &[u8], size: usize) -> TitleOut {
     }
 }
 
-/// `CONSOLE_SETCP_MSG { IN CodePage; IN Output }`: only 65001 (§5.9).
-fn set_cp(fixed: &[u8]) -> i32 {
-    match msg::u32_at(fixed, 0) {
-        Some(UTF8) => msg::STATUS_SUCCESS,
-        Some(_) => msg::STATUS_NOT_SUPPORTED,
-        None => msg::STATUS_ILLEGAL_FUNCTION,
-    }
-}
-
-/// `CONSOLE_LANGID_MSG { OUT LangId }`. conhost answers only for the CJK
-/// code pages; under 65001 the call fails and the client falls back to
-/// its own UI language.
+/// `CONSOLE_LANGID_MSG { OUT LangId }`. conhost answers only for an East
+/// Asian output code page, and only when the system's ANSI code page is
+/// East Asian too; we don't read the system's, so the call always fails
+/// (V13) and the client falls back to its own UI language.
 fn get_lang_id() -> i32 {
     msg::from_hresult(0xD000_00BB)
 }
@@ -1402,7 +1494,7 @@ pub(crate) mod tests {
 
         pub(super) fn sized(size: WinSize) -> Host {
             Host {
-                c: Console::new(size, input::us_key_for),
+                c: Console::new(size, input::us_key_for, codepage::table::CODEC),
                 queued: 0,
                 high_water: 0,
                 vt: Vec::new(),
@@ -1534,6 +1626,27 @@ pub(crate) mod tests {
                 &bytes,
                 0,
             )
+        }
+
+        pub(super) fn write_a(&mut self, output: usize, bytes: &[u8]) -> Reply {
+            let r = self.call(output, api::WRITE_CONSOLE, &[0; 8], bytes, 0);
+            assert_eq!(r.status, msg::STATUS_SUCCESS);
+            r
+        }
+
+        /// GetConsoleCP, or GetConsoleOutputCP when `output`.
+        pub(super) fn cp(&mut self, output: bool) -> u32 {
+            let fixed = [0, 0, 0, 0, u8::from(output), 0, 0, 0];
+            let r = self.call(1, api::GET_CP, &fixed, &[], 0);
+            assert_eq!(r.status, msg::STATUS_SUCCESS);
+            msg::u32_at(&r.write_back, 0).expect("CodePage")
+        }
+
+        /// SetConsoleCP, or SetConsoleOutputCP when `output`.
+        pub(super) fn set_cp(&mut self, cp: u32, output: bool) -> i32 {
+            let mut fixed = cp.to_le_bytes().to_vec();
+            fixed.extend([u8::from(output), 0, 0, 0]);
+            self.call(1, api::SET_CP, &fixed, &[], 0).status
         }
 
         fn get_title(&mut self, unicode: bool, original: bool, capacity: u32) -> Reply {
@@ -2071,17 +2184,115 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn code_page_is_65001_only_and_lang_id_fails_like_conhost() {
+    fn code_pages_start_at_65001_and_take_any_installed_one() {
         let mut h = Host::new();
         h.connect(1, "");
-        let r = h.call(1, api::GET_CP, &[0; 8], &[], 0);
-        assert_eq!(msg::u32_at(&r.write_back, 0), Some(65001));
-        let set = |h: &mut Host, cp: u32| h.call(1, api::SET_CP, &cp.to_le_bytes(), &[], 0).status;
-        assert_eq!(set(&mut h, 65001), msg::STATUS_SUCCESS);
-        assert_eq!(set(&mut h, 437), msg::STATUS_NOT_SUPPORTED);
+        assert_eq!((h.cp(false), h.cp(true)), (65001, 65001), "V4");
+        assert_eq!(h.set_cp(437, false), msg::STATUS_SUCCESS);
+        assert_eq!(h.set_cp(850, true), msg::STATUS_SUCCESS);
+        assert_eq!(
+            (h.cp(false), h.cp(true)),
+            (437, 850),
+            "input and output apart"
+        );
+        // conhost checks IsValidCodePage: E_INVALIDARG, nothing changed.
+        assert_eq!(h.set_cp(1, true), msg::STATUS_FROM_INVALIDARG);
+        assert_eq!(h.cp(true), 850);
+        let short = h.call(1, api::SET_CP, &437u32.to_le_bytes(), &[], 0);
+        assert_eq!(short.status, msg::STATUS_ILLEGAL_FUNCTION, "no Output flag");
         // HRESULT_FROM_NT(STATUS_NOT_SUPPORTED) through NTSTATUS_FROM_HRESULT.
         let lang = h.call(1, api::GET_LANG_ID, &[0; 4], &[], 0);
-        assert_eq!(lang.status as u32, 0xC007_00BB);
+        assert_eq!(lang.status as u32, 0xC007_00BB, "V13");
+    }
+
+    #[test]
+    fn write_console_a_decodes_the_output_code_page() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        h.set_cp(437, true);
+        let r = h.write_a(output, b"\xb0\xdb");
+        assert_eq!((r.status, r.information), (msg::STATUS_SUCCESS, 2));
+        assert_eq!(msg::u32_at(&r.write_back, 0), Some(2), "NumBytes");
+        assert_eq!(h.vt, "░█".as_bytes());
+        // A raw write is WriteConsoleA too.
+        h.vt.clear();
+        h.set_cp(850, true);
+        let (r, _) = h.packet(msg::RAW_WRITE, 1, output, b"\x9b", 0);
+        assert_eq!((r.status, r.information), (msg::STATUS_SUCCESS, 1));
+        assert_eq!(h.vt, "ø".as_bytes());
+        // Back on 65001 the bytes are UTF-8 again.
+        h.vt.clear();
+        h.set_cp(65001, true);
+        h.write_a(output, "ø".as_bytes());
+        assert_eq!(h.vt, "ø".as_bytes());
+    }
+
+    #[test]
+    fn a_dbcs_lead_byte_waits_for_the_next_write() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        h.set_cp(932, true);
+        let r = h.write_a(output, b"a\x82");
+        assert_eq!(r.information, 2, "the kept byte counts as written");
+        assert_eq!(h.vt, b"a");
+        h.write_a(output, b"\xa0\x82\xa2");
+        assert_eq!(h.vt, "aあい".as_bytes());
+        // A control after a kept lead byte drops it, as conhost does.
+        h.vt.clear();
+        h.write_a(output, b"\x82");
+        h.write_a(output, b"\x07b");
+        assert_eq!(h.vt, b"\x07b");
+        // So does a change of output code page.
+        h.vt.clear();
+        h.write_a(output, b"\x82");
+        h.set_cp(437, true);
+        h.write_a(output, b"A");
+        assert_eq!(h.vt, b"A");
+        // An empty write keeps it.
+        h.vt.clear();
+        h.set_cp(932, true);
+        h.write_a(output, b"\x82");
+        h.write_a(output, b"");
+        h.write_a(output, b"\xa0");
+        assert_eq!(h.vt, "あ".as_bytes());
+    }
+
+    #[test]
+    fn a_long_dbcs_write_never_splits_a_pair_between_slices() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        h.set_cp(932, true);
+        // Odd-aligned pairs past several slices.
+        let mut bytes = b"a".to_vec();
+        let pairs = CODED_SLICE * 3 / 2;
+        for _ in 0..pairs {
+            bytes.extend(b"\x82\xa0");
+        }
+        let r = h.write_a(output, &bytes);
+        assert_eq!(r.status, msg::STATUS_SUCCESS);
+        assert!(bytes.len() > 3 * CODED_SLICE, "several slices");
+        let shown = String::from_utf8(h.vt.clone()).expect("UTF-8");
+        // A split pair would show as U+30FB; wrapping adds only CR LF.
+        let text: String = shown
+            .chars()
+            .filter(|c| !matches!(c, '\r' | '\n'))
+            .collect();
+        assert_eq!(text, format!("a{}", "あ".repeat(pairs)));
+    }
+
+    #[test]
+    fn ansi_titles_use_the_input_code_page() {
+        let mut h = Host::new();
+        h.connect(1, "");
+        h.set_cp(850, false);
+        // SetConsoleTitleA { Unicode = FALSE }.
+        let r = h.call(1, api::SET_TITLE, &[0, 0, 0, 0], b"\x9b", 0);
+        assert_eq!(r.status, msg::STATUS_SUCCESS);
+        assert!(h.vt.ends_with("\x1b]0;ø\x07".as_bytes()));
+        assert_eq!(h.get_title(true, false, 8).output, [0xF8, 0, 0, 0]);
+        let a = h.get_title(false, false, 8);
+        assert_eq!(a.output, [0x9B, 0]);
+        assert_eq!(msg::u32_at(&a.write_back, 0), Some(1));
     }
 
     #[test]
