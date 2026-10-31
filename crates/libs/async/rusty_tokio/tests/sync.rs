@@ -607,6 +607,123 @@ fn semaphore_new_panics_past_max_permits() {
     let _ = Semaphore::new(Semaphore::MAX_PERMITS + 1);
 }
 
+/// #1305: runs `f`, which must panic with a message containing `expected`
+/// (tokio's wording); a different panic (a debug build's `attempt to add
+/// with overflow`) or none (a release build's wrap) fails.
+fn assert_overflow_panic(expected: &str, f: impl FnOnce()) {
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .expect_err("adding past MAX_PERMITS must panic");
+    let msg = err
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| err.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(msg.contains(expected), "unexpected panic message: {msg:?}");
+}
+
+/// #1305: the issue's repro. Base: a debug build panics with
+/// `attempt to add with overflow` under the state lock; a release build
+/// wraps the count to 0. tokio 1.53.3 panics with this message.
+#[test]
+fn semaphore_add_permits_past_usize_panics_and_leaves_the_count_unchanged() {
+    let semaphore = Semaphore::new(1);
+    assert_overflow_panic("cannot add more than MAX_PERMITS permits", || {
+        semaphore.add_permits(usize::MAX)
+    });
+    assert_eq!(semaphore.available_permits(), 1);
+    // Still usable afterwards.
+    semaphore.add_permits(1);
+    assert!(semaphore.try_acquire_many(2).is_ok());
+}
+
+/// #1305: tokio's bound is `MAX_PERMITS`, not `usize::MAX`: the count
+/// may reach it exactly, never pass it.
+#[test]
+fn semaphore_add_permits_reaches_max_permits_and_never_passes_it() {
+    let semaphore = Semaphore::new(0);
+    semaphore.add_permits(Semaphore::MAX_PERMITS);
+    assert_eq!(semaphore.available_permits(), Semaphore::MAX_PERMITS);
+    assert_overflow_panic(
+        "number of added permits (1) would overflow MAX_PERMITS",
+        || semaphore.add_permits(1),
+    );
+    assert_eq!(semaphore.available_permits(), Semaphore::MAX_PERMITS);
+}
+
+/// #1305: as in tokio, the bound applies to the count left once queued
+/// waiters are granted, so permits a waiter takes count against nothing.
+#[test]
+fn semaphore_add_permits_bound_applies_after_queued_waiters_are_granted() {
+    let semaphore = Semaphore::new(0);
+    let mut waiter = Box::pin(semaphore.acquire_many(5));
+    assert!(poll_once(waiter.as_mut(), std::task::Waker::noop()).is_pending());
+    semaphore.add_permits(Semaphore::MAX_PERMITS + 5);
+    let std::task::Poll::Ready(Ok(permit)) = poll_once(waiter.as_mut(), std::task::Waker::noop())
+    else {
+        panic!("the waiter must have been granted");
+    };
+    assert_eq!(semaphore.available_permits(), Semaphore::MAX_PERMITS);
+    // Make room, so returning the permit stays within the bound.
+    assert_eq!(semaphore.forget_permits(5), 5);
+    drop(permit);
+    assert_eq!(semaphore.available_permits(), Semaphore::MAX_PERMITS);
+}
+
+/// #1305: a rejected addition grants no queued waiter, even one the
+/// added permits would have covered.
+#[test]
+fn semaphore_rejected_add_permits_leaves_queued_waiters_queued() {
+    let semaphore = Semaphore::new(0);
+    let mut waiter = Box::pin(semaphore.acquire_many(5));
+    assert!(poll_once(waiter.as_mut(), std::task::Waker::noop()).is_pending());
+    assert_overflow_panic("cannot add more than MAX_PERMITS permits", || {
+        semaphore.add_permits(usize::MAX)
+    });
+    assert_eq!(semaphore.available_permits(), 0);
+    assert!(poll_once(waiter.as_mut(), std::task::Waker::noop()).is_pending());
+    // The waiter is still queued, and a later in-range release grants it.
+    semaphore.add_permits(5);
+    assert!(matches!(
+        poll_once(waiter.as_mut(), std::task::Waker::noop()),
+        std::task::Poll::Ready(Ok(_))
+    ));
+}
+
+/// #1305: a dropped permit returns its permits through the same check,
+/// as tokio's does. Base: the count silently passes `MAX_PERMITS`.
+#[test]
+fn semaphore_permit_drop_past_max_permits_panics_and_leaves_the_count_unchanged() {
+    let semaphore = Arc::new(Semaphore::new(2));
+    let borrowed = semaphore.try_acquire().unwrap();
+    let owned = semaphore.clone().try_acquire_owned().unwrap();
+    semaphore.add_permits(Semaphore::MAX_PERMITS);
+    assert_overflow_panic(
+        "number of added permits (1) would overflow MAX_PERMITS",
+        || drop(borrowed),
+    );
+    assert_overflow_panic(
+        "number of added permits (1) would overflow MAX_PERMITS",
+        || drop(owned),
+    );
+    assert_eq!(semaphore.available_permits(), Semaphore::MAX_PERMITS);
+}
+
+/// #1305: an `acquire` future dropped after it was granted, but before
+/// it observed the grant, hands its permits back through the same check.
+#[test]
+fn semaphore_granted_acquire_dropped_past_max_permits_panics_and_leaves_the_count_unchanged() {
+    let semaphore = Semaphore::new(0);
+    let mut waiter = Box::pin(semaphore.acquire());
+    assert!(poll_once(waiter.as_mut(), std::task::Waker::noop()).is_pending());
+    semaphore.add_permits(1); // granted, not yet observed
+    semaphore.add_permits(Semaphore::MAX_PERMITS);
+    assert_overflow_panic(
+        "number of added permits (1) would overflow MAX_PERMITS",
+        || drop(waiter),
+    );
+    assert_eq!(semaphore.available_permits(), Semaphore::MAX_PERMITS);
+}
+
 #[test]
 fn forget_permits_permanently_reduces_availability_without_needing_a_release() {
     let semaphore = Semaphore::new(5);

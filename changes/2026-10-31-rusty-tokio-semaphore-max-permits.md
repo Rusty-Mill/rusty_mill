@@ -1,0 +1,8 @@
+---
+category: Fixed
+changelog: rusty_tokio's Semaphore::add_permits now panics, as tokio's does, when the count would pass MAX_PERMITS, instead of panicking under its lock in debug builds and wrapping in release builds.
+---
+## 2026-10-31 - rusty_tokio: Semaphore bounds added permits at MAX_PERMITS
+
+- **Fixed:** `Semaphore::add_permits` added to the permit count with no bound (#1305). An overflowing addition panicked with the state lock held in a debug build, poisoning it, and wrapped the count silently in a release build; an addition that passed `MAX_PERMITS` without overflowing a `usize` was accepted. Every path that returns permits (`add_permits`, dropping a `SemaphorePermit` or `OwnedSemaphorePermit`, and dropping an `acquire` future that was granted before it saw the grant) now checks, under the lock and in the same critical section as the update, that the count left after granting queued waiters stays within `MAX_PERMITS`, as tokio's `add_permits_locked` does, and panics with tokio's messages once the lock is released. A rejected release changes nothing: no permit is added and no waiter is granted. `OwnedSemaphorePermit::merge` now panics instead of wrapping when the merged count would not fit in a `usize`.
+- **Known limitations:** as in tokio, dropping a permit can now panic when `add_permits` has pushed the available count up to `MAX_PERMITS` while that permit was held; a drop that panics while already unwinding aborts. Unlike tokio, which can have granted waiters or added the permits before it panics, a rejected release leaves the semaphore unchanged.
