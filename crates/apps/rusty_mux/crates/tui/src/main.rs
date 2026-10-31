@@ -969,6 +969,7 @@ mod client {
             passed: None,
             no_win32: NoWin32Input::default(),
             pending: None,
+            detaching: None,
             ended: None,
         };
         app.sync();
@@ -1742,6 +1743,8 @@ mod client {
         no_win32: NoWin32Input,
         /// A layout change held back while blocks it drops drain.
         pending: Option<Pending>,
+        /// Detaching once no keys wait on a lease, or by this at the latest.
+        detaching: Option<Instant>,
         ended: Option<Ended>,
     }
 
@@ -1812,7 +1815,10 @@ mod client {
                 Input::ControlEnded(joined) if joined != self.joined => {}
                 Input::ControlEnded(_) if !self.panes.is_empty() => {}
                 Input::ControlEnded(_) => self.broke(Ended::Disconnected),
-                Input::Pane(tag, message) => self.on_pane(tag, message),
+                Input::Pane(tag, message) => {
+                    self.on_pane(tag, message);
+                    self.detach_when_sent(Instant::now());
+                }
                 // Only asked for while lost.
                 Input::Rejoined(_) if self.lost.is_none() => {}
                 Input::Rejoined(Ok(back)) => self.rejoined(back),
@@ -1854,6 +1860,7 @@ mod client {
         /// hears the server's keepalives; brings a lost one back when due.
         fn beat(&mut self) {
             let now = Instant::now();
+            self.detach_when_sent(now);
             if let Some(lost) = self.lost.as_mut() {
                 if lost.retry.is_some_and(|at| now >= at) {
                     lost.retry = None;
@@ -2038,7 +2045,7 @@ mod client {
             }
             for Aimed { at, action } in held {
                 match action {
-                    Action::Detach => return self.end(Ended::Detached),
+                    Action::Detach => return self.detach(),
                     Action::Focus(_) if self.visible().iter().any(|(b, _)| *b == at) => {
                         self.focus = at;
                         self.sync();
@@ -2239,6 +2246,26 @@ mod client {
             self.sync();
         }
 
+        /// Detaches once the keys waiting on a lease are sent (or refused),
+        /// at most [`HANDSHAKE`] from now: a detach typed after them must
+        /// not drop them. Nothing typed meanwhile is taken.
+        fn detach(&mut self) {
+            self.detaching.get_or_insert(Instant::now() + HANDSHAKE);
+            self.detach_when_sent(Instant::now());
+        }
+
+        /// Ends a detach under way once no keys wait on a lease, or at `now`
+        /// past its time.
+        fn detach_when_sent(&mut self, now: Instant) {
+            let Some(by) = self.detaching else {
+                return;
+            };
+            let waiting = self.panes.values().any(|pane| !pane.waiting.is_empty());
+            if !waiting || now >= by {
+                self.end(Ended::Detached);
+            }
+        }
+
         /// Keeps the first reason the client stops.
         fn end(&mut self, ended: Ended) {
             self.ended.get_or_insert(ended);
@@ -2261,8 +2288,9 @@ mod client {
         /// move that lost the path, behind what that move held; either
         /// way aimed at the block it was typed for (see [`Aimed`]).
         fn typed(&mut self, action: Action) {
-            // A detach is held already: the client stops either way.
-            if detaching(&self.held) {
+            // A detach is held or under way already: the client stops
+            // either way.
+            if detaching(&self.held) || self.detaching.is_some() {
                 return bell();
             }
             let Some(aimed) = self.aim(action) else {
@@ -2306,7 +2334,7 @@ mod client {
                         pane.typed(data);
                     }
                 }
-                Action::Detach => self.end(Ended::Detached),
+                Action::Detach => self.detach(),
                 Action::Focus(dir) => {
                     match screen::neighbor(&self.visible(), focus, dir) {
                         Some(block) => self.focus = block,
@@ -3162,6 +3190,7 @@ mod client {
                 passed: None,
                 no_win32: NoWin32Input::default(),
                 pending: None,
+                detaching: None,
                 ended: None,
             };
             let (a_open, a_far) = opened(a, takeover(11), true);
@@ -3490,6 +3519,75 @@ mod client {
             assert!(app.lost.is_some());
             assert!(matches!(app.standby.moving, Moving::Idle));
             assert_eq!(actions(&app.held), [&input(b"held")]);
+        }
+
+        /// Focus to B, keys for B and Ctrl-] d, all held during a move:
+        /// once it is done, the detach waits for B's lease so the keys are
+        /// sent first, exactly once; nothing typed after it is sent.
+        #[cfg(unix)]
+        #[test]
+        fn a_held_detach_waits_for_keys_waiting_on_a_lease() {
+            let (mut app, inbox, [_control, a_old, _b_old]) = app(None);
+            sent(&a_old);
+            app.standby.moving = Moving::Taking(Taking::default());
+            app.typed(Action::Focus(Dir::Right));
+            app.typed(input(b"before"));
+            app.typed(Action::Detach);
+            let (path, _control, _a_new, b_new) = back(takeover(1));
+            app.take(Input::Moved(Ok(path)));
+            assert!(app.ended.is_none(), "not before B's keys are sent");
+            app.typed(input(b"after"));
+            let at_b = sent(&b_new);
+            assert!(typed_in(&at_b).is_empty());
+            grant(&mut app, &inbox, &b_new, &at_b);
+            assert_eq!(typed_in(&sent(&b_new)), [b"before".to_vec()]);
+            assert!(matches!(app.ended, Some(Ended::Detached)));
+        }
+
+        /// A detach waiting on a lease that is refused, or never answered,
+        /// still ends: the keys are dropped, as the server would refuse them.
+        #[cfg(unix)]
+        #[test]
+        fn a_detach_waiting_on_a_lease_ends_on_refusal_or_in_time() {
+            let (mut app, inbox, [_control, _a_old, b_old]) = app(None);
+            app.typed(Action::Focus(Dir::Right));
+            app.typed(input(b"before"));
+            app.typed(Action::Detach);
+            assert!(app.ended.is_none());
+            let req = sent(&b_old)
+                .iter()
+                .find_map(|m| match m {
+                    Message::AcquireLease { req, .. } => Some(*req),
+                    _ => None,
+                })
+                .expect("B's lease asked for");
+            let mut server = Conn::new(b_old.try_clone().expect("clone"));
+            server
+                .send(&Message::Failed {
+                    req,
+                    reason: "held elsewhere".into(),
+                    code: None,
+                })
+                .expect("failed");
+            loop {
+                if let input @ Input::Pane(..) =
+                    inbox.recv_timeout(Duration::from_secs(5)).expect("answer")
+                {
+                    app.take(input);
+                    break;
+                }
+            }
+            assert!(typed_in(&sent(&b_old)).is_empty());
+            assert!(matches!(app.ended, Some(Ended::Detached)));
+
+            let (mut late, _inbox, _ends) = super::tests::app(None);
+            late.typed(Action::Focus(Dir::Right));
+            late.typed(input(b"before"));
+            late.typed(Action::Detach);
+            late.detach_when_sent(Instant::now());
+            assert!(late.ended.is_none());
+            late.detach_when_sent(Instant::now() + HANDSHAKE);
+            assert!(matches!(late.ended, Some(Ended::Detached)));
         }
 
         /// A second Ctrl-] d while a detach held through a broken move

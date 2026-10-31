@@ -213,7 +213,9 @@ ordering, acks and flow control belong to each stream.
   so the clients the move took over are detached on their new connections,
   not left to the server for 30 s. After a move that broke, the path gets
   one attempt on the forward in use to detach them before the client
-  stops; a second Ctrl-] d meanwhile is ignored.
+  stops; a second Ctrl-] d meanwhile is ignored. Any detach, held or not,
+  waits until keys waiting on a lease are sent or refused (at most 10 s),
+  and nothing typed after it is sent.
 - **Flow control:** each stream's receive buffer holds at most 1 MiB in
   total: bytes in order but not yet read, plus bytes out of order. Every
   `Ack` sets `limit` to the cumulative offset plus the free space, and a
