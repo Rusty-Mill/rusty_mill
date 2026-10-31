@@ -465,22 +465,17 @@ mod client {
         fn datagram(&mut self, port: u16, id: [u8; 8], key: [u8; 32]) -> Result<PathBuf, String> {
             use std::net::ToSocketAddrs;
 
-            use rusty_mux_tui::udp::{Relay, any_for};
-
             self.fresh = None;
             let host = match &self.udp_host {
                 Some(host) => host.clone(),
                 None => rusty_mux_tui::ssh::hostname(&self.program, &self.host)?,
             };
-            let server = (host.as_str(), port)
+            let mut servers: Vec<_> = (host.as_str(), port)
                 .to_socket_addrs()
                 .map_err(|e| format!("resolving {host}: {e}"))?
-                .next()
-                .ok_or_else(|| format!("{host} has no address"))?;
-            let relay = Relay::start(any_for(server), server, id, &key)?;
-            if !relay.probe(PROBE) {
-                return Err(format!("no answer on UDP from {server}"));
-            }
+                .collect();
+            servers.dedup();
+            let relay = rusty_mux_tui::udp::reach(&servers, id, &key, PROBE)?;
             let local = relay.socket().to_owned();
             self.fresh = Some(Route::Udp(relay));
             Ok(local)

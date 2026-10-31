@@ -28,6 +28,10 @@ const TICK: Duration = Duration::from_millis(100);
 /// acknowledge what it still holds before it closes anyway.
 const LINGER: Duration = Duration::from_secs(10);
 
+/// How long dropping a relay waits for the server to acknowledge what
+/// finished local connections wrote, such as a last Detach.
+const DRAIN: Duration = Duration::from_secs(2);
+
 /// The most read from a local connection at once.
 const CHUNK: usize = 16 << 10;
 
@@ -134,12 +138,34 @@ impl Relay {
     }
 }
 
+impl Relay {
+    /// Waits, at most [`DRAIN`], until every local connection has ended
+    /// and the server has acknowledged what it wrote: each one's carrier
+    /// leaves `locals` only then.
+    fn drain(&self) {
+        let by = Instant::now() + DRAIN;
+        let mut assoc = self.shared.lock();
+        while !assoc.is_ended() && !self.shared.carried().is_empty() {
+            let left = by.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            assoc = self.shared.wait(assoc, left);
+        }
+    }
+}
+
 impl Drop for Relay {
     fn drop(&mut self) {
+        self.drain();
         {
             let mut assoc = self.shared.lock();
-            assoc.end();
-            self.shared.transmit(&mut assoc);
+            // One never answered may share its id with a relay to another
+            // address of the same server: ending it there would end both.
+            if assoc.last_heard().is_some() {
+                assoc.end();
+                self.shared.transmit(&mut assoc);
+            }
         }
         self.shared.stop.store(true, Ordering::Release);
         self.shared.changed.notify_all();
@@ -183,6 +209,10 @@ impl Shared {
             .wait_timeout(assoc, at_most.min(TICK))
             .unwrap_or_else(PoisonError::into_inner);
         assoc
+    }
+
+    fn carried(&self) -> MutexGuard<'_, HashMap<StreamId, UnixStream>> {
+        self.locals.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn stopped(&self) -> bool {
@@ -346,6 +376,29 @@ impl Shared {
             }
         }
     }
+}
+
+/// Starts association `id` under `key` with the first of `servers` that
+/// answers a probe, trying each in turn with an equal share of what is
+/// left of `patience`: a host may resolve to addresses UDP cannot reach.
+pub fn reach(
+    servers: &[SocketAddr],
+    id: [u8; ID_LEN],
+    key: &[u8; KEY_LEN],
+    patience: Duration,
+) -> Result<Relay, String> {
+    let by = Instant::now() + patience;
+    let mut why = String::from("no address to send to");
+    for (i, &server) in servers.iter().enumerate() {
+        let left = by.saturating_duration_since(Instant::now());
+        let share = left / (servers.len() - i) as u32;
+        match Relay::start(any_for(server), server, id, key) {
+            Ok(relay) if relay.probe(share) => return Ok(relay),
+            Ok(_) => why = format!("no answer on UDP from {server}"),
+            Err(e) => why = e,
+        }
+    }
+    Err(why)
 }
 
 /// Where to send from to reach `server`: any address of its family.

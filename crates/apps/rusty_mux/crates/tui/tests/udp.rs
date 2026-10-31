@@ -10,12 +10,13 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use rusty_mux_proto::{Features, Message, Takeover};
+use rusty_mux_proto::{Entry, Features, Message, Takeover};
 use rusty_mux_tui::Conn;
-use rusty_mux_tui::udp::Relay;
+use rusty_mux_tui::udp::{Relay, reach};
 
 const PATIENCE: Duration = Duration::from_secs(10);
 const FEATURES: Features = Features::CHECKPOINT_V6
+    .union(Features::INSPECT)
     .union(Features::SYNC)
     .union(Features::TAKEOVER)
     .union(Features::DATAGRAM);
@@ -160,4 +161,61 @@ fn a_blocked_port_fails_the_probe_within_its_patience() {
     assert!(started.elapsed() < Duration::from_secs(3));
     // The control connection never moved, so it still works.
     sync(&mut conn, 2);
+}
+
+/// Whether the server has a session called `name`.
+fn has_session(path: &std::path::Path, name: &str) -> bool {
+    let (mut conn, _) = connect(path, None);
+    conn.send(&Message::List { req: 9 }).expect("list");
+    loop {
+        match reply(&mut conn) {
+            Message::Entry {
+                entry: Entry::Session { name: n, .. },
+                ..
+            } if n == name => return true,
+            Message::Entry { .. } => {}
+            Message::Done { req: 9, .. } => return false,
+            other => panic!("expected List entries, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn the_last_request_reaches_the_server_when_the_relay_drops() {
+    let (path, udp) = udp_server();
+    let (mut over_ssh, _) = connect(&path, None);
+    let (_, id, key) = open_datagram(&mut over_ssh);
+    let relay = Relay::start(bind([127, 0, 0, 1]), udp, id, &key).expect("relay");
+    assert!(relay.probe(Duration::from_secs(2)));
+    let (mut conn, _) = connect(relay.socket(), None);
+    // Sent and hung up at once, as a client's last Detach is.
+    let create = Message::CreateSession {
+        req: 1,
+        name: "last-words".into(),
+    };
+    conn.send(&create).expect("create");
+    conn.get_ref()
+        .shutdown(std::net::Shutdown::Both)
+        .expect("hang up");
+    drop(relay);
+    assert!(has_session(&path, "last-words"), "the request was lost");
+}
+
+#[test]
+fn a_host_whose_first_address_is_silent_is_reached_on_the_next() {
+    let (path, udp) = udp_server();
+    let (mut over_ssh, me) = connect(&path, None);
+    let (_, id, key) = open_datagram(&mut over_ssh);
+    let blackhole = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let silent = blackhole.local_addr().expect("addr");
+    let started = std::time::Instant::now();
+    let relay = reach(&[silent, udp], id, &key, Duration::from_secs(2)).expect("reach");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    // The address that answered carries the move.
+    let (mut moved, again) = connect(relay.socket(), Some(me));
+    assert_eq!(again.client, me.client);
+    sync(&mut moved, 2);
+
+    let none = reach(&[silent], id, &key, Duration::from_millis(300));
+    assert!(none.is_err());
 }
