@@ -37,15 +37,18 @@ pub(crate) enum Reader {
     Batch,
 }
 
-/// Who reads the command line of `program`, by its file name: what
-/// follows the last `\\`, `/` or drive colon (`C:cmd.exe`). A bare `cmd`
-/// is cmd.exe, as `CreateProcessW` adds `.exe`.
+/// Who reads the command line of `program`, by its file name as Windows
+/// opens it: after the last `\\` or `/` and any drive (`C:cmd.exe`),
+/// before any stream (`cmd.exe::$DATA`), without trailing dots and spaces
+/// (`cmd.exe.`). A bare `cmd` is cmd.exe, as `CreateProcessW` adds `.exe`.
 pub(crate) fn reader(program: &str) -> Reader {
-    let name = program
-        .rsplit(['\\', '/', ':'])
-        .next()
-        .unwrap_or(program)
-        .to_ascii_lowercase();
+    let name = program.rsplit(['\\', '/']).next().unwrap_or(program);
+    let name = match name.as_bytes() {
+        [drive, b':', ..] if drive.is_ascii_alphabetic() => &name[2..],
+        _ => name,
+    };
+    let name = name.split(':').next().unwrap_or(name);
+    let name = name.trim_end_matches(['.', ' ']).to_ascii_lowercase();
     if name.ends_with(".bat") || name.ends_with(".cmd") {
         Reader::Batch
     } else if name == "cmd" || name == "cmd.exe" {
@@ -373,6 +376,12 @@ mod tests {
         // Drive-relative: the name follows the drive colon.
         assert_eq!(reader("C:cmd.exe"), Reader::Cmd);
         assert_eq!(reader("d:x.BAT"), Reader::Batch);
+        // Names Windows normalizes: trailing dots and spaces, a stream.
+        assert_eq!(reader(r"C:\x\cmd.exe."), Reader::Cmd);
+        assert_eq!(reader("cmd.exe . "), Reader::Cmd);
+        assert_eq!(reader("x.bat."), Reader::Batch);
+        assert_eq!(reader(r"C:\x\cmd.exe::$DATA"), Reader::Cmd);
+        assert_eq!(reader("C:cmd.exe::$DATA"), Reader::Cmd);
     }
 
     #[test]
