@@ -290,6 +290,58 @@ fn a_client_is_opened_only_through_its_connect_thread() {
     let _ = other.wait();
 }
 
+/// What ConDrv does with a CONNECT whose client dies before the host
+/// reads it (#1259, design §7.3): it must not be delivered, or a host
+/// could not tell the client's thread id from a reused one. Probe for
+/// the identity check's generation argument; run on Windows.
+#[test]
+fn a_connect_whose_client_died_unread_is_not_delivered() {
+    let _serial = lock();
+    let mut attached = condrv::spawn_attached(&command("ping.exe", &["-n", "30", "127.0.0.1"]))
+        .expect("spawn_attached");
+    // The child blocks in its CONNECT; nothing reads it yet.
+    std::thread::sleep(Duration::from_millis(500));
+    let pid = attached.child.id();
+    attached.child.kill_single(Signal::Kill).expect("kill");
+    let status = Box::new(attached.child).wait().expect("wait");
+    assert!(matches!(status, ExitStatus::Code(_)), "{status:?}");
+    let waker = Waker::new().expect("Waker::new");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        match attached.server.submit_read(None) {
+            Ok(()) => {}
+            Err(e) if e.kind == ErrorKind::BrokenPipe => break,
+            Err(e) => panic!("submit_read: {e:?}"),
+        }
+        match attached.server.wait(&waker, None, Some(deadline)) {
+            Ok(Ready { io: Some(d), .. }) => {
+                seen.push((d.function, d.process, d.object));
+                if d.function == CONNECT {
+                    break;
+                }
+                // Answer it so the next read can be issued.
+                attached
+                    .server
+                    .complete_io(&IoComplete {
+                        id: d.id,
+                        status: STATUS_SUCCESS,
+                        information: 0,
+                        write_back: &[],
+                    })
+                    .expect("complete_io");
+            }
+            Ok(_) => break,
+            Err(e) if e.kind == ErrorKind::BrokenPipe => break,
+            Err(e) => panic!("wait: {e:?}"),
+        }
+    }
+    assert!(
+        !seen.iter().any(|&(f, _, _)| f == CONNECT),
+        "a dead client's CONNECT (pid {pid}) was delivered: {seen:?}"
+    );
+}
+
 #[test]
 fn packet_bounds_and_completion_are_checked() {
     let _serial = lock();

@@ -57,9 +57,9 @@ impl Reaper {
     }
 
     /// Queues `job` for a worker, starting one if fewer than
-    /// [`MAX_WORKERS`] run. If none can start, this thread works the
-    /// queue, still counted, so `join` waits for it. Once joined, runs
-    /// `job` here.
+    /// [`MAX_WORKERS`] run, and returns at once. If no thread can start,
+    /// the job waits in the queue, still counted: a later `run` tries
+    /// again, and `join` runs what is left. Once joined, runs `job` here.
     pub(crate) fn run(self: &Arc<Self>, job: Job) {
         let mut state = self.lock();
         if state.joined {
@@ -76,16 +76,18 @@ impl Reaper {
         drop(state);
         let me = Arc::clone(self);
         if let Err(e) = (self.spawn)(Box::new(move || me.work())) {
-            eprintln!("rusty_term: no thread for a console shutdown ({e}); waiting here");
-            self.work();
+            self.lock().workers -= 1;
+            eprintln!("rusty_term: no thread for a console shutdown ({e}); it waits for exit");
         }
     }
 
-    /// Waits until every accepted job has finished; later jobs run on the
-    /// caller's thread. Bounded, as each job bounds its own wait.
+    /// Waits until every accepted job has finished, running any still
+    /// queued here; later jobs run on the caller's thread. Bounded, as
+    /// each job bounds its own wait.
     pub(crate) fn join(&self) {
+        self.lock().joined = true;
+        self.drain();
         let mut state = self.lock();
-        state.joined = true;
         while state.in_flight > 0 {
             state = self
                 .idle
@@ -94,16 +96,17 @@ impl Reaper {
         }
     }
 
-    /// A worker: runs queued jobs until none is left.
+    /// A worker: runs queued jobs until none is left, then retires.
     fn work(&self) {
+        self.drain();
+        self.lock().workers -= 1;
+    }
+
+    /// Runs queued jobs until none is left.
+    fn drain(&self) {
         loop {
-            let job = {
-                let mut state = self.lock();
-                let Some(job) = state.queue.pop_front() else {
-                    state.workers -= 1;
-                    return;
-                };
-                job
+            let Some(job) = self.lock().queue.pop_front() else {
+                return;
             };
             run_logged(job);
             let mut state = self.lock();
@@ -197,8 +200,13 @@ mod tests {
         );
         reaper.join();
         assert_eq!(finished.load(Ordering::SeqCst), jobs);
-        assert!(peak.load(Ordering::SeqCst) <= MAX_WORKERS);
-        assert_eq!(reaper.lock().workers, 0, "the workers exit once idle");
+        // The joiner works the queue too.
+        assert!(peak.load(Ordering::SeqCst) <= MAX_WORKERS + 1);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while reaper.lock().workers > 0 {
+            assert!(Instant::now() < deadline, "the workers exit once idle");
+            std::thread::yield_now();
+        }
     }
 
     #[test]
@@ -210,25 +218,47 @@ mod tests {
         assert!(done.load(Ordering::SeqCst), "it ran before run returned");
     }
 
-    /// With no thread to be had, the caller runs the job, and `join` on
-    /// another thread still waits for it (review of 0ce71b34).
+    /// With no thread to be had, a close still returns at once (review of
+    /// 0ce71b34): the job waits, counted, and `join` runs it, even when
+    /// the handle drops on another thread as the backend goes.
     #[test]
-    fn a_job_run_here_for_want_of_a_thread_is_still_joined() {
+    fn a_job_with_no_thread_waits_for_join_and_never_blocks_the_close() {
         let reaper = Arc::new(Reaper::with_spawn(|_| Err(io::Error::other("no threads"))));
         let done = Arc::new(AtomicBool::new(false));
-        let caller = {
+        let closer = {
             let (reaper, done) = (Arc::clone(&reaper), Arc::clone(&done));
-            std::thread::spawn(move || reaper.run(slow_job(&done)))
+            std::thread::spawn(move || {
+                let start = Instant::now();
+                reaper.run(slow_job(&done));
+                start.elapsed()
+            })
         };
-        while reaper.lock().in_flight == 0 {
-            std::thread::yield_now();
+        let took = closer.join().expect("closer");
+        assert!(took < Duration::from_millis(100), "the close didn't wait");
+        assert!(!done.load(Ordering::SeqCst), "nothing ran it yet");
+        assert_eq!(reaper.lock().workers, 0);
+        reaper.join();
+        assert!(done.load(Ordering::SeqCst), "join ran the queued job");
+    }
+
+    /// Jobs accepted while `join` runs, from other threads, are waited for.
+    #[test]
+    fn jobs_accepted_during_join_are_waited_for() {
+        let reaper = Arc::new(Reaper::new());
+        let flags: Vec<_> = (0..4).map(|_| Arc::new(AtomicBool::new(false))).collect();
+        reaper.run(slow_job(&flags[0]));
+        let closers: Vec<_> = flags[1..]
+            .iter()
+            .map(|done| {
+                let (reaper, done) = (Arc::clone(&reaper), Arc::clone(done));
+                std::thread::spawn(move || reaper.run(slow_job(&done)))
+            })
+            .collect();
+        for c in closers {
+            c.join().expect("closer");
         }
         reaper.join();
-        assert!(
-            done.load(Ordering::SeqCst),
-            "join waited for the inline job"
-        );
-        caller.join().expect("caller");
+        assert!(flags.iter().all(|d| d.load(Ordering::SeqCst)));
     }
 
     #[test]
