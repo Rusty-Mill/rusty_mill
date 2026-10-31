@@ -765,7 +765,7 @@ Each PR includes one change fragment and is reviewed by Dottius. Line counts inc
 | 10 | (reserved for issues found at the milestone) | — | 2 |
 | 11 | rusty_mux server: local host choice, `RUSTY_CONSOLE_HOST`, Config field and sites | 250 | 1–2 |
 | 12 | yirp `sessionmgr-pty`: `PtyOptions::console_host`, Send/Sync justification (`sessionmgr-pty/src/lib.rs:99-113, 302-305`) | 150 | 1 |
-| 13 | Fuzz crate `rusty_conhost/fuzz` plus a nightly job modelled on `rusty-tls-fuzz` (`ci.yml:1673-1714`) | 200 | 1–2 |
+| 13 | Fuzz crate `rusty_conhost/fuzz` plus a nightly job modelled on `rusty-tls-fuzz` (`ci.yml:1673-1714`). As built: the driver is rusty_conhost's hidden `fuzz` module behind a `fuzz` feature (the core is crate-private), the crate's tests run it on 300 seeded scripts on every PR, the fuzz crate has an empty `[workspace]` table like the other fuzz crates, and the job reuses `tls_fuzz_smoke.sh` | 200 | 1–2 |
 | 14 | Windows end-to-end bench and Phase B gate | 250 | 1–2 |
 | | **Total** | **~5.8k** | **27–39** focused days |
 | | Plus S1–S3 | | 1.5 |

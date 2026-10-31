@@ -306,6 +306,7 @@ exclude = [
     # Temporary, pinned upstream crypto patch; not a first-party member.
     "vendor/jsonwebtoken",
     "crates/libs/ui/rusty_term/fuzz",
+    "crates/libs/ui/rusty_conhost/fuzz",
     "crates/apps/rush/fuzz",
     "crates/libs/ui/rusty_lines/bench",
     "crates/foundation/rusty_libc/bench",

@@ -157,6 +157,24 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", job)
         self.assertIn("      - rusty-tls-fuzz\n", self.workflow[self.workflow.index("required-gate:") :])
 
+    def test_the_conhost_fuzz_job_runs_only_on_sweeps_and_cannot_pass_vacuously(self) -> None:
+        # Design PR 13 (D2): scheduled and manual runs only, never a PR or the queue.
+        start = self.workflow.index("  rusty-conhost-fuzz:\n")
+        end = self.workflow.find("\n  # ----", start)
+        job = self.workflow[start : end if end != -1 else None]
+        self.assertIn(
+            "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'\n", job
+        )
+        self.assertRegex(job, r"FUZZ_TOOLCHAIN: nightly-\d{4}-\d{2}-\d{2}\n")
+        self.assertIn("toolchain: ${{ env.FUZZ_TOOLCHAIN }}", job)
+        self.assertIn("tool: cargo-fuzz@0.13.2", job)
+        # Both targets, through the tested script.
+        self.assertIn("FUZZ_ROOT: crates/libs/ui/rusty_conhost", job)
+        self.assertRegex(job, r"bash \.github/scripts/tls_fuzz_smoke\.sh 30 2\n")
+        self.assertIn("FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu", job)
+        self.assertNotIn("continue-on-error", job)
+        self.assertIn("      - rusty-conhost-fuzz\n", self.workflow[self.workflow.index("required-gate:") :])
+
     # Both engine jobs, `ring` and native (ADR-0002 Amendment 2), carry the same
     # limbo and live steps; each is checked with the same rules.
     ENGINE_JOBS = (("rusty-tls-engine", "ring"), ("rusty-tls-engine-native", "native"))

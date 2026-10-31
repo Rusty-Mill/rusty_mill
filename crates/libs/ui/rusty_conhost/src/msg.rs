@@ -229,8 +229,9 @@ pub(crate) fn server_msg(title: &str) -> Vec<u8> {
     server_msg_in_group(title, 0)
 }
 
-#[cfg(test)]
-/// [`server_msg`] with a `ProcessGroupId`.
+#[cfg(any(test, feature = "fuzz"))]
+/// A CONSOLE_SERVER_MSG with `title`, empty other strings and a
+/// `ProcessGroupId`.
 pub(crate) fn server_msg_in_group(title: &str, group: u32) -> Vec<u8> {
     let mut m = vec![0; SERVER_MSG_LEN];
     put_u32(&mut m, SERVER_MSG_GROUP_AT, group);

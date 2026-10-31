@@ -30,7 +30,7 @@ pub(crate) mod vk {
     pub(crate) const CANCEL: u16 = 0x03;
     pub(crate) const BACK: u16 = 0x08;
     pub(crate) const TAB: u16 = 0x09;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzz"))]
     pub(crate) const RETURN: u16 = 0x0D;
     pub(crate) const SHIFT: u16 = 0x10;
     pub(crate) const CONTROL: u16 = 0x11;
@@ -725,8 +725,8 @@ impl Queue {
     }
 }
 
-/// A US-English stand-in for `VkKeyScanW`, for tests.
-#[cfg(test)]
+/// A US-English stand-in for `VkKeyScanW`, for tests and the fuzzer.
+#[cfg(any(test, feature = "fuzz"))]
 pub(crate) fn us_key_for(c: char) -> Option<(u16, u32)> {
     Some(match c {
         '\0' => (0x32, state::LEFT_CTRL | state::SHIFT),
