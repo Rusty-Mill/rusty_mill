@@ -15,7 +15,7 @@ use std::net::{Shutdown, SocketAddr, UdpSocket};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -117,6 +117,12 @@ impl Relay {
         &self.socket
     }
 
+    /// When the server was last heard, readable from anywhere while the
+    /// relay lives.
+    pub fn heard(&self) -> Heard {
+        Heard(Arc::downgrade(&self.shared))
+    }
+
     /// Asks the server for an answer and waits up to `patience` for one:
     /// whether the path works now.
     pub fn probe(&self, patience: Duration) -> bool {
@@ -214,6 +220,17 @@ impl Drop for Relay {
             let _ = worker.join();
         }
         remove(&self.dir);
+    }
+}
+
+/// When a relay last heard the server: an authentic datagram, data or a
+/// keepalive. `None` once the relay is gone or before anything arrived.
+#[derive(Clone)]
+pub struct Heard(Weak<Shared>);
+
+impl Heard {
+    pub fn last(&self) -> Option<Instant> {
+        self.0.upgrade()?.lock().last_heard()
     }
 }
 

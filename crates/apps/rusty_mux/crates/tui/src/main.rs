@@ -68,9 +68,9 @@ mod client {
     #[cfg(unix)]
     use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{Receiver as Inbox, RecvTimeoutError, Sender, channel};
+    use std::sync::{Arc, Mutex, PoisonError};
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
@@ -117,6 +117,10 @@ mod client {
     const BEAT: Duration = Duration::from_secs(5);
     const DEAD: Duration = Duration::from_secs(15);
 
+    /// How long a path that can tell (UDP, whose server sends a keepalive
+    /// after 3 s of silence) may go without a datagram before it is lost.
+    const SILENT: Duration = Duration::from_secs(6);
+
     /// The longest wait between attempts to bring the path back.
     const BACKOFF: Duration = Duration::from_secs(30);
 
@@ -156,6 +160,10 @@ mod client {
         /// Brings up a fresh path beside the one in use, giving up once
         /// `cancel` is set; returns the socket to connect to.
         fn fresh(&mut self, cancel: &AtomicBool) -> Result<PathBuf, String>;
+        /// The clients are taken over on the fresh path: its [`Pulse`] is
+        /// the one read from now on, before the main loop hears of it, so
+        /// the old path's silence cannot count against the fresh one.
+        fn listen(&mut self);
         /// The clients are taken over: the fresh path is the one in use,
         /// and the old one stops.
         fn settle(&mut self);
@@ -165,6 +173,28 @@ mod client {
         /// `port` as a fresh path, once it answers a probe; returns the
         /// socket to connect to.
         fn datagram(&mut self, port: u16, id: [u8; 8], key: [u8; 32]) -> Result<PathBuf, String>;
+        /// When the path in use last heard the server, kept current as
+        /// paths change.
+        fn pulse(&self) -> Pulse;
+    }
+
+    /// When the path in use last heard the server, for a path that can
+    /// tell; shared between the path, which sets it, and the main loop.
+    #[derive(Clone, Default)]
+    struct Pulse(Arc<Mutex<Option<Heard>>>);
+
+    type Heard = Arc<dyn Fn() -> Option<Instant> + Send + Sync>;
+
+    impl Pulse {
+        #[cfg(unix)]
+        fn set(&self, heard: Option<Heard>) {
+            *self.0.lock().unwrap_or_else(PoisonError::into_inner) = heard;
+        }
+
+        fn last(&self) -> Option<Instant> {
+            let heard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            heard.as_ref().and_then(|heard| heard())
+        }
     }
 
     /// What the main loop asks of a [`Rejoiner`].
@@ -234,13 +264,9 @@ mod client {
                             continue;
                         }
                     };
-                    let back = rejoin
-                        .fresh(&cancelled)
-                        .map_err(Missed::Retry)
-                        .and_then(|socket| take_over(socket, plan, &cancelled));
-                    if back.is_err() {
-                        rejoin.discard();
-                    }
+                    let back = bring_back(rejoin.as_mut(), &cancelled, |socket| {
+                        take_over(socket, plan, &cancelled)
+                    });
                     if tx.send(Input::Rejoined(back)).is_err() {
                         return;
                     }
@@ -259,6 +285,23 @@ mod client {
                 let _ = sender.send(ask);
             }
         }
+    }
+
+    /// One attempt at a fresh path, its clients taken over by `take`. On
+    /// success the fresh path is listened to before the attempt returns,
+    /// so before the main loop can read the [`Pulse`] again; on failure it
+    /// is discarded.
+    fn bring_back<T>(
+        rejoin: &mut dyn Rejoin,
+        cancel: &AtomicBool,
+        take: impl FnOnce(PathBuf) -> Result<T, Missed>,
+    ) -> Result<T, Missed> {
+        let back = rejoin.fresh(cancel).map_err(Missed::Retry).and_then(take);
+        match &back {
+            Ok(_) => rejoin.listen(),
+            Err(_) => rejoin.discard(),
+        }
+        back
     }
 
     impl Drop for Rejoiner {
@@ -401,6 +444,7 @@ mod client {
             remote,
             current: Route::Ssh(first),
             fresh: None,
+            pulse: Pulse::default(),
         };
         attach(local, block, Some(Box::new(path)))
     }
@@ -429,6 +473,7 @@ mod client {
         remote: PathBuf,
         current: Route,
         fresh: Option<Route>,
+        pulse: Pulse,
     }
 
     #[cfg(unix)]
@@ -451,11 +496,31 @@ mod client {
             Ok(local)
         }
 
+        fn listen(&mut self) {
+            let Some(fresh) = &self.fresh else {
+                return;
+            };
+            let heard = match fresh {
+                Route::Udp(relay) => {
+                    let heard = relay.heard();
+                    Some(Arc::new(move || heard.last()) as Heard)
+                }
+                Route::Ssh(_) => None,
+            };
+            self.pulse.set(heard);
+        }
+
         fn settle(&mut self) {
-            if let Some(fresh) = self.fresh.take() {
-                // Stops the old forward.
-                self.current = fresh;
-            }
+            self.listen();
+            let Some(fresh) = self.fresh.take() else {
+                return;
+            };
+            // Stops the old forward, or the old association.
+            self.current = fresh;
+        }
+
+        fn pulse(&self) -> Pulse {
+            self.pulse.clone()
         }
 
         fn discard(&mut self) {
@@ -547,6 +612,7 @@ mod client {
         // Without a sign of life to ask for, or a client to take over, a
         // lost path cannot be told or brought back.
         let rejoins = features.contains(Features::SYNC) && takeover.is_some();
+        let pulse = rejoin.as_ref().map(|r| r.pulse()).unwrap_or_default();
         // Kept to the end either way: it owns the forward in use.
         let (rejoiner, kept) = match rejoin {
             Some(rejoin) if rejoins => (Some(Rejoiner::spawn(rejoin, tx.clone())), None),
@@ -560,6 +626,7 @@ mod client {
                 heard: now,
             }),
             rejoiner,
+            pulse,
             me: takeover,
             lost: None,
             abandoned: None,
@@ -1273,6 +1340,8 @@ mod client {
         rejoiner: Option<Rejoiner>,
         /// Asks for signs of life, when the client can bring a path back.
         beat: Option<Beat>,
+        /// When a path that can tell last heard the server.
+        pulse: Pulse,
         /// How to take the control connection's client over.
         me: Option<Takeover>,
         lost: Option<Lost>,
@@ -1426,7 +1495,8 @@ mod client {
         }
 
         /// Asks for a sign of life every [`BEAT`], and counts the path lost
-        /// after [`DEAD`] without one; brings a lost one back when due.
+        /// after [`DEAD`] without one, or after [`SILENT`] on a path that
+        /// hears the server's keepalives; brings a lost one back when due.
         fn beat(&mut self) {
             let now = Instant::now();
             if let Some(lost) = self.lost.as_mut() {
@@ -1439,7 +1509,11 @@ mod client {
             let Some(beat) = self.beat.as_mut() else {
                 return;
             };
-            if now.duration_since(beat.heard) >= DEAD {
+            let silent = self
+                .pulse
+                .last()
+                .is_some_and(|heard| now.saturating_duration_since(heard) >= SILENT);
+            if silent || now.duration_since(beat.heard) >= DEAD {
                 self.lose();
             } else if now.duration_since(beat.asked) >= BEAT {
                 beat.asked = now;
@@ -2070,5 +2144,55 @@ mod client {
     fn parse_uuid(text: &OsString) -> Result<Uuid, String> {
         let text = text.to_str().ok_or("block id is not UTF-8")?;
         text.parse().map_err(|e| format!("block id: {e}"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Records what a [`Rejoin`] is asked, in order.
+        #[derive(Default)]
+        struct Calls(Vec<&'static str>);
+
+        impl Rejoin for Calls {
+            fn fresh(&mut self, _: &AtomicBool) -> Result<PathBuf, String> {
+                self.0.push("fresh");
+                Ok(PathBuf::from("fresh.sock"))
+            }
+            fn listen(&mut self) {
+                self.0.push("listen");
+            }
+            fn settle(&mut self) {
+                self.0.push("settle");
+            }
+            fn discard(&mut self) {
+                self.0.push("discard");
+            }
+            fn datagram(&mut self, _: u16, _: [u8; 8], _: [u8; 32]) -> Result<PathBuf, String> {
+                unreachable!("not asked here")
+            }
+            fn pulse(&self) -> Pulse {
+                Pulse::default()
+            }
+        }
+
+        #[test]
+        fn a_path_brought_back_is_listened_to_before_the_main_loop_hears() {
+            let mut calls = Calls::default();
+            let back = bring_back(&mut calls, &AtomicBool::new(false), |_| Ok(()));
+            assert!(back.is_ok());
+            // `settle` is left to the main loop; the pulse moved already.
+            assert_eq!(calls.0, ["fresh", "listen"]);
+        }
+
+        #[test]
+        fn a_path_not_brought_back_is_discarded_and_not_listened_to() {
+            let mut calls = Calls::default();
+            let back = bring_back(&mut calls, &AtomicBool::new(false), |_| {
+                Err::<(), _>(Missed::Dropped)
+            });
+            assert!(matches!(back, Err(Missed::Dropped)));
+            assert_eq!(calls.0, ["fresh", "discard"]);
+        }
     }
 }

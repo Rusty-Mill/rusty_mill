@@ -10,7 +10,7 @@
 use std::ffi::OsStr;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -782,11 +782,18 @@ fn a_server_offering_only_v3_checkpoints_is_refused() {
 
 /// A real server on a new socket, with `/bin/sh` for each block.
 fn real_server() -> PathBuf {
-    real_server_with(false)
+    real_server_with(false).0
 }
 
-/// A real server, offering UDP on 127.0.0.1 when `udp` holds.
-fn real_server_with(udp: bool) -> PathBuf {
+/// [`real_server`], offering UDP on 127.0.0.1; with its UDP port.
+fn real_udp_server() -> (PathBuf, u16) {
+    let (path, port) = real_server_with(true);
+    (path, port.expect("udp port"))
+}
+
+/// A real server, offering UDP on 127.0.0.1 when `udp` holds; with the
+/// UDP port it took.
+fn real_server_with(udp: bool) -> (PathBuf, Option<u16>) {
     use rusty_mux_server::{Config, Udp, serve, serve_udp};
     use rusty_tokio::io::{UdpSocket, UnixListener};
     use rusty_tokio::{Builder, LocalOptions};
@@ -806,25 +813,78 @@ fn real_server_with(udp: bool) -> PathBuf {
             .expect("runtime");
         runtime.block_on(async move {
             let listener = UnixListener::bind(&bind).expect("bind");
-            ready_tx.send(()).expect("ready");
             let config = Config {
                 program: "/bin/sh".into(),
                 args: Vec::new(),
                 cwd: "/".into(),
             };
-            match udp {
-                true => {
-                    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("udp");
-                    let idle = Duration::from_secs(600);
-                    let udp = Udp { socket, idle };
-                    serve_udp(listener, config, udp).await.expect("serve");
-                }
-                false => serve(listener, config).await.expect("serve"),
+            if !udp {
+                ready_tx.send(None).expect("ready");
+                return serve(listener, config).await.expect("serve");
             }
+            let socket = UdpSocket::bind("127.0.0.1:0").await.expect("udp");
+            let port = socket.local_addr().expect("udp addr").port();
+            ready_tx.send(Some(port)).expect("ready");
+            let idle = Duration::from_secs(600);
+            serve_udp(listener, config, Udp { socket, idle })
+                .await
+                .expect("serve");
         });
     });
-    ready_rx.recv_timeout(PATIENCE).expect("server bound");
-    path
+    let port = ready_rx.recv_timeout(PATIENCE).expect("server bound");
+    (path, port)
+}
+
+/// A UDP path to the server's `port` on 127.0.0.1, offered at the same
+/// port on 127.0.0.9 (set `STANDIN_HOSTNAME` to that); dropping it, or
+/// [`Wire::cut`], silences it both ways, as a dead network does.
+struct Wire(Arc<AtomicBool>);
+
+impl Wire {
+    fn new(port: u16) -> Self {
+        use std::net::UdpSocket;
+
+        let near = UdpSocket::bind(("127.0.0.9", port)).expect("near");
+        let far = UdpSocket::bind("127.0.0.1:0").expect("far");
+        far.connect(("127.0.0.1", port)).expect("connect");
+        let cut = Arc::new(AtomicBool::new(false));
+        let client = Arc::new(Mutex::new(None));
+        let (out, back) = (
+            near.try_clone().expect("near"),
+            far.try_clone().expect("far"),
+        );
+        let (cut_out, client_out) = (Arc::clone(&cut), Arc::clone(&client));
+        std::thread::spawn(move || {
+            let mut buf = [0; 65536];
+            while let Ok((n, from)) = out.recv_from(&mut buf) {
+                *client_out.lock().expect("client") = Some(from);
+                if !cut_out.load(Ordering::Relaxed) {
+                    let _ = back.send(&buf[..n]);
+                }
+            }
+        });
+        let cut_in = Arc::clone(&cut);
+        std::thread::spawn(move || {
+            let mut buf = [0; 65536];
+            while let Ok(n) = far.recv(&mut buf) {
+                let to = *client.lock().expect("client");
+                if let Some(to) = to.filter(|_| !cut_in.load(Ordering::Relaxed)) {
+                    let _ = near.send_to(&buf[..n], to);
+                }
+            }
+        });
+        Self(cut)
+    }
+
+    fn cut(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Wire {
+    fn drop(&mut self) {
+        self.cut();
+    }
 }
 
 /// A work directory holding a stand-in `ssh` that logs `pid args...` to
@@ -1086,7 +1146,7 @@ fn a_frozen_path_is_brought_back_with_the_screen_and_the_lease() {
 /// block shown later opens its own stream, and typing reaches the block.
 #[test]
 fn an_ssh_attach_moves_to_udp_and_stops_the_forward() {
-    let socket = real_server_with(true);
+    let socket = real_udp_server().0;
     let work = relaying_ssh("udp", &[]);
     let tui = ssh_client(&work, &socket);
     type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
@@ -1108,11 +1168,45 @@ fn an_ssh_attach_moves_to_udp_and_stops_the_forward() {
     std::fs::remove_dir_all(&work).expect("cleanup");
 }
 
+/// A UDP path that goes silent is lost after 6 s without a datagram,
+/// two of the server's keepalives, not after the 15 s a forward needs:
+/// the probe of the dead association fails, a second login brings the
+/// clients back over SSH, and typing reaches the block.
+#[test]
+fn a_silent_udp_path_is_noticed_in_6_s() {
+    let (socket, port) = real_udp_server();
+    let wire = Wire::new(port);
+    let work = relaying_ssh("udp-silent", &[]);
+    let tui = ssh_client_with(&work, &socket, &[("STANDIN_HOSTNAME", "127.0.0.9")]);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    let forward = wait_logins(&work, 1, PATIENCE)[0].0;
+    let deadline = Instant::now() + PATIENCE;
+    while running(forward) {
+        assert!(Instant::now() < deadline, "the forward outlived the move");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    wire.cut();
+    let cut = Instant::now();
+
+    // 6 s of silence and the 2 s probe; a missed sign of life takes 10 s
+    // and more, and the probe on top of it.
+    wait_logins(&work, 2, Duration::from_secs(11));
+    assert!(
+        cut.elapsed() < Duration::from_secs(11),
+        "{:?}",
+        cut.elapsed()
+    );
+    type_until(&tui, b"echo two-$((1+1))\r", b"two-2");
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
 /// With UDP unanswered, or turned off, the client stays on the forward:
 /// in 2 s or not at all, and it says so once when it tried.
 #[test]
 fn an_unanswered_or_unwanted_udp_keeps_the_client_on_ssh() {
-    let socket = real_server_with(true);
+    let socket = real_udp_server().0;
     for (name, env) in [
         // TEST-NET-1: nothing there answers.
         ("udp-blocked", ("STANDIN_HOSTNAME", "192.0.2.1")),
