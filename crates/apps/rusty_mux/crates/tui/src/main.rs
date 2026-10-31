@@ -2068,8 +2068,17 @@ mod client {
             req
         }
 
-        /// Takes a typed action, or holds it during a move.
+        /// Takes a typed action, or holds it during a move, and after a
+        /// move that lost the path, behind what that move held: actions
+        /// held there name no block, so they must be taken before any
+        /// later one moves the focus.
         fn typed(&mut self, action: Action) {
+            if !self.held.is_empty() && action != Action::Detach {
+                return match self.held.len() < HELD {
+                    true => self.held.push(action),
+                    false => bell(),
+                };
+            }
             match self.standby.hold(action) {
                 Held::Now(action) => self.act(action),
                 Held::Kept => {}
@@ -3005,11 +3014,12 @@ mod client {
 
         /// Keys typed during a move that broke after the control client
         /// moved are kept through the lost path and sent once it is back,
-        /// which takes the clients over with the control's new takeover.
+        /// which takes the clients over with the control's new takeover;
+        /// a focus change typed while it is down comes after them.
         #[cfg(unix)]
         #[test]
         fn keys_typed_during_a_broken_move_reach_their_block_once_the_path_is_back() {
-            let (mut app, _inbox, [_control, a_old, _b_old]) = app(Some(Box::new(Never)));
+            let (mut app, inbox, [_control, a_old, _b_old]) = app(Some(Box::new(Never)));
             sent(&a_old);
             app.standby.moving = Moving::Taking(Taking::default());
             app.typed(input(b"kept"));
@@ -3020,11 +3030,24 @@ mod client {
             app.take(Input::Moved(Err(Missed::Broken("pane".into(), new))));
             assert!(app.lost.is_some());
             assert_eq!(app.me, Some(new), "recovery asks with the new takeover");
+            // Typed while the path is down: after the held keys, not before.
+            app.typed(Action::Focus(Dir::Right));
+            app.typed(input(b"after"));
+            assert_eq!(app.focus, block(1));
 
-            let (back, _control, a_new, _b_new) = back(new);
+            let (back, _control, a_new, b_new) = back(new);
             app.take(Input::Rejoined(Ok(back)));
             assert!(typed_in(&sent(&a_old)).is_empty());
             assert_eq!(typed_in(&sent(&a_new)), [b"kept".to_vec()]);
+            let at_b = sent(&b_new);
+            assert!(typed_in(&at_b).is_empty(), "not before B holds the lease");
+            grant(&mut app, &inbox, &b_new, &at_b);
+            assert_eq!(
+                typed_in(&sent(&b_new)),
+                [b"after".to_vec()],
+                "B never gets A's keys"
+            );
+            assert!(typed_in(&sent(&a_new)).is_empty(), "A's keys went once");
             assert!(app.held.is_empty());
         }
 

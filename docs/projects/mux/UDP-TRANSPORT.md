@@ -187,7 +187,8 @@ ordering, acks and flow control belong to each stream.
   go after `--udp-idle` and would never answer the old one again; whichever
   answers first is moved onto. During a move, what is typed (keys, a focus
   change, up to 1024 actions) is held and taken in order on the path the
-  client ends up on, even one brought back after the move broke; and a
+  client ends up on, even one brought back after the move broke, with
+  anything typed while that path is down taken after it; and a
   connection on the old path that ends counts as a loss only if the move
   fails before any client moved. A
   move that fails after the control client was taken over brings the path
