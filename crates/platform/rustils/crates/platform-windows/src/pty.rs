@@ -11,11 +11,10 @@
 //! named accessors instead ([`WindowsPtyMaster::input_handle`]/
 //! [`WindowsPtyMaster::output_handle`]).
 
-use std::ffi::{OsStr, OsString};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
-use platform::process::{Child, Command, GroupSpec, Spawner};
+use platform::process::{Child, Command, GroupSpec};
 use platform::pty::{Pty, PtyMaster};
 use platform::term::WinSize;
 
@@ -58,12 +57,10 @@ impl WindowsPty {
             ));
         }
 
-        let resolved = crate::WindowsSpawner.resolve(&cmd.program)?;
-        let args: Vec<&OsStr> = cmd.argv.iter().map(OsString::as_os_str).collect();
         // The security boundary: winargv classifies the resolved program
         // and builds the one command line handed to `CreateProcessW`,
         // exactly like `WindowsSpawner::spawn` already does.
-        let line = crate::winargv::build_command_line(&resolved, &args)?;
+        let line = crate::cmdline::command_line(cmd)?;
 
         let _serial = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
         let (hpc, input, output) = syspty::create_pty(size)?;
