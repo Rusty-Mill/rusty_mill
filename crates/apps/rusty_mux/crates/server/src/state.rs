@@ -140,6 +140,10 @@ pub(crate) struct State {
     /// Leases silence released, each with its block and the connection
     /// that served the client then, until heard again or taken over.
     silenced: HashMap<ClientId, (BlockId, Rc<Notify>)>,
+    /// The consoles a stopping server waits for.
+    hosts: pty::Hosts,
+    /// Set by [`State::stop`]: no block starts any more.
+    stopping: bool,
 }
 
 /// How long a UDP client outlives silence or an overflow: its lease for
@@ -180,7 +184,20 @@ impl State {
             },
             stale: HashMap::new(),
             silenced: HashMap::new(),
+            hosts: Default::default(),
+            stopping: false,
         }))
+    }
+
+    /// The server is stopping: starts no more blocks, and ends every
+    /// block's program now, as dropping the block would. The consoles to
+    /// wait for, which still hold the ones closing when this was called.
+    pub(crate) fn stop(&mut self) -> pty::Hosts {
+        self.stopping = true;
+        for (_, rt) in self.blocks.drain() {
+            drop(rt.release(true));
+        }
+        std::mem::take(&mut self.hosts)
     }
 
     /// Offers `DATAGRAM` from now on, handing out associations of
@@ -872,6 +889,9 @@ impl State {
         launch: &Launch,
         beside: Option<(BlockId, Side)>,
     ) -> Result<Outcome, Refusal> {
+        if self.stopping {
+            return Err(String::from("the server is stopping").into());
+        }
         validate_size(size)?;
         let config = launched(&self.config, launch)?;
         let session = self
@@ -884,6 +904,7 @@ impl State {
         let env = self.block_env(session, window, block);
         let (pty, process) = pty::spawn(&config, size, &env)
             .map_err(|e| format!("spawning the block's program: {e}"))?;
+        self.hosts.track(&process);
         let pty = Rc::new(pty);
         // Named after the program as started, so a block does not announce
         // its own program once it has exec'd.

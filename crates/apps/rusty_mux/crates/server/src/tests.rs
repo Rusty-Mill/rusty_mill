@@ -25,9 +25,15 @@ fn a_client_of_another_user_is_refused() {
                 console_host: ConsoleHost::default(),
             };
             let other = rusty_libc::process::geteuid().wrapping_add(1);
-            serve_for(listener, config, None, |s: &UnixStream| owned_by(s, other))
-                .await
-                .expect("serve");
+            serve_for(
+                listener,
+                config,
+                None,
+                |s: &UnixStream| owned_by(s, other),
+                std::future::pending(),
+            )
+            .await
+            .expect("serve");
         });
     });
     ready_rx

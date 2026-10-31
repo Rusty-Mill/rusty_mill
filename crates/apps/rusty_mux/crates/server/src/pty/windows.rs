@@ -19,7 +19,7 @@ use std::ffi::OsString;
 use std::io;
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use platform::error::Result as PlatformResult;
 use platform::process::{Child, Signal};
@@ -223,6 +223,63 @@ fn hang_up(master: &Arc<Master>) {
 fn kill(child: &WindowsChild) {
     if let Err(err) = child.kill_single(Signal::Kill) {
         eprintln!("rusty-mux-server: signalling pid {}: {err:?}", child.id());
+    }
+}
+
+/// The consoles we host that may not have shut down yet, so a stopping
+/// server can wait for them (design V15). ConPTY's need no wait: conhost
+/// is a process of its own, and ends its clients when we are gone.
+#[derive(Default)]
+pub(crate) struct Hosts(Vec<Arc<Master>>);
+
+impl Hosts {
+    /// Keeps `process`'s console if we host it, and lets go of every
+    /// console kept so far that has shut down.
+    pub(crate) fn track(&mut self, process: &Process) {
+        self.0.retain(|master| !shut_down(master, Duration::ZERO));
+        if matches!(*process.master, Master::Own(_)) {
+            self.0.push(Arc::clone(&process.master));
+        }
+    }
+
+    /// Hangs up every console kept, then waits on a thread of its own until
+    /// each has shut down (its clients ended 5 s after CTRL_CLOSE at most)
+    /// or `budget` has passed. `budget` bounds the whole wait, however many
+    /// consoles there are. Whether every console shut down.
+    pub(crate) async fn shut_down(self, budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
+        let masters = self.0;
+        if masters.is_empty() {
+            return true;
+        }
+        for master in &masters {
+            if let Master::Own(own) = &**master {
+                own.hang_up();
+            }
+        }
+        let (done, result) = oneshot::channel();
+        let wait = move || {
+            let all = masters.iter().fold(true, |all, master| {
+                let left = deadline.saturating_duration_since(Instant::now());
+                shut_down(master, left) && all
+            });
+            // A refused result means the server stopped waiting for it.
+            let _ = done.send(all);
+        };
+        if let Err(err) = start("rusty-mux-shutdown", wait) {
+            eprintln!("rusty-mux-server: starting the shutdown wait: {err}");
+            return false;
+        }
+        result.await.unwrap_or(false)
+    }
+}
+
+/// Whether `master`'s console has shut down, waiting up to `timeout`;
+/// ConPTY's always has, as far as we wait.
+fn shut_down(master: &Master, timeout: Duration) -> bool {
+    match master {
+        Master::Own(own) => own.wait_shut_down(timeout),
+        Master::ConPty(_) => true,
     }
 }
 

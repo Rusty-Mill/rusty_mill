@@ -118,7 +118,7 @@ pub struct Udp {
 /// whatever the socket file's permissions are.
 #[cfg(any(target_os = "linux", windows))]
 pub async fn serve(listener: UnixListener, config: Config) -> io::Result<()> {
-    serve_for(listener, config, None, peer_check).await
+    serve_for(listener, config, None, peer_check, std::future::pending()).await
 }
 
 /// [`serve`], and offers clients `DATAGRAM`: each may then move its
@@ -126,7 +126,30 @@ pub async fn serve(listener: UnixListener, config: Config) -> io::Result<()> {
 /// receiving fails.
 #[cfg(any(target_os = "linux", windows))]
 pub async fn serve_udp(listener: UnixListener, config: Config, udp: Udp) -> io::Result<()> {
-    serve_for(listener, config, Some(udp), peer_check).await
+    serve_for(
+        listener,
+        config,
+        Some(udp),
+        peer_check,
+        std::future::pending(),
+    )
+    .await
+}
+
+/// [`serve`], or [`serve_udp`] when `udp` is given, until `stop` resolves:
+/// a clean stop. Either way it ends, every block's program is ended and
+/// the call returns once each console we host
+/// ([`ConsoleHost::Own`]) has shut down, its other clients ended 5 s
+/// after CTRL_CLOSE, or 6 s have passed, whichever is first. Dropping the
+/// future instead ends the programs without that wait.
+#[cfg(any(target_os = "linux", windows))]
+pub async fn serve_until(
+    listener: UnixListener,
+    config: Config,
+    udp: Option<Udp>,
+    stop: impl Future<Output = ()>,
+) -> io::Result<()> {
+    serve_for(listener, config, udp, peer_check, stop).await
 }
 
 /// Whether a connection's peer may be served.
@@ -171,6 +194,7 @@ async fn serve_for(
     config: Config,
     udp: Option<Udp>,
     allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
+    stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
     let socket = listener
         .local_addr()
@@ -179,6 +203,28 @@ async fn serve_for(
         .and_then(Result::ok);
     let state = state::State::shared(config, socket);
     rusty_tokio::task::spawn_local(state::watch_processes(std::rc::Rc::downgrade(&state)));
+    let served = rusty_tokio::select! {
+        result = serve_clients(listener, state.clone(), udp, allowed) => result,
+        () = stop => Ok(()),
+    };
+    let hosts = state.borrow_mut().stop();
+    if !hosts.shut_down(pty::SHUTDOWN).await {
+        eprintln!(
+            "rusty-mux-server: a console was still shutting down after {:?}",
+            pty::SHUTDOWN
+        );
+    }
+    served
+}
+
+/// Serves clients on `listener`, and on `udp` if given, until either fails.
+#[cfg(any(target_os = "linux", windows))]
+async fn serve_clients(
+    listener: UnixListener,
+    state: state::Shared,
+    udp: Option<Udp>,
+    allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
+) -> io::Result<()> {
     let Some(udp) = udp else {
         return accept(listener, state, allowed).await;
     };

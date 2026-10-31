@@ -1,6 +1,7 @@
 //! How blocks end on Windows: a close reaches every program on the
-//! console, a flooding block closes without stalling the server, and a
-//! server that dies takes its blocks with it. A program that exits by
+//! console, a flooding block closes without stalling the server, a server
+//! stopped with Ctrl+Break ends every program on its blocks' consoles
+//! before it exits, and a server that dies takes its blocks with it. A program that exits by
 //! itself reports its exit code, and `terminal.process` names its pid.
 //! Each runs on ConPTY and on our own console host.
 
@@ -46,6 +47,7 @@ on_both_hosts!(
     closing_a_block_ends_every_program_on_its_console,
     closing_a_flooding_block_leaves_the_server_responsive,
     a_killed_server_takes_its_blocks_with_it,
+    a_stopped_server_ends_every_program_before_it_exits,
     a_program_that_exits_reports_its_code,
     terminal_process_names_the_programs_pid
 );
@@ -154,6 +156,73 @@ fn a_killed_server_takes_its_blocks_with_it(host: ConsoleHost) {
     server.0.wait().expect("reap the server");
     assert_gone_within(shell, "the dead server's shell", Duration::from_secs(7));
     let _ = std::fs::remove_file(&path);
+}
+
+/// Ctrl+Break is a clean stop. On our host the server exits only once
+/// each block's console has ended every program on it, a ping started
+/// beside the shell included, within its 6 s budget; on ConPTY conhost ends
+/// them after the server has gone, as before.
+fn a_stopped_server_ends_every_program_before_it_exits(host: ConsoleHost) {
+    let name = format!("rusty-mux-stopped-{}-{host:?}.sock", std::process::id());
+    let path = std::env::temp_dir().join(name);
+    let _ = std::fs::remove_file(&path);
+    let mut server = KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"))
+            .arg(&path)
+            .env(ConsoleHost::ENV, console_host_name(host))
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("start the server"),
+    );
+    wait_until_listening(&path);
+
+    let mut a = Client::connect(&path);
+    let mut programs = Vec::new();
+    for _ in 0..2 {
+        let block = block_for(&mut a);
+        programs.push(("a shell", shell_pid(&mut a, block)));
+        a.input(block, PING);
+        // Printed once Start-Process has returned the running ping.
+        programs.push(("a ping", a.wait_for_number(block, "PING=")));
+    }
+    for &(what, pid) in &programs {
+        assert!(alive(pid), "{what} (pid {pid}) never ran");
+    }
+
+    let pid = server.0.id();
+    let stopping = Instant::now();
+    platform_windows::condrv::send_ctrl(pid, platform_windows::condrv::CtrlEvent::Break)
+        .expect("send Ctrl+Break");
+    // The 6 s budget and a margin.
+    let status = wait_within(&mut server.0, Duration::from_secs(9));
+    let took = stopping.elapsed();
+    assert!(status.success(), "the server exited with {status:?}");
+    let budget = match host {
+        // Gone before the server exited; a moment for Windows to list it so.
+        ConsoleHost::Own => Duration::from_secs(1),
+        // conhost's 5 s console-close timeout, and a margin.
+        ConsoleHost::ConPty => Duration::from_secs(7),
+    };
+    for (what, pid) in programs {
+        assert_gone_within(pid, what, budget);
+    }
+    eprintln!("{host:?}: the server stopped in {took:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Waits up to `budget` for `child` to exit.
+fn wait_within(child: &mut std::process::Child, budget: Duration) -> std::process::ExitStatus {
+    let deadline = Instant::now() + budget;
+    loop {
+        if let Some(status) = child.try_wait().expect("poll the server") {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the server still runs after {budget:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// A server process that a failing test still ends.

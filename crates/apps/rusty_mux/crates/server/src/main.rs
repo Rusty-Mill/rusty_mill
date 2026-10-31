@@ -15,6 +15,10 @@
 //! file to the current user. `RUSTY_CONSOLE_HOST=own` hosts the console
 //! ourselves (rusty_conhost) instead of ConPTY; `conpty` or unset keeps
 //! ConPTY, and any other value stops the server before it starts.
+//! Ctrl+C or Ctrl+Break stops the server cleanly: it ends every block's
+//! program and waits up to 6 s for the consoles it hosts to end their
+//! other programs. Closing its console window, or killing it, does not
+//! wait.
 
 use std::ffi::OsString;
 use std::net::{IpAddr, SocketAddr};
@@ -22,7 +26,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use rusty_mux_server::{Config, ConsoleHost, Udp, serve, serve_udp};
+use rusty_mux_server::{Config, ConsoleHost, Udp, serve_until};
 use rusty_tokio::io::{UdpSocket, UnixListener};
 use rusty_tokio::{Builder, LocalOptions};
 
@@ -121,13 +125,42 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
         platform_windows::fs::restrict_to_owner(&socket).map_err(|e| {
             std::io::Error::other(format!("restricting {}: {e:?}", socket.display()))
         })?;
-        let Some(addr) = args.udp else {
-            return serve(listener, config).await;
+        let udp = match args.udp {
+            Some(addr) => Some(Udp {
+                socket: UdpSocket::bind(addr).await?,
+                idle: args.idle,
+            }),
+            None => None,
         };
-        let socket = UdpSocket::bind(addr).await?;
-        let idle = args.idle;
-        serve_udp(listener, config, Udp { socket, idle }).await
+        serve_until(listener, config, udp, stop_requested()?).await
     })
+}
+
+/// Resolves on Ctrl+C or Ctrl+Break, the server's clean stops on Windows.
+/// The Ctrl+Break listener is installed now, so a failure stops the server
+/// from starting; Ctrl+C's shares its handler.
+#[cfg(windows)]
+fn stop_requested() -> std::io::Result<impl Future<Output = ()>> {
+    let mut ctrl_break = rusty_tokio::signal::windows::ctrl_break()?;
+    Ok(async move {
+        let ctrl_c = async {
+            if let Err(err) = rusty_tokio::signal::ctrl_c().await {
+                eprintln!("rusty-mux-server: listening for Ctrl+C: {err}");
+                std::future::pending::<()>().await;
+            }
+        };
+        rusty_tokio::select! {
+            () = ctrl_c => {}
+            _ = ctrl_break.recv() => {}
+        }
+    })
+}
+
+/// Never: on Linux a signal ends the server as before, and the kernel
+/// hangs up every block's PTY with it.
+#[cfg(not(windows))]
+fn stop_requested() -> std::io::Result<impl Future<Output = ()>> {
+    Ok(std::future::pending())
 }
 
 #[cfg(not(windows))]
