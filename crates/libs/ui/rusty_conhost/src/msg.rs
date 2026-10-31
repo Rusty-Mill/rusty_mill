@@ -39,7 +39,6 @@ pub(crate) const STATUS_BUFFER_TOO_SMALL: i32 = 0xC000_0023_u32 as i32;
 /// A read ended because its client disconnected.
 pub(crate) const STATUS_THREAD_IS_TERMINATING: i32 = 0xC000_004B_u32 as i32;
 pub(crate) const STATUS_ILLEGAL_FUNCTION: i32 = 0xC000_00AF_u32 as i32;
-pub(crate) const STATUS_NOT_SUPPORTED: i32 = 0xC000_00BB_u32 as i32;
 pub(crate) const STATUS_INVALID_BUFFER_SIZE: i32 = 0xC000_0206_u32 as i32;
 
 /// What conhost puts on the wire for a failed HRESULT:

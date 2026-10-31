@@ -20,7 +20,7 @@ changelog: rusty_mux_server on Windows can run its blocks on our own console hos
 - **Known limitations:** our host runs inside the server, so stopping the
   server, cleanly or not, sends no close notification: a program still
   attached to a block's console besides the shell, such as one started
-  with `start /b`, can outlive it (design V13). On our host, closing a
+  with `start /b`, can outlive it (design V15). On our host, closing a
   block still ends its
   program after the mux's 1 s grace; other programs on the block's console
   are ended by the host 5 s after the close notification. The echo mode is

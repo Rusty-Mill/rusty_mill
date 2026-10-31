@@ -24,11 +24,19 @@ use platform_windows::condrv::{
 };
 use platform_windows::sys::handle::OwnedWinHandle;
 
+use crate::codepage::Codec;
 use crate::console::{Console, Effect, Event, OutputQueue, POSTAMBLE, PREAMBLE, Packet, Reply};
 use crate::ctrl::{self, Ctrl, Pushed};
 use crate::fixture::{self, FIXTURE_CAP};
 use crate::msg::STATUS_UNSUCCESSFUL;
 use crate::sched::{self, Control, Grace, KILL_AFTER, PACKET_INPUT_CAP, View};
+
+/// Code-page conversion by the OS (§5.9).
+pub(crate) const NATIVE_CODEC: Codec = Codec {
+    valid: condrv::is_valid_code_page,
+    decode: |cp, bytes| condrv::decode(cp, bytes).ok(),
+    encode: |cp, text| condrv::encode(cp, text).ok(),
+};
 
 /// Terminal input waiting for the engine; `write` blocks past this.
 const INPUT_LANE_CAP: usize = 64 * 1024;
@@ -508,7 +516,7 @@ where
         let Ok((server, wait)) = rx.recv() else {
             return;
         };
-        let console = Console::new(size, condrv::key_for);
+        let console = Console::new(size, condrv::key_for, NATIVE_CODEC);
         Engine::new(console, server, wait, engine_shared, ctrl).run();
     });
     spawn("rusty_conhost-engine", run)
@@ -1112,7 +1120,7 @@ mod tests {
             cols: 120,
         };
         let mut engine = Engine::new(
-            Console::new(size, condrv::key_for),
+            Console::new(size, condrv::key_for, NATIVE_CODEC),
             attached.server,
             attached.wait,
             Arc::clone(&shared),
@@ -1238,7 +1246,7 @@ mod tests {
 
     #[test]
     fn a_joined_client_is_held_from_its_connect_and_ended_by_kill() {
-        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for, NATIVE_CODEC));
         let pid = child.id();
         // The CONNECT is answered but its reply not yet sent.
         while engine.reply.is_none() {
@@ -1275,7 +1283,7 @@ mod tests {
     /// f24f50b3).
     #[test]
     fn a_client_joining_at_the_deadline_is_ended_once_confirmed() {
-        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for, NATIVE_CODEC));
         let pid = child.id();
         while engine.reply.is_none() {
             engine.turn().expect("turn");
@@ -1299,7 +1307,7 @@ mod tests {
     /// ended, so nothing is doomed (fails closed).
     #[test]
     fn a_client_joining_at_the_deadline_that_dies_first_is_never_ended() {
-        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for, NATIVE_CODEC));
         let pid = child.id();
         while engine.reply.is_none() {
             engine.turn().expect("turn");
@@ -1318,7 +1326,7 @@ mod tests {
     /// and its pid was reused, is never held, so never ended.
     #[test]
     fn a_client_not_reached_through_its_connect_thread_is_never_ended() {
-        let (mut engine, mut child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let (mut engine, mut child) = engine_on(Console::new(SIZE, condrv::key_for, NATIVE_CODEC));
         let pid = child.id();
         engine.apply(Effect::Joined {
             pid,
@@ -1337,7 +1345,7 @@ mod tests {
     /// and ConDrv aborts the reply (design §7.3).
     #[test]
     fn a_client_that_dies_before_its_connect_reply_is_never_held() {
-        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for, NATIVE_CODEC));
         let pid = child.id();
         while engine.reply.is_none() {
             engine.turn().expect("turn");
@@ -1367,7 +1375,7 @@ mod tests {
 
     #[test]
     fn a_client_that_left_is_let_go_and_never_ended() {
-        let (mut engine, mut child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let (mut engine, mut child) = engine_on(Console::new(SIZE, condrv::key_for, NATIVE_CODEC));
         let pid = child.id();
         // Served as the engine serves it: opened through its CONNECT.
         while engine.reply.is_none() {
@@ -1388,7 +1396,7 @@ mod tests {
 
     #[test]
     fn ctrl_events_behind_a_held_reply_are_queued_once_it_is_sent() {
-        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for, NATIVE_CODEC));
         // Serve until ping's CONNECT is answered but its reply not sent,
         // then add a CTRL_CLOSE, as a late CONNECT leaves them.
         while engine.reply.is_none() {
@@ -1411,7 +1419,7 @@ mod tests {
 
     #[test]
     fn input_left_behind_an_esc_cut_is_taken_without_another_wake() {
-        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for, NATIVE_CODEC));
         engine.shared.write(b"\x1b").expect("write");
         engine.shared.write(b"x").expect("write");
         let turns = turns_without_another_wake(&mut engine);
@@ -1474,7 +1482,7 @@ mod tests {
             let attached = condrv::spawn_attached(&cmd).expect("spawn_attached");
             let shared = Arc::new(Shared::new(Waker::new().expect("Waker")));
             let mut engine = Engine::new(
-                Console::new(SIZE, condrv::key_for),
+                Console::new(SIZE, condrv::key_for, NATIVE_CODEC),
                 attached.server,
                 attached.wait,
                 Arc::clone(&shared),

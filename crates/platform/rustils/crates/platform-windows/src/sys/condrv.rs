@@ -1014,6 +1014,95 @@ pub fn key_scan(ch: u16) -> i16 {
     unsafe { w::VkKeyScanW(ch) }
 }
 
+/// `IsValidCodePage(cp)`: the code page is installed.
+pub fn valid_code_page(cp: u32) -> bool {
+    // SAFETY: no pointers.
+    unsafe { w::IsValidCodePage(cp) != 0 }
+}
+
+/// `MultiByteToWideChar(cp, 0, ..)`: invalid bytes become U+FFFD (or the
+/// code page's default character) rather than failing. `bytes` is not
+/// empty and fits an `i32`.
+pub fn to_wide(cp: u32, bytes: &[u8]) -> Result<Vec<u16>> {
+    let len = i32::try_from(bytes.len()).map_err(|_| too_long("MultiByteToWideChar"))?;
+    // SAFETY: `bytes` is valid for `len` bytes; a NULL output with 0
+    // capacity asks for the length.
+    let need =
+        unsafe { w::MultiByteToWideChar(cp, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0) };
+    if need <= 0 {
+        return Err(errmap::last_win32_err(
+            "MultiByteToWideChar",
+            OsStr::new(""),
+        ));
+    }
+    let mut out = vec![0u16; need as usize];
+    // SAFETY: `out` holds `need` units, the length asked for above.
+    let got = unsafe { w::MultiByteToWideChar(cp, 0, bytes.as_ptr(), len, out.as_mut_ptr(), need) };
+    if got <= 0 {
+        return Err(errmap::last_win32_err(
+            "MultiByteToWideChar",
+            OsStr::new(""),
+        ));
+    }
+    out.truncate(got as usize);
+    Ok(out)
+}
+
+/// `WideCharToMultiByte(cp, 0, ..)` with the code page's default
+/// character for what it cannot encode. `units` is not empty and fits
+/// an `i32`.
+pub fn to_multi(cp: u32, units: &[u16]) -> Result<Vec<u8>> {
+    let len = i32::try_from(units.len()).map_err(|_| too_long("WideCharToMultiByte"))?;
+    let null = std::ptr::null();
+    // SAFETY: `units` is valid for `len` units; a NULL output with 0
+    // capacity asks for the length; the default-character pointers are
+    // NULL, as UTF-7 and UTF-8 require.
+    let need = unsafe {
+        w::WideCharToMultiByte(
+            cp,
+            0,
+            units.as_ptr(),
+            len,
+            std::ptr::null_mut(),
+            0,
+            null,
+            std::ptr::null_mut(),
+        )
+    };
+    if need <= 0 {
+        return Err(errmap::last_win32_err(
+            "WideCharToMultiByte",
+            OsStr::new(""),
+        ));
+    }
+    let mut out = vec![0u8; need as usize];
+    // SAFETY: `out` holds `need` bytes, the length asked for above.
+    let got = unsafe {
+        w::WideCharToMultiByte(
+            cp,
+            0,
+            units.as_ptr(),
+            len,
+            out.as_mut_ptr(),
+            need,
+            null,
+            std::ptr::null_mut(),
+        )
+    };
+    if got <= 0 {
+        return Err(errmap::last_win32_err(
+            "WideCharToMultiByte",
+            OsStr::new(""),
+        ));
+    }
+    out.truncate(got as usize);
+    Ok(out)
+}
+
+fn too_long(op: &'static str) -> PlatformError {
+    PlatformError::new(ErrorKind::InvalidInput, OsCode::None, op)
+}
+
 /// `OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE)` on a console client's
 /// pid: enough to end it and to see whether it has exited.
 pub fn open_process(pid: u32) -> Result<OwnedWinHandle> {

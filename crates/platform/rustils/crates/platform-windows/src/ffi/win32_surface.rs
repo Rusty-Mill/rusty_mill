@@ -214,6 +214,12 @@ pub use windows_sys::Win32::System::Console::{
     SHIFT_PRESSED,
 };
 pub use windows_sys::Win32::UI::Input::KeyboardAndMouse::VkKeyScanW;
+// `condrv::{is_valid_code_page, decode, encode}`: our console host's
+// code pages (#1222 PR 9). conhost converts the `A` APIs' text with the
+// same three calls, without `MB_ERR_INVALID_CHARS`.
+pub use windows_sys::Win32::Globalization::{
+    IsValidCodePage, MultiByteToWideChar, WideCharToMultiByte,
+};
 
 // Security surface, CSPRNG slice (RFC v2 R5+, D15, first slice) —
 // rusty_rdp's five hand-rolled `/dev/urandom` reads. `BCryptGenRandom`

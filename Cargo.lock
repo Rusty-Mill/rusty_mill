@@ -12581,6 +12581,7 @@ dependencies = [
  "platform",
  "platform-linux",
  "platform-windows",
+ "rusty_conhost",
 ]
 
 [[package]]

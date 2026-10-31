@@ -114,6 +114,26 @@ dev headers first — see `.github/workflows/ci.yml`'s "Install Tauri Linux
 build dependencies" step for the exact package list. Windows needs nothing
 extra (WebView2 ships with Windows 10/11).
 
+## Console host on Windows
+
+A PTY session runs on Microsoft's ConPTY by default. Set
+`RUSTY_CONSOLE_HOST=own` in the daemon's environment to run sessions on our
+own console host (`rusty_conhost`) instead; `conpty` or unset keeps ConPTY.
+Each worker reads it when it starts its session, so any other value fails
+that session's start with an error naming the variable, and a Windows that
+can't run our host fails it too: there is no silent fallback. Linux ignores
+the variable.
+
+Our host runs inside the session's worker, which differs from ConPTY's
+separate conhost in two ways:
+
+- When the session's process exits while something it started is still
+  attached, the exit is recorded up to 2 s later than on ConPTY. The host
+  closes the console then, and a closing worker waits up to 6 s more for
+  it to end those processes.
+- If the worker crashes or is killed from outside, the host goes with it.
+  Processes the session left attached get no CTRL_CLOSE and keep running.
+
 ## Desktop UI
 
 `sessionmgr-desktop` is a second binary — a Tauri-based graphical client, an
