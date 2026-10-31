@@ -1,13 +1,15 @@
-//! One client connection: handshake, then requests in, frames out.
+//! One client connection: handshake, then requests in, frames out. A
+//! connection is any read half and write half: a Unix socket's, or a
+//! datagram stream's.
 
+use std::future::poll_fn;
 use std::io;
+use std::pin::Pin;
 use std::rc::Rc;
 
 use rusty_mux_core::ClientId;
 use rusty_mux_proto::{Message, decode};
-use rusty_tokio::io::{
-    AsyncReadExt, AsyncWriteExt, OwnedUnixReadHalf, OwnedUnixWriteHalf, UnixStream,
-};
+use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use rusty_tokio::sync::Notify;
 
 use crate::outbox::{Inbox, outbox};
@@ -15,8 +17,11 @@ use crate::state::{Shared, State};
 
 const READ_CHUNK: usize = 64 << 10;
 
-pub(crate) async fn run(state: Shared, stream: UnixStream) {
-    let (mut rd, wr) = stream.into_split();
+pub(crate) async fn run<R, W>(state: Shared, mut rd: R, wr: W)
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut frames = Frames::default();
 
     let (features, resume, takeover) = match frames.next(&mut rd).await {
@@ -55,7 +60,7 @@ async fn serve(
     state: &Shared,
     client: ClientId,
     cancel: &Rc<Notify>,
-    rd: &mut OwnedUnixReadHalf,
+    rd: &mut (impl AsyncRead + Unpin),
     frames: &mut Frames,
 ) -> io::Result<()> {
     while let Some(message) = frames.next(rd).await? {
@@ -76,15 +81,39 @@ async fn serve(
 
 /// Writes queued frames until the server drops the client, then closes the
 /// write side so the client sees end of stream.
-async fn write_frames(mut inbox: Inbox, mut wr: OwnedUnixWriteHalf) {
+async fn write_frames(mut inbox: Inbox, mut wr: impl AsyncWrite + Unpin) {
     while let Some(frame) = inbox.next().await {
-        if wr.write_all(&frame).await.is_err() {
+        if write_all(&mut wr, &frame).await.is_err() {
             return;
         }
     }
-    if let Err(err) = wr.shutdown().await {
+    if let Err(err) = poll_fn(|cx| Pin::new(&mut wr).poll_shutdown(cx)).await {
         eprintln!("rusty-mux-server: closing a connection: {err}");
     }
+}
+
+// rusty_tokio's extension methods need `Send` halves; a datagram stream's
+// are `Rc`-based, so these poll the traits directly.
+
+async fn read(rd: &mut (impl AsyncRead + Unpin), buf: &mut [u8]) -> io::Result<usize> {
+    poll_fn(|cx| {
+        let mut buf = ReadBuf::new(buf);
+        Pin::new(&mut *rd)
+            .poll_read(cx, &mut buf)
+            .map_ok(|()| buf.filled().len())
+    })
+    .await
+}
+
+async fn write_all(wr: &mut (impl AsyncWrite + Unpin), mut bytes: &[u8]) -> io::Result<()> {
+    while !bytes.is_empty() {
+        let n = poll_fn(|cx| Pin::new(&mut *wr).poll_write(cx, bytes)).await?;
+        if n == 0 {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        bytes = &bytes[n..];
+    }
+    Ok(())
 }
 
 /// Reassembles frames from a byte stream. The buffer never holds more than
@@ -108,7 +137,7 @@ impl Default for Frames {
 
 impl Frames {
     /// The next message, or `None` at a clean end of stream.
-    async fn next(&mut self, rd: &mut OwnedUnixReadHalf) -> io::Result<Option<Message>> {
+    async fn next(&mut self, rd: &mut (impl AsyncRead + Unpin)) -> io::Result<Option<Message>> {
         loop {
             let decoded = decode(&self.buf[self.start..])
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -118,7 +147,7 @@ impl Frames {
             }
             self.buf.drain(..self.start);
             self.start = 0;
-            let n = rd.read(&mut self.chunk).await?;
+            let n = read(rd, &mut self.chunk).await?;
             if n == 0 {
                 return match self.buf.is_empty() {
                     true => Ok(None),
@@ -136,6 +165,7 @@ mod regression {
     use super::*;
     use crate::Config;
     use rusty_mux_proto::{Features, encode};
+    use rusty_tokio::io::UnixStream;
     use rusty_tokio::{Builder, LocalOptions};
     use std::time::Duration;
 
@@ -164,7 +194,8 @@ mod regression {
             )
             .await
             .unwrap();
-            let task = rusty_tokio::task::spawn_local(run(state.clone(), server));
+            let (rd, wr) = server.into_split();
+            let task = rusty_tokio::task::spawn_local(run(state.clone(), rd, wr));
             rusty_tokio::task::yield_now().await;
             let client = state.borrow().test_client();
             // The peer stops reading. Force the writer into a pending write_all,
