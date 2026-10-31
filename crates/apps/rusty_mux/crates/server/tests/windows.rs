@@ -187,22 +187,12 @@ fn a_stopped_server_ends_every_program_before_it_exits(host: ConsoleHost) {
     let mut programs = Ends(Vec::new());
     for _ in 0..2 {
         let block = block_for(&mut a);
-        programs
-            .0
-            .push(("a shell", "cmd.exe", shell_pid(&mut a, block)));
+        programs.hold("a shell", shell_pid(&mut a, block));
         a.input(block, PING);
         // Printed once Start-Process has returned the running ping.
-        programs
-            .0
-            .push(("a ping", "PING.EXE", a.wait_for_number(block, "PING=")));
+        programs.hold("a ping", a.wait_for_number(block, "PING="));
         a.input(block, stubborn.start.as_bytes());
-        let pid = a.wait_for_number(block, "STUBBORN=");
-        programs
-            .0
-            .push(("a stalling program", "powershell.exe", pid));
-    }
-    for &(what, _, pid) in &programs.0 {
-        assert!(alive(pid), "{what} (pid {pid}) never ran");
+        programs.hold("a stalling program", a.wait_for_number(block, "STUBBORN="));
     }
 
     let pid = server.0.id();
@@ -218,7 +208,7 @@ fn a_stopped_server_ends_every_program_before_it_exits(host: ConsoleHost) {
         // conhost's 5 s console-close timeout, and a margin.
         ConsoleHost::ConPty => Duration::from_secs(7),
     };
-    for &(what, _, pid) in &programs.0 {
+    for (what, pid) in programs.pids() {
         assert_gone_within(pid, what, budget);
     }
     eprintln!("{host:?}: the server stopped in {took:?}");
@@ -291,21 +281,27 @@ fn send_ctrl_break(group: u32) {
     assert!(status.success(), "Ctrl+Break to group {group}: {status:?}");
 }
 
-/// Programs a failing test still ends, so none outlives it: each by pid
-/// and image name, so a pid since reused by another program is spared.
-struct Ends(Vec<(&'static str, &'static str, u32)>);
+/// The test's programs, each held by a handle opened while it is known to
+/// be the test's, in a kill-on-close job: dropping it ends any still
+/// running, so a failing run leaves none behind, and a pid since reused by
+/// another process is never touched.
+struct Ends(Vec<(&'static str, u32, Adopted)>);
 
-impl Drop for Ends {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            return;
-        }
-        for &(_, image, pid) in &self.0 {
-            let _ = Command::new("taskkill")
-                .args(["/F", "/PID", &pid.to_string()])
-                .args(["/FI", &format!("IMAGENAME eq {image}")])
-                .output();
-        }
+type Adopted = (
+    platform_windows::sys::handle::OwnedWinHandle,
+    platform_windows::sys::handle::OwnedWinHandle,
+);
+
+impl Ends {
+    /// Holds `pid`, which must still be running.
+    fn hold(&mut self, what: &'static str, pid: u32) {
+        let adopted = platform_windows::sys::proc::adopt(pid)
+            .unwrap_or_else(|e| panic!("{what} (pid {pid}) is not running: {e:?}"));
+        self.0.push((what, pid, adopted));
+    }
+
+    fn pids(&self) -> impl Iterator<Item = (&'static str, u32)> + '_ {
+        self.0.iter().map(|&(what, pid, _)| (what, pid))
     }
 }
 
