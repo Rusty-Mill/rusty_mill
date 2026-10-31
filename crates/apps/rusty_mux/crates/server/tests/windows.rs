@@ -1,25 +1,65 @@
-//! How blocks end on Windows: a close reaches every program on the pseudo
-//! console, a flooding block closes without stalling the server, and a
-//! server that dies takes its blocks with it. A program that exits by
+//! How blocks end on Windows: a close reaches every program on the
+//! console, a flooding block closes without stalling the server, a server
+//! stopped with Ctrl+Break ends every program on its blocks' consoles
+//! before it exits, and a server that dies takes its blocks with it. A program that exits by
 //! itself reports its exit code, and `terminal.process` names its pid.
+//! Each runs on ConPTY and on our own console host.
 
 #![cfg(windows)]
 
 mod common;
 
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{Client, PATIENCE, block_for, connect, run_and_wait, start_server};
+use common::{Client, PATIENCE, block_for, connect, run_and_wait, start_server_on};
 use rusty_mux_core::{BlockId, Event, ExitStatus};
 use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Features, Message};
+use rusty_mux_server::ConsoleHost;
 
 /// Prints the block's shell pid as `SHELL=<n>`: powershell's parent.
 const SHELL_PID: &[u8] = b"powershell -NoProfile -c \"'SHELL=' + (Get-CimInstance Win32_Process -Filter ('ProcessId=' + $PID)).ParentProcessId\"\r";
 /// Starts a ping attached to the block's console and prints its pid.
 const PING: &[u8] = b"powershell -NoProfile -c \"$p = Start-Process ping -ArgumentList '-n','1000','127.0.0.1' -NoNewWindow -PassThru; 'PING=' + $p.Id\"\r";
+
+/// Runs each scenario, a function of the host, once per host.
+macro_rules! on_both_hosts {
+    ($($scenario:ident),* $(,)?) => {$(
+        mod $scenario {
+            use super::ConsoleHost;
+
+            #[test]
+            fn conpty() {
+                super::$scenario(ConsoleHost::ConPty);
+            }
+
+            #[test]
+            fn own() {
+                super::$scenario(ConsoleHost::Own);
+            }
+        }
+    )*};
+}
+
+on_both_hosts!(
+    closing_a_block_ends_every_program_on_its_console,
+    closing_a_flooding_block_leaves_the_server_responsive,
+    a_killed_server_takes_its_blocks_with_it,
+    a_stopped_server_ends_every_program_before_it_exits,
+    a_program_that_exits_reports_its_code,
+    terminal_process_names_the_programs_pid
+);
+
+/// The `RUSTY_CONSOLE_HOST` value that names `host`.
+fn console_host_name(host: ConsoleHost) -> &'static str {
+    match host {
+        ConsoleHost::ConPty => "conpty",
+        ConsoleHost::Own => "own",
+    }
+}
 
 fn shell_pid(client: &mut Client, block: BlockId) -> u32 {
     client.input(block, SHELL_PID);
@@ -49,9 +89,8 @@ fn assert_gone_within(pid: u32, what: &str, budget: Duration) {
     }
 }
 
-#[test]
-fn closing_a_block_ends_every_program_on_its_console() {
-    let path = start_server();
+fn closing_a_block_ends_every_program_on_its_console(host: ConsoleHost) {
+    let path = start_server_on(host);
     let mut a = Client::connect(&path);
     let block = block_for(&mut a);
     let shell = shell_pid(&mut a, block);
@@ -65,9 +104,8 @@ fn closing_a_block_ends_every_program_on_its_console() {
     assert_gone_within(ping, "the ping", Duration::from_secs(7));
 }
 
-#[test]
-fn closing_a_flooding_block_leaves_the_server_responsive() {
-    let path = start_server();
+fn closing_a_flooding_block_leaves_the_server_responsive(host: ConsoleHost) {
+    let path = start_server_on(host);
     let mut a = Client::connect(&path);
     a.parse = false;
     let flooding = block_for(&mut a);
@@ -96,15 +134,18 @@ fn closing_a_flooding_block_leaves_the_server_responsive() {
     b.request(|req| Message::CloseBlock { req, block: other });
 }
 
-#[test]
-fn a_killed_server_takes_its_blocks_with_it() {
-    let path = std::env::temp_dir().join(format!("rusty-mux-killed-{}.sock", std::process::id()));
+fn a_killed_server_takes_its_blocks_with_it(host: ConsoleHost) {
+    let name = format!("rusty-mux-killed-{}-{host:?}.sock", std::process::id());
+    let path = std::env::temp_dir().join(name);
     let _ = std::fs::remove_file(&path);
-    let mut server = Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"))
-        .arg(&path)
-        .stdin(Stdio::null())
-        .spawn()
-        .expect("start the server");
+    let mut server = KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"))
+            .arg(&path)
+            .env(ConsoleHost::ENV, console_host_name(host))
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("start the server"),
+    );
     wait_until_listening(&path);
 
     let mut a = Client::connect(&path);
@@ -112,10 +153,182 @@ fn a_killed_server_takes_its_blocks_with_it() {
     let shell = shell_pid(&mut a, block);
     assert!(alive(shell), "shell {shell}");
 
-    server.kill().expect("kill the server");
-    server.wait().expect("reap the server");
+    server.0.kill().expect("kill the server");
+    server.0.wait().expect("reap the server");
     assert_gone_within(shell, "the dead server's shell", Duration::from_secs(7));
     let _ = std::fs::remove_file(&path);
+}
+
+/// Ctrl+Break is a clean stop. Each of two blocks runs, beside its shell,
+/// a ping and a program whose CTRL_CLOSE handler stalls for 30 s, which
+/// only the console's 5 s end of lingering clients stops. On our host the
+/// server exits only once both consoles have ended them: in parallel,
+/// within the one 6 s budget. On ConPTY conhost ends them after the server
+/// has gone, as before.
+fn a_stopped_server_ends_every_program_before_it_exits(host: ConsoleHost) {
+    let name = format!("rusty-mux-stopped-{}-{host:?}.sock", std::process::id());
+    let path = std::env::temp_dir().join(name);
+    let _ = std::fs::remove_file(&path);
+    // In a process group of its own, on this test's console, so a
+    // Ctrl+Break can be aimed at it alone.
+    let mut server = KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"))
+            .arg(&path)
+            .env(ConsoleHost::ENV, console_host_name(host))
+            .stdin(Stdio::null())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP)
+            .spawn()
+            .expect("start the server"),
+    );
+    wait_until_listening(&path);
+
+    let stubborn = Stubborn::new(host);
+    let mut a = Client::connect(&path);
+    let mut programs = Ends(Vec::new());
+    for _ in 0..2 {
+        let block = block_for(&mut a);
+        programs.hold("a shell", shell_pid(&mut a, block));
+        a.input(block, PING);
+        // Printed once Start-Process has returned the running ping.
+        programs.hold("a ping", a.wait_for_number(block, "PING="));
+        a.input(block, stubborn.start.as_bytes());
+        programs.hold("a stalling program", a.wait_for_number(block, "STUBBORN="));
+    }
+
+    let pid = server.0.id();
+    let stopping = Instant::now();
+    send_ctrl_break(pid);
+    // The 6 s budget and a margin.
+    let status = wait_within(&mut server.0, Duration::from_secs(9));
+    let took = stopping.elapsed();
+    assert!(status.success(), "the server exited with {status:?}");
+    let budget = match host {
+        // Gone before the server exited; a moment for Windows to list it so.
+        ConsoleHost::Own => Duration::from_secs(1),
+        // conhost's 5 s console-close timeout, and a margin.
+        ConsoleHost::ConPty => Duration::from_secs(7),
+    };
+    for (what, pid) in programs.pids() {
+        assert_gone_within(pid, what, budget);
+    }
+    eprintln!("{host:?}: the server stopped in {took:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A PowerShell script whose CTRL_CLOSE handler sleeps for 30 s, and the
+/// command that starts it beside a block's shell. It prints
+/// `STUBBORN=<pid>` once the handler is installed.
+struct Stubborn {
+    script: std::path::PathBuf,
+    start: String,
+}
+
+impl Stubborn {
+    const SCRIPT: &str = r#"
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+public static class Stall {
+    public delegate bool Handler(uint ctrl);
+    static readonly Handler handler = ctrl => { Thread.Sleep(30000); return true; };
+    [DllImport("kernel32.dll")]
+    static extern bool SetConsoleCtrlHandler(Handler handler, bool add);
+    public static bool Install() { return SetConsoleCtrlHandler(handler, true); }
+}
+'@
+if (-not [Stall]::Install()) { exit 1 }
+'STUBBORN=' + $PID
+Start-Sleep -Seconds 600
+"#;
+
+    fn new(host: ConsoleHost) -> Self {
+        let name = format!("rusty-mux-stubborn-{}-{host:?}.ps1", std::process::id());
+        let script = std::env::temp_dir().join(name);
+        std::fs::write(&script, Self::SCRIPT).expect("write the stalling script");
+        let start = format!(
+            "start /b powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"\r",
+            script.display()
+        );
+        Self { script, start }
+    }
+}
+
+impl Drop for Stubborn {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.script);
+    }
+}
+
+/// `CREATE_NEW_PROCESS_GROUP` (winbase.h): the child leads a process group
+/// of its own, whose id is its pid.
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+/// Sends Ctrl+Break to the process group `group` on this console, as
+/// pressing it would: `GenerateConsoleCtrlEvent` through PowerShell, which
+/// shares this console, so the test needs no Win32 binding of its own.
+fn send_ctrl_break(group: u32) {
+    let script = format!(
+        "$k = Add-Type -Name K -Namespace RustyMuxTest -PassThru -MemberDefinition \
+         '[DllImport(\"kernel32.dll\")] public static extern bool GenerateConsoleCtrlEvent(uint e, uint g);'; \
+         if (-not $k::GenerateConsoleCtrlEvent(1, {group})) {{ exit 1 }}"
+    );
+    let status = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdin(Stdio::null())
+        .status()
+        .expect("run powershell");
+    assert!(status.success(), "Ctrl+Break to group {group}: {status:?}");
+}
+
+/// The test's programs, each held by a handle opened while it is known to
+/// be the test's, in a kill-on-close job: dropping it ends any still
+/// running, so a failing run leaves none behind, and a pid since reused by
+/// another process is never touched.
+struct Ends(Vec<(&'static str, u32, Adopted)>);
+
+type Adopted = (
+    platform_windows::sys::handle::OwnedWinHandle,
+    platform_windows::sys::handle::OwnedWinHandle,
+);
+
+impl Ends {
+    /// Holds `pid`, which must still be running.
+    fn hold(&mut self, what: &'static str, pid: u32) {
+        let adopted = platform_windows::sys::proc::adopt(pid)
+            .unwrap_or_else(|e| panic!("{what} (pid {pid}) is not running: {e:?}"));
+        self.0.push((what, pid, adopted));
+    }
+
+    fn pids(&self) -> impl Iterator<Item = (&'static str, u32)> + '_ {
+        self.0.iter().map(|&(what, pid, _)| (what, pid))
+    }
+}
+
+/// Waits up to `budget` for `child` to exit.
+fn wait_within(child: &mut std::process::Child, budget: Duration) -> std::process::ExitStatus {
+    let deadline = Instant::now() + budget;
+    loop {
+        if let Some(status) = child.try_wait().expect("poll the server") {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the server still runs after {budget:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A server process that a failing test still ends.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        // Both fail harmlessly once the test has killed and reaped it.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 fn wait_until_listening(path: &Path) {
@@ -126,9 +339,8 @@ fn wait_until_listening(path: &Path) {
     }
 }
 
-#[test]
-fn a_program_that_exits_reports_its_code() {
-    let path = start_server();
+fn a_program_that_exits_reports_its_code(host: ConsoleHost) {
+    let path = start_server_on(host);
     let wanted = Features::PROGRAM_EVENTS.union(Features::CHECKPOINT_V6);
     let mut a = Client::connect_with(&path, wanted, None);
     let block = block_for(&mut a);
@@ -148,9 +360,8 @@ fn a_program_that_exits_reports_its_code() {
 
 /// Windows has no foreground process group, so `terminal.process` lists
 /// only the block's own program, by pid alone.
-#[test]
-fn terminal_process_names_the_programs_pid() {
-    let path = start_server();
+fn terminal_process_names_the_programs_pid(host: ConsoleHost) {
+    let path = start_server_on(host);
     let wanted = Features::CHECKPOINT_V6.union(Features::BLOCK_CALL);
     let mut a = Client::connect_with(&path, wanted, None);
     let block = block_for(&mut a);

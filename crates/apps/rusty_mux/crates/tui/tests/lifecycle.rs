@@ -800,7 +800,7 @@ fn real_udp_server_idle(idle: Duration) -> (PathBuf, u16) {
 /// A real server, offering UDP on 127.0.0.1 with associations kept for
 /// `udp`'s idle time, when given; with the UDP port it took.
 fn real_server_with(udp: Option<Duration>) -> (PathBuf, Option<u16>) {
-    use rusty_mux_server::{Config, Udp, serve, serve_udp};
+    use rusty_mux_server::{Config, ConsoleHost, Udp, serve, serve_udp};
     use rusty_tokio::io::{UdpSocket, UnixListener};
     use rusty_tokio::{Builder, LocalOptions};
 
@@ -823,6 +823,7 @@ fn real_server_with(udp: Option<Duration>) -> (PathBuf, Option<u16>) {
                 program: "/bin/sh".into(),
                 args: Vec::new(),
                 cwd: "/".into(),
+                console_host: ConsoleHost::default(),
             };
             let Some(idle) = udp else {
                 ready_tx.send(None).expect("ready");

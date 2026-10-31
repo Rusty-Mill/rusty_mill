@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use platform_windows::WindowsUnixStream as UnixStream;
 use rusty_mux_core::{BlockId, ClientId, Event, SessionId, Size, WindowId};
 use rusty_mux_proto::{Cursor, Features, Launch, Message, Takeover, decode, encode};
-use rusty_mux_server::{Config, serve};
+use rusty_mux_server::{Config, ConsoleHost, serve};
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::{Builder, LocalOptions};
@@ -33,20 +33,22 @@ pub fn connect(path: &Path) -> std::io::Result<UnixStream> {
 }
 
 /// The shell each test block runs: `/bin/sh` in `/`, or `cmd.exe /Q` (no
-/// command echo, so less re-rendered text crosses ConPTY) in the temp
-/// directory.
+/// command echo, so less re-rendered text crosses the console host) in the
+/// temp directory, on the host `RUSTY_CONSOLE_HOST` names.
 pub fn shell() -> Config {
     if cfg!(windows) {
         Config {
             program: "cmd.exe".into(),
             args: vec!["/Q".into()],
             cwd: std::env::temp_dir().into_os_string(),
+            console_host: ConsoleHost::from_env().expect("RUSTY_CONSOLE_HOST"),
         }
     } else {
         Config {
             program: "/bin/sh".into(),
             args: Vec::new(),
             cwd: "/".into(),
+            console_host: ConsoleHost::default(),
         }
     }
 }
@@ -66,6 +68,15 @@ pub fn marker(n: u32) -> (String, String) {
 /// Starts a server running [`shell`] in each block; returns its socket.
 pub fn start_server() -> PathBuf {
     start_server_with(shell())
+}
+
+/// [`start_server`] with every block on `host`, whatever
+/// `RUSTY_CONSOLE_HOST` says.
+pub fn start_server_on(host: ConsoleHost) -> PathBuf {
+    start_server_with(Config {
+        console_host: host,
+        ..shell()
+    })
 }
 
 /// Starts a server on a fresh socket and returns its path.
