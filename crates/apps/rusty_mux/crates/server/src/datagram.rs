@@ -7,6 +7,9 @@
 //! first authentic datagram under that id makes it live: a [`Link`] holding
 //! the pure [`Association`], with one task ([`drive`]) that sends what it
 //! has to send, wakes at its timers and ends it after `idle` of silence.
+//! Silence of [`LEASE_SILENCE`] already releases the leases its clients
+//! hold, so others can type; the next datagram heard gives them back where
+//! nobody took them meanwhile.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -17,15 +20,19 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+use rusty_mux_core::ClientId;
 use rusty_mux_transport::{Association, ID_LEN, KEY_LEN, MAX_DATAGRAM, Side, StreamId};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf, UdpSocket};
 use rusty_tokio::sync::Notify;
 
 use crate::conn;
-use crate::state::Shared;
+use crate::state::{Released, Shared};
 
 pub(crate) type Id = [u8; ID_LEN];
 pub(crate) type Key = [u8; KEY_LEN];
+
+/// How long an association's clients keep their leases through silence.
+pub(crate) const LEASE_SILENCE: Duration = Duration::from_secs(30);
 
 /// How long an offered association waits for its first datagram.
 const OFFER_TTL: Duration = Duration::from_secs(60);
@@ -146,11 +153,14 @@ enum Received {
 
 /// Receives on `socket` until receiving fails, starting a driver for each
 /// association that comes alive and a connection for each stream it opens.
+/// An association silent for `idle` ends; one silent for `silence` loses
+/// its clients' leases until it is heard again.
 pub(crate) async fn serve(
     socket: Rc<UdpSocket>,
     registry: Registry,
     state: Shared,
     idle: Duration,
+    silence: Duration,
 ) -> io::Result<()> {
     // Room for any UDP datagram: one larger than the buffer is an error on
     // Windows (WSAEMSGSIZE), which would end the server. Too big for the
@@ -170,9 +180,19 @@ pub(crate) async fn serve(
         }
         let link = match registry.datagram(Instant::now(), from, &buf[..n]) {
             Received::Nothing => continue,
-            Received::Live(link) => link,
+            Received::Live(link) => {
+                link.heard(&state);
+                link
+            }
             Received::New(link) => {
-                let driver = drive(link.clone(), socket.clone(), registry.clone(), idle);
+                let timers = Timers { idle, silence };
+                let driver = drive(
+                    link.clone(),
+                    socket.clone(),
+                    registry.clone(),
+                    state.clone(),
+                    timers,
+                );
                 rusty_tokio::task::spawn_local(driver);
                 link
             }
@@ -186,18 +206,35 @@ pub(crate) async fn serve(
                 link: link.clone(),
                 id,
             };
-            rusty_tokio::task::spawn_local(conn::run(state.clone(), rd, wr));
+            let (adopter, known) = (link.clone(), state.clone());
+            let adopt = move |client, cancel: &Rc<Notify>| adopter.adopt(client, cancel, &known);
+            rusty_tokio::task::spawn_local(conn::run(state.clone(), rd, wr, adopt));
         }
     }
 }
 
+/// How long a link's silence may last: before it ends, and before its
+/// clients' leases are released.
+#[derive(Clone, Copy)]
+struct Timers {
+    idle: Duration,
+    silence: Duration,
+}
+
 /// Sends what `link` has to send and sleeps until its next timer or a
 /// change, until either side ends it or it has been silent for `idle`.
-async fn drive(link: Rc<Link>, socket: Rc<UdpSocket>, registry: Registry, idle: Duration) {
+async fn drive(
+    link: Rc<Link>,
+    socket: Rc<UdpSocket>,
+    registry: Registry,
+    state: Shared,
+    timers: Timers,
+) {
     loop {
         let now = Instant::now();
         link.send(&socket, now).await;
-        let Some(deadline) = link.deadline(now, idle) else {
+        link.fall_silent(now, timers.silence, &state);
+        let Some(deadline) = link.deadline(now, timers) else {
             break;
         };
         rusty_tokio::select! {
@@ -222,6 +259,12 @@ pub(crate) struct Link {
     wakers: RefCell<HashMap<StreamId, Wakers>>,
     /// Whether the last send failed, so a dead path is logged once.
     failing: Cell<bool>,
+    /// Each client a stream of this link served, with that connection's
+    /// cancel; one taken over elsewhere is no longer this link's.
+    clients: RefCell<Vec<(ClientId, Rc<Notify>)>>,
+    /// While silent past [`LEASE_SILENCE`]: the leases released, to give
+    /// back when the link is heard again.
+    released: RefCell<Option<Vec<Released>>>,
 }
 
 #[derive(Default)]
@@ -239,7 +282,44 @@ impl Link {
             wake: Notify::new(),
             wakers: RefCell::default(),
             failing: Cell::new(false),
+            clients: RefCell::default(),
+            released: RefCell::default(),
         }
+    }
+
+    /// A stream of this link now serves `client`; clients no longer
+    /// served here are forgotten, so the list stays as long as the open
+    /// streams.
+    fn adopt(&self, client: ClientId, cancel: &Rc<Notify>, state: &Shared) {
+        let state = state.borrow();
+        let mut clients = self.clients.borrow_mut();
+        clients.retain(|(client, cancel)| state.served_by(*client, cancel));
+        clients.push((client, cancel.clone()));
+    }
+
+    /// Once silent for `silence`, releases the leases this link's clients
+    /// hold, once until heard again; forgets clients served elsewhere.
+    fn fall_silent(&self, now: Instant, silence: Duration, state: &Shared) {
+        if self.released.borrow().is_some() || now < self.heard_at() + silence {
+            return;
+        }
+        let mut clients = self.clients.borrow_mut();
+        let mut state = state.borrow_mut();
+        clients.retain(|(client, cancel)| state.served_by(*client, cancel));
+        *self.released.borrow_mut() = Some(state.release_silent(&clients));
+    }
+
+    /// Heard again after falling silent: gives the leases back.
+    fn heard(&self, state: &Shared) {
+        let released = self.released.borrow_mut().take();
+        if let Some(released) = released {
+            state.borrow_mut().regain(&released);
+        }
+    }
+
+    /// When the last authentic datagram arrived, or the link was born.
+    fn heard_at(&self) -> Instant {
+        self.assoc.borrow().last_heard().unwrap_or(self.born)
     }
 
     fn datagram(&self, now: Instant, from: SocketAddr, datagram: &[u8]) -> bool {
@@ -253,15 +333,20 @@ impl Link {
 
     /// When the driver should next look, or `None` once the association
     /// ended or has been silent for `idle`.
-    fn deadline(&self, now: Instant, idle: Duration) -> Option<Instant> {
-        let assoc = self.assoc.borrow();
-        let silent_until = assoc.last_heard().unwrap_or(self.born) + idle;
-        if assoc.is_ended() || now >= silent_until {
+    fn deadline(&self, now: Instant, timers: Timers) -> Option<Instant> {
+        let heard = self.heard_at();
+        let mut until = heard + timers.idle;
+        if self.assoc.borrow().is_ended() || now >= until {
             return None;
         }
-        let at = assoc
+        if self.released.borrow().is_none() {
+            until = until.min(heard + timers.silence);
+        }
+        let at = self
+            .assoc
+            .borrow()
             .timeout()
-            .map_or(silent_until, |at| at.min(silent_until));
+            .map_or(until, |at| at.min(until));
         Some(at.max(now + MIN_SLEEP))
     }
 

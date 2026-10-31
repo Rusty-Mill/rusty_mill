@@ -17,8 +17,14 @@ use crate::state::{Shared, State};
 
 const READ_CHUNK: usize = 64 << 10;
 
-pub(crate) async fn run<R, W>(state: Shared, mut rd: R, wr: W)
-where
+/// Serves one connection; `on_client` learns which client it serves, and
+/// the cancel that tells whether it still does.
+pub(crate) async fn run<R, W>(
+    state: Shared,
+    mut rd: R,
+    wr: W,
+    on_client: impl FnOnce(ClientId, &Rc<Notify>),
+) where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
@@ -36,6 +42,7 @@ where
     };
     let (out, inbox, cancel) = outbox();
     let client = state.borrow_mut().connect(out, features, resume, takeover);
+    on_client(client, &cancel);
     // One owning future races both halves and eviction. Dropping the losing
     // futures closes both socket halves and discards the receiver/backlog,
     // including a writer currently blocked inside write_all.
@@ -195,7 +202,7 @@ mod regression {
             .await
             .unwrap();
             let (rd, wr) = server.into_split();
-            let task = rusty_tokio::task::spawn_local(run(state.clone(), rd, wr));
+            let task = rusty_tokio::task::spawn_local(run(state.clone(), rd, wr, |_, _| {}));
             rusty_tokio::task::yield_now().await;
             let client = state.borrow().test_client();
             // The peer stops reading. Force the writer into a pending write_all,
