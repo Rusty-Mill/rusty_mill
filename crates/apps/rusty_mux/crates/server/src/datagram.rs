@@ -263,7 +263,8 @@ pub(crate) struct Link {
     /// Whether the last send failed, so a dead path is logged once.
     failing: Cell<bool>,
     /// Each client a stream of this link served, with that connection's
-    /// cancel; one taken over elsewhere is no longer this link's.
+    /// cancel, while it still does or left the client a stale orphan; one
+    /// taken over elsewhere is no longer this link's.
     clients: RefCell<Vec<(ClientId, Rc<Notify>)>>,
     /// While silent past [`LEASE_SILENCE`]: the leases released, to give
     /// back when the link is heard again.
@@ -296,7 +297,7 @@ impl Link {
     fn adopt(&self, client: ClientId, cancel: &Rc<Notify>, state: &Shared) {
         let state = state.borrow();
         let mut clients = self.clients.borrow_mut();
-        clients.retain(|(client, cancel)| state.served_by(*client, cancel));
+        clients.retain(|(client, cancel)| state.kept_by(*client, cancel));
         clients.push((client, cancel.clone()));
     }
 
@@ -308,7 +309,7 @@ impl Link {
         }
         let mut clients = self.clients.borrow_mut();
         let mut state = state.borrow_mut();
-        clients.retain(|(client, cancel)| state.served_by(*client, cancel));
+        clients.retain(|(client, cancel)| state.kept_by(*client, cancel));
         *self.released.borrow_mut() = Some(state.release_silent(&clients));
     }
 

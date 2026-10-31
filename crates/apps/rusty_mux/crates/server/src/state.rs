@@ -232,6 +232,13 @@ impl State {
 
     /// Whether `client` is still served by the connection owning `cancel`,
     /// and not dropped or taken over.
+    /// Whether the connection owning `cancel` still serves `client`, or
+    /// left it a stale orphan: silence on its path still counts for it.
+    pub(crate) fn kept_by(&self, client: ClientId, cancel: &Rc<Notify>) -> bool {
+        let stale = self.stale.contains_key(&client) && self.orphaned_by(client, cancel);
+        stale || self.served_by(client, cancel)
+    }
+
     pub(crate) fn served_by(&self, client: ClientId, cancel: &Rc<Notify>) -> bool {
         self.clients
             .get(&client)
@@ -428,6 +435,10 @@ impl State {
                 eprintln!("rusty-mux-server: model out of step on a silent lease: {err}");
             }
             self.silenced.insert(*client, (*block, cancel.clone()));
+            // Stale already: its takeover gets the lease back.
+            if let Some(held) = self.stale.get_mut(client) {
+                *held = Some(*block);
+            }
         }
         self.flush();
         released
