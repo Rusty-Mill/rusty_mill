@@ -121,6 +121,46 @@ fn closing_a_session_stops_both_its_worker_and_its_child() {
 }
 
 #[test]
+#[cfg(windows)]
+fn closing_a_session_on_our_own_console_host_ends_what_it_left_attached() {
+    // Our host runs inside the worker, so it can only end a process the
+    // session left attached while the worker lives. The daemon has to let
+    // an acknowledging worker finish (review of 9ecfce64, P1).
+    let root = TempRoot::new("lifecycle-own-host-close");
+    let marker = root.path().join("survived.txt");
+    let script = root.path().join("survivor.bat");
+    std::fs::write(
+        &script,
+        format!(
+            "@ping -n 10 127.0.0.1 > NUL\r\n@echo survived> \"{}\"\r\n",
+            marker.display()
+        ),
+    )
+    .expect("write the survivor script");
+    let line = format!(
+        "start /b {} & ping -n 600 127.0.0.1 > NUL",
+        script.display()
+    );
+    let output = run_with_env(
+        root.path(),
+        &["new", "--", "cmd", "/C", &line],
+        &[("RUSTY_CONSOLE_HOST", "own")],
+    );
+    assert_success("new", &output);
+    let id = stdout_of(&output);
+    let worker = worker_pid(root.path(), &id);
+
+    assert_success("close", &run(root.path(), &["close", &id]));
+    assert!(!is_alive(worker), "close returns once the worker is gone");
+    // The survivor would write its marker about 9 s after it started.
+    std::thread::sleep(Duration::from_secs(12));
+    assert!(
+        !marker.exists(),
+        "a process the session left attached outlived the close"
+    );
+}
+
+#[test]
 fn closing_twice_is_rejected_rather_than_silently_succeeding() {
     let root = TempRoot::new("lifecycle-double-close");
     let id = session_new(root.path(), &long_running());

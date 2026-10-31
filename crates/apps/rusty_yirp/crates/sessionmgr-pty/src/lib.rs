@@ -43,8 +43,6 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io;
-#[cfg(windows)]
-use std::sync::Arc;
 use std::sync::Mutex;
 #[cfg(windows)]
 use std::time::Duration;
@@ -151,10 +149,9 @@ enum Master {
     /// The platform's pty: `openpty` on Linux, ConPTY on Windows.
     Platform(Box<dyn PtyMaster>),
     /// Our own console host. Concrete, because hanging up and shutting
-    /// down are not on the `PtyMaster` trait. An `Arc` so the exit
-    /// watcher can hold it weakly (see [`hang_up_on_exit`]).
+    /// down are not on the `PtyMaster` trait.
     #[cfg(windows)]
-    Own(Arc<rusty_conhost::OwnPtyMaster>),
+    Own(rusty_conhost::OwnPtyMaster),
 }
 
 impl Master {
@@ -162,7 +159,7 @@ impl Master {
         match self {
             Master::Platform(master) => master.as_ref(),
             #[cfg(windows)]
-            Master::Own(master) => master.as_ref(),
+            Master::Own(master) => master,
         }
     }
 }
@@ -382,46 +379,17 @@ fn spawn_on(
 }
 
 /// Spawns `command` on our own console host.
+///
+/// When the child exits, the host itself sends CTRL_CLOSE to whatever it
+/// left attached and closes within 2 s, so [`PtySession::read`] ends as
+/// it does on ConPTY. With something still attached that end comes up to
+/// 2 s after the exit, where ConPTY's comes at once.
 #[cfg(windows)]
 fn spawn_own(command: &Command, size: WinSize) -> io::Result<(Master, Box<dyn Child>)> {
     let (master, child) = rusty_conhost::OwnPty
         .spawn_concrete(command, size)
         .map_err(to_io)?;
-    let master = Arc::new(master);
-    if let Err(e) = hang_up_on_exit(&master) {
-        // Without the watcher, `read` would not end when the child does.
-        // Undo the spawn rather than hand back a session that can hang.
-        // The spawn error is the one worth reporting; a failed kill
-        // leaves the child to the host's own end, 5 s after the hang-up.
-        let _ = child.kill_single(platform::process::Signal::Kill);
-        master.hang_up();
-        master.wait_shut_down(SHUTDOWN);
-        return Err(e);
-    }
     Ok((Master::Own(master), Box::new(child)))
-}
-
-/// Hangs up our console host when the session's process exits.
-///
-/// [`PtySession::read`] returns `Ok(0)` once the process has exited.
-/// ConPTY's backend arranges that by closing the pseudo console on exit,
-/// which ends whatever the process left attached. Our host instead keeps
-/// serving those processes until it is hung up, so this does the same.
-/// The watcher holds the master weakly, so it never keeps a dropped
-/// session's console open; dropping it also wakes the watcher.
-#[cfg(windows)]
-fn hang_up_on_exit(master: &Arc<rusty_conhost::OwnPtyMaster>) -> io::Result<()> {
-    let waiter = master.exit_waiter();
-    let master = Arc::downgrade(master);
-    std::thread::Builder::new()
-        .name("sessionmgr-pty exit".into())
-        .spawn(move || {
-            waiter.wait();
-            if let Some(master) = master.upgrade() {
-                master.hang_up();
-            }
-        })
-        .map(drop)
 }
 
 /// No PTY backend on this platform.

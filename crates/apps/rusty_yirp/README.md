@@ -124,6 +124,16 @@ that session's start with an error naming the variable, and a Windows that
 can't run our host fails it too: there is no silent fallback. Linux ignores
 the variable.
 
+Our host runs inside the session's worker, which differs from ConPTY's
+separate conhost in two ways:
+
+- When the session's process exits while something it started is still
+  attached, the exit is recorded up to 2 s later than on ConPTY. The host
+  closes the console then, and a closing worker waits up to 6 s more for
+  it to end those processes.
+- If the worker crashes or is killed from outside, the host goes with it.
+  Processes the session left attached get no CTRL_CLOSE and keep running.
+
 ## Desktop UI
 
 `sessionmgr-desktop` is a second binary — a Tauri-based graphical client, an
