@@ -1570,7 +1570,10 @@ fn moves_page_by_time_and_seq_and_survive_a_restart() {
     let list = h.list("L");
     for (hour, column) in [(0, "ready"), (1, "qa"), (2, "review")] {
         h.clock.store(NOW + hour * HOUR, Ordering::SeqCst);
-        h.task(&list, &format!(r#""title":"c","tags":["board:{column}"]"#));
+        h.task(
+            &list,
+            &format!(r#""title":"c","tags":["agent","board:{column}"]"#),
+        );
     }
     drop(h);
     let mut h = Harness::open(dir.path());
@@ -1625,19 +1628,24 @@ fn bad_actors_and_paging_arguments_are_refused() {
 }
 
 #[test]
-fn a_purge_takes_the_task_history_with_it() {
-    let (_d, mut h) = harness();
+fn history_outlives_a_purge_so_a_seq_is_never_reused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::open(dir.path());
     let list = h.list("L");
-    let t = h.task(&list, r#""title":"c","tags":["board:ready"]"#);
+    let t = h.task(&list, r#""title":"c","tags":["agent","board:ready"]"#);
     let id = t["id"].as_str().unwrap();
-    h.call(Method::Delete, &format!("/api/v1/tasks/{id}"), "");
-    let (_, kept) = h.call(Method::Get, "/api/v1/moves", "");
-    assert_eq!(
-        kept["moves"].as_array().unwrap().len(),
-        1,
-        "the trash keeps it"
+    h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{id}?permanent=true"),
+        "",
     );
-    h.call(Method::Delete, "/api/v1/trash", "");
-    let (_, gone) = h.call(Method::Get, "/api/v1/moves", "");
-    assert!(gone["moves"].as_array().unwrap().is_empty());
+    drop(h);
+
+    let mut h = Harness::open(dir.path());
+    let (_, kept) = h.call(Method::Get, "/api/v1/moves", "");
+    assert_eq!(kept["moves"][0]["seq"].as_u64(), Some(1));
+    h.task(&list, r#""title":"d","tags":["agent"]"#);
+    let (_, after) = h.call(Method::Get, "/api/v1/moves?after=1", "");
+    assert_eq!(after["moves"][0]["seq"].as_u64(), Some(2));
+    assert_eq!(after["moves"][0]["to"].as_str(), Some("backlog"));
 }

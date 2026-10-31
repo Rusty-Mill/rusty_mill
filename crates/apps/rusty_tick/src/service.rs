@@ -316,6 +316,7 @@ impl Service {
     pub fn create_task(&mut self, new: NewTask) -> Result<Task> {
         self.tasks.require_writable()?;
         let actor = clean_actor(new.actor)?;
+        self.moves.require_writable()?;
         self.live_list(new.list_id)?;
         if let Some(parent) = new.parent_id {
             let parent = self.task(parent)?;
@@ -439,9 +440,12 @@ impl Service {
 
     /// Every task write goes through here or [`Service::save_batch`], which record
     /// the column move it makes, if any, as `actor`, after the task is durable.
+    /// After a failed move append they refuse until reopen, so a later move never
+    /// hides the gap.
     fn save_task(&mut self, mut task: Task, actor: &str) -> Result<Task> {
         task.updated_ms = self.now();
         task.version = task.version.wrapping_add(1);
+        self.moves.require_writable()?;
         let old = self.tasks.get(task.id);
         self.tasks.replace(task.clone())?;
         self.moves.record(old.as_ref(), &task, actor)?;
@@ -459,11 +463,13 @@ impl Service {
             .last()
             .cloned()
             .ok_or_else(|| ServiceError::Invalid("nothing to save".into()))?;
+        self.moves.require_writable()?;
         let old: Vec<Option<Task>> = tasks.iter().map(|t| self.tasks.get(t.id)).collect();
         self.tasks.replace_batch(tasks.clone())?;
         for (old, new) in old.iter().zip(&tasks) {
-            self.moves.record(old.as_ref(), new, actor)?;
+            self.moves.queue(old.as_ref(), new, actor);
         }
+        self.moves.flush()?;
         Ok(result)
     }
 
@@ -562,11 +568,12 @@ impl Service {
         Ok(trashed.len())
     }
 
-    /// Delete what belongs to purged tasks: comments, board documents and column history.
+    /// Delete the documents that belong to purged tasks: comments and board
+    /// documents. Their column history is kept: it is append-only, so a `seq`
+    /// cursor is never reused.
     fn forget_docs_of(&mut self, gone: &[Uuid]) -> Result<()> {
         self.docs.delete_comments_of(gone)?;
         self.docs.delete_board_of(gone)?;
-        self.moves.delete_of(gone)?;
         Ok(())
     }
 
