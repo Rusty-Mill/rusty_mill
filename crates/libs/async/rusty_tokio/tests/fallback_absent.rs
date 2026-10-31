@@ -18,7 +18,9 @@ fn sleep_without_a_runtime_or_fallback_panics() {
 
 /// With nothing to reap on, dropping a `kill_on_drop` child still kills it
 /// and doesn't panic in `Drop`: the reap is skipped, leaving a zombie the
-/// test reaps itself.
+/// test reaps itself. Passes before #1302's fix too: it guards against a
+/// fix that reaches the fallback through the panicking lookup, and fails
+/// if `Child`'s `Drop` uses `Handle::current_or_fallback()` (checked).
 #[cfg(unix)]
 #[test]
 fn kill_on_drop_without_a_runtime_or_fallback_kills_without_panicking() {

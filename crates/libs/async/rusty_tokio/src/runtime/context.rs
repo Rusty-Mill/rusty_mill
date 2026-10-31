@@ -58,9 +58,13 @@ impl Handle {
     /// [`current_or_fallback`](Self::current_or_fallback) without the
     /// panic: `None` if there is neither a runtime on this thread nor an
     /// installed fallback. For callers, such as a `Drop`, that must not
-    /// panic and can skip their work instead.
+    /// panic and can skip their work instead. Built on
+    /// [`try_current_no_panic`](Self::try_current_no_panic), so a value
+    /// dropped by a thread-local destructor after this thread's runtime
+    /// context is torn down gets the fallback (or `None`), not a panic
+    /// that would abort the process.
     pub(crate) fn try_current_or_fallback() -> Option<Handle> {
-        Self::try_current().or_else(super::fallback::get)
+        Self::try_current_no_panic().or_else(super::fallback::get)
     }
 
     /// Like [`try_current`](Self::try_current), but `None` instead of a
