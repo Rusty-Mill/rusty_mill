@@ -135,12 +135,14 @@ fn a_killed_server_takes_its_blocks_with_it(host: ConsoleHost) {
     let name = format!("rusty-mux-killed-{}-{host:?}.sock", std::process::id());
     let path = std::env::temp_dir().join(name);
     let _ = std::fs::remove_file(&path);
-    let mut server = Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"))
-        .arg(&path)
-        .env(ConsoleHost::ENV, console_host_name(host))
-        .stdin(Stdio::null())
-        .spawn()
-        .expect("start the server");
+    let mut server = KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"))
+            .arg(&path)
+            .env(ConsoleHost::ENV, console_host_name(host))
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("start the server"),
+    );
     wait_until_listening(&path);
 
     let mut a = Client::connect(&path);
@@ -148,10 +150,21 @@ fn a_killed_server_takes_its_blocks_with_it(host: ConsoleHost) {
     let shell = shell_pid(&mut a, block);
     assert!(alive(shell), "shell {shell}");
 
-    server.kill().expect("kill the server");
-    server.wait().expect("reap the server");
+    server.0.kill().expect("kill the server");
+    server.0.wait().expect("reap the server");
     assert_gone_within(shell, "the dead server's shell", Duration::from_secs(7));
     let _ = std::fs::remove_file(&path);
+}
+
+/// A server process that a failing test still ends.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        // Both fail harmlessly once the test has killed and reaped it.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 fn wait_until_listening(path: &Path) {

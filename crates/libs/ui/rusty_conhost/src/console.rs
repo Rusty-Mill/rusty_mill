@@ -1004,6 +1004,12 @@ impl Console {
             api::SET_TEXT_ATTRIBUTE => return self.set_text_attribute(p, fixed, out, fx),
             api::GET_CURRENT_FONT => self.get_current_font(p.object, &mut fixed),
             api::GET_CONSOLE_WINDOW => get_console_window(&mut fixed),
+            api::SET_CURRENT_FONT => self.set_current_font(p.object, &fixed),
+            api::GET_CONSOLE_PROCESS_LIST => {
+                let reply = self.get_console_process_list(p, m, fixed);
+                fx.push(Effect::Reply(reply));
+                return;
+            }
             #[cfg(test)]
             PANIC_FOR_TEST => panic!("a test asked the console to panic"),
             api::GET_TITLE => {
@@ -1219,6 +1225,36 @@ impl Console {
         reply.information = t.information;
         reply.output = t.output;
         reply.output_at = at as u32;
+        reply
+    }
+
+    /// `CONSOLE_GETPROCESSLIST_MSG { OUT dwProcessCount }`, the pids in
+    /// the output buffer, newest client first, as conhost lists them.
+    /// When they don't fit, only the count is returned, which then
+    /// exceeds the room, and the call still succeeds.
+    fn get_console_process_list(&self, p: &Packet<'_>, m: ApiMsg<'_>, mut fixed: Vec<u8>) -> Reply {
+        if fixed.len() < 4 {
+            return Reply::status(p.id, msg::STATUS_ILLEGAL_FUNCTION);
+        }
+        let at = m.fixed.len();
+        let room = (p.output_size as usize).saturating_sub(at) / 4;
+        let mut newest_first: Vec<(usize, u32)> = self
+            .clients
+            .iter()
+            .map(|(&cookie, c)| (cookie, c.pid))
+            .collect();
+        newest_first.sort_unstable_by_key(|&(cookie, _)| std::cmp::Reverse(cookie));
+        msg::put_u32(&mut fixed, 0, newest_first.len() as u32);
+        let mut reply = Reply::ok(p.id);
+        reply.write_back = fixed;
+        if newest_first.len() <= room {
+            reply.output = newest_first
+                .iter()
+                .flat_map(|(_, pid)| pid.to_le_bytes())
+                .collect();
+            reply.information = reply.output.len();
+            reply.output_at = at as u32;
+        }
         reply
     }
 
@@ -2004,6 +2040,29 @@ pub(crate) mod tests {
         let r = h.get_title(false, true, 64);
         assert_eq!(r.output, b"orig\0");
         assert_eq!(r.information, 5);
+    }
+
+    #[test]
+    fn process_list_is_newest_first_or_only_counted_when_short() {
+        let mut h = Host::new();
+        for pid in [10, 20, 30] {
+            h.connect(pid, "");
+        }
+        let r = h.call(1, api::GET_CONSOLE_PROCESS_LIST, &[0; 4], &[], 12);
+        assert_eq!(r.status, msg::STATUS_SUCCESS);
+        assert_eq!(msg::u32_at(&r.write_back, 0), Some(3));
+        let pids: Vec<u32> = r
+            .output
+            .chunks(4)
+            .filter_map(|c| msg::u32_at(c, 0))
+            .collect();
+        assert_eq!(pids, [30, 20, 10]);
+        assert_eq!((r.information, r.output_at), (12, 4));
+        // Room for two: the count says how many, and nothing is copied.
+        let r = h.call(1, api::GET_CONSOLE_PROCESS_LIST, &[0; 4], &[], 8);
+        assert_eq!(r.status, msg::STATUS_SUCCESS);
+        assert_eq!(msg::u32_at(&r.write_back, 0), Some(3));
+        assert_eq!((r.information, r.output.len()), (0, 0));
     }
 
     #[test]

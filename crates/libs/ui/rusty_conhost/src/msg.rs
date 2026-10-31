@@ -81,6 +81,8 @@ pub(crate) mod api {
     pub(crate) const SET_TITLE: u32 = 0x0200_0015;
     pub(crate) const GET_CURRENT_FONT: u32 = 0x0300_0004;
     pub(crate) const GET_CONSOLE_WINDOW: u32 = 0x0300_001F;
+    pub(crate) const GET_CONSOLE_PROCESS_LIST: u32 = 0x0300_0029;
+    pub(crate) const SET_CURRENT_FONT: u32 = 0x0300_002C;
 }
 
 /// `CD_IO_OBJECT_TYPE_*`.

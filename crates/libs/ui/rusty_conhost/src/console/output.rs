@@ -208,6 +208,20 @@ impl Console {
         msg::STATUS_SUCCESS
     }
 
+    /// `CONSOLE_CURRENTFONT_MSG`, as SetCurrentConsoleFontEx sends it.
+    /// The terminal owns the font, so the call is accepted and changes
+    /// nothing, as under ConPTY. Windows PowerShell 5.1 sets the font at
+    /// startup and exits if this fails.
+    pub(super) fn set_current_font(&self, object: usize, fixed: &[u8]) -> i32 {
+        if fixed.len() < FONT_LEN {
+            return msg::STATUS_ILLEGAL_FUNCTION;
+        }
+        match self.output_object(object, true) {
+            Ok(()) => msg::STATUS_SUCCESS,
+            Err(status) => status,
+        }
+    }
+
     /// The terminal's new size (§5.7). The Grid reflows; the terminal
     /// does its own, so nothing is emitted. A client that asked for
     /// WINDOW_INPUT gets a WINDOW_BUFFER_SIZE_EVENT.
@@ -611,6 +625,22 @@ mod tests {
         assert_eq!(u16s(&r, &[8, 10]), [80, 24], "the maximum window, in cells");
         let r = h.call(output, api::GET_CONSOLE_WINDOW, &[0xAA; 8], &[], 0);
         assert_eq!((r.status, r.write_back), (msg::STATUS_SUCCESS, vec![0; 8]));
+    }
+
+    /// Accepted and ignored, as ConPTY does; Windows PowerShell 5.1 dies
+    /// at startup without it. Still a write on an output object.
+    #[test]
+    fn set_current_font_is_accepted_on_a_writable_output() {
+        let mut h = Host::new();
+        let [_, input, output] = h.connect(1, "");
+        let r = h.call(output, api::SET_CURRENT_FONT, &[0; FONT_LEN], &[], 0);
+        assert_eq!(r.status, msg::STATUS_SUCCESS);
+        let r = h.call(output, api::GET_CURRENT_FONT, &[0; FONT_LEN], &[], 0);
+        assert_eq!(u16s(&r, &[8, 10]), [8, 16], "the font is unchanged");
+        let r = h.call(input, api::SET_CURRENT_FONT, &[0; FONT_LEN], &[], 0);
+        assert_eq!(r.status, msg::STATUS_FROM_HANDLE);
+        let r = h.call(output, api::SET_CURRENT_FONT, &[0; 4], &[], 0);
+        assert_eq!(r.status, msg::STATUS_ILLEGAL_FUNCTION);
     }
 
     #[test]

@@ -10,6 +10,10 @@ changelog: rusty_mux_server on Windows can run its blocks on our own console hos
   unset, keeps ConPTY. Any other value stops the server at startup, and a
   Windows without a usable ConDrv fails the block's spawn: there is no
   silent fallback to ConPTY. Linux ignores the variable but still checks it.
+- **Fixed:** our console host accepts SetCurrentConsoleFontEx and ignores
+  it, as ConPTY does. Windows PowerShell 5.1 calls it at startup and exited
+  at once without it. GetConsoleProcessList is answered too, newest
+  process first.
 - **Changed:** `rusty_mux_server::Config` gains a public `console_host`
   field (`ConsoleHost::ConPty` or `Own`), so code building a `Config` by
   struct literal must set it.

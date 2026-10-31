@@ -763,7 +763,7 @@ Each PR includes one change fragment and is reviewed by Dottius. Line counts inc
 | 8 | Lifetime: CTRL_CLOSE (the ctrl worker and its queue are in PR 3), absolute grace deadline, `hang_up`, the §7.3 tests (§5.8). Needs S1. As built: CTRL_CLOSE supersedes queued Ctrl+C/Break and is still delivered after the server closes; a client connecting during the grace gets it; Drop discards output nobody reads | 350 | 1–2 |
 | 9 | Code pages via `codec` (§5.9) | 250 | 1–2 |
 | 10 | (reserved for issues found at the milestone) | — | 2 |
-| 11 | rusty_mux server: local host choice, `RUSTY_CONSOLE_HOST`, Config field and sites | 250 | 1–2 |
+| 11 | rusty_mux server: local host choice, `RUSTY_CONSOLE_HOST`, Config field and sites. As built: `ConsoleHost::{ConPty, Own}` in `rusty_mux_server`, a local `Master` enum in the server's Windows pty, and the Windows tests run on both hosts. Beast found Windows PowerShell 5.1 dying at startup on our host, so the host also accepts SetCurrentConsoleFontEx as a no-op, and GetConsoleProcessList (Appendix A) lands here | 250 | 1–2 |
 | 12 | yirp `sessionmgr-pty`: `PtyOptions::console_host`, Send/Sync justification (`sessionmgr-pty/src/lib.rs:99-113, 302-305`) | 150 | 1 |
 | 13 | Fuzz crate `rusty_conhost/fuzz` plus a nightly job modelled on `rusty-tls-fuzz` (`ci.yml:1673-1714`) | 200 | 1–2 |
 | 14 | Windows end-to-end bench and Phase B gate | 250 | 1–2 |
@@ -1023,7 +1023,8 @@ Function codes: 1 CONNECT, 2 DISCONNECT, 3 CREATE_OBJECT, 4 CLOSE_OBJECT, 5 RAW_
 | 6 | ScrollConsoleScreenBuffer | from `conmsgl2.h`, pinned in PR 6 |
 | 7 | ReadConsoleOutput | 0x02000013 |
 | 7 | WriteConsoleOutput(+String), ReadConsoleOutputString, Get/SetConsoleScreenBufferInfoEx, GetLargestConsoleWindowSize, SetConsoleScreenBufferSize, SetConsoleWindowInfo | from `conmsgl2.h`, pinned in PR 7 |
-| 11 | GetConsoleProcessList | 0x0300002A |
+| 11 | GetConsoleProcessList | 0x03000029 (draft 6 said 0x0300002A, which is GetConsoleHistory in `conmsgl3.h`) |
+| 11 | SetCurrentConsoleFontEx (accepted, ignored; Windows PowerShell 5.1 exits at startup without it) | 0x0300002C |
 | — | CREATE_OBJECT type 3, SetConsoleActiveScreenBuffer | deferred (V6) |
 
 ## Appendix B. How the review findings were resolved
