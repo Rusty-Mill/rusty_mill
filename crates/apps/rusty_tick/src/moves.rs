@@ -1,11 +1,13 @@
 //! Column history for Mill Board: one append-only record each time a task's
 //! board column changes, however it changed (a board `PATCH`, the tick UI, a
 //! tag rename). The service appends it in the same locked operation as the
-//! task write. A failed append (a torn log tail cannot be appended past in
-//! process) refuses every later task write until the store is reopened, as the
-//! task store does, so a later move never hides the gap; on open,
-//! [`MoveStore::repair`] writes the missing move. Nothing is ever deleted, so a
-//! `seq` is never reused. History starts when this shipped: there is no backfill.
+//! task write, as a small redo: the write's moves are made durable as an
+//! intent first ([`MoveStore::begin`]), the task is written, then the moves are
+//! appended and the intent retired ([`MoveStore::commit`]). A crash or failure
+//! in between leaves the intent, which [`MoveStore::open`] replays against the
+//! tasks; until then every task write is refused, as the task store does, so a
+//! later move never hides a missing one. Nothing is ever deleted, so a `seq` is
+//! never reused. History starts when this shipped: there is no backfill.
 
 use crate::store::TickError;
 use crate::table::Table;
@@ -15,8 +17,7 @@ use rusty_multimodal_db_engine::generic::traits::{
     IndexedField, Record, ScannableField, SchemaTag,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// The tag that puts a task on Mill Board.
@@ -124,76 +125,138 @@ impl ScannableField<AtMs> for Move {
     }
 }
 
+/// The file holding the moves of the task write in progress (the intent).
+const INTENT_FILE: &str = "moves.intent";
+
 pub struct MoveStore {
     table: Table<Move, ByTask, AtMs>,
+    intent: PathBuf,
     next_seq: u64,
-    /// Moves queued by [`MoveStore::queue`], written by [`MoveStore::flush`].
+    /// The moves of the task write in progress, durable in `intent` until
+    /// [`MoveStore::commit`] appends them.
     pending: Vec<Move>,
-    /// An append failed: refuse writes until reopened.
+    /// An append failed: refuse writes until reopened, when the intent replays.
     failed: bool,
 }
 
 impl MoveStore {
-    pub fn open(dir: &Path) -> Result<Self, TickError> {
+    /// Open the history in `dir`, replaying an intent left by a crash or failure:
+    /// each of its moves is appended if `task` shows the task write landed (the
+    /// task is in the move's `to` column) and the move is not already recorded.
+    pub fn open(dir: &Path, task: impl Fn(Uuid) -> Option<Task>) -> Result<Self, TickError> {
         let path = dir.join("moves.mmap");
         // A log whose creation was interrupted (empty, or a prefix of its header)
-        // holds no move, and history is repaired from the tasks, so clearing it
-        // loses nothing and lets the store open.
+        // holds no record; the move being written is in the intent, replayed below.
         if path.exists() {
             insert_log::clear_interrupted_creation::<Move>(&path)?;
         }
         let table: Table<Move, ByTask, AtMs> = Table::open(dir, "moves.mmap")?;
         let next_seq = table.all().iter().map(|m| m.seq + 1).max().unwrap_or(1);
-        Ok(Self {
+        let mut store = Self {
             table,
+            intent: dir.join(INTENT_FILE),
             next_seq,
             pending: Vec::new(),
             failed: false,
-        })
+        };
+        store.replay(task)?;
+        Ok(store)
     }
 
-    /// Append the move from `old` to `new` (`None` for a task being created),
-    /// if the column changed; returns whether it did.
-    pub fn record(
-        &mut self,
-        old: Option<&Task>,
-        new: &Task,
-        actor: &str,
-    ) -> Result<bool, TickError> {
-        let changed = self.queue(old, new, actor);
-        self.flush()?;
-        Ok(changed)
+    fn replay(&mut self, task: impl Fn(Uuid) -> Option<Task>) -> Result<(), TickError> {
+        let text = match std::fs::read_to_string(&self.intent) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let planned: Vec<Move> = rusty_json::from_str(&text).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{INTENT_FILE}: {e}"),
+            )
+        })?;
+        self.pending = planned
+            .into_iter()
+            .filter(|m| {
+                let landed = task(m.task_id).as_ref().and_then(column_of) == m.to.as_deref();
+                let recorded = self
+                    .of_task(m.task_id)
+                    .last()
+                    .is_some_and(|last| last.to == m.to && last.at_ms == m.at_ms);
+                landed && !recorded
+            })
+            .collect();
+        self.commit()?;
+        // Nothing to append still retires the intent.
+        remove_if_present(&self.intent)
     }
 
-    /// Queue the move from `old` to `new` without writing it, if the column
-    /// changed; returns whether it did.
-    pub fn queue(&mut self, old: Option<&Task>, new: &Task, actor: &str) -> bool {
+    /// The move from `old` to `new` (`None` for a task being created), if the
+    /// column changed.
+    pub fn plan(old: Option<&Task>, new: &Task, actor: &str) -> Option<Move> {
         let from = old.and_then(column_of);
         let to = column_of(new);
-        if from == to {
-            return false;
-        }
-        self.pending
-            .push(Move::new(new.id, from, to, new.updated_ms, actor));
-        true
+        (from != to).then(|| Move::new(new.id, from, to, new.updated_ms, actor))
     }
 
-    /// Write every queued move, in order. After a failed append nothing more is
-    /// written until the store is reopened.
-    pub fn flush(&mut self) -> Result<(), TickError> {
+    /// Make `moves` durable as the intent of the task write about to happen.
+    pub fn begin(&mut self, moves: Vec<Move>) -> Result<(), TickError> {
         self.require_writable()?;
+        if moves.is_empty() {
+            return Ok(());
+        }
+        let text = rusty_json::to_string(&moves).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{INTENT_FILE}: {e}"),
+            )
+        })?;
+        rusty_atomic_file::write(&self.intent, text.as_bytes())?;
+        self.pending = moves;
+        Ok(())
+    }
+
+    /// The task write landed: append the intent's moves, in order, and retire it.
+    /// On failure the intent stays and writes are refused until reopen replays it.
+    pub fn commit(&mut self) -> Result<(), TickError> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let result = self.append_pending();
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+
+    fn append_pending(&mut self) -> Result<(), TickError> {
         for entry in std::mem::take(&mut self.pending) {
             let entry = Move {
                 seq: self.next_seq,
                 ..entry
             };
-            if let Err(error) = self.table.insert(entry) {
-                self.failed = true;
-                return Err(error);
-            }
+            self.table.insert(entry)?;
             self.next_seq += 1;
         }
-        Ok(())
+        remove_if_present(&self.intent)
+    }
+
+    /// The task write failed. If it may still have landed (`ambiguous`: the task
+    /// store needs reopening), keep the intent for the replay and refuse writes;
+    /// otherwise retire it.
+    pub fn abort(&mut self, ambiguous: bool) -> Result<(), TickError> {
+        if std::mem::take(&mut self.pending).is_empty() {
+            return Ok(());
+        }
+        if ambiguous {
+            self.failed = true;
+            return Ok(());
+        }
+        let result = remove_if_present(&self.intent);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
     }
 
     /// `Err(RecoveryRequired)` after a failed append: the service checks this
@@ -225,34 +288,13 @@ impl MoveStore {
         moves.sort_by_key(|m| m.seq);
         moves
     }
+}
 
-    /// Make the history agree with `tasks` after a crash between a task write and
-    /// its move: a task whose last recorded column is not its column now gets the
-    /// missing move, at its `updated_ms`, as [`DEFAULT_ACTOR`]. Tasks with no
-    /// history are left alone (no backfill). Returns the number of moves added.
-    pub fn repair(&mut self, tasks: &[Task]) -> Result<usize, TickError> {
-        let mut all = self.table.all();
-        all.sort_by_key(|m| m.seq);
-        // In seq order, so each task keeps its latest move.
-        let last: BTreeMap<Uuid, Move> = all.into_iter().map(|m| (m.task_id, m)).collect();
-        for task in tasks {
-            let Some(recorded) = last.get(&task.id) else {
-                continue;
-            };
-            let now = column_of(task);
-            if recorded.to.as_deref() != now {
-                self.pending.push(Move::new(
-                    task.id,
-                    recorded.to.as_deref(),
-                    now,
-                    task.updated_ms,
-                    DEFAULT_ACTOR,
-                ));
-            }
-        }
-        let added = self.pending.len();
-        self.flush()?;
-        Ok(added)
+fn remove_if_present(path: &Path) -> Result<(), TickError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -268,11 +310,33 @@ mod tests {
         task
     }
 
+    fn with_tags(task: &Task, tags: &[&str], at: i64) -> Task {
+        let mut next = task.clone();
+        next.tags = tags.iter().map(|t| t.to_string()).collect();
+        next.updated_ms = at;
+        next
+    }
+
     fn path(moves: &[Move]) -> Vec<(u64, Option<&str>, Option<&str>)> {
         moves
             .iter()
             .map(|m| (m.seq, m.from.as_deref(), m.to.as_deref()))
             .collect()
+    }
+
+    fn open(dir: &Path, landed: &[&Task]) -> MoveStore {
+        MoveStore::open(dir, |id| {
+            landed.iter().find(|t| t.id == id).map(|t| (*t).clone())
+        })
+        .unwrap()
+    }
+
+    /// The service's sequence for a write that lands: intent, (task write), commit.
+    fn write(store: &mut MoveStore, old: Option<&Task>, new: &Task, actor: &str) {
+        store
+            .begin(MoveStore::plan(old, new, actor).into_iter().collect())
+            .unwrap();
+        store.commit().unwrap();
     }
 
     #[test]
@@ -306,25 +370,23 @@ mod tests {
     }
 
     #[test]
-    fn only_a_column_change_is_recorded_and_seq_survives_reopen() {
+    fn only_a_column_change_is_planned_and_seq_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = MoveStore::open(dir.path()).unwrap();
+        let mut store = open(dir.path(), &[]);
         let ready = task(&["agent", "board:ready"], Status::Open);
         let mut edited = ready.clone();
         edited.title = "renamed".into();
-        let mut building = ready.clone();
-        building.tags = vec!["agent".into(), "board:building".into()];
-        building.updated_ms = 20;
+        let building = with_tags(&ready, &["agent", "board:building"], 20);
 
-        assert!(store.record(None, &ready, "a").unwrap());
-        assert!(!store.record(Some(&ready), &edited, "a").unwrap());
-        assert!(store.record(Some(&ready), &building, "b").unwrap());
+        write(&mut store, None, &ready, "a");
+        assert!(MoveStore::plan(Some(&ready), &edited, "a").is_none());
+        write(&mut store, Some(&ready), &building, "b");
         drop(store);
 
-        let mut store = MoveStore::open(dir.path()).unwrap();
+        let mut store = open(dir.path(), &[]);
         let mut done = building.clone();
         done.status = Status::Done;
-        store.record(Some(&building), &done, "c").unwrap();
+        write(&mut store, Some(&building), &done, "c");
         let moves = store.of_task(ready.id);
         assert_eq!(
             path(&moves),
@@ -335,16 +397,20 @@ mod tests {
             ]
         );
         assert_eq!((moves[1].at_ms, moves[1].actor.as_str()), (20, "b"));
+        assert!(
+            !dir.path().join(INTENT_FILE).exists(),
+            "a commit retires the intent"
+        );
     }
 
     #[test]
     fn pages_filter_by_time_and_continue_after_a_seq() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = MoveStore::open(dir.path()).unwrap();
+        let mut store = open(dir.path(), &[]);
         for at in [5, 10, 15, 20] {
             let mut t = task(&["agent"], Status::Open);
             t.updated_ms = at;
-            store.record(None, &t, "a").unwrap();
+            write(&mut store, None, &t, "a");
         }
         let page = store.page(10, 0, 2);
         assert_eq!(page.iter().map(|m| m.at_ms).collect::<Vec<_>>(), [10, 15]);
@@ -353,28 +419,76 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_append_refuses_writes_and_reopen_repairs_it() {
+    fn a_crash_after_the_task_write_replays_even_a_first_move() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = MoveStore::open(dir.path()).unwrap();
-        let ready = task(&["agent", "board:ready"], Status::Open);
-        store.record(None, &ready, "a").unwrap();
-        let mut qa = ready.clone();
-        qa.tags = vec!["agent".into(), "board:qa".into()];
+        let mut store = open(dir.path(), &[]);
+        let card = task(&["agent", "board:ready"], Status::Open);
+        store
+            .begin(MoveStore::plan(None, &card, "a").into_iter().collect())
+            .unwrap();
+        drop(store); // the task landed; the process died before the commit
 
+        let store = open(dir.path(), &[&card]);
+        let moves = store.of_task(card.id);
+        assert_eq!(path(&moves), [(1, None, Some("ready"))]);
+        assert_eq!(moves[0].actor, "a");
+        assert!(!dir.path().join(INTENT_FILE).exists());
+    }
+
+    #[test]
+    fn a_crash_before_the_task_write_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &[]);
+        let ready = task(&["agent", "board:ready"], Status::Open);
+        write(&mut store, None, &ready, "a");
+        let qa = with_tags(&ready, &["agent", "board:qa"], 20);
+        store
+            .begin(
+                MoveStore::plan(Some(&ready), &qa, "a")
+                    .into_iter()
+                    .collect(),
+            )
+            .unwrap();
+        drop(store); // the task write never happened
+
+        let store = open(dir.path(), &[&ready]);
+        assert_eq!(path(&store.of_task(ready.id)), [(1, None, Some("ready"))]);
+        assert!(!dir.path().join(INTENT_FILE).exists());
+    }
+
+    #[test]
+    fn a_failed_append_refuses_writes_and_reopen_replays_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &[]);
+        let ready = task(&["agent", "board:ready"], Status::Open);
+        write(&mut store, None, &ready, "a");
+        let qa = with_tags(&ready, &["agent", "board:qa"], 20);
+
+        store
+            .begin(
+                MoveStore::plan(Some(&ready), &qa, "b")
+                    .into_iter()
+                    .collect(),
+            )
+            .unwrap();
         arm_fault(Fault::InsertWritePrefix(3));
-        assert!(store.record(Some(&ready), &qa, "a").is_err());
+        assert!(store.commit().is_err());
         assert!(matches!(
             store.require_writable(),
             Err(TickError::RecoveryRequired)
         ));
+        let review = with_tags(&qa, &["agent", "board:review"], 30);
         assert!(matches!(
-            store.record(Some(&qa), &ready, "a"),
+            store.begin(
+                MoveStore::plan(Some(&qa), &review, "b")
+                    .into_iter()
+                    .collect()
+            ),
             Err(TickError::RecoveryRequired)
         ));
         drop(store);
 
-        let mut store = MoveStore::open(dir.path()).unwrap();
-        assert_eq!(store.repair(&[qa.clone()]).unwrap(), 1);
+        let store = open(dir.path(), &[&qa]);
         assert_eq!(
             path(&store.of_task(ready.id)),
             [(1, None, Some("ready")), (2, Some("ready"), Some("qa"))]
@@ -382,46 +496,41 @@ mod tests {
     }
 
     #[test]
-    fn an_interrupted_log_creation_does_not_stop_the_store_opening() {
+    fn replaying_an_intent_already_appended_does_not_duplicate_it() {
         let dir = tempfile::tempdir().unwrap();
-        drop(MoveStore::open(dir.path()).unwrap());
-        let log = insert_log::log_path(&dir.path().join("moves.mmap"));
-        std::fs::write(&log, b"").unwrap();
-        let mut store = MoveStore::open(dir.path()).unwrap();
-        store
-            .record(None, &task(&["agent"], Status::Open), "a")
-            .unwrap();
+        let mut store = open(dir.path(), &[]);
+        let card = task(&["agent", "board:ready"], Status::Open);
+        let planned: Vec<Move> = MoveStore::plan(None, &card, "a").into_iter().collect();
+        store.begin(planned.clone()).unwrap();
+        store.commit().unwrap();
         drop(store);
-        assert_eq!(MoveStore::open(dir.path()).unwrap().page(0, 0, 10).len(), 1);
+        // Died after the append, before the intent was retired.
+        std::fs::write(
+            dir.path().join(INTENT_FILE),
+            rusty_json::to_string(&planned).unwrap(),
+        )
+        .unwrap();
+
+        let store = open(dir.path(), &[&card]);
+        assert_eq!(store.of_task(card.id).len(), 1);
     }
 
     #[test]
-    fn repair_adds_a_missing_move_but_never_backfills() {
+    fn an_interrupted_first_log_header_is_cleared_and_its_move_replayed() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = MoveStore::open(dir.path()).unwrap();
-        let tracked = task(&["agent", "board:ready"], Status::Open);
-        store.record(None, &tracked, "a").unwrap();
-        // The task write landed; the move did not.
-        let mut moved = tracked.clone();
-        moved.tags = vec!["agent".into(), "board:qa".into()];
-        moved.updated_ms = 99;
-        let untracked = task(&["agent", "board:review"], Status::Open);
+        let mut store = open(dir.path(), &[]);
+        let card = task(&["agent"], Status::Open);
+        store
+            .begin(MoveStore::plan(None, &card, "a").into_iter().collect())
+            .unwrap();
+        drop(store);
+        // The first append died writing the log's header.
+        let log = insert_log::log_path(&dir.path().join("moves.mmap"));
+        std::fs::write(&log, b"").unwrap();
 
-        assert_eq!(
-            store.repair(&[moved.clone(), untracked.clone()]).unwrap(),
-            1
-        );
-        let last = store.of_task(moved.id).pop().unwrap();
-        assert_eq!(
-            (
-                last.from.as_deref(),
-                last.to.as_deref(),
-                last.at_ms,
-                last.actor.as_str()
-            ),
-            (Some("ready"), Some("qa"), 99, DEFAULT_ACTOR)
-        );
-        assert!(store.of_task(untracked.id).is_empty());
-        assert_eq!(store.repair(&[moved, untracked]).unwrap(), 0);
+        let store = open(dir.path(), &[&card]);
+        assert_eq!(path(&store.of_task(card.id)), [(1, None, Some("backlog"))]);
+        drop(store);
+        assert_eq!(open(dir.path(), &[]).page(0, 0, 10).len(), 1);
     }
 }

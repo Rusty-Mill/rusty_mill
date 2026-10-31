@@ -165,18 +165,19 @@ pub struct Service {
 
 impl Service {
     pub fn open(dir: &std::path::Path, clock: Clock) -> Result<Self> {
+        let tasks = TaskStore::open(dir)?;
+        let moves = MoveStore::open(dir, |id| tasks.get(id))?;
         let mut service = Self {
-            tasks: TaskStore::open(dir)?,
+            tasks,
             lists: ListStore::open(dir)?,
             tags: TagStore::open(dir)?,
             docs: DocStore::open(dir)?,
-            moves: MoveStore::open(dir)?,
+            moves,
             clock,
         };
         service.ensure_inbox()?;
         service.realign_subtasks()?;
         service.sweep_orphan_docs()?;
-        service.moves.repair(&service.tasks.all())?;
         Ok(service)
     }
 
@@ -351,8 +352,11 @@ impl Service {
         if let Some(status) = new.status {
             apply_status(&mut task, status, now);
         }
-        self.tasks.insert(task.clone())?;
-        self.moves.record(None, &task, &actor)?;
+        let planned = MoveStore::plan(None, &task, &actor);
+        let inserted = task.clone();
+        self.write_with_moves(planned.into_iter().collect(), |tasks| {
+            tasks.insert(inserted)
+        })?;
         Ok(task)
     }
 
@@ -438,17 +442,36 @@ impl Service {
             .collect()
     }
 
-    /// Every task write goes through here or [`Service::save_batch`], which record
-    /// the column move it makes, if any, as `actor`, after the task is durable.
-    /// After a failed move append they refuse until reopen, so a later move never
-    /// hides the gap.
+    /// Write tasks with `write`, recording the column `moves` it makes under the
+    /// history's redo ([`crate::moves`]): intent, task write, then moves. Every
+    /// task write that can change a column goes through here.
+    fn write_with_moves(
+        &mut self,
+        moves: Vec<Move>,
+        write: impl FnOnce(&mut TaskStore) -> std::result::Result<(), TickError>,
+    ) -> Result<()> {
+        self.moves.begin(moves)?;
+        match write(&mut self.tasks) {
+            Ok(()) => Ok(self.moves.commit()?),
+            Err(error) => {
+                // A write the task store cannot vouch for may have landed: keep the intent.
+                let ambiguous = self.tasks.require_writable().is_err();
+                self.moves.abort(ambiguous)?;
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Save one task, recording the column move it makes, if any, as `actor`.
     fn save_task(&mut self, mut task: Task, actor: &str) -> Result<Task> {
         task.updated_ms = self.now();
         task.version = task.version.wrapping_add(1);
-        self.moves.require_writable()?;
         let old = self.tasks.get(task.id);
-        self.tasks.replace(task.clone())?;
-        self.moves.record(old.as_ref(), &task, actor)?;
+        let planned = MoveStore::plan(old.as_ref(), &task, actor);
+        let replaced = task.clone();
+        self.write_with_moves(planned.into_iter().collect(), |tasks| {
+            tasks.replace(replaced)
+        })?;
         Ok(task)
     }
 
@@ -463,13 +486,11 @@ impl Service {
             .last()
             .cloned()
             .ok_or_else(|| ServiceError::Invalid("nothing to save".into()))?;
-        self.moves.require_writable()?;
-        let old: Vec<Option<Task>> = tasks.iter().map(|t| self.tasks.get(t.id)).collect();
-        self.tasks.replace_batch(tasks.clone())?;
-        for (old, new) in old.iter().zip(&tasks) {
-            self.moves.queue(old.as_ref(), new, actor);
-        }
-        self.moves.flush()?;
+        let planned = tasks
+            .iter()
+            .filter_map(|t| MoveStore::plan(self.tasks.get(t.id).as_ref(), t, actor))
+            .collect();
+        self.write_with_moves(planned, |store| store.replace_batch(tasks))?;
         Ok(result)
     }
 
@@ -738,8 +759,15 @@ impl Service {
 
     /// Rename a tag everywhere: the entity, its children's `parent`, and every
     /// task that carries it.
-    pub fn rename_tag(&mut self, name: &str, new_label: &str) -> Result<Tag> {
+    /// `actor` is who the column moves a renamed `board:` tag makes are recorded as.
+    pub fn rename_tag(
+        &mut self,
+        name: &str,
+        new_label: &str,
+        actor: Option<String>,
+    ) -> Result<Tag> {
         self.tasks.require_writable()?;
+        let actor = clean_actor(actor)?;
         let old = self.tag(name)?;
         let label = clean_tag_label(new_label)?;
         let new_name = tag_name(&label);
@@ -764,16 +792,17 @@ impl Service {
                 child.parent = Some(new_name.clone());
                 self.tags.replace(child)?;
             }
-            self.retag(&old.name, Some(&new_name))?;
+            self.retag(&old.name, Some(&new_name), &actor)?;
         } else {
             self.tags.replace(renamed.clone())?;
         }
         Ok(renamed)
     }
 
-    /// Delete a tag and take it off every task.
-    pub fn delete_tag(&mut self, name: &str) -> Result<()> {
+    /// Delete a tag and take it off every task, as `actor` (see [`Service::rename_tag`]).
+    pub fn delete_tag(&mut self, name: &str, actor: Option<String>) -> Result<()> {
         self.tasks.require_writable()?;
+        let actor = clean_actor(actor)?;
         let tag = self.tag(name)?;
         self.tags.delete(&tag.name)?;
         for mut child in self
@@ -785,11 +814,11 @@ impl Service {
             child.parent = None;
             self.tags.replace(child)?;
         }
-        self.retag(&tag.name, None)
+        self.retag(&tag.name, None, &actor)
     }
 
     /// Replace tag `from` with `to` (or drop it) on every task, trashed ones too.
-    fn retag(&mut self, from: &str, to: Option<&str>) -> Result<()> {
+    fn retag(&mut self, from: &str, to: Option<&str>, actor: &str) -> Result<()> {
         for mut task in self
             .tasks
             .all()
@@ -809,7 +838,7 @@ impl Service {
                 })
                 .filter(|g| seen.insert(g.clone()))
                 .collect();
-            self.save_task(task, DEFAULT_ACTOR)?;
+            self.save_task(task, actor)?;
         }
         Ok(())
     }
@@ -1080,6 +1109,57 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_move_that_fails_after_landing_is_recorded_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = Service::open(dir.path(), Box::new(|| 1_000)).unwrap();
+        let other = service
+            .create_list(NewList {
+                name: "other".into(),
+                ..NewList::default()
+            })
+            .unwrap();
+        let card = service
+            .create_task(NewTask {
+                list_id: INBOX_ID,
+                title: "card".into(),
+                tags: vec!["agent".into(), "board:ready".into()],
+                ..NewTask::default()
+            })
+            .unwrap();
+
+        // The journaled batch reaches its checkpoint and fails there: it may have landed.
+        std::fs::create_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        let moved = service.patch_task(
+            card.id,
+            TaskPatch {
+                tags: Some(vec!["agent".into(), "board:qa".into()]),
+                list_id: Some(other.id),
+                actor: Some("builder".into()),
+                ..TaskPatch::default()
+            },
+        );
+        assert!(moved.is_err());
+        is_recovery_required(service.set_status(card.id, Status::Done, None));
+
+        drop(service);
+        std::fs::remove_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        let reopened = Service::open(dir.path(), Box::new(|| 2_000)).unwrap();
+        let path: Vec<_> = reopened
+            .task_moves(card.id)
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.to, m.actor))
+            .collect();
+        assert_eq!(
+            path,
+            [
+                (Some("ready".to_string()), "tick".to_string()),
+                (Some("qa".to_string()), "builder".to_string())
+            ]
+        );
+    }
+
+    #[test]
     fn task_fence_precedes_every_compound_registry_side_effect() {
         let dir = tempfile::tempdir().unwrap();
         let mut service = Service::open(dir.path(), Box::new(|| 1_000)).unwrap();
@@ -1111,8 +1191,8 @@ mod tests {
             Err(ServiceError::Storage(TickError::Journal(_)))
         ));
 
-        is_recovery_required(service.rename_tag("original", "renamed"));
-        is_recovery_required(service.delete_tag("original"));
+        is_recovery_required(service.rename_tag("original", "renamed", None));
+        is_recovery_required(service.delete_tag("original", None));
         is_recovery_required(service.create_task(NewTask {
             list_id: INBOX_ID,
             title: "refused".into(),

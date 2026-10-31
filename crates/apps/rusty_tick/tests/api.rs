@@ -1649,3 +1649,44 @@ fn history_outlives_a_purge_so_a_seq_is_never_reused() {
     assert_eq!(after["moves"][0]["seq"].as_u64(), Some(2));
     assert_eq!(after["moves"][0]["to"].as_str(), Some("backlog"));
 }
+
+#[test]
+fn tag_renames_carry_the_actor_and_columns_match_the_board() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let t = h.task(&list, r#""title":"c","tags":["agent","board:ready"]"#);
+    let id = t["id"].as_str().unwrap().to_string();
+    let as_owner = || Conditions {
+        actor: Some("owner"),
+        ..Conditions::default()
+    };
+    let (s, _) = h.send_conditional(
+        Method::Post,
+        "/api/v1/tags/board:ready/rename",
+        r#"{"label":"board:review"}"#,
+        Some(TOKEN),
+        as_owner(),
+    );
+    assert_eq!(s, 200);
+    let (s, _) = h.send_conditional(
+        Method::Delete,
+        "/api/v1/tags/board:review",
+        "",
+        Some(TOKEN),
+        as_owner(),
+    );
+    assert_eq!(s, 204);
+
+    let (_, all) = h.call(Method::Get, &format!("/api/v1/tasks/{id}/moves"), "");
+    let ready = Value::from("ready");
+    let review = Value::from("review");
+    assert_eq!(
+        moves(&all),
+        [
+            (Value::Null, ready.clone(), "tick".to_string()),
+            (ready, review.clone(), "owner".to_string()),
+            // An agent card without a column tag is in backlog on the board.
+            (review, Value::from("backlog"), "owner".to_string()),
+        ]
+    );
+}

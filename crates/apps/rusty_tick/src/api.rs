@@ -29,8 +29,9 @@
 //! | GET | `/tasks/{id}/moves` | one task's column history, oldest first |
 //!
 //! Writes accept `If-Match: "<etag>"`; a stale one is refused with 412 and
-//! the current entity in `current`. Task writes accept `X-Actor: <name>`, who
-//! any column move they make is recorded as ([`crate::moves`]).
+//! the current entity in `current`. Writes that can move a task's board column
+//! (task writes, tag rename and delete) accept `X-Actor: <name>`, who the move is
+//! recorded as ([`crate::moves`]).
 
 use crate::auth::{Authenticator, Denied};
 use crate::docs::{comment_owner, BOARD_KIND};
@@ -705,11 +706,11 @@ fn route_tags(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Respo
         }
         (Method::Post, [name, "rename"]) => {
             let input: RenameTag = cx.body()?;
-            let tag = service.rename_tag(name, &input.label)?;
+            let tag = service.rename_tag(name, &input.label, cx.actor())?;
             Ok(Response::json(StatusCode::OK, &TagDto::from(tag)))
         }
         (Method::Delete, [name]) => {
-            service.delete_tag(name)?;
+            service.delete_tag(name, cx.actor())?;
             Ok(Response::empty(StatusCode::NO_CONTENT))
         }
         (Method::Get, [name, "tasks"]) => Ok(Response::json(
