@@ -42,9 +42,18 @@ fn probe() -> String {
     let exe = std::env::current_exe().expect("current_exe");
     let dir = exe.parent().and_then(|d| d.parent()).expect("target dir");
     let path: PathBuf = dir.join("examples").join("conhost_probe.exe");
+    // `cargo test --test own_pty` builds no examples, so an old probe
+    // would answer for new probes.
+    let modified = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let sources = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/conhost_probe");
+    let newest = std::fs::read_dir(&sources)
+        .expect("the probe's sources")
+        .filter_map(|e| modified(&e.ok()?.path()))
+        .max();
     assert!(
-        path.exists(),
-        "build the conhost_probe example: {}",
+        modified(&path) >= newest,
+        "build the conhost_probe example (cargo build -p rusty_conhost --example \
+         conhost_probe): {} is missing or older than its sources",
         path.display()
     );
     path.to_string_lossy().into_owned()
@@ -327,8 +336,20 @@ fn parity_probes() -> Vec<Vec<String>> {
         &["print", "7", "\\e[3;7r\\e[H\\e[99B"],
         &["print", "7", "\\u{65e5}\\u{672c}"],
         &["print", "3", "\\u{65e5}\\u{672c}"],
-        &["print-a", "41420d0a43"],
-        &["print-a", "e9"],
+        &["print", "7", "\\e[53m"],
+        &["print-a", "437", "41420d0a43"],
+        &["print-a", "437", "e9"],
+        &["print-a", "65001", "c3a9"],
+        &["print-a", "65001", "e9"],
+        &["print-a", "850", "e9"],
+        // A row exactly full, one past it, and one past it with wrap off.
+        &["print-x", "3", "200"],
+        &["print-x", "7", "200"],
+        &["print-x", "3", "205"],
+        &["print-x", "1", "205"],
+        // One write at the 64 KiB packet cap and past it.
+        &["print-x", "7", "32768"],
+        &["print-x", "7", "100000"],
         // The screen buffer.
         &["sbi"],
         &["sbi-ex"],
@@ -346,6 +367,8 @@ fn parity_probes() -> Vec<Vec<String>> {
         &["set-attr", "1e"],
         &["set-attr", "8007"],
         &["set-attr", "ffff"],
+        &["set-attr", "407"],
+        &["set-attr", "1c4f"],
         &["set-buffer", "200", "30"],
         &["set-buffer", "200", "9001"],
         &["set-buffer", "100", "30"],
@@ -379,29 +402,51 @@ fn parity_probes() -> Vec<Vec<String>> {
         &["ctrl-c", "0"],
         &["ctrl-c", "4242"],
     ];
-    let mut probes: Vec<Vec<String>> = FIXED
+    FIXED
         .iter()
         .map(|args| args.iter().map(|a| (*a).to_owned()).collect())
-        .collect();
-    // A row exactly full, one past it, and one past it with wrap off.
-    for (mode, len) in [("3", 200), ("7", 200), ("3", 205), ("1", 205)] {
-        probes.push(vec!["print".into(), mode.into(), "x".repeat(len)]);
-    }
-    probes
+        .collect()
 }
 
 /// Answers that differ from ConPTY by design (§5.10), as (probe, ours).
-/// V4: we start at 65001 where ConPTY starts at the OEM code page, which
-/// a refused SetConsoleCP leaves in place.
 const DIVERGENCES: &[(&[&str], &str)] = &[
+    // V4: both code pages start at 65001 where ConPTY starts at the OEM
+    // one, which a refused set leaves in place.
     (&["cp"], "cp in=65001"),
     (&["set-cp", "1"], "set-cp error=87 after=65001"),
+    (&["out-cp"], "out-cp out=65001"),
+    (&["set-out-cp", "1"], "set-out-cp error=87 after=65001"),
+    // V5: no console window.
+    (&["window"], "window null=1"),
 ];
 
 /// Gaps the suite has found and that are tracked but not yet closed, as
 /// (probe, issue). They must still differ: a gap that starts to agree
 /// fails the suite until it is taken off this list.
-const GAPS: &[(&[&str], &str)] = &[];
+const GAPS: &[(&[&str], &str)] = &[
+    (&["fill", "x", "1e", "10", "2", "1"], "#1330"),
+    (&["fill", "x", "1e", "500", "190", "29"], "#1330"),
+    (&["fill", "x", "1e", "0", "0", "0"], "#1330"),
+    (&["fill", "x", "1e", "5", "200", "0"], "#1330"),
+    (&["scroll", "0"], "#1330"),
+    (&["scroll", "1"], "#1330"),
+    (&["cells", "abc", "1e,2f,4e", "3", "2"], "#1333"),
+    (&["cells", "abcd", "1e,2f,4e,70", "198", "0"], "#1333"),
+    (&["cells", "abcd", "1e,2f,4e,70", "198", "29"], "#1333"),
+    (&["block"], "#1333"),
+    (&["set-buffer", "200", "30"], "#1333"),
+    (&["set-buffer", "200", "9001"], "#1333"),
+    (&["set-buffer", "100", "30"], "#1333"),
+    (&["set-window", "1", "0", "0", "199", "29"], "#1333"),
+    (&["set-window", "1", "0", "0", "99", "19"], "#1333"),
+    (&["set-window", "0", "0", "0", "0", "0"], "#1333"),
+    (&["set-window", "1", "0", "0", "300", "29"], "#1333"),
+    (&["largest"], "#1333"),
+    (&["input"], "#1335"),
+    (&["cooked", "hi\\r"], "#1335"),
+    (&["cooked", "ab\\bc\\r"], "#1335"),
+    (&["print-x", "1", "205"], "#1336"),
+];
 
 /// How one probe compared.
 #[derive(Debug, PartialEq)]

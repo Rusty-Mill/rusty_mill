@@ -11,7 +11,7 @@
 
 use platform::term::WinSize;
 
-use super::screen::{self, VALID_ATTRIBUTES};
+use super::screen::VALID_ATTRIBUTES;
 use super::{Console, Effect, Kind, Origin, OutputQueue, Packet, Reply, Text, mode};
 use crate::input::Record;
 use crate::msg;
@@ -32,10 +32,11 @@ const POPUP_ATTRIBUTES: u16 = 0xF5;
 /// `CONSOLE_CURRENTFONT_MSG`: the face name, 32 units, at 20.
 const FONT_LEN: usize = 84;
 const FONT_FACE: usize = 20;
-/// What GetCurrentConsoleFont reports: the terminal owns the real font,
-/// so these are a plausible cell (8×16 Consolas, `FF_MODERN` with
-/// `TMPF_VECTOR | TMPF_TRUETYPE`, normal weight).
-const FONT_SIZE: (u16, u16) = (8, 16);
+/// What GetCurrentConsoleFont reports: the terminal owns the real font.
+/// The size is ConPTY's answer, a cell 0 wide and 16 high (the parity
+/// suite's `font` probe); the rest is a plausible face (Consolas,
+/// `FF_MODERN` with `TMPF_VECTOR | TMPF_TRUETYPE`, normal weight).
+const FONT_SIZE: (u16, u16) = (0, 16);
 const FONT_FAMILY: u32 = 0x36;
 const FONT_WEIGHT: u32 = 400;
 const FONT_FACE_NAME: &str = "Consolas";
@@ -97,8 +98,10 @@ impl Console {
     }
 
     /// `CONSOLE_SCREENBUFFERINFO_MSG`. The buffer is the window (§5.1,
-    /// V1); CurrentWindowSize is conhost's inclusive extent, one less
-    /// than the size.
+    /// V1). CurrentWindowSize is the window's width and height: conhost
+    /// makes its inclusive `srWindow` exclusive before it subtracts
+    /// (`GetConsoleScreenBufferInfoExImpl`), and kernelbase takes one off
+    /// again to give the client an inclusive `srWindow`.
     pub(super) fn get_screen_buffer_info(&self, object: usize, fixed: &mut [u8]) -> i32 {
         if fixed.len() < SBI_LEN {
             return msg::STATUS_ILLEGAL_FUNCTION;
@@ -116,8 +119,8 @@ impl Console {
             (8, 0),
             (10, 0),
             (12, self.screen.attributes()),
-            (14, cols.saturating_sub(1)),
-            (16, rows.saturating_sub(1)),
+            (14, cols),
+            (16, rows),
             (18, cols),
             (20, rows),
             (22, POPUP_ATTRIBUTES),
@@ -177,7 +180,9 @@ impl Console {
         if attr & !VALID_ATTRIBUTES != 0 {
             return reply(p, msg::STATUS_FROM_INVALIDARG, fixed, fx);
         }
-        self.write_host(p, fixed, screen::sgr(attr), out, fx);
+        let mut reply = Reply::ok(p.id);
+        reply.write_back = fixed;
+        self.write(reply, Text::Attr(attr), Origin::Host, out, fx);
     }
 
     /// `CONSOLE_CURRENTFONT_MSG { IN MaximumWindow; OUT FontIndex,
@@ -350,7 +355,7 @@ mod tests {
         assert_eq!(r.status, msg::STATUS_SUCCESS);
         // Size, cursor, scroll position, attributes, window, maximum, popup.
         let at = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22];
-        let want = [80, 24, 2, 0, 0, 0, 0x14, 79, 23, 80, 24, POPUP_ATTRIBUTES];
+        let want = [80, 24, 2, 0, 0, 0, 0x14, 80, 24, 80, 24, POPUP_ATTRIBUTES];
         assert_eq!(u16s(&r, &at), want);
         let palette = *h.c.screen.palette();
         let red = palette[1];
@@ -620,7 +625,7 @@ mod tests {
         let [_, _, output] = h.connect(1, "");
         let r = h.call(output, api::GET_CURRENT_FONT, &[0; FONT_LEN], &[], 0);
         assert_eq!(r.status, msg::STATUS_SUCCESS);
-        assert_eq!(u16s(&r, &[8, 10]), [8, 16]);
+        assert_eq!(u16s(&r, &[8, 10]), [0, 16]);
         assert_eq!(msg::u32_at(&r.write_back, 12), Some(FONT_FAMILY));
         let face = msg::utf16_units(&r.write_back[FONT_FACE..]);
         assert_eq!(String::from_utf16_lossy(&face[..9]), "Consolas\0");
@@ -641,7 +646,7 @@ mod tests {
         let r = h.call(output, api::SET_CURRENT_FONT, &[0; FONT_LEN], &[], 0);
         assert_eq!(r.status, msg::STATUS_SUCCESS);
         let r = h.call(output, api::GET_CURRENT_FONT, &[0; FONT_LEN], &[], 0);
-        assert_eq!(u16s(&r, &[8, 10]), [8, 16], "the font is unchanged");
+        assert_eq!(u16s(&r, &[8, 10]), [0, 16], "the font is unchanged");
         let r = h.call(input, api::SET_CURRENT_FONT, &[0; FONT_LEN], &[], 0);
         assert_eq!(r.status, msg::STATUS_FROM_HANDLE);
         let r = h.call(output, api::SET_CURRENT_FONT, &[0; 4], &[], 0);

@@ -33,9 +33,11 @@ pub(crate) fn run(args: &[String]) -> Result<String, String> {
         // Writing, and where it leaves the cursor and pen.
         "print" => print(a.hex(0)?, &a.text(1)?),
         "print-a" => {
-            let n = calls::write_a(&unhex(a.str(0)?)?);
-            format!("n={} {}", val(n, |n| n.to_string()), pen())
+            let set = calls::set_output_cp(a.num(0)?);
+            let n = calls::write_a(&unhex(a.str(1)?)?);
+            format!("cp={} n={} {}", done(set), val(n, |n| n.to_string()), pen())
         }
+        "print-x" => print(a.hex(0)?, &vec![u16::from(b'x'); a.num(1)?]),
         // The screen buffer.
         "sbi" => sbi(),
         "sbi-ex" => sbi_ex(),
