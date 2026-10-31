@@ -196,10 +196,10 @@ impl<T> Receiver<T> {
     /// immediately if that already matches. Fails once the sender has
     /// dropped without a matching value.
     ///
-    /// `f` runs while the channel's lock is held, as in tokio: it may call
-    /// [`Sender::receiver_count`] and clone or drop a `Receiver`, but
-    /// calling `borrow`, `send` or `send_modify` on this channel from `f`
-    /// deadlocks.
+    /// `f` runs while the channel's exclusive lock is held (tokio holds
+    /// its read lock there): it may call [`Sender::receiver_count`] and
+    /// clone or drop a `Receiver`, but calling `borrow`, `send` or
+    /// `send_modify` on this channel from `f` deadlocks.
     pub async fn wait_for(
         &mut self,
         mut f: impl FnMut(&T) -> bool,
