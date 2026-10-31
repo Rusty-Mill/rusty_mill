@@ -45,6 +45,7 @@ struct Inner<T> {
     /// (and once every sender drops), since a new message means every
     /// currently-parked receiver, by definition already caught up to the
     /// old `next_seq`, now has something new to read.
+    ///
     /// Each keyed by the [`Waiter`] that owns it, which removes it when
     /// dropped (see the module docs).
     waiters: Vec<(u64, Waker)>,
@@ -287,6 +288,8 @@ impl<T: Clone> Waiter<'_, T> {
         let waker = cx.waker().clone();
         let mut guard = self.shared.inner.lock().unwrap();
         let (poll, stale) = match next_message(&mut guard, next_to_read) {
+            // Whatever made a parked waiter ready (a send, the last sender
+            // dropping) already drained its slot; this only guards that.
             Some(result) => (Poll::Ready(result), self.unregister(&mut guard)),
             None => (Poll::Pending, self.park(&mut guard, waker)),
         };
