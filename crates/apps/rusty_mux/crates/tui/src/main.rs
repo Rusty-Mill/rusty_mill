@@ -434,7 +434,22 @@ mod client {
     struct Taking {
         /// An old connection ended, or a request on one failed.
         ended: bool,
-        held: Vec<Action>,
+        held: Vec<Aimed>,
+    }
+
+    /// An action held for later, with the block it was typed for: the one
+    /// in focus then, or for a focus change, the one it moved to. Taken
+    /// later only on that block, never on another the focus has since
+    /// gone to, by this client's keys or by another client's layout.
+    #[derive(Debug, PartialEq)]
+    struct Aimed {
+        at: BlockId,
+        action: Action,
+    }
+
+    /// Whether `held` holds a detach.
+    fn detaching(held: &[Aimed]) -> bool {
+        held.iter().any(|aimed| aimed.action == Action::Detach)
     }
 
     /// What became of an action typed while a move may be under way.
@@ -468,17 +483,27 @@ mod client {
         /// left to the server as orphans; a move is over within its
         /// probe and [`HANDSHAKE`]. Nothing typed after it is kept: it was
         /// meant for whatever the terminal shows once the client stops.
-        fn hold(&mut self, action: Action) -> Held {
+        fn hold(&mut self, aimed: Aimed) -> Held {
             match &mut self.moving {
-                Moving::Taking(taking) if taking.held.contains(&Action::Detach) => Held::Full,
-                Moving::Taking(taking) if taking.held.len() >= HELD && action != Action::Detach => {
+                Moving::Taking(taking) if detaching(&taking.held) => Held::Full,
+                Moving::Taking(taking)
+                    if taking.held.len() >= HELD && aimed.action != Action::Detach =>
+                {
                     Held::Full
                 }
                 Moving::Taking(taking) => {
-                    taking.held.push(action);
+                    taking.held.push(aimed);
                     Held::Kept
                 }
-                Moving::Idle | Moving::Asked(_) => Held::Now(action),
+                Moving::Idle | Moving::Asked(_) => Held::Now(aimed.action),
+            }
+        }
+
+        /// The actions held by a move under way.
+        fn held(&self) -> &[Aimed] {
+            match &self.moving {
+                Moving::Taking(taking) => &taking.held,
+                Moving::Idle | Moving::Asked(_) => &[],
             }
         }
 
@@ -512,7 +537,7 @@ mod client {
         /// Connections that ended during a move that went through were its
         /// own takeovers; during one that failed before any client moved,
         /// they ended for real.
-        fn finish<T>(&mut self, moved: Result<T, Missed>, now: Instant) -> (After<T>, Vec<Action>) {
+        fn finish<T>(&mut self, moved: Result<T, Missed>, now: Instant) -> (After<T>, Vec<Aimed>) {
             let taking = match std::mem::replace(&mut self.moving, Moving::Idle) {
                 Moving::Taking(taking) => taking,
                 Moving::Idle | Moving::Asked(_) => Taking::default(),
@@ -1620,7 +1645,7 @@ mod client {
         standby: Standby,
         /// Actions held during a move that lost the path, taken once it is
         /// back.
-        held: Vec<Action>,
+        held: Vec<Aimed>,
         /// Keys that were waiting on a block's lease when a move started or
         /// the path was lost, with that block: taken ahead of the held
         /// actions, and only if the block still has the focus then.
@@ -1923,18 +1948,26 @@ mod client {
         /// up to a detach. The keys go only to the block they were typed
         /// into, if it still has the focus: the layout the path came back
         /// with may have moved it, and they would reach the wrong program.
-        fn replay(&mut self, held: Vec<Action>) {
+        /// Each held action is taken only on the block it was aimed at, a
+        /// focus change only onto a block still shown.
+        fn replay(&mut self, held: Vec<Aimed>) {
             if let Some((block, keys)) = self.kept.take() {
                 match (block == self.focus, self.panes.get_mut(&block)) {
                     (true, Some(pane)) => pane.typed(keys),
                     _ => bell(),
                 }
             }
-            for action in held {
-                let detach = action == Action::Detach;
-                self.act(action);
-                if detach {
-                    return;
+            for Aimed { at, action } in held {
+                match action {
+                    Action::Detach => return self.end(Ended::Detached),
+                    Action::Focus(_) if self.visible().iter().any(|(b, _)| *b == at) => {
+                        self.focus = at;
+                        self.sync();
+                    }
+                    action if at == self.focus && !matches!(action, Action::Focus(_)) => {
+                        self.act(action)
+                    }
+                    _ => bell(),
                 }
             }
         }
@@ -1998,7 +2031,7 @@ mod client {
         /// the clients it moved; then the client stops, leaving them to
         /// the server's grace.
         fn retry(&mut self, why: String) {
-            if self.held.contains(&Action::Detach) {
+            if detaching(&self.held) {
                 return self.end(Ended::Detached);
             }
             let Some(lost) = self.lost.as_mut() else {
@@ -2142,25 +2175,44 @@ mod client {
         }
 
         /// Takes a typed action, or holds it during a move, and after a
-        /// move that lost the path, behind what that move held: actions
-        /// held there name no block, so they must be taken before any
-        /// later one moves the focus.
+        /// move that lost the path, behind what that move held; either
+        /// way aimed at the block it was typed for (see [`Aimed`]).
         fn typed(&mut self, action: Action) {
             // A detach is held already: the client stops either way.
-            if self.held.contains(&Action::Detach) {
+            if detaching(&self.held) {
                 return bell();
             }
-            if !self.held.is_empty() && action != Action::Detach {
+            let Some(aimed) = self.aim(action) else {
+                return bell();
+            };
+            if !self.held.is_empty() && aimed.action != Action::Detach {
                 return match self.held.len() < HELD {
-                    true => self.held.push(action),
+                    true => self.held.push(aimed),
                     false => bell(),
                 };
             }
-            match self.standby.hold(action) {
+            match self.standby.hold(aimed) {
                 Held::Now(action) => self.act(action),
                 Held::Kept => {}
                 Held::Full => bell(),
             }
+        }
+
+        /// `action` aimed at the block in focus once what is held is taken;
+        /// `None` for a focus change with nowhere to go.
+        fn aim(&self, action: Action) -> Option<Aimed> {
+            let focus = self
+                .held
+                .iter()
+                .chain(self.standby.held())
+                .rev()
+                .find(|aimed| matches!(aimed.action, Action::Focus(_)))
+                .map_or(self.focus, |aimed| aimed.at);
+            let at = match &action {
+                Action::Focus(dir) => screen::neighbor(&self.visible(), focus, *dir)?,
+                _ => focus,
+            };
+            Some(Aimed { at, action })
         }
 
         fn act(&mut self, action: Action) {
@@ -2698,21 +2750,36 @@ mod client {
             Action::Input(data.to_vec())
         }
 
+        fn aimed(action: Action) -> Aimed {
+            Aimed {
+                at: BlockId::from_uuid(Uuid::nil()),
+                action,
+            }
+        }
+
+        fn actions(held: &[Aimed]) -> Vec<&Action> {
+            held.iter().map(|aimed| &aimed.action).collect()
+        }
+
         #[test]
         fn actions_typed_during_a_move_are_held_in_order_up_to_a_detach() {
             let mut standby = taking();
-            assert_eq!(standby.hold(input(b"ab")), Held::Kept);
-            assert_eq!(standby.hold(Action::Focus(Dir::Right)), Held::Kept);
-            assert_eq!(standby.hold(Action::Detach), Held::Kept);
-            assert_eq!(standby.hold(input(b"c")), Held::Full, "nothing after it");
+            assert_eq!(standby.hold(aimed(input(b"ab"))), Held::Kept);
+            assert_eq!(standby.hold(aimed(Action::Focus(Dir::Right))), Held::Kept);
+            assert_eq!(standby.hold(aimed(Action::Detach)), Held::Kept);
+            assert_eq!(
+                standby.hold(aimed(input(b"c"))),
+                Held::Full,
+                "nothing after it"
+            );
             let (after, held) = standby.finish(Ok(()), Instant::now());
             assert_eq!(after, After::Install(()));
             assert_eq!(
-                held,
-                [input(b"ab"), Action::Focus(Dir::Right), Action::Detach]
+                actions(&held),
+                [&input(b"ab"), &Action::Focus(Dir::Right), &Action::Detach]
             );
             // Once over, actions go straight through, and none come back.
-            assert_eq!(standby.hold(input(b"e")), Held::Now(input(b"e")));
+            assert_eq!(standby.hold(aimed(input(b"e"))), Held::Now(input(b"e")));
             assert_eq!(standby.finish(Ok(()), Instant::now()).1, []);
         }
 
@@ -2720,21 +2787,25 @@ mod client {
         fn actions_held_during_a_move_are_bounded() {
             let mut standby = taking();
             for _ in 0..HELD {
-                assert_eq!(standby.hold(input(b"k")), Held::Kept);
+                assert_eq!(standby.hold(aimed(input(b"k"))), Held::Kept);
             }
-            assert_eq!(standby.hold(input(b"k")), Held::Full);
-            assert_eq!(standby.hold(Action::Detach), Held::Kept, "never dropped");
+            assert_eq!(standby.hold(aimed(input(b"k"))), Held::Full);
+            assert_eq!(
+                standby.hold(aimed(Action::Detach)),
+                Held::Kept,
+                "never dropped"
+            );
             assert_eq!(standby.finish(Ok(()), Instant::now()).1.len(), HELD + 1);
         }
 
         #[test]
         fn actions_held_during_a_failed_move_are_given_back_to_take_on_ssh() {
             let mut standby = taking();
-            assert_eq!(standby.hold(input(b"x")), Held::Kept);
+            assert_eq!(standby.hold(aimed(input(b"x"))), Held::Kept);
             let (after, held) =
                 standby.finish::<()>(Err(Missed::Retry("no".into())), Instant::now());
             assert_eq!(after, After::Stay);
-            assert_eq!(held, [input(b"x")]);
+            assert_eq!(actions(&held), [&input(b"x")]);
         }
 
         #[test]
@@ -3196,13 +3267,35 @@ mod client {
             assert!(app.kept.is_none());
         }
 
+        /// Keys for A typed during a move, with A gone from the layout the
+        /// move came back with (another client zoomed B): dropped, never
+        /// sent to B, even once B holds its lease.
+        #[cfg(unix)]
+        #[test]
+        fn keys_held_during_a_move_never_reach_another_block() {
+            let (mut app, inbox, [_control, a_old, _b_old]) = app(None);
+            sent(&a_old);
+            app.standby.moving = Moving::Taking(Taking::default());
+            app.typed(input(b"for-a"));
+            let (mut path, _control, a_new, b_new) = back(takeover(1));
+            path.layout = Some((Some(Layout::Block(block(2))), None));
+            app.take(Input::Moved(Ok(path)));
+            assert_eq!(app.focus, block(2));
+            assert!(typed_in(&sent(&a_new)).is_empty());
+            let at_b = sent(&b_new);
+            assert!(typed_in(&at_b).is_empty());
+            grant(&mut app, &inbox, &b_new, &at_b);
+            assert!(typed_in(&sent(&b_new)).is_empty(), "not A's keys");
+        }
+
         /// A second Ctrl-] d while a detach held through a broken move
         /// waits on its one attempt is ignored: the path still comes back
         /// to detach the moved clients there.
         #[cfg(unix)]
         #[test]
         fn a_second_detach_waits_for_the_one_held_through_a_broken_move() {
-            let (mut app, inbox, _ends) = app(Some(Box::new(Never)));
+            let asked = Arc::new(Mutex::new(Vec::new()));
+            let (mut app, inbox, _ends) = app(Some(Box::new(Keeps(asked.clone()))));
             app.standby.moving = Moving::Taking(Taking::default());
             app.typed(Action::Detach);
             app.take(Input::Moved(Err(Missed::Broken(
@@ -3213,7 +3306,12 @@ mod client {
             app.typed(Action::Detach);
             app.typed(input(b"x"));
             assert!(app.ended.is_none(), "still waiting on the attempt");
-            assert_eq!(app.held, [Action::Detach]);
+            assert_eq!(actions(&app.held), [&Action::Detach]);
+            assert!(
+                inbox.recv_timeout(Duration::from_millis(300)).is_err(),
+                "no second attempt"
+            );
+            assert_eq!(asked.lock().expect("lock").len(), 1);
         }
 
         /// A [`Rejoin`] that records whether each fresh path was to try the

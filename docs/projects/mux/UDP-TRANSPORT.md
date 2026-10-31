@@ -198,7 +198,12 @@ ordering, acks and flow control belong to each stream.
   lease is asked for go ahead of what is held, so a move or a lost path
   does not drop them, but only to that block, if it still has the focus
   once the path is back; otherwise, like keys still waiting on a block the
-  focus had left, they are dropped with a bell, never sent elsewhere. A detach during a move waits for it to end (within
+  focus had left, they are dropped with a bell, never sent elsewhere. The
+  same holds for every action held during a move or while the path is
+  down: each is aimed at the block it was typed for (a focus change at the
+  block it moved to), and is dropped with a bell if, once taken, that
+  block no longer has the focus, for example because another client
+  changed the window's layout meanwhile. A detach during a move waits for it to end (within
   the probe and the 10 s handshake), and nothing typed after it is sent,
   so the clients the move took over are detached on their new connections,
   not left to the server for 30 s. After a move that broke, the path gets
