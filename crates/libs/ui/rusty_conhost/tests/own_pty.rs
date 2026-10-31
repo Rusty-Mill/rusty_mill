@@ -7,7 +7,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use platform::error::ErrorKind;
-use platform::process::{Child, Command, ExitStatus, GroupSpec};
+use platform::process::{Child, Command, ExitStatus, GroupSpec, Spawner as _};
 use platform::pty::PtyMaster;
 use platform::term::WinSize;
 use platform_windows::{WindowsChild, WindowsPty};
@@ -394,6 +394,59 @@ fn a_client_still_attached_at_the_deadline_is_ended_there() {
     assert_eq!(status, ExitStatus::Code(CONTROL_C_EXIT));
 }
 
+/// The pid in the probe's `ready pid=<pid>` line.
+fn ready_pid(stream: &Stream) -> u32 {
+    plain_lines(&stream.out)
+        .iter()
+        .find_map(|l| l.strip_prefix("ready pid=")?.trim().parse().ok())
+        .expect("a ready pid line")
+}
+
+/// Ends a process by pid if a test fails before it exits.
+struct ReapedPid(u32);
+
+impl Drop for ReapedPid {
+    fn drop(&mut self) {
+        if let Ok(p) = platform_windows::condrv::ClientProcess::open(self.0) {
+            let _ = p.terminate();
+        }
+    }
+}
+
+#[test]
+fn a_grandchild_still_attached_at_the_deadline_is_ended_there() {
+    let _g = lock();
+    // cmd starts the probe on the same console, waits about a second so
+    // the probe's handler is in place, and exits: the console then
+    // closes on child exit with only the grandchild attached.
+    let probe = probe();
+    assert!(
+        !probe.contains(' '),
+        "start needs an unquoted path: {probe}"
+    );
+    let tail = format!("start /b {probe} ctrl-hold 60000 & ping -n 2 127.0.0.1 >nul");
+    let cmd = command("cmd.exe", &["/c", &tail]);
+    let (master, child) = own(&cmd);
+    let master = Arc::new(master);
+    let mut stream = Stream::new(Arc::clone(&master));
+    let mut child = Reaped(child);
+    stream.until("ready pid=");
+    let grandchild = ReapedPid(ready_pid(&stream));
+    exit_of(&mut child);
+    let exited = Instant::now();
+    let spawner = platform_windows::WindowsSpawner;
+    while spawner.is_alive(grandchild.0).expect("is_alive") {
+        assert!(exited.elapsed() < BUDGET, "the grandchild runs on");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Windows would end its held handler only at about 5 s.
+    let took = exited.elapsed();
+    assert!(
+        took < GRACE + Duration::from_millis(1500),
+        "ended {took:?} after the child's exit, not at the deadline"
+    );
+}
+
 #[test]
 fn eof_comes_once_to_readers_on_two_threads() {
     let _g = lock();
@@ -421,7 +474,7 @@ fn drop_during_the_grace_returns_at_once_and_the_console_closes() {
     let _child = Reaped(child);
     let mut out = Vec::new();
     let mut buf = [0u8; 1024];
-    while !plain_lines(&out).iter().any(|l| l == "ready") {
+    while !plain_lines(&out).iter().any(|l| l.starts_with("ready")) {
         let n = master.read(&mut buf).expect("read");
         assert!(n > 0, "EOF before ready");
         out.extend_from_slice(&buf[..n]);

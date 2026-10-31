@@ -1780,6 +1780,11 @@ pub(crate) mod tests {
             [Effect::Joined { pid: 7 }, Effect::Reply(r), close_to(7)],
             "after its reply"
         );
+        let fx = h.ev(Event::GraceExpired);
+        assert!(
+            fx.contains(&Effect::Kill { pid: 7 }),
+            "ended at the deadline, whatever handler time it had"
+        );
     }
 
     #[test]
