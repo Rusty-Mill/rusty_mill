@@ -3288,6 +3288,29 @@ mod client {
             assert!(typed_in(&sent(&b_new)).is_empty(), "not A's keys");
         }
 
+        /// The same, when the move broke and the path came back by recovery.
+        #[cfg(unix)]
+        #[test]
+        fn keys_held_through_a_broken_move_never_reach_another_block() {
+            let (mut app, inbox, [_control, a_old, _b_old]) = app(Some(Box::new(Never)));
+            sent(&a_old);
+            app.standby.moving = Moving::Taking(Taking::default());
+            app.typed(input(b"for-a"));
+            app.take(Input::Moved(Err(Missed::Broken(
+                "pane".into(),
+                takeover(1),
+            ))));
+            let (mut path, _control, a_new, b_new) = back(takeover(1));
+            path.layout = Some((Some(Layout::Block(block(2))), None));
+            app.take(Input::Rejoined(Ok(path)));
+            assert_eq!(app.focus, block(2));
+            assert!(typed_in(&sent(&a_new)).is_empty());
+            let at_b = sent(&b_new);
+            grant(&mut app, &inbox, &b_new, &at_b);
+            assert!(typed_in(&sent(&b_new)).is_empty(), "not A's keys");
+            assert!(app.held.is_empty());
+        }
+
         /// A second Ctrl-] d while a detach held through a broken move
         /// waits on its one attempt is ignored: the path still comes back
         /// to detach the moved clients there.
