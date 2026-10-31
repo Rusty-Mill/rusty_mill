@@ -107,6 +107,9 @@ enum Host {
     Own,
 }
 
+/// What precedes a probe's result line.
+const RESULT: &str = "#> ";
+
 /// Run the probe with `args` on `host` and return its result line.
 fn probe_line(host: Host, args: &[&str]) -> String {
     let cmd = command(&probe(), args);
@@ -122,13 +125,13 @@ fn probe_line(host: Host, args: &[&str]) -> String {
     };
     let out = out.unwrap_or_else(|| panic!("{host:?}: no EOF within the budget"));
     assert_eq!(Box::new(child).wait().expect("wait"), ExitStatus::Code(0));
+    let head = format!("{RESULT}{} ", args[0]);
     plain_lines(&out)
-        .into_iter()
-        .find(|l| l.starts_with(args[0]))
+        .iter()
+        .find_map(|l| Some(l[l.find(&head)? + RESULT.len()..].to_owned()))
         .unwrap_or_else(|| {
             panic!(
-                "{host:?}: no {:?} line in {:?}",
-                args[0],
+                "{host:?}: no {head:?} line in {:?}",
                 String::from_utf8_lossy(&out)
             )
         })
@@ -277,6 +280,116 @@ fn ctrl_c_stops_the_running_command_not_the_shell() {
     assert_eq!(exit_of(&mut child), ExitStatus::Code(3));
 }
 
+/// The parity suite (§8.1, the first Phase B criterion in §9.2): every
+/// API our host serves, and those it doesn't yet, each called by a real
+/// client through kernelbase under ConPTY and under our host. Probes take
+/// `conhost_probe`'s escapes (`\e`, `\s`, ...).
+fn parity_probes() -> Vec<Vec<String>> {
+    const FIXED: &[&[&str]] = &[
+        // Modes.
+        &["modes"],
+        &["set-mode", "in", "1e4"],
+        &["set-mode", "in", "400"],
+        &["set-mode", "in", "0"],
+        &["set-mode", "in", "f7"],
+        &["set-mode", "out", "20"],
+        &["set-mode", "out", "5"],
+        &["set-mode", "out", "7"],
+        &["set-mode", "out", "1f"],
+        // Code pages.
+        &["cp"],
+        &["set-cp", "65001"],
+        &["set-cp", "437"],
+        &["set-cp", "850"],
+        &["set-cp", "1"],
+        &["out-cp"],
+        &["set-out-cp", "65001"],
+        &["set-out-cp", "437"],
+        &["set-out-cp", "1"],
+        // WriteConsoleW: controls, wrap and VT, by output mode.
+        &["print", "3", "ab\\tc"],
+        &["print", "7", "ab\\tc"],
+        &["print", "3", "abc\\rd"],
+        &["print", "3", "a\\nb"],
+        &["print", "7", "a\\nb"],
+        &["print", "f", "a\\nb"],
+        &["print", "3", "\\bx"],
+        &["print", "3", "ab\\b\\bx"],
+        &["print", "3", "a\\x07b"],
+        &["print", "3", "\\e[31m"],
+        &["print", "1", "\\e[31m"],
+        &["print", "7", "\\e[5;10H"],
+        &["print", "7", "\\e[31;44m"],
+        &["print", "7", "\\e[1;7m"],
+        &["print", "7", "\\e[4m"],
+        &["print", "7", "\\e[38;2;1;2;3mx"],
+        &["print", "7", "ab\\e7\\e[5;5H\\e8c"],
+        &["print", "7", "\\e[3;7r\\e[H\\e[99B"],
+        &["print", "7", "\\u{65e5}\\u{672c}"],
+        &["print", "3", "\\u{65e5}\\u{672c}"],
+        &["print-a", "41420d0a43"],
+        &["print-a", "e9"],
+        // The screen buffer.
+        &["sbi"],
+        &["sbi-ex"],
+        &["colors"],
+        &["cursor-info"],
+        &["set-cursor-info", "50", "1"],
+        &["set-cursor-info", "100", "0"],
+        &["set-cursor-info", "0", "1"],
+        &["set-cursor-info", "101", "1"],
+        &["set-cursor", "5", "3"],
+        &["set-cursor", "199", "29"],
+        &["set-cursor", "200", "0"],
+        &["set-cursor", "0", "30"],
+        &["set-cursor", "-1", "0"],
+        &["set-attr", "1e"],
+        &["set-attr", "8007"],
+        &["set-attr", "ffff"],
+        &["set-buffer", "200", "30"],
+        &["set-buffer", "200", "9001"],
+        &["set-buffer", "100", "30"],
+        &["set-window", "1", "0", "0", "199", "29"],
+        &["set-window", "1", "0", "0", "99", "19"],
+        &["set-window", "0", "0", "0", "0", "0"],
+        &["set-window", "1", "0", "0", "300", "29"],
+        &["largest"],
+        &["font"],
+        &["window"],
+        // Cells.
+        &["fill", "x", "1e", "10", "2", "1"],
+        &["fill", "x", "1e", "500", "190", "29"],
+        &["fill", "x", "1e", "0", "0", "0"],
+        &["fill", "x", "1e", "5", "200", "0"],
+        &["cells", "abc", "1e,2f,4e", "3", "2"],
+        &["cells", "abcd", "1e,2f,4e,70", "198", "0"],
+        &["cells", "abcd", "1e,2f,4e,70", "198", "29"],
+        &["block"],
+        &["scroll", "0"],
+        &["scroll", "1"],
+        // Titles and processes.
+        &["title"],
+        &["set-title", "hello\\sworld"],
+        &["set-title", ""],
+        &["procs"],
+        // Input and control events.
+        &["input"],
+        &["cooked", "hi\\r"],
+        &["cooked", "ab\\bc\\r"],
+        &["ctrl-c", "0"],
+        &["ctrl-c", "4242"],
+    ];
+    let mut probes: Vec<Vec<String>> = FIXED
+        .iter()
+        .map(|args| args.iter().map(|a| (*a).to_owned()).collect())
+        .collect();
+    // A row exactly full, one past it, and one past it with wrap off.
+    for (mode, len) in [("3", 200), ("7", 200), ("3", 205), ("1", 205)] {
+        probes.push(vec!["print".into(), mode.into(), "x".repeat(len)]);
+    }
+    probes
+}
+
 /// Answers that differ from ConPTY by design (§5.10), as (probe, ours).
 /// V4: we start at 65001 where ConPTY starts at the OEM code page, which
 /// a refused SetConsoleCP leaves in place.
@@ -285,32 +398,52 @@ const DIVERGENCES: &[(&[&str], &str)] = &[
     (&["set-cp", "1"], "set-cp error=87 after=65001"),
 ];
 
+/// Gaps the suite has found and that are tracked but not yet closed, as
+/// (probe, issue). They must still differ: a gap that starts to agree
+/// fails the suite until it is taken off this list.
+const GAPS: &[(&[&str], &str)] = &[];
+
+/// How one probe compared.
+#[derive(Debug, PartialEq)]
+enum Verdict {
+    Same,
+    Divergence,
+    Gap(&'static str),
+    /// A tracked gap that agrees now.
+    Closed(&'static str),
+    Mismatch,
+}
+
+fn verdict(args: &[String], conpty: &str, ours: &str) -> Verdict {
+    let is = |listed: &[&str]| listed.iter().copied().eq(args.iter().map(String::as_str));
+    let gap = GAPS.iter().find(|(p, _)| is(p)).map(|(_, issue)| *issue);
+    match (conpty == ours, gap) {
+        (true, None) => Verdict::Same,
+        (true, Some(issue)) => Verdict::Closed(issue),
+        (false, Some(issue)) => Verdict::Gap(issue),
+        (false, None) if DIVERGENCES.iter().any(|(p, o)| is(p) && *o == ours) => {
+            Verdict::Divergence
+        }
+        (false, None) => Verdict::Mismatch,
+    }
+}
+
 #[test]
-fn probes_agree_with_conpty() {
+fn parity_suite_agrees_with_conpty() {
     let _g = lock();
-    let probe_args: &[&[&str]] = &[
-        &["modes"],
-        &["set-mode", "in", "1e4"],
-        &["set-mode", "in", "400"],
-        &["set-mode", "out", "20"],
-        &["set-mode", "out", "5"],
-        &["cp"],
-        &["set-cp", "65001"],
-        &["set-cp", "437"],
-        &["set-cp", "850"],
-        &["set-cp", "1"],
-    ];
-    let mismatches: Vec<String> = probe_args
-        .iter()
-        .filter_map(|args| {
-            let conpty = probe_line(Host::ConPty, args);
-            let ours = probe_line(Host::Own, args);
-            let diverges = DIVERGENCES.contains(&(args, ours.as_str()));
-            (conpty != ours && !diverges)
-                .then(|| format!("{args:?}: ConPTY {conpty:?}, ours {ours:?}"))
-        })
-        .collect();
-    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    let mut failures = Vec::new();
+    for args in parity_probes() {
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let conpty = probe_line(Host::ConPty, &argv);
+        let ours = probe_line(Host::Own, &argv);
+        let v = verdict(&args, &conpty, &ours);
+        // The whole matrix, for `--nocapture`.
+        eprintln!("{v:?}\t{args:?}\n  conpty {conpty}\n  ours   {ours}");
+        if matches!(v, Verdict::Mismatch | Verdict::Closed(_)) {
+            failures.push(format!("{v:?} {args:?}: ConPTY {conpty:?}, ours {ours:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
