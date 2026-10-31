@@ -257,10 +257,11 @@ mod client {
         Retry(String),
         /// The server had let a client go.
         Dropped,
-        /// After the control connection's client was taken over: hanging
-        /// the fresh connection up ends that client, so there is nothing
-        /// left to continue.
-        Broken(String),
+        /// After the control connection's client was taken over, with the
+        /// takeover it was welcomed with: a request on the fresh connection
+        /// may have confirmed that token and retired the one asked with,
+        /// so only this one continues the client.
+        Broken(String, Takeover),
     }
 
     /// Runs a [`Rejoin`] on its own thread, so the keys, the heartbeat and
@@ -397,15 +398,31 @@ mod client {
         /// Whether to ask the server for a new association: the client
         /// stayed on SSH from the start.
         asks: bool,
-        /// The request for one, until the server answers.
-        offer: Option<u64>,
-        /// A move is under way: the old path's connections end as their
-        /// clients are taken over, and that is no loss.
-        moving: bool,
+        moving: Moving,
         /// Failed moves since the last one that worked.
         tries: u32,
         /// No move before this.
         next: Instant,
+    }
+
+    /// Where a move onto UDP stands.
+    enum Moving {
+        Idle,
+        /// The server was asked for a new association by this request.
+        Asked(u64),
+        /// The clients are being taken over on UDP.
+        Taking(Taking),
+    }
+
+    /// While the clients are taken over, the old path's connections end
+    /// one by one: no loss if the move goes through, but a real one if it
+    /// fails before any client moved. Keys typed meanwhile wait for the
+    /// path they will go on.
+    #[derive(Default)]
+    struct Taking {
+        /// An old connection ended, or a request on one failed.
+        ended: bool,
+        typed: Vec<(BlockId, Vec<u8>)>,
     }
 
     /// When the client last asked for and had a sign of life.
@@ -721,8 +738,7 @@ mod client {
             standby: Standby {
                 pulse: pulses.standby,
                 asks: stayed,
-                offer: None,
-                moving: false,
+                moving: Moving::Idle,
                 tries: 0,
                 next: now,
             },
@@ -851,14 +867,14 @@ mod client {
         };
         rejoin.discard();
         let why = match missed {
-            Missed::Retry(why) | Missed::Broken(why) => why,
+            Missed::Retry(why) | Missed::Broken(why, _) => why,
             Missed::Dropped => return Err("the server let this client go".into()),
         };
         eprintln!("rusty-mux: staying on SSH: {why}");
         match take_over(ssh.to_owned(), plan(), &NEVER) {
             Ok(back) => Ok(Some(back)),
             Err(Missed::Dropped) => Err("the server let this client go".into()),
-            Err(Missed::Retry(why) | Missed::Broken(why)) => Err(why),
+            Err(Missed::Retry(why) | Missed::Broken(why, _)) => Err(why),
         }
     }
 
@@ -1164,7 +1180,7 @@ mod client {
             Some(window) => {
                 let entries = req
                     .call(|req| Message::List { req })
-                    .map_err(Missed::Broken)?;
+                    .map_err(|why| Missed::Broken(why, me))?;
                 Some(layout_of(entries, window).unwrap_or_default())
             }
             None => None,
@@ -1175,7 +1191,7 @@ mod client {
             .into_iter()
             .map(|(block, resume)| {
                 reach(&socket, block, Some(resume), by, cancel).map_err(|missed| match missed {
-                    Missed::Retry(why) | Missed::Broken(why) => Missed::Broken(why),
+                    Missed::Retry(why) | Missed::Broken(why, _) => Missed::Broken(why, me),
                     Missed::Dropped => Missed::Dropped,
                 })
             })
@@ -1557,7 +1573,7 @@ mod client {
                 // The server closes every connection when it goes; a
                 // block's own is left to report it, after its last output.
                 Input::ControlEnded(joined) if joined != self.joined => {}
-                Input::ControlEnded(_) if !self.panes.is_empty() || self.standby.moving => {}
+                Input::ControlEnded(_) if !self.panes.is_empty() => {}
                 Input::ControlEnded(_) => self.broke(Ended::Disconnected),
                 Input::Pane(tag, message) => self.on_pane(tag, message),
                 // Only asked for while lost.
@@ -1565,7 +1581,7 @@ mod client {
                 Input::Rejoined(Ok(back)) => self.rejoined(back),
                 Input::Rejoined(Err(Missed::Retry(why))) => self.retry(why),
                 Input::Rejoined(Err(Missed::Dropped)) => self.end(Ended::Dropped),
-                Input::Rejoined(Err(Missed::Broken(why))) => {
+                Input::Rejoined(Err(Missed::Broken(why, _))) => {
                     self.end(Ended::Failed(format!("reconnecting: {why}")))
                 }
                 Input::Moved(moved) => self.moved(moved),
@@ -1578,8 +1594,6 @@ mod client {
                     let closed = self.panes.get(&block).is_some_and(|p| p.closed);
                     match leaving || closed {
                         true => self.drained(block),
-                        // Taken over by the move under way.
-                        false if self.standby.moving => {}
                         // A block this client still shows lost its connection.
                         false => self.broke(Ended::Disconnected),
                     }
@@ -1634,30 +1648,33 @@ mod client {
         /// a new association instead, and moves once the server offers one.
         fn move_back(&mut self, now: Instant) {
             let standby = &self.standby;
-            if standby.moving || now < standby.next {
+            if !matches!(standby.moving, Moving::Idle) || now < standby.next {
                 return;
             }
-            let heard = standby
-                .pulse
-                .last()
-                .is_some_and(|heard| now.saturating_duration_since(heard) < SILENT);
+            let last = standby.pulse.last();
+            let heard = last.is_some_and(|heard| now.saturating_duration_since(heard) < SILENT);
             if heard {
                 self.move_onto(Onto::Standby);
-            } else if standby.asks {
-                self.standby.moving = true;
-                let req = self.request(|req| Message::OpenDatagram { req });
-                self.standby.offer = Some(req);
+            } else if standby.asks || last.is_some() {
+                // A silent path in standby may be gone from the server, past
+                // its `--udp-idle`: a new association is asked for as well.
+                self.standby.moving = Moving::Asked(self.next);
+                self.request(|req| Message::OpenDatagram { req });
             }
         }
 
         /// The server answered the request for a new association.
         fn offered(&mut self, offer: Option<Onto>) {
-            self.standby.offer = None;
-            self.standby.moving = false;
+            self.standby.moving = Moving::Idle;
             match offer {
                 Some(onto) => self.move_onto(onto),
                 None => self.wait_to_move(),
             }
+        }
+
+        /// Whether `req` asked for the new association awaited.
+        fn asked(&self, req: u64) -> bool {
+            matches!(self.standby.moving, Moving::Asked(asked) if asked == req)
         }
 
         /// Asks for every client to be taken over on `onto`.
@@ -1678,7 +1695,7 @@ mod client {
             let Some(resumes) = resumes else {
                 return;
             };
-            self.standby.moving = true;
+            self.standby.moving = Moving::Taking(Taking::default());
             rejoiner.ask(Ask::Move(
                 onto,
                 Plan {
@@ -1699,21 +1716,43 @@ mod client {
             standby.next = Instant::now() + wait;
         }
 
-        /// A move back onto UDP is done or failed. Failing before any
-        /// client moved leaves the client on SSH, to try again later, at
-        /// most [`BACKOFF`] apart; failing after leaves it a lost path.
+        /// A move onto UDP is done or failed. Failing before any client
+        /// moved leaves the client on SSH, to try again later, at most
+        /// [`BACKOFF`] apart, unless an SSH connection ended meanwhile;
+        /// failing after leaves it a lost path. Keys typed during the move
+        /// go on whichever path the client is left on.
         fn moved(&mut self, moved: Result<Back, Missed>) {
-            self.standby.moving = false;
+            let taking = match std::mem::replace(&mut self.standby.moving, Moving::Idle) {
+                Moving::Taking(taking) => taking,
+                Moving::Idle | Moving::Asked(_) => Taking::default(),
+            };
             match moved {
                 Ok(back) => {
                     // On UDP: a later fallback keeps its path in standby.
                     (self.standby.tries, self.standby.asks) = (0, false);
                     self.rejoined(back);
                 }
-                // Nothing moved; the SSH path is still the one in use.
+                // Nothing moved, so whatever ended on SSH ended for real.
+                Err(Missed::Retry(_)) if taking.ended => {
+                    self.wait_to_move();
+                    self.lose();
+                }
                 Err(Missed::Retry(_)) => self.wait_to_move(),
-                Err(Missed::Broken(_)) => self.lose(),
+                Err(Missed::Broken(_, me)) => {
+                    self.me = Some(me);
+                    self.lose();
+                }
                 Err(Missed::Dropped) => self.end(Ended::Dropped),
+            }
+            self.type_in(taking.typed);
+        }
+
+        /// Sends keys held during a move to their blocks, if still leased.
+        fn type_in(&mut self, typed: Vec<(BlockId, Vec<u8>)>) {
+            for (block, data) in typed {
+                if let Some(pane) = self.panes.get_mut(&block).filter(|p| p.leased) {
+                    pane.type_in(data);
+                }
             }
         }
 
@@ -1723,9 +1762,15 @@ mod client {
             if self.lost.is_some() {
                 return;
             }
-            // An answer to it would come on the connection given up.
-            if self.standby.offer.take().is_some() {
-                self.standby.moving = false;
+            match &mut self.standby.moving {
+                // Left to the move: see `moved`.
+                Moving::Taking(taking) => {
+                    taking.ended = true;
+                    return;
+                }
+                // An answer to it would come on the connection given up.
+                Moving::Asked(_) => self.standby.moving = Moving::Idle,
+                Moving::Idle => {}
             }
             let panes: Vec<Pane> = self.panes.drain().map(|(_, pane)| pane).collect();
             self.resumes = panes
@@ -1907,11 +1952,10 @@ mod client {
         fn act(&mut self, action: Action) {
             let focus = self.focus;
             match action {
-                Action::Input(data) => {
-                    if let Some(pane) = self.panes.get_mut(&focus).filter(|p| p.leased) {
-                        pane.type_in(data);
-                    }
-                }
+                Action::Input(data) => match &mut self.standby.moving {
+                    Moving::Taking(taking) => taking.typed.push((focus, data)),
+                    Moving::Idle | Moving::Asked(_) => self.type_in(vec![(focus, data)]),
+                },
                 Action::Detach => self.end(Ended::Detached),
                 Action::Focus(dir) => {
                     match screen::neighbor(&self.visible(), focus, dir) {
@@ -1959,12 +2003,10 @@ mod client {
                     self.arriving = Some(BlockId::from_uuid(id));
                     self.sync();
                 }
-                Message::Datagram { req, port, id, key } if self.standby.offer == Some(req) => {
+                Message::Datagram { req, port, id, key } if self.asked(req) => {
                     self.offered(Some(Onto::Offer(port, id, key.0)))
                 }
-                Message::Failed { req, .. } if self.standby.offer == Some(req) => {
-                    self.offered(None)
-                }
+                Message::Failed { req, .. } if self.asked(req) => self.offered(None),
                 Message::Failed { .. } => bell(),
                 _ => {}
             }
@@ -2168,7 +2210,7 @@ mod client {
             let by = Instant::now() + HANDSHAKE;
             match reach(&self.socket, block, None, by, &NEVER) {
                 Ok(opened) => Ok(self.pane(opened)),
-                Err(Missed::Retry(why) | Missed::Broken(why)) => Err(Ended::Failed(why)),
+                Err(Missed::Retry(why) | Missed::Broken(why, _)) => Err(Ended::Failed(why)),
                 Err(Missed::Dropped) => Err(Ended::Dropped),
             }
         }

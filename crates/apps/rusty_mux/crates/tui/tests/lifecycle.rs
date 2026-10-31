@@ -782,18 +782,24 @@ fn a_server_offering_only_v3_checkpoints_is_refused() {
 
 /// A real server on a new socket, with `/bin/sh` for each block.
 fn real_server() -> PathBuf {
-    real_server_with(false).0
+    real_server_with(None).0
 }
 
 /// [`real_server`], offering UDP on 127.0.0.1; with its UDP port.
 fn real_udp_server() -> (PathBuf, u16) {
-    let (path, port) = real_server_with(true);
+    real_udp_server_idle(Duration::from_secs(600))
+}
+
+/// A real server offering UDP, whose associations go after `idle` of
+/// silence; with the UDP port it took.
+fn real_udp_server_idle(idle: Duration) -> (PathBuf, u16) {
+    let (path, port) = real_server_with(Some(idle));
     (path, port.expect("udp port"))
 }
 
-/// A real server, offering UDP on 127.0.0.1 when `udp` holds; with the
-/// UDP port it took.
-fn real_server_with(udp: bool) -> (PathBuf, Option<u16>) {
+/// A real server, offering UDP on 127.0.0.1 with associations kept for
+/// `udp`'s idle time, when given; with the UDP port it took.
+fn real_server_with(udp: Option<Duration>) -> (PathBuf, Option<u16>) {
     use rusty_mux_server::{Config, Udp, serve, serve_udp};
     use rusty_tokio::io::{UdpSocket, UnixListener};
     use rusty_tokio::{Builder, LocalOptions};
@@ -818,14 +824,13 @@ fn real_server_with(udp: bool) -> (PathBuf, Option<u16>) {
                 args: Vec::new(),
                 cwd: "/".into(),
             };
-            if !udp {
+            let Some(idle) = udp else {
                 ready_tx.send(None).expect("ready");
                 return serve(listener, config).await.expect("serve");
-            }
+            };
             let socket = UdpSocket::bind("127.0.0.1:0").await.expect("udp");
             let port = socket.local_addr().expect("udp addr").port();
             ready_tx.send(Some(port)).expect("ready");
-            let idle = Duration::from_secs(600);
             serve_udp(listener, config, Udp { socket, idle })
                 .await
                 .expect("serve");
@@ -1238,6 +1243,37 @@ fn a_udp_path_heard_again_after_a_fallback_gets_the_clients_back() {
     let text = detach(tui);
     assert!(text.contains("detached from block"), "{text:?}");
     assert!(!text.contains("path to the server was down"), "{text:?}");
+    assert_eq!(logins(&work).len(), 2, "no third login");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// A path in standby the server let go, past its idle time, is never
+/// heard again: the client asks for a new association instead, and moves
+/// onto it once UDP answers, with no third login.
+#[test]
+fn a_standby_the_server_let_go_is_replaced_by_a_new_association() {
+    // Past the fallback (6 s silence, a 2 s probe), but soon after.
+    let idle = Duration::from_secs(12);
+    let (socket, port) = real_udp_server_idle(idle);
+    let wire = Wire::new(port);
+    let work = relaying_ssh("udp-expired", &[]);
+    let tui = on_udp(&work, &socket);
+    wire.cut();
+    let cut = Instant::now();
+    let second = wait_logins(&work, 2, Duration::from_secs(20))[1].0;
+    type_until(&tui, b"echo two-$((1+1))\r", b"two-2");
+
+    std::thread::sleep((idle + Duration::from_secs(2)).saturating_sub(cut.elapsed()));
+    wire.mend();
+    // Asked again at most 30 s apart.
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while running(second) {
+        assert!(Instant::now() < deadline, "still on SSH");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    type_until(&tui, b"echo three-$((1+2))\r", b"three-3");
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
     assert_eq!(logins(&work).len(), 2, "no third login");
     std::fs::remove_dir_all(&work).expect("cleanup");
 }
