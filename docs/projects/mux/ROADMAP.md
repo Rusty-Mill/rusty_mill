@@ -56,9 +56,21 @@ From the [Rex gap check](REX-GAP-CHECK.md) §5 (owner, 2026-10-27). Started 2026
 
 Identity, login server mode, roaming transport, sharing, several servers per client (C35). Tailscale identity uses first-party `rusty_tail`, after the owner approves moving its library crates to `crates/libs/` (ADR-0003). Exit: a remote session survives a client IP change (test, after spike 4); login mode maps peer credentials or Tailscale identity to an account (test); a shared session enforces input leases (test).
 
+Identity scope from the [Rex delta check](REX-DELTA.md) (owner, 2026-10-31): every client entry and client event carries the caller's principal, with a `whoami` method (C25, D8); login mode maps principals, the SSH user included, to accounts from a file that starts empty, and per-account servers outlive the front door (C26, C27, D9); a saved host holds several addresses tried in order (C35, D10).
+
+## Phase 3b: Rex parity follow-ups
+
+From the [Rex delta check](REX-DELTA.md) §4 (owner, 2026-10-31). After Phase 3's identity steps; starting it still needs the owner's go. One PR per step, in order. Each extends a done capability; no new crate and no new dependency.
+
+1. Wait on a window or a session (C37).
+2. Events: clipboard written, program status removed, active window changed, config reloaded (C38).
+3. Agent setup for Codex, OpenCode and Pi, per-repository setup, dry run, per-item status (C39). Each new agent's settings path is a write outside the repo and needs the owner's approval, as K4 did.
+4. Block methods `terminal.reset`, `terminal.set-theme`, `terminal.size` (C40).
+5. Layout editing: resize splits, swap and move blocks, block to its own window, move a window, server-side focus (C41).
+
 ## Phase 4: clients and Windows
 
-Web and native clients, ConPTY server and client. Exit: the Phase 1 acceptance suite passes on Windows; web and native clients pass the convergence test.
+Web and native clients, ConPTY server and client; floating layers (C42), key sequences and modes (C43), client actions (C44) and directory browse with `terminal.list-dir` (C08), from the Rex delta check. Exit: the Phase 1 acceptance suite passes on Windows; web and native clients pass the convergence test.
 
 Windows, ahead of the phase (owner, 2026-10-26): the server, `rusty-mux-ctl`, `rusty-mux-mcp` and the attach client run on Windows (#1109, #1136, #1142, #1148). `server/tests/phase1.rs` passes on CI's Windows leg except `reattach_after_more_than_four_mib_of_real_pty_output`, which stays Linux-only because ConPTY re-renders output. Still Linux-only: the attach client's lifecycle tests, `rusty-mux-mcp`'s stdio tests, and the ctl interrupt, `terminal.pwd`/`title` and `watch` rules tests. Open: spike 1 (R1) and the two-account check (R10).
 
