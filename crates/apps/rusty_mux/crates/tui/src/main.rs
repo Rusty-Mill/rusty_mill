@@ -425,6 +425,92 @@ mod client {
         typed: Vec<(BlockId, Vec<u8>)>,
     }
 
+    /// What to do once a move onto UDP is over.
+    #[derive(Debug, PartialEq)]
+    enum After<T> {
+        /// Every client moved: take `T`, the path brought up.
+        Install(T),
+        /// Nothing moved, and nothing was lost meanwhile: stay on SSH.
+        Stay,
+        /// Lose the path, taking the clients over with this control
+        /// takeover if the move left a newer one.
+        Lose(Option<Takeover>),
+        /// The server let a client go.
+        End,
+    }
+
+    impl Standby {
+        /// Keys typed for `block`: held during a move, else given back to
+        /// send now.
+        fn typed(&mut self, block: BlockId, data: Vec<u8>) -> Option<Vec<u8>> {
+            match &mut self.moving {
+                Moving::Taking(taking) => {
+                    taking.typed.push((block, data));
+                    None
+                }
+                Moving::Idle | Moving::Asked(_) => Some(data),
+            }
+        }
+
+        /// A connection ended or failed: whether to lose the path now.
+        /// During a move it is left to the move: see [`Standby::finish`].
+        fn lose(&mut self) -> bool {
+            match &mut self.moving {
+                Moving::Taking(taking) => {
+                    taking.ended = true;
+                    false
+                }
+                // An answer to it would come on the connection given up.
+                Moving::Asked(_) => {
+                    self.moving = Moving::Idle;
+                    true
+                }
+                Moving::Idle => true,
+            }
+        }
+
+        /// No move before a while from `now`, longer after each failed one,
+        /// at most [`BACKOFF`].
+        fn wait(&mut self, now: Instant) {
+            self.tries += 1;
+            let wait = Duration::from_secs(1 << self.tries.min(5)).min(BACKOFF);
+            self.next = now + wait;
+        }
+
+        /// A move is over, at `now`: what to do, and the keys held during
+        /// it, in order, to send on whatever path the client is left on.
+        /// Connections that ended during a move that went through were its
+        /// own takeovers; during one that failed before any client moved,
+        /// they ended for real.
+        fn finish<T>(
+            &mut self,
+            moved: Result<T, Missed>,
+            now: Instant,
+        ) -> (After<T>, Vec<(BlockId, Vec<u8>)>) {
+            let taking = match std::mem::replace(&mut self.moving, Moving::Idle) {
+                Moving::Taking(taking) => taking,
+                Moving::Idle | Moving::Asked(_) => Taking::default(),
+            };
+            let after = match moved {
+                Ok(back) => {
+                    // On UDP: a later fallback keeps its path in standby.
+                    (self.tries, self.asks) = (0, false);
+                    After::Install(back)
+                }
+                Err(Missed::Retry(_)) => {
+                    self.wait(now);
+                    match taking.ended {
+                        true => After::Lose(None),
+                        false => After::Stay,
+                    }
+                }
+                Err(Missed::Broken(_, me)) => After::Lose(Some(me)),
+                Err(Missed::Dropped) => After::End,
+            };
+            (after, taking.typed)
+        }
+    }
+
     /// When the client last asked for and had a sign of life.
     struct Beat {
         asked: Instant,
@@ -689,18 +775,27 @@ mod client {
         };
         let mut next = req.next;
         let (mut socket, mut stream, mut conn, mut takeover) = (socket, stream, conn, takeover);
-        // Stayed on SSH though UDP was offered and wanted: asked again later.
+        // On SSH though UDP was offered and wanted, whether it never
+        // answered or the move onto it failed: asked again later.
         let mut stayed = false;
         if let (Some(rejoin), Some(me)) = (rejoin.as_mut(), takeover)
             && features.contains(Features::DATAGRAM)
             && udp_wanted()
         {
-            match upgrade(rejoin.as_mut(), &socket, &mut conn, me, next)? {
-                Some(back) => {
-                    (socket, stream, conn) = (back.socket, back.stream, back.conn);
-                    (takeover, next) = (Some(back.me), back.next);
+            let back = match upgrade(rejoin.as_mut(), &socket, &mut conn, me, next)? {
+                Upgraded::Udp(back) => Some(back),
+                Upgraded::Ssh(back) => {
+                    stayed = true;
+                    Some(back)
                 }
-                None => stayed = true,
+                Upgraded::Stayed => {
+                    stayed = true;
+                    None
+                }
+            };
+            if let Some(back) = back {
+                (socket, stream, conn) = (back.socket, back.stream, back.conn);
+                (takeover, next) = (Some(back.me), back.next);
             }
         }
 
@@ -822,6 +917,16 @@ mod client {
         std::env::var_os("RUSTY_MUX_UDP").is_none_or(|v| v != "off")
     }
 
+    /// Where [`upgrade`] left the control connection.
+    enum Upgraded {
+        /// Moved onto UDP.
+        Udp(Back),
+        /// Taken back over SSH after a failed move onto UDP.
+        Ssh(Back),
+        /// Still on the connection it had: nothing moved.
+        Stayed,
+    }
+
     /// Moves the control connection, the only one so far, from the SSH
     /// forward at `ssh` onto a UDP association, once the association
     /// answers a probe; the forward then stops (UDP-TRANSPORT.md). Until
@@ -835,7 +940,7 @@ mod client {
         conn: &mut Conn<UnixStream>,
         me: Takeover,
         next: u64,
-    ) -> Result<Option<Back>, String> {
+    ) -> Result<Upgraded, String> {
         let mut req = Requests {
             conn,
             next,
@@ -855,13 +960,13 @@ mod client {
             Err(why) => {
                 rejoin.discard();
                 eprintln!("rusty-mux: staying on SSH: {why}");
-                return Ok(None);
+                return Ok(Upgraded::Stayed);
             }
         };
         let missed = match take_over(socket, plan(), &NEVER) {
             Ok(back) => {
                 rejoin.settle();
-                return Ok(Some(back));
+                return Ok(Upgraded::Udp(back));
             }
             Err(missed) => missed,
         };
@@ -872,7 +977,7 @@ mod client {
         };
         eprintln!("rusty-mux: staying on SSH: {why}");
         match take_over(ssh.to_owned(), plan(), &NEVER) {
-            Ok(back) => Ok(Some(back)),
+            Ok(back) => Ok(Upgraded::Ssh(back)),
             Err(Missed::Dropped) => Err("the server let this client go".into()),
             Err(Missed::Retry(why) | Missed::Broken(why, _)) => Err(why),
         }
@@ -1710,41 +1815,22 @@ mod client {
         /// No move for a while, longer after each failed one, at most
         /// [`BACKOFF`].
         fn wait_to_move(&mut self) {
-            let standby = &mut self.standby;
-            standby.tries += 1;
-            let wait = Duration::from_secs(1 << standby.tries.min(5)).min(BACKOFF);
-            standby.next = Instant::now() + wait;
+            self.standby.wait(Instant::now());
         }
 
-        /// A move onto UDP is done or failed. Failing before any client
-        /// moved leaves the client on SSH, to try again later, at most
-        /// [`BACKOFF`] apart, unless an SSH connection ended meanwhile;
-        /// failing after leaves it a lost path. Keys typed during the move
-        /// go on whichever path the client is left on.
+        /// A move onto UDP is done or failed: see [`Standby::finish`].
         fn moved(&mut self, moved: Result<Back, Missed>) {
-            let taking = match std::mem::replace(&mut self.standby.moving, Moving::Idle) {
-                Moving::Taking(taking) => taking,
-                Moving::Idle | Moving::Asked(_) => Taking::default(),
-            };
-            match moved {
-                Ok(back) => {
-                    // On UDP: a later fallback keeps its path in standby.
-                    (self.standby.tries, self.standby.asks) = (0, false);
-                    self.rejoined(back);
-                }
-                // Nothing moved, so whatever ended on SSH ended for real.
-                Err(Missed::Retry(_)) if taking.ended => {
-                    self.wait_to_move();
+            let (after, typed) = self.standby.finish(moved, Instant::now());
+            match after {
+                After::Install(back) => self.rejoined(back),
+                After::Stay => {}
+                After::Lose(me) => {
+                    self.me = me.or(self.me);
                     self.lose();
                 }
-                Err(Missed::Retry(_)) => self.wait_to_move(),
-                Err(Missed::Broken(_, me)) => {
-                    self.me = Some(me);
-                    self.lose();
-                }
-                Err(Missed::Dropped) => self.end(Ended::Dropped),
+                After::End => self.end(Ended::Dropped),
             }
-            self.type_in(taking.typed);
+            self.type_in(typed);
         }
 
         /// Sends keys held during a move to their blocks, if still leased.
@@ -1762,15 +1848,8 @@ mod client {
             if self.lost.is_some() {
                 return;
             }
-            match &mut self.standby.moving {
-                // Left to the move: see `moved`.
-                Moving::Taking(taking) => {
-                    taking.ended = true;
-                    return;
-                }
-                // An answer to it would come on the connection given up.
-                Moving::Asked(_) => self.standby.moving = Moving::Idle,
-                Moving::Idle => {}
+            if !self.standby.lose() {
+                return;
             }
             let panes: Vec<Pane> = self.panes.drain().map(|(_, pane)| pane).collect();
             self.resumes = panes
@@ -1952,10 +2031,11 @@ mod client {
         fn act(&mut self, action: Action) {
             let focus = self.focus;
             match action {
-                Action::Input(data) => match &mut self.standby.moving {
-                    Moving::Taking(taking) => taking.typed.push((focus, data)),
-                    Moving::Idle | Moving::Asked(_) => self.type_in(vec![(focus, data)]),
-                },
+                Action::Input(data) => {
+                    if let Some(data) = self.standby.typed(focus, data) {
+                        self.type_in(vec![(focus, data)]);
+                    }
+                }
                 Action::Detach => self.end(Ended::Detached),
                 Action::Focus(dir) => {
                     match screen::neighbor(&self.visible(), focus, dir) {
@@ -2446,6 +2526,274 @@ mod client {
             let back = bring_back(&mut calls, path, |_| Err::<(), _>(Missed::Dropped));
             assert!(matches!(back, Err(Missed::Dropped)));
             assert_eq!(calls.0, ["fresh", "discard"]);
+        }
+
+        fn idle() -> Standby {
+            Standby {
+                pulse: Pulse::default(),
+                asks: false,
+                moving: Moving::Idle,
+                tries: 0,
+                next: Instant::now(),
+            }
+        }
+
+        fn taking() -> Standby {
+            Standby {
+                moving: Moving::Taking(Taking::default()),
+                ..idle()
+            }
+        }
+
+        fn block(n: u8) -> BlockId {
+            BlockId::from_uuid(Uuid::from_bytes([n; 16]))
+        }
+
+        fn takeover(n: u8) -> Takeover {
+            Takeover {
+                client: rusty_mux_core::ClientId::from_uuid(Uuid::from_bytes([n; 16])),
+                token: Uuid::from_bytes([n + 100; 16]),
+            }
+        }
+
+        #[test]
+        fn keys_typed_during_a_move_are_held_and_given_back_once_in_order() {
+            let mut standby = taking();
+            assert_eq!(standby.typed(block(1), b"ab".to_vec()), None);
+            assert_eq!(standby.typed(block(2), b"c".to_vec()), None);
+            assert_eq!(standby.typed(block(1), b"d".to_vec()), None);
+            let (after, typed) = standby.finish(Ok(()), Instant::now());
+            assert_eq!(after, After::Install(()));
+            let want = [
+                (block(1), b"ab".to_vec()),
+                (block(2), b"c".to_vec()),
+                (block(1), b"d".to_vec()),
+            ];
+            assert_eq!(typed, want);
+            // Once over, keys go straight through, and none come back again.
+            assert_eq!(standby.typed(block(1), b"e".to_vec()), Some(b"e".to_vec()));
+            assert_eq!(standby.finish(Ok(()), Instant::now()).1, []);
+        }
+
+        #[test]
+        fn keys_held_during_a_failed_move_are_given_back_to_send_on_ssh() {
+            let mut standby = taking();
+            assert_eq!(standby.typed(block(1), b"x".to_vec()), None);
+            let (after, typed) =
+                standby.finish::<()>(Err(Missed::Retry("no".into())), Instant::now());
+            assert_eq!(after, After::Stay);
+            assert_eq!(typed, [(block(1), b"x".to_vec())]);
+        }
+
+        #[test]
+        fn a_loss_during_a_move_is_left_to_it_and_ignored_if_it_goes_through() {
+            let mut standby = taking();
+            // A heartbeat on the SSH control the move took over fails.
+            assert!(!standby.lose());
+            assert!(!standby.lose());
+            assert_eq!(standby.finish(Ok(()), Instant::now()).0, After::Install(()));
+            assert!(standby.lose(), "after the move, a loss is a loss");
+        }
+
+        #[test]
+        fn a_loss_during_a_move_that_failed_before_any_client_moved_is_real() {
+            let mut standby = taking();
+            assert!(!standby.lose());
+            let now = Instant::now();
+            let (after, _) = standby.finish::<()>(Err(Missed::Retry("no".into())), now);
+            assert_eq!(after, After::Lose(None));
+            assert_eq!(
+                (standby.tries, standby.next),
+                (1, now + Duration::from_secs(2))
+            );
+            assert!(matches!(standby.moving, Moving::Idle));
+        }
+
+        #[test]
+        fn a_move_broken_after_the_control_moved_loses_the_path_with_its_new_takeover() {
+            let mut standby = taking();
+            let missed = Missed::Broken("list".into(), takeover(7));
+            let (after, _) = standby.finish::<()>(Err(missed), Instant::now());
+            assert_eq!(after, After::Lose(Some(takeover(7))));
+        }
+
+        #[test]
+        fn a_loss_while_an_offer_is_awaited_drops_the_offer() {
+            let mut standby = Standby {
+                moving: Moving::Asked(4),
+                ..idle()
+            };
+            assert!(standby.lose());
+            assert!(matches!(standby.moving, Moving::Idle));
+        }
+
+        /// A server at a fresh socket, its connections handed to `script`
+        /// in turn.
+        #[cfg(unix)]
+        fn scripted(
+            script: impl FnOnce(&std::os::unix::net::UnixListener) + Send + 'static,
+        ) -> PathBuf {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "rusty-mux-tui-unit-{}-{n}.sock",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+            std::thread::spawn(move || script(&listener));
+            path
+        }
+
+        /// Accepts a connection and answers its Hello with a Welcome
+        /// giving `client` the token `taken`.
+        #[cfg(unix)]
+        fn welcome(
+            listener: &std::os::unix::net::UnixListener,
+            taken: Takeover,
+        ) -> Conn<UnixStream> {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut conn = Conn::new(stream);
+            assert!(matches!(conn.recv().expect("hello"), Message::Hello { .. }));
+            conn.send(&Message::Welcome {
+                features: CONTROL.union(PANE),
+                client: taken.client,
+                cursor: None,
+                token: Some(taken.token),
+            })
+            .expect("welcome");
+            conn
+        }
+
+        #[cfg(unix)]
+        fn plan(me: Takeover, window: Option<WindowId>, resumes: Vec<(BlockId, Resume)>) -> Plan {
+            Plan {
+                me,
+                next: 1,
+                window,
+                resumes,
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_list_whose_answer_is_lost_breaks_the_move_with_the_new_takeover() {
+            let (old, new) = (
+                takeover(1),
+                Takeover {
+                    token: Uuid::from_bytes([9; 16]),
+                    ..takeover(1)
+                },
+            );
+            let socket = scripted(move |listener| {
+                let mut conn = welcome(listener, new);
+                // The List reaches the server, confirming `new`; no answer.
+                assert!(matches!(conn.recv().expect("list"), Message::List { .. }));
+            });
+            let window = WindowId::from_uuid(Uuid::from_bytes([3; 16]));
+            let missed = take_over(socket, plan(old, Some(window), Vec::new()), &NEVER).err();
+            assert!(
+                matches!(missed, Some(Missed::Broken(_, me)) if me == new),
+                "the new takeover is kept"
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_pane_failing_after_another_moved_breaks_the_move_with_the_new_takeover() {
+            let (old, new) = (
+                takeover(1),
+                Takeover {
+                    token: Uuid::from_bytes([9; 16]),
+                    ..takeover(1)
+                },
+            );
+            let (first, second) = (takeover(2), takeover(3));
+            let socket = scripted(move |listener| {
+                let _control = welcome(listener, new);
+                let _moved = welcome(listener, first);
+                // The second pane's connection ends before its Welcome.
+                drop(listener.accept().expect("accept"));
+                std::thread::sleep(Duration::from_millis(200));
+            });
+            let resumes = vec![
+                (
+                    block(2),
+                    Resume {
+                        takeover: first,
+                        leased: true,
+                    },
+                ),
+                (
+                    block(3),
+                    Resume {
+                        takeover: second,
+                        leased: false,
+                    },
+                ),
+            ];
+            let missed = take_over(socket, plan(old, None, resumes), &NEVER).err();
+            assert!(
+                matches!(missed, Some(Missed::Broken(_, me)) if me == new),
+                "the new takeover is kept"
+            );
+        }
+
+        /// A [`Rejoin`] whose UDP path is the socket given.
+        #[cfg(unix)]
+        struct Udp(PathBuf);
+
+        #[cfg(unix)]
+        impl Rejoin for Udp {
+            fn fresh(&mut self, _: &AtomicBool) -> Result<PathBuf, String> {
+                unreachable!("not asked here")
+            }
+            fn listen(&mut self) {}
+            fn settle(&mut self) {}
+            fn discard(&mut self) {}
+            fn datagram(&mut self, _: u16, _: [u8; 8], _: [u8; 32]) -> Result<PathBuf, String> {
+                Ok(self.0.clone())
+            }
+            fn standby(&mut self) -> Result<PathBuf, String> {
+                unreachable!("not asked here")
+            }
+            fn pulses(&self) -> Pulses {
+                Pulses::default()
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_failed_move_onto_udp_at_start_says_the_client_is_back_on_ssh() {
+            let me = takeover(1);
+            // The probe answered, but the handoff over UDP fails.
+            let udp = scripted(|listener| drop(listener.accept().expect("accept")));
+            let ssh = scripted(move |listener| {
+                let _back = welcome(listener, me);
+                std::thread::sleep(Duration::from_millis(200));
+            });
+            let (near, far) = UnixStream::pair().expect("pair");
+            std::thread::spawn(move || {
+                let mut server = Conn::new(far);
+                let Message::OpenDatagram { req } = server.recv().expect("ask") else {
+                    panic!("expected OpenDatagram");
+                };
+                let key = rusty_mux_proto::DatagramKey([5; 32]);
+                server
+                    .send(&Message::Datagram {
+                        req,
+                        port: 1,
+                        id: [6; 8],
+                        key,
+                    })
+                    .expect("offer");
+            });
+            let mut conn = Conn::new(near);
+            let upgraded = upgrade(&mut Udp(udp), &ssh, &mut conn, me, 1);
+            assert!(
+                matches!(upgraded, Ok(Upgraded::Ssh(_))),
+                "asked again later"
+            );
         }
 
         #[test]
