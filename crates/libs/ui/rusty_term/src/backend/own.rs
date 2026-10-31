@@ -8,7 +8,7 @@
 //!
 //! This module is only compiled on Windows (gated in `backend/mod.rs`).
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
@@ -22,8 +22,8 @@ use platform::term::WinSize;
 use platform_windows::WindowsChild;
 use rusty_conhost::{OwnPty, OwnPtyMaster};
 
-use crate::backend::cmdline::split_program;
-use crate::backend::windows::{WindowsBackend, push_quoted_arg, shell_or_default};
+use crate::backend::cmdline::{Reader, locate, reader, split_program};
+use crate::backend::windows::{WindowsBackend, push_launcher_args, shell_or_default};
 use crate::backend::{Backend, BackendHandle};
 
 /// How long the child gets to exit after a hang-up, or to report its exit
@@ -158,26 +158,9 @@ fn exited_within(child: &mut WindowsChild, grace: Duration) -> Option<ExitStatus
     }
 }
 
-/// Where `CreateProcessW` finds `program` before it searches PATH, as a
-/// full path. A name with a directory part is looked up from our current
-/// directory; a bare name in rusty_term's own directory, the current
-/// directory, System32, then the Windows directory. A name with no
-/// extension gets `.exe`, and is never tried bare, as in `CreateProcessW`:
-/// an extensionless file must not hide the program on PATH. `None` leaves
-/// the name to `Command`'s PATH search.
-fn locate(program: &str) -> Option<PathBuf> {
-    let bare = !program.contains(['\\', '/', ':']);
-    let dirs = if bare {
-        search_dirs()
-    } else {
-        vec![PathBuf::new()]
-    };
-    locate_in(program, &dirs)
-}
-
 /// The `Command` that runs `shell` and then `args` as `CreateProcessW`
 /// would. The shell's own arguments go on verbatim, as ConPTY's would;
-/// only the trailing `args` are quoted.
+/// only the trailing `args` are quoted, for whoever reads them.
 fn shell_command(shell: &str, args: &[String], cwd: OsString) -> io::Result<Command> {
     let Some((word, rest)) = split_program(shell, |p| locate(p).is_some()) else {
         return Err(io::Error::new(
@@ -185,27 +168,40 @@ fn shell_command(shell: &str, args: &[String], cwd: OsString) -> io::Result<Comm
             format!("rusty_term: no program in the shell `{shell}`"),
         ));
     };
-    if is_batch(word) {
-        return Ok(Command::new(cmd_exe()?, cwd).raw_args(batch_line(shell, args)));
+    let reader = reader(word);
+    if reader == Reader::Batch {
+        return Ok(Command::new(cmd_exe()?, cwd).raw_args(batch_line(shell, args)?));
     }
     // `Command`'s own search is PATH only; what CreateProcessW finds
     // before PATH is passed as a full path.
     let program = locate(word).map_or_else(|| word.into(), PathBuf::into_os_string);
-    let cmd = Command::new(program, cwd).args(args);
-    Ok(if rest.is_empty() {
-        cmd
-    } else {
-        cmd.raw_args(rest)
-    })
+    let cmd = Command::new(program, cwd);
+    if reader == Reader::Cmd {
+        return Ok(with_raw(cmd, &cmd_tail(rest, args)?));
+    }
+    let rest: Vec<u16> = rest.encode_utf16().collect();
+    Ok(with_raw(cmd.args(args), &rest))
 }
 
-/// Whether `program` names a batch file, which `CreateProcessW` runs
-/// through cmd.exe.
-fn is_batch(program: &str) -> bool {
-    Path::new(program)
-        .extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("bat") || ext.eq_ignore_ascii_case("cmd"))
+/// `cmd` with `raw` as its raw arguments, unless `raw` is empty.
+fn with_raw(cmd: Command, raw: &[u16]) -> Command {
+    if raw.is_empty() {
+        cmd
+    } else {
+        cmd.raw_args(OsString::from_wide(raw))
+    }
+}
+
+/// cmd.exe's parameters: its own `rest` from the shell, then `args` quoted
+/// by cmd's rules. `Command` would quote argv for the C runtime, which cmd
+/// doesn't use, so they go in the raw text too.
+fn cmd_tail(rest: &str, args: &[String]) -> io::Result<Vec<u16>> {
+    let mut tail: Vec<u16> = rest.encode_utf16().collect();
+    push_launcher_args(&mut tail, 0, Reader::Cmd, args)?;
+    if rest.is_empty() && !tail.is_empty() {
+        tail.remove(0); // the space before the first argument
+    }
+    Ok(tail)
 }
 
 /// The cmd.exe `CreateProcessW` runs a batch file with.
@@ -220,54 +216,20 @@ fn cmd_exe() -> io::Result<OsString> {
 
 /// What `CreateProcessW` hands cmd.exe for the batch `shell` and `args`:
 /// `/c `, then the whole line, wrapped in one more pair of quotes when it
-/// starts with one (measured on Windows).
-fn batch_line(shell: &str, args: &[String]) -> OsString {
+/// starts with one (measured on Windows). `args` are quoted by cmd's rules.
+fn batch_line(shell: &str, args: &[String]) -> io::Result<OsString> {
     let mut line: Vec<u16> = shell
         .trim_start_matches([' ', '\t'])
         .encode_utf16()
         .collect();
-    for arg in args {
-        line.push(u16::from(b' '));
-        push_quoted_arg(arg, &mut line);
-    }
+    push_launcher_args(&mut line, 0, Reader::Batch, args)?;
     let quote = u16::from(b'"');
     let wrap = line.first() == Some(&quote);
     let mut out: Vec<u16> = "/c ".encode_utf16().collect();
     out.extend(wrap.then_some(quote));
     out.extend(line);
     out.extend(wrap.then_some(quote));
-    OsString::from_wide(&out)
-}
-
-/// [`locate`] over the given places.
-fn locate_in(program: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
-    dirs.iter()
-        .map(|dir| with_exe(dir.join(program)))
-        .find(|candidate| candidate.is_file())
-        .and_then(|found| std::path::absolute(found).ok())
-}
-
-/// `path`, with `.exe` added when it has no extension.
-fn with_exe(path: PathBuf) -> PathBuf {
-    if path.extension().is_some() {
-        return path;
-    }
-    let mut name = path.into_os_string();
-    name.push(OsStr::new(".exe"));
-    PathBuf::from(name)
-}
-
-/// The places `CreateProcessW` searches for a bare name before PATH.
-fn search_dirs() -> Vec<PathBuf> {
-    let own = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf));
-    let windows = std::env::var_os("SystemRoot").map(PathBuf::from);
-    own.into_iter()
-        .chain(std::env::current_dir().ok())
-        .chain(windows.as_ref().map(|dir| dir.join("System32")))
-        .chain(windows)
-        .collect()
+    Ok(OsString::from_wide(&out))
 }
 
 /// A platform error as an `io::Error`, keeping its message and the kinds
@@ -287,7 +249,8 @@ fn to_io(e: PlatformError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::OwnBackend;
-    use crate::backend::{Backend as _, BackendHandle};
+    use crate::backend::windows::WindowsBackend;
+    use crate::backend::{Backend, BackendHandle};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -354,6 +317,69 @@ mod tests {
         wait_for(&out, br#"a"b c"d "tail one""#, "cmd's verbatim echo");
         h.exit_token().expect("exit token")();
         assert_eq!(h.reap_exit_status(), Some(0));
+    }
+
+    /// A launcher argument can't close cmd's quotes and run a command
+    /// (#1279), on either backend: cmd echoes it whole, and the shell exits 0.
+    #[test]
+    fn a_launcher_argument_cannot_inject_into_cmd_on_either_backend() {
+        let backends: [&dyn Backend; 2] = [&OwnBackend, &WindowsBackend];
+        for backend in backends {
+            let args = [r#"x\" & echo INJECTED& exit 9 & \"y"#.to_owned()];
+            let mut h = backend
+                .spawn_shell(80, 24, Some("cmd.exe /c echo"), &args, None)
+                .expect("spawn");
+            let out = drain(h.as_ref());
+            wait_for(
+                &out,
+                br#""x\"" & echo INJECTED& exit 9 & \""y""#,
+                "cmd's inert echo",
+            );
+            h.exit_token().expect("exit token")();
+            assert_eq!(h.reap_exit_status(), Some(0));
+        }
+    }
+
+    /// Delayed expansion turned on by a launcher argument still refuses
+    /// a `!` argument, on either backend.
+    #[test]
+    fn a_launcher_v_on_refuses_bang_on_either_backend() {
+        let backends: [&dyn Backend; 2] = [&OwnBackend, &WindowsBackend];
+        for backend in backends {
+            let args: Vec<String> = ["/v:on", "/c", "echo", "!PATH!"]
+                .iter()
+                .map(|a| (*a).to_owned())
+                .collect();
+            let err = backend
+                .spawn_shell(80, 24, Some("cmd"), &args, None)
+                .err()
+                .expect("refused");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
+    /// `rusty_term -- cmd /c ...`: plain words stay bare, so cmd still
+    /// finds its switch and command, and a quoted first word keeps its
+    /// quotes through cmd's quote stripping.
+    #[test]
+    fn cmd_switches_and_a_quoted_command_reach_cmd_on_either_backend() {
+        let backends: [&dyn Backend; 2] = [&OwnBackend, &WindowsBackend];
+        for backend in backends {
+            let args: Vec<String> = ["/c", "echo a b", "&", "exit", "5"]
+                .iter()
+                .map(|a| (*a).to_owned())
+                .collect();
+            let mut h = backend
+                .spawn_shell(80, 24, Some("cmd"), &args, None)
+                .expect("spawn");
+            let _out = drain(h.as_ref());
+            h.exit_token().expect("exit token")();
+            assert_eq!(
+                h.reap_exit_status(),
+                Some(1),
+                "`&` and `exit 5` were not run"
+            );
+        }
     }
 
     /// Input typed into the console reaches an interactive cmd.exe, and a
@@ -441,6 +467,7 @@ mod tests {
         let line = |shell: &str, args: &[&str]| {
             let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
             super::batch_line(shell, &args)
+                .expect("batch line")
                 .into_string()
                 .expect("utf-8")
         };
@@ -449,8 +476,36 @@ mod tests {
             line(r#""C:\a b\t.cmd" -x"#, &["c d"]),
             r#"/c ""C:\a b\t.cmd" -x "c d"""#
         );
-        assert!(super::is_batch("x.CMD") && super::is_batch(r"C:\a\x.bat"));
-        assert!(!super::is_batch("cmd.exe") && !super::is_batch("cmd"));
+        let refused = super::batch_line(r"C:\t.cmd", &["%PATH%".to_owned()]);
+        assert_eq!(
+            refused.map_err(|e| e.kind()).err(),
+            Some(std::io::ErrorKind::InvalidInput)
+        );
+        assert_eq!(line(r"C:\t.cmd", &["a\"b", "c"]), r#"/c C:\t.cmd "a""b" c"#);
+    }
+
+    /// The own host's command for `shell` and `args`: its raw text and argv.
+    fn own_command(shell: &str, args: &[&str]) -> std::io::Result<(String, usize)> {
+        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        let cmd = super::shell_command(shell, &args, std::env::temp_dir().into_os_string())?;
+        let raw = cmd
+            .raw_args
+            .unwrap_or_default()
+            .into_string()
+            .expect("utf-8");
+        Ok((raw, cmd.argv.len()))
+    }
+
+    /// Review of d21ea929: a drive-relative cmd is read as cmd (P1), and a
+    /// launcher `/v:on` refuses a `!` argument (P2), on the own host too.
+    #[test]
+    fn own_host_reads_drive_relative_cmd_and_launcher_options() {
+        let (raw, argv) =
+            own_command("C:cmd.exe /c echo", &[r#"x\" & calc & \"y"#]).expect("quoted");
+        assert_eq!(raw, r#"/c echo "x\"" & calc & \""y""#);
+        assert_eq!(argv, 0, "cmd's arguments go in the raw text");
+        let err = own_command("cmd", &["/v:on", "/c", "echo", "!SECRET!"]).expect_err("refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -479,10 +534,10 @@ mod tests {
             dir.clone(),
             system.parent().expect("System32").to_path_buf(),
         ];
-        let found = super::locate_in("cmd", &dirs);
+        let found = crate::backend::cmdline::locate_in("cmd", &dirs);
         let by_path = super::locate(&dir.join("cmd").to_string_lossy());
         std::fs::copy(&system, dir.join("cmd.exe")).expect("copy");
-        let beside = super::locate_in("cmd", &dirs);
+        let beside = crate::backend::cmdline::locate_in("cmd", &dirs);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(found.as_ref(), Some(&system), "the sentinel is skipped");
         assert_eq!(by_path, None, "a path is tried with .exe only");
