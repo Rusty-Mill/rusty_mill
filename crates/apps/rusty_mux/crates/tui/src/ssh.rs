@@ -133,6 +133,11 @@ impl Forward {
         &self.socket
     }
 
+    /// Whether `ssh` is still running: once it exits, the forward is gone.
+    pub fn running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
     /// Waits until `ssh` has bound the local socket, which it does only
     /// after logging in, failing if it exits first or `patience` runs out.
     /// A login can take a while: the user may be typing a password. The
