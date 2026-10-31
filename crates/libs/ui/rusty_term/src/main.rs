@@ -264,7 +264,7 @@ fn main() -> Result<(), std::io::Error> {
     #[cfg(windows)]
     let backend: Box<dyn Backend> = match config.console_host.unwrap_or_default() {
         config::ConsoleHost::ConPty => Box::new(WindowsBackend),
-        config::ConsoleHost::Own => Box::new(OwnBackend),
+        config::ConsoleHost::Own => Box::new(OwnBackend::new()),
     };
 
     // `--gui` launches the native window backend (the tcore-app fork) instead of

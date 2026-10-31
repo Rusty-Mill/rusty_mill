@@ -23,6 +23,7 @@ use platform_windows::WindowsChild;
 use rusty_conhost::{OwnPty, OwnPtyMaster};
 
 use crate::backend::cmdline::{Reader, locate, reader, split_program};
+use crate::backend::reaper::Reaper;
 use crate::backend::windows::{WindowsBackend, push_launcher_args, shell_or_default};
 use crate::backend::{Backend, BackendHandle};
 
@@ -39,8 +40,32 @@ const SHUTDOWN: Duration = Duration::from_secs(6);
 /// How often [`exited_within`] looks at the child.
 const POLL: Duration = Duration::from_millis(10);
 
-/// Unit type implementing [`Backend`] on our own console host.
-pub struct OwnBackend;
+/// [`Backend`] on our own console host. Dropping it waits for the
+/// consoles its handles hung up to shut down (#1259), so drop it last,
+/// before the process exits.
+pub struct OwnBackend {
+    reaper: Arc<Reaper>,
+}
+
+impl OwnBackend {
+    pub fn new() -> Self {
+        Self {
+            reaper: Arc::new(Reaper::new()),
+        }
+    }
+}
+
+impl Default for OwnBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for OwnBackend {
+    fn drop(&mut self) {
+        self.reaper.join();
+    }
+}
 
 impl Backend for OwnBackend {
     fn spawn_shell(
@@ -62,6 +87,7 @@ impl Backend for OwnBackend {
         Ok(Box::new(OwnHandle {
             master: Arc::new(master),
             child: Some(child),
+            reaper: Arc::clone(&self.reaper),
         }))
     }
 
@@ -79,6 +105,8 @@ impl Backend for OwnBackend {
 struct OwnHandle {
     master: Arc<OwnPtyMaster>,
     child: Option<WindowsChild>,
+    /// Where the original's Drop leaves the console's shutdown.
+    reaper: Arc<Reaper>,
 }
 
 impl BackendHandle for OwnHandle {
@@ -109,6 +137,7 @@ impl BackendHandle for OwnHandle {
         Ok(Box::new(OwnHandle {
             master: Arc::clone(&self.master),
             child: None,
+            reaper: Arc::clone(&self.reaper),
         }))
     }
 
@@ -133,26 +162,34 @@ impl BackendHandle for OwnHandle {
 }
 
 impl Drop for OwnHandle {
-    /// The original hangs up and waits for the console to shut down,
-    /// which ends every client still attached 5 s after the hang-up, the
-    /// child included. The process may exit right after this, taking the
-    /// host with it, so it waits here rather than leave those clients
-    /// running. Only a host that fails to shut down in time leaves the
-    /// child to be killed here. A clone only drops its reference; the last
-    /// one closes the console (`OwnPtyMaster`'s Drop).
+    /// The original hangs up, and the backend's reaper waits for the
+    /// console to shut down, which ends every client still attached 5 s
+    /// after the hang-up, the child included. Drop returns at once, so
+    /// closing a pane never stalls the caller; the backend's own Drop
+    /// joins the wait before the process exits. Only a host that fails to
+    /// shut down in time leaves the child to be killed. A clone only drops
+    /// its reference; the last one closes the console (`OwnPtyMaster`'s
+    /// Drop).
     fn drop(&mut self) {
-        let Some(child) = self.child.as_mut() else {
+        let Some(child) = self.child.take() else {
             return;
         };
         self.master.hang_up();
-        if self.master.wait_shut_down(SHUTDOWN) {
-            return;
-        }
-        if exited_within(child, Duration::ZERO).is_none() {
-            // Drop can't report a failure; a child that outlives this is
-            // already detached from a console that has closed.
-            let _ = child.kill_single(Signal::Kill);
-        }
+        let master = Arc::clone(&self.master);
+        self.reaper.run(Box::new(move || shut_down(&master, child)));
+    }
+}
+
+/// Waits for the hung-up console to shut down, then kills `child` if it
+/// is still running.
+fn shut_down(master: &OwnPtyMaster, mut child: WindowsChild) {
+    if master.wait_shut_down(SHUTDOWN) {
+        return;
+    }
+    if exited_within(&mut child, Duration::ZERO).is_none() {
+        // Nothing can report a failure here; a child that outlives this is
+        // already detached from a console that has closed.
+        let _ = child.kill_single(Signal::Kill);
     }
 }
 
@@ -307,7 +344,7 @@ mod tests {
     /// exit fires the exit token and its exit code is reported.
     #[test]
     fn own_host_child_output_exit_and_status_reach_the_terminal() {
-        let mut h = OwnBackend
+        let mut h = OwnBackend::new()
             .spawn_shell(80, 24, Some("cmd.exe /c echo own_ok& exit 7"), &[], None)
             .expect("spawn on our own host");
         let out = drain(h.as_ref());
@@ -322,7 +359,7 @@ mod tests {
     #[test]
     fn cmd_reads_the_shell_arguments_verbatim() {
         let args = ["tail one".to_owned()];
-        let mut h = OwnBackend
+        let mut h = OwnBackend::new()
             .spawn_shell(80, 24, Some(r#"cmd.exe /c echo a"b c"d"#), &args, None)
             .expect("spawn on our own host");
         let out = drain(h.as_ref());
@@ -335,7 +372,7 @@ mod tests {
     /// (#1279), on either backend: cmd echoes it whole, and the shell exits 0.
     #[test]
     fn a_launcher_argument_cannot_inject_into_cmd_on_either_backend() {
-        let backends: [&dyn Backend; 2] = [&OwnBackend, &WindowsBackend];
+        let backends: [&dyn Backend; 2] = [&OwnBackend::new(), &WindowsBackend];
         for backend in backends {
             let args = [r#"x\" & echo INJECTED& exit 9 & \"y"#.to_owned()];
             let mut h = backend
@@ -356,7 +393,7 @@ mod tests {
     /// a `!` argument, on either backend.
     #[test]
     fn a_launcher_v_on_refuses_bang_on_either_backend() {
-        let backends: [&dyn Backend; 2] = [&OwnBackend, &WindowsBackend];
+        let backends: [&dyn Backend; 2] = [&OwnBackend::new(), &WindowsBackend];
         for backend in backends {
             let args: Vec<String> = ["/v:on", "/c", "echo", "!PATH!"]
                 .iter()
@@ -375,7 +412,7 @@ mod tests {
     /// quotes through cmd's quote stripping.
     #[test]
     fn cmd_switches_and_a_quoted_command_reach_cmd_on_either_backend() {
-        let backends: [&dyn Backend; 2] = [&OwnBackend, &WindowsBackend];
+        let backends: [&dyn Backend; 2] = [&OwnBackend::new(), &WindowsBackend];
         for backend in backends {
             let args: Vec<String> = ["/c", "echo a b", "&", "exit", "5"]
                 .iter()
@@ -398,7 +435,7 @@ mod tests {
     /// resize is accepted while it runs.
     #[test]
     fn own_host_input_round_trips_through_cmd() {
-        let mut h = OwnBackend
+        let mut h = OwnBackend::new()
             .spawn_shell(80, 24, Some("cmd.exe"), &[], None)
             .expect("spawn cmd.exe on our own host");
         let out = drain(h.as_ref());
@@ -414,7 +451,7 @@ mod tests {
     /// CTRL_CLOSE, or is killed after the grace, and Drop returns soon after.
     #[test]
     fn dropping_the_original_ends_a_running_child() {
-        let h = OwnBackend
+        let h = OwnBackend::new()
             .spawn_shell(80, 24, Some("ping.exe -n 60 127.0.0.1"), &[], None)
             .expect("spawn");
         let exited = h.exit_token().expect("exit token");
@@ -430,6 +467,36 @@ mod tests {
             .expect("the child ended after the hang-up");
     }
 
+    /// Closing a pane doesn't wait for its console to shut down (review
+    /// P2 10): the handle's Drop returns at once, and the backend's Drop
+    /// waits for the shutdown, which ends the child.
+    #[test]
+    fn a_dropped_handle_leaves_the_shutdown_to_the_backend() {
+        let backend = OwnBackend::new();
+        let h = backend
+            .spawn_shell(80, 24, Some("ping.exe -n 60 127.0.0.1"), &[], None)
+            .expect("spawn");
+        let exited = h.exit_token().expect("exit token");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            exited();
+            let _ = tx.send(());
+        });
+        let start = Instant::now();
+        drop(h);
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "the handle's Drop hands the wait off"
+        );
+        drop(backend);
+        assert!(
+            start.elapsed() < super::SHUTDOWN + Duration::from_secs(1),
+            "the backend's Drop is bounded"
+        );
+        rx.recv_timeout(Duration::from_secs(1))
+            .expect("the child ended by the time the backend dropped");
+    }
+
     /// A program named by a full path with spaces, followed by arguments,
     /// is found as CreateProcessW finds it.
     #[test]
@@ -440,7 +507,7 @@ mod tests {
         let cmd = dir.join("cmd copy.exe");
         std::fs::copy(format!(r"{windir}\System32\cmd.exe"), &cmd).expect("copy cmd");
         let shell = format!("{} /c exit 4", cmd.display());
-        let mut h = OwnBackend
+        let mut h = OwnBackend::new()
             .spawn_shell(80, 24, Some(&shell), &[], None)
             .expect("spawn by an unquoted path with spaces");
         h.exit_token().expect("exit token")();
@@ -459,7 +526,7 @@ mod tests {
         std::fs::write(&script, "@echo ARGS=[%*]\r\n").expect("script");
         let shell = format!(r#""{}" -x "a b""#, script.display());
         let args = ["tail one".to_owned()];
-        let mut h = OwnBackend
+        let mut h = OwnBackend::new()
             .spawn_shell(80, 24, Some(&shell), &args, None)
             .expect("spawn a batch shell");
         let out = drain(h.as_ref());
@@ -559,7 +626,7 @@ mod tests {
     /// A clone owns no child: no exit token, no status.
     #[test]
     fn a_clone_owns_no_child() {
-        let h = OwnBackend
+        let h = OwnBackend::new()
             .spawn_shell(80, 24, Some("cmd.exe /c exit 0"), &[], None)
             .expect("spawn");
         let mut clone = h.try_clone().expect("clone");
