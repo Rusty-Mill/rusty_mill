@@ -1713,6 +1713,44 @@ jobs:
           path: crates/libs/net/rusty_tls/fuzz/artifacts
           if-no-files-found: ignore
 
+  # Coverage-guided fuzz of hostile ConDrv traffic against the console host
+  # (design docs/projects/term/conhost/design.md §8.1, D2 PR 13): packet
+  # decoding, and packet sequences checked against the §6.1/§7.4 limits.
+  # Scheduled and manual sweeps only, never on PRs or in the merge queue,
+  # where it is `skipped`; rusty_conhost's own tests run a seeded sample of the
+  # same driver on every PR. Same dated nightly, cargo-fuzz and tested script
+  # as rusty-tls-fuzz, pointed at this crate.
+  rusty-conhost-fuzz:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-conhost-fuzz
+      queue: max
+      cancel-in-progress: false
+    name: rusty_conhost fuzz smoke
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      FUZZ_TOOLCHAIN: nightly-2026-10-07
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        with:
+          tool: cargo-fuzz@0.13.2
+      - name: fuzz smoke (30 s per target)
+        env:
+          FUZZ_ROOT: crates/libs/ui/rusty_conhost
+          FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu
+        run: bash .github/scripts/tls_fuzz_smoke.sh 30 2
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rusty-conhost-fuzz-artifacts
+          path: crates/libs/ui/rusty_conhost/fuzz/artifacts
+          if-no-files-found: ignore
+
   # ---------------------------------------------------------------------------
 
   # The offline replay viewer bundles three.js and a render loop in JS that the
@@ -2006,6 +2044,7 @@ jobs:
       - rusty-tls-engine
       - rusty-tls-engine-native
       - rusty-tls-fuzz
+      - rusty-conhost-fuzz
       - crypto-constant-time
       - rusty-rand-platforms
       - rleval-viewer-gl-smoke

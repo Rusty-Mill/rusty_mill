@@ -33,6 +33,8 @@ use crate::sched::{MAX_RETAINED_PER_CALL, PACKET_INPUT_CAP, WRITE_BACK_CAP};
 
 mod output;
 mod read;
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) use read::READ_REPLY_CAP;
 mod screen;
 
 use output::get_console_window;
