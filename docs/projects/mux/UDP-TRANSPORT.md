@@ -6,7 +6,8 @@ Built in #1270 (transport), #1280 (server) and #1283 (client), and checked
 by hand over a real sshd on 2026-10-31
 ([UDP-MANUAL-CHECK-2026-10-31.md](UDP-MANUAL-CHECK-2026-10-31.md)). Not built
 yet, in their own step: the 6 s outage display, the lease release after
-30 s of silence, and the stale orphan on overflow.
+30 s of silence, the stale orphan on overflow, and moving back to UDP after
+a fallback to SSH.
 Background: [SPIKE-4-ROAMING.md](SPIKE-4-ROAMING.md) and the step 2 decision
 in [DECISIONS.md](DECISIONS.md) (SSH bootstrap, 2026-10-29).
 
