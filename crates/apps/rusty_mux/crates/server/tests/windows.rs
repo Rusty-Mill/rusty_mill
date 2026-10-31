@@ -159,10 +159,12 @@ fn a_killed_server_takes_its_blocks_with_it(host: ConsoleHost) {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Ctrl+Break is a clean stop. On our host the server exits only once
-/// each block's console has ended every program on it, a ping started
-/// beside the shell included, within its 6 s budget; on ConPTY conhost ends
-/// them after the server has gone, as before.
+/// Ctrl+Break is a clean stop. Each of two blocks runs, beside its shell,
+/// a ping and a program whose CTRL_CLOSE handler stalls for 30 s, which
+/// only the console's 5 s end of lingering clients stops. On our host the
+/// server exits only once both consoles have ended them: in parallel,
+/// within the one 6 s budget. On ConPTY conhost ends them after the server
+/// has gone, as before.
 fn a_stopped_server_ends_every_program_before_it_exits(host: ConsoleHost) {
     let name = format!("rusty-mux-stopped-{}-{host:?}.sock", std::process::id());
     let path = std::env::temp_dir().join(name);
@@ -180,6 +182,7 @@ fn a_stopped_server_ends_every_program_before_it_exits(host: ConsoleHost) {
     );
     wait_until_listening(&path);
 
+    let stubborn = Stubborn::new(host);
     let mut a = Client::connect(&path);
     let mut programs = Ends(Vec::new());
     for _ in 0..2 {
@@ -192,6 +195,11 @@ fn a_stopped_server_ends_every_program_before_it_exits(host: ConsoleHost) {
         programs
             .0
             .push(("a ping", "PING.EXE", a.wait_for_number(block, "PING=")));
+        a.input(block, stubborn.start.as_bytes());
+        let pid = a.wait_for_number(block, "STUBBORN=");
+        programs
+            .0
+            .push(("a stalling program", "powershell.exe", pid));
     }
     for &(what, _, pid) in &programs.0 {
         assert!(alive(pid), "{what} (pid {pid}) never ran");
@@ -215,6 +223,51 @@ fn a_stopped_server_ends_every_program_before_it_exits(host: ConsoleHost) {
     }
     eprintln!("{host:?}: the server stopped in {took:?}");
     let _ = std::fs::remove_file(&path);
+}
+
+/// A PowerShell script whose CTRL_CLOSE handler sleeps for 30 s, and the
+/// command that starts it beside a block's shell. It prints
+/// `STUBBORN=<pid>` once the handler is installed.
+struct Stubborn {
+    script: std::path::PathBuf,
+    start: String,
+}
+
+impl Stubborn {
+    const SCRIPT: &str = r#"
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+public static class Stall {
+    public delegate bool Handler(uint ctrl);
+    static readonly Handler handler = ctrl => { Thread.Sleep(30000); return true; };
+    [DllImport("kernel32.dll")]
+    static extern bool SetConsoleCtrlHandler(Handler handler, bool add);
+    public static bool Install() { return SetConsoleCtrlHandler(handler, true); }
+}
+'@
+if (-not [Stall]::Install()) { exit 1 }
+'STUBBORN=' + $PID
+Start-Sleep -Seconds 600
+"#;
+
+    fn new(host: ConsoleHost) -> Self {
+        let name = format!("rusty-mux-stubborn-{}-{host:?}.ps1", std::process::id());
+        let script = std::env::temp_dir().join(name);
+        std::fs::write(&script, Self::SCRIPT).expect("write the stalling script");
+        let start = format!(
+            "start /b powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"\r",
+            script.display()
+        );
+        Self { script, start }
+    }
+}
+
+impl Drop for Stubborn {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.script);
+    }
 }
 
 /// `CREATE_NEW_PROCESS_GROUP` (winbase.h): the child leads a process group
