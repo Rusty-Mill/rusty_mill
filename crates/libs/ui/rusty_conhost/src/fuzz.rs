@@ -170,6 +170,24 @@ struct Owed {
     write_back: usize,
 }
 
+impl Owed {
+    /// The call as it arrives: `payload` is what the console will see,
+    /// so a header that lies about its size bounds nothing.
+    fn new(id: [u8; 8], function: u32, payload: &[u8], room: u32) -> Owed {
+        let write_back = match function {
+            msg::CONNECT => msg::CONNECTION_INFORMATION_LEN,
+            msg::USER_DEFINED => msg::api_msg(payload).map_or(0, |m| m.fixed.len()),
+            _ => 0,
+        };
+        Owed {
+            id,
+            function,
+            room: room as usize,
+            write_back,
+        }
+    }
+}
+
 /// The engine of `runtime.rs` without the OS: an output queue nobody
 /// reads until the script drains it, an input lane, the control lane, and
 /// every call still owed an answer.
@@ -357,17 +375,7 @@ impl Engine {
         };
         self.next_id += 1;
         let id = self.next_id.to_le_bytes();
-        let write_back = match function {
-            msg::CONNECT => msg::CONNECTION_INFORMATION_LEN,
-            msg::USER_DEFINED => msg::api_msg(payload).map_or(0, |m| m.fixed.len()),
-            _ => 0,
-        };
-        self.owed.push(Owed {
-            id,
-            function,
-            room: output as usize,
-            write_back,
-        });
+        self.owed.push(Owed::new(id, function, payload, output));
         self.handle(Event::Packet(Packet {
             id,
             process,
@@ -691,6 +699,79 @@ mod tests {
         assert_eq!(e.last_status, msg::STATUS_ILLEGAL_FUNCTION);
         assert_eq!((e.c.waiting(), e.c.parked()), (0, 0));
         e.finish();
+    }
+
+    /// A USER_DEFINED payload: header, `fixed` and no variable part.
+    fn api_payload(number: u32, fixed: &[u8]) -> Vec<u8> {
+        let mut p = number.to_le_bytes().to_vec();
+        p.extend((fixed.len() as u32).to_le_bytes());
+        p.extend(fixed);
+        p
+    }
+
+    fn reply(id: [u8; 8], write_back: usize) -> Reply {
+        Reply {
+            id,
+            status: msg::STATUS_SUCCESS,
+            information: 0,
+            write_back: vec![0; write_back],
+            output: Vec::new(),
+            output_at: 0,
+        }
+    }
+
+    /// A `CONSOLE_READCONSOLE_MSG` for an ANSI read: 20 bytes.
+    const READ_CONSOLE_MSG: [u8; 20] = [0; 20];
+
+    #[test]
+    #[should_panic(expected = "write-back of 8 for a 4-byte descriptor")]
+    fn a_write_back_past_its_descriptor_is_caught() {
+        let mut e = engine();
+        let id = 99u64.to_le_bytes();
+        let payload = api_payload(api::GET_CP, &[0; 4]);
+        // 256 bytes of room and 8 <= WRITE_BACK_CAP: only the descriptor
+        // bound can catch it.
+        e.owed.push(Owed::new(id, msg::USER_DEFINED, &payload, 256));
+        e.answer(&reply(id, 8));
+    }
+
+    #[test]
+    fn a_header_that_lies_bounds_no_write_back() {
+        let mut lying = api_payload(api::GET_CP, &[0; 4]);
+        lying[4..8].copy_from_slice(&200u32.to_le_bytes());
+        let o = Owed::new([0; 8], msg::USER_DEFINED, &lying, 256);
+        assert_eq!(o.write_back, 0);
+        let past_cap = Owed::new([0; 8], msg::USER_DEFINED, &[], 256);
+        assert_eq!(past_cap.write_back, 0);
+    }
+
+    /// A cooked READ_CONSOLE waits for its line.
+    fn deferred_read(e: &mut Engine) -> [u8; 8] {
+        let [_, input, _] = connect(e, 7).expect("connects");
+        let payload = api_payload(api::READ_CONSOLE, &READ_CONSOLE_MSG);
+        e.send(msg::USER_DEFINED, 1, input, &payload, 256);
+        assert_eq!(e.c.waiting(), 1, "the read waits");
+        assert_eq!(e.owed[0].write_back, READ_CONSOLE_MSG.len());
+        e.owed[0].id
+    }
+
+    #[test]
+    fn a_deferred_read_completes_within_its_descriptor() {
+        let mut e = engine();
+        let id = deferred_read(&mut e);
+        e.lane.extend(b"hi\r");
+        e.turn();
+        assert!(e.answered.contains(&id), "the line completes the read");
+        assert!(e.owed.is_empty());
+        e.finish();
+    }
+
+    #[test]
+    #[should_panic(expected = "write-back of 21 for a 20-byte descriptor")]
+    fn a_deferred_completion_keeps_its_bound() {
+        let mut e = engine();
+        let id = deferred_read(&mut e);
+        e.answer(&reply(id, 21));
     }
 
     #[test]
