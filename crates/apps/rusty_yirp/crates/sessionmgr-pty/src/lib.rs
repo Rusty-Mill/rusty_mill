@@ -84,8 +84,13 @@ pub enum ConsoleHost {
 impl ConsoleHost {
     /// Reads `RUSTY_CONSOLE_HOST`: `conpty` or `own`, and [`Conpty`](
     /// ConsoleHost::Conpty) when unset. Any other value is an
-    /// `InvalidInput` error naming the variable.
+    /// `InvalidInput` error naming the variable. Off Windows the variable
+    /// is not read at all, so a Windows-only setting can never fail a
+    /// session there.
     pub fn from_env() -> io::Result<Self> {
+        if !cfg!(windows) {
+            return Ok(ConsoleHost::default());
+        }
         Self::parse(std::env::var_os(CONSOLE_HOST_ENV).as_deref())
     }
 
@@ -453,6 +458,18 @@ mod tests {
         let parse = |v: &str| ConsoleHost::parse(Some(OsStr::new(v)));
         assert_eq!(parse("conpty").expect("conpty"), ConsoleHost::Conpty);
         assert_eq!(parse("own").expect("own"), ConsoleHost::Own);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn the_console_host_variable_is_ignored_off_windows() {
+        // Review of ff3a25b3 (Codex P2): a bad value inherited by a Linux
+        // daemon must not fail its sessions. Nothing else in this crate's
+        // tests reads the variable, so setting it here races nothing.
+        std::env::set_var(CONSOLE_HOST_ENV, "not-a-host");
+        let host = ConsoleHost::from_env();
+        std::env::remove_var(CONSOLE_HOST_ENV);
+        assert_eq!(host.expect("ignored off Windows"), ConsoleHost::Conpty);
     }
 
     #[test]
