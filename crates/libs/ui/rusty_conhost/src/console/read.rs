@@ -33,7 +33,7 @@ const CONTROL_KEY_STATE_AT: usize = 12;
 const NUM_BYTES_AT: usize = 16;
 /// Reply data one read returns, and one call builds across the reads it
 /// completes (§7.4); a read's buffer beyond it goes unused.
-pub(super) const READ_REPLY_CAP: usize = 1024 * 1024;
+pub(crate) const READ_REPLY_CAP: usize = 1024 * 1024;
 /// UTF-16 units of finished lines that all handles together keep for
 /// their next read (§7.4); a line's rest past it is dropped.
 pub(super) const MAX_PENDING_UNITS: usize = 512 * 1024;

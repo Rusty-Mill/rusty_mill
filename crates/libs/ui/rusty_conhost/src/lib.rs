@@ -33,6 +33,11 @@ mod msg;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod sched;
 
+/// Fuzz entry points, for `fuzz/` only: not a supported API.
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub mod fuzz;
+
 #[cfg(windows)]
 mod pty;
 #[cfg(windows)]
