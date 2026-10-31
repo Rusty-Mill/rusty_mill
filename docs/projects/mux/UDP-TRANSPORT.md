@@ -5,9 +5,9 @@ Go on 2026-10-30 and answered its four open questions the same day (below).
 Built in #1270 (transport), #1280 (server) and #1283 (client), and checked
 by hand over a real sshd on 2026-10-31
 ([UDP-MANUAL-CHECK-2026-10-31.md](UDP-MANUAL-CHECK-2026-10-31.md)). Not built
-yet, in their own step: the 6 s outage display and moving back to UDP
-after a fallback to SSH. The lease release after 30 s of silence and the
-stale orphan on overflow are built (see Session lifetime and Overflow).
+yet, in its own step: moving back to UDP after a fallback to SSH. The
+lease release after 30 s of silence, the stale orphan on overflow and the
+6 s outage display are built (see Session lifetime, Overflow and Liveness).
 Background: [SPIKE-4-ROAMING.md](SPIKE-4-ROAMING.md) and the step 2 decision
 in [DECISIONS.md](DECISIONS.md) (SSH bootstrap, 2026-10-29).
 
@@ -168,7 +168,9 @@ ordering, acks and flow control belong to each stream.
 - **Liveness:** each side sends a datagram after 3 s of silence. The client
   treats the path as lost after 6 s with nothing heard, keeps retransmitting
   at the capped RTO, and shows the outage the way #1243 already does for a
-  dead SSH path.
+  dead SSH path. Built: the client's heartbeat also reads when the relay
+  last heard the server, and loses a UDP path after 6 s of that silence;
+  the 15 s missed sign of life still covers the SSH forward.
 - **Flow control:** each stream's receive buffer holds at most 1 MiB in
   total: bytes in order but not yet read, plus bytes out of order. Every
   `Ack` sets `limit` to the cumulative offset plus the free space, and a
