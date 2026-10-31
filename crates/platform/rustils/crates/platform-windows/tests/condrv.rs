@@ -375,7 +375,7 @@ fn a_connect_reply_to_a_client_that_died_after_the_read_fails() {
         information: info.len(),
         write_back: &info,
     });
-    let err = done.err().expect("the reply to a dead client fails");
+    let err = done.expect_err("the reply to a dead client fails");
     eprintln!("dead-client CONNECT reply: {err:?}");
 }
 
