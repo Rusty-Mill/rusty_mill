@@ -185,9 +185,11 @@ ordering, acks and flow control belong to each stream.
   its probe. While the kept association stays silent, the client asks for
   a new one on that schedule as well, since the server lets an association
   go after `--udp-idle` and would never answer the old one again; whichever
-  answers first is moved onto. During a move, keys typed are held and sent
-  on the path the client ends up on, and a connection on the old path that
-  ends counts as a loss only if the move fails before any client moved. A
+  answers first is moved onto. During a move, what is typed (keys, a focus
+  change, up to 1024 actions) is held and taken in order on the path the
+  client ends up on, even one brought back after the move broke; and a
+  connection on the old path that ends counts as a loss only if the move
+  fails before any client moved. A
   move that fails after the control client was taken over brings the path
   back over SSH with the takeover token that client was last welcomed with.
 - **Flow control:** each stream's receive buffer holds at most 1 MiB in

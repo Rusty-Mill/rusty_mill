@@ -120,6 +120,10 @@ mod client {
     /// How long a path that can tell (UDP, whose server sends a keepalive
     /// after 3 s of silence) may go without a datagram before it is lost.
     const SILENT: Duration = Duration::from_secs(6);
+    /// At most this many typed actions wait for a move onto UDP to end.
+    const HELD: usize = 1024;
+    /// At most this many bytes typed wait for a block's lease.
+    const WAITING: usize = 64 * 1024;
 
     /// The longest wait between attempts to bring the path back.
     const BACKOFF: Duration = Duration::from_secs(30);
@@ -416,13 +420,23 @@ mod client {
 
     /// While the clients are taken over, the old path's connections end
     /// one by one: no loss if the move goes through, but a real one if it
-    /// fails before any client moved. Keys typed meanwhile wait for the
-    /// path they will go on.
+    /// fails before any client moved. What is typed meanwhile, keys and
+    /// focus alike, waits for the path it will go on, in order.
     #[derive(Default)]
     struct Taking {
         /// An old connection ended, or a request on one failed.
         ended: bool,
-        typed: Vec<(BlockId, Vec<u8>)>,
+        held: Vec<Action>,
+    }
+
+    /// What became of an action typed while a move may be under way.
+    #[derive(Debug, PartialEq)]
+    enum Held {
+        /// No move: act on it now.
+        Now(Action),
+        Kept,
+        /// [`HELD`] actions are waiting already: dropped.
+        Full,
     }
 
     /// What to do once a move onto UDP is over.
@@ -440,15 +454,17 @@ mod client {
     }
 
     impl Standby {
-        /// Keys typed for `block`: held during a move, else given back to
-        /// send now.
-        fn typed(&mut self, block: BlockId, data: Vec<u8>) -> Option<Vec<u8>> {
+        /// An action typed: held during a move, but for detaching, else
+        /// given back to act on now.
+        fn hold(&mut self, action: Action) -> Held {
             match &mut self.moving {
+                Moving::Taking(_) if action == Action::Detach => Held::Now(action),
+                Moving::Taking(taking) if taking.held.len() >= HELD => Held::Full,
                 Moving::Taking(taking) => {
-                    taking.typed.push((block, data));
-                    None
+                    taking.held.push(action);
+                    Held::Kept
                 }
-                Moving::Idle | Moving::Asked(_) => Some(data),
+                Moving::Idle | Moving::Asked(_) => Held::Now(action),
             }
         }
 
@@ -477,16 +493,12 @@ mod client {
             self.next = now + wait;
         }
 
-        /// A move is over, at `now`: what to do, and the keys held during
-        /// it, in order, to send on whatever path the client is left on.
+        /// A move is over, at `now`: what to do, and the actions held during
+        /// it, in order, to take on whatever path the client is left on.
         /// Connections that ended during a move that went through were its
         /// own takeovers; during one that failed before any client moved,
         /// they ended for real.
-        fn finish<T>(
-            &mut self,
-            moved: Result<T, Missed>,
-            now: Instant,
-        ) -> (After<T>, Vec<(BlockId, Vec<u8>)>) {
+        fn finish<T>(&mut self, moved: Result<T, Missed>, now: Instant) -> (After<T>, Vec<Action>) {
             let taking = match std::mem::replace(&mut self.moving, Moving::Idle) {
                 Moving::Taking(taking) => taking,
                 Moving::Idle | Moving::Asked(_) => Taking::default(),
@@ -507,7 +519,7 @@ mod client {
                 Err(Missed::Broken(_, me)) => After::Lose(Some(me)),
                 Err(Missed::Dropped) => After::End,
             };
-            (after, taking.typed)
+            (after, taking.held)
         }
     }
 
@@ -837,6 +849,7 @@ mod client {
                 tries: 0,
                 next: now,
             },
+            held: Vec::new(),
             me: takeover,
             lost: None,
             abandoned: None,
@@ -1395,6 +1408,8 @@ mod client {
         term: Option<(Grid, AnsiParser)>,
         /// The pending lease request, if any.
         asking: Option<u64>,
+        /// Keys typed while the lease is asked for, sent once it is held.
+        waiting: Vec<Vec<u8>>,
         leased: bool,
         /// The size last asked for, until the block reports a resize.
         sizing: Option<Size>,
@@ -1411,6 +1426,21 @@ mod client {
             // A failed send ends the reader too, which reports it.
             let _ = self.conn.send(&make(req));
             req
+        }
+
+        /// Keys typed into this block: sent if it holds the lease, kept
+        /// until it does while asked for, up to [`WAITING`] bytes, else
+        /// dropped as the server would refuse them.
+        fn typed(&mut self, data: Vec<u8>) {
+            if self.leased {
+                return self.type_in(data);
+            }
+            let kept: usize = self.waiting.iter().map(Vec::len).sum();
+            match (self.asking.is_some(), kept + data.len() <= WAITING) {
+                (true, true) => self.waiting.push(data),
+                (true, false) => bell(),
+                (false, _) => {}
+            }
         }
 
         /// Sends typed `data` to the block and predicts its echo, timing
@@ -1498,6 +1528,9 @@ mod client {
                 Message::Done { req, .. } if self.asking == Some(req) => {
                     self.asking = None;
                     self.leased = true;
+                    for data in std::mem::take(&mut self.waiting) {
+                        self.type_in(data);
+                    }
                     return Ok(Change::Leased);
                 }
                 Message::Failed { req, reason, .. } if req == self.attach => {
@@ -1507,6 +1540,7 @@ mod client {
                     // A refused lease, or input after losing it.
                     if self.asking == Some(req) {
                         self.asking = None;
+                        self.waiting.clear();
                     }
                     self.leased = false;
                     self.unpredict();
@@ -1564,6 +1598,9 @@ mod client {
         pulse: Pulse,
         /// Moving back onto the UDP path given up for SSH.
         standby: Standby,
+        /// Actions held during a move that lost the path, taken once it is
+        /// back.
+        held: Vec<Action>,
         /// How to take the control connection's client over.
         me: Option<Takeover>,
         lost: Option<Lost>,
@@ -1663,7 +1700,7 @@ mod client {
                 Input::Keys(bytes) if bytes.is_empty() => self.end(Ended::Detached),
                 Input::Keys(bytes) => {
                     for action in self.keys.feed(&bytes) {
-                        self.act(action);
+                        self.typed(action);
                     }
                 }
                 // From a control connection given up on.
@@ -1820,25 +1857,26 @@ mod client {
 
         /// A move onto UDP is done or failed: see [`Standby::finish`].
         fn moved(&mut self, moved: Result<Back, Missed>) {
-            let (after, typed) = self.standby.finish(moved, Instant::now());
+            let (after, held) = self.standby.finish(moved, Instant::now());
             match after {
-                After::Install(back) => self.rejoined(back),
-                After::Stay => {}
+                After::Install(back) => {
+                    self.held = held;
+                    self.rejoined(back);
+                }
+                After::Stay => self.replay(held),
                 After::Lose(me) => {
                     self.me = me.or(self.me);
+                    self.held = held;
                     self.lose();
                 }
                 After::End => self.end(Ended::Dropped),
             }
-            self.type_in(typed);
         }
 
-        /// Sends keys held during a move to their blocks, if still leased.
-        fn type_in(&mut self, typed: Vec<(BlockId, Vec<u8>)>) {
-            for (block, data) in typed {
-                if let Some(pane) = self.panes.get_mut(&block).filter(|p| p.leased) {
-                    pane.type_in(data);
-                }
+        /// Takes actions held during a move, in order.
+        fn replay(&mut self, held: Vec<Action>) {
+            for action in held {
+                self.act(action);
             }
         }
 
@@ -1947,6 +1985,8 @@ mod client {
             if let Some(rejoiner) = &self.rejoiner {
                 rejoiner.ask(Ask::Settle);
             }
+            let held = std::mem::take(&mut self.held);
+            self.replay(held);
         }
 
         /// Whether `tag` is the open connection to its block.
@@ -2028,12 +2068,21 @@ mod client {
             req
         }
 
+        /// Takes a typed action, or holds it during a move.
+        fn typed(&mut self, action: Action) {
+            match self.standby.hold(action) {
+                Held::Now(action) => self.act(action),
+                Held::Kept => {}
+                Held::Full => bell(),
+            }
+        }
+
         fn act(&mut self, action: Action) {
             let focus = self.focus;
             match action {
                 Action::Input(data) => {
-                    if let Some(data) = self.standby.typed(focus, data) {
-                        self.type_in(vec![(focus, data)]);
+                    if let Some(pane) = self.panes.get_mut(&focus) {
+                        pane.typed(data);
                     }
                 }
                 Action::Detach => self.end(Ended::Detached),
@@ -2324,6 +2373,7 @@ mod client {
                 receiver: Some(Receiver::default()),
                 term: None,
                 asking: None,
+                waiting: Vec::new(),
                 leased: opened.resumed.is_some_and(|r| r.leased),
                 sizing: None,
                 reader: Some(reader),
@@ -2478,6 +2528,7 @@ mod client {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use rusty_mux_tui::keys::Dir;
 
         /// Records what a [`Rejoin`] is asked, in order.
         #[derive(Default)]
@@ -2545,6 +2596,7 @@ mod client {
             }
         }
 
+        #[cfg(unix)]
         fn block(n: u8) -> BlockId {
             BlockId::from_uuid(Uuid::from_bytes([n; 16]))
         }
@@ -2556,33 +2608,43 @@ mod client {
             }
         }
 
+        fn input(data: &[u8]) -> Action {
+            Action::Input(data.to_vec())
+        }
+
         #[test]
-        fn keys_typed_during_a_move_are_held_and_given_back_once_in_order() {
+        fn actions_typed_during_a_move_are_held_in_order_but_detach() {
             let mut standby = taking();
-            assert_eq!(standby.typed(block(1), b"ab".to_vec()), None);
-            assert_eq!(standby.typed(block(2), b"c".to_vec()), None);
-            assert_eq!(standby.typed(block(1), b"d".to_vec()), None);
-            let (after, typed) = standby.finish(Ok(()), Instant::now());
+            assert_eq!(standby.hold(input(b"ab")), Held::Kept);
+            assert_eq!(standby.hold(Action::Focus(Dir::Right)), Held::Kept);
+            assert_eq!(standby.hold(Action::Detach), Held::Now(Action::Detach));
+            assert_eq!(standby.hold(input(b"c")), Held::Kept);
+            let (after, held) = standby.finish(Ok(()), Instant::now());
             assert_eq!(after, After::Install(()));
-            let want = [
-                (block(1), b"ab".to_vec()),
-                (block(2), b"c".to_vec()),
-                (block(1), b"d".to_vec()),
-            ];
-            assert_eq!(typed, want);
-            // Once over, keys go straight through, and none come back again.
-            assert_eq!(standby.typed(block(1), b"e".to_vec()), Some(b"e".to_vec()));
+            assert_eq!(held, [input(b"ab"), Action::Focus(Dir::Right), input(b"c")]);
+            // Once over, actions go straight through, and none come back.
+            assert_eq!(standby.hold(input(b"e")), Held::Now(input(b"e")));
             assert_eq!(standby.finish(Ok(()), Instant::now()).1, []);
         }
 
         #[test]
-        fn keys_held_during_a_failed_move_are_given_back_to_send_on_ssh() {
+        fn actions_held_during_a_move_are_bounded() {
             let mut standby = taking();
-            assert_eq!(standby.typed(block(1), b"x".to_vec()), None);
-            let (after, typed) =
+            for _ in 0..HELD {
+                assert_eq!(standby.hold(input(b"k")), Held::Kept);
+            }
+            assert_eq!(standby.hold(input(b"k")), Held::Full);
+            assert_eq!(standby.finish(Ok(()), Instant::now()).1.len(), HELD);
+        }
+
+        #[test]
+        fn actions_held_during_a_failed_move_are_given_back_to_take_on_ssh() {
+            let mut standby = taking();
+            assert_eq!(standby.hold(input(b"x")), Held::Kept);
+            let (after, held) =
                 standby.finish::<()>(Err(Missed::Retry("no".into())), Instant::now());
             assert_eq!(after, After::Stay);
-            assert_eq!(typed, [(block(1), b"x".to_vec())]);
+            assert_eq!(held, [input(b"x")]);
         }
 
         #[test]
@@ -2737,6 +2799,233 @@ mod client {
                 matches!(missed, Some(Missed::Broken(_, me)) if me == new),
                 "the new takeover is kept"
             );
+        }
+
+        /// A connection's two ends: the client's, and the server's to
+        /// read what the client sent.
+        #[cfg(unix)]
+        fn ends() -> (UnixStream, UnixStream) {
+            UnixStream::pair().expect("pair")
+        }
+
+        /// A block's connection past its Welcome, continuing `who`.
+        #[cfg(unix)]
+        fn opened(block: BlockId, who: Takeover, leased: bool) -> (Opened, UnixStream) {
+            let (near, far) = ends();
+            let opened = Opened {
+                block,
+                conn: Conn::new(near.try_clone().expect("clone")),
+                writer: Conn::new(near.try_clone().expect("clone")),
+                stream: near,
+                takeover: Some(who),
+                resumed: Some(Resume {
+                    takeover: who,
+                    leased,
+                }),
+                features: PANE,
+            };
+            (opened, far)
+        }
+
+        /// What the client sent on a connection, until it goes quiet.
+        #[cfg(unix)]
+        fn sent(far: &UnixStream) -> Vec<Message> {
+            far.set_read_timeout(Some(Duration::from_millis(200)))
+                .expect("timeout");
+            let mut conn = Conn::new(far.try_clone().expect("clone"));
+            std::iter::from_fn(|| conn.recv().ok()).collect()
+        }
+
+        /// The bytes typed among `messages`, in order.
+        #[cfg(unix)]
+        fn typed_in(messages: &[Message]) -> Vec<Vec<u8>> {
+            messages
+                .iter()
+                .filter_map(|m| match m {
+                    Message::Input { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The path back, with blocks A (leased) and B (not) taken over.
+        #[cfg(unix)]
+        fn back(me: Takeover) -> (Back, UnixStream, UnixStream, UnixStream) {
+            let (stream, control) = ends();
+            let (a, a_far) = opened(block(1), takeover(11), true);
+            let (b, b_far) = opened(block(2), takeover(12), false);
+            let back = Back {
+                socket: PathBuf::from("udp.sock"),
+                conn: Conn::new(stream.try_clone().expect("clone")),
+                writer: Conn::new(stream.try_clone().expect("clone")),
+                stream,
+                me,
+                next: 50,
+                layout: None,
+                panes: vec![a, b],
+            };
+            (back, control, a_far, b_far)
+        }
+
+        /// A client showing blocks A and B side by side over SSH, A focused
+        /// and leased, with what the server's ends of A and B receive.
+        #[cfg(unix)]
+        fn app(rejoin: Option<Box<dyn Rejoin>>) -> (App, Inbox<Input>, [UnixStream; 3]) {
+            let (tx, inbox) = channel();
+            let (stream, control) = ends();
+            let (a, b) = (block(1), block(2));
+            let mut app = App {
+                socket: PathBuf::from("ssh.sock"),
+                rejoiner: rejoin.map(|r| Rejoiner::spawn(r, tx.clone())),
+                beat: None,
+                pulse: Pulse::default(),
+                standby: idle(),
+                held: Vec::new(),
+                me: Some(takeover(1)),
+                lost: None,
+                abandoned: None,
+                resumes: HashMap::new(),
+                tx,
+                control: Conn::new(stream.try_clone().expect("clone")),
+                control_stream: stream,
+                reader: None,
+                joined: 0,
+                predicting: false,
+                next: 1,
+                inspect: false,
+                layouts: true,
+                window: None,
+                layout: Some(Layout::Split {
+                    axis: rusty_mux_core::Axis::Columns,
+                    share: rusty_mux_core::Share::HALF,
+                    first: Box::new(Layout::Block(a)),
+                    second: Box::new(Layout::Block(b)),
+                }),
+                zoomed: None,
+                focus: a,
+                panes: HashMap::new(),
+                keys: Keys::default(),
+                area: Size::new(80, 24).expect("size"),
+                shown: Shown::Nothing,
+                split: None,
+                arriving: None,
+                opened: 0,
+                mirrored: None,
+                passed: None,
+                no_win32: NoWin32Input::default(),
+                pending: None,
+                ended: None,
+            };
+            let (a_open, a_far) = opened(a, takeover(11), true);
+            let (b_open, b_far) = opened(b, takeover(12), false);
+            for opened in [a_open, b_open] {
+                let pane = app.pane(opened);
+                app.panes.insert(pane.block, pane);
+            }
+            (app, inbox, [control, a_far, b_far])
+        }
+
+        /// Answers B's lease request on its fresh connection, as the server
+        /// would, and hands the answer to the client.
+        #[cfg(unix)]
+        fn grant(app: &mut App, inbox: &Inbox<Input>, b_far: &UnixStream, asked: &[Message]) {
+            let req = asked
+                .iter()
+                .find_map(|m| match m {
+                    Message::AcquireLease { req, .. } => Some(*req),
+                    _ => None,
+                })
+                .expect("B's lease asked for");
+            let mut server = Conn::new(b_far.try_clone().expect("clone"));
+            server
+                .send(&Message::Done { req, created: None })
+                .expect("done");
+            loop {
+                if let input @ Input::Pane(..) =
+                    inbox.recv_timeout(Duration::from_secs(5)).expect("answer")
+                {
+                    return app.take(input);
+                }
+            }
+        }
+
+        /// Keys for A, a move of the focus to B, then keys for B, all typed
+        /// while every client moves onto UDP: once it has, A gets its keys
+        /// and gives up its lease, and B gets its keys once its lease is
+        /// held, each exactly once; nothing went to the old connections.
+        #[cfg(unix)]
+        #[test]
+        fn typing_and_focus_during_a_move_reach_their_blocks_once_it_is_done() {
+            let (mut app, inbox, [_control, a_old, b_old]) = app(None);
+            sent(&a_old); // A's lease and the like, before the move.
+            app.standby.moving = Moving::Taking(Taking::default());
+            app.typed(input(b"for-a"));
+            app.typed(Action::Focus(Dir::Right));
+            app.typed(input(b"for-b"));
+            assert_eq!(app.focus, block(1), "the focus moves once the move is done");
+
+            let (back, _control, a_new, b_new) = back(takeover(1));
+            app.take(Input::Moved(Ok(back)));
+            assert!(typed_in(&sent(&a_old)).is_empty() && typed_in(&sent(&b_old)).is_empty());
+            let at_a = sent(&a_new);
+            assert_eq!(typed_in(&at_a), [b"for-a".to_vec()]);
+            assert!(
+                at_a.iter()
+                    .any(|m| matches!(m, Message::ReleaseLease { .. }))
+            );
+            let at_b = sent(&b_new);
+            assert!(typed_in(&at_b).is_empty(), "not before B holds the lease");
+            grant(&mut app, &inbox, &b_new, &at_b);
+            assert_eq!(typed_in(&sent(&b_new)), [b"for-b".to_vec()]);
+            assert_eq!(app.focus, block(2));
+        }
+
+        /// A [`Rejoin`] that never brings a path back by itself.
+        #[cfg(unix)]
+        struct Never;
+
+        #[cfg(unix)]
+        impl Rejoin for Never {
+            fn fresh(&mut self, _: &AtomicBool) -> Result<PathBuf, String> {
+                Err("not in this test".into())
+            }
+            fn listen(&mut self) {}
+            fn settle(&mut self) {}
+            fn discard(&mut self) {}
+            fn datagram(&mut self, _: u16, _: [u8; 8], _: [u8; 32]) -> Result<PathBuf, String> {
+                unreachable!("not asked here")
+            }
+            fn standby(&mut self) -> Result<PathBuf, String> {
+                unreachable!("not asked here")
+            }
+            fn pulses(&self) -> Pulses {
+                Pulses::default()
+            }
+        }
+
+        /// Keys typed during a move that broke after the control client
+        /// moved are kept through the lost path and sent once it is back,
+        /// which takes the clients over with the control's new takeover.
+        #[cfg(unix)]
+        #[test]
+        fn keys_typed_during_a_broken_move_reach_their_block_once_the_path_is_back() {
+            let (mut app, _inbox, [_control, a_old, _b_old]) = app(Some(Box::new(Never)));
+            sent(&a_old);
+            app.standby.moving = Moving::Taking(Taking::default());
+            app.typed(input(b"kept"));
+            let new = Takeover {
+                token: Uuid::from_bytes([42; 16]),
+                ..takeover(1)
+            };
+            app.take(Input::Moved(Err(Missed::Broken("pane".into(), new))));
+            assert!(app.lost.is_some());
+            assert_eq!(app.me, Some(new), "recovery asks with the new takeover");
+
+            let (back, _control, a_new, _b_new) = back(new);
+            app.take(Input::Rejoined(Ok(back)));
+            assert!(typed_in(&sent(&a_old)).is_empty());
+            assert_eq!(typed_in(&sent(&a_new)), [b"kept".to_vec()]);
+            assert!(app.held.is_empty());
         }
 
         /// A [`Rejoin`] whose UDP path is the socket given.
