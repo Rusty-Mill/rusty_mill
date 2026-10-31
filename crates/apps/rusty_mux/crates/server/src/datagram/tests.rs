@@ -736,14 +736,21 @@ async fn stale_orphan_goes_after_idle(lease: Duration, idle: Duration) {
     let frame = encode(&input).expect("encode");
     assert_eq!(peer.assoc.write(stream, &frame), frame.len());
     peer.until(|a| a.queued(stream) == 0).await;
-    let deadline = Instant::now() + PATIENCE;
-    while !state.borrow().is_stale(me.client) {
-        assert!(Instant::now() < deadline, "never over budget");
+    // The association stays alive, so only going stale lets the client go:
+    // served, then stale, then gone. Polled for gone, not for the stale
+    // moment: with the output pumping on this thread, a tick can outlast a
+    // short idle.
+    let sent = Instant::now();
+    let known =
+        |state: &crate::state::State| state.has_client(me.client) || state.is_stale(me.client);
+    while known(&state.borrow()) {
+        // Well short of the 5 s lease of the case that checks idle wins.
+        assert!(
+            sent.elapsed() < idle + Duration::from_secs(4),
+            "not gone after idle"
+        );
         rusty_tokio::time::sleep(TICK).await;
     }
-    rusty_tokio::time::sleep(idle * 2).await;
-    assert!(!state.borrow().is_stale(me.client));
-    assert!(!state.borrow().has_client(me.client));
     // The token no longer takes anything over.
     let (_, fresh) = peer.hello(features, Some(me)).await;
     assert_ne!(fresh.client, me.client);
