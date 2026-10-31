@@ -227,6 +227,11 @@ impl Default for Notify {
 
 /// Shared poll body for [`Notified`]/[`OwnedNotified`] -- identical
 /// either way, since both only ever need `&Notify`.
+///
+/// `done` is sticky: once set it stays set and short-cuts every later
+/// poll to `Ready`, before the coop budget is consulted, as tokio's
+/// `State::Done` does. Otherwise a poll the budget turned away could
+/// clear it, and a drop would then pass on a wakeup already consumed.
 fn poll_notified(
     notify: &Notify,
     registered: &mut bool,
@@ -234,6 +239,9 @@ fn poll_notified(
     state: &Arc<WaiterState>,
     cx: &mut Context<'_>,
 ) -> Poll<()> {
+    if *done {
+        return Poll::Ready(());
+    }
     let poll = poll_waiter(notify, registered, state, cx);
     *done = poll.is_ready();
     poll
@@ -312,9 +320,7 @@ fn enable_waiter(notify: &Notify, registered: &mut bool, state: &Arc<WaiterState
     let mut guard = notify.inner.lock().unwrap();
     if guard.permits > 0 {
         guard.permits -= 1;
-        // Lets a later poll return `Ready` without queueing.
-        state.woken.store(true, Ordering::Release);
-        *registered = true;
+        // `enable` sets `done`, which makes every later poll `Ready`.
         return true;
     }
     guard.waiters.push_back(state.clone());
@@ -557,6 +563,45 @@ mod tests {
         notify.notify_one();
         assert!(first.as_mut().enable());
         assert!(first.as_mut().enable(), "still reported");
+        drop(first);
+        assert!(poll(second.as_mut()).is_pending());
+    }
+
+    /// Polls `future` inside a task budget that is already spent, so
+    /// `coop::poll_proceed` would return `Pending`.
+    fn poll_without_budget(future: Pin<&mut impl Future<Output = ()>>) -> Poll<()> {
+        crate::coop::budget(|| {
+            let mut cx = Context::from_waker(Waker::noop());
+            while crate::coop::has_budget_remaining() {
+                assert!(crate::coop::poll_proceed(&mut cx).is_ready());
+            }
+            future.poll(&mut cx)
+        })
+    }
+
+    /// A wakeup `enable` reported stays consumed through a later poll
+    /// that the coop budget would have turned away, as tokio's `Done`
+    /// state does.
+    #[test]
+    fn a_wakeup_enable_reported_survives_a_poll_with_no_budget() {
+        let notify = Arc::new(Notify::new());
+        let (mut first, mut second) = two(&notify);
+        notify.notify_one();
+        assert!(first.as_mut().enable());
+        assert!(poll_without_budget(first.as_mut()).is_ready());
+        drop(first);
+        assert!(poll(second.as_mut()).is_pending());
+    }
+
+    /// The same for a future that already returned `Ready` and is polled
+    /// again with no budget.
+    #[test]
+    fn a_ready_waiter_repolled_with_no_budget_stays_ready() {
+        let notify = Arc::new(Notify::new());
+        let (mut first, mut second) = two(&notify);
+        notify.notify_one();
+        assert!(poll(first.as_mut()).is_ready());
+        assert!(poll_without_budget(first.as_mut()).is_ready());
         drop(first);
         assert!(poll(second.as_mut()).is_pending());
     }
