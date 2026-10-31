@@ -1229,28 +1229,32 @@ impl Console {
     }
 
     /// `CONSOLE_GETPROCESSLIST_MSG { OUT dwProcessCount }`, the pids in
-    /// the output buffer, newest client first, as conhost lists them.
-    /// When they don't fit, only the count is returned, which then
-    /// exceeds the room, and the call still succeeds.
+    /// the output buffer, newest process first, as conhost lists them:
+    /// one entry per process, ordered by its first connection. When they
+    /// don't fit, only the count is returned, which then exceeds the
+    /// room, and the call still succeeds. An output buffer that ends
+    /// inside the descriptor never gets here (`packet` refuses it).
     fn get_console_process_list(&self, p: &Packet<'_>, m: ApiMsg<'_>, mut fixed: Vec<u8>) -> Reply {
+        let at = m.fixed.len();
         if fixed.len() < 4 {
             return Reply::status(p.id, msg::STATUS_ILLEGAL_FUNCTION);
         }
-        let at = m.fixed.len();
-        let room = (p.output_size as usize).saturating_sub(at) / 4;
-        let mut newest_first: Vec<(usize, u32)> = self
-            .clients
-            .iter()
-            .map(|(&cookie, c)| (cookie, c.pid))
-            .collect();
-        newest_first.sort_unstable_by_key(|&(cookie, _)| std::cmp::Reverse(cookie));
+        let room = (p.output_size as usize).saturating_sub(at);
+        // Each pid's first connection: the cookies only grow.
+        let mut first: HashMap<u32, usize> = HashMap::new();
+        for (&cookie, c) in &self.clients {
+            let seen = first.entry(c.pid).or_insert(cookie);
+            *seen = (*seen).min(cookie);
+        }
+        let mut newest_first: Vec<(u32, usize)> = first.into_iter().collect();
+        newest_first.sort_unstable_by_key(|&(_, cookie)| std::cmp::Reverse(cookie));
         msg::put_u32(&mut fixed, 0, newest_first.len() as u32);
         let mut reply = Reply::ok(p.id);
         reply.write_back = fixed;
-        if newest_first.len() <= room {
+        if newest_first.len() <= room / 4 {
             reply.output = newest_first
                 .iter()
-                .flat_map(|(_, pid)| pid.to_le_bytes())
+                .flat_map(|(pid, _)| pid.to_le_bytes())
                 .collect();
             reply.information = reply.output.len();
             reply.output_at = at as u32;
@@ -2063,6 +2067,38 @@ pub(crate) mod tests {
         assert_eq!(r.status, msg::STATUS_SUCCESS);
         assert_eq!(msg::u32_at(&r.write_back, 0), Some(3));
         assert_eq!((r.information, r.output.len()), (0, 0));
+    }
+
+    /// conhost lists a process once, however many connections it has,
+    /// at the place of its first one.
+    #[test]
+    fn process_list_names_a_process_once() {
+        let mut h = Host::new();
+        for pid in [10, 20, 10] {
+            h.connect(pid, "");
+        }
+        let r = h.call(1, api::GET_CONSOLE_PROCESS_LIST, &[0; 4], &[], 12);
+        assert_eq!(msg::u32_at(&r.write_back, 0), Some(2));
+        let pids: Vec<u32> = r
+            .output
+            .chunks(4)
+            .filter_map(|c| msg::u32_at(c, 0))
+            .collect();
+        assert_eq!(pids, [20, 10]);
+    }
+
+    /// An output buffer ending inside the descriptor fails, as conhost's
+    /// `GetOutputBuffer` makes it; `packet` refuses it for every API.
+    #[test]
+    fn process_list_with_an_output_short_of_the_descriptor_fails() {
+        let mut h = Host::new();
+        h.connect(10, "");
+        let mut payload = Vec::new();
+        payload.extend(api::GET_CONSOLE_PROCESS_LIST.to_le_bytes());
+        payload.extend(4u32.to_le_bytes());
+        payload.extend([0; 4]);
+        let (r, _) = h.packet(msg::USER_DEFINED, 1, 1, &payload, 2);
+        assert_eq!(r.status, msg::STATUS_ILLEGAL_FUNCTION);
     }
 
     #[test]

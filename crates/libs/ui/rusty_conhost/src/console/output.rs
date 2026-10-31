@@ -212,9 +212,14 @@ impl Console {
     /// The terminal owns the font, so the call is accepted and changes
     /// nothing, as under ConPTY. Windows PowerShell 5.1 sets the font at
     /// startup and exits if this fails.
+    /// As in conhost, a face name filling all 32 units with no NUL fails.
     pub(super) fn set_current_font(&self, object: usize, fixed: &[u8]) -> i32 {
         if fixed.len() < FONT_LEN {
             return msg::STATUS_ILLEGAL_FUNCTION;
+        }
+        let face = &fixed[FONT_FACE..FONT_LEN];
+        if !face.as_chunks::<2>().0.contains(&[0, 0]) {
+            return msg::STATUS_FROM_INSUFFICIENT_BUFFER;
         }
         match self.output_object(object, true) {
             Ok(()) => msg::STATUS_SUCCESS,
@@ -641,6 +646,14 @@ mod tests {
         assert_eq!(r.status, msg::STATUS_FROM_HANDLE);
         let r = h.call(output, api::SET_CURRENT_FONT, &[0; 4], &[], 0);
         assert_eq!(r.status, msg::STATUS_ILLEGAL_FUNCTION);
+        let mut unterminated = [0u8; FONT_LEN];
+        unterminated[FONT_FACE..].fill(b'A');
+        let r = h.call(output, api::SET_CURRENT_FONT, &unterminated, &[], 0);
+        assert_eq!(
+            r.status,
+            msg::STATUS_FROM_INSUFFICIENT_BUFFER,
+            "no NUL in the face name"
+        );
     }
 
     #[test]
