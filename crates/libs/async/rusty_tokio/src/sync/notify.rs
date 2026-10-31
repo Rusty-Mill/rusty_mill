@@ -28,14 +28,18 @@
 //!
 //! Dropping a `Notified` before it resolves takes it out of the queue,
 //! so a later `notify_one` reaches a live waiter instead of a dead one.
-//! If a `notify_one`/`notify_last` (or a banked permit) had already
-//! reached it, that wakeup passes on to the next waiter, or is banked
-//! again, as tokio does. A `notify_waiters` wakeup is not passed on.
+//! If a `notify_one` or `notify_last` had already reached it, that wakeup
+//! passes on as tokio 1.53's `Notified::drop` does: to the next waiter
+//! at the same end of the queue (the oldest for `notify_one`, the newest
+//! for `notify_last`), or banked as a permit if none waits. A wakeup the
+//! waiter already consumed is not passed on: a permit it took, or a
+//! wakeup that `poll` returned `Ready` for or `enable` returned `true`
+//! for. Nor is a `notify_waiters` wakeup.
 
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -45,11 +49,12 @@ use std::task::{Context, Poll, Waker};
 /// filled in later once `poll` actually runs.
 struct WaiterState {
     woken: AtomicBool,
-    /// Set, under the queue lock as the waiter leaves the queue, when its
-    /// wakeup is meant for it alone (`notify_one`, `notify_last` or a
-    /// permit), so dropping it unresolved passes the wakeup on, even
-    /// before `fire` has run.
-    single: AtomicBool,
+    /// Set, under the queue lock as the waiter leaves the queue, to the
+    /// [`End`] a `notify_one` or `notify_last` took it from, so dropping
+    /// it unconsumed passes the wakeup on to that same end, even before
+    /// `fire` has run. [`NO_END`] otherwise. Like tokio's per-waiter
+    /// `Notification::One(strategy)`.
+    forward: AtomicU8,
     waker: Mutex<Option<Waker>>,
 }
 
@@ -57,7 +62,7 @@ impl WaiterState {
     fn new() -> Arc<Self> {
         Arc::new(WaiterState {
             woken: AtomicBool::new(false),
-            single: AtomicBool::new(false),
+            forward: AtomicU8::new(NO_END),
             waker: Mutex::new(None),
         })
     }
@@ -65,9 +70,23 @@ impl WaiterState {
 
 /// Which waiter a single wakeup goes to.
 #[derive(Clone, Copy)]
+#[repr(u8)]
 enum End {
-    Oldest,
-    Newest,
+    Oldest = 1,
+    Newest = 2,
+}
+
+/// [`WaiterState::forward`] when there is no wakeup to pass on.
+const NO_END: u8 = 0;
+
+impl End {
+    fn from_u8(end: u8) -> Option<End> {
+        match end {
+            1 => Some(End::Oldest),
+            2 => Some(End::Newest),
+            _ => None,
+        }
+    }
 }
 
 struct Inner {
@@ -106,9 +125,7 @@ impl Notify {
     /// Wakes one waiter, or -- if nobody is currently waiting -- banks a
     /// permit so the very next `notified().await` returns immediately.
     pub fn notify_one(&self) {
-        if let Some(state) = self.take(End::Oldest) {
-            Self::fire(&state);
-        }
+        self.give(End::Oldest);
     }
 
     /// Like [`notify_one`](Self::notify_one), but wakes the most
@@ -116,16 +133,22 @@ impl Notify {
     /// Still just banks a permit, exactly like `notify_one`, if nobody
     /// is currently waiting.
     pub fn notify_last(&self) {
-        if let Some(state) = self.take(End::Newest) {
+        self.give(End::Newest);
+    }
+
+    /// Gives one wakeup to the waiter at `end`, or banks a permit.
+    fn give(&self, end: End) {
+        if let Some(state) = self.take(end) {
             Self::fire(&state);
         }
     }
 
     /// Gives one wakeup, under the queue lock: takes the waiter at `end`
-    /// out of the queue and marks the wakeup its alone, for the caller to
-    /// fire once the lock is released, or banks a permit if none waits.
-    /// Marking it here, not in `fire`, means a waiter dropped before it
-    /// is fired still passes the wakeup on.
+    /// out of the queue and records `end` as where the wakeup goes if the
+    /// waiter is dropped unconsumed, for the caller to fire once the lock
+    /// is released, or banks a permit if none waits. Recording it here,
+    /// not in `fire`, means a waiter dropped before it is fired still
+    /// passes the wakeup on.
     fn take(&self, end: End) -> Option<Arc<WaiterState>> {
         let mut guard = self.inner.lock().unwrap();
         let state = match end {
@@ -133,7 +156,7 @@ impl Notify {
             End::Newest => guard.waiters.pop_back(),
         };
         match &state {
-            Some(state) => state.single.store(true, Ordering::Relaxed),
+            Some(state) => state.forward.store(end as u8, Ordering::Relaxed),
             None => guard.permits += 1,
         }
         state
@@ -263,7 +286,23 @@ fn poll_waiter(
 /// real waker for) yet. Returns whether this waiter is already
 /// notified, either because it already was before this call, or
 /// because a banked permit was immediately available.
-fn enable(notify: &Notify, registered: &mut bool, state: &Arc<WaiterState>) -> bool {
+///
+/// `true` consumes the wakeup, as a `Ready` poll does: it sets `done`,
+/// so dropping the waiter afterwards passes nothing on. tokio's `enable`
+/// moves its future to `Done` the same way.
+fn enable(
+    notify: &Notify,
+    registered: &mut bool,
+    done: &mut bool,
+    state: &Arc<WaiterState>,
+) -> bool {
+    if !*done {
+        *done = enable_waiter(notify, registered, state);
+    }
+    *done
+}
+
+fn enable_waiter(notify: &Notify, registered: &mut bool, state: &Arc<WaiterState>) -> bool {
     if state.woken.load(Ordering::Acquire) {
         return true;
     }
@@ -273,9 +312,8 @@ fn enable(notify: &Notify, registered: &mut bool, state: &Arc<WaiterState>) -> b
     let mut guard = notify.inner.lock().unwrap();
     if guard.permits > 0 {
         guard.permits -= 1;
-        state.single.store(true, Ordering::Relaxed);
+        // Lets a later poll return `Ready` without queueing.
         state.woken.store(true, Ordering::Release);
-        // It holds the permit now, so dropping it unresolved returns it.
         *registered = true;
         return true;
     }
@@ -285,8 +323,8 @@ fn enable(notify: &Notify, registered: &mut bool, state: &Arc<WaiterState>) -> b
 }
 
 /// Takes a waiter that never resolved out of `notify`'s queue, and
-/// passes on a single wakeup it had already received (see the module's
-/// docs).
+/// passes on a `notify_one`/`notify_last` wakeup it had already received
+/// to the same end of the queue (see the module's docs).
 fn release(notify: &Notify, registered: bool, done: bool, state: &Arc<WaiterState>) {
     if done || !registered {
         return;
@@ -297,17 +335,18 @@ fn release(notify: &Notify, registered: bool, done: bool, state: &Arc<WaiterStat
         return;
     }
     // Not queued: something took it out to fire it, perhaps not yet.
-    let single = state.single.load(Ordering::Relaxed);
+    let forward = End::from_u8(state.forward.load(Ordering::Relaxed));
     drop(guard);
-    if single {
-        notify.notify_one();
+    if let Some(end) = forward {
+        notify.give(end);
     }
 }
 
 pub struct Notified<'a> {
     notify: &'a Notify,
     registered: bool,
-    /// Whether `poll` returned `Ready`, which consumed the wakeup.
+    /// Whether `poll` returned `Ready` or `enable` returned `true`, which
+    /// consumed the wakeup.
     done: bool,
     state: Arc<WaiterState>,
 }
@@ -322,10 +361,16 @@ impl Notified<'_> {
     /// Registers this waiter now, without waiting for an actual
     /// `.await`/`poll` -- see this module's docs for why that's useful.
     /// Returns whether it's already notified (a banked permit, or an
-    /// already-fired notification).
+    /// already-fired notification). `true` consumes that notification,
+    /// as tokio's does: dropping this future afterwards passes nothing on.
     pub fn enable(self: Pin<&mut Self>) -> bool {
         let this = self.get_mut();
-        enable(this.notify, &mut this.registered, &this.state)
+        enable(
+            this.notify,
+            &mut this.registered,
+            &mut this.done,
+            &this.state,
+        )
     }
 }
 
@@ -349,7 +394,8 @@ impl Future for Notified<'_> {
 pub struct OwnedNotified {
     notify: Arc<Notify>,
     registered: bool,
-    /// Whether `poll` returned `Ready`, which consumed the wakeup.
+    /// Whether `poll` returned `Ready` or `enable` returned `true`, which
+    /// consumed the wakeup.
     done: bool,
     state: Arc<WaiterState>,
 }
@@ -364,7 +410,12 @@ impl OwnedNotified {
     /// See [`Notified::enable`] -- identical semantics here.
     pub fn enable(self: Pin<&mut Self>) -> bool {
         let this = self.get_mut();
-        enable(&this.notify, &mut this.registered, &this.state)
+        enable(
+            &this.notify,
+            &mut this.registered,
+            &mut this.done,
+            &this.state,
+        )
     }
 }
 
@@ -420,14 +471,14 @@ mod tests {
     }
 
     #[test]
-    fn a_permit_taken_by_enable_and_dropped_is_banked_again() {
+    fn a_permit_taken_by_enable_stays_taken_when_dropped() {
         let notify = Notify::new();
         notify.notify_one();
         {
             let enabled = pin!(notify.notified());
             assert!(enabled.enable());
         }
-        assert!(poll(pin!(notify.notified())).is_ready());
+        assert!(poll(pin!(notify.notified())).is_pending());
     }
 
     #[test]
@@ -483,8 +534,35 @@ mod tests {
         assert!(poll(first.as_mut()).is_ready());
     }
 
-    /// Passing a wakeup on goes through `notify_one`, so the window
-    /// above is covered for it too; a chain of drops passes it along.
+    /// A `notify_last` wakeup passes to the next-newest waiter, not the
+    /// oldest, as tokio's does (#1303).
+    #[test]
+    fn a_notify_last_dropped_before_it_fires_passes_to_the_next_newest() {
+        let notify = Arc::new(Notify::new());
+        let (mut oldest, mut middle) = two(&notify);
+        let mut newest = Box::pin(notify.notified());
+        assert!(!newest.as_mut().enable());
+        let taken = notify.take(End::Newest).expect("the newest waiter");
+        drop(newest);
+        Notify::fire(&taken);
+        assert!(poll(middle.as_mut()).is_ready());
+        assert!(poll(oldest.as_mut()).is_pending());
+    }
+
+    /// `enable` returning `true` consumed the wakeup, as tokio's does.
+    #[test]
+    fn a_wakeup_enable_reported_is_not_passed_on() {
+        let notify = Arc::new(Notify::new());
+        let (mut first, mut second) = two(&notify);
+        notify.notify_one();
+        assert!(first.as_mut().enable());
+        assert!(first.as_mut().enable(), "still reported");
+        drop(first);
+        assert!(poll(second.as_mut()).is_pending());
+    }
+
+    /// Passing a wakeup on goes through `give`, so the window above is
+    /// covered for it too; a chain of drops passes it along.
     #[test]
     fn a_wakeup_passed_on_passes_on_again() {
         let notify = Arc::new(Notify::new());
