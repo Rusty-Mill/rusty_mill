@@ -435,6 +435,21 @@ mod client {
         /// An old connection ended, or a request on one failed.
         ended: bool,
         held: Vec<Aimed>,
+        /// Until every block's old connection has written what was sent on
+        /// it, the clients are not asked to move.
+        drain: Option<Drain>,
+    }
+
+    /// Before the clients are taken over, each block's old connection is
+    /// asked for a `Sync`. The server answers it only once every input sent
+    /// before it is written to the block, so the takeover, which ends the
+    /// old connection's reads, cannot drop keys still on their way.
+    struct Drain {
+        onto: Onto,
+        /// The `Sync`s not answered yet, by block.
+        syncs: Vec<(BlockId, u64)>,
+        /// Given up after this: the move waits for a later try.
+        by: Instant,
     }
 
     /// An action held for later, with the block it was typed for: the one
@@ -497,6 +512,37 @@ mod client {
                 }
                 Moving::Idle | Moving::Asked(_) => Held::Now(aimed.action),
             }
+        }
+
+        /// Gives up a move still draining, which no client has moved for:
+        /// the actions it held, to take on the path in use.
+        fn undrain(&mut self) -> Option<Vec<Aimed>> {
+            let Moving::Taking(Taking { drain: Some(_), .. }) = &self.moving else {
+                return None;
+            };
+            match std::mem::replace(&mut self.moving, Moving::Idle) {
+                Moving::Taking(taking) => Some(taking.held),
+                Moving::Idle | Moving::Asked(_) => None,
+            }
+        }
+
+        /// A block's `Sync` was answered, if `answered`: the move to ask
+        /// for once every block's was.
+        fn synced(&mut self, answered: Option<(BlockId, u64)>) -> Option<Onto> {
+            let Moving::Taking(Taking { drain, .. }) = &mut self.moving else {
+                return None;
+            };
+            let syncs = &mut drain.as_mut()?.syncs;
+            syncs.retain(|sync| Some(*sync) != answered);
+            match syncs.is_empty() {
+                true => drain.take().map(|drain| drain.onto),
+                false => None,
+            }
+        }
+
+        /// Whether a move still draining is past its time at `now`.
+        fn late(&self, now: Instant) -> bool {
+            matches!(&self.moving, Moving::Taking(Taking { drain: Some(drain), .. }) if now >= drain.by)
         }
 
         /// The actions held by a move under way.
@@ -1815,6 +1861,9 @@ mod client {
                 }
                 return;
             }
+            if self.standby.late(now) {
+                self.give_up_move();
+            }
             let Some(beat) = self.beat.as_mut() else {
                 return;
             };
@@ -1869,8 +1918,35 @@ mod client {
         }
 
         /// Asks for every client to be taken over on `onto`.
+        /// What is typed meanwhile is held; first each block's old
+        /// connection is drained (see [`Drain`]).
         fn move_onto(&mut self, onto: Onto) {
-            let (true, Some(me)) = (self.rejoiner.is_some(), self.me) else {
+            // A block that cannot be taken over would be left on SSH.
+            if self.rejoiner.is_none() || self.panes.values().any(|p| p.takeover.is_none()) {
+                return;
+            }
+            self.kept = self.unsent();
+            let syncs = self
+                .panes
+                .values_mut()
+                .map(|pane| (pane.block, pane.send(|req| Message::Sync { req })))
+                .collect();
+            let drain = Drain {
+                onto,
+                syncs,
+                by: Instant::now() + HANDSHAKE,
+            };
+            self.standby.moving = Moving::Taking(Taking {
+                drain: Some(drain),
+                ..Taking::default()
+            });
+            self.synced(None);
+        }
+
+        /// A `Sync` asked for by a move was answered, if `answered`: once
+        /// every block's was, asks for the clients to move.
+        fn synced(&mut self, answered: Option<(BlockId, u64)>) {
+            let Some(onto) = self.standby.synced(answered) else {
                 return;
             };
             let resumes: Option<Vec<_>> = self
@@ -1882,14 +1958,9 @@ mod client {
                     Some((pane.block, Resume { takeover, leased }))
                 })
                 .collect();
-            // A block that cannot be taken over would be left on SSH.
-            let Some(resumes) = resumes else {
-                return;
-            };
-            self.kept = self.unsent();
-            self.standby.moving = Moving::Taking(Taking::default());
-            let Some(rejoiner) = &self.rejoiner else {
-                return;
+            let (Some(resumes), Some(rejoiner), Some(me)) = (resumes, &self.rejoiner, self.me)
+            else {
+                return self.give_up_move();
             };
             rejoiner.ask(Ask::Move(
                 onto,
@@ -1900,6 +1971,14 @@ mod client {
                     resumes,
                 },
             ));
+        }
+
+        /// Gives up a move still draining: what it held is taken on the
+        /// path in use, and the next try waits.
+        fn give_up_move(&mut self) {
+            let held = self.standby.undrain().unwrap_or_default();
+            self.wait_to_move();
+            self.replay(held);
         }
 
         /// No move for a while, longer after each failed one, at most
@@ -1978,6 +2057,10 @@ mod client {
         fn lose(&mut self, keep: bool) {
             if self.lost.is_some() {
                 return;
+            }
+            // No client moved yet: what the move held waits for the path.
+            if let Some(held) = self.standby.undrain() {
+                self.held = held;
             }
             if !self.standby.lose() {
                 return;
@@ -2304,6 +2387,9 @@ mod client {
                 return;
             }
             let block = tag.0;
+            if let Message::Done { req, .. } = &message {
+                self.synced(Some((block, *req)));
+            }
             let Some(pane) = self.panes.get_mut(&block) else {
                 return;
             };
@@ -3309,6 +3395,101 @@ mod client {
             grant(&mut app, &inbox, &b_new, &at_b);
             assert!(typed_in(&sent(&b_new)).is_empty(), "not A's keys");
             assert!(app.held.is_empty());
+        }
+
+        /// The `Sync` among `messages`.
+        #[cfg(unix)]
+        fn sync_in(messages: &[Message]) -> u64 {
+            messages
+                .iter()
+                .find_map(|m| match m {
+                    Message::Sync { req } => Some(*req),
+                    _ => None,
+                })
+                .expect("a Sync")
+        }
+
+        /// Answers `req` on a block's connection, as the server would once
+        /// what came before it is written, and hands it to the client.
+        #[cfg(unix)]
+        fn answer(app: &mut App, inbox: &Inbox<Input>, far: &UnixStream, req: u64) {
+            let mut server = Conn::new(far.try_clone().expect("clone"));
+            server
+                .send(&Message::Done { req, created: None })
+                .expect("done");
+            loop {
+                if let input @ Input::Pane(..) =
+                    inbox.recv_timeout(Duration::from_secs(5)).expect("answer")
+                {
+                    return app.take(input);
+                }
+            }
+        }
+
+        /// Keys sent on SSH just before a move are written before any
+        /// client is taken over: each block's old connection is asked for a
+        /// `Sync` after them, and the move is asked for only once every one
+        /// is answered; keys typed meanwhile are held.
+        #[cfg(unix)]
+        #[test]
+        fn a_move_waits_for_keys_already_sent_to_be_written() {
+            let (mut app, inbox, [_control, a_old, b_old]) = app(Some(Box::new(Calls::default())));
+            sent(&a_old);
+            app.typed(input(b"sent"));
+            app.move_onto(Onto::Standby);
+            app.typed(input(b"held"));
+            let at_a = sent(&a_old);
+            assert_eq!(typed_in(&at_a), [b"sent".to_vec()]);
+            assert!(
+                matches!(at_a.last(), Some(Message::Sync { .. })),
+                "after the keys"
+            );
+            let at_b = sent(&b_old);
+
+            answer(&mut app, &inbox, &a_old, sync_in(&at_a));
+            assert!(
+                app.standby.late(Instant::now() + HANDSHAKE),
+                "still draining"
+            );
+            answer(&mut app, &inbox, &b_old, sync_in(&at_b));
+            assert!(
+                !app.standby.late(Instant::now() + HANDSHAKE),
+                "the move is asked for"
+            );
+            assert!(matches!(app.standby.moving, Moving::Taking(_)));
+            assert_eq!(actions(app.standby.held()), [&input(b"held")]);
+        }
+
+        /// A move whose blocks never answer is given up once the handshake
+        /// time is past: what it held goes on the path in use, and the next
+        /// try waits.
+        #[cfg(unix)]
+        #[test]
+        fn a_move_that_cannot_drain_is_given_up_keeping_what_was_typed() {
+            let (mut app, _inbox, [_control, a_old, _b_old]) =
+                app(Some(Box::new(Calls::default())));
+            sent(&a_old);
+            app.move_onto(Onto::Standby);
+            app.typed(input(b"held"));
+            assert!(app.standby.late(Instant::now() + HANDSHAKE));
+            app.give_up_move();
+            assert!(matches!(app.standby.moving, Moving::Idle));
+            assert_eq!(app.standby.tries, 1);
+            assert_eq!(typed_in(&sent(&a_old)), [b"held".to_vec()]);
+        }
+
+        /// A path lost while a move drains loses it for real, keeping what
+        /// the move held for the path brought back.
+        #[cfg(unix)]
+        #[test]
+        fn a_loss_while_a_move_drains_keeps_what_it_held() {
+            let (mut app, _inbox, _ends) = app(Some(Box::new(Never)));
+            app.move_onto(Onto::Standby);
+            app.typed(input(b"held"));
+            app.lose(false);
+            assert!(app.lost.is_some());
+            assert!(matches!(app.standby.moving, Moving::Idle));
+            assert_eq!(actions(&app.held), [&input(b"held")]);
         }
 
         /// A second Ctrl-] d while a detach held through a broken move

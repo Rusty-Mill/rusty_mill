@@ -185,7 +185,12 @@ ordering, acks and flow control belong to each stream.
   its probe. While the kept association stays silent, the client asks for
   a new one on that schedule as well, since the server lets an association
   go after `--udp-idle` and would never answer the old one again; whichever
-  answers first is moved onto. During a move, what is typed (keys, a focus
+  answers first is moved onto. Before any client is taken over, each
+  block's SSH connection is asked for a `Sync`, which the server answers
+  only once every input sent before it is written, so the takeover, which
+  ends the old connection's reads, cannot drop keys already sent; a move
+  whose `Sync`s are not all answered within the 10 s handshake is given up
+  for a later try. During a move, what is typed (keys, a focus
   change, up to 1024 actions) is held and taken in order on the path the
   client ends up on, even one brought back after the move broke, with
   anything typed while that path is down taken after it; and a
