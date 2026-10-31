@@ -13,7 +13,7 @@ use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use rusty_tokio::sync::Notify;
 
 use crate::outbox::{Inbox, outbox};
-use crate::state::{Shared, State};
+use crate::state::{Kept, Shared, State};
 
 const READ_CHUNK: usize = 64 << 10;
 
@@ -56,11 +56,18 @@ pub(crate) async fn run<R, W>(
         _ = write_frames(inbox, wr) => {},
     }
     // A connection that took this client over owns it now; leave it be.
-    let orphaned = state.borrow_mut().disconnect(client, &cancel);
-    if orphaned {
-        rusty_tokio::time::sleep(crate::state::ORPHAN_GRACE).await;
-        state.borrow_mut().expire(client, &cancel);
+    let kept = state.borrow_mut().disconnect(client, &cancel);
+    match kept {
+        Kept::Gone => return,
+        Kept::Orphan => rusty_tokio::time::sleep(crate::state::ORPHAN_GRACE).await,
+        Kept::Stale(lifetimes) => {
+            rusty_tokio::time::sleep(lifetimes.lease).await;
+            state.borrow_mut().release_stale(client, &cancel);
+            let rest = lifetimes.idle.saturating_sub(lifetimes.lease);
+            rusty_tokio::time::sleep(rest).await;
+        }
     }
+    state.borrow_mut().expire(client, &cancel);
 }
 
 async fn serve(

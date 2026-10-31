@@ -131,6 +131,31 @@ pub(crate) struct State {
     history: History,
     /// With `--udp`: the associations, offered with `DATAGRAM`.
     datagrams: Option<Registry>,
+    /// How long silence and staleness keep a UDP client and its lease.
+    lifetimes: Lifetimes,
+    /// Orphans whose datagram stream overflowed its budget, each with the
+    /// block whose lease was released after [`Lifetimes::lease`], to give
+    /// back on takeover.
+    stale: HashMap<ClientId, Option<BlockId>>,
+}
+
+/// How long a UDP client outlives silence or an overflow: its lease for
+/// `lease`, the client itself for `idle` (`--udp-idle`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Lifetimes {
+    pub(crate) idle: Duration,
+    pub(crate) lease: Duration,
+}
+
+/// What became of a client when its connection ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Kept {
+    /// Dropped, or another connection's now.
+    Gone,
+    /// Kept for [`ORPHAN_GRACE`], lease and all.
+    Orphan,
+    /// Its datagram stream overflowed: kept for these lifetimes.
+    Stale(Lifetimes),
 }
 
 impl State {
@@ -146,13 +171,31 @@ impl State {
             orphans: HashMap::new(),
             history: History::new(Uuid::new_v4(), HISTORY),
             datagrams: None,
+            lifetimes: Lifetimes {
+                idle: ORPHAN_GRACE,
+                lease: ORPHAN_GRACE,
+            },
+            stale: HashMap::new(),
         }))
     }
 
     /// Offers `DATAGRAM` from now on, handing out associations of
     /// `registry`.
-    pub(crate) fn offer_datagrams(&mut self, registry: Registry) {
+    pub(crate) fn offer_datagrams(&mut self, registry: Registry, lifetimes: Lifetimes) {
         self.datagrams = Some(registry);
+        self.lifetimes = lifetimes;
+    }
+
+    /// The connection owning `cancel`, serving `client`, is a datagram
+    /// stream.
+    pub(crate) fn over_datagram(&mut self, client: ClientId, cancel: &Rc<Notify>) {
+        if let Some(out) = self
+            .clients
+            .get_mut(&client)
+            .filter(|o| o.belongs_to(cancel))
+        {
+            out.over_datagram();
+        }
     }
 
     /// What this server offers: [`OFFERED`], and `DATAGRAM` with `--udp`.
@@ -166,6 +209,16 @@ impl State {
     #[cfg(test)]
     pub(crate) fn lease_of(&self, block: BlockId) -> Option<ClientId> {
         self.mux.block(block)?.lease()
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn test_lifetimes(&mut self, lifetimes: Lifetimes) {
+        self.lifetimes = lifetimes;
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn is_stale(&self, client: ClientId) -> bool {
+        self.stale.contains_key(&client)
     }
 
     #[cfg(test)]
@@ -199,6 +252,7 @@ impl State {
         // The new connection numbers its requests afresh.
         self.forget_keys(client);
         self.orphans.remove(&client);
+        let released = self.stale.remove(&client).flatten();
         self.clients.insert(client, outbox);
         self.features.insert(client, features);
         let token = features.contains(Features::TAKEOVER).then(Uuid::new_v4);
@@ -225,6 +279,11 @@ impl State {
             },
         );
         missed.iter().for_each(|m| self.send(client, m));
+        // A stale client's lease, released while it was away, comes back
+        // on the connection that took it over.
+        if let Some(block) = released {
+            self.regain_lease(client, block);
+        }
         // A taken-over client may still be attached; its new connection has
         // no screen yet, so it gets one before any live output.
         // It also learns who echoes there, as on an attach.
@@ -281,18 +340,62 @@ impl State {
     /// instead, for [`ORPHAN_GRACE`], with its attachment and lease;
     /// whether it was, so the caller calls [`Self::expire`] after the
     /// grace. A client that means to leave detaches first.
-    pub(crate) fn disconnect(&mut self, client: ClientId, cancel: &Rc<Notify>) -> bool {
+    pub(crate) fn disconnect(&mut self, client: ClientId, cancel: &Rc<Notify>) -> Kept {
+        if self.stale.contains_key(&client) && self.orphaned_by(client, cancel) {
+            return Kept::Stale(self.lifetimes);
+        }
         if !self.served_by(client, cancel) {
-            return false;
+            return Kept::Gone;
         }
         if self.tokens.contains_key(&client) {
             self.clients.remove(&client);
             self.orphans.insert(client, cancel.clone());
-            return true;
+            return Kept::Orphan;
         }
         self.drop_client(client);
         self.flush();
-        false
+        Kept::Gone
+    }
+
+    /// Whether `client` is an orphan of the connection owning `cancel`.
+    fn orphaned_by(&self, client: ClientId, cancel: &Rc<Notify>) -> bool {
+        self.orphans
+            .get(&client)
+            .is_some_and(|ended| Rc::ptr_eq(ended, cancel))
+    }
+
+    /// A datagram client over its budget: ends its connection but keeps the
+    /// client as a stale orphan, as lifetime B keeps a silent one. Its
+    /// takeover sends the screen again, so nothing discarded is missed.
+    fn go_stale(&mut self, client: ClientId) {
+        let Some(out) = self.clients.remove(&client) else {
+            return;
+        };
+        eprintln!("rusty-mux-server: client {client}: UDP output over budget, kept for a takeover");
+        self.orphans.insert(client, out.cancel().clone());
+        self.stale.insert(client, None);
+    }
+
+    /// A stale orphan's lease time is up: releases its lease, kept for its
+    /// takeover.
+    pub(crate) fn release_stale(&mut self, client: ClientId, cancel: &Rc<Notify>) {
+        if !self.orphaned_by(client, cancel) {
+            return;
+        }
+        let Some(held) = self.stale.get_mut(&client) else {
+            return;
+        };
+        let block = self.mux.client(client).and_then(|c| c.attached());
+        let Some(block) =
+            block.filter(|&b| self.mux.block(b).and_then(|b| b.lease()) == Some(client))
+        else {
+            return;
+        };
+        *held = Some(block);
+        if let Err(err) = self.mux.release_lease(client, block) {
+            eprintln!("rusty-mux-server: model out of step on a stale lease: {err}");
+        }
+        self.flush();
     }
 
     /// Releases the lease each of `clients` holds on its attached block:
@@ -316,29 +419,38 @@ impl State {
 
     /// Gives each client the lease silence released, where the same
     /// connection still serves it, it is still attached there and the
-    /// lease is still free. A client taken over meanwhile is its new
-    /// connection's to lease.
+    /// lease is still free. A client that went stale on that connection
+    /// since gets it back on its takeover; one taken over meanwhile is
+    /// its new connection's to lease.
     pub(crate) fn regain(&mut self, released: &[Released]) {
         for (client, block, cancel) in released {
-            let (client, block) = (*client, *block);
-            let ours = self.served_by(client, cancel);
-            let free = self.mux.block(block).is_some_and(|b| b.lease().is_none());
-            let attached = self.mux.client(client).and_then(|c| c.attached()) == Some(block);
-            if ours && free && attached && self.mux.acquire_lease(client, block).is_err() {
-                eprintln!("rusty-mux-server: model out of step regaining a lease");
+            if self.served_by(*client, cancel) {
+                self.regain_lease(*client, *block);
+            } else if self.orphaned_by(*client, cancel)
+                && let Some(held) = self.stale.get_mut(client)
+            {
+                // Gone stale on that connection since: the takeover that
+                // resumes it gets the lease back.
+                *held = Some(*block);
             }
         }
         self.flush();
     }
 
+    /// Gives `client` the lease on `block` if it is still attached there
+    /// and the lease is still free.
+    fn regain_lease(&mut self, client: ClientId, block: BlockId) {
+        let free = self.mux.block(block).is_some_and(|b| b.lease().is_none());
+        let attached = self.mux.client(client).and_then(|c| c.attached()) == Some(block);
+        if free && attached && self.mux.acquire_lease(client, block).is_err() {
+            eprintln!("rusty-mux-server: model out of step regaining a lease");
+        }
+    }
+
     /// The grace of the connection owning `cancel` ended: drops `client`
     /// unless another connection took it over meanwhile.
     pub(crate) fn expire(&mut self, client: ClientId, cancel: &Rc<Notify>) {
-        if !self
-            .orphans
-            .get(&client)
-            .is_some_and(|ended| Rc::ptr_eq(ended, cancel))
-        {
+        if !self.orphaned_by(client, cancel) {
             return;
         }
         self.drop_client(client);
@@ -347,6 +459,7 @@ impl State {
 
     fn drop_client(&mut self, client: ClientId) {
         let orphan = self.orphans.remove(&client).is_some();
+        self.stale.remove(&client);
         if self.clients.remove(&client).is_none() && !orphan {
             return;
         }
@@ -1065,6 +1178,9 @@ impl State {
             return;
         };
         if !outbox.push(frame) {
+            if outbox.is_datagram() && self.tokens.contains_key(&client) {
+                return self.go_stale(client);
+            }
             eprintln!("rusty-mux-server: dropping client {client}: output queue over budget");
             self.drop_client(client);
         }
@@ -1781,7 +1897,11 @@ mod regression {
             let mut state = shared.borrow_mut();
             let (out, _inbox, cancel) = outbox();
             let client = state.connect(out, Features::TAKEOVER, None, None);
-            assert!(state.disconnect(client, &cancel), "kept for a reconnect");
+            assert_eq!(
+                state.disconnect(client, &cancel),
+                Kept::Orphan,
+                "kept for a reconnect"
+            );
             assert!(state.mux.client(client).is_some());
 
             // A later connection's expiry is not this one's.
@@ -1796,7 +1916,11 @@ mod regression {
 
             let (out, _inbox, cancel) = outbox();
             let plain = state.connect(out, Features::NONE, None, None);
-            assert!(!state.disconnect(plain, &cancel), "no token, no grace");
+            assert_eq!(
+                state.disconnect(plain, &cancel),
+                Kept::Gone,
+                "no token, no grace"
+            );
             assert!(state.mux.client(plain).is_none());
         });
     }

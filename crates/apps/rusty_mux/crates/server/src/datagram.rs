@@ -207,7 +207,10 @@ pub(crate) async fn serve(
                 id,
             };
             let (adopter, known) = (link.clone(), state.clone());
-            let adopt = move |client, cancel: &Rc<Notify>| adopter.adopt(client, cancel, &known);
+            let adopt = move |client, cancel: &Rc<Notify>| {
+                known.borrow_mut().over_datagram(client, cancel);
+                adopter.adopt(client, cancel, &known);
+            };
             rusty_tokio::task::spawn_local(conn::run(state.clone(), rd, wr, adopt));
         }
     }
