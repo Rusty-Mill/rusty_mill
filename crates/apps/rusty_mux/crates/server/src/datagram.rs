@@ -20,13 +20,13 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-use rusty_mux_core::{BlockId, ClientId};
+use rusty_mux_core::ClientId;
 use rusty_mux_transport::{Association, ID_LEN, KEY_LEN, MAX_DATAGRAM, Side, StreamId};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf, UdpSocket};
 use rusty_tokio::sync::Notify;
 
 use crate::conn;
-use crate::state::Shared;
+use crate::state::{Released, Shared};
 
 pub(crate) type Id = [u8; ID_LEN];
 pub(crate) type Key = [u8; KEY_LEN];
@@ -264,7 +264,7 @@ pub(crate) struct Link {
     clients: RefCell<Vec<(ClientId, Rc<Notify>)>>,
     /// While silent past [`LEASE_SILENCE`]: the leases released, to give
     /// back when the link is heard again.
-    released: RefCell<Option<Vec<(ClientId, BlockId)>>>,
+    released: RefCell<Option<Vec<Released>>>,
 }
 
 #[derive(Default)]

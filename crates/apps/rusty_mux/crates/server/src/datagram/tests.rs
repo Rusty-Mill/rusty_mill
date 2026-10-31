@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::future::poll_fn;
 
-use rusty_mux_core::ClientId;
+use rusty_mux_core::{BlockId, ClientId};
 use rusty_mux_proto::{Features, Message, decode, encode};
 use rusty_tokio::time::timeout;
 use rusty_tokio::{Builder, LocalOptions};
@@ -158,6 +158,30 @@ impl Peer {
                 // An attach's screen.
                 _ => {}
             }
+        }
+    }
+
+    /// Opens a stream and says Hello on it, taking `takeover` over if
+    /// given; returns the stream and how to take its client over.
+    async fn hello(
+        &mut self,
+        features: Features,
+        takeover: Option<rusty_mux_proto::Takeover>,
+    ) -> (StreamId, rusty_mux_proto::Takeover) {
+        let stream = self.assoc.open().expect("a stream");
+        let hello = Message::Hello {
+            features,
+            resume: None,
+            takeover,
+        };
+        self.send(stream, &hello).await;
+        match self.recv(stream).await {
+            Message::Welcome {
+                client,
+                token: Some(token),
+                ..
+            } => (stream, rusty_mux_proto::Takeover { client, token }),
+            other => panic!("expected Welcome with a token, got {other:?}"),
         }
     }
 
@@ -524,5 +548,37 @@ fn silence_releases_the_lease_and_being_heard_gives_it_back_if_free() {
         away.request(stream, Message::Sync { req: 7 }).await;
         assert_eq!(state.borrow().lease_of(block), Some(typist), "taken back");
         assert!(state.borrow().has_client(client));
+    });
+}
+
+/// A client taken over by another association after silence released its
+/// lease is not given the lease back when the first association is heard
+/// again: the lease is its new connection's to take.
+#[test]
+fn a_released_lease_is_not_regained_for_a_client_taken_over_meanwhile() {
+    runtime().block_on(async {
+        let silence = Duration::from_millis(600);
+        let (state, registry, addr) = server_with("127.0.0.1:0", shell(), PATIENCE, silence).await;
+        let features = Features::DATAGRAM
+            .union(Features::TAKEOVER)
+            .union(Features::CHECKPOINT_V6);
+        let mut away = Peer::new(&registry, addr).await;
+        away.probe().await;
+        let (stream, me) = away.hello(features, None).await;
+        let block = leased_block(&mut away, stream).await;
+        rusty_tokio::time::sleep(silence * 2).await;
+        assert_eq!(state.borrow().lease_of(block), None);
+
+        let mut moved = Peer::new(&registry, addr).await;
+        moved.probe().await;
+        moved.hello(features, Some(me)).await;
+        // A Welcome on a new stream proves the old association was heard.
+        away.connect(features).await;
+        assert_eq!(
+            state.borrow().lease_of(block),
+            None,
+            "regained for the old path"
+        );
+        assert!(state.borrow().has_client(me.client));
     });
 }

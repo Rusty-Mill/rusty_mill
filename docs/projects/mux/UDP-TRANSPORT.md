@@ -249,8 +249,9 @@ association's `Close`, ends its connections as a socket close does.
   `--udp-idle` passes, the association and its clients are dropped, and the
   client must log in again over SSH, as `--ssh` reconnect already does.
   As built, the server gives the lease back itself when it next hears the
-  association, if its client is still attached there and nobody took the
-  lease meanwhile, so a client needs no change to retake it.
+  association, if the association still serves its client, the client is
+  still attached there and nobody took the lease meanwhile, so a client
+  needs no change to retake it.
 - *A, not chosen:* would have treated 30 s of silence as the end of each
   connection, followed by the usual 30 s grace and then a new SSH login.
 

@@ -31,6 +31,10 @@ use crate::terminal;
 
 pub(crate) type Shared = Rc<RefCell<State>>;
 
+/// A lease silence released: the client, its block, and the cancel of
+/// the connection that served it then.
+pub(crate) type Released = (ClientId, BlockId, Rc<Notify>);
+
 /// Bytes read from a PTY per output frame.
 const CHUNK: usize = 16 << 10;
 
@@ -294,16 +298,14 @@ impl State {
     /// Releases the lease each of `clients` holds on its attached block:
     /// the path they are on went silent. Returns what was released, for
     /// [`Self::regain`].
-    pub(crate) fn release_silent(
-        &mut self,
-        clients: &[(ClientId, Rc<Notify>)],
-    ) -> Vec<(ClientId, BlockId)> {
-        let held = |&(client, _): &(ClientId, Rc<Notify>)| {
-            let block = self.mux.client(client)?.attached()?;
-            (self.mux.block(block)?.lease() == Some(client)).then_some((client, block))
+    pub(crate) fn release_silent(&mut self, clients: &[(ClientId, Rc<Notify>)]) -> Vec<Released> {
+        let held = |(client, cancel): &(ClientId, Rc<Notify>)| {
+            let block = self.mux.client(*client)?.attached()?;
+            let leased = self.mux.block(block)?.lease() == Some(*client);
+            leased.then(|| (*client, block, cancel.clone()))
         };
         let released: Vec<_> = clients.iter().filter_map(held).collect();
-        for &(client, block) in &released {
+        for &(client, block, _) in &released {
             if let Err(err) = self.mux.release_lease(client, block) {
                 eprintln!("rusty-mux-server: model out of step on a silent lease: {err}");
             }
@@ -312,13 +314,17 @@ impl State {
         released
     }
 
-    /// Gives each client the lease silence released, where it is still
-    /// attached there and the lease is still free.
-    pub(crate) fn regain(&mut self, released: &[(ClientId, BlockId)]) {
-        for &(client, block) in released {
+    /// Gives each client the lease silence released, where the same
+    /// connection still serves it, it is still attached there and the
+    /// lease is still free. A client taken over meanwhile is its new
+    /// connection's to lease.
+    pub(crate) fn regain(&mut self, released: &[Released]) {
+        for (client, block, cancel) in released {
+            let (client, block) = (*client, *block);
+            let ours = self.served_by(client, cancel);
             let free = self.mux.block(block).is_some_and(|b| b.lease().is_none());
             let attached = self.mux.client(client).and_then(|c| c.attached()) == Some(block);
-            if free && attached && self.mux.acquire_lease(client, block).is_err() {
+            if ours && free && attached && self.mux.acquire_lease(client, block).is_err() {
                 eprintln!("rusty-mux-server: model out of step regaining a lease");
             }
         }
