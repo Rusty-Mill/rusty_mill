@@ -158,6 +158,18 @@ impl<'a> Script<'a> {
     }
 }
 
+/// A call still owed an answer.
+struct Owed {
+    id: [u8; 8],
+    function: u32,
+    /// The client's output capacity.
+    room: usize,
+    /// The most its write-back may hold: CONNECT's connection
+    /// information, a USER_DEFINED call's own fixed descriptor (none if
+    /// the header doesn't decode), nothing for any other function.
+    write_back: usize,
+}
+
 /// The engine of `runtime.rs` without the OS: an output queue nobody
 /// reads until the script drains it, an input lane, the control lane, and
 /// every call still owed an answer.
@@ -174,7 +186,7 @@ struct Engine {
     eof: bool,
     next_id: u64,
     /// Calls without a reply, with their output size and function.
-    owed: Vec<([u8; 8], u32, u32)>,
+    owed: Vec<Owed>,
     answered: HashSet<[u8; 8]>,
     logs: usize,
     /// Every cookie the console handed out, live or not, for the script
@@ -345,7 +357,17 @@ impl Engine {
         };
         self.next_id += 1;
         let id = self.next_id.to_le_bytes();
-        self.owed.push((id, output, function));
+        let write_back = match function {
+            msg::CONNECT => msg::CONNECTION_INFORMATION_LEN,
+            msg::USER_DEFINED => msg::api_msg(payload).map_or(0, |m| m.fixed.len()),
+            _ => 0,
+        };
+        self.owed.push(Owed {
+            id,
+            function,
+            room: output as usize,
+            write_back,
+        });
         self.handle(Event::Packet(Packet {
             id,
             process,
@@ -497,16 +519,27 @@ impl Engine {
     /// Check one answer against its call; returns its variable output.
     fn answer(&mut self, r: &Reply) -> usize {
         assert!(self.answered.insert(r.id), "{:?} answered twice", r.id);
-        let at = self.owed.iter().position(|(id, ..)| *id == r.id);
+        let at = self.owed.iter().position(|o| o.id == r.id);
         let Some(at) = at else {
             panic!("{:?} was never asked", r.id)
         };
-        let (_, room, function) = self.owed.remove(at);
-        let room = room as usize;
+        let Owed {
+            function,
+            room,
+            write_back,
+            ..
+        } = self.owed.remove(at);
         self.last_status = r.status;
         if r.status == msg::STATUS_SUCCESS {
             self.learn_cookies(function, r);
         }
+        // Past its descriptor, a write-back would run into the variable
+        // output region (msg.rs).
+        assert!(
+            r.write_back.len() <= write_back,
+            "write-back of {} for a {write_back}-byte descriptor (function {function})",
+            r.write_back.len()
+        );
         assert!(
             r.write_back.len() <= WRITE_BACK_CAP,
             "write-back of {}",
