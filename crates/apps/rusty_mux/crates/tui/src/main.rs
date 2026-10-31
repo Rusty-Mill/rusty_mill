@@ -2401,9 +2401,7 @@ mod client {
         fn a_path_not_brought_back_is_discarded_and_not_listened_to() {
             let mut calls = Calls::default();
             let path = calls.fresh(&AtomicBool::new(false));
-            let back = bring_back(&mut calls, path, |_| {
-                Err::<(), _>(Missed::Dropped)
-            });
+            let back = bring_back(&mut calls, path, |_| Err::<(), _>(Missed::Dropped));
             assert!(matches!(back, Err(Missed::Dropped)));
             assert_eq!(calls.0, ["fresh", "discard"]);
         }
