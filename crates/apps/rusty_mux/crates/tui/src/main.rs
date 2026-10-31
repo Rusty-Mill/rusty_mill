@@ -869,6 +869,7 @@ mod client {
                 next: now,
             },
             held: Vec::new(),
+            kept: None,
             me: takeover,
             lost: None,
             abandoned: None,
@@ -1620,6 +1621,10 @@ mod client {
         /// Actions held during a move that lost the path, taken once it is
         /// back.
         held: Vec<Action>,
+        /// Keys that were waiting on a block's lease when a move started or
+        /// the path was lost, with that block: taken ahead of the held
+        /// actions, and only if the block still has the focus then.
+        kept: Option<(BlockId, Vec<u8>)>,
         /// How to take the control connection's client over.
         me: Option<Takeover>,
         lost: Option<Lost>,
@@ -1856,8 +1861,8 @@ mod client {
             let Some(resumes) = resumes else {
                 return;
             };
-            let held = self.unsent().into_iter().collect();
-            self.standby.moving = Moving::Taking(Taking { ended: false, held });
+            self.kept = self.unsent();
+            self.standby.moving = Moving::Taking(Taking::default());
             let Some(rejoiner) = &self.rejoiner else {
                 return;
             };
@@ -1897,25 +1902,34 @@ mod client {
         }
 
         /// Keys typed while a lease was asked for, taken off the path being
-        /// left so they go with the actions held for the next one: the
-        /// focused block's as one input, any other block's (typed before
-        /// the focus moved on) dropped with a bell.
-        fn unsent(&mut self) -> Option<Action> {
+        /// left so they go ahead of the actions held for the next one: the
+        /// focused block's, with that block, any other block's (typed
+        /// before the focus moved on) dropped with a bell.
+        fn unsent(&mut self) -> Option<(BlockId, Vec<u8>)> {
             let focus = self.focus;
             let mut keys = None;
             for (block, pane) in &mut self.panes {
                 let waiting = std::mem::take(&mut pane.waiting);
                 match (waiting.is_empty(), *block == focus) {
                     (true, _) => {}
-                    (false, true) => keys = Some(Action::Input(waiting.concat())),
+                    (false, true) => keys = Some((*block, waiting.concat())),
                     (false, false) => bell(),
                 }
             }
             keys
         }
 
-        /// Takes actions held during a move, in order, up to a detach.
+        /// Takes the kept keys, then actions held during a move, in order,
+        /// up to a detach. The keys go only to the block they were typed
+        /// into, if it still has the focus: the layout the path came back
+        /// with may have moved it, and they would reach the wrong program.
         fn replay(&mut self, held: Vec<Action>) {
+            if let Some((block, keys)) = self.kept.take() {
+                match (block == self.focus, self.panes.get_mut(&block)) {
+                    (true, Some(pane)) => pane.typed(keys),
+                    _ => bell(),
+                }
+            }
             for action in held {
                 let detach = action == Action::Detach;
                 self.act(action);
@@ -1935,9 +1949,8 @@ mod client {
             if !self.standby.lose() {
                 return;
             }
-            // Ahead of anything typed while the path is down.
             if let Some(keys) = self.unsent() {
-                self.held.insert(0, keys);
+                self.kept = Some(keys);
             }
             let panes: Vec<Pane> = self.panes.drain().map(|(_, pane)| pane).collect();
             self.resumes = panes
@@ -2133,8 +2146,12 @@ mod client {
         /// held there name no block, so they must be taken before any
         /// later one moves the focus.
         fn typed(&mut self, action: Action) {
+            // A detach is held already: the client stops either way.
+            if self.held.contains(&Action::Detach) {
+                return bell();
+            }
             if !self.held.is_empty() && action != Action::Detach {
-                return match self.held.len() < HELD && !self.held.contains(&Action::Detach) {
+                return match self.held.len() < HELD {
                     true => self.held.push(action),
                     false => bell(),
                 };
@@ -2954,6 +2971,7 @@ mod client {
                 pulse: Pulse::default(),
                 standby: idle(),
                 held: Vec::new(),
+                kept: None,
                 me: Some(takeover(1)),
                 lost: None,
                 abandoned: None,
@@ -3156,6 +3174,46 @@ mod client {
             let at_b = sent(&b_new);
             grant(&mut app, &inbox, &b_new, &at_b);
             assert_eq!(typed_in(&sent(&b_new)), [b"early".to_vec()]);
+        }
+
+        /// Keys waiting on B's lease when the path is lost, with B gone
+        /// from the focus by the time it is back (another client zoomed A):
+        /// dropped, never sent to A.
+        #[cfg(unix)]
+        #[test]
+        fn keys_waiting_on_a_lease_never_reach_another_block() {
+            let (mut app, _inbox, [_control, _a_old, b_old]) = app(Some(Box::new(Never)));
+            app.typed(Action::Focus(Dir::Right));
+            app.typed(input(b"for-b"));
+            sent(&b_old);
+            app.lose(false);
+            let (mut path, _control, a_new, b_new) = back(takeover(1));
+            path.layout = Some((Some(Layout::Block(block(1))), None));
+            app.take(Input::Rejoined(Ok(path)));
+            assert_eq!(app.focus, block(1));
+            assert!(typed_in(&sent(&a_new)).is_empty(), "not A's keys");
+            assert!(typed_in(&sent(&b_new)).is_empty());
+            assert!(app.kept.is_none());
+        }
+
+        /// A second Ctrl-] d while a detach held through a broken move
+        /// waits on its one attempt is ignored: the path still comes back
+        /// to detach the moved clients there.
+        #[cfg(unix)]
+        #[test]
+        fn a_second_detach_waits_for_the_one_held_through_a_broken_move() {
+            let (mut app, inbox, _ends) = app(Some(Box::new(Never)));
+            app.standby.moving = Moving::Taking(Taking::default());
+            app.typed(Action::Detach);
+            app.take(Input::Moved(Err(Missed::Broken(
+                "pane".into(),
+                takeover(1),
+            ))));
+            inbox.recv_timeout(Duration::from_secs(5)).expect("a try");
+            app.typed(Action::Detach);
+            app.typed(input(b"x"));
+            assert!(app.ended.is_none(), "still waiting on the attempt");
+            assert_eq!(app.held, [Action::Detach]);
         }
 
         /// A [`Rejoin`] that records whether each fresh path was to try the
