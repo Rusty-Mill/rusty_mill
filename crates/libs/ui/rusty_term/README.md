@@ -140,7 +140,11 @@ theme = "gruvbox-dark"   # preset: default, gruvbox-dark, dracula,
 On Windows, `shell` accepts a bare name resolved through the standard search
 path — `"powershell"`, `"pwsh"`, `"wsl"`, `"cmd"` all work — as well as a full
 path (quoted automatically if it contains spaces) and trailing arguments
-(`"wsl -d Ubuntu"`, `"cmd /K clink inject"`):
+(`"wsl -d Ubuntu"`, `"cmd /K clink inject"`). Arguments after `--` are quoted
+for the program that reads them. When that is cmd.exe or a batch file, cmd's
+rules apply on both hosts, so an argument can't run a command: a plain word
+goes bare, anything else in quotes, and an argument with `%`, a line break,
+or quoting after a shell that leaves a quote open is refused with an error:
 
 ```toml
 shell = "pwsh"           # or "wsl", "powershell", "C:\\tools\\nu.exe", ...

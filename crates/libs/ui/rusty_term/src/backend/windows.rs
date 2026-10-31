@@ -13,8 +13,10 @@
 //! wire, so `resize_poll` in `src/runtime/reactor.rs` polls the console size
 //! on a timer and calls [`BackendHandle::set_winsize`] on change.
 
+use crate::backend::cmdline::{self, Reader, locate, split_program};
 use crate::backend::{Backend, BackendHandle};
 use crate::sync::Mutex;
+use platform_windows::winargv;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE, HANDLE,
@@ -85,6 +87,8 @@ impl Backend for WindowsBackend {
     ) -> Result<Box<dyn BackendHandle>, std::io::Error> {
         use std::os::windows::ffi::OsStrExt;
 
+        // Built first: a refused argument leaves nothing to clean up.
+        let mut cmdline = command_line(shell, args)?;
         unsafe {
             // Two anonymous pipes. The child reads its input from `input_read`
             // and writes its output to `output_write`; we keep the opposite ends.
@@ -157,33 +161,6 @@ impl Backend for WindowsBackend {
                 CloseHandle(output_read);
                 return Err(e);
             }
-
-            // Bare names (`powershell`, `pwsh`, `wsl`) resolve through the
-            // standard CreateProcessW search path, and arguments pass through
-            // (`wsl -d Ubuntu`, `cmd /K ...`). An unquoted path containing
-            // spaces is ambiguous to CreateProcessW (it would try
-            // `C:\Program.exe` first), so when the whole string names an
-            // existing file we quote it.
-            let shell = shell_or_default(shell);
-            let shell = if shell.contains(' ')
-                && !shell.starts_with('"')
-                && std::path::Path::new(&shell).is_file()
-            {
-                format!("\"{shell}\"")
-            } else {
-                shell
-            };
-            // CreateProcessW needs a mutable, null-terminated wide command line.
-            // `shell` may already carry its own args (CreateProcessW parses the
-            // whole string itself); explicit `args` — the caller's pre-split
-            // argv, e.g. a trailing `-- prog arg...` — are appended, each
-            // quoted so the child's argv parser splits them back out unchanged.
-            let mut cmdline: Vec<u16> = std::ffi::OsStr::new(&shell).encode_wide().collect();
-            for arg in args {
-                cmdline.push(' ' as u16);
-                push_quoted_arg(arg, &mut cmdline);
-            }
-            cmdline.push(0);
 
             let cwd_wide: Option<Vec<u16>> = cwd.map(|p| {
                 p.as_os_str()
@@ -279,6 +256,41 @@ impl Backend for WindowsBackend {
     }
 }
 
+/// The NUL-terminated command line ConPTY's `CreateProcessW` gets for
+/// `shell` and the launcher `args`.
+fn command_line(shell: Option<&str>, args: &[String]) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    // Bare names (`powershell`, `pwsh`, `wsl`) resolve through the
+    // standard CreateProcessW search path, and arguments pass through
+    // (`wsl -d Ubuntu`, `cmd /K ...`). An unquoted path containing
+    // spaces is ambiguous to CreateProcessW (it would try
+    // `C:\Program.exe` first), so when the whole string names an
+    // existing file we quote it.
+    let shell = shell_or_default(shell);
+    let (reader, rest_len) = match split_program(&shell, |p| locate(p).is_some()) {
+        Some((program, rest)) => (cmdline::reader(program), rest.encode_utf16().count()),
+        None => (Reader::Crt, 0),
+    };
+    let shell =
+        if shell.contains(' ') && !shell.starts_with('"') && std::path::Path::new(&shell).is_file()
+        {
+            format!("\"{shell}\"")
+        } else {
+            shell
+        };
+    // CreateProcessW needs a mutable, null-terminated wide command line.
+    // `shell` may already carry its own args (CreateProcessW parses the
+    // whole string itself); explicit `args` — the caller's pre-split
+    // argv, e.g. a trailing `-- prog arg...` — are appended, each
+    // quoted for whoever reads them.
+    let mut line: Vec<u16> = std::ffi::OsStr::new(&shell).encode_wide().collect();
+    let params = line.len() - rest_len;
+    push_launcher_args(&mut line, params, reader, args)?;
+    line.push(0);
+    Ok(line)
+}
+
 /// The configured shell, else `%COMSPEC%`, else `cmd.exe`. Shared with the
 /// own-host backend.
 pub(super) fn shell_or_default(shell: Option<&str>) -> String {
@@ -287,6 +299,56 @@ pub(super) fn shell_or_default(shell: Option<&str>) -> String {
         .or_else(|| std::env::var("COMSPEC").ok())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "cmd.exe".to_string())
+}
+
+/// Appends the launcher `args` to `line`, the command line of a program
+/// read by `reader` whose own parameters start at `params`, each after a
+/// space and quoted for that reader (see `cmdline`'s module doc). For
+/// cmd.exe and batch files an argument cmd can't take safely is refused
+/// with `InvalidInput`: a `%`, CR, LF or NUL, or any quoted argument after
+/// a shell that leaves a quote open.
+pub(super) fn push_launcher_args(
+    line: &mut Vec<u16>,
+    params: usize,
+    reader: Reader,
+    args: &[String],
+) -> std::io::Result<()> {
+    if reader == Reader::Crt {
+        for arg in args {
+            line.push(u16::from(b' '));
+            push_quoted_arg(arg, line);
+        }
+        return Ok(());
+    }
+    let closed = cmdline::quotes_closed(line);
+    for arg in args {
+        line.push(u16::from(b' '));
+        push_cmd_arg(arg, closed, line)?;
+    }
+    if reader == Reader::Cmd && !args.is_empty() {
+        cmdline::keep_command_quotes(line, params);
+    }
+    Ok(())
+}
+
+/// Appends `arg` for cmd.exe: bare when it is one plain word, else by
+/// cmd's rules. `closed` is whether the line so far ends outside quotes.
+fn push_cmd_arg(arg: &str, closed: bool, out: &mut Vec<u16>) -> std::io::Result<()> {
+    if cmdline::plain_for_cmd(arg) {
+        out.extend(arg.encode_utf16());
+        return Ok(());
+    }
+    let refused = |why: &dyn std::fmt::Display| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("rusty_term: cmd.exe can't take the argument {arg:?} safely: {why}"),
+        )
+    };
+    if !closed {
+        return Err(refused(&"the shell leaves a quote open"));
+    }
+    let wide: Vec<u16> = arg.encode_utf16().collect();
+    winargv::quote_batch_arg_into(&wide, out).map_err(|e| refused(&e))
 }
 
 /// Appends `arg` to `out` (a wide command-line buffer), quoted per the
@@ -536,7 +598,63 @@ impl Drop for WindowsHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::push_quoted_arg;
+    use super::{command_line, push_quoted_arg};
+    use std::io::ErrorKind;
+
+    /// ConPTY's command line for `shell` and `args`, without its NUL.
+    fn line(shell: &str, args: &[&str]) -> std::io::Result<String> {
+        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        let mut line = command_line(Some(shell), &args)?;
+        assert_eq!(line.pop(), Some(0));
+        Ok(String::from_utf16(&line).expect("utf-16"))
+    }
+
+    fn refused(shell: &str, args: &[&str]) -> Option<ErrorKind> {
+        line(shell, args).err().map(|e| e.kind())
+    }
+
+    /// #1279: cmd.exe gets its launcher arguments by cmd's rules.
+    #[test]
+    fn launcher_args_for_cmd_are_quoted_by_cmds_rules() {
+        let injected = r#"x\" & calc & \"y"#;
+        assert_eq!(
+            line("cmd.exe /c echo", &[injected]).expect("quoted"),
+            r#"cmd.exe /c echo "x\"" & calc & \""y""#
+        );
+        assert_eq!(
+            line("cmd.exe /c echo", &["tail one", "/q"]).expect("quoted"),
+            r#"cmd.exe /c echo "tail one" /q"#
+        );
+        assert_eq!(
+            line("cmd", &["/c", "x y", "a&b"]).expect("quoted"),
+            r#"cmd /c ""x y" "a&b"""#
+        );
+        assert_eq!(
+            refused("cmd /c echo", &["%PATH%"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            refused("cmd /c echo", &["a\nb"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        // After a shell that leaves a quote open, only plain words go on.
+        assert_eq!(
+            refused(r#"cmd /c echo ""#, &["a b"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            line(r#"cmd /c echo ""#, &["ab"]).expect("plain"),
+            r#"cmd /c echo " ab"#
+        );
+    }
+
+    #[test]
+    fn launcher_args_for_other_programs_keep_msvcrt_quoting() {
+        assert_eq!(
+            line("pwsh -NoLogo", &[r#"a\"b"#, "%x%"]).expect("quoted"),
+            r#"pwsh -NoLogo "a\\\"b" %x%"#
+        );
+    }
 
     fn quote(arg: &str) -> String {
         let mut out = Vec::new();
