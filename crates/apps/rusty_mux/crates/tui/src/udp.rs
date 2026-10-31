@@ -50,9 +50,17 @@ struct Shared {
     changed: Condvar,
     udp: Mutex<Arc<UdpSocket>>,
     stop: AtomicBool,
-    /// Each local connection still read from, to unblock its reader on
-    /// stop.
-    locals: Mutex<HashMap<StreamId, UnixStream>>,
+    /// Each local connection, until both its workers finish, to unblock
+    /// them on stop.
+    locals: Mutex<HashMap<StreamId, Carried>>,
+    /// Every connection's workers, joined on stop.
+    workers: Mutex<Vec<JoinHandle<()>>>,
+}
+
+/// A local connection and how many of its two workers still run.
+struct Carried {
+    local: UnixStream,
+    workers: u8,
 }
 
 impl Relay {
@@ -83,6 +91,7 @@ impl Relay {
             udp: Mutex::new(Arc::new(udp)),
             stop: AtomicBool::new(false),
             locals: Mutex::default(),
+            workers: Mutex::default(),
         });
         let receiver = {
             let shared = shared.clone();
@@ -140,8 +149,8 @@ impl Relay {
 
 impl Relay {
     /// Waits, at most [`DRAIN`], until every local connection has ended
-    /// and the server has acknowledged what it wrote: each one's carrier
-    /// leaves `locals` only then.
+    /// and the server has acknowledged what it wrote: each one leaves
+    /// `locals` only once both its workers finish.
     fn drain(&self) {
         let by = Instant::now() + DRAIN;
         let mut assoc = self.shared.lock();
@@ -169,20 +178,25 @@ impl Drop for Relay {
         }
         self.shared.stop.store(true, Ordering::Release);
         self.shared.changed.notify_all();
-        for local in self
-            .shared
-            .locals
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .values()
-        {
+        for carried in self.shared.carried().values() {
             // It may have closed already.
-            let _ = local.shutdown(Shutdown::Both);
+            let _ = carried.local.shutdown(Shutdown::Both);
         }
         // Wakes the acceptor, which then sees the stop.
         let _ = UnixStream::connect(&self.socket);
+        // The acceptor first, so no worker starts after the rest are joined.
         for thread in self.threads.drain(..) {
             let _ = thread.join();
+        }
+        let workers = std::mem::take(
+            &mut *self
+                .shared
+                .workers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for worker in workers {
+            let _ = worker.join();
         }
         remove(&self.dir);
     }
@@ -211,8 +225,20 @@ impl Shared {
         assoc
     }
 
-    fn carried(&self) -> MutexGuard<'_, HashMap<StreamId, UnixStream>> {
+    fn carried(&self) -> MutexGuard<'_, HashMap<StreamId, Carried>> {
         self.locals.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// One of `id`'s workers finished; the connection goes with the last.
+    fn finished(&self, id: StreamId) {
+        let mut carried = self.carried();
+        let Some(entry) = carried.get_mut(&id) else {
+            return;
+        };
+        entry.workers -= 1;
+        if entry.workers == 0 {
+            carried.remove(&id);
+        }
     }
 
     fn stopped(&self) -> bool {
@@ -287,14 +313,26 @@ impl Shared {
                 self.lock().close(Instant::now(), id);
                 continue;
             };
-            self.locals
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(id, kept);
-            let shared = self.clone();
-            std::thread::spawn(move || shared.up(id, up));
-            let shared = self.clone();
-            std::thread::spawn(move || shared.down(id, local));
+            let mut carried = self.carried();
+            if self.stopped() {
+                // After the stop's sweep of `locals`: never carried. The
+                // association's lock is never taken under `locals`.
+                drop(carried);
+                let _ = local.shutdown(Shutdown::Both);
+                self.lock().close(Instant::now(), id);
+                return;
+            }
+            let entry = Carried {
+                local: kept,
+                workers: 2,
+            };
+            carried.insert(id, entry);
+            drop(carried);
+            let (shared, other) = (self.clone(), self.clone());
+            let mut workers = self.workers.lock().unwrap_or_else(PoisonError::into_inner);
+            workers.retain(|w| !w.is_finished());
+            workers.push(std::thread::spawn(move || shared.up(id, up)));
+            workers.push(std::thread::spawn(move || other.down(id, local)));
         }
     }
 
@@ -302,8 +340,7 @@ impl Shared {
     /// side finishes, the stream closes once the server has it all.
     fn up(&self, id: StreamId, local: UnixStream) {
         self.carry_up(id, local);
-        let mut locals = self.locals.lock().unwrap_or_else(PoisonError::into_inner);
-        locals.remove(&id);
+        self.finished(id);
     }
 
     fn carry_up(&self, id: StreamId, mut local: UnixStream) {
@@ -350,7 +387,12 @@ impl Shared {
 
     /// Carries what arrives on stream `id` to the local side, which sees
     /// the end once the server closes the stream and all of it is read.
-    fn down(&self, id: StreamId, mut local: UnixStream) {
+    fn down(&self, id: StreamId, local: UnixStream) {
+        self.carry_down(id, local);
+        self.finished(id);
+    }
+
+    fn carry_down(&self, id: StreamId, mut local: UnixStream) {
         let mut buf = vec![0; CHUNK];
         loop {
             let n = {
@@ -427,5 +469,80 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         drop(relay);
         assert!(!dir.exists());
+    }
+
+    /// A server end, driven on its own thread: it accepts every stream
+    /// and sends `flood` bytes down each, until `stop` is set.
+    fn flooding_server(
+        id: [u8; ID_LEN],
+        key: [u8; KEY_LEN],
+        flood: usize,
+        stop: Arc<AtomicBool>,
+    ) -> (SocketAddr, JoinHandle<()>) {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let addr = socket.local_addr().expect("addr");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .expect("timeout");
+        let thread = std::thread::spawn(move || {
+            let mut assoc = Association::new(Side::Server, id, &key, Instant::now(), None);
+            let mut sent: HashMap<StreamId, usize> = HashMap::new();
+            let mut buf = vec![0; MAX_DATAGRAM];
+            let chunk = vec![b'x'; CHUNK];
+            while !stop.load(Ordering::Acquire) {
+                if let Ok((n, from)) = socket.recv_from(&mut buf) {
+                    assoc.datagram(Instant::now(), from, &buf[..n]);
+                }
+                while let Some(id) = assoc.accept() {
+                    sent.insert(id, 0);
+                }
+                for (&id, done) in sent.iter_mut() {
+                    let left = flood.saturating_sub(*done).min(CHUNK);
+                    *done += assoc.write(id, &chunk[..left]);
+                }
+                while let Some((to, datagram)) = assoc.transmit(Instant::now()) {
+                    let _ = socket.send_to(&datagram, to);
+                }
+            }
+        });
+        (addr, thread)
+    }
+
+    #[test]
+    fn dropping_the_relay_stops_a_worker_blocked_on_a_stalled_reader() {
+        let (id, key) = ([3; ID_LEN], [4; KEY_LEN]);
+        let stop = Arc::new(AtomicBool::new(false));
+        // Far more than a Unix socket buffers, so the down worker blocks.
+        let (server, flood) = flooding_server(id, key, 8 << 20, stop.clone());
+        let relay = Relay::start(any_for(server), server, id, &key).expect("start");
+        assert!(relay.probe(Duration::from_secs(2)));
+        let bound = relay.shared.udp().local_addr().expect("addr");
+        let mut local = UnixStream::connect(relay.socket()).expect("connect");
+        local.write_all(b"hello").expect("write");
+        // Reads nothing, so the down worker fills the socket and blocks;
+        // then finishes its own side, so the up worker ends.
+        std::thread::sleep(Duration::from_millis(500));
+        local.shutdown(Shutdown::Write).expect("half close");
+        std::thread::sleep(Duration::from_millis(200));
+
+        let (done, dropped) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(relay);
+            let _ = done.send(());
+        });
+        let joined = dropped.recv_timeout(Duration::from_secs(10));
+        stop.store(true, Ordering::Release);
+        flood.join().expect("server");
+        assert!(
+            joined.is_ok(),
+            "dropping the relay hung on a blocked worker"
+        );
+        // Every thread is gone with the relay, so nothing holds its socket,
+        // though the local side never read or closed.
+        assert!(
+            UdpSocket::bind(bound).is_ok(),
+            "a worker outlived the relay"
+        );
+        drop(local);
     }
 }
