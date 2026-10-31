@@ -43,6 +43,7 @@ impl Handler for Backend {
             if_match: request.if_match,
             if_none_match: request.headers.get("if-none-match"),
             if_task_match: request.headers.get("if-task-match"),
+            actor: request.headers.get("x-actor"),
             body: request.body,
         };
         let path = request.target.split('?').next().unwrap_or("");

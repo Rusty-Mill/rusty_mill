@@ -6,6 +6,7 @@
 
 use crate::docs::{Doc, DocStore, BOARD_KIND, KINDS, MAX_DOC_BYTES};
 use crate::lists::{ListStore, TaskList, ViewMode, INBOX_ID};
+use crate::moves::{valid_actor, Move, MoveStore, DEFAULT_ACTOR, MAX_ACTOR_BYTES};
 use crate::store::{TaskStore, TickError, SORT_STEP};
 use crate::tags::{tag_name, Tag, TagStore};
 use crate::task::{ChecklistItem, Priority, Status, Task, TaskKind, NO_DUE};
@@ -86,6 +87,8 @@ pub struct NewTask {
     /// Create it already closed (stamping `completed_ms`); `None` is open. One write, so a
     /// caller recording finished work never leaves an open task behind.
     pub status: Option<Status>,
+    /// Who is writing, recorded on the column move this makes; `None` is [`DEFAULT_ACTOR`].
+    pub actor: Option<String>,
 }
 
 /// `Option<Option<_>>` fields: outer `None` leaves the field alone,
@@ -108,6 +111,8 @@ pub struct TaskPatch {
     pub tags: Option<Vec<String>>,
     pub list_id: Option<Uuid>,
     pub sort_order: Option<i64>,
+    /// Who is writing, recorded on the column move this makes; `None` is [`DEFAULT_ACTOR`].
+    pub actor: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -154,16 +159,20 @@ pub struct Service {
     lists: ListStore,
     tags: TagStore,
     docs: DocStore,
+    moves: MoveStore,
     clock: Clock,
 }
 
 impl Service {
     pub fn open(dir: &std::path::Path, clock: Clock) -> Result<Self> {
+        let tasks = TaskStore::open(dir)?;
+        let moves = MoveStore::open(dir, |id| tasks.get(id))?;
         let mut service = Self {
-            tasks: TaskStore::open(dir)?,
+            tasks,
             lists: ListStore::open(dir)?,
             tags: TagStore::open(dir)?,
             docs: DocStore::open(dir)?,
+            moves,
             clock,
         };
         service.ensure_inbox()?;
@@ -191,7 +200,7 @@ impl Service {
         for mut child in stray {
             if let Some(parent) = child.parent_id.and_then(|p| self.tasks.get(p)) {
                 child.list_id = parent.list_id;
-                self.save_task(child)?;
+                self.save_task(child, DEFAULT_ACTOR)?;
             }
         }
         Ok(())
@@ -215,6 +224,15 @@ impl Service {
             .filter(|id| !live.contains(id))
             .collect();
         Ok(comments + self.docs.delete_board_of(&orphans)?)
+    }
+
+    /// Refuse a task mutation while either the task store or the column history
+    /// needs reopening; checked before any operation's first side effect, so a
+    /// refused request changes nothing and the history's intent stays replayable.
+    fn require_writable(&self) -> Result<()> {
+        self.tasks.require_writable()?;
+        self.moves.require_writable()?;
+        Ok(())
     }
 
     fn now(&self) -> i64 {
@@ -287,7 +305,7 @@ impl Service {
 
     /// Delete a list; its tasks go to the trash.
     pub fn delete_list(&mut self, id: Uuid) -> Result<()> {
-        self.tasks.require_writable()?;
+        self.require_writable()?;
         if id == INBOX_ID {
             return invalid("the Inbox cannot be deleted");
         }
@@ -296,7 +314,7 @@ impl Service {
         for mut task in self.tasks.in_list(id) {
             if !task.is_deleted() {
                 task.deleted_ms = Some(now);
-                self.save_task(task)?;
+                self.save_task(task, DEFAULT_ACTOR)?;
             }
         }
         self.lists.delete(id)?;
@@ -306,7 +324,8 @@ impl Service {
     // ---- tasks -------------------------------------------------------
 
     pub fn create_task(&mut self, new: NewTask) -> Result<Task> {
-        self.tasks.require_writable()?;
+        self.require_writable()?;
+        let actor = clean_actor(new.actor)?;
         self.live_list(new.list_id)?;
         if let Some(parent) = new.parent_id {
             let parent = self.task(parent)?;
@@ -341,7 +360,11 @@ impl Service {
         if let Some(status) = new.status {
             apply_status(&mut task, status, now);
         }
-        self.tasks.insert(task.clone())?;
+        let planned = MoveStore::plan(None, &task, &actor);
+        let inserted = task.clone();
+        self.write_with_moves(planned.into_iter().collect(), |tasks| {
+            tasks.insert(inserted)
+        })?;
         Ok(task)
     }
 
@@ -351,7 +374,8 @@ impl Service {
     }
 
     pub fn patch_task(&mut self, id: Uuid, patch: TaskPatch) -> Result<Task> {
-        self.tasks.require_writable()?;
+        self.require_writable()?;
+        let actor = clean_actor(patch.actor)?;
         let mut task = self.task(id)?;
         if let Some(title) = patch.title {
             task.title = clean_title(&title)?;
@@ -413,9 +437,9 @@ impl Service {
             }
             task.list_id = list;
             changed.push(task);
-            return self.save_batch(changed);
+            return self.save_batch(changed, &actor);
         }
-        self.save_task(task)
+        self.save_task(task, &actor)
     }
 
     fn children(&self, parent: &Task) -> Vec<Task> {
@@ -426,15 +450,41 @@ impl Service {
             .collect()
     }
 
-    fn save_task(&mut self, mut task: Task) -> Result<Task> {
+    /// Write tasks with `write`, recording the column `moves` it makes under the
+    /// history's redo ([`crate::moves`]): intent, task write, then moves. Every
+    /// task write that can change a column goes through here.
+    fn write_with_moves(
+        &mut self,
+        moves: Vec<Move>,
+        write: impl FnOnce(&mut TaskStore) -> std::result::Result<(), TickError>,
+    ) -> Result<()> {
+        self.moves.begin(moves)?;
+        match write(&mut self.tasks) {
+            Ok(()) => Ok(self.moves.commit()?),
+            Err(error) => {
+                // A write the task store cannot vouch for may have landed: keep the intent.
+                let ambiguous = self.tasks.require_writable().is_err();
+                self.moves.abort(ambiguous)?;
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Save one task, recording the column move it makes, if any, as `actor`.
+    fn save_task(&mut self, mut task: Task, actor: &str) -> Result<Task> {
         task.updated_ms = self.now();
         task.version = task.version.wrapping_add(1);
-        self.tasks.replace(task.clone())?;
+        let old = self.tasks.get(task.id);
+        let planned = MoveStore::plan(old.as_ref(), &task, actor);
+        let replaced = task.clone();
+        self.write_with_moves(planned.into_iter().collect(), |tasks| {
+            tasks.replace(replaced)
+        })?;
         Ok(task)
     }
 
     /// Save a task and its children under the task store's durable redo seam.
-    fn save_batch(&mut self, mut tasks: Vec<Task>) -> Result<Task> {
+    fn save_batch(&mut self, mut tasks: Vec<Task>, actor: &str) -> Result<Task> {
         let now = self.now();
         for task in &mut tasks {
             task.updated_ms = now;
@@ -444,15 +494,20 @@ impl Service {
             .last()
             .cloned()
             .ok_or_else(|| ServiceError::Invalid("nothing to save".into()))?;
-        self.tasks.replace_batch(tasks)?;
+        let planned = tasks
+            .iter()
+            .filter_map(|t| MoveStore::plan(self.tasks.get(t.id).as_ref(), t, actor))
+            .collect();
+        self.write_with_moves(planned, |store| store.replace_batch(tasks))?;
         Ok(result)
     }
 
-    pub fn set_status(&mut self, id: Uuid, status: Status) -> Result<Task> {
+    pub fn set_status(&mut self, id: Uuid, status: Status, actor: Option<String>) -> Result<Task> {
         self.patch_task(
             id,
             TaskPatch {
                 status: Some(status),
+                actor,
                 ..TaskPatch::default()
             },
         )
@@ -460,6 +515,7 @@ impl Service {
 
     /// Move a task and its subtasks to the trash.
     pub fn trash_task(&mut self, id: Uuid) -> Result<Task> {
+        self.require_writable()?;
         let mut task = self.task(id)?;
         let now = self.now();
         let mut changed = Vec::new();
@@ -480,6 +536,7 @@ impl Service {
     /// Trash a task only if it has no subtasks, checked in the same step as the
     /// write, so a subtask added by anyone else is never trashed along with it.
     pub fn trash_leaf_task(&mut self, id: Uuid) -> Result<Task> {
+        self.require_writable()?;
         let task = self.task(id)?;
         if !self.children(&task).is_empty() {
             return Err(ServiceError::Conflict(format!("{id} has subtasks")));
@@ -490,6 +547,7 @@ impl Service {
     /// Bring a task and the subtasks trashed with it back. A task whose list
     /// is gone (or itself trashed) is restored into the Inbox.
     pub fn restore_task(&mut self, id: Uuid) -> Result<Task> {
+        self.require_writable()?;
         let mut task = self.task(id)?;
         let trashed_at = task.deleted_ms;
         let rehome = self.live_list(task.list_id).is_err().then_some(INBOX_ID);
@@ -511,11 +569,12 @@ impl Service {
         }
         task.deleted_ms = None;
         changed.push(task);
-        self.save_batch(changed)
+        self.save_batch(changed, DEFAULT_ACTOR)
     }
 
     /// Delete a task and its subtasks for good.
     pub fn purge_task(&mut self, id: Uuid) -> Result<()> {
+        self.require_writable()?;
         let task = self.task(id)?;
         let mut gone = vec![id];
         for child in self.children(&task) {
@@ -528,6 +587,7 @@ impl Service {
 
     /// Permanently delete everything in the trash; returns how many tasks went.
     pub fn empty_trash(&mut self) -> Result<usize> {
+        self.require_writable()?;
         let trashed: Vec<Uuid> = self
             .tasks
             .all()
@@ -542,15 +602,31 @@ impl Service {
         Ok(trashed.len())
     }
 
-    /// Delete the documents that belong to purged tasks: comments and board documents.
+    /// Delete the documents that belong to purged tasks: comments and board
+    /// documents. Their column history is kept: it is append-only, so a `seq`
+    /// cursor is never reused.
     fn forget_docs_of(&mut self, gone: &[Uuid]) -> Result<()> {
         self.docs.delete_comments_of(gone)?;
         self.docs.delete_board_of(gone)?;
         Ok(())
     }
 
+    // ---- column history ----------------------------------------------
+
+    /// Column moves at or after `since` and past seq `after`, oldest first, at most `limit`.
+    pub fn moves(&self, since: i64, after: u64, limit: usize) -> Vec<Move> {
+        self.moves.page(since, after, limit)
+    }
+
+    /// Every column move of task `id`, oldest first.
+    pub fn task_moves(&self, id: Uuid) -> Result<Vec<Move>> {
+        self.task(id)?;
+        Ok(self.moves.of_task(id))
+    }
+
     /// Set a task's manual position. Rewrites one durable slot.
     pub fn reorder(&mut self, id: Uuid, sort_order: i64) -> Result<Task> {
+        self.require_writable()?;
         self.task(id)?;
         self.tasks.reorder(id, sort_order)?;
         self.task(id)
@@ -697,8 +773,15 @@ impl Service {
 
     /// Rename a tag everywhere: the entity, its children's `parent`, and every
     /// task that carries it.
-    pub fn rename_tag(&mut self, name: &str, new_label: &str) -> Result<Tag> {
-        self.tasks.require_writable()?;
+    /// `actor` is who the column moves a renamed `board:` tag makes are recorded as.
+    pub fn rename_tag(
+        &mut self,
+        name: &str,
+        new_label: &str,
+        actor: Option<String>,
+    ) -> Result<Tag> {
+        self.require_writable()?;
+        let actor = clean_actor(actor)?;
         let old = self.tag(name)?;
         let label = clean_tag_label(new_label)?;
         let new_name = tag_name(&label);
@@ -723,16 +806,17 @@ impl Service {
                 child.parent = Some(new_name.clone());
                 self.tags.replace(child)?;
             }
-            self.retag(&old.name, Some(&new_name))?;
+            self.retag(&old.name, Some(&new_name), &actor)?;
         } else {
             self.tags.replace(renamed.clone())?;
         }
         Ok(renamed)
     }
 
-    /// Delete a tag and take it off every task.
-    pub fn delete_tag(&mut self, name: &str) -> Result<()> {
-        self.tasks.require_writable()?;
+    /// Delete a tag and take it off every task, as `actor` (see [`Service::rename_tag`]).
+    pub fn delete_tag(&mut self, name: &str, actor: Option<String>) -> Result<()> {
+        self.require_writable()?;
+        let actor = clean_actor(actor)?;
         let tag = self.tag(name)?;
         self.tags.delete(&tag.name)?;
         for mut child in self
@@ -744,11 +828,11 @@ impl Service {
             child.parent = None;
             self.tags.replace(child)?;
         }
-        self.retag(&tag.name, None)
+        self.retag(&tag.name, None, &actor)
     }
 
     /// Replace tag `from` with `to` (or drop it) on every task, trashed ones too.
-    fn retag(&mut self, from: &str, to: Option<&str>) -> Result<()> {
+    fn retag(&mut self, from: &str, to: Option<&str>, actor: &str) -> Result<()> {
         for mut task in self
             .tasks
             .all()
@@ -768,7 +852,7 @@ impl Service {
                 })
                 .filter(|g| seen.insert(g.clone()))
                 .collect();
-            self.save_task(task)?;
+            self.save_task(task, actor)?;
         }
         Ok(())
     }
@@ -860,12 +944,12 @@ impl Service {
         if let Some(task) = task {
             // The write is authorized by the task's state, so it must not be read
             // from a task store that is serving its pre-failure view.
-            self.tasks.require_writable()?;
+            self.require_writable()?;
             let task = self.task(task)?;
             if task.is_deleted() {
                 return invalid("a document written for a task needs one that is not in the trash");
             }
-            self.save_task(task)?;
+            self.save_task(task, DEFAULT_ACTOR)?;
         }
         let now = self.now();
         let doc = Doc {
@@ -909,6 +993,17 @@ fn day_bounds(now_ms: i64, utc_offset_min: i32) -> (i64, i64) {
     let local = now_ms.saturating_add(offset);
     let start = local - local.rem_euclid(DAY_MS) - offset;
     (start, start + DAY_MS)
+}
+
+/// The writer a move is recorded as: `actor` if usable, else [`DEFAULT_ACTOR`] when absent.
+fn clean_actor(actor: Option<String>) -> Result<String> {
+    match actor {
+        None => Ok(DEFAULT_ACTOR.to_string()),
+        Some(a) if valid_actor(&a) => Ok(a),
+        Some(_) => invalid(format!(
+            "actor must be 1 to {MAX_ACTOR_BYTES} printable ASCII characters without spaces"
+        )),
+    }
 }
 
 fn check_kind(kind: &str) -> Result<()> {
@@ -1028,6 +1123,116 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_history_append_fences_every_task_mutation_until_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = Service::open(dir.path(), Box::new(|| 1_000)).unwrap();
+        let card = task_named(&mut service, "card", None);
+        let binned = task_named(&mut service, "binned", None);
+        service
+            .patch_task(
+                binned.id,
+                TaskPatch {
+                    tags: Some(vec!["label".into()]),
+                    ..TaskPatch::default()
+                },
+            )
+            .unwrap();
+        service.trash_task(binned.id).unwrap();
+        // No move yet, so the history's log does not exist: block its creation.
+        let log = rusty_multimodal_db_engine::generic::insert_log::log_path(
+            &dir.path().join("moves.mmap"),
+        );
+        std::fs::create_dir(&log).unwrap();
+
+        let landed = service.patch_task(
+            card.id,
+            TaskPatch {
+                tags: Some(vec!["agent".into(), "board:ready".into()]),
+                ..TaskPatch::default()
+            },
+        );
+        assert!(landed.is_err(), "the task write landed, its move did not");
+        let tasks_before = service.snapshot().tasks;
+        let tags_before = service.tags();
+
+        is_recovery_required(service.purge_task(card.id));
+        is_recovery_required(service.empty_trash());
+        is_recovery_required(service.rename_tag("label", "renamed", None));
+        is_recovery_required(service.delete_tag("label", None));
+        is_recovery_required(service.trash_task(card.id));
+        is_recovery_required(service.restore_task(binned.id));
+        is_recovery_required(service.reorder(card.id, 5));
+        is_recovery_required(service.set_status(card.id, Status::Done, None));
+        assert_eq!(service.snapshot().tasks, tasks_before);
+        assert_eq!(service.tags(), tags_before);
+
+        drop(service);
+        std::fs::remove_dir(&log).unwrap();
+        let reopened = Service::open(dir.path(), Box::new(|| 2_000)).unwrap();
+        let moves = reopened.task_moves(card.id).unwrap();
+        assert_eq!(
+            moves
+                .iter()
+                .map(|m| (m.from.as_deref(), m.to.as_deref()))
+                .collect::<Vec<_>>(),
+            [(None, Some("ready"))]
+        );
+        assert!(reopened.task(binned.id).unwrap().is_deleted());
+        assert!(reopened.tag("label").is_ok());
+    }
+
+    #[test]
+    fn a_batch_move_that_fails_after_landing_is_recorded_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = Service::open(dir.path(), Box::new(|| 1_000)).unwrap();
+        let other = service
+            .create_list(NewList {
+                name: "other".into(),
+                ..NewList::default()
+            })
+            .unwrap();
+        let card = service
+            .create_task(NewTask {
+                list_id: INBOX_ID,
+                title: "card".into(),
+                tags: vec!["agent".into(), "board:ready".into()],
+                ..NewTask::default()
+            })
+            .unwrap();
+
+        // The journaled batch reaches its checkpoint and fails there: it may have landed.
+        std::fs::create_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        let moved = service.patch_task(
+            card.id,
+            TaskPatch {
+                tags: Some(vec!["agent".into(), "board:qa".into()]),
+                list_id: Some(other.id),
+                actor: Some("builder".into()),
+                ..TaskPatch::default()
+            },
+        );
+        assert!(moved.is_err());
+        is_recovery_required(service.set_status(card.id, Status::Done, None));
+
+        drop(service);
+        std::fs::remove_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        let reopened = Service::open(dir.path(), Box::new(|| 2_000)).unwrap();
+        let path: Vec<_> = reopened
+            .task_moves(card.id)
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.to, m.actor))
+            .collect();
+        assert_eq!(
+            path,
+            [
+                (Some("ready".to_string()), "tick".to_string()),
+                (Some("qa".to_string()), "builder".to_string())
+            ]
+        );
+    }
+
+    #[test]
     fn task_fence_precedes_every_compound_registry_side_effect() {
         let dir = tempfile::tempdir().unwrap();
         let mut service = Service::open(dir.path(), Box::new(|| 1_000)).unwrap();
@@ -1059,8 +1264,8 @@ mod tests {
             Err(ServiceError::Storage(TickError::Journal(_)))
         ));
 
-        is_recovery_required(service.rename_tag("original", "renamed"));
-        is_recovery_required(service.delete_tag("original"));
+        is_recovery_required(service.rename_tag("original", "renamed", None));
+        is_recovery_required(service.delete_tag("original", None));
         is_recovery_required(service.create_task(NewTask {
             list_id: INBOX_ID,
             title: "refused".into(),
@@ -1321,7 +1526,7 @@ mod tests {
             // The crash: the child's save landed, the parent's did not.
             let mut moved = svc.task(child.id).unwrap();
             moved.list_id = other.id;
-            svc.save_task(moved).unwrap();
+            svc.save_task(moved, DEFAULT_ACTOR).unwrap();
             (parent.id, child.id, other.id)
         };
         let svc = Service::open(dir.path(), clock()).unwrap();
