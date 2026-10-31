@@ -127,20 +127,27 @@ fn closing_a_session_on_our_own_console_host_ends_what_it_left_attached() {
     // session left attached while the worker lives. The daemon has to let
     // an acknowledging worker finish (review of 9ecfce64, P1).
     let root = TempRoot::new("lifecycle-own-host-close");
-    let marker = root.path().join("survived.txt");
-    let script = root.path().join("survivor.bat");
+    let ready = root.path().join("ready.txt");
+    let survived = root.path().join("survived.txt");
+    // The survivor announces itself, then writes `survived.txt` about 9 s
+    // later unless it is ended first. Its markers are quoted inside the
+    // script, so a temp path with spaces still works.
     std::fs::write(
-        &script,
-        format!(
-            "@ping -n 10 127.0.0.1 > NUL\r\n@echo survived> \"{}\"\r\n",
-            marker.display()
-        ),
+        root.path().join("survivor.bat"),
+        "@echo ready> \"%~dp0ready.txt\"\r\n\
+         @ping -n 10 127.0.0.1 > NUL\r\n\
+         @echo survived> \"%~dp0survived.txt\"\r\n",
     )
     .expect("write the survivor script");
-    let line = format!(
-        "start /b {} & ping -n 600 127.0.0.1 > NUL",
-        script.display()
-    );
+    // A plain session runs in the temp dir, which holds the root, so the
+    // script is named relative to it: the root's own name has no spaces,
+    // and the command line needs no quotes for cmd to misread.
+    let dir = root
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("the temp root has a plain name");
+    let line = format!("start /b {dir}\\survivor.bat & ping -n 600 127.0.0.1 > NUL");
     let output = run_with_env(
         root.path(),
         &["new", "--", "cmd", "/C", &line],
@@ -150,12 +157,21 @@ fn closing_a_session_on_our_own_console_host_ends_what_it_left_attached() {
     let id = stdout_of(&output);
     let worker = worker_pid(root.path(), &id);
 
+    // Close only once the survivor is running (review of ff3a25b3), so
+    // the close has to end an attached descendant, not just cmd.
+    assert!(
+        wait_until(|| ready.exists(), Duration::from_secs(30)),
+        "the survivor never started"
+    );
+    let started = std::time::Instant::now();
+    assert!(!survived.exists(), "the survivor finished before the close");
+
     assert_success("close", &run(root.path(), &["close", &id]));
     assert!(!is_alive(worker), "close returns once the worker is gone");
-    // The survivor would write its marker about 9 s after it started.
-    std::thread::sleep(Duration::from_secs(12));
+    // Past the survivor's own 9 s, with margin.
+    std::thread::sleep(Duration::from_secs(13).saturating_sub(started.elapsed()));
     assert!(
-        !marker.exists(),
+        !survived.exists(),
         "a process the session left attached outlived the close"
     );
 }

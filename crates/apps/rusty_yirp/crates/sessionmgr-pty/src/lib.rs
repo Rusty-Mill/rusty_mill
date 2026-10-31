@@ -331,15 +331,21 @@ impl PtySession {
         })
     }
 
-    /// Hangs up, then waits for the terminal to end every process the
-    /// session left attached. **Blocking**, for up to 6 s. Returns
-    /// whether it finished.
+    /// Hangs up, then waits for the terminal to finish shutting down.
+    /// **Blocking**, for up to 6 s.
     ///
-    /// Only our own console host has work here: it ends clients still
-    /// attached 5 s after the hang-up, and only while this process runs.
-    /// So a worker calls this before it exits, or those processes are
-    /// orphaned on a console nobody serves. ConPTY and Linux return
-    /// `true` at once.
+    /// Only our own console host has work here: once hung up, it closes
+    /// the console and, 5 s later, tries to end every client still
+    /// attached, but only while this process runs. So a worker calls this
+    /// before it exits, or those processes are orphaned on a console
+    /// nobody serves.
+    ///
+    /// Returns whether the host finished in time (`OwnPtyMaster::
+    /// wait_shut_down`). `true` means its shutdown, including those end
+    /// attempts, is complete. It does **not** mean every attached process
+    /// has exited: one the host could not open or end, or any after an
+    /// engine error closed the console early, may still run. ConPTY and
+    /// Linux return `true` at once.
     pub fn shut_down(&self) -> bool {
         match &self.inner.master {
             Master::Platform(_) => true,
