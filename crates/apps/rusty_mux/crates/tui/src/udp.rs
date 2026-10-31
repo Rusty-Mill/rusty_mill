@@ -431,7 +431,9 @@ impl Shared {
                 }
             };
             if local.write_all(&buf[..n]).is_err() {
-                self.lock().close(Instant::now(), id);
+                // Nobody reads any more, but what the local side wrote may
+                // still be on its way up: the up worker closes the stream
+                // once that is acknowledged or its linger ends.
                 return;
             }
         }

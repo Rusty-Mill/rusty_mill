@@ -8,10 +8,11 @@ use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use rusty_mux_proto::{Entry, Features, Message, Takeover};
+use rusty_mux_core::{BlockId, SessionId, Size, WindowId};
+use rusty_mux_proto::{Entry, Features, Launch, Message, Takeover};
 use rusty_mux_tui::Conn;
 use rusty_mux_tui::udp::{Relay, reach};
 
@@ -221,15 +222,23 @@ fn a_host_whose_first_address_is_silent_is_reached_on_the_next() {
     assert!(none.is_err());
 }
 
-/// A path to `server` that drops the next `lose` datagrams the client
-/// sends: where the client sends to, and the count to set.
-fn lossy_path(server: SocketAddr) -> (SocketAddr, Arc<AtomicUsize>) {
+/// A path to `server` the client sends to at `addr`, which drops the next
+/// `lose` datagrams the client sends, passes the server's back only while
+/// `answers`, and records the sequence number of each client datagram.
+struct Path {
+    addr: SocketAddr,
+    lose: Arc<AtomicUsize>,
+    seqs: Arc<Mutex<Vec<u64>>>,
+}
+
+fn path(server: SocketAddr, answers: bool) -> Path {
     let near = UdpSocket::bind("127.0.0.1:0").expect("bind");
     let far = UdpSocket::bind("127.0.0.1:0").expect("bind");
     let addr = near.local_addr().expect("addr");
     let lose = Arc::new(AtomicUsize::new(0));
-    let client = Arc::new(std::sync::Mutex::new(None));
-    let (dropping, client_up) = (lose.clone(), client.clone());
+    let seqs = Arc::new(Mutex::new(Vec::new()));
+    let client = Arc::new(Mutex::new(None));
+    let (dropping, seen, client_up) = (lose.clone(), seqs.clone(), client.clone());
     let (near_up, far_up) = (
         near.try_clone().expect("clone"),
         far.try_clone().expect("clone"),
@@ -238,6 +247,10 @@ fn lossy_path(server: SocketAddr) -> (SocketAddr, Arc<AtomicUsize>) {
         let mut buf = vec![0; 1 << 16];
         while let Ok((n, from)) = near_up.recv_from(&mut buf) {
             *client_up.lock().expect("client") = Some(from);
+            if let Some(seq) = buf.get(8..16).filter(|_| n >= 16) {
+                let seq = u64::from_be_bytes(seq.try_into().expect("eight bytes"));
+                seen.lock().expect("seqs").push(seq);
+            }
             let lost = dropping
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
                 .is_ok();
@@ -249,25 +262,26 @@ fn lossy_path(server: SocketAddr) -> (SocketAddr, Arc<AtomicUsize>) {
     std::thread::spawn(move || {
         let mut buf = vec![0; 1 << 16];
         while let Ok(n) = far.recv(&mut buf) {
-            if let Some(to) = *client.lock().expect("client") {
+            let to = *client.lock().expect("client");
+            if let Some(to) = to.filter(|_| answers) {
                 let _ = near.send_to(&buf[..n], to);
             }
         }
     });
-    (addr, lose)
+    Path { addr, lose, seqs }
 }
 
 #[test]
 fn the_last_request_survives_losing_its_first_datagrams() {
-    let (path, udp) = udp_server();
-    let (mut over_ssh, _) = connect(&path, None);
+    let (server, udp) = udp_server();
+    let (mut over_ssh, _) = connect(&server, None);
     let (_, id, key) = open_datagram(&mut over_ssh);
-    let (lossy, lose) = lossy_path(udp);
-    let relay = Relay::start(bind([127, 0, 0, 1]), lossy, id, &key).expect("relay");
+    let lossy = path(udp, true);
+    let relay = Relay::start(bind([127, 0, 0, 1]), lossy.addr, id, &key).expect("relay");
     assert!(relay.probe(Duration::from_secs(2)));
     let (mut conn, _) = connect(relay.socket(), None);
     // The request and the stream's first retries are lost on the way.
-    lose.store(2, Ordering::Release);
+    lossy.lose.store(2, Ordering::Release);
     let create = Message::CreateSession {
         req: 1,
         name: "resent".into(),
@@ -277,6 +291,104 @@ fn the_last_request_survives_losing_its_first_datagrams() {
         .shutdown(std::net::Shutdown::Both)
         .expect("hang up");
     drop(relay);
-    assert_eq!(lose.load(Ordering::Acquire), 0, "nothing was lost");
-    assert!(has_session(&path, "resent"), "the request was not resent");
+    assert_eq!(lossy.lose.load(Ordering::Acquire), 0, "nothing was lost");
+    assert!(has_session(&server, "resent"), "the request was not resent");
+}
+
+/// Sends `make(req)` and waits for its answer: `Done`'s created id, or
+/// the reason it failed.
+fn request(
+    conn: &mut Conn<UnixStream>,
+    req: u64,
+    make: impl FnOnce(u64) -> Message,
+) -> Result<Option<rusty_uuid::Uuid>, String> {
+    conn.send(&make(req)).expect("send");
+    loop {
+        match conn.recv().expect("an answer") {
+            Message::Done { req: r, created } if r == req => return Ok(created),
+            Message::Failed { req: r, reason, .. } if r == req => return Err(reason),
+            _ => {}
+        }
+    }
+}
+
+/// A block that `conn` creates, attaches to and leases.
+fn leased_block(conn: &mut Conn<UnixStream>) -> BlockId {
+    let created = |r: Result<Option<rusty_uuid::Uuid>, String>| r.expect("done").expect("an id");
+    let session = SessionId::from_uuid(created(request(conn, 10, |req| Message::CreateSession {
+        req,
+        name: "leased".into(),
+    })));
+    let window = WindowId::from_uuid(created(request(conn, 11, |req| Message::CreateWindow {
+        req,
+        session,
+        name: "w".into(),
+    })));
+    let size = Size::new(80, 24).expect("size");
+    let block = BlockId::from_uuid(created(request(conn, 12, |req| Message::CreateBlock {
+        req,
+        window,
+        size,
+        launch: Launch::default(),
+    })));
+    request(conn, 13, |req| Message::Attach { req, block }).expect("attach");
+    request(conn, 14, |req| Message::AcquireLease { req, block }).expect("lease");
+    block
+}
+
+#[test]
+fn a_lost_detach_is_resent_while_output_keeps_arriving() {
+    let (server, udp) = udp_server();
+    let (mut over_ssh, _) = connect(&server, None);
+    let (_, id, key) = open_datagram(&mut over_ssh);
+    let lossy = path(udp, true);
+    let relay = Relay::start(bind([127, 0, 0, 1]), lossy.addr, id, &key).expect("relay");
+    assert!(relay.probe(Duration::from_secs(2)));
+    let (mut conn, _) = connect(relay.socket(), None);
+    let block = leased_block(&mut conn);
+    // Output keeps coming down after the client hangs up.
+    let ticking = b"while :; do echo tick; sleep 0.01; done\n".to_vec();
+    let input = Message::Input {
+        req: 20,
+        block,
+        data: ticking,
+    };
+    conn.send(&input).expect("input");
+    // Unanswered: output proves the shell runs it.
+    while !matches!(conn.recv().expect("output"), Message::Output { .. }) {}
+    lossy.lose.store(2, Ordering::Release);
+    conn.send(&Message::Detach { req: 21 }).expect("detach");
+    conn.get_ref()
+        .shutdown(std::net::Shutdown::Both)
+        .expect("hang up");
+    drop(relay);
+    assert_eq!(lossy.lose.load(Ordering::Acquire), 0, "nothing was lost");
+    // A client kept for a takeover keeps its lease unless it detached.
+    let (mut other, _) = connect(&server, None);
+    request(&mut other, 1, |req| Message::Attach { req, block }).expect("attach");
+    let leased = request(&mut other, 2, |req| Message::AcquireLease { req, block });
+    assert!(leased.is_ok(), "the detach was lost: {leased:?}");
+}
+
+#[test]
+fn a_candidate_whose_answers_are_lost_does_not_spoil_the_next() {
+    let (server, udp) = udp_server();
+    let (mut over_ssh, me) = connect(&server, None);
+    let (_, id, key) = open_datagram(&mut over_ssh);
+    // The first reaches the server, which hears its probes; no answer returns.
+    let (deaf, heard) = (path(udp, false), path(udp, true));
+    let started = std::time::Instant::now();
+    let relay = reach(&[deaf.addr, heard.addr], id, &key, Duration::from_secs(2)).expect("reach");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let (mut moved, again) = connect(relay.socket(), Some(me));
+    assert_eq!(again.client, me.client);
+    sync(&mut moved, 2);
+    // Under the one key, every sequence number went out once.
+    let mut sent: Vec<u64> = deaf.seqs.lock().expect("seqs").clone();
+    sent.extend(heard.seqs.lock().expect("seqs").iter());
+    let all = sent.len();
+    sent.sort_unstable();
+    sent.dedup();
+    assert!(all > 1);
+    assert_eq!(sent.len(), all, "a sequence number was sent twice");
 }
