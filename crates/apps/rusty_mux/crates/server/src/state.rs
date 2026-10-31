@@ -220,6 +220,13 @@ impl State {
         self.lifetimes = lifetimes;
     }
 
+    /// Makes `client` stale, as its datagram stream overflowing its budget
+    /// would, without the output it takes to get there.
+    #[cfg(all(test, unix))]
+    pub(crate) fn test_go_stale(&mut self, client: ClientId) {
+        self.go_stale(client);
+    }
+
     #[cfg(all(test, unix))]
     pub(crate) fn is_stale(&self, client: ClientId) -> bool {
         self.stale.contains_key(&client)
