@@ -17,9 +17,11 @@ changelog: rusty_mux_server on Windows can run its blocks on our own console hos
 - **Added:** a clean stop. `rusty_mux_server::serve_until` serves until a
   given future resolves, and the Windows binary stops that way on Ctrl+C or
   Ctrl+Break. However serving ends, every block's program is ended and, on
-  our host, the server waits until each console has ended the other
-  programs attached to it (5 s after the close notification at most), with
-  one 6 s deadline for all blocks together; past it, it logs and returns.
+  our host, the server waits until each console has shut down, which
+  includes trying to end the other programs still attached 5 s after the
+  close notification. One 6 s deadline covers all blocks together; past
+  it, the server logs and returns. A program the host could not end may
+  still run.
   No block starts meanwhile. ConPTY and Linux have nothing to wait for.
 - **Changed:** `rusty_mux_server::Config` gains a public `console_host`
   field (`ConsoleHost::ConPty` or `Own`), so code building a `Config` by

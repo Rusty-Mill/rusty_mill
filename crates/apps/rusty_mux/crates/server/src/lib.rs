@@ -137,10 +137,12 @@ pub async fn serve_udp(listener: UnixListener, config: Config, udp: Udp) -> io::
 }
 
 /// [`serve`], or [`serve_udp`] when `udp` is given, until `stop` resolves:
-/// a clean stop. Either way it ends, every block's program is ended and
-/// the call returns once each console we host
-/// ([`ConsoleHost::Own`]) has shut down, its other clients ended 5 s
-/// after CTRL_CLOSE, or 6 s have passed, whichever is first. Dropping the
+/// a clean stop. Either way it ends, every block's program is ended, and
+/// every console we host ([`ConsoleHost::Own`]) is hung up; the call
+/// returns once each has shut down or 6 s have passed, whichever is first,
+/// logging if one had not. A console that has shut down has closed and
+/// tried to end each client still attached, 5 s after CTRL_CLOSE; one it
+/// could not open or end may still run. Dropping the
 /// future instead stops nothing: the tasks it spawned on the runtime keep
 /// serving connected clients and their blocks until the runtime itself is
 /// dropped, which ends the programs without that wait.
@@ -274,6 +276,16 @@ pub async fn serve(_listener: UnixListener, _config: Config) -> io::Result<()> {
 
 #[cfg(not(any(target_os = "linux", windows)))]
 pub async fn serve_udp(_listener: UnixListener, _config: Config, _udp: Udp) -> io::Result<()> {
+    Err(unsupported())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub async fn serve_until(
+    _listener: UnixListener,
+    _config: Config,
+    _udp: Option<Udp>,
+    _stop: impl Future<Output = ()>,
+) -> io::Result<()> {
     Err(unsupported())
 }
 

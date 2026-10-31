@@ -16,9 +16,9 @@
 //! ourselves (rusty_conhost) instead of ConPTY; `conpty` or unset keeps
 //! ConPTY, and any other value stops the server before it starts.
 //! Ctrl+C or Ctrl+Break stops the server cleanly: it ends every block's
-//! program and waits up to 6 s for the consoles it hosts to end their
-//! other programs. Closing its console window, or killing it, does not
-//! wait.
+//! program and waits up to 6 s for the consoles it hosts to shut down,
+//! which includes trying to end the other programs still attached.
+//! Closing its console window, or killing it, does not wait.
 
 use std::ffi::OsString;
 use std::net::{IpAddr, SocketAddr};

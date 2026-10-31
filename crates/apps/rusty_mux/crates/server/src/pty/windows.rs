@@ -243,8 +243,8 @@ impl Hosts {
     }
 
     /// Hangs up every console kept, then waits on a thread of its own until
-    /// each has shut down (its clients ended 5 s after CTRL_CLOSE at most)
-    /// or `budget` has passed. `budget` bounds the whole wait, however many
+    /// each has shut down (closed, and the end of each client still attached
+    /// tried 5 s after CTRL_CLOSE at most) or `budget` has passed. `budget` bounds the whole wait, however many
     /// consoles there are. Whether every console shut down.
     pub(crate) async fn shut_down(self, budget: Duration) -> bool {
         let deadline = Instant::now() + budget;
