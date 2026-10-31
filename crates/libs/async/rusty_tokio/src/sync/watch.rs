@@ -20,11 +20,19 @@
 //! and drain the (not-yet-registered) waker list, and this receiver
 //! would then wait for a second, distinct change instead of noticing
 //! the one it just missed -- a real lost wakeup, not a hypothetical one.
+//!
+//! The receiver count is the exception: it is an atomic beside that lock,
+//! as in tokio 1.53.3's `watch.rs` (`ref_count_rx`), because
+//! [`Receiver::wait_for`] runs its predicate *under* the lock and a
+//! predicate may call [`Sender::receiver_count`] or clone or drop a
+//! [`Receiver`] (#1304). Nothing waits on the count, so it needs no lock
+//! to publish: `send` reads it once, as tokio's does.
 
 use std::fmt;
 use std::future::Future;
 use std::ops::Deref;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 
@@ -36,11 +44,13 @@ struct Inner<T> {
     wakers: Vec<(u64, Waker)>,
     next_key: u64,
     sender_alive: bool,
-    receivers_alive: usize,
 }
 
 struct Shared<T> {
     inner: StdMutex<Inner<T>>,
+    /// Live `Receiver`s. Outside `inner` so `receiver_count`, `clone` and
+    /// `drop` never take the lock a `wait_for` predicate runs under.
+    receivers: AtomicUsize,
 }
 
 pub fn channel<T>(initial: T) -> (Sender<T>, Receiver<T>) {
@@ -51,8 +61,8 @@ pub fn channel<T>(initial: T) -> (Sender<T>, Receiver<T>) {
             wakers: Vec::new(),
             next_key: 0,
             sender_alive: true,
-            receivers_alive: 1,
         }),
+        receivers: AtomicUsize::new(1),
     });
     (
         Sender {
@@ -75,11 +85,10 @@ impl<T> Sender<T> {
     /// receiver has already dropped -- there would be nobody left to
     /// ever observe it.
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
-        let mut guard = self.shared.inner.lock().unwrap();
-        if guard.receivers_alive == 0 {
-            drop(guard);
+        if self.receiver_count() == 0 {
             return Err(SendError(value));
         }
+        let mut guard = self.shared.inner.lock().unwrap();
         guard.value = value;
         guard.version += 1;
         let wakers = std::mem::take(&mut guard.wakers);
@@ -113,8 +122,11 @@ impl<T> Sender<T> {
         }
     }
 
+    /// The number of live [`Receiver`]s. Takes no lock, so a
+    /// [`Receiver::wait_for`] predicate may call it.
     pub fn receiver_count(&self) -> usize {
-        self.shared.inner.lock().unwrap().receivers_alive
+        // A counter only; it orders no other memory (tokio uses Relaxed too).
+        self.shared.receivers.load(Ordering::Relaxed)
     }
 }
 
@@ -183,6 +195,11 @@ impl<T> Receiver<T> {
     /// returns it. Checks the current value first, so it resolves
     /// immediately if that already matches. Fails once the sender has
     /// dropped without a matching value.
+    ///
+    /// `f` runs while the channel's lock is held, as in tokio: it may call
+    /// [`Sender::receiver_count`] and clone or drop a `Receiver`, but
+    /// calling `borrow`, `send` or `send_modify` on this channel from `f`
+    /// deadlocks.
     pub async fn wait_for(
         &mut self,
         mut f: impl FnMut(&T) -> bool,
@@ -305,7 +322,7 @@ impl<T> Drop for Changed<'_, T> {
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        self.shared.inner.lock().unwrap().receivers_alive += 1;
+        self.shared.receivers.fetch_add(1, Ordering::Relaxed);
         Receiver {
             shared: self.shared.clone(),
             // Starts wherever *this* receiver's own last-seen marker
@@ -319,7 +336,7 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.shared.inner.lock().unwrap().receivers_alive -= 1;
+        self.shared.receivers.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
