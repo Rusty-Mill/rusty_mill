@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 const QUOTE: u16 = b'"' as u16;
 const CARET: u16 = b'^' as u16;
+const PERCENT: u16 = b'%' as u16;
 const SLASH: u16 = b'/' as u16;
 const SPACE: u16 = b' ' as u16;
 const TAB: u16 = b'\t' as u16;
@@ -75,6 +76,77 @@ pub(crate) fn quotes_closed(line: &[u16]) -> bool {
         }
     }
     !quoted
+}
+
+/// What the text before the launcher arguments lets them be, when cmd.exe
+/// reads them (for itself or for a batch file).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CmdRules {
+    /// Whether cmd already has the `/c`, `/k` or `/r` that starts its
+    /// command. Before it, an argument holding one would start a command.
+    pub(crate) switched: bool,
+    /// Why only plain words ([`plain_for_cmd`]) may follow, if so.
+    pub(crate) plain_only: Option<&'static str>,
+    /// Whether cmd expands `!var!` (`/v` or `/v:on`), inside quotes too.
+    pub(crate) delayed: bool,
+    /// Whether to [`keep_command_quotes`] once the arguments are on.
+    pub(crate) wrap: bool,
+}
+
+/// [`CmdRules`] for `line`, whose cmd parameters start at `params` (after
+/// the program; 0 when `line` is cmd's raw text or a batch line).
+///
+/// Only plain words may follow text that leaves a quote open, holds a `%`
+/// (cmd expands `%var%` before it reads quotes, and the value may hold
+/// one), or whose command was written for cmd's quote stripping: it starts
+/// with `""` or follows `/s`. Such a shell keeps its text as written, so
+/// its command isn't wrapped, and a quote in an argument would become the
+/// line's last one, which cmd drops. Delayed expansion through the
+/// registry (`DelayedExpansion`) can't be seen here.
+pub(crate) fn cmd_rules(line: &[u16], params: usize, reader: Reader) -> CmdRules {
+    let shell = &line[params..];
+    let start = command_start(shell);
+    let options = &shell[..start.unwrap_or(shell.len())];
+    let stripped = reader == Reader::Cmd
+        && start.is_some_and(|i| {
+            shell.get(i) == Some(&QUOTE)
+                && (shell.get(i + 1) == Some(&QUOTE) || has_switch(options, b's'))
+        });
+    let plain_only = if !quotes_closed(line) {
+        Some("the shell leaves a quote open")
+    } else if line.contains(&PERCENT) {
+        Some("the shell expands a %variable%, which may hold a quote")
+    } else if stripped {
+        Some("the shell's command is written for cmd's quote stripping")
+    } else {
+        None
+    };
+    CmdRules {
+        switched: reader == Reader::Batch || start.is_some(),
+        plain_only,
+        delayed: reader == Reader::Cmd && delayed_expansion(options),
+        wrap: reader == Reader::Cmd && !stripped,
+    }
+}
+
+/// Whether `options` holds the switch `/<letter>`, any case.
+fn has_switch(options: &[u16], letter: u8) -> bool {
+    options
+        .windows(2)
+        .any(|w| w[0] == SLASH && w[1] | 0x20 == u16::from(letter))
+}
+
+/// Whether cmd's `options` turn delayed expansion on: a `/v` that isn't
+/// `/v:off`.
+fn delayed_expansion(options: &[u16]) -> bool {
+    let off: Vec<u16> = ":off".encode_utf16().collect();
+    options.windows(2).enumerate().any(|(i, w)| {
+        w[0] == SLASH
+            && w[1] | 0x20 == u16::from(b'v')
+            && !options[i + 2..]
+                .get(..off.len())
+                .is_some_and(|rest| rest.iter().zip(&off).all(|(&u, &o)| u | 0x20 == o))
+    })
 }
 
 /// Wraps cmd.exe's command in one more pair of quotes when it starts with
@@ -209,8 +281,8 @@ fn search_dirs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Reader, has_command_switch, is_command_switch, keep_command_quotes, plain_for_cmd,
-        quotes_closed, reader, split_program,
+        CmdRules, Reader, cmd_rules, has_command_switch, is_command_switch, keep_command_quotes,
+        plain_for_cmd, quotes_closed, reader, split_program,
     };
 
     /// Split with no program on disk: the program is the first word.
@@ -350,5 +422,75 @@ mod tests {
         }
         assert!(is_command_switch("/C") && is_command_switch("/k"));
         assert!(!is_command_switch("/cdir") && !is_command_switch("x/c"));
+    }
+
+    fn rules(line: &str, params: usize, reader: Reader) -> CmdRules {
+        cmd_rules(&wide(line), params, reader)
+    }
+
+    #[test]
+    fn a_plain_shell_lets_quoted_arguments_follow() {
+        let r = rules("cmd /c echo", 3, Reader::Cmd);
+        assert_eq!(
+            r,
+            CmdRules {
+                switched: true,
+                plain_only: None,
+                delayed: false,
+                wrap: true
+            }
+        );
+        assert!(!rules("cmd", 3, Reader::Cmd).switched);
+        let batch = rules(r#""C:\a b\t.cmd" -x"#, 0, Reader::Batch);
+        assert!(batch.switched && !batch.wrap && batch.plain_only.is_none());
+        // A quoted command not written for stripping is wrapped (clink).
+        let clink = rules(r#"cmd /k "C:\a b\clink.bat" inject"#, 3, Reader::Cmd);
+        assert!(clink.wrap && clink.plain_only.is_none());
+    }
+
+    #[test]
+    fn a_shell_written_for_quote_stripping_takes_plain_words_unwrapped() {
+        for line in [
+            r#"cmd /c ""C:\a b\x.exe" -v""#,
+            r#"cmd /s /c "prog a""#,
+            r#"cmd /S/K "x""#,
+        ] {
+            let r = rules(line, 3, Reader::Cmd);
+            assert!(!r.wrap && r.plain_only.is_some(), "{line}");
+        }
+        // `/s` with an unquoted command strips nothing.
+        assert!(rules("cmd /s /c echo", 3, Reader::Cmd).plain_only.is_none());
+    }
+
+    #[test]
+    fn a_percent_or_open_quote_in_the_shell_takes_plain_words() {
+        assert!(
+            rules("cmd /c echo %X%", 3, Reader::Cmd)
+                .plain_only
+                .is_some()
+        );
+        assert!(
+            rules(r#"C:\t.cmd %X%"#, 0, Reader::Batch)
+                .plain_only
+                .is_some()
+        );
+        assert!(
+            rules(r#"cmd /c echo ""#, 3, Reader::Cmd)
+                .plain_only
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn delayed_expansion_follows_v_before_the_command() {
+        for (line, on) in [
+            ("cmd /v:on /c echo", true),
+            ("cmd /V /c echo", true),
+            ("cmd /v:OFF /c echo", false),
+            ("cmd /c findstr /v x", false),
+            ("cmd /c echo", false),
+        ] {
+            assert_eq!(rules(line, 3, Reader::Cmd).delayed, on, "{line}");
+        }
     }
 }

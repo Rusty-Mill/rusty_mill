@@ -16,7 +16,9 @@ changelog: rusty_term on Windows quotes launcher arguments for cmd.exe and batch
 - **Changed:** for cmd.exe and batch files, an argument with `%`, CR, LF or
   NUL is refused with an error instead of passed on, since cmd expands `%`
   even inside quotes. So is a quoted argument after a shell whose own text
-  leaves a quote open, and, before cmd's own `/c`, `/k` or `/r`, an
+  leaves a quote open, holds a `%`, or is written for cmd's quote
+  stripping (`/s`, or a command starting `""`), which keeps its text as
+  written; a `!` after `/v:on`; and, before cmd's own `/c`, `/k` or `/r`, an
   argument holding one other than the bare switch: cmd takes the first such
   switch anywhere, even inside quotes, so `cmd` with the argument
   `"x /c calc"` would run calc. Put such text in `shell` itself, which is

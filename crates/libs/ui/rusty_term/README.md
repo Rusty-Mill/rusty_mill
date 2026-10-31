@@ -143,10 +143,12 @@ path (quoted automatically if it contains spaces) and trailing arguments
 (`"wsl -d Ubuntu"`, `"cmd /K clink inject"`). Arguments after `--` are quoted
 for the program that reads them. When that is cmd.exe or a batch file, cmd's
 rules apply on both hosts, so an argument can't run a command: a plain word
-goes bare, anything else in quotes. An argument with `%` or a line break, a
-quoted one after a shell that leaves a quote open, and one holding `/c`, `/k`
-or `/r` before cmd has its switch (other than the switch itself, as in
-`-- cmd /c dir`) are refused with an error:
+goes bare, anything else in quotes. An argument with `%` or a line break, and
+one holding `/c`, `/k` or `/r` before cmd has its switch (other than the
+switch itself, as in `-- cmd /c dir`), are refused with an error. Only plain
+words may follow a shell whose own text leaves a quote open, holds a `%`, or
+is written for cmd's quote stripping (`/s`, or a command starting `""`), and
+`!` is refused after `/v:on`:
 
 ```toml
 shell = "pwsh"           # or "wsl", "powershell", "C:\\tools\\nu.exe", ...

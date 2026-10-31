@@ -13,7 +13,7 @@
 //! wire, so `resize_poll` in `src/runtime/reactor.rs` polls the console size
 //! on a timer and calls [`BackendHandle::set_winsize`] on change.
 
-use crate::backend::cmdline::{self, Reader, locate, split_program};
+use crate::backend::cmdline::{self, CmdRules, Reader, locate, split_program};
 use crate::backend::{Backend, BackendHandle};
 use crate::sync::Mutex;
 use platform_windows::winargv;
@@ -305,8 +305,8 @@ pub(super) fn shell_or_default(shell: Option<&str>) -> String {
 /// read by `reader` whose own parameters start at `params`, each after a
 /// space and quoted for that reader (see `cmdline`'s module doc). For
 /// cmd.exe and batch files an argument cmd can't take safely is refused
-/// with `InvalidInput`: a `%`, CR, LF or NUL, or any quoted argument after
-/// a shell that leaves a quote open.
+/// with `InvalidInput`: a `%`, CR, LF or NUL, a switch before cmd's own,
+/// or what the shell's [`CmdRules`] rule out.
 pub(super) fn push_launcher_args(
     line: &mut Vec<u16>,
     params: usize,
@@ -320,10 +320,8 @@ pub(super) fn push_launcher_args(
         }
         return Ok(());
     }
-    let closed = cmdline::quotes_closed(line);
-    // Until cmd has its `/c`, `/k` or `/r`, an argument can only be that
-    // switch itself: one holding it anywhere else would start a command.
-    let mut switched = reader == Reader::Batch || cmdline::has_command_switch(&line[params..]);
+    let rules = cmdline::cmd_rules(line, params, reader);
+    let mut switched = rules.switched;
     for arg in args {
         if !switched && cmdline::is_command_switch(arg) {
             switched = true;
@@ -335,23 +333,26 @@ pub(super) fn push_launcher_args(
             ));
         }
         line.push(u16::from(b' '));
-        push_cmd_arg(arg, closed, line)?;
+        push_cmd_arg(arg, rules, line)?;
     }
-    if reader == Reader::Cmd && !args.is_empty() {
+    if rules.wrap && !args.is_empty() {
         cmdline::keep_command_quotes(line, params);
     }
     Ok(())
 }
 
 /// Appends `arg` for cmd.exe: bare when it is one plain word, else by
-/// cmd's rules. `closed` is whether the line so far ends outside quotes.
-fn push_cmd_arg(arg: &str, closed: bool, out: &mut Vec<u16>) -> std::io::Result<()> {
+/// cmd's rules, as the shell's `rules` allow.
+fn push_cmd_arg(arg: &str, rules: CmdRules, out: &mut Vec<u16>) -> std::io::Result<()> {
+    if rules.delayed && arg.contains('!') {
+        return Err(cmd_refused(arg, &"the shell's /v expands `!`"));
+    }
     if cmdline::plain_for_cmd(arg) {
         out.extend(arg.encode_utf16());
         return Ok(());
     }
-    if !closed {
-        return Err(cmd_refused(arg, &"the shell leaves a quote open"));
+    if let Some(why) = rules.plain_only {
+        return Err(cmd_refused(arg, &why));
     }
     let wide: Vec<u16> = arg.encode_utf16().collect();
     winargv::quote_batch_arg_into(&wide, out).map_err(|e| cmd_refused(arg, &e))
@@ -674,6 +675,29 @@ mod tests {
         assert_eq!(
             line("cmd /c echo", &["a/c"]).expect("after it"),
             "cmd /c echo a/c"
+        );
+        // A shell written for cmd's quote stripping keeps its text and takes
+        // plain words only (review of 3fcd0d4d, P2 1).
+        assert_eq!(
+            line(r#"cmd /c ""C:\a b\x.exe" -v""#, &["y"]).expect("plain"),
+            r#"cmd /c ""C:\a b\x.exe" -v" y"#
+        );
+        assert_eq!(
+            line(r#"cmd /s /c "prog a""#, &["y"]).expect("plain"),
+            r#"cmd /s /c "prog a" y"#
+        );
+        assert_eq!(
+            refused(r#"cmd /s /c "prog a""#, &["a&b"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        // %X% may hold a quote (P2 2); /v expands `!` (P2 3).
+        assert_eq!(
+            refused("cmd /c echo %X%", &["a & calc"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            refused("cmd /v:on /c echo", &["a!PATH!b"]),
+            Some(ErrorKind::InvalidInput)
         );
     }
 
