@@ -45,7 +45,7 @@ impl Handle {
     /// Panics if there is neither.
     #[track_caller]
     pub(crate) fn current_or_fallback() -> Handle {
-        if let Some(handle) = Self::try_current().or_else(super::fallback::get) {
+        if let Some(handle) = Self::try_current_or_fallback() {
             return handle;
         }
         panic!(
@@ -53,6 +53,14 @@ impl Handle {
              call this from within Runtime::block_on or a spawned task, or \
              call rusty_tokio::runtime::install_fallback() first"
         )
+    }
+
+    /// [`current_or_fallback`](Self::current_or_fallback) without the
+    /// panic: `None` if there is neither a runtime on this thread nor an
+    /// installed fallback. For callers, such as a `Drop`, that must not
+    /// panic and can skip their work instead.
+    pub(crate) fn try_current_or_fallback() -> Option<Handle> {
+        Self::try_current().or_else(super::fallback::get)
     }
 
     /// Like [`try_current`](Self::try_current), but `None` instead of a

@@ -114,3 +114,55 @@ fn installing_twice_returns_the_same_runtime() {
 
     assert_eq!(first.id(), second.id());
 }
+
+/// #1302: a `kill_on_drop` child dropped on a tokio thread is killed *and*
+/// reaped through the fallback, not left a zombie because the thread has no
+/// rusty_tokio runtime of its own.
+#[cfg(unix)]
+#[test]
+fn kill_on_drop_child_dropped_on_a_tokio_thread_is_reaped() {
+    use rusty_tokio::process::{Command, Stdio};
+
+    install_fallback().expect("fallback");
+    let pid = on_tokio(async {
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as libc::pid_t;
+        drop(child);
+        pid
+    });
+
+    // `kill(pid, 0)` still succeeds on a zombie; ESRCH means it was reaped.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let reaped = loop {
+        // SAFETY: signal 0 only checks that `pid` exists; nothing is sent.
+        if unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // Linux shows a zombie as state `Z`; elsewhere this is just `None`.
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+    if !reaped {
+        // Don't leave the zombie (or a still-running child) behind.
+        // SAFETY: `pid` is this process's own child, not yet reaped.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, std::ptr::null_mut(), 0);
+        }
+    }
+
+    assert!(
+        reaped,
+        "dropped kill_on_drop child {pid} was not reaped: {stat:?}"
+    );
+}
