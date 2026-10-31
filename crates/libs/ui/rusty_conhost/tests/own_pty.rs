@@ -402,14 +402,22 @@ fn ready_pid(stream: &Stream) -> u32 {
         .expect("a ready pid line")
 }
 
-/// Ends a process by pid if a test fails before it exits.
-struct ReapedPid(u32);
+/// A process by pid, opened while it is known to run and ended on drop
+/// if a test fails before it exits. The held handle keeps the pid from
+/// being reused, so the drop never reaches another process.
+struct ReapedPid(u32, platform_windows::condrv::ClientProcess);
+
+impl ReapedPid {
+    fn open(pid: u32) -> ReapedPid {
+        let process = platform_windows::condrv::ClientProcess::open(pid).expect("open the probe");
+        ReapedPid(pid, process)
+    }
+}
 
 impl Drop for ReapedPid {
     fn drop(&mut self) {
-        if let Ok(p) = platform_windows::condrv::ClientProcess::open(self.0) {
-            let _ = p.terminate();
-        }
+        // Fails harmlessly once it has exited.
+        let _ = self.1.terminate();
     }
 }
 
@@ -431,7 +439,8 @@ fn a_grandchild_still_attached_at_the_deadline_is_ended_there() {
     let mut stream = Stream::new(Arc::clone(&master));
     let mut child = Reaped(child);
     stream.until("ready pid=");
-    let grandchild = ReapedPid(ready_pid(&stream));
+    // Opened while the probe waits for CTRL_CLOSE, so it is running.
+    let grandchild = ReapedPid::open(ready_pid(&stream));
     exit_of(&mut child);
     let exited = Instant::now();
     let spawner = platform_windows::WindowsSpawner;
