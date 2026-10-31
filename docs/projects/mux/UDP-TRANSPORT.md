@@ -194,11 +194,15 @@ ordering, acks and flow control belong to each stream.
   move that fails after the control client was taken over brings the path
   back over SSH with the takeover token that client was last welcomed with,
   trying the SSH forward in use first, since it is likely sound, and a new
-  login only if that fails. Keys typed into a block while its lease is
-  asked for go ahead of what is held, so a move or a lost path never drops
-  them. A detach during a move waits for it to end (within the probe and
-  the 10 s handshake), so the clients it took over are detached on their
-  new connections, not left to the server for 30 s.
+  login only if that fails. Keys typed into the focused block while its
+  lease is asked for go ahead of what is held, so a move or a lost path
+  does not drop them; keys still waiting on a block the focus has left are
+  dropped with a bell. A detach during a move waits for it to end (within
+  the probe and the 10 s handshake), and nothing typed after it is sent,
+  so the clients the move took over are detached on their new connections,
+  not left to the server for 30 s. After a move that broke, the path gets
+  one attempt on the forward in use to detach them before the client
+  stops.
 - **Flow control:** each stream's receive buffer holds at most 1 MiB in
   total: bytes in order but not yet read, plus bytes out of order. Every
   `Ack` sets `limit` to the cumulative offset plus the free space, and a

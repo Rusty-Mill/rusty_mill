@@ -466,9 +466,11 @@ mod client {
         /// now. A detach is held too, past the bound, so the clients the
         /// move takes over are detached on the path they end up on, not
         /// left to the server as orphans; a move is over within its
-        /// probe and [`HANDSHAKE`].
+        /// probe and [`HANDSHAKE`]. Nothing typed after it is kept: it was
+        /// meant for whatever the terminal shows once the client stops.
         fn hold(&mut self, action: Action) -> Held {
             match &mut self.moving {
+                Moving::Taking(taking) if taking.held.contains(&Action::Detach) => Held::Full,
                 Moving::Taking(taking) if taking.held.len() >= HELD && action != Action::Detach => {
                     Held::Full
                 }
@@ -1885,8 +1887,6 @@ mod client {
                     self.rejoined(back);
                 }
                 After::Stay => self.replay(held),
-                // No path to detach on: the server keeps the clients a while.
-                After::Lose(_) if held.contains(&Action::Detach) => self.end(Ended::Detached),
                 After::Lose(me) => {
                     self.me = me.or(self.me);
                     self.held = held;
@@ -1914,10 +1914,14 @@ mod client {
             keys
         }
 
-        /// Takes actions held during a move, in order.
+        /// Takes actions held during a move, in order, up to a detach.
         fn replay(&mut self, held: Vec<Action>) {
             for action in held {
+                let detach = action == Action::Detach;
                 self.act(action);
+                if detach {
+                    return;
+                }
             }
         }
 
@@ -1976,8 +1980,14 @@ mod client {
         }
 
         /// An attempt to bring the path back failed: try again later, at
-        /// most [`BACKOFF`] apart. Ctrl-] d still detaches meanwhile.
+        /// most [`BACKOFF`] apart. Ctrl-] d still detaches meanwhile. A
+        /// detach held through a broken move gets one attempt, to detach
+        /// the clients it moved; then the client stops, leaving them to
+        /// the server's grace.
         fn retry(&mut self, why: String) {
+            if self.held.contains(&Action::Detach) {
+                return self.end(Ended::Detached);
+            }
             let Some(lost) = self.lost.as_mut() else {
                 return;
             };
@@ -2124,7 +2134,7 @@ mod client {
         /// later one moves the focus.
         fn typed(&mut self, action: Action) {
             if !self.held.is_empty() && action != Action::Detach {
-                return match self.held.len() < HELD {
+                return match self.held.len() < HELD && !self.held.contains(&Action::Detach) {
                     true => self.held.push(action),
                     false => bell(),
                 };
@@ -2672,22 +2682,17 @@ mod client {
         }
 
         #[test]
-        fn actions_typed_during_a_move_are_held_in_order_detach_too() {
+        fn actions_typed_during_a_move_are_held_in_order_up_to_a_detach() {
             let mut standby = taking();
             assert_eq!(standby.hold(input(b"ab")), Held::Kept);
             assert_eq!(standby.hold(Action::Focus(Dir::Right)), Held::Kept);
             assert_eq!(standby.hold(Action::Detach), Held::Kept);
-            assert_eq!(standby.hold(input(b"c")), Held::Kept);
+            assert_eq!(standby.hold(input(b"c")), Held::Full, "nothing after it");
             let (after, held) = standby.finish(Ok(()), Instant::now());
             assert_eq!(after, After::Install(()));
             assert_eq!(
                 held,
-                [
-                    input(b"ab"),
-                    Action::Focus(Dir::Right),
-                    Action::Detach,
-                    input(b"c")
-                ]
+                [input(b"ab"), Action::Focus(Dir::Right), Action::Detach]
             );
             // Once over, actions go straight through, and none come back.
             assert_eq!(standby.hold(input(b"e")), Held::Now(input(b"e")));
@@ -3227,15 +3232,61 @@ mod client {
                 "on the new path, whose panes are detached on exit"
             );
 
-            let (mut lost, _inbox, _ends) = super::tests::app(Some(Box::new(Never)));
+            // Broken after the control moved: the path is asked back on the
+            // forward in use, to detach there; brought back, it detaches.
+            let asked = Arc::new(Mutex::new(Vec::new()));
+            let (mut lost, inbox, _ends) = super::tests::app(Some(Box::new(Keeps(asked.clone()))));
             lost.standby.moving = Moving::Taking(Taking::default());
             lost.typed(Action::Detach);
             lost.take(Input::Moved(Err(Missed::Broken(
                 "pane".into(),
                 takeover(1),
             ))));
+            assert!(lost.ended.is_none() && lost.lost.is_some());
+            inbox.recv_timeout(Duration::from_secs(5)).expect("a try");
+            assert_eq!(*asked.lock().expect("lock"), [true]);
+            let (path, _control, _a_new, _b_new) = super::tests::back(takeover(1));
+            lost.take(Input::Rejoined(Ok(path)));
             assert!(matches!(lost.ended, Some(Ended::Detached)));
-            assert!(lost.lost.is_none(), "no path is asked back");
+            assert_eq!(lost.joined, 1, "on the path brought back");
+
+            // If that one attempt fails, the client stops anyway.
+            let (mut gone, _inbox, _ends) = super::tests::app(Some(Box::new(Never)));
+            gone.standby.moving = Moving::Taking(Taking::default());
+            gone.typed(Action::Detach);
+            gone.take(Input::Moved(Err(Missed::Broken(
+                "pane".into(),
+                takeover(1),
+            ))));
+            gone.take(Input::Rejoined(Err(Missed::Retry("down".into()))));
+            assert!(matches!(gone.ended, Some(Ended::Detached)));
+        }
+
+        /// Keys typed after Ctrl-] d during a move are meant for the local
+        /// shell the client returns to: never sent, whether the move goes
+        /// through or not.
+        #[cfg(unix)]
+        #[test]
+        fn keys_typed_after_a_detach_during_a_move_are_not_sent() {
+            let (mut app, _inbox, [_control, a_old, _b_old]) = app(None);
+            sent(&a_old);
+            app.standby.moving = Moving::Taking(Taking::default());
+            app.typed(input(b"before"));
+            app.typed(Action::Detach);
+            app.typed(input(b"after"));
+            let (back, _control, a_new, _b_new) = back(takeover(1));
+            app.take(Input::Moved(Ok(back)));
+            assert_eq!(typed_in(&sent(&a_new)), [b"before".to_vec()]);
+            assert!(matches!(app.ended, Some(Ended::Detached)));
+
+            let (mut stay, _inbox, [_control, a_old, _b_old]) = super::tests::app(None);
+            sent(&a_old);
+            stay.standby.moving = Moving::Taking(Taking::default());
+            stay.typed(Action::Detach);
+            stay.typed(input(b"after"));
+            stay.take(Input::Moved(Err(Missed::Retry("no".into()))));
+            assert!(typed_in(&sent(&a_old)).is_empty());
+            assert!(matches!(stay.ended, Some(Ended::Detached)));
         }
 
         /// A [`Rejoin`] whose UDP path is the socket given.
