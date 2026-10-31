@@ -7,7 +7,8 @@
 use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use rusty_mux_proto::{Entry, Features, Message, Takeover};
@@ -218,4 +219,64 @@ fn a_host_whose_first_address_is_silent_is_reached_on_the_next() {
 
     let none = reach(&[silent], id, &key, Duration::from_millis(300));
     assert!(none.is_err());
+}
+
+/// A path to `server` that drops the next `lose` datagrams the client
+/// sends: where the client sends to, and the count to set.
+fn lossy_path(server: SocketAddr) -> (SocketAddr, Arc<AtomicUsize>) {
+    let near = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let far = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let addr = near.local_addr().expect("addr");
+    let lose = Arc::new(AtomicUsize::new(0));
+    let client = Arc::new(std::sync::Mutex::new(None));
+    let (dropping, client_up) = (lose.clone(), client.clone());
+    let (near_up, far_up) = (
+        near.try_clone().expect("clone"),
+        far.try_clone().expect("clone"),
+    );
+    std::thread::spawn(move || {
+        let mut buf = vec![0; 1 << 16];
+        while let Ok((n, from)) = near_up.recv_from(&mut buf) {
+            *client_up.lock().expect("client") = Some(from);
+            let lost = dropping
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                .is_ok();
+            if !lost {
+                let _ = far_up.send_to(&buf[..n], server);
+            }
+        }
+    });
+    std::thread::spawn(move || {
+        let mut buf = vec![0; 1 << 16];
+        while let Ok(n) = far.recv(&mut buf) {
+            if let Some(to) = *client.lock().expect("client") {
+                let _ = near.send_to(&buf[..n], to);
+            }
+        }
+    });
+    (addr, lose)
+}
+
+#[test]
+fn the_last_request_survives_losing_its_first_datagrams() {
+    let (path, udp) = udp_server();
+    let (mut over_ssh, _) = connect(&path, None);
+    let (_, id, key) = open_datagram(&mut over_ssh);
+    let (lossy, lose) = lossy_path(udp);
+    let relay = Relay::start(bind([127, 0, 0, 1]), lossy, id, &key).expect("relay");
+    assert!(relay.probe(Duration::from_secs(2)));
+    let (mut conn, _) = connect(relay.socket(), None);
+    // The request and the stream's first retries are lost on the way.
+    lose.store(2, Ordering::Release);
+    let create = Message::CreateSession {
+        req: 1,
+        name: "resent".into(),
+    };
+    conn.send(&create).expect("create");
+    conn.get_ref()
+        .shutdown(std::net::Shutdown::Both)
+        .expect("hang up");
+    drop(relay);
+    assert_eq!(lose.load(Ordering::Acquire), 0, "nothing was lost");
+    assert!(has_session(&path, "resent"), "the request was not resent");
 }

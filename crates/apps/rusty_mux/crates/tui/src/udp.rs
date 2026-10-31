@@ -49,6 +49,8 @@ struct Shared {
     /// Signalled whenever a datagram is taken in.
     changed: Condvar,
     udp: Mutex<Arc<UdpSocket>>,
+    /// Where datagrams go: the server address being tried or in use.
+    to: Mutex<SocketAddr>,
     stop: AtomicBool,
     /// Each local connection, until both its workers finish, to unblock
     /// them on stop.
@@ -89,6 +91,7 @@ impl Relay {
             assoc: Mutex::new(assoc),
             changed: Condvar::new(),
             udp: Mutex::new(Arc::new(udp)),
+            to: Mutex::new(server),
             stop: AtomicBool::new(false),
             locals: Mutex::default(),
             workers: Mutex::default(),
@@ -145,6 +148,19 @@ impl Relay {
             .unwrap_or_else(PoisonError::into_inner) = Arc::new(udp);
         Ok(())
     }
+
+    /// Sends to `server` from now on, from any address of its family. The
+    /// association and its sequence numbers carry on, so trying another
+    /// address of a host never seals two datagrams under one nonce.
+    pub fn retarget(&self, server: SocketAddr) -> io::Result<()> {
+        self.rebind(any_for(server))?;
+        *self
+            .shared
+            .to
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = server;
+        Ok(())
+    }
 }
 
 impl Relay {
@@ -169,8 +185,7 @@ impl Drop for Relay {
         self.drain();
         {
             let mut assoc = self.shared.lock();
-            // One never answered may share its id with a relay to another
-            // address of the same server: ending it there would end both.
+            // One never answered has nobody to tell.
             if assoc.last_heard().is_some() {
                 assoc.end();
                 self.shared.transmit(&mut assoc);
@@ -254,9 +269,12 @@ impl Shared {
 
     /// Sends every datagram the association has ready. A failed send is
     /// a datagram lost, which the association already recovers from.
+    /// Every datagram goes to `to`, which a client chooses, not to where
+    /// the association last heard from.
     fn transmit(&self, assoc: &mut Association) {
         let udp = self.udp();
-        while let Some((to, datagram)) = assoc.transmit(Instant::now()) {
+        let to = *self.to.lock().unwrap_or_else(PoisonError::into_inner);
+        while let Some((_, datagram)) = assoc.transmit(Instant::now()) {
             let _ = udp.send_to(&datagram, to);
         }
     }
@@ -423,6 +441,8 @@ impl Shared {
 /// Starts association `id` under `key` with the first of `servers` that
 /// answers a probe, trying each in turn with an equal share of what is
 /// left of `patience`: a host may resolve to addresses UDP cannot reach.
+/// One association tries them all, retargeted, so its sequence numbers,
+/// and with them its nonces, never repeat under the one key.
 pub fn reach(
     servers: &[SocketAddr],
     id: [u8; ID_LEN],
@@ -431,11 +451,19 @@ pub fn reach(
 ) -> Result<Relay, String> {
     let by = Instant::now() + patience;
     let mut why = String::from("no address to send to");
+    let mut relay: Option<Relay> = None;
     for (i, &server) in servers.iter().enumerate() {
         let left = by.saturating_duration_since(Instant::now());
         let share = left / (servers.len() - i) as u32;
-        match Relay::start(any_for(server), server, id, key) {
-            Ok(relay) if relay.probe(share) => return Ok(relay),
+        let aimed = match relay.as_ref() {
+            Some(started) => started
+                .retarget(server)
+                .map(|()| started)
+                .map_err(|e| format!("binding UDP to reach {server}: {e}")),
+            None => Relay::start(any_for(server), server, id, key).map(|r| &*relay.insert(r)),
+        };
+        match aimed {
+            Ok(aimed) if aimed.probe(share) => return relay.ok_or(why),
             Ok(_) => why = format!("no answer on UDP from {server}"),
             Err(e) => why = e,
         }
@@ -469,6 +497,109 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         drop(relay);
         assert!(!dir.exists());
+    }
+
+    /// The sequence numbers of every datagram waiting on `socket`.
+    fn sequence_numbers(socket: &UdpSocket) -> Vec<u64> {
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("timeout");
+        let mut buf = vec![0; MAX_DATAGRAM];
+        let mut seqs = Vec::new();
+        while let Ok(n) = socket.recv(&mut buf) {
+            let header = buf[ID_LEN..n.min(ID_LEN + 8)].try_into().expect("a header");
+            seqs.push(u64::from_be_bytes(header));
+        }
+        seqs
+    }
+
+    #[test]
+    fn every_address_tried_shares_one_sequence_space() {
+        let (first, second) = (
+            UdpSocket::bind("127.0.0.1:0").expect("bind"),
+            UdpSocket::bind("127.0.0.1:0").expect("bind"),
+        );
+        let servers = [
+            first.local_addr().expect("addr"),
+            second.local_addr().expect("addr"),
+        ];
+        let tried = reach(
+            &servers,
+            [5; ID_LEN],
+            &[6; KEY_LEN],
+            Duration::from_millis(600),
+        );
+        assert!(tried.is_err());
+        let (to_first, to_second) = (sequence_numbers(&first), sequence_numbers(&second));
+        assert!(!to_first.is_empty() && !to_second.is_empty());
+        // Under one key, a sequence number reused is a nonce reused.
+        let last_first = to_first.iter().max().expect("one");
+        let first_second = to_second.iter().min().expect("one");
+        assert!(
+            first_second > last_first,
+            "the second address got {to_second:?} after {to_first:?}"
+        );
+    }
+
+    /// Runs `f` on its own thread: whether it finished within `bound`.
+    fn within(bound: Duration, f: impl FnOnce() + Send + 'static) -> bool {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            f();
+            let _ = done.send(());
+        });
+        finished.recv_timeout(bound).is_ok()
+    }
+
+    #[test]
+    fn dropping_a_relay_on_a_dead_path_gives_up_after_the_drain() {
+        let (id, key) = ([7; ID_LEN], [8; KEY_LEN]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (server, flood) = flooding_server(id, key, 0, stop.clone());
+        let relay = Relay::start(any_for(server), server, id, &key).expect("start");
+        assert!(relay.probe(Duration::from_secs(2)));
+        // The path dies, then a last request is written and hung up on.
+        stop.store(true, Ordering::Release);
+        flood.join().expect("server");
+        let mut local = UnixStream::connect(relay.socket()).expect("connect");
+        // Carried before hanging up, as a client's control connection is.
+        while relay.shared.carried().is_empty() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        local.write_all(b"detach").expect("write");
+        local.shutdown(Shutdown::Both).expect("hang up");
+        let started = Instant::now();
+        assert!(within(DRAIN + Duration::from_secs(2), move || drop(relay)));
+        assert!(started.elapsed() >= DRAIN, "gave up before the drain");
+    }
+
+    #[test]
+    fn dropping_the_relay_while_connections_arrive_finishes() {
+        let silent = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let server = silent.local_addr().expect("addr");
+        let relay =
+            Relay::start(any_for(server), server, [9; ID_LEN], &[10; KEY_LEN]).expect("start");
+        let socket = relay.socket().to_owned();
+        let stop = Arc::new(AtomicBool::new(false));
+        let dialer = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                // Each connection lingers with its workers, so a bounded
+                // number, paced to keep arriving through the drop.
+                let mut held = Vec::new();
+                while !stop.load(Ordering::Acquire) && held.len() < 256 {
+                    if let Ok(local) = UnixStream::connect(&socket) {
+                        held.push(local);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            })
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        let finished = within(DRAIN + Duration::from_secs(5), move || drop(relay));
+        stop.store(true, Ordering::Release);
+        dialer.join().expect("dialer");
+        assert!(finished, "dropping the relay hung on arriving connections");
     }
 
     /// A server end, driven on its own thread: it accepts every stream

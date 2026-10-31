@@ -5,7 +5,7 @@ changelog: rusty-mux --ssh moves onto UDP when the server offers it, keeps worki
 ## 2026-10-30 - rusty-mux --ssh moves onto UDP
 
 - **Added:** build step 3 of `docs/projects/mux/UDP-TRANSPORT.md` (Phase 3 step 4, C13), the client side.
-  - The control connection offers `DATAGRAM`. When the server echoes it, the client asks for an association over the SSH forward, sends to the `hostname` that `ssh -G HOST` prints (or `--udp-host HOST`), and probes it, trying each address the name resolves to within the 2 s.
+  - The control connection offers `DATAGRAM`. When the server echoes it, the client asks for an association over the SSH forward, sends to the `hostname` that `ssh -G HOST` prints (or `--udp-host HOST`), and probes it, trying each address the name resolves to within the 2 s on one association, so no sequence number (nonce) repeats under its key.
   - Once the probe is answered within 2 s, the control connection takes its client over on a stream of the association, and the SSH forward stops. Each block shown later opens its own stream.
   - The association is served on a private local Unix socket, as the forward was, so every connection, takeover and reconnect works as before. It keeps working when the client's address changes.
   - On exit, the client waits up to 2 s for the server to acknowledge its last messages, such as each block's Detach, before ending the association.
