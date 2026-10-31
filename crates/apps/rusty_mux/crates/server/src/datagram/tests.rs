@@ -326,3 +326,34 @@ fn shutting_a_stream_down_delivers_everything_written_first() {
         assert!(received == sent, "every byte, in order, before the close");
     });
 }
+
+#[test]
+fn an_offer_past_its_lifetime_cannot_be_taken_up() {
+    let registry = Registry::new(1);
+    let start = Instant::now();
+    let (_, id, key) = registry.offer(start).expect("offer");
+    let mut client = Association::new(Side::Client, id, &key, start, Some(addr_of(1)));
+    client.probe();
+    let (_, probe) = client.transmit(start).expect("a probe");
+    let late = start + OFFER_TTL;
+    let received = registry.datagram(late, addr_of(2), &probe);
+    assert!(matches!(received, Received::Nothing));
+    assert!(!registry.slots.borrow().contains_key(&id), "forgotten");
+}
+
+#[test]
+fn offers_stop_at_the_association_limit_until_one_expires() {
+    let registry = Registry::new(1);
+    let start = Instant::now();
+    for _ in 0..MAX_ASSOCIATIONS {
+        registry.offer(start).expect("offer");
+    }
+    assert!(registry.offer(start).is_err(), "one past the limit");
+    registry
+        .offer(start + OFFER_TTL)
+        .expect("room once they expire");
+}
+
+fn addr_of(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+}

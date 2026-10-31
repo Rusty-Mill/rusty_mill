@@ -6,7 +6,7 @@ changelog: rusty-mux-server --udp ADDR[:PORT] offers clients a UDP association, 
 
 - **Added:** build step 2 of `docs/projects/mux/UDP-TRANSPORT.md` (Phase 3 step 4, C13), the server side.
   - `rusty-mux-server --udp ADDR[:PORT]` listens for UDP on one port, 60001 unless given, for every association. Without the flag nothing changes.
-  - A client that offers the new feature `DATAGRAM` may send `OpenDatagram`. The reply, `Datagram { port, id, key }`, travels only inside its connection. The id and key come from `rusty_rand`; the key is never logged. An offer that sees no datagram within 60 s is forgotten.
+  - A client that offers the new feature `DATAGRAM` may send `OpenDatagram`. The reply, `Datagram { port, id, key }`, travels only inside its connection. The id and key come from `rusty_rand`; the key is never logged. An offer that sees no datagram within 60 s is forgotten and cannot be taken up later. A server holds at most 1024 associations, offered or live; past that, `OpenDatagram` fails.
   - The first authentic datagram under an offered id makes the association live. Each stream the client opens on it is served by the same connection code as a Unix socket, so a stream can say Hello, take a client over, attach and type.
   - `--udp-idle SECS` (a day unless given) ends an association that has been silent that long, and with it its streams. Their clients then go as a closed socket's do.
   - A stream's connection ends only once the client has acknowledged everything written to it, so a block's last output is not lost.

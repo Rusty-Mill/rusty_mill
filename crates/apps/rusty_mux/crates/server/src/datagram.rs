@@ -30,6 +30,9 @@ pub(crate) type Key = [u8; KEY_LEN];
 /// How long an offered association waits for its first datagram.
 const OFFER_TTL: Duration = Duration::from_secs(60);
 
+/// The most associations, offered or live, a server holds at once.
+const MAX_ASSOCIATIONS: usize = 1024;
+
 /// The shortest sleep between two passes of a link's driver, so a timer
 /// already due that sends nothing cannot spin the thread.
 const MIN_SLEEP: Duration = Duration::from_millis(1);
@@ -55,13 +58,17 @@ impl Registry {
     }
 
     /// A fresh association, from the OS's CSPRNG: the port to send to, its
-    /// id and its key. Offers older than [`OFFER_TTL`] are forgotten.
+    /// id and its key. Offers older than [`OFFER_TTL`] are forgotten, and
+    /// none is made while [`MAX_ASSOCIATIONS`] are held.
     pub(crate) fn offer(&self, now: Instant) -> Result<(u16, Id, Key), String> {
         let mut slots = self.slots.borrow_mut();
         slots.retain(|_, slot| match slot {
-            Slot::Offered { at, .. } => now.saturating_duration_since(*at) < OFFER_TTL,
+            Slot::Offered { at, .. } => !expired(*at, now),
             Slot::Live(_) => true,
         });
+        if slots.len() >= MAX_ASSOCIATIONS {
+            return Err("too many UDP associations".into());
+        }
         let (mut id, mut key) = ([0; ID_LEN], [0; KEY_LEN]);
         rusty_rand::fill(&mut id)
             .and_then(|()| rusty_rand::fill(&mut key))
@@ -91,6 +98,10 @@ impl Registry {
                     false => Received::Nothing,
                 };
             }
+            Some(Slot::Offered { at, .. }) if expired(*at, now) => {
+                slots.remove(&id);
+                return Received::Nothing;
+            }
             Some(Slot::Offered { key, .. }) => *key,
         };
         let mut assoc = Association::new(Side::Server, id, &key, now, None);
@@ -114,6 +125,11 @@ impl Registry {
             .filter(|s| matches!(s, Slot::Live(_)))
             .count()
     }
+}
+
+/// Whether an offer made `at` can no longer be taken up.
+fn expired(at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(at) >= OFFER_TTL
 }
 
 enum Received {
