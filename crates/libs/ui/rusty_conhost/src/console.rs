@@ -55,10 +55,6 @@ pub(crate) const SLICE: usize = 64 * 1024;
 /// bytes, and one watched sequence held from the last write may complete
 /// with its first unit, adding the modes it reasserts.
 const WIDE_SLICE: usize = (SLICE - PREAMBLE.len()) / screen::MAX_EXPANSION;
-/// Code-page bytes per slice: most code pages decode a byte to at most
-/// two units (a four-byte GB 18030 character to a surrogate pair), so
-/// they fit [`WIDE_SLICE`]; [`coded_slice`] shortens it for any other.
-const CODED_SLICE: usize = WIDE_SLICE / 2;
 /// Connected clients.
 pub(crate) const MAX_CLIENTS: usize = 256;
 // Every client's CTRL_CLOSE fits the Ctrl queue.
@@ -423,10 +419,16 @@ impl Share {
 enum Text {
     Wide(Vec<u16>),
     Bytes(Vec<u8>),
-    /// `A` text in an output code page other than UTF-8, decoded a
-    /// slice at a time so a parked write retains only its bytes. The
-    /// code page is the one in force when it was written.
-    Coded(Vec<u8>, CodePage),
+    /// `A` text in an output code page other than UTF-8, in the code
+    /// page in force when it was written, so a parked write retains only
+    /// its bytes. Each slice decodes the whole write afresh and emits
+    /// units from `at`: no byte-level cut can split a multibyte sequence
+    /// or lose a stateful code page's shift state (UTF-7, ISO-2022).
+    Coded {
+        bytes: Vec<u8>,
+        cp: u32,
+        units: usize,
+    },
     /// SetConsoleCursorPosition's move, made into VT when it is emitted:
     /// writes parked ahead of it may change the origin mode it depends on.
     CursorTo(u16, u16),
@@ -436,7 +438,8 @@ impl Text {
     fn len(&self) -> usize {
         match self {
             Text::Wide(units) => units.len(),
-            Text::Bytes(bytes) | Text::Coded(bytes, _) => bytes.len(),
+            Text::Bytes(bytes) => bytes.len(),
+            Text::Coded { units, .. } => *units,
             Text::CursorTo(..) => 1,
         }
     }
@@ -445,7 +448,7 @@ impl Text {
     fn retained(&self) -> usize {
         match self {
             Text::Wide(units) => units.len() * 2,
-            Text::Bytes(bytes) | Text::Coded(bytes, _) => bytes.len(),
+            Text::Bytes(bytes) | Text::Coded { bytes, .. } => bytes.len(),
             Text::CursorTo(..) => 0,
         }
     }
@@ -477,59 +480,41 @@ impl Text {
                     end
                 }
             },
-            Text::Wide(units) => {
-                let mut end = units.len().min(at + WIDE_SLICE);
-                // Keep a surrogate pair in one slice.
-                if end < units.len() && (0xD800..0xDC00).contains(&units[end - 1]) {
-                    end -= 1;
-                }
-                let text: String = char::decode_utf16(units[at..end].iter().copied())
-                    .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
-                    .collect();
-                emit_str(&text, at == 0, origin, screen, out, replies);
-                end
-            }
-            Text::Coded(bytes, cp) => {
-                let (end, text) = coded_slice(bytes, at, *cp, codec);
-                emit_str(&text, at == 0, origin, screen, out, replies);
-                end
+            Text::Wide(units) => emit_units(units, at, origin, screen, out, replies),
+            Text::Coded { bytes, cp, .. } => {
+                let units: Vec<u16> = codepage::decode(codec, *cp, bytes).encode_utf16().collect();
+                emit_units(&units, at, origin, screen, out, replies)
             }
         }
     }
 }
 
-/// The next slice of code-page text from `at`: its end and its text, at
-/// most [`WIDE_SLICE`] units. A code page that decodes a byte to more
-/// than two units gets a shorter slice, down to one character.
-fn coded_slice(bytes: &[u8], at: usize, cp: CodePage, codec: &Codec) -> (usize, String) {
-    let mut limit = CODED_SLICE;
-    loop {
-        let end = cp.boundary(bytes, at, limit);
-        let text = codepage::decode(codec, cp.cp, &bytes[at..end]);
-        if limit <= 2 || text.encode_utf16().count() <= WIDE_SLICE {
-            return (end, text);
-        }
-        limit /= 2;
-    }
-}
-
-/// Emit decoded text of at most [`WIDE_SLICE`] units, which all fit.
-fn emit_str(
-    text: &str,
-    first: bool,
+/// Emit up to [`WIDE_SLICE`] of `units` from `at`, keeping a surrogate
+/// pair in one slice; returns the new position.
+fn emit_units(
+    units: &[u16],
+    at: usize,
     origin: Origin,
     screen: &mut Screen,
     out: &mut OutputQueue,
     replies: &mut Vec<u8>,
-) {
-    debug_assert!(text.encode_utf16().count() <= WIDE_SLICE);
+) -> usize {
+    let mut end = units.len().min(at + WIDE_SLICE);
+    if end < units.len() && (0xD800..0xDC00).contains(&units[end - 1]) {
+        end -= 1;
+    }
+    let text: String = char::decode_utf16(units[at..end].iter().copied())
+        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect();
+    // Each unit emits at most MAX_EXPANSION bytes, so all fit.
     match origin {
         Origin::Client(mode) => {
-            let n = screen.client(text.as_bytes(), mode, SLICE, first, out, replies);
+            let n = screen.client(text.as_bytes(), mode, SLICE, at == 0, out, replies);
             debug_assert_eq!(n, text.len(), "a wide slice fits");
         }
         Origin::Host => screen.host(text.as_bytes(), out),
     }
+    end
 }
 
 /// Who made a write's text, which decides how it is emitted.
@@ -587,6 +572,9 @@ pub(crate) struct Console {
     /// A DBCS lead byte that ended the last `A` write, for the next one
     /// (conhost `WriteConsoleDbcsLeadByte`).
     lead_byte: Option<u8>,
+    /// The unfinished UTF-8 sequence that ended the last `A` write under
+    /// 65001, for the next (conhost's `u8State`).
+    utf8_tail: Vec<u8>,
     decoder: input::Decoder,
     /// The remainder of the engine's one admitted input slice. No new
     /// slice is admitted until this has been consumed.
@@ -651,6 +639,7 @@ impl Console {
             input_cp: codepage::UTF8,
             output_cp: CodePage::UTF8,
             lead_byte: None,
+            utf8_tail: Vec::new(),
             decoder: input::Decoder::default(),
             input_bytes: VecDeque::new(),
             input_end: false,
@@ -1124,8 +1113,16 @@ impl Console {
     fn ansi_text(&mut self, bytes: &[u8]) -> Text {
         let cp = self.output_cp;
         if cp.is_utf8() {
-            return Text::Bytes(bytes.to_vec());
+            // An unfinished sequence waits here, not in the terminal, so
+            // a write in another code page can drop it.
+            let mut text = std::mem::take(&mut self.utf8_tail);
+            text.extend_from_slice(bytes);
+            let keep = codepage::unfinished_utf8(&text);
+            self.utf8_tail = text.split_off(text.len() - keep);
+            return Text::Bytes(text);
         }
+        // conhost resets its UTF-8 state on a write in another code page.
+        self.utf8_tail.clear();
         let mut text = Vec::with_capacity(bytes.len() + 1);
         if let (Some(lead), Some(&first)) = (self.lead_byte, bytes.first())
             && first >= b' '
@@ -1142,7 +1139,14 @@ impl Console {
         if cp.ends_in_lead(&text[start.min(text.len())..]) {
             self.lead_byte = text.pop();
         }
-        Text::Coded(text, cp)
+        let units = codepage::decode(&self.codec, cp.cp, &text)
+            .encode_utf16()
+            .count();
+        Text::Coded {
+            bytes: text,
+            cp: cp.cp,
+            units,
+        }
     }
 
     /// `CONSOLE_MODE_MSG { IN OUT Mode }`. On input, the console-wide
@@ -2284,36 +2288,85 @@ pub(crate) mod tests {
         let [_, _, output] = h.connect(1, "");
         h.set_cp(932, true);
         // Odd-aligned pairs past several slices.
+        let pairs = WIDE_SLICE * 3 / 2;
         let mut bytes = b"a".to_vec();
-        let pairs = CODED_SLICE * 3 / 2;
         for _ in 0..pairs {
             bytes.extend(b"\x82\xa0");
         }
         let r = h.write_a(output, &bytes);
         assert_eq!(r.status, msg::STATUS_SUCCESS);
-        assert!(bytes.len() > 3 * CODED_SLICE, "several slices");
-        let shown = String::from_utf8(h.vt.clone()).expect("UTF-8");
         // A split pair would show as U+30FB; wrapping adds only CR LF.
-        let text: String = shown
-            .chars()
-            .filter(|c| !matches!(c, '\r' | '\n'))
-            .collect();
-        assert_eq!(text, format!("a{}", "あ".repeat(pairs)));
+        assert_eq!(shown_text(&h.vt), format!("a{}", "あ".repeat(pairs)));
+    }
+
+    /// A test code page with state: `~` turns upper case on; every other
+    /// byte is three characters.
+    fn shifting(_: u32, bytes: &[u8]) -> Option<String> {
+        let mut upper = false;
+        let mut out = String::new();
+        for &b in bytes {
+            if b == b'~' {
+                upper = true;
+                continue;
+            }
+            let c = char::from(b);
+            let c = if upper { c.to_ascii_uppercase() } else { c };
+            out.extend([c, c, c]);
+        }
+        Some(out)
     }
 
     #[test]
-    fn a_code_page_that_expands_gets_shorter_slices() {
-        let codec = Codec {
-            valid: |_| true,
-            decode: |_, bytes| Some("xyz".repeat(bytes.len())),
-            encode: |_, text| Some(text.as_bytes().to_vec()),
-        };
-        let cp = CodePage::new(7, &codec).expect("valid");
-        let bytes = vec![b'q'; CODED_SLICE * 2];
-        let (end, text) = coded_slice(&bytes, 0, cp, &codec);
-        assert!(0 < end && end < CODED_SLICE, "{end}");
-        assert_eq!(text.len(), end * 3);
-        assert!(text.encode_utf16().count() <= WIDE_SLICE);
+    fn a_stateful_expanding_code_page_keeps_its_state_across_slices() {
+        let mut h = Host::new();
+        h.c = Console::new(
+            WinSize { rows: 24, cols: 80 },
+            input::us_key_for,
+            Codec {
+                valid: |_| true,
+                decode: shifting,
+                encode: |_, text| Some(text.as_bytes().to_vec()),
+            },
+        );
+        let [_, _, output] = h.connect(1, "");
+        h.set_cp(7, true);
+        let n = WIDE_SLICE;
+        let mut bytes = b"~".to_vec();
+        bytes.extend(vec![b'q'; n]);
+        h.write_a(output, &bytes);
+        assert_eq!(
+            shown_text(&h.vt),
+            "Q".repeat(3 * n),
+            "three slices, all shifted"
+        );
+    }
+
+    /// Text the terminal was sent, without the CR LF of wrapping.
+    fn shown_text(vt: &[u8]) -> String {
+        String::from_utf8_lossy(vt)
+            .chars()
+            .filter(|c| !matches!(c, '\r' | '\n'))
+            .collect()
+    }
+
+    #[test]
+    fn an_unfinished_utf8_sequence_waits_and_another_code_page_drops_it() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        let r = h.write_a(output, b"a\xc3");
+        assert_eq!(r.information, 2, "every byte counts as written");
+        assert_eq!(h.vt, b"a");
+        h.write_a(output, b"\xa9");
+        assert_eq!(h.vt, "aé".as_bytes());
+        // A write in another code page in between drops it, as conhost
+        // resets its UTF-8 state.
+        h.vt.clear();
+        h.write_a(output, b"\xc3");
+        h.set_cp(437, true);
+        h.write_a(output, b"b");
+        h.set_cp(65001, true);
+        h.write_a(output, b"\xa9");
+        assert_eq!(h.vt, b"b\xa9");
     }
 
     #[test]

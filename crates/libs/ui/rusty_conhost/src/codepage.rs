@@ -30,7 +30,7 @@ pub(crate) struct Codec {
 }
 
 /// A code page and its DBCS lead bytes, which `WriteConsoleA` needs to
-/// keep a character whole across calls and slices.
+/// keep a character whole across calls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CodePage {
     pub cp: u32,
@@ -85,22 +85,17 @@ impl CodePage {
         }
         false
     }
+}
 
-    /// The end of the whole characters in `bytes[at..]` that fit in
-    /// `limit` bytes: a slice never splits a pair. At least one
-    /// character when any is left.
-    pub(crate) fn boundary(self, bytes: &[u8], at: usize, limit: usize) -> usize {
-        let stop = bytes.len().min(at.saturating_add(limit.max(2)));
-        let mut i = at;
-        while i < stop {
-            let next = if self.is_lead(bytes[i]) { i + 2 } else { i + 1 };
-            if next > stop {
-                break;
-            }
-            i = next;
-        }
-        i
-    }
+/// The length of the unfinished UTF-8 sequence that ends `bytes`, if
+/// any: a lead byte whose continuation bytes have not all come.
+pub(crate) fn unfinished_utf8(bytes: &[u8]) -> usize {
+    (1..=bytes.len().min(3))
+        .find(|&n| {
+            std::str::from_utf8(&bytes[bytes.len() - n..])
+                .is_err_and(|e| e.valid_up_to() == 0 && e.error_len().is_none())
+        })
+        .unwrap_or(0)
 }
 
 /// `bytes` in `cp` as text; bytes a codec can't take come through as
@@ -252,15 +247,13 @@ mod tests {
     }
 
     #[test]
-    fn a_boundary_never_splits_a_pair() {
-        let cp = CodePage::new(932, &CODEC).expect("932");
-        let bytes = b"a\x82\xa0b";
-        assert_eq!(cp.boundary(bytes, 0, 2), 1, "the pair would split");
-        assert_eq!(cp.boundary(bytes, 1, 2), 3);
-        assert_eq!(cp.boundary(bytes, 0, 100), 4);
-        assert_eq!(cp.boundary(bytes, 4, 2), 4, "nothing left");
-        let sbcs = CodePage::new(437, &CODEC).expect("437");
-        assert_eq!(sbcs.boundary(b"\x82\xa0b", 0, 2), 2);
+    fn an_unfinished_utf8_sequence_is_measured() {
+        assert_eq!(unfinished_utf8(b"a\xc3"), 1);
+        assert_eq!(unfinished_utf8(b"\xe2\x96"), 2);
+        assert_eq!(unfinished_utf8(b"\xf0\x9f\x98"), 3);
+        assert_eq!(unfinished_utf8("é".as_bytes()), 0);
+        assert_eq!(unfinished_utf8(b"\xa9"), 0, "a stray continuation byte");
+        assert_eq!(unfinished_utf8(b""), 0);
     }
 
     #[test]
