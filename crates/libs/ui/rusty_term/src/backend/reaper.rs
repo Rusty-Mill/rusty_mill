@@ -96,24 +96,40 @@ impl Reaper {
         }
     }
 
-    /// A worker: runs queued jobs until none is left, then retires.
+    /// A worker: runs queued jobs until none is left, then retires, under
+    /// the same lock that found the queue empty, so a job queued as it
+    /// retires starts another worker instead of waiting for `join`.
     fn work(&self) {
-        self.drain();
-        self.lock().workers -= 1;
+        while let Some(job) = self.next(true) {
+            self.finish(job);
+        }
     }
 
     /// Runs queued jobs until none is left.
     fn drain(&self) {
-        loop {
-            let Some(job) = self.lock().queue.pop_front() else {
-                return;
-            };
-            run_logged(job);
-            let mut state = self.lock();
-            state.in_flight -= 1;
-            if state.in_flight == 0 {
-                self.idle.notify_all();
-            }
+        while let Some(job) = self.next(false) {
+            self.finish(job);
+        }
+    }
+
+    /// The next queued job; when there is none and `retire`, one worker
+    /// fewer.
+    fn next(&self, retire: bool) -> Option<Job> {
+        let mut state = self.lock();
+        let job = state.queue.pop_front();
+        if job.is_none() && retire {
+            state.workers -= 1;
+        }
+        job
+    }
+
+    /// Runs `job` and counts it finished.
+    fn finish(&self, job: Job) {
+        run_logged(job);
+        let mut state = self.lock();
+        state.in_flight -= 1;
+        if state.in_flight == 0 {
+            self.idle.notify_all();
         }
     }
 
@@ -259,6 +275,31 @@ mod tests {
         }
         reaper.join();
         assert!(flags.iter().all(|d| d.load(Ordering::SeqCst)));
+    }
+
+    /// Jobs queued while workers retire still run before `join` (review
+    /// of 970d3b01): every round, the full pool drains and retires while
+    /// the next burst arrives.
+    #[test]
+    fn jobs_queued_as_workers_retire_run_without_join() {
+        let reaper = Arc::new(Reaper::new());
+        let finished = Arc::new(AtomicUsize::new(0));
+        let rounds = 50;
+        for _ in 0..rounds {
+            for _ in 0..MAX_WORKERS + 1 {
+                let finished = Arc::clone(&finished);
+                reaper.run(Box::new(move || {
+                    finished.fetch_add(1, Ordering::SeqCst);
+                }));
+            }
+        }
+        let want = rounds * (MAX_WORKERS + 1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while finished.load(Ordering::SeqCst) < want {
+            assert!(Instant::now() < deadline, "a job was stranded until join");
+            std::thread::yield_now();
+        }
+        reaper.join();
     }
 
     #[test]
