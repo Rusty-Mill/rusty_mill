@@ -178,8 +178,10 @@ ordering, acks and flow control belong to each stream.
   it and takes every client over on a new stream each, make before break
   as for a lost path, and the SSH forward stops. A probe that fails leaves
   the client on SSH, to try again 2 s later, doubling up to 30 s. A client
-  that stayed on SSH from the start, because UDP never answered, does not
-  try again.
+  that stayed on SSH from the start, because UDP never answered, has no
+  association to keep, since an unanswered offer lapses after 60 s: it asks
+  the server for a new one on the same schedule, and moves once one answers
+  its probe.
 - **Flow control:** each stream's receive buffer holds at most 1 MiB in
   total: bytes in order but not yet read, plus bytes out of order. Every
   `Ack` sets `limit` to the cumulative offset plus the free space, and a

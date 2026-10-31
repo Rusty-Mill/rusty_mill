@@ -215,9 +215,17 @@ mod client {
     enum Ask {
         /// Bring up a fresh path and take these clients over on it.
         Fresh(Plan),
-        /// Move these clients back onto the UDP path kept in standby.
-        Move(Plan),
+        /// Move these clients onto a UDP path.
+        Move(Onto, Plan),
         Settle,
+    }
+
+    /// The UDP path a move goes onto.
+    enum Onto {
+        /// The one kept in standby since a fallback to SSH.
+        Standby,
+        /// A new association the server offered: its port, id and key.
+        Offer(u16, [u8; 8], [u8; 32]),
     }
 
     /// The clients a fresh path is to take over.
@@ -275,7 +283,13 @@ mod client {
                 while let Ok(ask) = asked.recv() {
                     let (path, plan, tell): (_, _, fn(_) -> _) = match ask {
                         Ask::Fresh(plan) => (rejoin.fresh(&cancelled), plan, Input::Rejoined),
-                        Ask::Move(plan) => (rejoin.standby(), plan, Input::Moved),
+                        Ask::Move(onto, plan) => {
+                            let path = match onto {
+                                Onto::Standby => rejoin.standby(),
+                                Onto::Offer(port, id, key) => rejoin.datagram(port, id, key),
+                            };
+                            (path, plan, Input::Moved)
+                        }
                         Ask::Settle => {
                             rejoin.settle();
                             continue;
@@ -374,11 +388,17 @@ mod client {
         leased: bool,
     }
 
-    /// The UDP path given up for SSH, moved back onto once it is heard
-    /// again (UDP-TRANSPORT.md).
+    /// Getting onto UDP from SSH (UDP-TRANSPORT.md): back onto the path
+    /// given up for SSH once it is heard again, or, for a client that never
+    /// reached UDP, onto a new association the server offers.
     struct Standby {
-        /// When it last heard the server.
+        /// When the path given up last heard the server.
         pulse: Pulse,
+        /// Whether to ask the server for a new association: the client
+        /// stayed on SSH from the start.
+        asks: bool,
+        /// The request for one, until the server answers.
+        offer: Option<u64>,
         /// A move is under way: the old path's connections end as their
         /// clients are taken over, and that is no loss.
         moving: bool,
@@ -652,13 +672,19 @@ mod client {
         };
         let mut next = req.next;
         let (mut socket, mut stream, mut conn, mut takeover) = (socket, stream, conn, takeover);
+        // Stayed on SSH though UDP was offered and wanted: asked again later.
+        let mut stayed = false;
         if let (Some(rejoin), Some(me)) = (rejoin.as_mut(), takeover)
             && features.contains(Features::DATAGRAM)
             && udp_wanted()
-            && let Some(back) = upgrade(rejoin.as_mut(), &socket, &mut conn, me, next)?
         {
-            (socket, stream, conn) = (back.socket, back.stream, back.conn);
-            (takeover, next) = (Some(back.me), back.next);
+            match upgrade(rejoin.as_mut(), &socket, &mut conn, me, next)? {
+                Some(back) => {
+                    (socket, stream, conn) = (back.socket, back.stream, back.conn);
+                    (takeover, next) = (Some(back.me), back.next);
+                }
+                None => stayed = true,
+            }
         }
 
         let (tx, inbox) = channel();
@@ -694,6 +720,8 @@ mod client {
             pulse: pulses.current,
             standby: Standby {
                 pulse: pulses.standby,
+                asks: stayed,
+                offer: None,
                 moving: false,
                 tries: 0,
                 next: now,
@@ -1602,15 +1630,38 @@ mod client {
         /// Moves every client back onto the UDP path given up for SSH,
         /// once that path hears the server again, make before break as a
         /// lost path is brought back; the SSH path stays in use until then.
+        /// A client that stayed on SSH from the start asks the server for
+        /// a new association instead, and moves once the server offers one.
         fn move_back(&mut self, now: Instant) {
-            let standby = &mut self.standby;
+            let standby = &self.standby;
+            if standby.moving || now < standby.next {
+                return;
+            }
             let heard = standby
                 .pulse
                 .last()
                 .is_some_and(|heard| now.saturating_duration_since(heard) < SILENT);
-            if standby.moving || now < standby.next || !heard {
-                return;
+            if heard {
+                self.move_onto(Onto::Standby);
+            } else if standby.asks {
+                self.standby.moving = true;
+                let req = self.request(|req| Message::OpenDatagram { req });
+                self.standby.offer = Some(req);
             }
+        }
+
+        /// The server answered the request for a new association.
+        fn offered(&mut self, offer: Option<Onto>) {
+            self.standby.offer = None;
+            self.standby.moving = false;
+            match offer {
+                Some(onto) => self.move_onto(onto),
+                None => self.wait_to_move(),
+            }
+        }
+
+        /// Asks for every client to be taken over on `onto`.
+        fn move_onto(&mut self, onto: Onto) {
             let (Some(rejoiner), Some(me)) = (&self.rejoiner, self.me) else {
                 return;
             };
@@ -1627,13 +1678,25 @@ mod client {
             let Some(resumes) = resumes else {
                 return;
             };
-            standby.moving = true;
-            rejoiner.ask(Ask::Move(Plan {
-                me,
-                next: self.next,
-                window: self.window.filter(|_| self.inspect),
-                resumes,
-            }));
+            self.standby.moving = true;
+            rejoiner.ask(Ask::Move(
+                onto,
+                Plan {
+                    me,
+                    next: self.next,
+                    window: self.window.filter(|_| self.inspect),
+                    resumes,
+                },
+            ));
+        }
+
+        /// No move for a while, longer after each failed one, at most
+        /// [`BACKOFF`].
+        fn wait_to_move(&mut self) {
+            let standby = &mut self.standby;
+            standby.tries += 1;
+            let wait = Duration::from_secs(1 << standby.tries.min(5)).min(BACKOFF);
+            standby.next = Instant::now() + wait;
         }
 
         /// A move back onto UDP is done or failed. Failing before any
@@ -1643,16 +1706,12 @@ mod client {
             self.standby.moving = false;
             match moved {
                 Ok(back) => {
-                    self.standby.tries = 0;
+                    // On UDP: a later fallback keeps its path in standby.
+                    (self.standby.tries, self.standby.asks) = (0, false);
                     self.rejoined(back);
                 }
                 // Nothing moved; the SSH path is still the one in use.
-                Err(Missed::Retry(_)) => {
-                    let standby = &mut self.standby;
-                    standby.tries += 1;
-                    let wait = Duration::from_secs(1 << standby.tries.min(5)).min(BACKOFF);
-                    standby.next = Instant::now() + wait;
-                }
+                Err(Missed::Retry(_)) => self.wait_to_move(),
                 Err(Missed::Broken(_)) => self.lose(),
                 Err(Missed::Dropped) => self.end(Ended::Dropped),
             }
@@ -1663,6 +1722,10 @@ mod client {
         fn lose(&mut self) {
             if self.lost.is_some() {
                 return;
+            }
+            // An answer to it would come on the connection given up.
+            if self.standby.offer.take().is_some() {
+                self.standby.moving = false;
             }
             let panes: Vec<Pane> = self.panes.drain().map(|(_, pane)| pane).collect();
             self.resumes = panes
@@ -1895,6 +1958,12 @@ mod client {
                     self.split = None;
                     self.arriving = Some(BlockId::from_uuid(id));
                     self.sync();
+                }
+                Message::Datagram { req, port, id, key } if self.standby.offer == Some(req) => {
+                    self.offered(Some(Onto::Offer(port, id, key.0)))
+                }
+                Message::Failed { req, .. } if self.standby.offer == Some(req) => {
+                    self.offered(None)
                 }
                 Message::Failed { .. } => bell(),
                 _ => {}

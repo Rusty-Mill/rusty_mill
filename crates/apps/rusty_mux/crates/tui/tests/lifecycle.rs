@@ -1242,6 +1242,35 @@ fn a_udp_path_heard_again_after_a_fallback_gets_the_clients_back() {
     std::fs::remove_dir_all(&work).expect("cleanup");
 }
 
+/// A client that stayed on SSH because UDP did not answer asks the
+/// server for a new association later, and moves onto it once one
+/// answers: the forward stops, with no second login.
+#[test]
+fn a_client_that_stayed_on_ssh_moves_to_udp_once_it_answers() {
+    let (socket, port) = real_udp_server();
+    let wire = Wire::new(port);
+    wire.cut();
+    let work = relaying_ssh("udp-later", &[]);
+    let tui = ssh_client_with(&work, &socket, &[("STANDIN_HOSTNAME", "127.0.0.9")]);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    let forward = wait_logins(&work, 1, PATIENCE)[0].0;
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(running(forward), "moved while UDP was cut");
+
+    // Asked again at most 30 s apart; here within the first few tries.
+    wire.mend();
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while running(forward) {
+        assert!(Instant::now() < deadline, "still on SSH");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    type_until(&tui, b"echo two-$((1+1))\r", b"two-2");
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
+    assert_eq!(logins(&work).len(), 1, "no second login");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
 /// With UDP unanswered, or turned off, the client stays on the forward:
 /// in 2 s or not at all, and it says so once when it tried.
 #[test]
