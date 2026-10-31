@@ -268,14 +268,28 @@ pub struct ClientProcess {
 }
 
 impl ClientProcess {
-    /// Open the client `pid` while its CONNECT is unanswered; once open,
-    /// the handle keeps the pid from being reused. ConDrv doesn't keep a
-    /// waiting client referenced, though: one that died before this call
-    /// may have freed its pid for another process (design §7.3). Fails
-    /// with the OS error, e.g. `PermissionDenied` for a protected
-    /// process.
-    pub fn open(pid: u32) -> Result<ClientProcess> {
-        sys::open_process(pid).map(|handle| ClientProcess { handle })
+    /// Open the client `pid` whose CONNECT came from thread `tid` (the
+    /// descriptor's `object`), while that CONNECT is unanswered. ConDrv
+    /// doesn't keep a waiting client referenced, so a client that died
+    /// before this call may have freed its pid for another process
+    /// (design §7.3). The thread is opened first and must belong to `pid`;
+    /// its handle keeps the process from being freed until the process
+    /// handle is open, which then keeps the pid. Fails closed: an
+    /// `InvalidInput` error when the thread is another process's, else the
+    /// OS error, e.g. when the thread is gone or `PermissionDenied` for a
+    /// protected process.
+    pub fn open(pid: u32, tid: u32) -> Result<ClientProcess> {
+        let thread = sys::open_thread(tid)?;
+        if sys::process_of_thread(&thread)? != pid {
+            return Err(PlatformError::new(
+                ErrorKind::InvalidInput,
+                OsCode::None,
+                "ClientProcess::open: the CONNECT thread is not the client's",
+            ));
+        }
+        let handle = sys::open_process(pid)?;
+        drop(thread);
+        Ok(ClientProcess { handle })
     }
 
     /// End the client with `STATUS_CONTROL_C_EXIT` if it is still

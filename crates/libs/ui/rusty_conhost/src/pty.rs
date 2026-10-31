@@ -80,11 +80,14 @@ impl OwnPtyMaster {
     }
 
     /// Wait up to `timeout` for the console to shut down: closed, and
-    /// every client still attached at its close ended, 5 s after
-    /// CTRL_CLOSE (#1259). Returns whether it has. A process that exits
-    /// right after dropping its last master calls this first, or those
-    /// clients are never ended; without such a client it returns once
-    /// the console has closed.
+    /// the end of every client still attached at its close attempted, 5 s
+    /// after CTRL_CLOSE (#1259). Returns whether it has. `true` means the
+    /// host is done, not that every client has exited: one it could not
+    /// open or end, or any client after an engine error or panic closed
+    /// the console early, may still run, so a caller that owns a process
+    /// checks it too. A process that exits right after dropping its last
+    /// master calls this first, or those clients are never ended; without
+    /// such a client it returns once the console has closed.
     pub fn wait_shut_down(&self, timeout: Duration) -> bool {
         self.shared.wait_shut_down(timeout)
     }

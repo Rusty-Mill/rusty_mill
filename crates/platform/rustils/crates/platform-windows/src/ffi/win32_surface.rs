@@ -111,6 +111,16 @@ pub use windows_sys::Win32::System::Threading::{
 pub use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
 };
+// `condrv::ClientProcess::open` (#1259, D2 admission proposed on #1286):
+// ConDrv doesn't keep a client waiting on its CONNECT referenced, so its
+// pid can be freed and reused before the host opens it. The CONNECT also
+// carries the client's thread id; `OpenThread` with
+// `THREAD_QUERY_LIMITED_INFORMATION`, the least access
+// `GetProcessIdOfThread` needs, pins that thread and its process while
+// the host checks the thread belongs to the pid, then opens the pid.
+pub use windows_sys::Win32::System::Threading::{
+    GetProcessIdOfThread, OpenThread, THREAD_QUERY_LIMITED_INFORMATION,
+};
 // `Spawner::is_alive` (`docs/decision-request-detach-liveness.md`):
 // `PROCESS_QUERY_LIMITED_INFORMATION` is the least-privileged access
 // mask that still lets `GetExitCodeProcess` (already admitted above)

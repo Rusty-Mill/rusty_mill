@@ -243,6 +243,53 @@ fn connect_disconnect_round_trip_and_exit_code() {
     assert_eq!(status, Some(ExitStatus::Code(7)));
 }
 
+/// A client is opened only through the thread its CONNECT came from
+/// (#1259): a pid that thread doesn't belong to, as a reused pid would
+/// be, is refused and that process is never touched.
+#[test]
+fn a_client_is_opened_only_through_its_connect_thread() {
+    let _serial = lock();
+    let mut attached = condrv::spawn_attached(&command("ping.exe", &["-n", "30", "127.0.0.1"]))
+        .expect("spawn_attached");
+    let waker = Waker::new().expect("Waker::new");
+    attached.server.submit_read(None).expect("submit_read");
+    let deadline = Instant::now() + BUDGET;
+    let connect = loop {
+        let ready = attached
+            .server
+            .wait(&waker, None, Some(deadline))
+            .expect("wait");
+        if let Some(d) = ready.io {
+            break d;
+        }
+        assert!(Instant::now() < deadline, "no CONNECT");
+    };
+    assert_eq!(connect.function, CONNECT);
+    let (pid, tid) = (connect.process as u32, connect.object as u32);
+    assert_eq!(pid, attached.child.id());
+
+    let mut other = std::process::Command::new("ping.exe")
+        .args(["-n", "30", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn another process");
+    let refused = condrv::ClientProcess::open(other.id(), tid).err();
+    assert_eq!(refused.map(|e| e.kind), Some(ErrorKind::InvalidInput));
+    let gone = condrv::ClientProcess::open(pid, u32::MAX - 3).err();
+    assert!(gone.is_some(), "a thread that doesn't exist is refused");
+    assert!(
+        matches!(other.try_wait(), Ok(None)),
+        "the other process runs on"
+    );
+
+    let client = condrv::ClientProcess::open(pid, tid).expect("the CONNECT's client");
+    client.terminate().expect("terminate");
+    let status = Box::new(attached.child).wait().expect("wait");
+    assert_eq!(status, ExitStatus::Code(0xC000_013A_u32 as i32));
+    let _ = other.kill();
+    let _ = other.wait();
+}
+
 #[test]
 fn packet_bounds_and_completion_are_checked() {
     let _serial = lock();

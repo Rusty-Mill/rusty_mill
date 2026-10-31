@@ -872,7 +872,7 @@ impl Engine {
                 self.after_reply.push((pid, event));
             }
             Effect::Ctrl { pid, event } => self.ctrl.push(pid, event),
-            Effect::Joined { pid } => self.track(pid),
+            Effect::Joined { pid, tid } => self.track(pid, tid),
             Effect::Left { pid } => {
                 self.after_reply.retain(|&(p, _)| p != pid);
                 self.ctrl.forget(pid);
@@ -885,14 +885,16 @@ impl Engine {
         }
     }
 
-    /// Hold a joining client so the deadline can end it. A client that
-    /// can't be opened (a protected process) is only logged: CTRL_CLOSE
+    /// Hold a joining client so the deadline can end it, opened through
+    /// its CONNECT thread `tid`. Fails closed: a client that can't be
+    /// opened that way (gone already, its pid now another process's, or
+    /// a protected process) is only logged, and never ended; CTRL_CLOSE
     /// still reaches it.
-    fn track(&mut self, pid: u32) {
+    fn track(&mut self, pid: u32, tid: u32) {
         if self.clients.contains_key(&pid) {
             return;
         }
-        match ClientProcess::open(pid) {
+        match ClientProcess::open(pid, tid) {
             Ok(client) => {
                 self.clients.insert(pid, client);
             }
@@ -1190,6 +1192,24 @@ mod tests {
         engine.teardown();
     }
 
+    /// A pid whose CONNECT thread isn't its own, as when the client died
+    /// and its pid was reused, is never held, so never ended.
+    #[test]
+    fn a_client_not_reached_through_its_connect_thread_is_never_ended() {
+        let (mut engine, mut child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let pid = child.id();
+        engine.apply(Effect::Joined {
+            pid,
+            tid: u32::MAX - 3,
+        });
+        assert!(engine.clients.is_empty(), "fails closed");
+        engine.apply(Effect::Kill { pid });
+        assert!(engine.doomed.is_empty(), "nothing to end");
+        assert!(matches!(child.try_wait(), Ok(None)), "still running");
+        engine.teardown();
+        let _ = child.kill_single(Signal::Kill);
+    }
+
     #[test]
     fn the_shutdown_latch_waits_for_the_kill_and_is_bounded() {
         let shared = Shared::new(Waker::new().expect("Waker"));
@@ -1204,8 +1224,12 @@ mod tests {
     fn a_client_that_left_is_let_go_and_never_ended() {
         let (mut engine, mut child) = engine_on(Console::new(SIZE, condrv::key_for));
         let pid = child.id();
-        engine.apply(Effect::Joined { pid });
-        engine.apply(Effect::Joined { pid });
+        // Served as the engine serves it: opened through its CONNECT.
+        while engine.reply.is_none() {
+            engine.turn().expect("turn");
+        }
+        assert!(engine.clients.contains_key(&pid));
+        engine.apply(Effect::Joined { pid, tid: 0 });
         assert_eq!(engine.clients.len(), 1, "one handle per process");
         engine.apply(Effect::Left { pid });
         assert!(engine.clients.is_empty());

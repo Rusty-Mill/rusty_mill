@@ -37,6 +37,9 @@ const GRACE: Duration = Duration::from_secs(2);
 /// after it (#1259); 1 s more covers its teardown.
 const SHUTDOWN: Duration = Duration::from_secs(6);
 
+/// How long a child the host ended gets to exit before Drop kills it.
+const SETTLE: Duration = Duration::from_millis(250);
+
 /// How often [`exited_within`] looks at the child.
 const POLL: Duration = Duration::from_millis(10);
 
@@ -180,16 +183,27 @@ impl Drop for OwnHandle {
     }
 }
 
-/// Waits for the hung-up console to shut down, then kills `child` if it
+/// Waits for the hung-up console to shut down, then ends `child` if it
 /// is still running.
 fn shut_down(master: &OwnPtyMaster, mut child: WindowsChild) {
-    if master.wait_shut_down(SHUTDOWN) {
+    let done = master.wait_shut_down(SHUTDOWN);
+    end_survivor(&mut child, done);
+}
+
+/// Kill `child` if it still runs once the host is `done` (or gave up).
+/// The host being done doesn't prove the child ended: an engine error or
+/// panic closes the console without ending anyone, and an end can fail
+/// (review of 8703b3e4). Once done, the host's own end gets [`SETTLE`]
+/// to land first, so its exit code stands.
+fn end_survivor(child: &mut WindowsChild, done: bool) {
+    let settle = if done { SETTLE } else { Duration::ZERO };
+    if exited_within(child, settle).is_some() {
         return;
     }
-    if exited_within(&mut child, Duration::ZERO).is_none() {
-        // Nothing can report a failure here; a child that outlives this is
-        // already detached from a console that has closed.
-        let _ = child.kill_single(Signal::Kill);
+    if let Err(e) = child.kill_single(Signal::Kill) {
+        // Nothing can report it; a child that outlives this is already
+        // detached from a console that has closed.
+        eprintln!("rusty_term: the shell outlived its console and can't be killed: {e}");
     }
 }
 
@@ -495,6 +509,31 @@ mod tests {
         );
         rx.recv_timeout(Duration::from_secs(1))
             .expect("the child ended by the time the backend dropped");
+    }
+
+    /// The host being done doesn't stand for the child's end (review of
+    /// 8703b3e4): a child still running then, as after an engine error,
+    /// is killed.
+    #[test]
+    fn a_child_alive_after_the_host_is_done_is_killed() {
+        let cmd = super::shell_command(
+            "ping.exe -n 60 127.0.0.1",
+            &[],
+            std::env::temp_dir().into_os_string(),
+        )
+        .expect("command");
+        let (master, mut child) = rusty_conhost::OwnPty
+            .spawn_concrete(&cmd, platform::term::WinSize { rows: 24, cols: 80 })
+            .expect("spawn");
+        let start = Instant::now();
+        super::end_survivor(&mut child, true);
+        assert!(
+            start.elapsed() >= super::SETTLE,
+            "the host's end came first"
+        );
+        let status = super::exited_within(&mut child, Duration::from_secs(5));
+        assert!(status.is_some(), "killed");
+        drop(master);
     }
 
     /// A program named by a full path with spaces, followed by arguments,

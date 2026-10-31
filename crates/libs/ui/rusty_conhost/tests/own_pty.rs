@@ -403,21 +403,20 @@ fn ready_pids(stream: &Stream) -> Vec<u32> {
 }
 
 /// A process by pid, opened while it is known to run and ended on drop
-/// if a test fails before it exits. The held handle keeps the pid from
-/// being reused, so the drop never reaches another process.
-struct ReapedPid(u32, platform_windows::condrv::ClientProcess);
+/// if a test fails before it exits: adopted into a kill-on-close job. The
+/// held handle keeps the pid from being reused, so the drop never reaches
+/// another process.
+struct ReapedPid {
+    pid: u32,
+    _group: Box<dyn platform::process::GroupHandle>,
+}
 
 impl ReapedPid {
     fn open(pid: u32) -> ReapedPid {
-        let process = platform_windows::condrv::ClientProcess::open(pid).expect("open the probe");
-        ReapedPid(pid, process)
-    }
-}
-
-impl Drop for ReapedPid {
-    fn drop(&mut self) {
-        // A no-op once it has exited.
-        let _ = self.1.terminate();
+        let group = platform_windows::WindowsSpawner
+            .adopt(pid)
+            .expect("adopt the probe");
+        ReapedPid { pid, _group: group }
     }
 }
 
@@ -461,11 +460,11 @@ fn grandchildren_still_attached_are_ended_together_at_the_kill_bound() {
     for p in &probes {
         // TerminateProcess doesn't wait; the exit follows at once.
         let ended = Instant::now();
-        while spawner.is_alive(p.0).expect("is_alive") {
+        while spawner.is_alive(p.pid).expect("is_alive") {
             assert!(
                 ended.elapsed() < Duration::from_millis(500),
                 "probe {} runs on after the shutdown",
-                p.0
+                p.pid
             );
             std::thread::sleep(Duration::from_millis(50));
         }

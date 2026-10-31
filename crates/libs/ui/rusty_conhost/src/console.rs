@@ -189,11 +189,14 @@ pub(crate) enum Effect {
         pid: u32,
         event: Ctrl,
     },
-    /// A client process joined, before its CONNECT reply: while it waits
-    /// on that reply its pid can't name another process, so the engine
-    /// opens it now to end it at the grace deadline (#1259).
+    /// A client process joined, before its CONNECT reply. The engine
+    /// opens it now, to end it at the grace deadline (#1259), through
+    /// `tid`, the thread the CONNECT came from (its descriptor's object):
+    /// ConDrv doesn't keep a waiting client referenced, so `pid` alone
+    /// may by then name another process (design §7.3).
     Joined {
         pid: u32,
+        tid: u32,
     },
     /// A client process left, its last connection gone: Ctrl events
     /// still queued for it are moot, and dropping them keeps the queue
@@ -773,6 +776,7 @@ impl Console {
                 if joined {
                     fx.push(Effect::Joined {
                         pid: p.process as u32,
+                        tid: p.object as u32,
                     });
                 }
                 fx.push(Effect::Reply(reply));
@@ -1775,11 +1779,15 @@ pub(crate) mod tests {
         h.connect(1, "");
         h.ev(Event::ChildExited);
         let info = msg::CONNECTION_INFORMATION_LEN as u32;
-        let (r, fx) = h.packet(msg::CONNECT, 7, 0, &msg::server_msg(""), info);
+        let (r, fx) = h.packet(msg::CONNECT, 7, 70, &msg::server_msg(""), info);
         assert_eq!(r.status, msg::STATUS_SUCCESS);
         assert_eq!(
             fx,
-            [Effect::Joined { pid: 7 }, Effect::Reply(r), close_to(7)],
+            [
+                Effect::Joined { pid: 7, tid: 70 },
+                Effect::Reply(r),
+                close_to(7)
+            ],
             "after its reply"
         );
         let fx = h.ev(Event::GraceExpired);
@@ -1793,8 +1801,8 @@ pub(crate) mod tests {
     fn a_client_joins_before_its_connect_reply_and_only_on_success() {
         let mut h = Host::new();
         let info = msg::CONNECTION_INFORMATION_LEN as u32;
-        let (r, fx) = h.packet(msg::CONNECT, 3, 0, &msg::server_msg(""), info);
-        assert_eq!(fx, [Effect::Joined { pid: 3 }, Effect::Reply(r)]);
+        let (r, fx) = h.packet(msg::CONNECT, 3, 30, &msg::server_msg(""), info);
+        assert_eq!(fx, [Effect::Joined { pid: 3, tid: 30 }, Effect::Reply(r)]);
         let (r, fx) = h.packet(msg::CONNECT, 4, 0, &msg::server_msg(""), 0);
         assert_eq!(r.status, msg::STATUS_INVALID_BUFFER_SIZE);
         assert_eq!(fx, [Effect::Reply(r)], "a refused client never joins");

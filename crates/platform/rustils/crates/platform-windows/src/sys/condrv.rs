@@ -1026,6 +1026,31 @@ pub fn open_process(pid: u32) -> Result<OwnedWinHandle> {
         .ok_or_else(|| errmap::last_win32_err("OpenProcess", OsStr::new("")))
 }
 
+/// `OpenThread(THREAD_QUERY_LIMITED_INFORMATION)` on the thread a console
+/// client's CONNECT came from. While open, the handle keeps the thread
+/// object, and the process object it references, from being freed.
+pub fn open_thread(tid: u32) -> Result<OwnedWinHandle> {
+    // SAFETY: no pointers; a tid naming no thread gives NULL, checked
+    // below, not UB.
+    let raw = unsafe { w::OpenThread(w::THREAD_QUERY_LIMITED_INFORMATION, 0, tid) };
+    // SAFETY: `raw` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    unsafe { OwnedWinHandle::from_raw(raw) }
+        .ok_or_else(|| errmap::last_win32_err("OpenThread", OsStr::new("")))
+}
+
+/// The pid of the process `thread` belongs to: `GetProcessIdOfThread`.
+pub fn process_of_thread(thread: &OwnedWinHandle) -> Result<u32> {
+    // SAFETY: `thread` is an open handle for the life of the borrow.
+    match unsafe { w::GetProcessIdOfThread(thread.as_raw()) } {
+        0 => Err(errmap::last_win32_err(
+            "GetProcessIdOfThread",
+            OsStr::new(""),
+        )),
+        pid => Ok(pid),
+    }
+}
+
 /// Whether `process` (opened with `SYNCHRONIZE`) has exited: a zero
 /// timeout `WaitForSingleObject`.
 pub fn has_exited(process: &OwnedWinHandle) -> bool {
