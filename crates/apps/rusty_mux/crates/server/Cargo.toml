@@ -30,10 +30,14 @@ rusty_uuid = { workspace = true }
 rusty_crypto_key = { workspace = true }
 platform = { workspace = true }
 
-# Linux and Windows (ConPTY over AF_UNIX); other targets build a stub.
+# Linux and Windows (ConPTY or rusty_conhost, over AF_UNIX); other targets
+# build a stub.
 [target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { workspace = true }
 rusty_libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 platform-windows = { workspace = true }
+# `RUSTY_CONSOLE_HOST=own`: our own console host instead of ConPTY. Links
+# rusty_term_core without `l13`, as the line above for the server's grids.
+rusty_conhost = { workspace = true }

@@ -22,6 +22,7 @@ fn a_client_of_another_user_is_refused() {
                 program: "/bin/sh".into(),
                 args: Vec::new(),
                 cwd: "/".into(),
+                console_host: ConsoleHost::default(),
             };
             let other = rusty_libc::process::geteuid().wrapping_add(1);
             serve_for(listener, config, None, |s: &UnixStream| owned_by(s, other))
@@ -67,4 +68,27 @@ fn a_client_of_this_process_is_allowed() {
         drop(client.join().expect("client"));
     });
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn the_console_host_defaults_to_conpty_and_parses_in_any_case() {
+    use std::ffi::OsStr;
+    let parse = |v: &str| ConsoleHost::parse(Some(OsStr::new(v)));
+    assert_eq!(ConsoleHost::parse(None), Ok(ConsoleHost::ConPty));
+    assert_eq!(parse("conpty"), Ok(ConsoleHost::ConPty));
+    assert_eq!(parse("Own"), Ok(ConsoleHost::Own));
+    assert_eq!(parse("OWN"), Ok(ConsoleHost::Own));
+}
+
+/// No silent fallback: a value that names no host is refused, and named.
+#[test]
+fn an_unknown_console_host_is_an_error() {
+    use std::ffi::OsStr;
+    for value in ["", "openconsole", " own"] {
+        let err = ConsoleHost::parse(Some(OsStr::new(value))).expect_err(value);
+        assert!(
+            err.contains(&format!("RUSTY_CONSOLE_HOST={value}:")),
+            "{err}"
+        );
+    }
 }

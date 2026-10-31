@@ -12,7 +12,7 @@ use std::time::Duration;
 
 #[cfg(windows)]
 use platform_windows::WindowsUnixListener as StdListener;
-use rusty_mux_server::{Config, serve};
+use rusty_mux_server::{Config, ConsoleHost, serve};
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::{Builder, LocalOptions};
 #[cfg(unix)]
@@ -29,12 +29,14 @@ fn shell() -> Config {
             program: "cmd.exe".into(),
             args: vec!["/Q".into()],
             cwd: std::env::temp_dir().into_os_string(),
+            console_host: ConsoleHost::from_env().expect("RUSTY_CONSOLE_HOST"),
         }
     } else {
         Config {
             program: "/bin/sh".into(),
             args: Vec::new(),
             cwd: "/".into(),
+            console_host: ConsoleHost::default(),
         }
     }
 }

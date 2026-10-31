@@ -41,7 +41,7 @@ pub mod style;
 #[cfg(any(target_os = "linux", windows))]
 mod terminal;
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::time::Duration;
 
@@ -58,6 +58,47 @@ pub struct Config {
     pub args: Vec<OsString>,
     /// The working directory of a new block, unless the request names one.
     pub cwd: OsString,
+    /// Which console host runs a block's program on Windows; other
+    /// platforms ignore it.
+    pub console_host: ConsoleHost,
+}
+
+/// The Windows console host behind each block.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConsoleHost {
+    /// Windows' ConPTY.
+    #[default]
+    ConPty,
+    /// Our own host, `rusty_conhost`.
+    Own,
+}
+
+impl ConsoleHost {
+    /// The variable that picks the host: `conpty` (the default when it is
+    /// unset) or `own`.
+    pub const ENV: &str = "RUSTY_CONSOLE_HOST";
+
+    /// The host [`Self::ENV`] names. Any other value is an error, never a
+    /// silent fallback to ConPTY.
+    pub fn from_env() -> Result<Self, String> {
+        Self::parse(std::env::var_os(Self::ENV).as_deref())
+    }
+
+    /// The host `value` names, in any case; `None` is the default.
+    pub fn parse(value: Option<&OsStr>) -> Result<Self, String> {
+        let Some(value) = value else {
+            return Ok(Self::default());
+        };
+        match value.to_str().map(str::to_ascii_lowercase).as_deref() {
+            Some("conpty") => Ok(Self::ConPty),
+            Some("own") => Ok(Self::Own),
+            _ => Err(format!(
+                "{}={}: not a console host (conpty or own)",
+                Self::ENV,
+                value.display()
+            )),
+        }
+    }
 }
 
 /// The server's UDP side (`--udp`): one socket for every association.

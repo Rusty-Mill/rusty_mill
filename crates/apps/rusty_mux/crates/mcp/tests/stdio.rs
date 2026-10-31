@@ -16,7 +16,7 @@ use rusty_mcp_server::{StdioConfig, serve_lines};
 use rusty_mux_ctl::Env;
 use rusty_mux_mcp::DEFAULT_TIMEOUT;
 use rusty_mux_proto::schema::CATALOG;
-use rusty_mux_server::{Config, serve};
+use rusty_mux_server::{Config, ConsoleHost, serve};
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::{Builder, LocalOptions};
 
@@ -44,6 +44,7 @@ fn start_server() -> PathBuf {
                 program: "/bin/sh".into(),
                 args: Vec::new(),
                 cwd: "/".into(),
+                console_host: ConsoleHost::default(),
             };
             serve(listener, config).await.expect("serve");
         });

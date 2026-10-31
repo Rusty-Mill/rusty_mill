@@ -9,8 +9,8 @@ use rusty_tokio::time::timeout;
 use rusty_tokio::{Builder, LocalOptions};
 
 use super::*;
-use crate::Config;
 use crate::state::State;
+use crate::{Config, ConsoleHost};
 
 const PATIENCE: Duration = Duration::from_secs(20);
 /// The longest a test peer waits for a datagram before looking again.
@@ -34,6 +34,7 @@ async fn server_on(bind: &str, idle: Duration) -> (Shared, Registry, SocketAddr)
         program: "unused".into(),
         args: Vec::new(),
         cwd: "/".into(),
+        console_host: ConsoleHost::default(),
     };
     server_with(bind, program, idle, LEASE_SILENCE).await
 }
@@ -352,6 +353,7 @@ async fn bare_link(peer: &mut Peer, server: Rc<UdpSocket>, registry: Registry) -
             program: "unused".into(),
             args: Vec::new(),
             cwd: "/".into(),
+            console_host: ConsoleHost::default(),
         },
         None,
     );
@@ -507,12 +509,14 @@ fn shell() -> Config {
             program: "cmd.exe".into(),
             args: vec!["/Q".into()],
             cwd: std::env::temp_dir().into_os_string(),
+            console_host: ConsoleHost::from_env().expect("RUSTY_CONSOLE_HOST"),
         }
     } else {
         Config {
             program: "/bin/sh".into(),
             args: Vec::new(),
             cwd: "/".into(),
+            console_host: ConsoleHost::default(),
         }
     }
 }

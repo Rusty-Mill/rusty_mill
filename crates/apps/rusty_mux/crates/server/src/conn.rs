@@ -207,7 +207,7 @@ impl Frames {
 #[cfg(all(test, unix))]
 mod regression {
     use super::*;
-    use crate::Config;
+    use crate::{Config, ConsoleHost};
     use rusty_mux_proto::{Features, encode};
     use rusty_tokio::io::UnixStream;
     use rusty_tokio::{Builder, LocalOptions};
@@ -224,6 +224,7 @@ mod regression {
                     program: "/bin/sh".into(),
                     args: vec![],
                     cwd: "/".into(),
+                    console_host: ConsoleHost::default(),
                 },
                 None,
             );
@@ -293,8 +294,8 @@ mod tests {
     use rusty_tokio::{Builder, LocalOptions};
 
     use super::*;
-    use crate::Config;
     use crate::outbox::outbox;
+    use crate::{Config, ConsoleHost};
 
     /// An orphan's connection waits out its grace holding nothing, and
     /// stops waiting once the client is taken over, rather than for the
@@ -309,6 +310,7 @@ mod tests {
                 program: "/bin/sh".into(),
                 args: Vec::new(),
                 cwd: "/".into(),
+                console_host: ConsoleHost::default(),
             };
             let state = State::shared(config, None);
             let (theirs, ours) = UnixStream::pair().expect("pair");

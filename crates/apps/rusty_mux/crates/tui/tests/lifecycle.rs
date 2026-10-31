@@ -794,7 +794,7 @@ fn real_udp_server() -> (PathBuf, u16) {
 /// A real server, offering UDP on 127.0.0.1 when `udp` holds; with the
 /// UDP port it took.
 fn real_server_with(udp: bool) -> (PathBuf, Option<u16>) {
-    use rusty_mux_server::{Config, Udp, serve, serve_udp};
+    use rusty_mux_server::{Config, ConsoleHost, Udp, serve, serve_udp};
     use rusty_tokio::io::{UdpSocket, UnixListener};
     use rusty_tokio::{Builder, LocalOptions};
 
@@ -817,6 +817,7 @@ fn real_server_with(udp: bool) -> (PathBuf, Option<u16>) {
                 program: "/bin/sh".into(),
                 args: Vec::new(),
                 cwd: "/".into(),
+                console_host: ConsoleHost::default(),
             };
             if !udp {
                 ready_tx.send(None).expect("ready");

@@ -12,7 +12,9 @@
 //! each block runs `%COMSPEC%` (or `cmd.exe`) in `%USERPROFILE%` (or `C:\`)
 //! on a pseudo console. Put the socket under `%LOCALAPPDATA%`, for example
 //! `rusty-mux-server %LOCALAPPDATA%\rusty-mux.sock`; the server limits the
-//! file to the current user.
+//! file to the current user. `RUSTY_CONSOLE_HOST=own` hosts the console
+//! ourselves (rusty_conhost) instead of ConPTY; `conpty` or unset keeps
+//! ConPTY, and any other value stops the server before it starts.
 
 use std::ffi::OsString;
 use std::net::{IpAddr, SocketAddr};
@@ -20,7 +22,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use rusty_mux_server::{Config, Udp, serve, serve_udp};
+use rusty_mux_server::{Config, ConsoleHost, Udp, serve, serve_udp};
 use rusty_tokio::io::{UdpSocket, UnixListener};
 use rusty_tokio::{Builder, LocalOptions};
 
@@ -46,7 +48,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(args) {
+    let console_host = match ConsoleHost::from_env() {
+        Ok(host) => host,
+        Err(err) => {
+            eprintln!("rusty-mux-server: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    match run(args, console_host) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("rusty-mux-server: {err}");
@@ -95,8 +104,8 @@ fn udp_addr(value: &str) -> Result<SocketAddr, String> {
         .map_err(|_| format!("--udp {value}: not an address"))
 }
 
-fn run(args: Args) -> std::io::Result<()> {
-    let config = default_config();
+fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
+    let config = default_config(console_host);
     let socket = args.socket;
     let runtime = Builder::new_current_thread().build_local(&LocalOptions::default())?;
     runtime.block_on(async {
@@ -122,20 +131,22 @@ fn run(args: Args) -> std::io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn default_config() -> Config {
+fn default_config(console_host: ConsoleHost) -> Config {
     Config {
         program: std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh")),
         args: Vec::new(),
         cwd: std::env::var_os("HOME").unwrap_or_else(|| OsString::from("/")),
+        console_host,
     }
 }
 
 #[cfg(windows)]
-fn default_config() -> Config {
+fn default_config(console_host: ConsoleHost) -> Config {
     Config {
         program: std::env::var_os("COMSPEC").unwrap_or_else(|| OsString::from("cmd.exe")),
         args: Vec::new(),
         cwd: std::env::var_os("USERPROFILE").unwrap_or_else(|| OsString::from("C:\\")),
+        console_host,
     }
 }
 

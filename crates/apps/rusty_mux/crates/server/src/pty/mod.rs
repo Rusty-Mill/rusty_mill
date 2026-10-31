@@ -1,6 +1,7 @@
 //! A block's PTY and the program running on it. Linux drives the master fd
-//! from the reactor; Windows bridges ConPTY's pipes with two threads per
-//! block. Both expose the same `spawn`, `Pty` and `Process`.
+//! from the reactor; Windows bridges the console host's master (ConPTY's or
+//! our own) with two threads per block. Both expose the same `spawn`, `Pty`
+//! and `Process`.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
