@@ -1496,6 +1496,10 @@ mod client {
         /// Keys typed while the lease is asked for, sent once it is held.
         waiting: Vec<Vec<u8>>,
         leased: bool,
+        /// Continues a client that may still hold the block's lease on the
+        /// server: until [`App::lease`] settles it, asked for again in
+        /// focus, given back out of it.
+        retained: bool,
         /// The size last asked for, until the block reports a resize.
         sizing: Option<Size>,
         reader: Option<JoinHandle<()>>,
@@ -2545,11 +2549,15 @@ mod client {
                     true if !pane.leased && pane.asking.is_none() => {
                         let block = *block;
                         pane.asking = Some(pane.send(|req| Message::AcquireLease { req, block }));
+                        pane.retained = false;
                     }
-                    false if pane.leased => {
+                    // The server refuses a release of a lease that is not
+                    // this client's, so another holder keeps it.
+                    false if pane.leased || pane.retained => {
                         let block = *block;
                         pane.send(|req| Message::ReleaseLease { req, block });
                         pane.leased = false;
+                        pane.retained = false;
                         pane.unpredict();
                     }
                     _ => {}
@@ -2622,6 +2630,7 @@ mod client {
                 // Asked for again even on a takeover: silence may have
                 // released the lease meanwhile (UDP-TRANSPORT.md).
                 leased: false,
+                retained: opened.resumed.is_some(),
                 sizing: None,
                 reader: Some(reader),
                 predict: (self.predicting && opened.features.contains(PREDICT))
@@ -3272,6 +3281,76 @@ mod client {
             );
             grant(&mut app, &inbox, &a_new, &asked);
             assert_eq!(typed_in(&sent(&a_new)), [b"typed".to_vec()]);
+        }
+
+        /// Whether `messages` give a lease back.
+        #[cfg(unix)]
+        fn released(messages: &[Message]) -> bool {
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::ReleaseLease { .. }))
+        }
+
+        /// A's lease, kept by the server through a short loss, is given
+        /// back once the focus moved to B while the path was down; B's keys
+        /// wait for B's own lease.
+        #[cfg(unix)]
+        #[test]
+        fn a_lease_left_out_of_focus_through_a_loss_is_given_back() {
+            let (mut app, inbox, [_control, a_old, _b_old]) = app(Some(Box::new(Never)));
+            sent(&a_old);
+            app.lose(false);
+            app.typed(Action::Focus(Dir::Right));
+            let (back, _control, a_new, b_new) = back(takeover(1));
+            app.take(Input::Rejoined(Ok(back)));
+            assert_eq!(app.focus, block(2));
+            app.typed(input(b"for-b"));
+            let at_a = sent(&a_new);
+            assert!(released(&at_a), "A's lease is given back");
+            assert!(lease_asked(&at_a).is_none() && typed_in(&at_a).is_empty());
+            let at_b = sent(&b_new);
+            assert!(typed_in(&at_b).is_empty(), "not before B holds the lease");
+            grant(&mut app, &inbox, &b_new, &at_b);
+            assert_eq!(typed_in(&sent(&b_new)), [b"for-b".to_vec()]);
+        }
+
+        /// Giving back a lease the client no longer holds (released by
+        /// silence, or taken by another client) is refused by the server,
+        /// which leaves any other holder be; the client asks once only.
+        #[cfg(unix)]
+        #[test]
+        fn a_refused_give_back_is_not_repeated() {
+            let (mut app, inbox, [_control, a_old, _b_old]) = app(Some(Box::new(Never)));
+            sent(&a_old);
+            app.lose(false);
+            app.typed(Action::Focus(Dir::Right));
+            let (back, _control, a_new, _b_new) = back(takeover(1));
+            app.take(Input::Rejoined(Ok(back)));
+            let req = sent(&a_new)
+                .iter()
+                .find_map(|m| match m {
+                    Message::ReleaseLease { req, .. } => Some(*req),
+                    _ => None,
+                })
+                .expect("A's lease given back");
+            let mut server = Conn::new(a_new.try_clone().expect("clone"));
+            server
+                .send(&Message::Failed {
+                    req,
+                    reason: "no lease".into(),
+                    code: None,
+                })
+                .expect("failed");
+            loop {
+                if let input @ Input::Pane(..) =
+                    inbox.recv_timeout(Duration::from_secs(5)).expect("answer")
+                {
+                    break app.take(input);
+                }
+            }
+            app.typed(Action::Focus(Dir::Right));
+            assert!(!released(&sent(&a_new)), "given back once");
+            assert!(app.ended.is_none());
         }
 
         /// A lease taken by another client while the path was away is

@@ -307,7 +307,9 @@ association's `Close`, ends its connections as a socket close does.
   is no longer the association's, so the client asks for its focused
   block's lease again on every takeover rather than assume it still holds
   it; keys typed until then wait for the answer, and are dropped if
-  someone else took the lease.
+  someone else took the lease. A taken-over block out of focus gives its
+  lease back, which the server refuses unless the client still holds it,
+  so a lease kept through a short loss is not left held.
 - *A, not chosen:* would have treated 30 s of silence as the end of each
   connection, followed by the usual 30 s grace and then a new SSH login.
 
