@@ -1294,6 +1294,26 @@ mod tests {
         assert_eq!(status, ExitStatus::Code(0xC000_013A_u32 as i32));
     }
 
+    /// As above, but the client dies before the teardown delivers its
+    /// reply: the delivery fails, and an unconfirmed client is never
+    /// ended, so nothing is doomed (fails closed).
+    #[test]
+    fn a_client_joining_at_the_deadline_that_dies_first_is_never_ended() {
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let pid = child.id();
+        while engine.reply.is_none() {
+            engine.turn().expect("turn");
+        }
+        engine.arm_grace(Instant::now());
+        engine.apply(Effect::Kill { pid });
+        child.kill_single(Signal::Kill).expect("kill");
+        let _ = Box::new(child).wait().expect("wait");
+        engine.apply(Effect::CloseServer);
+        assert!(engine.joining.is_none());
+        assert!(engine.clients.is_empty(), "never held");
+        assert!(engine.doomed.is_empty(), "nothing to end");
+    }
+
     /// A pid whose CONNECT thread isn't its own, as when the client died
     /// and its pid was reused, is never held, so never ended.
     #[test]

@@ -24,8 +24,9 @@ type Spawn = fn(Box<dyn FnOnce() + Send>) -> io::Result<()>;
 const MAX_WORKERS: usize = 8;
 
 /// Runs jobs off the caller's thread; [`join`](Self::join) waits for every
-/// job it accepted, wherever it runs. Once joined, it runs a later job on
-/// the caller's thread, so handles should be dropped before the joiner.
+/// job accepted before it returns, wherever it runs. Once joining, it runs
+/// a job on the caller's thread, still counted, so handles should be
+/// dropped before the joiner.
 pub(crate) struct Reaper {
     state: Mutex<State>,
     /// Signalled when `in_flight` reaches 0.
@@ -59,15 +60,17 @@ impl Reaper {
     /// Queues `job` for a worker, starting one if fewer than
     /// [`MAX_WORKERS`] run, and returns at once. If no thread can start,
     /// the job waits in the queue, still counted: a later `run` tries
-    /// again, and `join` runs what is left. Once joined, runs `job` here.
+    /// again, and `join` runs what is left. Once joining, runs `job` here,
+    /// counted, so a `join` still waiting waits for it too (review of
+    /// f24f50b3).
     pub(crate) fn run(self: &Arc<Self>, job: Job) {
         let mut state = self.lock();
+        state.in_flight += 1;
         if state.joined {
             drop(state);
-            run_logged(job);
+            self.finish(job);
             return;
         }
-        state.in_flight += 1;
         state.queue.push_back(job);
         if state.workers >= MAX_WORKERS {
             return;
@@ -82,8 +85,9 @@ impl Reaper {
     }
 
     /// Waits until every accepted job has finished, running any still
-    /// queued here; later jobs run on the caller's thread. Bounded, as
-    /// each job bounds its own wait.
+    /// queued here, including jobs run inline on other threads while it
+    /// waits; later jobs run on the caller's thread. Bounded, as each job
+    /// bounds its own wait.
     pub(crate) fn join(&self) {
         self.lock().joined = true;
         self.drain();
@@ -275,6 +279,53 @@ mod tests {
         }
         reaper.join();
         assert!(flags.iter().all(|d| d.load(Ordering::SeqCst)));
+    }
+
+    /// A job submitted after `join` started, while it waits on a running
+    /// job, runs inline on its own thread and `join` waits for it too
+    /// (review of f24f50b3).
+    #[test]
+    fn a_job_run_inline_while_join_waits_is_waited_for() {
+        use std::sync::mpsc::channel;
+        let reaper = Arc::new(Reaper::new());
+        let (a_started, a_running) = channel();
+        let (release_a, a_gate) = channel::<()>();
+        reaper.run(Box::new(move || {
+            a_started.send(()).expect("started");
+            let _ = a_gate.recv();
+        }));
+        a_running.recv().expect("A runs on a worker");
+        let joiner = {
+            let reaper = Arc::clone(&reaper);
+            std::thread::spawn(move || reaper.join())
+        };
+        while !reaper.lock().joined {
+            std::thread::yield_now();
+        }
+        let (b_started, b_running) = channel();
+        let (release_b, b_gate) = channel::<()>();
+        let done = Arc::new(AtomicBool::new(false));
+        let closer = {
+            let (reaper, done) = (Arc::clone(&reaper), Arc::clone(&done));
+            std::thread::spawn(move || {
+                reaper.run(Box::new(move || {
+                    b_started.send(()).expect("started");
+                    let _ = b_gate.recv();
+                    done.store(true, Ordering::SeqCst);
+                }));
+            })
+        };
+        b_running.recv().expect("B runs inline");
+        release_a.send(()).expect("release A");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!joiner.is_finished(), "join waits for B");
+        release_b.send(()).expect("release B");
+        joiner.join().expect("joiner");
+        assert!(
+            done.load(Ordering::SeqCst),
+            "B finished before join returned"
+        );
+        closer.join().expect("closer");
     }
 
     /// Jobs queued while workers retire still run before `join` (review
