@@ -16,6 +16,11 @@ use platform::term::WinSize;
 
 /// How long clients have to exit after CTRL_CLOSE before the server closes.
 pub(crate) const GRACE: Duration = Duration::from_secs(2);
+/// How long after CTRL_CLOSE a client still attached at the close is
+/// ended (#1259): Windows' own bound on a CTRL_CLOSE handler, so a handler
+/// that Windows would let finish isn't cut short, while one the console's
+/// close left behind can't run on.
+pub(crate) const KILL_AFTER: Duration = Duration::from_secs(5);
 
 /// Terminal input taken per turn.
 pub(crate) const INPUT_SLICE: usize = 16 * 1024;

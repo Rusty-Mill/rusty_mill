@@ -146,6 +146,8 @@ pub fn read_batch(handle: &mut dyn BackendHandle, buf: &mut [u8]) -> Result<usiz
 mod cmdline;
 #[cfg(windows)]
 pub mod own;
+#[cfg(any(windows, test))]
+mod reaper;
 #[cfg(unix)]
 pub mod unix;
 #[cfg(windows)]

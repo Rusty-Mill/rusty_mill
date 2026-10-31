@@ -243,6 +243,142 @@ fn connect_disconnect_round_trip_and_exit_code() {
     assert_eq!(status, Some(ExitStatus::Code(7)));
 }
 
+/// A client is opened only through the thread its CONNECT came from
+/// (#1259): a pid that thread doesn't belong to, as a reused pid would
+/// be, is refused and that process is never touched.
+#[test]
+fn a_client_is_opened_only_through_its_connect_thread() {
+    let _serial = lock();
+    let mut attached = condrv::spawn_attached(&command("ping.exe", &["-n", "30", "127.0.0.1"]))
+        .expect("spawn_attached");
+    let waker = Waker::new().expect("Waker::new");
+    attached.server.submit_read(None).expect("submit_read");
+    let deadline = Instant::now() + BUDGET;
+    let connect = loop {
+        let ready = attached
+            .server
+            .wait(&waker, None, Some(deadline))
+            .expect("wait");
+        if let Some(d) = ready.io {
+            break d;
+        }
+        assert!(Instant::now() < deadline, "no CONNECT");
+    };
+    assert_eq!(connect.function, CONNECT);
+    let (pid, tid) = (connect.process as u32, connect.object as u32);
+    assert_eq!(pid, attached.child.id());
+
+    let mut other = std::process::Command::new("ping.exe")
+        .args(["-n", "30", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn another process");
+    let refused = condrv::ClientProcess::open(other.id(), tid).err();
+    assert_eq!(refused.map(|e| e.kind), Some(ErrorKind::InvalidInput));
+    let gone = condrv::ClientProcess::open(pid, u32::MAX - 3).err();
+    assert!(gone.is_some(), "a thread that doesn't exist is refused");
+    assert!(
+        matches!(other.try_wait(), Ok(None)),
+        "the other process runs on"
+    );
+
+    let client = condrv::ClientProcess::open(pid, tid).expect("the CONNECT's client");
+    client.terminate().expect("terminate");
+    let status = Box::new(attached.child).wait().expect("wait");
+    assert_eq!(status, ExitStatus::Code(0xC000_013A_u32 as i32));
+    let _ = other.kill();
+    let _ = other.wait();
+}
+
+/// What ConDrv does with a CONNECT whose client dies before the host
+/// reads it (#1259, design §7.3): it must not be delivered, or a host
+/// could not tell the client's thread id from a reused one. Probe for
+/// the identity check's generation argument; run on Windows.
+#[test]
+fn a_connect_whose_client_died_unread_is_not_delivered() {
+    let _serial = lock();
+    let mut attached = condrv::spawn_attached(&command("ping.exe", &["-n", "30", "127.0.0.1"]))
+        .expect("spawn_attached");
+    // The child blocks in its CONNECT; nothing reads it yet.
+    std::thread::sleep(Duration::from_millis(500));
+    let pid = attached.child.id();
+    attached.child.kill_single(Signal::Kill).expect("kill");
+    let status = Box::new(attached.child).wait().expect("wait");
+    assert!(matches!(status, ExitStatus::Code(_)), "{status:?}");
+    let waker = Waker::new().expect("Waker::new");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        match attached.server.submit_read(None) {
+            Ok(()) => {}
+            Err(e) if e.kind == ErrorKind::BrokenPipe => break,
+            Err(e) => panic!("submit_read: {e:?}"),
+        }
+        match attached.server.wait(&waker, None, Some(deadline)) {
+            Ok(Ready { io: Some(d), .. }) => {
+                seen.push((d.function, d.process, d.object));
+                if d.function == CONNECT {
+                    break;
+                }
+                // Answer it so the next read can be issued.
+                attached
+                    .server
+                    .complete_io(&IoComplete {
+                        id: d.id,
+                        status: STATUS_SUCCESS,
+                        information: 0,
+                        write_back: &[],
+                    })
+                    .expect("complete_io");
+            }
+            Ok(_) => break,
+            Err(e) if e.kind == ErrorKind::BrokenPipe => break,
+            Err(e) => panic!("wait: {e:?}"),
+        }
+    }
+    assert!(
+        !seen.iter().any(|&(f, _, _)| f == CONNECT),
+        "a dead client's CONNECT (pid {pid}) was delivered: {seen:?}"
+    );
+}
+
+/// What completing a CONNECT does once its client has died after the
+/// host read it (#1259): a probe for whether a successful reply proves the
+/// client's thread was alive when the host opened it. Run on Windows.
+#[test]
+fn a_connect_reply_to_a_client_that_died_after_the_read_fails() {
+    let _serial = lock();
+    let mut attached = condrv::spawn_attached(&command("ping.exe", &["-n", "30", "127.0.0.1"]))
+        .expect("spawn_attached");
+    let waker = Waker::new().expect("Waker::new");
+    attached.server.submit_read(None).expect("submit_read");
+    let deadline = Instant::now() + BUDGET;
+    let connect = loop {
+        let ready = attached
+            .server
+            .wait(&waker, None, Some(deadline))
+            .expect("wait");
+        if let Some(d) = ready.io {
+            break d;
+        }
+        assert!(Instant::now() < deadline, "no CONNECT");
+    };
+    assert_eq!(connect.function, CONNECT);
+    let _payload = read_all(&mut attached.server, &connect);
+    attached.child.kill_single(Signal::Kill).expect("kill");
+    let _ = Box::new(attached.child).wait().expect("wait");
+    std::thread::sleep(Duration::from_millis(200));
+    let info = connection_information();
+    let done = attached.server.complete_io(&IoComplete {
+        id: connect.id,
+        status: STATUS_SUCCESS,
+        information: info.len(),
+        write_back: &info,
+    });
+    let err = done.expect_err("the reply to a dead client fails");
+    eprintln!("dead-client CONNECT reply: {err:?}");
+}
+
 #[test]
 fn packet_bounds_and_completion_are_checked() {
     let _serial = lock();

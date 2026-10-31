@@ -1014,6 +1014,60 @@ pub fn key_scan(ch: u16) -> i16 {
     unsafe { w::VkKeyScanW(ch) }
 }
 
+/// `OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE)` on a console client's
+/// pid: enough to end it and to see whether it has exited.
+pub fn open_process(pid: u32) -> Result<OwnedWinHandle> {
+    // SAFETY: no pointers; a pid naming no process gives NULL, checked
+    // below, not UB.
+    let raw = unsafe { w::OpenProcess(w::PROCESS_TERMINATE | w::SYNCHRONIZE, 0, pid) };
+    // SAFETY: `raw` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    unsafe { OwnedWinHandle::from_raw(raw) }
+        .ok_or_else(|| errmap::last_win32_err("OpenProcess", OsStr::new("")))
+}
+
+/// `OpenThread(THREAD_QUERY_LIMITED_INFORMATION)` on the thread a console
+/// client's CONNECT came from. While open, the handle keeps the thread
+/// object, and the process object it references, from being freed.
+pub fn open_thread(tid: u32) -> Result<OwnedWinHandle> {
+    // SAFETY: no pointers; a tid naming no thread gives NULL, checked
+    // below, not UB.
+    let raw = unsafe { w::OpenThread(w::THREAD_QUERY_LIMITED_INFORMATION, 0, tid) };
+    // SAFETY: `raw` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    unsafe { OwnedWinHandle::from_raw(raw) }
+        .ok_or_else(|| errmap::last_win32_err("OpenThread", OsStr::new("")))
+}
+
+/// The pid of the process `thread` belongs to: `GetProcessIdOfThread`.
+pub fn process_of_thread(thread: &OwnedWinHandle) -> Result<u32> {
+    // SAFETY: `thread` is an open handle for the life of the borrow.
+    match unsafe { w::GetProcessIdOfThread(thread.as_raw()) } {
+        0 => Err(errmap::last_win32_err(
+            "GetProcessIdOfThread",
+            OsStr::new(""),
+        )),
+        pid => Ok(pid),
+    }
+}
+
+/// Whether `process` (opened with `SYNCHRONIZE`) has exited: a zero
+/// timeout `WaitForSingleObject`.
+pub fn has_exited(process: &OwnedWinHandle) -> bool {
+    // SAFETY: `process` is an open handle for the life of the borrow.
+    unsafe { w::WaitForSingleObject(process.as_raw(), 0) == w::WAIT_OBJECT_0 }
+}
+
+/// `TerminateProcess(process, code)`. It starts the termination and
+/// doesn't wait for it.
+pub fn terminate(process: &OwnedWinHandle, code: u32) -> Result<()> {
+    // SAFETY: `process` is an open handle for the life of the borrow.
+    if unsafe { w::TerminateProcess(process.as_raw(), code) } == 0 {
+        return Err(errmap::last_win32_err("TerminateProcess", OsStr::new("")));
+    }
+    Ok(())
+}
+
 /// Whether `ConsoleControl` resolves.
 pub fn has_console_control() -> bool {
     console_control().is_some()

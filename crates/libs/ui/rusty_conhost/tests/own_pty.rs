@@ -7,7 +7,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use platform::error::ErrorKind;
-use platform::process::{Child, Command, ExitStatus, GroupSpec};
+use platform::process::{Child, Command, ExitStatus, GroupSpec, Spawner as _};
 use platform::pty::PtyMaster;
 use platform::term::WinSize;
 use platform_windows::{WindowsChild, WindowsPty};
@@ -372,6 +372,110 @@ fn a_client_that_holds_ctrl_close_is_cut_off_at_the_deadline() {
     assert_eq!(master.read(&mut buf).expect("EOF again"), 0);
 }
 
+/// `STATUS_CONTROL_C_EXIT`, the code CTRL_CLOSE ends a process with.
+const CONTROL_C_EXIT: i32 = 0xC000_013A_u32 as i32;
+/// When the host ends a client still attached at the close: 5 s from
+/// CTRL_CLOSE, Windows' own bound on a handler (#1259).
+const KILL_AFTER: Duration = Duration::from_secs(5);
+/// Slack on the host's and Windows' timing.
+const SLACK: Duration = Duration::from_millis(1500);
+
+#[test]
+fn a_client_holding_ctrl_close_past_the_grace_is_ended_by_the_kill_bound() {
+    let _g = lock();
+    let (master, mut stream, mut child) = holding(60_000);
+    let started = Instant::now();
+    master.hang_up();
+    stream.until("ctrl-close");
+    let status = exit_of(&mut child);
+    let took = started.elapsed();
+    assert!(took >= GRACE, "ended after {took:?}, before the grace");
+    assert!(took < KILL_AFTER + SLACK, "ended after {took:?}");
+    assert_eq!(status, ExitStatus::Code(CONTROL_C_EXIT));
+}
+
+/// Every `ready pid=<pid>` line so far.
+fn ready_pids(stream: &Stream) -> Vec<u32> {
+    plain_lines(&stream.out)
+        .iter()
+        .filter_map(|l| l.strip_prefix("ready pid=")?.trim().parse().ok())
+        .collect()
+}
+
+/// A process by pid, opened while it is known to run and ended on drop
+/// if a test fails before it exits: adopted into a kill-on-close job. The
+/// held handle keeps the pid from being reused, so the drop never reaches
+/// another process.
+struct ReapedPid {
+    pid: u32,
+    _group: Box<dyn platform::process::GroupHandle>,
+}
+
+impl ReapedPid {
+    fn open(pid: u32) -> ReapedPid {
+        let group = platform_windows::WindowsSpawner
+            .adopt(pid)
+            .expect("adopt the probe");
+        ReapedPid { pid, _group: group }
+    }
+}
+
+#[test]
+fn grandchildren_still_attached_are_ended_together_at_the_kill_bound() {
+    let _g = lock();
+    // cmd starts two probes on the same console, waits about a second so
+    // their handlers are in place, and exits. CTRL_CLOSE then reaches one
+    // probe, whose held handler blocks the delivery to the other until
+    // Windows ends it at about 5 s; the other would hold to about 10 s.
+    // The host ends both at 5 s (#1259).
+    let probe = probe();
+    assert!(
+        !probe.contains(' '),
+        "start needs an unquoted path: {probe}"
+    );
+    let hold = format!("start /b {probe} ctrl-hold 60000");
+    let tail = format!("{hold} & {hold} & ping -n 2 127.0.0.1 >nul");
+    let cmd = command("cmd.exe", &["/c", &tail]);
+    let (master, child) = own(&cmd);
+    let master = Arc::new(master);
+    let mut stream = Stream::new(Arc::clone(&master));
+    let mut child = Reaped(child);
+    let deadline = Instant::now() + BUDGET;
+    while ready_pids(&stream).len() < 2 {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let chunk = stream.rx.recv_timeout(left).expect("two ready probes");
+        stream.out.extend(chunk);
+    }
+    // Opened while the probes wait for CTRL_CLOSE, so they are running.
+    let probes: Vec<ReapedPid> = ready_pids(&stream)
+        .into_iter()
+        .map(ReapedPid::open)
+        .collect();
+    exit_of(&mut child);
+    let exited = Instant::now();
+    // What a process that exits right after closing relies on: once the
+    // shutdown latch is set, the probes have been ended.
+    assert!(master.wait_shut_down(BUDGET), "no shutdown");
+    let spawner = platform_windows::WindowsSpawner;
+    for p in &probes {
+        // TerminateProcess doesn't wait; the exit follows at once.
+        let ended = Instant::now();
+        while spawner.is_alive(p.pid).expect("is_alive") {
+            assert!(
+                ended.elapsed() < Duration::from_millis(500),
+                "probe {} runs on after the shutdown",
+                p.pid
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let took = exited.elapsed();
+    assert!(
+        took < KILL_AFTER + SLACK,
+        "the last ended {took:?} after the child's exit, not at the kill bound"
+    );
+}
+
 #[test]
 fn eof_comes_once_to_readers_on_two_threads() {
     let _g = lock();
@@ -399,7 +503,7 @@ fn drop_during_the_grace_returns_at_once_and_the_console_closes() {
     let _child = Reaped(child);
     let mut out = Vec::new();
     let mut buf = [0u8; 1024];
-    while !plain_lines(&out).iter().any(|l| l == "ready") {
+    while !plain_lines(&out).iter().any(|l| l.starts_with("ready")) {
         let n = master.read(&mut buf).expect("read");
         assert!(n > 0, "EOF before ready");
         out.extend_from_slice(&buf[..n]);

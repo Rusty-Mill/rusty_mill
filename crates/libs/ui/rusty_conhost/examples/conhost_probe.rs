@@ -9,7 +9,7 @@
 //! conhost_probe cp                         GetConsoleCP
 //! conhost_probe set-cp <code page>         SetConsoleCP, then GetConsoleCP
 //! conhost_probe write <bytes>              write that many `x`s to stdout
-//! conhost_probe ctrl-hold <ms>             print `ready`, then wait; on CTRL_CLOSE
+//! conhost_probe ctrl-hold <ms>             print `ready pid=<pid>`, then wait; on CTRL_CLOSE
 //!                                          print `ctrl-close` and hold the handler <ms>
 //! ```
 //!
@@ -86,7 +86,7 @@ mod probe {
             "ctrl-hold" => {
                 let ms = arg(1)?.parse().map_err(|_| "milliseconds")?;
                 console::hold_ctrl_close(ms).map_err(|e| format!("error={e}"))?;
-                println!("ready");
+                println!("ready pid={}", std::process::id());
                 loop {
                     std::thread::park();
                 }

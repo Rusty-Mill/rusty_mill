@@ -255,6 +255,56 @@ pub fn send_ctrl(pid: u32, event: CtrlEvent) -> Result<()> {
     sys::end_task(pid, code, flag)
 }
 
+/// `STATUS_CONTROL_C_EXIT`: the code Windows ends a process with once
+/// its CTRL_CLOSE handler returns, so a client ended by
+/// [`ClientProcess::terminate`] exits as one that CTRL_CLOSE ended.
+const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
+
+/// A console client, held so the host can end it if it is still attached
+/// when the console closes (#1259, design §7.3). The handle has
+/// `PROCESS_TERMINATE` and `SYNCHRONIZE` access and nothing else.
+pub struct ClientProcess {
+    handle: OwnedWinHandle,
+}
+
+impl ClientProcess {
+    /// Open the client `pid` whose CONNECT came from thread `tid` (the
+    /// descriptor's `object`), while that CONNECT is unanswered. ConDrv
+    /// doesn't keep a waiting client referenced, so a client that died
+    /// before this call may have freed its pid for another process
+    /// (design §7.3). The thread is opened first and must belong to `pid`;
+    /// its handle keeps the process from being freed until the process
+    /// handle is open, which then keeps the pid. That the thread is still
+    /// the CONNECT's own, not a reuse of its id, the caller proves by
+    /// delivering the CONNECT reply afterwards (design §7.3). Fails closed: an
+    /// `InvalidInput` error when the thread is another process's, else the
+    /// OS error, e.g. when the thread is gone or `PermissionDenied` for a
+    /// protected process.
+    pub fn open(pid: u32, tid: u32) -> Result<ClientProcess> {
+        let thread = sys::open_thread(tid)?;
+        if sys::process_of_thread(&thread)? != pid {
+            return Err(PlatformError::new(
+                ErrorKind::InvalidInput,
+                OsCode::None,
+                "ClientProcess::open: the CONNECT thread is not the client's",
+            ));
+        }
+        let handle = sys::open_process(pid)?;
+        drop(thread);
+        Ok(ClientProcess { handle })
+    }
+
+    /// End the client with `STATUS_CONTROL_C_EXIT` if it is still
+    /// running; a client that has exited is left as it is, with `Ok`. It
+    /// doesn't wait for the exit. Fails with the OS error.
+    pub fn terminate(&self) -> Result<()> {
+        if sys::has_exited(&self.handle) {
+            return Ok(());
+        }
+        sys::terminate(&self.handle, STATUS_CONTROL_C_EXIT)
+    }
+}
+
 /// The key that types `ch` on the active keyboard layout, as conhost
 /// synthesizes input records: `(vk, dwControlKeyState)`, the shift state
 /// as SHIFT_PRESSED, LEFT_CTRL_PRESSED and LEFT_ALT_PRESSED. `None` when

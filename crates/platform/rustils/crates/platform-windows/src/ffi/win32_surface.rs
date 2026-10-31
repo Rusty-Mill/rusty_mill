@@ -104,8 +104,22 @@ pub use windows_sys::Win32::System::Threading::{
 // `AssignProcessToJobObject` (already admitted below) and
 // `TerminateProcess` (already admitted above) each require — no broader
 // access than the two calls this handle is actually used for.
+// `condrv::ClientProcess` (#1259) opens a console client by the pid its
+// CONNECT carries with `PROCESS_TERMINATE | SYNCHRONIZE` (both admitted),
+// to end it after the close grace with `TerminateProcess` unless a
+// zero-timeout `WaitForSingleObject` shows it has already exited.
 pub use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+};
+// `condrv::ClientProcess::open` (#1259, D2 admission proposed on #1286):
+// ConDrv doesn't keep a client waiting on its CONNECT referenced, so its
+// pid can be freed and reused before the host opens it. The CONNECT also
+// carries the client's thread id; `OpenThread` with
+// `THREAD_QUERY_LIMITED_INFORMATION`, the least access
+// `GetProcessIdOfThread` needs, pins that thread and its process while
+// the host checks the thread belongs to the pid, then opens the pid.
+pub use windows_sys::Win32::System::Threading::{
+    GetProcessIdOfThread, OpenThread, THREAD_QUERY_LIMITED_INFORMATION,
 };
 // `Spawner::is_alive` (`docs/decision-request-detach-liveness.md`):
 // `PROCESS_QUERY_LIMITED_INFORMATION` is the least-privileged access

@@ -9,7 +9,7 @@
 //! A second thread, the ctrl worker, delivers Ctrl events: delivery can
 //! block on the target's handler, so it never runs on the engine thread.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -20,7 +20,7 @@ use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::term::WinSize;
 use platform_windows::WindowsChild;
 use platform_windows::condrv::{
-    self, Attached, ConsoleServer, CtrlEvent, IoComplete, IoDescriptor, Waker,
+    self, Attached, ClientProcess, ConsoleServer, CtrlEvent, IoComplete, IoDescriptor, Waker,
 };
 use platform_windows::sys::handle::OwnedWinHandle;
 
@@ -28,7 +28,7 @@ use crate::console::{Console, Effect, Event, OutputQueue, POSTAMBLE, PREAMBLE, P
 use crate::ctrl::{self, Ctrl, Pushed};
 use crate::fixture::{self, FIXTURE_CAP};
 use crate::msg::STATUS_UNSUCCESSFUL;
-use crate::sched::{self, Control, Grace, PACKET_INPUT_CAP, View};
+use crate::sched::{self, Control, Grace, KILL_AFTER, PACKET_INPUT_CAP, View};
 
 /// Terminal input waiting for the engine; `write` blocks past this.
 const INPUT_LANE_CAP: usize = 64 * 1024;
@@ -86,6 +86,10 @@ pub(crate) struct Shared {
     output_ready: Condvar,
     exited: Mutex<bool>,
     exit_seen: Condvar,
+    /// Latched once the console has closed and the clients still attached
+    /// at its close have been ended (#1259).
+    shut_down: Mutex<bool>,
+    shut_down_seen: Condvar,
     waker: Waker,
 }
 
@@ -146,6 +150,8 @@ impl Shared {
             output_ready: Condvar::new(),
             exited: Mutex::new(false),
             exit_seen: Condvar::new(),
+            shut_down: Mutex::new(false),
+            shut_down_seen: Condvar::new(),
             waker,
         }
     }
@@ -278,7 +284,30 @@ impl Shared {
         }
     }
 
+    /// Wait up to `timeout` for the shutdown latch; whether it is set.
+    pub(crate) fn wait_shut_down(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut done = lock(&self.shut_down);
+        while !*done {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            done = self
+                .shut_down_seen
+                .wait_timeout(done, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
+
     // The engine's side.
+
+    fn set_shut_down(&self) {
+        *lock(&self.shut_down) = true;
+        self.shut_down_seen.notify_all();
+    }
 
     fn take_control(&self) -> (Control, usize) {
         let mut lanes = lock(&self.lanes);
@@ -531,6 +560,21 @@ struct Engine {
     exit_handled: bool,
     /// The CTRL_CLOSE deadline, armed by the first hang-up or child exit.
     grace: Grace,
+    /// Attached client processes by pid, ended if still attached at the
+    /// deadline (#1259). One that couldn't be opened is missing.
+    clients: HashMap<u32, ClientProcess>,
+    /// The client whose CONNECT [`Engine::reply`] answers, opened and
+    /// checked against its CONNECT thread; held only once that reply is
+    /// delivered (design §7.3).
+    joining: Option<Joining>,
+    /// A client that couldn't be opened was logged once already.
+    open_failed_logged: bool,
+    /// Clients still attached when the grace ran out, ended at `kill_at`
+    /// once the console has closed (#1259).
+    doomed: Vec<(u32, ClientProcess)>,
+    kill_at: Option<Instant>,
+    /// When CTRL_CLOSE went out: the grace was armed.
+    close_started: Option<Instant>,
     /// Calls the console holds without a reply yet, for the panic path.
     pending: Vec<[u8; 8]>,
     /// `handle` panicked; nothing more reaches the console.
@@ -556,9 +600,15 @@ impl Engine {
             read_in_flight: false,
             reply: None,
             after_reply: Vec::new(),
+            joining: None,
             exited: false,
             exit_handled: false,
             grace: Grace::default(),
+            clients: HashMap::new(),
+            open_failed_logged: false,
+            doomed: Vec::new(),
+            kill_at: None,
+            close_started: None,
             pending: Vec::new(),
             dead: false,
             recorder: Recorder::from_env(),
@@ -574,6 +624,26 @@ impl Engine {
             }
         }
         self.shared.close();
+        self.reap();
+        self.shared.set_shut_down();
+    }
+
+    /// End the clients still attached at the grace, at [`KILL_AFTER`]
+    /// from CTRL_CLOSE. The console is closed and every reader and exit
+    /// waiter released, so only this thread and a caller of
+    /// `OwnPtyMaster::wait_shut_down` wait; a client that exited
+    /// meanwhile, as Windows ends a handler at about the same bound, is
+    /// left alone.
+    fn reap(&mut self) {
+        let Some(at) = self.kill_at else {
+            return;
+        };
+        std::thread::sleep(at.saturating_duration_since(Instant::now()));
+        for (pid, client) in self.doomed.drain(..) {
+            if let Err(e) = client.terminate() {
+                crate::diag::log(&format!("ending client {pid} failed: {e}"));
+            }
+        }
     }
 
     /// One turn of design §7.2's loop.
@@ -647,15 +717,22 @@ impl Engine {
         let Some(server) = self.server.as_mut() else {
             return Ok(());
         };
+        let mut reply = self.reply.take().map(|r| deliverable(server, r));
+        if let Some(r) = &reply
+            && let Some(joining) = self.joining.take()
+        {
+            if let Some(j) = confirm_join(server, r, joining) {
+                j.admit(&mut self.clients, &mut self.doomed);
+            }
+            reply = None;
+        }
         if plan.submit_read {
-            let reply = self.reply.take().map(|r| deliverable(server, r));
             let complete = reply.as_ref().map(Reply::as_complete);
             server.submit_read(complete.as_ref())?;
             self.read_in_flight = true;
-        } else if let Some(r) = self.reply.take() {
+        } else if let Some(r) = reply {
             // No READ_IO goes out this turn, so the reply can't ride on
             // one: complete it on its own rather than hold the client.
-            let r = deliverable(server, r);
             server.complete_io(&r.as_complete())?;
         }
         self.release_ctrl();
@@ -677,6 +754,7 @@ impl Engine {
     fn arm_grace(&mut self, now: Instant) {
         if self.server.is_some() {
             self.grace.arm(now);
+            self.close_started.get_or_insert(now);
         }
     }
 
@@ -806,14 +884,60 @@ impl Engine {
                 self.after_reply.push((pid, event));
             }
             Effect::Ctrl { pid, event } => self.ctrl.push(pid, event),
-            Effect::CtrlGone { pid } => {
+            Effect::Joined { pid, tid } => self.track(pid, tid),
+            Effect::Left { pid } => {
                 self.after_reply.retain(|&(p, _)| p != pid);
                 self.ctrl.forget(pid);
+                self.clients.remove(&pid);
             }
+            Effect::Kill { pid } => self.kill(pid),
             Effect::CloseServer => self.teardown(),
             Effect::Eof => self.shared.set_eof(),
             Effect::Log(d) => crate::diag::log(&d.to_string()),
         }
+    }
+
+    /// Open a joining client through its CONNECT thread `tid`, to hold it
+    /// once its CONNECT reply is delivered ([`confirm_join`]). Fails
+    /// closed: a client that can't be opened that way (gone already, its
+    /// pid now another process's, or a protected process) is only logged,
+    /// and never ended; CTRL_CLOSE still reaches it.
+    fn track(&mut self, pid: u32, tid: u32) {
+        if self.clients.contains_key(&pid) {
+            return;
+        }
+        match ClientProcess::open(pid, tid) {
+            Ok(client) => {
+                self.joining = Some(Joining {
+                    pid,
+                    client,
+                    doomed: false,
+                });
+            }
+            Err(e) if !self.open_failed_logged => {
+                self.open_failed_logged = true;
+                crate::diag::log(&format!(
+                    "client {pid} can't be ended at the close deadline: {e}"
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Doom a client still attached at the grace deadline: [`Engine::reap`]
+    /// ends it [`KILL_AFTER`] from CTRL_CLOSE, after the console closes.
+    /// One whose CONNECT reply is still held is doomed once that reply is
+    /// delivered, which may be in the teardown this deadline starts.
+    fn kill(&mut self, pid: u32) {
+        let started = *self.close_started.get_or_insert_with(Instant::now);
+        if let Some(joining) = self.joining.as_mut().filter(|j| j.pid == pid) {
+            joining.doomed = true;
+        } else if let Some(client) = self.clients.remove(&pid) {
+            self.doomed.push((pid, client));
+        } else {
+            return;
+        }
+        self.kill_at.get_or_insert(started + KILL_AFTER);
     }
 
     /// Signal or reset the input-available event, best effort: a failure
@@ -855,7 +979,15 @@ impl Engine {
     /// the in-flight read, then close.
     fn teardown(&mut self) {
         if let Some(r) = self.reply.take() {
-            self.complete(r);
+            match (self.joining.take(), self.server.as_mut()) {
+                (Some(joining), Some(server)) => {
+                    let r = deliverable(server, r);
+                    if let Some(j) = confirm_join(server, &r, joining) {
+                        j.admit(&mut self.clients, &mut self.doomed);
+                    }
+                }
+                _ => self.complete(r),
+            }
         }
         self.release_ctrl();
         let Some(mut server) = self.server.take() else {
@@ -869,6 +1001,47 @@ impl Engine {
         server.close();
         self.shared.push_output(POSTAMBLE.to_vec());
         self.shared.close_lanes();
+    }
+}
+
+/// A client opened through its CONNECT thread, whose reply is held.
+struct Joining {
+    pid: u32,
+    client: ClientProcess,
+    /// The grace ran out before its reply went out (review of f24f50b3).
+    doomed: bool,
+}
+
+impl Joining {
+    /// Hold the confirmed client, or doom it if the deadline already
+    /// passed it by.
+    fn admit(
+        self,
+        clients: &mut HashMap<u32, ClientProcess>,
+        doomed: &mut Vec<(u32, ClientProcess)>,
+    ) {
+        if self.doomed {
+            doomed.push((self.pid, self.client));
+        } else {
+            clients.insert(self.pid, self.client);
+        }
+    }
+}
+
+/// Deliver the CONNECT reply `r` on its own, returning its client only if
+/// it is delivered. ConDrv aborts a CONNECT whose thread dies before its
+/// reply (ERROR_OPERATION_ABORTED, Beast 2026-10-31), and a thread can't
+/// finish exiting while its CONNECT is pending; so a delivered reply
+/// proves the thread `joining` was opened through was the client's own,
+/// not a reuse of its id (design §7.3). Failing only drops the client.
+fn confirm_join(server: &mut ConsoleServer, r: &Reply, joining: Joining) -> Option<Joining> {
+    match server.complete_io(&r.as_complete()) {
+        Ok(()) => Some(joining),
+        Err(e) => {
+            let pid = joining.pid;
+            crate::diag::log(&format!("client {pid} left before its CONNECT reply: {e}"));
+            None
+        }
     }
 }
 
@@ -925,7 +1098,7 @@ mod tests {
     use super::*;
     use crate::console::PANIC_FOR_TEST;
     use crate::msg;
-    use platform::process::{Child, Command, Signal};
+    use platform::process::{Child, Command, ExitStatus, Signal};
 
     #[test]
     fn a_panicking_console_fails_its_calls_and_closes() {
@@ -1059,6 +1232,156 @@ mod tests {
         assert_eq!(engine.shared.input_len(), 0);
         assert!(!engine.console.reads_ready());
         assert_eq!(engine.console.waiting(), 0, "every read was served");
+        engine.teardown();
+        let _ = child.kill_single(Signal::Kill);
+    }
+
+    #[test]
+    fn a_joined_client_is_held_from_its_connect_and_ended_by_kill() {
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let pid = child.id();
+        // The CONNECT is answered but its reply not yet sent.
+        while engine.reply.is_none() {
+            engine.turn().expect("turn");
+        }
+        assert_eq!(
+            engine.joining.as_ref().map(|j| j.pid),
+            Some(pid),
+            "opened before its reply"
+        );
+        assert!(engine.clients.is_empty(), "held only once it is delivered");
+        engine.work().expect("send the reply");
+        assert!(engine.clients.contains_key(&pid), "held once delivered");
+        let started = Instant::now();
+        engine.arm_grace(started);
+        engine.apply(Effect::Kill { pid });
+        assert!(engine.clients.is_empty());
+        assert_eq!(engine.doomed.len(), 1, "ended later, not now");
+        assert_eq!(
+            engine.kill_at,
+            Some(started + KILL_AFTER),
+            "from CTRL_CLOSE"
+        );
+        engine.kill_at = Some(Instant::now());
+        engine.reap();
+        let status = Box::new(child).wait().expect("wait");
+        assert_eq!(status, ExitStatus::Code(0xC000_013A_u32 as i32));
+        engine.teardown();
+    }
+
+    /// The grace runs out while a CONNECT reply is held, so the deadline's
+    /// Kill finds the client still joining, and its reply goes out in the
+    /// teardown that follows: it is ended all the same (review of
+    /// f24f50b3).
+    #[test]
+    fn a_client_joining_at_the_deadline_is_ended_once_confirmed() {
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let pid = child.id();
+        while engine.reply.is_none() {
+            engine.turn().expect("turn");
+        }
+        let started = Instant::now();
+        engine.arm_grace(started);
+        engine.apply(Effect::Kill { pid });
+        assert!(engine.doomed.is_empty(), "not confirmed yet");
+        assert_eq!(engine.kill_at, Some(started + KILL_AFTER));
+        engine.apply(Effect::CloseServer);
+        assert!(engine.clients.is_empty(), "never held as attached");
+        assert_eq!(engine.doomed.len(), 1, "doomed once its reply went out");
+        engine.kill_at = Some(Instant::now());
+        engine.reap();
+        let status = Box::new(child).wait().expect("wait");
+        assert_eq!(status, ExitStatus::Code(0xC000_013A_u32 as i32));
+    }
+
+    /// As above, but the client dies before the teardown delivers its
+    /// reply: the delivery fails, and an unconfirmed client is never
+    /// ended, so nothing is doomed (fails closed).
+    #[test]
+    fn a_client_joining_at_the_deadline_that_dies_first_is_never_ended() {
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let pid = child.id();
+        while engine.reply.is_none() {
+            engine.turn().expect("turn");
+        }
+        engine.arm_grace(Instant::now());
+        engine.apply(Effect::Kill { pid });
+        child.kill_single(Signal::Kill).expect("kill");
+        let _ = Box::new(child).wait().expect("wait");
+        engine.apply(Effect::CloseServer);
+        assert!(engine.joining.is_none());
+        assert!(engine.clients.is_empty(), "never held");
+        assert!(engine.doomed.is_empty(), "nothing to end");
+    }
+
+    /// A pid whose CONNECT thread isn't its own, as when the client died
+    /// and its pid was reused, is never held, so never ended.
+    #[test]
+    fn a_client_not_reached_through_its_connect_thread_is_never_ended() {
+        let (mut engine, mut child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let pid = child.id();
+        engine.apply(Effect::Joined {
+            pid,
+            tid: u32::MAX - 3,
+        });
+        assert!(engine.clients.is_empty(), "fails closed");
+        engine.apply(Effect::Kill { pid });
+        assert!(engine.doomed.is_empty(), "nothing to end");
+        assert!(matches!(child.try_wait(), Ok(None)), "still running");
+        engine.teardown();
+        let _ = child.kill_single(Signal::Kill);
+    }
+
+    /// A client that dies after its CONNECT is read and checked but before
+    /// the reply is never held: its thread and pid may already be reused,
+    /// and ConDrv aborts the reply (design §7.3).
+    #[test]
+    fn a_client_that_dies_before_its_connect_reply_is_never_held() {
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let pid = child.id();
+        while engine.reply.is_none() {
+            engine.turn().expect("turn");
+        }
+        assert!(engine.joining.is_some(), "checked against its thread");
+        child.kill_single(Signal::Kill).expect("kill");
+        let _ = Box::new(child).wait().expect("wait");
+        engine
+            .work()
+            .expect("a failed reply is not an engine error");
+        assert!(engine.joining.is_none());
+        assert!(engine.clients.is_empty(), "never held");
+        engine.apply(Effect::Kill { pid });
+        assert!(engine.doomed.is_empty(), "nothing to end");
+        engine.teardown();
+    }
+
+    #[test]
+    fn the_shutdown_latch_waits_for_the_kill_and_is_bounded() {
+        let shared = Shared::new(Waker::new().expect("Waker"));
+        let started = Instant::now();
+        assert!(!shared.wait_shut_down(Duration::from_millis(50)), "not yet");
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        shared.set_shut_down();
+        assert!(shared.wait_shut_down(Duration::ZERO), "latched");
+    }
+
+    #[test]
+    fn a_client_that_left_is_let_go_and_never_ended() {
+        let (mut engine, mut child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let pid = child.id();
+        // Served as the engine serves it: opened through its CONNECT.
+        while engine.reply.is_none() {
+            engine.turn().expect("turn");
+        }
+        engine.work().expect("send the reply");
+        assert!(engine.clients.contains_key(&pid));
+        engine.apply(Effect::Joined { pid, tid: 0 });
+        assert_eq!(engine.clients.len(), 1, "one handle per process");
+        engine.apply(Effect::Left { pid });
+        assert!(engine.clients.is_empty());
+        engine.apply(Effect::Kill { pid });
+        assert!(engine.doomed.is_empty(), "nothing to end");
+        assert!(matches!(child.try_wait(), Ok(None)), "still running");
         engine.teardown();
         let _ = child.kill_single(Signal::Kill);
     }
