@@ -38,7 +38,7 @@ use sessionmgr_core::ports::{worker_ref, AgentAdapterPort, AgentSignal};
 use sessionmgr_core::{SessionId, SessionStatus};
 use sessionmgr_proc::SystemProcessPort;
 use sessionmgr_protocol::{ErrorKind, Request, Response, SessionEvent};
-use sessionmgr_pty::{PtyOptions, PtySession, TerminalSize};
+use sessionmgr_pty::{ConsoleHost, PtyOptions, PtySession, TerminalSize};
 
 use crate::error::{Error, Result};
 use crate::{catalog, paths, transport};
@@ -320,7 +320,26 @@ pub async fn run(args: WorkerArgs) -> Result<()> {
     });
 
     worker.shutdown.notified().await;
+    shut_down_terminal(&worker).await;
     Ok(())
+}
+
+/// Lets the session's terminal end what the session left attached before
+/// this process exits. Only our own Windows console host needs the time
+/// (see [`PtySession::shut_down`]); it never takes more than 6 s.
+async fn shut_down_terminal(worker: &Worker) {
+    let Backend::Pty(pty) = &worker.backend else {
+        return;
+    };
+    let pty = Arc::clone(pty);
+    match rusty_tokio::spawn_blocking(move || pty.shut_down()).await {
+        Ok(true) => {}
+        Ok(false) => eprintln!(
+            "sessionmgr worker: the console host did not shut down in time; \
+             processes the session left attached may still run"
+        ),
+        Err(e) => eprintln!("sessionmgr worker: shutting the terminal down failed: {e}"),
+    }
 }
 
 /// Starts the session's process on a real terminal.
@@ -332,6 +351,9 @@ fn start_pty(program: &str, args: &[String], cwd: &Path) -> std::io::Result<PtyS
         // The creating client usually has no terminal of its own, so this
         // is a placeholder an attaching UI corrects with a resize.
         size: TerminalSize::default(),
+        // Read per session, so a bad value fails this session's start
+        // (recorded as its exit) rather than the daemon's.
+        console_host: ConsoleHost::from_env()?,
     })
 }
 
