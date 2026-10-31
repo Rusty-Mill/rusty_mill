@@ -146,7 +146,7 @@ async fn serve_for(
     let socket = std::rc::Rc::new(udp.socket);
     rusty_tokio::select! {
         result = accept(listener, state.clone(), allowed) => result,
-        result = datagram::serve(socket, registry, state, udp.idle) => result,
+        result = datagram::serve(socket, registry, state, udp.idle, datagram::LEASE_SILENCE) => result,
     }
 }
 
@@ -161,7 +161,7 @@ async fn accept(
         match allowed(&stream) {
             Ok(Peer::Allowed) => {
                 let (rd, wr) = stream.into_split();
-                rusty_tokio::task::spawn_local(conn::run(state.clone(), rd, wr));
+                rusty_tokio::task::spawn_local(conn::run(state.clone(), rd, wr, |_, _| {}));
             }
             Ok(Peer::Refused(who)) => eprintln!("rusty-mux-server: refusing a client of {who}"),
             Err(err) => eprintln!("rusty-mux-server: reading a client's credentials: {err}"),

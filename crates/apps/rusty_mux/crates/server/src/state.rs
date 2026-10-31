@@ -160,6 +160,11 @@ impl State {
     }
 
     #[cfg(test)]
+    pub(crate) fn lease_of(&self, block: BlockId) -> Option<ClientId> {
+        self.mux.block(block)?.lease()
+    }
+
+    #[cfg(test)]
     pub(crate) fn has_client(&self, client: ClientId) -> bool {
         self.clients.contains_key(&client)
     }
@@ -284,6 +289,40 @@ impl State {
         self.drop_client(client);
         self.flush();
         false
+    }
+
+    /// Releases the lease each of `clients` holds on its attached block:
+    /// the path they are on went silent. Returns what was released, for
+    /// [`Self::regain`].
+    pub(crate) fn release_silent(
+        &mut self,
+        clients: &[(ClientId, Rc<Notify>)],
+    ) -> Vec<(ClientId, BlockId)> {
+        let held = |&(client, _): &(ClientId, Rc<Notify>)| {
+            let block = self.mux.client(client)?.attached()?;
+            (self.mux.block(block)?.lease() == Some(client)).then_some((client, block))
+        };
+        let released: Vec<_> = clients.iter().filter_map(held).collect();
+        for &(client, block) in &released {
+            if let Err(err) = self.mux.release_lease(client, block) {
+                eprintln!("rusty-mux-server: model out of step on a silent lease: {err}");
+            }
+        }
+        self.flush();
+        released
+    }
+
+    /// Gives each client the lease silence released, where it is still
+    /// attached there and the lease is still free.
+    pub(crate) fn regain(&mut self, released: &[(ClientId, BlockId)]) {
+        for &(client, block) in released {
+            let free = self.mux.block(block).is_some_and(|b| b.lease().is_none());
+            let attached = self.mux.client(client).and_then(|c| c.attached()) == Some(block);
+            if free && attached && self.mux.acquire_lease(client, block).is_err() {
+                eprintln!("rusty-mux-server: model out of step regaining a lease");
+            }
+        }
+        self.flush();
     }
 
     /// The grace of the connection owning `cancel` ended: drops `client`

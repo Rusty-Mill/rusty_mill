@@ -5,9 +5,9 @@ Go on 2026-10-30 and answered its four open questions the same day (below).
 Built in #1270 (transport), #1280 (server) and #1283 (client), and checked
 by hand over a real sshd on 2026-10-31
 ([UDP-MANUAL-CHECK-2026-10-31.md](UDP-MANUAL-CHECK-2026-10-31.md)). Not built
-yet, in their own step: the 6 s outage display, the lease release after
-30 s of silence, the stale orphan on overflow, and moving back to UDP after
-a fallback to SSH.
+yet, in their own step: the 6 s outage display, the stale orphan on
+overflow, and moving back to UDP after a fallback to SSH. The lease release
+after 30 s of silence is built (see Session lifetime).
 Background: [SPIKE-4-ROAMING.md](SPIKE-4-ROAMING.md) and the step 2 decision
 in [DECISIONS.md](DECISIONS.md) (SSH bootstrap, 2026-10-29).
 
@@ -248,6 +248,9 @@ association's `Close`, ends its connections as a socket close does.
   keeps the client record and the association, not the output. Once
   `--udp-idle` passes, the association and its clients are dropped, and the
   client must log in again over SSH, as `--ssh` reconnect already does.
+  As built, the server gives the lease back itself when it next hears the
+  association, if its client is still attached there and nobody took the
+  lease meanwhile, so a client needs no change to retake it.
 - *A, not chosen:* would have treated 30 s of silence as the end of each
   connection, followed by the usual 30 s grace and then a new SSH login.
 

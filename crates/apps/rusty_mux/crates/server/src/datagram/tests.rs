@@ -30,19 +30,34 @@ async fn server(idle: Duration) -> (Shared, Registry, SocketAddr) {
 
 /// [`server`], its UDP side bound to `bind`.
 async fn server_on(bind: &str, idle: Duration) -> (Shared, Registry, SocketAddr) {
-    let state = State::shared(
-        Config {
-            program: "unused".into(),
-            args: Vec::new(),
-            cwd: "/".into(),
-        },
-        None,
-    );
+    let program = Config {
+        program: "unused".into(),
+        args: Vec::new(),
+        cwd: "/".into(),
+    };
+    server_with(bind, program, idle, LEASE_SILENCE).await
+}
+
+/// A server running `program` in its blocks, whose associations end after
+/// `idle` of silence and lose their leases after `silence`.
+async fn server_with(
+    bind: &str,
+    program: Config,
+    idle: Duration,
+    silence: Duration,
+) -> (Shared, Registry, SocketAddr) {
+    let state = State::shared(program, None);
     let socket = UdpSocket::bind(bind).await.expect("bind");
     let addr = socket.local_addr().expect("addr");
     let registry = Registry::new(addr.port());
     state.borrow_mut().offer_datagrams(registry.clone());
-    let udp = serve(Rc::new(socket), registry.clone(), state.clone(), idle);
+    let udp = serve(
+        Rc::new(socket),
+        registry.clone(),
+        state.clone(),
+        idle,
+        silence,
+    );
     rusty_tokio::task::spawn_local(async move {
         udp.await.expect("udp side");
     });
@@ -95,8 +110,9 @@ impl Peer {
 
     /// Probes until the server answers.
     async fn probe(&mut self) {
+        let before = self.assoc.last_heard();
         self.assoc.probe();
-        self.until(|a| a.last_heard().is_some()).await;
+        self.until(|a| a.last_heard() != before).await;
     }
 
     async fn send(&mut self, stream: StreamId, message: &Message) {
@@ -128,6 +144,19 @@ impl Peer {
             match self.recv(stream).await {
                 Message::Event { .. } => continue,
                 other => return other,
+            }
+        }
+    }
+
+    /// Sends a request and returns the id its `Done` created.
+    async fn request(&mut self, stream: StreamId, message: Message) -> Option<rusty_uuid::Uuid> {
+        self.send(stream, &message).await;
+        loop {
+            match self.reply(stream).await {
+                Message::Done { created, .. } => return created,
+                Message::Failed { reason, .. } => panic!("{message:?} failed: {reason}"),
+                // An attach's screen.
+                _ => {}
             }
         }
     }
@@ -288,7 +317,20 @@ async fn bare_link(peer: &mut Peer, server: Rc<UdpSocket>, registry: Registry) -
     let Received::New(link) = registry.datagram(Instant::now(), from, &buf[..n]) else {
         panic!("the probe should bring the offer alive");
     };
-    rusty_tokio::task::spawn_local(drive(link.clone(), server.clone(), registry, PATIENCE));
+    let state = State::shared(
+        Config {
+            program: "unused".into(),
+            args: Vec::new(),
+            cwd: "/".into(),
+        },
+        None,
+    );
+    let timers = Timers {
+        idle: PATIENCE,
+        silence: LEASE_SILENCE,
+    };
+    let driver = drive(link.clone(), server.clone(), registry, state, timers);
+    rusty_tokio::task::spawn_local(driver);
     let feed = link.clone();
     rusty_tokio::task::spawn_local(async move {
         let mut buf = [0; MAX_DATAGRAM];
@@ -393,5 +435,94 @@ fn the_largest_ipv6_datagram_is_dropped_and_the_server_goes_on() {
         peer.socket.send_to(&oversized, addr).await.expect("send");
         peer.probe().await;
         assert_eq!(registry.live(), 1);
+    });
+}
+
+/// A block on its own session and window, created by the client on
+/// `stream`, which attaches to it and takes its lease.
+async fn leased_block(peer: &mut Peer, stream: StreamId) -> BlockId {
+    use rusty_mux_core::{SessionId, Size, WindowId};
+    let name = "s".to_owned();
+    let created = peer
+        .request(stream, Message::CreateSession { req: 1, name })
+        .await;
+    let session = SessionId::from_uuid(created.expect("a session"));
+    let name = "w".to_owned();
+    let window = Message::CreateWindow {
+        req: 2,
+        session,
+        name,
+    };
+    let window = WindowId::from_uuid(peer.request(stream, window).await.expect("a window"));
+    let size = Size::new(80, 24).expect("size");
+    let launch = rusty_mux_proto::Launch::default();
+    let block = Message::CreateBlock {
+        req: 3,
+        window,
+        size,
+        launch,
+    };
+    let block = BlockId::from_uuid(peer.request(stream, block).await.expect("a block"));
+    peer.request(stream, Message::Attach { req: 4, block })
+        .await;
+    peer.request(stream, Message::AcquireLease { req: 5, block })
+        .await;
+    block
+}
+
+/// A shell for blocks to run.
+fn shell() -> Config {
+    if cfg!(windows) {
+        Config {
+            program: "cmd.exe".into(),
+            args: vec!["/Q".into()],
+            cwd: std::env::temp_dir().into_os_string(),
+        }
+    } else {
+        Config {
+            program: "/bin/sh".into(),
+            args: Vec::new(),
+            cwd: "/".into(),
+        }
+    }
+}
+
+#[test]
+fn silence_releases_the_lease_and_being_heard_gives_it_back_if_free() {
+    runtime().block_on(async {
+        let silence = Duration::from_millis(600);
+        let (state, registry, addr) = server_with("127.0.0.1:0", shell(), PATIENCE, silence).await;
+        let features = Features::DATAGRAM
+            .union(Features::TAKEOVER)
+            .union(Features::CHECKPOINT_V6);
+        let mut away = Peer::new(&registry, addr).await;
+        away.probe().await;
+        let (stream, client) = away.connect(features).await;
+        let block = leased_block(&mut away, stream).await;
+        assert_eq!(state.borrow().lease_of(block), Some(client));
+
+        // Silent past `silence`: the lease is free, the client still there.
+        rusty_tokio::time::sleep(silence * 2).await;
+        assert_eq!(state.borrow().lease_of(block), None);
+        assert!(state.borrow().has_client(client));
+        // Heard again: the lease comes back. A request's answer proves the
+        // server heard it; a probe's could be any datagram of the server's.
+        away.request(stream, Message::Sync { req: 6 }).await;
+        assert_eq!(state.borrow().lease_of(block), Some(client));
+
+        // Silent again, and someone else takes the lease meanwhile.
+        rusty_tokio::time::sleep(silence * 2).await;
+        let mut other = Peer::new(&registry, addr).await;
+        other.probe().await;
+        let (theirs, typist) = other.connect(features).await;
+        other
+            .request(theirs, Message::Attach { req: 1, block })
+            .await;
+        other
+            .request(theirs, Message::AcquireLease { req: 2, block })
+            .await;
+        away.request(stream, Message::Sync { req: 7 }).await;
+        assert_eq!(state.borrow().lease_of(block), Some(typist), "taken back");
+        assert!(state.borrow().has_client(client));
     });
 }
