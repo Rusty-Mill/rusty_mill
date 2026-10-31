@@ -215,7 +215,8 @@ ordering, acks and flow control belong to each stream.
   one attempt on the forward in use to detach them before the client
   stops; a second Ctrl-] d meanwhile is ignored. Any detach, held or not,
   waits until keys waiting on a lease are sent or refused (at most 10 s),
-  and nothing typed after it is sent.
+  through a lost path as well, starts no move meanwhile, and sends nothing
+  typed after it.
 - **Flow control:** each stream's receive buffer holds at most 1 MiB in
   total: bytes in order but not yet read, plus bytes out of order. Every
   `Ack` sets `limit` to the cumulative offset plus the free space, and a

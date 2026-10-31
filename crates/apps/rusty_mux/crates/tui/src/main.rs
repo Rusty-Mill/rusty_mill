@@ -1898,6 +1898,9 @@ mod client {
             if !matches!(standby.moving, Moving::Idle) || now < standby.next {
                 return;
             }
+            if self.detaching.is_some() {
+                return;
+            }
             let last = standby.pulse.last();
             let heard = last.is_some_and(|heard| now.saturating_duration_since(heard) < SILENT);
             if heard {
@@ -1928,8 +1931,11 @@ mod client {
         /// What is typed meanwhile is held; first each block's old
         /// connection is drained (see [`Drain`]).
         fn move_onto(&mut self, onto: Onto) {
-            // A block that cannot be taken over would be left on SSH.
-            if self.rejoiner.is_none() || self.panes.values().any(|p| p.takeover.is_none()) {
+            // A block that cannot be taken over would be left on SSH; a
+            // client detaching is about to stop, and would only take keys
+            // still to send off the connections it detaches.
+            let stuck = self.panes.values().any(|p| p.takeover.is_none());
+            if self.rejoiner.is_none() || stuck || self.detaching.is_some() {
                 return;
             }
             self.kept = self.unsent();
@@ -2260,7 +2266,9 @@ mod client {
             let Some(by) = self.detaching else {
                 return;
             };
-            let waiting = self.panes.values().any(|pane| !pane.waiting.is_empty());
+            // Keys kept off a lost path are still to send once it is back.
+            let waiting =
+                self.kept.is_some() || self.panes.values().any(|pane| !pane.waiting.is_empty());
             if !waiting || now >= by {
                 self.end(Ended::Detached);
             }
@@ -3588,6 +3596,47 @@ mod client {
             assert!(late.ended.is_none());
             late.detach_when_sent(Instant::now() + HANDSHAKE);
             assert!(matches!(late.ended, Some(Ended::Detached)));
+        }
+
+        /// A detach waiting on B's lease starts no move, even on an offer
+        /// already asked for: B's keys stay where they are, to be sent.
+        #[cfg(unix)]
+        #[test]
+        fn a_detach_waiting_on_a_lease_starts_no_move() {
+            let (mut app, inbox, [_control, _a_old, b_old]) = app(Some(Box::new(Calls::default())));
+            app.typed(Action::Focus(Dir::Right));
+            app.typed(input(b"before"));
+            app.typed(Action::Detach);
+            app.offered(Some(Onto::Standby));
+            assert!(matches!(app.standby.moving, Moving::Idle));
+            app.detach_when_sent(Instant::now());
+            assert!(app.ended.is_none(), "B's keys are not sent yet");
+            let asked = sent(&b_old);
+            assert!(!asked.iter().any(|m| matches!(m, Message::Sync { .. })));
+            grant(&mut app, &inbox, &b_old, &asked);
+            assert_eq!(typed_in(&sent(&b_old)), [b"before".to_vec()]);
+            assert!(matches!(app.ended, Some(Ended::Detached)));
+        }
+
+        /// A detach waiting on B's lease when the path is lost waits, within
+        /// its time, for the path back: B's keys are sent first.
+        #[cfg(unix)]
+        #[test]
+        fn a_detach_waiting_on_a_lease_through_a_loss_sends_the_keys_first() {
+            let (mut app, inbox, [_control, _a_old, b_old]) = app(Some(Box::new(Never)));
+            app.typed(Action::Focus(Dir::Right));
+            app.typed(input(b"before"));
+            app.typed(Action::Detach);
+            sent(&b_old);
+            app.lose(false);
+            app.detach_when_sent(Instant::now());
+            assert!(app.ended.is_none(), "the keys are kept, not sent");
+            let (path, _control, _a_new, b_new) = back(takeover(1));
+            app.take(Input::Rejoined(Ok(path)));
+            let at_b = sent(&b_new);
+            grant(&mut app, &inbox, &b_new, &at_b);
+            assert_eq!(typed_in(&sent(&b_new)), [b"before".to_vec()]);
+            assert!(matches!(app.ended, Some(Ended::Detached)));
         }
 
         /// A second Ctrl-] d while a detach held through a broken move
