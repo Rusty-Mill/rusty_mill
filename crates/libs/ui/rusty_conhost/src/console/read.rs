@@ -880,7 +880,7 @@ impl Console {
 
     /// `text` in the input code page, as an ANSI read returns it.
     fn ansi(&self, text: &str) -> Vec<u8> {
-        codepage::encode(&self.codec, self.input_cp.cp, text)
+        codepage::encode(&self.codec, self.input_cp, text)
     }
 
     fn take_pending(&mut self, object: usize) -> Option<Vec<u16>> {

@@ -55,9 +55,9 @@ pub(crate) const SLICE: usize = 64 * 1024;
 /// bytes, and one watched sequence held from the last write may complete
 /// with its first unit, adding the modes it reasserts.
 const WIDE_SLICE: usize = (SLICE - PREAMBLE.len()) / screen::MAX_EXPANSION;
-/// Code-page bytes per slice: a byte decodes to at most two units (a
-/// four-byte GB 18030 character to a surrogate pair), so they fit
-/// [`WIDE_SLICE`].
+/// Code-page bytes per slice: most code pages decode a byte to at most
+/// two units (a four-byte GB 18030 character to a surrogate pair), so
+/// they fit [`WIDE_SLICE`]; [`coded_slice`] shortens it for any other.
 const CODED_SLICE: usize = WIDE_SLICE / 2;
 /// Connected clients.
 pub(crate) const MAX_CLIENTS: usize = 256;
@@ -490,12 +490,26 @@ impl Text {
                 end
             }
             Text::Coded(bytes, cp) => {
-                let end = cp.boundary(bytes, at, CODED_SLICE);
-                let text = codepage::decode(codec, cp.cp, &bytes[at..end]);
+                let (end, text) = coded_slice(bytes, at, *cp, codec);
                 emit_str(&text, at == 0, origin, screen, out, replies);
                 end
             }
         }
+    }
+}
+
+/// The next slice of code-page text from `at`: its end and its text, at
+/// most [`WIDE_SLICE`] units. A code page that decodes a byte to more
+/// than two units gets a shorter slice, down to one character.
+fn coded_slice(bytes: &[u8], at: usize, cp: CodePage, codec: &Codec) -> (usize, String) {
+    let mut limit = CODED_SLICE;
+    loop {
+        let end = cp.boundary(bytes, at, limit);
+        let text = codepage::decode(codec, cp.cp, &bytes[at..end]);
+        if limit <= 2 || text.encode_utf16().count() <= WIDE_SLICE {
+            return (end, text);
+        }
+        limit /= 2;
     }
 }
 
@@ -567,7 +581,7 @@ pub(crate) struct Console {
     key_for: KeyFor,
     codec: Codec,
     /// `SetConsoleCP`: ANSI reads and the `A` title calls.
-    input_cp: CodePage,
+    input_cp: u32,
     /// `SetConsoleOutputCP`: `WriteConsoleA` and raw writes.
     output_cp: CodePage,
     /// A DBCS lead byte that ended the last `A` write, for the next one
@@ -634,7 +648,7 @@ impl Console {
             logged: HashSet::new(),
             key_for,
             codec,
-            input_cp: CodePage::UTF8,
+            input_cp: codepage::UTF8,
             output_cp: CodePage::UTF8,
             lead_byte: None,
             decoder: input::Decoder::default(),
@@ -1066,11 +1080,11 @@ impl Console {
             return msg::STATUS_ILLEGAL_FUNCTION;
         };
         let cp = if output {
-            self.output_cp
+            self.output_cp.cp
         } else {
             self.input_cp
         };
-        msg::put_u32(fixed, 0, cp.cp);
+        msg::put_u32(fixed, 0, cp);
         msg::STATUS_SUCCESS
     }
 
@@ -1080,17 +1094,24 @@ impl Console {
         let (Some(cp), Some(output)) = (msg::u32_at(fixed, 0), msg::bool_at(fixed, 4)) else {
             return msg::STATUS_ILLEGAL_FUNCTION;
         };
+        if !(self.codec.valid)(cp) {
+            return msg::STATUS_FROM_INVALIDARG;
+        }
+        if !output {
+            // Only output needs lead bytes.
+            self.input_cp = cp;
+            return msg::STATUS_SUCCESS;
+        }
+        if cp == self.output_cp.cp {
+            return msg::STATUS_SUCCESS;
+        }
         let Some(cp) = CodePage::new(cp, &self.codec) else {
             return msg::STATUS_FROM_INVALIDARG;
         };
-        if !output {
-            self.input_cp = cp;
-        } else if cp != self.output_cp {
-            // A lead byte kept under the old code page would pair with a
-            // byte of the new one.
-            self.lead_byte = None;
-            self.output_cp = cp;
-        }
+        // A lead byte kept under the old code page would pair with a
+        // byte of the new one; conhost keeps it (V14).
+        self.lead_byte = None;
+        self.output_cp = cp;
         msg::STATUS_SUCCESS
     }
 
@@ -1269,7 +1290,7 @@ impl Console {
         let title: Vec<u16> = if unicode {
             msg::utf16_units(m.variable)
         } else {
-            codepage::decode(&self.codec, self.input_cp.cp, m.variable)
+            codepage::decode(&self.codec, self.input_cp, m.variable)
                 .encode_utf16()
                 .collect()
         };
@@ -1307,7 +1328,7 @@ impl Console {
         } else {
             let text = String::from_utf16_lossy(title);
             title_a(
-                &codepage::encode(&self.codec, self.input_cp.cp, &text),
+                &codepage::encode(&self.codec, self.input_cp, &text),
                 capacity,
             )
         };
@@ -2278,6 +2299,21 @@ pub(crate) mod tests {
             .filter(|c| !matches!(c, '\r' | '\n'))
             .collect();
         assert_eq!(text, format!("a{}", "あ".repeat(pairs)));
+    }
+
+    #[test]
+    fn a_code_page_that_expands_gets_shorter_slices() {
+        let codec = Codec {
+            valid: |_| true,
+            decode: |_, bytes| Some("xyz".repeat(bytes.len())),
+            encode: |_, text| Some(text.as_bytes().to_vec()),
+        };
+        let cp = CodePage::new(7, &codec).expect("valid");
+        let bytes = vec![b'q'; CODED_SLICE * 2];
+        let (end, text) = coded_slice(&bytes, 0, cp, &codec);
+        assert!(0 < end && end < CODED_SLICE, "{end}");
+        assert_eq!(text.len(), end * 3);
+        assert!(text.encode_utf16().count() <= WIDE_SLICE);
     }
 
     #[test]
