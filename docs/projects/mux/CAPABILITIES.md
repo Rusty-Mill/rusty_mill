@@ -63,7 +63,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C38 | More events: clipboard written, program status removed, active window changed, config reloaded | 3b | `rusty_mux_proto`, `rusty_mux_server` | not-started | Rex delta D13; extends C29 |
 | C39 | Agent setup for Codex, OpenCode and Pi; per-repository setup; dry run; per-item status | 3b | `rusty_mux_ctl` | not-started | Rex delta D1; extends C34. Every new agent's settings path is an outside-the-repo write, as K4 was |
 | C40 | Block methods `terminal.reset`, `terminal.set-theme`, `terminal.size` | 3b | `rusty_mux_server` | not-started | Rex delta D2; extends C06. `list-dir` is in C08 |
-| C41 | Layout editing: resize splits, swap and move blocks, move a block to its own window, move a window, focus on the server | 3b | `rusty_mux_core`, `rusty_mux_server`, `rusty_mux_tui` | not-started | Rex delta D3; extends C12 |
+| C41 | Layout editing: resize splits, swap blocks, move a block into a new split, detach a block from the layout while it keeps running, reorder windows, focus on the server | 3b | `rusty_mux_core`, `rusty_mux_server`, `rusty_mux_tui` | not-started | Rex delta D3; extends C12 |
 | C42 | Floating layers in a window | 4 | `rusty_mux_core`, `rusty_mux` clients | not-started | Rex delta D4 |
 | C43 | Key sequences and key modes | 4 | `rusty_mux_script`, `rusty_mux` clients | not-started | Rex delta D6; G15 |
 | C44 | Client actions: list a client's actions and ask it to run one | 4 | `rusty_mux_proto`, `rusty_mux` clients | not-started | Rex delta D7; G20 remainder |

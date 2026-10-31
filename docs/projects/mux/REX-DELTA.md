@@ -16,7 +16,7 @@ Tags: **[docs]** a page under `superlogical.com/rex/docs/`, **[cm]** the Classme
 |---|---|---|
 | R1 | Agent skill installer for **four agents**: Claude Code, Codex, OpenCode, Pi; `--project` (per repo), `--dry-run`, `--force`, `--session-naming` (agent names the session after its task); status per item: current, outdated, missing, foreign, unreadable, unsupported. The skill body points at `rex skill show`, so upgrading Rex updates the agent's guide without rerunning setup | docs: automate/agent-skill; cm |
 | R2 | More terminal block methods: `size`, `write`, `reset`, `resize`, `set_theme`, `program_status`, `list_dir` (plus format, process, pwd, title) | docs: reference/lua |
-| R3 | Layout operations beyond split/zoom: resize a pane, swap and move blocks, detach a block to its own window, move a window, server-side focus (direction, next/previous pane and window), floating layers (new, float a block, resize, raise, lower) | docs: reference/lua |
+| R3 | Layout operations beyond split/zoom: resize a pane, swap blocks, move a block into a new split beside another, detach a block from the layout without closing it (it stays listed as detached), reorder windows in the tab order, server-side focus (direction, next/previous pane and window), floating layers (new, float a block, resize, raise, lower) | docs: reference/lua |
 | R4 | `rex wait` on windows and sessions, not only blocks; `--for` timeout | docs: automate/shell-scripting |
 | R5 | Key sequences (`ctrl+b>c`, any length, Escape cancels), key modes, conflict warnings naming both bindings | docs: customize/key-sequences, key-modes |
 | R6 | Ask a client to act: list a client's actions (`rex -C iPhone actions`), queue one of its actions from a script; app-changing requests need the app's Remote Control switch | docs: reference/lua, agent-skill; cm |
@@ -33,7 +33,7 @@ Tags: **[docs]** a page under `superlogical.com/rex/docs/`, **[cm]** the Classme
 ## 3. rusty_mux against it
 
 **Still ahead or by design**
-- **Remote transport (C13).** Rex documents HTTP(S) over Tailscale only. We have SSH bootstrap (#1236), bridge fallback (#1239), make-before-break reconnect (#1243), predictive echo (#1247, #1258, #1267) and our own UDP roaming (#1270, #1280, #1283). Rex has no SSH at all yet.
+- **Remote transport (C13).** Rex documents HTTP(S) listeners: the caller-identifying ones go through Tailscale, and a plain HTTP listener needs an explicit `--allow-anonymous` opt-in (for use behind a VPN such as ZeroTier). We have SSH bootstrap (#1236), bridge fallback (#1239), make-before-break reconnect (#1243), predictive echo (#1247, #1258, #1267) and our own UDP roaming (#1270, #1280, #1283). Rex has no SSH at all yet.
 - Resumable event stream (G7), MCP control server (C07), public Windows server (C24).
 
 **Gaps** (status: *new* = not in CAPABILITIES; *extends* = adds to an existing row)
@@ -42,7 +42,7 @@ Tags: **[docs]** a page under `superlogical.com/rex/docs/`, **[cm]** the Classme
 |---|---|---|---|---|
 | D1 | Agent setup for Codex, OpenCode, Pi; `--project`, `--dry-run`; per-item status states; skill text read from the installed binary | extends C34 (Claude Code only today, `ctl/src/agent.rs`) | 2b follow-up | S |
 | D2 | Block methods `reset`, `set_theme`, `list_dir`, `size` (we have input, resize, format, process, pwd, title, status, send-keys) | extends C06; `list_dir` is C08's directory browse | 2b follow-up / Phase 4 | S |
-| D3 | Resize splits, swap/move blocks, detach block to window, move window, server-side focus | extends C12 (resize explicitly not built) | 2b follow-up | M |
+| D3 | Resize splits, swap blocks, move a block into a new split, detach a block from the layout while it keeps running, reorder windows, server-side focus | extends C12 (resize explicitly not built) | 2b follow-up | M |
 | D4 | Floating layers | new | Phase 4 (client-visible) | M–L |
 | D5 | Wait on a window or session | extends C30 (block and event only, `ctl/src/wait.rs`) | 2b follow-up | XS |
 | D6 | Key sequences and key modes | extends C19 (G15 still partial) | Phase 4 with clients | M |

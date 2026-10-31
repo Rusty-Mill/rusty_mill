@@ -66,7 +66,7 @@ From the [Rex delta check](REX-DELTA.md) §4 (owner, 2026-10-31). After Phase 3'
 2. Events: clipboard written, program status removed, active window changed, config reloaded (C38).
 3. Agent setup for Codex, OpenCode and Pi, per-repository setup, dry run, per-item status (C39). Each new agent's settings path is a write outside the repo and needs the owner's approval, as K4 did.
 4. Block methods `terminal.reset`, `terminal.set-theme`, `terminal.size` (C40).
-5. Layout editing: resize splits, swap and move blocks, block to its own window, move a window, server-side focus (C41).
+5. Layout editing: resize splits, swap blocks, move a block into a new split, detach a block from the layout while it keeps running, reorder windows, server-side focus (C41).
 
 ## Phase 4: clients and Windows
 
