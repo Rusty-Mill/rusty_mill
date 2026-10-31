@@ -232,6 +232,23 @@ fn interactive_cmd_runs_typed_lines() {
     assert_eq!(exit_of(&mut child), ExitStatus::Code(7));
 }
 
+/// `chcp 850` (§8.3): cmd sets both code pages, and a raw write's bytes
+/// are then read as 850; an uninstalled code page is refused.
+#[test]
+fn chcp_changes_how_a_raw_write_reads() {
+    let _g = lock();
+    let (master, child) = own(&command("cmd.exe", &["/d", "/q"]));
+    let mut child = Reaped(child);
+    let master = Arc::new(master);
+    let mut stream = Stream::new(Arc::clone(&master));
+    let typed = format!("chcp 850\r\"{}\" raw 9b\rchcp 1\rexit 5\r", probe());
+    master.write(typed.as_bytes()).expect("write");
+    stream.until("Active code page: 850");
+    stream.until("\u{f8}");
+    stream.until("Invalid code page");
+    assert_eq!(exit_of(&mut child), ExitStatus::Code(5));
+}
+
 /// Clear this test process's "ignore Ctrl+C" flag, which children
 /// inherit: nextest and the CI runner start tests with it set. The host
 /// leaves the caller's policy alone, as `spawn_attached` does, so a
@@ -261,9 +278,12 @@ fn ctrl_c_stops_the_running_command_not_the_shell() {
 }
 
 /// Answers that differ from ConPTY by design (§5.10), as (probe, ours).
-/// V4: only 65001 until code pages land, where ConPTY reports the OEM
-/// code page.
-const DIVERGENCES: &[(&[&str], &str)] = &[(&["cp"], "cp in=65001")];
+/// V4: we start at 65001 where ConPTY starts at the OEM code page, which
+/// a refused SetConsoleCP leaves in place.
+const DIVERGENCES: &[(&[&str], &str)] = &[
+    (&["cp"], "cp in=65001"),
+    (&["set-cp", "1"], "set-cp error=87 after=65001"),
+];
 
 #[test]
 fn probes_agree_with_conpty() {
@@ -276,6 +296,9 @@ fn probes_agree_with_conpty() {
         &["set-mode", "out", "5"],
         &["cp"],
         &["set-cp", "65001"],
+        &["set-cp", "437"],
+        &["set-cp", "850"],
+        &["set-cp", "1"],
     ];
     let mismatches: Vec<String> = probe_args
         .iter()

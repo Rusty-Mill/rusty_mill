@@ -9,6 +9,8 @@
 //! conhost_probe cp                         GetConsoleCP
 //! conhost_probe set-cp <code page>         SetConsoleCP, then GetConsoleCP
 //! conhost_probe write <bytes>              write that many `x`s to stdout
+//! conhost_probe raw <hex>                  WriteFile those bytes to stdout: a raw
+//!                                          write, read in the output code page
 //! conhost_probe ctrl-hold <ms>             print `ready pid=<pid>`, then wait; on CTRL_CLOSE
 //!                                          print `ctrl-close` and hold the handler <ms>
 //! ```
@@ -83,6 +85,11 @@ mod probe {
                 out.flush().map_err(|e| e.to_string())?;
                 Ok(0)
             }
+            "raw" => {
+                let bytes = unhex(arg(1)?)?;
+                console::write_raw(&bytes).map_err(|e| format!("error={e}"))?;
+                Ok(0)
+            }
             "ctrl-hold" => {
                 let ms = arg(1)?.parse().map_err(|_| "milliseconds")?;
                 console::hold_ctrl_close(ms).map_err(|e| format!("error={e}"))?;
@@ -122,6 +129,16 @@ mod probe {
             platform::process::ExitStatus::Code(code) => Ok(code),
             other => Err(format!("host: the child ended with {other:?}")),
         }
+    }
+
+    fn unhex(text: &str) -> Result<Vec<u8>, String> {
+        if !text.len().is_multiple_of(2) {
+            return Err("an even number of hex digits".to_owned());
+        }
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).map_err(|e| e.to_string()))
+            .collect()
     }
 
     fn hex(mode: Result<u32, i32>) -> String {
@@ -205,6 +222,18 @@ mod probe {
                 return Err(last_error());
             }
             Ok(())
+        }
+
+        /// `WriteFile` on stdout, which the console serves as a raw
+        /// write; std's console stdout would use WriteConsoleW instead.
+        pub(crate) fn write_raw(bytes: &[u8]) -> Result<(), i32> {
+            use std::os::windows::io::FromRawHandle as _;
+            // SAFETY: stdout's handle stays open for the process's life;
+            // ManuallyDrop keeps the File from closing it.
+            let file = unsafe { std::fs::File::from_raw_handle(std_handle(true)) };
+            let mut file = std::mem::ManuallyDrop::new(file);
+            file.write_all(bytes)
+                .map_err(|e| e.raw_os_error().unwrap_or(-1))
         }
 
         pub(crate) fn cp() -> u32 {
