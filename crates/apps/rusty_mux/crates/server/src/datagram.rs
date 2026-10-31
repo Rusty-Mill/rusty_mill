@@ -30,6 +30,9 @@ pub(crate) type Key = [u8; KEY_LEN];
 /// How long an offered association waits for its first datagram.
 const OFFER_TTL: Duration = Duration::from_secs(60);
 
+/// The largest UDP payload over IPv4 (65535 less the IP and UDP headers).
+const UDP_MAX: usize = 65_507;
+
 /// The most associations, offered or live, a server holds at once.
 const MAX_ASSOCIATIONS: usize = 1024;
 
@@ -146,8 +149,10 @@ pub(crate) async fn serve(
     state: Shared,
     idle: Duration,
 ) -> io::Result<()> {
-    // One byte more than the largest datagram, to see one that is too big.
-    let mut buf = vec![0; MAX_DATAGRAM + 1];
+    // Room for any UDP datagram: one larger than the buffer is an error on
+    // Windows (WSAEMSGSIZE), which would end the server. Too big for the
+    // transport, it is dropped below.
+    let mut buf = vec![0; UDP_MAX];
     loop {
         let (n, from) = match socket.recv_from(&mut buf).await {
             Ok(received) => received,

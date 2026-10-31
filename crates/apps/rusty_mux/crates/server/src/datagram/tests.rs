@@ -187,11 +187,17 @@ fn only_an_authentic_datagram_brings_an_offer_alive() {
         stranger.probe();
         let (_, unknown) = stranger.transmit(now).expect("a probe");
         let socket = bind().await;
-        for datagram in [&forged[..], &unknown[..], &[0; 4]] {
+        // Garbage larger than any datagram must not end the receiver.
+        let oversized = vec![0xee; 4000];
+        for datagram in [&forged[..], &unknown[..], &[0; 4], &oversized[..]] {
             socket.send_to(datagram, addr).await.expect("send");
         }
         rusty_tokio::time::sleep(TICK * 5).await;
-        assert_eq!(registry.live(), 0, "forged, short or unknown: nothing live");
+        assert_eq!(
+            registry.live(),
+            0,
+            "forged, short, oversized or unknown: nothing live"
+        );
 
         peer.probe().await;
         assert_eq!(registry.live(), 1);
