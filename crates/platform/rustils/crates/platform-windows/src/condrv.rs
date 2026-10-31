@@ -268,10 +268,12 @@ pub struct ClientProcess {
 }
 
 impl ClientProcess {
-    /// Open the client `pid` while its CONNECT is unanswered. The client
-    /// waits on that reply, so `pid` still names it, and once open the
-    /// handle keeps the pid from being reused. Fails with the OS error,
-    /// e.g. `PermissionDenied` for a protected process.
+    /// Open the client `pid` while its CONNECT is unanswered; once open,
+    /// the handle keeps the pid from being reused. ConDrv doesn't keep a
+    /// waiting client referenced, though: one that died before this call
+    /// may have freed its pid for another process (design §7.3). Fails
+    /// with the OS error, e.g. `PermissionDenied` for a protected
+    /// process.
     pub fn open(pid: u32) -> Result<ClientProcess> {
         sys::open_process(pid).map(|handle| ClientProcess { handle })
     }

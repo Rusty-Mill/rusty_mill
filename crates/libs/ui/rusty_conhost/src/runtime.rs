@@ -28,7 +28,7 @@ use crate::console::{Console, Effect, Event, OutputQueue, POSTAMBLE, PREAMBLE, P
 use crate::ctrl::{self, Ctrl, Pushed};
 use crate::fixture::{self, FIXTURE_CAP};
 use crate::msg::STATUS_UNSUCCESSFUL;
-use crate::sched::{self, Control, GRACE, Grace, KILL_AFTER, PACKET_INPUT_CAP, View};
+use crate::sched::{self, Control, Grace, KILL_AFTER, PACKET_INPUT_CAP, View};
 
 /// Terminal input waiting for the engine; `write` blocks past this.
 const INPUT_LANE_CAP: usize = 64 * 1024;
@@ -86,6 +86,10 @@ pub(crate) struct Shared {
     output_ready: Condvar,
     exited: Mutex<bool>,
     exit_seen: Condvar,
+    /// Latched once the console has closed and the clients still attached
+    /// at its close have been ended (#1259).
+    shut_down: Mutex<bool>,
+    shut_down_seen: Condvar,
     waker: Waker,
 }
 
@@ -146,6 +150,8 @@ impl Shared {
             output_ready: Condvar::new(),
             exited: Mutex::new(false),
             exit_seen: Condvar::new(),
+            shut_down: Mutex::new(false),
+            shut_down_seen: Condvar::new(),
             waker,
         }
     }
@@ -278,7 +284,30 @@ impl Shared {
         }
     }
 
+    /// Wait up to `timeout` for the shutdown latch; whether it is set.
+    pub(crate) fn wait_shut_down(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut done = lock(&self.shut_down);
+        while !*done {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            done = self
+                .shut_down_seen
+                .wait_timeout(done, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
+
     // The engine's side.
+
+    fn set_shut_down(&self) {
+        *lock(&self.shut_down) = true;
+        self.shut_down_seen.notify_all();
+    }
 
     fn take_control(&self) -> (Control, usize) {
         let mut lanes = lock(&self.lanes);
@@ -540,6 +569,8 @@ struct Engine {
     /// once the console has closed (#1259).
     doomed: Vec<(u32, ClientProcess)>,
     kill_at: Option<Instant>,
+    /// When CTRL_CLOSE went out: the grace was armed.
+    close_started: Option<Instant>,
     /// Calls the console holds without a reply yet, for the panic path.
     pending: Vec<[u8; 8]>,
     /// `handle` panicked; nothing more reaches the console.
@@ -572,6 +603,7 @@ impl Engine {
             open_failed_logged: false,
             doomed: Vec::new(),
             kill_at: None,
+            close_started: None,
             pending: Vec::new(),
             dead: false,
             recorder: Recorder::from_env(),
@@ -588,12 +620,15 @@ impl Engine {
         }
         self.shared.close();
         self.reap();
+        self.shared.set_shut_down();
     }
 
     /// End the clients still attached at the grace, at [`KILL_AFTER`]
-    /// from CTRL_CLOSE. The console is closed and every waiter released,
-    /// so only this thread waits; a client that exited meanwhile, as
-    /// Windows ends a handler at about the same bound, is left alone.
+    /// from CTRL_CLOSE. The console is closed and every reader and exit
+    /// waiter released, so only this thread and a caller of
+    /// `OwnPtyMaster::wait_shut_down` wait; a client that exited
+    /// meanwhile, as Windows ends a handler at about the same bound, is
+    /// left alone.
     fn reap(&mut self) {
         let Some(at) = self.kill_at else {
             return;
@@ -707,6 +742,7 @@ impl Engine {
     fn arm_grace(&mut self, now: Instant) {
         if self.server.is_some() {
             self.grace.arm(now);
+            self.close_started.get_or_insert(now);
         }
     }
 
@@ -876,9 +912,8 @@ impl Engine {
         let Some(client) = self.clients.remove(&pid) else {
             return;
         };
-        // The deadline was armed at CTRL_CLOSE; `Kill` comes with it.
-        let at = Instant::now() + (KILL_AFTER - GRACE);
-        self.kill_at.get_or_insert(at);
+        let started = *self.close_started.get_or_insert_with(Instant::now);
+        self.kill_at.get_or_insert(started + KILL_AFTER);
         self.doomed.push((pid, client));
     }
 
@@ -1138,17 +1173,31 @@ mod tests {
             engine.turn().expect("turn");
         }
         assert!(engine.clients.contains_key(&pid), "opened before its reply");
-        let doomed = Instant::now();
+        let started = Instant::now();
+        engine.arm_grace(started);
         engine.apply(Effect::Kill { pid });
         assert!(engine.clients.is_empty());
         assert_eq!(engine.doomed.len(), 1, "ended later, not now");
-        let at = engine.kill_at.expect("a kill time");
-        assert!(at >= doomed + (KILL_AFTER - GRACE));
+        assert_eq!(
+            engine.kill_at,
+            Some(started + KILL_AFTER),
+            "from CTRL_CLOSE"
+        );
         engine.kill_at = Some(Instant::now());
         engine.reap();
         let status = Box::new(child).wait().expect("wait");
         assert_eq!(status, ExitStatus::Code(0xC000_013A_u32 as i32));
         engine.teardown();
+    }
+
+    #[test]
+    fn the_shutdown_latch_waits_for_the_kill_and_is_bounded() {
+        let shared = Shared::new(Waker::new().expect("Waker"));
+        let started = Instant::now();
+        assert!(!shared.wait_shut_down(Duration::from_millis(50)), "not yet");
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        shared.set_shut_down();
+        assert!(shared.wait_shut_down(Duration::ZERO), "latched");
     }
 
     #[test]
@@ -1163,67 +1212,6 @@ mod tests {
         engine.apply(Effect::Kill { pid });
         assert!(engine.doomed.is_empty(), "nothing to end");
         assert!(matches!(child.try_wait(), Ok(None)), "still running");
-        engine.teardown();
-        let _ = child.kill_single(Signal::Kill);
-    }
-
-    /// Design §7.3's pid assumption (#1259): a client ended after its
-    /// CONNECT was read but before it was served keeps its pid, because
-    /// ConDrv still references it, so `ClientProcess::open` can't reach
-    /// a process that reused the pid.
-    #[test]
-    fn a_client_killed_before_its_connect_is_served_keeps_its_pid() {
-        use platform::process::Spawner as _;
-        let cwd = std::env::current_dir().expect("current_dir");
-        let mut cmd = Command::new("cmd.exe", cwd);
-        // cmd starts a grandchild on the console and outlives it.
-        cmd.argv = vec![
-            "/c".into(),
-            "start /b ping -n 5 127.0.0.1 & ping -n 5 127.0.0.1 >nul".into(),
-        ];
-        let attached = condrv::spawn_attached(&cmd).expect("spawn_attached");
-        let cmd_pid = attached.child.id();
-        let shared = Arc::new(Shared::new(Waker::new().expect("Waker")));
-        let mut engine = Engine::new(
-            Console::new(SIZE, condrv::key_for),
-            attached.server,
-            attached.wait,
-            shared,
-            CtrlSender(Arc::default()),
-        );
-        let child = attached.child;
-        // Serve until a CONNECT from another pid is read, and hold it.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let pid = loop {
-            engine.work().expect("work");
-            let server = engine.server.as_mut().expect("open");
-            let ready = server
-                .wait(&engine.shared.waker, None, Some(deadline))
-                .expect("wait");
-            assert!(Instant::now() < deadline, "no second client");
-            let Some(d) = ready.io else { continue };
-            engine.read_in_flight = false;
-            if d.function == msg::CONNECT && d.process as u32 != cmd_pid {
-                break d.process as u32;
-            }
-            engine.serve(d).expect("serve");
-        };
-        // End it from outside while its CONNECT waits, and let go.
-        ClientProcess::open(pid)
-            .expect("open the connecting client")
-            .terminate()
-            .expect("terminate");
-        let spawner = platform_windows::WindowsSpawner;
-        while spawner.is_alive(pid).expect("is_alive") {
-            assert!(Instant::now() < deadline, "the client runs on");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        std::thread::sleep(Duration::from_millis(200));
-        // Still opened: the pid names the dead client, not a freed slot.
-        let held = ClientProcess::open(pid).expect("the pid is still referenced");
-        assert!(!spawner.is_alive(pid).expect("is_alive"), "not reused");
-        held.terminate()
-            .expect("ending an exited client is a no-op");
         engine.teardown();
         let _ = child.kill_single(Signal::Kill);
     }

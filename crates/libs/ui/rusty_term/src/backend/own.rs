@@ -31,6 +31,11 @@ use crate::backend::{Backend, BackendHandle};
 /// and the console's own close grace.
 const GRACE: Duration = Duration::from_secs(2);
 
+/// How long Drop waits for the console to shut down: it closes 2 s after
+/// the hang-up at the latest, and ends the clients still attached 5 s
+/// after it (#1259); 1 s more covers its teardown.
+const SHUTDOWN: Duration = Duration::from_secs(6);
+
 /// How often [`exited_within`] looks at the child.
 const POLL: Duration = Duration::from_millis(10);
 
@@ -128,15 +133,22 @@ impl BackendHandle for OwnHandle {
 }
 
 impl Drop for OwnHandle {
-    /// The original hangs up, gives the child the grace to exit, then kills
-    /// it, as the ConPTY handle does. A clone only drops its reference; the
-    /// last one closes the console (`OwnPtyMaster`'s Drop).
+    /// The original hangs up and waits for the console to shut down,
+    /// which ends every client still attached 5 s after the hang-up, the
+    /// child included. The process may exit right after this, taking the
+    /// host with it, so it waits here rather than leave those clients
+    /// running. Only a host that fails to shut down in time leaves the
+    /// child to be killed here. A clone only drops its reference; the last
+    /// one closes the console (`OwnPtyMaster`'s Drop).
     fn drop(&mut self) {
         let Some(child) = self.child.as_mut() else {
             return;
         };
         self.master.hang_up();
-        if exited_within(child, GRACE).is_none() {
+        if self.master.wait_shut_down(SHUTDOWN) {
+            return;
+        }
+        if exited_within(child, Duration::ZERO).is_none() {
             // Drop can't report a failure; a child that outlives this is
             // already detached from a console that has closed.
             let _ = child.kill_single(Signal::Kill);

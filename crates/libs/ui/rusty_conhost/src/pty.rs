@@ -2,6 +2,7 @@
 //! over our own console host.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::process::{Child, Command, GroupSpec};
@@ -76,6 +77,16 @@ impl OwnPtyMaster {
     /// or EOF is latched.
     pub fn output_ready(&self) -> bool {
         self.shared.output_ready()
+    }
+
+    /// Wait up to `timeout` for the console to shut down: closed, and
+    /// every client still attached at its close ended, 5 s after
+    /// CTRL_CLOSE (#1259). Returns whether it has. A process that exits
+    /// right after dropping its last master calls this first, or those
+    /// clients are never ended; without such a client it returns once
+    /// the console has closed.
+    pub fn wait_shut_down(&self, timeout: Duration) -> bool {
+        self.shared.wait_shut_down(timeout)
     }
 
     /// A handle that waits for the direct child to exit or the console to

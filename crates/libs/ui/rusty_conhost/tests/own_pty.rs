@@ -454,10 +454,19 @@ fn grandchildren_still_attached_are_ended_together_at_the_kill_bound() {
         .collect();
     exit_of(&mut child);
     let exited = Instant::now();
+    // What a process that exits right after closing relies on: once the
+    // shutdown latch is set, the probes have been ended.
+    assert!(master.wait_shut_down(BUDGET), "no shutdown");
     let spawner = platform_windows::WindowsSpawner;
     for p in &probes {
+        // TerminateProcess doesn't wait; the exit follows at once.
+        let ended = Instant::now();
         while spawner.is_alive(p.0).expect("is_alive") {
-            assert!(exited.elapsed() < BUDGET, "probe {} runs on", p.0);
+            assert!(
+                ended.elapsed() < Duration::from_millis(500),
+                "probe {} runs on after the shutdown",
+                p.0
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
     }
