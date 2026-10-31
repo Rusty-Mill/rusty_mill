@@ -315,6 +315,47 @@ pub fn key_for(ch: char) -> Option<(u16, u32)> {
     Some((scan & 0xff, key_state(scan >> 8)))
 }
 
+/// Whether `cp` is an installed code page. Wraps `IsValidCodePage`.
+pub fn is_valid_code_page(cp: u32) -> bool {
+    sys::valid_code_page(cp)
+}
+
+/// `bytes` in code page `cp` as text, as conhost converts the `A` APIs'
+/// input: `MultiByteToWideChar` without `MB_ERR_INVALID_CHARS`, so
+/// invalid bytes become U+FFFD or the code page's default character.
+/// `InvalidInput` when `cp` is not an installed code page. The caller
+/// keeps multibyte sequences whole.
+pub fn decode(cp: u32, bytes: &[u8]) -> Result<String> {
+    check_code_page(cp, "condrv::decode")?;
+    if bytes.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(String::from_utf16_lossy(&sys::to_wide(cp, bytes)?))
+}
+
+/// `text` in code page `cp`: `WideCharToMultiByte`, with the code page's
+/// default character (usually `?`) for what it cannot encode.
+/// `InvalidInput` when `cp` is not an installed code page.
+pub fn encode(cp: u32, text: &str) -> Result<Vec<u8>> {
+    check_code_page(cp, "condrv::encode")?;
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let units: Vec<u16> = text.encode_utf16().collect();
+    sys::to_multi(cp, &units)
+}
+
+fn check_code_page(cp: u32, op: &'static str) -> Result<()> {
+    if sys::valid_code_page(cp) {
+        return Ok(());
+    }
+    Err(PlatformError::new(
+        ErrorKind::InvalidInput,
+        OsCode::None,
+        op,
+    ))
+}
+
 /// `VkKeyScanW`'s shift byte (1 Shift, 2 Ctrl, 4 Alt) as key state.
 fn key_state(shift: u16) -> u32 {
     const SHIFT_PRESSED: u32 = 0x10;
@@ -471,6 +512,34 @@ mod tests {
         assert_eq!(key_state(2 | 4), 0x08 | 0x02);
         assert_eq!(key_for(' '), Some((0x20, 0)));
         assert_eq!(key_for('\u{1F600}'), None);
+    }
+
+    #[test]
+    fn code_pages_convert_like_conhost() {
+        assert!(is_valid_code_page(437) && is_valid_code_page(65001));
+        assert!(!is_valid_code_page(1));
+        assert_eq!(decode(437, b"\xb0A").expect("437"), "\u{2591}A");
+        assert_eq!(decode(850, b"\x9b").expect("850"), "\u{f8}");
+        assert_eq!(encode(850, "\u{f8}\u{4e00}").expect("850"), b"\x9b?");
+        assert_eq!(decode(65001, b"\xff").expect("65001"), "\u{fffd}");
+        assert_eq!(decode(437, b"").expect("empty"), "");
+        let e = decode(1, b"a").expect_err("cp 1");
+        assert_eq!(e.kind, ErrorKind::InvalidInput);
+        assert_eq!(
+            encode(1, "a").expect_err("cp 1").kind,
+            ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn dbcs_round_trips_when_installed() {
+        // 932 ships with every Windows install that has East Asian
+        // support; skip quietly where it doesn't.
+        if !is_valid_code_page(932) {
+            return;
+        }
+        assert_eq!(decode(932, b"\x82\xa0").expect("932"), "\u{3042}");
+        assert_eq!(encode(932, "\u{3042}").expect("932"), b"\x82\xa0");
     }
 
     fn injected(kind: ErrorKind, op: &'static str) -> PlatformError {
