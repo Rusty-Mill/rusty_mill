@@ -782,8 +782,13 @@ fn a_server_offering_only_v3_checkpoints_is_refused() {
 
 /// A real server on a new socket, with `/bin/sh` for each block.
 fn real_server() -> PathBuf {
-    use rusty_mux_server::{Config, serve};
-    use rusty_tokio::io::UnixListener;
+    real_server_with(false)
+}
+
+/// A real server, offering UDP on 127.0.0.1 when `udp` holds.
+fn real_server_with(udp: bool) -> PathBuf {
+    use rusty_mux_server::{Config, Udp, serve, serve_udp};
+    use rusty_tokio::io::{UdpSocket, UnixListener};
     use rusty_tokio::{Builder, LocalOptions};
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -807,7 +812,15 @@ fn real_server() -> PathBuf {
                 args: Vec::new(),
                 cwd: "/".into(),
             };
-            serve(listener, config).await.expect("serve");
+            match udp {
+                true => {
+                    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("udp");
+                    let idle = Duration::from_secs(600);
+                    let udp = Udp { socket, idle };
+                    serve_udp(listener, config, udp).await.expect("serve");
+                }
+                false => serve(listener, config).await.expect("serve"),
+            }
         });
     });
     ready_rx.recv_timeout(PATIENCE).expect("server bound");
@@ -829,7 +842,8 @@ fn real_server() -> PathBuf {
 ///   for `MS` milliseconds, in order: a slow path.
 ///
 /// SIGUSR1 cuts every connection on the client's side only, so the client
-/// sees them end while the server keeps its clients.
+/// sees them end while the server keeps its clients. `-G` prints only a
+/// `hostname` line, `$STANDIN_HOSTNAME` or 127.0.0.1, and is not a start.
 fn relaying_ssh(name: &str, plan: &[&str]) -> PathBuf {
     let work = std::env::temp_dir().join(format!("rusty-mux-relay-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
@@ -839,6 +853,9 @@ fn relaying_ssh(name: &str, plan: &[&str]) -> PathBuf {
         r#"#!/usr/bin/env python3
 import os, queue, signal, socket, sys, threading, time
 args = sys.argv[1:]
+if "-G" in args:
+    print("hostname " + os.environ.get("STANDIN_HOSTNAME", "127.0.0.1"))
+    sys.exit(0)
 with open("{log}", "a") as log:
     log.write(" ".join([str(os.getpid())] + args) + "\n")
 with open("{log}") as log:
@@ -1062,6 +1079,61 @@ fn a_frozen_path_is_brought_back_with_the_screen_and_the_lease() {
     assert!(!text.contains("path to the server was down"), "{text:?}");
     assert!(!running(seen[1].0), "the second ssh outlived the client");
     std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// A server that offers UDP gets the client's connections over it: the
+/// client moves once the association answers, and the forward stops. A
+/// block shown later opens its own stream, and typing reaches the block.
+#[test]
+fn an_ssh_attach_moves_to_udp_and_stops_the_forward() {
+    let socket = real_server_with(true);
+    let work = relaying_ssh("udp", &[]);
+    let tui = ssh_client(&work, &socket);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    let forward = wait_logins(&work, 1, PATIENCE)[0].0;
+    let deadline = Instant::now() + PATIENCE;
+    while running(forward) {
+        assert!(Instant::now() < deadline, "the forward outlived the move");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // A split shows a new block, on a new stream.
+    tui.master.write(b"\x1d|").expect("ctrl-] |");
+    type_until(&tui, b"echo two-$((1+1))\r", b"two-2");
+
+    tui.master.write(b"\x1dd").expect("ctrl-] d");
+    let text = String::from_utf8_lossy(&tui.exit()).into_owned();
+    assert!(text.contains("detached from block"), "{text:?}");
+    assert!(!text.contains("staying on SSH"), "{text:?}");
+    assert_eq!(logins(&work).len(), 1, "no second login");
+    std::fs::remove_dir_all(&work).expect("cleanup");
+}
+
+/// With UDP unanswered, or turned off, the client stays on the forward:
+/// in 2 s or not at all, and it says so once when it tried.
+#[test]
+fn an_unanswered_or_unwanted_udp_keeps_the_client_on_ssh() {
+    let socket = real_server_with(true);
+    for (name, env) in [
+        // TEST-NET-1: nothing there answers.
+        ("udp-blocked", ("STANDIN_HOSTNAME", "192.0.2.1")),
+        ("udp-off", ("RUSTY_MUX_UDP", "off")),
+    ] {
+        let work = relaying_ssh(name, &[]);
+        let started = Instant::now();
+        let tui = ssh_client_with(&work, &socket, &[env]);
+        type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+        assert!(started.elapsed() < PATIENCE, "{name}: too slow");
+        let forward = wait_logins(&work, 1, PATIENCE)[0].0;
+        assert!(running(forward), "{name}: the forward stopped");
+
+        tui.master.write(b"\x1dd").expect("ctrl-] d");
+        let text = String::from_utf8_lossy(&tui.exit()).into_owned();
+        assert!(text.contains("detached from block"), "{name}: {text:?}");
+        let said = text.matches("staying on SSH").count();
+        assert_eq!(said, usize::from(name == "udp-blocked"), "{name}: {text:?}");
+        assert!(!running(forward), "{name}: the forward outlived the client");
+        std::fs::remove_dir_all(&work).expect("cleanup");
+    }
 }
 
 /// Reconnecting only ever continues the clients the server still has: one

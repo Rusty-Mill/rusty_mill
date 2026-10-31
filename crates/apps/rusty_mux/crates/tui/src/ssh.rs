@@ -170,8 +170,34 @@ impl Drop for Forward {
     }
 }
 
+/// The name `ssh` would connect to for `host`, after the user's config
+/// (`HostName`, aliases), from `ssh -G`, which resolves the options and
+/// connects to nothing. A `ProxyJump` is not followed: UDP goes straight
+/// to this name, and the client falls back to SSH if nothing answers.
+pub fn hostname(program: &OsStr, host: &str) -> Result<String, String> {
+    let out = Command::new(program)
+        .args(["-G", "--", host])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("starting {} -G: {e}", Path::new(program).display()))?;
+    if !out.status.success() {
+        return Err(format!("ssh -G {host} failed ({})", out.status));
+    }
+    parse_hostname(&String::from_utf8_lossy(&out.stdout))
+        .ok_or_else(|| format!("ssh -G {host} printed no hostname"))
+}
+
+/// The value of the `hostname` line in `ssh -G` output.
+fn parse_hostname(config: &str) -> Option<String> {
+    config.lines().find_map(|line| {
+        let (key, value) = line.split_once(' ')?;
+        (key == "hostname" && !value.is_empty()).then(|| value.to_owned())
+    })
+}
+
 /// A new directory in the temp directory that only this user can enter.
-fn private_dir() -> io::Result<PathBuf> {
+pub(crate) fn private_dir() -> io::Result<PathBuf> {
     let name = format!(
         "rusty-mux-ssh-{}-{}",
         std::process::id(),
@@ -225,6 +251,13 @@ mod tests {
                 "box",
             ]
         );
+    }
+
+    #[test]
+    fn the_hostname_comes_from_ssh_g() {
+        let config = "user nano\nhostname box.example.net\nport 22\n";
+        assert_eq!(parse_hostname(config).as_deref(), Some("box.example.net"));
+        assert_eq!(parse_hostname("user nano\nhostnames x\n"), None);
     }
 
     #[test]

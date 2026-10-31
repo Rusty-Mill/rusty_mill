@@ -6,13 +6,16 @@
 //! ([`screen`]) and redrawn where it changed. [`keys`] turns the keyboard
 //! into input and prefix commands. [`predict`] guesses typed keys' echo
 //! ahead of a slow server. [`ssh`] reaches a server on another
-//! machine through an OpenSSH socket forward.
+//! machine through an OpenSSH socket forward, and [`udp`] moves it onto a
+//! UDP association when the server offers one.
 
 pub mod keys;
 pub mod predict;
 pub mod screen;
 #[cfg(unix)]
 pub mod ssh;
+#[cfg(unix)]
+pub mod udp;
 
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};
