@@ -9,6 +9,7 @@
 
 mod common;
 
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -166,33 +167,37 @@ fn a_stopped_server_ends_every_program_before_it_exits(host: ConsoleHost) {
     let name = format!("rusty-mux-stopped-{}-{host:?}.sock", std::process::id());
     let path = std::env::temp_dir().join(name);
     let _ = std::fs::remove_file(&path);
+    // In a process group of its own, on this test's console, so a
+    // Ctrl+Break can be aimed at it alone.
     let mut server = KillOnDrop(
         Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"))
             .arg(&path)
             .env(ConsoleHost::ENV, console_host_name(host))
             .stdin(Stdio::null())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP)
             .spawn()
             .expect("start the server"),
     );
     wait_until_listening(&path);
 
     let mut a = Client::connect(&path);
-    let mut programs = Vec::new();
+    let mut programs = Ends(Vec::new());
     for _ in 0..2 {
         let block = block_for(&mut a);
-        programs.push(("a shell", shell_pid(&mut a, block)));
+        programs.0.push(("a shell", shell_pid(&mut a, block)));
         a.input(block, PING);
         // Printed once Start-Process has returned the running ping.
-        programs.push(("a ping", a.wait_for_number(block, "PING=")));
+        programs
+            .0
+            .push(("a ping", a.wait_for_number(block, "PING=")));
     }
-    for &(what, pid) in &programs {
+    for &(what, pid) in &programs.0 {
         assert!(alive(pid), "{what} (pid {pid}) never ran");
     }
 
     let pid = server.0.id();
     let stopping = Instant::now();
-    platform_windows::condrv::send_ctrl(pid, platform_windows::condrv::CtrlEvent::Break)
-        .expect("send Ctrl+Break");
+    send_ctrl_break(pid);
     // The 6 s budget and a margin.
     let status = wait_within(&mut server.0, Duration::from_secs(9));
     let took = stopping.elapsed();
@@ -203,11 +208,47 @@ fn a_stopped_server_ends_every_program_before_it_exits(host: ConsoleHost) {
         // conhost's 5 s console-close timeout, and a margin.
         ConsoleHost::ConPty => Duration::from_secs(7),
     };
-    for (what, pid) in programs {
+    for &(what, pid) in &programs.0 {
         assert_gone_within(pid, what, budget);
     }
     eprintln!("{host:?}: the server stopped in {took:?}");
     let _ = std::fs::remove_file(&path);
+}
+
+/// `CREATE_NEW_PROCESS_GROUP` (winbase.h): the child leads a process group
+/// of its own, whose id is its pid.
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+/// Sends Ctrl+Break to the process group `group` on this console, as
+/// pressing it would: `GenerateConsoleCtrlEvent` through PowerShell, which
+/// shares this console, so the test needs no Win32 binding of its own.
+fn send_ctrl_break(group: u32) {
+    let script = format!(
+        "$k = Add-Type -Name K -Namespace RustyMuxTest -PassThru -MemberDefinition \
+         '[DllImport(\"kernel32.dll\")] public static extern bool GenerateConsoleCtrlEvent(uint e, uint g);'; \
+         if (-not $k::GenerateConsoleCtrlEvent(1, {group})) {{ exit 1 }}"
+    );
+    let status = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdin(Stdio::null())
+        .status()
+        .expect("run powershell");
+    assert!(status.success(), "Ctrl+Break to group {group}: {status:?}");
+}
+
+/// Programs a failing test still ends, so none outlives it.
+struct Ends(Vec<(&'static str, u32)>);
+
+impl Drop for Ends {
+    fn drop(&mut self) {
+        for &(_, pid) in &self.0 {
+            if alive(pid) {
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/PID", &pid.to_string()])
+                    .output();
+            }
+        }
+    }
 }
 
 /// Waits up to `budget` for `child` to exit.
