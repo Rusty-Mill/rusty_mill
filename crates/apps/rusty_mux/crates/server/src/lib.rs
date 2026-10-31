@@ -142,7 +142,13 @@ async fn serve_for(
         return accept(listener, state, allowed).await;
     };
     let registry = datagram::Registry::new(udp.socket.local_addr()?.port());
-    state.borrow_mut().offer_datagrams(registry.clone());
+    let lifetimes = state::Lifetimes {
+        idle: udp.idle,
+        lease: datagram::LEASE_SILENCE,
+    };
+    state
+        .borrow_mut()
+        .offer_datagrams(registry.clone(), lifetimes);
     let socket = std::rc::Rc::new(udp.socket);
     rusty_tokio::select! {
         result = accept(listener, state.clone(), allowed) => result,

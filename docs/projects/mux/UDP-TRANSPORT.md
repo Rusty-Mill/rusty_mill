@@ -5,9 +5,9 @@ Go on 2026-10-30 and answered its four open questions the same day (below).
 Built in #1270 (transport), #1280 (server) and #1283 (client), and checked
 by hand over a real sshd on 2026-10-31
 ([UDP-MANUAL-CHECK-2026-10-31.md](UDP-MANUAL-CHECK-2026-10-31.md)). Not built
-yet, in their own step: the 6 s outage display, the stale orphan on
-overflow, and moving back to UDP after a fallback to SSH. The lease release
-after 30 s of silence is built (see Session lifetime).
+yet, in their own step: the 6 s outage display and moving back to UDP
+after a fallback to SSH. The lease release after 30 s of silence and the
+stale orphan on overflow are built (see Session lifetime and Overflow).
 Background: [SPIKE-4-ROAMING.md](SPIKE-4-ROAMING.md) and the step 2 decision
 in [DECISIONS.md](DECISIONS.md) (SSH bootstrap, 2026-10-29).
 
@@ -207,6 +207,10 @@ stream, through the existing takeover, resume and attach path.
   attached block's screen as a checkpoint before any new output, as attach
   does, and clears the mark. The screen is then current, whatever was
   discarded.
+- As built, a takeover of any client already re-sends the attached block's
+  screen, so the stale mark only sets the orphan's lifetimes. A stale
+  client's lease, released after 30 s, comes back on its takeover when it
+  is still free.
 - Silence without overflow behaves the same way, minus the eviction: the
   stream survives, the server retransmits when the client is heard again,
   and nothing is replayed.

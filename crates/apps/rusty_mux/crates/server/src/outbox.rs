@@ -19,6 +19,9 @@ pub(crate) struct Outbox {
     attaching: Rc<Cell<bool>>,
     cancel: Rc<Notify>,
     queued: Rc<Cell<usize>>,
+    /// Whether the connection is a datagram stream, which outlives its
+    /// budget as a stale orphan instead of being dropped.
+    datagram: bool,
 }
 
 /// The receiving side, held by the connection's writer task.
@@ -40,6 +43,7 @@ pub(crate) fn outbox() -> (Outbox, Inbox, Rc<Notify>) {
             attaching: attaching.clone(),
             cancel: cancel.clone(),
             queued: queued.clone(),
+            datagram: false,
         },
         Inbox {
             rx,
@@ -80,6 +84,19 @@ impl Outbox {
     /// Whether this is the outbox of the connection that owns `cancel`.
     pub(crate) fn belongs_to(&self, cancel: &Rc<Notify>) -> bool {
         Rc::ptr_eq(&self.cancel, cancel)
+    }
+
+    /// The cancel of the connection this outbox feeds.
+    pub(crate) fn cancel(&self) -> &Rc<Notify> {
+        &self.cancel
+    }
+
+    pub(crate) fn over_datagram(&mut self) {
+        self.datagram = true;
+    }
+
+    pub(crate) fn is_datagram(&self) -> bool {
+        self.datagram
     }
 
     pub(crate) fn attaching(&self) -> bool {
