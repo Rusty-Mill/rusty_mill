@@ -9,7 +9,7 @@
 //! A second thread, the ctrl worker, delivers Ctrl events: delivery can
 //! block on the target's handler, so it never runs on the engine thread.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -20,7 +20,7 @@ use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::term::WinSize;
 use platform_windows::WindowsChild;
 use platform_windows::condrv::{
-    self, Attached, ConsoleServer, CtrlEvent, IoComplete, IoDescriptor, Waker,
+    self, Attached, ClientProcess, ConsoleServer, CtrlEvent, IoComplete, IoDescriptor, Waker,
 };
 use platform_windows::sys::handle::OwnedWinHandle;
 
@@ -531,6 +531,11 @@ struct Engine {
     exit_handled: bool,
     /// The CTRL_CLOSE deadline, armed by the first hang-up or child exit.
     grace: Grace,
+    /// Attached client processes by pid, ended if still attached at the
+    /// deadline (#1259). One that couldn't be opened is missing.
+    clients: HashMap<u32, ClientProcess>,
+    /// A client that couldn't be opened was logged once already.
+    open_failed_logged: bool,
     /// Calls the console holds without a reply yet, for the panic path.
     pending: Vec<[u8; 8]>,
     /// `handle` panicked; nothing more reaches the console.
@@ -559,6 +564,8 @@ impl Engine {
             exited: false,
             exit_handled: false,
             grace: Grace::default(),
+            clients: HashMap::new(),
+            open_failed_logged: false,
             pending: Vec::new(),
             dead: false,
             recorder: Recorder::from_env(),
@@ -806,13 +813,47 @@ impl Engine {
                 self.after_reply.push((pid, event));
             }
             Effect::Ctrl { pid, event } => self.ctrl.push(pid, event),
-            Effect::CtrlGone { pid } => {
+            Effect::Joined { pid } => self.track(pid),
+            Effect::Left { pid } => {
                 self.after_reply.retain(|&(p, _)| p != pid);
                 self.ctrl.forget(pid);
+                self.clients.remove(&pid);
             }
+            Effect::Kill { pid } => self.kill(pid),
             Effect::CloseServer => self.teardown(),
             Effect::Eof => self.shared.set_eof(),
             Effect::Log(d) => crate::diag::log(&d.to_string()),
+        }
+    }
+
+    /// Hold a joining client so the deadline can end it. A client that
+    /// can't be opened (a protected process) is only logged: CTRL_CLOSE
+    /// still reaches it.
+    fn track(&mut self, pid: u32) {
+        if self.clients.contains_key(&pid) {
+            return;
+        }
+        match ClientProcess::open(pid) {
+            Ok(client) => {
+                self.clients.insert(pid, client);
+            }
+            Err(e) if !self.open_failed_logged => {
+                self.open_failed_logged = true;
+                crate::diag::log(&format!(
+                    "client {pid} can't be ended at the close deadline: {e}"
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// End a client still attached at the deadline, best effort.
+    fn kill(&mut self, pid: u32) {
+        let Some(client) = self.clients.remove(&pid) else {
+            return;
+        };
+        if let Err(e) = client.terminate() {
+            crate::diag::log(&format!("ending client {pid} failed: {e}"));
         }
     }
 
@@ -925,7 +966,7 @@ mod tests {
     use super::*;
     use crate::console::PANIC_FOR_TEST;
     use crate::msg;
-    use platform::process::{Child, Command, Signal};
+    use platform::process::{Child, Command, ExitStatus, Signal};
 
     #[test]
     fn a_panicking_console_fails_its_calls_and_closes() {
@@ -1059,6 +1100,37 @@ mod tests {
         assert_eq!(engine.shared.input_len(), 0);
         assert!(!engine.console.reads_ready());
         assert_eq!(engine.console.waiting(), 0, "every read was served");
+        engine.teardown();
+        let _ = child.kill_single(Signal::Kill);
+    }
+
+    #[test]
+    fn a_joined_client_is_held_from_its_connect_and_ended_by_kill() {
+        let (mut engine, child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let pid = child.id();
+        // The CONNECT is answered but its reply not yet sent.
+        while engine.reply.is_none() {
+            engine.turn().expect("turn");
+        }
+        assert!(engine.clients.contains_key(&pid), "opened before its reply");
+        engine.apply(Effect::Kill { pid });
+        assert!(engine.clients.is_empty());
+        let status = Box::new(child).wait().expect("wait");
+        assert_eq!(status, ExitStatus::Code(0xC000_013A_u32 as i32));
+        engine.teardown();
+    }
+
+    #[test]
+    fn a_client_that_left_is_let_go_and_never_ended() {
+        let (mut engine, mut child) = engine_on(Console::new(SIZE, condrv::key_for));
+        let pid = child.id();
+        engine.apply(Effect::Joined { pid });
+        engine.apply(Effect::Joined { pid });
+        assert_eq!(engine.clients.len(), 1, "one handle per process");
+        engine.apply(Effect::Left { pid });
+        assert!(engine.clients.is_empty());
+        engine.apply(Effect::Kill { pid });
+        assert!(matches!(child.try_wait(), Ok(None)), "still running");
         engine.teardown();
         let _ = child.kill_single(Signal::Kill);
     }

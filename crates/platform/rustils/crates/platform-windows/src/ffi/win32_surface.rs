@@ -104,6 +104,9 @@ pub use windows_sys::Win32::System::Threading::{
 // `AssignProcessToJobObject` (already admitted below) and
 // `TerminateProcess` (already admitted above) each require — no broader
 // access than the two calls this handle is actually used for.
+// `condrv::ClientProcess` (#1259) opens a console client by the pid its
+// CONNECT carries with `PROCESS_TERMINATE` alone, to end it at the close
+// grace deadline with `TerminateProcess`.
 pub use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
 };

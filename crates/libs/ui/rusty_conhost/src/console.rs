@@ -20,7 +20,7 @@
 //!
 //! Copyright (c) Microsoft Corporation. Licensed under the MIT license.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use platform::term::WinSize;
@@ -189,9 +189,21 @@ pub(crate) enum Effect {
         pid: u32,
         event: Ctrl,
     },
-    /// A client process left: Ctrl events still queued for it are moot,
-    /// and dropping them keeps the queue within one entry per client.
-    CtrlGone {
+    /// A client process joined, before its CONNECT reply: while it waits
+    /// on that reply its pid can't name another process, so the engine
+    /// opens it now to end it at the grace deadline (#1259).
+    Joined {
+        pid: u32,
+    },
+    /// A client process left, its last connection gone: Ctrl events
+    /// still queued for it are moot, and dropping them keeps the queue
+    /// within one entry per client; the engine lets go of the process.
+    Left {
+        pid: u32,
+    },
+    /// End a client process still attached when the console closes at
+    /// the grace deadline (#1259). Always before [`Effect::CloseServer`].
+    Kill {
         pid: u32,
     },
     /// Disconnect every client.
@@ -731,6 +743,11 @@ impl Console {
         // Reset the input-available event while the server can still be
         // reached: after CloseServer the engine drops every effect.
         self.sync_input_available(fx);
+        // Only the grace deadline closes with clients left (#1259): they
+        // had CTRL_CLOSE and 2 s, and one that ignores the closed
+        // console's errors would otherwise run on (S1).
+        let pids: BTreeSet<u32> = self.clients.values().map(|c| c.pid).collect();
+        fx.extend(pids.into_iter().map(|pid| Effect::Kill { pid }));
         fx.push(Effect::CloseServer);
         fx.push(Effect::Eof);
     }
@@ -751,6 +768,11 @@ impl Console {
             msg::CONNECT => {
                 let reply = self.connect(&p, fx);
                 let joined = reply.status == msg::STATUS_SUCCESS;
+                if joined {
+                    fx.push(Effect::Joined {
+                        pid: p.process as u32,
+                    });
+                }
                 fx.push(Effect::Reply(reply));
                 if joined && self.closing {
                     // A late client is told too, or it would hold the
@@ -869,7 +891,7 @@ impl Console {
                 self.remove_object(cookie);
             }
             if !self.clients.values().any(|c| c.pid == client.pid) {
-                fx.push(Effect::CtrlGone { pid: client.pid });
+                fx.push(Effect::Left { pid: client.pid });
             }
         }
         Reply::ok(p.id)
@@ -1679,7 +1701,7 @@ pub(crate) mod tests {
         assert_eq!(
             fx,
             [
-                Effect::CtrlGone { pid: 1 },
+                Effect::Left { pid: 1 },
                 Effect::Reply(r),
                 Effect::CloseServer,
                 Effect::Eof
@@ -1708,7 +1730,13 @@ pub(crate) mod tests {
             assert!(h.ev(Event::ChildExited).is_empty());
             assert_eq!(
                 h.ev(Event::GraceExpired),
-                [Effect::CloseServer, Effect::Eof]
+                [
+                    Effect::Kill { pid: 1 },
+                    Effect::Kill { pid: 2 },
+                    Effect::CloseServer,
+                    Effect::Eof
+                ],
+                "the clients still attached are ended before the close"
             );
             assert!(h.ev(Event::GraceExpired).is_empty(), "closes once");
         }
@@ -1730,7 +1758,7 @@ pub(crate) mod tests {
         assert_eq!(
             fx,
             [
-                Effect::CtrlGone { pid: 2 },
+                Effect::Left { pid: 2 },
                 Effect::Reply(r),
                 Effect::CloseServer,
                 Effect::Eof
@@ -1747,7 +1775,55 @@ pub(crate) mod tests {
         let info = msg::CONNECTION_INFORMATION_LEN as u32;
         let (r, fx) = h.packet(msg::CONNECT, 7, 0, &msg::server_msg(""), info);
         assert_eq!(r.status, msg::STATUS_SUCCESS);
-        assert_eq!(fx, [Effect::Reply(r), close_to(7)], "after its reply");
+        assert_eq!(
+            fx,
+            [Effect::Joined { pid: 7 }, Effect::Reply(r), close_to(7)],
+            "after its reply"
+        );
+    }
+
+    #[test]
+    fn a_client_joins_before_its_connect_reply_and_only_on_success() {
+        let mut h = Host::new();
+        let info = msg::CONNECTION_INFORMATION_LEN as u32;
+        let (r, fx) = h.packet(msg::CONNECT, 3, 0, &msg::server_msg(""), info);
+        assert_eq!(fx, [Effect::Joined { pid: 3 }, Effect::Reply(r)]);
+        let (r, fx) = h.packet(msg::CONNECT, 4, 0, &msg::server_msg(""), 0);
+        assert_eq!(r.status, msg::STATUS_INVALID_BUFFER_SIZE);
+        assert_eq!(fx, [Effect::Reply(r)], "a refused client never joins");
+    }
+
+    #[test]
+    fn the_grace_ends_each_attached_process_once_and_no_departed_one() {
+        let mut h = Host::new();
+        let [a, ..] = h.connect(5, "");
+        h.connect(5, "");
+        h.connect(9, "");
+        let [d, ..] = h.connect(2, "");
+        h.ev(Event::HangUp);
+        h.packet(msg::DISCONNECT, d, 0, &[], 0);
+        h.packet(msg::DISCONNECT, a, 0, &[], 0);
+        assert_eq!(
+            h.ev(Event::GraceExpired),
+            [
+                Effect::Kill { pid: 5 },
+                Effect::Kill { pid: 9 },
+                Effect::CloseServer,
+                Effect::Eof
+            ],
+            "pid 5 still has a connection; pid 2 left during the grace"
+        );
+    }
+
+    #[test]
+    fn closing_on_the_last_disconnect_ends_nobody() {
+        let mut h = Host::new();
+        let [a, ..] = h.connect(1, "");
+        h.ev(Event::ChildExited);
+        let (_, fx) = h.packet(msg::DISCONNECT, a, 0, &[], 0);
+        assert!(fx.contains(&Effect::CloseServer));
+        assert!(!fx.iter().any(|e| matches!(e, Effect::Kill { .. })));
+        assert!(h.ev(Event::GraceExpired).is_empty(), "already closed");
     }
 
     #[test]
@@ -1756,9 +1832,9 @@ pub(crate) mod tests {
         let [a, ..] = h.connect(5, "");
         let [b, ..] = h.connect(5, "");
         let (_, fx) = h.packet(msg::DISCONNECT, a, 0, &[], 0);
-        assert!(!fx.iter().any(|e| matches!(e, Effect::CtrlGone { .. })));
+        assert!(!fx.iter().any(|e| matches!(e, Effect::Left { .. })));
         let (_, fx) = h.packet(msg::DISCONNECT, b, 0, &[], 0);
-        assert!(fx.contains(&Effect::CtrlGone { pid: 5 }));
+        assert!(fx.contains(&Effect::Left { pid: 5 }));
     }
 
     #[test]
@@ -1770,7 +1846,7 @@ pub(crate) mod tests {
         assert_eq!(
             fx,
             [
-                Effect::CtrlGone { pid: 1 },
+                Effect::Left { pid: 1 },
                 Effect::Reply(r),
                 Effect::SetInputAvailable(false),
                 Effect::CloseServer,

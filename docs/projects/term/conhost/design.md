@@ -457,7 +457,7 @@ This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd,
 ### 5.8 Lifetime
 **EOF** comes when the direct child exits and the queue drains. That matches today's `spawn_exit_watcher` (`platform-windows/src/sys/pty.rs:624-643`). Grandchildren (`start /b`) don't keep the console alive.
 
-**Shutdown:** §7.3 is normative. In short, on `ChildExited` or `HangUp` the core sends `Ctrl{Close}` to the remaining clients through the ctrl worker and the engine arms a 2 s deadline. 2 s matches today's Drop drain bound (`sys/pty.rs:691, 727`). On the last DISCONNECT or at the deadline, the engine cancels and drains its read, closes the server and emits `Eof`.
+**Shutdown:** §7.3 is normative. In short, on `ChildExited` or `HangUp` the core sends `Ctrl{Close}` to the remaining clients through the ctrl worker and the engine arms a 2 s deadline. 2 s matches today's Drop drain bound (`sys/pty.rs:691, 727`). On the last DISCONNECT or at the deadline, the engine cancels and drains its read, closes the server and emits `Eof`. At the deadline it first ends every client process still attached (#1259, §7.3).
 
 **`hang_up` contract:** `hang_up` returns at once and never calls `ConsoleControl` itself. Today's `hang_up` blocks only on a full pipe (`platform-windows/src/pty.rs:147-160`). The mux's `GRACE` = 1 s kill (`rusty_mux/crates/server/src/pty/mod.rs:29`) still works on top of it.
 
@@ -479,7 +479,7 @@ This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd,
 | V6 | Multiple screen buffers (CREATE_OBJECT type 3, SetConsoleActiveScreenBuffer) | supported | STATUS_NOT_IMPLEMENTED | no target program uses them (edit.exe uses `?1049h`); build when the unknown-API log shows a real caller |
 | V7 | GenerateConsoleCtrlEvent for a group no client is in | falls back to the caller's parent process | `E_INVALIDARG`, nothing sent | the fallback serves console-less callers; our clients always carry their group |
 | V8 | Synthesized key records (plain VT input, not win32-input-mode) | scan codes from the layout; mouse reports become mouse records | scan code 0; mouse reports reach VT-input clients only | no target program reads scan codes or mouse records from a VT terminal; win32-input-mode carries both exactly |
-| V9 | Closing after CTRL_CLOSE | no host deadline: serves until the last DISCONNECT; Windows ends a handler at about 5 s | the server closes at the last DISCONNECT or 2 s after the first hang-up or child exit (§7.3), so a handler taking 2–5 s loses its console | teardown stays bounded, matching today's 2 s Drop drain (§5.8); a client that ignores the closed console's errors can't hold it open (S1) |
+| V9 | Closing after CTRL_CLOSE | no host deadline: serves until the last DISCONNECT; Windows ends a handler at about 5 s | the server closes at the last DISCONNECT or 2 s after the first hang-up or child exit (§7.3), so a handler taking 2–5 s loses its console | teardown stays bounded, matching today's 2 s Drop drain (§5.8); a client that ignores the closed console's errors can't hold it open (S1), and one still attached at the deadline is ended there with `STATUS_CONTROL_C_EXIT`, the code CTRL_CLOSE ends it with (#1259) |
 | V10 | A client connecting during the close | CTRL_CLOSE is sent once (`_closeEventSent`), so a late client gets none | a late client gets CTRL_CLOSE once its CONNECT reply has gone out | without it a late `ping -t`-like client outlives the console (S1) |
 | V11 | DSR 5, CPR and DECXCPR from a client (§5.6) | under ConPTY never answered: the query goes to the terminal, whose CPR comes back as input | answered from the host's Grid, and the query is kept from the terminal | the answer then agrees with GetConsoleScreenBufferInfo even after a resize (V3), and a CPR never has to be told apart from a modified F3 key on input |
 | V12 | Input availability while an earlier read is held on echo or the 1 MiB reply budget | count describes buffered records | count, the input event and a NOWAIT peek report no available records until the owed reads resume | those records belong to the earlier reads; later readers must not take their input |
@@ -585,7 +585,8 @@ Effects are applied after each `handle` call, in the order the core returned the
 - **`hang_up`** sets the control lane's `hang_up` flag (a second call finds it set and returns at once), wakes the engine and returns. It needs no input-lane capacity. It takes no lock that is held across an OS call, so it never waits on a client handler.
 - **Drop of the last `OwnPtyMaster`** does the same, and also marks the console detached. The engine then tears down, frees its own state and exits. Drop never joins a thread.
 - **Engine on `HangUp` or `ChildExited`.** The core emits `Ctrl{Close}` for every client, newest first as Windows dispatches them (onto the Ctrl queue; a Ctrl effect that comes with a reply is queued once that reply is sent), and the engine arms the deadline at `now + 2 s` once. A later `HangUp` or `ChildExited` doesn't move it. During the grace the engine keeps serving the driver.
-- **Engine on the last DISCONNECT or on `GraceExpired`.** The core emits `CloseServer`, and the engine then:
+- **Client processes (#1259).** The core emits `Joined{pid}` before a successful CONNECT's reply, and the engine opens the client with `condrv::ClientProcess::open` (`PROCESS_TERMINATE` only). The client waits on that reply, so its pid can't have been reused. One handle is held per pid, bounded by the client limit (§6.1), and is released on `Left{pid}`, when the pid's last connection goes. A client that can't be opened, such as a protected process, is logged once per console and still gets CTRL_CLOSE.
+- **Engine on the last DISCONNECT or on `GraceExpired`.** At `GraceExpired` the core first emits `Kill{pid}` for every process still attached, and the engine calls `ClientProcess::terminate`, which ends it with `STATUS_CONTROL_C_EXIT` and doesn't wait. A failure is logged. After the last DISCONNECT no client is left, so nothing is ended. The core then emits `CloseServer`, and the engine:
   1. calls `cancel_read` if a READ_IO is in flight;
   2. keeps calling `wait` until that read's completion arrives, whatever it is: success, cancelled or error. CancelIoEx only requests cancellation, and the OVERLAPPED block and buffer can't be freed or reused before completion. A descriptor that completed successfully in the race is answered `STATUS_UNSUCCESSFUL` with `complete_io`, best effort;
   3. calls `server.take().map(ConsoleServer::close)`, so `CloseServer` reaches the consuming `close(self)`;
@@ -726,8 +727,9 @@ serving thread. Results are author-reported:
   last DISCONNECT (closing on the direct child's exit cut off a
   grandchild's last output in S1), and its ctrl worker still delivers
   queued CTRL_CLOSE after the server closes, leaving Windows' 5 s rule to
-  end slow handlers. The host kills no client: that needs a process
-  handle the host doesn't own.
+  end slow handlers. PR 8 killed no client: that needed a process
+  handle the host didn't own. #1259 adds one per client, opened at
+  CONNECT, and ends clients still attached at the deadline (§7.3).
 
 WOW64 (author-reported on Beast): 32-bit clients send the same 64-bit
 packet layouts, so there is no 32-bit path. 32-bit kernelbase leaves
@@ -858,6 +860,13 @@ pub fn probe() -> Result<()>;
 pub fn spawn_attached(cmd: &Command) -> Result<Attached>;
 pub fn send_ctrl(pid: u32, event: CtrlEvent) -> Result<()>;
 
+// #1259
+pub struct ClientProcess { /* private */ }         // Send + Sync
+impl ClientProcess {
+    pub fn open(pid: u32) -> Result<ClientProcess>;
+    pub fn terminate(&self) -> Result<()>;
+}
+
 impl Waker {
     pub fn new() -> Result<Waker>;
     pub fn wake(&self);
@@ -886,6 +895,7 @@ pub fn encode(cp: u32, text: &str) -> Result<Vec<u8>>;
 | `probe` | Opens and closes a server handle, then resolves `ConsoleControl`. `Ok(())` when both work. `Unsupported` when the device or the export is missing. Any other OS error is mapped by `sys::errmap`. It has no other side effects and can be called any number of times. |
 | `spawn_attached` | Resolves and quotes the program exactly as `WindowsPty::spawn_concrete` does, under the same `SPAWN` lock. It opens the server and its `\Reference`, `\Input` and `\Output`. The child is created with `PROC_THREAD_ATTRIBUTE_CONSOLE_REFERENCE` plus a `HANDLE_LIST` of only the three std handles, `STARTF_USESTDHANDLES`, and `bInheritHandles = TRUE` (the list limits what is inherited). The call returns once `CreateProcessW` succeeds, so the child's CONNECT is the first packet `wait` reports. `GroupSpec::JoinGroup` gives `InvalidInput`, matching `WindowsPty`. Before `CreateProcessW` it reserves one of 8 process-wide cleanup slots; with every slot holding an unfinished child it fails with `WouldBlock` and creates nothing. A failure before the child exists closes every handle. A failure after it terminates the child and returns setup's error once the exit is confirmed, every handle closed. If the exit isn't confirmed within 5 s, or `TerminateProcess` fails while the child runs, the cleanup error is returned instead, and the reserved slot keeps the child's process handle and console until a worker confirms the exit. A failed wait never releases a slot. Nothing in the call waits longer than that. Draft 3's `size` parameter is dropped: the size belongs to the engine, not the driver. |
 | `send_ctrl` | Calls `ConsoleControl(ConsoleEndTask, {pid, hwnd: 0, event, flags})`, where `event` is CTRL_C, CTRL_BREAK or CTRL_CLOSE. `Ok(())` means the call was made, not that the signal arrived: the driver reports success even for a pid that isn't attached to us, and Windows then drops it. `Unsupported` when the export is missing. It may block; rusty_conhost calls it only from the ctrl worker, never from the engine thread or a caller thread (§7.2). |
+| `ClientProcess` (#1259) | `open` is `OpenProcess(PROCESS_TERMINATE)` on a client's pid, called while its CONNECT is unanswered so the pid still names it; the handle then keeps the pid from being reused. It fails with the OS error, e.g. `PermissionDenied` for a protected process. `terminate` is `TerminateProcess` with `STATUS_CONTROL_C_EXIT` (`0xC000013A`), the code Windows ends a process with after CTRL_CLOSE. It doesn't wait for the exit, and fails with the OS error, which Windows may also give for a client that has already exited. Both calls are already admitted (`adopt` uses them), so D2 is unchanged |
 | `Waker` | An auto-reset event. `wake` is non-blocking and may be called from any thread; several wakes before a `wait` collapse into one. A wake only ends a `wait`; it isn't reported in `Ready`, because the engine reads its lanes on every turn (§7.2). |
 | `submit_read` | Starts an overlapped READ_IO, completing `reply` in the same IOCTL when given. Returns at once. A read already in flight gives `WouldBlock` and nothing is sent. The OVERLAPPED block and buffer live inside the `ConsoleServer` at a stable address until that read completes. `BrokenPipe` once the driver has dropped the server. |
 | `wait` | Blocks until the in-flight read completes, `waker` fires, `exit` is signalled, or the absolute `deadline` passes; `None` waits without limit, and a deadline already past makes it a non-blocking poll. It then returns a snapshot with no priority between sources: `io` holds the completed read if it has completed, and `exited` is `true` if `exit` is signalled, both checked after the wait ends. Both empty means only the waker or the deadline ended it. The deadline is the caller's `Instant`, so a call cut short by a wake never extends it. A read that completed with an error is returned as that error, and the read is no longer in flight; `exit` stays signalled, so the next call still reports it. Callers stop passing `exit` once they've handled it. |

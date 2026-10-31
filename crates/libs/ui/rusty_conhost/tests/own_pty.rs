@@ -372,6 +372,28 @@ fn a_client_that_holds_ctrl_close_is_cut_off_at_the_deadline() {
     assert_eq!(master.read(&mut buf).expect("EOF again"), 0);
 }
 
+/// `STATUS_CONTROL_C_EXIT`, the code CTRL_CLOSE ends a process with.
+const CONTROL_C_EXIT: i32 = 0xC000_013A_u32 as i32;
+
+#[test]
+fn a_client_still_attached_at_the_deadline_is_ended_there() {
+    let _g = lock();
+    // The handler would hold for 60 s, and Windows ends it only at about
+    // 5 s: an exit well before that is the host's doing (#1259).
+    let (master, mut stream, mut child) = holding(60_000);
+    let started = Instant::now();
+    master.hang_up();
+    stream.until("ctrl-close");
+    let status = exit_of(&mut child);
+    let took = started.elapsed();
+    assert!(took >= GRACE, "ended after {took:?}, before the grace");
+    assert!(
+        took < GRACE + Duration::from_millis(1500),
+        "ended after {took:?}, not at the deadline"
+    );
+    assert_eq!(status, ExitStatus::Code(CONTROL_C_EXIT));
+}
+
 #[test]
 fn eof_comes_once_to_readers_on_two_threads() {
     let _g = lock();

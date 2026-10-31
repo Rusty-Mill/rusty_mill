@@ -255,6 +255,35 @@ pub fn send_ctrl(pid: u32, event: CtrlEvent) -> Result<()> {
     sys::end_task(pid, code, flag)
 }
 
+/// `STATUS_CONTROL_C_EXIT`: the code Windows ends a process with once
+/// its CTRL_CLOSE handler returns, so a client ended by
+/// [`ClientProcess::terminate`] exits as one that CTRL_CLOSE ended.
+const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
+
+/// A console client, held so the host can end it if it is still attached
+/// when the console closes (#1259, design §7.3). The handle has
+/// `PROCESS_TERMINATE` access and nothing else.
+pub struct ClientProcess {
+    handle: OwnedWinHandle,
+}
+
+impl ClientProcess {
+    /// Open the client `pid` while its CONNECT is unanswered. The client
+    /// waits on that reply, so `pid` still names it, and once open the
+    /// handle keeps the pid from being reused. Fails with the OS error,
+    /// e.g. `PermissionDenied` for a protected process.
+    pub fn open(pid: u32) -> Result<ClientProcess> {
+        sys::open_process(pid).map(|handle| ClientProcess { handle })
+    }
+
+    /// End the client with `STATUS_CONTROL_C_EXIT`. It doesn't wait for
+    /// the exit. Fails with the OS error, which Windows may also report
+    /// for a client that has already exited.
+    pub fn terminate(&self) -> Result<()> {
+        sys::terminate(&self.handle, STATUS_CONTROL_C_EXIT)
+    }
+}
+
 /// The key that types `ch` on the active keyboard layout, as conhost
 /// synthesizes input records: `(vk, dwControlKeyState)`, the shift state
 /// as SHIFT_PRESSED, LEFT_CTRL_PRESSED and LEFT_ALT_PRESSED. `None` when
