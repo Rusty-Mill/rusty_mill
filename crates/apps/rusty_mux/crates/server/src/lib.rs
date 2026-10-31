@@ -108,9 +108,9 @@ pub struct Udp {
     pub idle: Duration,
 }
 
-/// Accepts clients on `listener` until accepting fails. Must run inside a
-/// `rusty_tokio` `LocalRuntime`, because connection and PTY tasks are
-/// spawned with `spawn_local`.
+/// Accepts clients on `listener` until accepting fails, then stops as
+/// [`serve_until`] does. Must run inside a `rusty_tokio` `LocalRuntime`,
+/// because connection and PTY tasks are spawned with `spawn_local`.
 ///
 /// The server has no authentication, so only peers running as this
 /// process's user are served (the effective uid on Linux, the token's user
@@ -141,7 +141,9 @@ pub async fn serve_udp(listener: UnixListener, config: Config, udp: Udp) -> io::
 /// the call returns once each console we host
 /// ([`ConsoleHost::Own`]) has shut down, its other clients ended 5 s
 /// after CTRL_CLOSE, or 6 s have passed, whichever is first. Dropping the
-/// future instead ends the programs without that wait.
+/// future instead stops nothing: the tasks it spawned on the runtime keep
+/// serving connected clients and their blocks until the runtime itself is
+/// dropped, which ends the programs without that wait.
 #[cfg(any(target_os = "linux", windows))]
 pub async fn serve_until(
     listener: UnixListener,
