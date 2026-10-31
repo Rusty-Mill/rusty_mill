@@ -150,15 +150,6 @@ impl<'a> Script<'a> {
         }
     }
 
-    /// A cookie: ConDrv echoes the console's own, which count up from 1,
-    /// so mostly a small one.
-    fn cookie(&mut self) -> usize {
-        match self.u8().unwrap_or(0) {
-            n @ 0..=223 => usize::from(n % 8),
-            n => usize::from(n),
-        }
-    }
-
     /// A terminal size, as the terminal reports one.
     fn size(&mut self) -> Option<WinSize> {
         let rows = u16::from(self.u8()?) + 1;
@@ -182,10 +173,22 @@ struct Engine {
     closed: bool,
     eof: bool,
     next_id: u64,
-    /// Calls without a reply, with their output size.
-    owed: Vec<([u8; 8], u32)>,
+    /// Calls without a reply, with their output size and function.
+    owed: Vec<([u8; 8], u32, u32)>,
     answered: HashSet<[u8; 8]>,
     logs: usize,
+    /// Every cookie the console handed out, live or not, for the script
+    /// to name.
+    cookies: Vec<usize>,
+    /// Pids that joined and haven't left.
+    attached: HashSet<u32>,
+    killed: HashSet<u32>,
+    /// The grace deadline has passed: the next turn handles it first.
+    grace_due: bool,
+    /// No reader: output is discarded, and blocked calls drain each turn.
+    detached: bool,
+    /// The last answer's status, for tests.
+    last_status: i32,
 }
 
 impl Engine {
@@ -204,6 +207,24 @@ impl Engine {
             owed: Vec::new(),
             answered: HashSet::new(),
             logs: 0,
+            cookies: Vec::new(),
+            attached: HashSet::new(),
+            killed: HashSet::new(),
+            grace_due: false,
+            detached: false,
+            last_status: 0,
+        }
+    }
+
+    /// A cookie to name: mostly one the console handed out, sometimes a
+    /// small or any number.
+    fn cookie(&self, s: &mut Script<'_>) -> usize {
+        match s.u8().unwrap_or(0) {
+            0..=223 if !self.cookies.is_empty() => {
+                self.cookies[usize::from(s.u16()) % self.cookies.len()]
+            }
+            n @ 0..=239 => usize::from(n % 16),
+            _ => s.u32() as usize,
         }
     }
 
@@ -212,15 +233,21 @@ impl Engine {
     fn step(&mut self, op: u8, s: &mut Script<'_>) {
         match op {
             0..=15 => self.connect(s),
-            16..=23 => self.send(msg::DISCONNECT, s.cookie(), 0, &[], 0),
+            16..=23 => {
+                let process = self.cookie(s);
+                self.send(msg::DISCONNECT, process, 0, &[], 0);
+            }
             24..=39 => {
-                let process = s.cookie();
+                let process = self.cookie(s);
                 let info = s.bytes(12);
                 self.send(msg::CREATE_OBJECT, process, 0, info, 0);
             }
-            40..=47 => self.send(msg::CLOSE_OBJECT, s.cookie(), s.cookie(), &[], 0),
+            40..=47 => {
+                let (process, object) = (self.cookie(s), self.cookie(s));
+                self.send(msg::CLOSE_OBJECT, process, object, &[], 0);
+            }
             48..=79 | 232..=243 => {
-                let object = s.cookie();
+                let object = self.cookie(s);
                 // The high ops write up to a whole packet.
                 let n = if op >= 232 {
                     usize::from(s.u16())
@@ -230,7 +257,7 @@ impl Engine {
                 self.send(msg::RAW_WRITE, 1, object, &s.blob(n), 0);
             }
             80..=95 => {
-                let object = s.cookie();
+                let object = self.cookie(s);
                 let output = s.output(0);
                 self.send(msg::RAW_READ, 1, object, &[], output);
             }
@@ -238,15 +265,26 @@ impl Engine {
             176..=183 => {
                 let function = s.u32();
                 let n = s.len();
-                self.send(function, s.cookie(), s.cookie(), &s.blob(n), s.u32());
+                let (process, object) = (self.cookie(s), self.cookie(s));
+                let payload = s.blob(n);
+                self.send(function, process, object, &payload, s.u32());
             }
             184..=231 => {
                 let n = s.len().min(INPUT_LANE - self.lane.len());
                 self.lane.extend(s.blob(n));
             }
-            244..=251 => self.control.resize = s.size(),
-            252 => self.control.hang_up = true,
-            253 => self.exited = true,
+            244..=249 => self.control.resize = s.size(),
+            250 => self.control.hang_up = true,
+            251 => self.exited = true,
+            // The deadline passes with whatever is still in flight.
+            252 => self.grace_due = self.grace_armed,
+            // The terminal goes away: `OwnPtyMaster::detach`.
+            253 => {
+                self.detached = true;
+                self.queued = 0;
+                self.control.output_drained = true;
+                self.control.hang_up = true;
+            }
             // The reader takes everything queued and says so.
             _ => {
                 self.queued = 0;
@@ -258,7 +296,7 @@ impl Engine {
     /// CONNECT with a well-formed message, so the script gets past it;
     /// malformed ones come from step 10.
     fn connect(&mut self, s: &mut Script<'_>) {
-        let pid = s.cookie();
+        let pid = usize::from(s.u8().unwrap_or(0));
         let n = s.len().min(260);
         let title: String = s.bytes(n).iter().map(|b| char::from(*b)).collect();
         let group = u32::from(s.u8().unwrap_or(0));
@@ -269,8 +307,8 @@ impl Engine {
 
     /// A USER_DEFINED call: header, fixed struct, variable data.
     fn api(&mut self, s: &mut Script<'_>) {
-        let process = s.cookie();
-        let object = s.cookie();
+        let process = self.cookie(s);
+        let object = self.cookie(s);
         let number = match s.u8().unwrap_or(0) {
             n @ 0..=239 => APIS[usize::from(n) % APIS.len()],
             _ => s.u32(),
@@ -278,9 +316,14 @@ impl Engine {
         let fixed = s.len().min(128);
         let variable = s.len();
         let output = s.output(fixed);
+        // Sometimes the header lies about its fixed size.
+        let claim = match s.u8() {
+            Some(255) => s.u32(),
+            _ => fixed as u32,
+        };
         let mut payload = Vec::with_capacity(8 + fixed + variable);
         payload.extend(number.to_le_bytes());
-        payload.extend((fixed as u32).to_le_bytes());
+        payload.extend(claim.to_le_bytes());
         payload.extend(s.bytes(fixed));
         payload.resize(8 + fixed, 0);
         payload.extend(s.blob(variable));
@@ -302,7 +345,7 @@ impl Engine {
         };
         self.next_id += 1;
         let id = self.next_id.to_le_bytes();
-        self.owed.push((id, output));
+        self.owed.push((id, output, function));
         self.handle(Event::Packet(Packet {
             id,
             process,
@@ -316,7 +359,12 @@ impl Engine {
 
     /// One engine turn up to its wait, in `Engine::work`'s order.
     fn turn(&mut self) {
-        let control = std::mem::take(&mut self.control);
+        if std::mem::take(&mut self.grace_due) && !self.closed {
+            self.handle(Event::GraceExpired);
+        }
+        let mut control = std::mem::take(&mut self.control);
+        // Calls wait on output nobody will read: `drains_itself`.
+        control.output_drained |= self.detached && self.c.output_blocked();
         let plan = sched::turn(&self.view(control));
         if plan.control.hang_up {
             self.handle(Event::HangUp);
@@ -372,7 +420,10 @@ impl Engine {
         let mut out = OutputQueue::default();
         out.set_held(self.queued);
         let fx = self.c.handle(ev, &mut out);
-        self.queued += out.take().len();
+        let new = out.take().len();
+        if !self.detached {
+            self.queued += new;
+        }
         assert!(
             self.queued <= OUTPUT_BOUND,
             "output queue at {} bytes",
@@ -405,11 +456,29 @@ impl Engine {
                     self.logs += 1;
                     assert!(self.logs <= MAX_LOGS, "{} log lines", self.logs);
                 }
-                Effect::Kill { .. } => assert!(!self.closed, "Kill after CloseServer"),
-                Effect::SetInputAvailable(_)
-                | Effect::Ctrl { .. }
-                | Effect::Joined { .. }
-                | Effect::Left { .. } => {}
+                Effect::Kill { pid } => {
+                    assert!(!self.closed, "Kill after CloseServer");
+                    assert!(
+                        self.attached.contains(&pid),
+                        "Kill for pid {pid}, not attached"
+                    );
+                    assert!(self.killed.insert(pid), "pid {pid} killed twice");
+                }
+                Effect::Joined { pid, .. } => {
+                    self.attached.insert(pid);
+                }
+                Effect::Left { pid } => {
+                    assert!(self.attached.remove(&pid), "pid {pid} left, never joined");
+                }
+                // Two Ctrl+C in one input slice signal a pid twice; the
+                // engine's queue coalesces them, so only the target is checked.
+                Effect::Ctrl { pid, .. } => {
+                    assert!(
+                        self.attached.contains(&pid),
+                        "Ctrl to pid {pid}, not attached"
+                    );
+                }
+                Effect::SetInputAvailable(_) => {}
             }
         }
         assert!(
@@ -428,12 +497,16 @@ impl Engine {
     /// Check one answer against its call; returns its variable output.
     fn answer(&mut self, r: &Reply) -> usize {
         assert!(self.answered.insert(r.id), "{:?} answered twice", r.id);
-        let at = self.owed.iter().position(|(id, _)| *id == r.id);
+        let at = self.owed.iter().position(|(id, ..)| *id == r.id);
         let Some(at) = at else {
             panic!("{:?} was never asked", r.id)
         };
-        let (_, room) = self.owed.remove(at);
+        let (_, room, function) = self.owed.remove(at);
         let room = room as usize;
+        self.last_status = r.status;
+        if r.status == msg::STATUS_SUCCESS {
+            self.learn_cookies(function, r);
+        }
         assert!(
             r.write_back.len() <= WRITE_BACK_CAP,
             "write-back of {}",
@@ -450,6 +523,19 @@ impl Engine {
             "output to {end} of {room}"
         );
         r.output.len()
+    }
+
+    /// Keep the cookies a successful CONNECT or CREATE_OBJECT handed out.
+    fn learn_cookies(&mut self, function: u32, r: &Reply) {
+        match function {
+            msg::CONNECT => {
+                let (words, _) = r.write_back.as_chunks::<8>();
+                let cookies = words.iter().map(|w| u64::from_le_bytes(*w) as usize);
+                self.cookies.extend(cookies);
+            }
+            msg::CREATE_OBJECT => self.cookies.push(r.information),
+            _ => {}
+        }
     }
 
     /// Hang up, drain and let the grace run out: the console must close,
@@ -497,5 +583,97 @@ mod tests {
     #[test]
     fn an_empty_script_still_closes() {
         packets(&[]);
+    }
+
+    fn engine() -> Engine {
+        Engine::new(WinSize { rows: 24, cols: 80 })
+    }
+
+    /// CONNECT as `pid`: its (process, input, output) cookies.
+    fn connect(e: &mut Engine, pid: usize) -> Option<[usize; 3]> {
+        let m = msg::server_msg_in_group("", 0);
+        let info = msg::CONNECTION_INFORMATION_LEN as u32;
+        e.send(msg::CONNECT, pid, pid, &m, info);
+        let c = &e.cookies;
+        (e.last_status == msg::STATUS_SUCCESS)
+            .then(|| [c[c.len() - 3], c[c.len() - 2], c[c.len() - 1]])
+    }
+
+    #[test]
+    fn the_257th_client_is_refused() {
+        let mut e = engine();
+        for pid in 0..256 {
+            assert!(connect(&mut e, pid).is_some(), "client {pid}");
+        }
+        assert!(connect(&mut e, 256).is_none());
+        assert_eq!(e.last_status, msg::STATUS_NO_MEMORY);
+        e.finish();
+    }
+
+    #[test]
+    fn the_65th_object_of_a_client_is_refused() {
+        let mut e = engine();
+        connect(&mut e, 1);
+        let [process, ..] = connect(&mut e, 2).expect("connects");
+        let info: Vec<u8> = [msg::OBJECT_CURRENT_INPUT, 3, 0]
+            .iter()
+            .flat_map(|v: &u32| v.to_le_bytes())
+            .collect();
+        // CONNECT's own two count towards the 64.
+        for _ in 0..62 {
+            e.send(msg::CREATE_OBJECT, process, 0, &info, 0);
+            assert_eq!(e.last_status, msg::STATUS_SUCCESS);
+        }
+        e.send(msg::CREATE_OBJECT, process, 0, &info, 0);
+        assert_eq!(e.last_status, msg::STATUS_NO_MEMORY);
+        e.finish();
+    }
+
+    #[test]
+    fn the_grace_expires_with_calls_in_flight() {
+        let mut e = engine();
+        let [_, input, output] = connect(&mut e, 7).expect("connects");
+        e.send(msg::RAW_READ, 1, input, &[], 64);
+        e.control.hang_up = true;
+        e.turn();
+        for _ in 0..4 {
+            e.send(msg::RAW_WRITE, 1, output, &[b'x'; 60 * 1024], 0);
+        }
+        assert!(e.c.waiting() >= 2, "the read and a write wait");
+        e.grace_due = e.grace_armed;
+        e.turn();
+        assert!(e.closed && e.eof);
+        assert_eq!(e.killed, HashSet::from([7]));
+    }
+
+    #[test]
+    fn a_header_that_overstates_its_fixed_size_is_refused() {
+        let mut e = engine();
+        let [_, _, output] = connect(&mut e, 7).expect("connects");
+        let mut payload = Vec::new();
+        payload.extend(api::WRITE_CONSOLE.to_le_bytes());
+        payload.extend(200u32.to_le_bytes());
+        payload.extend([0; 16]);
+        e.send(msg::USER_DEFINED, 1, output, &payload, 256);
+        assert_eq!(e.last_status, msg::STATUS_ILLEGAL_FUNCTION);
+        assert_eq!((e.c.waiting(), e.c.parked()), (0, 0));
+        e.finish();
+    }
+
+    #[test]
+    fn a_detached_reader_drains_parked_writes() {
+        let mut e = engine();
+        let [_, _, output] = connect(&mut e, 7).expect("connects");
+        while sched::admits_read(e.c.waiting(), e.c.parked()) {
+            e.send(msg::RAW_WRITE, 1, output, &[b'x'; 60 * 1024], 0);
+        }
+        assert!(e.c.parked() > 0);
+        e.detached = true;
+        e.queued = 0;
+        for _ in 0..64 {
+            e.turn();
+        }
+        assert_eq!((e.c.waiting(), e.c.parked()), (0, 0));
+        e.finish();
     }
 }
