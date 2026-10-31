@@ -192,7 +192,13 @@ ordering, acks and flow control belong to each stream.
   connection on the old path that ends counts as a loss only if the move
   fails before any client moved. A
   move that fails after the control client was taken over brings the path
-  back over SSH with the takeover token that client was last welcomed with.
+  back over SSH with the takeover token that client was last welcomed with,
+  trying the SSH forward in use first, since it is likely sound, and a new
+  login only if that fails. Keys typed into a block while its lease is
+  asked for go ahead of what is held, so a move or a lost path never drops
+  them. A detach during a move waits for it to end (within the probe and
+  the 10 s handshake), so the clients it took over are detached on their
+  new connections, not left to the server for 30 s.
 - **Flow control:** each stream's receive buffer holds at most 1 MiB in
   total: bytes in order but not yet read, plus bytes out of order. Every
   `Ack` sets `limit` to the cumulative offset plus the free space, and a
