@@ -4,10 +4,11 @@ Status: built. Proposed 2026-10-30 as Phase 3 step 4 (C13); the owner said
 Go on 2026-10-30 and answered its four open questions the same day (below).
 Built in #1270 (transport), #1280 (server) and #1283 (client), and checked
 by hand over a real sshd on 2026-10-31
-([UDP-MANUAL-CHECK-2026-10-31.md](UDP-MANUAL-CHECK-2026-10-31.md)). Not built
-yet, in its own step: moving back to UDP after a fallback to SSH. The
-lease release after 30 s of silence, the stale orphan on overflow and the
-6 s outage display are built (see Session lifetime, Overflow and Liveness).
+([UDP-MANUAL-CHECK-2026-10-31.md](UDP-MANUAL-CHECK-2026-10-31.md)). The
+four pieces the owner kept C13 open for are built too: the lease release
+after 30 s of silence, the stale orphan on overflow, the 6 s outage display
+and moving back to UDP after a fallback to SSH (see Session lifetime,
+Overflow and Liveness).
 Background: [SPIKE-4-ROAMING.md](SPIKE-4-ROAMING.md) and the step 2 decision
 in [DECISIONS.md](DECISIONS.md) (SSH bootstrap, 2026-10-29).
 
@@ -171,6 +172,51 @@ ordering, acks and flow control belong to each stream.
   dead SSH path. Built: the client's heartbeat also reads when the relay
   last heard the server, and loses a UDP path after 6 s of that silence;
   the 15 s missed sign of life still covers the SSH forward.
+- **Moving back:** when a lost UDP path is brought back over SSH, the client
+  keeps the association it gave up, which goes on sending keepalives. Once
+  that association hears the server again, within 6 s, the client probes
+  it and takes every client over on a new stream each, make before break
+  as for a lost path, and the SSH forward stops. A probe that fails leaves
+  the client on SSH, to try again 2 s later, doubling up to 30 s. A client
+  that stayed on SSH from the start, because UDP never answered or the
+  first move onto it failed and the client was taken back over SSH, has no
+  association to keep, since an unanswered offer lapses after 60 s: it asks
+  the server for a new one on the same schedule, and moves once one answers
+  its probe. While the kept association stays silent, the client asks for
+  a new one on that schedule as well, since the server lets an association
+  go after `--udp-idle` and would never answer the old one again; whichever
+  answers first is moved onto. Before any client is taken over, each
+  block's SSH connection is asked for a `Sync`, which the server answers
+  only once every input sent before it is written, so the takeover, which
+  ends the old connection's reads, cannot drop keys already sent; a move
+  whose `Sync`s are not all answered within the 10 s handshake is given up
+  for a later try. During a move, what is typed (keys, a focus
+  change, up to 1024 actions) is held and taken in order on the path the
+  client ends up on, even one brought back after the move broke, with
+  anything typed while that path is down taken after it; and a
+  connection on the old path that ends counts as a loss only if the move
+  fails before any client moved. A
+  move that fails after the control client was taken over brings the path
+  back over SSH with the takeover token that client was last welcomed with,
+  trying the SSH forward in use first, since it is likely sound, and a new
+  login only if that fails. Keys typed into the focused block while its
+  lease is asked for go ahead of what is held, so a move or a lost path
+  does not drop them, but only to that block, if it still has the focus
+  once the path is back; otherwise, like keys still waiting on a block the
+  focus had left, they are dropped with a bell, never sent elsewhere. The
+  same holds for every action held during a move or while the path is
+  down: each is aimed at the block it was typed for (a focus change at the
+  block it moved to), and is dropped with a bell if, once taken, that
+  block no longer has the focus, for example because another client
+  changed the window's layout meanwhile. A detach during a move waits for it to end (within
+  the probe and the 10 s handshake), and nothing typed after it is sent,
+  so the clients the move took over are detached on their new connections,
+  not left to the server for 30 s. After a move that broke, the path gets
+  one attempt on the forward in use to detach them before the client
+  stops; a second Ctrl-] d meanwhile is ignored. Any detach, held or not,
+  waits until keys waiting on a lease are sent or refused (at most 10 s),
+  through a lost path as well, starts no move meanwhile, and sends nothing
+  typed after it.
 - **Flow control:** each stream's receive buffer holds at most 1 MiB in
   total: bytes in order but not yet read, plus bytes out of order. Every
   `Ack` sets `limit` to the cumulative offset plus the free space, and a
@@ -256,8 +302,14 @@ association's `Close`, ends its connections as a socket close does.
   client must log in again over SSH, as `--ssh` reconnect already does.
   As built, the server gives the lease back itself when it next hears the
   association, if the association still serves its client, the client is
-  still attached there and nobody took the lease meanwhile, so a client
-  needs no change to retake it.
+  still attached there and nobody took the lease meanwhile. A client
+  taken over by another connection meanwhile (a fallback to SSH, a move)
+  is no longer the association's, so the client asks for its focused
+  block's lease again on every takeover rather than assume it still holds
+  it; keys typed until then wait for the answer, and are dropped if
+  someone else took the lease. A taken-over block out of focus gives its
+  lease back, which the server refuses unless the client still holds it,
+  so a lease kept through a short loss is not left held.
 - *A, not chosen:* would have treated 30 s of silence as the end of each
   connection, followed by the usual 30 s grace and then a new SSH login.
 

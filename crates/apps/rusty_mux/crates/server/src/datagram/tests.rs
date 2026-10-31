@@ -639,16 +639,22 @@ fn a_stream_over_budget_leaves_a_stale_orphan_that_a_takeover_resumes() {
 /// Going stale partway through a silence does not restart its clock: the
 /// lease is free by the silence deadline, someone else can take it, and
 /// the stale client's takeover does not take it back.
+///
+/// The client is made stale directly rather than by printing past its
+/// budget, so the test does not race the shell's throughput against the
+/// silence; the overflow itself is covered by
+/// `a_stream_over_budget_leaves_a_stale_orphan_that_a_takeover_resumes`.
 #[cfg(unix)]
 #[test]
 fn going_stale_mid_silence_keeps_the_silence_deadline() {
     runtime().block_on(async {
         let silence = Duration::from_millis(1500);
         let (state, registry, addr) = server_with("127.0.0.1:0", shell(), PATIENCE, silence).await;
-        // A stale lease time far past the silence, as if the clock restarted.
+        // A stale lease time far past the patience below, as if the clock
+        // restarted when the client went stale.
         let lifetimes = crate::state::Lifetimes {
-            idle: Duration::from_secs(60),
-            lease: Duration::from_secs(20),
+            idle: PATIENCE * 6,
+            lease: PATIENCE * 3,
         };
         state.borrow_mut().test_lifetimes(lifetimes);
         let features = Features::DATAGRAM
@@ -658,29 +664,22 @@ fn going_stale_mid_silence_keeps_the_silence_deadline() {
         peer.probe().await;
         let (stream, me) = peer.hello(features, None).await;
         let block = leased_block(&mut peer, stream).await;
-        let data = b"head -c 30000000 /dev/zero | tr '\\0' x\n".to_vec();
-        let input = Message::Input {
-            req: 9,
-            block,
-            data,
-        };
-        let frame = encode(&input).expect("encode");
-        assert_eq!(peer.assoc.write(stream, &frame), frame.len());
-        peer.until(|a| a.queued(stream) == 0).await;
-        // Nothing heard from the peer after this.
-        let deadline = Instant::now() + silence;
-        while !state.borrow().is_stale(me.client) {
-            assert!(Instant::now() < deadline, "not stale within the silence");
-            rusty_tokio::time::sleep(TICK).await;
-        }
-        let left =
-            (deadline + Duration::from_millis(500)).saturating_duration_since(Instant::now());
-        rusty_tokio::time::sleep(left).await;
+        // Nothing heard from the peer after this. Going stale with no await
+        // since, so the driver cannot have released the lease yet.
+        let quiet = Instant::now();
+        state.borrow_mut().test_go_stale(me.client);
+        assert!(state.borrow().is_stale(me.client));
         assert_eq!(
             state.borrow().lease_of(block),
-            None,
-            "held past the silence"
+            Some(me.client),
+            "released before going stale"
         );
+        // Released by the silence deadline, long before the stale lease time.
+        while state.borrow().lease_of(block).is_some() {
+            assert!(quiet.elapsed() < PATIENCE, "held past the silence");
+            rusty_tokio::time::sleep(TICK).await;
+        }
+        assert!(quiet.elapsed() < lifetimes.lease);
 
         let mut other = Peer::new(&registry, addr).await;
         other.probe().await;
@@ -736,14 +735,21 @@ async fn stale_orphan_goes_after_idle(lease: Duration, idle: Duration) {
     let frame = encode(&input).expect("encode");
     assert_eq!(peer.assoc.write(stream, &frame), frame.len());
     peer.until(|a| a.queued(stream) == 0).await;
-    let deadline = Instant::now() + PATIENCE;
-    while !state.borrow().is_stale(me.client) {
-        assert!(Instant::now() < deadline, "never over budget");
+    // The association stays alive, so only going stale lets the client go:
+    // served, then stale, then gone. Polled for gone, not for the stale
+    // moment: with the output pumping on this thread, a tick can outlast a
+    // short idle.
+    let sent = Instant::now();
+    let known =
+        |state: &crate::state::State| state.has_client(me.client) || state.is_stale(me.client);
+    while known(&state.borrow()) {
+        // Well short of the 5 s lease of the case that checks idle wins.
+        assert!(
+            sent.elapsed() < idle + Duration::from_secs(4),
+            "not gone after idle"
+        );
         rusty_tokio::time::sleep(TICK).await;
     }
-    rusty_tokio::time::sleep(idle * 2).await;
-    assert!(!state.borrow().is_stale(me.client));
-    assert!(!state.borrow().has_client(me.client));
     // The token no longer takes anything over.
     let (_, fresh) = peer.hello(features, Some(me)).await;
     assert_ne!(fresh.client, me.client);
