@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::thread;
 
-use rusty_mill_board::domain::{Card, Column};
+use rusty_mill_board::domain::{Capability, Card, Column};
 use uuid::Uuid;
 
 use crate::config::Stage;
@@ -135,6 +135,12 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
                         return Err(format!(
                             "stage {:?}: role {:?} lacks {:?} for {from} -> {to}",
                             s.name, s.role, t.cap
+                        ));
+                    }
+                    Ok(Some(t)) if t.gate && !caps.contains(&Capability::Admin) => {
+                        return Err(format!(
+                            "stage {:?}: {from} -> {to} is a gate (a human approval) and role {:?} lacks Admin",
+                            s.name, s.role
                         ));
                     }
                     Ok(_) => {}
@@ -781,6 +787,39 @@ mod tests {
             let e = r.validate().expect_err(json);
             assert!(e.contains(why), "{json} -> {e}");
         }
+    }
+
+    #[test]
+    fn validate_refuses_a_stage_that_would_pass_a_gate_without_admin() {
+        let flow = Workflow::default();
+        let transitions = flow
+            .transitions()
+            .iter()
+            .cloned()
+            .map(|t| rusty_mill_board::workflow::Transition {
+                gate: t.from == Column::BUILDING && t.to == Column::QA,
+                ..t
+            })
+            .collect();
+        let gated = Workflow::new(flow.columns().to_vec(), transitions).expect("valid");
+        let stages = r#"[{"name":"b","from":["ready"],"enter":"building","role":"builder","argv":["x"],"ok":"qa"}]"#;
+        let board: Arc<Shared> = Arc::new(
+            Board::new(
+                Box::new(MemStore::default()) as Box<dyn rusty_mill_board::store::Store>,
+                BoardRoles::default(),
+            )
+            .with_workflow(gated),
+        );
+        let r = Runner::new(
+            Local(board),
+            Fake::default(),
+            parse(stages).expect("stages"),
+            "r",
+            1,
+            vec![],
+        );
+        let e = r.validate().expect_err("gate without admin");
+        assert!(e.contains("lacks Admin"), "{e}");
     }
 
     // ---- projects: a runner serves one application and may change only its paths
