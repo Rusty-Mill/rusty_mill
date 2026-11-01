@@ -14,8 +14,7 @@ pub(crate) use rusty_multimodal_db_engine::durability::sync_parent_dir;
 pub use rusty_multimodal_db_engine::durability::DurabilityError;
 
 /// Below this many records, spawning a thread to parallelize index
-/// construction (`CanonicalCachedState::new` and the three Tier 2
-/// `build_indexes` functions) costs more than the work it parallelizes —
+/// construction in [`mmap_store::MmapAgeStore`] costs more than the work it parallelizes —
 /// sequential wins. Measured directly, not guessed: two independent,
 /// warm-up-corrected 9-sample runs comparing sequential vs. parallel
 /// construction at 500/800/1,000/1,200/1,500/1,800/2,000/3,000/5,000
@@ -25,22 +24,10 @@ pub use rusty_multimodal_db_engine::durability::DurabilityError;
 /// threshold sits at the upper, confidently-parallel edge of that
 /// measured range, erring toward the known-safe sequential path through
 /// the ambiguous 1,000–1,200 band rather than risking the very regression
-/// this threshold exists to prevent. One constant, shared by every
-/// parallelized construction site, so there's a single place to tune —
-/// not four separate magic numbers.
-// Shared by `mmap_store::MmapAgeStore` (unconditional, front-door) and
-// `CanonicalCachedState::new` below (research-gated) — stays unconditional
-// since the former needs it.
+/// this threshold exists to prevent. (Measured when four construction
+/// sites shared it; the other three were removed by ADR-0138.)
 pub(crate) const PARALLEL_CONSTRUCTION_THRESHOLD: usize = 1_500;
 
-// Seven of the eight durability variants below are the benchmark
-// comparison this crate's charter set out to run — not the recommended
-// path (see `lib.rs`'s own top-level doc comment). Gated behind the
-// `research` feature; `mmap_store`/`MmapAgeStore`, `record_blob` (the
-// companion file `ProductionStore::create`/`open_portable` persist the
-// immutable half of a record set through — STORAGE-014) and
-// `DurabilityError` stay unconditional since
-// `crate::production::ProductionStore` uses them directly.
 pub mod mmap_store;
 pub(crate) mod record_blob;
 

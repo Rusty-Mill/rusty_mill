@@ -60,8 +60,8 @@ It now gates only:
 
 ## Consequences
 
-- 1,500 fewer lines in the app crate, and 644 fewer lines in
-  `Cargo.lock`. CI no longer builds DuckDB.
+- About 9,600 fewer lines in the app crate (+138/−9,782), and 644 fewer
+  lines in `Cargo.lock`. CI no longer builds DuckDB.
 - Re-running an old comparison means checking out the commit above.
 - The Windows exclusion's original reason is gone. Re-enabling Windows is
   a separate change, because this crate has never been tested there.
