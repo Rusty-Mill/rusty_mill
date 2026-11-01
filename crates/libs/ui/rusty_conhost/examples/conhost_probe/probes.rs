@@ -58,6 +58,11 @@ pub(crate) fn run(args: &[String]) -> Result<String, String> {
             let set = calls::set_attr(a.hex::<u16>(0)?);
             format!("{} {}", done(set), pen())
         }
+        // A legacy attribute, then VT: what the VT leaves of it.
+        "attr-then" => {
+            let set = calls::set_attr(a.hex::<u16>(0)?);
+            format!("attr={} {}", done(set), print(a.hex(1)?, &a.text(2)?))
+        }
         "set-buffer" => {
             let set = calls::set_buffer_size(coord(a.num(0)?, a.num(1)?));
             format!("{} after={}", done(set), sbi())

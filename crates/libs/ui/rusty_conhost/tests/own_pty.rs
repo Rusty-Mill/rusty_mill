@@ -369,6 +369,17 @@ fn parity_probes() -> Vec<Vec<String>> {
         &["set-attr", "ffff"],
         &["set-attr", "407"],
         &["set-attr", "1c4f"],
+        // Legacy gridlines under VT: only a rendition reset clears them.
+        &["attr-then", "807", "7", "text"],
+        &["attr-then", "807", "3", "text"],
+        &["attr-then", "807", "7", "\\e[0m"],
+        &["attr-then", "807", "7", "\\e[m"],
+        &["attr-then", "807", "7", "\\e[!p"],
+        &["attr-then", "807", "7", "\\e[38;5;0m"],
+        &["attr-then", "8007", "7", "\\e[24m"],
+        &["attr-then", "181e", "7", "\\e[31m"],
+        &["attr-then", "181e", "7", "\\e[0m\\e[93;44m"],
+        &["attr-then", "407", "7", "\\e[55m"],
         &["set-buffer", "200", "30"],
         &["set-buffer", "200", "9001"],
         &["set-buffer", "100", "30"],
@@ -418,19 +429,45 @@ const DIVERGENCES: &[(&[&str], &str)] = &[
     (&["set-out-cp", "1"], "set-out-cp error=87 after=65001"),
     // V5: no console window.
     (&["window"], "window null=1"),
+    // V1: the buffer and window stay the terminal's size, and the
+    // largest window is the window.
+    (&["set-buffer", "200", "9001"], REFUSED_BUFFER),
+    (&["set-window", "1", "0", "0", "99", "19"], REFUSED_WINDOW),
+    (&["set-window", "1", "0", "0", "300", "29"], REFUSED_WINDOW),
+    (&["largest"], "largest size=200,30"),
 ];
 
+// Our V1 answers: the size refused, the buffer as it was.
+const REFUSED_BUFFER: &str =
+    "set-buffer error=87 after=size=200,30 cursor=0,0 attr=0x7 window=0,0,199,29 max=200,30";
+const REFUSED_WINDOW: &str =
+    "set-window error=87 after=size=200,30 cursor=0,0 attr=0x7 window=0,0,199,29 max=200,30";
+
 /// Gaps the suite has found and that are tracked but not yet closed, as
-/// (probe, issue). They must still differ: a gap that starts to agree
-/// fails the suite until it is taken off this list.
-const GAPS: &[(&[&str], &str)] = &[
-    (&["input"], "#1335"),
-    (&["cooked", "hi\\r"], "#1335"),
-    (&["cooked", "ab\\bc\\r"], "#1335"),
-    (&["print-x", "1", "205"], "#1336"),
-    (&["print-x", "7", "32768"], "#1337"),
-    (&["print-x", "7", "100000"], "#1337"),
+/// (probe, our answer, issue). Our answer is pinned, as a divergence's
+/// is, so the rest of the probe still catches regressions: a gap whose
+/// answer changes in any other way is a mismatch, and one that starts to
+/// agree fails the suite until it is taken off this list.
+const GAPS: &[(&[&str], &str, &str)] = &[
+    (
+        &["input"],
+        "input before=0 wrote=error=1 queued=0 peek=0: read=0: left=0 flush=ok after=0",
+        "#1335",
+    ),
+    (&["cooked", "hi\\r"], NO_COOKED, "#1335"),
+    (&["cooked", "ab\\bc\\r"], NO_COOKED, "#1335"),
+    (
+        &["print-x", "1", "205"],
+        "print-x mode=ok n=205 cursor=199,0 attr=0x7",
+        "#1336",
+    ),
+    (&["print-x", "7", "32768"], NO_BIG_WRITE, "#1337"),
+    (&["print-x", "7", "100000"], NO_BIG_WRITE, "#1337"),
 ];
+
+// Our answers while those APIs are unserved (ERROR_INVALID_FUNCTION).
+const NO_COOKED: &str = "cooked wrote=error=1 read= cursor=0,0 attr=0x7";
+const NO_BIG_WRITE: &str = "print-x mode=ok n=error=6 cursor=0,0 attr=0x7";
 
 /// How one probe compared.
 #[derive(Debug, PartialEq)]
@@ -445,14 +482,14 @@ enum Verdict {
 
 fn verdict(args: &[String], conpty: &str, ours: &str) -> Verdict {
     let is = |listed: &[&str]| listed.iter().copied().eq(args.iter().map(String::as_str));
-    let gap = GAPS.iter().find(|(p, _)| is(p)).map(|(_, issue)| *issue);
+    let gap = GAPS.iter().find(|(p, ..)| is(p));
+    let diverges = || DIVERGENCES.iter().any(|(p, o)| is(p) && *o == ours);
     match (conpty == ours, gap) {
         (true, None) => Verdict::Same,
-        (true, Some(issue)) => Verdict::Closed(issue),
-        (false, Some(issue)) => Verdict::Gap(issue),
-        (false, None) if DIVERGENCES.iter().any(|(p, o)| is(p) && *o == ours) => {
-            Verdict::Divergence
-        }
+        (true, Some(&(_, _, issue))) => Verdict::Closed(issue),
+        (false, Some(&(_, pinned, issue))) if pinned == ours => Verdict::Gap(issue),
+        (false, Some(_)) => Verdict::Mismatch,
+        (false, None) if diverges() => Verdict::Divergence,
         (false, None) => Verdict::Mismatch,
     }
 }
