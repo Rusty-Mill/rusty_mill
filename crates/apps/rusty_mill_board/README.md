@@ -14,9 +14,16 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 "Sign in now" with one of the board's own tokens; see
 [deploy/README.md](deploy/README.md#signing-in-from-claudeai-oauth).
 
-- **Columns:** backlog, ready, building, qa, review, done, blocked.
-- **Rules:** each move needs a capability (triage, build, qa, review, merge, close); leaving
-  building/qa/review needs your claim. `close` moves a card from building or qa straight to done when
+- **Columns:** set by an admin (Settings > Columns, kept in `workflow.json`); `board_columns` lists them and
+  the moves between them. The default is backlog, ready, building, qa, review, done, blocked. Each column has a
+  kind: `queue` (waits to be taken; `card_take` enters it into the first work column it moves to), `work`
+  (claimed; leaving needs the claim), or one of the fixed `backlog`, `done` and `blocked`, which can be relabelled
+  and reordered but not removed. A column id is what cards store (`board:<id>` in rusty_tick) and never changes;
+  its label is what people see. A column that still holds cards cannot be removed, and a card whose column the
+  workflow lacks reads as backlog. A move may be a **gate** (a human approval): it needs its capability and
+  `admin`, even with movement rules off.
+- **Rules:** each move needs the capability the workflow gives it (by default triage, build, qa, review, merge,
+  close); any open card may be moved to blocked; leaving a work column needs your claim. `close` moves a card from building or qa straight to done when
   its work already merged on the forge, and lets `card_add` with `done: true` record merged work that never
   had a card (bookkeeping, not a review: it never makes a card someone's work in `card_take`). The default
   `builder` role holds it, and `project`: `project_add` adds a project (or a repository) whose paths overlap no
@@ -25,7 +32,8 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   defined by the caller, `Roles::default()` is a starting set. `actor`/`role` are
   trusted as given: this is a workflow guard between cooperating agents, and the
   bearer token is the authentication.
-- **Order:** `card_take` looks in Review, QA, Building, then Ready; within one, the highest `priority` (0, 1, 3, 5)
+- **Order:** `card_take` looks in the queue and work columns nearest Done first (by default Review, QA, Building,
+  then Ready); within one, the highest `priority` (0, 1, 3, 5)
   first, then the oldest. A card waits until every card in its `deps` is Done (a dependency no longer on the board
   holds nothing up); naming it explicitly says why. `card_plan` sets both and needs Triage. The tags `agent`,
   `board:…` and `claim:…` are the board's own ([ADR-0012](../../../docs/adr/0012-one-task-store.md)): a card cannot
@@ -51,11 +59,12 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 - **Settings.** The ⚙ button opens a view to add and remove agents (credentials: name, role, project limit; a
   token is shown once; "New token" replaces it), edit repositories and their projects, edit roles, and configure
   the GitHub sync. It needs the `admin` capability (the default `human` role has it). Run with
-  `--settings-dir DIR`: it keeps `identities.json`, `projects.json`, `roles.json`, `github.json` and `rules.json` there
+  `--settings-dir DIR`: it keeps `identities.json`, `projects.json`, `roles.json`, `github.json`, `rules.json` and `workflow.json` there
   (secrets owner-only), changes take effect at once, and a first start creates an `admin` credential and
   prints its token once. Without files the view is read-only. A change that would lock everyone out, or drop a
   project that still has cards, is refused. Roles explain each capability. **Apps** lists the apps signed in
-  through OAuth (with `--issuer`) and revokes one (it can sign in again); **Rules** turns card movement
+  through OAuth (with `--issuer`) and revokes one (it can sign in again); **Columns** adds, relabels, reorders and removes columns and edits the moves between them;
+  **Rules** turns card movement
   rules off and on (off: any move but out of Done, by anyone holding a capability, each logged; on by
   default); **Server** shows, read-only, where
   the cards live, the issuer, the accepted hosts and the settings files. Not available over MCP. ADR-0004.

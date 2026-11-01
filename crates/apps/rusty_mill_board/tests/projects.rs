@@ -35,7 +35,7 @@ fn actor(b: &Board<impl Store>, name: &str, role: &str, scope: Option<&[&str]>) 
 fn ready_in(b: &Board<impl Store>, project: &str, title: &str) -> Uuid {
     let human = actor(b, "nano", "human", None);
     let c = b.add_in(&human, project, title, "", vec![]).expect("add");
-    b.move_card(c.id, Column::Ready, &human).expect("ready");
+    b.move_card(c.id, &Column::READY, &human).expect("ready");
     c.id
 }
 
@@ -89,7 +89,7 @@ fn a_scoped_actor_cannot_change_cards_of_other_projects() {
         Err(BoardError::OutOfScope("orch".into()))
     );
     assert_eq!(
-        b.move_card(orch_card, Column::Building, &dev),
+        b.move_card(orch_card, &Column::BUILDING, &dev),
         Err(BoardError::OutOfScope("orch".into()))
     );
     assert_eq!(
@@ -100,7 +100,7 @@ fn a_scoped_actor_cannot_change_cards_of_other_projects() {
     let untouched = b.get(orch_card).expect("card");
     assert_eq!(
         (untouched.column, untouched.claim, untouched.comments.len()),
-        (Column::Ready, None, 0)
+        (Column::READY, None, 0)
     );
     assert_eq!(
         b.take(&dev, Some(rl_card))
@@ -212,8 +212,8 @@ fn assign_needs_triage_and_clears_the_claim() {
 fn done_in_rl(b: &Board<impl Store>) -> Uuid {
     let human = actor(b, "nano", "human", None);
     let id = ready_in(b, "rl", "x");
-    for to in [Column::Building, Column::Qa, Column::Review, Column::Done] {
-        b.move_card(id, to, &human).expect("move");
+    for to in [Column::BUILDING, Column::QA, Column::REVIEW, Column::DONE] {
+        b.move_card(id, &to, &human).expect("move");
     }
     id
 }
@@ -226,11 +226,11 @@ fn a_done_card_changes_project_and_stays_done() {
     let moved = b.assign(id, "orch", &builder).expect("re-file a Done card");
     assert_eq!(
         (moved.project.as_str(), moved.column),
-        ("orch", Column::Done)
+        ("orch", Column::DONE)
     );
     let human = actor(&b, "nano", "human", None);
     assert_eq!(
-        b.move_card(id, Column::Ready, &human),
+        b.move_card(id, &Column::READY, &human),
         Err(BoardError::Terminal)
     );
     let events = b.events(None, 1000).expect("events");
@@ -314,7 +314,7 @@ fn a_card_reassigned_after_the_read_is_refused_not_half_taken() {
     let now = b.get(id).expect("card");
     assert_eq!(
         (now.project.as_str(), now.column, now.claim),
-        ("orch", Column::Ready, None)
+        ("orch", Column::READY, None)
     );
 }
 

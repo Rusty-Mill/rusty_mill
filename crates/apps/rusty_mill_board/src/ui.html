@@ -114,7 +114,12 @@ dialog form{display:grid;gap:8px}
 </form></dialog>
 <div id="toast" role="alert"></div>
 <script>
-const COLS=["backlog","ready","building","qa","review","done","blocked"];
+/* The board's columns and the moves between them, as an admin set them (board_columns).
+   Until read, the original seven, so the board draws at once. */
+let FLOW={columns:[["backlog","Backlog","backlog"],["ready","Ready","queue"],["building","Building","work"],["qa","QA","work"],
+  ["review","Review","work"],["done","Done","done"],["blocked","Blocked","blocked"]].map(([id,label,kind])=>({id,label,kind})),transitions:[]};
+const colLabel=id=>FLOW.columns.find(c=>c.id===id)?.label??id;
+const working=()=>FLOW.columns.filter(c=>c.kind==="work").map(c=>c.id);
 let tok=null;
 const $=id=>document.getElementById(id);
 let cards=[],cursor=null,dlg=null,repos={},sel={repo:"",project:"",agent:""};
@@ -140,7 +145,6 @@ function agentColor(n){
   if(!(n in slotOf)){known=[...new Set([...known,n])].sort();pref("agents",JSON.stringify(known));assignSlots()}
   return "hsl("+(slotOf[n]*30+8)+" 62% var(--al))";
 }
-const RUNNING=["building","qa","review"];
 const pref=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch{}};
 /* The token: a #token= in the address is kept in this browser and dropped from the address bar;
    otherwise the one kept from before. With none, or a refused one, the first call asks for it. */
@@ -194,8 +198,8 @@ function render(){
   if(view==="metrics"){renderMetrics();return}
   mapSeq++;   // drop any roadmap or metrics still loading
   const b=$("board");b.classList.remove("roadmap","metrics");b.replaceChildren();
-  for(const c of COLS){
-    const col=el("section",null,"col");col.dataset.col=c;col.append(el("h2",c));
+  for(const {id:c,label:name} of FLOW.columns){
+    const col=el("section",null,"col");col.dataset.col=c;col.append(el("h2",name));
     col.ondragover=e=>{e.preventDefault();col.classList.add("over")};
     col.ondragleave=()=>col.classList.remove("over");
     col.ondrop=e=>{e.preventDefault();col.classList.remove("over");act("card_move",{id:e.dataTransfer.getData("text"),to:c})};
@@ -207,7 +211,7 @@ function render(){
       k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
       if(k.claim){
         d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
-        const t=el("span",null,"tag agent"+(RUNNING.includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);
+        const t=el("span",null,"tag agent"+(working().includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);
       }
       if(k.issue)m.append(el("span","issue #"+k.issue));
       if(k.comments.length)m.append(el("span"," · "+k.comments.length+" 💬"));
@@ -245,7 +249,7 @@ async function renderRoadmap(){
     for(const k of l.cards){
       const d=el("div",null,"card");d.append(...heading(k));
       const m=el("div",null,"meta");
-      if(l.lane==="now")m.append(el("span",k.column,"tag"));
+      if(l.lane==="now")m.append(el("span",colLabel(k.column),"tag"));
       m.append(...priorityTag(k));
       k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
       if(k.claim)m.append(el("span",k.claim,"tag"));
@@ -282,7 +286,7 @@ async function renderMetrics(){
   if(stale())return;
   const n=c=>m.by_column.find(t=>t.key===c)?.count??0,lt=m.lead_time;
   const kpis=el("div",null,"kpis");
-  for(const [v,l,t] of [[m.open,"open"],[RUNNING.reduce((a,c)=>a+n(c),0),"in progress","building, qa, review"],[n("blocked"),"blocked"],
+  for(const [v,l,t] of [[m.open,"open"],[working().reduce((a,c)=>a+n(c),0),"in progress",working().map(colLabel).join(", ")],[n("blocked"),"blocked"],
     [lt.shipped,"shipped, 30 days"],[dur(lt.median_ms),"median lead time","created to shipped, last 30 days"],[dur(lt.p85_ms),"85% within","created to shipped, last 30 days"]]){
     const k=el("div",null,"kpi");k.append(el("b",String(v)),l);if(t)k.title=t;kpis.append(k);
   }
@@ -290,7 +294,7 @@ async function renderMetrics(){
   const idle=el("section",null,"col");idle.append(el("h2","idle longest"));
   for(const k of m.idle){
     const d=el("div",null,"card");d.append(...heading(k));
-    d.append(el("div",[k.column,"idle "+dur(k.idle_ms),...(k.claim?[k.claim]:[]),...(sel.project?[]:[label(k.project)])].join(" · "),"meta"));
+    d.append(el("div",[colLabel(k.column),"idle "+dur(k.idle_ms),...(k.claim?[k.claim]:[]),...(sel.project?[]:[label(k.project)])].join(" · "),"meta"));
     d.onclick=()=>show(k.id);idle.append(d);
   }
   if(!m.idle.length)idle.append(el("p","Nothing past backlog is open.","meta"));
@@ -298,10 +302,10 @@ async function renderMetrics(){
   b.replaceChildren(el("h3","Metrics · "+(sel.project?label(sel.project):sel.repo||"all projects")),kpis,
     bars("added per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.added})),"cards created, the current week last",wmax),
     bars("shipped per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.done})),"cards done, the current week last",wmax),
-    bars("open by column",m.by_column.map(t=>({label:t.key,n:t.count}))),
+    bars("open by column",m.by_column.map(t=>({label:colLabel(t.key),n:t.count}))),
     bars("open by priority",m.by_priority.map(t=>({label:PRIORITY[t.key],n:t.count}))),
     ...(sel.project?[]:[bars("open by project",m.by_project.map(p=>({label:label(p.project),n:p.open,title:p.shipped+" shipped in 30 days"})))]),
-    bars("in progress by agent",m.by_claim.map(t=>({label:t.key,n:t.count,fill:agentColor(t.key)})),"claimed cards in building, qa or review"),
+    bars("in progress by agent",m.by_claim.map(t=>({label:t.key,n:t.count,fill:agentColor(t.key)})),"claimed cards in work columns"),
     idle);
   renderSide();syncDialog();
 }
@@ -381,7 +385,7 @@ function syncDialog(){
   const k=cards.find(c=>c.id===dlg.id),f=dlg.f;
   if(!k){f.banner.textContent="This card no longer exists.";return}
   // Display-only parts follow the board; the inputs are never rebuilt.
-  f.meta.textContent=(k.number?"#"+k.number+" · ":"")+k.column+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
+  f.meta.textContent=(k.number?"#"+k.number+" · ":"")+colLabel(k.column)+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
   const theirs=snap(k);
@@ -429,15 +433,15 @@ async function setting(op,args){return api(op,{...who(),...args})}
 async function openSettings(){
   try{cfg=await setting("settings_get")}
   catch(e){toast(e.status===403?"Settings need the admin capability.":e.message);return}
-  secret=null;reposDraft=null;tab="agents";drawSettings();if(!$("settings").open)$("settings").showModal();
+  secret=null;reposDraft=null;flowDraft=null;tab="agents";drawSettings();if(!$("settings").open)$("settings").showModal();
 }
 function drawSettings(){
   const d=$("settings"),box=el("div");
   const tabs=el("div",null,"tabs");
-  for(const [id,label] of [["agents","Agents"],["repos","Repositories"],["roles","Roles"],["rules","Rules"],["github","GitHub"],["apps","Apps"],["server","Server"]]){
-    const b=el("button",label,tab===id?"on":"");b.type="button";b.onclick=()=>{tab=id;secret=null;reposDraft=null;drawSettings()};tabs.append(b)}
+  for(const [id,label] of [["agents","Agents"],["repos","Repositories"],["roles","Roles"],["columns","Columns"],["rules","Rules"],["github","GitHub"],["apps","Apps"],["server","Server"]]){
+    const b=el("button",label,tab===id?"on":"");b.type="button";b.onclick=()=>{tab=id;secret=null;reposDraft=null;flowDraft=null;drawSettings()};tabs.append(b)}
   const close=el("button","Close");close.type="button";close.onclick=()=>d.close();close.style.marginLeft="auto";tabs.append(close);
-  box.append(tabs,{agents:agentsTab,repos:reposTab,roles:rolesTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
+  box.append(tabs,{agents:agentsTab,repos:reposTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
   d.replaceChildren(box);
 }
 /* After a change: re-read the settings, the board's roles and projects, and redraw. */
@@ -543,6 +547,57 @@ function rolesTab(){
   return t;
 }
 
+/* Columns and the moves between them. Edited as a draft and saved whole: the server checks it
+   (Backlog, Done and Blocked stay; a column that still holds cards cannot be removed). */
+let flowDraft=null;
+const KINDS={queue:"Queue: waits to be taken",work:"Work: claimed; leaving needs the claim",backlog:"Backlog",done:"Done",blocked:"Blocked"};
+function columnsTab(){
+  const t=el("div"),err=el("div",null,"err"),ro=!cfg.files.workflow;
+  if(ro)t.append(unwritable("--settings-dir DIR"));
+  const d=flowDraft??=JSON.parse(JSON.stringify(cfg.workflow)),redraw=()=>drawSettings();
+  const btn=(text,fn,title)=>{const b=el("button",text);b.type="button";b.disabled=ro;if(title)b.title=title;b.onclick=()=>{fn();redraw()};return b};
+  const held=id=>count(k=>k.column===id);
+  const cols=el("table"),ch=el("tr");["Column","Label","Kind","Cards",""].forEach(h=>ch.append(el("th",h)));cols.append(ch);
+  d.columns.forEach((c,i)=>{
+    const tr=el("tr"),anchor=["backlog","done","blocked"].includes(c.kind);
+    const lb=field("input",{value:c.label,size:18,disabled:ro});lb.setAttribute("aria-label","label of "+c.id);lb.oninput=()=>{c.label=lb.value};
+    const kind=anchor?el("span",KINDS[c.kind]):field("select",{disabled:ro});
+    if(!anchor){for(const k of ["queue","work"])kind.append(new Option(KINDS[k],k));kind.value=c.kind;kind.onchange=()=>{c.kind=kind.value}}
+    const ops=el("td");
+    ops.append(btn("↑",()=>{if(i)[d.columns[i-1],d.columns[i]]=[d.columns[i],d.columns[i-1]]},"move left"),
+      btn("↓",()=>{if(i<d.columns.length-1)[d.columns[i+1],d.columns[i]]=[d.columns[i],d.columns[i+1]]},"move right"));
+    if(!anchor)ops.append(btn("Remove",()=>{d.columns.splice(i,1);d.transitions=d.transitions.filter(m=>m.from!==c.id&&m.to!==c.id)},
+      held(c.id)?"move its cards out first":"remove this column and its moves"));
+    const k=el("td");k.append(kind);
+    tr.append(el("td",c.id),(()=>{const td=el("td");td.append(lb);return td})(),k,el("td",String(held(c.id))),ops);cols.append(tr);
+  });
+  const id=field("input",{placeholder:"new column id, e.g. design",size:20,disabled:ro}),nl=field("input",{placeholder:"label",size:14,disabled:ro});
+  const nk=field("select",{disabled:ro});for(const k of ["queue","work"])nk.append(new Option(KINDS[k],k));nk.value="work";
+  const add=btn("Add column",()=>{const v=id.value.trim();if(!v)return;
+    const at=d.columns.findIndex(c=>c.kind==="done");d.columns.splice(at<0?d.columns.length:at,0,{id:v,label:nl.value.trim()||v,kind:nk.value})});
+  const addRow=el("div",null,"row");addRow.append(id,nl,nk,add);
+  const ids=d.columns.map(c=>c.id),caps=cfg.capabilities;
+  const pick=(opts,v,on,lbl,name=o=>o)=>{const s=field("select",{disabled:ro});s.setAttribute("aria-label",lbl);for(const o of opts)s.append(new Option(name(o),o));s.value=v;s.onchange=()=>on(s.value);return s};
+  const colName=o=>d.columns.find(c=>c.id===o)?.label??o;
+  const moves=el("table"),mh=el("tr");["From","To","Needs","Gate",""].forEach(h=>mh.append(el("th",h)));moves.append(mh);
+  d.transitions.forEach((m,i)=>{
+    const tr=el("tr"),cell=x=>{const td=el("td");td.append(x);return td};
+    const gate=field("input",{type:"checkbox",checked:!!m.gate,disabled:ro});gate.title="a human approval: also needs admin, even with movement rules off";
+    gate.onchange=()=>{m.gate=gate.checked};
+    tr.append(cell(pick(ids,m.from,v=>{m.from=v},"from",colName)),cell(pick(ids,m.to,v=>{m.to=v},"to",colName)),cell(pick(caps,m.cap,v=>{m.cap=v},"capability")),cell(gate),
+      cell(btn("Remove",()=>d.transitions.splice(i,1))));
+    moves.append(tr);
+  });
+  const addMove=btn("Add move",()=>d.transitions.push({from:ids[0],to:ids[1]??ids[0],cap:caps[0]}));
+  const save=el("button","Save columns");save.type="button";save.disabled=ro;
+  save.onclick=guard(err,async()=>{await setting("settings_workflow_set",{workflow:d});flowDraft=null});
+  const reset=btn("Discard changes",()=>{flowDraft=null});
+  const bar=el("div",null,"row");bar.append(save,reset);
+  t.append(cols,addRow,el("h4","Moves"),moves,addMove,bar,err,
+    el("p","A column's id is fixed once cards use it; its label is what people see. Any open card may always be moved to Blocked, so that move is not listed. A gate is a human approval: it needs its capability and admin.","note"));
+  return t;
+}
+
 /* Card movement rules: on, moves follow the column table and each role's capabilities; off, any move but out of Done. */
 function rulesTab(){
   const t=el("div"),err=el("div",null,"err"),note=el("p",null,"note");
@@ -551,8 +606,8 @@ function rulesTab(){
   // Always show what the server holds: after a save, and after a failed one too.
   const show=()=>{const on=(cfg.rules||{}).movement!=="open";box.checked=on;box.disabled=!cfg.files.rules;
     note.textContent=on
-      ?"On: a card moves only along the column table, by a role holding that move's capability, and leaving Building, QA or Review needs the claim."
-      :"Off: anyone signed in with any capability may move any card to any column, except out of Done. Each such move is logged."};
+      ?"On: a card moves only along the Columns tab's moves, by a role holding that move's capability, and leaving a work column needs the claim."
+      :"Off: anyone signed in with any capability may move any card to any column, except out of Done and through a gate. Each such move is logged."};
   box.onchange=async()=>{
     const movement=box.checked?"enforced":"open";err.textContent="";box.disabled=true;
     try{await setting("settings_rules_set",{movement});await changed();return}
@@ -590,7 +645,7 @@ function serverTab(){
   row("Cards",s.tick?"rusty_tick at "+s.tick:"in memory (lost on restart)");
   row("OAuth sign-in",s.issuer||"off");
   row("Accepted hosts",(s.hosts||[]).join(", "));
-  for(const [k,label] of [["agents","Agents file"],["projects","Projects file"],["roles","Roles file"],["rules","Rules file"],["github","GitHub file"]])
+  for(const [k,label] of [["agents","Agents file"],["projects","Projects file"],["roles","Roles file"],["rules","Rules file"],["workflow","Columns file"],["github","GitHub file"]])
     row(label,p[k]||"none (read-only here)");
   t.append(tbl,el("p","These come from the server's flags or its environment file and change with a restart.","note"));
   return t;
@@ -619,6 +674,7 @@ async function loadMeta(){
   const roles=Object.keys((await meta("board_roles",{roles:{human:1}})).roles);
   const cur=$("role").value;$("role").replaceChildren(...roles.map(r=>new Option(r,r)));
   $("role").value=roles.includes(cur)?cur:(pref("role")&&roles.includes(pref("role"))?pref("role"):(roles.includes("human")?"human":roles[0]));
+  FLOW=await meta("board_columns",FLOW);
   // With a per-model token, who you are is fixed by the token: show it, do not ask.
   const me=await meta("board_whoami",{});
   if(me.authenticated){$("actor").value=me.actor;$("actor").disabled=true;$("role").value=me.role;$("role").disabled=true}

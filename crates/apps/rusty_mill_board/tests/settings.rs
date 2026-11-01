@@ -14,11 +14,13 @@ use rusty_mill_board::identities::Credentials;
 use rusty_mill_board::mcp;
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::settings::{
-    Files, ServerInfo, Settings, load_github, load_roles, load_rules, open_credentials,
+    Files, ServerInfo, Settings, load_github, load_roles, load_rules, load_workflow,
+    open_credentials,
 };
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
 use rusty_mill_board::web::{Auth, Web};
+use rusty_mill_board::workflow::Workflow;
 use serde_json::{Value, json};
 
 const ISSUER: &str = "http://localhost:8787";
@@ -559,7 +561,7 @@ fn without_files_settings_can_be_read_but_not_changed() {
         .expect("ok");
     assert_eq!(
         get["files"],
-        json!({"agents": false, "projects": false, "roles": false, "github": false, "rules": false})
+        json!({"agents": false, "projects": false, "roles": false, "github": false, "rules": false, "workflow": false})
     );
     for (op, body) in [
         (
@@ -570,6 +572,10 @@ fn without_files_settings_can_be_read_but_not_changed() {
         ("settings_roles_set", json!({"roles": {"human": ["admin"]}})),
         ("settings_github_set", json!({"repo": "o/n", "token": "t"})),
         ("settings_rules_set", json!({"movement": "open"})),
+        (
+            "settings_workflow_set",
+            json!({"workflow": Workflow::default()}),
+        ),
     ] {
         let err = settings
             .call(op, Some(&human), body)
@@ -622,6 +628,94 @@ fn an_admin_turns_movement_rules_off_and_on_and_the_choice_is_kept() {
         422,
         "an unknown setting is refused"
     );
+}
+
+#[test]
+fn an_admin_adds_renames_reorders_and_removes_columns() {
+    let f = start("columns");
+    let builder = f.add_agent("claude-cloud", "builder");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    let mut flow = out["workflow"].clone();
+    assert_eq!(flow, json!(Workflow::default()));
+
+    // Add a queue column "Design" after Backlog, relabel Ready, and route Backlog through it.
+    let columns = flow["columns"].as_array_mut().expect("columns");
+    columns.insert(
+        1,
+        json!({"id": "design", "label": "Design", "kind": "work"}),
+    );
+    columns[2]["label"] = json!("Approved");
+    flow["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+        .push(json!({"from": "backlog", "to": "design", "cap": "build"}));
+    let (status, set, text) = f.admin("settings_workflow_set", &json!({"workflow": flow}));
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(set["workflow"]["columns"][2]["label"], "Approved");
+    assert_eq!(
+        load_workflow(&f.file("workflow.json")).map(|w| json!(w)),
+        Ok(set["workflow"].clone())
+    );
+    let (_, listed, _) = call(f.addr, &builder, "board_columns", &json!({}));
+    assert_eq!(listed["columns"][1]["id"], "design");
+
+    // Cards move through it, under the capability the admin gave the move.
+    let (_, card, _) = call(f.addr, &builder, "card_add", &json!({"title": "t"}));
+    let id = card["card"]["id"].as_str().expect("id").to_owned();
+    let (status, moved, text) = call(
+        f.addr,
+        &builder,
+        "card_move",
+        &json!({"id": id, "to": "design"}),
+    );
+    assert_eq!(
+        (status, moved["card"]["column"].as_str()),
+        (200, Some("design")),
+        "{text}"
+    );
+
+    // A column holding cards cannot be removed; once empty it can.
+    let mut without = set["workflow"].clone();
+    without["columns"]
+        .as_array_mut()
+        .expect("columns")
+        .remove(1);
+    without["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+        .retain(|t| t["to"] != "design");
+    let (status, _, text) = f.admin("settings_workflow_set", &json!({"workflow": without}));
+    assert_eq!(status, 422, "{text}");
+    assert!(text.contains("design still has cards"), "{text}");
+    assert_eq!(
+        load_workflow(&f.file("workflow.json")).map(|w| json!(w)),
+        Ok(set["workflow"].clone())
+    );
+    call(
+        f.addr,
+        &f.admin,
+        "card_move",
+        &json!({"id": id, "to": "blocked"}),
+    );
+    let (status, _, text) = f.admin("settings_workflow_set", &json!({"workflow": without}));
+    assert_eq!(status, 200, "{text}");
+
+    // The anchors stay, and an inconsistent workflow is refused with the reason.
+    let mut no_done = without.clone();
+    no_done["columns"]
+        .as_array_mut()
+        .expect("columns")
+        .retain(|c| c["id"] != "done");
+    let (status, _, text) = f.admin("settings_workflow_set", &json!({"workflow": no_done}));
+    assert_eq!(status, 422);
+    assert!(text.contains("done cannot be removed"), "{text}");
+    let (status, _, _) = call(
+        f.addr,
+        &builder,
+        "settings_workflow_set",
+        &json!({"workflow": without}),
+    );
+    assert_eq!(status, 403, "only an admin");
 }
 
 #[test]

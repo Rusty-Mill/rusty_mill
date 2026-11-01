@@ -392,10 +392,10 @@ pub fn ops() -> Vec<Op> {
     vec![
         op(
             "board_list",
-            "List cards, optionally one column and/or one project. Columns: backlog, ready, building, qa, review, done, blocked. A credential limited to some projects only sees those.",
+            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those.",
             |b, i, a: ListArgs| {
                 checked_project(b, scope(i), a.project.as_deref())?;
-                let mut cards = b.list(a.column)?;
+                let mut cards = b.list(a.column.as_ref())?;
                 cards.retain(|c| {
                     in_scope(scope(i), &c.project)
                         && a.project.as_deref().is_none_or(|p| c.project == p)
@@ -427,7 +427,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_roadmap",
-            "A project's roadmap, derived from its cards: lanes now (building, qa, review), next (ready), later (backlog), blocked, and shipped (done in the last 30 days, newest first). Each lane is ordered as card_take orders work; `waits_on` lists dependencies not yet done. {project, lanes: [{lane, cards}]}.",
+            "A project's roadmap, derived from its cards: lanes now (work columns), next (queues), later (backlog), blocked, and shipped (done in the last 30 days, newest first). Each lane is ordered as card_take orders work; `waits_on` lists dependencies not yet done. {project, lanes: [{lane, cards}]}.",
             |b, i, a: RoadmapArgs| {
                 checked_project(b, scope(i), Some(&a.project))?;
                 to_json(b.roadmap(&a.project)?)
@@ -435,7 +435,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_metrics",
-            "Board metrics over the cards the caller may see, optionally one project or one repository's projects: open cards by column, project (with shipped in the last 30 days), priority and claimant (building, qa, review); cards added and shipped per week for 8 weeks, oldest first; created-to-shipped lead time (median, p85, ms) over the last 30 days; and the 5 open cards past backlog idle longest. {open, by_column, by_project, by_priority, by_claim, weeks, lead_time, idle}.",
+            "Board metrics over the cards the caller may see, optionally one project or one repository's projects: open cards by column, project (with shipped in the last 30 days), priority and claimant (work columns); cards added and shipped per week for 8 weeks, oldest first; created-to-shipped lead time (median, p85, ms) over the last 30 days; and the 5 open cards past backlog idle longest. {open, by_column, by_project, by_priority, by_claim, weeks, lead_time, idle}.",
             |b, i, a: MetricsArgs| {
                 checked_project(b, scope(i), a.project.as_deref())?;
                 let projects = b.projects();
@@ -465,6 +465,11 @@ pub fn ops() -> Vec<Op> {
             "board_roles",
             "List roles and the capabilities each holds.",
             |b, _, _: Nothing| to_json(json!({ "roles": b.roles().0 })),
+        ),
+        op(
+            "board_columns",
+            "The board's columns in display order ({id, label, kind}: kind backlog, queue (waits to be taken), work (claimed; leaving needs the claim), done or blocked) and the moves between them ({from, to, cap, gate}: the capability a move needs; a gate also needs admin). Any open card may move to blocked.",
+            |b, _, _: Nothing| to_json(json!(b.workflow())),
         ),
         op(
             "board_events",
@@ -576,10 +581,10 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_move",
-            "Move a card. Needs the capability for that transition; leaving building/qa/review needs your claim. While an admin has turned movement rules off, any move but out of Done is allowed.",
+            "Move a card to a column (an id from `board_columns`). Needs the capability of that transition (`board_columns` lists them; a gate also needs admin); leaving a work column needs your claim. Any open card may be moved to blocked. While an admin has turned movement rules off, any move but out of Done and through a gate is allowed.",
             |b, i, a: MoveArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.move_card(card_ref(b, &a.id)?, a.to, &who)?)
+                card(b.move_card(card_ref(b, &a.id)?, &a.to, &who)?)
             },
         ),
         op(
