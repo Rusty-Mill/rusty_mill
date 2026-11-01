@@ -1,82 +1,19 @@
-//! Concurrent reader/writer access prototypes for `CanonicalCachedStore` —
-//! the only backend that gets a concurrency story in this pass, same
-//! "don't build for backends nobody would deploy" reasoning the durability
-//! work (`STORAGE-008`/`STORAGE-009`) already established for that backend.
-//! Everything benchmarked before this module assumed single-threaded
-//! access; this tests what happens once real reader/writer threads contend
-//! for the same store. See `docs/decisions/ADR-0007-concurrency-strategies.md`
-//! for the design decisions and `docs/specifications/storage/STORAGE-010-concurrency-prototypes.md`
-//! for the requirements each variant satisfies.
+//! [`ConcurrentStore`], the `&self` store interface `ProductionStore`
+//! implements so one instance can be shared across threads, and its error
+//! type. `ProductionStore` holds its own `RwLock` (ADR-0008).
 //!
-//! # Scope: in-memory only, not paired with a durability variant
-//!
-//! This is concurrency over the plain, non-durable `CanonicalCachedStore`
-//! shape — none of these variants persist anything to disk. Combining a
-//! concurrency strategy with a specific durability variant (e.g. "a
-//! sharded, WAL-backed store") is a real, natural follow-up, but a second
-//! round: the two axes (concurrency, durability) multiply into a much
-//! larger design space than either alone, and this pass's job is to
-//! establish the concurrency numbers on their own footing first.
-//!
-//! # Two tiers, same rigor split as durability
-//!
-//! - **Tier 1** (full build, correctness-stress-tested, fully benchmarked):
-//!   [`global_rwlock::GlobalRwLockStore`] (one `RwLock` around the whole
-//!   store), [`sharded::ShardedStore`] (N independently-locked shards,
-//!   partitioned by UUID), [`dashmap_store::DashMapStore`] (swaps the
-//!   canonical map for `dashmap::DashMap`).
-//! - **Tier 2** (lighter proof-of-concept): [`actor::ActorStore`] (a single
-//!   writer thread owns the store outright; every other thread talks to it
-//!   over a channel).
-//!
-//! # Why one shared trait, not four uses of `DogStore`
-//!
-//! `DogStore::update_age` takes `&mut self` — correct for single-threaded
-//! backends, but incompatible with sharing one store instance across
-//! threads (`&mut` can't be held by more than one caller at a time, which
-//! is exactly what these variants exist to allow via their own internal
-//! synchronization). [`ConcurrentStore`] below takes `&self` everywhere,
-//! including for `update_age`, and returns `Result` uniformly across all
-//! four variants — mirroring how `DogStore::update_age` is `Result` for
-//! every backend even though only an unknown UUID ever produces `Err` for
-//! three of the four; here, only [`actor::ActorStore`] can fail on a
-//! channel disconnect, but giving every method one shared, fallible
-//! signature is what lets one generic stress test and one generic
-//! benchmark loop drive all four variants identically.
+//! The four strategies ADR-0007 compared here (a global `RwLock`, sharding,
+//! `DashMap`, an actor) were removed by ADR-0138; `RESULTS.md` keeps their
+//! measurements and the commit ADR-0138 names keeps their code.
 
 use crate::record::DogRecord;
 use crate::store::StoreError;
 use thiserror::Error;
 use uuid::Uuid;
 
-// The four concurrency strategies below are the benchmark comparison this
-// crate's charter set out to run — not the recommended path (see
-// `lib.rs`'s own top-level doc comment). Gated behind the `research`
-// feature; the `ConcurrentStore` trait/`ConcurrencyError` type below stay
-// unconditional since `crate::production::ProductionStore` implements
-// this trait directly (with its own bare `RwLock`, not
-// `GlobalRwLockStore` — see that type's own module docs).
-#[cfg(feature = "research")]
-pub mod actor;
-#[cfg(feature = "research")]
-pub mod dashmap_store;
-#[cfg(feature = "research")]
-pub mod global_rwlock;
-#[cfg(feature = "research")]
-pub mod sharded;
-
-#[cfg(feature = "research")]
-pub use actor::ActorStore;
-#[cfg(feature = "research")]
-pub use dashmap_store::DashMapStore;
-#[cfg(feature = "research")]
-pub use global_rwlock::GlobalRwLockStore;
-#[cfg(feature = "research")]
-pub use sharded::ShardedStore;
-
 /// Every fallible outcome across every concurrency variant. `Store` covers
 /// the one failure mode every variant shares (`update_age` on an unknown
-/// UUID); `ActorDisconnected` is specific to [`ActorStore`] — a channel
+/// UUID); `ActorDisconnected` is specific to `ActorStore` — a channel
 /// send/recv failing because the single writer thread has already exited,
 /// which can't happen while the owning `ActorStore` is still alive (its
 /// `Drop` doesn't run until every clone/reference is gone), but callers

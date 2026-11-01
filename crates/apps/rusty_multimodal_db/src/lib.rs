@@ -120,19 +120,14 @@
 //! [`generic::production::GenericProductionStore`] (`with_exclusive`) —
 //! purely additive, no existing method's behavior changed.
 //!
-//! # Everything else: benchmarked alternatives, behind `research`
+//! # Reference fixtures, behind `research`
 //!
-//! `store`, `durability`, and `concurrency` hold the other three `Dog`
-//! storage backends, seven other durability variants, and three other
-//! concurrency strategies this recommendation is built on — the evidence,
-//! not dead code, but not compiled into a default build either. Each
-//! variant lost outright, tied, or won only in a narrow corner the
-//! production pick's own module docs and `RESULTS.md` name explicitly.
-//! Reach for one of them directly (with `--features research`) only if
-//! your workload's shape is genuinely one of those narrow corners (e.g.
-//! `ShardedStore` for a small, write-heavy, high-thread-count deployment —
-//! see `docs/decisions/ADR-0008-production-default.md`); otherwise, use
-//! [`production::ProductionStore`].
+//! `research` now gates only the reference domains (`Order`/`Customer`,
+//! `Employee`), the dataset builders and the crash-safety and
+//! multi-process harnesses. The benchmarked-alternative backends,
+//! durability variants, concurrency strategies and spikes were removed by
+//! ADR-0138; `RESULTS.md` keeps their measurements and the commit that ADR
+//! names keeps their code.
 //!
 //! See `docs/charter/CHARTER.md` for the original hypothesis under test
 //! and `docs/decisions/ADR-0001-three-backend-empirical-comparison.md` for
