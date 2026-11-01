@@ -397,7 +397,7 @@ async fn server_for(front: &Shared, account: &Account) -> io::Result<UnixStream>
             .ok_or_else(|| io::Error::other(format!("groups of {}", account.name)))?;
         Some(groups)
     };
-    let started = watch(start(&server, &socket, account, groups)?)?;
+    let started = watch(command(&server, &socket, account, groups))?;
     served_by(ready(&socket, &started).await?, account)
 }
 
@@ -542,14 +542,10 @@ fn account_dir(dir: &Path, account: &Account) -> io::Result<()> {
     }
 }
 
-/// Starts `server` for `account` on `socket`, in a session of its own, as
-/// the account (with its `groups`) when the front door is root.
-fn start(
-    server: &Path,
-    socket: &Path,
-    account: &Account,
-    groups: Option<Vec<u32>>,
-) -> io::Result<Child> {
+/// The command that starts `server` for `account` on `socket`, in a
+/// session of its own, as the account (with its `groups`) when the front
+/// door is root.
+fn command(server: &Path, socket: &Path, account: &Account, groups: Option<Vec<u32>>) -> Command {
     let me = rusty_libc::process::geteuid();
     let (uid, gid) = (account.uid, account.gid);
     let mut command = Command::new(server);
@@ -584,7 +580,7 @@ fn start(
             Ok(())
         });
     }
-    command.spawn()
+    command
 }
 
 fn errno(e: rusty_libc::Errno) -> io::Error {
@@ -595,26 +591,46 @@ fn errno(e: rusty_libc::Errno) -> io::Error {
 /// handle that signals it and no process that later reuses its pid.
 struct Started {
     exited: mpsc::Receiver<io::Result<ExitStatus>>,
-    pidfd: Option<OwnedFd>,
+    pidfd: OwnedFd,
 }
 
-/// Hands `child` to a thread that reaps it whenever it ends, so a relay
-/// closed while it starts leaves no zombie behind.
-fn watch(child: Child) -> io::Result<Started> {
-    let pidfd = i32::try_from(child.id())
-        .ok()
-        .and_then(|pid| rusty_libc::process::pidfd_open(pid, 0).ok())
-        // SAFETY: `pidfd_open` just returned this fd, owned by no one else.
-        .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) });
+/// Runs `command` with a thread to reap it whenever it ends, so a relay
+/// closed while it starts leaves no zombie behind. The thread comes first:
+/// if it cannot be made, nothing is started. A child with no pidfd (Linux
+/// before 5.3, or a policy that denies it) could not be stopped safely
+/// later, so it is killed at once, while unreaped, and the start fails.
+fn watch(mut command: Command) -> io::Result<Started> {
+    let (give, take) = mpsc::channel::<Child>();
     let (tx, exited) = mpsc::channel();
-    let mut child = child;
     std::thread::Builder::new()
         .name("rusty-mux-reap".into())
         .spawn(move || {
-            // Nobody waiting any more is fine; the reaping is the point.
-            let _ = tx.send(child.wait());
+            // No child comes if the start failed. Nobody waiting for the
+            // exit any more is fine; the reaping is the point.
+            if let Ok(mut child) = take.recv() {
+                let _ = tx.send(child.wait());
+            }
         })?;
-    Ok(Started { exited, pidfd })
+    let mut child = command.spawn()?;
+    let pidfd = pidfd_of(&child);
+    if pidfd.is_err() {
+        // Unreaped, so the pid is still this child's.
+        let _ = child.kill();
+    }
+    // The reaper lives until it gets this, so the send cannot fail.
+    give.send(child)
+        .map_err(|_| io::Error::other("the reaper stopped"))?;
+    Ok(Started {
+        exited,
+        pidfd: pidfd?,
+    })
+}
+
+fn pidfd_of(child: &Child) -> io::Result<OwnedFd> {
+    let pid = i32::try_from(child.id()).map_err(io::Error::other)?;
+    let fd = rusty_libc::process::pidfd_open(pid, 0).map_err(errno)?;
+    // SAFETY: `pidfd_open` just returned this fd, owned by no one else.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// Waits for the server in `started` to listen on `socket`. Fails if it
@@ -640,10 +656,8 @@ async fn ready(socket: &Path, started: &Started) -> io::Result<UnixStream> {
         if Instant::now() >= deadline {
             // Not ours to leave half-started. Through the pidfd: never a
             // process that took the pid after this one was reaped.
-            if let Some(pidfd) = &started.pidfd {
-                let sigkill = rusty_libc::signal::SIGKILL;
-                let _ = rusty_libc::process::pidfd_send_signal(pidfd.as_raw_fd(), sigkill);
-            }
+            let sigkill = rusty_libc::signal::SIGKILL;
+            let _ = rusty_libc::process::pidfd_send_signal(started.pidfd.as_raw_fd(), sigkill);
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "the server did not start listening",
