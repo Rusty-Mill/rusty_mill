@@ -2,7 +2,7 @@
 //! `--json`.
 
 use rusty_json::{Map, Value};
-use rusty_mux_core::{BlockId, Event, ExitStatus, Layout, Progress, Size};
+use rusty_mux_core::{BlockId, Event, ExitStatus, Layout, Principal, Progress, Size};
 use rusty_mux_proto::{Cursor, Entry};
 use rusty_uuid::Uuid;
 
@@ -160,6 +160,17 @@ fn size_fields(size: Size) -> [(&'static str, Field); 2] {
     ]
 }
 
+/// A principal's id and account name, or absent from an older server.
+fn principal_fields(principal: Option<&Principal>) -> [(&'static str, Field); 2] {
+    let text = |get: fn(&Principal) -> &str| {
+        principal.map_or(Field::Absent, |p| Field::Text(get(p).to_owned()))
+    };
+    [
+        ("principal", text(Principal::id)),
+        ("user", text(Principal::user)),
+    ]
+}
+
 fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Field)>) {
     use Field::{Id, Text};
     match entry {
@@ -201,14 +212,18 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
             client,
             name,
             attached,
-        } => (
-            "client",
-            client.uuid(),
-            vec![
+            principal,
+            transport,
+        } => {
+            let mut fields = vec![
                 ("name", Text(name.clone())),
                 ("attached", attached.map_or(Field::Absent, |b| Id(b.uuid()))),
-            ],
-        ),
+            ];
+            fields.extend(principal_fields(principal.as_ref()));
+            let transport = transport.map_or(Field::Absent, |t| Text(t.name().to_owned()));
+            fields.push(("transport", transport));
+            ("client", client.uuid(), fields)
+        }
     }
 }
 
@@ -241,9 +256,26 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
             ("block-resized", fields)
         }
         E::BlockClosed { block } => ("block-closed", vec![("block", Id(block.uuid()))]),
-        E::ClientConnected { client } => ("client-connected", vec![("client", Id(client.uuid()))]),
+        E::ClientConnected {
+            client,
+            ref principal,
+        } => {
+            let mut fields = vec![("client", Id(client.uuid()))];
+            fields.extend(principal_fields(principal.as_ref()));
+            ("client-connected", fields)
+        }
         E::ClientDisconnected { client } => {
             ("client-disconnected", vec![("client", Id(client.uuid()))])
+        }
+        E::ClientConnectionChanged {
+            client,
+            ref principal,
+            transport,
+        } => {
+            let mut fields = vec![("client", Id(client.uuid()))];
+            fields.extend(principal_fields(Some(principal)));
+            fields.push(("transport", Text(transport.name().to_owned())));
+            ("client-connection-changed", fields)
         }
         E::Attached { client, block } => (
             "attached",
@@ -371,7 +403,7 @@ fn renamed(entity: &'static str, id: Uuid, name: &str) -> Vec<(&'static str, Fie
 
 #[cfg(test)]
 mod tests {
-    use rusty_mux_core::{BlockId, ClientId, SessionId, Size, WindowId};
+    use rusty_mux_core::{BlockId, ClientId, Principal, SessionId, Size, Transport, WindowId};
 
     use super::*;
 
@@ -476,7 +508,10 @@ mod tests {
             },
             Event::BlockResized { block, size },
             Event::BlockClosed { block },
-            Event::ClientConnected { client },
+            Event::ClientConnected {
+                client,
+                principal: Some(Principal::unix(1, None).unwrap()),
+            },
             Event::ClientDisconnected { client },
             Event::Attached { client, block },
             Event::Detached { client, block },
@@ -526,6 +561,11 @@ mod tests {
                 window,
                 layout: Some(Layout::Block(block)),
                 zoomed: Some(block),
+            },
+            Event::ClientConnectionChanged {
+                client,
+                principal: Principal::unix(1, None).unwrap(),
+                transport: Transport::Socket,
             },
         ];
         assert_eq!(events.len(), rusty_mux_script::EVENTS.len());
@@ -580,10 +620,31 @@ mod tests {
             client: ClientId::from_uuid(id(3)),
             name: "laptop".into(),
             attached: Some(BlockId::from_uuid(id(1))),
+            principal: Some(Principal::unix(1000, Some("alice".into())).unwrap()),
+            transport: Some(Transport::Datagram),
         };
         assert_eq!(
             entry_line(&client, false),
-            format!("client {} name=\"laptop\" attached={}", id(3), id(1))
+            format!(
+                "client {} name=\"laptop\" attached={} principal=\"uid:1000\" user=\"alice\" \
+                 transport=\"udp\"",
+                id(3),
+                id(1)
+            )
+        );
+        let old = Entry::Client {
+            client: ClientId::from_uuid(id(3)),
+            name: String::new(),
+            attached: None,
+            principal: None,
+            transport: None,
+        };
+        assert_eq!(
+            entry_line(&old, false),
+            format!(
+                "client {} name=\"\" attached=- principal=- user=- transport=-",
+                id(3)
+            )
         );
         let Value::Object(map) = Value::from_json_str(&entry_line(&block, true)).unwrap() else {
             panic!("an object")

@@ -781,6 +781,15 @@ pub static CATALOG: &[Method] = &[
         build: |req, _| Ok(Message::List { req }),
     },
     Method {
+        name: "whoami",
+        doc: "Show the caller's own client: its id, the principal the server verified it \
+              to be, and how it is connected.",
+        params: &[],
+        needs: Features::IDENTITY,
+        returns: Returns::Entries,
+        build: |req, _| Ok(Message::Whoami { req }),
+    },
+    Method {
         name: "terminal.format",
         doc: "Read the terminal's screen as text, after some lines of its history: one line \
               per row, without trailing blanks.",

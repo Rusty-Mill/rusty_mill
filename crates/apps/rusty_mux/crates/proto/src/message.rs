@@ -1,8 +1,8 @@
 //! The messages and their field layouts.
 
 use rusty_mux_core::{
-    BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Progress, SessionId, Side, Size,
-    WindowId,
+    BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, SessionId, Side,
+    Size, Transport, WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::{Reader, Writer};
@@ -101,6 +101,12 @@ impl Features {
     /// server started with a UDP port hands out associations
     /// (`docs/projects/mux/UDP-TRANSPORT.md`).
     pub const DATAGRAM: Self = Self(1 << 21);
+
+    /// Who each client is: [`Message::Whoami`] and
+    /// [`Event::ClientConnectionChanged`] (skipped for a client without
+    /// it). A client entry carries its principal and transport regardless,
+    /// since older decoders skip the fields.
+    pub const IDENTITY: Self = Self(1 << 22);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -227,6 +233,10 @@ pub enum Entry {
         name: String,
         /// The block whose output it receives, if any.
         attached: Option<BlockId>,
+        /// Who the server verified it to be; `None` from an older server.
+        principal: Option<Principal>,
+        /// How it is connected; `None` from an older server.
+        transport: Option<Transport>,
     },
 }
 
@@ -305,6 +315,11 @@ pub enum Message {
     /// every client. Answered with one [`Message::Entry`] per entity, each
     /// parent before its children, then [`Message::Done`]. Negotiated with [`Features::INSPECT`].
     List {
+        req: u64,
+    },
+    /// The caller's own client: answered with one [`Message::Entry`] for
+    /// it, then [`Message::Done`]. Negotiated with [`Features::IDENTITY`].
+    Whoami {
         req: u64,
     },
     /// Runs `method`, one of the methods of the block's type such as
@@ -500,8 +515,14 @@ const PORT: u32 = 38;
 const ASSOCIATION: u32 = 39;
 /// An association's key, 32 bytes.
 const KEY: u32 = 40;
-// IDs 1..=KEY are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = KEY as usize;
+/// A [`Transport`]: 1 socket, 2 datagram.
+const TRANSPORT: u32 = 41;
+/// A [`Principal`]'s id, such as `uid:1000`.
+const PRINCIPAL: u32 = 42;
+/// A [`Principal`]'s account name.
+const USER: u32 = 43;
+// IDs 1..=USER are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = USER as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -525,6 +546,7 @@ mod ty {
     pub const ZOOM: u8 = 0x13;
     pub const UNZOOM: u8 = 0x14;
     pub const OPEN_DATAGRAM: u8 = 0x15;
+    pub const WHOAMI: u8 = 0x16;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -612,6 +634,10 @@ impl Message {
             M::List { req } => {
                 out.varint(REQ, *req);
                 ty::LIST
+            }
+            M::Whoami { req } => {
+                out.varint(REQ, *req);
+                ty::WHOAMI
             }
             M::BlockCall {
                 req,
@@ -799,6 +825,9 @@ impl Message {
                 block: block(&f, BLOCK)?,
             },
             ty::LIST => M::List {
+                req: f.varint(REQ)?,
+            },
+            ty::WHOAMI => M::Whoami {
                 req: f.varint(REQ)?,
             },
             ty::BLOCK_CALL => M::BlockCall {
@@ -1075,6 +1104,7 @@ mod kind {
     pub const BLOCK_RENAMED: u64 = 23;
     pub const CLIENT_RENAMED: u64 = 24;
     pub const LAYOUT_CHANGED: u64 = 25;
+    pub const CLIENT_CONNECTION_CHANGED: u64 = 26;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -1119,13 +1149,31 @@ fn put_event(out: &mut Out, event: &Event) {
             out.varint(KIND, kind::BLOCK_CLOSED)
                 .uuid(BLOCK, block.uuid());
         }
-        E::ClientConnected { client } => {
-            out.varint(KIND, kind::CLIENT_CONNECTED)
+        E::ClientConnected {
+            client,
+            ref principal,
+        } => {
+            let o = out
+                .varint(KIND, kind::CLIENT_CONNECTED)
                 .uuid(CLIENT, client.uuid());
+            if let Some(principal) = principal {
+                put_principal(o, principal);
+            }
         }
         E::ClientDisconnected { client } => {
             out.varint(KIND, kind::CLIENT_DISCONNECTED)
                 .uuid(CLIENT, client.uuid());
+        }
+        E::ClientConnectionChanged {
+            client,
+            ref principal,
+            transport,
+        } => {
+            let o = out
+                .varint(KIND, kind::CLIENT_CONNECTION_CHANGED)
+                .uuid(CLIENT, client.uuid())
+                .varint(TRANSPORT, transport_wire(transport));
+            put_principal(o, principal);
         }
         E::Attached { client, block } => {
             out.varint(KIND, kind::ATTACHED)
@@ -1299,9 +1347,16 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         },
         kind::CLIENT_CONNECTED => E::ClientConnected {
             client: client(f, CLIENT)?,
+            // An older server sends none.
+            principal: f.opt(PRINCIPAL, principal)?,
         },
         kind::CLIENT_DISCONNECTED => E::ClientDisconnected {
             client: client(f, CLIENT)?,
+        },
+        kind::CLIENT_CONNECTION_CHANGED => E::ClientConnectionChanged {
+            client: client(f, CLIENT)?,
+            principal: principal(f, PRINCIPAL)?,
+            transport: transport(f, TRANSPORT)?,
         },
         kind::ATTACHED => E::Attached {
             client: client(f, CLIENT)?,
@@ -1421,6 +1476,8 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             client,
             name,
             attached,
+            principal,
+            transport,
         } => {
             let o = out
                 .varint(KIND, entry::CLIENT)
@@ -1428,6 +1485,12 @@ fn put_entry(out: &mut Out, entry: &Entry) {
                 .bytes(NAME, name.as_bytes());
             if let Some(block) = attached {
                 o.uuid(BLOCK, block.uuid());
+            }
+            if let Some(principal) = principal {
+                put_principal(o, principal);
+            }
+            if let Some(transport) = transport {
+                o.varint(TRANSPORT, transport_wire(*transport));
             }
         }
     }
@@ -1460,9 +1523,37 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             client: client(f, CLIENT)?,
             name: f.string(NAME)?,
             attached: f.opt(BLOCK, block)?,
+            principal: f.opt(PRINCIPAL, principal)?,
+            transport: f.opt(TRANSPORT, transport)?,
         },
         _ => return Err(f.invalid(KIND)),
     })
+}
+
+const fn transport_wire(transport: Transport) -> u64 {
+    match transport {
+        Transport::Socket => 1,
+        Transport::Datagram => 2,
+    }
+}
+
+fn transport(f: &In<'_>, id: u32) -> Result<Transport, Error> {
+    match f.varint(id)? {
+        1 => Ok(Transport::Socket),
+        2 => Ok(Transport::Datagram),
+        _ => Err(f.invalid(id)),
+    }
+}
+
+fn put_principal(out: &mut Out, principal: &Principal) {
+    out.bytes(PRINCIPAL, principal.id().as_bytes())
+        .bytes(USER, principal.user().as_bytes());
+}
+
+/// A principal's id at `id`, with its account name, which is always sent
+/// beside it.
+fn principal(f: &In<'_>, id: u32) -> Result<Principal, Error> {
+    Principal::new(f.string(id)?, f.string(USER)?).map_err(|_| f.invalid(id))
 }
 
 impl Code {
