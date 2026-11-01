@@ -1531,8 +1531,19 @@ fn select_window_moves_the_active_window() {
     .stdout(Stdio::piped())
     .spawn()
     .expect("spawn");
-    std::thread::sleep(Duration::from_millis(500));
-    ok(&socket, &["select-window", "--window", &second]);
+    // `wait` sees only events after it subscribes, so select back and
+    // forth until it has caught one, rather than guess how long that takes.
+    let mut waiter = waiter;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while waiter.try_wait().expect("poll").is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the waiter never saw it"
+        );
+        ok(&socket, &["select-window", "--window", &first]);
+        ok(&socket, &["select-window", "--window", &second]);
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let output = waiter.wait_with_output().expect("wait");
     assert_eq!(output.status.code(), Some(0));
     let printed = stdout(&output);

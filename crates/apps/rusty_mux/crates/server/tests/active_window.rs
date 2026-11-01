@@ -146,3 +146,35 @@ fn a_client_without_the_feature_can_not_select_and_hears_nothing() {
             .any(|(_, e)| matches!(e, Event::ActiveWindowChanged { .. }))
     );
 }
+
+#[test]
+fn replay_sends_the_event_only_to_clients_that_asked() {
+    let path = start_server();
+    let mut away = Vec::new();
+    for features in [PLAIN, ACTIVE] {
+        let client = Client::connect_with(&path, features, None);
+        away.push((features, client.cursor.expect("cursor")));
+    }
+
+    // While both are away: a window becomes active, then a later event.
+    let mut writer = Client::connect_with(&path, ACTIVE, None);
+    let window = window_for(&mut writer);
+    let (session, _) = listed(&mut writer, window);
+    let changed = Event::ActiveWindowChanged {
+        session,
+        window: Some(window),
+    };
+    let later = new_window(&mut writer, session, "later");
+    let created = Event::WindowCreated {
+        window: later,
+        session,
+    };
+
+    for (features, seen) in away {
+        let mut client = Client::connect_with(&path, features, Some(seen));
+        assert_eq!(client.cursor, Some(seen), "resumed");
+        wait_for_event(&mut client, &created);
+        let replayed = client.events.iter().any(|(_, e)| *e == changed);
+        assert_eq!(replayed, features == ACTIVE, "{features:?}");
+    }
+}
