@@ -472,7 +472,7 @@ This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd,
 
 | # | Behaviour | conhost | We | Why |
 |---|---|---|---|---|
-| V1 | Buffer larger than window | allowed (e.g. 9001 rows) | window size only | scrollback belongs to the terminal; ConPTY does the same |
+| V1 | Buffer or window other than the terminal's size | SetConsoleScreenBufferSize grows the buffer (e.g. 9001 rows); under ConPTY SetConsoleWindowInfo resizes the buffer to the window asked for; GetLargestConsoleWindowSize reports what the display could hold | SetConsoleScreenBufferSize and SetConsoleWindowInfo succeed only at the window's size (`E_INVALIDARG` otherwise); GetLargestConsoleWindowSize reports the window | scrollback belongs to the terminal, and the terminal owns the size: a buffer the host resized alone would wrap text where the terminal doesn't |
 | V2 | SetConsoleScreenBufferInfoEx colours | changes the palette | no-op | no target program needs it |
 | V3 | Content and cursor after resize | one buffer, so one history | the host's model and the terminal's screen can differ after a shrink then grow, or a narrow then widen, until a redraw; absolute positioning then lands on different rows (§5.7) | the host keeps no scrollback, the terminal does; S3 measures it before Phase B |
 | V4 | Startup code pages, input and output | OEM (e.g. 437) | 65001; `chcp` changes both from PR 9 | consumers are UTF-8 |
@@ -763,8 +763,8 @@ Each PR includes one change fragment and is reviewed by Dottius. Line counts inc
 | 3 | Input. Covers: VT/win32-input-mode parser, raw passthrough, reply filter, waiting reads, input event, cooked ReadConsole, Ctrl+C/Break, process groups, GenerateConsoleCtrlEvent, 65001-only code pages. Interactive cmd works. As built: the ctrl worker and its queue land here, since Ctrl+C needs them; cooked editing is typing, Backspace, Escape and Enter, with the cursor keys, history and popups later | 700 | 3–4 |
 | 4 | Screen over Grid. Covers: rusty_term_core additions (§4.3, flagged), cursor/attribute/cursor-info APIs, SBI from the Grid, output-mode table, query routing (§5.6), resize (§5.7) with the V3 regression tests. pwsh/PSReadLine and edit.exe start work. As built: with VT processing off and PROCESSED_OUTPUT on, C0 controls other than the five keep their CP437 glyph; §5.4 gained rules 3–5 from the conhost review (legacy wrap, DEL and C1, re-asserting the input modes); DECXCPR (`CSI ? 6 n`) is answered with CPR (V11); the start of a watched sequence at the end of a write is held for the next bytes, and goes out before host VT or at hang-up; on the alternate screen the V3 tests show no divergence, since neither side keeps history there | 700 | 3–4 |
 | 5 | rusty_term `OwnBackend` (§4.5), key documented. **Milestone**. As built: `OwnBackend` is the `Backend` and `OwnHandle` the `BackendHandle`, following `WindowsBackend`/`WindowsHandle`; raw mode and the host size stay the ConPTY backend's. The program is split off the `shell` string by `CreateProcessW`'s rules (`backend/cmdline.rs`, §4.5). PR 5 also split the arguments and `winargv` quoted each again, which changed the raw tail cmd.exe reads (`cmd /c echo a"b c"d`); the follow-up adds `Command::raw_args` (a D3 public API change) and passes the tail verbatim. The web bridge stays on ConPTY. The root `Cargo.toml` gains the `rusty_conhost` workspace entry that `rusty_conhost.workspace = true` needs | 300 | 1–2 |
-| 6 | FillConsoleOutput, ScrollConsoleScreenBuffer. Clear-Host works | 450 | 2 |
-| 7 | Read/WriteConsoleOutput family, SBIEx, window/buffer size calls | 550 | 2–3 |
+| 6 | FillConsoleOutput, ScrollConsoleScreenBuffer. Clear-Host works. As built (with PR 7, #1330): every cell write paints as conhost under ConPTY does (`VtIo::Writer::WriteInfos`): runs of CUP, SGR and characters between DECSC and DECRC, through the host's Grid, so the terminal and the model get the same bytes. A write queues as one call and paints at most a slice's worth of cells per step, reading what it keeps (attributes under a character fill, a scroll's source) a row at a time, a scroll's rows in memmove order. No cmd `cls` or PowerShell Clear-Host shim (conhost's `^[[3J`): the screen clears and the terminal keeps its scrollback | 450 | 2 |
+| 7 | Read/WriteConsoleOutput family, SBIEx, window/buffer size calls. As built (#1333): reads take conhost's `AsCharInfo` view of the Grid; a ReadConsoleOutput reply over 1 MiB is refused with `STATUS_INVALID_PARAMETER` (§7.4). The size calls follow V1, GetLargestConsoleWindowSize reports the window, SetConsoleScreenBufferInfoEx is the V2 no-op | 550 | 2–3 |
 | 8 | Lifetime: CTRL_CLOSE (the ctrl worker and its queue are in PR 3), absolute grace deadline, `hang_up`, the §7.3 tests (§5.8). Needs S1. As built: CTRL_CLOSE supersedes queued Ctrl+C/Break and is still delivered after the server closes; a client connecting during the grace gets it; Drop discards output nobody reads | 350 | 1–2 |
 | 9 | Code pages via `codec` (§5.9). As built: the two code pages, WriteConsoleA's DBCS lead byte and the slice-wise decode of parked writes (§5.9), V13, `chcp` end to end on Windows | 250 | 1–2 |
 | 10 | (reserved for issues found at the milestone) | — | 2 |
@@ -1025,9 +1025,11 @@ Function codes: 1 CONNECT, 2 DISCONNECT, 3 CREATE_OBJECT, 4 CLOSE_OBJECT, 5 RAW_
 | 4 | GetCurrentConsoleFont | 0x03000004 |
 | 4 | GetConsoleWindow (returns NULL, V5) | 0x0300001F |
 | 6 | FillConsoleOutput | 0x02000000 |
-| 6 | ScrollConsoleScreenBuffer | from `conmsgl2.h`, pinned in PR 6 |
+| 6 | ScrollConsoleScreenBuffer | 0x0200000C |
 | 7 | ReadConsoleOutput | 0x02000013 |
-| 7 | WriteConsoleOutput(+String), ReadConsoleOutputString, Get/SetConsoleScreenBufferInfoEx, GetLargestConsoleWindowSize, SetConsoleScreenBufferSize, SetConsoleWindowInfo | from `conmsgl2.h`, pinned in PR 7 |
+| 7 | WriteConsoleOutput / WriteConsoleOutputString / ReadConsoleOutputString | 0x02000011 / 0x02000012 / 0x0200000F |
+| 7 | SetConsoleScreenBufferInfoEx (GetConsoleScreenBufferInfoEx is 0x02000007, PR 4) | 0x02000008 |
+| 7 | SetConsoleScreenBufferSize / GetLargestConsoleWindowSize / SetConsoleWindowInfo | 0x02000009 / 0x0200000B / 0x0200000E |
 | 11 | GetConsoleProcessList | 0x03000029 (draft 6 said 0x0300002A, which is GetConsoleHistory in `conmsgl3.h`) |
 | 11 | SetCurrentConsoleFontEx (accepted, ignored; Windows PowerShell 5.1 exits at startup without it) | 0x0300002C |
 | — | CREATE_OBJECT type 3, SetConsoleActiveScreenBuffer | deferred (V6) |

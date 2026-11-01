@@ -33,7 +33,7 @@ const MAX_LOGS: usize = crate::console::MAX_LOGGED + 1;
 
 /// API numbers the script picks from by index; any other index sends a
 /// raw number.
-const APIS: [u32; 20] = [
+const APIS: [u32; 30] = [
     api::GET_CP,
     api::GET_MODE,
     api::SET_MODE,
@@ -54,6 +54,16 @@ const APIS: [u32; 20] = [
     api::SET_TITLE,
     api::GET_CURRENT_FONT,
     api::GET_CONSOLE_WINDOW,
+    api::FILL_OUTPUT,
+    api::SCROLL_SCREEN_BUFFER,
+    api::READ_OUTPUT,
+    api::WRITE_OUTPUT,
+    api::READ_OUTPUT_STRING,
+    api::WRITE_OUTPUT_STRING,
+    api::SET_SCREEN_BUFFER_SIZE,
+    api::SET_WINDOW_INFO,
+    api::GET_LARGEST_WINDOW_SIZE,
+    api::SET_SCREEN_BUFFER_INFO,
 ];
 
 /// Code pages the driver's codec (`codepage::table`) knows.

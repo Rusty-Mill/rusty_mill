@@ -65,7 +65,7 @@ impl CodePage {
         self.cp == UTF8
     }
 
-    fn is_lead(self, b: u8) -> bool {
+    pub(crate) fn is_lead(self, b: u8) -> bool {
         b >= 0x80 && self.lead & 1 << (b - 0x80) != 0
     }
 
