@@ -694,7 +694,8 @@ fn git(repo: &Path, args: &[&str]) -> Result<(bool, String), String> {
     ))
 }
 
-/// The commit a run is pinned to: HEAD of `repo`, which must be clean and must
+/// The commit a run is pinned to: HEAD of `repo`, which must be clean (no
+/// edited, staged or untracked file, whatever the user's git config hides) and must
 /// contain `min_commit` (the merge of the verdict-binding fix). A criteria file
 /// with no `min_commit` refuses: the pin is part of the criteria.
 pub fn pin(repo: &Path, min_commit: Option<&str>, build_sha: &str) -> Result<String, String> {
@@ -704,7 +705,12 @@ pub fn pin(repo: &Path, min_commit: Option<&str>, build_sha: &str) -> Result<Str
     if !ok {
         return Err(format!("{}: not a git checkout", repo.display()));
     }
-    let (_, dirty) = git(repo, &["status", "--porcelain"])?;
+    // `--untracked-files=normal` overrides a user's `status.showUntrackedFiles=no`
+    // (#1328), and a status git could not produce is not a clean tree.
+    let (ok, dirty) = git(repo, &["status", "--porcelain", "--untracked-files=normal"])?;
+    if !ok {
+        return Err(format!("{}: git status failed", repo.display()));
+    }
     if !dirty.is_empty() {
         return Err(format!("{}: the working tree is not clean", repo.display()));
     }
@@ -1021,9 +1027,11 @@ mod tests {
         assert!(spec_wall_ms("not json").is_err());
     }
 
-    /// A scratch git repo with two commits; returns (dir, first sha, second sha).
-    fn repo() -> (std::path::PathBuf, String, String) {
-        let d = std::env::temp_dir().join(format!("pin-{}-{:p}", std::process::id(), &0u8));
+    /// A scratch git repo with two commits, in its own directory per `tag`;
+    /// returns (dir, first sha, second sha).
+    fn repo(tag: &str) -> (std::path::PathBuf, String, String) {
+        let d = std::env::temp_dir().join(format!("pin-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let g = |a: &[&str]| {
             let o = std::process::Command::new("git")
@@ -1049,7 +1057,7 @@ mod tests {
 
     #[test]
     fn a_run_is_pinned_to_a_clean_head_built_into_the_binary_that_contains_the_minimum_commit() {
-        let (d, first, second) = repo();
+        let (d, first, second) = repo("pinned");
         assert_eq!(pin(&d, Some(&first), &second).unwrap(), second);
         assert_eq!(pin(&d, Some(&second), &second).unwrap(), second);
         // A binary built from another commit, or from a dirty tree, refuses.
@@ -1074,6 +1082,38 @@ mod tests {
             &second
         )
         .is_err());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn an_untracked_file_is_dirty_even_when_git_config_hides_untracked_files() {
+        // #1328: `status.showUntrackedFiles=no` (here in the repository's own
+        // config, as a user's global config would set it) made `git status
+        // --porcelain` print nothing for an untracked file.
+        let (d, first, second) = repo("untracked");
+        let cfg = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&d)
+            .args(["config", "status.showUntrackedFiles", "no"])
+            .status()
+            .unwrap();
+        assert!(cfg.success());
+        assert_eq!(pin(&d, Some(&first), &second).unwrap(), second);
+        std::fs::write(d.join("new.rs"), "// untracked\n").unwrap();
+        assert!(pin(&d, Some(&first), &second)
+            .unwrap_err()
+            .contains("not clean"));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_status_git_cannot_read_is_not_a_clean_tree() {
+        // A failed `git status` printed nothing, which read as clean. A corrupt
+        // index fails status while `rev-parse HEAD` still answers.
+        let (d, first, second) = repo("corrupt-index");
+        std::fs::write(d.join(".git/index"), "not an index").unwrap();
+        let err = pin(&d, Some(&first), &second).unwrap_err();
+        assert!(err.contains("git status"), "{err}");
         std::fs::remove_dir_all(d).unwrap();
     }
 
