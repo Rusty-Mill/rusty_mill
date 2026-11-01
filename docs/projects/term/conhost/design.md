@@ -475,7 +475,7 @@ This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd,
 | V1 | Buffer larger than window | allowed (e.g. 9001 rows) | window size only | scrollback belongs to the terminal; ConPTY does the same |
 | V2 | SetConsoleScreenBufferInfoEx colours | changes the palette | no-op | no target program needs it |
 | V3 | Content and cursor after resize | one buffer, so one history | the host's model and the terminal's screen can differ after a shrink then grow, or a narrow then widen, until a redraw; absolute positioning then lands on different rows (§5.7) | the host keeps no scrollback, the terminal does; S3 measures it before Phase B |
-| V4 | Startup code page | OEM (e.g. 437) | 65001; `chcp` changes it from PR 9 | consumers are UTF-8 |
+| V4 | Startup code pages, input and output | OEM (e.g. 437) | 65001; `chcp` changes both from PR 9 | consumers are UTF-8 |
 | V5 | GetConsoleWindow | a hidden pseudo-window | NULL | add a message-only window if a program in the census needs it; conhost's source names cygwin, which fails silently on NULL, so cygwin and MSYS2 (git-bash tools) are in the census |
 | V6 | Multiple screen buffers (CREATE_OBJECT type 3, SetConsoleActiveScreenBuffer) | supported | STATUS_NOT_IMPLEMENTED | no target program uses them (edit.exe uses `?1049h`); build when the unknown-API log shows a real caller |
 | V7 | GenerateConsoleCtrlEvent for a group no client is in | falls back to the caller's parent process | `E_INVALIDARG`, nothing sent | the fallback serves console-less callers; our clients always carry their group |
@@ -671,7 +671,8 @@ Any store a later PR adds names its cap in one of these tables in the same PR.
 | Fuzz: `msg` decode and packet sequences | nightly | no panic, every effect within limits | 13 |
 | Manual gate | Beast plus one older build | see below | each milestone |
 
-- **Probes** are `examples/probe.rs` in rusty_conhost: one binary with a subcommand per API. Tests spawn it from the target directory. No extra workspace member is needed.
+- **Probes** are the `conhost_probe` example in rusty_conhost (`examples/conhost_probe/`): one binary with a subcommand per API, each a real client calling through kernelbase. Tests spawn it from the target directory. No extra workspace member is needed. The console calls it makes are admitted in their own block of `win32_surface` (D2, asked on the suite's PR).
+- **The parity suite** is `own_pty.rs`'s `parity_suite_agrees_with_conpty`, the first Phase B criterion (§9.2). It runs every probe under ConPTY and our host and compares the result lines. A difference must be a §5.10 divergence (`DIVERGENCES`, with our exact answer) or a tracked gap (`GAPS`, with its issue); a listed gap that starts to agree fails until it is taken off. "The parity suite passes" in §9.2 means it passes with `GAPS` empty. `cargo test --test own_pty` builds no examples, so the test refuses a probe older than its sources.
 - **Platform tests** reuse `platform-windows/tests/pty.rs`'s bounded-read helpers (`sys::pty::wait_readable`, `sys/pty.rs:524-567`).
 
 **The manual gate covers:**
