@@ -9,7 +9,7 @@ use std::future::{pending, Future};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Wake, Waker};
 use std::time::Duration;
 
 #[derive(Default)]
@@ -177,37 +177,123 @@ fn set_once_repolled_wait_is_woken_through_its_newest_waker_only() {
     assert_eq!(poll(wait.as_mut(), &new_waker), Poll::Ready(&3));
 }
 
-/// A waker that owns the `SetOnce`'s `Arc`: dropping it may drop the
-/// cell, and its `wake` reads it, so neither may happen under the
-/// cell's lock.
-struct OwnsCell(Arc<SetOnce<u8>>);
+/// A waker whose last drop runs `on_drop`, as a user-defined one may.
+struct OnDrop<F: Fn() + Send + Sync>(F);
 
-impl Wake for OwnsCell {
-    fn wake(self: Arc<Self>) {
-        let _ = self.0.initialized();
+#[allow(
+    clippy::manual_noop_waker,
+    reason = "the destructor is the point; `Waker::noop` has none"
+)]
+impl<F: Fn() + Send + Sync> Wake for OnDrop<F> {
+    fn wake(self: Arc<Self>) {}
+}
+
+impl<F: Fn() + Send + Sync> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)();
     }
 }
 
+fn on_drop(f: impl Fn() + Send + Sync + 'static) -> Waker {
+    Waker::from(Arc::new(OnDrop(f)))
+}
+
+/// A waker whose clone runs `on_clone`, as a custom `RawWaker` may.
+fn clone_hook(on_clone: impl Fn() + Send + Sync + 'static) -> Waker {
+    type Hook = Box<dyn Fn() + Send + Sync>;
+    unsafe fn clone(data: *const ()) -> RawWaker {
+        // SAFETY: `data` is a live `Arc<Hook>` from `Arc::into_raw`.
+        unsafe { (*data.cast::<Hook>())() };
+        // SAFETY: as above; the new `RawWaker` owns one more count.
+        unsafe { Arc::increment_strong_count(data.cast::<Hook>()) };
+        RawWaker::new(data, &VTABLE)
+    }
+    unsafe fn release(data: *const ()) {
+        // SAFETY: each `RawWaker` owns one count of the `Arc`.
+        unsafe { Arc::decrement_strong_count(data.cast::<Hook>()) };
+    }
+    unsafe fn wake_by_ref(_: *const ()) {}
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, release, wake_by_ref, release);
+
+    let hook: Arc<Hook> = Arc::new(Box::new(on_clone));
+    let raw = RawWaker::new(Arc::into_raw(hook).cast(), &VTABLE);
+    // SAFETY: `VTABLE` upholds the `RawWaker` contract over the `Arc`.
+    unsafe { Waker::from_raw(raw) }
+}
+
+/// Parks `wait` with a waker whose destructor runs `reenter`, then has
+/// the wait list drop it twice: displaced by a re-poll, then removed by
+/// a cancel. `reenter` takes the primitive's lock, so either drop made
+/// under that lock deadlocks.
+fn drops_unlocked<F: Future>(
+    mut wait: impl FnMut() -> Pin<Box<F>>,
+    reenter: impl Fn() + Clone + Send + Sync + 'static,
+) {
+    let mut displaced = wait();
+    assert!(poll(displaced.as_mut(), &on_drop(reenter.clone())).is_pending());
+    assert!(poll(displaced.as_mut(), Waker::noop()).is_pending());
+    let mut removed = wait();
+    assert!(poll(removed.as_mut(), &on_drop(reenter)).is_pending());
+    drop(removed);
+}
+
 #[test]
-fn set_once_drops_and_wakes_wakers_outside_its_lock() {
+fn set_once_drops_wakers_outside_its_lock() {
     bounded(|| {
         let cell = Arc::new(SetOnce::<u8>::new());
-        // Displaced by a re-poll, then removed by a cancel.
+        let reenter = cell.clone();
+        drops_unlocked(
+            || Box::pin(cell.wait()),
+            move || {
+                let _ = reenter.initialized();
+            },
+        );
+    });
+}
+
+#[test]
+fn once_cell_drops_wakers_outside_its_lock() {
+    bounded(|| {
+        let cell = Arc::new(OnceCell::<u8>::new());
+        let _init = initializing(&cell);
+        let reenter = cell.clone();
+        drops_unlocked(
+            || Box::pin(cell.get_or_init(|| async { 1 })),
+            move || {
+                let _ = reenter.initialized();
+            },
+        );
+    });
+}
+
+#[test]
+fn barrier_drops_wakers_outside_its_lock() {
+    bounded(|| {
+        let barrier = Arc::new(Barrier::new(100));
+        let reenter = barrier.clone();
+        // Barrier has no lock-taking accessor, so the destructor arrives
+        // once more: its first poll takes the lock. 100 arrivals are
+        // never reached.
+        drops_unlocked(
+            || Box::pin(barrier.wait()),
+            move || {
+                let mut arrival = Box::pin(reenter.wait());
+                let _ = poll(arrival.as_mut(), Waker::noop());
+            },
+        );
+    });
+}
+
+#[test]
+fn set_once_clones_wakers_outside_its_lock() {
+    bounded(|| {
+        let cell = Arc::new(SetOnce::<u8>::new());
+        let reenter = cell.clone();
+        let waker = clone_hook(move || {
+            let _ = reenter.initialized();
+        });
         let mut wait = Box::pin(cell.wait());
-        let owning = Waker::from(Arc::new(OwnsCell(cell.clone())));
-        assert!(poll(wait.as_mut(), &owning).is_pending());
-        drop(owning);
-        assert!(poll(wait.as_mut(), Waker::noop()).is_pending());
-        let owning = Waker::from(Arc::new(OwnsCell(cell.clone())));
-        assert!(poll(wait.as_mut(), &owning).is_pending());
-        drop(owning);
-        drop(wait);
-        // Woken by `set`.
-        let mut wait = Box::pin(cell.wait());
-        let owning = Waker::from(Arc::new(OwnsCell(cell.clone())));
-        assert!(poll(wait.as_mut(), &owning).is_pending());
-        drop(owning);
-        cell.set(1).expect("unset");
-        assert_eq!(poll(wait.as_mut(), Waker::noop()), Poll::Ready(&1));
+        assert!(poll(wait.as_mut(), &waker).is_pending());
+        assert!(poll(wait.as_mut(), &waker).is_pending());
     });
 }
