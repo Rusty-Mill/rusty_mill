@@ -39,12 +39,13 @@ enum Target {
     Own,
 }
 
-/// The account a principal maps to, and whether a rule named the
-/// principal (`exact`) or it came through `*`.
+/// The account a principal maps to, whether a rule named the principal
+/// (`exact`) or it came through `*`, and whether the rule said `=` (`own`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Route {
     pub account: String,
     pub exact: bool,
+    pub own: bool,
 }
 
 /// Why a file was refused, with its 1-based line.
@@ -112,12 +113,16 @@ impl AccountMap {
             Some(target) => (target, true),
             None => (self.anyone.as_ref()?, false),
         };
-        let account = match target {
-            Target::Named(account) => account.clone(),
+        let (account, own) = match target {
+            Target::Named(account) => (account.clone(), false),
             Target::Own if user.is_empty() => return None,
-            Target::Own => user.to_owned(),
+            Target::Own => (user.to_owned(), true),
         };
-        Some(Route { account, exact })
+        Some(Route {
+            account,
+            exact,
+            own,
+        })
     }
 }
 
@@ -145,10 +150,13 @@ pub(crate) fn is_account_name(name: &str) -> bool {
         && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b))
 }
 
-/// Whether `route` may reach the account whose uid is `account_uid`:
-/// root (uid 0) only through a rule naming the principal.
-pub(crate) fn admits(route: &Route, account_uid: u32) -> bool {
-    account_uid != 0 || route.exact
+/// Whether `route`, taken by the principal `peer_uid`, may reach the
+/// account whose uid is `account_uid`: root (uid 0) only through a rule
+/// naming the principal, and `=` only to an account of the principal's own
+/// uid. The name `=` looked up can belong to another uid when two account
+/// databases (files and LDAP, say) both have it.
+pub(crate) fn admits(route: &Route, peer_uid: u32, account_uid: u32) -> bool {
+    (account_uid != 0 || route.exact) && (!route.own || account_uid == peer_uid)
 }
 
 #[cfg(test)]
@@ -193,14 +201,31 @@ mod tests {
     fn root_comes_only_through_a_rule_that_names_it() {
         let anyone = AccountMap::parse("* =\n").unwrap();
         let via_star = anyone.route(0, "root").unwrap();
-        assert!(!admits(&via_star, 0), "* = let root in");
+        assert!(!admits(&via_star, 0, 0), "* = let root in");
         let to_root = AccountMap::parse("* root\n").unwrap();
-        assert!(!admits(&to_root.route(1000, "alice").unwrap(), 0));
+        assert!(!admits(&to_root.route(1000, "alice").unwrap(), 1000, 0));
         let named = AccountMap::parse("uid:0 root\nuser:alice root\n").unwrap();
-        assert!(admits(&named.route(0, "root").unwrap(), 0));
-        assert!(admits(&named.route(1000, "alice").unwrap(), 0));
+        assert!(admits(&named.route(0, "root").unwrap(), 0, 0));
+        assert!(admits(&named.route(1000, "alice").unwrap(), 1000, 0));
         // Anyone else may still reach an ordinary account through `*`.
-        assert!(admits(&via_star, 1000));
+        let alice = anyone.route(1000, "alice").unwrap();
+        assert!(admits(&alice, 1000, 1000));
+    }
+
+    /// `=` means the principal's own account, not whichever account has
+    /// its name: with NSS `files ldap`, an LDAP `bob` (uid 5000) must not
+    /// reach the local `bob` (uid 1001).
+    #[test]
+    fn own_account_is_the_principals_uid_not_just_its_name() {
+        for text in ["* =\n", "user:bob =\n", "uid:5000 =\n"] {
+            let map = AccountMap::parse(text).unwrap();
+            let route = map.route(5000, "bob").unwrap();
+            assert!(!admits(&route, 5000, 1001), "{text}: a shadowed bob got in");
+            assert!(admits(&route, 5000, 5000), "{text}");
+        }
+        // A named account is a grant, whatever its uid.
+        let named = AccountMap::parse("uid:5000 deploy\n").unwrap();
+        assert!(admits(&named.route(5000, "bob").unwrap(), 5000, 1001));
     }
 
     #[test]

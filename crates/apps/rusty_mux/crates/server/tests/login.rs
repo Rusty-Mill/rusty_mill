@@ -400,6 +400,23 @@ fn a_runtime_directory_others_can_write_stops_the_front_door() {
     assert!(ended.is_err(), "a world-writable runtime was used");
 }
 
+/// Its parent too: another user could rename `run` away and put their own
+/// tree in its place, between the check and the front door's use of it.
+#[test]
+fn a_runtime_directory_in_a_parent_others_can_write_stops_the_front_door() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(&dir, &format!("uid:{uid} {user}\n"));
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+    let front = Front::start(&dir, "login.sock");
+    let ended = front.ended.recv_timeout(PATIENCE).expect("ended");
+    assert!(
+        ended.is_err(),
+        "a runtime under a world-writable parent was used"
+    );
+}
+
 /// An account server trusts a preface only from the forwarder's uid, and
 /// closes a forwarder's connection whose preface is missing or bad.
 #[test]
@@ -456,13 +473,19 @@ fn a_root_front_door_starts_the_server_as_the_account() {
         (meta.uid(), meta.gid(), meta.mode() & 0o777),
         (account.uid, account.gid, 0o700)
     );
-    let server = server_uid(&account_dir.join("server.sock")).expect("the account's server");
+    let (pid, server) = server_uid(&account_dir.join("server.sock")).expect("the account's server");
     assert_eq!(server, account.uid);
+    // No descriptor of the front door's (here, the test's own stdio)
+    // reaches the account: its first three are /dev/null.
+    for fd in 0..3 {
+        let target = std::fs::read_link(format!("/proc/{pid}/fd/{fd}")).expect("fd");
+        assert_eq!(target, Path::new("/dev/null"), "fd {fd}");
+    }
     front.stop();
 }
 
-/// The real uid of the process whose command line names `socket`.
-fn server_uid(socket: &Path) -> Option<u32> {
+/// The pid and real uid of the process whose command line names `socket`.
+fn server_uid(socket: &Path) -> Option<(u32, u32)> {
     let needle = socket.as_os_str().as_encoded_bytes();
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
         let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
@@ -471,7 +494,8 @@ fn server_uid(socket: &Path) -> Option<u32> {
         }
         let status = std::fs::read_to_string(entry.path().join("status")).ok()?;
         let line = status.lines().find(|l| l.starts_with("Uid:"))?;
-        return line.split_whitespace().nth(1)?.parse().ok();
+        let pid = entry.file_name().to_str()?.parse().ok()?;
+        return Some((pid, line.split_whitespace().nth(1)?.parse().ok()?));
     }
     None
 }

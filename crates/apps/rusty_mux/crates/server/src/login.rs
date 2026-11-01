@@ -14,6 +14,10 @@
 //! account can open. It outlives the front door: stopping or restarting the
 //! front door ends the relays, and clients reconnect to the same sessions.
 //! It trusts a preface only from the front door's uid (`--forwarded-by`).
+//! Its stdin, stdout and stderr are `/dev/null`: no descriptor the front
+//! door opened reaches it. Under systemd it outlives the front door only if
+//! the unit does not kill its whole cgroup (`KillMode=process`), since a
+//! new session does not leave the cgroup; no unit ships yet.
 //!
 //! The map is checked when read: a regular file owned by root or by the
 //! front door's own user, writable by no one else. A bad map stops the
@@ -146,8 +150,10 @@ fn admit(front: &Shared, stream: UnixStream) -> Result<(), String> {
         .ok_or_else(|| refuse("no rule"))?;
     let account = platform_linux::account(&route.account)
         .ok_or_else(|| refuse(&format!("no account {}", route.account)))?;
-    if !admits(&route, account.uid) {
-        return Err(refuse("root only through a rule that names the principal"));
+    if !admits(&route, uid, account.uid) {
+        return Err(refuse(
+            "root only through a rule that names the principal, and `=` only to its own uid",
+        ));
     }
     let me = rusty_libc::process::geteuid();
     if me != 0 && account.uid != me {
@@ -268,23 +274,39 @@ fn served_by(stream: UnixStream, account: &Account) -> io::Result<UnixStream> {
     Ok(stream)
 }
 
-/// Creates `dir` if needed, and refuses one that anyone but this user
-/// could change: its entries are where the front door looks for servers.
+/// Creates `dir` if needed, and refuses one that anyone but root or this
+/// user could change or swap: its entries are where the front door looks
+/// for servers, and it creates, gives away and connects by path. `dir`
+/// must be this user's and writable by no one else, and each directory
+/// above it root's or this user's, writable by others only when sticky
+/// (as `/tmp`), where no one else can rename what is in it.
 fn runtime_dir(dir: &Path) -> io::Result<()> {
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o755)
         .create(dir)?;
-    let meta = std::fs::symlink_metadata(dir)?;
     let me = rusty_libc::process::geteuid();
-    if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o022 != 0 {
-        return Err(io::Error::new(
+    let unsafe_dir = |why: &str| {
+        io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!(
-                "{}: the runtime directory must be this user's, writable by no one else",
-                dir.display()
-            ),
-        ));
+            format!("{}: the runtime directory {why}", dir.display()),
+        )
+    };
+    let dir = std::fs::canonicalize(dir)?;
+    let meta = std::fs::symlink_metadata(&dir)?;
+    if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o022 != 0 {
+        return Err(unsafe_dir("must be this user's, writable by no one else"));
+    }
+    for ancestor in dir.ancestors().skip(1) {
+        let meta = std::fs::symlink_metadata(ancestor)?;
+        let owner_ok = meta.uid() == 0 || meta.uid() == me;
+        let sticky = meta.mode() & 0o1000 != 0;
+        if !owner_ok || (meta.mode() & 0o022 != 0 && !sticky) {
+            return Err(unsafe_dir(&format!(
+                "sits in {}, which another user could change",
+                ancestor.display()
+            )));
+        }
     }
     Ok(())
 }
@@ -341,7 +363,9 @@ fn start(server: &Path, socket: &Path, account: &Account) -> io::Result<std::pro
         .current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
+        // Not the front door's: a descriptor root opened (its journal or
+        // terminal) must not reach a process the account can take fds from.
+        .stderr(Stdio::null());
     // SAFETY: between fork and exec the closure makes raw system calls
     // only (`rusty_libc` wraps each in a syscall, no allocation, no lock):
     // a new session, then groups, gid and uid, in the order that leaves
@@ -432,7 +456,8 @@ fn reload(front: &Shared) -> io::Result<()> {
             .filter(|relay| {
                 !map.route(relay.uid, &relay.user)
                     .is_some_and(|route: Route| {
-                        route.account == relay.account && admits(&route, relay.account_uid)
+                        route.account == relay.account
+                            && admits(&route, relay.uid, relay.account_uid)
                     })
             })
             .map(|relay| relay.task.clone())
