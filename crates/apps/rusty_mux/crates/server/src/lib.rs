@@ -237,7 +237,7 @@ async fn serve_for(
     let state = state::State::shared(config, socket);
     state
         .borrow_mut()
-        .load_config()
+        .load_config(settings::When::Start)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     rusty_tokio::task::spawn_local(state::watch_processes(std::rc::Rc::downgrade(&state)));
     let served = rusty_tokio::select! {

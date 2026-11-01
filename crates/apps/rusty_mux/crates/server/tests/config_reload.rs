@@ -101,6 +101,11 @@ fn a_reload_moves_the_next_block_and_a_bad_file_keeps_the_last() {
     write_cwd(&file, &temp("gone"));
     let answer = client.answer(|req| Message::ReloadConfig { req });
     assert!(failed(&answer).contains("not a directory"), "{answer:?}");
+    // Nor does a file deleted, or mid-replace, undo the last good settings.
+    std::fs::remove_file(&file).unwrap();
+    let answer = client.answer(|req| Message::ReloadConfig { req });
+    assert!(failed(&answer).contains("good.json"), "{answer:?}");
+    assert_eq!(started_in(&mut client, window), b.display().to_string());
     assert_eq!(reloads(&client), 1, "a refused reload announces nothing");
 
     // Without the feature: refused, and never told.

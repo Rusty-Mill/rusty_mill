@@ -199,11 +199,11 @@ impl State {
         }))
     }
 
-    /// Reads the config file again, keeping what it had when the file is
-    /// bad: the next block starts as it now says. Blocks already running
-    /// keep their program.
-    pub(crate) fn load_config(&mut self) -> Result<(), String> {
-        self.config = crate::settings::read(&self.base)?;
+    /// Reads the config file, keeping what it had when the file is bad:
+    /// the next block starts as it now says. Blocks already running keep
+    /// their program.
+    pub(crate) fn load_config(&mut self, when: crate::settings::When) -> Result<(), String> {
+        self.config = crate::settings::read(&self.base, when)?;
         Ok(())
     }
 
@@ -213,7 +213,7 @@ impl State {
         if self.base.config_file.is_none() {
             return Err("the server was started with no config file".into());
         }
-        self.load_config()?;
+        self.load_config(crate::settings::When::Reload)?;
         self.mux.note_config_reloaded();
         Ok(Outcome::Done(None))
     }
