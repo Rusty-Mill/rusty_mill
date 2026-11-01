@@ -1455,9 +1455,10 @@ fn wait_for_a_clipboard_write_and_an_ended_status() {
     let copied = wait("clipboard-written", "--selection", "primary");
     let ended = wait("status-removed", "--id", "job");
     std::thread::sleep(Duration::from_millis(500));
-    // "aGk=" is "hi". The record is set, then cleared after a pause, so
-    // the clear lands in a later read and ends it.
-    let typed = "printf '\\033]7501;state=working:id=job\\007\\033]52;p;aGk=\\007'; \
+    // "aGk=" is "hi". The program pauses first, so both waiters are
+    // listening, and again before the clear, so it lands in a later read
+    // and ends the record.
+    let typed = "sleep 1; printf '\\033]7501;state=working:id=job\\007\\033]52;p;aGk=\\007'; \
                  sleep 1; printf '\\033]7501;state=clear:id=job\\007'\r";
     ok(
         &socket,
