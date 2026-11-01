@@ -307,7 +307,10 @@ impl Screen {
             }
             emitted += vt.len();
             self.forward(&vt, out);
-            if self.grid.cursor.0 >= self.grid.cols {
+            // conhost writes a glyph with the marks that follow it before
+            // it meets the margin, so they join it, not the next row's.
+            let rest = &text[consumed..];
+            if self.grid.cursor.0 >= self.grid.cols && !self.c2 && !continues(rest) {
                 emitted += self.margin(wrap, out);
             }
             if ends_run {
@@ -595,6 +598,26 @@ fn csi_byte(b: u8) -> CsiByte {
 /// A CSI parameter byte, as the parser stores them.
 fn is_param(b: u8) -> bool {
     matches!(b, b'0'..=b'9' | b';' | b':')
+}
+
+/// Whether `text` goes on with the glyph before it: the rest of a UTF-8
+/// sequence, or a mark that joins it.
+fn continues(text: &[u8]) -> bool {
+    match text.first() {
+        Some(0x80..=0xBF) => true,
+        Some(_) => std::str::from_utf8(&text[..text.len().min(4)])
+            .or_else(|e| std::str::from_utf8(&text[..e.valid_up_to()]))
+            .ok()
+            .and_then(|s| s.chars().next())
+            .is_some_and(joins),
+        None => false,
+    }
+}
+
+/// Whether `ch` joins the glyph on its left (rusty_term_core's default
+/// widths: a zero-width scalar), not counting C1 controls.
+pub(super) fn joins(ch: char) -> bool {
+    ch >= '\u{a0}' && char_width(ch) == 0
 }
 
 /// The UTF-8 length of a double-width glyph at `text`'s start. Those
@@ -1084,6 +1107,19 @@ mod tests {
         let (vt, _) = client(&mut s, "漢x".as_bytes(), PROCESSED_OUTPUT);
         assert_eq!(vt, b" \x1b[10Gx\x1b[10G");
         assert_eq!((row(&s, 1), s.cursor()), ("abcdefghix".into(), (9, 1)));
+    }
+
+    #[test]
+    fn marks_join_the_glyph_at_the_margin_before_the_cursor_moves() {
+        let mut s = screen();
+        let (vt, _) = client(&mut s, "abcdefghie\u{301}x".as_bytes(), PROCESSED_OUTPUT);
+        assert_eq!(vt, "abcdefghie\u{301}\x1b[1Gx".as_bytes());
+        assert_ne!(s.grid().row(0)[9].cluster, 0, "the accent is on the e");
+        assert_eq!((row(&s, 0), s.cursor()), ("xbcdefghie".into(), (1, 0)));
+        let legacy = PROCESSED_OUTPUT | WRAP_AT_EOL_OUTPUT;
+        let (vt, _) = client(&mut s, "\r\n0123456789\u{301}x".as_bytes(), legacy);
+        assert_eq!(vt, "\r\n0123456789\u{301}\r\nx".as_bytes());
+        assert_ne!(s.grid().row(1)[9].cluster, 0, "and on the 9");
     }
 
     #[test]

@@ -509,6 +509,12 @@ fn emit_units(
     replies: &mut Vec<u8>,
 ) -> usize {
     let mut end = units.len().min(at + WIDE_SLICE);
+    // A glyph goes with the marks that join it, so the screen sees them
+    // before it decides about the margin; a surrogate pair stays whole.
+    let joins = |u: u16| char::from_u32(u.into()).is_some_and(screen::joins);
+    while end < units.len() && end > at + 1 && joins(units[end]) {
+        end -= 1;
+    }
     if end < units.len() && (0xD800..0xDC00).contains(&units[end - 1]) {
         end -= 1;
     }
@@ -2421,6 +2427,19 @@ pub(crate) mod tests {
             out.extend([c, c, c]);
         }
         Some(out)
+    }
+
+    #[test]
+    fn a_slice_keeps_a_glyph_with_its_marks() {
+        let mut screen = Screen::new(WinSize { rows: 2, cols: 80 });
+        let (mut out, mut replies) = (OutputQueue::default(), Vec::new());
+        let mut units = vec![u16::from(b'e'); WIDE_SLICE];
+        units.extend([0x301, 0x301, u16::from(b'x')]);
+        let mode = Origin::Client(screen::PROCESSED_OUTPUT);
+        let end = emit_units(&units, 0, mode, &mut screen, &mut out, &mut replies);
+        assert_eq!(end, WIDE_SLICE - 1, "the e goes with its two marks");
+        let end = emit_units(&units, end, mode, &mut screen, &mut out, &mut replies);
+        assert_eq!(end, units.len());
     }
 
     #[test]
