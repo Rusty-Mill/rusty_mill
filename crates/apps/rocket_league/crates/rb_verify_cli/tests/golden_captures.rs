@@ -163,14 +163,14 @@ const CASES: &[Case] = &[
         scenario: "experiments/probe_ball_roll.json",
         fixture: "probe_ball_roll.jsonl",
         car: (0.5, 1.5),
-        ball: Some((1.8, 8.5)),
+        ball: Some((1.5, 4.3)),
         other: None,
     },
     Case {
         scenario: "experiments/probe_ball_wall.json",
         fixture: "probe_ball_wall.jsonl",
         car: (0.5, 1.5),
-        ball: Some((2.8, 10.4)),
+        ball: Some((1.9, 5.9)),
         other: None,
     },
     // A ball rolling without sliding below the sleep thresholds is frozen 2.0 s in
@@ -192,18 +192,21 @@ const CASES: &[Case] = &[
         ball: Some((1.3, 1.8)),
         other: None,
     },
+    // rest_40's ball error fell when the ball's spin moved to its 91.25 uu
+    // sphere (FR-161): 6.49 / 11.07 -> 0.29 / 0.36 uu. Ball bounds on roll, wall,
+    // rest_80, ballfuzz_203 and nose_hit_glancing were lowered with it.
     Case {
         scenario: "experiments/probe_ball_rest_40.json",
         fixture: "probe_ball_rest_40.jsonl",
         car: (0.5, 1.5),
-        ball: Some((8.1, 13.8)),
+        ball: Some((0.5, 1.5)),
         other: None,
     },
     Case {
         scenario: "experiments/probe_ball_rest_80.json",
         fixture: "probe_ball_rest_80.jsonl",
         car: (0.5, 1.5),
-        ball: Some((3.6, 10.8)),
+        ball: Some((2.7, 8.0)),
         other: None,
     },
     Case {
@@ -255,10 +258,13 @@ const CASES: &[Case] = &[
         ball: Some((1.0, 3.8)),
         other: None,
     },
+    // The car's max rose from 0.62 to 1.50 uu when the ball's inertia moved to its
+    // 91.25 uu sphere (FR-161), at the bound; raised by a quarter. Its ball error did
+    // not move (3.09 -> 3.02 uu max).
     Case {
         scenario: "experiments/probe_hit_offset.json",
         fixture: "probe_hit_offset.jsonl",
-        car: (0.5, 1.5),
+        car: (0.5, 1.9),
         ball: Some((1.0, 3.9)),
         other: None,
     },
@@ -364,7 +370,7 @@ const CASES: &[Case] = &[
         scenario: "experiments/ballfuzz_203.json",
         fixture: "ballfuzz_203.jsonl",
         car: (0.2, 0.2),
-        ball: Some((13.0, 39.0)),
+        ball: Some((9.7, 28.8)),
         other: None,
     },
     Case {
@@ -448,7 +454,7 @@ const CASES: &[Case] = &[
         scenario: "experiments/probe_nose_hit_glancing.json",
         fixture: "probe_nose_hit_glancing.jsonl",
         car: (0.8, 2.4),
-        ball: Some((1.8, 5.7)),
+        ball: Some((1.3, 3.2)),
         other: None,
     },
     Case {
@@ -604,6 +610,40 @@ const CASES: &[Case] = &[
         other: Some((0.2, 0.2)),
     },
 ];
+
+/// The game spins a sliding ball up at 0.05190 rad/s a tick
+/// (`probe_ball_fast_6500`, from 0.05191 at tick 1 to 5.19001 at tick 100):
+/// friction about RocketSim's 91.25 uu ball sphere. From the game's tick-1
+/// state the port's spin stays within 0.02 rad/s of it for 100 ticks; about
+/// the 93.15 uu contact sphere it fell 0.10 rad/s behind.
+#[test]
+fn a_sliding_ball_spins_up_as_the_games_does() -> Result<(), Box<dyn Error>> {
+    const FROM: usize = 1;
+    const TICKS: usize = 100;
+    let frames =
+        CaptureFileSource::new(bot_dir().join("fixtures/probe_ball_fast_6500.jsonl")).frames()?;
+    let window = frames
+        .get(FROM..=FROM + TICKS)
+        .ok_or("the capture is shorter than the window")?;
+    let mut env = rb_env::Env::new();
+    env.reset(&window[0]);
+    let mut worst = 0.0f32;
+    for pair in window.windows(2) {
+        let (before, recorded) = (&pair[0], &pair[1]);
+        let gap = recorded.timestamp_secs - before.timestamp_secs;
+        assert!((gap - rb_env::TICK_SECS).abs() < 1e-4, "gap {gap} s");
+        let inputs: Vec<_> = recorded
+            .cars
+            .iter()
+            .map(|car| car.input.unwrap_or_default())
+            .collect();
+        let predicted = env.step(&inputs);
+        let spin = (predicted.ball.angular_velocity - recorded.ball.angular_velocity).length();
+        worst = worst.max(spin);
+    }
+    assert!(worst < 0.02, "worst ball spin error {worst:.4} rad/s");
+    Ok(())
+}
 
 fn bot_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rusty_bullet/tools/rb_tape_bot")
