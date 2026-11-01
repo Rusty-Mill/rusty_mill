@@ -19,7 +19,9 @@
 //! Copyright (c) Microsoft Corporation. Licensed under the MIT license.
 
 use platform::term::WinSize;
-use rusty_term_core::{ATTR_REVERSE, ATTR_UNDERLINE, AnsiParser, CellColors, ColorRef, Grid};
+use rusty_term_core::{
+    ATTR_BOLD, ATTR_OVERLINE, ATTR_REVERSE, AnsiParser, CellColors, ColorRef, Grid,
+};
 
 use super::{OutputQueue, PREAMBLE};
 
@@ -30,8 +32,20 @@ pub(super) const VIRTUAL_TERMINAL_PROCESSING: u32 = 0x4;
 pub(super) const DISABLE_NEWLINE_AUTO_RETURN: u32 = 0x8;
 
 /// `COMMON_LVB_*` attribute bits.
+const FOREGROUND_INTENSITY: u16 = 0x8;
+const LVB_GRID_HORIZONTAL: u16 = 0x0400;
 const LVB_REVERSE_VIDEO: u16 = 0x4000;
 const LVB_UNDERSCORE: u16 = 0x8000;
+/// The gridlines no SGR maps to: left, right and bottom (conhost's
+/// `BottomGridline` is `COMMON_LVB_UNDERSCORE`, apart from SGR 4). The
+/// top one is overline, SGR 53.
+const LVB_GRID: u16 = 0x0800 | 0x1000 | LVB_UNDERSCORE;
+/// conhost's default colour table ("Campbell"), as `0x00RRGGBB` in ANSI
+/// order.
+const CAMPBELL: [u32; 16] = [
+    0x0C0C0C, 0xC50F1F, 0x13A10E, 0xC19C00, 0x0037DA, 0x881798, 0x3A96DD, 0xCCCCCC, //
+    0x767676, 0xE74856, 0x16C60C, 0xF9F1A5, 0x3B78FF, 0xB4009E, 0x61D6D6, 0xF2F2F2,
+];
 /// The bits SetConsoleTextAttribute accepts (conhost `FG_ATTRS`,
 /// `BG_ATTRS` and `META_ATTRS`): all but 0x2000.
 pub(super) const VALID_ATTRIBUTES: u16 = !0x2000;
@@ -78,20 +92,30 @@ pub(super) struct Screen {
     /// Inside a DEC private CSI too long to hold, forwarded as it came:
     /// its final byte decides whether the input modes are reasserted.
     long: bool,
+    /// The gridline bits of the last SetConsoleTextAttribute, which no
+    /// SGR sets; they hold until the model applies a rendition reset
+    /// ([`AnsiParser::take_rendition_reset`]).
+    legacy_meta: u16,
 }
 
 impl Screen {
     pub(super) fn new(size: WinSize) -> Screen {
         let mut grid = Grid::new(usize::from(size.cols), usize::from(size.rows));
         grid.set_scrollback_max(0);
-        Screen {
+        let mut screen = Screen {
             parser: AnsiParser::new(),
             grid,
             held: Vec::new(),
             after_cr: false,
             c2: false,
             long: false,
-        }
+            legacy_meta: 0,
+        };
+        // conhost's colour table, which GetConsoleScreenBufferInfoEx
+        // reports and legacy attributes are matched against. Only the
+        // model's palette changes; the terminal keeps its own.
+        screen.feed(&campbell_osc4());
+        screen
     }
 
     /// VT the host made itself (echo, cursor moves, modes): forwarded as
@@ -307,6 +331,9 @@ impl Screen {
     /// already goes to the terminal, so keeping it would only grow.
     fn feed(&mut self, vt: &[u8]) -> Vec<u8> {
         self.parser.advance(&mut self.grid, vt);
+        if self.parser.take_rendition_reset() {
+            self.legacy_meta = 0;
+        }
         self.grid.take_host_out();
         self.parser.take_responses()
     }
@@ -357,7 +384,14 @@ impl Screen {
 
     /// The pen as a legacy attribute (§5.2).
     pub(super) fn attributes(&self) -> u16 {
-        legacy(self.parser.pen_colors(), self.parser.palette())
+        legacy(self.parser.pen_colors(), self.parser.palette()) | self.legacy_meta
+    }
+
+    /// SetConsoleTextAttribute's pen, as SGR the host sends.
+    pub(super) fn set_attributes(&mut self, attr: u16, out: &mut OutputQueue) {
+        self.host(&sgr(attr), out);
+        // After the SGR, whose own reset would clear them.
+        self.legacy_meta = attr & LVB_GRID;
     }
 
     /// The first 16 palette entries as `COLORREF`s (`0x00BBGGRR`), in
@@ -590,21 +624,37 @@ fn nearest(rgb: u32, palette: &[u32; 256]) -> u8 {
         .unwrap_or(0)
 }
 
-/// `colors` as a legacy attribute: default reads as 7 on 0 (§5.2).
+/// OSC 4 setting the first 16 palette entries to [`CAMPBELL`].
+fn campbell_osc4() -> Vec<u8> {
+    let mut vt = Vec::new();
+    for (i, rgb) in CAMPBELL.iter().enumerate() {
+        let (r, g, b) = (rgb >> 16, rgb >> 8 & 0xFF, rgb & 0xFF);
+        vt.extend(format!("\x1b]4;{i};rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\").bytes());
+    }
+    vt
+}
+
+/// `colors` as a legacy attribute: default reads as 7 on 0 (§5.2). As
+/// conhost's `GetLegacyAttributes`: bold brightens a default or 16-colour
+/// foreground, reverse and overline are meta bits, underline is none.
 fn legacy(colors: CellColors, palette: &[u32; 256]) -> u16 {
     let mut attr = nibble(colors.fg, 7, palette) | nibble(colors.bg, 0, palette) << 4;
+    let brightens = matches!(colors.fg, ColorRef::Default | ColorRef::Palette(0..16));
+    if colors.flags & ATTR_BOLD != 0 && brightens {
+        attr |= FOREGROUND_INTENSITY;
+    }
     if colors.flags & ATTR_REVERSE != 0 {
         attr |= LVB_REVERSE_VIDEO;
     }
-    if colors.flags & ATTR_UNDERLINE != 0 {
-        attr |= LVB_UNDERSCORE;
+    if colors.flags & ATTR_OVERLINE != 0 {
+        attr |= LVB_GRID_HORIZONTAL;
     }
     attr
 }
 
 /// SGR for a legacy attribute (§5.2): it replaces the whole rendition, so
 /// it starts with a reset; 7 on 0 is the default colours.
-pub(super) fn sgr(attr: u16) -> Vec<u8> {
+fn sgr(attr: u16) -> Vec<u8> {
     let fg = swap((attr & 0xF) as u8);
     let bg = swap((attr >> 4 & 0xF) as u8);
     let mut params = vec!["0".to_string()];
@@ -617,6 +667,9 @@ pub(super) fn sgr(attr: u16) -> Vec<u8> {
     }
     if bg != 0 {
         params.push(color_param(bg, 40, 100));
+    }
+    if attr & LVB_GRID_HORIZONTAL != 0 {
+        params.push("53".into());
     }
     if attr & LVB_UNDERSCORE != 0 {
         params.push("4".into());
@@ -943,11 +996,16 @@ mod tests {
     fn attributes_read_the_pen() {
         let mut s = screen();
         assert_eq!(s.attributes(), 0x07);
+        // SGR 4 is no legacy bit: COMMON_LVB_UNDERSCORE is conhost's
+        // bottom gridline (the parity suite's `print 7 \e[4m`).
         client(&mut s, b"\x1b[91;44;4;7m", VT);
-        assert_eq!(
-            s.attributes(),
-            0x0C | 0x10 | LVB_UNDERSCORE | LVB_REVERSE_VIDEO
-        );
+        assert_eq!(s.attributes(), 0x0C | 0x10 | LVB_REVERSE_VIDEO);
+        // Bold brightens a default or 16-colour foreground; overline is
+        // the top gridline.
+        client(&mut s, b"\x1b[0;1;53m", VT);
+        assert_eq!(s.attributes(), 0x0F | LVB_GRID_HORIZONTAL);
+        client(&mut s, b"\x1b[0;1;38;5;100m", VT);
+        assert_eq!(s.attributes() & FOREGROUND_INTENSITY, 0, "not 256-colour");
         // Off the 16, the nearest entry: just off bright red, and black.
         let red = s.parser.palette()[9] ^ 1;
         let (r, g, b) = (red >> 16, red >> 8 & 0xFF, red & 0xFF);
@@ -967,15 +1025,100 @@ mod tests {
             0x1F,
             0xC4 | LVB_UNDERSCORE,
             0x70 | LVB_REVERSE_VIDEO,
+            0x07 | LVB_GRID_HORIZONTAL | 0x0800 | 0x1000,
         ] {
             let mut s = screen();
-            client(&mut s, &sgr(attr), VT);
+            let mut out = OutputQueue::default();
+            s.set_attributes(attr, &mut out);
+            assert_eq!(out.take(), sgr(attr));
             assert_eq!(s.attributes(), attr, "{attr:#06x}");
         }
         assert_eq!(sgr(0x07), b"\x1b[0m");
         assert_eq!(sgr(0x4E), b"\x1b[0;93;41m");
         // conhost's own order: VtIoTests::SetConsoleTextAttribute.
         assert_eq!(sgr(0x2D | LVB_REVERSE_VIDEO), b"\x1b[0;7;95;42m");
+    }
+
+    #[test]
+    fn gridlines_hold_until_a_rendition_reset() {
+        let mut s = screen();
+        let mut out = OutputQueue::default();
+        s.set_attributes(0x1E | LVB_UNDERSCORE, &mut out);
+        client(&mut s, b"text", VT);
+        client(&mut s, b"\x1b[24;31m", VT);
+        assert_eq!(
+            s.attributes() & LVB_GRID,
+            LVB_UNDERSCORE,
+            "only a reset clears them"
+        );
+        client(&mut s, b"\x1b[0m", VT);
+        assert_eq!(s.attributes(), 0x07, "SGR 0 resets them");
+        client(&mut s, b"\x1b[4m", VT);
+        assert_eq!(s.attributes(), 0x07, "and SGR 4 is not one");
+    }
+
+    #[test]
+    fn default_coloured_gridlines_are_cleared_by_sgr_0() {
+        // The pen after 0x0807 is the default one, the same as after
+        // SGR 0: only the reset itself can tell them apart.
+        let mut s = screen();
+        let mut out = OutputQueue::default();
+        s.set_attributes(0x0807, &mut out);
+        assert_eq!(s.attributes(), 0x0807);
+        client(&mut s, b"plain text keeps them", 0x3);
+        assert_eq!(s.attributes(), 0x0807);
+        client(&mut s, b"\x1b[0m", VT);
+        assert_eq!(s.attributes(), 0x07);
+    }
+
+    #[test]
+    fn a_reset_then_the_same_pen_does_not_bring_them_back() {
+        let mut s = screen();
+        let mut out = OutputQueue::default();
+        s.set_attributes(0x1E | 0x1000, &mut out);
+        client(&mut s, b"\x1b[0m\x1b[93;44m", VT);
+        assert_eq!(s.attributes(), 0x1E);
+    }
+
+    #[test]
+    fn gridlines_follow_the_models_sgr_parsing() {
+        let mut out = OutputQueue::default();
+        // A zero-padded 256-colour selector: index 0, not a reset.
+        let mut s = screen();
+        s.set_attributes(0x07 | LVB_UNDERSCORE, &mut out);
+        client(&mut s, b"\x1b[38;05;0m", VT);
+        assert_eq!(s.attributes() & LVB_GRID, LVB_UNDERSCORE);
+        // A 67-byte list ending in 0: the model applies it, so a reset,
+        // whole or split across writes.
+        let long = format!("\x1b[{}0m", "1;".repeat(33));
+        for split in [long.len(), 3, 40, long.len() - 1] {
+            s.set_attributes(0x07 | LVB_UNDERSCORE, &mut out);
+            let (head, tail) = long.as_bytes().split_at(split);
+            client(&mut s, head, VT);
+            client(&mut s, tail, VT);
+            assert_eq!(s.attributes() & LVB_GRID, 0, "split at {split}");
+        }
+        // The extended forms keep them, split or not.
+        for vt in [
+            &b"\x1b[38;5;0m"[..],
+            b"\x1b[48;2;0;0;0m",
+            b"\x1b[38:2:0:0:0m",
+        ] {
+            s.set_attributes(0x07 | LVB_UNDERSCORE, &mut out);
+            let (head, tail) = vt.split_at(vt.len() - 2);
+            client(&mut s, head, VT);
+            client(&mut s, tail, VT);
+            assert_eq!(s.attributes() & LVB_GRID, LVB_UNDERSCORE, "{vt:?}");
+        }
+    }
+
+    #[test]
+    fn color_table_starts_as_conhosts() {
+        let s = screen();
+        // Win32 order: blue (ANSI 4) is entry 1; COLORREF is 0x00BBGGRR.
+        assert_eq!(s.color_table()[0], 0x000C_0C0C);
+        assert_eq!(s.color_table()[1], 0x00DA_3700);
+        assert_eq!(s.color_table()[15], 0x00F2_F2F2);
     }
 
     #[test]
