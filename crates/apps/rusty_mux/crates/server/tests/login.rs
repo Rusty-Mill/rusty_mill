@@ -20,7 +20,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use common::{Client, PATIENCE, shell};
 use rusty_mux_core::SessionId;
 use rusty_mux_proto::{Entry, Features, Message};
-use rusty_mux_server::{Login, MAX_MAP, Reload, bind_front_door, serve_forwarded, serve_login};
+use rusty_mux_server::{
+    Limits, Login, MAX_MAP, Reload, bind_front_door, serve_forwarded, serve_login,
+};
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::sync::{mpsc, oneshot};
 use rusty_tokio::{Builder, LocalOptions};
@@ -65,19 +67,23 @@ struct Front {
     ended: std::sync::mpsc::Receiver<std::io::Result<()>>,
 }
 
+/// The front door's settings for a test in `dir`.
+fn login(dir: &Path) -> Login {
+    Login {
+        map: dir.join("accounts"),
+        runtime: dir.join("run"),
+        server: PathBuf::from(env!("CARGO_BIN_EXE_rusty-mux-server")),
+        limits: Limits::default(),
+    }
+}
+
 impl Front {
     fn start(dir: &Path, name: &str) -> Self {
-        Self::with_server(dir, name, env!("CARGO_BIN_EXE_rusty-mux-server").as_ref())
+        Self::with(dir, name, login(dir))
     }
 
-    /// A front door that starts `server` for each account.
-    fn with_server(dir: &Path, name: &str, server: &Path) -> Self {
+    fn with(dir: &Path, name: &str, login: Login) -> Self {
         let socket = dir.join(name);
-        let login = Login {
-            map: dir.join("accounts"),
-            runtime: dir.join("run"),
-            server: server.to_owned(),
-        };
         let (reload, reloads) = mpsc::unbounded_channel();
         let (stop, stopped) = oneshot::channel::<()>();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -434,9 +440,8 @@ fn a_runtime_directory_through_a_link_stops_the_front_door() {
     std::os::unix::fs::symlink(dir.join("safe"), dir.join("link")).expect("link");
     let socket = dir.join("login.sock");
     let login = Login {
-        map: dir.join("accounts"),
         runtime: dir.join("link").join("run"),
-        server: PathBuf::from(env!("CARGO_BIN_EXE_rusty-mux-server")),
+        ..login(&dir)
     };
     let ended = Builder::new_current_thread()
         .build_local(&LocalOptions::default())
@@ -541,7 +546,14 @@ fn a_server_revoked_while_it_starts_is_reaped() {
     std::fs::write(&server, "#!/bin/sh\nsleep 2\n").expect("server");
     std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     write_map(&dir, &format!("uid:{uid} =\n"));
-    let front = Front::with_server(&dir, "login.sock", &server);
+    let front = Front::with(
+        &dir,
+        "login.sock",
+        Login {
+            server: server.clone(),
+            ..login(&dir)
+        },
+    );
     let mut stream = UnixStream::connect(&front.socket).expect("connect");
     stream.set_read_timeout(Some(PATIENCE)).expect("timeout");
     let pid = wait_for(|| pid_running(&server)).expect("the server started");
@@ -561,6 +573,94 @@ fn a_server_revoked_while_it_starts_is_reaped() {
         std::fs::read_to_string(&stat)
     );
     front.stop();
+}
+
+/// One uid holds at most its share of the front door's connections, idle
+/// ones included; those over it are closed at once, the rest go on, and a
+/// slot freed is taken again. The whole front door has a limit too.
+#[test]
+fn one_uid_cannot_hold_more_than_its_share() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(&dir, &format!("uid:{uid} {user}\n"));
+    let limits = Limits {
+        total: 4,
+        per_peer: 2,
+    };
+    let front = Front::with(
+        &dir,
+        "login.sock",
+        Login {
+            limits,
+            ..login(&dir)
+        },
+    );
+    let mut client = Client::connect_with(&front.socket, IDENTITY, None);
+    // Never says Hello: holds its slot.
+    let idle = UnixStream::connect(&front.socket).expect("connect");
+    assert!(closed_unheard(&front.socket), "a third connection got in");
+    assert_eq!(whoami(&mut client).0, format!("uid:{uid}"));
+    drop(idle);
+    let admitted = wait_for(|| (!closed_unheard(&front.socket)).then_some(()));
+    assert!(admitted.is_some(), "the freed slot was not taken again");
+    front.stop();
+    let _ = std::fs::remove_file(dir.join("login.sock"));
+
+    let limits = Limits {
+        total: 1,
+        per_peer: 2,
+    };
+    let front = Front::with(
+        &dir,
+        "login.sock",
+        Login {
+            limits,
+            ..login(&dir)
+        },
+    );
+    let mut client = Client::connect_with(&front.socket, IDENTITY, None);
+    assert!(closed_unheard(&front.socket), "over the total got in");
+    assert_eq!(whoami(&mut client).0, format!("uid:{uid}"));
+    front.stop();
+}
+
+/// Out of descriptors, the front door stops accepting for a while; it does
+/// not end, so the connections it holds go on and new ones get in later.
+#[test]
+fn running_out_of_descriptors_pauses_the_front_door() {
+    use rusty_libc::rlimit::{RLIMIT_NOFILE, Rlimit, prlimit};
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(&dir, &format!("uid:{uid} {user}\n"));
+    let mut front = FrontProcess::start(&dir, "login.sock");
+    let mut client = Client::connect_with(&front.socket, IDENTITY, None);
+    let pid = i32::try_from(front.child.id()).expect("pid");
+    let open = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .expect("fds")
+        .count();
+    let mut was = Rlimit { cur: 0, max: 0 };
+    prlimit(pid, RLIMIT_NOFILE, None, Some(&mut was)).expect("limit");
+    let tight = Rlimit {
+        cur: u64::try_from(open).expect("count") + 2,
+        max: was.max,
+    };
+    prlimit(pid, RLIMIT_NOFILE, Some(&tight), None).expect("tighten");
+    let idle: Vec<UnixStream> = (0..8)
+        .map(|_| UnixStream::connect(&front.socket).expect("connect"))
+        .collect();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        front.child.try_wait().expect("wait").is_none(),
+        "the front door ended"
+    );
+    assert_eq!(whoami(&mut client).0, format!("uid:{uid}"));
+
+    drop(idle);
+    prlimit(pid, RLIMIT_NOFILE, Some(&was), None).expect("loosen");
+    let admitted = wait_for(|| (!closed_unheard(&front.socket)).then_some(()));
+    assert!(admitted.is_some(), "no one got in after the pause");
 }
 
 /// The pid of a process whose command line names `path`.

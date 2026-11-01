@@ -56,7 +56,7 @@ use rusty_tokio::io::UnixStream;
 use rusty_tokio::io::{UdpSocket, UnixListener};
 
 #[cfg(target_os = "linux")]
-pub use login::{Login, MAX_MAP, Reload, bind as bind_front_door, serve_login};
+pub use login::{Limits, Login, MAX_MAP, Reload, bind as bind_front_door, serve_login};
 
 /// How the server starts each block's program.
 #[derive(Debug, Clone, PartialEq, Eq)]

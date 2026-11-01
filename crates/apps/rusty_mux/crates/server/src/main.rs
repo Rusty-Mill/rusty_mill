@@ -229,6 +229,7 @@ fn run_login(socket: PathBuf, map: PathBuf, runtime: PathBuf) -> std::io::Result
         map,
         runtime,
         server,
+        limits: rusty_mux_server::Limits::default(),
     };
     let runtime = Builder::new_current_thread().build_local(&LocalOptions::default())?;
     runtime.block_on(async {

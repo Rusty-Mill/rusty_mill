@@ -84,7 +84,33 @@ pub struct Login {
     pub runtime: PathBuf,
     /// The server binary to start for each account.
     pub server: PathBuf,
+    /// How many connections it holds at once.
+    pub limits: Limits,
 }
+
+/// How many connections the front door holds at once, counting those still
+/// being admitted or waiting for their server: at most `total`, and at
+/// most `per_peer` from one uid, so no one user can take every slot.
+/// Those over a limit are closed at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub total: usize,
+    pub per_peer: usize,
+}
+
+impl Default for Limits {
+    /// 64 per uid, 1024 in all: two descriptors each, well inside the
+    /// usual 4096 a service may open.
+    fn default() -> Self {
+        Self {
+            total: 1024,
+            per_peer: 64,
+        }
+    }
+}
+
+/// How long accepting waits after running out of descriptors or memory.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// A request to read the map again, answered with whether the new map
 /// took (the old one stays when it did not).
@@ -134,6 +160,8 @@ struct Front {
 
 /// A connection being relayed, and, once admitted, what let it in.
 struct Relay {
+    /// The peer's uid, for [`Limits::per_peer`].
+    uid: u32,
     task: AbortHandle,
     /// `None` while its lookups run: [`admit`] checks it against the map
     /// in force when they end, so a reload meanwhile has nothing to close.
@@ -156,9 +184,18 @@ impl Admitted {
     }
 }
 
+/// Accepts until the listener fails for good. Running out of descriptors
+/// or memory only pauses it: one user's connections must not end the
+/// front door for everyone.
 async fn accept(listener: UnixListener, front: Shared) -> io::Result<()> {
     loop {
-        let (stream, _) = listener.accept().await?;
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                pause_after(e).await?;
+                continue;
+            }
+        };
         let uid = match stream.peer_cred() {
             Ok(cred) => cred.uid(),
             Err(e) => {
@@ -168,6 +205,10 @@ async fn accept(listener: UnixListener, front: Shared) -> io::Result<()> {
         };
         let id = {
             let mut f = front.borrow_mut();
+            if let Err(why) = room_for(&f, uid) {
+                eprintln!("rusty-mux-server: login: refusing uid {uid}: {why}");
+                continue;
+            }
             f.next = f.next.wrapping_add(1);
             f.next
         };
@@ -176,11 +217,51 @@ async fn accept(listener: UnixListener, front: Shared) -> io::Result<()> {
         front.borrow_mut().relays.insert(
             id,
             Relay {
+                uid,
                 task: task.abort_handle(),
                 admitted: None,
             },
         );
     }
+}
+
+/// Whether the front door may hold one more connection from `uid`.
+fn room_for(front: &Front, uid: u32) -> Result<(), &'static str> {
+    let limits = front.login.limits;
+    if front.relays.len() >= limits.total {
+        return Err("the front door is full");
+    }
+    let from_peer = front.relays.values().filter(|r| r.uid == uid).count();
+    if from_peer >= limits.per_peer {
+        return Err("too many connections from this uid");
+    }
+    Ok(())
+}
+
+/// Waits a little after an accept error that passes (out of descriptors
+/// or memory), retries at once after one a client caused, and returns any
+/// other.
+async fn pause_after(err: io::Error) -> io::Result<()> {
+    use rusty_libc::Errno;
+    /// No buffer space (`accept(2)`); rusty_libc does not name it.
+    const ENOBUFS: i32 = 105;
+    const PASSING: [i32; 4] = [Errno::EMFILE.0, Errno::ENFILE.0, Errno::ENOMEM.0, ENOBUFS];
+    let kind = err.kind();
+    if matches!(
+        kind,
+        io::ErrorKind::ConnectionAborted | io::ErrorKind::Interrupted
+    ) {
+        return Ok(());
+    }
+    if !err
+        .raw_os_error()
+        .is_some_and(|code| PASSING.contains(&code))
+    {
+        return Err(err);
+    }
+    eprintln!("rusty-mux-server: login: accepting: {err}; pausing");
+    rusty_tokio::time::sleep(ACCEPT_BACKOFF).await;
+    Ok(())
 }
 
 /// Maps the peer `uid` of relay `id` to an account, or refuses it with the
