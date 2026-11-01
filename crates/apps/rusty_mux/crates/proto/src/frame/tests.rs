@@ -1,6 +1,6 @@
 use rusty_mux_core::{
-    BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, SessionId, Side,
-    Size, Transport, WindowId,
+    BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, Selection,
+    SessionId, Side, Size, Transport, WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::Writer;
@@ -458,6 +458,22 @@ fn every_event_round_trips() {
             layout: None,
             zoomed: None,
         },
+        Event::ClipboardWritten {
+            block,
+            selection: Selection::Clipboard,
+        },
+        Event::ClipboardWritten {
+            block,
+            selection: Selection::Primary,
+        },
+        Event::StatusRemoved {
+            block,
+            id: "build/test".into(),
+        },
+        Event::StatusRemoved {
+            block,
+            id: String::new(),
+        },
     ];
     for event in events {
         round_trip(Message::Event {
@@ -730,6 +746,29 @@ fn program_event_values_are_checked() {
             field: 25
         }),
         "neither a code nor a signal"
+    );
+    assert_eq!(
+        event(27, &|o| {
+            o.varint(44, 3);
+        }),
+        invalid(44),
+        "an unknown selection"
+    );
+    assert_eq!(
+        event(27, &|_| {}),
+        Err(Error::MissingField {
+            message: 0x84,
+            field: 44
+        }),
+        "a clipboard write names its selection"
+    );
+    assert_eq!(
+        event(28, &|_| {}),
+        Err(Error::MissingField {
+            message: 0x84,
+            field: 45
+        }),
+        "a removal names its record"
     );
     assert_eq!(
         event(20, &|o| {

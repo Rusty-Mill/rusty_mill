@@ -367,6 +367,8 @@ fn status_notes_need_a_live_block() {
         gone
     );
     assert_eq!(mux.note_process(block, 7, "vim".into()), gone);
+    assert_eq!(mux.note_clipboard(block, Selection::Primary), gone);
+    assert_eq!(mux.note_status_removed(block, "a".into()), gone);
     assert!(mux.take_events().is_empty());
 }
 
@@ -406,6 +408,27 @@ fn program_notes_emit_their_events_in_order() {
             Event::ProgramExited {
                 block,
                 status: ExitStatus::Signal(9)
+            },
+        ]
+    );
+}
+
+#[test]
+fn clipboard_and_status_removal_notes_emit_their_events() {
+    let (mut mux, _, _, block) = fixture();
+    mux.take_events();
+    assert_eq!(mux.note_clipboard(block, Selection::Clipboard), Ok(()));
+    assert_eq!(mux.note_status_removed(block, "a/b".into()), Ok(()));
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::ClipboardWritten {
+                block,
+                selection: Selection::Clipboard
+            },
+            Event::StatusRemoved {
+                block,
+                id: "a/b".into()
             },
         ]
     );

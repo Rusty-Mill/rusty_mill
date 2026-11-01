@@ -134,6 +134,40 @@ pub enum Event {
         layout: Option<Layout>,
         zoomed: Option<BlockId>,
     },
+    /// The block's program set a selection (OSC 52). The text is not in
+    /// the event: it may be a secret, and clients attached to the block
+    /// already received it in the output. Several writes read at once are
+    /// one event per selection.
+    ClipboardWritten {
+        block: BlockId,
+        selection: Selection,
+    },
+    /// A status record the block's program reported ended: cleared, ended
+    /// by a prompt or reset, or evicted by a newer one. `id` is its path,
+    /// empty for the root; [`Event::BlockStatus`] follows.
+    StatusRemoved {
+        block: BlockId,
+        id: String,
+    },
+}
+
+/// Which selection a program wrote with OSC 52.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selection {
+    /// The clipboard, also what an empty or unknown target means.
+    Clipboard,
+    /// The X11 primary selection.
+    Primary,
+}
+
+impl Selection {
+    /// The name ctl and MCP print.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Clipboard => "clipboard",
+            Self::Primary => "primary",
+        }
+    }
 }
 
 /// How a block's program ended.

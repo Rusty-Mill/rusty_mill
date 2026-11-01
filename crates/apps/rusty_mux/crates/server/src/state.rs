@@ -72,7 +72,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::LAYOUT)
     .union(Features::TAKEOVER)
     .union(Features::ECHO_ACK)
-    .union(Features::IDENTITY);
+    .union(Features::IDENTITY)
+    .union(Features::MORE_PROGRAM_EVENTS);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) struct PtyWrite {
@@ -1173,7 +1174,11 @@ impl State {
         };
         rt.parser.advance(&mut rt.grid, data);
         let replies = rt.parser.take_responses();
-        if terminal::absorb_status(&mut rt.grid, &mut rt.status) {
+        let status = terminal::absorb_status(&mut rt.grid, &mut rt.status);
+        for id in status.removed {
+            in_step("status removed", self.mux.note_status_removed(block, id));
+        }
+        if status.changed {
             in_step("status", self.mux.note_status(block));
         }
         let (pwd, title) = rt.seen.changes(&rt.grid);
@@ -1194,6 +1199,9 @@ impl State {
                 "notification",
                 self.mux.note_notification(block, title, body),
             );
+        }
+        for selection in terminal::take_clipboard(&mut rt.grid) {
+            in_step("clipboard", self.mux.note_clipboard(block, selection));
         }
         // What a terminal host would relay, such as the bell; clients
         // already have the raw output.
@@ -1383,6 +1391,9 @@ fn receives(features: Features, event: &Event) -> bool {
         | Event::ClientRenamed { .. } => Features::LABELS,
         Event::LayoutChanged { .. } => Features::LAYOUT,
         Event::ClientConnectionChanged { .. } => Features::IDENTITY,
+        Event::ClipboardWritten { .. } | Event::StatusRemoved { .. } => {
+            Features::MORE_PROGRAM_EVENTS
+        }
         _ => Features::NONE,
     };
     features.contains(needs)

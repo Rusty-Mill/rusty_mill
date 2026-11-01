@@ -1,8 +1,8 @@
 //! The messages and their field layouts.
 
 use rusty_mux_core::{
-    BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, SessionId, Side,
-    Size, Transport, WindowId,
+    BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, Selection,
+    SessionId, Side, Size, Transport, WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::{Reader, Writer};
@@ -107,6 +107,10 @@ impl Features {
     /// it). A client entry carries its principal and transport regardless,
     /// since older decoders skip the fields.
     pub const IDENTITY: Self = Self(1 << 22);
+
+    /// [`Event::ClipboardWritten`] and [`Event::StatusRemoved`] events,
+    /// skipped for a client without it as the other optional kinds are.
+    pub const MORE_PROGRAM_EVENTS: Self = Self(1 << 23);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -521,8 +525,12 @@ const TRANSPORT: u32 = 41;
 const PRINCIPAL: u32 = 42;
 /// A [`Principal`]'s account name.
 const USER: u32 = 43;
-// IDs 1..=USER are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = USER as usize;
+/// A [`Selection`]: 1 clipboard, 2 primary.
+const SELECTION: u32 = 44;
+/// A status record's id, its path; empty for the root.
+const STATUS: u32 = 45;
+// IDs 1..=STATUS are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = STATUS as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -1105,6 +1113,8 @@ mod kind {
     pub const CLIENT_RENAMED: u64 = 24;
     pub const LAYOUT_CHANGED: u64 = 25;
     pub const CLIENT_CONNECTION_CHANGED: u64 = 26;
+    pub const CLIPBOARD_WRITTEN: u64 = 27;
+    pub const STATUS_REMOVED: u64 = 28;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -1233,6 +1243,16 @@ fn put_event(out: &mut Out, event: &Event) {
                 .bytes(TITLE, title.as_bytes())
                 .bytes(BODY, body.as_bytes());
         }
+        E::ClipboardWritten { block, selection } => {
+            out.varint(KIND, kind::CLIPBOARD_WRITTEN)
+                .uuid(BLOCK, block.uuid())
+                .varint(SELECTION, selection_wire(selection));
+        }
+        E::StatusRemoved { block, ref id } => {
+            out.varint(KIND, kind::STATUS_REMOVED)
+                .uuid(BLOCK, block.uuid())
+                .bytes(STATUS, id.as_bytes());
+        }
         E::ProcessChanged {
             block,
             pid,
@@ -1352,6 +1372,14 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         },
         kind::CLIENT_DISCONNECTED => E::ClientDisconnected {
             client: client(f, CLIENT)?,
+        },
+        kind::CLIPBOARD_WRITTEN => E::ClipboardWritten {
+            block: block(f, BLOCK)?,
+            selection: selection(f)?,
+        },
+        kind::STATUS_REMOVED => E::StatusRemoved {
+            block: block(f, BLOCK)?,
+            id: f.string(STATUS)?,
         },
         kind::CLIENT_CONNECTION_CHANGED => E::ClientConnectionChanged {
             client: client(f, CLIENT)?,
@@ -1542,6 +1570,21 @@ fn transport(f: &In<'_>, id: u32) -> Result<Transport, Error> {
         1 => Ok(Transport::Socket),
         2 => Ok(Transport::Datagram),
         _ => Err(f.invalid(id)),
+    }
+}
+
+const fn selection_wire(selection: Selection) -> u64 {
+    match selection {
+        Selection::Clipboard => 1,
+        Selection::Primary => 2,
+    }
+}
+
+fn selection(f: &In<'_>) -> Result<Selection, Error> {
+    match f.varint(SELECTION)? {
+        1 => Ok(Selection::Clipboard),
+        2 => Ok(Selection::Primary),
+        _ => Err(f.invalid(SELECTION)),
     }
 }
 

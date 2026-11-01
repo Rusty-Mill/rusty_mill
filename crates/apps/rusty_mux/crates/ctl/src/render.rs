@@ -342,6 +342,17 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
                 ("body", Text(body.clone())),
             ],
         ),
+        E::ClipboardWritten { block, selection } => (
+            "clipboard-written",
+            vec![
+                ("block", Id(block.uuid())),
+                ("selection", Field::Word(selection.name())),
+            ],
+        ),
+        E::StatusRemoved { block, ref id } => (
+            "status-removed",
+            vec![("block", Id(block.uuid())), ("id", Text(id.clone()))],
+        ),
         E::ProcessChanged {
             block,
             pid,
@@ -403,7 +414,9 @@ fn renamed(entity: &'static str, id: Uuid, name: &str) -> Vec<(&'static str, Fie
 
 #[cfg(test)]
 mod tests {
-    use rusty_mux_core::{BlockId, ClientId, Principal, SessionId, Size, Transport, WindowId};
+    use rusty_mux_core::{
+        BlockId, ClientId, Principal, Selection, SessionId, Size, Transport, WindowId,
+    };
 
     use super::*;
 
@@ -566,6 +579,14 @@ mod tests {
                 client,
                 principal: Principal::unix(1, None).unwrap(),
                 transport: Transport::Socket,
+            },
+            Event::ClipboardWritten {
+                block,
+                selection: Selection::Primary,
+            },
+            Event::StatusRemoved {
+                block,
+                id: "build".into(),
             },
         ];
         assert_eq!(events.len(), rusty_mux_script::EVENTS.len());
