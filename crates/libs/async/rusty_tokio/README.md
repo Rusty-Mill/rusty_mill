@@ -665,8 +665,8 @@ them yet.
   immediately resets to accept the next round (one caller's
   `BarrierWaitResult::is_leader()` is arbitrarily `true` per round, for
   a task that wants to do one-time per-round bookkeeping without every
-  task racing to do it). Hand-rolls its own waiter list (a `Vec<Waker>`
-  behind the same plain `std::sync::Mutex` guarding the arrival count
+  task racing to do it). Hand-rolls its own waiter list (one waker slot
+  per waiting future, removed when it is dropped, behind the same plain `std::sync::Mutex` guarding the arrival count
   and a generation counter) rather than building on `Notify`: `Notify`'s
   own waiters queue lives behind a *separate* lock from whatever
   external state a caller checks before registering with it, which means
