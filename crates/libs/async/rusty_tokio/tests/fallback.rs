@@ -216,7 +216,7 @@ fn thread_local_teardown_probe() {
 }
 
 /// Waits up to 5 s for `pid`, a child of this process, to be reaped by
-/// someone else, then reaps it itself so nothing lingers and fails.
+/// someone else, and fails if it was not. It never signals or reaps `pid`.
 #[cfg(unix)]
 fn assert_reaped(pid: libc::pid_t) {
     // `kill(pid, 0)` still succeeds on a zombie; ESRCH means it was reaped.
