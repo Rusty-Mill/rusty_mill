@@ -180,7 +180,7 @@ pub fn perform_as(
     by: &str,
 ) -> Result<Response, String> {
     let act = action(verb, args, rev)?;
-    refuse_evidence_extension(dir, task, &act)?;
+    let _admission = refuse_evidence_extension(dir, task, &act)?;
     let op = labelled_op(by)?;
     let mut d = open_driver(dir, task)?;
     d.dispatch(&Command::Human { op, action: act }, now())
@@ -194,17 +194,26 @@ pub fn perform_as(
 /// run whose log holds an extension anyway (one logged before the marker was
 /// written, or by an older `bbp`), so this check is the early, operator-facing
 /// half and not the only one.
-fn refuse_evidence_extension(dir: &Path, task: &TaskId, act: &HumanAction) -> Result<(), String> {
+///
+/// An extend that may go ahead returns the evidence admission lock (see
+/// [`crate::moderator::evidence_admission`]); the caller holds it through its
+/// append, so a capped first start cannot write the marker in between.
+fn refuse_evidence_extension(
+    dir: &Path,
+    task: &TaskId,
+    act: &HumanAction,
+) -> Result<Option<std::fs::File>, String> {
     let mut act = act;
     while let HumanAction::Fenced { action, .. } = act {
         act = action;
     }
     if !matches!(act, HumanAction::BudgetExtended { .. }) {
-        return Ok(());
+        return Ok(None);
     }
+    let admission = crate::moderator::evidence_admission(dir, task)?;
     let marker = crate::moderator::evidence_marker_path(dir, task);
     match std::fs::metadata(&marker) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(admission)),
         Ok(_) => Err(format!(
             "{}: an evidence run's budget cannot be extended; it runs under the budget it was opened with",
             task.0
@@ -240,15 +249,18 @@ pub fn perform_fenced(
         }
         Err(error) => return Err(error),
     };
-    if let Err(detail) = refuse_evidence_extension(dir, task, &action) {
-        return match fence {
-            Some(_) => Ok(Response::Rejected(Rejection::new(
-                Code::BadHumanInput,
-                detail,
-            ))),
-            None => Err(detail),
-        };
-    }
+    let _admission = match refuse_evidence_extension(dir, task, &action) {
+        Ok(admission) => admission,
+        Err(detail) => {
+            return match fence {
+                Some(_) => Ok(Response::Rejected(Rejection::new(
+                    Code::BadHumanInput,
+                    detail,
+                ))),
+                None => Err(detail),
+            }
+        }
+    };
     let action = match fence {
         Some(expected_rev) => HumanAction::Fenced {
             expected_rev,
@@ -374,6 +386,31 @@ mod tests {
                 }
             )),
             "{events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_extend_racing_a_capped_first_start_waits_for_it_and_is_refused() {
+        // The first capped start checks the log and writes the marker under
+        // the evidence admission lock; an extend that arrives meanwhile must
+        // see the marker, not append behind the start's back.
+        let (dir, task) = task("racing-extend", false);
+        let before = log_len(&dir, &task);
+        let admission = crate::moderator::evidence_admission(&dir, &task).unwrap();
+        let racer = {
+            let (dir, task) = (dir.clone(), task.clone());
+            std::thread::spawn(move || perform(&dir, &task, "extend", &["messages", "1000"], None))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        crate::moderator::write_evidence_marker(&dir, &task, 5.0, "sha").unwrap();
+        drop(admission);
+        let err = racer.join().unwrap().unwrap_err();
+        assert!(err.contains("evidence"), "{err}");
+        assert_eq!(
+            log_len(&dir, &task),
+            before,
+            "the racing extend appends nothing"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
