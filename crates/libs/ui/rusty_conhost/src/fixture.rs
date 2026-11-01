@@ -51,6 +51,10 @@ pub(crate) fn event_line(ev: &Event<'_>, held: usize) -> String {
         Event::ChildExited => "exited".to_owned(),
         Event::HangUp => "hangup".to_owned(),
         Event::GraceExpired => "grace-expired".to_owned(),
+        // A failed read replays as an empty slice, which fails the same way.
+        Event::Fetched { bytes, .. } => {
+            format!("fetched {}", hex_or_dash(bytes.unwrap_or_default()))
+        }
     };
     if held > 0 {
         let _ = write!(line, " held={held}");
@@ -147,6 +151,7 @@ mod tests {
             Effect::Kill { pid } => Some(format!("kill {pid}")),
             Effect::CloseServer => Some("close".to_owned()),
             Effect::Eof => Some("eof".to_owned()),
+            Effect::Fetch { at, len, .. } => Some(format!("fetch {at} {len}")),
             Effect::Log(_) => None,
         }
     }
@@ -180,8 +185,16 @@ mod tests {
         (words, held)
     }
 
-    /// Run one event line; the lines its effects should match.
-    fn run(console: &mut Console, n: usize, line: &str, payload: &mut Vec<u8>) -> Vec<String> {
+    /// Run one event line; the lines its effects should match. `fetch`
+    /// is the call the last [`Effect::Fetch`] named, which a `fetched`
+    /// line answers.
+    fn run(
+        console: &mut Console,
+        n: usize,
+        line: &str,
+        payload: &mut Vec<u8>,
+        fetch: &mut [u8; 8],
+    ) -> Vec<String> {
         let (words, held) = split_held(line);
         let num = |i: usize| -> u64 { words[i].parse().expect("a number") };
         let ev = match words[0] {
@@ -214,15 +227,24 @@ mod tests {
             "hangup" => Event::HangUp,
             "grace-expired" => Event::GraceExpired,
             "exited" => Event::ChildExited,
+            "fetched" => {
+                *payload = unhex(words[1]).expect("fetched hex");
+                Event::Fetched {
+                    id: *fetch,
+                    bytes: Some(payload),
+                }
+            }
             other => panic!("unknown step {other:?}"),
         };
         let mut out = OutputQueue::default();
         out.set_held(held);
-        let mut lines: Vec<String> = console
-            .handle(ev, &mut out)
-            .iter()
-            .filter_map(effect_line)
-            .collect();
+        let fx = console.handle(ev, &mut out);
+        for e in &fx {
+            if let Effect::Fetch { id, .. } = e {
+                *fetch = *id;
+            }
+        }
+        let mut lines: Vec<String> = fx.iter().filter_map(effect_line).collect();
         let vt = out.take();
         if !vt.is_empty() {
             lines.push(format!("vt {}", hex(&vt)));
@@ -246,6 +268,7 @@ mod tests {
             crate::codepage::table::CODEC,
         );
         let mut payload = Vec::new();
+        let mut fetch = [0; 8];
         let mut blessed = String::new();
         let mut expected: Vec<String> = Vec::new();
         let mut actual: Vec<String> = Vec::new();
@@ -274,7 +297,7 @@ mod tests {
                 continue;
             }
             at = n + 1;
-            actual = run(&mut console, at, line, &mut payload);
+            actual = run(&mut console, at, line, &mut payload, &mut fetch);
             for e in &actual {
                 let _ = writeln!(blessed, "expect {e}");
             }

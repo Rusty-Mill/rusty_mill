@@ -588,6 +588,20 @@ struct Engine {
     /// `handle` panicked; nothing more reaches the console.
     dead: bool,
     recorder: Option<Recorder>,
+    /// The next slice a streamed write asked for ([`Effect::Fetch`]),
+    /// read in the next turn, after its control lane (§7.2).
+    fetch: Option<Fetch>,
+    /// Whole inputs of calls a test made up, read in place of the driver.
+    #[cfg(test)]
+    test_inputs: HashMap<[u8; 8], Vec<u8>>,
+}
+
+/// A slice of call `id`'s input: `len` bytes from `at`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Fetch {
+    id: [u8; 8],
+    at: usize,
+    len: usize,
 }
 
 impl Engine {
@@ -620,6 +634,9 @@ impl Engine {
             pending: Vec::new(),
             dead: false,
             recorder: Recorder::from_env(),
+            fetch: None,
+            #[cfg(test)]
+            test_inputs: HashMap::new(),
         }
     }
 
@@ -711,6 +728,7 @@ impl Engine {
             self.handle(Event::ChildExited);
             self.arm_grace(now);
         }
+        self.serve_fetch();
         if plan.serve_reads {
             self.handle(Event::ServeReads);
         }
@@ -793,16 +811,20 @@ impl Engine {
             reads_ready: self.console.reads_ready(),
             input_paused: self.console.input_paused(),
             writes_ready: self.console.writes_ready(),
+            streaming: self.console.streaming(),
+            fetch_due: self.fetch.is_some(),
         }
     }
 
-    /// Read a packet's variable input, capped, and hand it to the console.
+    /// Read a packet's variable input, at most [`PACKET_INPUT_CAP`] of
+    /// it, and hand it to the console: a write past the cap fetches the
+    /// rest a slice at a time, and any other such packet is refused.
     fn serve(&mut self, d: IoDescriptor) -> Result<()> {
         let Some(server) = self.server.as_mut() else {
             return Ok(());
         };
         let len = d.input_size as usize;
-        let mut payload = vec![0u8; if len > PACKET_INPUT_CAP { 0 } else { len }];
+        let mut payload = vec![0u8; len.min(PACKET_INPUT_CAP)];
         let got = match server.read_input(d.id, 0, &mut payload) {
             Ok(n) => n,
             Err(e) => {
@@ -823,9 +845,54 @@ impl Engine {
         Ok(())
     }
 
-    /// Run one event through the console, inside the panic boundary, and
-    /// apply its effects in order.
+    /// Run one event through the console, keeping the slice of a
+    /// streamed write it asks for until the next turn (§7.4).
     fn handle(&mut self, ev: Event<'_>) {
+        if let Some(fetch) = self.handle_one(ev) {
+            self.fetch = Some(fetch);
+        }
+    }
+
+    /// Hand the console the slice its streamed write asked for, if any:
+    /// one per turn, so a write of any size leaves the control lane, the
+    /// child's exit and the deadline their turns (§7.2).
+    fn serve_fetch(&mut self) {
+        let Some(f) = self.fetch.take() else {
+            return;
+        };
+        let bytes = self.read_slice(f);
+        self.handle(Event::Fetched {
+            id: f.id,
+            bytes: bytes.as_deref(),
+        });
+    }
+
+    /// Read a slice of a call's input; `None`, logged, when the driver
+    /// can't, which fails the call.
+    fn read_slice(&mut self, f: Fetch) -> Option<Vec<u8>> {
+        #[cfg(test)]
+        if let Some(input) = self.test_inputs.get(&f.id) {
+            return input
+                .get(f.at..(f.at + f.len).min(input.len()))
+                .map(<[u8]>::to_vec);
+        }
+        let server = self.server.as_mut()?;
+        let mut bytes = vec![0u8; f.len];
+        match server.read_input(f.id, f.at as u32, &mut bytes) {
+            Ok(n) => {
+                bytes.truncate(n);
+                Some(bytes)
+            }
+            Err(e) => {
+                crate::diag::log(&format!("READ_INPUT of a streamed write failed: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Run one event through the console, inside the panic boundary, and
+    /// apply its effects in order; returns the fetch it asked for.
+    fn handle_one(&mut self, ev: Event<'_>) -> Option<Fetch> {
         let packet = match &ev {
             Event::Packet(p) => Some(p.id),
             _ => None,
@@ -834,7 +901,7 @@ impl Engine {
             if let Some(id) = packet {
                 self.reply = Some(Reply::status(id, STATUS_UNSUCCESSFUL));
             }
-            return;
+            return None;
         }
         let held = self.shared.output_len();
         self.out.set_held(held);
@@ -850,14 +917,21 @@ impl Engine {
             Err(_) => {
                 self.out.take();
                 self.die(packet);
-                return;
+                return None;
             }
         };
         self.shared.push_output(self.out.take());
         let mut replied = false;
+        let mut fetch = None;
         for e in effects {
-            if let Effect::Reply(r) = &e {
-                replied |= Some(r.id) == packet;
+            match e {
+                Effect::Reply(ref r) => replied |= Some(r.id) == packet,
+                // Answered once the effects are applied, as the next event.
+                Effect::Fetch { id, at, len } => {
+                    fetch = Some(Fetch { id, at, len });
+                    continue;
+                }
+                _ => {}
             }
             self.apply(e);
         }
@@ -867,6 +941,7 @@ impl Engine {
         {
             self.pending.push(id);
         }
+        fetch.filter(|_| self.server.is_some())
     }
 
     fn apply(&mut self, e: Effect) {
@@ -901,6 +976,8 @@ impl Engine {
             Effect::Kill { pid } => self.kill(pid),
             Effect::CloseServer => self.teardown(),
             Effect::Eof => self.shared.set_eof(),
+            // `handle` answers it; it never gets here.
+            Effect::Fetch { .. } => {}
             Effect::Log(d) => crate::diag::log(&d.to_string()),
         }
     }
@@ -986,6 +1063,7 @@ impl Engine {
     /// Close the server (§7.3): answer the held reply, cancel and drain
     /// the in-flight read, then close.
     fn teardown(&mut self) {
+        self.fetch = None;
         if let Some(r) = self.reply.take() {
             match (self.joining.take(), self.server.as_mut()) {
                 (Some(joining), Some(server)) => {
@@ -1413,6 +1491,45 @@ mod tests {
             lock(&engine.ctrl.0.state).queue.pop(),
             Some((7, Ctrl::Close))
         );
+        engine.teardown();
+        let _ = child.kill_single(Signal::Kill);
+    }
+
+    /// Design §7.2: a streamed write reads one slice a turn, so the
+    /// control lane is served between its slices, and the next slice
+    /// needs no other wake. DSR queries only: no output to stall on.
+    #[test]
+    fn a_streamed_write_reads_one_slice_a_turn_and_yields_to_hang_up() {
+        let queries = b"\x1b[5n".repeat(8 * PACKET_INPUT_CAP / 4);
+        let (console, id, at, len) = crate::console::tests::streaming_write(&queries);
+        let (mut engine, child) = engine_on(console);
+        engine.test_inputs.insert(id, queries.clone());
+        engine.fetch = Some(Fetch { id, at, len });
+        // Eight slices: still streaming after three turns only if each
+        // turn read one at most.
+        let mut last = at;
+        for turn in 0..3 {
+            assert!(engine.must_poll(), "the next turn needs no other wake");
+            engine.work().expect("turn");
+            if let Some(f) = engine.fetch {
+                assert!(
+                    f.at <= last + PACKET_INPUT_CAP,
+                    "turn {turn} read more than a slice"
+                );
+                last = f.at;
+            }
+            assert!(engine.console.streaming(), "turn {turn}");
+        }
+        lock(&engine.shared.lanes).control.hang_up = true;
+        engine.work().expect("turn");
+        assert_ne!(
+            engine.grace,
+            Grace::Unarmed,
+            "the hang-up was served mid-stream"
+        );
+        assert!(engine.console.streaming(), "the write goes on in the grace");
+        turns_without_another_wake(&mut engine);
+        assert!(!engine.console.streaming() && engine.fetch.is_none());
         engine.teardown();
         let _ = child.kill_single(Signal::Kill);
     }
