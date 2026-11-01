@@ -49,9 +49,10 @@ an expert storage review). The reviews found that:
   consumer's first write on the new layout, rollback is swapping back to the
   untouched source path; after it, rollback is the reverse tool
   `migrate_to_map`, which ships alongside the forward one.
-- Segment stores never panic on a read failure: `get` poisons the store and
-  returns `None`, and consumers move to the fallible `try_get` before they
-  opt in.
+- A read failure is always an error to the caller, never "not found" and
+  never a panic. Segment stores are a distinct `SegmentStore` type with only
+  the fallible `TryGetById`, which every layer forwards, so a consumer's
+  opt-in PR cannot compile until all its reads are fallible.
 - `bincode` leaves the normal dependency graph in phase 0, and remains only
   as a dev-only test oracle.
 - The root ADR-0009 "Replace `bincode`" row is updated in the phase 0 PR.

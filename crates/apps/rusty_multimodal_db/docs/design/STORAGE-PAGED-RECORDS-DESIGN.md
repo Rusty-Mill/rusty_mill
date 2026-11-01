@@ -183,6 +183,11 @@ Which one a store uses is decided by how it is opened (§7.2), never by a
 type parameter. `SegmentHeap` is `pub(crate)`. `Map` is removed in the
 release after the default flips (phase 5).
 
+A segment store is handed out only as `SegmentStore<R, I, S>`, a public
+newtype over `GenericMmapStore` whose bodies are `Segments`. It implements
+every store trait the plain type does except the infallible `GetById`
+(§8.4), so reads through it can only be fallible.
+
 ### 7.2 Opening a segment store
 
 ```rust
@@ -192,7 +197,7 @@ pub struct HeapOptions {
     pub segment_bytes: u32,
 }
 
-impl GenericMmapStore<R, I, S> {
+impl<R, I, S> SegmentStore<R, I, S> {
     pub fn create_segments(path: &Path, opts: HeapOptions)
         -> Result<Self, DurabilityError>;
     pub fn open_segments(path: &Path, opts: HeapOptions)
@@ -380,7 +385,7 @@ pub trait ForEachRecord<R> {
 }
 ```
 
-- The default implementation is `all_ids` + `try_get`.
+- The default implementation is `all_ids` + `try_get` (`TryGetById`, §8.4).
 - `GenericMmapStore` on segments overrides it with a sequential read of each
   segment that skips dead entries.
 - `MmapScanned` wraps its inner store's pass and applies its own overlay.
@@ -489,24 +494,30 @@ This is `journal.rs`'s rule, applied per segment:
 
 ### 8.4 Read errors
 
-- `GetById` gains `try_get(&self, id) -> Result<Option<R>, DurabilityError>`,
-  with a default of `Ok(self.get(id))`, so the ten existing implementors are
-  unaffected.
-- Segment stores implement `try_get`. Their `get` never panics: on `Err`
-  it poisons the heap, logs the error, counts `mmdb_heap_read_errors`, and
-  returns `None`. Because the heap is poisoned, a caller that reads that
-  `None` as "absent" and then writes gets `Poisoned`, so a misread can
-  never overwrite or duplicate the record. Readers can still see a false
-  "not found", which is why every consumer moves off `get` before it opts in.
-- A CRC or identity failure at read time is `Corrupt` and poisons the heap.
-- **Transition.** A consumer's phase 4 PR moves all its reads to `try_get`,
-  and a test there fails on any remaining `get` call. Phase 5 marks
-  `GetById::get` `#[deprecated]` in favour of `try_get`; removing it is a
-  later breaking release.
-- Every engine-internal read uses `try_get`. That covers layers,
-  `for_each_overlaid`, `replace_with_old` and compaction, and a test
-  enforces it. A panic under the production write lock would poison the
-  `RwLock` for good; a panic under a read guard does not.
+The boundary is fallible by type, not by convention. A read error is
+always an `Err`, never `None` and never a panic (PAGED-FR-004).
+
+- **A new trait, `TryGetById`**, with
+  `try_get(&self, id) -> Result<Option<R>, DurabilityError>`. There is no
+  blanket impl from `GetById` and no default that calls `get`.
+- **Map-layout stores** implement both traits; their `try_get` is
+  `Ok(self.get(id))`, which is exact because they cannot fail a read.
+- **`SegmentStore`** implements `TryGetById` and not `GetById` (§7.1).
+- **Every layer and helper forwards the fallible path.** `Ordered`,
+  `NameIndex`, `MmapScanned`, the edge wrappers and `GenericProductionStore`
+  implement `TryGetById` whenever their inner store does, forwarding
+  `try_get`. They implement `GetById` only `where S: GetById`. So a
+  production stack built on a `SegmentStore` has no `get` at all, and
+  calling it is a compile error, not a runtime surprise.
+- Every engine-internal read (layers, `for_each_overlaid`,
+  `replace_with_old`, compaction) goes through `try_get` and propagates the
+  error with `?`.
+- A CRC, I/O or identity failure at read time is `Corrupt` and poisons the
+  heap, so later writes return `Poisoned` (outcome unknown, §8.1).
+- **Transition.** Nothing changes for a consumer until it opts in. Its
+  phase 4 PR must compile against the `SegmentStore` stack, which forces
+  every read onto `try_get`. Once every in-repo consumer is on segments,
+  `GetById` is deprecated with `Map`.
 - Callers that switch to `try_get` in their rollout PR: the server adapters,
   rusty_tick, and orch-store's legacy read-through, which treats
   `get() == None` as absent (`orch-store/src/lib.rs:240-243`).
@@ -521,7 +532,7 @@ The server's metrics renderer exposes, per table:
 - `mmdb_heap_tombstone_bytes`
 - `mmdb_heap_needs_compaction` (0 or 1)
 - `mmdb_heap_poisoned` (0 or 1)
-- `mmdb_heap_read_errors` (count since open)
+- `mmdb_heap_read_errors` (count since open; each is also returned as `Err`)
 - `mmdb_heap_hints_rejected` (count since open)
 
 ## 9. Security, privacy and compatibility
@@ -544,7 +555,7 @@ Each phase is one PR that leaves `main` green.
 | M | Measure every consumer (below) | None | — | n/a |
 | 0 | First-party codec (§6) | None | PAGED-T6 | Revert |
 | 1 | `segment_log` (crate-private) on #1355's writer: framing, recovery rule, seal and close order, hints, `durability::crc` | None (unused code, covered by its own tests; `#[cfg_attr(not(test), allow(dead_code))]` until phase 3) | PAGED-T2 (unit) | Revert |
-| 2 | `try_get`, `ForEachRecord`, `replace_with_old`; constructors iterate `for_each_overlaid` | None | PAGED-T1 (map layout), existing suites | Revert |
+| 2 | `TryGetById` across stores and layers, `ForEachRecord`, `replace_with_old`; constructors iterate `for_each_overlaid` | None | PAGED-T1 (map layout), existing suites | Revert |
 | 3 | `SegmentHeap`, `create_segments`/`open_segments` and the `_segments` helpers, compaction, the migration tool, server backup and metrics | New files, opt-in only | PAGED-T1–T5, T7, G1–G3 | Revert; no consumer uses it yet |
 | 4 | One PR per consumer, in phase M's order: switch to the `_segments` helpers, migrate | Yes, per consumer | PAGED-T7 on that consumer's data shape; G4 for body-heavy consumers | Before the first write: swap back to the untouched source. After: `migrate_to_map` (§11) |
 | 5 | Default flip: the plain helpers open segments, and the old layout returns `NeedsMigration`. `Map` removed in the next minor | — | All in-repo consumers migrated | Revert before release |
@@ -576,8 +587,9 @@ pub fn migrate_to_segments<R, I, S>(
 
 `src` and `dst` are store paths (`<path>` prefixes).
 
-- **`dst` exclusion is enforced:** the tool takes `<dst>.lock` (§7.2) first
-  and holds it until it returns.
+- **`dst` exclusion is enforced, by one lock held throughout.** The tool
+  takes `<dst>.lock` first and keeps that same `DirLock` until it returns.
+  It never drops it and re-takes it, so there is no unlocked window.
 - **`src` exclusion is a caller precondition, not a proof.** An old-layout
   store has no engine-owned lock; its writers are excluded only by the
   consumer's own directory lock, whose name the engine does not know. The
@@ -586,15 +598,25 @@ pub fn migrate_to_segments<R, I, S>(
 
 The tool:
 
-1. Refuses if any file with the `dst` prefix exists.
+1. Takes `<dst>.lock`, then refuses if any file with the `dst` prefix
+   exists other than that lock file. A lock file left by an earlier run is
+   empty and is reused.
 2. Opens `src` read-only through `read_portable_records`, which writes
    nothing.
-3. Writes segments and hints under `dst`, and copies the slot files, edge
-   blobs and edge logs (and the label manifest) unchanged.
+3. Creates `dst` through a crate-private `SegmentStore::create_locked(dst,
+   lock, opts)`, which takes ownership of the tool's `DirLock` instead of
+   acquiring a second one. It writes segments and hints, and copies the slot
+   files, edge blobs and edge logs (and the label manifest) unchanged.
 4. Syncs every file and the directory.
-5. Reopens `dst`, streams `for_each_overlaid`, and compares each record with
-   `src`'s overlaid record. It never holds both sets in full.
-6. Never writes to `src`. The operator swaps paths (ADR-0066).
+5. Verifies through a crate-private `SegmentStore::reopen(self)`, which
+   closes the files and re-runs open (§7.7) while the store keeps owning the
+   same lock. It streams `for_each_overlaid` and compares each record with
+   `src`'s overlaid record, never holding both sets in full.
+6. Drops the store, which releases the lock, and returns. It never writes
+   to `src`. The operator swaps paths (ADR-0066).
+
+A public `open_segments` on `dst` during steps 1–6, from this process or
+another, returns `Locked`.
 
 **Rollback has two windows.**
 
@@ -605,8 +627,13 @@ The tool:
 - **After that:** `src` is a stale snapshot, and swapping back would drop
   every write acknowledged since. Rollback is instead the reverse tool,
   `migrate_to_map::<R, I, S>(src, dst, opts)`, run on a stopped consumer.
-  It is the same streaming copy and verify in the other direction, writing
-  the old layout through `create_portable`, into a fresh `dst`. It ships with
+  It is the same streaming copy and verify in the other direction. `src` is
+  opened with `open_segments`, which takes `<src>.lock`. The tool takes
+  `<dst>.lock` and holds it throughout, applies the same emptiness rule,
+  writes the old layout through `create_portable` into the fresh `dst`, and
+  verifies through `open_portable`; the old layout never takes that lock, so
+  there is no second acquisition. The leftover empty `<dst>.lock` is
+  harmless, and backup skips it. It ships with
   `migrate_to_segments` in phase 3, is covered by PAGED-T7, and is removed
   with `Map`.
 
@@ -669,12 +696,12 @@ median of 5 runs is at most 5% slower.
 | ID | What | How |
 |---|---|---|
 | PAGED-T1 | Equivalence | One generated operation sequence against a segment store and the `AosStore` oracle, with reopens, compactions, `update`s and deletes mixed in. Every query matches, and so does every index after reopen |
-| PAGED-T2 | Fault injection | New `test_support::Fault` variants: `SegmentWritePrefix(n)`, `SegmentTruncate`, `SegmentSync`, `HintInstall`, `SkipDirSync`, `ReadCrc`. Cases: failed then successful append; failed truncate (poison); failed sync (poison, outcome unknown); deferred batch crossing a seal; unsynced unlink (`SkipDirSync`) then tombstone drop; read CRC failure and a row pointing at another id's entry (`try_get` returns `Corrupt`; `get` returns `None` without panicking and the next write returns `Poisoned`); equal-`seq` orphan after a compaction crash |
+| PAGED-T2 | Fault injection | New `test_support::Fault` variants: `SegmentWritePrefix(n)`, `SegmentTruncate`, `SegmentSync`, `HintInstall`, `SkipDirSync`, `ReadCrc`. Cases: failed then successful append; failed truncate (poison); failed sync (poison, outcome unknown); deferred batch crossing a seal; unsynced unlink (`SkipDirSync`) then tombstone drop; read CRC failure and a row pointing at another id's entry (`try_get` returns `Corrupt` through the full production stack, the error reaches the caller, and the next write returns `Poisoned`; a compile-fail doc test shows a `SegmentStore` stack has no `get`); equal-`seq` orphan after a compaction crash |
 | PAGED-T3 | Process crash | `crash_writer` gains a segment mode with `segment_bytes = 64 KiB` and a `test-support` abort hook at named steps: mid-append, mid-seal, mid-hint-install, mid-compaction, mid-create. Each reopens to the acknowledged state |
 | PAGED-T4 | Power loss | `power_loss_trial.sh` gains a filesystem argument (ext4, XFS) and a segment-store mode. Its `dm-log-writes` replay is in order, so it covers prefix crashes, not sector reordering. Run before phase 3 merges; results go in the PR |
 | PAGED-T5 | Backup round trip | `Backup`, restore and reopen through the server, chunked snapshot included; temp files are skipped |
 | PAGED-T6 | Codec parity | Golden vectors, plus a differential property test against bincode 1.3.3 over every persisted type in use (rusty_tick `Task`, orch-store, fair_play, rleval `SessionBlob`, the server's `Request`/`Response`/`WriteOp`/`TransactionOp`/journal entries) and adversarial inputs. `cargo tree -e normal` shows no `bincode`. remind-me runs the test on `Memory` in its own CI |
-| PAGED-T7 | Migration | `dst` matches `src` record for record; `src` bytes are unchanged; an existing `dst` is refused; `open_segments` on the old layout returns `NeedsMigration`; `open` on segments returns `LayoutMismatch`; a migrate, write, `migrate_to_map` round trip keeps every post-cutover write |
+| PAGED-T7 | Migration | `dst` matches `src` record for record; `src` bytes are unchanged; an existing `dst` is refused; `open_segments` on the old layout returns `NeedsMigration`; `open` on segments returns `LayoutMismatch`. Under the real lock protocol: a migration into a fresh `dst` succeeds in each direction (the tool's own lock file does not trip the emptiness check, and verify does not hit `Locked`); a stale empty `<dst>.lock` from an earlier run is reused; `open_segments(dst)` from another process during migration returns `Locked`; a migrate, write, `migrate_to_map` round trip keeps every post-cutover write |
 | PAGED-T8 | Exclusion and options | A foreign segment is refused; out-of-range `segment_bytes` is refused. Lock: a second `open_segments` of the same `path` (same process, and a child process) returns `Locked` while the first store lives and succeeds after it is dropped; migration refuses while `<dst>.lock` is held; a consumer's migration command fails while that consumer runs. Hints: swapping same-length hints between two same-schema stores, a hint left from an earlier segment with the same number, and a hint whose row points past `segment_len` are each ignored, the segment is scanned, and every record is found |
 
 ## 14. Traceability and API changes
@@ -693,7 +720,7 @@ median of 5 runs is at most 5% slower.
 | API change | Phase |
 |---|---|
 | `codec::Error` replaces `bincode::Error`; `DurabilityError` becomes `#[non_exhaustive]` | 0 |
-| `GetById::try_get` (defaulted); `ForEachRecord`; `replace_with_old`; layer constructors read through `for_each_overlaid` | 2 |
+| `TryGetById`, implemented by every store and forwarded by every layer; `GetById` on layers only `where S: GetById`; `ForEachRecord`; `replace_with_old`; layer constructors read through `for_each_overlaid` | 2 |
 | `HeapOptions`; `create_segments`/`open_segments` and the `_segments` helpers; `migrate_to_segments`, `migrate_to_map`; `DurabilityError::{Corrupt, Poisoned, NeedsMigration, LayoutMismatch, ForeignSegment, InvalidOptions, Locked}`; `CompactionReport` `#[non_exhaustive]` with new fields | 3 |
 | Plain helpers open segments; `open(records, path)`, `read_portable_records` and the public `insert_log` API (`clear_interrupted_creation`) are deprecated, then removed with `Map` | 5 |
 
@@ -749,9 +776,12 @@ median of 5 runs is at most 5% slower.
     `snapshot()` approach, and code citations.
 - **Draft 3.1 (2026-11-01):** folded in DottiusMaximus's and Codex's
   reviews of #1359.
-  - **Reads:** segment `get` no longer panics; it poisons and returns
-    `None`, consumers move to `try_get` before opting in, and reads check
-    the entry's id and `seq`.
+  - **Reads:** segment stores are a `SegmentStore` type with no `get`; a
+    new `TryGetById` is forwarded by every layer, so a read error always
+    reaches the caller as `Err` (a revision that returned `None` contradicted
+    PAGED-FR-004). Reads also check the entry's id and `seq`.
+  - **Migration lock:** the tool holds one `<dst>.lock` throughout, the
+    emptiness check excludes it, and create and verify reuse the same lock.
   - **Rollback:** swapping back to `src` is limited to before the first
     write; after that, `migrate_to_map` is the lossless path.
   - **Lock:** a `&DirLock` parameter proved nothing (it could be dropped
