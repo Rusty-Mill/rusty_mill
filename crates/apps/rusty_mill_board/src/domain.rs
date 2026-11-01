@@ -662,8 +662,9 @@ impl Card {
 
     /// Move to `to` with the movement rules off: no transition table, capability or claim
     /// check, only an actor holding some capability, except that gates hold: a listed move
-    /// with a gated alternative needs one of its alternatives, and an unlisted move that
-    /// jumps over a gate ([`Workflow::gates_crossed`]) needs `Admin`. The claim is cleared on
+    /// with a gated alternative needs one of its alternatives, and a move that jumps over a
+    /// gate ([`Workflow::gates_crossed`]) needs `Admin`, or, when the workflow lists it, the
+    /// capability of one of its ways (Building -> Done by `close`). The claim is cleared on
     /// arrival.
     ///
     /// # Errors
@@ -692,18 +693,16 @@ impl Card {
             return Err(BoardError::Invalid("moving a card needs some capability"));
         }
         // Gates hold with the rules off. A listed move with a gated way of making it needs one
-        // of its ways (a gated merge, or the `close` beside it); any other move that jumps over
-        // a gate needs `Admin`.
-        match flow.transition(&self.column, to) {
-            Ok(Some(ts)) if ts.iter().any(|t| t.gate) => check_any(&ts, by)?,
-            Ok(Some(_)) => {}
-            _ => {
-                if !flow.gates_crossed(&self.column, to).is_empty()
-                    && !by.caps.contains(&Capability::Admin)
-                {
-                    return Err(BoardError::Forbidden(Capability::Admin));
-                }
-            }
+        // of its ways (a gated merge, or the `close` beside it); a move that jumps over a gate
+        // needs `Admin`, or one of its listed ways.
+        let listed = flow.transition(&self.column, to).ok().flatten();
+        match listed {
+            Some(ts) if ts.iter().any(|t| t.gate) => check_any(&ts, by)?,
+            _ if by.caps.contains(&Capability::Admin)
+                || flow.gates_crossed(&self.column, to).is_empty() => {}
+            // A listed shortcut past a gate (Building -> Done by `close`) keeps its capability.
+            Some(ts) => check_any(&ts, by)?,
+            None => return Err(BoardError::Forbidden(Capability::Admin)),
         }
         Ok(self.arrive(to, now_ms))
     }

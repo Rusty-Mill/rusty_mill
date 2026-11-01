@@ -282,3 +282,29 @@ fn open_rules_refuse_skipping_over_a_gate() {
     b.move_card(planned, &col("v_and_ving"), &h)
         .expect("an admin may skip");
 }
+
+#[test]
+fn open_rules_keep_listed_shortcuts_past_a_gate_to_their_capability() {
+    let b = board();
+    b.set_move_rules(MoveRules::Open);
+    let reviewer = who(&b, "codex", "reviewer");
+    let tester = who(&b, "gemini", "tester");
+    let building = approved(&b, "building");
+    place(&b, building, "building");
+    assert_eq!(
+        b.move_card(building, &Column::DONE, &reviewer).map(drop),
+        Err(BoardError::Forbidden(Capability::Close)),
+        "Building -> Done jumps the merge gate"
+    );
+    let verifying = approved(&b, "verifying");
+    place(&b, verifying, "v_and_ving");
+    b.move_card(verifying, &col("building"), &tester)
+        .expect("back to Building");
+    assert_eq!(
+        b.move_card(verifying, &Column::DONE, &tester).map(drop),
+        Err(BoardError::Forbidden(Capability::Close)),
+        "and no detour through Building gets round it"
+    );
+    b.move_card(verifying, &Column::DONE, &who(&b, "claude", "builder"))
+        .expect("close still records a forge merge");
+}
