@@ -760,17 +760,30 @@ pub fn check_settings(pairs: &[Pair], reads_per_turn: u64) -> Result<(), String>
     Ok(())
 }
 
-fn git(repo: &Path, args: &[&str]) -> Result<(bool, String), String> {
+/// What one git command answered.
+struct GitOut {
+    ok: bool,
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+/// Run git on `repo`. `GIT_OPTIONAL_LOCKS=0`, as in `build.rs`: reading the
+/// tree's state must not refresh and rewrite the index it inspects.
+fn git(repo: &Path, args: &[&str]) -> Result<GitOut, String> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .map_err(|e| format!("git: {e}"))?;
-    Ok((
-        out.status.success(),
-        String::from_utf8_lossy(&out.stdout).trim().to_owned(),
-    ))
+    Ok(GitOut {
+        ok: out.status.success(),
+        code: out.status.code(),
+        stdout: String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+    })
 }
 
 /// The commit a run is pinned to: HEAD of `repo`, which must be clean as
@@ -782,22 +795,42 @@ fn git(repo: &Path, args: &[&str]) -> Result<(bool, String), String> {
 pub fn pin(repo: &Path, min_commit: Option<&str>, build_sha: &str) -> Result<String, String> {
     let min =
         min_commit.ok_or("the criteria file does not pin min_commit (the verdict-binding fix)")?;
-    let (ok, head) = git(repo, &["rev-parse", "HEAD"])?;
-    if !ok {
-        return Err(format!("{}: not a git checkout", repo.display()));
+    let rev = git(repo, &["rev-parse", "HEAD"])?;
+    if !rev.ok {
+        return Err(format!(
+            "{}: not a git checkout: {}",
+            repo.display(),
+            rev.stderr
+        ));
     }
+    let head = rev.stdout;
     // `--untracked-files=normal` overrides a user's `status.showUntrackedFiles=no`
     // (#1328), and a status git could not produce is not a clean tree.
-    let (ok, dirty) = git(repo, &["status", "--porcelain", "--untracked-files=normal"])?;
-    if !ok {
-        return Err(format!("{}: git status failed", repo.display()));
+    let status = git(repo, &["status", "--porcelain", "--untracked-files=normal"])?;
+    if !status.ok {
+        return Err(format!(
+            "{}: git status failed: {}",
+            repo.display(),
+            status.stderr
+        ));
     }
-    if !dirty.is_empty() {
+    if !status.stdout.is_empty() {
         return Err(format!("{}: the working tree is not clean", repo.display()));
     }
-    let (contains, _) = git(repo, &["merge-base", "--is-ancestor", min, "HEAD"])?;
-    if !contains {
-        return Err(format!("HEAD {head} does not contain min_commit {min}"));
+    // Exit 1 is "not an ancestor"; any other failure (an unknown commit)
+    // refuses too, with git's reason.
+    let contains = git(repo, &["merge-base", "--is-ancestor", min, "HEAD"])?;
+    match (contains.ok, contains.code) {
+        (true, _) => {}
+        (false, Some(1)) => {
+            return Err(format!("HEAD {head} does not contain min_commit {min}"));
+        }
+        (false, _) => {
+            return Err(format!(
+                "cannot check that HEAD {head} contains min_commit {min}: {}",
+                contains.stderr
+            ));
+        }
     }
     if build_sha != head {
         return Err(format!(
@@ -1161,7 +1194,9 @@ mod tests {
         assert!(pin(&d, Some(&first), &format!("{second}-dirty")).is_err());
         assert!(pin(&d, Some(&first), "unknown").is_err());
         // A commit HEAD does not contain (here: a made-up sha) refuses.
-        assert!(pin(&d, Some(&"0".repeat(40)), &second).is_err());
+        assert!(pin(&d, Some(&"0".repeat(40)), &second)
+            .unwrap_err()
+            .contains("cannot check"));
         // No pin in the criteria refuses.
         assert!(pin(&d, None, &second).unwrap_err().contains("min_commit"));
         // A dirty tree refuses.
@@ -1208,6 +1243,29 @@ mod tests {
         std::fs::write(d.join(".git/index"), "not an index").unwrap();
         let err = pin(&d, Some(&first), &second).unwrap_err();
         assert!(err.contains("git status"), "{err}");
+        // git's own reason reaches the operator. Its wording is translated,
+        // so only its presence is checked.
+        let reason = err.split("git status failed:").nth(1).unwrap_or("");
+        assert!(!reason.trim().is_empty(), "{err}");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn the_pin_does_not_rewrite_the_index_it_inspects() {
+        // A file whose stat data changed but whose content did not: a plain
+        // `git status` refreshes the index and writes it back, so the check
+        // would change the tree it describes. `GIT_OPTIONAL_LOCKS=0` stops it.
+        let (d, first, second) = repo("optional-locks");
+        let index = d.join(".git/index");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(d.join("a"), "2").unwrap();
+        let before = std::fs::read(&index).unwrap();
+        assert_eq!(pin(&d, Some(&first), &second).unwrap(), second);
+        assert_eq!(
+            std::fs::read(&index).unwrap(),
+            before,
+            "the index was rewritten"
+        );
         std::fs::remove_dir_all(d).unwrap();
     }
 
