@@ -33,6 +33,14 @@
 //! clone is made before it locks, a grant moves the queued waker out,
 //! and wakers removed from or replaced in the queue are dropped after
 //! unlocking.
+//!
+//! Every path that returns permits ([`Semaphore::add_permits`], a
+//! dropped permit, a dropped `acquire` future that was already granted)
+//! goes through [`State::release`], which bounds the count left after
+//! granting at [`Semaphore::MAX_PERMITS`] as tokio does. The bound is
+//! checked under `state`, in the same critical section as the update,
+//! so two releases cannot both pass it; a release that would exceed it
+//! changes nothing, and the caller panics only once `state` is unlocked.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -82,6 +90,50 @@ impl State {
         woken
     }
 
+    /// Adds `added` permits and grants the queued waiters they let
+    /// proceed, as `permits += added` followed by [`grant`] would without
+    /// overflow, and returns their wakers. If the count left after granting would
+    /// exceed [`Semaphore::MAX_PERMITS`], changes nothing and returns the
+    /// part of `added` the waiters did not take, for [`overflow`]: as in
+    /// tokio's `add_permits_locked` (batch_semaphore.rs), permits handed
+    /// to waiters count against nothing. Plans first and commits after,
+    /// so no arithmetic here can overflow and nothing panics with `state`
+    /// held.
+    ///
+    /// [`grant`]: Self::grant
+    fn release(&mut self, added: usize) -> Result<Vec<Waker>, usize> {
+        // `free + extra` may not fit in a usize, so they stay apart until
+        // the waiters have taken their share.
+        let mut free = self.permits;
+        let mut extra = added;
+        let mut granted = 0;
+        for waiter in &self.waiters {
+            if waiter.needed <= free {
+                free -= waiter.needed;
+            } else if waiter.needed - free <= extra {
+                extra -= waiter.needed - free;
+                free = 0;
+            } else {
+                break;
+            }
+            granted += 1;
+        }
+        let left = free
+            .checked_add(extra)
+            .filter(|&left| left <= Semaphore::MAX_PERMITS)
+            .ok_or(extra)?;
+        self.permits = left;
+        let woken = self
+            .waiters
+            .drain(..granted)
+            .map(|waiter| {
+                waiter.outcome.store(WAITER_GRANTED, Ordering::Release);
+                waiter.waker
+            })
+            .collect();
+        Ok(woken)
+    }
+
     /// Whether the waiter owning `outcome` already wakes `waker`'s task.
     fn wakes(&self, outcome: &Arc<AtomicU8>, waker: &Waker) -> bool {
         self.waiters
@@ -120,6 +172,21 @@ fn lock(state: &StdMutex<State>) -> StdGuard<'_, State> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Fails a release that [`State::release`] rejected, given the permits
+/// left over once waiters were granted. Called with `state` unlocked;
+/// the messages are tokio's `add_permits_locked`. `#[track_caller]` here,
+/// on `Semaphore::release` and on `add_permits` puts the panic at the
+/// caller of `add_permits`; a permit's drop reports its `Drop` impl.
+#[cold]
+#[track_caller]
+fn overflow(rest: usize) -> ! {
+    let max = Semaphore::MAX_PERMITS;
+    if rest > max {
+        panic!("cannot add more than MAX_PERMITS permits ({max})");
+    }
+    panic!("number of added permits ({rest}) would overflow MAX_PERMITS ({max})")
+}
+
 fn wake_all(wakers: Vec<Waker>) {
     for waker in wakers {
         waker.wake();
@@ -128,8 +195,10 @@ fn wake_all(wakers: Vec<Waker>) {
 
 /// A queued `acquire`'s claim, settled on drop if its future never
 /// observed the outcome: a pending waiter leaves the queue, and a
-/// granted one hands its permits back. Outcomes are only ever set with
-/// `state` held, so reading one under it is final.
+/// granted one hands its permits back, which panics, as a permit's drop
+/// does, if that would take the count past [`Semaphore::MAX_PERMITS`].
+/// Outcomes are only ever set with `state` held, so reading one under it
+/// is final.
 struct Claim<'a> {
     state: &'a StdMutex<State>,
     outcome: Arc<AtomicU8>,
@@ -145,19 +214,19 @@ impl Drop for Claim<'_> {
         let mut state = lock(self.state);
         let mut removed = None;
         let woken = match self.outcome.load(Ordering::Acquire) {
-            WAITER_GRANTED => {
-                state.permits += self.needed;
-                state.grant()
-            }
+            WAITER_GRANTED => state.release(self.needed),
             WAITER_PENDING => {
                 removed = state.dequeue(&self.outcome);
-                state.grant()
+                Ok(state.grant())
             }
-            _ => Vec::new(),
+            _ => Ok(Vec::new()),
         };
         drop(state);
         drop(removed);
-        wake_all(woken);
+        match woken {
+            Ok(woken) => wake_all(woken),
+            Err(rest) => overflow(rest),
+        }
     }
 }
 
@@ -229,11 +298,14 @@ impl Semaphore {
     }
 
     /// Like [`new`](Self::new), but usable in a `const` context (e.g. a
-    /// `static Semaphore`) -- skips the `MAX_PERMITS` assertion `new`
-    /// makes, since panicking isn't available at const-eval time here;
-    /// a `permits` value this crate itself would never construct is the
-    /// caller's own responsibility to avoid.
+    /// `static Semaphore`). It makes the same `MAX_PERMITS` assertion, as
+    /// tokio's `const_new` does: in a `static` an out-of-range count is a
+    /// compile error, and at run time it panics.
     pub const fn const_new(permits: usize) -> Self {
+        assert!(
+            permits <= Self::MAX_PERMITS,
+            "a Semaphore cannot be created with more than Semaphore::MAX_PERMITS permits"
+        );
         Semaphore {
             state: StdMutex::new(State {
                 permits,
@@ -264,6 +336,15 @@ impl Semaphore {
     /// waiters that can now proceed -- useful for a semaphore whose
     /// capacity isn't fixed at creation (e.g. starting at zero and
     /// being fed permits as some external resource becomes available).
+    ///
+    /// # Panics
+    /// Panics, as tokio's does and with its messages, if the available
+    /// permits left after granting queued waiters would exceed
+    /// [`MAX_PERMITS`](Self::MAX_PERMITS). Unlike tokio, which may already
+    /// have granted waiters or added the permits when it panics, the
+    /// semaphore is then unchanged: no permit is added and no waiter is
+    /// granted.
+    #[track_caller]
     pub fn add_permits(&self, n: usize) {
         Self::release(&self.state, n);
     }
@@ -443,17 +524,31 @@ impl Semaphore {
         .await
     }
 
-    /// Gives `n` permits back (a guard's `Drop`, or [`add_permits`]),
-    /// then grants queued waiters (see [`State::grant`]).
+    /// Gives `n` permits back (a permit's `Drop`, or [`add_permits`]) and
+    /// grants queued waiters (see [`State::release`]), or, past
+    /// [`MAX_PERMITS`](Self::MAX_PERMITS), changes nothing and panics once
+    /// `state` is unlocked. Adding none does nothing, as in tokio.
+    ///
+    /// [`add_permits`]: Self::add_permits
+    #[track_caller]
     fn release(state: &StdMutex<State>, n: usize) {
+        if n == 0 {
+            return;
+        }
         let mut guard = lock(state);
-        guard.permits += n;
-        let woken = guard.grant();
+        let woken = guard.release(n);
         drop(guard);
-        wake_all(woken);
+        match woken {
+            Ok(woken) => wake_all(woken),
+            Err(rest) => overflow(rest),
+        }
     }
 }
 
+/// Dropping it returns its permits. As in tokio, that panics if the
+/// semaphore's available count would pass [`Semaphore::MAX_PERMITS`],
+/// which takes [`Semaphore::add_permits`] beyond the capacity in use;
+/// the permits are then not returned.
 pub struct SemaphorePermit<'a> {
     semaphore: &'a Semaphore,
     permits: usize,
@@ -473,6 +568,10 @@ impl Drop for SemaphorePermit<'_> {
     }
 }
 
+/// Dropping it returns its permits. As in tokio, that panics if the
+/// semaphore's available count would pass [`Semaphore::MAX_PERMITS`],
+/// which takes [`Semaphore::add_permits`] beyond the capacity in use;
+/// the permits are then not returned.
 pub struct OwnedSemaphorePermit {
     semaphore: Arc<Semaphore>,
     permits: usize,
@@ -503,13 +602,18 @@ impl OwnedSemaphorePermit {
     /// without releasing anything on its own.
     ///
     /// # Panics
-    /// Panics if `other` was acquired from a different `Semaphore`.
+    /// Panics if `other` was acquired from a different `Semaphore`, or if
+    /// the merged count would not fit in a `usize`; either way `self` is
+    /// unchanged and `other` releases its own permits as it drops.
     pub fn merge(&mut self, other: Self) {
         assert!(
             Arc::ptr_eq(&self.semaphore, &other.semaphore),
             "merge called with permits from different Semaphores"
         );
-        self.permits += other.permits;
+        let Some(permits) = self.permits.checked_add(other.permits) else {
+            panic!("merged permit count would overflow usize");
+        };
+        self.permits = permits;
         // Skip `other`'s own `Drop` -- it would release its permits
         // back, which its count has instead just been folded into
         // `self` to release later, together.
@@ -520,5 +624,48 @@ impl OwnedSemaphorePermit {
 impl Drop for OwnedSemaphorePermit {
     fn drop(&mut self) {
         Semaphore::release(&self.semaphore.state, self.permits);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    /// #1305: the check runs under `state` but panics only once it is
+    /// released, so the lock is never poisoned. Base, debug build: the
+    /// `+=` overflow panics with `state` held and poisons it.
+    #[test]
+    fn add_permits_overflow_does_not_poison_the_state_lock() {
+        let semaphore = Semaphore::new(1);
+        let result = catch_unwind(AssertUnwindSafe(|| semaphore.add_permits(usize::MAX)));
+        assert!(result.is_err(), "adding past MAX_PERMITS must panic");
+        assert!(!semaphore.state.is_poisoned());
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+
+    /// #1305: `merge` sums two counts outside any lock; the sum must not
+    /// wrap in a release build, and on a panic both permits stay as they
+    /// were (`other` is released by unwinding, `self` keeps its count).
+    #[test]
+    fn merge_past_usize_panics_without_wrapping() {
+        let semaphore = Arc::new(Semaphore::new(0));
+        // Never acquired, so never released: dropping it would overflow
+        // (and, while a failed assertion unwinds, abort the test binary).
+        let mut big = std::mem::ManuallyDrop::new(OwnedSemaphorePermit {
+            semaphore: semaphore.clone(),
+            permits: usize::MAX,
+        });
+        let one = OwnedSemaphorePermit {
+            semaphore: semaphore.clone(),
+            permits: 1,
+        };
+        let err = catch_unwind(AssertUnwindSafe(|| big.merge(one)))
+            .expect_err("a merged count past usize::MAX must panic");
+        let msg = err.downcast_ref::<String>().map(String::as_str);
+        let msg = msg.or_else(|| err.downcast_ref::<&str>().copied());
+        assert_eq!(msg, Some("merged permit count would overflow usize"));
+        assert_eq!(big.num_permits(), usize::MAX);
+        assert_eq!(semaphore.available_permits(), 1);
     }
 }
