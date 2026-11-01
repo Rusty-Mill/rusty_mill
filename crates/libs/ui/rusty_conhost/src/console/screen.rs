@@ -332,8 +332,9 @@ impl Screen {
             // conhost writes a glyph with the marks that follow it before
             // it meets the margin, so they join it, not the next row's;
             // the next slice may still hold some.
-            // A control is written alone, so no mark joins it. The move
-            // is fixed now: the run may end before it is made.
+            // A control is written alone, so no mark joins it: its move
+            // is made at once. Another's destination is fixed now, as the
+            // run may end before it is made.
             let rest = &text[consumed..];
             if self.grid.cursor.0 >= self.grid.cols && !self.c2 {
                 self.owed = Some(if wrap {
@@ -341,7 +342,8 @@ impl Screen {
                 } else {
                     Margin::Back(self.run.unwrap_or(0))
                 });
-                if !rest.is_empty() && (ends_run || !continues(rest)) {
+                let lone = control(text[consumed - 1]);
+                if lone || (!rest.is_empty() && !continues(rest)) {
                     emitted += self.end_write(out);
                 }
             }

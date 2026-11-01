@@ -2481,6 +2481,44 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_mark_in_the_next_slice_does_not_join_a_control_at_the_margin() {
+        let modes = [
+            (screen::PROCESSED_OUTPUT, "\x1b[80G"),
+            (
+                screen::PROCESSED_OUTPUT | screen::WRAP_AT_EOL_OUTPUT,
+                "\r\n",
+            ),
+        ];
+        for (control, shown) in [('\u{1}', '☺'), ('\0', ' ')] {
+            for (mode, moved) in modes {
+                let mut h = Host::new();
+                let [_, _, output] = h.connect(1, "");
+                h.set_mode(output, mode);
+                // The control is the last unit of the first slice, in the
+                // last column.
+                let lead = "b".repeat(WIDE_SLICE - 81);
+                let text = format!("{lead}\r{}{control}\u{301}x", "a".repeat(79));
+                assert_eq!(text.find(control), Some(WIDE_SLICE - 1));
+                assert_eq!(h.write_w(output, &text).status, msg::STATUS_SUCCESS);
+                let tail = format!("{shown}{moved}\u{301}x");
+                let shown_vt = String::from_utf8_lossy(&h.vt);
+                assert!(shown_vt.contains(&tail), "{control:?} mode {mode:#x}");
+                // With wrap the control keeps its row; without, x
+                // overwrites it after the mark.
+                let (x, y) = h.c.screen.cursor();
+                let (y, glyph) = if moved == "\r\n" {
+                    (y - 1, shown)
+                } else {
+                    (y, 'x')
+                };
+                assert_eq!(x, if moved == "\r\n" { 1 } else { 79 });
+                let cell = h.c.screen.grid().row(usize::from(y))[79];
+                assert_eq!((cell.ch, cell.cluster), (glyph, 0), "no mark on it");
+            }
+        }
+    }
+
+    #[test]
     fn a_stateful_expanding_code_page_keeps_its_state_across_slices() {
         let mut h = Host::new();
         h.c = Console::new(
