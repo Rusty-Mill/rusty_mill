@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rusty_uuid::Uuid;
 
 use super::*;
+use crate::AgentHomes;
 
 const CTL: &str = "/opt/rusty mux/bin/rusty-mux-ctl";
 
@@ -31,10 +32,19 @@ fn env(ctl: &str) -> Env {
     }
 }
 
-/// Runs `command` in `dir`, returning the exit and stdout.
-fn agent(command: fn(Option<PathBuf>) -> AgentCommand, dir: &Path, ctl: &str) -> (Exit, String) {
+/// Claude Code in `dir`, as `--dir DIR` gives.
+fn claude_in(dir: &Path) -> AgentArgs {
+    AgentArgs {
+        agents: vec![AgentKind::Claude],
+        scope: AgentScope::Dir(dir.into()),
+        dry_run: false,
+    }
+}
+
+/// Runs `command` for Claude Code in `dir`, returning the exit and stdout.
+fn agent(command: fn(AgentArgs) -> AgentCommand, dir: &Path, ctl: &str) -> (Exit, String) {
     let mut out = Vec::new();
-    let exit = run(&command(Some(dir.into())), &env(ctl), false, &mut out).expect("runs");
+    let exit = run(&command(claude_in(dir)), &env(ctl), false, &mut out).expect("runs");
     (exit, String::from_utf8(out).expect("UTF-8"))
 }
 
@@ -121,7 +131,7 @@ fn setup_then_remove_leaves_an_empty_directory_empty() {
     let dir = scratch();
     let (exit, out) = agent(AgentCommand::Setup, &dir, CTL);
     assert_eq!(exit, Exit::Ok);
-    assert!(out.starts_with("skill  installed"), "{out}");
+    assert!(out.starts_with("claude   skill  installed"), "{out}");
     assert_eq!(
         fs::read_to_string(dir.join("skills/rusty-mux/SKILL.md")).expect("skill"),
         SKILL
@@ -184,7 +194,7 @@ fn foreign_files_are_never_replaced() {
     fs::write(&skill, "my own notes").expect("write");
     let mut out = Vec::new();
     let refused = run(
-        &AgentCommand::Setup(Some(dir.clone())),
+        &AgentCommand::Setup(claude_in(&dir)),
         &env(CTL),
         false,
         &mut out,
@@ -199,7 +209,7 @@ fn foreign_files_are_never_replaced() {
     fs::remove_file(&skill).expect("rm");
     assert!(
         run(
-            &AgentCommand::Setup(Some(dir.clone())),
+            &AgentCommand::Setup(claude_in(&dir)),
             &env(CTL),
             false,
             &mut out
@@ -460,4 +470,396 @@ fn private_settings_stay_private_on_windows() {
     owner_only(&settings);
     assert_eq!(fs::read_to_string(&settings).expect("read"), "{}");
     assert!(!dir.join("settings.json.rusty-mux.bak").exists());
+}
+
+/// Runs `command` for `agents` with `home` as the home directory and the
+/// project directory, returning the exit and stdout.
+fn in_home(
+    command: fn(AgentArgs) -> AgentCommand,
+    agents: &[AgentKind],
+    scope: AgentScope,
+    dry_run: bool,
+    home: &Path,
+) -> Result<(Exit, String), String> {
+    let mut env = env(CTL);
+    env.agent_homes.home = Some(home.into());
+    env.here.dir = Some(home.join("project"));
+    let args = AgentArgs {
+        agents: agents.to_vec(),
+        scope,
+        dry_run,
+    };
+    let mut out = Vec::new();
+    let exit = run(&command(args), &env, false, &mut out)?;
+    Ok((exit, String::from_utf8(out).expect("UTF-8")))
+}
+
+/// Every file under `dir`, relative and sorted.
+fn tree(dir: &Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, into: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).expect("read dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                walk(root, &path, into);
+            } else {
+                let rel = path.strip_prefix(root).expect("under root");
+                into.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(dir, dir, &mut files);
+    files.sort();
+    files
+}
+
+#[test]
+fn each_agent_has_its_own_hook_and_a_shared_skill() {
+    let homes = AgentHomes {
+        home: Some("/h".into()),
+        ..AgentHomes::default()
+    };
+    let at = |agent, scope: &AgentScope| {
+        let layout =
+            layout::layout(agent, scope, &homes, Some(Path::new("/p")), CTL).expect("layout");
+        (layout.skill, layout.hook.path().to_path_buf())
+    };
+    let paths = |skill: &str, hook: &str| (PathBuf::from(skill), PathBuf::from(hook));
+    let user = AgentScope::User;
+    assert_eq!(
+        at(AgentKind::Claude, &user),
+        paths(
+            "/h/.claude/skills/rusty-mux/SKILL.md",
+            "/h/.claude/settings.json"
+        )
+    );
+    assert_eq!(
+        at(AgentKind::Codex, &user),
+        paths(
+            "/h/.agents/skills/rusty-mux/SKILL.md",
+            "/h/.codex/hooks.json"
+        )
+    );
+    assert_eq!(
+        at(AgentKind::OpenCode, &user),
+        paths(
+            "/h/.agents/skills/rusty-mux/SKILL.md",
+            "/h/.config/opencode/plugins/rusty-mux.js"
+        )
+    );
+    assert_eq!(
+        at(AgentKind::Pi, &user),
+        paths(
+            "/h/.agents/skills/rusty-mux/SKILL.md",
+            "/h/.pi/agent/extensions/rusty-mux.ts"
+        )
+    );
+    let project = AgentScope::Project;
+    assert_eq!(
+        at(AgentKind::Claude, &project),
+        paths(
+            "/p/.claude/skills/rusty-mux/SKILL.md",
+            "/p/.claude/settings.json"
+        )
+    );
+    assert_eq!(
+        at(AgentKind::Codex, &project),
+        paths(
+            "/p/.agents/skills/rusty-mux/SKILL.md",
+            "/p/.codex/hooks.json"
+        )
+    );
+    assert_eq!(
+        at(AgentKind::OpenCode, &project).1,
+        PathBuf::from("/p/.opencode/plugins/rusty-mux.js")
+    );
+    assert_eq!(
+        at(AgentKind::Pi, &project).1,
+        PathBuf::from("/p/.pi/extensions/rusty-mux.ts")
+    );
+}
+
+#[test]
+fn each_agents_variable_moves_its_user_directory() {
+    let mut homes = AgentHomes {
+        home: Some("/h".into()),
+        claude: Some("/c".into()),
+        codex: Some("/x".into()),
+        config: Some("/xdg".into()),
+        pi: Some("/pi".into()),
+    };
+    let hook = |agent| {
+        layout::layout(agent, &AgentScope::User, &homes, None, CTL)
+            .map(|l| l.hook.path().to_path_buf())
+    };
+    assert_eq!(hook(AgentKind::Claude), Ok("/c/settings.json".into()));
+    assert_eq!(hook(AgentKind::Codex), Ok("/x/hooks.json".into()));
+    assert_eq!(
+        hook(AgentKind::OpenCode),
+        Ok("/xdg/opencode/plugins/rusty-mux.js".into())
+    );
+    assert_eq!(
+        hook(AgentKind::Pi),
+        Ok("/pi/extensions/rusty-mux.ts".into())
+    );
+    // The shared skill lives under the home directory, which may be unknown.
+    homes.home = None;
+    let err = layout::layout(AgentKind::Codex, &AgentScope::User, &homes, None, CTL)
+        .err()
+        .expect("no home");
+    assert!(err.contains("HOME"), "{err}");
+    // Project scope needs the current directory.
+    assert!(layout::layout(AgentKind::Pi, &AgentScope::Project, &homes, None, CTL).is_err());
+}
+
+#[test]
+fn codex_takes_the_claude_hook_shape_in_hooks_json() {
+    let home = scratch();
+    let codex = home.join(".codex");
+    fs::create_dir_all(&codex).expect("dir");
+    let original = "{\"hooks\": {\"Stop\": []}, \"x\": 1}\n";
+    fs::write(codex.join("hooks.json"), original).expect("write");
+    let setup = in_home(
+        AgentCommand::Setup,
+        &[AgentKind::Codex],
+        AgentScope::User,
+        false,
+        &home,
+    );
+    let (exit, out) = setup.expect("setup");
+    assert_eq!(exit, Exit::Ok);
+    assert!(out.contains("codex    hook   installed"), "{out}");
+    let hooks = json(&fs::read_to_string(codex.join("hooks.json")).expect("read"));
+    assert_eq!(
+        hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str(),
+        Some(ours().as_str())
+    );
+    assert_eq!(hooks["x"], Value::from(1u64));
+    assert_eq!(
+        fs::read_to_string(home.join(".agents/skills/rusty-mux/SKILL.md")).expect("skill"),
+        SKILL
+    );
+
+    let removed = in_home(
+        AgentCommand::Remove,
+        &[AgentKind::Codex],
+        AgentScope::User,
+        false,
+        &home,
+    );
+    assert_eq!(removed.expect("remove").0, Exit::Ok);
+    assert_eq!(
+        fs::read_to_string(codex.join("hooks.json")).expect("read"),
+        original,
+        "restored byte for byte"
+    );
+    assert_eq!(tree(&home), [".codex/hooks.json"]);
+}
+
+#[test]
+fn opencode_and_pi_hooks_are_whole_files_naming_this_ctl() {
+    let home = scratch();
+    let agents = [AgentKind::OpenCode, AgentKind::Pi];
+    let (exit, out) =
+        in_home(AgentCommand::Setup, &agents, AgentScope::User, false, &home).expect("setup");
+    assert_eq!(exit, Exit::Ok, "{out}");
+    let plugin = home.join(".config/opencode/plugins/rusty-mux.js");
+    let extension = home.join(".pi/agent/extensions/rusty-mux.ts");
+    assert_eq!(
+        fs::read_to_string(&plugin).expect("plugin"),
+        scripts::opencode(CTL)
+    );
+    assert_eq!(
+        fs::read_to_string(&extension).expect("extension"),
+        scripts::pi(CTL)
+    );
+    for text in [scripts::opencode(CTL), scripts::pi(CTL)] {
+        assert!(text.starts_with(scripts::MARK));
+        assert!(
+            text.contains(r#"const CTL = "/opt/rusty mux/bin/rusty-mux-ctl";"#),
+            "{text}"
+        );
+    }
+    let status = in_home(
+        AgentCommand::Status,
+        &agents,
+        AgentScope::User,
+        false,
+        &home,
+    );
+    assert_eq!(status.expect("status").0, Exit::Ok);
+
+    // A moved ctl makes both outdated, and setup rewrites them.
+    let moved = |command: fn(AgentArgs) -> AgentCommand| {
+        let mut env = env("/new/rusty-mux-ctl");
+        env.agent_homes.home = Some(home.clone());
+        let args = AgentArgs {
+            agents: agents.to_vec(),
+            scope: AgentScope::User,
+            dry_run: false,
+        };
+        let mut out = Vec::new();
+        let exit = run(&command(args), &env, false, &mut out).expect("runs");
+        (exit, String::from_utf8(out).expect("UTF-8"))
+    };
+    let (exit, out) = moved(AgentCommand::Status);
+    assert_eq!(exit, Exit::Failed);
+    assert_eq!(out.matches("hook   outdated").count(), 2, "{out}");
+    let (_, out) = moved(AgentCommand::Setup);
+    assert_eq!(out.matches("hook   updated").count(), 2, "{out}");
+    assert_eq!(
+        fs::read_to_string(&plugin).expect("plugin"),
+        scripts::opencode("/new/rusty-mux-ctl")
+    );
+
+    let removed = in_home(
+        AgentCommand::Remove,
+        &agents,
+        AgentScope::User,
+        false,
+        &home,
+    );
+    assert!(
+        removed
+            .expect("remove")
+            .1
+            .contains("opencode skill  removed")
+    );
+    assert!(tree(&home).is_empty(), "{:?}", tree(&home));
+}
+
+#[test]
+fn a_path_cannot_end_the_scripts_string_early() {
+    let ctl = "/a\"b\\c\n';`${x}`/rusty-mux-ctl";
+    for text in [scripts::opencode(ctl), scripts::pi(ctl)] {
+        let line = text
+            .lines()
+            .find_map(|l| l.strip_prefix("const CTL = "))
+            .expect("the CTL line");
+        let literal = line.strip_suffix(';').expect("one statement");
+        assert_eq!(json(literal).as_str(), Some(ctl), "{line}");
+    }
+}
+
+#[test]
+fn a_foreign_hook_file_is_never_replaced() {
+    let home = scratch();
+    let plugin = home.join(".config/opencode/plugins/rusty-mux.js");
+    fs::create_dir_all(plugin.parent().expect("parent")).expect("dir");
+    fs::write(&plugin, "export const Mine = async () => ({});\n").expect("write");
+    let refused = in_home(
+        AgentCommand::Setup,
+        &[AgentKind::Codex, AgentKind::OpenCode],
+        AgentScope::User,
+        false,
+        &home,
+    );
+    assert!(refused.expect_err("refused").contains("rusty-mux.js"));
+    assert_eq!(
+        tree(&home),
+        [".config/opencode/plugins/rusty-mux.js"],
+        "nothing is written for any agent"
+    );
+    let (_, out) = in_home(
+        AgentCommand::Remove,
+        &[AgentKind::OpenCode],
+        AgentScope::User,
+        false,
+        &home,
+    )
+    .expect("remove");
+    assert!(out.contains("opencode hook   absent"), "{out}");
+    assert!(plugin.exists());
+}
+
+#[test]
+fn the_shared_skill_stays_while_another_agent_uses_it() {
+    let home = scratch();
+    let all = [AgentKind::Codex, AgentKind::OpenCode, AgentKind::Pi];
+    let (_, out) =
+        in_home(AgentCommand::Setup, &all, AgentScope::User, false, &home).expect("setup");
+    assert_eq!(out.matches("skill  installed").count(), 3, "{out}");
+    let skill = home.join(".agents/skills/rusty-mux/SKILL.md");
+
+    let (_, out) = in_home(
+        AgentCommand::Remove,
+        &[AgentKind::Codex],
+        AgentScope::User,
+        false,
+        &home,
+    )
+    .expect("remove codex");
+    assert!(out.contains("codex    skill  shared"), "{out}");
+    assert!(skill.exists());
+    let (_, out) = in_home(
+        AgentCommand::Remove,
+        &[AgentKind::OpenCode, AgentKind::Pi],
+        AgentScope::User,
+        false,
+        &home,
+    )
+    .expect("remove the rest");
+    assert!(out.contains("opencode skill  removed"), "{out}");
+    assert!(tree(&home).is_empty(), "{:?}", tree(&home));
+}
+
+#[test]
+fn dry_run_reports_and_writes_nothing() {
+    let home = scratch();
+    let all = AgentKind::ALL;
+    let (exit, out) =
+        in_home(AgentCommand::Setup, &all, AgentScope::Project, true, &home).expect("dry setup");
+    assert_eq!(exit, Exit::Ok);
+    assert!(out.starts_with("dry run: nothing written\n"), "{out}");
+    assert_eq!(out.matches(" installed ").count(), 8, "{out}");
+    assert!(tree(&home).is_empty(), "{:?}", tree(&home));
+
+    in_home(AgentCommand::Setup, &all, AgentScope::Project, false, &home).expect("setup");
+    let before = tree(&home);
+    assert_eq!(before.len(), 6, "{before:?}");
+    let (_, out) =
+        in_home(AgentCommand::Remove, &all, AgentScope::Project, true, &home).expect("dry remove");
+    assert_eq!(out.matches(" removed ").count(), 8, "{out}");
+    assert_eq!(tree(&home), before, "nothing removed");
+
+    let mut env = env(CTL);
+    env.here.dir = Some(home.join("project"));
+    let args = AgentArgs {
+        agents: vec![AgentKind::Pi],
+        scope: AgentScope::Project,
+        dry_run: true,
+    };
+    let mut out = Vec::new();
+    run(&AgentCommand::Setup(args), &env, true, &mut out).expect("json");
+    let first = String::from_utf8(out).expect("UTF-8");
+    let first = json(first.lines().next().expect("a line"));
+    assert_eq!(first["agent"].as_str(), Some("pi"));
+    assert_eq!(first["dry_run"], Value::Bool(true));
+}
+
+#[test]
+fn status_names_an_unreadable_item_instead_of_failing() {
+    let home = scratch();
+    let codex = home.join(".codex");
+    fs::create_dir_all(&codex).expect("dir");
+    fs::write(codex.join("hooks.json"), "{ not json").expect("write");
+    let (exit, out) = in_home(
+        AgentCommand::Status,
+        &[AgentKind::Codex],
+        AgentScope::User,
+        false,
+        &home,
+    )
+    .expect("status reports");
+    assert_eq!(exit, Exit::Failed);
+    assert!(out.contains("codex    hook   unreadable"), "{out}");
+    assert!(out.contains("codex    skill  missing"), "{out}");
+    let setup = in_home(
+        AgentCommand::Setup,
+        &[AgentKind::Codex],
+        AgentScope::User,
+        false,
+        &home,
+    );
+    assert!(setup.is_err(), "setup refuses it with the reason");
 }

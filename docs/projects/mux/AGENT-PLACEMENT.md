@@ -44,7 +44,10 @@ rule between "here" and "refused", and this page changes with it.
 
 ## The session-start hook
 
-`agent setup` adds a Claude Code `SessionStart` hook that runs
-`rusty-mux-ctl agent hook`. Inside a block it prints one paragraph naming the
-block, window and session and pointing at the skill; elsewhere it prints
-nothing, so the hook costs nothing outside rusty_mux.
+`agent setup` adds a hook that runs `rusty-mux-ctl agent hook` when the
+agent starts: a `SessionStart` hook for Claude Code and Codex, a plugin for
+OpenCode and an extension for Pi, which add its text to the system prompt.
+Inside a block it prints one paragraph naming the block, window and session
+and pointing at the skill; elsewhere it prints nothing, so the hook costs
+nothing outside rusty_mux. Codex runs a new hook only after it is trusted
+(`/hooks` in Codex).

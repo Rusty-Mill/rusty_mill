@@ -1,4 +1,5 @@
-//! The session-start hook in Claude Code's `settings.json`, as pure edits of
+//! The session-start hook in Claude Code's `settings.json` or Codex's
+//! `hooks.json` (one shape), as pure edits of
 //! the parsed file: everything else in it is kept as it was.
 //!
 //! The hook is one group in `hooks.SessionStart` whose single command runs
@@ -100,7 +101,7 @@ pub(crate) fn with_hook(mut settings: Value, command: &str) -> Result<Value, Str
     let had = state(&settings, command)?;
     let groups = groups_mut(&mut settings)?;
     match had {
-        State::Installed | State::Foreign => {}
+        State::Installed | State::Foreign | State::Unreadable => {}
         State::Outdated => {
             for hook in groups.iter_mut().flat_map(hooks_of_mut) {
                 if is_ours(hook) {

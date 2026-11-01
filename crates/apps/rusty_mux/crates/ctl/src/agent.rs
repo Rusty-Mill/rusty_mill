@@ -1,17 +1,23 @@
 //! `agent setup|status|remove`: the rusty-mux skill and a session-start
-//! hook for Claude Code, in its config directory (`$CLAUDE_CONFIG_DIR`, else
-//! `~/.claude`, or `--dir`, such as a project's `.claude`). `agent hook` is
-//! what the hook runs: inside a block it tells the agent where it is.
+//! hook for Claude Code, Codex, OpenCode and Pi, for every project (each
+//! agent's own config directory) or for one (`--project`, under the current
+//! directory). `agent hook` is what the hooks run: inside a block it tells
+//! the agent where it is. Paths per agent: [`layout`].
 //!
-//! Setup writes `skills/rusty-mux/SKILL.md` and adds one hook to
-//! `settings.json`, keeping everything else in it. Before its first edit of
-//! an existing `settings.json` it keeps the file's bytes in
-//! `settings.json.rusty-mux.bak`; `remove` puts them back when nothing else
-//! changed since, so removal leaves the file as it was. Nothing is written
-//! until every file has been checked, and a skill or settings file setup
-//! did not write is never replaced. Placement rules:
+//! Claude Code and Codex take the hook in a JSON settings file, which setup
+//! edits, keeping everything else in it. Before its first edit of an
+//! existing file it keeps the file's bytes in `FILE.rusty-mux.bak`;
+//! `remove` puts them back when nothing else changed since, so removal
+//! leaves the file as it was. OpenCode and Pi take the hook as a file of
+//! code, which setup writes whole ([`scripts`]). Nothing is written until
+//! every file of every chosen agent has been checked, a file setup did not
+//! write is never replaced, and `--dry-run` stops after the check. Codex,
+//! OpenCode and Pi share one skill file; `remove` keeps it while another of
+//! them still has its hook. Placement rules:
 //! `docs/projects/mux/AGENT-PLACEMENT.md`.
 
+mod layout;
+mod scripts;
 mod settings;
 
 use std::fs;
@@ -20,8 +26,9 @@ use std::path::{Path, PathBuf};
 
 use rusty_json::{Map, Value};
 
-use crate::cli::{AgentCommand, Defaults};
+use crate::cli::{AgentArgs, AgentCommand, AgentKind, AgentScope, Defaults};
 use crate::{Env, Exit};
+use layout::{Hook, Layout};
 
 /// The skill, our own text.
 const SKILL: &str = include_str!("agent/SKILL.md");
@@ -38,9 +45,12 @@ pub(crate) enum State {
     Missing,
     /// A file by that name that setup did not write.
     Foreign,
+    /// A file `status` could not read, or a settings file it cannot edit;
+    /// setup and remove refuse it with the reason.
+    Unreadable,
 }
 
-/// What setup or remove did to one file.
+/// What setup or remove did, or with `--dry-run` would do, to one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Done {
     Installed,
@@ -48,32 +58,19 @@ enum Done {
     Unchanged,
     Removed,
     Absent,
-    /// A foreign skill, left alone.
+    /// A foreign file, left alone.
     Kept,
+    /// The shared skill, left for another agent whose hook is installed.
+    Shared,
 }
 
-/// One line of output: a part, what it is or what was done, and its file.
+/// One line of output: an agent, a part, what it is or what was done, and
+/// its file.
 struct Line {
+    agent: AgentKind,
     part: &'static str,
     word: &'static str,
     path: PathBuf,
-}
-
-/// The files setup manages in an agent config directory.
-struct Files {
-    skill: PathBuf,
-    settings: PathBuf,
-    backup: PathBuf,
-}
-
-impl Files {
-    fn in_dir(dir: &Path) -> Self {
-        Self {
-            skill: dir.join("skills").join("rusty-mux").join("SKILL.md"),
-            settings: dir.join("settings.json"),
-            backup: dir.join("settings.json.rusty-mux.bak"),
-        }
-    }
 }
 
 /// Runs an `agent` command, printing one line per file to `out`.
@@ -83,40 +80,62 @@ pub(crate) fn run(
     json: bool,
     out: &mut dyn io::Write,
 ) -> Result<Exit, String> {
-    let (lines, exit) = match command {
+    let (args, lines, exit) = match command {
         AgentCommand::Hook => {
             let text = hook_text(&env.here, env.ctl.as_deref()).unwrap_or_default();
             return print(out, &text);
         }
-        AgentCommand::Setup(dir) => (setup(&files(dir, env)?, &hook_command(env)?)?, Exit::Ok),
-        AgentCommand::Remove(dir) => (remove(&files(dir, env)?)?, Exit::Ok),
-        AgentCommand::Status(dir) => {
-            let files = files(dir, env)?;
-            let (skill, hook) = status(&files, &hook_command(env)?)?;
-            let exit = match (skill, hook) {
-                (State::Installed, State::Installed) => Exit::Ok,
-                _ => Exit::Failed,
-            };
-            let lines = vec![
-                line("skill", state_word(skill), &files.skill),
-                line("hook", state_word(hook), &files.settings),
-            ];
-            (lines, exit)
+        AgentCommand::Setup(args) => (args, setup(&layouts(args, env)?, args.dry_run)?, Exit::Ok),
+        AgentCommand::Remove(args) => {
+            let others = layouts(&everyone(args), env)?;
+            (
+                args,
+                remove(&layouts(args, env)?, &others, args.dry_run)?,
+                Exit::Ok,
+            )
+        }
+        AgentCommand::Status(args) => {
+            let lines = status(&layouts(args, env)?);
+            let current = lines.iter().all(|l| l.word == state_word(State::Installed));
+            (args, lines, if current { Exit::Ok } else { Exit::Failed })
         }
     };
-    let text: Vec<String> = lines.iter().map(|l| render(l, json)).collect();
+    let mut text: Vec<String> = Vec::new();
+    if args.dry_run && !json {
+        text.push("dry run: nothing written".into());
+    }
+    text.extend(lines.iter().map(|l| render(l, json, args.dry_run)));
     print(out, &text.join("\n"))?;
     Ok(exit)
 }
 
-/// The files in `--dir`, else in the agent's usual config directory.
-fn files(dir: &Option<PathBuf>, env: &Env) -> Result<Files, String> {
-    dir.as_deref()
-        .or(env.agent_dir.as_deref())
-        .map(Files::in_dir)
-        .ok_or_else(|| {
-            "no agent config directory: pass --dir, or set CLAUDE_CONFIG_DIR or HOME".into()
+/// The chosen agents' layouts.
+fn layouts(args: &AgentArgs, env: &Env) -> Result<Vec<Layout>, String> {
+    let ctl = ctl_path(env)?;
+    args.agents
+        .iter()
+        .map(|&agent| {
+            layout::layout(
+                agent,
+                &args.scope,
+                &env.agent_homes,
+                env.here.dir.as_deref(),
+                ctl,
+            )
         })
+        .collect()
+}
+
+/// Every agent the scope allows, to find who else uses a shared skill.
+fn everyone(args: &AgentArgs) -> AgentArgs {
+    let agents = match args.scope {
+        AgentScope::Dir(_) => vec![AgentKind::Claude],
+        AgentScope::User | AgentScope::Project => AgentKind::ALL.to_vec(),
+    };
+    AgentArgs {
+        agents,
+        ..args.clone()
+    }
 }
 
 fn print(out: &mut dyn io::Write, text: &str) -> Result<Exit, String> {
@@ -144,125 +163,249 @@ fn hook_text(here: &Defaults, ctl: Option<&Path>) -> Option<String> {
     Some(text)
 }
 
-fn hook_command(env: &Env) -> Result<String, String> {
+fn ctl_path(env: &Env) -> Result<&str, String> {
     let ctl = env
         .ctl
         .as_deref()
         .ok_or("cannot tell where rusty-mux-ctl is installed")?;
-    let ctl = ctl
-        .to_str()
-        .ok_or_else(|| format!("{}: the path is not UTF-8", ctl.display()))?;
-    Ok(settings::command(ctl))
+    ctl.to_str()
+        .ok_or_else(|| format!("{}: the path is not UTF-8", ctl.display()))
 }
 
-fn status(files: &Files, command: &str) -> Result<(State, State), String> {
-    let skill = skill_state(&files.skill)?;
-    let hook = match read(&files.settings)? {
-        None => State::Missing,
-        Some((_, value)) => settings::state(&value, command).map_err(|e| at(&files.settings, e))?,
-    };
-    Ok((skill, hook))
-}
-
-/// Checks both files, then writes what is missing or outdated.
-fn setup(files: &Files, command: &str) -> Result<Vec<Line>, String> {
-    let skill = skill_state(&files.skill)?;
-    if skill == State::Foreign {
-        return Err(format!(
-            "{}: not written by agent setup; move it away first",
-            files.skill.display()
+/// Each item's state; one that cannot be read is `Unreadable`, not an error.
+fn status(layouts: &[Layout]) -> Vec<Line> {
+    let mut lines = Vec::new();
+    for layout in layouts {
+        let skill = skill_state(&layout.skill).unwrap_or(State::Unreadable);
+        let hook = hook_state(&layout.hook).unwrap_or(State::Unreadable);
+        lines.push(line(
+            layout.agent,
+            "skill",
+            state_word(skill),
+            &layout.skill,
+        ));
+        lines.push(line(
+            layout.agent,
+            "hook",
+            state_word(hook),
+            layout.hook.path(),
         ));
     }
-    let existing = read(&files.settings)?;
-    let hook = match &existing {
-        None => State::Missing,
-        Some((_, value)) => settings::state(value, command).map_err(|e| at(&files.settings, e))?,
-    };
+    lines
+}
 
-    if skill != State::Installed {
-        if let Some(parent) = files.skill.parent() {
-            fs::create_dir_all(parent).map_err(|e| at(parent, e))?;
+/// The state of the hook `hook` describes.
+fn hook_state(hook: &Hook) -> Result<State, String> {
+    match hook {
+        Hook::Settings { file, command, .. } => match read(file)? {
+            None => Ok(State::Missing),
+            Some((_, value)) => settings::state(&value, command).map_err(|e| at(file, e)),
+        },
+        Hook::Script { file, text } => marked_state(file, text, |t| t.starts_with(scripts::MARK)),
+    }
+}
+
+/// Whether a hook of ours is there, current or not.
+fn has_hook(hook: &Hook) -> Result<bool, String> {
+    Ok(matches!(
+        hook_state(hook)?,
+        State::Installed | State::Outdated
+    ))
+}
+
+/// Checks every agent's files, then writes what is missing or outdated.
+fn setup(layouts: &[Layout], dry_run: bool) -> Result<Vec<Line>, String> {
+    let mut plan = Vec::new();
+    for layout in layouts {
+        let skill = skill_state(&layout.skill)?;
+        if skill == State::Foreign {
+            return Err(foreign(&layout.skill));
         }
-        write(&files.skill, SKILL)?;
+        let hook = hook_state(&layout.hook)?;
+        if hook == State::Foreign {
+            return Err(foreign(layout.hook.path()));
+        }
+        plan.push((layout, skill, hook));
     }
-    if hook != State::Installed {
-        let value = match existing {
-            Some((text, value)) => {
-                if hook == State::Missing && !exists(&files.backup)? {
-                    let protection = permissions(&files.settings)?;
-                    create(&files.backup, &text, protection.as_ref())
-                        .map_err(|e| at(&files.backup, e))?;
+    let mut lines = Vec::new();
+    for (layout, skill, hook) in plan {
+        // A skill shared with an agent earlier in the plan is written once.
+        if skill != State::Installed && !dry_run && skill_state(&layout.skill)? != State::Installed
+        {
+            write_new(&layout.skill, SKILL)?;
+        }
+        if hook != State::Installed && !dry_run {
+            install_hook(&layout.hook, hook)?;
+        }
+        lines.push(line(
+            layout.agent,
+            "skill",
+            done_word(set_done(skill)),
+            &layout.skill,
+        ));
+        lines.push(line(
+            layout.agent,
+            "hook",
+            done_word(set_done(hook)),
+            layout.hook.path(),
+        ));
+    }
+    Ok(lines)
+}
+
+fn foreign(path: &Path) -> String {
+    format!(
+        "{}: not written by agent setup; move it away first",
+        path.display()
+    )
+}
+
+fn install_hook(hook: &Hook, state: State) -> Result<(), String> {
+    match hook {
+        Hook::Script { file, text } => write_new(file, text),
+        Hook::Settings {
+            file,
+            backup,
+            command,
+        } => {
+            let value = match read(file)? {
+                Some((text, value)) => {
+                    if state == State::Missing && !exists(backup)? {
+                        let protection = permissions(file)?;
+                        create(backup, &text, protection.as_ref()).map_err(|e| at(backup, e))?;
+                    }
+                    value
                 }
-                value
-            }
-            None => Value::Object(Map::new()),
-        };
-        let value = settings::with_hook(value, command).map_err(|e| at(&files.settings, e))?;
-        write(&files.settings, &pretty(&value))?;
+                None => Value::Object(Map::new()),
+            };
+            let value = settings::with_hook(value, command).map_err(|e| at(file, e))?;
+            write_new(file, &pretty(&value))
+        }
     }
-    Ok(vec![
-        line("skill", done_word(set_done(skill)), &files.skill),
-        line("hook", done_word(set_done(hook)), &files.settings),
-    ])
+}
+
+/// Writes `text` to `path`, making its directory first.
+fn write_new(path: &Path, text: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| at(parent, e))?;
+    }
+    write(path, text)
 }
 
 fn set_done(state: State) -> Done {
     match state {
         State::Installed => Done::Unchanged,
         State::Outdated => Done::Updated,
-        State::Missing | State::Foreign => Done::Installed,
+        State::Missing | State::Foreign | State::Unreadable => Done::Installed,
     }
 }
 
-/// Deletes our skill (and its directory once empty) and our hook,
-/// restoring the backed-up settings when nothing else changed since.
-fn remove(files: &Files) -> Result<Vec<Line>, String> {
-    let skill = match skill_state(&files.skill)? {
-        State::Missing => Done::Absent,
-        State::Foreign => Done::Kept,
-        State::Installed | State::Outdated => {
-            fs::remove_file(&files.skill).map_err(|e| at(&files.skill, e))?;
-            // The skill's directory, then `skills` if that leaves it empty.
-            let dir = files.skill.parent();
-            remove_empty_dir(dir)?;
-            remove_empty_dir(dir.and_then(Path::parent))?;
-            Done::Removed
+/// Deletes our skills (and their directories once empty) and our hooks,
+/// restoring backed-up settings when nothing else changed since. A skill
+/// another agent of `everyone` still uses is kept.
+fn remove(layouts: &[Layout], everyone: &[Layout], dry_run: bool) -> Result<Vec<Line>, String> {
+    let mut plan = Vec::new();
+    for layout in layouts {
+        let skill = skill_state(&layout.skill)?;
+        let hook = has_hook(&layout.hook)?;
+        let mut shared = false;
+        for other in everyone.iter().filter(|o| layout.shares_skill(o)) {
+            let leaving = layouts.iter().any(|l| l.agent == other.agent);
+            shared |= !leaving && has_hook(&other.hook)?;
         }
-    };
-    let hook = remove_hook(files)?;
-    Ok(vec![
-        line("skill", done_word(skill), &files.skill),
-        line("hook", done_word(hook), &files.settings),
-    ])
+        plan.push((layout, skill, hook, shared));
+    }
+    let mut lines = Vec::new();
+    for (layout, skill, hook, shared) in plan {
+        let skill = match skill {
+            State::Missing => Done::Absent,
+            State::Foreign | State::Unreadable => Done::Kept,
+            State::Installed | State::Outdated if shared => Done::Shared,
+            State::Installed | State::Outdated => {
+                if !dry_run {
+                    remove_skill(&layout.skill)?;
+                }
+                Done::Removed
+            }
+        };
+        let hook = match (hook, &layout.hook) {
+            (false, _) => Done::Absent,
+            (true, Hook::Script { file, .. }) => {
+                if !dry_run {
+                    fs::remove_file(file).map_err(|e| at(file, e))?;
+                    remove_empty_dir(file.parent())?;
+                }
+                Done::Removed
+            }
+            (true, Hook::Settings { file, backup, .. }) if !dry_run => remove_hook(file, backup)?,
+            (true, Hook::Settings { .. }) => Done::Removed,
+        };
+        lines.push(line(layout.agent, "skill", done_word(skill), &layout.skill));
+        lines.push(line(
+            layout.agent,
+            "hook",
+            done_word(hook),
+            layout.hook.path(),
+        ));
+    }
+    Ok(lines)
 }
 
-fn remove_hook(files: &Files) -> Result<Done, String> {
-    let backup = read(&files.backup)?;
-    let done = match read(&files.settings)? {
+/// Deletes the skill, then its directory and `skills` if that leaves them
+/// empty. A skill an earlier agent of the same command removed is gone.
+fn remove_skill(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        other => other.map_err(|e| at(path, e))?,
+    }
+    let dir = path.parent();
+    remove_empty_dir(dir)?;
+    remove_empty_dir(dir.and_then(Path::parent))
+}
+
+fn remove_hook(file: &Path, backup_path: &Path) -> Result<Done, String> {
+    let backup = read(backup_path)?;
+    let done = match read(file)? {
         None => Done::Absent,
         Some((_, value)) => {
-            let ours = settings::has_hook(&value).map_err(|e| at(&files.settings, e))?;
+            let ours = settings::has_hook(&value).map_err(|e| at(file, e))?;
             if !ours {
                 Done::Absent
             } else {
                 let before = backup.as_ref().map(|(_, before)| before);
-                let value =
-                    settings::without_hook(value, before).map_err(|e| at(&files.settings, e))?;
+                let value = settings::without_hook(value, before).map_err(|e| at(file, e))?;
                 match &backup {
-                    Some((text, before)) if *before == value => write(&files.settings, text)?,
+                    Some((text, before)) if *before == value => write(file, text)?,
                     None if value == Value::Object(Map::new()) => {
-                        fs::remove_file(&files.settings).map_err(|e| at(&files.settings, e))?
+                        fs::remove_file(file).map_err(|e| at(file, e))?
                     }
-                    _ => write(&files.settings, &pretty(&value))?,
+                    _ => write(file, &pretty(&value))?,
                 }
                 Done::Removed
             }
         }
     };
     if backup.is_some() {
-        fs::remove_file(&files.backup).map_err(|e| at(&files.backup, e))?;
+        fs::remove_file(backup_path).map_err(|e| at(backup_path, e))?;
     }
     Ok(done)
+}
+
+fn skill_state(path: &Path) -> Result<State, String> {
+    marked_state(path, SKILL, |text| text.contains(MARK))
+}
+
+/// `Installed` when the file at `path` holds `want`, `Outdated` when it is
+/// ours by `is_ours` but differs, `Foreign` otherwise.
+fn marked_state(path: &Path, want: &str, is_ours: fn(&str) -> bool) -> Result<State, String> {
+    match fs::read_to_string(path) {
+        Ok(text) if text == want => Ok(State::Installed),
+        Ok(text) if is_ours(&text) => Ok(State::Outdated),
+        Ok(_) => Ok(State::Foreign),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(State::Missing),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => Ok(State::Foreign),
+        Err(e) => Err(at(path, e)),
+    }
 }
 
 fn remove_empty_dir(dir: Option<&Path>) -> Result<(), String> {
@@ -277,17 +420,6 @@ fn remove_empty_dir(dir: Option<&Path>) -> Result<(), String> {
             Ok(())
         }
         other => other.map_err(|e| at(dir, e)),
-    }
-}
-
-fn skill_state(path: &Path) -> Result<State, String> {
-    match fs::read_to_string(path) {
-        Ok(text) if text == SKILL => Ok(State::Installed),
-        Ok(text) if text.contains(MARK) => Ok(State::Outdated),
-        Ok(_) => Ok(State::Foreign),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(State::Missing),
-        Err(e) if e.kind() == io::ErrorKind::InvalidData => Ok(State::Foreign),
-        Err(e) => Err(at(path, e)),
     }
 }
 
@@ -387,8 +519,9 @@ fn at(path: &Path, error: impl std::fmt::Display) -> String {
     format!("{}: {error}", path.display())
 }
 
-fn line(part: &'static str, word: &'static str, path: &Path) -> Line {
+fn line(agent: AgentKind, part: &'static str, word: &'static str, path: &Path) -> Line {
     Line {
+        agent,
         part,
         word,
         path: path.to_path_buf(),
@@ -401,6 +534,7 @@ const fn state_word(state: State) -> &'static str {
         State::Outdated => "outdated",
         State::Missing => "missing",
         State::Foreign => "foreign",
+        State::Unreadable => "unreadable",
     }
 }
 
@@ -412,18 +546,24 @@ const fn done_word(done: Done) -> &'static str {
         Done::Removed => "removed",
         Done::Absent => "absent",
         Done::Kept => "kept",
+        Done::Shared => "shared",
     }
 }
 
-fn render(line: &Line, json: bool) -> String {
+fn render(line: &Line, json: bool, dry_run: bool) -> String {
     let path = line.path.display().to_string();
+    let agent = line.agent.name();
     if !json {
-        return format!("{:<6} {:<10} {path}", line.part, line.word);
+        return format!("{agent:<9}{:<6} {:<10} {path}", line.part, line.word);
     }
     let mut map = Map::new();
+    map.insert("agent".into(), agent.into());
     map.insert("part".into(), line.part.into());
     map.insert("state".into(), line.word.into());
     map.insert("path".into(), path.into());
+    if dry_run {
+        map.insert("dry_run".into(), true.into());
+    }
     Value::Object(map).to_json_string()
 }
 
