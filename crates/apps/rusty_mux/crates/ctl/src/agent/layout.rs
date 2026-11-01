@@ -49,13 +49,6 @@ impl Hook {
     }
 }
 
-impl Layout {
-    /// Whether `other` keeps its skill in the same file as this one.
-    pub fn shares_skill(&self, other: &Self) -> bool {
-        self.agent != other.agent && self.skill == other.skill
-    }
-}
-
 /// The layout of `agent` in `scope` for the ctl at `ctl`; `cwd` is the
 /// project directory in project scope.
 pub(super) fn layout(

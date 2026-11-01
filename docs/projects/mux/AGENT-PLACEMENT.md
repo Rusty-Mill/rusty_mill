@@ -50,4 +50,11 @@ OpenCode and an extension for Pi, which add its text to the system prompt.
 Inside a block it prints one paragraph naming the block, window and session
 and pointing at the skill; elsewhere it prints nothing, so the hook costs
 nothing outside rusty_mux. Codex runs a new hook only after it is trusted
-(`/hooks` in Codex).
+(`/hooks` in Codex), and a project's hook only in a project whose `.codex`
+layer is trusted.
+
+`agent setup --project` writes the same files under the current directory.
+Each hook names this machine's ctl by absolute path, so a hook committed to
+a repository fails quietly (prints nothing) for anyone whose ctl is
+elsewhere; each person runs `agent setup --project` for themselves, or
+keeps the hook files out of version control.

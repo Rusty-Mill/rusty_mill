@@ -863,3 +863,81 @@ fn status_names_an_unreadable_item_instead_of_failing() {
     );
     assert!(setup.is_err(), "setup refuses it with the reason");
 }
+
+/// Review on C39: removing Claude Code alone needs no home directory, as
+/// in C34, though other agents' skills live under it.
+#[test]
+fn removing_claude_alone_needs_no_home() {
+    let dir = scratch();
+    let mut env = env(CTL);
+    env.agent_homes.claude = Some(dir.clone());
+    let args = AgentArgs {
+        agents: vec![AgentKind::Claude],
+        scope: AgentScope::User,
+        dry_run: false,
+    };
+    let mut out = Vec::new();
+    run(&AgentCommand::Setup(args.clone()), &env, false, &mut out).expect("setup");
+    run(&AgentCommand::Remove(args), &env, false, &mut out).expect("remove");
+    assert!(files_in(&dir).is_empty(), "{:?}", files_in(&dir));
+}
+
+/// Review on C39: run from the home directory, project scope's shared skill
+/// is user scope's, so removing one agent there keeps it for another agent
+/// set up for the user.
+#[test]
+fn the_shared_skill_is_kept_for_another_scope() {
+    let home = scratch();
+    let mut env = env(CTL);
+    env.agent_homes.home = Some(home.clone());
+    env.here.dir = Some(home.clone());
+    let args = |agents: &[AgentKind], scope| AgentArgs {
+        agents: agents.to_vec(),
+        scope,
+        dry_run: false,
+    };
+    let mut out = Vec::new();
+    let both = [AgentKind::Codex, AgentKind::OpenCode];
+    run(
+        &AgentCommand::Setup(args(&both, AgentScope::User)),
+        &env,
+        false,
+        &mut out,
+    )
+    .expect("setup");
+    let mut out = Vec::new();
+    let remove = AgentCommand::Remove(args(&[AgentKind::Codex], AgentScope::Project));
+    run(&remove, &env, false, &mut out).expect("remove");
+    let out = String::from_utf8(out).expect("UTF-8");
+    assert!(out.contains("codex    skill  shared"), "{out}");
+    assert!(home.join(".agents/skills/rusty-mux/SKILL.md").exists());
+}
+
+/// Review on C39: another agent's file that cannot be read stops remove
+/// with a reason naming why it was read.
+#[test]
+fn a_broken_neighbour_is_named_as_the_reason() {
+    let home = scratch();
+    in_home(
+        AgentCommand::Setup,
+        &[AgentKind::OpenCode],
+        AgentScope::User,
+        false,
+        &home,
+    )
+    .expect("setup");
+    fs::create_dir_all(home.join(".codex")).expect("dir");
+    fs::write(home.join(".codex/hooks.json"), "{ broken").expect("write");
+    let err = in_home(
+        AgentCommand::Remove,
+        &[AgentKind::OpenCode],
+        AgentScope::User,
+        false,
+        &home,
+    )
+    .expect_err("refused");
+    assert!(
+        err.contains("still used") && err.contains("hooks.json"),
+        "{err}"
+    );
+}

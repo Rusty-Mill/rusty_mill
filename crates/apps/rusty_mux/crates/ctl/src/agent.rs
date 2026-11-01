@@ -87,7 +87,7 @@ pub(crate) fn run(
         }
         AgentCommand::Setup(args) => (args, setup(&layouts(args, env)?, args.dry_run)?, Exit::Ok),
         AgentCommand::Remove(args) => {
-            let others = layouts(&everyone(args), env)?;
+            let others = neighbours(args, env)?;
             (
                 args,
                 remove(&layouts(args, env)?, &others, args.dry_run)?,
@@ -126,16 +126,37 @@ fn layouts(args: &AgentArgs, env: &Env) -> Result<Vec<Layout>, String> {
         .collect()
 }
 
-/// Every agent the scope allows, to find who else uses a shared skill.
-fn everyone(args: &AgentArgs) -> AgentArgs {
-    let agents = match args.scope {
-        AgentScope::Dir(_) => vec![AgentKind::Claude],
-        AgentScope::User | AgentScope::Project => AgentKind::ALL.to_vec(),
-    };
-    AgentArgs {
-        agents,
-        ..args.clone()
+/// The layouts that can share a skill with the chosen agents: Codex,
+/// OpenCode and Pi in this scope and in user scope, since a project in the
+/// home directory has user scope's skill. One that cannot be resolved (no
+/// home directory, say) holds no file, so it is left out. None when only
+/// Claude Code is chosen, whose skill is its own.
+fn neighbours(args: &AgentArgs, env: &Env) -> Result<Vec<Layout>, String> {
+    if args.agents.iter().all(|&agent| agent == AgentKind::Claude) {
+        return Ok(Vec::new());
     }
+    let ctl = ctl_path(env)?;
+    let mut scopes = vec![&args.scope];
+    if args.scope != AgentScope::User {
+        scopes.push(&AgentScope::User);
+    }
+    let sharing = [AgentKind::Codex, AgentKind::OpenCode, AgentKind::Pi];
+    Ok(scopes
+        .into_iter()
+        .flat_map(|scope| sharing.map(|agent| (agent, scope)))
+        .filter_map(|(agent, scope)| {
+            layout::layout(agent, scope, &env.agent_homes, env.here.dir.as_deref(), ctl).ok()
+        })
+        .collect())
+}
+
+/// Whether `a` and `b` name one file, through links and `..`.
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (fs::canonicalize(a), fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
 }
 
 fn print(out: &mut dyn io::Write, text: &str) -> Result<Exit, String> {
@@ -302,16 +323,24 @@ fn set_done(state: State) -> Done {
 
 /// Deletes our skills (and their directories once empty) and our hooks,
 /// restoring backed-up settings when nothing else changed since. A skill
-/// another agent of `everyone` still uses is kept.
-fn remove(layouts: &[Layout], everyone: &[Layout], dry_run: bool) -> Result<Vec<Line>, String> {
+/// one of `neighbours` that is not being removed still uses is kept.
+fn remove(layouts: &[Layout], neighbours: &[Layout], dry_run: bool) -> Result<Vec<Line>, String> {
     let mut plan = Vec::new();
     for layout in layouts {
         let skill = skill_state(&layout.skill)?;
         let hook = has_hook(&layout.hook)?;
         let mut shared = false;
-        for other in everyone.iter().filter(|o| layout.shares_skill(o)) {
-            let leaving = layouts.iter().any(|l| l.agent == other.agent);
-            shared |= !leaving && has_hook(&other.hook)?;
+        for other in neighbours {
+            let leaving = layouts
+                .iter()
+                .any(|l| same_file(l.hook.path(), other.hook.path()));
+            if leaving || !same_file(&layout.skill, &other.skill) {
+                continue;
+            }
+            shared |= has_hook(&other.hook).map_err(|e| {
+                let skill = layout.skill.display();
+                format!("checking whether {skill} is still used: {e}")
+            })?;
         }
         plan.push((layout, skill, hook, shared));
     }
