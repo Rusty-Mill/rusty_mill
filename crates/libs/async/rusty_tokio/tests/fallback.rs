@@ -235,14 +235,9 @@ fn assert_reaped(pid: libc::pid_t) {
     };
     // Linux shows a zombie as state `Z`; elsewhere this is just `None`.
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
-    if !reaped {
-        // Don't leave the zombie (or a still-running child) behind.
-        // SAFETY: `pid` is this process's own child, not yet reaped.
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-            libc::waitpid(pid, std::ptr::null_mut(), 0);
-        }
-    }
+    // No cleanup signal on failure: the fallback reaper may reap the child
+    // after the last check, and a bare `pid` could then name an unrelated
+    // process. `Child`'s `Drop` has already sent its `SIGKILL`.
 
     assert!(
         reaped,
