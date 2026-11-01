@@ -1385,17 +1385,12 @@ pub(crate) fn block_on_inner<F: Future>(future: F) -> F::Output {
 /// creation on, even unpolled (#576). Reading the flag first would let a
 /// broadcast land between the read and the creation and be missed by
 /// both (#583).
-fn flag_or_notified<'a>(
-    notify: &'a Notify,
-    flagged: impl Fn() -> bool + Send + 'a,
-) -> impl Future<Output = ()> + Send + 'a {
-    async move {
-        let notified = notify.notified();
-        if flagged() {
-            return;
-        }
-        notified.await;
+async fn flag_or_notified(notify: &Notify, flagged: impl Fn() -> bool) {
+    let notified = notify.notified();
+    if flagged() {
+        return;
     }
+    notified.await;
 }
 
 #[cfg(test)]
