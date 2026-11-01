@@ -202,7 +202,11 @@ impl Notify {
     /// without ever needing a wakeup delivered.
     fn fire(state: &Arc<WaiterState>) {
         state.woken.store(true, Ordering::Release);
-        if let Some(waker) = state.waker.lock().unwrap().take() {
+        // Taken in its own statement, so the waker lock is released
+        // before `wake` runs: on edition 2021 an `if let` scrutinee's
+        // guard would live through the whole block.
+        let waker = state.waker.lock().unwrap().take();
+        if let Some(waker) = waker {
             waker.wake();
         }
     }
@@ -303,7 +307,13 @@ fn poll_waiter(
     // or already registered earlier (by a previous `poll` whose waker
     // may be stale, or by `enable`, which registers with no waker at
     // all yet).
-    *state.waker.lock().unwrap() = Some(cx.waker().clone());
+    //
+    // Cloned before locking, and the waker it displaces dropped after
+    // unlocking (the guard is a temporary of the `let`): either may run
+    // code that re-enters this `Notify`.
+    let waker = cx.waker().clone();
+    let displaced = state.waker.lock().unwrap().replace(waker);
+    drop(displaced);
     // Re-check after storing it: a `notify_one`/`notify_waiters` call
     // may have already popped and fired this exact entry in the window
     // between the check above and now.
