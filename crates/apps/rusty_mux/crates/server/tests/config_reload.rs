@@ -56,6 +56,14 @@ fn started_in(client: &mut Client, window: WindowId) -> String {
     text[start..end].to_owned()
 }
 
+/// What a new client's first block starts in: proof the server still
+/// serves others.
+fn plain_window(path: &Path) -> (Client, WindowId) {
+    let mut other = Client::connect_with(path, PLAIN, None);
+    let window = window_for(&mut other);
+    (other, window)
+}
+
 fn failed(answer: &[Message]) -> &str {
     match answer {
         [Message::Failed { reason, .. }] => reason,
@@ -106,6 +114,18 @@ fn a_reload_moves_the_next_block_and_a_bad_file_keeps_the_last() {
     let answer = client.answer(|req| Message::ReloadConfig { req });
     assert!(failed(&answer).contains("good.json"), "{answer:?}");
     assert_eq!(started_in(&mut client, window), b.display().to_string());
+    // A FIFO swapped in with no writer is refused at once, and the server
+    // goes on serving: the next block still starts.
+    let made = std::process::Command::new("mkfifo").arg(&file).status();
+    assert!(made.expect("mkfifo").success());
+    let answer = client.answer(|req| Message::ReloadConfig { req });
+    assert!(failed(&answer).contains("not a regular file"), "{answer:?}");
+    let (mut other, other_window) = plain_window(&path);
+    assert_eq!(
+        started_in(&mut other, other_window),
+        b.display().to_string()
+    );
+    std::fs::remove_file(&file).unwrap();
     assert_eq!(reloads(&client), 1, "a refused reload announces nothing");
 
     // Without the feature: refused, and never told.
