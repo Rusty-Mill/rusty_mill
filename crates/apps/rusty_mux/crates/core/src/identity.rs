@@ -3,8 +3,10 @@
 //! A [`Principal`] is what the server verified about a connection's peer,
 //! never what the client claims. A personal server serves only its own
 //! user (the socket's peer check refuses anyone else), so every client's
-//! principal is that user; login mode (C26) will map other principals to
-//! accounts. Over `rusty-mux --ssh` the peer is the SSH user's own process
+//! principal is that user. In login mode (C26) the front door verifies each
+//! peer and maps it to an account, and the account's server takes the
+//! principal the front door forwarded (`rusty_mux_server`'s `login.rs`).
+//! Over `rusty-mux --ssh` the peer is the SSH user's own process
 //! on the server's host, so the SSH user is the principal there too.
 
 use std::fmt;
