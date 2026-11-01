@@ -996,3 +996,83 @@ fn the_shared_skill_is_kept_for_the_home_project_from_any_directory() {
     assert!(out.contains("codex    skill  shared"), "{out}");
     assert!(home.join(".agents/skills/rusty-mux/SKILL.md").exists());
 }
+
+/// Review on #1372: a backup remove cannot read stops it, dry run or not,
+/// before anything is deleted.
+#[test]
+fn a_bad_backup_stops_remove_before_any_change() {
+    let home = scratch();
+    let codex = home.join(".codex");
+    fs::create_dir_all(&codex).expect("dir");
+    fs::write(codex.join("hooks.json"), "{}").expect("write");
+    let agents = [AgentKind::Codex];
+    in_home(AgentCommand::Setup, &agents, AgentScope::User, false, &home).expect("setup");
+    fs::write(codex.join("hooks.json.rusty-mux.bak"), "{ broken").expect("write");
+    let before = tree(&home);
+    for dry_run in [true, false] {
+        let removed = in_home(
+            AgentCommand::Remove,
+            &agents,
+            AgentScope::User,
+            dry_run,
+            &home,
+        );
+        let err = removed.expect_err("refused");
+        assert!(err.contains("hooks.json.rusty-mux.bak"), "{err}");
+        assert_eq!(tree(&home), before, "dry run {dry_run}");
+    }
+}
+
+/// Review on #1372: a hook someone already took out still leaves remove to
+/// drop its backup, so a later setup backs up the settings as they are.
+#[test]
+fn remove_drops_the_backup_when_the_hook_is_already_gone() {
+    let dir = scratch();
+    fs::write(dir.join("settings.json"), r#"{"a":1}"#).expect("write");
+    agent(AgentCommand::Setup, &dir, CTL);
+    fs::write(dir.join("settings.json"), r#"{"a":2}"#).expect("write");
+    let (exit, out) = agent(AgentCommand::Remove, &dir, CTL);
+    assert_eq!(exit, Exit::Ok);
+    assert!(out.contains("hook   absent"), "{out}");
+    assert_eq!(files_in(&dir), ["settings.json"]);
+}
+
+/// Review on #1372: Claude Code's skill can be the shared one, when its
+/// directory is `~/.agents`; neither agent's remove takes it from the other.
+#[test]
+fn claude_can_share_the_skill_too() {
+    let home = scratch();
+    let mut env = env(CTL);
+    env.agent_homes.home = Some(home.clone());
+    env.agent_homes.claude = Some(home.join(".agents"));
+    let args = |agent| AgentArgs {
+        agents: vec![agent],
+        scope: AgentScope::User,
+        dry_run: false,
+    };
+    let mut out = Vec::new();
+    for agent in [AgentKind::Claude, AgentKind::Codex] {
+        run(&AgentCommand::Setup(args(agent)), &env, false, &mut out).expect("setup");
+    }
+    let skill = home.join(".agents/skills/rusty-mux/SKILL.md");
+    let mut out = Vec::new();
+    run(
+        &AgentCommand::Remove(args(AgentKind::Claude)),
+        &env,
+        false,
+        &mut out,
+    )
+    .expect("remove");
+    let out = String::from_utf8(out).expect("UTF-8");
+    assert!(out.contains("claude   skill  shared"), "{out}");
+    assert!(skill.exists());
+    let mut out = Vec::new();
+    run(
+        &AgentCommand::Remove(args(AgentKind::Codex)),
+        &env,
+        false,
+        &mut out,
+    )
+    .expect("remove");
+    assert!(!skill.exists());
+}

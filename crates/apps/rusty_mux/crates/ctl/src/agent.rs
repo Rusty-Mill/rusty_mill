@@ -87,7 +87,7 @@ pub(crate) fn run(
         }
         AgentCommand::Setup(args) => (args, setup(&layouts(args, env)?, args.dry_run)?, Exit::Ok),
         AgentCommand::Remove(args) => {
-            let others = neighbours(args, env)?;
+            let others = neighbours(env)?;
             (
                 args,
                 remove(&layouts(args, env)?, &others, args.dry_run)?,
@@ -126,30 +126,26 @@ fn layouts(args: &AgentArgs, env: &Env) -> Result<Vec<Layout>, String> {
         .collect()
 }
 
-/// The layouts that can share a skill with the chosen agents: Codex,
-/// OpenCode and Pi in user scope, and in project scope rooted at the
-/// current directory and at the home directory, whatever scope is chosen
-/// and wherever it runs, since a project in the home directory has user
-/// scope's skill; [`same_file`] drops those whose skill is another file.
-/// A project elsewhere whose `.agents` links to the home directory's is not
+/// The layouts that can share a skill with the chosen agents: every agent
+/// in user scope, and in project scope rooted at the current directory and
+/// at the home directory, whatever scope is chosen and wherever it runs,
+/// since a project in the home directory has user scope's skill and
+/// Claude Code's directory may be `~/.agents`. [`same_file`] drops those
+/// whose skill is another file, so no other file of theirs is read. A
+/// project elsewhere whose `.agents` links to the home directory's is not
 /// found. One that cannot be resolved (no home or current directory, say)
-/// holds no file, so it is left out. None when only Claude Code is chosen,
-/// whose skill is its own.
-fn neighbours(args: &AgentArgs, env: &Env) -> Result<Vec<Layout>, String> {
-    if args.agents.iter().all(|&agent| agent == AgentKind::Claude) {
-        return Ok(Vec::new());
-    }
+/// holds no file, so it is left out.
+fn neighbours(env: &Env) -> Result<Vec<Layout>, String> {
     let ctl = ctl_path(env)?;
     let homes = &env.agent_homes;
-    let sharing = [AgentKind::Codex, AgentKind::OpenCode, AgentKind::Pi];
     let roots = [
         (AgentScope::User, None),
         (AgentScope::Project, env.here.dir.as_deref()),
-    ]
-    .into_iter()
-    .chain([(AgentScope::Project, homes.home.as_deref())]);
+        (AgentScope::Project, homes.home.as_deref()),
+    ];
     Ok(roots
-        .flat_map(|(scope, root)| sharing.map(|agent| (agent, scope.clone(), root)))
+        .into_iter()
+        .flat_map(|(scope, root)| AgentKind::ALL.map(|agent| (agent, scope.clone(), root)))
         .filter_map(|(agent, scope, root)| layout::layout(agent, &scope, homes, root, ctl).ok())
         .collect())
 }
@@ -332,7 +328,7 @@ fn remove(layouts: &[Layout], neighbours: &[Layout], dry_run: bool) -> Result<Ve
     let mut plan = Vec::new();
     for layout in layouts {
         let skill = skill_state(&layout.skill)?;
-        let hook = has_hook(&layout.hook)?;
+        let hook = plan_hook_removal(&layout.hook)?;
         let mut shared = false;
         for other in neighbours {
             let leaving = layouts
@@ -361,27 +357,93 @@ fn remove(layouts: &[Layout], neighbours: &[Layout], dry_run: bool) -> Result<Ve
                 Done::Removed
             }
         };
-        let hook = match (hook, &layout.hook) {
-            (false, _) => Done::Absent,
-            (true, Hook::Script { file, .. }) => {
-                if !dry_run {
-                    fs::remove_file(file).map_err(|e| at(file, e))?;
-                    remove_empty_dir(file.parent())?;
-                }
-                Done::Removed
-            }
-            (true, Hook::Settings { file, backup, .. }) if !dry_run => remove_hook(file, backup)?,
-            (true, Hook::Settings { .. }) => Done::Removed,
-        };
+        let done = hook.done;
+        if !dry_run {
+            apply_hook_removal(&layout.hook, hook)?;
+        }
         lines.push(line(layout.agent, "skill", done_word(skill), &layout.skill));
         lines.push(line(
             layout.agent,
             "hook",
-            done_word(hook),
+            done_word(done),
             layout.hook.path(),
         ));
     }
     Ok(lines)
+}
+
+/// What removing a hook does, worked out before anything is changed.
+struct HookRemoval {
+    done: Done,
+    /// The settings file's new contents: its backed-up bytes, ours without
+    /// the hook, or `None` to delete it. Unused when nothing changes.
+    settings: Option<String>,
+    /// Whether a settings backup is there to delete.
+    drop_backup: bool,
+}
+
+/// Reads and checks every file removing `hook` touches, its backup
+/// included, so a file it cannot use stops remove before any change.
+fn plan_hook_removal(hook: &Hook) -> Result<HookRemoval, String> {
+    let keep = |done| HookRemoval {
+        done,
+        settings: None,
+        drop_backup: false,
+    };
+    let (file, backup_path) = match hook {
+        Hook::Script { .. } if has_hook(hook)? => return Ok(keep(Done::Removed)),
+        Hook::Script { .. } => return Ok(keep(Done::Absent)),
+        Hook::Settings { file, backup, .. } => (file, backup),
+    };
+    let backup = read(backup_path)?;
+    let drop_backup = backup.is_some();
+    let Some((_, value)) = read(file)? else {
+        return Ok(HookRemoval {
+            drop_backup,
+            ..keep(Done::Absent)
+        });
+    };
+    if !settings::has_hook(&value).map_err(|e| at(file, e))? {
+        return Ok(HookRemoval {
+            drop_backup,
+            ..keep(Done::Absent)
+        });
+    }
+    let before = backup.as_ref().map(|(_, before)| before);
+    let value = settings::without_hook(value, before).map_err(|e| at(file, e))?;
+    let settings = match backup {
+        Some((text, before)) if before == value => Some(text),
+        None if value == Value::Object(Map::new()) => None,
+        _ => Some(pretty(&value)),
+    };
+    Ok(HookRemoval {
+        done: Done::Removed,
+        settings,
+        drop_backup,
+    })
+}
+
+/// Carries out a [`plan_hook_removal`] plan.
+fn apply_hook_removal(hook: &Hook, plan: HookRemoval) -> Result<(), String> {
+    match hook {
+        Hook::Script { file, .. } if plan.done == Done::Removed => {
+            fs::remove_file(file).map_err(|e| at(file, e))?;
+            remove_empty_dir(file.parent())
+        }
+        Hook::Script { .. } => Ok(()),
+        Hook::Settings { file, backup, .. } => {
+            if plan.done == Done::Removed {
+                match &plan.settings {
+                    Some(text) => write(file, text)?,
+                    None => fs::remove_file(file).map_err(|e| at(file, e))?,
+                }
+            }
+            if plan.drop_backup {
+                fs::remove_file(backup).map_err(|e| at(backup, e))?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Deletes the skill, then its directory and `skills` if that leaves them
@@ -394,34 +456,6 @@ fn remove_skill(path: &Path) -> Result<(), String> {
     let dir = path.parent();
     remove_empty_dir(dir)?;
     remove_empty_dir(dir.and_then(Path::parent))
-}
-
-fn remove_hook(file: &Path, backup_path: &Path) -> Result<Done, String> {
-    let backup = read(backup_path)?;
-    let done = match read(file)? {
-        None => Done::Absent,
-        Some((_, value)) => {
-            let ours = settings::has_hook(&value).map_err(|e| at(file, e))?;
-            if !ours {
-                Done::Absent
-            } else {
-                let before = backup.as_ref().map(|(_, before)| before);
-                let value = settings::without_hook(value, before).map_err(|e| at(file, e))?;
-                match &backup {
-                    Some((text, before)) if *before == value => write(file, text)?,
-                    None if value == Value::Object(Map::new()) => {
-                        fs::remove_file(file).map_err(|e| at(file, e))?
-                    }
-                    _ => write(file, &pretty(&value))?,
-                }
-                Done::Removed
-            }
-        }
-    };
-    if backup.is_some() {
-        fs::remove_file(backup_path).map_err(|e| at(backup_path, e))?;
-    }
-    Ok(done)
 }
 
 fn skill_state(path: &Path) -> Result<State, String> {
