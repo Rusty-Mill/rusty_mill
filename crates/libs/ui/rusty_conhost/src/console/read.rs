@@ -498,7 +498,13 @@ impl Console {
                 r => stored.push(*r),
             }
         }
-        let coalesce = !(vt && matches!(records.as_slice(), [Record::Key(_)]));
+        // conhost coalesces only a write of one record, and never one it
+        // turned into VT, whatever that VT stores.
+        let coalesce = match records.as_slice() {
+            [Record::Key(_)] => !vt,
+            [_] => true,
+            _ => false,
+        };
         if !self.input.write(&stored, append, coalesce) {
             return Err(msg::STATUS_NO_MEMORY);
         }
@@ -2440,6 +2446,45 @@ pub(crate) mod tests {
             (0, 2)
         );
         assert_eq!(wide(&read_w(&mut h, input, 64)), "\x1b[A");
+        // A synthesized NUL is a character, not a key to translate.
+        assert_eq!(write_input(&mut h, input, &[typed(0, true)]), (0, 1));
+        let nul: Vec<u16> = queued(&h)
+            .iter()
+            .filter_map(|r| match r {
+                Record::Key(k) if k.down => Some(k.ch),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(nul, [0]);
+    }
+
+    /// A VT batch that stores one record is still a batch: it neither
+    /// coalesces nor slips past the cap.
+    #[test]
+    fn a_vt_batch_storing_one_record_does_not_coalesce() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.set_mode(input, RAW | mode::VIRTUAL_TERMINAL_INPUT);
+        let pair = [typed(0x61, true), typed(0x61, false)];
+        write_input(&mut h, input, &pair);
+        assert_eq!(write_input(&mut h, input, &pair), (0, 2));
+        assert_eq!(count(&mut h, input), 2);
+        // Fill to the cap with the last record an `a`: the pair must not
+        // fold into it.
+        let menus = |n: usize| {
+            let menu = Record::Other {
+                event_type: 8,
+                event: [0; 16],
+            };
+            vec![menu; n]
+        };
+        let half = input::MAX_RECORDS / 2;
+        write_input(&mut h, input, &menus(half - 1));
+        write_input(&mut h, input, &menus(half - 2));
+        assert_eq!(write_input(&mut h, input, &pair), (0, 2));
+        assert_eq!(h.c.input.len(), input::MAX_RECORDS);
+        let (status, _) = write_input(&mut h, input, &pair);
+        assert_eq!(status, msg::STATUS_NO_MEMORY);
     }
 
     #[test]

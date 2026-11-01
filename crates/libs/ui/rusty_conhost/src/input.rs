@@ -53,6 +53,7 @@ pub(crate) mod vk {
     pub(crate) const RWIN: u16 = 0x5C;
     pub(crate) const F1: u16 = 0x70;
     pub(crate) const F12: u16 = 0x7B;
+    pub(crate) const PACKET: u16 = 0xE7;
 }
 
 /// `dwControlKeyState` bits.
@@ -654,7 +655,9 @@ pub(crate) fn vt_for(k: &KeyEvent, utf8: &mut Utf8Units) -> Vec<u8> {
     let ctrl = k.state & state::CTRL != 0;
     let shift = k.state & state::SHIFT != 0;
     let mut out = Vec::new();
-    if k.ch != 0 {
+    // A synthesized key (VK_PACKET or no VK) types its character, NUL
+    // included (conhost `HandleKey`).
+    if k.ch != 0 || k.vk == 0 || k.vk == vk::PACKET {
         // AltGr arrives as Ctrl+Alt and types its character plainly. A
         // low surrogate's Alt went out with its high half.
         if alt && !ctrl && !utf8.pending() {
