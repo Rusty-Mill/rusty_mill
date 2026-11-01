@@ -14,14 +14,22 @@ use std::fmt;
 use std::future::poll_fn;
 use std::mem::MaybeUninit;
 use std::sync::Mutex as StdMutex;
-use std::task::{Poll, Waker};
+
+use super::wait_list::{HasWaitList, WaitList, Waiting};
 
 struct Inner {
     initialized: bool,
-    /// Wakers for every caller currently parked in
-    /// [`SetOnce::wait`](SetOnce::wait), woken and cleared all at once
-    /// the moment [`SetOnce::set`] succeeds.
-    wakers: Vec<Waker>,
+    /// One slot per caller currently parked in
+    /// [`SetOnce::wait`](SetOnce::wait), removed if its future is
+    /// dropped; woken and cleared all at once the moment
+    /// [`SetOnce::set`] succeeds.
+    waiters: WaitList,
+}
+
+impl HasWaitList for Inner {
+    fn wait_list(&mut self) -> &mut WaitList {
+        &mut self.waiters
+    }
 }
 
 /// A cell that's set at most once. See the module docs for how this
@@ -47,7 +55,7 @@ impl<T> SetOnce<T> {
         SetOnce {
             inner: StdMutex::new(Inner {
                 initialized: false,
-                wakers: Vec::new(),
+                waiters: WaitList::new(),
             }),
             value: UnsafeCell::new(MaybeUninit::uninit()),
         }
@@ -58,7 +66,7 @@ impl<T> SetOnce<T> {
         SetOnce {
             inner: StdMutex::new(Inner {
                 initialized: true,
-                wakers: Vec::new(),
+                waiters: WaitList::new(),
             }),
             value: UnsafeCell::new(MaybeUninit::new(value)),
         }
@@ -91,7 +99,7 @@ impl<T> SetOnce<T> {
         // below), so no one else has written or read `value` yet.
         unsafe { (*self.value.get()).write(value) };
         guard.initialized = true;
-        let wakers = std::mem::take(&mut guard.wakers);
+        let wakers = guard.waiters.take();
         drop(guard);
         for waker in wakers {
             waker.wake();
@@ -103,20 +111,13 @@ impl<T> SetOnce<T> {
     /// value -- resolves immediately if it already was set before this
     /// was even called.
     pub async fn wait(&self) -> &T {
-        poll_fn(|cx| {
-            // Re-checks `initialized` and registers to be woken as one
-            // atomic step under `inner`'s lock on every poll (including
-            // the first) -- closes the same "condition changed between
-            // the check and registering to wait for it" race `OnceCell`'s
-            // own docs describe, for the identical reason.
-            let mut guard = self.inner.lock().unwrap();
-            if guard.initialized {
-                return Poll::Ready(());
-            }
-            guard.wakers.push(cx.waker().clone());
-            Poll::Pending
-        })
-        .await;
+        // Re-checks `initialized` and registers to be woken as one
+        // atomic step under `inner`'s lock on every poll (including the
+        // first) -- closes the same "condition changed between the check
+        // and registering to wait for it" race `OnceCell`'s own docs
+        // describe, for the identical reason.
+        let mut waiting = Waiting::new(&self.inner);
+        poll_fn(|cx| waiting.poll_until(cx, |inner| inner.initialized)).await;
         // SAFETY: see `get`.
         unsafe { (*self.value.get()).assume_init_ref() }
     }

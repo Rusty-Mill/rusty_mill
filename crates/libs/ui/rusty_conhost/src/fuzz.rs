@@ -12,7 +12,7 @@
 //!   (admission and turn order from `sched`), and checks every effect
 //!   against the limits of §6.1 and §7.4 after each event.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use platform::term::WinSize;
 
@@ -209,6 +209,10 @@ struct Engine {
     next_id: u64,
     /// Calls without a reply, with their output size and function.
     owed: Vec<Owed>,
+    /// The whole input of each call too large to deliver at once.
+    inputs: HashMap<[u8; 8], Vec<u8>>,
+    /// The slice a streamed write asked for, answered next turn.
+    fetch: Option<([u8; 8], usize, usize)>,
     answered: HashSet<[u8; 8]>,
     logs: usize,
     /// Every cookie the console handed out, live or not, for the script
@@ -243,6 +247,8 @@ impl Engine {
             eof: false,
             next_id: 0,
             owed: Vec::new(),
+            inputs: HashMap::new(),
+            fetch: None,
             answered: HashSet::new(),
             logs: 0,
             cookies: Vec::new(),
@@ -377,20 +383,22 @@ impl Engine {
     }
 
     /// Deliver a packet if the engine would have a READ_IO out for it.
-    /// A payload past the per-packet cap arrives empty, as the engine
-    /// reads none of it.
+    /// Only the first [`PACKET_INPUT_CAP`] bytes arrive with it, as the
+    /// engine reads no more; the rest is kept to answer fetches.
     fn send(&mut self, function: u32, process: usize, object: usize, payload: &[u8], output: u32) {
-        if self.closed || !sched::admits_read(self.c.waiting(), self.c.parked()) {
+        if self.closed
+            || self.c.streaming()
+            || !sched::admits_read(self.c.waiting(), self.c.parked())
+        {
             return;
         }
         let input_size = payload.len() as u32;
-        let payload = if payload.len() > PACKET_INPUT_CAP {
-            &[][..]
-        } else {
-            payload
-        };
         self.next_id += 1;
         let id = self.next_id.to_le_bytes();
+        if payload.len() > PACKET_INPUT_CAP {
+            self.inputs.insert(id, payload.to_vec());
+        }
+        let payload = &payload[..payload.len().min(PACKET_INPUT_CAP)];
         self.owed.push(Owed::new(id, function, payload, output));
         self.handle(Event::Packet(Packet {
             id,
@@ -427,6 +435,7 @@ impl Engine {
             self.handle(Event::ChildExited);
             self.grace_armed = true;
         }
+        self.serve_fetch();
         if plan.serve_reads {
             self.handle(Event::ServeReads);
         }
@@ -454,6 +463,8 @@ impl Engine {
             reads_ready: self.c.reads_ready(),
             input_paused: self.c.input_paused(),
             writes_ready: self.c.writes_ready(),
+            streaming: self.c.streaming(),
+            fetch_due: self.fetch.is_some(),
         }
     }
 
@@ -486,6 +497,7 @@ impl Engine {
             self.c.parked()
         );
         let mut built = 0;
+        let mut fetch = None;
         for e in fx {
             match e {
                 Effect::Reply(r) => {
@@ -496,6 +508,7 @@ impl Engine {
                 Effect::CloseServer => {
                     assert!(!self.closed, "CloseServer twice");
                     self.closed = true;
+                    self.fetch = None;
                 }
                 Effect::Eof => self.eof = true,
                 Effect::Log(_) => {
@@ -525,6 +538,12 @@ impl Engine {
                     );
                 }
                 Effect::SetInputAvailable(_) => {}
+                Effect::Fetch { id, at, len } => {
+                    assert!(!self.closed, "Fetch after CloseServer");
+                    assert!(fetch.is_none(), "two fetches from one event");
+                    assert!((1..=PACKET_INPUT_CAP).contains(&len), "fetch of {len}");
+                    fetch = Some((id, at, len));
+                }
             }
         }
         assert!(
@@ -538,11 +557,33 @@ impl Engine {
                 "calls owed vs. calls held"
             );
         }
+        if fetch.is_some() {
+            assert!(
+                self.fetch.is_none(),
+                "a second fetch before the first is read"
+            );
+            self.fetch = fetch;
+        }
+    }
+
+    /// The slice `Engine::serve_fetch` reads this turn, if one is due.
+    fn serve_fetch(&mut self) {
+        let Some((id, at, len)) = self.fetch.take() else {
+            return;
+        };
+        let input = self.inputs.get(&id).expect("a fetch for a streamed call");
+        assert!(at + len <= input.len(), "fetch past the input");
+        let bytes = input[at..at + len].to_vec();
+        self.handle(Event::Fetched {
+            id,
+            bytes: Some(&bytes),
+        });
     }
 
     /// Check one answer against its call; returns its variable output.
     fn answer(&mut self, r: &Reply) -> usize {
         assert!(self.answered.insert(r.id), "{:?} answered twice", r.id);
+        self.inputs.remove(&r.id);
         let at = self.owed.iter().position(|o| o.id == r.id);
         let Some(at) = at else {
             panic!("{:?} was never asked", r.id)
@@ -700,6 +741,69 @@ mod tests {
         e.grace_due = e.grace_armed;
         e.turn();
         assert!(e.closed && e.eof);
+        assert_eq!(e.killed, HashSet::from([7]));
+    }
+
+    /// Turns until the streamed write in flight completes, the reader
+    /// draining everything each turn; panics past `limit`.
+    fn stream_turns(e: &mut Engine, limit: usize) -> usize {
+        for turns in 1..=limit {
+            assert!(
+                sched::must_poll(&e.view(Control::default())),
+                "a due slice needs no other wake"
+            );
+            e.queued = 0;
+            e.control.output_drained = true;
+            e.turn();
+            if !e.c.streaming() {
+                return turns;
+            }
+        }
+        panic!("still streaming after {limit} turns");
+    }
+
+    #[test]
+    fn a_streamed_write_reads_one_slice_per_turn() {
+        let mut e = engine();
+        let [_, _, output] = connect(&mut e, 7).expect("connects");
+        let slices = 8;
+        e.send(
+            msg::RAW_WRITE,
+            1,
+            output,
+            &vec![b'x'; slices * PACKET_INPUT_CAP],
+            0,
+        );
+        assert!(e.c.streaming() && e.fetch.is_some());
+        // An always-draining reader still gets one slice a turn.
+        let turns = stream_turns(&mut e, 100);
+        assert!(turns >= slices - 1, "{turns} turns for {slices} slices");
+        assert_eq!((e.c.waiting(), e.c.parked()), (0, 0));
+        assert_eq!(e.last_status, msg::STATUS_SUCCESS);
+        e.finish();
+    }
+
+    #[test]
+    fn a_query_only_stream_yields_to_hang_up_and_the_deadline() {
+        let mut e = engine();
+        let [_, _, output] = connect(&mut e, 7).expect("connects");
+        // DSR queries alone: answers, no terminal output to stall on.
+        let queries = b"\x1b[5n".repeat(8 * PACKET_INPUT_CAP / 4);
+        e.send(msg::RAW_WRITE, 1, output, &queries, 0);
+        assert!(e.c.streaming());
+        e.queued = 0;
+        e.turn();
+        assert!(e.c.streaming(), "one slice a turn");
+        // Hang-up between slices is served in the next turn.
+        e.control.hang_up = true;
+        e.turn();
+        assert!(e.grace_armed, "the hang-up was handled mid-stream");
+        assert!(e.c.streaming(), "the write goes on during the grace");
+        // So is the deadline: the console closes with the write unfinished.
+        e.grace_due = true;
+        e.turn();
+        assert!(e.closed && e.eof);
+        assert!(e.fetch.is_none(), "no slice is read after the close");
         assert_eq!(e.killed, HashSet::from([7]));
     }
 

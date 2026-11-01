@@ -333,8 +333,20 @@ impl RigidBody {
     /// the identical reason `standard_car`'s own doc comment gives for the
     /// car's hitbox: retuning every mass-dependent test's own expectations
     /// is a dedicated calibration FR of its own, out of `FR-076`'s scope.
+    ///
+    /// Its inertia is RocketSim's 91.25 uu sphere's (`BALL_COLLISION_RADIUS`,
+    /// `btSphereShape::calculateLocalInertia`), not the `BALL_RADIUS` contact
+    /// sphere's (`RB-PHYSICS-001-FR-161`): with the 91.25 lever its world
+    /// contacts use, a sliding ball spins up as the game's does.
     pub fn standard_ball(position: Vec3) -> RigidBody {
-        RigidBody::ball(BALL_RADIUS, BALL_MASS, position)
+        let mut ball = RigidBody::ball(BALL_RADIUS, BALL_MASS, position);
+        let inertia = Shape::Sphere {
+            radius: BALL_COLLISION_RADIUS,
+        }
+        .local_inertia(BALL_MASS);
+        ball.inv_inertia_local = Vec3::new(1.0 / inertia.x, 1.0 / inertia.y, 1.0 / inertia.z);
+        ball.update_inertia_tensor();
+        ball
     }
 
     pub fn car_box(half_extents: Vec3, mass: f32, position: Vec3) -> RigidBody {

@@ -184,8 +184,9 @@ impl Command {
     /// `std::process::Child`'s own "drop just orphans it" behavior.
     /// When `true`, [`Child`]'s `Drop` impl sends `SIGKILL` (best
     /// effort -- errors are ignored, there's nothing a destructor could
-    /// do about them) and, if a [`crate::Runtime`] is still running on
-    /// the dropping thread, detaches a [`crate::spawn_blocking`] task to
+    /// do about them) and, if a [`crate::Runtime`] is running on the
+    /// dropping thread or the [fallback](crate::runtime::install_fallback)
+    /// is installed, detaches a [`crate::spawn_blocking`] task on it to
     /// reap it afterward so it doesn't linger as a zombie.
     pub fn kill_on_drop(&mut self, kill_on_drop: bool) -> &mut Command {
         self.kill_on_drop = kill_on_drop;
@@ -410,16 +411,18 @@ impl Drop for Child {
     /// child orphaned, exactly like dropping a `std::process::Child`
     /// does. When it was set, sends `SIGKILL` (best effort -- a
     /// destructor has no way to surface or act on a failure) and, if a
-    /// [`crate::Runtime`] is still running on the dropping thread,
-    /// detaches a [`crate::spawn_blocking`] task to `wait()` on it
-    /// afterward so the kernel doesn't have to keep it around as a
-    /// zombie until some unrelated `wait` call happens to reap it.
+    /// [`crate::Runtime`] is running on the dropping thread or the
+    /// [fallback](crate::runtime::install_fallback) is installed,
+    /// detaches a [`crate::spawn_blocking`] task on it to `wait()` on
+    /// the child afterward so the kernel doesn't have to keep it around
+    /// as a zombie until some unrelated `wait` call happens to reap it.
     /// `Drop` can't itself `.await`, so this is the same
     /// signal-now/reap-separately shape [`Child::wait`] already needs
     /// for the blocking `wait(2)` syscall, just fired off rather than
-    /// awaited. With no runtime running here, the kill still goes out;
-    /// only the reap is skipped (the same zombie-until-reaped state a
-    /// signal-only kill would always leave behind).
+    /// awaited. With neither a runtime on this thread nor a fallback,
+    /// the kill still goes out; only the reap is skipped (the same
+    /// zombie-until-reaped state a signal-only kill would always leave
+    /// behind).
     fn drop(&mut self) {
         if !self.kill_on_drop {
             return;
@@ -428,7 +431,7 @@ impl Drop for Child {
             return;
         };
         let _ = inner.kill();
-        if let Some(handle) = Handle::try_current() {
+        if let Some(handle) = Handle::try_current_or_fallback() {
             handle.spawn_blocking(move || {
                 let _ = inner.wait();
             });

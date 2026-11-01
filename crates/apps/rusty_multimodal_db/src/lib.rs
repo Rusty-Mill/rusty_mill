@@ -6,15 +6,12 @@
 //! `ScannableField`/`SymmetricRelation`/`ChildOf` traits in
 //! [`generic::traits`], the query traits in [`generic::query`], the
 //! composable store layers in [`generic::store`], and the error types
-//! each returns), are this crate's whole public contract. Everything
-//! else — the three other `Dog` storage backends, the seven other
-//! durability variants, the three other concurrency strategies, the
-//! `Dog`-specific dataset generator, and every historical spike/
-//! comparison module — is the *evidence* this recommendation is built on,
-//! not part of it, and lives behind the `research` Cargo feature (off by
-//! default): `cargo build --features research` to compile it in and see
-//! the underlying benchmark comparisons this crate's whole prior history
-//! produced. See `RESULTS.md` for the numbers and
+//! each returns), are this crate's whole public contract. The `research`
+//! Cargo feature (off by default) adds only reference fixtures: the
+//! `Order`/`Customer` and `Employee` domains, the dataset builders, and the
+//! crash-safety and multi-process harnesses. The alternatives this
+//! recommendation was measured against were removed by ADR-0138. See
+//! `RESULTS.md` for the numbers and
 //! `docs/decisions/ADR-0008-production-default.md`/`ADR-0009` for the
 //! acceptance records.
 //!
@@ -120,19 +117,14 @@
 //! [`generic::production::GenericProductionStore`] (`with_exclusive`) —
 //! purely additive, no existing method's behavior changed.
 //!
-//! # Everything else: benchmarked alternatives, behind `research`
+//! # Reference fixtures, behind `research`
 //!
-//! `store`, `durability`, and `concurrency` hold the other three `Dog`
-//! storage backends, seven other durability variants, and three other
-//! concurrency strategies this recommendation is built on — the evidence,
-//! not dead code, but not compiled into a default build either. Each
-//! variant lost outright, tied, or won only in a narrow corner the
-//! production pick's own module docs and `RESULTS.md` name explicitly.
-//! Reach for one of them directly (with `--features research`) only if
-//! your workload's shape is genuinely one of those narrow corners (e.g.
-//! `ShardedStore` for a small, write-heavy, high-thread-count deployment —
-//! see `docs/decisions/ADR-0008-production-default.md`); otherwise, use
-//! [`production::ProductionStore`].
+//! `research` now gates only the reference domains (`Order`/`Customer`,
+//! `Employee`), the dataset builders and the crash-safety and
+//! multi-process harnesses. The benchmarked-alternative backends,
+//! durability variants, concurrency strategies and spikes were removed by
+//! ADR-0138; `RESULTS.md` keeps their measurements and the commit that ADR
+//! names keeps their code.
 //!
 //! See `docs/charter/CHARTER.md` for the original hypothesis under test
 //! and `docs/decisions/ADR-0001-three-backend-empirical-comparison.md` for
@@ -173,9 +165,9 @@ pub mod generator;
 /// and ADR-0009 (Accepted) for the acceptance record. New, parallel
 /// capability: nothing above changed to build this.
 pub mod generic;
-/// Historical validation spikes that led to `generic` above — kept as the
-/// measurement record, not part of the recommended API surface. Gated
-/// behind the `research` feature. See its own module docs.
+/// Reference fixtures left from the spikes that led to `generic` above:
+/// the `Employee` domain and the `Order` dataset builder. Not part of the
+/// recommended API surface. Gated behind the `research` feature.
 #[cfg(feature = "research")]
 pub mod generic_spike;
 pub mod production;

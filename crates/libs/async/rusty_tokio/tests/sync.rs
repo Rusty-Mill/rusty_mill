@@ -2400,6 +2400,193 @@ fn watch_wait_for_inspects_each_version_once() {
     });
 }
 
+// #1303: `Notify` parity with tokio when a notified waiter is dropped. Each
+// case runs the same hand-polled call sequence on `tokio::sync::Notify` (the
+// contract) and on ours, and asserts the same results and wake counts.
+
+/// A waker that counts its wakes.
+struct WakeCount(AtomicUsize);
+
+impl std::task::Wake for WakeCount {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn wake_count() -> (Arc<WakeCount>, std::task::Waker) {
+    let count = Arc::new(WakeCount(AtomicUsize::new(0)));
+    (count.clone(), std::task::Waker::from(count))
+}
+
+fn is_ready<F: std::future::Future>(fut: std::pin::Pin<&mut F>) -> bool {
+    poll_once(fut, std::task::Waker::noop()).is_ready()
+}
+
+/// `enable` takes the banked permit, the waiter is dropped: is a fresh
+/// `notified()` ready?
+macro_rules! enable_permit_then_drop {
+    ($notify:ty) => {{
+        let notify = <$notify>::new();
+        notify.notify_one();
+        {
+            let enabled = std::pin::pin!(notify.notified());
+            assert!(enabled.enable(), "enable takes the permit");
+        }
+        let ready = is_ready(std::pin::pin!(notify.notified()));
+        ready
+    }};
+}
+
+#[test]
+fn notify_permit_taken_by_enable_stays_taken_when_the_waiter_drops() {
+    assert!(!enable_permit_then_drop!(tokio::sync::Notify), "tokio");
+    assert!(!enable_permit_then_drop!(Notify), "rusty_tokio");
+}
+
+/// `notify_one` reaches the first of two waiters, `enable` then reports it
+/// and the waiter is dropped: does the second waiter get the wakeup?
+macro_rules! enable_wakeup_then_drop {
+    ($notify:ty) => {{
+        let notify = <$notify>::new();
+        let mut first = Box::pin(notify.notified());
+        let mut second = Box::pin(notify.notified());
+        assert!(!first.as_mut().enable());
+        assert!(!second.as_mut().enable());
+        notify.notify_one();
+        assert!(first.as_mut().enable(), "enable reports the wakeup");
+        drop(first);
+        is_ready(second.as_mut())
+    }};
+}
+
+#[test]
+fn notify_wakeup_reported_by_enable_is_not_passed_on_when_the_waiter_drops() {
+    assert!(!enable_wakeup_then_drop!(tokio::sync::Notify), "tokio");
+    assert!(!enable_wakeup_then_drop!(Notify), "rusty_tokio");
+}
+
+/// Waiters a, b, c are queued, `notify_last` fires c, c is dropped
+/// unresolved: (a woken, b woken, a ready, b ready).
+macro_rules! notify_last_then_drop {
+    ($notify:ty) => {{
+        let notify = <$notify>::new();
+        let (a_wakes, a_waker) = wake_count();
+        let (b_wakes, b_waker) = wake_count();
+        let mut a = Box::pin(notify.notified());
+        let mut b = Box::pin(notify.notified());
+        let mut c = Box::pin(notify.notified());
+        assert!(poll_once(a.as_mut(), &a_waker).is_pending());
+        assert!(poll_once(b.as_mut(), &b_waker).is_pending());
+        assert!(!is_ready(c.as_mut()));
+        notify.notify_last();
+        drop(c);
+        (
+            a_wakes.0.load(Ordering::SeqCst),
+            b_wakes.0.load(Ordering::SeqCst),
+            is_ready(a.as_mut()),
+            is_ready(b.as_mut()),
+        )
+    }};
+}
+
+#[test]
+fn notify_last_reaching_a_dropped_waiter_passes_to_the_next_newest() {
+    assert_eq!(
+        notify_last_then_drop!(tokio::sync::Notify),
+        (0, 1, false, true),
+        "tokio"
+    );
+    assert_eq!(
+        notify_last_then_drop!(Notify),
+        (0, 1, false, true),
+        "rusty_tokio"
+    );
+}
+
+/// A waiter takes a permit and returns `Ready`, a second permit is banked
+/// and the waiter is polled again: is a fresh `notified()` still ready?
+macro_rules! repoll_after_permit {
+    ($notify:ty) => {{
+        let notify = <$notify>::new();
+        let mut waiter = Box::pin(notify.notified());
+        notify.notify_one();
+        assert!(is_ready(waiter.as_mut()));
+        notify.notify_one();
+        assert!(is_ready(waiter.as_mut()), "stays ready");
+        let ready = is_ready(std::pin::pin!(notify.notified()));
+        ready
+    }};
+}
+
+#[test]
+fn notify_ready_waiter_repolled_leaves_a_banked_permit() {
+    assert!(repoll_after_permit!(tokio::sync::Notify), "tokio");
+    assert!(repoll_after_permit!(Notify), "rusty_tokio");
+}
+
+/// One thread fires `notify_one` (or `notify_last`) while another drops the
+/// waiter it targets, `ROUNDS` times, so both orders and the window between
+/// them occur. Whatever the order, exactly one wakeup reaches the expected
+/// survivor (`b`), once, and none is left banked.
+macro_rules! notify_races_drop {
+    ($notify:ty, $last:expr) => {{
+        const ROUNDS: usize = 2_000;
+        for round in 0..ROUNDS {
+            let notify = <$notify>::new();
+            let barrier = std::sync::Barrier::new(2);
+            let (a_wakes, a_waker) = wake_count();
+            let (b_wakes, b_waker) = wake_count();
+            let mut a = Box::pin(notify.notified());
+            let mut b = Box::pin(notify.notified());
+            let mut target = Box::pin(notify.notified());
+            // `notify_one` takes the oldest and `notify_last` the newest, so
+            // the queue is `target, b, a` or `a, b, target`: `b`, in the
+            // middle, is next in line either way.
+            if $last {
+                assert!(poll_once(a.as_mut(), &a_waker).is_pending());
+                assert!(poll_once(b.as_mut(), &b_waker).is_pending());
+                assert!(!is_ready(target.as_mut()));
+            } else {
+                assert!(!is_ready(target.as_mut()));
+                assert!(poll_once(b.as_mut(), &b_waker).is_pending());
+                assert!(poll_once(a.as_mut(), &a_waker).is_pending());
+            }
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    barrier.wait();
+                    if $last {
+                        notify.notify_last();
+                    } else {
+                        notify.notify_one();
+                    }
+                });
+                barrier.wait();
+                drop(target);
+            });
+            let outcome = (
+                a_wakes.0.load(Ordering::SeqCst),
+                b_wakes.0.load(Ordering::SeqCst),
+                is_ready(a.as_mut()),
+                is_ready(b.as_mut()),
+                is_ready(std::pin::pin!(notify.notified())),
+            );
+            assert_eq!(outcome, (0, 1, false, true, false), "round {round}");
+        }
+    }};
+}
+
+#[test]
+fn notify_one_racing_a_drop_of_its_target_reaches_the_next_waiter_once() {
+    notify_races_drop!(tokio::sync::Notify, false);
+    notify_races_drop!(Notify, false);
+}
+
+#[test]
+fn notify_last_racing_a_drop_of_its_target_reaches_the_next_newest_once() {
+    notify_races_drop!(tokio::sync::Notify, true);
+    notify_races_drop!(Notify, true);
+}
+
 /// #1304: `wait_for` runs its predicate under the channel's lock, so a
 /// predicate that reached for that lock again (`receiver_count`, cloning or
 /// dropping a `Receiver`) re-locked a std mutex on its own thread and hung.

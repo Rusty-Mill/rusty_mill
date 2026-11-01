@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, Layout, MAX_DEPTH,
-    Progress, Session, SessionId, Share, Side, Size, Window, WindowId,
+    Principal, Progress, Session, SessionId, Share, Side, Size, Transport, Window, WindowId,
 };
 
 /// The longest name any entity may have, in UTF-8 bytes. Names travel in
@@ -468,18 +468,40 @@ impl Mux {
         Ok(())
     }
 
-    pub fn connect(&mut self) -> ClientId {
+    /// Adds a client that the server verified as `principal`.
+    pub fn connect(&mut self, principal: Principal, transport: Transport) -> ClientId {
         let id = ClientId::random();
+        self.events.push(Event::ClientConnected {
+            client: id,
+            principal: Some(principal.clone()),
+        });
         self.clients.insert(
             id,
             Client {
                 id,
                 name: String::new(),
                 attached: None,
+                principal,
+                transport,
             },
         );
-        self.events.push(Event::ClientConnected { client: id });
         id
+    }
+
+    /// Records that a new connection, by `transport`, took the client over.
+    pub fn reconnect(&mut self, client: ClientId, transport: Transport) -> Result<(), Error> {
+        let found = self
+            .clients
+            .get_mut(&client)
+            .ok_or(Error::UnknownClient(client))?;
+        found.transport = transport;
+        let principal = found.principal.clone();
+        self.events.push(Event::ClientConnectionChanged {
+            client,
+            principal,
+            transport,
+        });
+        Ok(())
     }
 
     /// Detaches the client, releasing any lease it holds, and forgets it.

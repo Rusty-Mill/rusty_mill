@@ -20,7 +20,7 @@ use uuid::Uuid;
 /// still the only copy of `breed` and full-record data, but `age` is
 /// additionally held in a packed `Vec<u32>`, kept in sync on every write.
 /// `neighbors` uses the same `littermate_of` adjacency-index pattern as
-/// [`CanonicalStore`](crate::store::CanonicalStore) — this backend doesn't
+/// `CanonicalStore` — this backend doesn't
 /// change that pattern, just inherits it alongside the age cache.
 pub struct CanonicalCachedStore {
     records: HashMap<Uuid, DogRecord>,
@@ -36,7 +36,7 @@ pub struct CanonicalCachedStore {
 impl CanonicalCachedStore {
     /// Build a store from generated records and littermate edges: the
     /// canonical map, breed index, and adjacency index (identical to
-    /// [`CanonicalStore`](crate::store::CanonicalStore)), plus a packed age
+    /// `CanonicalStore`), plus a packed age
     /// cache and the position index needed to write through to it.
     pub fn new(records: Vec<DogRecord>, edges: Vec<(Uuid, Uuid)>) -> Self {
         let mut breed_index: HashMap<String, Vec<Uuid>> = HashMap::new();
