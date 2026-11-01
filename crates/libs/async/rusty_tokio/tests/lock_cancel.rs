@@ -474,26 +474,38 @@ fn rwlock_survives_a_panicking_waker_destructor() {
     assert!(lock.try_write().is_some(), "and still releases");
 }
 
-/// A reader that acquires while its stored waker's destructor panics
+/// A waiter that acquires while its stored waker's destructor panics
 /// still ends up holding a guard, which releases the lock as the panic
-/// unwinds; the lock is not left held with no guard.
-#[test]
-fn rwlock_acquire_with_a_panicking_waker_destructor_leaves_the_lock_releasable() {
-    let lock = Arc::new(RwLock::new(()));
+/// unwinds; the lock is not left held with no guard. Run over each of
+/// `read`, `write`, `read_owned` and `write_owned`, which each order the
+/// drop themselves.
+fn acquire_with_a_panicking_waker_destructor<F: Future>(
+    lock: &Arc<RwLock<()>>,
+    acquire: impl FnOnce() -> Pin<Box<F>>,
+) {
     let held = lock.try_write().expect("free");
-    let mut reader = Box::pin(lock.read());
-    assert!(poll(reader.as_mut(), &on_drop(|| panic!("waker drop"))).is_pending());
+    let mut waiter = acquire();
+    assert!(poll(waiter.as_mut(), &on_drop(|| panic!("waker drop"))).is_pending());
     drop(held);
     let (_, plain) = flag();
     let acquired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = poll(reader.as_mut(), &plain);
+        let _ = poll(waiter.as_mut(), &plain);
     }));
     assert!(
         acquired.is_err(),
         "the destructor's panic reaches the poller"
     );
-    drop(reader);
+    drop(waiter);
     assert!(lock.try_write().is_some(), "nothing still holds the lock");
+}
+
+#[test]
+fn rwlock_acquire_with_a_panicking_waker_destructor_leaves_the_lock_releasable() {
+    let lock = Arc::new(RwLock::new(()));
+    acquire_with_a_panicking_waker_destructor(&lock, || Box::pin(lock.read()));
+    acquire_with_a_panicking_waker_destructor(&lock, || Box::pin(lock.write()));
+    acquire_with_a_panicking_waker_destructor(&lock, || Box::pin(lock.read_owned()));
+    acquire_with_a_panicking_waker_destructor(&lock, || Box::pin(lock.write_owned()));
 }
 
 /// A cancelled waiter whose waker destructor panics still wakes the
