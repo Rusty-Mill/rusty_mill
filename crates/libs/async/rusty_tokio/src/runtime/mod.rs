@@ -148,10 +148,9 @@ pub(crate) struct Shared {
     /// consumes `self` by value doesn't redo (or, worse, re-wait on)
     /// work already done.
     torn_down: AtomicBool,
-    /// The persistent, checkable half of the graceful-shutdown signal --
-    /// see `shutdown_notified`'s doc comment for why a bare `Notify`
-    /// alone (which only wakes whoever's *already* waiting) isn't
-    /// enough on its own.
+    /// The persistent, checkable half of the graceful-shutdown signal:
+    /// a task that starts waiting after the broadcast still needs to see
+    /// it (see `flag_or_notified`).
     shutting_down: AtomicBool,
     shutdown_signal: Notify,
     /// Tasks currently spawned and not yet finished (completed, aborted,
@@ -374,22 +373,9 @@ impl Shared {
     }
 
     /// Resolves once `begin_graceful_shutdown` has been called --
-    /// immediately, if it already has been by the time this is first
-    /// polled. Plain `Notify::notify_waiters` alone only wakes a
-    /// `Notified` that *already exists* when it's called (matching tokio's
-    /// own semantics -- see `sync::notify`'s docs), and this one is only
-    /// created on first poll; a task that calls this *after* shutdown has
-    /// already begun still needs to observe that, which is exactly what
-    /// the `shutting_down` flag checked here first is for.
+    /// immediately, if it already has been. See [`flag_or_notified`].
     pub(crate) fn shutdown_notified(&self) -> impl Future<Output = ()> + Send + '_ {
-        let mut inner: Option<crate::sync::Notified<'_>> = None;
-        std::future::poll_fn(move |cx| {
-            if self.is_shutting_down() {
-                return std::task::Poll::Ready(());
-            }
-            let fut = inner.get_or_insert_with(|| self.shutdown_signal.notified());
-            std::pin::Pin::new(fut).poll(cx)
-        })
+        flag_or_notified(&self.shutdown_signal, move || self.is_shutting_down())
     }
 
     pub(crate) fn is_current_thread(&self) -> bool {
@@ -1388,5 +1374,88 @@ pub(crate) fn block_on_inner<F: Future>(future: F) -> F::Output {
             std::task::Poll::Ready(v) => return v,
             std::task::Poll::Pending => parker.park(),
         }
+    }
+}
+
+/// Resolves once `flagged()` holds or `notify` broadcasts with
+/// `notify_waiters`. The setter stores the flag, then broadcasts.
+///
+/// The `Notified` is created *before* the flag is read, as tokio's own
+/// docs prescribe: a `Notified` receives every `notify_waiters` from its
+/// creation on, even unpolled (#576). Reading the flag first would let a
+/// broadcast land between the read and the creation and be missed by
+/// both (#583).
+fn flag_or_notified<'a>(
+    notify: &'a Notify,
+    flagged: impl Fn() -> bool + Send + 'a,
+) -> impl Future<Output = ()> + Send + 'a {
+    async move {
+        let notified = notify.notified();
+        if flagged() {
+            return;
+        }
+        notified.await;
+    }
+}
+
+#[cfg(test)]
+mod flag_or_notified_tests {
+    use super::*;
+    use std::pin::pin;
+
+    struct Flag(AtomicBool);
+
+    impl Wake for Flag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn flag_waker() -> (Arc<Flag>, Waker) {
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        (flag.clone(), Waker::from(flag))
+    }
+
+    /// A broadcast that lands between the flag check and the `Notified`'s
+    /// creation still resolves the future (#583). Here `flagged` itself
+    /// runs `begin_graceful_shutdown`'s two steps right after reading the
+    /// flag, as another thread could.
+    #[test]
+    fn a_broadcast_right_after_the_flag_check_is_not_missed() {
+        let notify = Notify::new();
+        let flag = AtomicBool::new(false);
+        let mut fut = pin!(flag_or_notified(&notify, || {
+            let was = flag.load(Ordering::SeqCst);
+            if !was {
+                flag.store(true, Ordering::SeqCst);
+                notify.notify_waiters();
+            }
+            was
+        }));
+        let (woken, waker) = flag_waker();
+        let mut cx = Context::from_waker(&waker);
+        let ready = fut.as_mut().poll(&mut cx).is_ready()
+            || (woken.0.load(Ordering::SeqCst) && fut.as_mut().poll(&mut cx).is_ready());
+        assert!(ready, "the shutdown is observed, not slept through");
+    }
+
+    #[test]
+    fn a_flag_already_set_resolves_at_once() {
+        let notify = Notify::new();
+        let mut fut = pin!(flag_or_notified(&notify, || true));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(fut.as_mut().poll(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn a_later_broadcast_wakes_a_pending_waiter() {
+        let notify = Notify::new();
+        let mut fut = pin!(flag_or_notified(&notify, || false));
+        let (woken, waker) = flag_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        notify.notify_waiters();
+        assert!(woken.0.load(Ordering::SeqCst), "woken by the broadcast");
+        assert!(fut.as_mut().poll(&mut cx).is_ready());
     }
 }
