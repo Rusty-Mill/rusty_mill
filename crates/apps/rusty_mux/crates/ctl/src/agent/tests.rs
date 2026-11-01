@@ -941,3 +941,29 @@ fn a_broken_neighbour_is_named_as_the_reason() {
         "{err}"
     );
 }
+
+/// Review on C39, round 2: the other direction. Run from the home
+/// directory, a user-scope remove keeps the skill a project there uses.
+#[test]
+fn the_shared_skill_is_kept_for_a_project_in_the_home_directory() {
+    let home = scratch();
+    let mut env = env(CTL);
+    env.agent_homes.home = Some(home.clone());
+    env.here.dir = Some(home.clone());
+    let args = |agent, scope| AgentArgs {
+        agents: vec![agent],
+        scope,
+        dry_run: false,
+    };
+    let mut out = Vec::new();
+    let project = AgentCommand::Setup(args(AgentKind::OpenCode, AgentScope::Project));
+    run(&project, &env, false, &mut out).expect("project setup");
+    let user = AgentCommand::Setup(args(AgentKind::Codex, AgentScope::User));
+    run(&user, &env, false, &mut out).expect("user setup");
+    let mut out = Vec::new();
+    let remove = AgentCommand::Remove(args(AgentKind::Codex, AgentScope::User));
+    run(&remove, &env, false, &mut out).expect("remove");
+    let out = String::from_utf8(out).expect("UTF-8");
+    assert!(out.contains("codex    skill  shared"), "{out}");
+    assert!(home.join(".agents/skills/rusty-mux/SKILL.md").exists());
+}

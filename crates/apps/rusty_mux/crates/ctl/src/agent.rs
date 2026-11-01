@@ -127,22 +127,19 @@ fn layouts(args: &AgentArgs, env: &Env) -> Result<Vec<Layout>, String> {
 }
 
 /// The layouts that can share a skill with the chosen agents: Codex,
-/// OpenCode and Pi in this scope and in user scope, since a project in the
-/// home directory has user scope's skill. One that cannot be resolved (no
-/// home directory, say) holds no file, so it is left out. None when only
-/// Claude Code is chosen, whose skill is its own.
+/// OpenCode and Pi in user scope and in project scope, whatever scope is
+/// chosen, since a project in the home directory has user scope's skill;
+/// [`same_file`] drops those whose skill is another file. One that cannot
+/// be resolved (no home or current directory, say) holds no file, so it is
+/// left out. None when only Claude Code is chosen, whose skill is its own.
 fn neighbours(args: &AgentArgs, env: &Env) -> Result<Vec<Layout>, String> {
     if args.agents.iter().all(|&agent| agent == AgentKind::Claude) {
         return Ok(Vec::new());
     }
     let ctl = ctl_path(env)?;
-    let mut scopes = vec![&args.scope];
-    if args.scope != AgentScope::User {
-        scopes.push(&AgentScope::User);
-    }
     let sharing = [AgentKind::Codex, AgentKind::OpenCode, AgentKind::Pi];
-    Ok(scopes
-        .into_iter()
+    Ok([AgentScope::User, AgentScope::Project]
+        .iter()
         .flat_map(|scope| sharing.map(|agent| (agent, scope)))
         .filter_map(|(agent, scope)| {
             layout::layout(agent, scope, &env.agent_homes, env.here.dir.as_deref(), ctl).ok()
