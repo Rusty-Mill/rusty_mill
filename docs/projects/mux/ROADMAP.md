@@ -56,7 +56,7 @@ From the [Rex gap check](REX-GAP-CHECK.md) §5 (owner, 2026-10-27). Started 2026
 
 Identity, login server mode, roaming transport, sharing, several servers per client (C35). Tailscale identity uses first-party `rusty_tail`, after the owner approves moving its library crates to `crates/libs/` (ADR-0003). Exit: a remote session survives a client IP change (test, after spike 4); login mode maps peer credentials or Tailscale identity to an account (test); a shared session enforces input leases (test).
 
-Identity scope from the [Rex delta check](REX-DELTA.md) (owner, 2026-10-31): every client entry and client event carries the caller's principal, with a `whoami` method (C25, D8); login mode maps principals, the SSH user included, to accounts from a file that starts empty, and per-account servers outlive the front door (C26, C27, D9); a saved host holds several addresses tried in order (C35, D10).
+Identity scope from the [Rex delta check](REX-DELTA.md) (owner, 2026-10-31): every client entry, `client-connected` and `client-connection-changed` carry the client's principal, with a `whoami` method (C25, D8; the owner narrowed it from every client event on 2026-11-01); login mode maps principals, the SSH user included, to accounts from a file that starts empty, and per-account servers outlive the front door (C26, C27, D9); a saved host holds several addresses tried in order (C35, D10).
 
 ## Phase 3b: Rex parity follow-ups
 
