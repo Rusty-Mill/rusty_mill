@@ -1426,6 +1426,72 @@ fn wait_for_an_event_whose_fields_match() {
     }
 }
 
+/// An agent waits for the program to copy to the primary selection, and
+/// then for its status record to end, without reading the screen.
+#[cfg(unix)]
+#[test]
+fn wait_for_a_clipboard_write_and_an_ended_status() {
+    let socket = start_server();
+    let block = block(&socket);
+    let wait = |kind: &str, field: &str, value: &str| {
+        ctl_command(
+            &socket,
+            &[
+                "wait",
+                "--event",
+                kind,
+                "--block",
+                &block,
+                field,
+                value,
+                "--timeout",
+                "20",
+            ],
+        )
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn")
+    };
+    let copied = wait("clipboard-written", "--selection", "primary");
+    let ended = wait("status-removed", "--id", "job");
+    std::thread::sleep(Duration::from_millis(500));
+    // "aGk=" is "hi". The record is set, then cleared after a pause, so
+    // the clear lands in a later read and ends it.
+    let typed = "printf '\\033]7501;state=working:id=job\\007\\033]52;p;aGk=\\007'; \
+                 sleep 1; printf '\\033]7501;state=clear:id=job\\007'\r";
+    ok(
+        &socket,
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+            "input",
+            "--block",
+            &block,
+            "--data",
+            typed,
+        ],
+    );
+    let expected = [
+        (
+            copied,
+            format!("clipboard-written block={block} selection=primary"),
+        ),
+        (ended, format!("status-removed block={block} id=\"job\"")),
+    ];
+    for (waiter, line) in expected {
+        let output = waiter.wait_with_output().expect("wait");
+        assert_eq!(output.status.code(), Some(0), "{line}");
+        let printed = stdout(&output);
+        assert!(printed.trim_end().ends_with(&line), "{printed}");
+    }
+}
+
 /// Types at `block`'s shell, once leased, what makes it exit with `code`
 /// after a pause.
 fn exit_later(socket: &Path, block: &str, code: u8) {

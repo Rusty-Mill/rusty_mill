@@ -151,6 +151,8 @@ pub const EVENTS: &[(&str, &[&str])] = &[
         "client-connection-changed",
         &["client", "principal", "user", "transport"],
     ),
+    ("clipboard-written", &["block", "selection"]),
+    ("status-removed", &["block", "id"]),
 ];
 
 /// What to run when an event of one kind happens.

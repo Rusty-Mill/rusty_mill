@@ -6,7 +6,7 @@
 mod common;
 
 use common::{Client, block_for, start_server, window_for};
-use rusty_mux_core::{BlockId, Event, ExitStatus, Progress, SessionId, Size};
+use rusty_mux_core::{BlockId, Event, ExitStatus, Progress, Selection, SessionId, Size};
 use rusty_mux_proto::{Cursor, Features, Launch, Message, Program};
 use rusty_uuid::Uuid;
 
@@ -249,6 +249,64 @@ fn program_events_reach_only_clients_that_asked() {
             | Event::ProgressChanged { .. }
             | Event::Notification { .. }
             | Event::ProgramExited { .. }
+    )));
+}
+
+/// A clipboard write and an ended status record, each announced after the
+/// output that made it, the removal ahead of the status change; only
+/// clients that asked hear of either.
+#[test]
+fn clipboard_writes_and_status_removals_reach_only_clients_that_asked() {
+    let path = start_server();
+    let wanted = SEQ
+        .union(Features::MORE_PROGRAM_EVENTS)
+        .union(Features::STATUS)
+        .union(Features::CHECKPOINT_V6);
+    let mut watcher = Client::connect_with(&path, wanted, None);
+    let mut plain = Client::connect_with(&path, SEQ.union(Features::STATUS), None);
+    let block = block_for(&mut watcher);
+    // The record is set first, so the clear ends it. "aGk=" is "hi".
+    watcher.input(block, b"printf '\\033]7501;state=working:id=job\\007'\r");
+    let status = Event::BlockStatus { block };
+    while !watcher.events.iter().any(|(_, e)| *e == status) {
+        watcher.recv();
+    }
+    watcher.input(
+        block,
+        b"printf '\\033]52;p;aGk=\\007\\033]7501;state=clear:id=job\\007'\r",
+    );
+    let removed = Event::StatusRemoved {
+        block,
+        id: "job".into(),
+    };
+    let written = Event::ClipboardWritten {
+        block,
+        selection: Selection::Primary,
+    };
+    while ![&removed, &written]
+        .iter()
+        .all(|w| watcher.events.iter().any(|(_, e)| e == *w))
+    {
+        watcher.recv();
+    }
+    let after_removal: Vec<&Event> = watcher
+        .events
+        .iter()
+        .map(|(_, e)| e)
+        .skip_while(|e| **e != removed)
+        .collect();
+    assert_eq!(
+        after_removal.get(1),
+        Some(&&status),
+        "the status change follows the removal"
+    );
+
+    let later = create_session(&mut watcher, "later");
+    wait_for_session(&mut plain, later);
+    assert!(plain.events.iter().any(|(_, e)| *e == status));
+    assert!(!plain.events.iter().any(|(_, e)| matches!(
+        e,
+        Event::ClipboardWritten { .. } | Event::StatusRemoved { .. }
     )));
 }
 

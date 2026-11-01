@@ -63,7 +63,7 @@ Identity scope from the [Rex delta check](REX-DELTA.md) (owner, 2026-10-31): eve
 From the [Rex delta check](REX-DELTA.md) §4 (owner, 2026-10-31). After Phase 3's identity steps; starting it still needs the owner's go. One PR per step, in order. Each extends a done capability; no new crate and no new dependency.
 
 1. Wait on a window or a session (C37). Done: `wait --window`, `wait --session`, exiting with the last failure. Started ahead of Phase 3 identity at the owner's call, confirmed on #1348 (2026-11-01).
-2. Events: clipboard written, program status removed, active window changed, config reloaded (C38).
+2. Events: clipboard written, program status removed, active window changed, config reloaded (C38). In progress: `clipboard-written` and `status-removed` (2026-11-01); the other two wait on the owner's scope call (see C38).
 3. Agent setup for Codex, OpenCode and Pi, per-repository setup, dry run, per-item status (C39). Each new agent's settings path is a write outside the repo and needs the owner's approval, as K4 did.
 4. Block methods `terminal.reset`, `terminal.set-theme`, `terminal.size` (C40).
 5. Layout editing: resize splits, swap blocks, move a block into a new split, detach a block from the layout while it keeps running, reorder windows, server-side focus (C41).

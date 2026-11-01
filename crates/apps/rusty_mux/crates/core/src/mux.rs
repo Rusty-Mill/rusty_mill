@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 
 use crate::{
     Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, Layout, MAX_DEPTH,
-    Principal, Progress, Session, SessionId, Share, Side, Size, Transport, Window, WindowId,
+    Principal, Progress, Selection, Session, SessionId, Share, Side, Size, Transport, Window,
+    WindowId,
 };
 
 /// The longest name any entity may have, in UTF-8 bytes. Names travel in
@@ -339,6 +340,16 @@ impl Mux {
         body: String,
     ) -> Result<(), Error> {
         self.note(block, Event::Notification { block, title, body })
+    }
+
+    /// Announces that the block's program wrote `selection`.
+    pub fn note_clipboard(&mut self, block: BlockId, selection: Selection) -> Result<(), Error> {
+        self.note(block, Event::ClipboardWritten { block, selection })
+    }
+
+    /// Announces that the block's status record at `id` ended.
+    pub fn note_status_removed(&mut self, block: BlockId, id: String) -> Result<(), Error> {
+        self.note(block, Event::StatusRemoved { block, id })
     }
 
     /// Announces that process group `pid`, running `name`, now has the

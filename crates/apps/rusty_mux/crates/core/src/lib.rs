@@ -35,7 +35,7 @@ mod mux;
 
 pub use entity::{Block, Client, Session, Size, Window};
 pub use error::Error;
-pub use event::{Event, ExitStatus, Progress};
+pub use event::{Event, ExitStatus, Progress, Selection};
 pub use id::{BlockId, ClientId, EntityId, SessionId, WindowId};
 pub use identity::{Principal, Transport};
 pub use layout::{Axis, Layout, MAX_DEPTH, ParseError, Rect, Share, Side};

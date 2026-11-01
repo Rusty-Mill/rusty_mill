@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use rusty_mux_core::Progress;
+use rusty_mux_core::{Progress, Selection};
 use rusty_mux_status::Records;
 use rusty_term_core::{Cell, Grid, StatusSignal, WIDE_TRAILER};
 
@@ -128,12 +128,22 @@ pub(crate) fn pwd(grid: &Grid, pid: Option<u32>) -> Option<String> {
     })
 }
 
+/// What applying a block's status signals did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Absorbed {
+    /// Whether any record's state changed, the part worth announcing;
+    /// progress and text alone are not.
+    pub(crate) changed: bool,
+    /// The ids of the records that ended, in id order. A record cleared
+    /// and reported again in the same read did not end.
+    pub(crate) removed: Vec<String>,
+}
+
 /// Applies the status signals the grid collected since the last call: OSC
-/// 7501 reports, prompts and resets. Whether any record's state changed, the
-/// part worth announcing; progress and text alone are not.
-pub(crate) fn absorb_status(grid: &mut Grid, records: &mut Records) -> bool {
+/// 7501 reports, prompts and resets.
+pub(crate) fn absorb_status(grid: &mut Grid, records: &mut Records) -> Absorbed {
     if grid.program_status.is_empty() {
-        return false;
+        return Absorbed::default();
     }
     let before = records.states();
     for signal in grid.program_status.drain(..) {
@@ -147,7 +157,28 @@ pub(crate) fn absorb_status(grid: &mut Grid, records: &mut Records) -> bool {
             StatusSignal::Reset => records.reset(),
         }
     }
-    records.states() != before
+    let after = records.states();
+    // Both are in id order, as `Records` keeps them.
+    let removed = before
+        .iter()
+        .filter(|(id, ..)| after.binary_search_by(|(a, ..)| a.cmp(id)).is_err())
+        .map(|(id, ..)| id.as_str().to_owned())
+        .collect();
+    Absorbed {
+        changed: after != before,
+        removed,
+    }
+}
+
+/// The selections the block's program wrote (OSC 52) since the last call,
+/// clipboard first; the text itself is let go.
+pub(crate) fn take_clipboard(grid: &mut Grid) -> Vec<Selection> {
+    let clipboard = grid.clipboard_set.take().map(|_| Selection::Clipboard);
+    let primary = grid
+        .clipboard_set_primary
+        .take()
+        .map(|_| Selection::Primary);
+    clipboard.into_iter().chain(primary).collect()
 }
 
 /// The working directory URI (OSC 7) and title a block last announced, to
@@ -294,13 +325,14 @@ mod tests {
     #[test]
     fn status_changes_are_announced_once() {
         let (mut grid, mut parser, mut records) = status_grid();
-        assert!(!absorb_status(&mut grid, &mut records), "nothing collected");
+        let changed = |grid: &mut Grid, records: &mut Records| absorb_status(grid, records).changed;
+        assert!(!changed(&mut grid, &mut records), "nothing collected");
         parser.advance(&mut grid, b"\x1b]7501;state=working:progress=10\x07");
-        assert!(absorb_status(&mut grid, &mut records));
+        assert!(changed(&mut grid, &mut records));
         parser.advance(&mut grid, b"\x1b]7501;state=working:progress=90\x07");
-        assert!(!absorb_status(&mut grid, &mut records), "progress only");
+        assert!(!changed(&mut grid, &mut records), "progress only");
         parser.advance(&mut grid, b"\x1b]7501;state=bogus\x07");
-        assert!(!absorb_status(&mut grid, &mut records), "ignored report");
+        assert!(!changed(&mut grid, &mut records), "ignored report");
         assert!(grid.program_status.is_empty(), "drained");
         assert_eq!(records.bodies(), ["state=working:progress=90"]);
     }
@@ -310,13 +342,61 @@ mod tests {
         let (mut grid, mut parser, mut records) = status_grid();
         parser.advance(&mut grid, b"\x1b]7501;state=blocked:kind=question\x07");
         parser.advance(&mut grid, b"\x1b]7501;state=done:id=build\x07");
-        assert!(absorb_status(&mut grid, &mut records));
+        assert_eq!(absorb_status(&mut grid, &mut records), changed(&[]));
         parser.advance(&mut grid, b"\x1b]133;A\x07");
-        assert!(absorb_status(&mut grid, &mut records));
+        assert_eq!(absorb_status(&mut grid, &mut records), changed(&[""]));
         assert_eq!(records.bodies(), ["state=done:id=build"]);
         parser.advance(&mut grid, b"\x1bc");
-        assert!(absorb_status(&mut grid, &mut records));
+        assert_eq!(absorb_status(&mut grid, &mut records), changed(&["build"]));
         assert!(records.bodies().is_empty());
+    }
+
+    fn changed(removed: &[&str]) -> Absorbed {
+        Absorbed {
+            changed: true,
+            removed: removed.iter().map(|id| (*id).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_clear_removes_the_record_and_those_beneath_it() {
+        let (mut grid, mut parser, mut records) = status_grid();
+        for id in ["a", "a/x", "ab", "b"] {
+            let report = format!("\x1b]7501;state=working:id={id}\x07");
+            parser.advance(&mut grid, report.as_bytes());
+        }
+        absorb_status(&mut grid, &mut records);
+        parser.advance(&mut grid, b"\x1b]7501;state=clear:id=a\x07");
+        assert_eq!(
+            absorb_status(&mut grid, &mut records),
+            changed(&["a", "a/x"])
+        );
+        // Cleared and reported again in one read: it never ended.
+        parser.advance(
+            &mut grid,
+            b"\x1b]7501;state=clear:id=b\x07\x1b]7501;state=done:id=b\x07",
+        );
+        assert_eq!(absorb_status(&mut grid, &mut records), changed(&[]));
+        parser.advance(&mut grid, b"\x1b]7501;state=clear:id=nothing\x07");
+        assert_eq!(absorb_status(&mut grid, &mut records), Absorbed::default());
+    }
+
+    #[test]
+    fn clipboard_writes_are_taken_once_each() {
+        let mut grid = Grid::new(20, 2);
+        let mut parser = rusty_term_core::AnsiParser::new();
+        assert!(take_clipboard(&mut grid).is_empty());
+        // "aGk=" is "hi"; a query and undecodable data are not writes.
+        parser.advance(
+            &mut grid,
+            b"\x1b]52;p;aGk=\x07\x1b]52;c;aGk=\x07\x1b]52;;aGk=\x07",
+        );
+        parser.advance(&mut grid, b"\x1b]52;c;?\x07\x1b]52;p;!!\x07");
+        assert_eq!(
+            take_clipboard(&mut grid),
+            [Selection::Clipboard, Selection::Primary]
+        );
+        assert!(take_clipboard(&mut grid).is_empty(), "taken");
     }
 
     #[test]
@@ -326,7 +406,7 @@ mod tests {
         let burst = round.repeat(rusty_term_core::PROGRAM_STATUS_MAX * 2);
         parser.advance(&mut grid, &burst);
         parser.advance(&mut grid, b"\x1b]7501;state=done\x07");
-        assert!(absorb_status(&mut grid, &mut records));
+        assert_eq!(absorb_status(&mut grid, &mut records), changed(&[]));
         assert_eq!(records.bodies(), ["state=done"]);
     }
 

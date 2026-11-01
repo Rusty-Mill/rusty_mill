@@ -731,7 +731,8 @@ impl<S: io::Read + Write> Session<'_, S> {
             .union(Features::PROCESS)
             .union(Features::LABELS)
             .union(Features::LAYOUT)
-            .union(Features::IDENTITY);
+            .union(Features::IDENTITY)
+            .union(Features::MORE_PROGRAM_EVENTS);
         let (features, start) = self.hello(wanted, after)?;
         if let Some((kind, _)) = needs.iter().find(|(_, need)| !features.contains(*need)) {
             return Err(Failure::Failed(format!(
