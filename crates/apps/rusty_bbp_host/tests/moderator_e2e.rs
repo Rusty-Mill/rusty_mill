@@ -1940,6 +1940,49 @@ fn a_capped_first_start_on_an_extended_task_is_refused_and_leaves_no_marker() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn a_capped_first_start_waits_for_an_extend_in_progress_and_then_refuses() {
+    // The opposite ordering to the human-side race test: an extend holds the
+    // evidence admission lock while it appends, so a first start arriving
+    // meanwhile waits, then sees the extension and refuses before it runs.
+    let (dir, task, repo) = opened("racing-first-start");
+    let admission = moderator::evidence_admission(&dir, &task).expect("admission");
+    let mut planner = script(&dir, "planner", "sleep 1");
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let mut cfg = config(
+        &dir,
+        &task,
+        repo,
+        Launchers::default().with("planner", planner),
+        2,
+    );
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    let start = std::thread::spawn(move || moderator::run(&cfg));
+    std::thread::sleep(Duration::from_millis(200));
+    // What the extend does under the lock (`human::perform` takes it itself).
+    let action = human::action("extend", &["messages", "1000"], None).expect("action");
+    open_driver(&dir, &task)
+        .expect("driver")
+        .dispatch(
+            &Command::Human {
+                op: rusty_bbp_host::fresh_op(),
+                action,
+            },
+            rusty_bbp_host::now(),
+        )
+        .expect("extend under the lock");
+    drop(admission);
+    let err = start.join().expect("join").unwrap_err();
+    assert!(err.contains("budget was extended"), "{err}");
+    assert!(
+        !moderator::evidence_marker_path(&dir, &task).exists(),
+        "a refused first start must not make the task an evidence run"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- review comments on #763 (baileyrd, fa4a8a8a): the marker waits for the lock
 
 #[test]
