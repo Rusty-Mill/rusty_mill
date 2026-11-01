@@ -32,13 +32,21 @@
 //! (never two writers, or a writer and a reader, active together) is
 //! still fully guaranteed, just not strict FIFO fairness against a
 //! fresh (non-queued) caller.
+//!
+//! A waker's clone or drop may run executor code that re-enters this
+//! lock, so neither ever happens with `state` held, as in
+//! [`super::Mutex`]: queued wakers sit behind an `Arc` that a release
+//! copies by refcount alone, a waiter's own clone is made before it
+//! locks, and wakers removed from or replaced in the queue are dropped
+//! after unlocking. Since no code that can panic runs under `state`, a
+//! poisoned `state` still guards consistent state and is used as is.
 
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdGuard, PoisonError};
 use std::task::{Poll, Waker};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,7 +58,7 @@ enum Mode {
 struct Waiter {
     id: u64,
     mode: Mode,
-    waker: Waker,
+    waker: Arc<Waker>,
 }
 
 struct State {
@@ -78,34 +86,35 @@ impl State {
     }
 
     /// Queues a new waiter, returning its id.
-    fn enqueue(&mut self, mode: Mode, waker: &Waker) -> u64 {
+    fn enqueue(&mut self, mode: Mode, waker: Arc<Waker>) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.waiters.push_back(Waiter {
-            id,
-            mode,
-            waker: waker.clone(),
-        });
+        self.waiters.push_back(Waiter { id, mode, waker });
         id
     }
 
-    /// Refreshes waiter `id`'s waker for its next wake.
-    fn rewait(&mut self, id: u64, waker: &Waker) {
-        if let Some(w) = self.waiters.iter_mut().find(|w| w.id == id) {
-            if !w.waker.will_wake(waker) {
-                w.waker = waker.clone();
-            }
+    /// Whether waiter `id`'s stored waker already wakes `waker`'s task.
+    fn wakes(&self, id: u64, waker: &Waker) -> bool {
+        self.waiters
+            .iter()
+            .any(|w| w.id == id && w.waker.will_wake(waker))
+    }
+
+    /// Stores `waker` for waiter `id`. Returns the waker it displaces
+    /// (or `waker`, if `id` is gone), for the caller to drop once
+    /// unlocked.
+    fn rewait(&mut self, id: u64, waker: Arc<Waker>) -> Arc<Waker> {
+        match self.waiters.iter_mut().find(|w| w.id == id) {
+            Some(w) => std::mem::replace(&mut w.waker, waker),
+            None => waker,
         }
     }
 
-    fn dequeue(&mut self, id: u64) -> bool {
-        match self.waiters.iter().position(|w| w.id == id) {
-            Some(pos) => {
-                self.waiters.remove(pos);
-                true
-            }
-            None => false,
-        }
+    /// Removes waiter `id`, returning its waker for the caller to drop
+    /// once unlocked.
+    fn dequeue(&mut self, id: u64) -> Option<Arc<Waker>> {
+        let pos = self.waiters.iter().position(|w| w.id == id)?;
+        self.waiters.remove(pos).map(|w| w.waker)
     }
 
     /// Returns the wakers of every waiter now eligible to run,
@@ -121,15 +130,18 @@ impl State {
     ///
     /// Waiters stay queued when woken: each leaves the queue itself once
     /// its re-poll acquires (or its future is dropped).
-    fn wake_eligible(&mut self) -> Vec<Waker> {
+    ///
+    /// The wakers are `Arc` copies, so collecting them runs no waker
+    /// code under the lock; see [`wake_all`] for waking them.
+    fn wake_eligible(&mut self) -> Vec<Arc<Waker>> {
         if self.writer_locked {
             return Vec::new();
         }
-        let mut woken: Vec<Waker> = self
+        let mut woken: Vec<Arc<Waker>> = self
             .waiters
             .iter()
             .take_while(|w| w.mode == Mode::Read)
-            .map(|w| w.waker.clone())
+            .map(|w| Arc::clone(&w.waker))
             .collect();
         // Only ever check for a queued writer in the *same* release
         // event when no readers were just woken above -- waking a
@@ -142,11 +154,24 @@ impl State {
         // last of that reader batch's own guards actually drops.
         if woken.is_empty() && self.readers == 0 {
             if let Some(w) = self.waiters.front().filter(|w| w.mode == Mode::Write) {
-                woken.push(w.waker.clone());
+                woken.push(Arc::clone(&w.waker));
             }
         }
         woken
     }
+}
+
+/// Wakes wakers collected under the lock, once it is released.
+fn wake_all(woken: Vec<Arc<Waker>>) {
+    for waker in woken {
+        waker.wake_by_ref();
+    }
+}
+
+/// No code that can panic runs while `state` is held, so a poisoned
+/// lock still guards consistent state (see the module docs).
+fn lock_state(state: &StdMutex<State>) -> StdGuard<'_, State> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// A waiter's place in the queue, left on drop (a cancelled `read()` or
@@ -159,15 +184,61 @@ struct Place<'a> {
 impl Drop for Place<'_> {
     fn drop(&mut self) {
         let Some(id) = self.id else { return };
-        let mut state = self.state.lock().unwrap();
-        let woken = if state.dequeue(id) {
-            state.wake_eligible()
-        } else {
-            Vec::new()
+        let mut state = lock_state(self.state);
+        let removed = state.dequeue(id);
+        let woken = match removed {
+            Some(_) => state.wake_eligible(),
+            None => Vec::new(),
         };
         drop(state);
-        for waker in woken {
-            waker.wake();
+        drop(removed);
+        wake_all(woken);
+    }
+}
+
+impl Place<'_> {
+    /// One poll of a `read()` or `write()` waiter: takes the lock if
+    /// `grant` allows it (given this waiter's id, if queued), else
+    /// queues or re-waits with `cx`'s waker. Follows
+    /// [`super::Mutex`]'s acquire loop: the waker is cloned only with
+    /// `state` released, and a displaced or dequeued one dropped after.
+    fn poll_acquire(
+        &mut self,
+        mode: Mode,
+        cx: &mut std::task::Context<'_>,
+        grant: impl Fn(&mut State, Option<u64>) -> bool,
+    ) -> Poll<()> {
+        // A clone made on a pass through the loop that found the stored
+        // waker stale.
+        let mut fresh: Option<Arc<Waker>> = None;
+        loop {
+            let mut state = lock_state(self.state);
+            if grant(&mut state, self.id) {
+                let removed = self.id.take().and_then(|id| state.dequeue(id));
+                drop(state);
+                drop((removed, fresh));
+                return Poll::Ready(());
+            }
+            if self.id.is_some_and(|id| state.wakes(id, cx.waker())) {
+                drop(state);
+                drop(fresh);
+                return Poll::Pending;
+            }
+            let Some(waker) = fresh.take() else {
+                drop(state);
+                fresh = Some(Arc::new(cx.waker().clone()));
+                continue;
+            };
+            let displaced = match self.id {
+                Some(id) => Some(state.rewait(id, waker)),
+                None => {
+                    self.id = Some(state.enqueue(mode, waker));
+                    None
+                }
+            };
+            drop(state);
+            drop(displaced);
+            return Poll::Pending;
         }
     }
 }
@@ -207,23 +278,17 @@ impl<T> RwLock<T> {
             id: None,
         };
         std::future::poll_fn(|cx| {
-            let mut guard = self.state.lock().unwrap();
-            let blocked = match place.id {
-                None => guard.writer_pending(),
-                Some(id) => guard.writer_ahead_of(id),
-            };
-            if !guard.writer_locked && !blocked {
-                guard.readers += 1;
-                if let Some(id) = place.id.take() {
-                    guard.dequeue(id);
+            place.poll_acquire(Mode::Read, cx, |state, id| {
+                let blocked = match id {
+                    None => state.writer_pending(),
+                    Some(id) => state.writer_ahead_of(id),
+                };
+                let free = !state.writer_locked && !blocked;
+                if free {
+                    state.readers += 1;
                 }
-                return Poll::Ready(());
-            }
-            match place.id {
-                Some(id) => guard.rewait(id, cx.waker()),
-                None => place.id = Some(guard.enqueue(Mode::Read, cx.waker())),
-            }
-            Poll::Pending
+                free
+            })
         })
         .await;
     }
@@ -236,29 +301,23 @@ impl<T> RwLock<T> {
             id: None,
         };
         std::future::poll_fn(|cx| {
-            let mut guard = self.state.lock().unwrap();
-            let turn = match place.id {
-                None => guard.waiters.is_empty(),
-                Some(id) => guard.is_front(id),
-            };
-            if !guard.writer_locked && guard.readers == 0 && turn {
-                guard.writer_locked = true;
-                if let Some(id) = place.id.take() {
-                    guard.dequeue(id);
+            place.poll_acquire(Mode::Write, cx, |state, id| {
+                let turn = match id {
+                    None => state.waiters.is_empty(),
+                    Some(id) => state.is_front(id),
+                };
+                let free = !state.writer_locked && state.readers == 0 && turn;
+                if free {
+                    state.writer_locked = true;
                 }
-                return Poll::Ready(());
-            }
-            match place.id {
-                Some(id) => guard.rewait(id, cx.waker()),
-                None => place.id = Some(guard.enqueue(Mode::Write, cx.waker())),
-            }
-            Poll::Pending
+                free
+            })
         })
         .await;
     }
 
     fn try_acquire_read(&self) -> bool {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = lock_state(&self.state);
         if !guard.writer_locked && !guard.writer_pending() {
             guard.readers += 1;
             true
@@ -268,7 +327,7 @@ impl<T> RwLock<T> {
     }
 
     fn try_acquire_write(&self) -> bool {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = lock_state(&self.state);
         if !guard.writer_locked && guard.readers == 0 {
             guard.writer_locked = true;
             true
@@ -281,7 +340,7 @@ impl<T> RwLock<T> {
     /// are now eligible once the last reader clears. Shared by
     /// `RwLockReadGuard`'s and `OwnedRwLockReadGuard`'s `Drop` impls.
     fn release_read(&self) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = lock_state(&self.state);
         guard.readers -= 1;
         let woken = if guard.readers == 0 {
             guard.wake_eligible()
@@ -289,9 +348,7 @@ impl<T> RwLock<T> {
             Vec::new()
         };
         drop(guard);
-        for waker in woken {
-            waker.wake();
-        }
+        wake_all(woken);
     }
 
     /// Releases the write lock, waking whichever waiters are now
@@ -299,13 +356,11 @@ impl<T> RwLock<T> {
     /// (`RwLockWriteGuard`, `OwnedRwLockWriteGuard`, and the mapped write
     /// guards).
     fn release_write(&self) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = lock_state(&self.state);
         guard.writer_locked = false;
         let woken = guard.wake_eligible();
         drop(guard);
-        for waker in woken {
-            waker.wake();
-        }
+        wake_all(woken);
     }
 
     pub async fn read(&self) -> RwLockReadGuard<'_, T> {
@@ -458,14 +513,12 @@ impl<'a, T> RwLockWriteGuard<'a, T> {
         // which is exactly the momentary "nothing holds the lock" gap
         // this method exists to avoid.
         std::mem::forget(self);
-        let mut guard = lock.state.lock().unwrap();
+        let mut guard = lock_state(&lock.state);
         guard.writer_locked = false;
         guard.readers = 1;
         let woken = guard.wake_eligible();
         drop(guard);
-        for waker in woken {
-            waker.wake();
-        }
+        wake_all(woken);
         RwLockReadGuard { lock }
     }
 
@@ -529,14 +582,12 @@ impl<T> OwnedRwLockWriteGuard<T> {
         // `ManuallyDrop`), so the clone below is the only `Arc` handle
         // produced here -- no double-release, no leaked refcount.
         let lock = unsafe { std::ptr::read(&this.lock) };
-        let mut guard = lock.state.lock().unwrap();
+        let mut guard = lock_state(&lock.state);
         guard.writer_locked = false;
         guard.readers = 1;
         let woken = guard.wake_eligible();
         drop(guard);
-        for waker in woken {
-            waker.wake();
-        }
+        wake_all(woken);
         OwnedRwLockReadGuard { lock }
     }
 
