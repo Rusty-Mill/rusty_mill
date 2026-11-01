@@ -460,8 +460,10 @@ fn a_marker_from_before_segments_is_refused_and_an_older_bbp_refuses_the_new_one
 
 // ---- #1327: reads_per_turn is the opened budget, and an extended one refuses
 
-/// The facts of a run opened at `reads_per_turn` 30 that a human then
-/// extended with `extend <field> <limit>`.
+/// The facts of a run opened at `reads_per_turn` 30 whose log then holds a
+/// `BudgetExtended` of `field` to `limit`. It is dispatched to the engine
+/// directly: `bbp human extend` refuses on an evidence task, so this stands
+/// for a log written before the marker or by an older `bbp`.
 fn extended_facts(tag: &str, field: &str, limit: &str) -> Result<pairs::RunFacts, String> {
     let root = tempdir(tag);
     let (_repo, head) = checkout(&root);
@@ -473,7 +475,16 @@ fn extended_facts(tag: &str, field: &str, limit: &str) -> Result<pairs::RunFacts
     .unwrap();
     let r = run(&root, "extended", &mod_out(Some(&head)), Some(ASSISTANT));
     let task = TaskId("T1".into());
-    rusty_bbp_host::human::perform(Path::new(&r.dir), &task, "extend", &[field, limit], None)
+    let action = rusty_bbp_host::human::action("extend", &[field, limit], None).unwrap();
+    rusty_bbp_host::open_driver(Path::new(&r.dir), &task)
+        .unwrap()
+        .dispatch(
+            &rusty_bbp::Command::Human {
+                op: rusty_bbp_host::fresh_op(),
+                action,
+            },
+            rusty_bbp_host::now(),
+        )
         .expect("extend");
     let (c, sha) = rusty_bbp_host::tokens::read_criteria(&criteria).unwrap();
     let f = pairs::facts(
@@ -515,7 +526,15 @@ fn a_run_extended_back_to_its_opened_reads_per_turn_is_still_refused() {
 }
 
 #[test]
-fn a_run_extended_in_another_field_keeps_its_opened_reads_per_turn() {
-    let f = extended_facts("extended-msgs", "messages", "1000").expect("loads");
-    assert_eq!(f.reads_per_turn, 30);
+fn a_run_extended_in_any_budget_field_is_refused() {
+    // Owner decision 2026-11-01: an evidence run runs under the budget its
+    // task was opened with. An extended `messages` or `bytes` limit would also
+    // hide an earlier overshoot, which is checked against the folded budget.
+    for field in ["messages", "bytes", "reads", "turns", "iterations"] {
+        let err = extended_facts(&format!("extended-{field}"), field, "100000").unwrap_err();
+        assert!(
+            err.starts_with(&format!("{field} was opened at ")) && err.contains("100000"),
+            "{field}: {err}"
+        );
+    }
 }
