@@ -567,8 +567,9 @@ pub(crate) struct Console {
     logged: HashSet<Diag>,
     key_for: KeyFor,
     codec: Codec,
-    /// `SetConsoleCP`: ANSI reads and the `A` title calls.
-    input_cp: u32,
+    /// `SetConsoleCP`: ANSI reads, `WriteConsoleInputA` and the `A`
+    /// title calls.
+    input_cp: CodePage,
     /// `SetConsoleOutputCP`: `WriteConsoleA` and raw writes.
     output_cp: CodePage,
     /// A DBCS lead byte that ended the last `A` write, for the next one
@@ -614,6 +615,9 @@ pub(crate) struct Console {
     /// A win32-input-mode surrogate half waiting for its partner before
     /// it goes to a VT client as UTF-8.
     vt_utf8: input::Utf8Units,
+    /// A DBCS lead byte's record that ended the last `WriteConsoleInputA`,
+    /// for the next (conhost `_writePartialByteSequence`).
+    input_lead: Option<input::KeyEvent>,
 }
 
 impl Console {
@@ -638,7 +642,7 @@ impl Console {
             logged: HashSet::new(),
             key_for,
             codec,
-            input_cp: codepage::UTF8,
+            input_cp: CodePage::UTF8,
             output_cp: CodePage::UTF8,
             lead_byte: None,
             utf8_tail: Vec::new(),
@@ -658,6 +662,7 @@ impl Console {
             held_unit: None,
             record_utf8: [input::Utf8Units::default(); 2],
             vt_utf8: input::Utf8Units::default(),
+            input_lead: None,
         }
     }
 
@@ -1037,6 +1042,7 @@ impl Console {
             },
             api::GENERATE_CTRL_EVENT => self.generate_ctrl_event(&fixed, fx),
             api::GET_CONSOLE_INPUT => return self.get_console_input(p, m, fixed, fx),
+            api::WRITE_CONSOLE_INPUT => return self.write_console_input(p, m, fixed, out, fx),
             api::READ_CONSOLE => return self.read_console(p, Some(m), fixed, out, fx),
             api::WRITE_CONSOLE => return self.write_console(p, m, fixed, out, fx),
             api::SET_TITLE => return self.set_title(p, m, fixed, out, fx),
@@ -1079,7 +1085,7 @@ impl Console {
         let cp = if output {
             self.output_cp.cp
         } else {
-            self.input_cp
+            self.input_cp.cp
         };
         msg::put_u32(fixed, 0, cp);
         msg::STATUS_SUCCESS
@@ -1094,17 +1100,21 @@ impl Console {
         if !(self.codec.valid)(cp) {
             return msg::STATUS_FROM_INVALIDARG;
         }
-        if !output {
-            // Only output needs lead bytes.
-            self.input_cp = cp;
-            return msg::STATUS_SUCCESS;
-        }
-        if cp == self.output_cp.cp {
+        let current = if output {
+            self.output_cp
+        } else {
+            self.input_cp
+        };
+        if cp == current.cp {
             return msg::STATUS_SUCCESS;
         }
         let Some(cp) = CodePage::new(cp, &self.codec) else {
             return msg::STATUS_FROM_INVALIDARG;
         };
+        if !output {
+            self.input_cp = cp;
+            return msg::STATUS_SUCCESS;
+        }
         // A lead byte kept under the old code page would pair with a
         // byte of the new one; conhost keeps it (V14).
         self.lead_byte = None;
@@ -1305,7 +1315,7 @@ impl Console {
         let title: Vec<u16> = if unicode {
             msg::utf16_units(m.variable)
         } else {
-            codepage::decode(&self.codec, self.input_cp, m.variable)
+            codepage::decode(&self.codec, self.input_cp.cp, m.variable)
                 .encode_utf16()
                 .collect()
         };
@@ -1343,7 +1353,7 @@ impl Console {
         } else {
             let text = String::from_utf16_lossy(title);
             title_a(
-                &codepage::encode(&self.codec, self.input_cp, &text),
+                &codepage::encode(&self.codec, self.input_cp.cp, &text),
                 capacity,
             )
         };

@@ -437,6 +437,76 @@ impl Console {
         fx.push(Effect::Reply(records_reply(read, &records)));
     }
 
+    /// `CONSOLE_WRITECONSOLEINPUT_MSG { OUT NumRecords; IN Unicode; IN
+    /// Append }`, the records being the variable input (conhost
+    /// `ServerWriteConsoleInput`). Waiting reads are served at once.
+    pub(super) fn write_console_input(
+        &mut self,
+        p: &Packet<'_>,
+        m: ApiMsg<'_>,
+        mut fixed: Vec<u8>,
+        out: &mut OutputQueue,
+        fx: &mut Vec<Effect>,
+    ) {
+        let (Some(unicode), Some(append)) = (msg::bool_at(&fixed, 4), msg::bool_at(&fixed, 5))
+        else {
+            fx.push(Effect::Reply(Reply::status(
+                p.id,
+                msg::STATUS_ILLEGAL_FUNCTION,
+            )));
+            return;
+        };
+        let written = self
+            .input_object(p.object, true)
+            .and_then(|()| self.write_input(m.variable, unicode, append));
+        msg::put_u32(&mut fixed, 0, *written.as_ref().unwrap_or(&0));
+        let mut reply = Reply::status(p.id, written.err().unwrap_or(msg::STATUS_SUCCESS));
+        reply.write_back = fixed;
+        fx.push(Effect::Reply(reply));
+        if !self.reads_behind() {
+            self.serve_reads(out, fx);
+        }
+    }
+
+    /// Queue a client's records; the count conhost reports, one per
+    /// record after `A` conversion. A VT client gets keys as VT, as
+    /// terminal input; such keys never coalesce. STATUS_NO_MEMORY, with
+    /// nothing queued, when the write would pass the queue's cap (§7.4).
+    fn write_input(&mut self, variable: &[u8], unicode: bool, append: bool) -> Result<u32, i32> {
+        let records: Vec<Record> = variable
+            .as_chunks::<{ input::RECORD_LEN }>()
+            .0
+            .iter()
+            .map(Record::decode)
+            .collect();
+        let mut lead = self.input_lead;
+        let records = if unicode {
+            records
+        } else {
+            input::ansi_records(&records, &mut lead, self.input_cp, &self.codec)
+        };
+        let vt = self.input_mode & mode::VIRTUAL_TERMINAL_INPUT != 0;
+        let mut vt_utf8 = self.vt_utf8;
+        let mut stored = Vec::with_capacity(records.len());
+        for r in &records {
+            match r {
+                Record::Key(k) if vt => {
+                    let bytes = input::vt_for(k, &mut vt_utf8);
+                    let keys = input::text_events(&bytes, self.key_for);
+                    stored.extend(keys.into_iter().map(Record::Key));
+                }
+                r => stored.push(*r),
+            }
+        }
+        let coalesce = !(vt && matches!(records.as_slice(), [Record::Key(_)]));
+        if !self.input.write(&stored, append, coalesce) {
+            return Err(msg::STATUS_NO_MEMORY);
+        }
+        self.input_lead = lead;
+        self.vt_utf8 = vt_utf8;
+        Ok(records.len() as u32)
+    }
+
     /// ReadConsole (`m` given) and RAW_READ (`m` None, read as ANSI with
     /// Ctrl+Z processing): pending data first, then a cooked read under
     /// LINE_INPUT, otherwise characters as they come.
@@ -880,7 +950,7 @@ impl Console {
 
     /// `text` in the input code page, as an ANSI read returns it.
     fn ansi(&self, text: &str) -> Vec<u8> {
-        codepage::encode(&self.codec, self.input_cp, text)
+        codepage::encode(&self.codec, self.input_cp.cp, text)
     }
 
     fn take_pending(&mut self, object: usize) -> Option<Vec<u16>> {
@@ -985,7 +1055,7 @@ fn is_editing_key(k: &KeyEvent) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::super::tests::Host;
+    use super::super::tests::{Host, units};
     use super::super::{Effect, Event};
     use super::*;
     use crate::msg::api;
@@ -2107,5 +2177,290 @@ pub(crate) mod tests {
         check(&mut h, fx);
         let fx = h.ev(Event::HangUp);
         check(&mut h, fx);
+    }
+
+    /// A key record as a client writes it: no VK or scan code.
+    fn typed(ch: u16, down: bool) -> Record {
+        Record::Key(KeyEvent {
+            down,
+            repeat: 1,
+            vk: 0,
+            scan: 0,
+            ch,
+            state: 0,
+        })
+    }
+
+    /// Each unit of `text` as a key-down and key-up.
+    fn typing(text: &str) -> Vec<Record> {
+        text.encode_utf16()
+            .flat_map(|u| [typed(u, true), typed(u, false)])
+            .collect()
+    }
+
+    /// WriteConsoleInput: the reply and every effect.
+    fn write_input_fx(
+        h: &mut Host,
+        object: usize,
+        records: &[Record],
+        unicode: bool,
+        append: bool,
+    ) -> (Reply, Vec<Effect>) {
+        let variable: Vec<u8> = records.iter().flat_map(Record::encode).collect();
+        let fixed = [0, 0, 0, 0, u8::from(unicode), u8::from(append), 0, 0];
+        let mut payload = api::WRITE_CONSOLE_INPUT.to_le_bytes().to_vec();
+        payload.extend((fixed.len() as u32).to_le_bytes());
+        payload.extend(fixed);
+        payload.extend(&variable);
+        h.packet(msg::USER_DEFINED, 1, object, &payload, fixed.len() as u32)
+    }
+
+    /// WriteConsoleW: the status and NumRecords.
+    fn write_input(h: &mut Host, object: usize, records: &[Record]) -> (i32, u32) {
+        let (r, _) = write_input_fx(h, object, records, true, true);
+        (r.status, msg::u32_at(&r.write_back, 0).unwrap_or(u32::MAX))
+    }
+
+    fn count(h: &mut Host, input: usize) -> u32 {
+        let r = h.call(input, api::GET_NUMBER_OF_INPUT_EVENTS, &[0; 4], &[], 0);
+        msg::u32_at(&r.write_back, 0).unwrap_or(u32::MAX)
+    }
+
+    fn queued(h: &Host) -> Vec<Record> {
+        h.c.input.iter().copied().collect()
+    }
+
+    /// The parity suite's `input` probe: ConPTY gives `wrote=3 queued=3
+    /// peek=3:ab read=1:a left=2 flush=ok after=0`.
+    #[test]
+    fn written_records_are_counted_peeked_read_and_flushed() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        let records = [typed(0x61, true), typed(0x61, false), typed(0x62, true)];
+        assert_eq!(write_input(&mut h, input, &records), (0, 3));
+        assert_eq!(count(&mut h, input), 3);
+        let peek = get_input(&mut h, input, READ_NOREMOVE | READ_NOWAIT, true, 8);
+        assert_eq!(msg::u32_at(&peek.write_back, 0), Some(3));
+        let read = get_input(&mut h, input, 0, true, 1);
+        assert_eq!(msg::u32_at(&read.write_back, 0), Some(1));
+        assert_eq!(read.output[..input::RECORD_LEN], records[0].encode());
+        assert_eq!(count(&mut h, input), 2);
+        let flush = h.call(input, api::FLUSH_INPUT_BUFFER, &[], &[], 0);
+        assert_eq!(flush.status, msg::STATUS_SUCCESS);
+        assert_eq!(count(&mut h, input), 0);
+    }
+
+    /// The `cooked` probes: typed records make a cooked line, whether
+    /// written before the read or while it waits.
+    #[test]
+    fn a_written_line_serves_a_cooked_read() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        assert_eq!(write_input(&mut h, input, &typing("hi\r")), (0, 6));
+        assert_eq!(wide(&read_w(&mut h, input, 64)), "hi\r\n");
+
+        let waiting = read_w(&mut h, input, 64);
+        assert!(held(&waiting));
+        let (r, fx) = write_input_fx(&mut h, input, &typing("ab\x08c\r"), true, true);
+        assert_eq!(r.status, msg::STATUS_SUCCESS);
+        let done = completes(&fx);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].id, waiting.id);
+        assert_eq!(wide(done[0]), "ac\r\n");
+        assert_eq!(h.c.waiting(), 0);
+    }
+
+    #[test]
+    fn a_write_past_the_queue_cap_fails_and_queues_nothing() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        // One packet carries at most 64 KiB, so the cap takes two writes.
+        let half = input::MAX_RECORDS / 2;
+        let ups = |n: usize| vec![typed(0x61, false); n];
+        assert_eq!(write_input(&mut h, input, &ups(half)), (0, half as u32));
+        let (status, n) = write_input(&mut h, input, &ups(half + 1));
+        assert_eq!((status, n), (msg::STATUS_NO_MEMORY, 0));
+        assert_eq!(h.c.input.len(), half, "all or nothing");
+        assert_eq!(write_input(&mut h, input, &ups(half)), (0, half as u32));
+        let (status, _) = write_input(&mut h, input, &ups(1));
+        assert_eq!(status, msg::STATUS_NO_MEMORY);
+        assert_eq!(h.c.input.len(), input::MAX_RECORDS);
+        // A repeat still coalesces into a full queue.
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        for _ in 0..2 {
+            write_input(&mut h, input, &vec![typed(0x61, true); half]);
+        }
+        assert_eq!(write_input(&mut h, input, &[typed(0x61, true)]), (0, 1));
+        assert_eq!(h.c.input.len(), input::MAX_RECORDS);
+    }
+
+    /// conhost `_CoalesceEvent`, for one record at a time only.
+    #[test]
+    fn a_single_repeated_key_down_coalesces_but_a_batch_does_not() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        write_input(&mut h, input, &[typed(0x78, true)]);
+        assert_eq!(write_input(&mut h, input, &[typed(0x78, true)]), (0, 1));
+        assert_eq!(count(&mut h, input), 1);
+        let Record::Key(k) = queued(&h)[0] else {
+            panic!("a key");
+        };
+        assert_eq!(k.repeat, 2);
+        write_input(&mut h, input, &[typed(0x78, true), typed(0x78, true)]);
+        assert_eq!(count(&mut h, input), 3);
+        // A surrogate half never coalesces.
+        write_input(&mut h, input, &[typed(0xD83D, true)]);
+        write_input(&mut h, input, &[typed(0xD83D, true)]);
+        assert_eq!(count(&mut h, input), 5);
+    }
+
+    #[test]
+    fn mouse_and_menu_records_are_kept_as_written_and_moves_coalesce() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        let mouse = |x: u8, flags: u8| {
+            let mut event = [0u8; 16];
+            event[0] = x;
+            event[12] = flags;
+            Record::Other {
+                event_type: 2,
+                event,
+            }
+        };
+        let menu = Record::Other {
+            event_type: 8,
+            event: [7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        write_input(&mut h, input, &[mouse(1, 1), menu]);
+        write_input(&mut h, input, &[mouse(2, 1)]);
+        write_input(&mut h, input, &[mouse(3, 1)]);
+        write_input(&mut h, input, &[mouse(4, 0)]);
+        assert_eq!(queued(&h), [mouse(1, 1), menu, mouse(3, 1), mouse(4, 0)]);
+        let r = get_input(&mut h, input, 0, true, 4);
+        assert_eq!(r.output[20..40], menu.encode());
+    }
+
+    #[test]
+    fn a_write_not_appending_goes_ahead_of_queued_input() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.ev(Event::Input(b"c"));
+        let (r, _) = write_input_fx(
+            &mut h,
+            input,
+            &[typed(0x61, true), typed(0x62, true)],
+            true,
+            false,
+        );
+        assert_eq!(msg::u32_at(&r.write_back, 0), Some(2));
+        let chars: Vec<u16> = queued(&h)
+            .iter()
+            .filter_map(|r| match r {
+                Record::Key(k) if k.down => Some(k.ch),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chars, units("abc"));
+    }
+
+    #[test]
+    fn an_ansi_write_converts_from_the_input_code_page() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        assert_eq!(h.set_cp(437, false), msg::STATUS_SUCCESS);
+        let (r, _) = write_input_fx(&mut h, input, &[typed(0x82, true)], false, true);
+        assert_eq!(msg::u32_at(&r.write_back, 0), Some(1));
+        assert_eq!(queued(&h), [typed(0xE9, true)]);
+
+        // Under 932 a lead byte joins its trail, across writes too, and
+        // the count is of records made.
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        assert_eq!(h.set_cp(932, false), msg::STATUS_SUCCESS);
+        let a = |b: u16| typed(b, true);
+        let (r, _) = write_input_fx(&mut h, input, &[a(0x82), a(0xA0), a(0x82)], false, true);
+        assert_eq!(msg::u32_at(&r.write_back, 0), Some(1));
+        let (r, _) = write_input_fx(&mut h, input, &[a(0xA2), a(0x41)], false, true);
+        assert_eq!(msg::u32_at(&r.write_back, 0), Some(2));
+        let chars: Vec<u16> = queued(&h)
+            .iter()
+            .filter_map(|r| match r {
+                Record::Key(k) => Some(k.ch),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chars, units("あいA"));
+    }
+
+    #[test]
+    fn an_ansi_lead_byte_before_a_non_key_record_is_dropped() {
+        let mut lead = None;
+        let cp = codepage::CodePage::new(932, &codepage::table::CODEC).expect("932");
+        let other = Record::Other {
+            event_type: 8,
+            event: [0; 16],
+        };
+        let out = input::ansi_records(
+            &[typed(0x82, true), other, typed(0x41, true)],
+            &mut lead,
+            cp,
+            &codepage::table::CODEC,
+        );
+        assert_eq!(out, [typed(0x41, true)]);
+        // A stored lead meeting a non-key record is dropped too; the
+        // record stays.
+        lead = Some(KeyEvent {
+            down: true,
+            repeat: 1,
+            vk: 0,
+            scan: 0,
+            ch: 0x82,
+            state: 0,
+        });
+        let out = input::ansi_records(&[other], &mut lead, cp, &codepage::table::CODEC);
+        assert_eq!((out, lead), (vec![other], None));
+    }
+
+    #[test]
+    fn a_vt_client_gets_written_keys_as_vt() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        h.set_mode(input, RAW | mode::VIRTUAL_TERMINAL_INPUT);
+        let up = Record::Key(KeyEvent {
+            down: true,
+            repeat: 1,
+            vk: vk::UP,
+            scan: 0,
+            ch: 0,
+            state: 0,
+        });
+        assert_eq!(
+            write_input(&mut h, input, &[up, typed(0x78, false)]),
+            (0, 2)
+        );
+        assert_eq!(wide(&read_w(&mut h, input, 64)), "\x1b[A");
+    }
+
+    #[test]
+    fn writing_input_needs_a_writable_input_handle() {
+        let mut h = Host::new();
+        let [_, input, output] = h.connect(1, "");
+        let read_only = h
+            .create(1, msg::OBJECT_GENERIC, msg::GENERIC_READ)
+            .information;
+        let key = [typed(0x61, true)];
+        assert_eq!(
+            write_input(&mut h, read_only, &key),
+            (msg::STATUS_FROM_ACCESS_DENIED, 0)
+        );
+        assert_eq!(
+            write_input(&mut h, output, &key),
+            (msg::STATUS_FROM_HANDLE, 0)
+        );
+        assert!(h.c.input.is_empty());
+        assert_eq!(write_input(&mut h, input, &[]), (0, 0));
+        let short = h.call(input, api::WRITE_CONSOLE_INPUT, &[0; 4], &[], 0);
+        assert_eq!(short.status, msg::STATUS_ILLEGAL_FUNCTION);
     }
 }

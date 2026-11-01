@@ -17,6 +17,8 @@
 
 use std::collections::VecDeque;
 
+use crate::codepage::{self, CodePage, Codec};
+
 /// Records the queue holds; past it the oldest is dropped (§6.1).
 pub(crate) const MAX_RECORDS: usize = 4096;
 /// Bytes of an unfinished escape sequence kept for the next input; a
@@ -116,6 +118,11 @@ pub(crate) enum Record {
         cols: u16,
         rows: u16,
     },
+    /// Any other record a client wrote (mouse, menu), kept as written.
+    Other {
+        event_type: u16,
+        event: [u8; 16],
+    },
 }
 
 impl Record {
@@ -124,7 +131,7 @@ impl Record {
         let mut b = [0u8; RECORD_LEN];
         match self {
             Record::Key(k) => {
-                b[0..2].copy_from_slice(&1u16.to_le_bytes());
+                b[0..2].copy_from_slice(&KEY_EVENT.to_le_bytes());
                 b[4..8].copy_from_slice(&u32::from(k.down).to_le_bytes());
                 b[8..10].copy_from_slice(&k.repeat.to_le_bytes());
                 b[10..12].copy_from_slice(&k.vk.to_le_bytes());
@@ -137,13 +144,101 @@ impl Record {
                 b[4..8].copy_from_slice(&u32::from(*on).to_le_bytes());
             }
             Record::BufferSize { cols, rows } => {
-                b[0..2].copy_from_slice(&4u16.to_le_bytes());
+                b[0..2].copy_from_slice(&BUFFER_SIZE_EVENT.to_le_bytes());
                 b[4..6].copy_from_slice(&cols.to_le_bytes());
                 b[6..8].copy_from_slice(&rows.to_le_bytes());
+            }
+            Record::Other { event_type, event } => {
+                b[0..2].copy_from_slice(&event_type.to_le_bytes());
+                b[4..].copy_from_slice(event);
             }
         }
         b
     }
+
+    /// An `INPUT_RECORD` a client wrote. Key and buffer-size events are
+    /// typed, since reads and coalescing look into them; the rest stay
+    /// as written.
+    pub(crate) fn decode(b: &[u8; RECORD_LEN]) -> Record {
+        let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
+        let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        match u16_at(0) {
+            KEY_EVENT => Record::Key(KeyEvent {
+                down: u32_at(4) != 0,
+                repeat: u16_at(8),
+                vk: u16_at(10),
+                scan: u16_at(12),
+                ch: u16_at(14),
+                state: u32_at(16),
+            }),
+            BUFFER_SIZE_EVENT => Record::BufferSize {
+                cols: u16_at(4),
+                rows: u16_at(6),
+            },
+            event_type => {
+                let mut event = [0u8; 16];
+                event.copy_from_slice(&b[4..]);
+                Record::Other { event_type, event }
+            }
+        }
+    }
+}
+
+/// `INPUT_RECORD.EventType` values the host looks into.
+const KEY_EVENT: u16 = 0x1;
+const MOUSE_EVENT: u16 = 0x2;
+const BUFFER_SIZE_EVENT: u16 = 0x4;
+/// `MOUSE_EVENT_RECORD.dwEventFlags`, at byte 12 of the event.
+const MOUSE_MOVED: u32 = 0x1;
+/// `dwControlKeyState`: an IME conversion, which coalesces whatever the
+/// scan code.
+const NLS_IME_CONVERSION: u32 = 0x0080_0000;
+
+/// conhost `WriteConsoleInputAImpl`: each key record's character byte
+/// (`uChar.AsciiChar`) in the input code page becomes one record per
+/// UTF-16 unit. A DBCS lead byte joins the next record's byte; one that
+/// ends the write waits in `lead` for the next write, and one followed
+/// by a non-key record is dropped. Other records pass as they are.
+pub(crate) fn ansi_records(
+    records: &[Record],
+    lead: &mut Option<KeyEvent>,
+    cp: CodePage,
+    codec: &Codec,
+) -> Vec<Record> {
+    if records.is_empty() {
+        return Vec::new();
+    }
+    let byte = |k: &KeyEvent| k.ch.to_le_bytes()[0];
+    let widen = |k: KeyEvent, narrow: &[u8], out: &mut Vec<Record>| {
+        let text = codepage::decode(codec, cp.cp, narrow);
+        out.extend(
+            text.encode_utf16()
+                .take(2)
+                .map(|ch| Record::Key(KeyEvent { ch, ..k })),
+        );
+    };
+    let mut out = Vec::with_capacity(records.len());
+    let mut it = records.iter();
+    if let (Some(first), Some(Record::Key(trail))) = (lead.take(), records.first()) {
+        widen(first, &[byte(&first), byte(trail)], &mut out);
+        it.next();
+    }
+    while let Some(r) = it.next() {
+        let Record::Key(k) = r else {
+            out.push(*r);
+            continue;
+        };
+        if !cp.is_lead(byte(k)) {
+            widen(*k, &[byte(k)], &mut out);
+            continue;
+        }
+        match it.next() {
+            None => *lead = Some(*k),
+            Some(Record::Key(trail)) => widen(*k, &[byte(k), byte(trail)], &mut out),
+            Some(_) => {}
+        }
+    }
+    out
 }
 
 /// What a run of terminal input means.
@@ -698,6 +793,72 @@ impl Queue {
         full
     }
 
+    /// conhost `InputBuffer::Write` (`append`) or `Prepend` for
+    /// WriteConsoleInput. A single appended record may coalesce with the
+    /// last; otherwise `false`, with nothing stored, when the records
+    /// would take the queue past [`MAX_RECORDS`]: unlike terminal input,
+    /// a client's write fails rather than displace older input.
+    pub(crate) fn write(&mut self, records: &[Record], append: bool, coalesce: bool) -> bool {
+        if let ([r], true) = (records, append && coalesce)
+            && self.coalesce(r)
+        {
+            return true;
+        }
+        if self.records.len() + records.len() > MAX_RECORDS {
+            return false;
+        }
+        if append {
+            self.records.extend(records);
+        } else {
+            for r in records.iter().rev() {
+                self.records.push_front(*r);
+            }
+        }
+        true
+    }
+
+    /// conhost `_CoalesceEvent`: a key-down repeating the last key-down
+    /// adds to its repeat count; a buffer size or a mouse move replaces
+    /// the last one.
+    fn coalesce(&mut self, r: &Record) -> bool {
+        let Some(last) = self.records.back_mut() else {
+            return false;
+        };
+        match (last, r) {
+            (Record::Key(last), Record::Key(k)) => {
+                let same = last.down
+                    && k.down
+                    && (last.scan == k.scan || k.state & NLS_IME_CONVERSION != 0)
+                    && last.ch == k.ch
+                    && last.state == k.state
+                    && !is_high_surrogate(k.ch)
+                    && !is_low_surrogate(k.ch);
+                if same {
+                    last.repeat = last.repeat.wrapping_add(k.repeat);
+                }
+                same
+            }
+            (last @ Record::BufferSize { .. }, Record::BufferSize { .. }) => {
+                *last = *r;
+                true
+            }
+            (
+                Record::Other {
+                    event_type: MOUSE_EVENT,
+                    event: last,
+                },
+                Record::Other {
+                    event_type: MOUSE_EVENT,
+                    event,
+                },
+            ) if mouse_moved(last) && mouse_moved(event) => {
+                last[..4].copy_from_slice(&event[..4]);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.records.clear();
     }
@@ -723,6 +884,10 @@ impl Queue {
         }
         self.records.pop_front()
     }
+}
+
+fn mouse_moved(event: &[u8; 16]) -> bool {
+    u32::from_le_bytes([event[12], event[13], event[14], event[15]]) == MOUSE_MOVED
 }
 
 /// A US-English stand-in for `VkKeyScanW`, for tests and the fuzzer.

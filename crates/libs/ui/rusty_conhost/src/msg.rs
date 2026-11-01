@@ -78,6 +78,7 @@ pub(crate) mod api {
     pub(crate) const GET_SCREEN_BUFFER_INFO: u32 = 0x0200_0007;
     pub(crate) const SET_CURSOR_POSITION: u32 = 0x0200_000A;
     pub(crate) const SET_TEXT_ATTRIBUTE: u32 = 0x0200_000D;
+    pub(crate) const WRITE_CONSOLE_INPUT: u32 = 0x0200_0010;
     pub(crate) const GET_TITLE: u32 = 0x0200_0014;
     pub(crate) const SET_TITLE: u32 = 0x0200_0015;
     pub(crate) const GET_CURRENT_FONT: u32 = 0x0300_0004;

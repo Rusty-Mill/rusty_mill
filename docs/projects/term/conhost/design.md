@@ -487,6 +487,7 @@ This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd,
 | V13 | GetConsoleLangId | answers for an East Asian output code page when the system's ANSI code page is East Asian too | always fails (`STATUS_NOT_SUPPORTED`) | the answer needs the system's ANSI code page, which we don't read; clients fall back to their own UI language, as they do under conhost on every other system |
 | V14 | WriteConsoleA's kept DBCS lead byte | lead bytes from `GetCPInfo`; the kept byte survives a change of output code page | lead bytes probed through the codec, so they may differ where `GetCPInfo` lists none for a multibyte code page (possibly GB 18030 and EUC-JP: we keep a two-byte lead, conhost keeps nothing); a change of output code page drops the kept byte | no fourth Win32 admission; a byte kept across a code-page change would pair with a byte of the new one |
 | V15 | The hosting process ends abruptly (the mux server killed or crashing, or its console window closed) | OpenConsole is its own process: the broken pipes make it send CTRL_CLOSE, and Windows ends the handlers at about 5 s | the host runs inside the server, so it ends with it and nothing runs: clients still attached get no CTRL_CLOSE and are never ended | the console stays bounded and in-process (D1). On Beast a killed server's cmd ended within 3 s, but a `start /b` survivor can outlive it. A clean stop does not share this: the mux server's `serve_until` (Ctrl+C or Ctrl+Break for the binary) and any end of `serve`/`serve_udp` end every block's program, hang up every console we host and wait, with one 6 s deadline for them all, until each has shut down: closed, and the end of each client still attached tried 5 s after CTRL_CLOSE (`wait_shut_down`). A client the host could not open or end may still run. Past the deadline the server logs and exits anyway. Closing the server's own console window counts as abrupt, since Windows ends a process once its CTRL_CLOSE handler returns. yirp (#1290) likewise awaits a bounded shutdown on normal exit and abandon (`shut_down_terminal`) |
+| V16 | WriteConsoleInput past 4,096 queued records | the queue grows without bound | the write fails with `STATUS_NO_MEMORY` and queues nothing | a client must not grow host memory without bound (§7.4); terminal input keeps dropping the oldest instead, since it can't be refused. One packet carries at most 3,276 records, so only a client that never reads hits it (#1335) |
 
 The parity suite (§8) treats each of these as an expected difference.
 
@@ -621,7 +622,7 @@ Effects are applied after each `handle` call, in the order the core returned the
 | Input lane (terminal input) | 64 KiB of pending bytes | `PtyMaster::write` blocks until the engine drains it, as a pty write blocks when the child stops reading |
 | Admitted terminal slice | 16 KiB of bytes, plus one decoded sequence (at most 4,097 raw bytes or a wrapped key's records) | no later slice is taken until this remainder is consumed. Decode incrementally and serve a waiting cooked read between records, before processing a later Ctrl+C. Echo and reply-budget holds retain the remainder instead of overflowing the record queue |
 | Control lane | fixed size: four flags and one `WinSize` | never full: setting a flag that is already set is a no-op |
-| Input records | 4,096 | oldest dropped, logged once (unchanged) |
+| Input records | 4,096 | terminal input: oldest dropped, logged once (unchanged). WriteConsoleInput: the write fails, queuing nothing (V16) |
 | Unfinished input escape sequence | 4,096 bytes | given up as an unknown sequence and dropped |
 | Cooked line | 8,192 UTF-16 units, or the read's initial data if longer. **Reserved** in the parked payload when the read starts waiting, so it is within the 64 KiB per call | further typing is ignored |
 | Rest of finished lines kept per handle for the next read | 512 Ki units (1 MiB) across all handles | the rest of the line that would pass it is dropped, logged once |
@@ -1029,6 +1030,7 @@ Function codes: 1 CONNECT, 2 DISCONNECT, 3 CREATE_OBJECT, 4 CLOSE_OBJECT, 5 RAW_
 | 7 | WriteConsoleOutput(+String), ReadConsoleOutputString, Get/SetConsoleScreenBufferInfoEx, GetLargestConsoleWindowSize, SetConsoleScreenBufferSize, SetConsoleWindowInfo | from `conmsgl2.h`, pinned in PR 7 |
 | 11 | GetConsoleProcessList | 0x03000029 (draft 6 said 0x0300002A, which is GetConsoleHistory in `conmsgl3.h`) |
 | 11 | SetCurrentConsoleFontEx (accepted, ignored; Windows PowerShell 5.1 exits at startup without it) | 0x0300002C |
+| #1335 | WriteConsoleInput (W and A, append or prepend; A in the input code page, keeping a DBCS lead byte for the next write) | 0x02000010 |
 | — | CREATE_OBJECT type 3, SetConsoleActiveScreenBuffer | deferred (V6) |
 
 ## Appendix B. How the review findings were resolved
