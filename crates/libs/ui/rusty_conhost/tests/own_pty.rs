@@ -432,34 +432,75 @@ const DIVERGENCES: &[(&[&str], &str)] = &[
 ];
 
 /// Gaps the suite has found and that are tracked but not yet closed, as
-/// (probe, issue). They must still differ: a gap that starts to agree
-/// fails the suite until it is taken off this list.
-const GAPS: &[(&[&str], &str)] = &[
-    (&["fill", "x", "1e", "10", "2", "1"], "#1330"),
-    (&["fill", "x", "1e", "500", "190", "29"], "#1330"),
-    (&["fill", "x", "1e", "0", "0", "0"], "#1330"),
-    (&["fill", "x", "1e", "5", "200", "0"], "#1330"),
-    (&["scroll", "0"], "#1330"),
-    (&["scroll", "1"], "#1330"),
-    (&["cells", "abc", "1e,2f,4e", "3", "2"], "#1333"),
-    (&["cells", "abcd", "1e,2f,4e,70", "198", "0"], "#1333"),
-    (&["cells", "abcd", "1e,2f,4e,70", "198", "29"], "#1333"),
-    (&["block"], "#1333"),
-    (&["set-buffer", "200", "30"], "#1333"),
-    (&["set-buffer", "200", "9001"], "#1333"),
-    (&["set-buffer", "100", "30"], "#1333"),
-    (&["set-window", "1", "0", "0", "199", "29"], "#1333"),
-    (&["set-window", "1", "0", "0", "99", "19"], "#1333"),
-    (&["set-window", "0", "0", "0", "0", "0"], "#1333"),
-    (&["set-window", "1", "0", "0", "300", "29"], "#1333"),
-    (&["largest"], "#1333"),
-    (&["input"], "#1335"),
-    (&["cooked", "hi\\r"], "#1335"),
-    (&["cooked", "ab\\bc\\r"], "#1335"),
-    (&["print-x", "1", "205"], "#1336"),
-    (&["print-x", "7", "32768"], "#1337"),
-    (&["print-x", "7", "100000"], "#1337"),
+/// (probe, our answer, issue). Our answer is pinned, as a divergence's
+/// is, so the rest of the probe still catches regressions: a gap whose
+/// answer changes in any other way is a mismatch, and one that starts to
+/// agree fails the suite until it is taken off this list.
+const GAPS: &[(&[&str], &str, &str)] = &[
+    (&["fill", "x", "1e", "10", "2", "1"], NO_FILL, "#1330"),
+    (&["fill", "x", "1e", "500", "190", "29"], NO_FILL, "#1330"),
+    (&["fill", "x", "1e", "0", "0", "0"], NO_FILL, "#1330"),
+    (&["fill", "x", "1e", "5", "200", "0"], NO_FILL, "#1330"),
+    (&["scroll", "0"], NO_SCROLL, "#1330"),
+    (&["scroll", "1"], NO_SCROLL, "#1330"),
+    (&["cells", "abc", "1e,2f,4e", "3", "2"], NO_CELLS, "#1333"),
+    (
+        &["cells", "abcd", "1e,2f,4e,70", "198", "0"],
+        NO_CELLS,
+        "#1333",
+    ),
+    (
+        &["cells", "abcd", "1e,2f,4e,70", "198", "29"],
+        NO_CELLS,
+        "#1333",
+    ),
+    (&["block"], "block wrote=error=1 read=error=1", "#1333"),
+    (&["set-buffer", "200", "30"], NO_BUFFER, "#1333"),
+    (&["set-buffer", "200", "9001"], NO_BUFFER, "#1333"),
+    (&["set-buffer", "100", "30"], NO_BUFFER, "#1333"),
+    (
+        &["set-window", "1", "0", "0", "199", "29"],
+        NO_WINDOW,
+        "#1333",
+    ),
+    (
+        &["set-window", "1", "0", "0", "99", "19"],
+        NO_WINDOW,
+        "#1333",
+    ),
+    (&["set-window", "0", "0", "0", "0", "0"], NO_WINDOW, "#1333"),
+    (
+        &["set-window", "1", "0", "0", "300", "29"],
+        NO_WINDOW,
+        "#1333",
+    ),
+    (&["largest"], "largest size=error=1", "#1333"),
+    (
+        &["input"],
+        "input before=0 wrote=error=1 queued=0 peek=0: read=0: left=0 flush=ok after=0",
+        "#1335",
+    ),
+    (&["cooked", "hi\\r"], NO_COOKED, "#1335"),
+    (&["cooked", "ab\\bc\\r"], NO_COOKED, "#1335"),
+    (
+        &["print-x", "1", "205"],
+        "print-x mode=ok n=205 cursor=199,0 attr=0x7",
+        "#1336",
+    ),
+    (&["print-x", "7", "32768"], NO_BIG_WRITE, "#1337"),
+    (&["print-x", "7", "100000"], NO_BIG_WRITE, "#1337"),
 ];
+
+// Our answers while those APIs are unserved (ERROR_INVALID_FUNCTION).
+const NO_FILL: &str = "fill chars=error=1 attrs=error=1 text=error=1 attrs=error=1";
+const NO_SCROLL: &str = "scroll painted=error=1 error=1 row0=[text=error=1 attrs=error=1] row3=[text=error=1 attrs=error=1]";
+const NO_CELLS: &str = "cells chars=error=1 attrs=error=1 text=error=1 attrs=error=1";
+const NO_BUFFER: &str =
+    "set-buffer error=1 after=size=200,30 cursor=0,0 attr=0x7 window=0,0,199,29 max=200,30";
+const NO_WINDOW: &str =
+    "set-window error=1 after=size=200,30 cursor=0,0 attr=0x7 window=0,0,199,29 max=200,30";
+const NO_COOKED: &str = "cooked wrote=error=1 read= cursor=0,0 attr=0x7";
+const NO_BIG_WRITE: &str = "print-x mode=ok n=error=6 cursor=0,0 attr=0x7";
 
 /// How one probe compared.
 #[derive(Debug, PartialEq)]
@@ -474,14 +515,14 @@ enum Verdict {
 
 fn verdict(args: &[String], conpty: &str, ours: &str) -> Verdict {
     let is = |listed: &[&str]| listed.iter().copied().eq(args.iter().map(String::as_str));
-    let gap = GAPS.iter().find(|(p, _)| is(p)).map(|(_, issue)| *issue);
+    let gap = GAPS.iter().find(|(p, ..)| is(p));
+    let diverges = || DIVERGENCES.iter().any(|(p, o)| is(p) && *o == ours);
     match (conpty == ours, gap) {
         (true, None) => Verdict::Same,
-        (true, Some(issue)) => Verdict::Closed(issue),
-        (false, Some(issue)) => Verdict::Gap(issue),
-        (false, None) if DIVERGENCES.iter().any(|(p, o)| is(p) && *o == ours) => {
-            Verdict::Divergence
-        }
+        (true, Some(&(_, _, issue))) => Verdict::Closed(issue),
+        (false, Some(&(_, pinned, issue))) if pinned == ours => Verdict::Gap(issue),
+        (false, Some(_)) => Verdict::Mismatch,
+        (false, None) if diverges() => Verdict::Divergence,
         (false, None) => Verdict::Mismatch,
     }
 }
