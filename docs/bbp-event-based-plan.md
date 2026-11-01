@@ -96,14 +96,17 @@ editors and their edit rate, so a two-agent probe cannot rule a CRDT out (owner,
   rates and sizes are taken from real model traces (the 2b logs give planner timings and spec sizes).
 - Report per N: stale refusals per edit, the extra work to rebase each one, lost edits under
   last-write-wins, and the same under an RGA fold (built in the harness, not in BBP).
-- A small live-model check (a few runs at N = 4) confirms the scripted rates are realistic.
+- ~~A small live-model check (a few runs at N = 4) confirms the scripted rates are realistic.~~ Dropped by
+  the owner on 2026-11-01: BBP runs use scripted editors only, never a paid API key. The scripted rates
+  stay anchored to the 2b planner timings and spec sizes.
 - Decision rule, agreed before running: if stale refusals stay rare and cheap at the agent counts the
   factory will actually use, last-write-wins with a base check is enough. If they grow so that rebasing
   costs a large share of work or edits are lost, build `rusty_crdt` as the artifact fold.
 
 ### Step 4a: what was built, and the rule fixed before the first harness run
 
-Approved 2026-10-25. No provider runs and no spend: the live N = 4 check waits for its own approval.
+Approved 2026-10-25. No provider runs and no spend. The live N = 4 check was dropped on 2026-11-01
+(scripted editors only, no paid API key for BBP runs).
 
 **Op format (built).** A co-edited spec version is an `ArtifactStored` whose payload is
 `SpecEdit { brief, base, ops }` (`rusty_bbp/src/coedit.rs`); `base: None` starts a spec. An op is
