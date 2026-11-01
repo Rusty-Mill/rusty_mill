@@ -488,7 +488,8 @@ impl Mux {
         id
     }
 
-    /// Records that a new connection, by `transport`, took the client over.
+    /// Records that the client is now reached by `transport`: a new
+    /// connection took it over, or its UDP association roamed.
     pub fn reconnect(&mut self, client: ClientId, transport: Transport) -> Result<(), Error> {
         let found = self
             .clients

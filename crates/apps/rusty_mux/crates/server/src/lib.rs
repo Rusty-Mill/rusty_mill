@@ -227,10 +227,11 @@ async fn serve_for(
         .ok()
         .and_then(|addr| addr.as_pathname().map(std::path::absolute))
         .and_then(Result::ok);
-    let state = state::State::shared(config, socket, owner()?);
+    let owner = owner()?;
+    let state = state::State::shared(config, socket);
     rusty_tokio::task::spawn_local(state::watch_processes(std::rc::Rc::downgrade(&state)));
     let served = rusty_tokio::select! {
-        result = serve_clients(listener, state.clone(), udp, allowed) => result,
+        result = serve_clients(listener, state.clone(), udp, allowed, owner) => result,
         () = stop => Ok(()),
     };
     let hosts = state.borrow_mut().stop();
@@ -244,15 +245,17 @@ async fn serve_for(
 }
 
 /// Serves clients on `listener`, and on `udp` if given, until either fails.
+/// Every peer `allowed` lets in is `owner`.
 #[cfg(any(target_os = "linux", windows))]
 async fn serve_clients(
     listener: UnixListener,
     state: state::Shared,
     udp: Option<Udp>,
     allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
+    owner: Principal,
 ) -> io::Result<()> {
     let Some(udp) = udp else {
-        return accept(listener, state, allowed).await;
+        return accept(listener, state, allowed, owner).await;
     };
     let registry = datagram::Registry::new(udp.socket.local_addr()?.port());
     let lifetimes = state::Lifetimes {
@@ -264,16 +267,19 @@ async fn serve_clients(
         .offer_datagrams(registry.clone(), lifetimes);
     let socket = std::rc::Rc::new(udp.socket);
     rusty_tokio::select! {
-        result = accept(listener, state.clone(), allowed) => result,
+        result = accept(listener, state.clone(), allowed, owner) => result,
         result = datagram::serve(socket, registry, state, udp.idle, datagram::LEASE_SILENCE) => result,
     }
 }
 
+/// Accepts socket clients, each of `owner`: a personal server lets in only
+/// its own user.
 #[cfg(any(target_os = "linux", windows))]
 async fn accept(
     listener: UnixListener,
     state: state::Shared,
     allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
+    owner: Principal,
 ) -> io::Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
@@ -284,6 +290,7 @@ async fn accept(
                     state.clone(),
                     rd,
                     wr,
+                    owner.clone(),
                     Transport::Socket,
                     |_, _| {},
                 ));

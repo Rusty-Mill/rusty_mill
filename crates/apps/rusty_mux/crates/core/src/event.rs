@@ -42,8 +42,9 @@ pub enum Event {
     ClientDisconnected {
         client: ClientId,
     },
-    /// A new connection took the client over, by `transport`: it keeps its
-    /// id, name, attachment and lease.
+    /// The client is reached another way, by `transport`: a new connection
+    /// took it over, or its UDP association moved to a new address. It
+    /// keeps its id, name, attachment and lease.
     ClientConnectionChanged {
         client: ClientId,
         principal: Principal,

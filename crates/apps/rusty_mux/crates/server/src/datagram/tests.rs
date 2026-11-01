@@ -9,7 +9,7 @@ use rusty_tokio::time::timeout;
 use rusty_tokio::{Builder, LocalOptions};
 
 use super::*;
-use crate::state::State;
+use crate::state::{State, test_owner};
 use crate::{Config, ConsoleHost};
 
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -47,7 +47,7 @@ async fn server_with(
     idle: Duration,
     silence: Duration,
 ) -> (Shared, Registry, SocketAddr) {
-    let state = State::shared(program, None, crate::state::test_owner());
+    let state = State::shared(program, None);
     let socket = UdpSocket::bind(bind).await.expect("bind");
     let addr = socket.local_addr().expect("addr");
     let registry = Registry::new(addr.port());
@@ -81,7 +81,7 @@ struct Peer {
 
 impl Peer {
     async fn new(registry: &Registry, server: SocketAddr) -> Self {
-        let (port, id, key) = registry.offer(Instant::now()).expect("offer");
+        let (port, id, key) = registry.offer(Instant::now(), test_owner()).expect("offer");
         assert_eq!(port, server.port());
         let assoc = Association::new(Side::Client, id, &key, Instant::now(), Some(server));
         Self {
@@ -270,12 +270,85 @@ fn a_client_over_udp_says_so_in_whoami() {
                 ..
             } => {
                 assert_eq!(client, me);
-                assert_eq!(principal, Some(crate::state::test_owner()));
+                assert_eq!(principal, Some(test_owner()));
                 assert_eq!(transport, Some(Transport::Datagram));
             }
             other => panic!("expected the caller's entry, got {other:?}"),
         }
     });
+}
+
+/// A roam moves the association, not the connection: every client it
+/// serves stays, and a client with `IDENTITY` hears that each one's
+/// connection changed, once per new address (C26).
+#[test]
+fn a_roam_tells_identity_clients_the_connection_changed() {
+    runtime().block_on(async {
+        let (_state, registry, addr) = server(PATIENCE).await;
+        let mut peer = Peer::new(&registry, addr).await;
+        peer.probe().await;
+        let features = Features::DATAGRAM.union(Features::IDENTITY);
+        let (stream, me) = peer.connect(features).await;
+        let (_, other) = peer.connect(features).await;
+
+        peer.socket = bind().await;
+        let mut moved = changes_until_synced(&mut peer, stream, 7).await;
+        moved.sort();
+        let mut both = vec![me, other];
+        both.sort();
+        assert_eq!(moved, both, "one event for each client on the association");
+
+        // Heard again from the same address: nothing moved.
+        assert_eq!(changes_until_synced(&mut peer, stream, 8).await, []);
+    });
+}
+
+/// A client gone stale on the association is an orphan kept for its
+/// takeover, not served there: a roam names only the clients still
+/// served (C26).
+#[cfg(unix)]
+#[test]
+fn a_roam_does_not_name_a_stale_client() {
+    runtime().block_on(async {
+        let (state, registry, addr) = server(PATIENCE).await;
+        let mut peer = Peer::new(&registry, addr).await;
+        peer.probe().await;
+        let features = Features::DATAGRAM.union(Features::IDENTITY);
+        let (stream, me) = peer.connect(features).await;
+        let (_, stale) = peer.hello(features.union(Features::TAKEOVER), None).await;
+        state.borrow_mut().test_go_stale(stale.client);
+        assert!(state.borrow().is_stale(stale.client));
+
+        peer.socket = bind().await;
+        assert_eq!(changes_until_synced(&mut peer, stream, 7).await, [me]);
+    });
+}
+
+/// Sends `Sync { req }` on `stream` and returns the clients named by the
+/// `client-connection-changed` events seen before its `Done`; checks each
+/// carries the owner's principal and the UDP transport.
+async fn changes_until_synced(peer: &mut Peer, stream: StreamId, req: u64) -> Vec<ClientId> {
+    peer.send(stream, &Message::Sync { req }).await;
+    let mut moved = Vec::new();
+    loop {
+        match peer.recv(stream).await {
+            Message::Done { req: done, .. } if done == req => return moved,
+            Message::Event {
+                event:
+                    rusty_mux_core::Event::ClientConnectionChanged {
+                        client,
+                        principal,
+                        transport,
+                    },
+                ..
+            } => {
+                assert_eq!(principal, test_owner());
+                assert_eq!(transport, Transport::Datagram);
+                moved.push(client);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[test]
@@ -360,10 +433,14 @@ fn closing_a_stream_ends_its_connection_only() {
 fn offers_not_taken_up_expire() {
     let registry = Registry::new(1);
     let start = Instant::now();
-    let (_, first, _) = registry.offer(start).expect("offer");
-    let (_, second, _) = registry.offer(start + OFFER_TTL / 2).expect("offer");
+    let (_, first, _) = registry.offer(start, test_owner()).expect("offer");
+    let (_, second, _) = registry
+        .offer(start + OFFER_TTL / 2, test_owner())
+        .expect("offer");
     assert_ne!(first, second, "fresh ids");
-    registry.offer(start + OFFER_TTL).expect("offer");
+    registry
+        .offer(start + OFFER_TTL, test_owner())
+        .expect("offer");
     let slots = registry.slots.borrow();
     assert!(!slots.contains_key(&first));
     assert!(slots.contains_key(&second));
@@ -387,7 +464,6 @@ async fn bare_link(peer: &mut Peer, server: Rc<UdpSocket>, registry: Registry) -
             console_host: ConsoleHost::default(),
         },
         None,
-        crate::state::test_owner(),
     );
     let timers = Timers {
         idle: PATIENCE,
@@ -458,7 +534,7 @@ fn shutting_a_stream_down_delivers_everything_written_first() {
 fn an_offer_past_its_lifetime_cannot_be_taken_up() {
     let registry = Registry::new(1);
     let start = Instant::now();
-    let (_, id, key) = registry.offer(start).expect("offer");
+    let (_, id, key) = registry.offer(start, test_owner()).expect("offer");
     let mut client = Association::new(Side::Client, id, &key, start, Some(addr_of(1)));
     client.probe();
     let (_, probe) = client.transmit(start).expect("a probe");
@@ -473,11 +549,14 @@ fn offers_stop_at_the_association_limit_until_one_expires() {
     let registry = Registry::new(1);
     let start = Instant::now();
     for _ in 0..MAX_ASSOCIATIONS {
-        registry.offer(start).expect("offer");
+        registry.offer(start, test_owner()).expect("offer");
     }
-    assert!(registry.offer(start).is_err(), "one past the limit");
+    assert!(
+        registry.offer(start, test_owner()).is_err(),
+        "one past the limit"
+    );
     registry
-        .offer(start + OFFER_TTL)
+        .offer(start + OFFER_TTL, test_owner())
         .expect("room once they expire");
 }
 

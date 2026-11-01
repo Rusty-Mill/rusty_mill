@@ -122,10 +122,6 @@ pub(crate) struct State {
     config: Config,
     /// The listening socket's path, given to each block's program.
     socket: Option<PathBuf>,
-    /// Every client's principal. A personal server serves only its own
-    /// user: the socket's peer check refuses anyone else, and a UDP
-    /// association is handed only to a client already connected.
-    owner: Principal,
     mux: Mux,
     blocks: HashMap<BlockId, BlockRt>,
     clients: HashMap<ClientId, Outbox>,
@@ -173,11 +169,10 @@ pub(crate) enum Kept {
 }
 
 impl State {
-    pub(crate) fn shared(config: Config, socket: Option<PathBuf>, owner: Principal) -> Shared {
+    pub(crate) fn shared(config: Config, socket: Option<PathBuf>) -> Shared {
         Rc::new(RefCell::new(Self {
             config,
             socket,
-            owner,
             mux: Mux::new(),
             blocks: HashMap::new(),
             clients: HashMap::new(),
@@ -277,29 +272,31 @@ impl State {
             .is_some_and(|out| out.belongs_to(cancel))
     }
 
-    /// Registers a client, negotiates features and, with `EVENT_SEQ`,
-    /// replays the events after `resume` when they are all still held.
-    /// With `TAKEOVER` and a valid `takeover`, the connection continues
-    /// that client instead: its id, name, attachment and lease stay, and
+    /// Registers a client of `principal`, whom the server verified, and
+    /// negotiates features and, with `EVENT_SEQ`, replays the events after
+    /// `resume` when they are all still held. With `TAKEOVER` and a valid
+    /// `takeover` by the same principal, the connection continues that
+    /// client instead: its id, name, attachment and lease stay, and
     /// replacing its outbox closes the old connection. Either way the
     /// client is now reached by `transport`.
     pub(crate) fn connect(
         &mut self,
         outbox: Outbox,
+        principal: Principal,
         transport: Transport,
         theirs: Features,
         resume: Option<Cursor>,
         takeover: Option<Takeover>,
     ) -> ClientId {
         let features = theirs.intersection(self.offered());
-        let continued = takeover.and_then(|t| self.takes_over(t, features));
+        let continued = takeover.and_then(|t| self.takes_over(t, &principal, features));
         let client = match continued {
             Some(client) => {
                 let moved = self.mux.reconnect(client, transport);
                 in_step("reconnect", moved);
                 client
             }
-            None => self.mux.connect(self.owner.clone(), transport),
+            None => self.mux.connect(principal, transport),
         };
         // The new connection numbers its requests afresh.
         self.forget_keys(client);
@@ -372,12 +369,20 @@ impl State {
     }
 
     /// The client `takeover` names, if it is connected or kept for a
-    /// reconnect, the token is its current or confirmed one, and the new
-    /// connection negotiated exactly its features.
+    /// reconnect, the token is its current or confirmed one, the new
+    /// connection is `principal`'s, as the client is, and it negotiated
+    /// exactly the client's features.
     /// Only `TAKEOVER` clients hold a token. Equal features keep what the
     /// client is already attached to and subscribed for (a checkpoint
-    /// version, event numbering) valid on the new connection.
-    fn takes_over(&self, takeover: Takeover, features: Features) -> Option<ClientId> {
+    /// version, event numbering) valid on the new connection. A token
+    /// leaked to another principal continues nothing: that connection
+    /// becomes a client of its own, and the token stays good.
+    fn takes_over(
+        &self,
+        takeover: Takeover,
+        principal: &Principal,
+        features: Features,
+    ) -> Option<ClientId> {
         let tokens = self.tokens.get(&takeover.client)?;
         let matches = |token: &Uuid| {
             rusty_crypto_key::constant_time_eq(token.as_bytes(), takeover.token.as_bytes())
@@ -386,7 +391,11 @@ impl State {
         let same = self.features.get(&takeover.client) == Some(&features);
         let known = self.clients.contains_key(&takeover.client)
             || self.orphans.contains_key(&takeover.client);
-        (valid && same && known).then_some(takeover.client)
+        let theirs = self
+            .mux
+            .client(takeover.client)
+            .is_some_and(|c| c.principal().id() == principal.id());
+        (valid && same && known && theirs).then_some(takeover.client)
     }
 
     /// Forgets a client whose connection, the one owning `cancel`, ended. A
@@ -501,6 +510,20 @@ impl State {
             }
             if self.served_by(*client, cancel) {
                 self.regain_lease(*client, *block);
+            }
+        }
+        self.flush();
+    }
+
+    /// Tells clients with `IDENTITY` that each of `clients` the same
+    /// connection still serves is reached at a new address: its UDP
+    /// association roamed. A client taken over elsewhere is not this
+    /// association's any more.
+    pub(crate) fn roamed(&mut self, clients: &[(ClientId, Rc<Notify>)]) {
+        for (client, cancel) in clients {
+            if self.served_by(*client, cancel) {
+                let moved = self.mux.reconnect(*client, Transport::Datagram);
+                in_step("roam", moved);
             }
         }
         self.flush();
@@ -712,17 +735,24 @@ impl State {
             M::OpenDatagram { req } => (
                 req,
                 self.require(client, Features::DATAGRAM, "a datagram association")
-                    .and_then(|()| self.open_datagram(req)),
+                    .and_then(|()| self.open_datagram(client, req)),
             ),
             other => (0, Err(format!("not a client request: {other:?}").into())),
         }
     }
 
-    /// A new association for the client to move its connections onto. The
-    /// key travels only in this reply, inside the client's connection.
-    fn open_datagram(&self, req: u64) -> Result<Outcome, Refusal> {
+    /// A new association for the client to move its connections onto,
+    /// whose streams are the client's principal's. The key travels only in
+    /// this reply, inside the client's connection.
+    fn open_datagram(&self, client: ClientId, req: u64) -> Result<Outcome, Refusal> {
         let registry = self.datagrams.as_ref().ok_or("no UDP listener")?;
-        let (port, id, key) = registry.offer(Instant::now())?;
+        let principal = self
+            .mux
+            .client(client)
+            .ok_or("unknown client")?
+            .principal()
+            .clone();
+        let (port, id, key) = registry.offer(Instant::now(), principal)?;
         reply(
             "open datagram",
             &[Message::Datagram {
@@ -1629,7 +1659,6 @@ mod regression {
                     console_host: ConsoleHost::default(),
                 },
                 None,
-                crate::state::test_owner(),
             );
             let poll = rusty_tokio::task::spawn_local(watch_processes(Rc::downgrade(&shared)));
             // One pass over an empty state first.
@@ -1652,11 +1681,17 @@ mod regression {
                 console_host: ConsoleHost::default(),
             },
             None,
-            crate::state::test_owner(),
         );
         let (out, inbox, _) = outbox();
         let mut state = shared.borrow_mut();
-        let client = state.connect(out, Transport::Socket, Features::CHECKPOINT_V6, None, None);
+        let client = state.connect(
+            out,
+            test_owner(),
+            Transport::Socket,
+            Features::CHECKPOINT_V6,
+            None,
+            None,
+        );
         let session = state.mux.create_session("s").unwrap();
         let window = state.mux.create_window(session, "w").unwrap();
         let Outcome::Done(Some(id)) = state
@@ -1685,16 +1720,25 @@ mod regression {
                 .union(Features::TAKEOVER)
                 .union(Features::ECHO_ACK);
             let (out, _old_inbox, old) = outbox();
-            let client = shared
-                .borrow_mut()
-                .connect(out, Transport::Socket, features, None, None);
+            let client = shared.borrow_mut().connect(
+                out,
+                test_owner(),
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
             let token = shared.borrow().tokens[&client].current;
             let (out, _new_inbox, new) = outbox();
             let takeover = Some(Takeover { client, token });
-            let taken =
-                shared
-                    .borrow_mut()
-                    .connect(out, Transport::Socket, features, None, takeover);
+            let taken = shared.borrow_mut().connect(
+                out,
+                test_owner(),
+                Transport::Socket,
+                features,
+                None,
+                takeover,
+            );
             assert_eq!(taken, client);
 
             let now = Instant::now();
@@ -1715,7 +1759,7 @@ mod regression {
             let features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
             let (out, _old_inbox, old) = outbox();
             let mut state = shared.borrow_mut();
-            let client = state.connect(out, Transport::Socket, features, None, None);
+            let client = state.connect(out, test_owner(), Transport::Socket, features, None, None);
             state.mux.attach(client, block).unwrap();
             state.mux.acquire_lease(client, block).unwrap();
             let token = state.tokens[&client].current;
@@ -1726,10 +1770,65 @@ mod regression {
             let (out, _new_inbox, _) = outbox();
             let takeover = Some(Takeover { client, token });
             assert_eq!(
-                state.connect(out, Transport::Socket, features, None, takeover),
+                state.connect(
+                    out,
+                    test_owner(),
+                    Transport::Socket,
+                    features,
+                    None,
+                    takeover
+                ),
                 client
             );
             assert_eq!(state.lease_of(block), Some(client));
+        });
+    }
+
+    /// A takeover must come from the client's own principal: a valid
+    /// token presented by anyone else continues nothing, takes no lease,
+    /// and leaves the token good for its owner (C26).
+    #[test]
+    fn a_takeover_by_another_principal_starts_a_client_of_its_own() {
+        runtime().block_on(async {
+            let (shared, _, block, _inbox) = fixture();
+            let features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
+            let mut state = shared.borrow_mut();
+            let (out, _owner_inbox, _) = outbox();
+            let client = state.connect(out, test_owner(), Transport::Socket, features, None, None);
+            state.mux.attach(client, block).unwrap();
+            state.mux.acquire_lease(client, block).unwrap();
+            let takeover = Some(Takeover {
+                client,
+                token: state.tokens[&client].current,
+            });
+
+            let stranger = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _stranger_inbox, _) = outbox();
+            let theirs = state.connect(
+                out,
+                stranger.clone(),
+                Transport::Datagram,
+                features,
+                None,
+                takeover,
+            );
+            assert_ne!(theirs, client);
+            assert_eq!(state.mux.client(theirs).unwrap().principal(), &stranger);
+            assert_eq!(state.mux.client(theirs).unwrap().attached(), None);
+            assert_eq!(state.lease_of(block), Some(client));
+            let mine = state.mux.client(client).unwrap();
+            assert_eq!(mine.transport(), Transport::Socket);
+
+            let (out, _new_inbox, _) = outbox();
+            let again = state.connect(
+                out,
+                test_owner(),
+                Transport::Socket,
+                features,
+                None,
+                takeover,
+            );
+            assert_eq!(again, client, "the token still works for its owner");
         });
     }
 
@@ -2045,11 +2144,17 @@ mod regression {
                     console_host: ConsoleHost::default(),
                 },
                 None,
-                crate::state::test_owner(),
             );
             let mut state = shared.borrow_mut();
             let (out, _inbox, cancel) = outbox();
-            let client = state.connect(out, Transport::Socket, Features::TAKEOVER, None, None);
+            let client = state.connect(
+                out,
+                test_owner(),
+                Transport::Socket,
+                Features::TAKEOVER,
+                None,
+                None,
+            );
             assert_eq!(
                 state.disconnect(client, &cancel),
                 Kept::Orphan,
@@ -2068,7 +2173,14 @@ mod regression {
             );
 
             let (out, _inbox, cancel) = outbox();
-            let plain = state.connect(out, Transport::Socket, Features::NONE, None, None);
+            let plain = state.connect(
+                out,
+                test_owner(),
+                Transport::Socket,
+                Features::NONE,
+                None,
+                None,
+            );
             assert_eq!(
                 state.disconnect(plain, &cancel),
                 Kept::Gone,
