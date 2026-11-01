@@ -448,6 +448,9 @@ enum Text {
     /// SetConsoleCursorPosition's move, made into VT when it is emitted:
     /// writes parked ahead of it may change the origin mode it depends on.
     CursorTo(u16, u16),
+    /// SetConsoleTextAttribute's attribute, made into SGR when it is
+    /// emitted, so the pen it leaves is the one its gridlines go with.
+    Attr(u16),
 }
 
 impl Text {
@@ -456,7 +459,7 @@ impl Text {
             Text::Wide(units) => units.len(),
             Text::Bytes(bytes) => bytes.len(),
             Text::Coded { units, .. } => *units,
-            Text::CursorTo(..) => 1,
+            Text::CursorTo(..) | Text::Attr(_) => 1,
         }
     }
 
@@ -465,7 +468,7 @@ impl Text {
         match self {
             Text::Wide(units) => units.len() * 2,
             Text::Bytes(bytes) | Text::Coded { bytes, .. } => bytes.len(),
-            Text::CursorTo(..) => 0,
+            Text::CursorTo(..) | Text::Attr(_) => 0,
         }
     }
 
@@ -485,6 +488,10 @@ impl Text {
             &Text::CursorTo(x, y) => {
                 let vt = screen.absolute_cup(x, y);
                 screen.host(&vt, out);
+                1
+            }
+            &Text::Attr(attr) => {
+                screen.set_attributes(attr, out);
                 1
             }
             Text::Bytes(bytes) => match origin {
