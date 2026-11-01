@@ -481,7 +481,12 @@ impl Text {
             }
             Text::Bytes(bytes) => match origin {
                 Origin::Client(mode) => {
-                    at + screen.client(&bytes[at..], mode, SLICE, at == 0, out, replies)
+                    let end = at + screen.client(&bytes[at..], mode, SLICE, at == 0, out, replies);
+                    // Its room was reserved when the text met the margin.
+                    if end == bytes.len() {
+                        screen.end_write(out);
+                    }
+                    end
                 }
                 Origin::Host => {
                     let end = bytes.len().min(at + SLICE);
@@ -509,23 +514,21 @@ fn emit_units(
     replies: &mut Vec<u8>,
 ) -> usize {
     let mut end = units.len().min(at + WIDE_SLICE);
-    // A glyph goes with the marks that join it, so the screen sees them
-    // before it decides about the margin; a surrogate pair stays whole.
-    let joins = |u: u16| char::from_u32(u.into()).is_some_and(screen::joins);
-    while end < units.len() && end > at + 1 && joins(units[end]) {
-        end -= 1;
-    }
     if end < units.len() && (0xD800..0xDC00).contains(&units[end - 1]) {
         end -= 1;
     }
     let text: String = char::decode_utf16(units[at..end].iter().copied())
         .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect();
-    // Each unit emits at most MAX_EXPANSION bytes, so all fit.
+    // Each unit emits at most MAX_EXPANSION bytes, so all fit; a margin
+    // move owed at the end had its room reserved when the text met it.
     match origin {
         Origin::Client(mode) => {
             let n = screen.client(text.as_bytes(), mode, SLICE, at == 0, out, replies);
             debug_assert_eq!(n, text.len(), "a wide slice fits");
+            if end == units.len() {
+                screen.end_write(out);
+            }
         }
         Origin::Host => screen.host(text.as_bytes(), out),
     }
@@ -2429,17 +2432,33 @@ pub(crate) mod tests {
         Some(out)
     }
 
+    /// A glyph in the last column, then `marks` past a slice, then `x`,
+    /// in one write under output `mode`: the marks join the glyph, and
+    /// the margin move comes after them.
+    fn marks_across_slices(mode: u32, mark: char, then: &str) {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        h.set_mode(output, mode);
+        let marks = mark.to_string().repeat(WIDE_SLICE + 5);
+        let text = format!("{}e{marks}x", "a".repeat(79));
+        assert!(text.encode_utf16().count() * 2 <= PACKET_INPUT_CAP);
+        h.vt.clear();
+        assert_eq!(h.write_w(output, &text).status, msg::STATUS_SUCCESS);
+        let shown = format!("{}e{marks}{then}x", "a".repeat(79));
+        assert!(h.vt == shown.as_bytes(), "mode {mode:#x}, {mark:?}");
+        assert_ne!(h.c.screen.grid().row(0)[79].cluster, 0, "on the e");
+    }
+
     #[test]
-    fn a_slice_keeps_a_glyph_with_its_marks() {
-        let mut screen = Screen::new(WinSize { rows: 2, cols: 80 });
-        let (mut out, mut replies) = (OutputQueue::default(), Vec::new());
-        let mut units = vec![u16::from(b'e'); WIDE_SLICE];
-        units.extend([0x301, 0x301, u16::from(b'x')]);
-        let mode = Origin::Client(screen::PROCESSED_OUTPUT);
-        let end = emit_units(&units, 0, mode, &mut screen, &mut out, &mut replies);
-        assert_eq!(end, WIDE_SLICE - 1, "the e goes with its two marks");
-        let end = emit_units(&units, end, mode, &mut screen, &mut out, &mut replies);
-        assert_eq!(end, units.len());
+    fn marks_past_a_slice_join_the_glyph_at_the_margin() {
+        for mark in ['\u{301}', '\u{1D167}'] {
+            marks_across_slices(screen::PROCESSED_OUTPUT, mark, "\x1b[1G");
+            marks_across_slices(
+                screen::PROCESSED_OUTPUT | screen::WRAP_AT_EOL_OUTPUT,
+                mark,
+                "\r\n",
+            );
+        }
     }
 
     #[test]

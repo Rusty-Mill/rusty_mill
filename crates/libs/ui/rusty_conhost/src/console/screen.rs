@@ -111,6 +111,11 @@ pub(super) struct Screen {
     /// (conhost `_writeCharsLegacyUnprocessed`). A run is a whole write
     /// without PROCESSED_OUTPUT, else the text between controls.
     run: Option<usize>,
+    /// Legacy text met the margin at the end of what the write has
+    /// emitted so far: the move it owes (CR LF with wrap, else a CHA to
+    /// [`Self::run`]) waits for the next slice, whose marks may still
+    /// join the glyph, or for the write's end.
+    owed: Option<bool>,
 }
 
 impl Screen {
@@ -126,6 +131,7 @@ impl Screen {
             long: false,
             legacy_meta: 0,
             run: None,
+            owed: None,
         };
         // conhost's colour table, which GetConsoleScreenBufferInfoEx
         // reports and legacy attributes are matched against. Only the
@@ -147,6 +153,7 @@ impl Screen {
     /// Forward whatever client bytes are held, as they are: no more
     /// output follows, or host VT goes next.
     pub(super) fn flush(&mut self, out: &mut OutputQueue) {
+        self.end_write(out);
         if std::mem::take(&mut self.c2) {
             self.held.push(0xC2);
         }
@@ -168,6 +175,7 @@ impl Screen {
         replies: &mut Vec<u8>,
     ) -> usize {
         if first {
+            self.end_write(out);
             // conhost adds an LF's CR afresh in every write.
             self.after_cr = false;
             self.run = None;
@@ -250,6 +258,12 @@ impl Screen {
         let held = std::mem::take(&mut self.held);
         self.forward(&held, out);
         let mut emitted = 0;
+        if self.owed.is_some() && !text.is_empty() && !continues(text) {
+            if CHA_MAX > room {
+                return 0;
+            }
+            emitted += self.end_write(out);
+        }
         let mut consumed = 0;
         while consumed < text.len() {
             let before = consumed;
@@ -308,16 +322,29 @@ impl Screen {
             emitted += vt.len();
             self.forward(&vt, out);
             // conhost writes a glyph with the marks that follow it before
-            // it meets the margin, so they join it, not the next row's.
+            // it meets the margin, so they join it, not the next row's;
+            // the next slice may still hold some.
             let rest = &text[consumed..];
-            if self.grid.cursor.0 >= self.grid.cols && !self.c2 && !continues(rest) {
-                emitted += self.margin(wrap, out);
+            if self.grid.cursor.0 >= self.grid.cols && !self.c2 {
+                self.owed = Some(wrap);
+                if !rest.is_empty() && !continues(rest) {
+                    emitted += self.end_write(out);
+                }
             }
             if ends_run {
                 self.run = None;
             }
         }
         consumed
+    }
+
+    /// The write is done: make the margin move it owes. Returns the
+    /// bytes sent.
+    pub(super) fn end_write(&mut self, out: &mut OutputQueue) -> usize {
+        match self.owed.take() {
+            Some(wrap) => self.margin(wrap, out),
+            None => 0,
+        }
     }
 
     /// The cursor met the margin: with wrap, CR LF; without, back to the
@@ -616,7 +643,7 @@ fn continues(text: &[u8]) -> bool {
 
 /// Whether `ch` joins the glyph on its left (rusty_term_core's default
 /// widths: a zero-width scalar), not counting C1 controls.
-pub(super) fn joins(ch: char) -> bool {
+fn joins(ch: char) -> bool {
     ch >= '\u{a0}' && char_width(ch) == 0
 }
 
@@ -813,6 +840,7 @@ mod tests {
             s.client(text, mode, usize::MAX, true, &mut out, &mut replies),
             text.len()
         );
+        s.end_write(&mut out);
         (out.take(), replies)
     }
 
