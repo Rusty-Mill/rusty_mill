@@ -87,14 +87,21 @@ fn plain_lines(vt: &[u8]) -> Vec<String> {
             continue;
         }
         match chars.next() {
-            // CSI: parameters up to a final byte.
+            // CSI: parameters up to a final byte. A cursor move ends the
+            // line: a cell write's repaint (CUP then text) can come out
+            // next to the result line, before or after it.
             Some('[') => {
                 for c in chars.by_ref() {
                     if ('@'..='~').contains(&c) {
+                        if matches!(c, 'H' | 'f') {
+                            plain.push('\n');
+                        }
                         break;
                     }
                 }
             }
+            // DECSC and DECRC bracket such a repaint.
+            Some('7' | '8') => plain.push('\n'),
             // OSC: up to BEL or ST.
             Some(']') => {
                 while let Some(c) = chars.next() {
@@ -429,67 +436,30 @@ const DIVERGENCES: &[(&[&str], &str)] = &[
     (&["set-out-cp", "1"], "set-out-cp error=87 after=65001"),
     // V5: no console window.
     (&["window"], "window null=1"),
+    // V1: the buffer and window stay the terminal's size, and the
+    // largest window is the window.
+    (&["set-buffer", "200", "9001"], REFUSED_BUFFER),
+    (&["set-window", "1", "0", "0", "99", "19"], REFUSED_WINDOW),
+    (&["set-window", "1", "0", "0", "300", "29"], REFUSED_WINDOW),
+    (&["largest"], "largest size=200,30"),
 ];
+
+// Our V1 answers: the size refused, the buffer as it was.
+const REFUSED_BUFFER: &str =
+    "set-buffer error=87 after=size=200,30 cursor=0,0 attr=0x7 window=0,0,199,29 max=200,30";
+const REFUSED_WINDOW: &str =
+    "set-window error=87 after=size=200,30 cursor=0,0 attr=0x7 window=0,0,199,29 max=200,30";
 
 /// Gaps the suite has found and that are tracked but not yet closed, as
 /// (probe, our answer, issue). Our answer is pinned, as a divergence's
 /// is, so the rest of the probe still catches regressions: a gap whose
 /// answer changes in any other way is a mismatch, and one that starts to
 /// agree fails the suite until it is taken off this list.
-const GAPS: &[(&[&str], &str, &str)] = &[
-    (&["fill", "x", "1e", "10", "2", "1"], NO_FILL, "#1330"),
-    (&["fill", "x", "1e", "500", "190", "29"], NO_FILL, "#1330"),
-    (&["fill", "x", "1e", "0", "0", "0"], NO_FILL, "#1330"),
-    (&["fill", "x", "1e", "5", "200", "0"], NO_FILL, "#1330"),
-    (&["scroll", "0"], NO_SCROLL, "#1330"),
-    (&["scroll", "1"], NO_SCROLL, "#1330"),
-    (&["cells", "abc", "1e,2f,4e", "3", "2"], NO_CELLS, "#1333"),
-    (
-        &["cells", "abcd", "1e,2f,4e,70", "198", "0"],
-        NO_CELLS,
-        "#1333",
-    ),
-    (
-        &["cells", "abcd", "1e,2f,4e,70", "198", "29"],
-        NO_CELLS,
-        "#1333",
-    ),
-    (&["block"], "block wrote=error=1 read=error=1", "#1333"),
-    (&["set-buffer", "200", "30"], NO_BUFFER, "#1333"),
-    (&["set-buffer", "200", "9001"], NO_BUFFER, "#1333"),
-    (&["set-buffer", "100", "30"], NO_BUFFER, "#1333"),
-    (
-        &["set-window", "1", "0", "0", "199", "29"],
-        NO_WINDOW,
-        "#1333",
-    ),
-    (
-        &["set-window", "1", "0", "0", "99", "19"],
-        NO_WINDOW,
-        "#1333",
-    ),
-    (&["set-window", "0", "0", "0", "0", "0"], NO_WINDOW, "#1333"),
-    (
-        &["set-window", "1", "0", "0", "300", "29"],
-        NO_WINDOW,
-        "#1333",
-    ),
-    (&["largest"], "largest size=error=1", "#1333"),
-    (
-        &["print-x", "1", "205"],
-        "print-x mode=ok n=205 cursor=199,0 attr=0x7",
-        "#1336",
-    ),
-];
-
-// Our answers while those APIs are unserved (ERROR_INVALID_FUNCTION).
-const NO_FILL: &str = "fill chars=error=1 attrs=error=1 text=error=1 attrs=error=1";
-const NO_SCROLL: &str = "scroll painted=error=1 error=1 row0=[text=error=1 attrs=error=1] row3=[text=error=1 attrs=error=1]";
-const NO_CELLS: &str = "cells chars=error=1 attrs=error=1 text=error=1 attrs=error=1";
-const NO_BUFFER: &str =
-    "set-buffer error=1 after=size=200,30 cursor=0,0 attr=0x7 window=0,0,199,29 max=200,30";
-const NO_WINDOW: &str =
-    "set-window error=1 after=size=200,30 cursor=0,0 attr=0x7 window=0,0,199,29 max=200,30";
+const GAPS: &[(&[&str], &str, &str)] = &[(
+    &["print-x", "1", "205"],
+    "print-x mode=ok n=205 cursor=199,0 attr=0x7",
+    "#1336",
+)];
 
 /// How one probe compared.
 #[derive(Debug, PartialEq)]

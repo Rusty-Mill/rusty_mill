@@ -1942,6 +1942,12 @@ impl Grid {
         )
     }
 
+    /// Whether insert mode (IRM, `CSI 4 h`) is on: printing shifts the
+    /// rest of the row right instead of replacing cells.
+    pub fn insert_mode(&self) -> bool {
+        self.insert_mode
+    }
+
     /// The region cursor addressing is relative to while origin mode
     /// (DECOM) is on, as 0-based inclusive (left, top, right, bottom);
     /// `None` with origin mode off.

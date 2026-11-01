@@ -20,9 +20,10 @@
 
 use platform::term::WinSize;
 use rusty_term_core::{
-    ATTR_BOLD, ATTR_OVERLINE, ATTR_REVERSE, AnsiParser, CellColors, ColorRef, Grid,
+    ATTR_BOLD, ATTR_OVERLINE, ATTR_REVERSE, AnsiParser, CellColors, ColorRef, Grid, WIDE_TRAILER,
 };
 
+use super::cells::{CharInfo, LEADING, LT, TRAILING, sanitize};
 use super::{OutputQueue, PREAMBLE};
 
 /// `ENABLE_*` output mode bits.
@@ -72,7 +73,7 @@ pub(super) const WATCHED_MAX: usize = CSI_PARAM_MAX + 4;
 pub(super) const MAX_EXPANSION: usize = (2 + PREAMBLE.len()) / 2;
 
 /// The CP437 glyphs conhost shows for C0 controls it does not act on.
-const CP437_C0: [char; 32] = [
+pub(super) const CP437_C0: [char; 32] = [
     ' ', '☺', '☻', '♥', '♦', '♣', '♠', '•', '◘', '○', '◙', '♂', '♀', '♪', '♫', '☼', //
     '►', '◄', '↕', '‼', '¶', '§', '▬', '↨', '↑', '↓', '→', '←', '∟', '↔', '▲', '▼',
 ];
@@ -392,6 +393,106 @@ impl Screen {
         self.host(&sgr(attr), out);
         // After the SGR, whose own reset would clear them.
         self.legacy_meta = attr & LVB_GRID;
+    }
+
+    /// Cells `x0..x1` of screen row `y` as conhost's `AsCharInfo` reports
+    /// them: a wide character's two cells both carry it, flagged leading
+    /// and trailing, and a cell that is more than one UTF-16 unit reads
+    /// as U+FFFD (§5.3). The caller keeps the range on the screen.
+    pub(super) fn cells(&self, y: usize, x0: usize, x1: usize) -> Vec<CharInfo> {
+        let row = self.grid.row(y);
+        let palette = self.parser.palette();
+        let trailer = |x: usize| row.get(x).is_some_and(|c| c.flags & WIDE_TRAILER != 0);
+        (x0..x1.min(row.len()))
+            .map(|x| {
+                let (lead, flag) = match (trailer(x), trailer(x + 1)) {
+                    (true, _) if x > 0 => (x - 1, TRAILING),
+                    (false, true) => (x, LEADING),
+                    _ => (x, 0),
+                };
+                let cell = row[lead];
+                let ch = match cell.ch {
+                    '\0' => u16::from(b' '),
+                    _ if cell.cluster != 0 => 0xFFFD,
+                    c => u16::try_from(u32::from(c)).unwrap_or(0xFFFD),
+                };
+                let attr = self
+                    .grid
+                    .cell_colors(x, y)
+                    .map_or(0, |c| legacy(c, palette));
+                CharInfo {
+                    ch,
+                    attr: attr | flag,
+                }
+            })
+            .collect()
+    }
+
+    /// Paint `cells` from (`x`, `y`) as conhost's `VtIo::Writer`
+    /// (`WriteInfos`) does: CUP, then SGR wherever the attribute changes,
+    /// and each character once, a wide one from its leading cell. A
+    /// leading cell at the end or a trailing one at the start can't hold
+    /// its half and shows a space. All of it sits between DECSC and DECRC,
+    /// as conhost's `BackupCursor` puts it, so the cursor, pen (with its
+    /// gridlines) and character sets stay. Inside, ASCII is selected so
+    /// each glyph prints as itself, origin mode goes off so the CUP is
+    /// absolute, and insert mode goes off so cells are replaced, not
+    /// shifted; the modes come back after.
+    pub(super) fn paint(&mut self, x: usize, y: usize, cells: &[CharInfo], out: &mut OutputQueue) {
+        let Some(last) = cells.len().checked_sub(1) else {
+            return;
+        };
+        let origin = self.grid.origin_region().is_some();
+        let insert = self.grid.insert_mode();
+        let mut vt = Vec::with_capacity(40 + cells.len() * 4);
+        // ASCII in G0, invoked into GL: DECRC restores the client's sets.
+        vt.extend_from_slice(b"\x1b7\x1b(B\x0f");
+        if origin {
+            vt.extend_from_slice(b"\x1b[?6l");
+        }
+        if insert {
+            vt.extend_from_slice(b"\x1b[4l");
+        }
+        vt.extend(format!("\x1b[{};{}H", y + 1, x + 1).bytes());
+        let mut pen = None;
+        for (i, c) in cells.iter().enumerate() {
+            let mut wide = c.attr & LT != 0;
+            let mut ch = c.ch;
+            if c.attr & LEADING != 0 && i == last || c.attr & TRAILING != 0 && i == 0 {
+                (ch, wide) = (u16::from(b' '), false);
+            } else if c.attr & TRAILING != 0 {
+                continue;
+            }
+            let attr = c.attr & !LT;
+            if pen != Some(attr) {
+                pen = Some(attr);
+                vt.extend(sgr(attr));
+            }
+            // A control or lone surrogate is a narrow glyph: a wide cell
+            // shows it twice, as conhost does.
+            let narrow = (0xD800..0xE000).contains(&ch) || ch < 0x20 || (0x7F..0xA0).contains(&ch);
+            let glyph = sanitize(ch);
+            let mut buf = [0; 4];
+            let glyph = glyph.encode_utf8(&mut buf).as_bytes();
+            vt.extend_from_slice(glyph);
+            if wide && narrow {
+                vt.extend_from_slice(glyph);
+            }
+        }
+        if insert {
+            vt.extend_from_slice(b"\x1b[4h");
+        }
+        if origin {
+            vt.extend_from_slice(b"\x1b[?6h");
+        }
+        vt.extend_from_slice(b"\x1b8");
+        // Held client bytes go first and may reset the pen themselves; the
+        // paint's own SGR 0 is not the client's, and DECRC can't restore
+        // the gridlines, so they come back by hand.
+        self.flush(out);
+        let meta = self.legacy_meta;
+        self.host(&vt, out);
+        self.legacy_meta = meta;
     }
 
     /// The first 16 palette entries as `COLORREF`s (`0x00BBGGRR`), in
