@@ -433,17 +433,25 @@ impl Screen {
     /// and each character once, a wide one from its leading cell. A
     /// leading cell at the end or a trailing one at the start can't hold
     /// its half and shows a space. All of it sits between DECSC and DECRC,
-    /// as conhost's `BackupCursor` puts it, so the cursor and pen (with its
-    /// gridlines) stay; origin mode goes off inside, so the CUP is absolute.
+    /// as conhost's `BackupCursor` puts it, so the cursor, pen (with its
+    /// gridlines) and character sets stay. Inside, ASCII is selected so
+    /// each glyph prints as itself, origin mode goes off so the CUP is
+    /// absolute, and insert mode goes off so cells are replaced, not
+    /// shifted; the modes come back after.
     pub(super) fn paint(&mut self, x: usize, y: usize, cells: &[CharInfo], out: &mut OutputQueue) {
         let Some(last) = cells.len().checked_sub(1) else {
             return;
         };
         let origin = self.grid.origin_region().is_some();
-        let mut vt = Vec::with_capacity(32 + cells.len() * 4);
-        vt.extend_from_slice(b"\x1b7");
+        let insert = self.grid.insert_mode();
+        let mut vt = Vec::with_capacity(40 + cells.len() * 4);
+        // ASCII in G0, invoked into GL: DECRC restores the client's sets.
+        vt.extend_from_slice(b"\x1b7\x1b(B\x0f");
         if origin {
             vt.extend_from_slice(b"\x1b[?6l");
+        }
+        if insert {
+            vt.extend_from_slice(b"\x1b[4l");
         }
         vt.extend(format!("\x1b[{};{}H", y + 1, x + 1).bytes());
         let mut pen = None;
@@ -470,6 +478,9 @@ impl Screen {
             if wide && narrow {
                 vt.extend_from_slice(glyph);
             }
+        }
+        if insert {
+            vt.extend_from_slice(b"\x1b[4h");
         }
         if origin {
             vt.extend_from_slice(b"\x1b[?6h");

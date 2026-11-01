@@ -483,7 +483,7 @@ impl Text {
                 screen.set_attributes(attr, out);
                 1
             }
-            Text::Cells(paint) => usize::from(paint.step(screen, out)),
+            Text::Cells(paint) => usize::from(paint.step(screen, out, codec)),
             Text::Bytes(bytes) => match origin {
                 Origin::Client(mode) => {
                     at + screen.client(&bytes[at..], mode, SLICE, at == 0, out, replies)

@@ -209,6 +209,13 @@ enum Stream {
     FillAttr(u16),
     Chars(Vec<u16>),
     Attrs(Vec<u16>),
+    /// An `A` string write, kept in its code page so a parked write
+    /// retains no more than it was sent; each step decodes it afresh, as
+    /// the write queue's own `A` text does.
+    Coded {
+        bytes: Vec<u8>,
+        cp: u32,
+    },
 }
 
 impl Stream {
@@ -216,10 +223,22 @@ impl Stream {
         matches!(self, Stream::FillAttr(_) | Stream::Attrs(_))
     }
 
-    fn at(&self, i: usize) -> u16 {
+    /// Element `i`; `decoded` is a `Coded` stream's text.
+    fn at(&self, i: usize, decoded: &[u16]) -> u16 {
         match self {
             Stream::FillChar(v) | Stream::FillAttr(v) => *v,
             Stream::Chars(v) | Stream::Attrs(v) => v[i],
+            Stream::Coded { .. } => decoded[i],
+        }
+    }
+
+    /// A `Coded` stream's text, as UTF-16.
+    fn decode(&self, codec: &Codec) -> Vec<u16> {
+        match self {
+            Stream::Coded { bytes, cp } => {
+                codepage::decode(codec, *cp, bytes).encode_utf16().collect()
+            }
+            _ => Vec::new(),
         }
     }
 }
@@ -272,7 +291,7 @@ enum Op {
 
 impl Op {
     /// The runs of the next row, reading the Grid now; `None` when done.
-    fn next_row(&mut self, screen: &Screen) -> Option<Vec<Run>> {
+    fn next_row(&mut self, screen: &Screen, decoded: &[u16]) -> Option<Vec<Run>> {
         let size = screen.size();
         match self {
             Op::Stream {
@@ -287,7 +306,7 @@ impl Op {
                     return None;
                 }
                 let mut cells = screen.cells(*y, *x, w);
-                let used = lay_out(what, *len, pos, &mut cells);
+                let used = lay_out(what, decoded, *len, pos, &mut cells);
                 cells.truncate(used);
                 let run = Run {
                     x: std::mem::take(x),
@@ -332,11 +351,17 @@ impl Op {
 /// keep each cell's leading and trailing flags. A wide character takes
 /// two cells; one that doesn't fit in the row's last cell leaves a
 /// space there and goes no further.
-fn lay_out(what: &Stream, len: usize, pos: &mut usize, cells: &mut [CharInfo]) -> usize {
+fn lay_out(
+    what: &Stream,
+    decoded: &[u16],
+    len: usize,
+    pos: &mut usize,
+    cells: &mut [CharInfo],
+) -> usize {
     let avail = cells.len();
     let mut used = 0;
     while used < avail && *pos < len {
-        let v = what.at(*pos);
+        let v = what.at(*pos, decoded);
         if what.sets_attrs() {
             let cell = &mut cells[used];
             cell.attr = v & !LT | cell.attr & LT;
@@ -397,7 +422,7 @@ fn plan_scroll(args: &ScrollArgs, size: WinSize, pen: u16) -> ScrollPlan {
     let attr = if args.fill == (CharInfo { ch: 0, attr: 0 }) {
         pen
     } else {
-        args.fill.attr
+        args.fill.attr & !LT
     };
     let ch = u16::try_from(u32::from(sanitize(args.fill.ch))).unwrap_or(0xFFFD);
     ScrollPlan {
@@ -430,7 +455,7 @@ fn scroll_row(plan: &ScrollPlan, y: i32, screen: &Screen) -> Vec<Run> {
             runs.push(Run {
                 x: a as usize,
                 y: y as usize,
-                cells: vec![plan.cell; (b - a + 1) as usize],
+                cells: fill_span(plan.cell, (b - a + 1) as usize),
             });
         }
     }
@@ -442,6 +467,28 @@ fn scroll_row(plan: &ScrollPlan, y: i32, screen: &Screen) -> Vec<Run> {
         });
     }
     runs
+}
+
+/// `n` cells of a scroll's fill. A wide character fills them in leading
+/// and trailing pairs, as conhost's `OutputCellIterator` does; an odd
+/// cell left at the span's end can't hold a half and takes a space.
+fn fill_span(cell: CharInfo, n: usize) -> Vec<CharInfo> {
+    if !is_wide(cell.ch) {
+        return vec![cell; n];
+    }
+    let mut cells: Vec<CharInfo> = (0..n)
+        .map(|i| CharInfo {
+            ch: cell.ch,
+            attr: cell.attr | if i % 2 == 0 { LEADING } else { TRAILING },
+        })
+        .collect();
+    if n % 2 == 1 {
+        cells[n - 1] = CharInfo {
+            ch: u16::from(b' '),
+            attr: cell.attr,
+        };
+    }
+    cells
 }
 
 /// A write of cells in the write queue: it paints a step at a time and
@@ -471,17 +518,30 @@ impl Paint {
                 what: Stream::Chars(v) | Stream::Attrs(v),
                 ..
             } => v.len() * 2,
+            Op::Stream {
+                what: Stream::Coded { bytes, .. },
+                ..
+            } => bytes.len(),
             Op::Block { cells, .. } => cells.len() * CharInfo::BYTES,
             _ => 0,
         }
     }
 
     /// Paint up to [`CHUNK`] cells; whether all are painted.
-    pub(super) fn step(&mut self, screen: &mut Screen, out: &mut OutputQueue) -> bool {
+    pub(super) fn step(
+        &mut self,
+        screen: &mut Screen,
+        out: &mut OutputQueue,
+        codec: &Codec,
+    ) -> bool {
         let mut budget = CHUNK;
+        let decoded = match &self.op {
+            Op::Stream { what, .. } => what.decode(codec),
+            _ => Vec::new(),
+        };
         loop {
             let Some(mut run) = self.pending.pop_front() else {
-                match self.op.next_row(screen) {
+                match self.op.next_row(screen, &decoded) {
                     Some(runs) => self.pending.extend(runs),
                     None => return true,
                 }
@@ -523,8 +583,8 @@ impl Paint {
             return;
         };
         let n = match (cp, what) {
-            (Some(cp), Stream::Chars(units)) => {
-                let text = String::from_utf16_lossy(&units[..*pos]);
+            (Some(cp), Stream::Coded { .. }) => {
+                let text = String::from_utf16_lossy(&what.decode(codec)[..*pos]);
                 codepage::encode(codec, cp, &text).len()
             }
             _ => *pos,
@@ -608,13 +668,17 @@ impl Console {
             REAL_UNICODE | FALSE_UNICODE => (Stream::Chars(msg::utf16_units(m.variable)), None),
             ASCII => {
                 let cp = self.output_cp.cp;
-                let text = codepage::decode(&self.codec, cp, m.variable);
-                (Stream::Chars(text.encode_utf16().collect()), Some(cp))
+                let what = Stream::Coded {
+                    bytes: m.variable.to_vec(),
+                    cp,
+                };
+                (what, Some(cp))
             }
             _ => return reply(p, msg::STATUS_FROM_INVALIDARG, fixed, fx),
         };
         let len = match &what {
             Stream::Chars(v) | Stream::Attrs(v) => v.len(),
+            coded @ Stream::Coded { .. } => coded.decode(&self.codec).len(),
             _ => 0,
         };
         self.stream(p, fixed, (x, y), what, len, (STRING_RECORDS, ansi), out, fx);
@@ -1174,7 +1238,7 @@ mod tests {
         let mark = h.vt.len();
         fill(&mut h, out, ATTRIBUTE, 0x1e, 3, (2, 1));
         let vt = String::from_utf8_lossy(&h.vt[mark..]).into_owned();
-        assert_eq!(vt, "\x1b7\x1b[2;3H\x1b[0;93;44m   \x1b8");
+        assert_eq!(vt, "\x1b7\x1b(B\x0f\x1b[2;3H\x1b[0;93;44m   \x1b8");
     }
 
     #[test]
@@ -1506,6 +1570,78 @@ mod tests {
         fill(&mut h, out, REAL_UNICODE, u16::from(b'x'), 1, (0, 0));
         h.write_a(out, b"\x1b[0m");
         assert_eq!(pen(&mut h, out), 0x07);
+    }
+
+    #[test]
+    fn a_held_ansi_string_write_retains_only_its_bytes() {
+        let mut h = Host::sized(WinSize {
+            rows: 200,
+            cols: 400,
+        });
+        let [_, _, out] = h.connect(1, "");
+        let fixed = string_fixed((0, 0), ASCII);
+        let text = vec![b'a'; 64_000];
+        let r = h.call(out, api::WRITE_OUTPUT_STRING, &fixed, &text, 0);
+        assert_eq!(r.status, i32::MIN, "held: more than one slice");
+        assert_eq!(
+            h.c.parked(),
+            64_000 + STRING_LEN,
+            "the bytes, not their UTF-16"
+        );
+        let mut done = None;
+        for _ in 0..100 {
+            let fx = h.drain();
+            done = fx.iter().find_map(|e| match e {
+                Effect::Complete(r) => Some(r.clone()),
+                _ => None,
+            });
+            if done.is_some() {
+                break;
+            }
+        }
+        assert_eq!(records(&done.expect("the write completes")), 64_000);
+        assert_eq!(h.c.screen.cells(159, 399, 400)[0].ch, u16::from(b'a'));
+    }
+
+    #[test]
+    fn a_wide_scroll_fill_stays_in_its_span() {
+        let (mut h, out) = host();
+        write_chars(&mut h, out, "abcdefghij", (0, 0));
+        // Off the screen: all of the source is fill, five cells of it.
+        scroll(&mut h, out, [0, 0, 4, 0], None, (0, 10), info('日', 7));
+        assert_eq!(row(&h, 0), "日日 fghij");
+        let flags: Vec<u16> = attrs(&h, 0)[..5].iter().map(|a| a & LT).collect();
+        assert_eq!(flags, [LEADING, TRAILING, LEADING, TRAILING, 0]);
+        assert_eq!(row(&h, 1), "          ", "nothing wraps");
+    }
+
+    #[test]
+    fn painting_replaces_cells_under_insert_mode() {
+        let (mut h, out) = host();
+        write_chars(&mut h, out, "abcd", (0, 0));
+        h.write_a(out, b"\x1b[4h");
+        fill(&mut h, out, REAL_UNICODE, u16::from(b'x'), 1, (0, 0));
+        assert_eq!(row(&h, 0), "xbcd      ");
+        assert!(
+            h.c.screen.grid().insert_mode(),
+            "the client's mode comes back"
+        );
+    }
+
+    #[test]
+    fn painting_prints_ascii_under_a_line_drawing_set() {
+        let (mut h, out) = host();
+        // Line drawing in G0, and in G1 shifted in with SO.
+        h.write_a(out, b"\x1b(0\x1b)0\x0e");
+        write_chars(&mut h, out, "q", (0, 0));
+        assert_eq!(row(&h, 0), "q         ");
+        h.write_a(out, b"q");
+        // The paint left the cursor where it was, so this prints over it.
+        assert_eq!(
+            row(&h, 0),
+            "\u{2500}         ",
+            "the client's sets come back"
+        );
     }
 
     #[test]
