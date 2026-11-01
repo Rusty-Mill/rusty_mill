@@ -94,6 +94,20 @@ fn signal(child: &LinuxChild, sig: Signal) {
     }
 }
 
+/// Nothing to wait for when the server stops: the kernel hangs up a
+/// block's PTY with its last master, and the dropped [`Process`] has
+/// killed and reaped the program's group.
+#[derive(Default)]
+pub(crate) struct Hosts;
+
+impl Hosts {
+    pub(crate) fn track(&mut self, _process: &Process) {}
+
+    pub(crate) async fn shut_down(self, _budget: std::time::Duration) -> bool {
+        true
+    }
+}
+
 impl Drop for Process {
     /// The fallback when a block is dropped without [`Process::reap`], for
     /// instance when the server stops: kill the group and reap it now.

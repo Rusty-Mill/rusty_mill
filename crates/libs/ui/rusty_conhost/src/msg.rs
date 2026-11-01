@@ -51,6 +51,8 @@ pub(crate) const fn from_hresult(hr: u32) -> i32 {
 
 /// E_INVALIDARG.
 pub(crate) const STATUS_FROM_INVALIDARG: i32 = from_hresult(0x8007_0057);
+/// STRSAFE_E_INSUFFICIENT_BUFFER: a string with no room for its NUL.
+pub(crate) const STATUS_FROM_INSUFFICIENT_BUFFER: i32 = from_hresult(0x8007_007A);
 /// HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION).
 pub(crate) const STATUS_FROM_SHARING_VIOLATION: i32 = from_hresult(0x8007_0020);
 /// E_HANDLE: no such object, or not the kind the API needs.
@@ -80,6 +82,8 @@ pub(crate) mod api {
     pub(crate) const SET_TITLE: u32 = 0x0200_0015;
     pub(crate) const GET_CURRENT_FONT: u32 = 0x0300_0004;
     pub(crate) const GET_CONSOLE_WINDOW: u32 = 0x0300_001F;
+    pub(crate) const GET_CONSOLE_PROCESS_LIST: u32 = 0x0300_0029;
+    pub(crate) const SET_CURRENT_FONT: u32 = 0x0300_002C;
 }
 
 /// `CD_IO_OBJECT_TYPE_*`.
@@ -228,8 +232,9 @@ pub(crate) fn server_msg(title: &str) -> Vec<u8> {
     server_msg_in_group(title, 0)
 }
 
-#[cfg(test)]
-/// [`server_msg`] with a `ProcessGroupId`.
+#[cfg(any(test, feature = "fuzz"))]
+/// A CONSOLE_SERVER_MSG with `title`, empty other strings and a
+/// `ProcessGroupId`.
 pub(crate) fn server_msg_in_group(title: &str, group: u32) -> Vec<u8> {
     let mut m = vec![0; SERVER_MSG_LEN];
     put_u32(&mut m, SERVER_MSG_GROUP_AT, group);

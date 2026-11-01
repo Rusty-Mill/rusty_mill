@@ -17,6 +17,11 @@ rusty_wire.workspace = true
 # The host's screen model (design §4.3, D2).
 rusty_term_core.workspace = true
 
+[features]
+# Exposes the hidden `fuzz` module to the cargo-fuzz crate in `fuzz/`.
+# Not a supported API.
+fuzz = []
+
 [target.'cfg(windows)'.dependencies]
 platform-windows.workspace = true
 

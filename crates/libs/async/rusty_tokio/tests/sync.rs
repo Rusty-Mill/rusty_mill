@@ -2418,3 +2418,48 @@ fn notify_last_racing_a_drop_of_its_target_reaches_the_next_newest_once() {
     notify_races_drop!(tokio::sync::Notify, true);
     notify_races_drop!(Notify, true);
 }
+
+/// #1304: `wait_for` runs its predicate under the channel's lock, so a
+/// predicate that reached for that lock again (`receiver_count`, cloning or
+/// dropping a `Receiver`) re-locked a std mutex on its own thread and hung.
+/// tokio keeps the receiver count in an atomic outside the lock, so the same
+/// code works there and reports the same counts. Hand-polled on its own thread
+/// so a deadlock fails the bounded wait below instead of hanging the suite.
+#[test]
+fn watch_wait_for_predicate_may_count_and_clone_receivers() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(0);
+        let other = rx.clone();
+        let mut counts = Vec::new();
+        let value = {
+            let predicate = |v: &i32| {
+                counts.push(tx.receiver_count());
+                let clone = other.clone();
+                counts.push(tx.receiver_count());
+                drop(clone);
+                *v == 1
+            };
+            let mut fut = std::pin::pin!(rx.wait_for(predicate));
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            let mut poll = || std::future::Future::poll(fut.as_mut(), &mut cx);
+            assert!(poll().is_pending(), "0 does not match");
+            tx.send(1).unwrap();
+            match poll() {
+                std::task::Poll::Ready(Ok(value)) => *value,
+                _ => panic!("the sent 1 matches"),
+            }
+        };
+        assert_eq!(tx.receiver_count(), 2, "the predicate's clones dropped");
+        done_tx.send((value, counts)).unwrap();
+    });
+    let (value, counts) = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("wait_for's predicate deadlocked on the channel lock");
+    assert_eq!(value, 1);
+    assert_eq!(
+        counts,
+        [2, 3, 2, 3],
+        "one call per version, as tokio counts"
+    );
+}

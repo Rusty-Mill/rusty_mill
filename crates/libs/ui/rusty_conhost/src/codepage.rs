@@ -116,8 +116,9 @@ pub(crate) fn encode(codec: &Codec, cp: u32, text: &str) -> Vec<u8> {
 }
 
 /// Tables standing in for the OS in tests: 437, 850, and of 932 the
-/// ASCII half, half-width katakana and two hiragana pairs.
-#[cfg(test)]
+/// ASCII half, half-width katakana and two hiragana pairs. Also the fuzz
+/// driver's codec, which must not reach the OS.
+#[cfg(any(test, feature = "fuzz"))]
 pub(crate) mod table {
     use super::{Codec, UTF8};
 

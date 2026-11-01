@@ -486,6 +486,7 @@ This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd,
 | V12 | Input availability while an earlier read is held on echo or the 1 MiB reply budget | count describes buffered records | count, the input event and a NOWAIT peek report no available records until the owed reads resume | those records belong to the earlier reads; later readers must not take their input |
 | V13 | GetConsoleLangId | answers for an East Asian output code page when the system's ANSI code page is East Asian too | always fails (`STATUS_NOT_SUPPORTED`) | the answer needs the system's ANSI code page, which we don't read; clients fall back to their own UI language, as they do under conhost on every other system |
 | V14 | WriteConsoleA's kept DBCS lead byte | lead bytes from `GetCPInfo`; the kept byte survives a change of output code page | lead bytes probed through the codec, so they may differ where `GetCPInfo` lists none for a multibyte code page (possibly GB 18030 and EUC-JP: we keep a two-byte lead, conhost keeps nothing); a change of output code page drops the kept byte | no fourth Win32 admission; a byte kept across a code-page change would pair with a byte of the new one |
+| V15 | The hosting process ends abruptly (the mux server killed or crashing, or its console window closed) | OpenConsole is its own process: the broken pipes make it send CTRL_CLOSE, and Windows ends the handlers at about 5 s | the host runs inside the server, so it ends with it and nothing runs: clients still attached get no CTRL_CLOSE and are never ended | the console stays bounded and in-process (D1). On Beast a killed server's cmd ended within 3 s, but a `start /b` survivor can outlive it. A clean stop does not share this: the mux server's `serve_until` (Ctrl+C or Ctrl+Break for the binary) and any end of `serve`/`serve_udp` end every block's program, hang up every console we host and wait, with one 6 s deadline for them all, until each has shut down: closed, and the end of each client still attached tried 5 s after CTRL_CLOSE (`wait_shut_down`). A client the host could not open or end may still run. Past the deadline the server logs and exits anyway. Closing the server's own console window counts as abrupt, since Windows ends a process once its CTRL_CLOSE handler returns. yirp (#1290) likewise awaits a bounded shutdown on normal exit and abandon (`shut_down_terminal`) |
 
 The parity suite (§8) treats each of these as an expected difference.
 
@@ -766,9 +767,9 @@ Each PR includes one change fragment and is reviewed by Dottius. Line counts inc
 | 8 | Lifetime: CTRL_CLOSE (the ctrl worker and its queue are in PR 3), absolute grace deadline, `hang_up`, the §7.3 tests (§5.8). Needs S1. As built: CTRL_CLOSE supersedes queued Ctrl+C/Break and is still delivered after the server closes; a client connecting during the grace gets it; Drop discards output nobody reads | 350 | 1–2 |
 | 9 | Code pages via `codec` (§5.9). As built: the two code pages, WriteConsoleA's DBCS lead byte and the slice-wise decode of parked writes (§5.9), V13, `chcp` end to end on Windows | 250 | 1–2 |
 | 10 | (reserved for issues found at the milestone) | — | 2 |
-| 11 | rusty_mux server: local host choice, `RUSTY_CONSOLE_HOST`, Config field and sites | 250 | 1–2 |
+| 11 | rusty_mux server: local host choice, `RUSTY_CONSOLE_HOST`, Config field and sites. As built: `ConsoleHost::{ConPty, Own}` in `rusty_mux_server`, a local `Master` enum in the server's Windows pty, and the Windows tests run on both hosts. Beast found Windows PowerShell 5.1 dying at startup on our host, so the host also accepts SetCurrentConsoleFontEx as a no-op, and GetConsoleProcessList (Appendix A) lands here. Per Nano, a clean stop waits for our consoles to shut down (`serve_until`, Ctrl+C/Ctrl+Break, one 6 s server-wide deadline); only an abrupt end remains V15 | 250 | 1–2 |
 | 12 | yirp `sessionmgr-pty`: `PtyOptions::console_host`, Send/Sync justification (`sessionmgr-pty/src/lib.rs:99-113, 302-305`) | 150 | 1 |
-| 13 | Fuzz crate `rusty_conhost/fuzz` plus a nightly job modelled on `rusty-tls-fuzz` (`ci.yml:1673-1714`) | 200 | 1–2 |
+| 13 | Fuzz crate `rusty_conhost/fuzz` plus a nightly job modelled on `rusty-tls-fuzz` (`ci.yml:1673-1714`). As built: the driver is rusty_conhost's hidden `fuzz` module behind a `fuzz` feature (the core is crate-private), the crate's tests run it on 300 seeded scripts on every PR, the fuzz crate has an empty `[workspace]` table like the other fuzz crates, and the job reuses `tls_fuzz_smoke.sh` | 200 | 1–2 |
 | 14 | Windows end-to-end bench and Phase B gate | 250 | 1–2 |
 | | **Total** | **~5.8k** | **27–39** focused days |
 | | Plus S1–S3 | | 1.5 |
@@ -1026,7 +1027,8 @@ Function codes: 1 CONNECT, 2 DISCONNECT, 3 CREATE_OBJECT, 4 CLOSE_OBJECT, 5 RAW_
 | 6 | ScrollConsoleScreenBuffer | from `conmsgl2.h`, pinned in PR 6 |
 | 7 | ReadConsoleOutput | 0x02000013 |
 | 7 | WriteConsoleOutput(+String), ReadConsoleOutputString, Get/SetConsoleScreenBufferInfoEx, GetLargestConsoleWindowSize, SetConsoleScreenBufferSize, SetConsoleWindowInfo | from `conmsgl2.h`, pinned in PR 7 |
-| 11 | GetConsoleProcessList | 0x0300002A |
+| 11 | GetConsoleProcessList | 0x03000029 (draft 6 said 0x0300002A, which is GetConsoleHistory in `conmsgl3.h`) |
+| 11 | SetCurrentConsoleFontEx (accepted, ignored; Windows PowerShell 5.1 exits at startup without it) | 0x0300002C |
 | — | CREATE_OBJECT type 3, SetConsoleActiveScreenBuffer | deferred (V6) |
 
 ## Appendix B. How the review findings were resolved

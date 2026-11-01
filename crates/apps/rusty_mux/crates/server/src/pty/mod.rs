@@ -1,6 +1,7 @@
 //! A block's PTY and the program running on it. Linux drives the master fd
-//! from the reactor; Windows bridges ConPTY's pipes with two threads per
-//! block. Both expose the same `spawn`, `Pty` and `Process`.
+//! from the reactor; Windows bridges the console host's master (ConPTY's or
+//! our own) with two threads per block. Both expose the same `spawn`, `Pty`
+//! and `Process`.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -20,13 +21,16 @@ mod linux;
 mod windows;
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{Process, Pty, spawn};
+pub(crate) use linux::{Hosts, Process, Pty, spawn};
 #[cfg(windows)]
-pub(crate) use windows::{Process, Pty, spawn};
+pub(crate) use windows::{Hosts, Process, Pty, spawn};
 
 /// How long a closed block's program has to exit after the hang-up before
 /// it is killed.
 const GRACE: Duration = Duration::from_secs(1);
+/// How long a stopping server waits for the consoles we host to shut
+/// down: their clients are ended 5 s after CTRL_CLOSE, and a margin.
+pub(crate) const SHUTDOWN: Duration = Duration::from_secs(6);
 /// How often `Process::reap` polls for the exit.
 const POLL: Duration = Duration::from_millis(10);
 
