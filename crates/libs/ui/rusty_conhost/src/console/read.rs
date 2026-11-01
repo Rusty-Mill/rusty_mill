@@ -470,8 +470,8 @@ impl Console {
 
     /// Queue a client's records; the count conhost reports, one per
     /// record after `A` conversion. A VT client gets keys as VT, as
-    /// terminal input; such keys never coalesce. There is no cap, as in
-    /// conhost.
+    /// terminal input; such keys never coalesce. A write is never
+    /// refused or trimmed, even past [`input::MAX_RECORDS`].
     fn write_input(&mut self, variable: &[u8], unicode: bool, append: bool) -> u32 {
         let records: Vec<Record> = variable
             .as_chunks::<{ input::RECORD_LEN }>()
@@ -2270,10 +2270,10 @@ pub(crate) mod tests {
         assert_eq!(h.c.waiting(), 0);
     }
 
-    /// No cap, as in conhost (owner decision 2026-11-01): a client's
-    /// writes take the queue past the terminal's 4,096 and lose nothing.
+    /// Owner decision 2026-11-01: a client's write is never refused, so
+    /// it can take the queue past the 4,096 terminal input keeps.
     #[test]
-    fn written_records_are_never_dropped_at_the_terminal_cap() {
+    fn written_records_can_take_the_queue_past_the_terminal_cap() {
         let mut h = Host::new();
         let [_, input, _] = h.connect(1, "");
         let half = input::MAX_RECORDS / 2;
@@ -2283,6 +2283,33 @@ pub(crate) mod tests {
         }
         assert_eq!(h.c.input.len(), 3 * half);
         assert_eq!(count(&mut h, input), 3 * half as u32);
+    }
+
+    /// Mixed sources: terminal input arriving at or past the cap drops
+    /// the oldest record whatever its source, one for one, so written
+    /// records are displaced and the length holds (it never shrinks back
+    /// to 4,096).
+    #[test]
+    fn terminal_input_past_the_cap_displaces_the_oldest_written_records() {
+        let mut h = Host::new();
+        let [_, input, _] = h.connect(1, "");
+        let half = input::MAX_RECORDS / 2;
+        for _ in 0..3 {
+            write_input(&mut h, input, &vec![typed(0x61, false); half]);
+        }
+        let fx = h.ev(Event::Input(b"xy"));
+        assert_eq!(super::super::tests::logs(&fx), 1, "InputDropped");
+        assert_eq!(h.c.input.len(), 3 * half);
+        let all = queued(&h);
+        assert_eq!(all[..all.len() - 4], vec![typed(0x61, false); 3 * half - 4]);
+        let tail: Vec<u16> = all[all.len() - 4..]
+            .iter()
+            .filter_map(|r| match r {
+                Record::Key(k) if k.down => Some(k.ch),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tail, units("xy"));
     }
 
     /// conhost `_CoalesceEvent`, for one record at a time only.

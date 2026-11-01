@@ -770,8 +770,9 @@ fn push_char(out: &mut Vec<u8>, ch: char) {
     out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
 }
 
-/// The INPUT_RECORD queue. Terminal input keeps it at [`MAX_RECORDS`];
-/// WriteConsoleInput may take it past.
+/// The INPUT_RECORD queue. WriteConsoleInput may take it past
+/// [`MAX_RECORDS`]; terminal input never grows it past that or past its
+/// current length, whichever is larger (see [`Queue::push`]).
 #[derive(Debug, Default)]
 pub(crate) struct Queue {
     records: VecDeque<Record>,
@@ -787,7 +788,10 @@ impl Queue {
         self.records.is_empty()
     }
 
-    /// Append; `true` when the oldest record had to be dropped.
+    /// Append terminal input. At [`MAX_RECORDS`] or more, the oldest
+    /// record is dropped first, whatever its source, so a client's
+    /// written records can be displaced one for one and the length holds.
+    /// `true` when a record was dropped.
     pub(crate) fn push(&mut self, r: Record) -> bool {
         let full = self.records.len() >= MAX_RECORDS;
         if full {
@@ -799,9 +803,9 @@ impl Queue {
 
     /// conhost `InputBuffer::Write` (`append`) or `Prepend` for
     /// WriteConsoleInput: a single appended record may coalesce with the
-    /// last. Unlike terminal input, a client's records are never dropped
-    /// and are not held to [`MAX_RECORDS`], as in conhost (owner decision
-    /// 2026-11-01, #1335).
+    /// last. A write is never refused or trimmed, so it can take the queue
+    /// past [`MAX_RECORDS`] (owner decision 2026-11-01, #1335); later
+    /// terminal input may still displace its records ([`Queue::push`]).
     pub(crate) fn write(&mut self, records: &[Record], append: bool, coalesce: bool) {
         if let ([r], true) = (records, append && coalesce)
             && self.coalesce(r)

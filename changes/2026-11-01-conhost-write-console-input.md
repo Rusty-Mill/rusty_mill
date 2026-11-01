@@ -11,6 +11,7 @@ changelog: Our Windows console host serves WriteConsoleInput, so programs that i
   client gets written keys as VT. A single appended record coalesces as in
   conhost (key repeats, mouse moves, buffer sizes). Mouse and menu records
   are kept as written.
-- **Known limitations:** as in conhost, written records are not held to
-  the 4,096-record cap that terminal input keeps, so a client that writes
-  input and never reads it grows the queue (owner decision).
+- **Known limitations:** a write is never refused, so a client that
+  writes input and never reads it grows the queue past 4,096 records
+  (owner decision). Terminal input arriving at that size drops the oldest
+  record first, which may be one the client wrote; conhost drops neither.
