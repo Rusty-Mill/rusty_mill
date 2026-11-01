@@ -36,7 +36,8 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   FILE exclusively and syncs the plan into it, then, for each card still at its planned revision, records `begin`,
   retags it (keeping its claim) and records `done`, each line synced. `--undo-retag FILE` puts back each card
   recorded `done` that is in the new column at the very next revision; a card changed since, never reached, or
-  whose write's outcome is unknown is left alone and reported.
+  whose write's outcome is unknown is left alone and reported. Unix only: elsewhere the record's directory entry
+  cannot be synced, so `--apply` refuses.
 - **Rules:** each move needs the capability the workflow gives it (by default triage, build, test, review, merge,
   close; `plan` and `architect` serve the factory workflow; `test` was `qa`, which stored roles may still say); any open card may be moved to blocked; leaving a work column needs your claim. `close` moves a card from building or qa straight to done when
   its work already merged on the forge, and lets `card_add` with `done: true` record merged work that never

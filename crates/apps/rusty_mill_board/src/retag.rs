@@ -176,11 +176,12 @@ impl RecordFile {
     ///
     /// The file is created exclusively (`create_new`), so of two runs naming the same record
     /// only one gets it, and an existing record is never touched. The plan is synced, then the
-    /// directory (Unix; on Windows creating the file is the durability point), before this
-    /// returns, and [`apply`] writes no card before that.
+    /// directory, before this returns, and [`apply`] writes no card before that. Unix only:
+    /// elsewhere the directory cannot be synced and this fails, so nothing is retagged.
     ///
     /// # Errors
-    /// The path exists, or any I/O error creating, writing or syncing it.
+    /// The path exists, the platform is not Unix, or any I/O error creating, writing or
+    /// syncing it.
     pub fn create(path: &Path, plan: &[Retag]) -> Result<Self, String> {
         let file = OpenOptions::new()
             .write(true)
@@ -216,10 +217,14 @@ fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
+/// Elsewhere this code cannot make a new file's directory entry durable, so it refuses to
+/// write a record, and with it any retag.
 #[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)] // same signature as the Unix version
 fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
-    Ok(())
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "retag records are only made durable on Unix",
+    ))
 }
 
 /// Retag each planned card still in its planned column at its planned revision, calling
@@ -544,6 +549,7 @@ mod tests {
         assert_eq!(column_of(&store, c.id), col("qa"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_record_file_is_created_once_and_read_back() {
         let dir = std::env::temp_dir().join(format!("mill-retag-{}", Uuid::new_v4()));
@@ -568,5 +574,13 @@ mod tests {
         assert_eq!(column_of(&store, c.id), col("qa"));
         assert!(Record::parse("{\"begin\":\"x\"}").is_err(), "no plan first");
         std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn a_record_is_refused_where_it_cannot_be_made_durable() {
+        let path = std::env::temp_dir().join(format!("mill-retag-{}.json", Uuid::new_v4()));
+        assert!(RecordFile::create(&path, &[]).is_err());
+        let _ = std::fs::remove_file(&path);
     }
 }
