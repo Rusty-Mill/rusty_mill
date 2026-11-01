@@ -237,53 +237,141 @@ fn append_entry(
     payload: &[u8],
     when: LogSync,
 ) -> Result<(), DurabilityError> {
-    write_entry(&mut None, log, tag, kind, payload, when)
+    // The path-based functions keep no state between calls, so a poisoned
+    // failure is reported as the error it carries.
+    write_entry(&mut None, log, tag, kind, payload, when).map_err(Failure::into_error)
+}
+
+/// An open log and the length of its last complete entry: where a failed
+/// append rolls back to.
+#[derive(Debug)]
+struct Handle {
+    file: File,
+    end: u64,
+}
+
+/// Why an append failed, and whether the log can still be trusted.
+enum Failure {
+    /// Nothing of the entry remains on disk (rolled back, or never
+    /// written): the log is as it was before the call.
+    Clean(DurabilityError),
+    /// The entry's bytes may still be in the file, or a `sync_data` failed
+    /// and the kernel may have dropped pages it reported written. Further
+    /// appends could land after garbage, and a later sync could report
+    /// success for data that is gone, so the caller must stop writing.
+    Poisoned(DurabilityError),
 }
 
 /// [`append_entry`] through `handle`: opened (upgrade check, header on a
-/// new file) when `None`, then left open for the next entry. Any failure
-/// closes it, so the next entry starts from the file as it is on disk.
+/// new file) when `None`, then left open for the next entry.
+///
+/// A failed write is rolled back to the last complete entry, so the next
+/// append starts on an entry boundary rather than after a partial one (a
+/// reader drops everything after a partial entry as a torn tail, which
+/// would take later, acknowledged entries with it). When the rollback
+/// itself fails, or `sync_data` fails, the failure is [`Failure::Poisoned`].
 fn write_entry(
-    handle: &mut Option<File>,
+    handle: &mut Option<Handle>,
     log: &Path,
     tag: &str,
     kind: u8,
     payload: &[u8],
     when: LogSync,
-) -> Result<(), DurabilityError> {
+) -> Result<(), Failure> {
     let result = try_write_entry(handle, log, tag, kind, payload, when);
-    if result.is_err() {
-        *handle = None;
+    match result {
+        Ok(()) => Ok(()),
+        Err(WriteError::BeforeWrite(error)) => {
+            *handle = None;
+            Err(Failure::Clean(error))
+        }
+        Err(WriteError::Write(error)) => match roll_back(handle, log) {
+            Ok(()) => Err(Failure::Clean(error)),
+            Err(rollback) => {
+                *handle = None;
+                Err(Failure::Poisoned(poisoned_by(error, &rollback)))
+            }
+        },
+        Err(WriteError::Sync(error)) => {
+            *handle = None;
+            Err(Failure::Poisoned(error))
+        }
     }
-    result
+}
+
+impl Failure {
+    fn into_error(self) -> DurabilityError {
+        match self {
+            Failure::Clean(error) | Failure::Poisoned(error) => error,
+        }
+    }
+}
+
+/// Where in an append an error happened.
+enum WriteError {
+    /// Opening, upgrading or encoding: nothing was written.
+    BeforeWrite(DurabilityError),
+    /// `write_all` failed: part of the entry may be in the file.
+    Write(DurabilityError),
+    /// `sync_data` (or the new log's directory sync) failed after a
+    /// complete write.
+    Sync(DurabilityError),
+}
+
+/// Truncate the file back to its last complete entry. A log this append
+/// created held nothing acknowledged, so it is removed instead: readers
+/// reject an empty log, and the next append recreates it, header included.
+fn roll_back(handle: &mut Option<Handle>, log: &Path) -> io::Result<()> {
+    let Some(open) = handle.as_mut() else {
+        return Ok(());
+    };
+    if open.end > 0 {
+        return open.file.set_len(open.end);
+    }
+    *handle = None;
+    match std::fs::remove_file(log) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+fn poisoned_by(write: DurabilityError, rollback: &io::Error) -> DurabilityError {
+    io::Error::other(format!(
+        "insert log append failed ({write}) and could not be rolled back ({rollback})"
+    ))
+    .into()
 }
 
 fn try_write_entry(
-    handle: &mut Option<File>,
+    handle: &mut Option<Handle>,
     log: &Path,
     tag: &str,
     kind: u8,
     payload: &[u8],
     when: LogSync,
-) -> Result<(), DurabilityError> {
+) -> Result<(), WriteError> {
     let len = u32::try_from(payload.len()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "encoded record too large for the insert log's u32 length prefix",
+        WriteError::BeforeWrite(
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "encoded record too large for the insert log's u32 length prefix",
+            )
+            .into(),
         )
     })?;
     let created = match handle {
         Some(_) => false,
         None => {
-            upgrade_if_version_1(log, tag)?;
-            let file = OpenOptions::new().append(true).create(true).open(log)?;
-            let created = file.metadata()?.len() == 0;
-            *handle = Some(file);
+            let opened = open_for_append(log, tag).map_err(WriteError::BeforeWrite)?;
+            let created = opened.end == 0;
+            *handle = Some(opened);
             created
         }
     };
-    let Some(file) = handle.as_mut() else {
-        return Err(io::Error::other("insert log handle missing after open").into());
+    let Some(open) = handle.as_mut() else {
+        return Err(WriteError::BeforeWrite(
+            io::Error::other("insert log handle missing after open").into(),
+        ));
     };
     let mut image = if created {
         encode_tagged_image(&MAGIC, LOG_VERSION, 0, tag, &[])
@@ -299,27 +387,47 @@ fn try_write_entry(
             matches!(fault, crate::test_support::Fault::InsertWritePrefix(_))
         })
     {
-        file.write_all(&image[..prefix.min(image.len())])?;
-        return Err(io::Error::other("injected insert-log partial write").into());
+        open.file
+            .write_all(&image[..prefix.min(image.len())])
+            .map_err(|e| WriteError::Write(e.into()))?;
+        return Err(WriteError::Write(
+            io::Error::other("injected insert-log partial write").into(),
+        ));
     }
-    file.write_all(&image)?;
+    open.file
+        .write_all(&image)
+        .map_err(|e| WriteError::Write(e.into()))?;
+    open.end += image.len() as u64;
     if when == LogSync::Now {
         #[cfg(feature = "test-support")]
         if crate::test_support::take_fault(|fault| fault == crate::test_support::Fault::InsertSync)
             .is_some()
         {
-            return Err(io::Error::other("injected insert-log sync failure").into());
+            return Err(WriteError::Sync(
+                io::Error::other("injected insert-log sync failure").into(),
+            ));
         }
-        file.sync_data()?;
+        open.file
+            .sync_data()
+            .map_err(|e| WriteError::Sync(e.into()))?;
     }
     if created {
         // `RVL-FR-003` (ADR-0112): a log created by this append needs its
         // directory entry durable too, as every other creation does. Done
         // even for a deferred append: it happens once per log, and a later
         // `sync` then needs only the file's data.
-        sync_parent_dir(log)?;
+        sync_parent_dir(log).map_err(|e| WriteError::Sync(e.into()))?;
     }
     Ok(())
+}
+
+/// Open `log` for appending, upgrading a version-1 log first, and note
+/// its length as the last complete entry's end.
+fn open_for_append(log: &Path, tag: &str) -> Result<Handle, DurabilityError> {
+    upgrade_if_version_1(log, tag)?;
+    let file = OpenOptions::new().append(true).create(true).open(log)?;
+    let end = file.metadata()?.len();
+    Ok(Handle { file, end })
 }
 
 /// One store's insert log, kept open between appends.
@@ -332,44 +440,56 @@ fn try_write_entry(
 /// directory lock guarantees; [`Self::close`] it before anything removes
 /// or rewrites the file (on Windows a removed file that is still open
 /// lingers until its last handle closes).
+///
+/// A failed append is rolled back to the last complete entry and the
+/// handle stays open, so a later [`Self::sync`] still covers any deferred
+/// entries before it. If the rollback fails, or any `sync_data` fails, the
+/// appender is *poisoned*: every later append and sync returns an error
+/// until the store is reopened (a new `Appender`). A sync is never retried
+/// on a fresh handle, which on Linux would not see the earlier writeback
+/// error and could report data the kernel dropped as durable.
 #[derive(Debug)]
 pub struct Appender {
     path: PathBuf,
-    file: Option<File>,
+    file: Option<Handle>,
+    poisoned: bool,
 }
 
 impl Appender {
     /// An appender for the log at `path`. Opens nothing until the first
     /// entry, so a store that never writes never creates a log.
     pub fn new(path: PathBuf) -> Self {
-        Self { path, file: None }
+        Self {
+            path,
+            file: None,
+            poisoned: false,
+        }
+    }
+
+    /// Whether an earlier failure poisoned this appender (see the type's
+    /// docs). A poisoned appender refuses every append and sync.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
     }
 
     /// [`append_record`] through this appender's handle.
     ///
     /// # Errors
     ///
-    /// As [`append`].
+    /// As [`append`], and an error without writing when poisoned.
     pub fn append_record<R>(&mut self, record: &R, when: LogSync) -> Result<(), DurabilityError>
     where
         R: Serialize + SchemaTag,
     {
         let payload = crate::codec::encode(record)?;
-        write_entry(
-            &mut self.file,
-            &self.path,
-            R::SCHEMA_TAG,
-            KIND_ITEM,
-            &payload,
-            when,
-        )
+        self.append(R::SCHEMA_TAG, KIND_ITEM, &payload, when)
     }
 
     /// [`append_tombstone_as`] through this appender's handle.
     ///
     /// # Errors
     ///
-    /// As [`append_tombstone`].
+    /// As [`append_tombstone`], and an error without writing when poisoned.
     pub fn append_tombstone<K>(
         &mut self,
         tag: &str,
@@ -380,48 +500,73 @@ impl Appender {
         K: Serialize + ?Sized,
     {
         let payload = crate::codec::encode(key)?;
-        write_entry(
-            &mut self.file,
-            &self.path,
-            tag,
-            KIND_TOMBSTONE,
-            &payload,
-            when,
-        )
+        self.append(tag, KIND_TOMBSTONE, &payload, when)
+    }
+
+    fn append(
+        &mut self,
+        tag: &str,
+        kind: u8,
+        payload: &[u8],
+        when: LogSync,
+    ) -> Result<(), DurabilityError> {
+        self.refuse_if_poisoned()?;
+        write_entry(&mut self.file, &self.path, tag, kind, payload, when).map_err(|failure| {
+            match failure {
+                Failure::Clean(error) => error,
+                Failure::Poisoned(error) => {
+                    self.poisoned = true;
+                    error
+                }
+            }
+        })
     }
 
     /// [`sync`]: every entry appended so far is on disk.
     ///
     /// # Errors
     ///
-    /// As [`sync`].
+    /// As [`sync`], and an error when poisoned. A failed sync poisons.
     pub fn sync(&mut self) -> Result<(), DurabilityError> {
-        match &self.file {
-            Some(file) => {
-                #[cfg(feature = "test-support")]
-                let result = if crate::test_support::take_fault(|fault| {
-                    fault == crate::test_support::Fault::GroupSync
-                })
-                .is_some()
-                {
-                    Err(io::Error::other("injected store group-sync failure"))
-                } else {
-                    file.sync_data()
-                };
-                #[cfg(not(feature = "test-support"))]
-                let result = file.sync_data();
-                result.map_err(|e| {
-                    self.file = None;
-                    e.into()
-                })
-            }
-            None => sync(&self.path),
-        }
+        self.refuse_if_poisoned()?;
+        let Some(open) = &self.file else {
+            // Nothing appended through this handle since it was opened or
+            // closed cleanly: every earlier entry was synced or rolled back.
+            return sync(&self.path);
+        };
+        #[cfg(feature = "test-support")]
+        let result = if crate::test_support::take_fault(|fault| {
+            fault == crate::test_support::Fault::GroupSync
+        })
+        .is_some()
+        {
+            Err(io::Error::other("injected store group-sync failure"))
+        } else {
+            open.file.sync_data()
+        };
+        #[cfg(not(feature = "test-support"))]
+        let result = open.file.sync_data();
+        result.map_err(|e| {
+            self.file = None;
+            self.poisoned = true;
+            e.into()
+        })
     }
 
-    /// Close the handle; the next entry reopens the file.
+    /// Close the handle; the next entry reopens the file. Does not clear
+    /// poisoning.
     pub fn close(&mut self) {
         self.file = None;
+    }
+
+    fn refuse_if_poisoned(&self) -> Result<(), DurabilityError> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "insert log refused: an earlier append or sync failed; reopen the store",
+            )
+            .into());
+        }
+        Ok(())
     }
 }
 
@@ -937,5 +1082,119 @@ mod tests {
                 LogEntry::Tombstone(1),
             ]
         );
+    }
+
+    fn items(log: &Path) -> Vec<LogEntry<Item, u32>> {
+        read_entries(log, Item::SCHEMA_TAG).unwrap()
+    }
+
+    /// The expert review's reproduction: a partial append used to leave
+    /// garbage that swallowed the next, acknowledged entry on reopen.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_failed_append_does_not_bury_the_next_acknowledged_one() {
+        use crate::test_support::{arm_fault, Fault};
+        let log = log_path(&fresh_temp_dir("insert_log_partial").unwrap().join("s"));
+        let mut appender = Appender::new(log.clone());
+        appender.append_record(&item(2), LogSync::Now).unwrap();
+        arm_fault(Fault::InsertWritePrefix(3));
+        assert!(appender.append_record(&item(3), LogSync::Now).is_err());
+        assert!(!appender.is_poisoned());
+        appender.append_record(&item(4), LogSync::Now).unwrap();
+        assert_eq!(
+            items(&log),
+            vec![LogEntry::Item(item(2)), LogEntry::Item(item(4))]
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_failed_first_append_leaves_a_log_that_takes_the_next_one() {
+        use crate::test_support::{arm_fault, Fault};
+        let log = log_path(
+            &fresh_temp_dir("insert_log_partial_first")
+                .unwrap()
+                .join("s"),
+        );
+        let mut appender = Appender::new(log.clone());
+        arm_fault(Fault::InsertWritePrefix(5));
+        assert!(appender.append_record(&item(1), LogSync::Now).is_err());
+        assert!(!log.exists(), "a log the failed append created is removed");
+        assert_eq!(
+            items(&log),
+            Vec::new(),
+            "readers see no log, not an empty one"
+        );
+        appender.append_record(&item(2), LogSync::Now).unwrap();
+        assert_eq!(items(&log), vec![LogEntry::Item(item(2))]);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_path_based_append_rolls_back_a_partial_write_too() {
+        use crate::test_support::{arm_fault, Fault};
+        let log = log_path(&fresh_temp_dir("insert_log_partial_path").unwrap().join("s"));
+        append(&log, &item(1)).unwrap();
+        arm_fault(Fault::InsertWritePrefix(4));
+        assert!(append(&log, &item(2)).is_err());
+        append(&log, &item(3)).unwrap();
+        assert_eq!(
+            items(&log),
+            vec![LogEntry::Item(item(1)), LogEntry::Item(item(3))]
+        );
+    }
+
+    /// A deferred batch's entries before a failed append are still covered
+    /// by the next sync on the same handle.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_failed_deferred_append_keeps_the_batch_before_it() {
+        use crate::test_support::{arm_fault, Fault};
+        let log = log_path(
+            &fresh_temp_dir("insert_log_partial_deferred")
+                .unwrap()
+                .join("s"),
+        );
+        let mut appender = Appender::new(log.clone());
+        appender.append_record(&item(1), LogSync::Deferred).unwrap();
+        arm_fault(Fault::InsertWritePrefix(2));
+        assert!(appender.append_record(&item(2), LogSync::Deferred).is_err());
+        appender.append_record(&item(3), LogSync::Deferred).unwrap();
+        appender.sync().unwrap();
+        assert_eq!(
+            items(&log),
+            vec![LogEntry::Item(item(1)), LogEntry::Item(item(3))]
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_failed_group_sync_poisons_until_a_new_appender() {
+        use crate::test_support::{arm_fault, Fault};
+        let log = log_path(&fresh_temp_dir("insert_log_group_sync").unwrap().join("s"));
+        let mut appender = Appender::new(log.clone());
+        appender.append_record(&item(1), LogSync::Deferred).unwrap();
+        arm_fault(Fault::GroupSync);
+        assert!(appender.sync().is_err());
+        assert!(appender.is_poisoned());
+        assert!(appender.sync().is_err(), "a retried sync must not succeed");
+        assert!(appender.append_record(&item(2), LogSync::Now).is_err());
+        let mut reopened = Appender::new(log.clone());
+        reopened.append_record(&item(3), LogSync::Now).unwrap();
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_failed_entry_sync_poisons() {
+        use crate::test_support::{arm_fault, Fault};
+        let log = log_path(&fresh_temp_dir("insert_log_entry_sync").unwrap().join("s"));
+        let mut appender = Appender::new(log.clone());
+        appender.append_record(&item(1), LogSync::Now).unwrap();
+        arm_fault(Fault::InsertSync);
+        assert!(appender.append_record(&item(2), LogSync::Now).is_err());
+        assert!(appender.is_poisoned());
+        assert!(appender
+            .append_tombstone(Item::SCHEMA_TAG, &1u32, LogSync::Now)
+            .is_err());
     }
 }
