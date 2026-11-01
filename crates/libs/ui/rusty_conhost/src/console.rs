@@ -2462,6 +2462,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_control_ending_a_write_at_the_margin_keeps_its_own_column() {
+        for (control, shown) in [("\u{1}", "☺"), ("\0", " ")] {
+            let mut h = Host::new();
+            let [_, _, output] = h.connect(1, "");
+            h.set_mode(output, screen::PROCESSED_OUTPUT);
+            h.write_w(output, &"a".repeat(79));
+            h.vt.clear();
+            assert_eq!(h.write_w(output, control).status, msg::STATUS_SUCCESS);
+            assert_eq!(h.vt, format!("{shown}\x1b[80G").as_bytes(), "{control:?}");
+            assert_eq!(h.c.screen.cursor(), (79, 0));
+            // Text after it in the same write is a run of its own.
+            h.vt.clear();
+            h.write_w(output, &format!("{control}b"));
+            assert_eq!(h.vt, format!("{shown}\x1b[80Gb\x1b[80G").as_bytes());
+            assert_eq!(h.c.screen.cursor(), (79, 0));
+        }
+    }
+
+    #[test]
     fn a_stateful_expanding_code_page_keeps_its_state_across_slices() {
         let mut h = Host::new();
         h.c = Console::new(

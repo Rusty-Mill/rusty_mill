@@ -112,10 +112,18 @@ pub(super) struct Screen {
     /// without PROCESSED_OUTPUT, else the text between controls.
     run: Option<usize>,
     /// Legacy text met the margin at the end of what the write has
-    /// emitted so far: the move it owes (CR LF with wrap, else a CHA to
-    /// [`Self::run`]) waits for the next slice, whose marks may still
-    /// join the glyph, or for the write's end.
-    owed: Option<bool>,
+    /// emitted so far: the move it owes waits for the next slice, whose
+    /// marks may still join the glyph, or for the write's end.
+    owed: Option<Margin>,
+}
+
+/// Where the cursor goes when legacy text meets the margin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Margin {
+    /// With wrap: CR LF.
+    Wrap,
+    /// Without: back to the run's start column, by CHA.
+    Back(usize),
 }
 
 impl Screen {
@@ -278,7 +286,7 @@ impl Screen {
                         break;
                     }
                     self.forward(b" ", out);
-                    emitted += 1 + self.margin(false, out);
+                    emitted += 1 + self.margin(Margin::Back(start), out);
                     if start == last {
                         // It can't fit at the run's start either, so
                         // conhost throws it away.
@@ -324,10 +332,16 @@ impl Screen {
             // conhost writes a glyph with the marks that follow it before
             // it meets the margin, so they join it, not the next row's;
             // the next slice may still hold some.
+            // A control is written alone, so no mark joins it. The move
+            // is fixed now: the run may end before it is made.
             let rest = &text[consumed..];
             if self.grid.cursor.0 >= self.grid.cols && !self.c2 {
-                self.owed = Some(wrap);
-                if !rest.is_empty() && !continues(rest) {
+                self.owed = Some(if wrap {
+                    Margin::Wrap
+                } else {
+                    Margin::Back(self.run.unwrap_or(0))
+                });
+                if !rest.is_empty() && (ends_run || !continues(rest)) {
                     emitted += self.end_write(out);
                 }
             }
@@ -342,18 +356,17 @@ impl Screen {
     /// bytes sent.
     pub(super) fn end_write(&mut self, out: &mut OutputQueue) -> usize {
         match self.owed.take() {
-            Some(wrap) => self.margin(wrap, out),
+            Some(margin) => self.margin(margin, out),
             None => 0,
         }
     }
 
-    /// The cursor met the margin: with wrap, CR LF; without, back to the
-    /// run's start. Returns the bytes sent.
-    fn margin(&mut self, wrap: bool, out: &mut OutputQueue) -> usize {
-        let vt = if wrap {
-            b"\r\n".to_vec()
-        } else {
-            format!("\x1b[{}G", self.run.unwrap_or(0) + 1).into_bytes()
+    /// The cursor met the margin: send it where `margin` says. Returns
+    /// the bytes sent.
+    fn margin(&mut self, margin: Margin, out: &mut OutputQueue) -> usize {
+        let vt = match margin {
+            Margin::Wrap => b"\r\n".to_vec(),
+            Margin::Back(start) => format!("\x1b[{}G", start + 1).into_bytes(),
         };
         self.forward(&vt, out);
         vt.len()
