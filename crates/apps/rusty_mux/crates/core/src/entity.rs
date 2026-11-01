@@ -1,7 +1,7 @@
 //! The model's entities. Only [`Mux`](crate::Mux) builds or changes them, so
 //! their cross-references stay consistent.
 
-use crate::{BlockId, ClientId, Error, Layout, SessionId, WindowId};
+use crate::{BlockId, ClientId, Error, Layout, Principal, SessionId, Transport, WindowId};
 
 /// A terminal size in cells. Both dimensions are at least 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -134,6 +134,8 @@ pub struct Client {
     pub(crate) id: ClientId,
     pub(crate) name: String,
     pub(crate) attached: Option<BlockId>,
+    pub(crate) principal: Principal,
+    pub(crate) transport: Transport,
 }
 
 impl Client {
@@ -149,5 +151,15 @@ impl Client {
     /// The block whose output this client receives, if any.
     pub fn attached(&self) -> Option<BlockId> {
         self.attached
+    }
+
+    /// Who the server verified this client to be.
+    pub fn principal(&self) -> &Principal {
+        &self.principal
+    }
+
+    /// How its current connection reaches the server.
+    pub fn transport(&self) -> Transport {
+        self.transport
     }
 }

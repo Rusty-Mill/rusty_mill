@@ -12,6 +12,9 @@
 //! the script names a path that never exists, which cargo treats as always
 //! changed, and asks git each time. A rebuild whose answer is the same costs
 //! one `git status`; a different answer recompiles the crate with the new sha.
+//!
+//! `--untracked-files=normal` overrides a user's `status.showUntrackedFiles=no`,
+//! which would otherwise hide an untracked source file and report clean (#1328).
 
 use std::process::Command;
 
@@ -34,7 +37,7 @@ fn git(args: &[&str]) -> Option<String> {
 fn main() {
     let sha = git(&["rev-parse", "HEAD"]).map_or_else(
         || "unknown".to_owned(),
-        |head| match git(&["status", "--porcelain"]) {
+        |head| match git(&["status", "--porcelain", "--untracked-files=normal"]) {
             Some(s) if s.is_empty() => head,
             _ => format!("{head}-dirty"),
         },

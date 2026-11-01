@@ -44,8 +44,11 @@ it off: `rusty-mux-ctl split-block --side right --command htop`. `zoom-block`
 shows one block alone and `unzoom-window` ends it; `list` gives each window's
 `layout`.
 
-Prefer `wait` over polling. `wait --event KIND --FIELD VALUE` waits for an
-event, such as `wait --event bell --block dev-server`.
+Prefer `wait` over polling. `wait --window W` or `wait --session S` waits
+until every block there has ended, blocks started meanwhile included; it
+prints each exit and exits with the last failure, 0 if every program
+succeeded. `wait --event KIND --FIELD VALUE` waits for an event, such as
+`wait --event bell --block dev-server`.
 
 ## Reading and typing
 
@@ -63,7 +66,10 @@ connection.
 
 ## Finding out more
 
-- `rusty-mux-ctl list` shows every session, window, block and client.
+- `rusty-mux-ctl list` shows every session, window, block and client; each
+  client with the principal (user) the server verified and its transport.
+  `rusty-mux-ctl whoami` shows your principal. Each ctl call is its own
+  client, so the id it prints is gone once the call returns.
 - `rusty-mux-ctl help` lists every command; `help COMMAND` shows its flags.
 - `--json` prints one JSON object per line.
 - Exit codes: 0 ok, 1 refused, 2 bad command line, 3 target missing or

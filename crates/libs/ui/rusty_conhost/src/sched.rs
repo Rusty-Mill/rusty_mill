@@ -81,6 +81,10 @@ pub(crate) struct View {
     pub input_paused: bool,
     /// Parked writes stopped at the budget on the host's own answers.
     pub writes_ready: bool,
+    /// A streamed write is unfinished: no packet is taken until it is.
+    pub streaming: bool,
+    /// A streamed write's next slice is due: the next turn reads it.
+    pub fetch_due: bool,
 }
 
 /// What one turn does, in this order.
@@ -115,10 +119,10 @@ pub(crate) fn turn(v: &View) -> Turn {
     }
 }
 
-/// Whether a READ_IO can be sent now: none is in flight and admission
-/// allows another packet.
+/// Whether a READ_IO can be sent now: none is in flight, no streamed
+/// write is unfinished, and admission allows another packet.
 fn read_admitted(v: &View) -> bool {
-    !v.closed && !v.read_in_flight && admits_read(v.waiting, v.parked)
+    !v.closed && !v.read_in_flight && !v.streaming && admits_read(v.waiting, v.parked)
 }
 
 /// Whether the engine's wait must not block: work is left that the next
@@ -129,6 +133,7 @@ fn read_admitted(v: &View) -> bool {
 pub(crate) fn must_poll(v: &View) -> bool {
     v.reads_ready
         || v.writes_ready
+        || v.fetch_due
         || (v.input > 0 && v.output <= INPUT_PAUSE_ABOVE && !v.input_paused)
         || read_admitted(v)
 }

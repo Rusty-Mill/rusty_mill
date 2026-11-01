@@ -44,6 +44,9 @@ pub enum Error {
     /// Splitting the block would nest the layout deeper than
     /// [`MAX_DEPTH`](crate::MAX_DEPTH).
     TooDeep(BlockId),
+    /// A [`Principal`](crate::Principal) with an empty id, or a field
+    /// longer than [`MAX_NAME`](crate::MAX_NAME) bytes.
+    BadPrincipal,
 }
 
 impl fmt::Display for Error {
@@ -53,6 +56,11 @@ impl fmt::Display for Error {
             Self::UnknownWindow(id) => write!(f, "unknown window {id}"),
             Self::UnknownBlock(id) => write!(f, "unknown block {id}"),
             Self::UnknownClient(id) => write!(f, "unknown client {id}"),
+            Self::BadPrincipal => write!(
+                f,
+                "a principal needs an id, and each field at most {} bytes",
+                crate::MAX_NAME
+            ),
             Self::BlockExists(id) => write!(f, "block {id} already exists"),
             Self::NameTooLong { len } => write!(
                 f,

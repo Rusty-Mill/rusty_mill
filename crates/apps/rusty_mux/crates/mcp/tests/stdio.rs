@@ -426,6 +426,27 @@ fn cancelling_a_call_stuck_connecting_ends_it() {
     ended.expect("serve");
 }
 
+/// `whoami` is a tool, generated from the catalog like the rest (C25).
+#[test]
+fn whoami_names_the_caller() {
+    let socket = start_server();
+    let me = ok(&socket, "whoami", "{}");
+    let uid = rusty_libc::process::geteuid();
+    assert!(me.contains(&format!("uid:{uid}")), "{me}");
+    assert!(me.contains("socket"), "{me}");
+}
+
+/// A server without `IDENTITY` cannot answer `whoami`: it is refused
+/// before anything is sent.
+#[test]
+fn whoami_on_a_server_without_identity_sends_nothing() {
+    let (socket, requests) = start_server_without_launch();
+    let (text, failed) = call(&socket, "whoami", "{}");
+    assert!(failed, "{text}");
+    assert!(text.contains("does not support whoami"), "{text}");
+    assert_eq!(requests.recv_timeout(PATIENCE).expect("count"), 0);
+}
+
 #[test]
 fn a_launch_the_server_would_ignore_is_a_tool_error_and_sends_nothing() {
     let (socket, requests) = start_server_without_launch();

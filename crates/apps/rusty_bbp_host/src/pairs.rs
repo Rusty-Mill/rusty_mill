@@ -62,7 +62,8 @@ pub struct RunFacts {
     pub spec_boundaries: u64,
     /// The run's harnesses cost more than the per-run cap.
     pub over_cap: bool,
-    /// The task's `reads_per_turn`, from its card.
+    /// The `reads_per_turn` the task was opened with (its `TaskOpened`
+    /// event). A run whose limit was later extended does not load.
     pub reads_per_turn: u64,
     /// The models each role's turns used, from the harness output.
     pub role_models: BTreeMap<String, BTreeSet<String>>,
@@ -577,7 +578,7 @@ pub fn facts(
         overshoot: st.spent.messages > st.budget.messages || st.spent.bytes > st.budget.bytes,
         unused_conflicts: rep.unused_conflicts,
         unused_bytes: rep.unused_bytes,
-        reads_per_turn: st.budget.reads_per_turn,
+        reads_per_turn: opened_reads_per_turn(&events)?,
         role_models,
         build_sha: build_sha_of(&text)?,
         no_model_turns,
@@ -585,6 +586,31 @@ pub fn facts(
         stopped,
         usd_floor: tok.usd_floor,
     })
+}
+
+/// The `reads_per_turn` a run was opened with. The final card is not the
+/// run's limit: a human extension changes it after turns already ran under the
+/// opened one, so the arms of a pair could differ while both cards match the
+/// manifest. A run with any `reads_per_turn` extension, even one back to the
+/// opened value, ran under more than one limit and refuses (#1327).
+fn opened_reads_per_turn(events: &[Event]) -> Result<u64, String> {
+    let Some(Event::TaskOpened { budget, .. }) = events.first() else {
+        return Err("the log does not start with TaskOpened".to_owned());
+    };
+    let extended = events.iter().find_map(|e| match e {
+        Event::BudgetExtended {
+            field: BudgetField::ReadsPerTurn,
+            limit,
+        } => Some(*limit),
+        _ => None,
+    });
+    match extended {
+        Some(limit) => Err(format!(
+            "reads_per_turn was opened at {} and extended to {limit}: the run ran under more than one limit",
+            budget.reads_per_turn
+        )),
+        None => Ok(budget.reads_per_turn),
+    }
 }
 
 /// Every run must have been produced by a `bbp` built from `head`.
@@ -694,8 +720,11 @@ fn git(repo: &Path, args: &[&str]) -> Result<(bool, String), String> {
     ))
 }
 
-/// The commit a run is pinned to: HEAD of `repo`, which must be clean and must
-/// contain `min_commit` (the merge of the verdict-binding fix). A criteria file
+/// The commit a run is pinned to: HEAD of `repo`, which must be clean as
+/// `git status --porcelain --untracked-files=normal` sees it (the flag overrides
+/// `status.showUntrackedFiles`; excludes files, index bits such as
+/// assume-unchanged, and submodule ignore settings can still hide a change) and
+/// must contain `min_commit` (the merge of the verdict-binding fix). A criteria file
 /// with no `min_commit` refuses: the pin is part of the criteria.
 pub fn pin(repo: &Path, min_commit: Option<&str>, build_sha: &str) -> Result<String, String> {
     let min =
@@ -704,7 +733,12 @@ pub fn pin(repo: &Path, min_commit: Option<&str>, build_sha: &str) -> Result<Str
     if !ok {
         return Err(format!("{}: not a git checkout", repo.display()));
     }
-    let (_, dirty) = git(repo, &["status", "--porcelain"])?;
+    // `--untracked-files=normal` overrides a user's `status.showUntrackedFiles=no`
+    // (#1328), and a status git could not produce is not a clean tree.
+    let (ok, dirty) = git(repo, &["status", "--porcelain", "--untracked-files=normal"])?;
+    if !ok {
+        return Err(format!("{}: git status failed", repo.display()));
+    }
     if !dirty.is_empty() {
         return Err(format!("{}: the working tree is not clean", repo.display()));
     }
@@ -1021,9 +1055,11 @@ mod tests {
         assert!(spec_wall_ms("not json").is_err());
     }
 
-    /// A scratch git repo with two commits; returns (dir, first sha, second sha).
-    fn repo() -> (std::path::PathBuf, String, String) {
-        let d = std::env::temp_dir().join(format!("pin-{}-{:p}", std::process::id(), &0u8));
+    /// A scratch git repo with two commits, in its own directory per `tag`;
+    /// returns (dir, first sha, second sha).
+    fn repo(tag: &str) -> (std::path::PathBuf, String, String) {
+        let d = std::env::temp_dir().join(format!("pin-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let g = |a: &[&str]| {
             let o = std::process::Command::new("git")
@@ -1049,7 +1085,7 @@ mod tests {
 
     #[test]
     fn a_run_is_pinned_to_a_clean_head_built_into_the_binary_that_contains_the_minimum_commit() {
-        let (d, first, second) = repo();
+        let (d, first, second) = repo("pinned");
         assert_eq!(pin(&d, Some(&first), &second).unwrap(), second);
         assert_eq!(pin(&d, Some(&second), &second).unwrap(), second);
         // A binary built from another commit, or from a dirty tree, refuses.
@@ -1074,6 +1110,38 @@ mod tests {
             &second
         )
         .is_err());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn an_untracked_file_is_dirty_even_when_git_config_hides_untracked_files() {
+        // #1328: `status.showUntrackedFiles=no` (here in the repository's own
+        // config, as a user's global config would set it) made `git status
+        // --porcelain` print nothing for an untracked file.
+        let (d, first, second) = repo("untracked");
+        let cfg = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&d)
+            .args(["config", "status.showUntrackedFiles", "no"])
+            .status()
+            .unwrap();
+        assert!(cfg.success());
+        assert_eq!(pin(&d, Some(&first), &second).unwrap(), second);
+        std::fs::write(d.join("new.rs"), "// untracked\n").unwrap();
+        assert!(pin(&d, Some(&first), &second)
+            .unwrap_err()
+            .contains("not clean"));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_status_git_cannot_read_is_not_a_clean_tree() {
+        // A failed `git status` printed nothing, which read as clean. A corrupt
+        // index fails status while `rev-parse HEAD` still answers.
+        let (d, first, second) = repo("corrupt-index");
+        std::fs::write(d.join(".git/index"), "not an index").unwrap();
+        let err = pin(&d, Some(&first), &second).unwrap_err();
+        assert!(err.contains("git status"), "{err}");
         std::fs::remove_dir_all(d).unwrap();
     }
 

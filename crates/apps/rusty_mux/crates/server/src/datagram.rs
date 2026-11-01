@@ -20,7 +20,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-use rusty_mux_core::ClientId;
+use rusty_mux_core::{ClientId, Transport};
 use rusty_mux_transport::{Association, ID_LEN, KEY_LEN, MAX_DATAGRAM, Side, StreamId};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf, UdpSocket};
 use rusty_tokio::sync::Notify;
@@ -211,7 +211,8 @@ pub(crate) async fn serve(
                 known.borrow_mut().over_datagram(client, cancel);
                 adopter.adopt(client, cancel, &known);
             };
-            rusty_tokio::task::spawn_local(conn::run(state.clone(), rd, wr, adopt));
+            let served = conn::run(state.clone(), rd, wr, Transport::Datagram, adopt);
+            rusty_tokio::task::spawn_local(served);
         }
     }
 }

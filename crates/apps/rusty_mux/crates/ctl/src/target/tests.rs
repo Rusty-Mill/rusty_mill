@@ -43,6 +43,8 @@ fn listing() -> Vec<Entry> {
         client: ClientId::from_uuid(id(c)),
         name: name.into(),
         attached: None,
+        principal: None,
+        transport: None,
     };
     vec![
         session(S1, "build"),

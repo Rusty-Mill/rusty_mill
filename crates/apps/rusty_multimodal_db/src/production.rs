@@ -26,7 +26,7 @@
 //! So the literal, correct composition of this round's three picks is
 //! **`RwLock<MmapAgeStore>`** — storage architecture and durability already
 //! combined by the prior round, concurrency layered on top by this one,
-//! exactly mirroring how [`crate::concurrency::global_rwlock`] itself
+//! exactly mirroring how `crate::concurrency::global_rwlock` itself
 //! chose to wrap `CanonicalCachedStore` directly rather than reinventing
 //! its internals. This module changes nothing inside
 //! `src/durability/mmap_store.rs` or `src/concurrency/global_rwlock.rs` —
@@ -46,8 +46,8 @@
 //!   `two_hop_neighbors`, `MixedWorkloadDriver::run_one`,
 //!   `benches/workloads.rs`'s per-workload generic runners) accepts
 //!   `ProductionStore` with no changes on their end. Unlike
-//!   [`crate::concurrency::sharded::ShardedStore`]/
-//!   [`crate::concurrency::dashmap_store::DashMapStore`] (which only cover
+//!   `crate::concurrency::sharded::ShardedStore`/
+//!   `crate::concurrency::dashmap_store::DashMapStore` (which only cover
 //!   `ConcurrentStore`'s narrower `get`/`update_age`/`scan_ages` surface),
 //!   `ProductionStore` gets the *full* `DogStore` surface including
 //!   `same_breed`/`neighbors` for free, because `MmapAgeStore` already
@@ -69,7 +69,7 @@
 //! the same helper every durability variant's own tests already use) and
 //! `.expect()` on failure — an explicit, documented exception to "no
 //! unwrap/expect outside tests," on the same footing
-//! [`crate::concurrency::global_rwlock::GlobalRwLockStore`] already
+//! `crate::concurrency::global_rwlock::GlobalRwLockStore` already
 //! established for `RwLock` poisoning: a failure here (no space or no
 //! permission on the OS temp dir) is a genuinely exceptional environment
 //! problem, not a normal operational outcome any caller could sensibly

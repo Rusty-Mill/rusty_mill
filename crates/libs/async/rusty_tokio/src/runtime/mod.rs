@@ -375,12 +375,12 @@ impl Shared {
 
     /// Resolves once `begin_graceful_shutdown` has been called --
     /// immediately, if it already has been by the time this is first
-    /// polled. Plain `Notify::notify_waiters` alone only wakes whoever's
-    /// *already* registered at the moment it's called (matching tokio's
-    /// own semantics -- see `sync::notify`'s docs); a task that calls
-    /// this *after* shutdown has already begun still needs to observe
-    /// that, which is exactly what the `shutting_down` flag checked here
-    /// first is for.
+    /// polled. Plain `Notify::notify_waiters` alone only wakes a
+    /// `Notified` that *already exists* when it's called (matching tokio's
+    /// own semantics -- see `sync::notify`'s docs), and this one is only
+    /// created on first poll; a task that calls this *after* shutdown has
+    /// already begun still needs to observe that, which is exactly what
+    /// the `shutting_down` flag checked here first is for.
     pub(crate) fn shutdown_notified(&self) -> impl Future<Output = ()> + Send + '_ {
         let mut inner: Option<crate::sync::Notified<'_>> = None;
         std::future::poll_fn(move |cx| {
