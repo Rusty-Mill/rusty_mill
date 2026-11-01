@@ -60,7 +60,8 @@ pub struct RunFacts {
     /// `unused_share` as (unused bytes, all spec bytes).
     pub unused_bytes: (u64, u64),
     /// The moderator's live state equalled the replay of the log at the end
-    /// of the run (`bbp mod` prints it); `None` when the run did not say.
+    /// of the run (`bbp mod` prints it); `None` when the run did not say, or
+    /// was resumed (the last output speaks for its last segment only).
     pub replay_equals_live: Option<bool>,
     /// State boundaries up to and including the end of the first `Planning`
     /// visit, each observed to within one poll.
@@ -80,7 +81,8 @@ pub struct RunFacts {
     /// their cost is only known from below.
     pub killed_turns: u64,
     /// Why the run stopped: `cap` or `wall` from its `bbp mod` output, or
-    /// `resumed` when more than one `bbp mod` produced it. Reported with a
+    /// `resumed: N bbp mod segments` (with `; last: cap|wall` when the last
+    /// output stopped) when more than one `bbp mod` produced it. Reported with a
     /// failed pair.
     pub stop: Option<String>,
     /// The moderator stopped the run (cap or wall limit), or it was resumed
@@ -573,16 +575,18 @@ pub fn facts(
     let m = mod_facts(&text)?;
     let build_sha = build_sha_of(&text)?;
     let resumed = check_segments(&segments, &build_sha)?;
-    let stop = match resumed {
-        Some(n) => Some(format!("resumed: {n} bbp mod segments")),
-        None => m.stop.clone(),
+    let stop = match (resumed, &m.stop) {
+        (Some(n), None) => Some(format!("resumed: {n} bbp mod segments")),
+        (Some(n), Some(last)) => Some(format!("resumed: {n} bbp mod segments; last: {last}")),
+        (None, s) => s.clone(),
     };
     let stopped = stop.is_some();
-    // A resumed run's saved output timed only its last segment, which saw the
-    // resume point as a fresh start: its spec wall is unknown, not that.
-    let (spec_wall_ms, spec_boundaries) = match resumed {
-        Some(_) => (None, 0),
-        None => (m.spec_wall_ms, m.spec_boundaries),
+    // A resumed run's saved output describes only its last segment: it timed
+    // the resume point as a fresh start, and its replay check says nothing of
+    // an earlier segment. Both are unknown, so criterion 1 cannot hold on it.
+    let (spec_wall_ms, spec_boundaries, replay_equals_live) = match resumed {
+        Some(_) => (None, 0, None),
+        None => (m.spec_wall_ms, m.spec_boundaries, m.replay_equals_live),
     };
     // A run the moderator stopped is a failed run whatever its log holds: a log
     // the tool cannot read (which may be why the cap stopped it) must not drop
@@ -600,7 +604,7 @@ pub fn facts(
         rubric_ok: r.rubric_ok,
         spec_wall_ms,
         spec_boundaries,
-        replay_equals_live: m.replay_equals_live,
+        replay_equals_live,
         over_cap: m.stop.as_deref() == Some("cap") || tok.usd_floor.is_some_and(|f| f > cap_usd),
         tokens: (tok.without_output == 0).then_some(tok.usd).flatten(),
         overshoot: st.spent.messages > st.budget.messages || st.spent.bytes > st.budget.bytes,
@@ -1023,6 +1027,19 @@ mod tests {
         let e = evaluate(&p, 500);
         assert_eq!(e.c1_safety, Verdict::Fails);
         assert!(e.decision == row(1));
+    }
+
+    /// #1326 review: a resumed run's replay check is unknown, so safety
+    /// cannot hold on ten otherwise good pairs; it is inconclusive.
+    #[test]
+    fn a_resumed_run_leaves_safety_inconclusive() {
+        let mut p = all([0.5; 5], 1, 1);
+        assert_eq!(evaluate(&p, 500).c1_safety, Verdict::Holds);
+        let i = p.iter().position(|x| x.kind == Kind::Shared).unwrap();
+        p[i].treatment.stopped = true;
+        p[i].treatment.stop = Some("resumed: 2 bbp mod segments".into());
+        p[i].treatment.replay_equals_live = None;
+        assert_eq!(evaluate(&p, 500).c1_safety, Verdict::Inconclusive);
     }
 
     #[test]

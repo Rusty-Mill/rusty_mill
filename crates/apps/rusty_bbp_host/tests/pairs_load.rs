@@ -367,6 +367,28 @@ fn a_resumed_run_loads_as_a_failed_stopped_run_marked_resumed() {
         f.spec_wall_ms, None,
         "the last segment's timing is not the run's"
     );
+    assert_eq!(
+        f.replay_equals_live, None,
+        "the last segment's replay check is not the run's"
+    );
+}
+
+#[test]
+fn a_resumed_run_whose_last_segment_stopped_keeps_that_stop_visible() {
+    let f = facts_after(
+        "two-segments-cap",
+        "cap",
+        Some(ASSISTANT),
+        |dir, task, head| {
+            moderator::record_evidence_segment(dir, task, head).unwrap();
+        },
+    )
+    .expect("loads");
+    assert_eq!(
+        f.stop.as_deref(),
+        Some("resumed: 2 bbp mod segments; last: cap")
+    );
+    assert!(f.over_cap && f.stopped && !f.succeeded());
 }
 
 #[test]
