@@ -599,18 +599,36 @@ struct Started {
 /// if it cannot be made, nothing is started. A child with no pidfd (Linux
 /// before 5.3, or a policy that denies it) could not be stopped safely
 /// later, so it is killed at once, while unreaped, and the start fails.
-fn watch(mut command: Command) -> io::Result<Started> {
-    let (give, take) = mpsc::channel::<Child>();
-    let (tx, exited) = mpsc::channel();
+fn watch(command: Command) -> io::Result<Started> {
+    watch_with(command, spawn_reaper, pidfd_of)
+}
+
+/// A job that runs until the child it waits for has ended.
+type Reaper = Box<dyn FnOnce() + Send>;
+
+fn spawn_reaper(reaper: Reaper) -> io::Result<()> {
     std::thread::Builder::new()
         .name("rusty-mux-reap".into())
-        .spawn(move || {
-            // No child comes if the start failed. Nobody waiting for the
-            // exit any more is fine; the reaping is the point.
-            if let Ok(mut child) = take.recv() {
-                let _ = tx.send(child.wait());
-            }
-        })?;
+        .spawn(reaper)
+        .map(drop)
+}
+
+/// [`watch`], with the steps that can fail passed in, so tests can fail
+/// them.
+fn watch_with(
+    mut command: Command,
+    spawn: impl FnOnce(Reaper) -> io::Result<()>,
+    pidfd_of: impl FnOnce(&Child) -> io::Result<OwnedFd>,
+) -> io::Result<Started> {
+    let (give, take) = mpsc::channel::<Child>();
+    let (tx, exited) = mpsc::channel();
+    spawn(Box::new(move || {
+        // No child comes if the start failed. Nobody waiting for the exit
+        // any more is fine; the reaping is the point.
+        if let Ok(mut child) = take.recv() {
+            let _ = tx.send(child.wait());
+        }
+    }))?;
     let mut child = command.spawn()?;
     let pidfd = pidfd_of(&child);
     if pidfd.is_err() {
@@ -748,6 +766,52 @@ async fn reload(front: &Shared) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    /// Whether process `pid` is gone, reaped (no zombie left), within 5 s.
+    fn reaped(pid: u32) -> bool {
+        let stat = PathBuf::from(format!("/proc/{pid}/stat"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if !stat.exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// No reaper thread, no start: the server never runs.
+    #[test]
+    fn no_reaper_thread_starts_nothing() {
+        let dir = scratch("no-reaper");
+        let marker = dir.join("ran");
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(format!("touch {}", marker.display()));
+        let failed = watch_with(command, |_| Err(io::Error::other("no thread")), pidfd_of);
+        assert!(failed.is_err());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!marker.exists(), "the server ran without a reaper");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No pidfd: each server is killed and reaped at once, however often
+    /// it is tried, so none is left running or as a zombie.
+    #[test]
+    fn no_pidfd_kills_and_reaps_the_server() {
+        for _ in 0..3 {
+            let pid = Cell::new(0);
+            let mut command = Command::new("/bin/sleep");
+            command.arg("30");
+            let failed = watch_with(command, spawn_reaper, |child| {
+                pid.set(child.id());
+                Err(io::Error::other("no pidfd"))
+            });
+            assert!(failed.is_err());
+            assert_ne!(pid.get(), 0, "never started");
+            assert!(reaped(pid.get()), "{} left behind", pid.get());
+        }
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir =
