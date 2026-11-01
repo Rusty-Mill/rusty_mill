@@ -1,5 +1,7 @@
 //! `Board::take`: pulling the next card for a role.
 
+use std::sync::Arc;
+
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{
     Actor, BoardError, Capability, Card, Column, Event, EventKind, MoveRules,
@@ -11,7 +13,7 @@ fn board() -> Board<MemStore> {
     Board::new(MemStore::default(), Roles::default())
 }
 
-fn who(b: &Board<MemStore>, name: &str, role: &str) -> Actor {
+fn who<S: Store>(b: &Board<S>, name: &str, role: &str) -> Actor {
     b.roles().actor(name, role).expect("role")
 }
 
@@ -114,7 +116,7 @@ fn a_claimed_ready_card_is_not_half_taken() {
 // ---- concurrency: the claim is the lock, so it must hold under a real race
 
 use std::collections::HashSet;
-use std::sync::{Arc, Barrier};
+use std::sync::Barrier;
 use std::thread;
 
 use rusty_mill_board::tick::TickStore;
@@ -613,4 +615,223 @@ fn a_column_holding_cards_cannot_be_removed() {
     b.set_workflow(Workflow::default(), |_| Ok(()))
         .expect("now empty");
     assert_eq!(b.workflow(), Workflow::default());
+}
+
+/// A store whose next `replace`, once armed, stops until released: a write paused between its
+/// checks and its commit. Commits and workflow publications are logged in order.
+struct Paused {
+    inner: MemStore,
+    armed: Arc<std::sync::atomic::AtomicBool>,
+    entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+impl Store for Paused {
+    fn get(&self, id: uuid::Uuid) -> Result<Option<Card>, BoardError> {
+        self.inner.get(id)
+    }
+    fn list(&self) -> Result<Vec<Card>, BoardError> {
+        self.inner.list()
+    }
+    fn insert(&self, c: &Card, e: Event) -> Result<u64, BoardError> {
+        self.inner.insert(c, e)
+    }
+    fn replace(&self, c: &Card, e: Event) -> Result<u64, BoardError> {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let entered = self.entered.lock().expect("lock").take().expect("once");
+            let release = self.release.lock().expect("lock").take().expect("once");
+            entered.send(()).expect("entered");
+            release.recv().expect("released");
+        }
+        let rev = self.inner.replace(c, e)?;
+        self.log.lock().expect("log").push("commit");
+        Ok(rev)
+    }
+    fn events_since(
+        &self,
+        after: Option<uuid::Uuid>,
+        limit: usize,
+    ) -> Result<Vec<Event>, BoardError> {
+        self.inner.events_since(after, limit)
+    }
+    fn last_event_id(&self) -> Result<Option<uuid::Uuid>, BoardError> {
+        self.inner.last_event_id()
+    }
+    fn reserve_number(&self, card: uuid::Uuid, floor: u64) -> Result<u64, BoardError> {
+        self.inner.reserve_number(card, floor)
+    }
+}
+
+/// Start `mv` on a card and pause it inside its commit, then try `next` workflow from another
+/// thread and let the move finish. Returns the move's result, the change's result and the
+/// order commits and the publication landed in.
+fn race_workflow_change(
+    flow: Workflow,
+    next: Workflow,
+    to: Column,
+) -> (
+    Result<Card, BoardError>,
+    Result<(), BoardError>,
+    Vec<&'static str>,
+) {
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let store = Paused {
+        inner: MemStore::default(),
+        armed: Arc::clone(&armed),
+        entered: std::sync::Mutex::new(Some(entered_tx)),
+        release: std::sync::Mutex::new(Some(release_rx)),
+        log: Arc::clone(&log),
+    };
+    let mut roles = Roles::default();
+    roles
+        .0
+        .insert("triager".into(), [Capability::Triage].into());
+    let b = Arc::new(Board::new(store, roles).with_workflow(flow));
+    let h = who(&b, "nano", "human");
+    let card = b.add(&h, "a", "", vec![]).expect("add");
+    log.lock().expect("log").clear();
+    let triager = who(&b, "t", "triager");
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mover = {
+        let b = Arc::clone(&b);
+        std::thread::spawn(move || b.move_card(card.id, &to, &triager))
+    };
+    entered_rx.recv().expect("move paused in its commit");
+    let changer = {
+        let (b, log) = (Arc::clone(&b), Arc::clone(&log));
+        std::thread::spawn(move || {
+            b.set_workflow(next, |_| {
+                log.lock().expect("log").push("publish");
+                Ok(())
+            })
+        })
+    };
+    // Give the change every chance to land while the move is paused, then let the move go.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    release_tx.send(()).expect("release");
+    let moved = mover.join().expect("mover");
+    let changed = changer.join().expect("changer");
+    let order = log.lock().expect("log").clone();
+    (moved, changed, order)
+}
+
+fn gated(flow: &Workflow, from: &Column, to: &Column) -> Workflow {
+    let transitions = flow
+        .transitions()
+        .iter()
+        .cloned()
+        .map(|t| Transition {
+            gate: t.gate || (t.from == *from && t.to == *to),
+            ..t
+        })
+        .collect();
+    Workflow::new(flow.columns().to_vec(), transitions).expect("valid")
+}
+
+#[test]
+fn a_gate_added_mid_move_waits_for_the_move_and_then_applies() {
+    let flow = Workflow::default();
+    let next = gated(&flow, &Column::BACKLOG, &Column::READY);
+    let (moved, changed, order) = race_workflow_change(flow, next, Column::READY);
+    assert!(moved.is_ok() && changed.is_ok());
+    assert_eq!(
+        order,
+        ["commit", "publish"],
+        "the move commits under the workflow it was checked against"
+    );
+}
+
+#[test]
+fn a_column_removed_mid_move_into_it_is_refused() {
+    let flow = with_design();
+    let without = Workflow::new(
+        flow.columns()
+            .iter()
+            .filter(|c| c.id.as_str() != "design")
+            .cloned()
+            .collect(),
+        flow.transitions()
+            .iter()
+            .filter(|t| t.from.as_str() != "design" && t.to.as_str() != "design")
+            .cloned()
+            .collect(),
+    )
+    .expect("valid");
+    let (moved, changed, order) =
+        race_workflow_change(flow, without, Column::new("design").expect("id"));
+    assert_eq!(moved.expect("moved in first").column.as_str(), "design");
+    assert!(
+        matches!(changed, Err(BoardError::Refused(why)) if why.contains("design still has cards")),
+        "the removal sees the card the move committed"
+    );
+    assert_eq!(order, ["commit"]);
+}
+
+#[test]
+fn a_move_removed_mid_move_waits_for_the_move() {
+    let flow = Workflow::default();
+    let next = Workflow::new(
+        flow.columns().to_vec(),
+        flow.transitions()
+            .iter()
+            .filter(|t| !(t.from == Column::BACKLOG && t.to == Column::READY))
+            .cloned()
+            .collect(),
+    )
+    .expect("valid");
+    let (moved, changed, order) = race_workflow_change(flow, next, Column::READY);
+    assert!(moved.is_ok() && changed.is_ok());
+    assert_eq!(order, ["commit", "publish"]);
+}
+
+#[test]
+fn a_take_into_a_column_the_actor_does_not_work_leaves_the_card_alone() {
+    // queue -> work needs Build, but the work column is left only by Review: a builder may
+    // enter it but not work it, so taking must not move the card.
+    let base = Workflow::default();
+    let col = |id: &str, kind: Kind| ColumnDef {
+        id: Column::new(id).expect("id"),
+        label: id.to_owned(),
+        kind,
+        takers: Default::default(),
+    };
+    let mut columns = base.columns().to_vec();
+    columns.insert(1, col("q", Kind::Queue));
+    columns.insert(2, col("w", Kind::Work));
+    let mv = |from: &str, to: &str, cap: Capability| Transition {
+        from: Column::new(from).expect("from"),
+        to: Column::new(to).expect("to"),
+        cap,
+        gate: false,
+    };
+    let flow = Workflow::new(
+        columns,
+        vec![
+            mv("backlog", "q", Capability::Triage),
+            mv("q", "w", Capability::Build),
+            mv("w", "done", Capability::Review),
+        ],
+    )
+    .expect("valid");
+    let b = board().with_workflow(flow);
+    let h = who(&b, "nano", "human");
+    let c = b.add(&h, "a", "", vec![]).expect("add");
+    b.move_card(c.id, &Column::new("q").expect("id"), &h)
+        .expect("queued");
+    let dev = who(&b, "claude", "builder");
+    assert!(b.take(&dev, None).expect("take").is_none());
+    assert!(matches!(
+        b.take(&dev, Some(c.id)),
+        Err(BoardError::Refused(_))
+    ));
+    let after = b.get(c.id).expect("card");
+    assert_eq!(
+        (after.column.as_str(), after.claim),
+        ("q", None),
+        "not moved, not claimed"
+    );
 }

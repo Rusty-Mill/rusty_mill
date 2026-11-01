@@ -418,13 +418,22 @@ async function snapshot(){
   cursor=at;cards=byPriority(list);
 }
 async function refresh(){await snapshot();render()}
+/* Columns change without a card event (an admin's edit elsewhere), so they are re-read on every
+   poll; a changed set redraws the board even when no card moved. */
+async function pollColumns(){
+  const flow=await api("board_columns");
+  if(JSON.stringify(flow)===JSON.stringify(FLOW))return false;
+  FLOW=flow;return true;
+}
 async function poll(){
   try{
+    let redraw=await pollColumns();
     const r=await api("board_events",{after:cursor,limit:1000});
     if(r.events.length){
       const list=(await api("board_list")).cards;   // if this throws, the cursor stays put and the events are retried
-      cursor=r.cursor;cards=byPriority(list);render();
+      cursor=r.cursor;cards=byPriority(list);redraw=true;
     }
+    if(redraw)render();
   }catch(e){}
   setTimeout(poll,1500);
 }

@@ -287,15 +287,24 @@ impl<S: Store> Board<S> {
 
     /// The workflow in force: columns and the moves between them.
     pub fn workflow(&self) -> Workflow {
-        read(&self.workflow)
+        self.flow().clone()
+    }
+
+    /// The workflow, held shared: while a guard lives, [`Board::set_workflow`] waits. Every
+    /// write that depends on it (a move, a take) holds it through its commit, so a change to
+    /// the workflow never lands between a check and the write it allowed. Never take it twice
+    /// in one call: a waiting writer would block the second.
+    fn flow(&self) -> RwLockReadGuard<'_, Workflow> {
+        self.workflow
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Replace the workflow. Refused if a card is still in a column the new workflow lacks
     /// (move those cards first). `persist` makes it durable and runs under the write lock,
-    /// after validation and before publication; if it fails nothing has changed.
-    ///
-    /// A card moved into a column while that column is being removed is not lost: a card in
-    /// a column the workflow lacks reads as Backlog.
+    /// after validation and before publication; if it fails nothing has changed. The write
+    /// lock waits for moves and takes in flight and holds new ones until it is published, so
+    /// none commits under the workflow it replaces.
     ///
     /// # Errors
     /// [`BoardError::Refused`] naming the column or what `persist` reported, or a storage failure.
@@ -326,12 +335,15 @@ impl<S: Store> Board<S> {
 
     /// Every card, each [`placed`] in the workflow.
     fn cards(&self) -> Result<Vec<Card>, BoardError> {
-        let flow = self.workflow();
+        self.cards_in(&self.flow())
+    }
+
+    fn cards_in(&self, flow: &Workflow) -> Result<Vec<Card>, BoardError> {
         Ok(self
             .store
             .list()?
             .into_iter()
-            .map(|c| placed(&flow, c))
+            .map(|c| placed(flow, c))
             .collect())
     }
 
@@ -374,9 +386,13 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// If missing, or on storage failure.
     pub fn get(&self, id: Uuid) -> Result<Card, BoardError> {
+        self.get_in(&self.flow(), id)
+    }
+
+    fn get_in(&self, flow: &Workflow, id: Uuid) -> Result<Card, BoardError> {
         self.store
             .get(id)?
-            .map(|c| placed(&self.workflow(), c))
+            .map(|c| placed(flow, c))
             .ok_or(BoardError::NotFound(id))
     }
 
@@ -661,10 +677,10 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::OutOfScope(p.to_owned()));
             }
         }
-        let flow = self.workflow();
+        let flow = self.flow();
         let queues = flow.work_queues();
         let rank = |c: &Card| queues.iter().position(|q| *q == c.column);
-        let cards = self.cards()?;
+        let cards = self.cards_in(&flow)?;
         let waiting = waiting_on_deps(&cards);
         if let Some(i) = id
             && waiting.contains(&i)
@@ -707,10 +723,11 @@ impl<S: Store> Board<S> {
         }
     }
 
-    /// Enter (if the card waits in Ready) and claim it. Every step re-checks the card
-    /// *inside* its own compare-and-swap, so a card that another worker moved on or
-    /// claimed since it was listed is refused instead of half-taken: a claim never
-    /// lands on a card that is no longer in a queue this actor can work.
+    /// Enter (if the card waits in a queue) and claim it, in one commit, so a take that is
+    /// refused leaves the card where it was. The commit re-checks the card *inside* its
+    /// compare-and-swap, so a card another worker moved on or claimed since it was listed is
+    /// refused instead of half-taken; and a card is entered only into a column whose work
+    /// this actor does, so it is never moved and then left unclaimed.
     fn enter_and_claim(
         &self,
         flow: &Workflow,
@@ -719,36 +736,44 @@ impl<S: Store> Board<S> {
     ) -> Result<Card, BoardError> {
         let id = listed.id;
         let queues = flow.work_queues();
-        let workable =
-            |c: &Card| queues.contains(&c.column) && flow.actionable(&c.column, &by.caps);
-        let current = self.get(id)?;
-        if !workable(&current) {
+        let works = |col: &Column| queues.contains(col) && flow.actionable(col, &by.caps);
+        let current = self.get_in(flow, id)?;
+        if !works(&current.column) {
             return Err(BoardError::Conflict);
         }
         self.check_deps_done(&current)?;
-        // Refuse before moving anything: a claimed card must not be half-taken.
+        // Refuse before writing anything: a claimed card must not be half-taken.
         if let Some(holder) = current.claim.as_ref().filter(|h| **h != by.name) {
             return Err(BoardError::Claimed(holder.clone()));
         }
-        if let Some(enter) = flow.entry_column(&current.column) {
-            self.apply(id, by, EventKind::Moved, |c, now| {
-                if flow.entry_column(&c.column) != Some(enter) {
+        let Some(enter) = flow.entry_column(&current.column) else {
+            return self.apply_in(flow, id, by, EventKind::Claimed, |c, now| {
+                if !works(&c.column) {
                     return Err(BoardError::Conflict);
                 }
                 self.check_deps_done(c)?;
-                // Checked on the card being committed, not the earlier read.
-                if let Some(holder) = c.claim.as_ref().filter(|h| **h != by.name) {
-                    return Err(BoardError::Claimed(holder.clone()));
-                }
-                c.move_to(flow, enter, by, now)
-            })?;
+                c.claim(by, now)
+            });
+        };
+        if !works(enter) {
+            return Err(BoardError::Refused(format!(
+                "taking this card moves it to {enter}, whose work your role does not do"
+            )));
         }
-        self.apply(id, by, EventKind::Claimed, |c, now| {
-            if !workable(c) {
+        self.apply_in(flow, id, by, EventKind::Moved, |c, now| {
+            if flow.entry_column(&c.column) != Some(enter) {
                 return Err(BoardError::Conflict);
             }
             self.check_deps_done(c)?;
-            c.claim(by, now)
+            // Checked on the card being committed, not the earlier read.
+            if let Some(holder) = c.claim.as_ref().filter(|h| **h != by.name) {
+                return Err(BoardError::Claimed(holder.clone()));
+            }
+            let entered = c.move_to(flow, enter, by, now)?;
+            Ok(Card {
+                claim: Some(by.name.clone()),
+                ..entered
+            })
         })
     }
 
@@ -776,8 +801,20 @@ impl<S: Store> Board<S> {
         kind: EventKind,
         op: impl Fn(&Card, i64) -> Result<Card, BoardError>,
     ) -> Result<Card, BoardError> {
+        self.apply_in(&self.flow(), id, by, kind, op)
+    }
+
+    /// [`Board::apply`] under `flow`, a guard the caller holds (see [`Board::flow`]).
+    fn apply_in(
+        &self,
+        flow: &Workflow,
+        id: Uuid,
+        by: &Actor,
+        kind: EventKind,
+        op: impl Fn(&Card, i64) -> Result<Card, BoardError>,
+    ) -> Result<Card, BoardError> {
         for _ in 0..RETRIES {
-            let current = self.get(id)?;
+            let current = self.get_in(flow, id)?;
             // Checked on the card being committed, so a card re-assigned mid-call is refused too.
             if !by.may_work_in(&current.project) {
                 return Err(BoardError::OutOfScope(current.project));
@@ -805,13 +842,13 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// See [`Card::move_to`], or [`Card::move_freely`] when the rules are off.
     pub fn move_card(&self, id: Uuid, to: &Column, by: &Actor) -> Result<Card, BoardError> {
-        let flow = self.workflow();
+        let flow = self.flow();
         match self.move_rules() {
-            MoveRules::Enforced => self.apply(id, by, EventKind::Moved, |c, now| {
+            MoveRules::Enforced => self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
                 c.move_to(&flow, to, by, now)
             }),
             MoveRules::Open => {
-                let card = self.apply(id, by, EventKind::Moved, |c, now| {
+                let card = self.apply_in(&flow, id, by, EventKind::Moved, |c, now| {
                     c.move_freely(&flow, to, by, now)
                 })?;
                 rusty_log::info!(card = %id, actor = %by.name, to = %to, "card moved with movement rules off");
