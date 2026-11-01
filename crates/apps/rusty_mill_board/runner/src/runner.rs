@@ -131,10 +131,13 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
             for (from, to) in moves {
                 match flow.transition(from, to) {
                     Err(e) => return Err(format!("stage {:?}: {from} -> {to}: {e}", s.name)),
-                    Ok(Some(t)) if !caps.contains(&t.cap) => {
+                    Ok(Some(ts)) if !ts.iter().any(|t| caps.contains(&t.cap)) => {
+                        let need: Vec<String> = ts.iter().map(|t| format!("{:?}", t.cap)).collect();
                         return Err(format!(
-                            "stage {:?}: role {:?} lacks {:?} for {from} -> {to}",
-                            s.name, s.role, t.cap
+                            "stage {:?}: role {:?} lacks {} for {from} -> {to}",
+                            s.name,
+                            s.role,
+                            need.join(" or ")
                         ));
                     }
                     Ok(_) => {}
