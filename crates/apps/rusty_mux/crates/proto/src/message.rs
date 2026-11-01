@@ -118,6 +118,10 @@ impl Features {
     /// decoders skip the field.
     pub const ACTIVE_WINDOW: Self = Self(1 << 24);
 
+    /// [`Message::ReloadConfig`] and [`Event::ConfigReloaded`] (skipped
+    /// for a client without it).
+    pub const CONFIG_RELOAD: Self = Self(1 << 25);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -390,6 +394,11 @@ pub enum Message {
         req: u64,
         window: WindowId,
     },
+    /// Has the server read its config file again. Negotiated with
+    /// [`Features::CONFIG_RELOAD`].
+    ReloadConfig {
+        req: u64,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -571,6 +580,7 @@ mod ty {
     pub const OPEN_DATAGRAM: u8 = 0x15;
     pub const WHOAMI: u8 = 0x16;
     pub const SELECT_WINDOW: u8 = 0x17;
+    pub const RELOAD_CONFIG: u8 = 0x18;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -704,6 +714,10 @@ impl Message {
             M::SelectWindow { req, window } => {
                 out.varint(REQ, *req).uuid(WINDOW, window.uuid());
                 ty::SELECT_WINDOW
+            }
+            M::ReloadConfig { req } => {
+                out.varint(REQ, *req);
+                ty::RELOAD_CONFIG
             }
             M::Welcome {
                 features,
@@ -890,6 +904,9 @@ impl Message {
             ty::SELECT_WINDOW => M::SelectWindow {
                 req: f.varint(REQ)?,
                 window: window(&f, WINDOW)?,
+            },
+            ty::RELOAD_CONFIG => M::ReloadConfig {
+                req: f.varint(REQ)?,
             },
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
@@ -1140,6 +1157,7 @@ mod kind {
     pub const CLIPBOARD_WRITTEN: u64 = 27;
     pub const STATUS_REMOVED: u64 = 28;
     pub const ACTIVE_WINDOW_CHANGED: u64 = 29;
+    pub const CONFIG_RELOADED: u64 = 30;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -1275,6 +1293,9 @@ fn put_event(out: &mut Out, event: &Event) {
                 .bytes(TITLE, title.as_bytes())
                 .bytes(BODY, body.as_bytes());
         }
+        E::ConfigReloaded => {
+            out.varint(KIND, kind::CONFIG_RELOADED);
+        }
         E::ClipboardWritten { block, selection } => {
             out.varint(KIND, kind::CLIPBOARD_WRITTEN)
                 .uuid(BLOCK, block.uuid())
@@ -1409,6 +1430,7 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         kind::CLIENT_DISCONNECTED => E::ClientDisconnected {
             client: client(f, CLIENT)?,
         },
+        kind::CONFIG_RELOADED => E::ConfigReloaded,
         kind::CLIPBOARD_WRITTEN => E::ClipboardWritten {
             block: block(f, BLOCK)?,
             selection: selection(f)?,

@@ -23,6 +23,7 @@ fn a_client_of_another_user_is_refused() {
                 args: Vec::new(),
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                config_file: None,
             };
             let other = rusty_libc::process::geteuid().wrapping_add(1);
             serve_for(

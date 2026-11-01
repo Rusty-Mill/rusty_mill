@@ -36,6 +36,8 @@ mod process;
 #[cfg(any(target_os = "linux", windows))]
 mod pty;
 #[cfg(any(target_os = "linux", windows))]
+mod settings;
+#[cfg(any(target_os = "linux", windows))]
 mod state;
 pub mod style;
 #[cfg(any(target_os = "linux", windows))]
@@ -63,6 +65,10 @@ pub struct Config {
     /// Which console host runs a block's program on Windows; other
     /// platforms ignore it.
     pub console_host: ConsoleHost,
+    /// The config file whose `server` section replaces `program`, `args`
+    /// and `cwd` (see [`rusty_mux_script::Defaults`]), read at start and on
+    /// `reload-config`; `None` reads none and refuses a reload.
+    pub config_file: Option<std::path::PathBuf>,
 }
 
 /// The Windows console host behind each block.
@@ -229,6 +235,10 @@ async fn serve_for(
         .and_then(Result::ok);
     let owner = owner()?;
     let state = state::State::shared(config, socket);
+    state
+        .borrow_mut()
+        .load_config()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     rusty_tokio::task::spawn_local(state::watch_processes(std::rc::Rc::downgrade(&state)));
     let served = rusty_tokio::select! {
         result = serve_clients(listener, state.clone(), udp, allowed, owner) => result,

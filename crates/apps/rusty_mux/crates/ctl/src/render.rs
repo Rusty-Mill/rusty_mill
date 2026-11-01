@@ -255,6 +255,7 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
                 ("window", window.map_or(Field::Absent, |w| Id(w.uuid()))),
             ],
         ),
+        E::ConfigReloaded => ("config-reloaded", vec![]),
         E::BlockCreated {
             block,
             window,
@@ -606,6 +607,7 @@ mod tests {
                 block,
                 id: "build".into(),
             },
+            Event::ConfigReloaded,
         ];
         assert_eq!(events.len(), rusty_mux_script::EVENTS.len());
         for (event, (kind, declared)) in events.iter().zip(rusty_mux_script::EVENTS) {

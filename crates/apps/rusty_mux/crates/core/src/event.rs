@@ -141,6 +141,9 @@ pub enum Event {
         layout: Option<Layout>,
         zoomed: Option<BlockId>,
     },
+    /// The server read its config again and now starts new blocks as it
+    /// says.
+    ConfigReloaded,
     /// The block's program set a selection (OSC 52). The text is not in
     /// the event: it may be a secret, and clients attached to the block
     /// already received it in the output. Several writes read at once are

@@ -19,6 +19,7 @@ fn config(program: &str, args: &[&str]) -> Config {
         args: args.iter().map(Into::into).collect(),
         cwd: "/".into(),
         console_host: ConsoleHost::default(),
+        config_file: None,
     }
 }
 

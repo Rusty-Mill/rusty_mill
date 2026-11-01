@@ -74,7 +74,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::ECHO_ACK)
     .union(Features::IDENTITY)
     .union(Features::MORE_PROGRAM_EVENTS)
-    .union(Features::ACTIVE_WINDOW);
+    .union(Features::ACTIVE_WINDOW)
+    .union(Features::CONFIG_RELOAD);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) struct PtyWrite {
@@ -121,6 +122,9 @@ impl BlockRt {
 }
 
 pub(crate) struct State {
+    /// What the server was started with, under the config file's section.
+    base: Config,
+    /// `base` with the config file's `server` section over it.
     config: Config,
     /// The listening socket's path, given to each block's program.
     socket: Option<PathBuf>,
@@ -173,6 +177,7 @@ pub(crate) enum Kept {
 impl State {
     pub(crate) fn shared(config: Config, socket: Option<PathBuf>) -> Shared {
         Rc::new(RefCell::new(Self {
+            base: config.clone(),
             config,
             socket,
             mux: Mux::new(),
@@ -192,6 +197,25 @@ impl State {
             hosts: Default::default(),
             stopping: false,
         }))
+    }
+
+    /// Reads the config file again, keeping what it had when the file is
+    /// bad: the next block starts as it now says. Blocks already running
+    /// keep their program.
+    pub(crate) fn load_config(&mut self) -> Result<(), String> {
+        self.config = crate::settings::read(&self.base)?;
+        Ok(())
+    }
+
+    /// `reload-config`: [`Self::load_config`], announced. A server started
+    /// with no file refuses, as does a bad file.
+    fn reload_config(&mut self) -> Result<Outcome, Refusal> {
+        if self.base.config_file.is_none() {
+            return Err("the server was started with no config file".into());
+        }
+        self.load_config()?;
+        self.mux.note_config_reloaded();
+        Ok(Outcome::Done(None))
     }
 
     /// The server is stopping: starts no more blocks, and ends every
@@ -678,6 +702,11 @@ impl State {
                 req,
                 self.require(client, Features::ACTIVE_WINDOW, "select-window")
                     .and_then(|()| done(self.mux.select_window(window))),
+            ),
+            M::ReloadConfig { req } => (
+                req,
+                self.require(client, Features::CONFIG_RELOAD, "reload-config")
+                    .and_then(|()| self.reload_config()),
             ),
             M::Attach { req, block } => {
                 if let Err(refusal) = self.require(client, Features::CHECKPOINT_V6, "attach") {
@@ -1402,6 +1431,7 @@ fn receives(features: Features, event: &Event) -> bool {
             Features::MORE_PROGRAM_EVENTS
         }
         Event::ActiveWindowChanged { .. } => Features::ACTIVE_WINDOW,
+        Event::ConfigReloaded => Features::CONFIG_RELOAD,
         _ => Features::NONE,
     };
     features.contains(needs)
@@ -1676,6 +1706,7 @@ mod regression {
                     args: vec![],
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
+                    config_file: None,
                 },
                 None,
             );
@@ -1698,6 +1729,7 @@ mod regression {
                 args: vec![],
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                config_file: None,
             },
             None,
         );
@@ -2161,6 +2193,7 @@ mod regression {
                     args: vec![],
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
+                    config_file: None,
                 },
                 None,
             );

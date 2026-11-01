@@ -275,6 +275,7 @@ fn every_message_round_trips() {
         Message::Zoom { req: 22, block },
         Message::Unzoom { req: 23, window },
         Message::SelectWindow { req: 24, window },
+        Message::ReloadConfig { req: 25 },
         Message::Welcome {
             features: Features::NONE,
             client,
@@ -364,6 +365,7 @@ fn every_event_round_trips() {
             session,
             window: None,
         },
+        Event::ConfigReloaded,
         Event::BlockCreated {
             block,
             window,

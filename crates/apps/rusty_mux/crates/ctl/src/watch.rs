@@ -112,6 +112,7 @@ pub(crate) fn needs(kind: &str) -> Features {
         "client-connection-changed" => Features::IDENTITY,
         "clipboard-written" | "status-removed" => Features::MORE_PROGRAM_EVENTS,
         "active-window-changed" => Features::ACTIVE_WINDOW,
+        "config-reloaded" => Features::CONFIG_RELOAD,
         _ => Features::NONE,
     }
 }

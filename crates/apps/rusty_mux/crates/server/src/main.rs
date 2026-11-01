@@ -1,6 +1,11 @@
-//! `rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] <socket>`: serves
-//! rusty_mux on a Unix socket. Each new block runs `$SHELL` (or `/bin/sh`)
-//! in `$HOME` (or `/`).
+//! `rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] [--config FILE]
+//! <socket>`: serves rusty_mux on a Unix socket. Each new block runs
+//! `$SHELL` (or `/bin/sh`) in `$HOME` (or `/`), unless the config file's
+//! `server` section names a command or directory. The file is `--config`,
+//! else `$RUSTY_MUX_CONFIG`, else `$XDG_CONFIG_HOME/rusty_mux/config.json`
+//! (or `~/.config/rusty_mux/config.json`); a missing file sets nothing and
+//! a bad one stops the server before it starts. `reload-config` reads it
+//! again, keeping what it had if the file has gone bad.
 //!
 //! With `--udp` the server also listens for UDP on `ADDR`, port 60001 unless
 //! given, and offers each client an association there to move its
@@ -30,7 +35,8 @@ use rusty_mux_server::{Config, ConsoleHost, Udp, serve_until};
 use rusty_tokio::io::{UdpSocket, UnixListener};
 use rusty_tokio::{Builder, LocalOptions};
 
-const USAGE: &str = "usage: rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] <socket>";
+const USAGE: &str =
+    "usage: rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] [--config FILE] <socket>";
 /// The UDP port when `--udp` names an address only.
 const UDP_PORT: u16 = 60001;
 /// How long a silent association lasts unless `--udp-idle` says.
@@ -42,6 +48,8 @@ struct Args {
     socket: PathBuf,
     udp: Option<SocketAddr>,
     idle: Duration,
+    /// `--config`, if given.
+    config: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -69,7 +77,7 @@ fn main() -> ExitCode {
 }
 
 fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
-    let (mut socket, mut udp, mut idle) = (None, None, UDP_IDLE);
+    let (mut socket, mut udp, mut idle, mut config) = (None, None, UDP_IDLE, None);
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| {
             args.next()
@@ -78,6 +86,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         };
         match arg.to_str() {
             Some("--udp") => udp = Some(udp_addr(&value("--udp")?)?),
+            Some("--config") => config = Some(PathBuf::from(value("--config")?)),
             Some("--udp-idle") => {
                 let secs = value("--udp-idle")?;
                 let secs = secs
@@ -92,7 +101,12 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         }
     }
     let socket = socket.ok_or("no socket given")?;
-    Ok(Args { socket, udp, idle })
+    Ok(Args {
+        socket,
+        udp,
+        idle,
+        config,
+    })
 }
 
 /// `ADDR:PORT`, or `ADDR` alone for [`UDP_PORT`]; an IPv6 address with a
@@ -109,7 +123,10 @@ fn udp_addr(value: &str) -> Result<SocketAddr, String> {
 }
 
 fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
-    let config = default_config(console_host);
+    let config_file = args
+        .config
+        .or_else(|| rusty_mux_script::default_path(|name| std::env::var_os(name)));
+    let config = default_config(console_host, config_file);
     let socket = args.socket;
     let runtime = Builder::new_current_thread().build_local(&LocalOptions::default())?;
     runtime.block_on(async {
@@ -164,22 +181,24 @@ fn stop_requested() -> std::io::Result<impl Future<Output = ()>> {
 }
 
 #[cfg(not(windows))]
-fn default_config(console_host: ConsoleHost) -> Config {
+fn default_config(console_host: ConsoleHost, config_file: Option<PathBuf>) -> Config {
     Config {
         program: std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh")),
         args: Vec::new(),
         cwd: std::env::var_os("HOME").unwrap_or_else(|| OsString::from("/")),
         console_host,
+        config_file,
     }
 }
 
 #[cfg(windows)]
-fn default_config(console_host: ConsoleHost) -> Config {
+fn default_config(console_host: ConsoleHost, config_file: Option<PathBuf>) -> Config {
     Config {
         program: std::env::var_os("COMSPEC").unwrap_or_else(|| OsString::from("cmd.exe")),
         args: Vec::new(),
         cwd: std::env::var_os("USERPROFILE").unwrap_or_else(|| OsString::from("C:\\")),
         console_host,
+        config_file,
     }
 }
 
@@ -202,6 +221,9 @@ mod tests {
         assert_eq!(v6.udp, Some("[::1]:7000".parse().unwrap()));
         assert_eq!(v6.idle, Duration::from_secs(90));
         assert_eq!(v6.socket, PathBuf::from("s.sock"));
+        assert_eq!(v6.config, None);
+        let file = parse_str(&["--config", "c.json", "s.sock"]).unwrap();
+        assert_eq!(file.config, Some(PathBuf::from("c.json")));
     }
 
     #[test]
@@ -213,6 +235,7 @@ mod tests {
             &["--udp", "nowhere", "s"],
             &["--udp-idle", "0", "s"],
             &["--udp-idle", "1h", "s"],
+            &["s", "--config"],
         ] {
             assert!(parse_str(bad).is_err(), "{bad:?}");
         }

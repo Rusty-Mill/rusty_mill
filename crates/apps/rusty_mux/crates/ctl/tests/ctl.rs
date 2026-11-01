@@ -30,6 +30,7 @@ fn shell() -> Config {
             args: vec!["/Q".into()],
             cwd: std::env::temp_dir().into_os_string(),
             console_host: ConsoleHost::from_env().expect("RUSTY_CONSOLE_HOST"),
+            config_file: None,
         }
     } else {
         Config {
@@ -37,6 +38,7 @@ fn shell() -> Config {
             args: Vec::new(),
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
+            config_file: None,
         }
     }
 }
@@ -54,6 +56,10 @@ fn socket_path(tag: &str) -> PathBuf {
 }
 
 fn start_server() -> PathBuf {
+    start_server_with(shell())
+}
+
+fn start_server_with(config: Config) -> PathBuf {
     let path = socket_path("srv");
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let bind_path = path.clone();
@@ -64,7 +70,7 @@ fn start_server() -> PathBuf {
         runtime.block_on(async move {
             let listener = UnixListener::bind(&bind_path).expect("bind");
             ready_tx.send(()).expect("signal ready");
-            serve(listener, shell()).await.expect("serve");
+            serve(listener, config).await.expect("serve");
         });
     });
     ready_rx.recv_timeout(PATIENCE).expect("server bound");
@@ -1562,6 +1568,43 @@ fn select_window_moves_the_active_window() {
             .code(),
         Some(3)
     );
+}
+
+#[test]
+fn reload_config_rereads_the_file_and_says_so() {
+    let file = socket_path("config").with_extension("json");
+    std::fs::write(&file, "{}").expect("write config");
+    let socket = start_server_with(Config {
+        config_file: Some(file.clone()),
+        ..shell()
+    });
+    let mut waiter = ctl_command(
+        &socket,
+        &["wait", "--event", "config-reloaded", "--timeout", "20"],
+    )
+    .stdout(Stdio::piped())
+    .spawn()
+    .expect("spawn");
+    // As with select-window: reload until the waiter has caught one.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while waiter.try_wait().expect("poll").is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the waiter never saw it"
+        );
+        assert_eq!(ok(&socket, &["reload-config"]), "");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let output = waiter.wait_with_output().expect("wait");
+    assert_eq!(output.status.code(), Some(0));
+    let printed = stdout(&output);
+    assert!(printed.trim_end().ends_with("config-reloaded"), "{printed}");
+
+    std::fs::write(&file, r#"{"server": {"command": ""}}"#).expect("write config");
+    let refused = ctl(&socket, &["reload-config"]);
+    assert_ne!(refused.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(err.contains("server.command"), "{err}");
 }
 
 /// Types at `block`'s shell, once leased, what makes it exit with `code`

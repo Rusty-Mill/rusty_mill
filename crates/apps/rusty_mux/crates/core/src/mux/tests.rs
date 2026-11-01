@@ -520,6 +520,13 @@ fn clipboard_and_status_removal_notes_emit_their_events() {
 }
 
 #[test]
+fn a_config_reload_is_announced() {
+    let (mut mux, ..) = fixture();
+    mux.note_config_reloaded();
+    assert_eq!(mux.take_events(), vec![Event::ConfigReloaded]);
+}
+
+#[test]
 fn process_notes_emit_their_event() {
     let (mut mux, _, _, block) = fixture();
     mux.take_events();

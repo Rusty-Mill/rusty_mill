@@ -378,6 +378,12 @@ impl Mux {
         self.note(block, Event::Notification { block, title, body })
     }
 
+    /// Announces that the host read its config again. The model holds no
+    /// config; the host that does calls this.
+    pub fn note_config_reloaded(&mut self) {
+        self.events.push(Event::ConfigReloaded);
+    }
+
     /// Announces that the block's program wrote `selection`.
     pub fn note_clipboard(&mut self, block: BlockId, selection: Selection) -> Result<(), Error> {
         self.note(block, Event::ClipboardWritten { block, selection })

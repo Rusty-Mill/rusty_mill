@@ -791,6 +791,16 @@ pub static CATALOG: &[Method] = &[
         },
     },
     Method {
+        name: "reload-config",
+        doc: "Have the server read its config file again: the `server` section's \
+              defaults for new blocks. A file with problems is refused, naming each, and \
+              the server keeps what it had.",
+        params: &[],
+        needs: Features::CONFIG_RELOAD,
+        returns: Returns::Nothing,
+        build: |req, _| Ok(Message::ReloadConfig { req }),
+    },
+    Method {
         name: "list",
         doc: "List every session, window, block and client.",
         params: &[],

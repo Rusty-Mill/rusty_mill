@@ -3,7 +3,9 @@
 use rusty_json::{Map, Value};
 use rusty_mux_proto::schema::{self, Method, Param, Presence, Ty};
 
-use crate::{Action, Bind, Call, Config, EVENTS, Problem, Rule, Run, is_arg_name, placeholders};
+use crate::{
+    Action, Bind, Call, Config, Defaults, EVENTS, Problem, Rule, Run, is_arg_name, placeholders,
+};
 
 /// The config in `text`, or every problem in it. A config is an object
 /// with optional `actions`, `binds` and `on` arrays:
@@ -54,7 +56,7 @@ impl Check {
     }
 
     fn config(&mut self, root: &Value) -> Config {
-        let Some(map) = self.object("config", root, &["actions", "binds", "on"]) else {
+        let Some(map) = self.object("config", root, &["actions", "binds", "on", "server"]) else {
             return Config::default();
         };
         let mut actions: Vec<Action> = Vec::new();
@@ -85,10 +87,64 @@ impl Check {
             .enumerate()
             .filter_map(|(i, value)| self.rule(&format!("on[{i}]"), value, &actions))
             .collect();
+        let server = match map.get("server") {
+            None => Defaults::default(),
+            Some(value) => self.defaults("server", value),
+        };
         Config {
             actions,
             binds,
             rules,
+            server,
+        }
+    }
+
+    fn defaults(&mut self, at: &str, value: &Value) -> Defaults {
+        let Some(map) = self.object(at, value, &["command", "args", "cwd"]) else {
+            return Defaults::default();
+        };
+        let command = map
+            .get("command")
+            .and_then(|c| self.string(&format!("{at}.command"), Some(c)));
+        if command == Some("") {
+            self.problem(&format!("{at}.command"), "must not be empty");
+        }
+        let args_at = format!("{at}.args");
+        let args: Vec<String> = self
+            .array(&args_at, map.get("args"))
+            .iter()
+            .enumerate()
+            .filter_map(|(i, arg)| self.string(&format!("{args_at}[{i}]"), Some(arg)))
+            .map(str::to_owned)
+            .collect();
+        if !args.is_empty() && command.is_none() {
+            self.problem(&args_at, "needs a `command`");
+        }
+        let cwd = map
+            .get("cwd")
+            .and_then(|c| self.string(&format!("{at}.cwd"), Some(c)));
+        if let Some(cwd) = cwd
+            && !std::path::Path::new(cwd).is_absolute()
+        {
+            self.problem(
+                &format!("{at}.cwd"),
+                format!("`{cwd}` is not an absolute path"),
+            );
+        }
+        let texts = [("command", command), ("cwd", cwd)]
+            .into_iter()
+            .chain(args.iter().map(|a| ("args", Some(a.as_str()))));
+        let nul: Vec<&str> = texts
+            .filter(|(_, text)| text.is_some_and(|t| t.contains('\0')))
+            .map(|(key, _)| key)
+            .collect();
+        for key in nul {
+            self.problem(&format!("{at}.{key}"), "must not hold a NUL");
+        }
+        Defaults {
+            command: command.map(str::to_owned),
+            args,
+            cwd: cwd.map(str::to_owned),
         }
     }
 

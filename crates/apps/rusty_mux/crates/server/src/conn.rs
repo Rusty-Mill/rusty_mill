@@ -230,6 +230,7 @@ mod regression {
                     args: vec![],
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
+                    config_file: None,
                 },
                 None,
             );
@@ -323,6 +324,7 @@ mod tests {
                 args: Vec::new(),
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                config_file: None,
             };
             let state = State::shared(config, None);
             let (theirs, ours) = UnixStream::pair().expect("pair");
