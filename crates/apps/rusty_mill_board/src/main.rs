@@ -293,20 +293,12 @@ fn run_retag(cli: &Cli, store: &dyn Store) -> Result<(), String> {
         );
         return Ok(());
     };
-    let out = retag::apply_recorded(store, &plan, system_ms(), |plan| save_record(record, plan))
-        .map_err(|e| format!("--retag-record {}: {e}", record.display()))?;
+    let out = retag::apply_recorded(store, &plan, system_ms(), |plan| {
+        retag::save_record(record, plan)
+    })
+    .map_err(|e| format!("--retag-record {}: {e}", record.display()))?;
     println!("{}", json(&out)?);
     Ok(())
-}
-
-/// Save the retag plan to `path`, which must not exist yet, durably: the file is written
-/// and synced through a temporary sibling, renamed into place, and its directory synced
-/// (Unix; on Windows the rename is the durability point), all before any card changes.
-fn save_record(path: &Path, plan: &[retag::Retag]) -> Result<(), String> {
-    if path.exists() {
-        return Err("the file exists; choose a new one".into());
-    }
-    rusty_atomic_file::write(path, json(&plan)?.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// Pretty JSON for the retag output.

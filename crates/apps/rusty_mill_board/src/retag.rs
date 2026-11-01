@@ -10,6 +10,9 @@
 //! revision, undone) or did not (planned revision, nothing to undo).
 
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -137,6 +140,43 @@ pub fn apply_recorded(
     save(plan).map_err(|e| format!("rollback record not saved, nothing retagged: {e}"))?;
     apply(store, plan, now_ms)
         .map_err(|e| format!("{e}; some cards may be retagged: undo them from the saved record"))
+}
+
+/// Publish `plan` at `path` as a new file, durably, refusing to replace anything there.
+///
+/// The file is created exclusively (`create_new`), so of two runs naming the same record only
+/// one gets it, and an existing record is never touched. Its bytes are synced, then its
+/// directory (Unix; on Windows creating the file is the durability point). A crash before
+/// that leaves at most a short file, and no card has changed yet: [`apply_recorded`] writes
+/// only after this returns.
+///
+/// # Errors
+/// The path exists, or any I/O error creating, writing or syncing it.
+pub fn save_record(path: &Path, plan: &[Retag]) -> Result<(), String> {
+    let text = serde_json::to_vec_pretty(plan).map_err(|e| e.to_string())?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(&text).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    sync_parent_dir(path).map_err(|e| format!("syncing its directory: {e}"))
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // same signature as the Unix version
+fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Put back each planned card the retag moved and nobody has changed since: in `to`, at the
@@ -269,6 +309,34 @@ mod tests {
         .expect("apply");
         assert_eq!(out.len(), 1);
         assert_eq!(column_of(&store, c.id), col("v_and_ving"));
+    }
+
+    #[test]
+    fn a_record_is_created_once_and_never_replaced() {
+        let dir = std::env::temp_dir().join(format!("mill-retag-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("record.json");
+        let store = MemStore::default();
+        card_in(&store, "qa", None);
+        let first = factory_plan(&store);
+        save_record(&path, &first).expect("the first run reserves it");
+        let saved = std::fs::read_to_string(&path).expect("read");
+        // A second run naming the same record, even with another plan, is refused and the
+        // first plan is left as it was.
+        assert!(save_record(&path, &[]).is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), saved);
+        let back: Vec<Retag> = serde_json::from_str(&saved).expect("parse");
+        assert_eq!(back, first);
+        // And a run that cannot save writes no card.
+        assert!(apply_recorded(&store, &first, 2, |p| save_record(&path, p)).is_err());
+        assert!(
+            store
+                .list()
+                .expect("list")
+                .iter()
+                .all(|c| c.column == col("qa"))
+        );
+        std::fs::remove_dir_all(&dir).expect("clean up");
     }
 
     #[test]
