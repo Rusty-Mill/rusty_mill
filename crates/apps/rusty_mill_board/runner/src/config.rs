@@ -54,8 +54,8 @@ fn default_attempts() -> u32 {
 
 impl Stage {
     /// The column the card is in while this stage works it.
-    pub fn work_column(&self) -> Column {
-        self.enter.unwrap_or(self.from[0])
+    pub fn work_column(&self) -> &Column {
+        self.enter.as_ref().unwrap_or(&self.from[0])
     }
 }
 
@@ -101,14 +101,14 @@ mod tests {
     fn parses_with_defaults() {
         let s = &parse(OK).expect("valid")[0];
         assert_eq!((s.wall_secs, s.max_attempts, s.network), (1800, 3, false));
-        assert_eq!(s.work_column(), Column::Building);
+        assert_eq!(s.work_column(), &Column::BUILDING);
     }
 
     #[test]
     fn work_column_defaults_to_first_source() {
         let s =
             parse(r#"[{"name":"t","from":["qa"],"role":"qa","argv":["make"]}]"#).expect("valid");
-        assert_eq!(s[0].work_column(), Column::Qa);
+        assert_eq!(s[0].work_column(), &Column::QA);
     }
 
     #[test]
@@ -140,8 +140,8 @@ mod tests {
                 "at least 1",
             ),
             (
-                r#"[{"name":"a","from":["nowhere"],"role":"r","argv":["x"]}]"#,
-                "unknown variant",
+                r#"[{"name":"a","from":["No Such"],"role":"r","argv":["x"]}]"#,
+                "column id",
             ),
             (
                 r#"[{"name":"a","from":["ready"],"role":"r","argv":["x"]},{"name":"a","from":["qa"],"role":"r","argv":["x"]}]"#,
