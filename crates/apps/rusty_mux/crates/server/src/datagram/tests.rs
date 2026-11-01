@@ -303,6 +303,27 @@ fn a_roam_tells_identity_clients_the_connection_changed() {
     });
 }
 
+/// A client gone stale on the association is an orphan kept for its
+/// takeover, not served there: a roam names only the clients still
+/// served (C26).
+#[cfg(unix)]
+#[test]
+fn a_roam_does_not_name_a_stale_client() {
+    runtime().block_on(async {
+        let (state, registry, addr) = server(PATIENCE).await;
+        let mut peer = Peer::new(&registry, addr).await;
+        peer.probe().await;
+        let features = Features::DATAGRAM.union(Features::IDENTITY);
+        let (stream, me) = peer.connect(features).await;
+        let (_, stale) = peer.hello(features.union(Features::TAKEOVER), None).await;
+        state.borrow_mut().test_go_stale(stale.client);
+        assert!(state.borrow().is_stale(stale.client));
+
+        peer.socket = bind().await;
+        assert_eq!(changes_until_synced(&mut peer, stream, 7).await, [me]);
+    });
+}
+
 /// Sends `Sync { req }` on `stream` and returns the clients named by the
 /// `client-connection-changed` events seen before its `Done`; checks each
 /// carries the owner's principal and the UDP transport.
