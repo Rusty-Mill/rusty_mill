@@ -23,7 +23,6 @@ use rusty_term_core::{
     ATTR_BOLD, ATTR_OVERLINE, ATTR_REVERSE, AnsiParser, CellColors, ColorRef, Grid,
 };
 
-use super::rendition::ResetWatch;
 use super::{OutputQueue, PREAMBLE};
 
 /// `ENABLE_*` output mode bits.
@@ -94,9 +93,9 @@ pub(super) struct Screen {
     /// its final byte decides whether the input modes are reasserted.
     long: bool,
     /// The gridline bits of the last SetConsoleTextAttribute, which no
-    /// SGR sets; they hold until a rendition reset ([`ResetWatch`]).
+    /// SGR sets; they hold until the model applies a rendition reset
+    /// ([`AnsiParser::take_rendition_reset`]).
     legacy_meta: u16,
-    resets: ResetWatch,
 }
 
 impl Screen {
@@ -111,7 +110,6 @@ impl Screen {
             c2: false,
             long: false,
             legacy_meta: 0,
-            resets: ResetWatch::default(),
         };
         // conhost's colour table, which GetConsoleScreenBufferInfoEx
         // reports and legacy attributes are matched against. Only the
@@ -332,10 +330,10 @@ impl Screen {
     /// to its own host (OSC 52, BEL, input modes) is dropped: `vt` itself
     /// already goes to the terminal, so keeping it would only grow.
     fn feed(&mut self, vt: &[u8]) -> Vec<u8> {
-        if self.resets.scan(vt) {
+        self.parser.advance(&mut self.grid, vt);
+        if self.parser.take_rendition_reset() {
             self.legacy_meta = 0;
         }
-        self.parser.advance(&mut self.grid, vt);
         self.grid.take_host_out();
         self.parser.take_responses()
     }
@@ -1080,6 +1078,38 @@ mod tests {
         s.set_attributes(0x1E | 0x1000, &mut out);
         client(&mut s, b"\x1b[0m\x1b[93;44m", VT);
         assert_eq!(s.attributes(), 0x1E);
+    }
+
+    #[test]
+    fn gridlines_follow_the_models_sgr_parsing() {
+        let mut out = OutputQueue::default();
+        // A zero-padded 256-colour selector: index 0, not a reset.
+        let mut s = screen();
+        s.set_attributes(0x07 | LVB_UNDERSCORE, &mut out);
+        client(&mut s, b"\x1b[38;05;0m", VT);
+        assert_eq!(s.attributes() & LVB_GRID, LVB_UNDERSCORE);
+        // A 67-byte list ending in 0: the model applies it, so a reset,
+        // whole or split across writes.
+        let long = format!("\x1b[{}0m", "1;".repeat(33));
+        for split in [long.len(), 3, 40, long.len() - 1] {
+            s.set_attributes(0x07 | LVB_UNDERSCORE, &mut out);
+            let (head, tail) = long.as_bytes().split_at(split);
+            client(&mut s, head, VT);
+            client(&mut s, tail, VT);
+            assert_eq!(s.attributes() & LVB_GRID, 0, "split at {split}");
+        }
+        // The extended forms keep them, split or not.
+        for vt in [
+            &b"\x1b[38;5;0m"[..],
+            b"\x1b[48;2;0;0;0m",
+            b"\x1b[38:2:0:0:0m",
+        ] {
+            s.set_attributes(0x07 | LVB_UNDERSCORE, &mut out);
+            let (head, tail) = vt.split_at(vt.len() - 2);
+            client(&mut s, head, VT);
+            client(&mut s, tail, VT);
+            assert_eq!(s.attributes() & LVB_GRID, LVB_UNDERSCORE, "{vt:?}");
+        }
     }
 
     #[test]

@@ -8385,3 +8385,50 @@ fn cell_colors_keep_palette_cells_after_osc_4() {
     assert_eq!(c, Some(ColorRef::Palette(2)));
     assert_eq!(cells(&g)[0].fg, 0x123456);
 }
+
+#[test]
+fn rendition_resets_are_reported_as_applied() {
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    let long = format!("\x1b[{}0m", "1;".repeat(33));
+    for vt in [
+        &b"\x1b[m"[..],
+        b"\x1b[0m",
+        b"\x1b[31;0m",
+        b"\x1b[;31m",
+        b"\x1b[00m",
+        long.as_bytes(),
+        b"\x1bc",
+        b"\x1b[!p",
+        b"\x1b[5!p",
+        b"\x1b8",
+    ] {
+        p.advance(&mut g, vt);
+        assert!(p.take_rendition_reset(), "{vt:?}");
+        assert!(!p.take_rendition_reset(), "taken once: {vt:?}");
+    }
+    for vt in [
+        &b"\x1b[31m"[..],
+        b"\x1b[24m",
+        b"\x1b[38;5;0m",
+        b"\x1b[38;05;0m",
+        b"\x1b[48;2;0;0;0m",
+        b"\x1b[38:2:0:0:0m",
+        b"\x1b[58;5;0m",
+        b"\x1b[4:0m",
+        b"\x1b[?0m",
+        b"\x1b[0K",
+        b"\x1b[0\x18m",
+        b"text 0m",
+    ] {
+        p.advance(&mut g, vt);
+        assert!(!p.take_rendition_reset(), "{vt:?}");
+    }
+    // Split across advances.
+    for part in [&b"\x1b["[..], b"1;", b"0"] {
+        p.advance(&mut g, part);
+        assert!(!p.take_rendition_reset());
+    }
+    p.advance(&mut g, b"m");
+    assert!(p.take_rendition_reset());
+}

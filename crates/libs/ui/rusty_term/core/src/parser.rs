@@ -127,6 +127,10 @@ pub struct AnsiParser {
     /// fg/bg/cursor. SGR color selectors resolve through it; OSC 4/10/11/12
     /// mutate it.
     palette: Palette,
+    /// Set whenever the rendition is reset (SGR 0 or empty, DECSTR, RIS,
+    /// DECRC with nothing saved); taken by [`AnsiParser::take_rendition_reset`].
+    /// Transient: not checkpointed.
+    rendition_reset: bool,
     /// What DECSC saved beside the cursor position, which the grid keeps in
     /// its one register. `None` until a save; DECRC then restores the reset
     /// state, as xterm does.
@@ -418,6 +422,7 @@ impl AnsiParser {
             palette,
             saved: None,
             alt_entry: None,
+            rendition_reset: false,
         }
     }
 
@@ -438,6 +443,14 @@ impl AnsiParser {
     /// calls this after `advance` and writes the result to the PTY master.
     pub fn take_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.responses)
+    }
+
+    /// Whether the rendition was reset since the last call: SGR 0 or an
+    /// empty SGR, DECSTR, RIS, or DECRC with nothing saved, exactly as this
+    /// parser applied them. A console host clears state that only a reset
+    /// clears (conhost's gridlines) on it, without parsing SGR again.
+    pub fn take_rendition_reset(&mut self) -> bool {
+        std::mem::take(&mut self.rendition_reset)
     }
 
     /// The current SGR pen, the one the next printed character takes.
@@ -1787,6 +1800,7 @@ impl AnsiParser {
     /// Reset SGR state to the default pen (default colors, no attributes).
     fn reset_sgr(&mut self) {
         self.pen = Pen::default_colors(self.palette.fg, self.palette.bg);
+        self.rendition_reset = true;
     }
 
     /// Apply an SGR (`CSI … m`) parameter list. Supports reset, the text
@@ -2030,7 +2044,8 @@ crate::checkpoint::fields!(
         palette,
         saved,
         alt_entry
-    ]
+    ],
+    skip[rendition_reset]
 );
 crate::checkpoint::fields!(SavedState, [pen, protected, charsets, gl]);
 crate::checkpoint::fields!(AltEntry, [state, register]);
