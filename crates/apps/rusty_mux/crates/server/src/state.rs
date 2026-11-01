@@ -73,7 +73,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::TAKEOVER)
     .union(Features::ECHO_ACK)
     .union(Features::IDENTITY)
-    .union(Features::MORE_PROGRAM_EVENTS);
+    .union(Features::MORE_PROGRAM_EVENTS)
+    .union(Features::ACTIVE_WINDOW);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) struct PtyWrite {
@@ -673,6 +674,11 @@ impl State {
                 self.require(client, Features::LAYOUT, "unzoom")
                     .and_then(|()| done(self.mux.unzoom(window))),
             ),
+            M::SelectWindow { req, window } => (
+                req,
+                self.require(client, Features::ACTIVE_WINDOW, "select-window")
+                    .and_then(|()| done(self.mux.select_window(window))),
+            ),
             M::Attach { req, block } => {
                 if let Err(refusal) = self.require(client, Features::CHECKPOINT_V6, "attach") {
                     return (req, Err(refusal));
@@ -871,6 +877,7 @@ impl State {
             entries.push(Entry::Session {
                 session: session.id(),
                 name: session.name().to_owned(),
+                active: session.active(),
             });
             for window in session.windows().iter().filter_map(|w| self.mux.window(*w)) {
                 entries.push(Entry::Window {
@@ -1394,6 +1401,7 @@ fn receives(features: Features, event: &Event) -> bool {
         Event::ClipboardWritten { .. } | Event::StatusRemoved { .. } => {
             Features::MORE_PROGRAM_EVENTS
         }
+        Event::ActiveWindowChanged { .. } => Features::ACTIVE_WINDOW,
         _ => Features::NONE,
     };
     features.contains(needs)

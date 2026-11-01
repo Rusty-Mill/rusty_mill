@@ -44,6 +44,10 @@ fn create_links_children_and_emits_in_order() {
         vec![
             Event::SessionCreated { session },
             Event::WindowCreated { window, session },
+            Event::ActiveWindowChanged {
+                session,
+                window: Some(window)
+            },
             Event::BlockCreated {
                 block,
                 window,
@@ -57,6 +61,87 @@ fn create_links_children_and_emits_in_order() {
         ]
     );
     assert!(mux.take_events().is_empty());
+}
+
+#[test]
+fn only_the_first_window_becomes_active_by_itself() {
+    let (mut mux, session, first, _) = fixture();
+    assert_eq!(mux.session(session).unwrap().active(), Some(first));
+    let second = mux.create_window(session, "bg").unwrap();
+    assert_eq!(mux.session(session).unwrap().active(), Some(first));
+    assert_eq!(
+        mux.take_events(),
+        vec![Event::WindowCreated {
+            window: second,
+            session
+        }]
+    );
+}
+
+#[test]
+fn selecting_a_window_makes_it_active_once() {
+    let (mut mux, session, first, _) = fixture();
+    let second = mux.create_window(session, "two").unwrap();
+    mux.take_events();
+    assert_eq!(mux.select_window(second), Ok(()));
+    assert_eq!(mux.select_window(second), Ok(()), "again: no change");
+    assert_eq!(mux.session(session).unwrap().active(), Some(second));
+    assert_eq!(
+        mux.take_events(),
+        vec![Event::ActiveWindowChanged {
+            session,
+            window: Some(second)
+        }]
+    );
+    mux.close_window(first).unwrap();
+    mux.take_events();
+    assert_eq!(mux.select_window(first), Err(Error::UnknownWindow(first)));
+    assert!(mux.take_events().is_empty());
+}
+
+#[test]
+fn closing_the_active_window_hands_over_to_the_newest() {
+    let (mut mux, session, first, block) = fixture();
+    let second = mux.create_window(session, "two").unwrap();
+    let third = mux.create_window(session, "three").unwrap();
+    mux.select_window(second).unwrap();
+    mux.take_events();
+
+    // An inactive window closes quietly.
+    mux.close_window(first).unwrap();
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::BlockClosed { block },
+            Event::WindowClosed { window: first }
+        ]
+    );
+    mux.close_window(second).unwrap();
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::WindowClosed { window: second },
+            Event::ActiveWindowChanged {
+                session,
+                window: Some(third)
+            },
+        ]
+    );
+    mux.close_window(third).unwrap();
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::WindowClosed { window: third },
+            Event::ActiveWindowChanged {
+                session,
+                window: None
+            },
+        ]
+    );
+    assert_eq!(mux.session(session).unwrap().active(), None);
+    // The next window is the first again.
+    let fourth = mux.create_window(session, "four").unwrap();
+    assert_eq!(mux.session(session).unwrap().active(), Some(fourth));
 }
 
 #[test]

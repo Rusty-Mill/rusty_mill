@@ -64,7 +64,7 @@ fn chain(entity: Entity) -> &'static [Entity] {
 
 fn node(entry: &Entry) -> Node<'_> {
     match entry {
-        Entry::Session { session, name } => Node {
+        Entry::Session { session, name, .. } => Node {
             entity: Entity::Session,
             id: session.uuid(),
             parent: None,

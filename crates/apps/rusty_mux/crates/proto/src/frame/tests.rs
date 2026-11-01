@@ -152,6 +152,15 @@ fn every_message_round_trips() {
             entry: Entry::Session {
                 session,
                 name: "main".into(),
+                active: None,
+            },
+        },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Session {
+                session,
+                name: String::new(),
+                active: Some(window),
             },
         },
         Message::Entry {
@@ -265,6 +274,7 @@ fn every_message_round_trips() {
         },
         Message::Zoom { req: 22, block },
         Message::Unzoom { req: 23, window },
+        Message::SelectWindow { req: 24, window },
         Message::Welcome {
             features: Features::NONE,
             client,
@@ -346,6 +356,14 @@ fn every_event_round_trips() {
         Event::SessionClosed { session },
         Event::WindowCreated { window, session },
         Event::WindowClosed { window },
+        Event::ActiveWindowChanged {
+            session,
+            window: Some(window),
+        },
+        Event::ActiveWindowChanged {
+            session,
+            window: None,
+        },
         Event::BlockCreated {
             block,
             window,

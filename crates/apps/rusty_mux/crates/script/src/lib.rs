@@ -126,6 +126,7 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ("session-closed", &["session"]),
     ("window-created", &["window", "session"]),
     ("window-closed", &["window"]),
+    ("active-window-changed", &["session", "window"]),
     ("block-created", &["block", "window", "cols", "rows"]),
     ("block-resized", &["block", "cols", "rows"]),
     ("block-closed", &["block"]),

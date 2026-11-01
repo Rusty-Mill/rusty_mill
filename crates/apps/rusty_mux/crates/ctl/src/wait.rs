@@ -547,6 +547,7 @@ mod tests {
             Entry::Session {
                 session: SessionId::from_uuid(id(1)),
                 name: "s".into(),
+                active: None,
             },
             window(2, 1),
             window(3, 1),

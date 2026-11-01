@@ -21,6 +21,13 @@ pub enum Event {
     WindowClosed {
         window: WindowId,
     },
+    /// The session's active window changed: its first window was made,
+    /// a client selected one, or the active one closed. `None` once the
+    /// session has no windows.
+    ActiveWindowChanged {
+        session: SessionId,
+        window: Option<WindowId>,
+    },
     BlockCreated {
         block: BlockId,
         window: WindowId,

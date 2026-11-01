@@ -773,6 +773,24 @@ pub static CATALOG: &[Method] = &[
         },
     },
     Method {
+        name: "select-window",
+        doc: "Make a window its session's active window, the one clients show for the \
+              session unless told otherwise.",
+        params: &[required(
+            "window",
+            Ty::Id(Entity::Window),
+            "The window to make active.",
+        )],
+        needs: Features::ACTIVE_WINDOW,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::SelectWindow {
+                req,
+                window: WindowId::from_uuid(a.uuid("window", Entity::Window)?),
+            })
+        },
+    },
+    Method {
         name: "list",
         doc: "List every session, window, block and client.",
         params: &[],

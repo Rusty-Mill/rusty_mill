@@ -77,6 +77,7 @@ impl Mux {
             id,
             name,
             windows: Vec::new(),
+            active: None,
         };
         self.sessions.insert(id, session);
         self.session_order.push(id);
@@ -97,6 +98,12 @@ impl Mux {
             .ok_or(Error::UnknownSession(session))?;
         let id = WindowId::random();
         parent.windows.push(id);
+        // Only a session's first window becomes active by itself, so a
+        // window an agent opens in the background takes nobody's view.
+        let first = parent.active.is_none();
+        if first {
+            parent.active = Some(id);
+        }
         self.windows.insert(
             id,
             Window {
@@ -112,7 +119,36 @@ impl Mux {
             window: id,
             session,
         });
+        if first {
+            self.events.push(Event::ActiveWindowChanged {
+                session,
+                window: Some(id),
+            });
+        }
         Ok(id)
+    }
+
+    /// Makes `window` its session's active window; selecting the active
+    /// one again changes nothing.
+    pub fn select_window(&mut self, window: WindowId) -> Result<(), Error> {
+        let session = self
+            .windows
+            .get(&window)
+            .ok_or(Error::UnknownWindow(window))?
+            .session;
+        let parent = self
+            .sessions
+            .get_mut(&session)
+            .ok_or(Error::UnknownSession(session))?;
+        if parent.active == Some(window) {
+            return Ok(());
+        }
+        parent.active = Some(window);
+        self.events.push(Event::ActiveWindowChanged {
+            session,
+            window: Some(window),
+        });
+        Ok(())
     }
 
     pub fn create_block(&mut self, window: WindowId, size: Size) -> Result<BlockId, Error> {
@@ -453,8 +489,17 @@ impl Mux {
             .ok_or(Error::UnknownWindow(window))?
             .session;
         self.remove_window(window);
-        if let Some(parent) = self.sessions.get_mut(&session) {
-            parent.windows.retain(|&w| w != window);
+        let Some(parent) = self.sessions.get_mut(&session) else {
+            return Ok(());
+        };
+        parent.windows.retain(|&w| w != window);
+        // The newest window left takes over, as closing a tab does.
+        if parent.active == Some(window) {
+            parent.active = parent.windows.last().copied();
+            self.events.push(Event::ActiveWindowChanged {
+                session,
+                window: parent.active,
+            });
         }
         Ok(())
     }

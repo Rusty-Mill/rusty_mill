@@ -1493,6 +1493,66 @@ fn wait_for_a_clipboard_write_and_an_ended_status() {
     }
 }
 
+/// An agent selects a window and sees the session's active window move,
+/// both in the listing and as an event a waiter catches.
+#[test]
+fn select_window_moves_the_active_window() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session", "--name", "s"]);
+    let first = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "a"],
+    );
+    let second = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "b"],
+    );
+    let line = |listing: &str| {
+        listing
+            .lines()
+            .find(|l| l.starts_with("session "))
+            .expect("a session line")
+            .to_owned()
+    };
+    assert!(line(&ok(&socket, &["list"])).ends_with(&format!("active={first}")));
+
+    let waiter = ctl_command(
+        &socket,
+        &[
+            "wait",
+            "--event",
+            "active-window-changed",
+            "--window",
+            &second,
+            "--timeout",
+            "20",
+        ],
+    )
+    .stdout(Stdio::piped())
+    .spawn()
+    .expect("spawn");
+    std::thread::sleep(Duration::from_millis(500));
+    ok(&socket, &["select-window", "--window", &second]);
+    let output = waiter.wait_with_output().expect("wait");
+    assert_eq!(output.status.code(), Some(0));
+    let printed = stdout(&output);
+    assert!(
+        printed.trim_end().ends_with(&format!(
+            "active-window-changed session={session} window={second}"
+        )),
+        "{printed}"
+    );
+    assert!(line(&ok(&socket, &["list"])).ends_with(&format!("active={second}")));
+    // A window that does not exist is a missing target: exit 3.
+    let gone = "00000000-0000-4000-8000-000000000000";
+    assert_eq!(
+        ctl(&socket, &["select-window", "--window", gone])
+            .status
+            .code(),
+        Some(3)
+    );
+}
+
 /// Types at `block`'s shell, once leased, what makes it exit with `code`
 /// after a pause.
 fn exit_later(socket: &Path, block: &str, code: u8) {

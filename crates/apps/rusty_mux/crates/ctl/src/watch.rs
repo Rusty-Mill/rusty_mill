@@ -111,6 +111,7 @@ pub(crate) fn needs(kind: &str) -> Features {
         "layout-changed" => Features::LAYOUT,
         "client-connection-changed" => Features::IDENTITY,
         "clipboard-written" | "status-removed" => Features::MORE_PROGRAM_EVENTS,
+        "active-window-changed" => Features::ACTIVE_WINDOW,
         _ => Features::NONE,
     }
 }

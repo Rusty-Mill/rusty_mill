@@ -174,10 +174,17 @@ fn principal_fields(principal: Option<&Principal>) -> [(&'static str, Field); 2]
 fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Field)>) {
     use Field::{Id, Text};
     match entry {
-        Entry::Session { session, name } => (
+        Entry::Session {
+            session,
+            name,
+            active,
+        } => (
             "session",
             session.uuid(),
-            vec![("name", Text(name.clone()))],
+            vec![
+                ("name", Text(name.clone())),
+                ("active", active.map_or(Field::Absent, |w| Id(w.uuid()))),
+            ],
         ),
         Entry::Window {
             window,
@@ -241,6 +248,13 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
             ],
         ),
         E::WindowClosed { window } => ("window-closed", vec![("window", Id(window.uuid()))]),
+        E::ActiveWindowChanged { session, window } => (
+            "active-window-changed",
+            vec![
+                ("session", Id(session.uuid())),
+                ("window", window.map_or(Field::Absent, |w| Id(w.uuid()))),
+            ],
+        ),
         E::BlockCreated {
             block,
             window,
@@ -514,6 +528,10 @@ mod tests {
             Event::SessionClosed { session },
             Event::WindowCreated { window, session },
             Event::WindowClosed { window },
+            Event::ActiveWindowChanged {
+                session,
+                window: Some(window),
+            },
             Event::BlockCreated {
                 block,
                 window,
@@ -726,12 +744,13 @@ mod tests {
         let session = Entry::Session {
             session: SessionId::from_uuid(id(1)),
             name: name.into(),
+            active: None,
         };
         let text = entry_line(&session, false);
         assert_eq!(
             text,
             format!(
-                "session {} name=\"a b\\nsession x\\r\\u{{1b}}]0;pwn\\u{{7}}\\\"\"",
+                "session {} name=\"a b\\nsession x\\r\\u{{1b}}]0;pwn\\u{{7}}\\\"\" active=-",
                 id(1)
             )
         );
