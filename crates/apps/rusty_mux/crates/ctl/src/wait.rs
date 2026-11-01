@@ -9,8 +9,12 @@
 //! A window or session wait takes its blocks from the listing, which
 //! already reflects every kept event, and then follows the stream: a block
 //! or window created in it joins, a block whose program exits or that
-//! closes leaves. Blocks never move between windows today; a move (C41)
-//! must make the block join or leave here too.
+//! closes leaves. A block that ended after the stream began but before the
+//! listing is left out of it, yet still counts: closing a block announces
+//! its window's layout at the very next number, which names the window
+//! that `block-closed` does not. Blocks of a whole window closed in that
+//! moment send no layout and are not counted. Blocks never move between
+//! windows today; a move (C41) must make the block join or leave here too.
 
 use std::collections::BTreeSet;
 
@@ -137,6 +141,23 @@ impl Group {
         }
     }
 
+    /// Takes back the blocks of its windows that closed while the listing
+    /// was awaited, so their exits in `kept` count.
+    pub(crate) fn adopt(&mut self, kept: &Kept) {
+        for pair in kept.windows(2) {
+            let [
+                (seq, Event::BlockClosed { block }),
+                (next, Event::LayoutChanged { window, .. }),
+            ] = pair
+            else {
+                continue;
+            };
+            if seq.checked_add(1) == Some(*next) && self.windows.contains(&window.uuid()) {
+                self.blocks.insert(block.uuid());
+            }
+        }
+    }
+
     fn see(&mut self, event: &Event) -> Seen {
         match event {
             Event::WindowCreated { window, session }
@@ -207,7 +228,9 @@ impl<S: std::io::Read + std::io::Write> Session<'_, S> {
     /// `wait`: until the block's program exits or a matching event comes.
     pub(crate) fn wait(&mut self, until: &Until) -> Result<Exit, Failure> {
         let needs = match until {
-            Until::Exit { .. } | Until::Ended { .. } => Features::PROGRAM_EVENTS,
+            Until::Exit { .. } => Features::PROGRAM_EVENTS,
+            // The layout names the window a block closed in; see `adopt`.
+            Until::Ended { .. } => Features::PROGRAM_EVENTS.union(Features::LAYOUT),
             Until::Event { kind, .. } => watch::needs(kind),
         };
         self.open_stream(needs.union(Features::INSPECT), "wait")?;
@@ -221,7 +244,9 @@ impl<S: std::io::Read + std::io::Write> Session<'_, S> {
                     Scope::Session => Entity::Session,
                 };
                 let id = target::resolve(&entries, entity, target, self.here)?;
-                Goal::Ended(Group::new(*scope, id, &entries))
+                let mut group = Group::new(*scope, id, &entries);
+                group.adopt(&kept);
+                Goal::Ended(group)
             }
             Until::Event { kind, fields } => {
                 let fields = fields
@@ -551,6 +576,39 @@ mod tests {
             goal.see(&closed(5)),
             Seen::Ends(Err(why)) if why.contains("closed before its program exited")
         ));
+    }
+
+    #[test]
+    fn a_block_that_ended_before_the_listing_still_counts() {
+        // Block 4 exited with 3 and closed before the listing, which shows
+        // only block 5 in window 2.
+        let entries: Vec<Entry> = listing()
+            .into_iter()
+            .filter(|e| !matches!(e, Entry::Block { block, .. } if block.uuid() == id(4)))
+            .collect();
+        let layout = |w: u8| Event::LayoutChanged {
+            window: WindowId::from_uuid(id(w)),
+            layout: None,
+            zoomed: None,
+        };
+        let kept: Kept = vec![(10, exited(4, 3)), (11, closed(4)), (12, layout(2))];
+        let mut group = Group::new(Scope::Window, id(2), &entries);
+        group.adopt(&kept);
+        let mut goal = Goal::Ended(group);
+        let seen: Vec<Seen> = kept.iter().map(|(_, e)| goal.see(e)).collect();
+        assert_eq!(seen, [Seen::Shown, Seen::Passed, Seen::Passed]);
+        assert_eq!(goal.see(&exited(5, 0)), Seen::Ends(Ok(program(3))));
+
+        // Another window's layout, or one that is not the very next
+        // event, adopts nothing.
+        for kept in [
+            vec![(11, closed(4)), (12, layout(7))],
+            vec![(11, closed(4)), (13, layout(2))],
+        ] {
+            let mut group = Group::new(Scope::Window, id(2), &entries);
+            group.adopt(&kept);
+            assert_eq!(Goal::Ended(group).see(&exited(4, 3)), Seen::Passed);
+        }
     }
 
     #[test]

@@ -1435,6 +1435,17 @@ fn exit_later(socket: &Path, block: &str, code: u8) {
     );
 }
 
+/// Returns once a second client, the waiter, is connected besides the
+/// one `list` itself uses. Its stream is open by then; whatever ends
+/// before its listing still counts.
+fn connected(socket: &Path) {
+    let started = std::time::Instant::now();
+    while client_ids(socket).len() < 2 {
+        assert!(started.elapsed() < PATIENCE, "the waiter never connected");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn shell_block(socket: &Path, window: &str) -> String {
     ok(
         socket,
@@ -1460,7 +1471,7 @@ fn wait_on_a_window_follows_every_block_until_the_last_ends() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn");
-    std::thread::sleep(Duration::from_millis(500));
+    connected(&socket);
     // A block made after the wait began joins it.
     let late = shell_block(&socket, &window);
     exit_later(&socket, &first, 0);
@@ -1499,7 +1510,7 @@ fn wait_on_a_session_fails_when_a_block_closes_unfinished() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn");
-    std::thread::sleep(Duration::from_millis(500));
+    connected(&socket);
     // A window and block made during the wait join it.
     let other = ok(
         &socket,
