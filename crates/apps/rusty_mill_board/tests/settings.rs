@@ -448,13 +448,39 @@ fn a_role_is_renamed_with_its_agents() {
     assert_eq!(after["roles"], expected);
 }
 
+/// The files reload as a restart would (no roles file: the defaults): every agent's role
+/// exists and an admin remains.
+fn restarts(f: &Fixture) -> Roles {
+    let path = f.file("roles.json");
+    let roles = if path.exists() {
+        load_roles(&path).expect("roles file")
+    } else {
+        Roles::default()
+    };
+    open_credentials(&f.file("identities.json"), &roles, &Projects::default()).expect("restart");
+    roles
+}
+
+/// Finish a rename by hand, as a partial one's error says: move the agent, drop the old role.
+fn finish_rename(f: &Fixture, agent: &str, from: &str, to: &str) {
+    let (status, _, text) = f.admin(
+        "settings_agent_update",
+        &json!({"agent": {"name": agent, "role": to}}),
+    );
+    assert_eq!(status, 200, "{text}");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    let mut roles = out["roles"].clone();
+    roles.as_object_mut().expect("roles").remove(from);
+    let (status, _, text) = f.admin("settings_roles_set", &json!({"roles": roles}));
+    assert_eq!(status, 200, "{text}");
+}
+
 #[test]
-fn a_rename_whose_agents_cannot_move_is_rolled_back() {
+fn a_rename_is_refused_untouched_while_the_saved_credentials_cannot_be_read() {
     let f = start("rename_fail");
     let builder = f.add_agent("claude", "builder");
     let creds = f.file("identities.json");
     let saved = std::fs::read(&creds).expect("credentials");
-    // The credentials file cannot be replaced: moving the agents fails.
     std::fs::remove_file(&creds).expect("remove");
     std::fs::create_dir(&creds).expect("block");
     let (status, _, text) = f.admin(
@@ -462,7 +488,7 @@ fn a_rename_whose_agents_cannot_move_is_rolled_back() {
         &json!({"from": "builder", "to": "maker"}),
     );
     assert_eq!(
-        (status, text.contains("not renamed")),
+        (status, text.contains("saved credentials")),
         (422, true),
         "{text}"
     );
@@ -471,16 +497,8 @@ fn a_rename_whose_agents_cannot_move_is_rolled_back() {
     #[cfg(unix)]
     std::fs::set_permissions(&creds, std::os::unix::fs::PermissionsExt::from_mode(0o600))
         .expect("owner-only");
-    // Nothing changed, live or on disk: the agent keeps its role and token.
-    let (_, me, _) = call(f.addr, &builder, "board_whoami", &json!({}));
-    assert_eq!(me["role"], "builder");
-    let roles = load_roles(&f.file("roles.json")).expect("file");
-    assert!(roles.0.contains_key("builder") && !roles.0.contains_key("maker"));
-    // A restart reads consistent files: every agent's role exists, an admin remains.
-    let (_, out, _) = f.admin("settings_get", &json!({}));
-    assert!(out["roles"].get("maker").is_none(), "{out}");
-    open_credentials(&creds, &roles, &Projects::default()).expect("restart");
-    // And the same rename now goes through.
+    // Nothing changed, and the same rename then goes through.
+    assert!(!restarts(&f).0.contains_key("maker"));
     assert_eq!(
         f.admin(
             "settings_role_rename",
@@ -491,6 +509,46 @@ fn a_rename_whose_agents_cannot_move_is_rolled_back() {
     );
     let (_, me, _) = call(f.addr, &builder, "board_whoami", &json!({}));
     assert_eq!(me["role"], "maker");
+    assert!(!restarts(&f).0.contains_key("builder"));
+}
+
+#[test]
+fn a_role_the_saved_credentials_still_use_is_not_dropped() {
+    // A credentials save can fail after the file was replaced: then the file holds the new
+    // role while the live set still holds the old. Simulate that end state directly.
+    let f = start("saved_creds");
+    let builder = f.add_agent("claude", "builder");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    let mut roles = out["roles"].clone();
+    roles["maker"] = roles["builder"].clone();
+    assert_eq!(
+        f.admin("settings_roles_set", &json!({"roles": roles})).0,
+        200
+    );
+    let creds = f.file("identities.json");
+    let on_disk = std::fs::read_to_string(&creds).expect("credentials");
+    let landed = on_disk.replace(r#""role": "builder""#, r#""role": "maker""#);
+    assert_ne!(on_disk, landed, "the agent's role is in the file");
+    std::fs::write(&creds, landed).expect("simulate a save that landed");
+    // Dropping either name is refused: live needs builder, the saved file needs maker.
+    for drop in ["maker", "builder"] {
+        let mut without = roles.clone();
+        without.as_object_mut().expect("roles").remove(drop);
+        let (status, _, text) = f.admin("settings_roles_set", &json!({"roles": without}));
+        assert_eq!(status, 422, "dropping {drop}: {text}");
+    }
+    let (_, _, text) = {
+        let mut without = roles.clone();
+        without.as_object_mut().expect("roles").remove("maker");
+        f.admin("settings_roles_set", &json!({"roles": without}))
+    };
+    assert!(text.contains("saved credentials"), "{text}");
+    restarts(&f);
+    // Saving the agent makes live and disk agree; then the old name can go.
+    finish_rename(&f, "claude", "builder", "maker");
+    let (_, me, _) = call(f.addr, &builder, "board_whoami", &json!({}));
+    assert_eq!(me["role"], "maker");
+    assert!(!restarts(&f).0.contains_key("builder"));
 }
 
 #[test]

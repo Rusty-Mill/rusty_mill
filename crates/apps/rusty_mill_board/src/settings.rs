@@ -581,6 +581,7 @@ impl Settings {
             }
             self.keeps_an_admin(&creds, roles)?;
         }
+        self.saved_creds_fit(roles)?;
         let json = serde_json::to_string_pretty(roles).map_err(|e| refused(e.to_string()))?;
         rusty_atomic_file::write(&path, json.as_bytes())
             .map_err(|e| refused(format!("{}: {e}", path.display())))?;
@@ -588,51 +589,63 @@ impl Settings {
         Ok(())
     }
 
+    /// The credentials file as saved must still load with `roles`. A failed save does not
+    /// prove the file is unchanged (an atomic write can fail after replacing it), so the saved
+    /// file may hold roles the live set does not.
+    fn saved_creds_fit(&self, roles: &Roles) -> Result<(), BoardError> {
+        let Some(path) = self
+            .files
+            .identities
+            .as_ref()
+            .filter(|_| self.creds.is_some())
+        else {
+            return Ok(());
+        };
+        if !path.exists() {
+            return Ok(());
+        }
+        Credentials::load(path, roles, &self.board.projects())
+            .map(drop)
+            .map_err(|e| {
+                refused(format!(
+                    "the saved credentials would not load with these roles ({e}); save any agent on the Agents tab first"
+                ))
+            })
+    }
+
     /// Rename a role and move every agent holding it: add the new name beside the old, move
-    /// the agents, drop the old name. Each step leaves the files valid. If moving the agents
-    /// fails, the added name is rolled back. Whatever fails, the leftover name is held by no
-    /// agent, and the error names it: removing it on the Roles tab finishes the job.
+    /// the agents, drop the old name. Each step leaves the files valid whatever a failed write
+    /// left behind, so nothing is rolled back: a failure keeps both names, and the error says
+    /// how to finish from there.
     fn role_rename(&self, a: &RoleRename) -> Res {
-        let before = self.board.roles();
-        if before.0.contains_key(&a.to) {
+        let mut roles = self.board.roles();
+        if roles.0.contains_key(&a.to) {
             return Err(refused(format!("there is already a role {:?}", a.to)));
         }
-        let caps = before
+        let caps = roles
             .0
             .get(&a.from)
             .cloned()
             .ok_or_else(|| refused(format!("there is no role {:?}", a.from)))?;
-        let mut both = before.clone();
-        both.0.insert(a.to.clone(), caps);
-        self.write_roles(&both)?;
+        roles.0.insert(a.to.clone(), caps);
+        self.write_roles(&roles)?;
+        let partly = |e: BoardError| {
+            refused(format!(
+                "partly renamed: roles {:?} and {:?} both exist with the same capabilities ({e}). \
+                 To finish, give {:?}'s agents role {:?} on the Agents tab, then remove {:?}",
+                a.from, a.to, a.from, a.to, a.from
+            ))
+        };
         if self.held(&a.from) {
-            let moved = self.change_creds(|c| {
+            self.change_creds(|c| {
                 c.rename_role(&a.from, &a.to);
                 Ok(())
-            });
-            if let Err(e) = moved {
-                return Err(self.undo_add(&before, &a.to, &e));
-            }
+            })
+            .map_err(partly)?;
         }
-        let mut after = both;
-        after.0.remove(&a.from);
-        self.write_roles(&after).map_err(|e| {
-            refused(format!(
-                "agents now hold {:?}, but role {:?} could not be dropped ({e}); remove it on the Roles tab",
-                a.to, a.from
-            ))
-        })?;
-        Ok(json!({ "roles": after }))
-    }
-
-    /// Roll back a role added by a rename whose agents could not be moved.
-    fn undo_add(&self, before: &Roles, added: &str, cause: &BoardError) -> BoardError {
-        match self.write_roles(before) {
-            Ok(()) => refused(format!("not renamed: {cause}")),
-            Err(e) => refused(format!(
-                "not renamed: {cause}; role {added:?} was added but could not be taken back ({e}); remove it on the Roles tab"
-            )),
-        }
+        roles.0.remove(&a.from);
+        self.write_roles(&roles).map_err(partly)?;
+        Ok(json!({ "roles": roles }))
     }
 
     /// Whether some agent holds `role`.
