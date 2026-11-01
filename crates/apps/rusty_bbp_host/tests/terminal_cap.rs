@@ -308,6 +308,7 @@ fn saved_wall_stop_remains_failed_after_task_closes_and_preserves_mixed_costs() 
     )
     .unwrap();
     moderator::write_evidence_marker(&dir, &task, 1000.0, "test").unwrap();
+    moderator::record_evidence_segment(&dir, &task, &"a".repeat(40)).unwrap();
     let f = pairs::facts(
         &pairs::RunRef {
             dir: dir.display().to_string(),
