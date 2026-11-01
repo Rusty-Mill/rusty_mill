@@ -60,7 +60,7 @@ Identity scope from the [Rex delta check](REX-DELTA.md) (owner, 2026-10-31): eve
 
 ## Phase 3b: Rex parity follow-ups
 
-From the [Rex delta check](REX-DELTA.md) §4 (owner, 2026-10-31). After Phase 3's identity steps; starting it still needs the owner's go. One PR per step, in order. Each extends a done capability; no new crate and no new dependency.
+From the [Rex delta check](REX-DELTA.md) §4 (owner, 2026-10-31). After Phase 3's identity steps; starting it still needs the owner's go. One PR per step, in order. Each extends a done capability; no new crate and no new third-party dependency.
 
 1. Wait on a window or a session (C37). Done: `wait --window`, `wait --session`, exiting with the last failure. Started ahead of Phase 3 identity at the owner's call, confirmed on #1348 (2026-11-01).
 2. Events: clipboard written, program status removed, active window changed, config reloaded (C38). Done: `clipboard-written` and `status-removed` (#1364), `active-window-changed` with `select-window` (#1368), and `config-reloaded` with `reload-config` and the config file's `server` section. The owner chose all four on 2026-11-01.

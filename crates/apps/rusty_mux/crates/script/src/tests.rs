@@ -308,21 +308,40 @@ fn rules_are_checked_against_events_and_their_fields() {
 
 #[test]
 fn the_server_section_gives_new_block_defaults() {
-    let config =
-        parse(r#"{"server": {"command": "fish", "args": ["-l"], "cwd": "/srv"}}"#).expect("valid");
-    assert_eq!(
-        config.server,
-        Defaults {
-            command: Some("fish".into()),
-            args: vec!["-l".into()],
-            cwd: Some("/srv".into()),
-        }
-    );
+    // Absolute on this platform.
+    let (cwd, json) = match cfg!(windows) {
+        true => (r"C:\srv", r"C:\\srv"),
+        false => ("/srv", "/srv"),
+    };
+    let text = format!(r#"{{"server": {{"command": "fish", "args": ["-l"], "cwd": "{json}"}}}}"#);
+    let expected = Defaults {
+        command: Some("fish".into()),
+        args: vec!["-l".into()],
+        cwd: Some(cwd.into()),
+    };
+    assert_eq!(parse(&text).expect("valid").server, expected);
+    assert_eq!(parse_server(&text), Ok(expected));
     assert_eq!(parse("{}").expect("valid").server, Defaults::default());
     assert_eq!(
         parse(r#"{"server": {}}"#).expect("valid").server,
         Defaults::default()
     );
+}
+
+#[test]
+fn the_server_reads_only_its_own_section() {
+    // A rule for an event this build does not know is ctl's problem.
+    let text =
+        r#"{"on": [{"event": "from-the-future", "action": "x"}], "server": {"command": "sh"}}"#;
+    assert!(parse(text).is_err());
+    assert_eq!(
+        parse_server(text).expect("valid").command.as_deref(),
+        Some("sh")
+    );
+    let found = parse_server(r#"{"server": {"cwd": "rel"}}"#).expect_err("relative");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(parse_server("[]").is_err());
+    assert!(parse_server("not json").is_err());
 }
 
 #[test]
@@ -354,18 +373,24 @@ fn the_config_file_is_found_as_documented() {
                 .map(|(_, v)| std::ffi::OsString::from(v))
         }
     };
-    let path = |pairs| default_path(env(pairs)).map(|p| p.to_string_lossy().into_owned());
+    let path = |pairs| default_path(env(pairs));
+    let under = |base: &str| Some(Path::new(base).join("rusty_mux").join("config.json"));
     assert_eq!(
         path(&[("RUSTY_MUX_CONFIG", "/c.json"), ("HOME", "/h")]),
         Some("/c.json".into())
     );
     assert_eq!(
         path(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/h")]),
-        Some("/x/rusty_mux/config.json".into())
+        under("/x")
     );
     assert_eq!(
         path(&[("HOME", "/h")]),
-        Some("/h/.config/rusty_mux/config.json".into())
+        Some(
+            Path::new("/h")
+                .join(".config")
+                .join("rusty_mux")
+                .join("config.json")
+        )
     );
     assert_eq!(path(&[]), None);
 }

@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 
 mod parse;
 
-pub use parse::parse;
+pub use parse::{parse, parse_server};
 
 /// A checked config.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

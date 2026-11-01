@@ -97,6 +97,10 @@ fn a_reload_moves_the_next_block_and_a_bad_file_keeps_the_last() {
         "{reason}"
     );
     assert_eq!(started_in(&mut client, window), b.display().to_string());
+    // An absolute directory that is not there would fail every block.
+    write_cwd(&file, &temp("gone"));
+    let answer = client.answer(|req| Message::ReloadConfig { req });
+    assert!(failed(&answer).contains("not a directory"), "{answer:?}");
     assert_eq!(reloads(&client), 1, "a refused reload announces nothing");
 
     // Without the feature: refused, and never told.
@@ -104,6 +108,44 @@ fn a_reload_moves_the_next_block_and_a_bad_file_keeps_the_last() {
     assert!(failed(&answer).contains("feature"), "{answer:?}");
     plain.request(|req| Message::List { req });
     assert_eq!(reloads(&plain), 0, "{:?}", plain.events);
+}
+
+#[test]
+fn replay_sends_the_event_only_to_clients_that_asked() {
+    let file = temp("replay.json");
+    std::fs::write(&file, "{}").unwrap();
+    let path = start_server_with(with_file(&file));
+    let away: Vec<_> = [PLAIN, RELOAD]
+        .into_iter()
+        .map(|f| {
+            (
+                f,
+                Client::connect_with(&path, f, None).cursor.expect("cursor"),
+            )
+        })
+        .collect();
+
+    // While both are away: a reload, then a later event.
+    let mut writer = Client::connect_with(&path, RELOAD, None);
+    writer.request(|req| Message::ReloadConfig { req });
+    let later = window_for(&mut writer);
+
+    for (features, seen) in away {
+        let mut client = Client::connect_with(&path, features, Some(seen));
+        assert_eq!(client.cursor, Some(seen), "resumed");
+        while !client
+            .events
+            .iter()
+            .any(|(_, e)| matches!(e, Event::WindowCreated { window, .. } if *window == later))
+        {
+            client.recv();
+        }
+        assert_eq!(
+            reloads(&client),
+            usize::from(features == RELOAD),
+            "{features:?}"
+        );
+    }
 }
 
 #[test]

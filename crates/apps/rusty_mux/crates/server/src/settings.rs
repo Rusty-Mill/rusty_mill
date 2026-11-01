@@ -12,9 +12,10 @@ use crate::Config;
 const LIMIT: u64 = 1 << 20;
 
 /// `base` with the `server` section of its config file over it: `base`
-/// itself when there is no file or it has no section. The error names the
-/// file and lists every problem, one per line; the caller keeps what it
-/// had.
+/// itself when there is no file or it has no section (so a file deleted
+/// since brings back the server's own defaults). Only that section is
+/// checked; the rest is ctl's. The error names the file and lists every
+/// problem, one per line; the caller keeps what it had.
 pub(crate) fn read(base: &Config) -> Result<Config, String> {
     let Some(path) = &base.config_file else {
         return Ok(base.clone());
@@ -24,19 +25,33 @@ pub(crate) fn read(base: &Config) -> Result<Config, String> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(base.clone()),
         Err(err) => return Err(format!("{}: {err}", path.display())),
     };
-    let parsed = rusty_mux_script::parse(&text).map_err(|problems| {
+    let defaults = rusty_mux_script::parse_server(&text).map_err(|problems| {
         let lines: Vec<String> = problems
             .iter()
             .map(|p| format!("{}: {p}", path.display()))
             .collect();
         lines.join("\n")
     })?;
-    Ok(overlay(base, &parsed.server))
+    // As a request's cwd: a directory that is not there would only fail
+    // each block later, after the reload was announced as taken.
+    if let Some(cwd) = &defaults.cwd
+        && !Path::new(cwd).is_dir()
+    {
+        return Err(format!(
+            "{}: server.cwd: `{cwd}` is not a directory",
+            path.display()
+        ));
+    }
+    Ok(overlay(base, &defaults))
 }
 
-/// The text of `path`, refused past [`LIMIT`]. Read in one blocking call:
-/// the file is local and small.
+/// The text of `path`, refused past [`LIMIT`] or when it is not a regular
+/// file: opening a FIFO would block the server's one thread until a writer
+/// came. Read in one blocking call, as the file is small.
 fn bounded(path: &Path) -> io::Result<String> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
     let mut text = String::new();
     std::fs::File::open(path)?
         .take(LIMIT + 1)
@@ -139,5 +154,34 @@ mod tests {
 
         let huge = temp("huge", &" ".repeat(LIMIT as usize + 1));
         assert!(read(&base(Some(huge))).unwrap_err().contains("larger than"));
+
+        // A directory that is not there, and a path that is no file.
+        let gone = std::env::temp_dir().join(format!("rusty-mux-gone-{}", std::process::id()));
+        let json = format!("\"{}\"", gone.display().to_string().replace('\\', "\\\\"));
+        let path = temp("gone", &format!(r#"{{"server": {{"cwd": {json}}}}}"#));
+        assert!(
+            read(&base(Some(path)))
+                .unwrap_err()
+                .contains("not a directory")
+        );
+        let dir = base(Some(std::env::temp_dir()));
+        assert!(read(&dir).unwrap_err().contains("not a regular file"));
+
+        // Other sections are ctl's: one this build cannot check is no
+        // reason to refuse.
+        let path = temp("ctl", r#"{"on": [{"event": "from-the-future"}]}"#);
+        assert!(read(&base(Some(path))).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fifo_is_refused_without_waiting_for_a_writer() {
+        let path = std::env::temp_dir().join(format!("rusty-mux-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let made = std::process::Command::new("mkfifo").arg(&path).status();
+        assert!(made.expect("mkfifo").success());
+        let err = read(&base(Some(path.clone()))).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("not a regular file"), "{err}");
     }
 }

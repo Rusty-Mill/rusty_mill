@@ -42,6 +42,34 @@ pub fn parse(text: &str) -> Result<Config, Vec<Problem>> {
     }
 }
 
+/// The `server` section of the config in `text`, or every problem in it;
+/// [`Defaults::default`] when there is none. Only that section is checked:
+/// the rest of the file is ctl's, and a server must not refuse it for a
+/// method or event only a newer ctl knows.
+pub fn parse_server(text: &str) -> Result<Defaults, Vec<Problem>> {
+    let root = Value::from_json_str(text).map_err(|e| {
+        vec![Problem {
+            at: "config".into(),
+            reason: format!("not JSON: {e}"),
+        }]
+    })?;
+    let Some(map) = root.as_object() else {
+        return Err(vec![Problem {
+            at: "config".into(),
+            reason: "expected an object".into(),
+        }]);
+    };
+    let mut check = Check::default();
+    let server = match map.get("server") {
+        None => Defaults::default(),
+        Some(value) => check.defaults("server", value),
+    };
+    match check.problems.is_empty() {
+        true => Ok(server),
+        false => Err(check.problems),
+    }
+}
+
 #[derive(Default)]
 struct Check {
     problems: Vec<Problem>,
