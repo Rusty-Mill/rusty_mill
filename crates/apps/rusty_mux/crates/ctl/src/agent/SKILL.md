@@ -44,8 +44,11 @@ it off: `rusty-mux-ctl split-block --side right --command htop`. `zoom-block`
 shows one block alone and `unzoom-window` ends it; `list` gives each window's
 `layout`.
 
-Prefer `wait` over polling. `wait --event KIND --FIELD VALUE` waits for an
-event, such as `wait --event bell --block dev-server`.
+Prefer `wait` over polling. `wait --window W` or `wait --session S` waits
+until every block there has ended, blocks started meanwhile included; it
+prints each exit and exits with the last failure, 0 if every program
+succeeded. `wait --event KIND --FIELD VALUE` waits for an event, such as
+`wait --event bell --block dev-server`.
 
 ## Reading and typing
 

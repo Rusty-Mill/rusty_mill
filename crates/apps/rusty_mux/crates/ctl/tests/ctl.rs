@@ -1412,6 +1412,121 @@ fn wait_for_an_event_whose_fields_match() {
     }
 }
 
+/// Types at `block`'s shell, once leased, what makes it exit with `code`
+/// after a pause.
+fn exit_later(socket: &Path, block: &str, code: u8) {
+    ok(
+        socket,
+        &[
+            "attach",
+            "--block",
+            block,
+            "+",
+            "acquire-lease",
+            "--block",
+            block,
+            "+",
+            "input",
+            "--block",
+            block,
+            "--data",
+            &pause_then_exit(code),
+        ],
+    );
+}
+
+fn shell_block(socket: &Path, window: &str) -> String {
+    ok(
+        socket,
+        &[
+            "create-block",
+            "--window",
+            window,
+            "--cols",
+            "80",
+            "--rows",
+            "24",
+        ],
+    )
+}
+
+#[test]
+fn wait_on_a_window_follows_every_block_until_the_last_ends() {
+    let socket = start_server();
+    let window = window(&socket);
+    let (first, second) = (shell_block(&socket, &window), shell_block(&socket, &window));
+    let waiter = ctl_command(&socket, &["wait", "--window", &window, "--timeout", "20"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    std::thread::sleep(Duration::from_millis(500));
+    // A block made after the wait began joins it.
+    let late = shell_block(&socket, &window);
+    exit_later(&socket, &first, 0);
+    exit_later(&socket, &second, 4);
+    exit_later(&socket, &late, 0);
+    let output = waiter.wait_with_output().expect("wait");
+    let text = stdout(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "{text}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (block, code) in [(&first, 0), (&second, 4), (&late, 0)] {
+        let line = format!("program-exited block={block} code={code}");
+        assert!(text.contains(&line), "{line} in {text}");
+    }
+
+    // Nothing is left in it, so a new wait ends at once, quietly.
+    let output = ctl(&socket, &["wait", "--window", &window, "--timeout", "5"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn wait_on_a_session_fails_when_a_block_closes_unfinished() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session", "--name", "s"]);
+    let window = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "w"],
+    );
+    let closed = shell_block(&socket, &window);
+    let waiter = ctl_command(&socket, &["wait", "--session", "s", "--timeout", "20"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    std::thread::sleep(Duration::from_millis(500));
+    // A window and block made during the wait join it.
+    let other = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "x"],
+    );
+    let finished = shell_block(&socket, &other);
+    exit_later(&socket, &finished, 0);
+    ok(&socket, &["close-block", "--block", &closed]);
+    let output = waiter.wait_with_output().expect("wait");
+    let text = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{text}");
+    assert!(
+        text.contains(&format!("block-closed block={closed}")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("program-exited block={finished} code=0")),
+        "{text}"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("before its program exited"));
+
+    assert_eq!(
+        ctl(&socket, &["wait", "--session", "nope"]).status.code(),
+        Some(3)
+    );
+}
+
 /// What a client running `ssh host rusty-mux-ctl bridge` sees: its frames
 /// reach the server through stdin and the answers come back on stdout. The
 /// end of stdin ends the bridge.
