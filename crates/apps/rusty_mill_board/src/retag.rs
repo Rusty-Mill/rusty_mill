@@ -123,6 +123,22 @@ pub fn apply(store: &dyn Store, plan: &[Retag], now_ms: i64) -> Result<Vec<Outco
         .collect()
 }
 
+/// [`apply`], after `save` has made the plan durable: nothing is written unless `save`
+/// succeeds, so every retag that lands has its origin on disk first.
+///
+/// # Errors
+/// `save`'s error, with no card touched; or [`apply`]'s, with the saved plan to undo from.
+pub fn apply_recorded(
+    store: &dyn Store,
+    plan: &[Retag],
+    now_ms: i64,
+    save: impl FnOnce(&[Retag]) -> Result<(), String>,
+) -> Result<Vec<Outcome>, String> {
+    save(plan).map_err(|e| format!("rollback record not saved, nothing retagged: {e}"))?;
+    apply(store, plan, now_ms)
+        .map_err(|e| format!("{e}; some cards may be retagged: undo them from the saved record"))
+}
+
 /// Put back each planned card the retag moved and nobody has changed since: in `to`, at the
 /// revision right after the planned one.
 ///
@@ -235,6 +251,24 @@ mod tests {
         fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
             self.inner.reserve_number(card, floor)
         }
+    }
+
+    #[test]
+    fn the_record_is_saved_before_any_card_changes_and_a_failed_save_writes_nothing() {
+        let store = MemStore::default();
+        let c = card_in(&store, "qa", None);
+        let p = factory_plan(&store);
+        let refused = apply_recorded(&store, &p, 2, |_| Err("disk full".into()));
+        assert!(refused.is_err_and(|e| e.contains("nothing retagged")));
+        assert_eq!(column_of(&store, c.id), col("qa"));
+        let out = apply_recorded(&store, &p, 3, |saved| {
+            assert_eq!(saved, &p[..]);
+            assert_eq!(column_of(&store, c.id), col("qa"), "saved before writing");
+            Ok(())
+        })
+        .expect("apply");
+        assert_eq!(out.len(), 1);
+        assert_eq!(column_of(&store, c.id), col("v_and_ving"));
     }
 
     #[test]
