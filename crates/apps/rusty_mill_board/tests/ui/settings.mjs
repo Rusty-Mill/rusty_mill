@@ -18,7 +18,8 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? 
 const page = await browser.newPage({ viewport: { width: 1300, height: 900 } });
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
-page.on("dialog", (d) => d.accept());
+let promptAnswer;
+page.on("dialog", (d) => d.accept(d.type() === "prompt" ? promptAnswer : undefined));
 await page.goto(`${BASE}/#token=${TOKEN}`);
 await page.waitForSelector("#gear");
 await page.waitForFunction(() => document.querySelector("#actor").value);
@@ -174,6 +175,24 @@ await page.fill("#title", "after rotation");
 await page.click("#add");
 await page.waitForFunction((n) => document.querySelectorAll(".card").length === n + 1, before);
 check(true, "card calls succeed after self-rotation");
+
+// Renaming your own role: the page follows without a reload, and settings and card calls keep working.
+await page.click("#gear");
+await page.waitForSelector("#settings[open]");
+await dialog.getByRole("button", { name: "Roles" }).click();
+promptAnswer = "owner";
+await dialog.locator("tr", { has: page.locator("td", { hasText: /^human$/ }) }).getByRole("button", { name: "Rename" }).click();
+await dialog.locator("td", { hasText: /^owner$/ }).waitFor();
+check((await page.inputValue("#role")) === "owner", "the header follows the renamed role");
+check((await api(adminToken, "board_whoami")).body.role === "owner", "renaming your own role moves you with it");
+check((await dialog.locator(".err").first().innerText()) === "", "and the settings view refreshes without an error");
+check((await dialog.locator("td", { hasText: /^human$/ }).count()) === 0, "and the old name is gone");
+await dialog.getByRole("button", { name: "Close" }).click();
+const n = await page.locator(".card").count();
+await page.fill("#title", "after renaming my role");
+await page.click("#add");
+await page.waitForFunction((k) => document.querySelectorAll(".card").length === k + 1, n);
+check(true, "card calls succeed after renaming your own role");
 
 check(errors.length === 0, `no page errors ${errors.join("; ")}`);
 await browser.close();
