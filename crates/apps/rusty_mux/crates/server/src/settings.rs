@@ -24,8 +24,9 @@ pub(crate) fn reloader() -> Loader {
 }
 
 /// A loader that reads only on cue, one go per read, then sets `cwd`
-/// to `/tmp`: a filesystem that stalls until the test says.
-#[cfg(test)]
+/// to `/tmp`: a filesystem that stalls until the test says. For the unix
+/// tests that start `/bin/sh`.
+#[cfg(all(test, unix))]
 pub(crate) fn stalled() -> (Loader, std::sync::mpsc::Sender<()>) {
     let (go, wait) = std::sync::mpsc::channel::<()>();
     let wait = std::sync::Mutex::new(wait);

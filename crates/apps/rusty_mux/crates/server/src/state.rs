@@ -331,7 +331,7 @@ impl State {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn test_cwd(&self) -> &std::ffi::OsStr {
         &self.config.cwd
     }
