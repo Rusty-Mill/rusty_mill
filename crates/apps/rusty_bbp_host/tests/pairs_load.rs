@@ -275,8 +275,14 @@ fn facts_after(
         r#"{"prices_as_of":"test","models":{"m":{"input":1,"output":1,"cache_creation_5m":1,"cache_creation_1h":1,"cache_read":1}}}"#,
     )
     .unwrap();
+    // An empty `stop` is an output that shows none.
+    let stop = if stop.is_empty() {
+        String::new()
+    } else {
+        format!(r#","stop":"{stop}","stop_reason":"stopped""#)
+    };
     let out = format!(
-        r#"{{"state":"Planning","turns_launched":1,"runs":0,"elapsed_ms":1,"state_ms":[["Planning",10]],"replay_equals_live":true,"stop":"{stop}","stop_reason":"stopped","bbp_build_sha":"{head}"}}"#
+        r#"{{"state":"Planning","turns_launched":1,"runs":0,"elapsed_ms":1,"state_ms":[["Planning",10]],"replay_equals_live":true{stop},"bbp_build_sha":"{head}"}}"#
     );
     let r = run(&root, "stopped", &out, log);
     edit(Path::new(&r.dir), &TaskId("T1".into()), &head);
@@ -349,17 +355,27 @@ fn a_run_with_one_segment_by_the_build_its_output_reports_loads() {
 }
 
 #[test]
-fn a_resumed_run_is_refused_whatever_its_segments_were_built_from() {
-    let err = facts_after(
-        "two-segments",
-        "wall",
-        Some(ASSISTANT),
-        |dir, task, head| {
-            moderator::record_evidence_segment(dir, task, head).unwrap();
-        },
-    )
+fn a_resumed_run_loads_as_a_failed_stopped_run_marked_resumed() {
+    // The saved output of the last segment shows no stop; the record shows two.
+    let f = facts_after("two-segments", "", Some(ASSISTANT), |dir, task, head| {
+        moderator::record_evidence_segment(dir, task, head).unwrap();
+    })
+    .expect("a resumed run loads, as a failed run");
+    assert!(f.stopped && !f.succeeded(), "{f:?}");
+    assert_eq!(f.stop.as_deref(), Some("resumed: 2 bbp mod segments"));
+    assert_eq!(
+        f.spec_wall_ms, None,
+        "the last segment's timing is not the run's"
+    );
+}
+
+#[test]
+fn a_resumed_run_with_a_segment_from_another_build_is_refused() {
+    let err = facts_after("two-builds", "wall", Some(ASSISTANT), |dir, task, _| {
+        moderator::record_evidence_segment(dir, task, OTHER).unwrap();
+    })
     .unwrap_err();
-    assert!(err.contains("2 bbp mod segments"), "{err}");
+    assert!(err.contains("segment 2") && err.contains(OTHER), "{err}");
 }
 
 #[test]

@@ -1089,7 +1089,7 @@ fn enforce_cap<S: Store>(
 /// resume must carry the same cap and the same price file, or it is refused,
 /// so a cap cannot be dropped by restarting. Every capped start then records
 /// its segment ([`record_evidence_segment`]) before it acts on the task, so
-/// `bbp pairs` can see a resumed run and refuse it.
+/// `bbp pairs` can see a resumed run and count it as failed.
 fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
     let file = evidence_marker_path(&cfg.dir, &cfg.task);
     let recorded = std::fs::read_to_string(&file).ok();

@@ -1352,13 +1352,24 @@ fn a_task_started_with_a_cap_cannot_be_resumed_without_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The test binary is no clean commit, so `bbp pairs` would refuse its
+/// build: stand a clean sha in for it in the segment record, keeping the
+/// count of segments the moderators recorded, and return that sha.
+fn clean_segments(dir: &Path, task: &TaskId) -> String {
+    let clean = "a".repeat(40);
+    let path = moderator::evidence_segments_path(dir, task);
+    let text = std::fs::read_to_string(&path).expect("segments");
+    std::fs::write(&path, text.replace(rusty_bbp_host::BUILD_SHA, &clean)).expect("write");
+    clean
+}
+
 /// Issue #1326: a capped run the wall stopped, then resumed under the same cap
 /// to a clean end, was judged by its last `bbp mod` output alone, which shows
 /// no stop: the first segment's wall stop and build were lost. Every capped
-/// `bbp mod` now records a segment, and `bbp pairs` refuses a run with more
-/// than one.
+/// `bbp mod` now records a segment, and `bbp pairs` loads a run with more
+/// than one as a failed, stopped run marked `resumed`.
 #[test]
-fn a_capped_run_resumed_after_a_wall_stop_is_refused_in_pairs() {
+fn a_capped_run_resumed_after_a_wall_stop_loads_as_a_failed_run_in_pairs() {
     let (dir, task, repo) = opened("resume-capped");
     let mut planner = script(
         &dir,
@@ -1382,12 +1393,12 @@ fn a_capped_run_resumed_after_a_wall_stop_is_refused_in_pairs() {
     second.cost_cap = Some(cap.clone());
     let s2 = moderator::run_to_stop(&second).expect("the resume runs under its cap");
     assert!(s2.stop.is_none(), "{:?}", s2.stop);
+    let clean = clean_segments(&dir, &task);
     let out = dir.join("mod-2.json");
     std::fs::write(
         &out,
         format!(
-            r#"{{"state":"Cancelled","state_ms":[["Planning",10]],"replay_equals_live":true,"bbp_build_sha":"{}"}}"#,
-            "a".repeat(40)
+            r#"{{"state":"Cancelled","state_ms":[["Planning",10]],"replay_equals_live":true,"bbp_build_sha":"{clean}"}}"#
         ),
     )
     .expect("write mod output");
@@ -1403,8 +1414,9 @@ fn a_capped_run_resumed_after_a_wall_stop_is_refused_in_pairs() {
         1000.0,
     );
     let _ = std::fs::remove_dir_all(&dir);
-    let err = r.expect_err("a resumed evidence run is not evidence");
-    assert!(err.contains("2 bbp mod segments"), "{err}");
+    let f = r.expect("a resumed run loads, as a failed run");
+    assert!(f.stopped && !f.succeeded(), "{f:?}");
+    assert_eq!(f.stop.as_deref(), Some("resumed: 2 bbp mod segments"));
 }
 
 #[test]
@@ -1672,8 +1684,9 @@ fn capped_mod(dir: &Path, task: &TaskId, repo: &Path, body: &str) -> Proc {
 
 /// #1326 review: a capped `bbp mod` SIGKILLed mid-run never returns, so its
 /// segment must be on record before it acts on the task. Resumed under the
-/// same cap, the run is still not counted as a clean success. Red if the
-/// segment is recorded only when the loop returns.
+/// same cap, it loads in `bbp pairs` as a failed run marked `resumed`. Red
+/// if the segment is recorded only when the loop returns: the record then
+/// shows one segment and the run loads as a clean, unstopped one.
 #[test]
 #[cfg(target_os = "linux")]
 fn a_capped_moderator_killed_mid_run_and_resumed_is_not_counted_as_clean() {
@@ -1708,12 +1721,12 @@ fn a_capped_moderator_killed_mid_run_and_resumed_is_not_counted_as_clean() {
     let s2 = moderator::run_to_stop(&second).expect("the resume runs under its cap");
     assert!(s2.stop.is_none(), "{:?}", s2.stop);
     let _ = moderator::quiesce(&dir, &task);
+    let clean = clean_segments(&dir, &task);
     let out = dir.join("mod-2.json");
     std::fs::write(
         &out,
         format!(
-            r#"{{"state":"Cancelled","state_ms":[["Planning",10]],"replay_equals_live":true,"bbp_build_sha":"{}"}}"#,
-            "a".repeat(40)
+            r#"{{"state":"Cancelled","state_ms":[["Planning",10]],"replay_equals_live":true,"bbp_build_sha":"{clean}"}}"#
         ),
     )
     .expect("write mod output");
@@ -1729,11 +1742,9 @@ fn a_capped_moderator_killed_mid_run_and_resumed_is_not_counted_as_clean() {
         1.0,
     );
     let _ = std::fs::remove_dir_all(&dir);
-    // Refused as resumed, or loaded as a stopped, failed run; never clean.
-    match r {
-        Err(e) => assert!(e.contains("2 bbp mod segments"), "{e}"),
-        Ok(f) => assert!(f.stopped && !f.succeeded(), "{f:?}"),
-    }
+    let f = r.expect("a resumed run loads, as a failed run");
+    assert!(f.stopped && !f.succeeded(), "{f:?}");
+    assert_eq!(f.stop.as_deref(), Some("resumed: 2 bbp mod segments"));
 }
 
 const TEN_DOLLARS: &str = r#"echo '{"type":"assistant","message":{"id":"m1","model":"claude-sonnet-5-5","usage":{"input_tokens":0,"output_tokens":1000000}}}'

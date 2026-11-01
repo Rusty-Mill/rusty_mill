@@ -1,8 +1,10 @@
 //! `bbp pairs`: the 2b gate criteria evaluated over a run's pairs. The
 //! evaluation is pure ([`evaluate`] over [`Pair`] facts); [`load`] reads the
 //! facts from each run's log, harness output and saved `bbp mod` output, and
-//! refuses a run whose evidence record shows any segment but that output's
-//! ([`check_segments`]). It decides nothing the criteria note does not say;
+//! from its evidence record: a run that more than one `bbp mod` produced is a
+//! failed, stopped run (`resumed`), and a record that is missing, unreadable
+//! or names another build is refused ([`check_segments`]). It decides
+//! nothing the criteria note does not say;
 //! see "2b gate criteria" in `docs/bbp-concurrency-design.md` for the
 //! definitions and the thresholds.
 
@@ -46,7 +48,8 @@ pub struct RunFacts {
     pub closed: bool,
     /// The grader's verdict against the frozen rubric and pass mark.
     pub rubric_ok: bool,
-    /// The first `planning` visit, from `bbp mod`'s `state_ms`.
+    /// The first `planning` visit, from `bbp mod`'s `state_ms`; `None` for a
+    /// resumed run, whose last output timed only its last segment.
     pub spec_wall_ms: Option<u64>,
     /// Dollars, all turns (revoked included), priced per model by the
     /// criteria file; `None` when any turn left no output.
@@ -76,7 +79,12 @@ pub struct RunFacts {
     /// Turns that ended with no valid result (killed, interrupted, crashed):
     /// their cost is only known from below.
     pub killed_turns: u64,
-    /// The moderator stopped the run (cap or wall limit): it may have printed
+    /// Why the run stopped: `cap` or `wall` from its `bbp mod` output, or
+    /// `resumed` when more than one `bbp mod` produced it. Reported with a
+    /// failed pair.
+    pub stop: Option<String>,
+    /// The moderator stopped the run (cap or wall limit), or it was resumed
+    /// (a later segment cannot show an earlier one's stop): it may have printed
     /// little or nothing a model can be read from.
     pub stopped: bool,
     /// The dollars the run is known to have cost, at least: complete turns at
@@ -93,6 +101,8 @@ pub struct FailedCost {
     pub incomplete: bool,
     /// Failures encountered while retaining readable turns.
     pub accounting_errors: Vec<String>,
+    /// Why each stopped run of the pair stopped, as `arm: reason`.
+    pub stops: Vec<String>,
 }
 
 impl RunFacts {
@@ -371,12 +381,16 @@ fn failed_pair_costs(pairs: &[Pair]) -> Vec<FailedCost> {
                 .iter()
                 .flat_map(|r| r.accounting_errors.clone())
                 .collect(),
+            stops: [("control", &p.control), ("treatment", &p.treatment)]
+                .iter()
+                .filter_map(|(arm, r)| r.stop.as_ref().map(|s| format!("{arm}: {s}")))
+                .collect(),
             usd_at_least: [&p.control, &p.treatment]
                 .iter()
                 .filter_map(|r| r.usd_floor)
                 .sum(),
         })
-        .filter(|f| f.usd_at_least > 0.0 || f.incomplete)
+        .filter(|f| f.usd_at_least > 0.0 || f.incomplete || !f.stops.is_empty())
         .collect()
 }
 
@@ -558,8 +572,18 @@ pub fn facts(
         std::fs::read_to_string(&r.mod_output).map_err(|e| format!("{}: {e}", r.mod_output))?;
     let m = mod_facts(&text)?;
     let build_sha = build_sha_of(&text)?;
-    check_segments(&segments, &build_sha)?;
-    let stopped = m.stop.is_some();
+    let resumed = check_segments(&segments, &build_sha)?;
+    let stop = match resumed {
+        Some(n) => Some(format!("resumed: {n} bbp mod segments")),
+        None => m.stop.clone(),
+    };
+    let stopped = stop.is_some();
+    // A resumed run's saved output timed only its last segment, which saw the
+    // resume point as a fresh start: its spec wall is unknown, not that.
+    let (spec_wall_ms, spec_boundaries) = match resumed {
+        Some(_) => (None, 0),
+        None => (m.spec_wall_ms, m.spec_boundaries),
+    };
     // A run the moderator stopped is a failed run whatever its log holds: a log
     // the tool cannot read (which may be why the cap stopped it) must not drop
     // the manifest. Any other run's log has to read.
@@ -574,8 +598,8 @@ pub fn facts(
         accounting_errors: tok.errors.clone(),
         closed: st.state == State::Closed,
         rubric_ok: r.rubric_ok,
-        spec_wall_ms: m.spec_wall_ms,
-        spec_boundaries: m.spec_boundaries,
+        spec_wall_ms,
+        spec_boundaries,
         replay_equals_live: m.replay_equals_live,
         over_cap: m.stop.as_deref() == Some("cap") || tok.usd_floor.is_some_and(|f| f > cap_usd),
         tokens: (tok.without_output == 0).then_some(tok.usd).flatten(),
@@ -587,27 +611,29 @@ pub fn facts(
         build_sha,
         no_model_turns,
         killed_turns: tok.unknown_turns,
+        stop,
         stopped,
         usd_floor: tok.usd_floor,
     })
 }
 
-/// A run is evidence only if exactly one `bbp mod` produced it, and that is
-/// the invocation whose output was saved: the one whose build it reports. A
-/// resumed run would be judged by its last segment alone, its earlier stops,
-/// builds and state timings lost (#1326), so it is refused rather than folded.
-pub fn check_segments(segments: &[String], build_sha: &str) -> Result<(), String> {
-    match segments {
-        [] => Err("no bbp mod segment recorded: nothing shows what produced the run".into()),
-        [only] if only == build_sha => Ok(()),
-        [only] => Err(format!(
-            "its bbp mod segment was built from {only}, but its saved output reports {build_sha}"
-        )),
-        more => Err(format!(
-            "{} bbp mod segments: a resumed run is not evidence; open a new task for the run",
-            more.len()
-        )),
+/// Every `bbp mod` segment that produced a run must be the build its saved
+/// output reports; no record, or one naming another build, is refused. A run
+/// that more than one segment produced is judged by its last output alone,
+/// its earlier stops and state timings lost (#1326), so it counts as a
+/// failed, stopped run under the failed-pair rule: `Some(segments)` when it
+/// was resumed, `None` when one `bbp mod` produced it.
+pub fn check_segments(segments: &[String], build_sha: &str) -> Result<Option<usize>, String> {
+    if segments.is_empty() {
+        return Err("no bbp mod segment recorded: nothing shows what produced the run".into());
     }
+    if let Some((i, other)) = segments.iter().enumerate().find(|(_, s)| *s != build_sha) {
+        return Err(format!(
+            "its bbp mod segment {} was built from {other}, but its saved output reports {build_sha}",
+            i + 1
+        ));
+    }
+    Ok((segments.len() > 1).then_some(segments.len()))
 }
 
 /// Every run must have been produced by a `bbp` built from `head`.
@@ -1895,7 +1921,8 @@ mod tests {
                 pair: id,
                 usd_at_least: 4.0,
                 incomplete: true,
-                accounting_errors: Vec::new()
+                accounting_errors: Vec::new(),
+                stops: Vec::new(),
             }]
         );
         // The killed run's cost is in the total all the same.
@@ -1903,6 +1930,23 @@ mod tests {
             near_f(e.total_usd_at_least, 2.0 * p.len() as f64 + 2.0),
             "{}",
             e.total_usd_at_least
+        );
+    }
+
+    /// #1326: a resumed run is a failed pair, reported with why it stopped,
+    /// even when its known cost is zero.
+    #[test]
+    fn a_resumed_run_fails_its_pair_and_the_report_says_resumed() {
+        let mut resumed = run(100, 100);
+        resumed.stopped = true;
+        resumed.stop = Some("resumed: 2 bbp mod segments".into());
+        assert!(!resumed.succeeded());
+        let p = vec![pair("p1", Kind::Separable, run(100, 100), resumed)];
+        let e = evaluate(&p, 500);
+        assert_eq!(e.failed_pair_costs.len(), 1, "{:?}", e.failed_pair_costs);
+        assert_eq!(
+            e.failed_pair_costs[0].stops,
+            vec!["treatment: resumed: 2 bbp mod segments".to_owned()]
         );
     }
 
