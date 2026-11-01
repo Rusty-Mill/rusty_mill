@@ -528,3 +528,55 @@ fn rwlock_cancel_with_a_panicking_waker_destructor_still_passes_the_wake_on() {
     assert!(reader_flag.woken(), "the reader behind the writer is woken");
     assert!(poll(reader.as_mut(), &reader_waker).is_ready());
 }
+
+/// Mutex counterpart of `acquire_with_a_panicking_waker_destructor`
+/// (#581): a waiter that acquires while its stored waker's destructor
+/// panics still ends up holding a guard, which unlocks as the panic
+/// unwinds.
+fn mutex_acquire_with_a_panicking_waker_destructor<F: Future>(
+    mutex: &Arc<Mutex<()>>,
+    acquire: impl FnOnce() -> Pin<Box<F>>,
+) {
+    let held = mutex.try_lock().expect("free");
+    let mut waiter = acquire();
+    assert!(poll(waiter.as_mut(), &on_drop(|| panic!("waker drop"))).is_pending());
+    drop(held);
+    let (_, plain) = flag();
+    let acquired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = poll(waiter.as_mut(), &plain);
+    }));
+    assert!(
+        acquired.is_err(),
+        "the destructor's panic reaches the poller"
+    );
+    drop(waiter);
+    assert!(mutex.try_lock().is_some(), "nothing still holds the mutex");
+}
+
+#[test]
+fn mutex_acquire_with_a_panicking_waker_destructor_leaves_the_lock_releasable() {
+    let mutex = Arc::new(Mutex::new(()));
+    mutex_acquire_with_a_panicking_waker_destructor(&mutex, || Box::pin(mutex.lock()));
+    mutex_acquire_with_a_panicking_waker_destructor(&mutex, || Box::pin(mutex.lock_owned()));
+}
+
+/// A cancelled head waiter whose waker destructor panics still passes
+/// the free lock on to the waiter behind it (#581).
+#[test]
+fn mutex_cancel_with_a_panicking_waker_destructor_still_passes_the_wake_on() {
+    let mutex = Mutex::new(());
+    let held = mutex.try_lock().expect("free");
+    let mut head = Box::pin(mutex.lock());
+    assert!(poll(head.as_mut(), &on_drop(|| panic!("waker drop"))).is_pending());
+    let (next_flag, next_waker) = flag();
+    let mut next = Box::pin(mutex.lock());
+    assert!(poll(next.as_mut(), &next_waker).is_pending());
+    drop(held);
+    let cancelled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(head)));
+    assert!(
+        cancelled.is_err(),
+        "the destructor's panic reaches the dropper"
+    );
+    assert!(next_flag.woken(), "the waiter behind the head is woken");
+    assert!(poll(next.as_mut(), &next_waker).is_ready());
+}
