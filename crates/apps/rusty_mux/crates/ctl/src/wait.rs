@@ -12,8 +12,10 @@
 //! closes leaves. A block that ended after the stream began but before the
 //! listing is left out of it, yet still counts: closing a block announces
 //! its window's layout at the very next number, which names the window
-//! that `block-closed` does not. Blocks of a whole window closed in that
-//! moment send no layout and are not counted. Blocks never move between
+//! that `block-closed` does not. A whole window closed in that moment
+//! sends no layout, so a session wait cannot tell whether its blocks were
+//! the session's; unless the stream showed the window made in another
+//! session, the wait fails rather than report success. Blocks never move between
 //! windows today; a move (C41) must make the block join or leave here too.
 
 use std::collections::BTreeSet;
@@ -83,7 +85,7 @@ impl Goal {
     /// no block left in it ends at once.
     fn settled(&self) -> Option<Result<Exit, String>> {
         match self {
-            Self::Ended(group) if group.blocks.is_empty() => Some(group.outcome.clone()),
+            Self::Ended(group) if group.blocks.is_empty() => Some(group.verdict()),
             _ => None,
         }
     }
@@ -106,6 +108,9 @@ pub(crate) struct Group {
     /// How the wait ends: `Ok` until a block fails, then the last failure,
     /// as `set -o pipefail` reports a pipeline.
     outcome: Result<Exit, String>,
+    /// Why the outcome cannot be known, which fails the wait whatever the
+    /// blocks do.
+    doubt: Option<String>,
 }
 
 impl Group {
@@ -138,23 +143,56 @@ impl Group {
             windows,
             blocks,
             outcome: Ok(Exit::Ok),
+            doubt: None,
         }
     }
 
     /// Takes back the blocks of its windows that closed while the listing
-    /// was awaited, so their exits in `kept` count.
+    /// was awaited, so their exits in `kept` count. A block closes with its
+    /// window's layout at the next number unless its whole window closed;
+    /// such a window, for a session wait, is doubt unless `kept` showed it
+    /// made in another session.
     pub(crate) fn adopt(&mut self, kept: &Kept) {
-        for pair in kept.windows(2) {
-            let [
-                (seq, Event::BlockClosed { block }),
-                (next, Event::LayoutChanged { window, .. }),
-            ] = pair
-            else {
-                continue;
-            };
-            if seq.checked_add(1) == Some(*next) && self.windows.contains(&window.uuid()) {
-                self.blocks.insert(block.uuid());
+        let mut foreign = BTreeSet::new();
+        let mut unplaced = false;
+        for (at, (seq, event)) in kept.iter().enumerate() {
+            match event {
+                Event::WindowCreated { window, session } if session.uuid() != self.id => {
+                    foreign.insert(window.uuid());
+                }
+                Event::BlockClosed { block } => match kept.get(at + 1) {
+                    Some((next, Event::LayoutChanged { window, .. }))
+                        if seq.checked_add(1) == Some(*next) =>
+                    {
+                        if self.windows.contains(&window.uuid()) {
+                            self.blocks.insert(block.uuid());
+                        }
+                    }
+                    _ => unplaced = true,
+                },
+                Event::WindowClosed { window } => {
+                    let closed_blocks = std::mem::take(&mut unplaced);
+                    if closed_blocks
+                        && self.scope == Scope::Session
+                        && !foreign.contains(&window.uuid())
+                    {
+                        self.doubt = Some(format!(
+                            "window {} closed with its blocks while the wait started; \
+                             they may have been this session's",
+                            window.uuid()
+                        ));
+                    }
+                }
+                _ => {}
             }
+        }
+    }
+
+    /// The outcome, failed if it cannot be known.
+    fn verdict(&self) -> Result<Exit, String> {
+        match &self.doubt {
+            Some(why) => Err(why.clone()),
+            None => self.outcome.clone(),
         }
     }
 
@@ -194,7 +232,7 @@ impl Group {
     /// A block left: the wait ends with the last one.
     fn left(&self) -> Seen {
         match self.blocks.is_empty() {
-            true => Seen::Ends(self.outcome.clone()),
+            true => Seen::Ends(self.verdict()),
             false => Seen::Shown,
         }
     }
@@ -609,6 +647,56 @@ mod tests {
             group.adopt(&kept);
             assert_eq!(Goal::Ended(group).see(&exited(4, 3)), Seen::Passed);
         }
+    }
+
+    #[test]
+    fn a_session_wait_fails_if_a_whole_window_closed_while_it_started() {
+        // Window 30 and its block 40 closed before the listing, which
+        // shows the session's window 2 with blocks 4 and 5 still running.
+        let window_closed = |w: u8| Event::WindowClosed {
+            window: WindowId::from_uuid(id(w)),
+        };
+        let detached = Event::Detached {
+            client: rusty_mux_core::ClientId::from_uuid(id(50)),
+            block: BlockId::from_uuid(id(40)),
+        };
+        let kept: Kept = vec![
+            (20, detached.clone()),
+            (21, closed(40)),
+            (22, window_closed(30)),
+        ];
+        let finish = |kept: &Kept| {
+            let mut group = Group::new(Scope::Session, id(1), &listing());
+            group.adopt(kept);
+            let mut goal = Goal::Ended(group);
+            for (_, event) in kept {
+                assert_eq!(goal.see(event), Seen::Passed);
+            }
+            assert_eq!(goal.see(&exited(4, 0)), Seen::Shown);
+            goal.see(&exited(5, 0))
+        };
+        assert!(matches!(
+            finish(&kept),
+            Seen::Ends(Err(why)) if why.contains("may have been this session's")
+        ));
+
+        // Made in another session, or closed with no block, it is no doubt.
+        let foreign = Event::WindowCreated {
+            window: WindowId::from_uuid(id(30)),
+            session: SessionId::from_uuid(id(8)),
+        };
+        let mut known = vec![(19, foreign)];
+        known.extend(kept.iter().cloned());
+        assert_eq!(finish(&known), Seen::Ends(Ok(Exit::Ok)));
+        assert_eq!(
+            finish(&vec![(22, window_closed(30))]),
+            Seen::Ends(Ok(Exit::Ok))
+        );
+        // A window wait is never in doubt: its own window closing leaves
+        // nothing to wait on.
+        let mut group = Group::new(Scope::Window, id(2), &listing());
+        group.adopt(&kept);
+        assert_eq!(group.doubt, None);
     }
 
     #[test]
