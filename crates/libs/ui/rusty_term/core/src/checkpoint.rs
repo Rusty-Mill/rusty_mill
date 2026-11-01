@@ -586,11 +586,17 @@ fn read_style(r: &mut Reader<'_>) -> Result<RunStyle> {
     }
     Ok(RunStyle { cell, index })
 }
+/// `Wire` for a struct, field by field in the order given. Fields after
+/// `skip` are not on the wire: they read back as their `Default`, so they
+/// must be transient (consumed between `advance` calls), never state.
 macro_rules! fields {
     ($t:ty, [$($field:ident),* $(,)?]) => {
+        crate::checkpoint::fields!($t, [$($field),*], skip []);
+    };
+    ($t:ty, [$($field:ident),* $(,)?], skip [$($skip:ident),* $(,)?]) => {
         impl crate::checkpoint::Wire for $t {
             fn write(&self, w: &mut crate::checkpoint::Writer) -> crate::checkpoint::Result<()> { $(crate::checkpoint::Wire::write(&self.$field,w)?;)* Ok(()) }
-            fn read(r: &mut crate::checkpoint::Reader<'_>) -> crate::checkpoint::Result<Self> { Ok(Self { $($field: crate::checkpoint::Wire::read(r)?,)* }) }
+            fn read(r: &mut crate::checkpoint::Reader<'_>) -> crate::checkpoint::Result<Self> { Ok(Self { $($field: crate::checkpoint::Wire::read(r)?,)* $($skip: Default::default(),)* }) }
         }
     };
 }
