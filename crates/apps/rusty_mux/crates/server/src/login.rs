@@ -20,10 +20,21 @@
 //! new session does not leave the cgroup; no unit ships yet.
 //!
 //! The map is checked when read: a regular file owned by root or by the
-//! front door's own user, writable by no one else. A bad map stops the
-//! front door from starting; a reload (SIGHUP) that finds one keeps the old
-//! map. A good reload closes only the relays whose principal now maps to a
-//! different account, or to none.
+//! front door's own user, writable by no one else, at most [`MAX_MAP`]
+//! bytes. A bad map stops the front door from starting; a reload (SIGHUP)
+//! that finds one keeps the old map. A good reload closes only the relays
+//! whose principal now maps to a different account, or to none.
+//!
+//! Nothing that can block waits on the front door's one thread: the map
+//! is read on a thread of its own, account lookups (which may ask LDAP)
+//! run on the blocking pool, and each new server is reaped by a thread of
+//! its own from the moment it starts. A connection is admitted against the
+//! map in force once its lookups are done, so a reload during them cannot
+//! let it through on the old map.
+//!
+//! The front door's socket ([`bind`]) is open to every user (mode 0666),
+//! given that mode as it is made, in a directory only root or this user
+//! can change.
 //!
 //! Account checks are only these: a rule admits the principal, the account
 //! exists, and root comes only through a rule naming its principal. No
@@ -35,12 +46,14 @@ pub(crate) mod map;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::io::{self, Read};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use platform_linux::Account;
@@ -59,6 +72,8 @@ const READY: Duration = Duration::from_secs(10);
 const READY_POLL: Duration = Duration::from_millis(20);
 /// `PATH` for an account's server and the programs in its blocks.
 const PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+/// The largest map read, in bytes.
+pub const MAX_MAP: u64 = 1 << 20;
 
 /// Where the front door finds its map and puts each account's server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,7 +98,7 @@ pub async fn serve_login(
     login: Login,
     mut reloads: UnboundedReceiver<Reload>,
 ) -> io::Result<()> {
-    let map = read_map(&login.map)?;
+    let map = load_map(login.map.clone()).await?;
     runtime_dir(&login.runtime)?;
     let front = Rc::new(RefCell::new(Front {
         login,
@@ -92,10 +107,11 @@ pub async fn serve_login(
         next: 0,
         starting: HashMap::new(),
     }));
+    // One reload at a time; accepting goes on meanwhile.
     let reload = async {
         while let Some(answer) = reloads.recv().await {
             // Nobody waiting for the answer (SIGHUP) is fine.
-            let _ = answer.send(reload(&front));
+            let _ = answer.send(reload(&front).await);
         }
         std::future::pending::<()>().await;
     };
@@ -116,43 +132,87 @@ struct Front {
     starting: HashMap<String, Rc<Mutex<()>>>,
 }
 
-/// A connection being relayed, and what let it in.
+/// A connection being relayed, and, once admitted, what let it in.
 struct Relay {
+    task: AbortHandle,
+    /// `None` while its lookups run: [`admit`] checks it against the map
+    /// in force when they end, so a reload meanwhile has nothing to close.
+    admitted: Option<Admitted>,
+}
+
+/// What admitted a relay, for a reload to check against the new map.
+struct Admitted {
     uid: u32,
     user: String,
     account: String,
     account_uid: u32,
-    task: AbortHandle,
+}
+
+impl Admitted {
+    fn still_by(&self, map: &AccountMap) -> bool {
+        map.route(self.uid, &self.user).is_some_and(|route: Route| {
+            route.account == self.account && admits(&route, self.uid, self.account_uid)
+        })
+    }
 }
 
 async fn accept(listener: UnixListener, front: Shared) -> io::Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
-        if let Err(why) = admit(&front, stream) {
-            eprintln!("rusty-mux-server: login: {why}");
-        }
+        let uid = match stream.peer_cred() {
+            Ok(cred) => cred.uid(),
+            Err(e) => {
+                eprintln!("rusty-mux-server: login: reading a client's credentials: {e}");
+                continue;
+            }
+        };
+        let id = {
+            let mut f = front.borrow_mut();
+            f.next = f.next.wrapping_add(1);
+            f.next
+        };
+        // The task first runs after the insert: nothing yields in between.
+        let task = rusty_tokio::task::spawn_local(relay(front.clone(), id, uid, stream));
+        front.borrow_mut().relays.insert(
+            id,
+            Relay {
+                task: task.abort_handle(),
+                admitted: None,
+            },
+        );
     }
 }
 
-/// Maps the connection's peer to an account and starts relaying it there,
-/// or refuses it (dropping the stream) with the reason.
-fn admit(front: &Shared, stream: UnixStream) -> Result<(), String> {
-    let uid = stream
-        .peer_cred()
-        .map_err(|e| format!("reading a client's credentials: {e}"))?
-        .uid();
-    let user = platform_linux::user_name(uid).unwrap_or_default();
+/// Maps the peer `uid` of relay `id` to an account, or refuses it with the
+/// reason. The lookups run off this thread; the decision is made, and
+/// recorded on the relay, against the map in force after them, with no
+/// await in between.
+async fn admit(front: &Shared, id: u64, uid: u32) -> Result<(Account, Principal), String> {
+    let user = blocking(move || platform_linux::user_name(uid))
+        .await?
+        .unwrap_or_default();
     let refuse = |why: &str| format!("refusing uid {uid} ({user}): {why}");
-    let route = front
+    let name = front
         .borrow()
         .map
         .route(uid, &user)
-        .ok_or_else(|| refuse("no rule"))?;
-    let account = platform_linux::account(&route.account)
-        .ok_or_else(|| refuse(&format!("no account {}", route.account)))?;
-    if !admits(&route, uid, account.uid) {
+        .ok_or_else(|| refuse("no rule"))?
+        .account;
+    let looked_up = name.clone();
+    let account = blocking(move || platform_linux::account(&looked_up))
+        .await?
+        .ok_or_else(|| refuse(&format!("no account {name}")))?;
+    let admitted = Admitted {
+        uid,
+        user: user.clone(),
+        account: account.name.clone(),
+        account_uid: account.uid,
+    };
+    let mut f = front.borrow_mut();
+    if !admitted.still_by(&f.map) {
         return Err(refuse(
-            "root only through a rule that names the principal, and `=` only to its own uid",
+            "no rule now, root only through a rule that names the principal, \
+             and `=` only to its own uid",
         ));
     }
     let me = rusty_libc::process::geteuid();
@@ -161,41 +221,31 @@ fn admit(front: &Shared, stream: UnixStream) -> Result<(), String> {
     }
     let principal = Principal::unix(uid, Some(user.clone()).filter(|u| !u.is_empty()))
         .map_err(|e| refuse(&e.to_string()))?;
-    let id = {
-        let mut f = front.borrow_mut();
-        f.next = f.next.wrapping_add(1);
-        f.next
-    };
-    let task = rusty_tokio::task::spawn_local(relay(
-        front.clone(),
-        id,
-        stream,
-        principal,
-        account.clone(),
-    ));
-    front.borrow_mut().relays.insert(
-        id,
-        Relay {
-            uid,
-            user,
-            account: account.name,
-            account_uid: account.uid,
-            task: task.abort_handle(),
-        },
-    );
-    Ok(())
+    let relay = f.relays.get_mut(&id).ok_or_else(|| refuse("closed"))?;
+    relay.admitted = Some(admitted);
+    Ok((account, principal))
 }
 
-/// Relays `stream` to its account's server until either side ends, then
-/// forgets it.
-async fn relay(
-    front: Shared,
-    id: u64,
-    mut stream: UnixStream,
-    principal: Principal,
-    account: Account,
-) {
+/// Runs `lookup` (one that may block, as NSS may) on the blocking pool.
+async fn blocking<T: Send + 'static>(
+    lookup: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    rusty_tokio::spawn_blocking(lookup)
+        .await
+        .map_err(|e| format!("an account lookup failed: {e}"))
+}
+
+/// Admits the connection from `uid`, then relays `stream` to its account's
+/// server until either side ends; forgets it either way.
+async fn relay(front: Shared, id: u64, uid: u32, mut stream: UnixStream) {
     let _forget = Forget(front.clone(), id);
+    let (account, principal) = match admit(&front, id, uid).await {
+        Ok(admitted) => admitted,
+        Err(why) => {
+            eprintln!("rusty-mux-server: login: {why}");
+            return;
+        }
+    };
     let mut upstream = match server_for(&front, &account).await {
         Ok(upstream) => upstream,
         Err(err) => {
@@ -256,8 +306,18 @@ async fn server_for(front: &Shared, account: &Account) -> io::Result<UnixStream>
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
         _ => {}
     }
-    let child = start(&server, &socket, account)?;
-    served_by(ready(&socket, child).await?, account)
+    let groups = if account.uid == rusty_libc::process::geteuid() {
+        None
+    } else {
+        let (name, gid) = (account.name.clone(), account.gid);
+        let groups = blocking(move || platform_linux::groups(&name, gid))
+            .await
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other(format!("groups of {}", account.name)))?;
+        Some(groups)
+    };
+    let started = watch(start(&server, &socket, account, groups)?)?;
+    served_by(ready(&socket, &started).await?, account)
 }
 
 /// `stream`, if the account itself serves it. The account owns its
@@ -293,16 +353,55 @@ fn runtime_dir(dir: &Path) -> io::Result<()> {
     check_parts(dir, me, false)?;
     let meta = std::fs::symlink_metadata(dir)?;
     if meta.uid() != me {
-        return Err(unsafe_dir(dir, "must be this user's".into()));
+        return Err(unsafe_dir(dir, "is not this user's".into()));
     }
     Ok(())
+}
+
+/// Binds the front door's socket at `socket`, open to every user (0666)
+/// as it is made: under a umask that gives it that mode, so no chmod
+/// afterwards follows a path someone could have swapped for a link. Its
+/// directory must pass the same checks as the runtime directory's parts
+/// (absolute, no link, root's or this user's, writable by no one else),
+/// so no other user can put anything in its place. A socket left by an
+/// earlier front door, which nothing answers, is replaced. Call it before
+/// starting any thread: the umask is the process's.
+pub fn bind(socket: &Path) -> io::Result<std::os::unix::net::UnixListener> {
+    let dir = socket
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .ok_or_else(|| unsafe_dir(socket, "has no directory".into()))?;
+    check_parts(dir, rusty_libc::process::geteuid(), false)?;
+    match bind_open(socket) {
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse && stale(socket) => {
+            std::fs::remove_file(socket)?;
+            bind_open(socket)
+        }
+        bound => bound,
+    }
+}
+
+fn bind_open(socket: &Path) -> io::Result<std::os::unix::net::UnixListener> {
+    let old = rusty_libc::umask::umask(0o111);
+    let bound = std::os::unix::net::UnixListener::bind(socket);
+    rusty_libc::umask::umask(old);
+    bound
+}
+
+/// Whether `socket` is a socket nothing answers on.
+fn stale(socket: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    let is_socket = std::fs::symlink_metadata(socket).is_ok_and(|m| m.file_type().is_socket());
+    is_socket
+        && std::os::unix::net::UnixStream::connect(socket)
+            .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionRefused)
 }
 
 /// Checks each part of `dir` as [`runtime_dir`] requires; a part that does
 /// not exist passes only when `allow_missing`.
 fn check_parts(dir: &Path, me: u32, allow_missing: bool) -> io::Result<()> {
     if !dir.is_absolute() {
-        return Err(unsafe_dir(dir, "must be an absolute path".into()));
+        return Err(unsafe_dir(dir, "is not an absolute path".into()));
     }
     for part in dir.ancestors() {
         let meta = match std::fs::symlink_metadata(part) {
@@ -332,7 +431,7 @@ fn check_parts(dir: &Path, me: u32, allow_missing: bool) -> io::Result<()> {
 fn unsafe_dir(dir: &Path, why: String) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
-        format!("{}: the runtime directory {why}", dir.display()),
+        format!("{}: {why}", dir.display()),
     )
 }
 
@@ -363,16 +462,14 @@ fn account_dir(dir: &Path, account: &Account) -> io::Result<()> {
 }
 
 /// Starts `server` for `account` on `socket`, in a session of its own, as
-/// the account when the front door is root.
-fn start(server: &Path, socket: &Path, account: &Account) -> io::Result<std::process::Child> {
+/// the account (with its `groups`) when the front door is root.
+fn start(
+    server: &Path,
+    socket: &Path,
+    account: &Account,
+    groups: Option<Vec<u32>>,
+) -> io::Result<Child> {
     let me = rusty_libc::process::geteuid();
-    let groups = if account.uid == me {
-        None
-    } else {
-        let groups = platform_linux::groups(&account.name, account.gid)
-            .ok_or_else(|| io::Error::other(format!("groups of {}", account.name)))?;
-        Some(groups)
-    };
     let (uid, gid) = (account.uid, account.gid);
     let mut command = Command::new(server);
     command
@@ -413,25 +510,59 @@ fn errno(e: rusty_libc::Errno) -> io::Error {
     io::Error::from_raw_os_error(e.0)
 }
 
-/// Waits for `child` to listen on `socket`, then leaves it running, reaped
-/// by a thread of its own when it ends. Fails if it exits first or takes
-/// longer than [`READY`].
-async fn ready(socket: &Path, mut child: std::process::Child) -> io::Result<UnixStream> {
+/// A server just started: its exit, from the thread that reaps it, and a
+/// handle that signals it and no process that later reuses its pid.
+struct Started {
+    exited: mpsc::Receiver<io::Result<ExitStatus>>,
+    pidfd: Option<OwnedFd>,
+}
+
+/// Hands `child` to a thread that reaps it whenever it ends, so a relay
+/// closed while it starts leaves no zombie behind.
+fn watch(child: Child) -> io::Result<Started> {
+    let pidfd = i32::try_from(child.id())
+        .ok()
+        .and_then(|pid| rusty_libc::process::pidfd_open(pid, 0).ok())
+        // SAFETY: `pidfd_open` just returned this fd, owned by no one else.
+        .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) });
+    let (tx, exited) = mpsc::channel();
+    let mut child = child;
+    std::thread::Builder::new()
+        .name("rusty-mux-reap".into())
+        .spawn(move || {
+            // Nobody waiting any more is fine; the reaping is the point.
+            let _ = tx.send(child.wait());
+        })?;
+    Ok(Started { exited, pidfd })
+}
+
+/// Waits for the server in `started` to listen on `socket`. Fails if it
+/// exits first or takes longer than [`READY`], when it is killed.
+async fn ready(socket: &Path, started: &Started) -> io::Result<UnixStream> {
     let deadline = Instant::now() + READY;
     loop {
         if let Ok(stream) = UnixStream::connect(socket).await {
-            std::thread::spawn(move || child.wait());
             return Ok(stream);
         }
-        if let Some(status) = child.try_wait()? {
-            return Err(io::Error::other(format!(
-                "the server exited first: {status}"
-            )));
+        match started.exited.try_recv() {
+            Ok(status) => {
+                return Err(io::Error::other(format!(
+                    "the server exited first: {}",
+                    status?
+                )));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(io::Error::other("the server's reaper stopped"));
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
         }
         if Instant::now() >= deadline {
-            // Not ours to leave half-started.
-            let _ = child.kill();
-            std::thread::spawn(move || child.wait());
+            // Not ours to leave half-started. Through the pidfd: never a
+            // process that took the pid after this one was reaped.
+            if let Some(pidfd) = &started.pidfd {
+                let sigkill = rusty_libc::signal::SIGKILL;
+                let _ = rusty_libc::process::pidfd_send_signal(pidfd.as_raw_fd(), sigkill);
+            }
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "the server did not start listening",
@@ -441,10 +572,28 @@ async fn ready(socket: &Path, mut child: std::process::Child) -> io::Result<Unix
     }
 }
 
+/// Reads the map at `path` on a thread of its own: a map on a hung file
+/// system stalls only reloads, never the relays.
+async fn load_map(path: PathBuf) -> io::Result<AccountMap> {
+    let (tx, rx) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("rusty-mux-map".into())
+        .spawn(move || {
+            let _ = tx.send(read_map(&path));
+        })?;
+    rx.await
+        .map_err(|_| io::Error::other("the map reader stopped"))?
+}
+
 /// Reads the map at `path`, refusing a file anyone but root or this user
-/// could have written.
+/// could have written, anything but a regular file (opened without
+/// blocking, so a FIFO is refused, not waited on), and one over
+/// [`MAX_MAP`] bytes.
 fn read_map(path: &Path) -> io::Result<AccountMap> {
-    let file = std::fs::File::open(path)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rusty_libc::fd::O_NONBLOCK)
+        .open(path)?;
     let meta = file.metadata()?;
     let me = rusty_libc::process::geteuid();
     let mine = meta.uid() == 0 || meta.uid() == me;
@@ -457,7 +606,14 @@ fn read_map(path: &Path) -> io::Result<AccountMap> {
             ),
         ));
     }
-    let text = io::read_to_string(file)?;
+    let mut text = String::new();
+    file.take(MAX_MAP + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_MAP {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: the map is over {MAX_MAP} bytes", path.display()),
+        ));
+    }
     AccountMap::parse(&text).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -468,23 +624,20 @@ fn read_map(path: &Path) -> io::Result<AccountMap> {
 
 /// Reads the map again; on success, closes every relay its principal no
 /// longer maps to the same account. On failure keeps the old map.
-fn reload(front: &Shared) -> io::Result<()> {
+/// Relays still in their lookups are left to [`admit`], which checks the
+/// map in force when they end.
+async fn reload(front: &Shared) -> io::Result<()> {
     let path = front.borrow().login.map.clone();
-    let map = read_map(&path).inspect_err(|err| {
+    let map = load_map(path).await.inspect_err(|err| {
         eprintln!("rusty-mux-server: login: keeping the old map: {err}");
     })?;
+    // From here to the swap, no await: no relay is admitted in between.
     let revoked: Vec<AbortHandle> = {
         let mut f = front.borrow_mut();
         let revoked = f
             .relays
             .values()
-            .filter(|relay| {
-                !map.route(relay.uid, &relay.user)
-                    .is_some_and(|route: Route| {
-                        route.account == relay.account
-                            && admits(&route, relay.uid, relay.account_uid)
-                    })
-            })
+            .filter(|relay| relay.admitted.as_ref().is_some_and(|a| !a.still_by(&map)))
             .map(|relay| relay.task.clone())
             .collect();
         f.map = map;

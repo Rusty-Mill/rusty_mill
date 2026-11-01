@@ -221,8 +221,9 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 fn run_login(socket: PathBuf, map: PathBuf, runtime: PathBuf) -> std::io::Result<()> {
     use rusty_tokio::signal::unix::{SignalKind, signal};
-    use std::os::unix::fs::PermissionsExt;
 
+    // Before the runtime starts a thread: binding sets the umask.
+    let listener = rusty_mux_server::bind_front_door(&socket)?;
     let server = std::env::current_exe()?;
     let login = rusty_mux_server::Login {
         map,
@@ -232,8 +233,7 @@ fn run_login(socket: PathBuf, map: PathBuf, runtime: PathBuf) -> std::io::Result
     let runtime = Builder::new_current_thread().build_local(&LocalOptions::default())?;
     runtime.block_on(async {
         let mut hangups = signal(SignalKind::hangup())?;
-        let listener = UnixListener::bind(&socket)?;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666))?;
+        let listener = UnixListener::from_std(listener)?;
         let (reload, reloads) = rusty_tokio::sync::mpsc::unbounded_channel();
         rusty_tokio::task::spawn_local(async move {
             while hangups.recv().await.is_some() {

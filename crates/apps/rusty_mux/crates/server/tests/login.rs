@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use common::{Client, PATIENCE, shell};
 use rusty_mux_core::SessionId;
 use rusty_mux_proto::{Entry, Features, Message};
-use rusty_mux_server::{Login, Reload, serve_forwarded, serve_login};
+use rusty_mux_server::{Login, MAX_MAP, Reload, bind_front_door, serve_forwarded, serve_login};
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::sync::{mpsc, oneshot};
 use rusty_tokio::{Builder, LocalOptions};
@@ -67,11 +67,16 @@ struct Front {
 
 impl Front {
     fn start(dir: &Path, name: &str) -> Self {
+        Self::with_server(dir, name, env!("CARGO_BIN_EXE_rusty-mux-server").as_ref())
+    }
+
+    /// A front door that starts `server` for each account.
+    fn with_server(dir: &Path, name: &str, server: &Path) -> Self {
         let socket = dir.join(name);
         let login = Login {
             map: dir.join("accounts"),
             runtime: dir.join("run"),
-            server: PathBuf::from(env!("CARGO_BIN_EXE_rusty-mux-server")),
+            server: server.to_owned(),
         };
         let (reload, reloads) = mpsc::unbounded_channel();
         let (stop, stopped) = oneshot::channel::<()>();
@@ -447,6 +452,145 @@ fn a_runtime_directory_through_a_link_stops_the_front_door() {
         !dir.join("safe").join("run").exists(),
         "created before the check"
     );
+}
+
+/// The front door's socket is open to every user as it is made, so nothing
+/// changes its mode by path afterwards; and it is made only in a directory
+/// no other user can change. A link planted where the socket goes never
+/// changes its target.
+#[test]
+fn the_front_door_socket_is_open_to_all_and_only_in_a_safe_directory() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let socket = dir.join("login.sock");
+    let listener = bind_front_door(&socket).expect("a safe directory");
+    let meta = std::fs::symlink_metadata(&socket).expect("socket");
+    assert_eq!(meta.mode() & 0o777, 0o666);
+    drop(listener);
+    // Left behind with nothing answering: the next front door replaces it.
+    let listener = bind_front_door(&socket).expect("a stale socket replaced");
+    // A live one is not.
+    assert!(bind_front_door(&socket).is_err(), "a live socket replaced");
+    drop(listener);
+
+    // The harmless target another user would have the front door open up.
+    let target = dir.join("target");
+    std::fs::write(&target, "secret").expect("target");
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    let untouched = |why: &str| {
+        let mode = std::fs::metadata(&target).expect("target").mode() & 0o777;
+        assert_eq!(mode, 0o600, "{why}");
+    };
+    // A link where the socket goes.
+    let planted = dir.join("planted.sock");
+    std::os::unix::fs::symlink(&target, &planted).expect("link");
+    assert!(bind_front_door(&planted).is_err(), "bound over a link");
+    untouched("a link where the socket goes");
+    // A directory others can write, where the socket could be swapped.
+    let open = dir.join("open");
+    std::fs::create_dir(&open).expect("open");
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+    assert!(bind_front_door(&open.join("login.sock")).is_err());
+    assert!(!open.join("login.sock").exists(), "bound before the check");
+    // A directory reached through a link.
+    std::fs::create_dir(dir.join("safe")).expect("safe");
+    std::os::unix::fs::symlink(dir.join("safe"), dir.join("link")).expect("link");
+    assert!(bind_front_door(&dir.join("link").join("login.sock")).is_err());
+    assert!(!dir.join("safe").join("login.sock").exists());
+    // A relative path, which another directory could later mean.
+    assert!(bind_front_door(Path::new("login.sock")).is_err());
+    untouched("refusals");
+}
+
+/// A map that is a FIFO is refused without waiting for a writer, and one
+/// over the limit is refused; either way the relays go on as before.
+#[test]
+fn a_reload_refuses_a_map_that_is_no_file_or_too_big_without_stalling() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    let path = write_map(&dir, &format!("uid:{uid} {user}\n"));
+    let front = Front::start(&dir, "login.sock");
+    let mut client = Client::connect_with(&front.socket, IDENTITY, None);
+
+    std::fs::remove_file(&path).expect("remove");
+    let fifo = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).expect("path");
+    rusty_libc::fs::mkfifo(&fifo, 0o644).expect("mkfifo");
+    let err = front.reload().expect_err("a FIFO was taken");
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+    assert_eq!(whoami(&mut client).0, format!("uid:{uid}"));
+
+    std::fs::remove_file(&path).expect("remove");
+    let big = usize::try_from(MAX_MAP).expect("size") + 1;
+    write_map(&dir, &format!("uid:{uid} {user}\n{}", "#".repeat(big)));
+    let err = front.reload().expect_err("an oversized map was taken");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
+    assert_eq!(whoami(&mut client).0, format!("uid:{uid}"));
+    front.stop();
+}
+
+/// A server revoked while it starts is still reaped when it exits: it
+/// leaves no zombie behind in the front door.
+#[test]
+fn a_server_revoked_while_it_starts_is_reaped() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, _) = me();
+    // Never listens, and exits after the revocation.
+    let server = dir.join("slow-server");
+    std::fs::write(&server, "#!/bin/sh\nsleep 2\n").expect("server");
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    write_map(&dir, &format!("uid:{uid} =\n"));
+    let front = Front::with_server(&dir, "login.sock", &server);
+    let mut stream = UnixStream::connect(&front.socket).expect("connect");
+    stream.set_read_timeout(Some(PATIENCE)).expect("timeout");
+    let pid = wait_for(|| pid_running(&server)).expect("the server started");
+
+    write_map(&dir, "");
+    front.reload().expect("an empty map");
+    assert!(ended(&mut stream), "the revoked relay went on");
+    let stat = Path::new("/proc").join(pid.to_string()).join("stat");
+    let reaped = wait_for(|| {
+        let state = std::fs::read_to_string(&stat).ok();
+        // Gone, not a zombie (state `Z`, after the name in parentheses).
+        state.is_none().then_some(())
+    });
+    assert!(
+        reaped.is_some(),
+        "{pid} left as {:?}",
+        std::fs::read_to_string(&stat)
+    );
+    front.stop();
+}
+
+/// The pid of a process whose command line names `path`.
+fn pid_running(path: &Path) -> Option<i32> {
+    let needle = path.as_os_str().as_encoded_bytes();
+    std::fs::read_dir("/proc")
+        .ok()?
+        .flatten()
+        .find_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<i32>().ok()?;
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            cmdline
+                .windows(needle.len())
+                .any(|w| w == needle)
+                .then_some(pid)
+        })
+}
+
+/// `look`'s first answer within [`PATIENCE`].
+fn wait_for<T>(mut look: impl FnMut() -> Option<T>) -> Option<T> {
+    let deadline = std::time::Instant::now() + PATIENCE;
+    loop {
+        if let Some(found) = look() {
+            return Some(found);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 /// An account server trusts a preface only from the forwarder's uid, and
