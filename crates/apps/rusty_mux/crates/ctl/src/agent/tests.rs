@@ -5,7 +5,12 @@ use rusty_uuid::Uuid;
 use super::*;
 use crate::AgentHomes;
 
+#[cfg(not(windows))]
 const CTL: &str = "/opt/rusty mux/bin/rusty-mux-ctl";
+/// Codex on Windows refuses a path its shells would misread, such as one
+/// with a space.
+#[cfg(windows)]
+const CTL: &str = r"C:\opt\rusty-mux\bin\rusty-mux-ctl.exe";
 
 fn json(text: &str) -> Value {
     Value::from_json_str(text).expect("JSON")
@@ -74,7 +79,7 @@ fn adding_keeps_every_other_setting_and_hook() {
     let before = json(
         r#"{"model":"x","hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"echo hi"}]}],"Stop":[]}}"#,
     );
-    let after = settings::with_hook(before.clone(), &ours()).expect("adds");
+    let after = settings::with_hook(before.clone(), &ours(), None).expect("adds");
     assert_eq!(after["model"], before["model"]);
     assert_eq!(after["hooks"]["Stop"], before["hooks"]["Stop"]);
     let groups = after["hooks"]["SessionStart"].as_array().expect("array");
@@ -83,9 +88,9 @@ fn adding_keeps_every_other_setting_and_hook() {
         groups[1]["hooks"][0]["command"].as_str(),
         Some(ours().as_str())
     );
-    assert_eq!(settings::state(&after, &ours()), Ok(State::Installed));
+    assert_eq!(settings::state(&after, &ours(), None), Ok(State::Installed));
     assert_eq!(
-        settings::with_hook(after.clone(), &ours()),
+        settings::with_hook(after.clone(), &ours(), None),
         Ok(after),
         "idempotent"
     );
@@ -93,22 +98,22 @@ fn adding_keeps_every_other_setting_and_hook() {
 
 #[test]
 fn a_moved_ctl_is_updated_in_place_not_added_twice() {
-    let old =
-        settings::with_hook(json("{}"), &settings::command("/old/rusty-mux-ctl")).expect("adds");
-    assert_eq!(settings::state(&old, &ours()), Ok(State::Outdated));
-    let new = settings::with_hook(old, &ours()).expect("updates");
+    let old = settings::with_hook(json("{}"), &settings::command("/old/rusty-mux-ctl"), None)
+        .expect("adds");
+    assert_eq!(settings::state(&old, &ours(), None), Ok(State::Outdated));
+    let new = settings::with_hook(old, &ours(), None).expect("updates");
     let groups = new["hooks"]["SessionStart"].as_array().expect("array");
     assert_eq!(groups.len(), 1);
-    assert_eq!(settings::state(&new, &ours()), Ok(State::Installed));
+    assert_eq!(settings::state(&new, &ours(), None), Ok(State::Installed));
 }
 
 #[test]
 fn removing_drops_only_ours_and_the_containers_it_empties() {
     let mine =
         json(r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo hi"}]}]}}"#);
-    let with = settings::with_hook(mine.clone(), &ours()).expect("adds");
+    let with = settings::with_hook(mine.clone(), &ours(), None).expect("adds");
     assert_eq!(settings::without_hook(with, None), Ok(mine.clone()));
-    let alone = settings::with_hook(json(r#"{"a":1}"#), &ours()).expect("adds");
+    let alone = settings::with_hook(json(r#"{"a":1}"#), &ours(), None).expect("adds");
     assert_eq!(settings::without_hook(alone, None), Ok(json(r#"{"a":1}"#)));
     // A group shared with someone else's hook keeps theirs.
     let shared = json(&format!(
@@ -121,7 +126,10 @@ fn removing_drops_only_ours_and_the_containers_it_empties() {
 #[test]
 fn a_shape_it_cannot_edit_is_refused() {
     for bad in [r"[]", r#"{"hooks":[]}"#, r#"{"hooks":{"SessionStart":{}}}"#] {
-        assert!(settings::with_hook(json(bad), &ours()).is_err(), "{bad}");
+        assert!(
+            settings::with_hook(json(bad), &ours(), None).is_err(),
+            "{bad}"
+        );
         assert!(settings::without_hook(json(bad), None).is_err(), "{bad}");
     }
 }
@@ -293,11 +301,11 @@ fn only_the_exact_generated_command_is_ours() {
             Value::from(theirs).to_json_string()
         ));
         assert_eq!(
-            settings::state(&settings, &ours()),
+            settings::state(&settings, &ours(), None),
             Ok(State::Missing),
             "{theirs}"
         );
-        let added = settings::with_hook(settings.clone(), &ours()).expect("adds");
+        let added = settings::with_hook(settings.clone(), &ours(), None).expect("adds");
         assert_eq!(
             added["hooks"]["SessionStart"][0], settings["hooks"]["SessionStart"][0],
             "{theirs}"
@@ -309,9 +317,9 @@ fn only_the_exact_generated_command_is_ours() {
         );
     }
     for moved in ["/it's/rusty-mux-ctl", r"C:\Program Files\rusty-mux-ctl.exe"] {
-        let old = settings::with_hook(json("{}"), &settings::command(moved)).expect("adds");
+        let old = settings::with_hook(json("{}"), &settings::command(moved), None).expect("adds");
         assert_eq!(
-            settings::state(&old, &ours()),
+            settings::state(&old, &ours(), None),
             Ok(State::Outdated),
             "{moved}"
         );
@@ -675,10 +683,8 @@ fn opencode_and_pi_hooks_are_whole_files_naming_this_ctl() {
     );
     for text in [scripts::opencode(CTL), scripts::pi(CTL)] {
         assert!(text.starts_with(scripts::MARK));
-        assert!(
-            text.contains(r#"const CTL = "/opt/rusty mux/bin/rusty-mux-ctl";"#),
-            "{text}"
-        );
+        let line = format!("const CTL = {};", Value::from(CTL).to_json_string());
+        assert!(text.contains(&line), "{text}");
     }
     let status = in_home(
         AgentCommand::Status,
@@ -1075,4 +1081,82 @@ fn claude_can_share_the_skill_too() {
     )
     .expect("remove");
     assert!(!skill.exists());
+}
+
+/// Review on #1372: Codex on Windows runs a hook in the session's shell
+/// (PowerShell, `cmd.exe` or Git Bash), so its Windows command is a plain
+/// path all three run, and a path one of them would misread is refused.
+#[test]
+fn codex_gets_a_windows_command_every_windows_shell_runs() {
+    assert_eq!(
+        settings::windows_command(r"C:\Users\me\.cargo\bin\rusty-mux-ctl.exe"),
+        Ok("C:/Users/me/.cargo/bin/rusty-mux-ctl.exe agent hook".to_owned())
+    );
+    for bad in [
+        r"C:\Program Files\rusty-mux-ctl.exe",
+        r"C:\a&b\rusty-mux-ctl.exe",
+        r"C:\it's\rusty-mux-ctl.exe",
+        r"C:\$x\rusty-mux-ctl.exe",
+        r"C:\a(b)\rusty-mux-ctl.exe",
+        r"C:\a%b%\rusty-mux-ctl.exe",
+        "",
+    ] {
+        assert!(settings::windows_command(bad).is_err(), "{bad}");
+    }
+    // Ours with the Windows command, and updated when it changes.
+    let windows = "C:/new/rusty-mux-ctl.exe agent hook";
+    let added = settings::with_hook(json("{}"), &ours(), Some(windows)).expect("adds");
+    let hook = &added["hooks"]["SessionStart"][0]["hooks"][0];
+    assert_eq!(hook["commandWindows"].as_str(), Some(windows));
+    assert_eq!(
+        settings::state(&added, &ours(), Some(windows)),
+        Ok(State::Installed)
+    );
+    assert_eq!(settings::state(&added, &ours(), None), Ok(State::Outdated));
+    let other = "C:/old/rusty-mux-ctl.exe agent hook";
+    assert_eq!(
+        settings::state(&added, &ours(), Some(other)),
+        Ok(State::Outdated)
+    );
+    let moved = settings::with_hook(added, &ours(), Some(other)).expect("updates");
+    assert_eq!(
+        settings::state(&moved, &ours(), Some(other)),
+        Ok(State::Installed)
+    );
+    let back = settings::with_hook(moved, &ours(), None).expect("updates");
+    let hook = &back["hooks"]["SessionStart"][0]["hooks"][0];
+    assert!(hook.get("commandWindows").is_none(), "{back:?}");
+    assert_eq!(settings::without_hook(back, None), Ok(json("{}")));
+}
+
+/// Review on #1372: on Windows, a ctl path Codex's shells would misread
+/// makes Codex's hook `unsupported`: setup refuses it before writing, and
+/// the other agents and remove are unaffected.
+#[test]
+fn codex_on_windows_refuses_a_path_its_shells_misread() {
+    let homes = AgentHomes {
+        home: Some("/h".into()),
+        ..AgentHomes::default()
+    };
+    let on_windows = |agent, ctl| {
+        layout::layout_on(agent, &AgentScope::User, &homes, None, ctl, true).expect("layout")
+    };
+    let spaced = r"C:\Program Files\rusty-mux\rusty-mux-ctl.exe";
+    let codex = on_windows(AgentKind::Codex, spaced);
+    assert!(codex.unsupported.is_some());
+    assert!(on_windows(AgentKind::Claude, spaced).unsupported.is_none());
+    let plain = on_windows(AgentKind::Codex, r"C:\bin\rusty-mux-ctl.exe");
+    assert!(plain.unsupported.is_none());
+    let Hook::Settings { windows, .. } = &plain.hook else {
+        panic!("Codex takes a settings hook");
+    };
+    assert_eq!(
+        windows.as_deref(),
+        Some("C:/bin/rusty-mux-ctl.exe agent hook")
+    );
+
+    let lines = status(std::slice::from_ref(&codex));
+    assert_eq!(lines[1].word, "unsupported");
+    let err = setup(&[codex], false).err().expect("refused");
+    assert!(err.contains("Program Files"), "{err}");
 }

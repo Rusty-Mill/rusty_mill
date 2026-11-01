@@ -48,6 +48,9 @@ pub(crate) enum State {
     /// A file `status` could not read, or a settings file it cannot edit;
     /// setup and remove refuse it with the reason.
     Unreadable,
+    /// A hook setup cannot install here (Codex on Windows with a path its
+    /// shells would misread); setup refuses it with the reason.
+    Unsupported,
 }
 
 /// What setup or remove did, or with `--dry-run` would do, to one file.
@@ -198,7 +201,10 @@ fn status(layouts: &[Layout]) -> Vec<Line> {
     let mut lines = Vec::new();
     for layout in layouts {
         let skill = skill_state(&layout.skill).unwrap_or(State::Unreadable);
-        let hook = hook_state(&layout.hook).unwrap_or(State::Unreadable);
+        let hook = match layout.unsupported {
+            Some(_) => State::Unsupported,
+            None => hook_state(&layout.hook).unwrap_or(State::Unreadable),
+        };
         lines.push(line(
             layout.agent,
             "skill",
@@ -218,9 +224,16 @@ fn status(layouts: &[Layout]) -> Vec<Line> {
 /// The state of the hook `hook` describes.
 fn hook_state(hook: &Hook) -> Result<State, String> {
     match hook {
-        Hook::Settings { file, command, .. } => match read(file)? {
+        Hook::Settings {
+            file,
+            command,
+            windows,
+            ..
+        } => match read(file)? {
             None => Ok(State::Missing),
-            Some((_, value)) => settings::state(&value, command).map_err(|e| at(file, e)),
+            Some((_, value)) => {
+                settings::state(&value, command, windows.as_deref()).map_err(|e| at(file, e))
+            }
         },
         Hook::Script { file, text } => marked_state(file, text, |t| t.starts_with(scripts::MARK)),
     }
@@ -238,6 +251,9 @@ fn has_hook(hook: &Hook) -> Result<bool, String> {
 fn setup(layouts: &[Layout], dry_run: bool) -> Result<Vec<Line>, String> {
     let mut plan = Vec::new();
     for layout in layouts {
+        if let Some(reason) = &layout.unsupported {
+            return Err(reason.clone());
+        }
         let skill = skill_state(&layout.skill)?;
         if skill == State::Foreign {
             return Err(foreign(&layout.skill));
@@ -288,6 +304,7 @@ fn install_hook(hook: &Hook, state: State) -> Result<(), String> {
             file,
             backup,
             command,
+            windows,
         } => {
             let value = match read(file)? {
                 Some((text, value)) => {
@@ -299,7 +316,8 @@ fn install_hook(hook: &Hook, state: State) -> Result<(), String> {
                 }
                 None => Value::Object(Map::new()),
             };
-            let value = settings::with_hook(value, command).map_err(|e| at(file, e))?;
+            let value =
+                settings::with_hook(value, command, windows.as_deref()).map_err(|e| at(file, e))?;
             write_new(file, &pretty(&value))
         }
     }
@@ -317,7 +335,7 @@ fn set_done(state: State) -> Done {
     match state {
         State::Installed => Done::Unchanged,
         State::Outdated => Done::Updated,
-        State::Missing | State::Foreign | State::Unreadable => Done::Installed,
+        State::Missing | State::Foreign | State::Unreadable | State::Unsupported => Done::Installed,
     }
 }
 
@@ -348,7 +366,7 @@ fn remove(layouts: &[Layout], neighbours: &[Layout], dry_run: bool) -> Result<Ve
     for (layout, skill, hook, shared) in plan {
         let skill = match skill {
             State::Missing => Done::Absent,
-            State::Foreign | State::Unreadable => Done::Kept,
+            State::Foreign | State::Unreadable | State::Unsupported => Done::Kept,
             State::Installed | State::Outdated if shared => Done::Shared,
             State::Installed | State::Outdated => {
                 if !dry_run {
@@ -602,6 +620,7 @@ const fn state_word(state: State) -> &'static str {
         State::Missing => "missing",
         State::Foreign => "foreign",
         State::Unreadable => "unreadable",
+        State::Unsupported => "unsupported",
     }
 }
 

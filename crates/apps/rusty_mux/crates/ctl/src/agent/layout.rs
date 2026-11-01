@@ -26,6 +26,9 @@ pub(super) struct Layout {
     pub agent: AgentKind,
     pub skill: PathBuf,
     pub hook: Hook,
+    /// Why setup cannot install this hook here, if it cannot; status calls
+    /// it `unsupported`, and remove still works.
+    pub unsupported: Option<String>,
 }
 
 /// The session-start hook, as the agent wants it.
@@ -36,6 +39,9 @@ pub(super) enum Hook {
         file: PathBuf,
         backup: PathBuf,
         command: String,
+        /// Codex's command for Windows, where it runs hooks in the
+        /// session's shell rather than a POSIX one.
+        windows: Option<String>,
     },
     /// A whole file setup writes: a plugin or an extension.
     Script { file: PathBuf, text: String },
@@ -58,15 +64,36 @@ pub(super) fn layout(
     cwd: Option<&Path>,
     ctl: &str,
 ) -> Result<Layout, String> {
+    layout_on(agent, scope, homes, cwd, ctl, cfg!(windows))
+}
+
+/// [`layout`], for Windows or not.
+pub(super) fn layout_on(
+    agent: AgentKind,
+    scope: &AgentScope,
+    homes: &AgentHomes,
+    cwd: Option<&Path>,
+    ctl: &str,
+    windows: bool,
+) -> Result<Layout, String> {
     let roots = Roots::new(scope, homes, cwd)?;
     let skill_base = match agent {
         AgentKind::Claude => roots.claude()?,
         AgentKind::Codex | AgentKind::OpenCode | AgentKind::Pi => roots.agents()?,
     };
     let skill = skill_base.join("skills").join("rusty-mux").join("SKILL.md");
+    let mut unsupported = None;
     let hook = match agent {
-        AgentKind::Claude => settings(roots.claude()?.join("settings.json"), ctl),
-        AgentKind::Codex => settings(roots.codex()?.join("hooks.json"), ctl),
+        AgentKind::Claude => settings(roots.claude()?.join("settings.json"), ctl, None),
+        AgentKind::Codex => {
+            let command = match windows {
+                true => super::settings::windows_command(ctl)
+                    .map_err(|reason| unsupported = Some(reason))
+                    .ok(),
+                false => None,
+            };
+            settings(roots.codex()?.join("hooks.json"), ctl, command)
+        }
         AgentKind::OpenCode => Hook::Script {
             file: roots.opencode()?.join("rusty-mux.js"),
             text: scripts::opencode(ctl),
@@ -76,16 +103,22 @@ pub(super) fn layout(
             text: scripts::pi(ctl),
         },
     };
-    Ok(Layout { agent, skill, hook })
+    Ok(Layout {
+        agent,
+        skill,
+        hook,
+        unsupported,
+    })
 }
 
-fn settings(file: PathBuf, ctl: &str) -> Hook {
+fn settings(file: PathBuf, ctl: &str, windows: Option<String>) -> Hook {
     let mut backup = file.clone().into_os_string();
     backup.push(".rusty-mux.bak");
     Hook::Settings {
         file,
         backup: backup.into(),
         command: super::settings::command(ctl),
+        windows,
     }
 }
 
