@@ -175,7 +175,8 @@ async function api(op,args={}){
   if(!r.ok){const e=new Error(j.error||r.statusText);e.status=r.status;throw e}
   return j;
 }
-const who=()=>({actor:$("actor").value.trim(),role:$("role").value});
+/* A per-model token fixes who you are: send nothing, so a role renamed under you never disagrees. */
+const who=()=>$("actor").disabled?{}:{actor:$("actor").value.trim(),role:$("role").value};
 function toast(m){const t=$("toast");t.textContent=m;t.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display="none",3500)}
 // Run a write as the current actor, then re-read the board. Resolves to the reply, or null after showing the error.
 async function act(op,args){
@@ -440,8 +441,8 @@ function drawSettings(){
   box.append(tabs,{agents:agentsTab,repos:reposTab,roles:rolesTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
   d.replaceChildren(box);
 }
-/* After a change: re-read the settings, the board's roles and projects, and redraw. */
-async function changed(){try{cfg=await setting("settings_get");await loadMeta()}catch(e){toast(e.message)}drawSettings();render()}
+/* After a change: re-read the board's roles and projects (who you are may have changed), then the settings, and redraw. */
+async function changed(){try{await loadMeta();cfg=await setting("settings_get")}catch(e){toast(e.message)}drawSettings();render()}
 function guard(errBox,fn){return async()=>{errBox.textContent="";try{await fn();await changed()}catch(e){errBox.textContent=e.message;errBox.scrollIntoView?.({block:"nearest"})}}}
 const field=(tag,props={})=>Object.assign(el(tag),props);
 const unwritable=what=>el("p","This is not kept in a file, so it is read-only here. Start the board with --settings-dir DIR (or "+what+") to manage it from this view.","note");
@@ -477,7 +478,7 @@ function agentsTab(){
     const save=el("button","Save"),rot=el("button","New token"),del=el("button","Remove");[save,rot,del].forEach(b=>{b.type="button"});
     save.onclick=guard(err,()=>setting("settings_agent_update",{agent:{name:a.actor,role:role.value,projects:pick.value()}}));
     rot.onclick=guard(err,async()=>{const r=await setting("settings_agent_rotate",{name:a.actor});secret={name:a.actor,token:r.token};
-      if(a.actor===who().actor)setToken(r.token)});
+      if(a.actor===$("actor").value)setToken(r.token)});
     del.onclick=guard(err,async()=>{if(!confirm("Remove "+a.actor+"? Its token stops working."))return;await setting("settings_agent_remove",{name:a.actor});secret=null});
     acts.append(save," ",rot," ",del);
     const r=el("td"),p=el("td");r.append(role);p.append(pick);tr.append(name,r,p,acts);tbl.append(tr);
