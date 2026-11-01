@@ -31,6 +31,7 @@ use crate::input::{self, KeyFor};
 use crate::msg::{self, ApiMsg, api};
 use crate::sched::{MAX_RETAINED_PER_CALL, PACKET_INPUT_CAP, WRITE_BACK_CAP};
 
+mod cells;
 mod output;
 mod read;
 #[cfg(any(test, feature = "fuzz"))]
@@ -451,6 +452,8 @@ enum Text {
     /// SetConsoleTextAttribute's attribute, made into SGR when it is
     /// emitted, so the pen it leaves is the one its gridlines go with.
     Attr(u16),
+    /// Cells painted a step at a time (fill, scroll, WriteConsoleOutput).
+    Cells(Box<cells::Paint>),
 }
 
 impl Text {
@@ -459,7 +462,7 @@ impl Text {
             Text::Wide(units) => units.len(),
             Text::Bytes(bytes) => bytes.len(),
             Text::Coded { units, .. } => *units,
-            Text::CursorTo(..) | Text::Attr(_) => 1,
+            Text::CursorTo(..) | Text::Attr(_) | Text::Cells(_) => 1,
         }
     }
 
@@ -469,6 +472,7 @@ impl Text {
             Text::Wide(units) => units.len() * 2,
             Text::Bytes(bytes) | Text::Coded { bytes, .. } => bytes.len(),
             Text::CursorTo(..) | Text::Attr(_) => 0,
+            Text::Cells(paint) => paint.retained(),
         }
     }
 
@@ -476,7 +480,7 @@ impl Text {
     /// position. A slice's VT is at most [`SLICE`] bytes. `first`: `at`
     /// is the start of the client's call, not of a streamed slice.
     fn emit(
-        &self,
+        &mut self,
         (at, first): (usize, bool),
         origin: Origin,
         codec: &Codec,
@@ -485,15 +489,16 @@ impl Text {
         replies: &mut Vec<u8>,
     ) -> usize {
         match self {
-            &Text::CursorTo(x, y) => {
+            &mut Text::CursorTo(x, y) => {
                 let vt = screen.absolute_cup(x, y);
                 screen.host(&vt, out);
                 1
             }
-            &Text::Attr(attr) => {
+            &mut Text::Attr(attr) => {
                 screen.set_attributes(attr, out);
                 1
             }
+            Text::Cells(paint) => usize::from(paint.step(screen, out, codec)),
             Text::Bytes(bytes) => match origin {
                 Origin::Client(mode) => {
                     at + screen.client(&bytes[at..], mode, SLICE, first, out, replies)
@@ -1151,6 +1156,22 @@ impl Console {
             api::SET_CURSOR_POSITION => return self.set_cursor_position(p, fixed, out, fx),
             api::SET_TEXT_ATTRIBUTE => return self.set_text_attribute(p, fixed, out, fx),
             api::GET_CURRENT_FONT => self.get_current_font(p.object, &mut fixed),
+            api::FILL_OUTPUT => return self.fill_output(p, fixed, out, fx),
+            api::SCROLL_SCREEN_BUFFER => return self.scroll_screen_buffer(p, fixed, out, fx),
+            api::WRITE_OUTPUT => return self.write_output(p, m, fixed, out, fx),
+            api::WRITE_OUTPUT_STRING => return self.write_output_string(p, m, fixed, out, fx),
+            api::READ_OUTPUT => {
+                fx.push(Effect::Reply(self.read_output(p, m, fixed)));
+                return;
+            }
+            api::READ_OUTPUT_STRING => {
+                fx.push(Effect::Reply(self.read_output_string(p, m, fixed)));
+                return;
+            }
+            api::SET_SCREEN_BUFFER_SIZE => self.set_screen_buffer_size(p.object, &fixed),
+            api::SET_WINDOW_INFO => self.set_window_info(p.object, &fixed),
+            api::GET_LARGEST_WINDOW_SIZE => self.get_largest_window_size(p.object, &mut fixed),
+            api::SET_SCREEN_BUFFER_INFO => self.set_screen_buffer_info(p.object, &fixed),
             api::GET_CONSOLE_WINDOW => get_console_window(&mut fixed),
             api::SET_CURRENT_FONT => self.set_current_font(p.object, &fixed),
             api::GET_CONSOLE_PROCESS_LIST => {
@@ -1662,9 +1683,12 @@ impl Console {
             // at a slice's end, whose next slice may hold marks that
             // join the glyph.
             self.screen.end_write(out);
-            let Some(done) = self.writes.pop_front() else {
+            let Some(mut done) = self.writes.pop_front() else {
                 return;
             };
+            if let Text::Cells(paint) = &done.text {
+                paint.complete(&mut done.reply.write_back, &self.codec);
+            }
             self.parked -= done.retained;
             if Some(done.reply.id) == current {
                 fx.push(Effect::Reply(done.reply));
