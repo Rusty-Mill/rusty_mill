@@ -140,7 +140,13 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
                             need.join(" or ")
                         ));
                     }
-                    Ok(Some(t)) if t.gate && !caps.contains(&Capability::Admin) => {
+                    // Some way of making the move must be one the role can pass: its
+                    // capability, plus Admin for a gate.
+                    Ok(Some(ts))
+                        if !ts.iter().any(|t| {
+                            caps.contains(&t.cap) && (!t.gate || caps.contains(&Capability::Admin))
+                        }) =>
+                    {
                         return Err(format!(
                             "stage {:?}: {from} -> {to} is a gate (a human approval) and role {:?} lacks Admin",
                             s.name, s.role
