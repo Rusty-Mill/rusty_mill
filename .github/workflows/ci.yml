@@ -1765,6 +1765,7 @@ jobs:
     name: rusty_conhost fuzz smoke
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       FUZZ_TOOLCHAIN: nightly-2026-10-07
     steps:
