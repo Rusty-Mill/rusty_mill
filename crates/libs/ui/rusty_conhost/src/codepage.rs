@@ -65,6 +65,13 @@ impl CodePage {
         self.cp == UTF8
     }
 
+    /// A code page whose decoding carries shift state from byte to byte:
+    /// UTF-7, the ISO-2022 family and HZ. A write in one decodes whole,
+    /// so it can't be streamed in slices (design §7.4).
+    pub(crate) fn is_stateful(self) -> bool {
+        matches!(self.cp, UTF7 | 50220..=50229 | 52936)
+    }
+
     fn is_lead(self, b: u8) -> bool {
         b >= 0x80 && self.lead & 1 << (b - 0x80) != 0
     }

@@ -894,7 +894,7 @@ impl Console {
             fx.push(Effect::Reply(Reply::status(p.id, msg::STATUS_UNSUCCESSFUL)));
             return;
         }
-        if p.input_size as usize > PACKET_INPUT_CAP && !streams(&p) {
+        if p.input_size as usize > PACKET_INPUT_CAP && !self.streams(&p) {
             fx.push(Effect::Reply(Reply::status(
                 p.id,
                 msg::STATUS_INVALID_PARAMETER,
@@ -1525,6 +1525,22 @@ impl Console {
         self.pump(Some(id), out, fx);
     }
 
+    /// Whether a packet over [`PACKET_INPUT_CAP`] is served a slice at a
+    /// time rather than refused: a raw write or WriteConsole, whose text
+    /// needn't be held whole (§7.4). Not ANSI text in a stateful output
+    /// code page, whose shift state a slice boundary would lose.
+    fn streams(&self, p: &Packet<'_>) -> bool {
+        let ansi_ok = !self.output_cp.is_stateful();
+        match p.function {
+            msg::RAW_WRITE => ansi_ok,
+            msg::USER_DEFINED => msg::api_msg(p.payload).is_some_and(|m| {
+                m.number == api::WRITE_CONSOLE
+                    && (ansi_ok || msg::bool_at(m.fixed, 4) == Some(true))
+            }),
+            _ => false,
+        }
+    }
+
     /// The next slice of the front write's input has arrived: it becomes
     /// the write's text, in place of the slice just emitted. A slice the
     /// driver could not read fails the call.
@@ -1634,19 +1650,6 @@ impl Console {
                 fx.push(Effect::Complete(done.reply));
             }
         }
-    }
-}
-
-/// Whether a packet over [`PACKET_INPUT_CAP`] is served a slice at a
-/// time rather than refused: a raw write or WriteConsole, whose text
-/// needn't be held whole (§7.4).
-fn streams(p: &Packet<'_>) -> bool {
-    match p.function {
-        msg::RAW_WRITE => true,
-        msg::USER_DEFINED => {
-            msg::api_msg(p.payload).is_some_and(|m| m.number == api::WRITE_CONSOLE)
-        }
-        _ => false,
     }
 }
 
@@ -2639,6 +2642,45 @@ pub(crate) mod tests {
             out.extend([c, c, c]);
         }
         Some(out)
+    }
+
+    /// A stateful output code page would lose its shift state at a slice
+    /// boundary, so ANSI text past the cap is refused there; W text, which
+    /// no code page touches, still streams.
+    #[test]
+    fn a_stateful_code_page_refuses_ansi_writes_past_the_cap() {
+        for cp in [codepage::UTF7, 50220, 52936] {
+            let mut h = Host::new();
+            h.c = Console::new(
+                WinSize { rows: 24, cols: 80 },
+                input::us_key_for,
+                Codec {
+                    valid: |_| true,
+                    decode: shifting,
+                    encode: |_, text| Some(text.as_bytes().to_vec()),
+                },
+            );
+            let [_, _, output] = h.connect(1, "");
+            assert_eq!(h.set_cp(cp, true), msg::STATUS_SUCCESS);
+            let big = vec![b'q'; PACKET_INPUT_CAP + 1];
+            let (r, _) = h.packet(msg::RAW_WRITE, 1, output, &big, 0);
+            assert_eq!(r.status, msg::STATUS_INVALID_PARAMETER, "raw, cp {cp}");
+            let r = h.call(output, api::WRITE_CONSOLE, &[0; 8], &big, 0);
+            assert_eq!(r.status, msg::STATUS_INVALID_PARAMETER, "A, cp {cp}");
+            let r = h.call(
+                output,
+                api::WRITE_CONSOLE,
+                &[0, 0, 0, 0, 1, 0, 0, 0],
+                &big,
+                0,
+            );
+            let r = answered(&mut h, r);
+            assert_eq!(r.status, msg::STATUS_SUCCESS, "W, cp {cp}");
+            assert!(h.fetches >= 1);
+            // At or under the cap, A text still decodes whole.
+            let (r, _) = h.packet(msg::RAW_WRITE, 1, output, &big[1..], 0);
+            assert_ne!(r.status, msg::STATUS_INVALID_PARAMETER, "cp {cp}");
+        }
     }
 
     #[test]
