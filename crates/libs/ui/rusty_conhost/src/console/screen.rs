@@ -435,8 +435,8 @@ impl Screen {
     /// and each character once, a wide one from its leading cell. A
     /// leading cell at the end or a trailing one at the start can't hold
     /// its half and shows a space. All of it sits between DECSC and DECRC,
-    /// as conhost's `BackupCursor` puts it, so the cursor and pen stay;
-    /// origin mode goes off inside, so the CUP is absolute.
+    /// as conhost's `BackupCursor` puts it, so the cursor and pen (with its
+    /// gridlines) stay; origin mode goes off inside, so the CUP is absolute.
     pub(super) fn paint(&mut self, x: usize, y: usize, cells: &[CharInfo], out: &mut OutputQueue) {
         let Some(last) = cells.len().checked_sub(1) else {
             return;
@@ -477,7 +477,13 @@ impl Screen {
             vt.extend_from_slice(b"\x1b[?6h");
         }
         vt.extend_from_slice(b"\x1b8");
+        // Held client bytes go first and may reset the pen themselves; the
+        // paint's own SGR 0 is not the client's, and DECRC can't restore
+        // the gridlines, so they come back by hand.
+        self.flush(out);
+        let meta = self.legacy_meta;
         self.host(&vt, out);
+        self.legacy_meta = meta;
     }
 
     /// The first 16 palette entries as `COLORREF`s (`0x00BBGGRR`), in

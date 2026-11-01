@@ -1443,6 +1443,71 @@ mod tests {
         assert_eq!(h.c.screen.cells(199, 399, 400)[0].attr, 0x1e);
     }
 
+    /// A pen with a gridline (`COMMON_LVB_GRID_RVERTICAL`), which no SGR
+    /// carries: only the host's own record keeps it.
+    const GRID_PEN: u16 = 0x0807;
+
+    fn set_pen(h: &mut Host, out: usize, attr: u16) {
+        let r = h.call(out, api::SET_TEXT_ATTRIBUTE, &attr.to_le_bytes(), &[], 0);
+        assert_eq!(r.status, msg::STATUS_SUCCESS);
+    }
+
+    fn pen(h: &mut Host, out: usize) -> u16 {
+        let r = h.call(out, api::GET_SCREEN_BUFFER_INFO, &[0; 92], &[], 0);
+        msg::u16_at(&r.write_back, 12).expect("wAttributes")
+    }
+
+    #[test]
+    fn painting_keeps_the_pens_gridlines() {
+        let (mut h, out) = host();
+        set_pen(&mut h, out, GRID_PEN);
+        fill(&mut h, out, REAL_UNICODE, u16::from(b'x'), 1, (0, 0));
+        assert_eq!(row(&h, 0), "x         ");
+        assert_eq!(pen(&mut h, out), GRID_PEN, "after a character fill");
+        fill(&mut h, out, ATTRIBUTE, 0x1e, 2, (0, 1));
+        assert_eq!(attrs(&h, 1)[..3], [0x1e, 0x1e, 7]);
+        assert_eq!(pen(&mut h, out), GRID_PEN, "after an attribute fill");
+        write_block(&mut h, out, &[info('b', 0x2f)], [3, 2, 3, 2]);
+        assert_eq!(row(&h, 2), "   b      ");
+        assert_eq!(pen(&mut h, out), GRID_PEN, "after a block write");
+        scroll(&mut h, out, [0, 0, 9, 0], None, (0, 3), info('-', 0x07));
+        assert_eq!(row(&h, 3), "x         ");
+        assert_eq!(pen(&mut h, out), GRID_PEN, "after a scroll");
+    }
+
+    #[test]
+    fn every_slice_of_a_held_paint_keeps_the_pens_gridlines() {
+        let mut h = Host::sized(WinSize {
+            rows: 200,
+            cols: 400,
+        });
+        let [_, _, out] = h.connect(1, "");
+        set_pen(&mut h, out, GRID_PEN);
+        let r = fill(&mut h, out, ATTRIBUTE, 0x1e, 80_000, (0, 0));
+        assert_eq!(r.status, i32::MIN, "held: more than one slice");
+        let mut done = false;
+        for _ in 0..100 {
+            let fx = h.drain();
+            assert_eq!(h.c.screen.attributes(), GRID_PEN, "between slices");
+            done = fx.iter().any(|e| matches!(e, Effect::Complete(_)));
+            if done {
+                break;
+            }
+        }
+        assert!(done, "the fill completes");
+        assert_eq!(h.c.screen.cells(199, 399, 400)[0].attr, 0x1e);
+        assert_eq!(pen(&mut h, out), GRID_PEN);
+    }
+
+    #[test]
+    fn a_client_reset_still_clears_the_gridlines() {
+        let (mut h, out) = host();
+        set_pen(&mut h, out, GRID_PEN);
+        fill(&mut h, out, REAL_UNICODE, u16::from(b'x'), 1, (0, 0));
+        h.write_a(out, b"\x1b[0m");
+        assert_eq!(pen(&mut h, out), 0x07);
+    }
+
     #[test]
     fn a_split_run_keeps_wide_halves_together() {
         let mut row = vec![info('a', 7); CHUNK - 1];
