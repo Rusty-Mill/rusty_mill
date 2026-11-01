@@ -35,6 +35,12 @@
 //! waiter already consumed is not passed on: a permit it took, or a
 //! wakeup that `poll` returned `Ready` for or `enable` returned `true`
 //! for. Nor is a `notify_waiters` wakeup.
+//!
+//! As in tokio, a `Notified` receives `notify_waiters` wakeups from the
+//! moment it is created, even if it has not been polled or enabled yet:
+//! `notify_waiters` counts its calls, each waiter keeps the count it saw
+//! when it was created, and a waiter that finds the count changed when it
+//! first takes the queue lock is notified instead of queued.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -48,6 +54,8 @@ use std::task::{Context, Poll, Waker};
 /// waker exists (see this module's own docs), with the real waker
 /// filled in later once `poll` actually runs.
 struct WaiterState {
+    /// [`Inner::notify_waiters_calls`] when this waiter was created.
+    notify_waiters_calls: usize,
     woken: AtomicBool,
     /// Set, under the queue lock as the waiter leaves the queue, to the
     /// [`End`] a `notify_one` or `notify_last` took it from, so dropping
@@ -59,8 +67,9 @@ struct WaiterState {
 }
 
 impl WaiterState {
-    fn new() -> Arc<Self> {
+    fn new(notify_waiters_calls: usize) -> Arc<Self> {
         Arc::new(WaiterState {
+            notify_waiters_calls,
             woken: AtomicBool::new(false),
             forward: AtomicU8::new(NO_END),
             waker: Mutex::new(None),
@@ -91,6 +100,10 @@ impl End {
 
 struct Inner {
     permits: usize,
+    /// How many times `notify_waiters` ran, wrapping. Like tokio 1.53's
+    /// `NOTIFY_WAITERS_CALLS_MASK` bits of `Notify::state`, but guarded
+    /// by this lock rather than atomic.
+    notify_waiters_calls: usize,
     waiters: VecDeque<Arc<WaiterState>>,
 }
 
@@ -103,6 +116,7 @@ impl Notify {
         Notify {
             inner: Mutex::new(Inner {
                 permits: 0,
+                notify_waiters_calls: 0,
                 waiters: VecDeque::new(),
             }),
         }
@@ -117,6 +131,7 @@ impl Notify {
         Notify {
             inner: Mutex::new(Inner {
                 permits: 0,
+                notify_waiters_calls: 0,
                 waiters: VecDeque::new(),
             }),
         }
@@ -165,11 +180,13 @@ impl Notify {
     /// Wakes every task currently waiting -- each one's own `woken` flag
     /// is set first (see this module's docs for why that's required,
     /// unlike a naive port of `notify_one`'s wake-and-hope approach).
-    /// Nothing is banked for a `notified()` call made *after* this
-    /// returns; that call waits for the next notification, same as
-    /// tokio's semantics.
+    /// That includes every `Notified` created before this call, even one
+    /// not yet polled or enabled. Nothing is banked for a `notified()`
+    /// call made *after* this returns; that call waits for the next
+    /// notification, same as tokio's semantics.
     pub fn notify_waiters(&self) {
         let mut guard = self.inner.lock().unwrap();
+        guard.notify_waiters_calls = guard.notify_waiters_calls.wrapping_add(1);
         let waiters = std::mem::take(&mut guard.waiters);
         drop(guard);
         for state in waiters {
@@ -195,8 +212,14 @@ impl Notify {
             notify: self,
             registered: false,
             done: false,
-            state: WaiterState::new(),
+            state: WaiterState::new(self.notify_waiters_calls()),
         }
+    }
+
+    /// The current `notify_waiters` call count, which a new waiter keeps
+    /// to tell whether a `notify_waiters` ran after it was created.
+    fn notify_waiters_calls(&self) -> usize {
+        self.inner.lock().unwrap().notify_waiters_calls
     }
 
     /// Like [`notified`](Self::notified), but the returned future owns
@@ -208,7 +231,7 @@ impl Notify {
             notify: self.clone(),
             registered: false,
             done: false,
-            state: WaiterState::new(),
+            state: WaiterState::new(self.notify_waiters_calls()),
         }
     }
 }
@@ -265,6 +288,9 @@ fn poll_waiter(
     }
     let mut guard = notify.inner.lock().unwrap();
     if !*registered {
+        if missed_notify_waiters(&guard, state) {
+            return Poll::Ready(());
+        }
         if guard.permits > 0 {
             guard.permits -= 1;
             return Poll::Ready(());
@@ -285,6 +311,20 @@ fn poll_waiter(
         return Poll::Ready(());
     }
     Poll::Pending
+}
+
+/// Whether a `notify_waiters` ran after `state`'s waiter was created but
+/// before it joined the queue, which notifies it as if it had been queued
+/// (tokio 1.53 `poll_notified`, `State::Init`). Checked under the queue
+/// lock, which `notify_waiters` counts under, and before a permit is
+/// taken, so the permit is left for another waiter as tokio leaves it.
+/// Marks the waiter woken, so later polls return `Ready` too.
+fn missed_notify_waiters(guard: &Inner, state: &WaiterState) -> bool {
+    if guard.notify_waiters_calls == state.notify_waiters_calls {
+        return false;
+    }
+    state.woken.store(true, Ordering::Release);
+    true
 }
 
 /// Registers `state` as a waiter (if it isn't already), *without* a
@@ -318,6 +358,9 @@ fn enable_waiter(notify: &Notify, registered: &mut bool, state: &Arc<WaiterState
         return false;
     }
     let mut guard = notify.inner.lock().unwrap();
+    if missed_notify_waiters(&guard, state) {
+        return true;
+    }
     if guard.permits > 0 {
         guard.permits -= 1;
         // `enable` sets `done`, which makes every later poll `Ready`.
@@ -502,6 +545,102 @@ mod tests {
             notify.notify_waiters();
         }
         assert!(poll(pin!(notify.notified())).is_pending());
+    }
+
+    // tokio guarantees a `Notified` receives `notify_waiters` wakeups
+    // from the moment it is created, polled or not (#576).
+
+    #[test]
+    fn notify_waiters_reaches_a_created_unpolled_notified() {
+        let notify = Notify::new();
+        let mut created = pin!(notify.notified());
+        notify.notify_waiters();
+        assert!(poll(created.as_mut()).is_ready());
+    }
+
+    #[test]
+    fn notify_waiters_reaches_a_created_unpolled_owned_notified() {
+        let notify = Arc::new(Notify::new());
+        let mut created = pin!(notify.notified_owned());
+        notify.notify_waiters();
+        assert!(poll(created.as_mut()).is_ready());
+    }
+
+    #[test]
+    fn enable_after_notify_waiters_reports_notified() {
+        let notify = Notify::new();
+        let mut created = pin!(notify.notified());
+        notify.notify_waiters();
+        assert!(created.as_mut().enable());
+        assert!(poll(created.as_mut()).is_ready());
+    }
+
+    /// A waiter woken by `notify_waiters` leaves a banked permit for the
+    /// next waiter, as tokio's `poll_notified` checks the call count
+    /// before it takes a permit.
+    #[test]
+    fn a_notify_waiters_wakeup_leaves_the_banked_permit() {
+        let notify = Notify::new();
+        notify.notify_one();
+        let mut created = pin!(notify.notified());
+        notify.notify_waiters();
+        assert!(poll(created.as_mut()).is_ready());
+        assert!(poll(pin!(notify.notified())).is_ready(), "permit left");
+    }
+
+    #[test]
+    fn a_notified_created_after_notify_waiters_still_waits() {
+        let notify = Notify::new();
+        notify.notify_waiters();
+        let mut later = pin!(notify.notified());
+        assert!(poll(later.as_mut()).is_pending());
+        assert!(!later.as_mut().enable());
+    }
+
+    // A `notify_waiters` wakeup a created waiter missed (#1322) is
+    // consumed like any other (#1320): sticky through a poll the coop
+    // budget turns away, and never passed on or charged to a permit.
+
+    #[test]
+    fn a_missed_notify_waiters_wakeup_survives_a_poll_with_no_budget() {
+        let notify = Notify::new();
+        notify.notify_one();
+        let mut created = pin!(notify.notified());
+        notify.notify_waiters();
+        assert!(poll(created.as_mut()).is_ready());
+        assert!(poll_without_budget(created.as_mut()).is_ready());
+        assert!(poll(pin!(notify.notified())).is_ready(), "permit left");
+        assert!(poll(pin!(notify.notified())).is_pending(), "only one");
+    }
+
+    #[test]
+    fn a_missed_notify_waiters_wakeup_enable_reported_leaves_the_permit() {
+        let notify = Notify::new();
+        notify.notify_one();
+        {
+            let mut created = pin!(notify.notified());
+            notify.notify_waiters();
+            assert!(created.as_mut().enable());
+            assert!(created.as_mut().enable(), "still reported");
+            assert!(poll_without_budget(created.as_mut()).is_ready());
+        }
+        assert!(poll(pin!(notify.notified())).is_ready(), "permit left");
+        assert!(poll(pin!(notify.notified())).is_pending(), "only one");
+    }
+
+    /// Dropping a created waiter that missed a `notify_waiters` passes
+    /// nothing on: the queued waiter still waits for its own wakeup.
+    #[test]
+    fn a_missed_notify_waiters_wakeup_is_not_passed_on_when_dropped() {
+        let notify = Arc::new(Notify::new());
+        let mut queued = Box::pin(notify.notified());
+        let created = Box::pin(notify.notified());
+        notify.notify_waiters();
+        assert!(poll(queued.as_mut()).is_ready());
+        let mut next = Box::pin(notify.notified());
+        assert!(!next.as_mut().enable());
+        drop(created);
+        assert!(poll(next.as_mut()).is_pending());
     }
 
     /// Two waiters, registered by `enable` as tokio's borrowed and owned

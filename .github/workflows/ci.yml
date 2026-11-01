@@ -1892,9 +1892,14 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Install valgrind
+        timeout-minutes: 10
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends valgrind
+          # Retry transient downloads, but bound stalled acquisition and setup.
+          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          # Partial index refreshes must fail before installation starts.
+          sudo apt-get "${apt_options[@]}" --error-on=any update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends valgrind
           valgrind --version
           objdump --version | head -1
       - name: Harness self-test (planted leaks must be caught)
