@@ -95,7 +95,7 @@ fn runner_drives_a_card_to_review_over_http_and_stops_there() {
         .add(&human, "Add retry", "make it retry", vec![])
         .expect("add");
     board
-        .move_card(card.id, Column::Ready, &human)
+        .move_card(card.id, &Column::READY, &human)
         .expect("triage");
 
     let http = HttpBoard::new(&format!("http://{addr}"), Some("tok".into()), "mill-runner")
@@ -124,7 +124,7 @@ fn runner_drives_a_card_to_review_over_http_and_stops_there() {
     let done = board.get(card.id).expect("card");
     assert_eq!(
         (done.column, done.claim.clone()),
-        (Column::Review, None),
+        (Column::REVIEW, None),
         "a person merges; the runner never does"
     );
     let notes: Vec<_> = done.comments.iter().map(|c| c.text.as_str()).collect();
@@ -143,14 +143,14 @@ fn a_wrong_token_is_a_clear_error_not_a_hang() {
     let (addr, _) = start(Some("right"));
     let http =
         HttpBoard::new(&format!("http://{addr}"), Some("wrong".into()), "r").expect("client");
-    let e = http.list(Column::Ready).expect_err("unauthorized");
+    let e = http.list(&Column::READY).expect_err("unauthorized");
     assert_eq!(e.status, 401);
 }
 
 #[test]
 fn unreachable_board_is_a_transport_error() {
     let http = HttpBoard::new("http://127.0.0.1:1", None, "r").expect("client");
-    assert_eq!(http.list(Column::Ready).expect_err("refused").status, 0);
+    assert_eq!(http.list(&Column::READY).expect_err("refused").status, 0);
 }
 
 #[test]
@@ -244,7 +244,7 @@ fn scoped_board() -> (SocketAddr, Arc<Shared>) {
     let human = board.roles().actor("nano", "human").expect("role");
     let card = board.add(&human, "Docs", "fix", vec![]).expect("add");
     board
-        .move_card(card.id, Column::Ready, &human)
+        .move_card(card.id, &Column::READY, &human)
         .expect("ready");
     serve(board, Auth::Credentials(creds.shared()))
 }
@@ -307,7 +307,7 @@ fn a_default_scoped_runner_cannot_edit_a_sibling_projects_files() {
         "foreign edit discarded, not committed"
     );
     let card = board
-        .list(Some(Column::Blocked))
+        .list(Some(&Column::BLOCKED))
         .expect("list")
         .into_iter()
         .next()

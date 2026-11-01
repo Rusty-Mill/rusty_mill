@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use rusty_mill_board::domain::{Card, Column};
 use rusty_mill_board::http::Http;
+use rusty_mill_board::workflow::Workflow;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -73,7 +74,7 @@ impl HttpBoard {
 }
 
 impl BoardApi for HttpBoard {
-    fn list(&self, column: Column) -> Result<Vec<Card>, ApiError> {
+    fn list(&self, column: &Column) -> Result<Vec<Card>, ApiError> {
         let out = self.call("board_list", json!({ "column": column }))?;
         serde_json::from_value(out["cards"].clone()).map_err(transport)
     }
@@ -81,6 +82,11 @@ impl BoardApi for HttpBoard {
     fn get(&self, id: Uuid) -> Result<Card, ApiError> {
         let out = self.call("card_get", json!({ "id": id }))?;
         serde_json::from_value(out["card"].clone()).map_err(transport)
+    }
+
+    fn workflow(&self) -> Result<Workflow, ApiError> {
+        let out = self.call("board_columns", json!({}))?;
+        serde_json::from_value(out).map_err(transport)
     }
 
     fn roles(&self) -> Result<Roles, ApiError> {
@@ -98,7 +104,7 @@ impl BoardApi for HttpBoard {
         serde_json::from_value(out["foreign"].clone()).map_err(transport)
     }
 
-    fn move_card(&self, role: &str, id: Uuid, to: Column) -> Result<Card, ApiError> {
+    fn move_card(&self, role: &str, id: Uuid, to: &Column) -> Result<Card, ApiError> {
         self.act("card_move", role, json!({ "id": id, "to": to }))
     }
 

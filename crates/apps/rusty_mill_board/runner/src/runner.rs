@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::thread;
 
-use rusty_mill_board::domain::{Card, Column, required_capability};
+use rusty_mill_board::domain::{Card, Column};
 use uuid::Uuid;
 
 use crate::config::Stage;
@@ -114,6 +114,7 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
     /// A message naming the stage and the first problem found.
     pub fn validate(&self) -> Result<(), String> {
         let roles = self.board.roles().map_err(|e| e.to_string())?;
+        let flow = self.board.workflow().map_err(|e| e.to_string())?;
         self.check_scope()?;
         for s in &self.stages {
             let caps = roles
@@ -123,17 +124,17 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
             let moves = s
                 .from
                 .iter()
-                .filter(|f| Some(**f) != s.enter)
-                .filter_map(|f| s.enter.map(|e| (*f, e)))
-                .chain(s.ok.map(|c| (work, c)))
-                .chain(s.fail.map(|c| (work, c)));
+                .filter(|f| Some(*f) != s.enter.as_ref())
+                .filter_map(|f| s.enter.as_ref().map(|e| (f, e)))
+                .chain(s.ok.as_ref().map(|c| (work, c)))
+                .chain(s.fail.as_ref().map(|c| (work, c)));
             for (from, to) in moves {
-                match required_capability(from, to) {
-                    Err(e) => return Err(format!("stage {:?}: {from:?} -> {to:?}: {e}", s.name)),
-                    Ok(Some(cap)) if !caps.contains(&cap) => {
+                match flow.transition(from, to) {
+                    Err(e) => return Err(format!("stage {:?}: {from} -> {to}: {e}", s.name)),
+                    Ok(Some(t)) if !caps.contains(&t.cap) => {
                         return Err(format!(
-                            "stage {:?}: role {:?} lacks {cap:?} for {from:?} -> {to:?}",
-                            s.name, s.role
+                            "stage {:?}: role {:?} lacks {:?} for {from} -> {to}",
+                            s.name, s.role, t.cap
                         ));
                     }
                     Ok(_) => {}
@@ -177,7 +178,7 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
         // within a stage the later column first (rework before fresh cards).
         for stage in self.stages.iter().rev() {
             for column in stage.from.iter().rev() {
-                for card in self.board.list(*column)? {
+                for card in self.board.list(column)? {
                     let in_scope = self
                         .scope
                         .as_ref()
@@ -219,7 +220,7 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
 
     fn work_card(&self, stage: &Stage, mut card: Card) -> Result<Step, ApiError> {
         let (role, id) = (stage.role.as_str(), card.id);
-        if let Some(enter) = stage.enter.filter(|e| *e != card.column) {
+        if let Some(enter) = stage.enter.as_ref().filter(|e| **e != card.column) {
             card = self.board.move_card(role, id, enter)?;
         }
         if card.claim.as_deref() != Some(&self.actor) {
@@ -235,7 +236,7 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
                     stage.name, stage.max_attempts
                 ),
             );
-            self.board.move_card(role, id, Column::Blocked)?;
+            self.board.move_card(role, id, &Column::BLOCKED)?;
             return Ok(Step::GaveUp(id));
         }
 
@@ -258,8 +259,8 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
         // is. The attempt is counted, so a persistent fault ends in Blocked.
         let dest = match (&ran, ok) {
             (Err(_), _) => None,
-            (Ok(_), true) => stage.ok,
-            (Ok(_), false) => stage.fail,
+            (Ok(_), true) => stage.ok.as_ref(),
+            (Ok(_), false) => stage.fail.as_ref(),
         };
         match dest {
             Some(column) => self.board.move_card(role, id, column)?,
@@ -376,8 +377,9 @@ mod tests {
 
     use rusty_mill_board::api::Shared;
     use rusty_mill_board::board::{Board, Roles as BoardRoles};
-    use rusty_mill_board::domain::Column::{self, *};
+    use rusty_mill_board::domain::Column;
     use rusty_mill_board::store::MemStore;
+    use rusty_mill_board::workflow::Workflow;
 
     use super::*;
     use crate::config::parse;
@@ -408,11 +410,14 @@ mod tests {
     }
 
     impl BoardApi for Local {
-        fn list(&self, column: Column) -> Result<Vec<Card>, ApiError> {
+        fn list(&self, column: &Column) -> Result<Vec<Card>, ApiError> {
             self.0.list(Some(column)).map_err(err)
         }
         fn get(&self, id: Uuid) -> Result<Card, ApiError> {
             self.0.get(id).map_err(err)
+        }
+        fn workflow(&self) -> Result<Workflow, ApiError> {
+            Ok(self.0.workflow())
         }
         fn roles(&self) -> Result<Roles, ApiError> {
             Ok(self.0.roles().0.clone())
@@ -423,7 +428,7 @@ mod tests {
         fn foreign(&self, project: &str, files: &[String]) -> Result<Vec<String>, ApiError> {
             Ok(self.0.projects().not_owned_by(project, files))
         }
-        fn move_card(&self, role: &str, id: Uuid, to: Column) -> Result<Card, ApiError> {
+        fn move_card(&self, role: &str, id: Uuid, to: &Column) -> Result<Card, ApiError> {
             self.0
                 .move_card(
                     id,
@@ -544,7 +549,9 @@ mod tests {
                 let c = board
                     .add(&human, &format!("card {i}"), "do it", vec![])
                     .expect("add");
-                board.move_card(c.id, Ready, &human).expect("ready");
+                board
+                    .move_card(c.id, &Column::READY, &human)
+                    .expect("ready");
                 c.id
             })
             .collect();
@@ -579,10 +586,10 @@ mod tests {
                 ok: true
             }]
         );
-        assert_eq!(column(&r, ids[0]), Qa);
-        r.tick().expect("tick"); // the Qa card is served before the fresh Ready ones
+        assert_eq!(column(&r, ids[0]), Column::QA);
+        r.tick().expect("tick"); // the Column::QA card is served before the fresh Column::READY ones
         let card = r.board.get(ids[0]).expect("card");
-        assert_eq!(card.column, Review, "{:?}", card.comments);
+        assert_eq!(card.column, Column::REVIEW, "{:?}", card.comments);
         assert_eq!(card.claim, None);
         assert!(
             card.comments[0]
@@ -604,8 +611,8 @@ mod tests {
         let (r, ids) = setup(fake, 1);
         r.tick().expect("build");
         r.tick().expect("test fails");
-        assert_eq!(column(&r, ids[0]), Building);
-        r.tick().expect("rebuild"); // rework in Building comes before fresh Ready cards
+        assert_eq!(column(&r, ids[0]), Column::BUILDING);
+        r.tick().expect("rebuild"); // rework in Column::BUILDING comes before fresh Column::READY cards
         let prompts = r.work.prompts.lock().expect("lock").clone();
         assert!(
             prompts[2].contains("FAILED test_x"),
@@ -629,7 +636,7 @@ mod tests {
         let steps = r.tick().expect("tick");
         assert!(steps.contains(&Step::GaveUp(ids[0])), "{steps:?}");
         let card = r.board.get(ids[0]).expect("card");
-        assert_eq!(card.column, Blocked);
+        assert_eq!(card.column, Column::BLOCKED);
         assert!(
             card.comments
                 .last()
@@ -650,7 +657,7 @@ mod tests {
         let card = r.board.get(ids[0]).expect("card");
         assert_eq!(
             (card.column, card.claim.clone()),
-            (Building, None),
+            (Column::BUILDING, None),
             "released, not moved"
         );
         assert!(card.comments[0].text.contains("error: disk full"));
@@ -666,7 +673,10 @@ mod tests {
     fn skips_cards_claimed_by_others_and_resumes_its_own() {
         let (r, ids) = setup(Fake::default().then("build", Ok(true)), 3);
         let other = r.board.0.roles().actor("someone", "builder").expect("role");
-        r.board.0.move_card(ids[0], Building, &other).expect("move");
+        r.board
+            .0
+            .move_card(ids[0], &Column::BUILDING, &other)
+            .expect("move");
         r.board.0.claim(ids[0], &other).expect("claim");
         // ids[1] is claimed by the runner itself, as if it crashed mid-run.
         let me = r
@@ -675,7 +685,10 @@ mod tests {
             .roles()
             .actor("mill-runner", "builder")
             .expect("role");
-        r.board.0.move_card(ids[1], Building, &me).expect("move");
+        r.board
+            .0
+            .move_card(ids[1], &Column::BUILDING, &me)
+            .expect("move");
         r.board.0.claim(ids[1], &me).expect("claim");
 
         let steps = r.tick().expect("tick");
@@ -707,7 +720,9 @@ mod tests {
         // While the command runs, a person (holding Triage) drags the card to Blocked.
         *r.work.before_run.lock().expect("lock") = Some(Box::new(move || {
             let human = board.roles().actor("nano", "human").expect("role");
-            board.move_card(id, Blocked, &human).expect("override");
+            board
+                .move_card(id, &Column::BLOCKED, &human)
+                .expect("override");
         }));
 
         let steps = r.tick().expect("tick");
@@ -715,7 +730,7 @@ mod tests {
         let card = r.board.get(id).expect("card");
         assert_eq!(
             (card.column, card.claim),
-            (Blocked, None),
+            (Column::BLOCKED, None),
             "the runner must not move it on"
         );
     }
@@ -729,7 +744,10 @@ mod tests {
         let (r, ids) = setup(fake, 2);
         let steps = r.tick().expect("tick");
         assert_eq!(steps.len(), 2);
-        let done = ids.iter().filter(|id| column(&r, **id) == Qa).count();
+        let done = ids
+            .iter()
+            .filter(|id| column(&r, **id) == Column::QA)
+            .count();
         assert_eq!(done, 2);
     }
 
@@ -740,10 +758,13 @@ mod tests {
         let weak = r#"[{"name":"a","from":["ready"],"enter":"building","role":"qa","argv":["x"],"ok":"qa"}]"#;
         let nonsense =
             r#"[{"name":"a","from":["backlog"],"enter":"done","role":"human","argv":["x"]}]"#;
+        let missing =
+            r#"[{"name":"a","from":["ready"],"enter":"design","role":"human","argv":["x"]}]"#;
         for (json, why) in [
             (unknown, "no role"),
             (weak, "lacks Build"),
             (nonsense, "no move"),
+            (missing, "no move ready -> design"),
         ] {
             let board: Arc<Shared> = Arc::new(Board::new(
                 Box::new(MemStore::default()),
@@ -786,7 +807,9 @@ mod tests {
             .iter()
             .map(|p| {
                 let c = board.add_in(&human, p, p, "do it", vec![]).expect("add");
-                board.move_card(c.id, Ready, &human).expect("ready");
+                board
+                    .move_card(c.id, &Column::READY, &human)
+                    .expect("ready");
                 ((*p).to_owned(), c.id)
             })
             .collect();
@@ -833,7 +856,11 @@ mod tests {
             }]
         );
         for (project, id) in &cards {
-            let expected = if project == "orch" { Qa } else { Ready };
+            let expected = if project == "orch" {
+                Column::QA
+            } else {
+                Column::READY
+            };
             assert_eq!(column(&r, *id), expected, "{project}");
         }
     }
@@ -856,7 +883,11 @@ mod tests {
         );
         assert_eq!(r.work.discards.load(Ordering::Relaxed), 1);
         let card = r.board.get(rl).expect("card");
-        assert_eq!(card.column, Blocked, "the build stage's failure column");
+        assert_eq!(
+            card.column,
+            Column::BLOCKED,
+            "the build stage's failure column"
+        );
         let note = &card.comments[0].text;
         assert!(
             note.contains("outside project") && note.contains("crates/apps/rusty_orch/src/lib.rs"),
@@ -882,7 +913,7 @@ mod tests {
         r.tick().expect("tick");
         assert_eq!(r.work.commits.load(Ordering::Relaxed), 1);
         assert_eq!(r.work.discards.load(Ordering::Relaxed), 0);
-        assert_eq!(column(&r, rl), Qa);
+        assert_eq!(column(&r, rl), Column::QA);
     }
 
     #[test]
@@ -908,7 +939,7 @@ mod tests {
         );
         assert_eq!(r.work.discards.load(Ordering::Relaxed), 1);
         let rl = cards.iter().find(|(p, _)| p == "rl").expect("card").1;
-        assert_eq!(column(&r, rl), Blocked);
+        assert_eq!(column(&r, rl), Column::BLOCKED);
     }
 
     #[test]
@@ -920,7 +951,9 @@ mod tests {
         ));
         let human = board.roles().actor("nano", "human").expect("role");
         let card = board.add(&human, "t", "do it", vec![]).expect("add");
-        board.move_card(card.id, Ready, &human).expect("ready");
+        board
+            .move_card(card.id, &Column::READY, &human)
+            .expect("ready");
         let r = Runner::new(
             Local(board.clone()),
             Fake::default().then("build", Ok(true)),
@@ -935,7 +968,7 @@ mod tests {
             .expect("more projects");
         let e = r.tick().expect_err("now it needs a project");
         assert!(e.message.contains("several projects"), "{e}");
-        assert_eq!(column(&r, card.id), Ready, "no work was taken");
+        assert_eq!(column(&r, card.id), Column::READY, "no work was taken");
     }
 
     #[test]
